@@ -1,0 +1,118 @@
+name: strand-dev
+
+services:
+  mysql-src:
+    image: mysql:8.4
+    command: >
+      --server-id=1
+      --gtid-mode=ON
+      --enforce-gtid-consistency=ON
+      --binlog-format=ROW
+      --binlog-row-image=FULL
+      --binlog-row-metadata=FULL
+    environment:
+      MYSQL_ROOT_PASSWORD: dev
+    volumes:
+      - mysql-src-data:/var/lib/mysql
+      - ./init/mysql-src:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -pdev || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  mysql-dst:
+    image: mysql:8.4
+    command: >
+      --server-id=2
+      --read-only=ON
+      --super-read-only=OFF
+    environment:
+      MYSQL_ROOT_PASSWORD: dev
+    volumes:
+      - mysql-dst-data:/var/lib/mysql
+      - ./init/mysql-dst:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -pdev || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  pg-src:
+    image: postgres:18
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=8", "-c", "max_wal_senders=8"]
+    environment:
+      POSTGRES_PASSWORD: dev
+    volumes:
+      - pg-src-data:/var/lib/postgresql
+      - ./init/pg-src:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  pg-dst:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: dev
+    volumes:
+      - pg-dst-data:/var/lib/postgresql
+      - ./init/pg-dst:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:latest
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy.json:/config/toxiproxy.json:ro
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 2s
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    command: ["-promscrape.config=/etc/vm/scrape.yaml"]
+    volumes:
+      - ./scrape.yaml:/etc/vm/scrape.yaml:ro
+      - vm-data:/victoria-metrics-data
+    ports:
+      - "8428:8428"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8428/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  mysql-src-data:
+  mysql-dst-data:
+  pg-src-data:
+  pg-dst-data:
+  vm-data:
+  grafana-data:

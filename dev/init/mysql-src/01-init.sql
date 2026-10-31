@@ -1,0 +1,6 @@
+-- spec: S03 §2 Quyền DB tối thiểu cho MySQL source
+CREATE USER IF NOT EXISTS 'strand'@'%' IDENTIFIED BY 'dev';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'strand'@'%';
+CREATE DATABASE IF NOT EXISTS app;
+GRANT SELECT ON app.* TO 'strand'@'%';
+FLUSH PRIVILEGES;

@@ -1,0 +1,7 @@
+-- spec: S03 §2 Quyền DB tối thiểu cho PostgreSQL source
+CREATE ROLE strand WITH LOGIN REPLICATION PASSWORD 'dev';
+CREATE SCHEMA IF NOT EXISTS app;
+GRANT USAGE ON SCHEMA app TO strand;
+GRANT SELECT ON ALL TABLES IN SCHEMA app TO strand;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA app TO strand;
+GRANT pg_monitor TO strand;
