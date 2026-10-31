@@ -1,0 +1,17 @@
+# Initial deps.allow per spec 06 §7
+github.com/go-mysql-org/go-mysql
+github.com/jackc/pglogrepl
+github.com/jackc/pgx/v5
+github.com/go-sql-driver/mysql
+github.com/cockroachdb/pebble
+github.com/spf13/cobra
+github.com/charmbracelet/bubbletea
+github.com/zeebo/xxh3
+github.com/klauspost/compress
+github.com/prometheus/client_golang
+gopkg.in/yaml.v3
+github.com/testcontainers/testcontainers-go
+pgregory.net/rapid
+go.uber.org/goleak
+github.com/pingcap/failpoint
+golang.org/x/
