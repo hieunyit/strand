@@ -1,0 +1,222 @@
+package sched
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"strand/internal/model"
+)
+
+// invariant: CO-1
+// AC1: TestCO1: hai Txn có writeset giao nhau commit đúng thứ tự source.
+func TestCO1_WritesetOrder(t *testing.T) {
+	ctx := context.Background()
+	sched := NewScheduler(DefaultConfig())
+
+	// 1. Kiểm thử cơ bản 2 Txn xung đột cùng một key
+	tbl := model.TableID{Schema: "test", Table: "orders"}
+	txn1 := &model.Txn{
+		Rows: []model.RowChange{
+			{Table: tbl, Op: model.OpUpdate, Key: []model.Value{100}},
+		},
+	}
+	txn2 := &model.Txn{
+		Rows: []model.RowChange{
+			{Table: tbl, Op: model.OpUpdate, Key: []model.Value{100}},
+		},
+	}
+
+	_ = sched.Admit(ctx, txn1)
+	_ = sched.Admit(ctx, txn2)
+
+	// Txn1 phải được phát vào readyCh trước
+	select {
+	case ready := <-sched.Ready():
+		if ready.Seq() != txn1.Seq() {
+			t.Fatalf("kỳ vọng txn1 (seq=%d) ready trước, got seq=%d", txn1.Seq(), ready.Seq())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timeout chờ txn1 ready")
+	}
+
+	// Txn2 KHÔNG ĐƯỢC ready khi txn1 chưa Done
+	select {
+	case ready := <-sched.Ready():
+		t.Fatalf("vi phạm CO-1: txn2 (seq=%d) ready trước khi txn1 Done!", ready.Seq())
+	case <-time.After(100 * time.Millisecond):
+		// Đúng kỳ vọng: Txn2 bị chặn lại bởi dependency của Txn1
+	}
+
+	// Báo Txn1 Done
+	sched.Done(txn1.Seq(), nil)
+
+	// Bây giờ Txn2 phải được unblock và emit vào readyCh
+	select {
+	case ready := <-sched.Ready():
+		if ready.Seq() != txn2.Seq() {
+			t.Fatalf("kỳ vọng txn2 (seq=%d) ready sau khi txn1 Done, got seq=%d", txn2.Seq(), ready.Seq())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timeout chờ txn2 ready sau khi txn1 Done")
+	}
+	sched.Done(txn2.Seq(), nil)
+
+	// 2. Kiểm thử nhiều worker đồng thời xử lý các transaction có hot key
+	t.Run("ConcurrentWorkers_StrictCommitOrder", func(t *testing.T) {
+		concurSched := NewScheduler(DefaultConfig())
+		numTxns := 200
+		numWorkers := 8
+
+		// Mỗi key lưu lại seq cuối cùng đã commit
+		var committedOrderMu sync.Mutex
+		lastCommittedSeqByKey := make(map[int]uint64)
+
+		var wg sync.WaitGroup
+		var completedCount int64
+
+		// Khởi động worker pool
+		for w := 0; w < numWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for txn := range concurSched.Ready() {
+					// Lấy key đang chạm
+					keyVal := txn.Rows[0].Key[0].(int)
+
+					committedOrderMu.Lock()
+					lastSeq := lastCommittedSeqByKey[keyVal]
+					if lastSeq >= txn.Seq() {
+						t.Errorf("vi phạm bất biến CO-1 trên key %d: lastSeq=%d >= curSeq=%d",
+							keyVal, lastSeq, txn.Seq())
+					}
+					// Giả lập thời gian apply
+					time.Sleep(100 * time.Microsecond)
+					lastCommittedSeqByKey[keyVal] = txn.Seq()
+					committedOrderMu.Unlock()
+
+					concurSched.Done(txn.Seq(), nil)
+					atomic.AddInt64(&completedCount, 1)
+
+					if atomic.LoadInt64(&completedCount) == int64(numTxns) {
+						concurSched.Close()
+						close(concurSched.readyCh)
+					}
+				}
+			}()
+		}
+
+		// Nạp 200 transaction tuần tự, luân phiên trên 5 hot key (0..4)
+		for i := 1; i <= numTxns; i++ {
+			hotKey := i % 5
+			tObj := &model.Txn{
+				Rows: []model.RowChange{
+					{Table: tbl, Op: model.OpUpdate, Key: []model.Value{hotKey}},
+				},
+			}
+			tObj.SetSeq(uint64(i))
+			if err := concurSched.Admit(ctx, tObj); err != nil {
+				t.Fatalf("failed to admit: %v", err)
+			}
+		}
+
+		wg.Wait()
+		if completedCount != int64(numTxns) {
+			t.Fatalf("chỉ hoàn thành %d / %d transaction", completedCount, numTxns)
+		}
+		t.Logf("AC1 TestCO1 PASS: 200 Txns trên %d worker tuân thủ tuyệt đối thứ tự source", numWorkers)
+	})
+}
+
+// AC2: Txn vượt 50.000 khóa được nâng lên khóa cấp bảng; map row được dọn.
+func TestAC2_TableLevelLock(t *testing.T) {
+	ctx := context.Background()
+	// Ngưỡng cấp bảng: 50.000 khóa (theo spec 02 §6)
+	cfg := DefaultConfig()
+	cfg.TableLevelThreshold = 50000
+	sched := NewScheduler(cfg)
+
+	tbl := model.TableID{Schema: "test", Table: "large_table"}
+	tblKey := tbl.String()
+
+	// Bước 1: Thêm một vài transaction nhỏ trước để map rows có dữ liệu
+	smallTxn1 := &model.Txn{
+		Rows: []model.RowChange{
+			{Table: tbl, Op: model.OpInsert, Key: []model.Value{1}},
+			{Table: tbl, Op: model.OpInsert, Key: []model.Value{2}},
+			{Table: tbl, Op: model.OpInsert, Key: []model.Value{3}},
+		},
+	}
+	_ = sched.Admit(ctx, smallTxn1)
+	readySmall1 := <-sched.Ready()
+	if readySmall1.Seq() != smallTxn1.Seq() {
+		t.Fatalf("kỳ vọng smallTxn1 ready ngay, got %d", readySmall1.Seq())
+	}
+	st := sched.table(tblKey)
+	if len(st.rows) != 3 {
+		t.Fatalf("kỳ vọng 3 rows trong map, got %d", len(st.rows))
+	}
+
+	// Bước 2: Tạo transaction lớn với 50.001 khóa (> 50.000)
+	numKeys := 50001
+	bigRows := make([]model.RowChange, numKeys)
+	for i := 0; i < numKeys; i++ {
+		bigRows[i] = model.RowChange{
+			Table: tbl,
+			Op:    model.OpInsert,
+			Key:   []model.Value{1000 + i},
+		}
+	}
+	bigTxn := &model.Txn{
+		Rows: bigRows,
+	}
+
+	_ = sched.Admit(ctx, bigTxn)
+
+	// Kiểm tra trạng thái cấp bảng:
+	// 1. tableWriter phải được gán bằng seq của bigTxn
+	if st.tableWriter != bigTxn.Seq() {
+		t.Fatalf("kỳ vọng tableWriter=%d, got %d", bigTxn.Seq(), st.tableWriter)
+	}
+
+	// 2. Map rows của bảng PHẢI BỊ DỌN (len == 0) theo spec 02 §6
+	if len(st.rows) != 0 {
+		t.Fatalf("AC2 vi phạm: kỳ vọng map row được dọn sạch (len=0) sau khi nâng cấp bảng, actual len=%d", len(st.rows))
+	}
+	t.Logf("AC2: Map rows đã được dọn sạch về 0 sau khi chạm ngưỡng %d khóa", cfg.TableLevelThreshold)
+
+	// Bước 3: Một transaction nhỏ tiếp theo sau bigTxn PHẢI phụ thuộc vào bigTxn
+	smallTxn2 := &model.Txn{
+		Rows: []model.RowChange{
+			{Table: tbl, Op: model.OpInsert, Key: []model.Value{9999999}},
+		},
+	}
+	_ = sched.Admit(ctx, smallTxn2)
+
+	// smallTxn2 không được ready trước khi bigTxn Done
+	sched.Done(smallTxn1.Seq(), nil) // smallTxn1 xong
+	// Lúc này bigTxn phải ready
+	readyBig := <-sched.Ready()
+	if readyBig.Seq() != bigTxn.Seq() {
+		t.Fatalf("kỳ vọng bigTxn ready, got %d", readyBig.Seq())
+	}
+
+	select {
+	case r := <-sched.Ready():
+		t.Fatalf("smallTxn2 không được ready khi bigTxn chưa Done, got %d", r.Seq())
+	case <-time.After(100 * time.Millisecond):
+		// Đúng kỳ vọng
+	}
+
+	// Báo bigTxn Done -> smallTxn2 được emit
+	sched.Done(bigTxn.Seq(), nil)
+	readySmall := <-sched.Ready()
+	if readySmall.Seq() != smallTxn2.Seq() {
+		t.Fatalf("kỳ vọng smallTxn2 ready sau khi bigTxn Done, got %d", readySmall.Seq())
+	}
+	sched.Done(smallTxn2.Seq(), nil)
+
+	t.Log("AC2 PASS: Txn vượt 50.000 khóa được nâng thành khóa cấp bảng; map row được dọn dẹp thành công")
+}
