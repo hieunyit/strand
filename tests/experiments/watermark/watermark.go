@@ -2,6 +2,7 @@ package watermark
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
 )
@@ -131,8 +133,8 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 	var stopWriters atomic.Bool
 	var wg sync.WaitGroup
 
-	// BufferPoolMu bảo vệ tránh buffer pool race trong go-mysql
-	var poolMu sync.Mutex
+	// writerMu bảo vệ tránh buffer pool race giữa các client.Conn của go-mysql
+	var writerMu sync.Mutex
 
 	// 2. Khởi chạy concurrent writers liên tục ghi và theo dõi GTID chính mình qua session_track_gtids
 	for w := 1; w <= cfg.NumWriters; w++ {
@@ -145,9 +147,9 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 			}
 			defer wConn.Close()
 
-			poolMu.Lock()
+			writerMu.Lock()
 			_, _ = wConn.Execute("SET SESSION session_track_gtids = 'OWN_GTID';")
-			poolMu.Unlock()
+			writerMu.Unlock()
 
 			v := 0
 			for !stopWriters.Load() {
@@ -161,7 +163,7 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 				var insertID uint64
 				var gtidCopy string
 
-				poolMu.Lock()
+				writerMu.Lock()
 				r, err := wConn.Execute("INSERT INTO wm_watermark_records (writer_id, val) VALUES (?, ?);", writerID, v)
 				if err == nil && r != nil {
 					insertID = r.InsertId
@@ -169,7 +171,7 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 						gtidCopy = cloneBytes(r.SessionTracking.GTID)
 					}
 				}
-				poolMu.Unlock()
+				writerMu.Unlock()
 
 				if gtidCopy != "" {
 					gSet, err := mysql.ParseMysqlGTIDSet(gtidCopy)
@@ -177,7 +179,7 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 						store.add(int64(insertID), gSet)
 					}
 				}
-				time.Sleep(2 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			}
 		}(w)
 	}
@@ -185,14 +187,17 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 	// Đợi writers ghi một số rows ban đầu
 	time.Sleep(50 * time.Millisecond)
 
-	// 3. Reader chạy N vòng thí nghiệm
-	readerConn, err := client.Connect(cfg.Addr, cfg.User, cfg.Password, cfg.DBName, opt)
+	// 3. Reader chạy N vòng thí nghiệm bằng database/sql
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true", cfg.User, cfg.Password, cfg.Addr, cfg.DBName)
+	readerDB, err := sql.Open("mysql", dsn)
 	if err != nil {
 		stopWriters.Store(true)
 		wg.Wait()
-		return nil, fmt.Errorf("failed to connect reader: %w", err)
+		return nil, fmt.Errorf("failed to open reader db: %w", err)
 	}
-	defer readerConn.Close()
+	readerDB.SetMaxOpenConns(10)
+	readerDB.SetMaxIdleConns(10)
+	defer readerDB.Close()
 
 	start := time.Now()
 	violations := 0
@@ -212,15 +217,8 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 		if !cfg.NegativeControl {
 			// [QUY CHUẨN ĐÚNG: S02 §2 (RS-2), §5; D §6.1]
 			// Bước 1: Đọc low = @@GLOBAL.gtid_executed TRƯỚC
-			poolMu.Lock()
-			rLow, err := readerConn.Execute("SELECT @@GLOBAL.gtid_executed;")
 			var rawLow string
-			if err == nil && len(rLow.Values) > 0 {
-				raw, _ := rLow.GetString(0, 0)
-				rawLow = cloneBytes(raw)
-			}
-			poolMu.Unlock()
-
+			err := readerDB.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed;").Scan(&rawLow)
 			if err != nil {
 				stopWriters.Store(true)
 				wg.Wait()
@@ -234,59 +232,40 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 			}
 
 			// Bước 2: Chạy SELECT đọc snapshot dữ liệu
-			poolMu.Lock()
-			rSel, err := readerConn.Execute("SELECT id FROM wm_watermark_records;")
-			var ids []int64
-			if err == nil && rSel != nil {
-				ids = make([]int64, len(rSel.Values))
-				for idx, row := range rSel.Values {
-					ids[idx] = row[0].AsInt64()
-				}
-			}
-			poolMu.Unlock()
-
+			rows, err := readerDB.QueryContext(ctx, "SELECT id FROM wm_watermark_records;")
 			if err != nil {
 				stopWriters.Store(true)
 				wg.Wait()
 				return nil, fmt.Errorf("select failed at iter %d: %w", i, err)
 			}
-			seenMap = make(map[int64]bool, len(ids))
-			for _, id := range ids {
-				seenMap[id] = true
+			seenMap = make(map[int64]bool)
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err == nil {
+					seenMap[id] = true
+				}
 			}
+			rows.Close()
 		} else {
 			// [NEGATIVE CONTROL: AC2 - Cố ý đọc SELECT TRƯỚC, rồi mới đọc low]
-			poolMu.Lock()
-			rSel, err := readerConn.Execute("SELECT id FROM wm_watermark_records;")
-			var ids []int64
-			if err == nil && rSel != nil {
-				ids = make([]int64, len(rSel.Values))
-				for idx, row := range rSel.Values {
-					ids[idx] = row[0].AsInt64()
-				}
-			}
-			poolMu.Unlock()
-
+			rows, err := readerDB.QueryContext(ctx, "SELECT id FROM wm_watermark_records;")
 			if err != nil {
 				stopWriters.Store(true)
 				wg.Wait()
 				return nil, fmt.Errorf("select failed at iter %d: %w", i, err)
 			}
-			seenMap = make(map[int64]bool, len(ids))
-			for _, id := range ids {
-				seenMap[id] = true
+			seenMap = make(map[int64]bool)
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err == nil {
+					seenMap[id] = true
+				}
 			}
+			rows.Close()
 
 			// Đọc low SAU câu SELECT
-			poolMu.Lock()
-			rLow, err := readerConn.Execute("SELECT @@GLOBAL.gtid_executed;")
 			var rawLow string
-			if err == nil && len(rLow.Values) > 0 {
-				raw, _ := rLow.GetString(0, 0)
-				rawLow = cloneBytes(raw)
-			}
-			poolMu.Unlock()
-
+			err = readerDB.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed;").Scan(&rawLow)
 			if err != nil {
 				stopWriters.Store(true)
 				wg.Wait()
@@ -322,7 +301,7 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 			store.advanceVerified(windowStart + firstUnverifiedOffset)
 		}
 
-		if !cfg.NegativeControl && i > 0 && i%50 == 0 {
+		if !cfg.NegativeControl && i > 0 && i%100 == 0 {
 			var cutoffID int64
 			store.mu.RLock()
 			if store.verifiedIdx > 0 && store.verifiedIdx < len(store.records) {
@@ -330,9 +309,7 @@ func RunWatermarkExperiment(ctx context.Context, cfg Config) (*Result, error) {
 			}
 			store.mu.RUnlock()
 			if cutoffID > 0 {
-				poolMu.Lock()
-				_, _ = readerConn.Execute(fmt.Sprintf("DELETE FROM wm_watermark_records WHERE id < %d;", cutoffID))
-				poolMu.Unlock()
+				_, _ = readerDB.ExecContext(ctx, "DELETE FROM wm_watermark_records WHERE id < ?;", cutoffID)
 			}
 		}
 	}
