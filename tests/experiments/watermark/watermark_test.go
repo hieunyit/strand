@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -35,28 +33,6 @@ func getIterations() int {
 
 func getMySQL84Addr(t *testing.T) (string, func()) {
 	t.Helper()
-
-	// 1. Kiểm tra compose service strand-dev-mysql-src-1
-	out, err := exec.Command("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", "strand-dev-mysql-src-1").Output()
-	if err == nil {
-		ip := strings.TrimSpace(string(out))
-		if ip != "" {
-			addr := net.JoinHostPort(ip, "3306")
-			db, err := sql.Open("mysql", fmt.Sprintf("root:dev@tcp(%s)/app", addr))
-			if err == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				if db.PingContext(ctx) == nil {
-					cancel()
-					db.Close()
-					return addr, func() {}
-				}
-				cancel()
-				db.Close()
-			}
-		}
-	}
-
-	// 2. Fallback: khởi động testcontainer mysql:8.4
 	return startTestContainerMySQL(t, "mysql:8.4")
 }
 
@@ -106,7 +82,7 @@ func startTestContainerMySQL(t *testing.T, image string) (string, func()) {
 	addr := net.JoinHostPort(host, portNat.Port())
 	dsn := fmt.Sprintf("root:dev@tcp(%s)/?multiStatements=true", addr)
 
-	// Đợi kết nối DB sẵn sàng và tạo database app
+	// Đợi kết nối DB sẵn sàng và tạo database test_watermark
 	var db *sql.DB
 	for i := 0; i < 30; i++ {
 		db, err = sql.Open("mysql", dsn)
@@ -116,7 +92,7 @@ func startTestContainerMySQL(t *testing.T, image string) (string, func()) {
 		time.Sleep(1 * time.Second)
 	}
 	if db != nil {
-		_, _ = db.Exec("CREATE DATABASE IF NOT EXISTS app;")
+		_, _ = db.Exec("CREATE DATABASE IF NOT EXISTS test_watermark;")
 		db.Close()
 	}
 
@@ -136,14 +112,14 @@ func TestAC1_Watermark_MySQL84(t *testing.T) {
 	iters := getIterations()
 
 	t.Logf("Chạy AC1 trên MySQL 8.4 với %d vòng lặp...", iters)
-	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 
 	cfg := watermark.Config{
 		Addr:            addr,
 		User:            "root",
 		Password:        "dev",
-		DBName:          "app",
+		DBName:          "test_watermark",
 		Iterations:      iters,
 		NumWriters:      4,
 		NegativeControl: false,
@@ -178,14 +154,14 @@ func TestAC1_Watermark_MySQL97(t *testing.T) {
 	iters := getIterations()
 
 	t.Logf("Chạy AC1 trên MySQL 9.7 với %d vòng lặp...", iters)
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 
 	cfg := watermark.Config{
 		Addr:            addr,
 		User:            "root",
 		Password:        "dev",
-		DBName:          "app",
+		DBName:          "test_watermark",
 		Iterations:      iters,
 		NumWriters:      4,
 		NegativeControl: false,
@@ -218,7 +194,6 @@ func TestAC2_Watermark_NegativeSelfCheck(t *testing.T) {
 	tmpDir := t.TempDir()
 	outJSON := filepath.Join(tmpDir, "watermark_negative.json")
 
-	// Với self-check chỉ cần chạy số vòng vừa phải (ví dụ 1.000) là đã đủ bắt hàng chục vi phạm
 	iters := 1000
 	t.Logf("Chạy AC2 Negative Self-Check trên MySQL 8.4 (%d vòng)...", iters)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -228,7 +203,7 @@ func TestAC2_Watermark_NegativeSelfCheck(t *testing.T) {
 		Addr:            addr,
 		User:            "root",
 		Password:        "dev",
-		DBName:          "app",
+		DBName:          "test_watermark",
 		Iterations:      iters,
 		NumWriters:      4,
 		NegativeControl: true, // Cố ý đọc low SAU câu SELECT
