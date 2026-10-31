@@ -25,8 +25,10 @@ run_tlc() {
   local cfg_file="$2"
   local metadir
   metadir="$(mktemp -d /tmp/tlc_meta_XXXXXX)"
-  java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -metadir "$metadir" -deadlock -config "$cfg_file" "$tla_file"
+  local res=0
+  java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -metadir "$metadir" -deadlock -config "$cfg_file" "$tla_file" || res=$?
   rm -rf "$metadir"
+  return "$res"
 }
 
 cleanup_traces() {
@@ -45,15 +47,13 @@ run_check() {
 
   for mod in "${MODULES[@]}"; do
     echo "--- Kiểm tra module: $mod ---"
-    local output
-    if output=$(run_tlc "$SCRIPT_DIR/$mod.tla" "$SCRIPT_DIR/$mod.cfg" 2>&1); then
-      if echo "$output" | grep -q "Model checking completed. No error has been found."; then
-        echo "  [PASS] $mod: Không tìm thấy vi phạm bất biến"
-      else
-        echo "  [FAIL] $mod: Output không chứa kết quả hợp lệ"
-        echo "$output"
-        FAILED=1
-      fi
+    local output ret
+    set +e
+    output=$(run_tlc "$SCRIPT_DIR/$mod.tla" "$SCRIPT_DIR/$mod.cfg" 2>&1)
+    ret=$?
+    set -e
+    if [ "$ret" -eq 0 ] && echo "$output" | grep -q "Model checking completed. No error has been found."; then
+      echo "  [PASS] $mod: Không tìm thấy vi phạm bất biến"
     else
       echo "  [FAIL] $mod: TLC phát hiện lỗi hoặc crash"
       echo "$output"
@@ -76,10 +76,10 @@ run_mutants() {
 
   for mod in "${MUTANTS[@]}"; do
     echo "--- Kiểm tra mutant: $mod ---"
-    local output
+    local output ret
     set +e
     output=$(run_tlc "$SCRIPT_DIR/$mod.tla" "$SCRIPT_DIR/$mod.cfg" 2>&1)
-    local ret=$?
+    ret=$?
     set -e
 
     if [ "$ret" -ne 0 ] && echo "$output" | grep -q -E "(Error: Invariant .* is violated|Error: The behavior up to this point is)"; then
