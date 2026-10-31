@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SeedManifest",
+  "description": "Lược đồ định dạng seed.json v1 dùng cho chế độ B (Seed và archive catch-up) theo spec 02 §9",
+  "type": "object",
+  "required": [
+    "version",
+    "engine",
+    "kind",
+    "tool_version",
+    "tool_prerelease",
+    "source_identity",
+    "backup_ref",
+    "start_position",
+    "schema_snapshot",
+    "tables",
+    "target",
+    "created_at"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Phiên bản schema của seed.json"
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["mysql", "pg", "postgres"],
+      "description": "Engine cơ sở dữ liệu nguồn"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["xtrabackup", "clone", "mydumper", "pgbackrest", "wal-g", "strand_export"],
+      "description": "Công cụ thực hiện seed/backup"
+    },
+    "tool_version": {
+      "type": "string",
+      "description": "Phiên bản cụ thể của công cụ backup"
+    },
+    "tool_prerelease": {
+      "type": "boolean",
+      "description": "Đánh dấu công cụ đang ở bản thử nghiệm/pre-release"
+    },
+    "source_identity": {
+      "type": "string",
+      "description": "Định danh source DB (UUID với MySQL hoặc System Identifier với PG)"
+    },
+    "backup_ref": {
+      "type": "string",
+      "description": "Đường dẫn tham chiếu bản backup (URI hoặc đường dẫn file/S3)"
+    },
+    "start_position": {
+      "type": "object",
+      "description": "Vị trí log P nhất quán bắt đầu stream"
+    },
+    "position_cross_check": {
+      "type": "object",
+      "description": "Đối chiếu chéo vị trí P từ nhiều nguồn metadata"
+    },
+    "schema_snapshot": {
+      "type": "string",
+      "description": "Tham chiếu tới snapshot schema tại vị trí P"
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "description": "Danh sách các bảng tham gia seed"
+    },
+    "integrity": {
+      "type": "object",
+      "description": "Kiểm tra tính toàn vẹn của backup"
+    },
+    "log_coverage": {
+      "type": "object",
+      "description": "Độ bao phủ của log từ P đến hiện tại"
+    },
+    "log_prefetch_until": {
+      "type": ["string", "null"],
+      "description": "Mốc log đã prefetch vào spool"
+    },
+    "legal_hold_ref": {
+      "type": ["string", "null"],
+      "description": "Tham chiếu khóa legal hold trên object storage"
+    },
+    "backup_expires_at": {
+      "type": ["string", "null"],
+      "description": "Thời hạn hết hạn của bản backup nếu có"
+    },
+    "target": {
+      "type": "object",
+      "required": ["version", "compatible"],
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "compatible": {
+          "type": "boolean"
+        }
+      },
+      "description": "Thông tin target tương thích theo SD-4"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Thời điểm sinh manifest seed.json theo chuẩn ISO 8601"
+    }
+  },
+  "additionalProperties": true
+}
