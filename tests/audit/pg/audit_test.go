@@ -224,10 +224,17 @@ func TestAC1_ProtoV1toV4_PG16_17_18(t *testing.T) {
 
 				_ = replConn.Close(ctx)
 
-				// Xóa slot sau khi test xong
-				_, err = db.ExecContext(ctx, fmt.Sprintf("SELECT pg_drop_replication_slot('%s')", slotName))
-				if err != nil {
-					t.Fatalf("failed to drop slot %s: %v", slotName, err)
+				// Xóa slot sau khi test xong (retry ngắn nếu backend postgres đang ngắt kết nối)
+				var dropErr error
+				for retry := 0; retry < 20; retry++ {
+					_, dropErr = db.ExecContext(ctx, fmt.Sprintf("SELECT pg_drop_replication_slot('%s')", slotName))
+					if dropErr == nil {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				if dropErr != nil {
+					t.Fatalf("failed to drop slot %s: %v", slotName, dropErr)
 				}
 			}
 		})
