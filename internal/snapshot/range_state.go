@@ -159,6 +159,58 @@ func (m *RangeStateManager) HandleStreamEvent(event *model.RowChange, pos model.
 	}
 }
 
+// StreamActionResult chứa kết quả xử lý của một stream event hoặc sub-event (sau khi tách đổi PK).
+type StreamActionResult struct {
+	Action Action
+	Chunk  *Chunk
+	Event  *model.RowChange
+}
+
+// SplitStreamEvent tách một row change thành hai nửa độc lập nếu đây là UPDATE đổi PK (OldKey != nil):
+// 1. Tombstone (OpDelete) cho OldKey
+// 2. Upsert (OpInsert) cho Key mới
+// spec: 02 §5, §8, design §6.1
+func SplitStreamEvent(event *model.RowChange) []*model.RowChange {
+	if event == nil {
+		return nil
+	}
+	if len(event.OldKey) == 0 {
+		return []*model.RowChange{event}
+	}
+
+	tombstone := &model.RowChange{
+		Table: event.Table,
+		Op:    model.OpDelete,
+		Key:   event.OldKey,
+	}
+
+	upsert := &model.RowChange{
+		Table:       event.Table,
+		Op:          model.OpInsert,
+		Key:         event.Key,
+		UniqueKeys:  event.UniqueKeys,
+		ForeignKeys: event.ForeignKeys,
+		Cols:        event.Cols,
+	}
+
+	return []*model.RowChange{tombstone, upsert}
+}
+
+// HandleStreamEventWithPKSplit xử lý một stream event, tự động tách thành tombstone và upsert nếu là UPDATE đổi PK.
+func (m *RangeStateManager) HandleStreamEventWithPKSplit(event *model.RowChange, pos model.Pos) []StreamActionResult {
+	subEvents := SplitStreamEvent(event)
+	results := make([]StreamActionResult, 0, len(subEvents))
+	for _, sub := range subEvents {
+		action, chunk := m.HandleStreamEvent(sub, pos)
+		results = append(results, StreamActionResult{
+			Action: action,
+			Chunk:  chunk,
+			Event:  sub,
+		})
+	}
+	return results
+}
+
 // StartReading chuyển trạng thái chunk sang StateReading kèm low watermark.
 func (m *RangeStateManager) StartReading(chunk *Chunk, low checkpoint.AppliedSet) {
 	m.mu.Lock()
