@@ -102,7 +102,7 @@ func getMySQL(t *testing.T) (*sql.DB, string) {
 	})
 
 	if mysqlDB == nil {
-		t.Skip("MySQL container failed to start")
+		t.Fatal("MySQL container failed to start")
 	}
 	return mysqlDB, mysqlDSN
 }
@@ -166,7 +166,7 @@ func getPostgres(t *testing.T) *sql.DB {
 	})
 
 	if pgDB == nil {
-		t.Skip("Postgres container failed to start")
+		t.Fatal("Postgres container failed to start")
 	}
 	return pgDB
 }
