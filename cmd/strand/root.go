@@ -29,6 +29,7 @@ func init() {
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newTopCmd())
+	rootCmd.AddCommand(newPromoteCmd())
 }
 
 func newPlanCmd() *cobra.Command {
