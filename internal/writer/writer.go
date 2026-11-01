@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -35,10 +36,14 @@ type Writer interface {
 
 // MySQLWriter cài đặt Writer cho MySQL target.
 type MySQLWriter struct {
-	db         *sql.DB
-	pipelineID string
-	workerID   int
-	epoch      int64
+	db                  *sql.DB
+	pipelineID          string
+	workerID            int
+	epoch               int64
+	orderer             *CommitOrderer
+	mu                  sync.Mutex
+	MultiRowUpsertCount int64
+	TotalUpsertRows     int64
 }
 
 // NewMySQLWriter khởi tạo MySQLWriter mới.
@@ -49,6 +54,20 @@ func NewMySQLWriter(db *sql.DB, pipelineID string, workerID int, epoch int64) *M
 		workerID:   workerID,
 		epoch:      epoch,
 	}
+}
+
+// SetCommitOrderer gán CommitOrderer để kiểm soát thứ tự commit (CP-5).
+func (w *MySQLWriter) SetCommitOrderer(orderer *CommitOrderer) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.orderer = orderer
+}
+
+// GetStats trả về số lượng câu lệnh multi-row upsert và tổng số row đã upsert.
+func (w *MySQLWriter) GetStats() (multiRowUpserts, totalUpsertRows int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.MultiRowUpsertCount, w.TotalUpsertRows
 }
 
 // EnsureWorkerRow đảm bảo row cho worker_id đã tồn tại trong _strand_worker_delta.
@@ -66,15 +85,19 @@ func (w *MySQLWriter) EnsureWorkerRow(ctx context.Context) error {
 // ApplyBatch ghi dữ liệu của batch và cập nhật row delta trong cùng transaction.
 // spec: 02 §4 quy tắc 3: nếu số row bị ảnh hưởng khác 1 thì rollback và trả về lỗi fenced.
 func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta DeltaRow) error {
+	w.mu.Lock()
+	orderer := w.orderer
+	w.mu.Unlock()
+
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// 1. Ghi dữ liệu vào các bảng ứng dụng
+	// 1. Ghi dữ liệu vào các bảng ứng dụng bằng multi-row upsert
 	for _, txn := range batch {
-		if err := applyRowChangesMySQL(ctx, tx, txn.Rows); err != nil {
+		if err := w.applyRowChangesMySQL(ctx, tx, txn.Rows); err != nil {
 			return fmt.Errorf("failed to apply row changes: %w", err)
 		}
 	}
@@ -109,41 +132,132 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: expected 1 row affected, got %d", affected), nil)
 	}
 
-	// 3. Commit cả dữ liệu và delta
+	// 3. Chờ đến lượt commit nếu có CommitOrderer ở chế độ strict (CP-5)
+	if orderer != nil && len(batch) > 0 {
+		firstSeq := batch[0].Seq()
+		if firstSeq > 0 {
+			if err := orderer.WaitTurn(ctx, firstSeq); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 4. Commit cả dữ liệu và delta
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit batch transaction: %w", err)
+	}
+
+	// 5. Thông báo commit xong cho orderer (CP-5)
+	if orderer != nil && len(batch) > 0 {
+		lastSeq := batch[len(batch)-1].Seq()
+		if lastSeq > 0 {
+			orderer.CommitDone(lastSeq)
+		}
 	}
 
 	return nil
 }
 
-func applyRowChangesMySQL(ctx context.Context, tx *sql.Tx, rows []model.RowChange) error {
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *MySQLWriter) applyRowChangesMySQL(ctx context.Context, tx *sql.Tx, rows []model.RowChange) error {
+	var curTable string
+	var curCols []string
+	var curVals [][]interface{}
+
+	flushInserts := func() error {
+		if len(curVals) == 0 {
+			return nil
+		}
+		numRows := len(curVals)
+		w.mu.Lock()
+		if numRows > 1 {
+			w.MultiRowUpsertCount++
+		}
+		w.TotalUpsertRows += int64(numRows)
+		w.mu.Unlock()
+
+		// Tạo câu lệnh multi-row INSERT ... VALUES (...), (...) ON DUPLICATE KEY UPDATE ...
+		var valPlaceholders []string
+		var allArgs []interface{}
+
+		rowPlaceholder := "(" + strings.Repeat("?, ", len(curCols)-1) + "?)"
+		for _, rowVal := range curVals {
+			valPlaceholders = append(valPlaceholders, rowPlaceholder)
+			allArgs = append(allArgs, rowVal...)
+		}
+
+		var updateClauses []string
+		for _, col := range curCols {
+			updateClauses = append(updateClauses, fmt.Sprintf("`%s`=VALUES(`%s`)", col, col))
+		}
+
+		var colNamesEscaped []string
+		for _, col := range curCols {
+			colNamesEscaped = append(colNamesEscaped, fmt.Sprintf("`%s`", col))
+		}
+
+		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s",
+			curTable,
+			strings.Join(colNamesEscaped, ", "),
+			strings.Join(valPlaceholders, ", "),
+			strings.Join(updateClauses, ", "),
+		)
+
+		if _, err := tx.ExecContext(ctx, query, allArgs...); err != nil {
+			return fmt.Errorf("failed multi-row upsert on %s: %w", curTable, err)
+		}
+
+		curVals = nil
+		return nil
+	}
+
 	for _, row := range rows {
 		tbl := row.Table.String()
-		switch row.Op {
-		case model.OpInsert:
+
+		if row.Op == model.OpInsert {
+			var colNames []string
+			var vals []interface{}
 			if len(row.Cols) > 0 {
-				var colNames []string
-				var placeholders []string
-				var vals []interface{}
-				var updateClauses []string
 				for _, c := range row.Cols {
-					colNames = append(colNames, fmt.Sprintf("`%s`", c.Name))
-					placeholders = append(placeholders, "?")
+					colNames = append(colNames, c.Name)
 					vals = append(vals, c.Value)
-					updateClauses = append(updateClauses, fmt.Sprintf("`%s`=VALUES(`%s`)", c.Name, c.Name))
-				}
-				q := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
-					tbl, strings.Join(colNames, ", "), strings.Join(placeholders, ", "), strings.Join(updateClauses, ", "))
-				if _, err := tx.ExecContext(ctx, q, vals...); err != nil {
-					return err
 				}
 			} else if len(row.Key) > 0 {
-				q := fmt.Sprintf("INSERT INTO %s (id) VALUES (?) ON DUPLICATE KEY UPDATE id=VALUES(id)", tbl)
-				if _, err := tx.ExecContext(ctx, q, row.Key[0]); err != nil {
-					return err
-				}
+				colNames = append(colNames, "id")
+				vals = append(vals, row.Key[0])
 			}
+
+			if len(colNames) > 0 {
+				canAppend := curTable == tbl && sameStringSlice(curCols, colNames) && len(curVals) < 500
+				if !canAppend {
+					if err := flushInserts(); err != nil {
+						return err
+					}
+					curTable = tbl
+					curCols = colNames
+				}
+				curVals = append(curVals, vals)
+				continue
+			}
+		}
+
+		// Nếu gặp OpUpdate hoặc OpDelete thì flush pending insert batch trước
+		if err := flushInserts(); err != nil {
+			return err
+		}
+
+		switch row.Op {
 		case model.OpUpdate:
 			if len(row.Cols) > 0 && len(row.Key) > 0 {
 				var setClauses []string
@@ -171,7 +285,8 @@ func applyRowChangesMySQL(ctx context.Context, tx *sql.Tx, rows []model.RowChang
 			}
 		}
 	}
-	return nil
+
+	return flushInserts()
 }
 
 // -----------------------------------------------------------------------------
