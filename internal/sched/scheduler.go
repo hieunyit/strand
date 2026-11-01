@@ -55,6 +55,12 @@ type Scheduler struct {
 	totalRows   int
 	isClosed    bool
 
+	// Holes tracking (spec 02 §1, §2 CP-4, §6)
+	lwd        uint64
+	high       uint64
+	completed  map[uint64]struct{}
+	holeWaitCh chan struct{}
+
 	// Metrics
 	readyWidthHist map[int]int
 	hotRowCount    int64
@@ -81,7 +87,41 @@ func NewScheduler(cfg Config) *Scheduler {
 		dependents:     make(map[uint64][]uint64),
 		readyCh:        make(chan *model.Txn, 1024),
 		readyWidthHist: make(map[int]int),
+		completed:      make(map[uint64]struct{}),
+		holeWaitCh:     make(chan struct{}),
 	}
+}
+
+func (s *Scheduler) holesLocked() int {
+	if s.high <= s.lwd {
+		return 0
+	}
+	holes := int(s.high-s.lwd) - len(s.completed)
+	if holes < 0 {
+		return 0
+	}
+	return holes
+}
+
+// Holes trả về số lượng lỗ hiện tại trong khoảng (lwd, high] (spec 02 §1, §6).
+func (s *Scheduler) Holes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.holesLocked()
+}
+
+// Lwd trả về mốc hoàn thành liên tục thấp nhất hiện tại.
+func (s *Scheduler) Lwd() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lwd
+}
+
+// High trả về mốc sequence cao nhất đã hoàn thành.
+func (s *Scheduler) High() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.high
 }
 
 func (s *Scheduler) Ready() <-chan *model.Txn {
@@ -124,11 +164,30 @@ func ComputeWriteset(t *model.Txn) map[string][]uint64 {
 // Admit tiếp nhận một Txn theo đúng thuật toán spec 02 §6.
 func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+
+	// Chặn nhận Txn mới khi số holes vượt ngưỡng max_holes (spec 02 §2 CP-4, §6)
+	for s.holesLocked() > s.cfg.MaxHoles {
+		if s.isClosed {
+			s.mu.Unlock()
+			return fmt.Errorf("scheduler is closed")
+		}
+		ch := s.holeWaitCh
+		s.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ch:
+		}
+
+		s.mu.Lock()
+	}
 
 	if s.isClosed {
+		s.mu.Unlock()
 		return fmt.Errorf("scheduler is closed")
 	}
+	defer s.mu.Unlock()
 
 	// Tự động gán seq nếu chưa có
 	if t.Seq() == 0 {
@@ -259,6 +318,28 @@ func (s *Scheduler) Done(seq uint64, err error) {
 	}
 
 	delete(s.activeTxns, seq)
+
+	// Cập nhật mốc hoàn thành và holes
+	if seq > s.lwd {
+		s.completed[seq] = struct{}{}
+		if seq > s.high {
+			s.high = seq
+		}
+		for {
+			next := s.lwd + 1
+			if _, ok := s.completed[next]; ok {
+				delete(s.completed, next)
+				s.lwd = next
+			} else {
+				break
+			}
+		}
+		// Đánh thức các goroutine đang chờ Admit khi holes giảm
+		if s.holeWaitCh != nil {
+			close(s.holeWaitCh)
+			s.holeWaitCh = make(chan struct{})
+		}
+	}
 }
 
 // Close đóng scheduler khi không còn transaction mới.
@@ -266,6 +347,13 @@ func (s *Scheduler) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.isClosed = true
+	if s.holeWaitCh != nil {
+		select {
+		case <-s.holeWaitCh:
+		default:
+			close(s.holeWaitCh)
+		}
+	}
 }
 
 // Stats trả về số liệu thống kê.

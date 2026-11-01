@@ -2,6 +2,9 @@ package checkpoint
 
 import (
 	"context"
+	"encoding/json"
+	"sort"
+	"strings"
 	"time"
 
 	"strand/internal/exitcode"
@@ -65,7 +68,45 @@ func ParseAppliedSet(engine model.Engine, appliedStr string) (AppliedSet, error)
 		return set, nil
 	case model.EnginePG:
 		set := NewPGAppliedSet(1)
-		// Phân tích PG applied format nếu có
+		appliedStr = strings.TrimSpace(appliedStr)
+		if appliedStr == "" {
+			return set, nil
+		}
+		var pj PGAppliedJSON
+		if err := json.Unmarshal([]byte(appliedStr), &pj); err == nil && pj.High != "" {
+			high, err := ParseLSN(pj.High)
+			if err == nil && high > 0 {
+				var holes []uint64
+				for _, hStr := range pj.Holes {
+					if hLSN, err := ParseLSN(hStr); err == nil {
+						holes = append(holes, hLSN)
+					}
+				}
+				sort.Slice(holes, func(i, j int) bool { return holes[i] < holes[j] })
+				cur := uint64(1)
+				for _, h := range holes {
+					if h > cur {
+						set.ranges.AddRange(cur, h-1)
+					}
+					cur = h + 1
+				}
+				if cur <= high {
+					set.ranges.AddRange(cur, high)
+				}
+				return set, nil
+			}
+		}
+		// Fallback parse comma-separated LSNs
+		parts := strings.Split(appliedStr, ",")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if lsn, err := ParseLSN(p); err == nil && lsn > 0 {
+				set.Add(model.Pos{Engine: model.EnginePG, LSN: lsn})
+			}
+		}
 		return set, nil
 	default:
 		return NewMySQLAppliedSet(), nil

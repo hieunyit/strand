@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -111,6 +112,56 @@ func (s *PGAppliedSet) Equal(other AppliedSet) bool {
 	return s.ranges.Equal(pgOther.ranges)
 }
 
+// PGAppliedJSON biểu diễn JSON metadata applied của PostgreSQL theo spec/02 §4.
+type PGAppliedJSON struct {
+	Lwd   string   `json:"lwd"`
+	High  string   `json:"high"`
+	Holes []string `json:"holes"`
+}
+
+func (s *PGAppliedSet) String() string {
+	if s == nil || s.ranges == nil || s.ranges.IsEmpty() {
+		return ""
+	}
+	lwdPos := s.Lwd()
+	highPos := s.High()
+	holesPos := s.Holes()
+
+	holesStr := make([]string, len(holesPos))
+	for i, h := range holesPos {
+		holesStr[i] = fmt.Sprintf("%X/%X", h.LSN>>32, h.LSN&0xFFFFFFFF)
+	}
+
+	payload := PGAppliedJSON{
+		Lwd:   fmt.Sprintf("%X/%X", lwdPos.LSN>>32, lwdPos.LSN&0xFFFFFFFF),
+		High:  fmt.Sprintf("%X/%X", highPos.LSN>>32, highPos.LSN&0xFFFFFFFF),
+		Holes: holesStr,
+	}
+	bytes, _ := json.Marshal(payload)
+	return string(bytes)
+}
+
+// ParseLSN phân tích chuỗi LSN dạng "X/Y" (hex) hoặc decimal thành uint64.
+func ParseLSN(s string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty LSN")
+	}
+	parts := strings.Split(s, "/")
+	if len(parts) == 2 {
+		hi, err := strconv.ParseUint(parts[0], 16, 32)
+		if err != nil {
+			return 0, err
+		}
+		lo, err := strconv.ParseUint(parts[1], 16, 32)
+		if err != nil {
+			return 0, err
+		}
+		return (hi << 32) | lo, nil
+	}
+	return strconv.ParseUint(s, 10, 64)
+}
+
 // -----------------------------------------------------------------------------
 // MySQLAppliedSet
 // -----------------------------------------------------------------------------
@@ -201,12 +252,76 @@ func (s *MySQLAppliedSet) Add(p model.Pos) {
 	if p.Engine != model.EngineMySQL {
 		return
 	}
-	prefix, gno, err := s.parseGTID(p.GTID)
-	if err != nil || gno == 0 {
+	s.ParseAndAddRange(p.GTID)
+}
+
+// ParseAndAddRange phân tích một phân đoạn GTID set (ví dụ "uuid:1-10:15-20" hoặc "uuid:5") và thêm vào RangeSet tương ứng.
+func (s *MySQLAppliedSet) ParseAndAddRange(segment string) {
+	segment = strings.TrimSpace(segment)
+	if segment == "" {
 		return
 	}
+	parts := strings.Split(segment, ":")
+	if len(parts) == 0 {
+		return
+	}
+
+	splitIdx := len(parts)
+	for i := len(parts) - 1; i >= 1; i-- {
+		p := parts[i]
+		if isIntervalStr(p) {
+			splitIdx = i
+		} else {
+			break
+		}
+	}
+
+	var prefix string
+	var intervalParts []string
+
+	if splitIdx < len(parts) {
+		prefix = strings.Join(parts[:splitIdx], ":")
+		intervalParts = parts[splitIdx:]
+	} else {
+		if isIntervalStr(parts[0]) {
+			prefix = s.defaultUUID
+			intervalParts = parts
+		} else {
+			prefix = parts[0]
+		}
+	}
+
 	rs := s.getOrCreateRangeSet(prefix)
-	rs.Add(gno)
+	for _, ivStr := range intervalParts {
+		if strings.Contains(ivStr, "-") {
+			sub := strings.SplitN(ivStr, "-", 2)
+			start, err1 := strconv.ParseUint(strings.TrimSpace(sub[0]), 10, 64)
+			end, err2 := strconv.ParseUint(strings.TrimSpace(sub[1]), 10, 64)
+			if err1 == nil && err2 == nil && start <= end {
+				rs.AddRange(start, end)
+			}
+		} else {
+			val, err := strconv.ParseUint(strings.TrimSpace(ivStr), 10, 64)
+			if err == nil && val > 0 {
+				rs.Add(val)
+			}
+		}
+	}
+}
+
+func isIntervalStr(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if strings.Contains(s, "-") {
+		sub := strings.SplitN(s, "-", 2)
+		_, err1 := strconv.ParseUint(strings.TrimSpace(sub[0]), 10, 64)
+		_, err2 := strconv.ParseUint(strings.TrimSpace(sub[1]), 10, 64)
+		return err1 == nil && err2 == nil
+	}
+	_, err := strconv.ParseUint(s, 10, 64)
+	return err == nil
 }
 
 func (s *MySQLAppliedSet) Merge(other AppliedSet) {
