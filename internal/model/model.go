@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+
+	"github.com/zeebo/xxh3"
 )
 
 // spec: 02 §3
@@ -60,13 +62,45 @@ type ColValue struct {
 	Unchanged bool   `json:"unchanged,omitempty"` // spec: 02 §3 ColValue.Unchanged = true với cột TOAST vắng mặt
 }
 
+// UniqueKey định danh một unique key trên một hàng theo spec: 02 §6.
+type UniqueKey struct {
+	Name   string  `json:"name,omitempty"`
+	Key    []Value `json:"key"`
+	OldKey []Value `json:"old_key,omitempty"`
+}
+
+// ForeignKey định danh khóa ngoại tham chiếu tới bảng cha theo spec: 02 §6.
+type ForeignKey struct {
+	ParentTable TableID `json:"parent_table"`
+	ParentKey   []Value `json:"parent_key"`
+}
+
 // RowChange biểu diễn một thay đổi trên một hàng.
 type RowChange struct {
-	Table  TableID    `json:"table"`
-	Op     Op         `json:"op"`
-	Key    []Value    `json:"key"`
-	OldKey []Value    `json:"old_key,omitempty"` // khác nil khi UPDATE đổi PK
-	Cols   []ColValue `json:"cols"`
+	Table       TableID      `json:"table"`
+	Op          Op           `json:"op"`
+	Key         []Value      `json:"key"`
+	OldKey      []Value      `json:"old_key,omitempty"` // khác nil khi UPDATE đổi PK
+	UniqueKeys  []UniqueKey  `json:"unique_keys,omitempty"`
+	ForeignKeys []ForeignKey `json:"foreign_keys,omitempty"`
+	Cols        []ColValue   `json:"cols"`
+}
+
+// AddUniqueKey thêm một unique index key vào row change.
+func (r *RowChange) AddUniqueKey(name string, key []Value, oldKey ...[]Value) {
+	uk := UniqueKey{Name: name, Key: key}
+	if len(oldKey) > 0 {
+		uk.OldKey = oldKey[0]
+	}
+	r.UniqueKeys = append(r.UniqueKeys, uk)
+}
+
+// AddForeignKey thêm tham chiếu khóa ngoại tới bảng cha vào row change.
+func (r *RowChange) AddForeignKey(parentTable TableID, parentKey []Value) {
+	r.ForeignKeys = append(r.ForeignKeys, ForeignKey{
+		ParentTable: parentTable,
+		ParentKey:   parentKey,
+	})
 }
 
 // Txn biểu diễn một transaction đã lắp ráp đủ từ nguồn.
@@ -113,6 +147,67 @@ func (t *Txn) SetSeq(s uint64) {
 	if t != nil {
 		t.seq = s
 	}
+}
+
+// WritesetByTable tính toán các hash khóa xxh3 theo từng bảng cho Txn theo spec: 02 §6.
+// Writeset của Txn T là tập hash xxh3 của:
+// - (table, PK) cho mọi row T chạm tới. Với UPDATE đổi PK, lấy cả PK cũ lẫn PK mới.
+// - (table, unique_key) cho mọi unique index.
+// - (parent_table, parent_key) cho FK.
+func (t *Txn) WritesetByTable() map[string][]uint64 {
+	ws := make(map[string][]uint64)
+	if t == nil {
+		return ws
+	}
+	for _, row := range t.Rows {
+		tbl := row.Table.String()
+		// 1. (table, PK) và OldKey nếu đổi PK
+		if len(row.Key) > 0 {
+			keyStr := fmt.Sprintf("%v", row.Key)
+			h := xxh3.HashString(tbl + "|" + keyStr)
+			ws[tbl] = append(ws[tbl], h)
+		}
+		if len(row.OldKey) > 0 {
+			oldStr := fmt.Sprintf("%v", row.OldKey)
+			hOld := xxh3.HashString(tbl + "|" + oldStr)
+			ws[tbl] = append(ws[tbl], hOld)
+		}
+
+		// 2. (table, unique_key) cho mọi unique index
+		for _, uk := range row.UniqueKeys {
+			if len(uk.Key) > 0 {
+				ukStr := fmt.Sprintf("%v", uk.Key)
+				var hUK uint64
+				if uk.Name != "" {
+					hUK = xxh3.HashString(tbl + "|uk|" + uk.Name + "|" + ukStr)
+				} else {
+					hUK = xxh3.HashString(tbl + "|uk|" + ukStr)
+				}
+				ws[tbl] = append(ws[tbl], hUK)
+			}
+			if len(uk.OldKey) > 0 {
+				oldUkStr := fmt.Sprintf("%v", uk.OldKey)
+				var hOldUK uint64
+				if uk.Name != "" {
+					hOldUK = xxh3.HashString(tbl + "|uk|" + uk.Name + "|" + oldUkStr)
+				} else {
+					hOldUK = xxh3.HashString(tbl + "|uk|" + oldUkStr)
+				}
+				ws[tbl] = append(ws[tbl], hOldUK)
+			}
+		}
+
+		// 3. (parent_table, parent_key) cho FK
+		for _, fk := range row.ForeignKeys {
+			if len(fk.ParentKey) > 0 {
+				parentTbl := fk.ParentTable.String()
+				fkStr := fmt.Sprintf("%v", fk.ParentKey)
+				hFK := xxh3.HashString(parentTbl + "|" + fkStr)
+				ws[parentTbl] = append(ws[parentTbl], hFK)
+			}
+		}
+	}
+	return ws
 }
 
 // Checkpoint lưu trạng thái đã commit tại target.

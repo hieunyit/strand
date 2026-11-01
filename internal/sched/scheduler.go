@@ -6,7 +6,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/zeebo/xxh3"
 	"strand/internal/model"
 )
 
@@ -48,7 +47,8 @@ type Scheduler struct {
 	mu          sync.Mutex
 	tables      map[string]*tableState
 	nextSeq     uint64
-	activeTxns  map[uint64]*model.Txn
+	activeSeqs  map[uint64]struct{}   // seq đang chạy trong scheduler (chưa Done)
+	pendingTxns map[uint64]*model.Txn // Txn đang chờ phụ thuộc trong DAG (chưa emit)
 	inDegree    map[uint64]int
 	dependents  map[uint64][]uint64
 	readyCh     chan *model.Txn
@@ -82,7 +82,8 @@ func NewScheduler(cfg Config) *Scheduler {
 	return &Scheduler{
 		cfg:            cfg,
 		tables:         make(map[string]*tableState),
-		activeTxns:     make(map[uint64]*model.Txn),
+		activeSeqs:     make(map[uint64]struct{}),
+		pendingTxns:    make(map[uint64]*model.Txn),
 		inDegree:       make(map[uint64]int),
 		dependents:     make(map[uint64][]uint64),
 		readyCh:        make(chan *model.Txn, 1024),
@@ -142,23 +143,55 @@ func (s *Scheduler) table(tbl string) *tableState {
 	return st
 }
 
-// ComputeWriteset tính toán các hash khóa xxh3 theo từng bảng cho Txn.
+// TableWritesetEntries trả về số lượng entry trong map rows của bảng (spec 02 §11 metric strand_writeset_entries).
+func (s *Scheduler) TableWritesetEntries(tbl string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st, ok := s.tables[tbl]; ok {
+		return len(st.rows)
+	}
+	return 0
+}
+
+// TotalWritesetEntries trả về tổng số entry trong map rows của tất cả các bảng.
+func (s *Scheduler) TotalWritesetEntries() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.totalRows
+}
+
+// IsForcedTableLevel kiểm tra bảng có đang ở chế độ forcedTableLevel không.
+func (s *Scheduler) IsForcedTableLevel(tbl string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st, ok := s.tables[tbl]; ok {
+		return st.forcedTableLevel
+	}
+	return false
+}
+
+// ComputeWriteset tính toán các hash khóa xxh3 theo từng bảng cho Txn theo spec 02 §6.
 func ComputeWriteset(t *model.Txn) map[string][]uint64 {
-	ws := make(map[string][]uint64)
-	for _, row := range t.Rows {
-		tbl := row.Table.String()
-		if len(row.Key) > 0 {
-			keyStr := fmt.Sprintf("%v", row.Key)
-			h := xxh3.HashString(tbl + "|" + keyStr)
-			ws[tbl] = append(ws[tbl], h)
+	if t == nil {
+		return make(map[string][]uint64)
+	}
+	return t.WritesetByTable()
+}
+
+func (s *Scheduler) checkBudgetLocked() {
+	if s.totalRows > s.cfg.WritesetBudget {
+		var maxTbl string
+		var maxCount int
+		for tbl, st := range s.tables {
+			if len(st.rows) > maxCount {
+				maxCount = len(st.rows)
+				maxTbl = tbl
+			}
 		}
-		if len(row.OldKey) > 0 {
-			oldStr := fmt.Sprintf("%v", row.OldKey)
-			hOld := xxh3.HashString(tbl + "|" + oldStr)
-			ws[tbl] = append(ws[tbl], hOld)
+		if maxTbl != "" && maxCount > 0 {
+			s.tables[maxTbl].forcedTableLevel = true
 		}
 	}
-	return ws
 }
 
 // Admit tiếp nhận một Txn theo đúng thuật toán spec 02 §6.
@@ -196,7 +229,9 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	}
 	seq := t.Seq()
 
-	writeset := ComputeWriteset(t)
+	s.checkBudgetLocked()
+
+	writeset := t.WritesetByTable()
 	var deps []uint64
 
 	for tbl, keys := range writeset {
@@ -207,7 +242,23 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 			deps = append(deps, st.tableWriter)
 		}
 
-		if len(keys) > s.cfg.TableLevelThreshold || st.forcedTableLevel {
+		isTableLevel := len(keys) > s.cfg.TableLevelThreshold || st.forcedTableLevel
+		if !isTableLevel && s.totalRows+len(keys) > s.cfg.WritesetBudget {
+			// Bảng chiếm nhiều entry nhất chuyển sang cấp bảng
+			isMax := true
+			for otherTbl, otherSt := range s.tables {
+				if otherTbl != tbl && len(otherSt.rows) > len(st.rows)+len(keys) {
+					isMax = false
+					break
+				}
+			}
+			if isMax {
+				isTableLevel = true
+				st.forcedTableLevel = true
+			}
+		}
+
+		if isTableLevel {
 			// Nâng thành khóa cấp bảng: phụ thuộc mọi Txn đang chạy trên bảng
 			for p := range st.active {
 				if p < seq {
@@ -235,36 +286,24 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 		st.active[seq] = struct{}{}
 	}
 
-	// Kiểm tra writeset_budget: nếu vượt, đặt cờ forcedTableLevel cho bảng chiếm nhiều entry nhất
-	if s.totalRows > s.cfg.WritesetBudget {
-		var maxTbl string
-		var maxCount int
-		for tbl, st := range s.tables {
-			if len(st.rows) > maxCount {
-				maxCount = len(st.rows)
-				maxTbl = tbl
-			}
-		}
-		if maxTbl != "" {
-			s.tables[maxTbl].forcedTableLevel = true
-		}
-	}
+	s.checkBudgetLocked()
 
 	// Lọc bỏ dep trùng và chỉ giữ các dep còn đang active trong scheduler
 	deps = dedup(deps)
 	var activeDeps []uint64
 	for _, dep := range deps {
-		if _, ok := s.activeTxns[dep]; ok {
+		if _, ok := s.activeSeqs[dep]; ok {
 			activeDeps = append(activeDeps, dep)
 		}
 	}
 
-	s.activeTxns[seq] = t
+	s.activeSeqs[seq] = struct{}{}
 
 	if len(activeDeps) == 0 {
 		// Không có phụ thuộc, sẵn sàng chạy ngay
 		s.emitReady(t)
 	} else {
+		s.pendingTxns[seq] = t
 		s.inDegree[seq] = len(activeDeps)
 		for _, dep := range activeDeps {
 			s.dependents[dep] = append(s.dependents[dep], seq)
@@ -293,7 +332,6 @@ func (s *Scheduler) Done(seq uint64, err error) {
 		delete(st.active, seq)
 		if st.tableWriter == seq {
 			st.tableWriter = 0
-			st.forcedTableLevel = false
 		}
 		for k, writerSeq := range st.rows {
 			if writerSeq == seq {
@@ -301,7 +339,11 @@ func (s *Scheduler) Done(seq uint64, err error) {
 				s.totalRows--
 			}
 		}
+		if len(st.rows) == 0 && st.tableWriter == 0 && s.totalRows <= s.cfg.WritesetBudget {
+			st.forcedTableLevel = false
+		}
 	}
+	s.checkBudgetLocked()
 
 	// Giải phóng các transaction phụ thuộc trong DAG
 	if depList, ok := s.dependents[seq]; ok {
@@ -309,7 +351,8 @@ func (s *Scheduler) Done(seq uint64, err error) {
 			s.inDegree[depSeq]--
 			if s.inDegree[depSeq] == 0 {
 				delete(s.inDegree, depSeq)
-				if readyTxn, exists := s.activeTxns[depSeq]; exists {
+				if readyTxn, exists := s.pendingTxns[depSeq]; exists {
+					delete(s.pendingTxns, depSeq)
 					s.emitReady(readyTxn)
 				}
 			}
@@ -317,7 +360,8 @@ func (s *Scheduler) Done(seq uint64, err error) {
 		delete(s.dependents, seq)
 	}
 
-	delete(s.activeTxns, seq)
+	delete(s.pendingTxns, seq)
+	delete(s.activeSeqs, seq)
 
 	// Cập nhật mốc hoàn thành và holes
 	if seq > s.lwd {
