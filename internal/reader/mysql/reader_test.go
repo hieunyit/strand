@@ -16,6 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"strand/internal/checkpoint"
+	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/reader"
 	readermysql "strand/internal/reader/mysql"
@@ -95,6 +96,19 @@ func startMySQLServer(t *testing.T, serverID int, extraArgs ...string) (*sql.DB,
 	}
 
 	return db, host, port, cleanup
+}
+
+func TestNew_InvalidDSN(t *testing.T) {
+	_, err := readermysql.New(readermysql.Config{
+		DSN: "invalid-dsn-format",
+	})
+	if err == nil {
+		t.Fatalf("expected error for invalid DSN, got nil")
+	}
+	code := exitcode.GetExitCode(err)
+	if code != exitcode.Rejected {
+		t.Errorf("expected exit code %d (Rejected), got %d", exitcode.Rejected, code)
+	}
 }
 
 // AC1: Đọc stream có tagged GTID (MySQL 8.4+)
@@ -265,27 +279,56 @@ collectLoop:
 // AC3: Đổi replica giữa hai lần chạy vẫn resume đúng (TestCP2)
 // invariant: CP-2
 func TestCP2_SwitchReplicaResume(t *testing.T) {
-	// Khởi chạy 2 MySQL servers giả lập Replica 1 và Replica 2
+	// Khởi chạy 2 MySQL servers hoàn toàn riêng biệt: Replica 1 (port1) và Replica 2 (port2)
 	db1, host1, port1, cleanup1 := startMySQLServer(t, 2003)
 	defer cleanup1()
 
-	var server1UUID string
-	if err := db1.QueryRow("SELECT @@server_uuid;").Scan(&server1UUID); err != nil {
-		t.Fatalf("Get @@server_uuid db1 failed: %v", err)
-	}
+	db2, host2, port2, cleanup2 := startMySQLServer(t, 2004)
+	defer cleanup2()
 
-	if _, err := db1.Exec("CREATE DATABASE IF NOT EXISTS test_cp2; CREATE TABLE test_cp2.items (id INT PRIMARY KEY);"); err != nil {
-		t.Fatalf("Setup db1 failed: %v", err)
-	}
+	// Cả 2 replica cùng đồng bộ từ 1 source chung có sourceUUID
+	const sourceUUID = "11111111-2222-3333-4444-555555555555"
 
-	// Ghi 3 Txn vào db1
-	for i := 1; i <= 3; i++ {
-		if _, err := db1.Exec(fmt.Sprintf("INSERT INTO test_cp2.items VALUES (%d);", i)); err != nil {
-			t.Fatalf("Insert db1 %d failed: %v", i, err)
+	// Khởi tạo schema trên cả 2 replica
+	for _, db := range []*sql.DB{db1, db2} {
+		if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS test_cp2; CREATE TABLE test_cp2.items (id INT PRIMARY KEY);"); err != nil {
+			t.Fatalf("Setup db failed: %v", err)
 		}
 	}
 
-	// Lần chạy 1 trên Replica 1: Đọc đến Txn 2
+	// Ghi các transaction từ source vào Replica 1 (txn 1..3)
+	for i := 1; i <= 3; i++ {
+		gtid := fmt.Sprintf("%s:%d", sourceUUID, i)
+		queries := []string{
+			fmt.Sprintf("SET @@SESSION.gtid_next = '%s';", gtid),
+			fmt.Sprintf("INSERT INTO test_cp2.items VALUES (%d);", i),
+			"COMMIT;",
+			"SET @@SESSION.gtid_next = 'automatic';",
+		}
+		for _, q := range queries {
+			if _, err := db1.Exec(q); err != nil {
+				t.Fatalf("db1 insert %d failed: %v", i, err)
+			}
+		}
+	}
+
+	// Ghi các transaction từ source vào Replica 2 (txn 1..5)
+	for i := 1; i <= 5; i++ {
+		gtid := fmt.Sprintf("%s:%d", sourceUUID, i)
+		queries := []string{
+			fmt.Sprintf("SET @@SESSION.gtid_next = '%s';", gtid),
+			fmt.Sprintf("INSERT INTO test_cp2.items VALUES (%d);", i),
+			"COMMIT;",
+			"SET @@SESSION.gtid_next = 'automatic';",
+		}
+		for _, q := range queries {
+			if _, err := db2.Exec(q); err != nil {
+				t.Fatalf("db2 insert %d failed: %v", i, err)
+			}
+		}
+	}
+
+	// Lần chạy 1 trên Replica 1 (host1:port1): Đọc đến Txn 2
 	r1, err := readermysql.New(readermysql.Config{
 		Host:     host1,
 		Port:     uint16(port1),
@@ -297,55 +340,56 @@ func TestCP2_SwitchReplicaResume(t *testing.T) {
 		t.Fatalf("New r1 failed: %v", err)
 	}
 
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel1()
 
-	appliedSet := checkpoint.NewMySQLAppliedSet(server1UUID)
+	appliedSet := checkpoint.NewMySQLAppliedSet(sourceUUID)
 	events1, err := r1.Start(ctx1, nil)
 	if err != nil {
 		t.Fatalf("r1.Start failed: %v", err)
 	}
 
-	// Đọc cho đến khi gặp ít nhất 2 GTID
-	gtidCount := 0
+	// Đọc cho đến khi gặp ít nhất 2 GTID thuộc sourceUUID
+	readCount := 0
 	for ev := range events1 {
-		if ev.Type == reader.EventGTID {
-			gtidCount++
+		if ev.Type == reader.EventGTID && strings.Contains(ev.GTID, sourceUUID) {
+			readCount++
 			appliedSet.Add(ev.Pos)
-			if gtidCount >= 2 {
+			if readCount >= 2 {
 				break
 			}
 		}
 	}
 	r1.Close()
 
-	t.Logf("Replica 1 read %d GTIDs. AppliedSet: %s", gtidCount, appliedSet.String())
+	t.Logf("Replica 1 (host %s:%d) read %d GTIDs. AppliedSet: %s", host1, port1, readCount, appliedSet.String())
 
-	// Lần chạy 2: Chuyển sang Replica 2 (ở đây ta dùng db1 hoặc một replica chứa cùng dữ liệu)
-	// Với AppliedSet đã ghi nhận các txn đã đọc từ Replica 1, kết nối tới replica tiếp theo để resume
+	// Lần chạy 2: Chuyển hoàn toàn sang Replica 2 độc lập (host2:port2)
+	// Resume với AppliedSet đã ghi nhận các txn từ Replica 1
 	r2, err := readermysql.New(readermysql.Config{
-		Host:     host1, // Switch endpoint
-		Port:     uint16(port1),
+		Host:     host2, // Endpoint Replica 2 riêng biệt
+		Port:     uint16(port2),
 		User:     "root",
 		Password: "dev",
-		ServerID: 3004, // Server ID khác nhau cho mỗi kết nối reader
+		ServerID: 3004,
 	})
 	if err != nil {
 		t.Fatalf("New r2 failed: %v", err)
 	}
 	defer r2.Close()
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel2()
 
 	events2, err := r2.Start(ctx2, appliedSet)
 	if err != nil {
-		t.Fatalf("r2.Start failed: %v", err)
+		t.Fatalf("r2.Start on replica 2 failed: %v", err)
 	}
 
 	// Đảm bảo không nhận lại bất kỳ Txn nào đã nằm trong appliedSet (TestCP2: Không Txn nào được apply hai lần)
 	timer := time.After(3 * time.Second)
 	duplicated := false
+	resumedCount := 0
 
 checkLoop:
 	for {
@@ -354,12 +398,13 @@ checkLoop:
 			if !ok {
 				break checkLoop
 			}
-			if ev.Type == reader.EventGTID {
+			if ev.Type == reader.EventGTID && strings.Contains(ev.GTID, sourceUUID) {
 				if appliedSet.Contains(ev.Pos) {
-					t.Errorf("CP-2 VIOLATION: Txn %s đã có trong appliedSet lại xuất hiện khi đổi replica!", ev.Pos.GTID)
+					t.Errorf("CP-2 VIOLATION: Txn %s đã có trong appliedSet từ Replica 1 lại xuất hiện trên Replica 2!", ev.Pos.GTID)
 					duplicated = true
 				} else {
-					t.Logf("Replica 2 resumed new GTID: %s", ev.Pos.GTID)
+					resumedCount++
+					t.Logf("Replica 2 (%s:%d) resumed new GTID: %s", host2, port2, ev.Pos.GTID)
 				}
 			}
 		case <-timer:
@@ -372,6 +417,10 @@ checkLoop:
 	if duplicated {
 		t.Fatalf("TestCP2 FAIL: Có transaction bị đọc lặp lại sau khi đổi replica")
 	}
+	if resumedCount == 0 {
+		t.Fatalf("TestCP2 FAIL: Không nhận được transaction mới nào từ Replica 2 sau khi resume")
+	}
 
-	t.Logf("AC3 (TestCP2) PASS: Đổi replica giữa hai lần chạy resume đúng, 0 Txn trùng lặp")
+	t.Logf("AC3 (TestCP2) PASS: Đổi replica từ (%s:%d) sang (%s:%d) resume đúng, nhận %d Txn mới, 0 Txn trùng lặp",
+		host1, port1, host2, port2, resumedCount)
 }

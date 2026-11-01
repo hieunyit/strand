@@ -46,24 +46,30 @@ type MySQLReader struct {
 func New(cfg Config) (*MySQLReader, error) {
 	if cfg.DSN != "" {
 		dbCfg, err := drivermysql.ParseDSN(cfg.DSN)
-		if err == nil {
-			if cfg.User == "" {
-				cfg.User = dbCfg.User
-			}
-			if cfg.Password == "" {
-				cfg.Password = dbCfg.Passwd
-			}
-			if cfg.Host == "" && dbCfg.Addr != "" {
-				h, p, err := net.SplitHostPort(dbCfg.Addr)
-				if err == nil {
-					cfg.Host = h
-					if portNum, err := strconv.Atoi(p); err == nil {
-						cfg.Port = uint16(portNum)
-					}
-				} else {
-					cfg.Host = dbCfg.Addr
-					cfg.Port = 3306
+		if err != nil {
+			return nil, exitcode.New(
+				exitcode.ErrBinlogConfigInvalid,
+				exitcode.Rejected,
+				fmt.Sprintf("invalid MySQL source DSN %q: %v", cfg.DSN, err),
+				err,
+			)
+		}
+		if cfg.User == "" {
+			cfg.User = dbCfg.User
+		}
+		if cfg.Password == "" {
+			cfg.Password = dbCfg.Passwd
+		}
+		if cfg.Host == "" && dbCfg.Addr != "" {
+			h, p, err := net.SplitHostPort(dbCfg.Addr)
+			if err == nil {
+				cfg.Host = h
+				if portNum, err := strconv.Atoi(p); err == nil {
+					cfg.Port = uint16(portNum)
 				}
+			} else {
+				cfg.Host = dbCfg.Addr
+				cfg.Port = 3306
 			}
 		}
 	}
@@ -117,7 +123,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return nil, exitcode.New("reader_closed", exitcode.Unclassified, "reader is already closed", nil)
+		return nil, fmt.Errorf("reader is already closed")
 	}
 	r.mu.Unlock()
 
@@ -192,7 +198,10 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 			switch ev.Header.EventType {
 			case replication.GTID_EVENT:
 				if gtidEv, ok := ev.Event.(*replication.GTIDEvent); ok {
-					u, _ := uuid.FromBytes(gtidEv.SID)
+					u, err := uuid.FromBytes(gtidEv.SID)
+					if err != nil {
+						continue
+					}
 					gtid := fmt.Sprintf("%s:%d", u.String(), gtidEv.GNO)
 					r.setPos(gtid)
 					select {
@@ -209,7 +218,10 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 
 			case replication.GTID_TAGGED_LOG_EVENT:
 				if taggedEv, ok := ev.Event.(*replication.GtidTaggedLogEvent); ok {
-					u, _ := uuid.FromBytes(taggedEv.SID)
+					u, err := uuid.FromBytes(taggedEv.SID)
+					if err != nil {
+						continue
+					}
 					gtid := fmt.Sprintf("%s:%s:%d", u.String(), taggedEv.Tag, taggedEv.GNO)
 					r.setPos(gtid)
 					select {
