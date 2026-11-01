@@ -78,6 +78,26 @@ type Txn struct {
 	SchemaVer uint32      `json:"schema_ver"`
 	Rows      []RowChange `json:"rows"`
 	Bytes     int64       `json:"bytes"`
+
+	// Hỗ trợ transaction lớn tràn đĩa theo spec: design §6.4
+	SpillPath string `json:"spill_path,omitempty"`
+	RowCount  int64  `json:"row_count,omitempty"`
+}
+
+// IsSpilled kiểm tra transaction có bị tràn xuống đĩa không.
+func (t *Txn) IsSpilled() bool {
+	return t != nil && t.SpillPath != ""
+}
+
+// TotalRows trả về tổng số dòng thay đổi trong transaction.
+func (t *Txn) TotalRows() int64 {
+	if t == nil {
+		return 0
+	}
+	if t.RowCount > 0 {
+		return t.RowCount
+	}
+	return int64(len(t.Rows))
 }
 
 // Seq trả về số thứ tự nội bộ trong RAM.
