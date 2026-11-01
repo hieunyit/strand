@@ -92,8 +92,12 @@ func (s *MySQLStore) Lock(ctx context.Context, pipelineID string) (func() error,
 		var relErr error
 		once.Do(func() {
 			var relRes sql.NullInt64
-			_ = conn.QueryRowContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName).Scan(&relRes)
-			relErr = conn.Close()
+			if err := conn.QueryRowContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName).Scan(&relRes); err != nil {
+				relErr = fmt.Errorf("RELEASE_LOCK query failed: %w", err)
+			}
+			if closeErr := conn.Close(); closeErr != nil && relErr == nil {
+				relErr = closeErr
+			}
 		})
 		return relErr
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"strand/internal/checkpoint"
+	"strand/internal/exitcode"
 	"strand/internal/model"
 )
 
@@ -275,7 +276,10 @@ func TestSG1_PipelineLockSecondInstance(t *testing.T) {
 		if !errors.Is(err2, checkpoint.ErrPipelineLocked) {
 			t.Fatalf("TestSG1 FAIL: Instance 2 expected ErrPipelineLocked ('pipeline_locked'), got: %v", err2)
 		}
-		t.Logf("Instance 2 bị từ chối chính xác với mã lỗi: %v", err2)
+		if code := exitcode.GetExitCode(err2); code != exitcode.Fenced {
+			t.Fatalf("TestSG1 FAIL: expected exit code %d (Fenced), got %d", exitcode.Fenced, code)
+		}
+		t.Logf("Instance 2 bị từ chối chính xác với mã lỗi: %v (exit code %d)", err2, exitcode.GetExitCode(err2))
 
 		// Instance 1 giải phóng khóa
 		if err := release1(); err != nil {
@@ -287,7 +291,9 @@ func TestSG1_PipelineLockSecondInstance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Instance 2 Lock failed after release: %v", err)
 		}
-		_ = release2()
+		if err := release2(); err != nil {
+			t.Fatalf("release2 failed: %v", err)
+		}
 		t.Logf("Instance 2 lấy khóa thành công sau khi Instance 1 giải phóng")
 	})
 
@@ -316,7 +322,10 @@ func TestSG1_PipelineLockSecondInstance(t *testing.T) {
 		if !errors.Is(err2, checkpoint.ErrPipelineLocked) {
 			t.Fatalf("TestSG1 FAIL: Instance 2 PG expected ErrPipelineLocked, got: %v", err2)
 		}
-		t.Logf("Instance 2 PG bị từ chối chính xác với mã lỗi: %v", err2)
+		if code := exitcode.GetExitCode(err2); code != exitcode.Fenced {
+			t.Fatalf("TestSG1 FAIL: expected exit code %d (Fenced), got %d", exitcode.Fenced, code)
+		}
+		t.Logf("Instance 2 PG bị từ chối chính xác với mã lỗi: %v (exit code %d)", err2, exitcode.GetExitCode(err2))
 
 		// Instance 1 giải phóng khóa
 		if err := release1(); err != nil {
@@ -328,7 +337,9 @@ func TestSG1_PipelineLockSecondInstance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Instance 2 PG Lock failed after release: %v", err)
 		}
-		_ = release2()
+		if err := release2(); err != nil {
+			t.Fatalf("release2 PG failed: %v", err)
+		}
 		t.Logf("Instance 2 PG lấy khóa thành công sau khi Instance 1 giải phóng")
 	})
 
@@ -345,7 +356,9 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 		pipelineID := "pipeline-epoch-mysql"
 		store := checkpoint.NewMySQLStore(db, pipelineID, model.EngineMySQL)
 
-		_ = store.EnsureTables(ctx)
+		if err := store.EnsureTables(ctx); err != nil {
+			t.Fatalf("EnsureTables failed: %v", err)
+		}
 
 		// Lần 1: Khởi động lần đầu -> epoch = 1
 		ep1, err := store.AdvanceEpoch(ctx, pipelineID, "host-pod-1", "hash-1")
@@ -354,6 +367,12 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 		}
 		if ep1 != 1 || store.Epoch() != 1 {
 			t.Fatalf("expected epoch 1 on first startup, got %d", ep1)
+		}
+
+		// Chèn delta row với worker 1 để kiểm tra cập nhật epoch
+		_, err = db.ExecContext(ctx, "INSERT INTO _strand_worker_delta (pipeline_id, worker_id, epoch, batch_no, applied) VALUES (?, 1, 1, 1, 'uuid:1-10')", pipelineID)
+		if err != nil {
+			t.Fatalf("insert worker delta failed: %v", err)
 		}
 
 		// Lần 2: Khởi động lại -> epoch = 2
@@ -365,6 +384,15 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 			t.Fatalf("expected epoch 2 on second startup, got %d", ep2)
 		}
 
+		// Kiểm tra worker delta đã được cập nhật lên epoch 2 trong transaction của AdvanceEpoch
+		var deltaEpoch int64
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_worker_delta WHERE pipeline_id = ? AND worker_id = 1", pipelineID).Scan(&deltaEpoch); err != nil {
+			t.Fatalf("scan worker delta epoch failed: %v", err)
+		}
+		if deltaEpoch != 2 {
+			t.Fatalf("expected _strand_worker_delta epoch 2, got %d", deltaEpoch)
+		}
+
 		// Lần 3: Khởi động lại -> epoch = 3
 		ep3, err := store.AdvanceEpoch(ctx, pipelineID, "host-pod-3", "hash-3")
 		if err != nil {
@@ -374,17 +402,28 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 			t.Fatalf("expected epoch 3 on third startup, got %d", ep3)
 		}
 
-		// Xác thực trên bảng _strand_pipeline và _strand_checkpoint
+		// Xác thực trên bảng _strand_pipeline, _strand_checkpoint, _strand_worker_delta
 		var pipelineEpoch int64
-		_ = db.QueryRowContext(ctx, "SELECT epoch FROM _strand_pipeline WHERE pipeline_id = ?", pipelineID).Scan(&pipelineEpoch)
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_pipeline WHERE pipeline_id = ?", pipelineID).Scan(&pipelineEpoch); err != nil {
+			t.Fatalf("scan pipeline epoch failed: %v", err)
+		}
 		if pipelineEpoch != 3 {
 			t.Fatalf("expected _strand_pipeline epoch 3, got %d", pipelineEpoch)
 		}
 
 		var checkpointEpoch int64
-		_ = db.QueryRowContext(ctx, "SELECT epoch FROM _strand_checkpoint WHERE pipeline_id = ?", pipelineID).Scan(&checkpointEpoch)
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_checkpoint WHERE pipeline_id = ?", pipelineID).Scan(&checkpointEpoch); err != nil {
+			t.Fatalf("scan checkpoint epoch failed: %v", err)
+		}
 		if checkpointEpoch != 3 {
 			t.Fatalf("expected _strand_checkpoint epoch 3, got %d", checkpointEpoch)
+		}
+
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_worker_delta WHERE pipeline_id = ? AND worker_id = 1", pipelineID).Scan(&deltaEpoch); err != nil {
+			t.Fatalf("scan worker delta epoch 3 failed: %v", err)
+		}
+		if deltaEpoch != 3 {
+			t.Fatalf("expected _strand_worker_delta epoch 3, got %d", deltaEpoch)
 		}
 	})
 
@@ -394,7 +433,9 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 		pipelineID := "pipeline-epoch-pg"
 		store := checkpoint.NewPGStore(db, pipelineID, model.EnginePG)
 
-		_ = store.EnsureTables(ctx)
+		if err := store.EnsureTables(ctx); err != nil {
+			t.Fatalf("PG EnsureTables failed: %v", err)
+		}
 
 		// Lần 1: Khởi động lần đầu -> epoch = 1
 		ep1, err := store.AdvanceEpoch(ctx, pipelineID, "host-pod-1", "hash-1")
@@ -403,6 +444,12 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 		}
 		if ep1 != 1 || store.Epoch() != 1 {
 			t.Fatalf("expected epoch 1 on first startup on PG, got %d", ep1)
+		}
+
+		// Chèn delta row với worker 1 để kiểm tra cập nhật epoch trên PG
+		_, err = db.ExecContext(ctx, "INSERT INTO _strand_worker_delta (pipeline_id, worker_id, epoch, batch_no, applied) VALUES ($1, 1, 1, 1, '{\"lwd\":\"0/10\"}')", pipelineID)
+		if err != nil {
+			t.Fatalf("insert worker delta on PG failed: %v", err)
 		}
 
 		// Lần 2: Khởi động lại -> epoch = 2
@@ -414,6 +461,15 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 			t.Fatalf("expected epoch 2 on second startup on PG, got %d", ep2)
 		}
 
+		// Kiểm tra worker delta trên PG đã được cập nhật lên epoch 2
+		var deltaEpoch int64
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_worker_delta WHERE pipeline_id = $1 AND worker_id = 1", pipelineID).Scan(&deltaEpoch); err != nil {
+			t.Fatalf("scan worker delta epoch on PG failed: %v", err)
+		}
+		if deltaEpoch != 2 {
+			t.Fatalf("expected _strand_worker_delta epoch 2 on PG, got %d", deltaEpoch)
+		}
+
 		// Lần 3: Khởi động lại -> epoch = 3
 		ep3, err := store.AdvanceEpoch(ctx, pipelineID, "host-pod-3", "hash-3")
 		if err != nil {
@@ -423,17 +479,28 @@ func TestAC3_EpochIncreasesOnStartup(t *testing.T) {
 			t.Fatalf("expected epoch 3 on third startup on PG, got %d", ep3)
 		}
 
-		// Xác thực trên bảng _strand_pipeline và _strand_checkpoint
+		// Xác thực trên bảng _strand_pipeline, _strand_checkpoint, _strand_worker_delta
 		var pipelineEpoch int64
-		_ = db.QueryRowContext(ctx, "SELECT epoch FROM _strand_pipeline WHERE pipeline_id = $1", pipelineID).Scan(&pipelineEpoch)
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_pipeline WHERE pipeline_id = $1", pipelineID).Scan(&pipelineEpoch); err != nil {
+			t.Fatalf("scan pipeline epoch on PG failed: %v", err)
+		}
 		if pipelineEpoch != 3 {
 			t.Fatalf("expected _strand_pipeline epoch 3 on PG, got %d", pipelineEpoch)
 		}
 
 		var checkpointEpoch int64
-		_ = db.QueryRowContext(ctx, "SELECT epoch FROM _strand_checkpoint WHERE pipeline_id = $1", pipelineID).Scan(&checkpointEpoch)
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_checkpoint WHERE pipeline_id = $1", pipelineID).Scan(&checkpointEpoch); err != nil {
+			t.Fatalf("scan checkpoint epoch on PG failed: %v", err)
+		}
 		if checkpointEpoch != 3 {
 			t.Fatalf("expected _strand_checkpoint epoch 3 on PG, got %d", checkpointEpoch)
+		}
+
+		if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_worker_delta WHERE pipeline_id = $1 AND worker_id = 1", pipelineID).Scan(&deltaEpoch); err != nil {
+			t.Fatalf("scan worker delta epoch 3 on PG failed: %v", err)
+		}
+		if deltaEpoch != 3 {
+			t.Fatalf("expected _strand_worker_delta epoch 3 on PG, got %d", deltaEpoch)
 		}
 	})
 

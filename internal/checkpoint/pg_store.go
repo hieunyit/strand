@@ -98,8 +98,12 @@ func (s *PGStore) Lock(ctx context.Context, pipelineID string) (func() error, er
 		var relErr error
 		once.Do(func() {
 			var unlocked bool
-			_ = conn.QueryRowContext(context.Background(), "SELECT pg_advisory_unlock($1, $2)", k1, k2).Scan(&unlocked)
-			relErr = conn.Close()
+			if err := conn.QueryRowContext(context.Background(), "SELECT pg_advisory_unlock($1, $2)", k1, k2).Scan(&unlocked); err != nil {
+				relErr = fmt.Errorf("pg_advisory_unlock query failed: %w", err)
+			}
+			if closeErr := conn.Close(); closeErr != nil && relErr == nil {
+				relErr = closeErr
+			}
 		})
 		return relErr
 	}

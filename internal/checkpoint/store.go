@@ -2,7 +2,6 @@ package checkpoint
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"strand/internal/exitcode"
@@ -11,7 +10,7 @@ import (
 
 // ErrPipelineLocked trả về khi có một instance khác đang giữ khóa pipeline.
 // spec: 02 §4, §12
-var ErrPipelineLocked = errors.New(exitcode.ErrPipelineLocked)
+var ErrPipelineLocked = exitcode.New(exitcode.ErrPipelineLocked, exitcode.Fenced, "pipeline is locked by another instance", nil)
 
 // Global đại diện cho thông tin checkpoint toàn cục trong _strand_checkpoint.
 // spec: 02 §3, §4
