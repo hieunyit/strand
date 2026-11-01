@@ -109,6 +109,24 @@ services:
       retries: 30
       start_period: 10s
 
+  minio:
+    image: minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
 volumes:
   mysql-src-data:
   mysql-dst-data:
@@ -116,3 +134,4 @@ volumes:
   pg-dst-data:
   vm-data:
   grafana-data:
+  minio-data:
