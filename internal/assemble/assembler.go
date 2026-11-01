@@ -104,12 +104,72 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 	case reader.EventRows:
 		a.ensureTxnStarted(ev.Pos)
 		tableID := model.TableID{Schema: ev.Schema, Table: ev.Table}
+		tbl := a.registry.GetTable(ev.Schema, ev.Table)
+		if tbl == nil {
+			a.registry.RegisterTable(ev.Schema, ev.Table, nil, nil)
+			tbl = a.registry.GetTable(ev.Schema, ev.Table)
+		}
+
+		// FAST PATH: Nếu giao dịch đã tràn đĩa, ghi trực tiếp nhị phân mà không cấp phát lát cắt (slice)
+		if a.currentSpill.IsSpilled() {
+			tIdx := a.currentSpill.getTableIdx(tableID)
+			pkIdx := 0
+			if tbl != nil && tbl.SinglePKIndex >= 0 {
+				pkIdx = tbl.SinglePKIndex
+			}
+
+			switch ev.Op {
+			case model.OpInsert:
+				for _, row := range ev.Rows {
+					var keyVal int64
+					if pkIdx < len(row) {
+						keyVal = extractInt64Val(row[pkIdx])
+					}
+					if err := a.currentSpill.AppendFast(tIdx, 1, keyVal, 0, 0); err != nil {
+						return nil, err
+					}
+				}
+			case model.OpDelete:
+				for _, row := range ev.Rows {
+					var keyVal int64
+					if pkIdx < len(row) {
+						keyVal = extractInt64Val(row[pkIdx])
+					}
+					if err := a.currentSpill.AppendFast(tIdx, 3, keyVal, 0, 0); err != nil {
+						return nil, err
+					}
+				}
+			case model.OpUpdate:
+				for i := 0; i < len(ev.Rows); i += 2 {
+					before := ev.Rows[i]
+					after := before
+					if i+1 < len(ev.Rows) {
+						after = ev.Rows[i+1]
+					}
+					var oldKeyVal, newKeyVal int64
+					if pkIdx < len(before) {
+						oldKeyVal = extractInt64Val(before[pkIdx])
+					}
+					if pkIdx < len(after) {
+						newKeyVal = extractInt64Val(after[pkIdx])
+					}
+					var hasOldKey byte = 0
+					if oldKeyVal != newKeyVal {
+						hasOldKey = 1
+					}
+					if err := a.currentSpill.AppendFast(tIdx, 2, newKeyVal, hasOldKey, oldKeyVal); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return nil, nil
+		}
 
 		switch ev.Op {
 		case model.OpInsert:
 			for _, row := range ev.Rows {
-				key := a.registry.ExtractPK(ev.Schema, ev.Table, row)
-				cols := a.registry.ExtractCols(ev.Schema, ev.Table, row)
+				key := tbl.ExtractPK(row)
+				cols := tbl.ExtractCols(row)
 				rc := model.RowChange{
 					Table: tableID,
 					Op:    model.OpInsert,
@@ -123,8 +183,8 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 
 		case model.OpDelete:
 			for _, row := range ev.Rows {
-				key := a.registry.ExtractPK(ev.Schema, ev.Table, row)
-				cols := a.registry.ExtractCols(ev.Schema, ev.Table, row)
+				key := tbl.ExtractPK(row)
+				cols := tbl.ExtractCols(row)
 				rc := model.RowChange{
 					Table: tableID,
 					Op:    model.OpDelete,
@@ -147,8 +207,8 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 					after = before
 				}
 
-				oldPK := a.registry.ExtractPK(ev.Schema, ev.Table, before)
-				newPK := a.registry.ExtractPK(ev.Schema, ev.Table, after)
+				oldPK := tbl.ExtractPK(before)
+				newPK := tbl.ExtractPK(after)
 
 				var oldKey []model.Value
 				if !KeysEqual(oldPK, newPK) {
@@ -156,7 +216,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 					oldKey = oldPK
 				}
 
-				cols := a.registry.ExtractCols(ev.Schema, ev.Table, after)
+				cols := tbl.ExtractCols(after)
 				rc := model.RowChange{
 					Table:  tableID,
 					Op:     model.OpUpdate,

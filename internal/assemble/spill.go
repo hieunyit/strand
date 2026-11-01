@@ -48,15 +48,15 @@ type DiskRowIterator struct {
 }
 
 func (it *DiskRowIterator) Next() (*model.RowChange, error) {
-	var tableIdx uint32
-	if err := binary.Read(it.reader, binary.LittleEndian, &tableIdx); err != nil {
+	var header [14]byte
+	if _, err := io.ReadFull(it.reader, header[:]); err != nil {
 		return nil, err // io.EOF hoặc lỗi đọc
 	}
 
-	var opByte byte
-	if err := binary.Read(it.reader, binary.LittleEndian, &opByte); err != nil {
-		return nil, err
-	}
+	tableIdx := binary.LittleEndian.Uint32(header[0:4])
+	opByte := header[4]
+	keyVal := int64(binary.LittleEndian.Uint64(header[5:13]))
+	hasOldKey := header[13]
 
 	var op model.Op
 	switch opByte {
@@ -73,23 +73,13 @@ func (it *DiskRowIterator) Next() (*model.RowChange, error) {
 		table = it.tables[tableIdx]
 	}
 
-	var keyVal int64
-	if err := binary.Read(it.reader, binary.LittleEndian, &keyVal); err != nil {
-		return nil, err
-	}
-
-	var hasOldKey byte
-	if err := binary.Read(it.reader, binary.LittleEndian, &hasOldKey); err != nil {
-		return nil, err
-	}
-
 	var oldKey []model.Value
 	if hasOldKey == 1 {
-		var oldKeyVal int64
-		if err := binary.Read(it.reader, binary.LittleEndian, &oldKeyVal); err != nil {
+		var oldKeyBuf [8]byte
+		if _, err := io.ReadFull(it.reader, oldKeyBuf[:]); err != nil {
 			return nil, err
 		}
-		oldKey = []model.Value{oldKeyVal}
+		oldKey = []model.Value{int64(binary.LittleEndian.Uint64(oldKeyBuf[:]))}
 	}
 
 	rc := &model.RowChange{
@@ -115,15 +105,15 @@ type SpillBuffer struct {
 	maxInMem int
 	dir      string
 
-	inMem    []model.RowChange
-	spilled  bool
-	spillF   *os.File
-	writer   *bufio.Writer
-	count    int64
-	bytes    int64
+	inMem   []model.RowChange
+	spilled bool
+	spillF  *os.File
+	writer  *bufio.Writer
+	count   int64
+	bytes   int64
 
-	tables    []model.TableID
-	tableMap  map[string]uint32
+	tables   []model.TableID
+	tableMap map[model.TableID]uint32
 }
 
 func NewSpillBuffer(maxInMem int, dir string) *SpillBuffer {
@@ -138,101 +128,133 @@ func NewSpillBuffer(maxInMem int, dir string) *SpillBuffer {
 		maxInMem: maxInMem,
 		dir:      dir,
 		inMem:    make([]model.RowChange, 0, 1024),
-		tableMap: make(map[string]uint32),
+		tableMap: make(map[model.TableID]uint32),
 	}
 }
 
+// IsSpilled cho biết buffer đã tràn xuống đĩa chưa.
+func (sb *SpillBuffer) IsSpilled() bool {
+	return sb.spilled
+}
+
 func (sb *SpillBuffer) getTableIdx(t model.TableID) uint32 {
-	key := fmt.Sprintf("%s.%s", t.Schema, t.Table)
-	if idx, exists := sb.tableMap[key]; exists {
+	if idx, exists := sb.tableMap[t]; exists {
 		return idx
 	}
 	idx := uint32(len(sb.tables))
 	sb.tables = append(sb.tables, t)
-	sb.tableMap[key] = idx
+	sb.tableMap[t] = idx
 	return idx
+}
+
+func extractInt64Val(val any) int64 {
+	switch v := val.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case uint64:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case uint32:
+		return int64(v)
+	case int16:
+		return int64(v)
+	case uint16:
+		return int64(v)
+	case int8:
+		return int64(v)
+	case uint8:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+
+func (sb *SpillBuffer) writeRowDirect(tIdx uint32, opByte byte, keyVal int64, hasOldKey byte, oldKeyVal int64) error {
+	var buf [22]byte
+	binary.LittleEndian.PutUint32(buf[0:4], tIdx)
+	buf[4] = opByte
+	binary.LittleEndian.PutUint64(buf[5:13], uint64(keyVal))
+	buf[13] = hasOldKey
+	n := 14
+	if hasOldKey == 1 {
+		binary.LittleEndian.PutUint64(buf[14:22], uint64(oldKeyVal))
+		n = 22
+	}
+	if _, err := sb.writer.Write(buf[:n]); err != nil {
+		return err
+	}
+	sb.bytes += int64(n)
+	return nil
 }
 
 func (sb *SpillBuffer) writeRowToFile(rc *model.RowChange) error {
 	tIdx := sb.getTableIdx(rc.Table)
-	if err := binary.Write(sb.writer, binary.LittleEndian, tIdx); err != nil {
-		return err
-	}
-
 	var opByte byte = 1
 	if rc.Op == model.OpUpdate {
 		opByte = 2
 	} else if rc.Op == model.OpDelete {
 		opByte = 3
 	}
-	if err := binary.Write(sb.writer, binary.LittleEndian, opByte); err != nil {
-		return err
-	}
 
 	var keyVal int64
 	if len(rc.Key) > 0 {
-		if v, ok := rc.Key[0].(int); ok {
-			keyVal = int64(v)
-		} else if v, ok := rc.Key[0].(int64); ok {
-			keyVal = v
-		} else if v, ok := rc.Key[0].(uint64); ok {
-			keyVal = int64(v)
-		}
-	}
-	if err := binary.Write(sb.writer, binary.LittleEndian, keyVal); err != nil {
-		return err
+		keyVal = extractInt64Val(rc.Key[0])
 	}
 
+	var hasOldKey byte = 0
+	var oldKeyVal int64
 	if len(rc.OldKey) > 0 {
-		if err := binary.Write(sb.writer, binary.LittleEndian, byte(1)); err != nil {
-			return err
-		}
-		var oldKeyVal int64
-		if v, ok := rc.OldKey[0].(int); ok {
-			oldKeyVal = int64(v)
-		} else if v, ok := rc.OldKey[0].(int64); ok {
-			oldKeyVal = v
-		} else if v, ok := rc.OldKey[0].(uint64); ok {
-			oldKeyVal = int64(v)
-		}
-		if err := binary.Write(sb.writer, binary.LittleEndian, oldKeyVal); err != nil {
-			return err
-		}
-	} else {
-		if err := binary.Write(sb.writer, binary.LittleEndian, byte(0)); err != nil {
+		hasOldKey = 1
+		oldKeyVal = extractInt64Val(rc.OldKey[0])
+	}
+
+	return sb.writeRowDirect(tIdx, opByte, keyVal, hasOldKey, oldKeyVal)
+}
+
+// AppendFast ghi trực tiếp một dòng vào đĩa khi buffer đã tràn.
+func (sb *SpillBuffer) AppendFast(tIdx uint32, opByte byte, keyVal int64, hasOldKey byte, oldKeyVal int64) error {
+	sb.count++
+	return sb.writeRowDirect(tIdx, opByte, keyVal, hasOldKey, oldKeyVal)
+}
+
+func (sb *SpillBuffer) spill() error {
+	if sb.spilled {
+		return nil
+	}
+
+	f, err := os.CreateTemp(sb.dir, "strand-txn-*.spill")
+	if err != nil {
+		return fmt.Errorf("failed to create spill file: %w", err)
+	}
+	sb.spillF = f
+	sb.writer = bufio.NewWriterSize(f, 256*1024)
+	sb.spilled = true
+
+	for i := range sb.inMem {
+		if err := sb.writeRowToFile(&sb.inMem[i]); err != nil {
 			return err
 		}
 	}
-
-	sb.bytes += 18 // ước lượng kích thước byte
+	sb.inMem = nil // Giải phóng RAM ngay lập tức
 	return nil
 }
 
 func (sb *SpillBuffer) Append(rc model.RowChange) error {
 	sb.count++
-	sb.bytes += 64
 
 	if !sb.spilled {
 		if len(sb.inMem) < sb.maxInMem {
+			sb.bytes += 64
 			sb.inMem = append(sb.inMem, rc)
 			return nil
 		}
 
-		// Vượt ngưỡng RAM: Khởi tạo file tràn đĩa và flush toàn bộ inMem
-		f, err := os.CreateTemp(sb.dir, "strand-txn-*.spill")
-		if err != nil {
-			return fmt.Errorf("failed to create spill file: %w", err)
+		if err := sb.spill(); err != nil {
+			return err
 		}
-		sb.spillF = f
-		sb.writer = bufio.NewWriterSize(f, 64*1024)
-		sb.spilled = true
-
-		for i := range sb.inMem {
-			if err := sb.writeRowToFile(&sb.inMem[i]); err != nil {
-				return err
-			}
-		}
-		sb.inMem = nil // Giải phóng RAM ngay lập tức
 	}
 
 	return sb.writeRowToFile(&rc)
@@ -269,7 +291,7 @@ func (sb *SpillBuffer) OpenIterator(txn *model.Txn) (RowIterator, error) {
 
 	return &DiskRowIterator{
 		file:   f,
-		reader: bufio.NewReaderSize(f, 64*1024),
+		reader: bufio.NewReaderSize(f, 256*1024),
 		tables: sb.tables,
 	}, nil
 }

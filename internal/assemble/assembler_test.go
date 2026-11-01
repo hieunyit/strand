@@ -2,6 +2,7 @@ package assemble_test
 
 import (
 	"context"
+	"io"
 	"os"
 	"runtime"
 	"testing"
@@ -326,5 +327,60 @@ func TestProcessChannel(t *testing.T) {
 
 	if len(received) != 1 {
 		t.Fatalf("expected 1 txn, got %d", len(received))
+	}
+}
+
+func TestRowIterator(t *testing.T) {
+	// Test in-mem iterator
+	inMemRows := []model.RowChange{
+		{Table: model.TableID{Schema: "s", Table: "t1"}, Op: model.OpInsert, Key: []model.Value{1}},
+		{Table: model.TableID{Schema: "s", Table: "t1"}, Op: model.OpUpdate, Key: []model.Value{2}, OldKey: []model.Value{1}},
+	}
+	itMem := assemble.NewSliceRowIterator(inMemRows)
+	r1, err := itMem.Next()
+	if err != nil || r1.Key[0] != 1 {
+		t.Fatalf("unexpected r1: %v, %v", r1, err)
+	}
+	r2, err := itMem.Next()
+	if err != nil || r2.Key[0] != 2 || r2.OldKey[0] != 1 {
+		t.Fatalf("unexpected r2: %v, %v", r2, err)
+	}
+	_, err = itMem.Next()
+	if err != io.EOF {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+	_ = itMem.Close()
+
+	// Test disk iterator
+	spill := assemble.NewSpillBuffer(2, t.TempDir())
+	_ = spill.Append(inMemRows[0])
+	_ = spill.Append(inMemRows[1])
+	_ = spill.Append(model.RowChange{Table: model.TableID{Schema: "s", Table: "t2"}, Op: model.OpDelete, Key: []model.Value{3}})
+	var txn model.Txn
+	_ = spill.Finish(&txn)
+	if !txn.IsSpilled() {
+		t.Fatalf("expected txn to be spilled")
+	}
+	itDisk, err := spill.OpenIterator(&txn)
+	if err != nil {
+		t.Fatalf("open iterator failed: %v", err)
+	}
+	defer itDisk.Close()
+
+	dr1, err := itDisk.Next()
+	if err != nil || dr1.Key[0] != int64(1) || dr1.Table.Table != "t1" {
+		t.Fatalf("unexpected dr1: %v, %v", dr1, err)
+	}
+	dr2, err := itDisk.Next()
+	if err != nil || dr2.Key[0] != int64(2) || dr2.OldKey[0] != int64(1) {
+		t.Fatalf("unexpected dr2: %v, %v", dr2, err)
+	}
+	dr3, err := itDisk.Next()
+	if err != nil || dr3.Key[0] != int64(3) || dr3.Op != model.OpDelete || dr3.Table.Table != "t2" {
+		t.Fatalf("unexpected dr3: %v, %v", dr3, err)
+	}
+	_, err = itDisk.Next()
+	if err != io.EOF {
+		t.Fatalf("expected EOF from disk iterator, got %v", err)
 	}
 }
