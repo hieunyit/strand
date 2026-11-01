@@ -318,3 +318,34 @@ func (s *MySQLAppliedSet) Equal(other AppliedSet) bool {
 	}
 	return true
 }
+
+func (s *MySQLAppliedSet) String() string {
+	if s == nil || len(s.sets) == 0 {
+		return ""
+	}
+	var prefixes []string
+	for k := range s.sets {
+		prefixes = append(prefixes, k)
+	}
+	sort.Strings(prefixes)
+
+	var parts []string
+	for _, prefix := range prefixes {
+		rs := s.sets[prefix]
+		if rs == nil || rs.IsEmpty() {
+			continue
+		}
+		var ivStrs []string
+		for _, it := range rs.Intervals() {
+			if it.Start == it.End {
+				ivStrs = append(ivStrs, fmt.Sprintf("%d", it.Start))
+			} else {
+				ivStrs = append(ivStrs, fmt.Sprintf("%d-%d", it.Start, it.End))
+			}
+		}
+		if len(ivStrs) > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%s", prefix, strings.Join(ivStrs, ":")))
+		}
+	}
+	return strings.Join(parts, ",")
+}

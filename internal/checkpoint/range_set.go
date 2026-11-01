@@ -40,6 +40,16 @@ func (rs *RangeSet) Clone() *RangeSet {
 	return res
 }
 
+// Intervals trả về bản sao các khoảng hiện có trong RangeSet.
+func (rs *RangeSet) Intervals() []Interval {
+	if rs == nil || len(rs.intervals) == 0 {
+		return nil
+	}
+	res := make([]Interval, len(rs.intervals))
+	copy(res, rs.intervals)
+	return res
+}
+
 // IsEmpty kiểm tra tập có rỗng không.
 func (rs *RangeSet) IsEmpty() bool {
 	return rs == nil || len(rs.intervals) == 0
