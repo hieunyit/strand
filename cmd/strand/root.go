@@ -29,6 +29,10 @@ func init() {
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newTopCmd())
+	rootCmd.AddCommand(newPauseCmd())
+	rootCmd.AddCommand(newResumeCmd())
+	rootCmd.AddCommand(newThrottleCmd())
+	rootCmd.AddCommand(newCheckpointCmd())
 	rootCmd.AddCommand(newPromoteCmd())
 }
 
@@ -48,16 +52,6 @@ func newSyncCmd() *cobra.Command {
 		Short: "Chạy pipeline đồng bộ CDC",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("sync command not yet implemented")
-		},
-	}
-}
-
-func newTopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "top",
-		Short: "TUI hiển thị lag, throughput, zone, tiến độ, ETA",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("top command not yet implemented")
 		},
 	}
 }
