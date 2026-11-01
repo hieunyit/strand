@@ -90,3 +90,18 @@ func Preflight(ctx context.Context, cfg *config.Config) error {
 
 	return nil
 }
+
+// CheckMySQLBinlogRowValueOptions kiểm tra binlog_row_value_options theo spec/02 §8:
+// "binlog_row_value_options phải rỗng, vì partial JSON bị từ chối."
+func CheckMySQLBinlogRowValueOptions(val string) error {
+	trimmed := strings.TrimSpace(val)
+	if trimmed != "" {
+		return exitcode.New(
+			exitcode.ErrBinlogConfigInvalid,
+			exitcode.Rejected,
+			fmt.Sprintf("binlog_row_value_options must be empty, partial JSON rejected: %q", val),
+			nil,
+		)
+	}
+	return nil
+}
