@@ -1,0 +1,30 @@
+# /etc/systemd/system/strand@.service
+# spec: 03 §4
+[Unit]
+Description=Strand CDC pipeline %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=strand
+Group=strand
+EnvironmentFile=/etc/strand/%i.env
+ExecStart=/usr/local/bin/strand sync -c /etc/strand/%i.yaml
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=10
+# Không restart khi lỗi cần người xử lý: cấu hình, validate, locked/fenced, log_gap, chờ quyết định
+RestartPreventExitStatus=2 3 4 5 10
+StateDirectory=strand/%i
+RuntimeDirectory=strand/%i
+MemoryMax=4G
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

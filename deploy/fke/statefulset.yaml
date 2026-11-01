@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: strand-orders-sync
+  namespace: strand
+spec:
+  replicas: 1
+  serviceName: strand-orders-sync
+  selector:
+    matchLabels:
+      app: strand
+      pipeline: orders-sync
+  template:
+    metadata:
+      labels:
+        app: strand
+        pipeline: orders-sync
+    spec:
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: strand
+          image: <registry>/strand:<version>
+          args: ["sync", "-c", "/etc/strand/pipeline.yaml"]
+          envFrom:
+            - secretRef:
+                name: strand-orders-sync
+          ports:
+            - name: metrics
+              containerPort: 9464
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              memory: 4Gi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: config
+              mountPath: /etc/strand
+              readOnly: true
+            - name: spool
+              mountPath: /var/lib/strand
+            - name: run
+              mountPath: /run/strand
+      volumes:
+        - name: config
+          configMap:
+            name: strand-orders-sync

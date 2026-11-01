@@ -45,13 +45,3 @@ func newPlanCmd() *cobra.Command {
 		},
 	}
 }
-
-func newSyncCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "sync",
-		Short: "Chạy pipeline đồng bộ CDC",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("sync command not yet implemented")
-		},
-	}
-}
