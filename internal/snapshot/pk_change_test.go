@@ -33,7 +33,7 @@ func TestRS_UpdatePK_AcrossDifferentRangeStates(t *testing.T) {
 	defer cancel()
 
 	tableName := "rs_update_pk_test"
-	table := model.TableID{Schema: "app", Table: tableName}
+	table := model.TableID{Table: tableName}
 	pkCol := "id"
 	columnNames := []string{"id", "title", "val"}
 

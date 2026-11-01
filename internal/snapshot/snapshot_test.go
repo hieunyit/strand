@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,37 +14,80 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
 	"strand/internal/snapshot"
 )
 
+var (
+	mysqlOnce sync.Once
+	srcDSN    string
+	dstDSN    string
+)
+
 func getMySQLDSNs(t *testing.T) (string, string) {
 	t.Helper()
-	src := os.Getenv("MYSQL_SRC_DSN")
-	dst := os.Getenv("MYSQL_DST_DSN")
-	if src != "" && dst != "" {
-		return src, dst
-	}
-
-	getIP := func(service string) string {
-		out, err := exec.Command("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", service).Output()
-		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-			return strings.TrimSpace(string(out))
+	if envSrc := os.Getenv("MYSQL_SRC_DSN"); envSrc != "" {
+		if envDst := os.Getenv("MYSQL_DST_DSN"); envDst != "" {
+			return envSrc, envDst
 		}
-		return ""
 	}
 
-	srcIP := getIP("strand-dev-mysql-src-1")
-	dstIP := getIP("strand-dev-mysql-dst-1")
-	if srcIP != "" && dstIP != "" {
-		return fmt.Sprintf("root:dev@tcp(%s:3306)/app?multiStatements=true&parseTime=true", srcIP),
-			fmt.Sprintf("root:dev@tcp(%s:3306)/app?multiStatements=true&parseTime=true", dstIP)
-	}
+	mysqlOnce.Do(func() {
+		ctx := context.Background()
+		cmd := []string{
+			"--server-id=6001",
+			"--gtid-mode=ON",
+			"--enforce-gtid-consistency=ON",
+			"--binlog-format=ROW",
+			"--binlog-row-image=FULL",
+		}
 
-	t.Fatalf("MySQL dev containers strand-dev-mysql-* not found")
-	return "", ""
+		req := testcontainers.ContainerRequest{
+			Image:        "mysql:8.4",
+			ExposedPorts: []string{"3306/tcp"},
+			Env: map[string]string{
+				"MYSQL_ROOT_PASSWORD": "dev",
+				"MYSQL_DATABASE":      "app_src",
+			},
+			Cmd:        cmd,
+			WaitingFor: wait.ForLog("port: 3306  MySQL Community Server").WithStartupTimeout(180 * time.Second),
+		}
+
+		container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: req,
+			Started:          true,
+		})
+		if err != nil {
+			t.Fatalf("failed to start mysql container for snapshot tests: %v", err)
+		}
+
+		host, err := container.Host(ctx)
+		if err != nil {
+			t.Fatalf("failed to get mysql host: %v", err)
+		}
+		portNat, err := container.MappedPort(ctx, "3306")
+		if err != nil {
+			t.Fatalf("failed to get mapped mysql port: %v", err)
+		}
+		addr := net.JoinHostPort(host, portNat.Port())
+		srcDSN = fmt.Sprintf("root:dev@tcp(%s)/app_src?multiStatements=true&parseTime=true", addr)
+		dstDSN = fmt.Sprintf("root:dev@tcp(%s)/app_dst?multiStatements=true&parseTime=true", addr)
+
+		db, err := sql.Open("mysql", fmt.Sprintf("root:dev@tcp(%s)/?multiStatements=true", addr))
+		if err != nil {
+			t.Fatalf("failed to connect to root mysql: %v", err)
+		}
+		defer db.Close()
+		if _, err := db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS app_dst;"); err != nil {
+			t.Fatalf("failed to create app_dst db: %v", err)
+		}
+	})
+
+	return srcDSN, dstDSN
 }
 
 // applyEventToTarget ghi một stream event trực tiếp vào target DB.
@@ -108,7 +151,7 @@ func TestRS1_SnapshotAdd_HeavyConcurrentUpdates(t *testing.T) {
 	defer cancel()
 
 	tableName := "rs1_snapshot_test"
-	table := model.TableID{Schema: "app", Table: tableName}
+	table := model.TableID{Table: tableName}
 	pkCol := "id"
 	columnNames := []string{"id", "title", "val"}
 
