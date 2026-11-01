@@ -3,7 +3,6 @@ package spool
 
 import (
 	"context"
-	"io"
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
@@ -29,28 +28,4 @@ type Spool interface {
 	Truncate(ctx context.Context, applied checkpoint.AppliedSet) error
 	Usage() SpoolUsage // số byte theo từng tầng
 	Close() error
-}
-
-// SliceSpoolIter duyệt trên mảng trong bộ nhớ (dùng cho test hoặc fallback).
-type SliceSpoolIter struct {
-	txns []*model.Txn
-	idx  int
-}
-
-func NewSliceSpoolIter(txns []*model.Txn) *SliceSpoolIter {
-	return &SliceSpoolIter{txns: txns}
-}
-
-func (it *SliceSpoolIter) Next(ctx context.Context) (*model.Txn, error) {
-	if it.idx >= len(it.txns) {
-		return nil, io.EOF
-	}
-	t := it.txns[it.idx]
-	it.idx++
-	return t, nil
-}
-
-func (it *SliceSpoolIter) Close() error {
-	it.txns = nil
-	return nil
 }

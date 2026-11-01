@@ -107,17 +107,28 @@ func TestAC1_RestartAppendIterTruncate(t *testing.T) {
 	if err != nil || r1.SourcePos.GTID != uuid+":1" {
 		t.Fatalf("expected txn1, got %v, err=%v", r1, err)
 	}
+	if r1.Rows[0].Op != model.OpInsert {
+		t.Fatalf("expected r1 OpInsert, got %v", r1.Rows[0].Op)
+	}
+
 	r2, err := iter.Next(ctx)
 	if err != nil || r2.SourcePos.GTID != uuid+":2" {
 		t.Fatalf("expected txn2, got %v, err=%v", r2, err)
+	}
+	if r2.Rows[0].Op != model.OpUpdate {
+		t.Fatalf("expected r2 OpUpdate, got %v", r2.Rows[0].Op)
 	}
 	// Kiểm tra OldKey của UPDATE đổi PK được bảo toàn
 	if len(r2.Rows[0].OldKey) == 0 || r2.Rows[0].OldKey[0] != 10 {
 		t.Fatalf("expected r2 OldKey [10], got %v", r2.Rows[0].OldKey)
 	}
+
 	r3, err := iter.Next(ctx)
 	if err != nil || r3.SourcePos.GTID != uuid+":3" {
 		t.Fatalf("expected txn3, got %v, err=%v", r3, err)
+	}
+	if r3.Rows[0].Op != model.OpInsert {
+		t.Fatalf("expected r3 OpInsert, got %v", r3.Rows[0].Op)
 	}
 	_, err = iter.Next(ctx)
 	if err != io.EOF {
@@ -139,6 +150,12 @@ func TestAC1_RestartAppendIterTruncate(t *testing.T) {
 		t.Fatalf("expected rf3 (txn3), got %v, err=%v", rf3, err)
 	}
 	_ = iterFrom.Close()
+
+	// Kiểm tra Iter với `from` không tồn tại phải trả về lỗi
+	_, errNotFound := sp2.Iter(ctx, model.Pos{Engine: model.EngineMySQL, GTID: uuid + ":999"})
+	if errNotFound == nil {
+		t.Fatalf("expected error when Iter with non-existent position")
+	}
 
 	// Truncate: đánh dấu txn1 và txn2 đã được apply
 	applied := checkpoint.NewMySQLAppliedSet(uuid)
@@ -339,6 +356,12 @@ func TestCodec_Roundtrip(t *testing.T) {
 					{Name: "unchanged_col", Value: nil, Unchanged: true},
 				},
 			},
+			{
+				Table: model.TableID{Schema: "public", Table: "orders"},
+				Op:    model.OpDelete,
+				Key:   []model.Value{789},
+				Cols:  []model.ColValue{{Name: "id", Value: 789}},
+			},
 		},
 	}
 
@@ -363,6 +386,9 @@ func TestCodec_Roundtrip(t *testing.T) {
 	}
 
 	r0 := decoded.Rows[0]
+	if r0.Op != model.OpInsert {
+		t.Fatalf("r0 Op mismatch: got %v, want OpInsert", r0.Op)
+	}
 	if r0.Key[0] != 123 || r0.Key[1] != "order-abc" {
 		t.Fatalf("Key mismatch: %v", r0.Key)
 	}
@@ -371,10 +397,21 @@ func TestCodec_Roundtrip(t *testing.T) {
 	}
 
 	r1 := decoded.Rows[1]
+	if r1.Op != model.OpUpdate {
+		t.Fatalf("r1 Op mismatch: got %v, want OpUpdate", r1.Op)
+	}
 	if len(r1.OldKey) == 0 || r1.OldKey[0] != 123 {
 		t.Fatalf("OldKey mismatch: %v", r1.OldKey)
 	}
 	if !r1.Cols[1].Unchanged {
 		t.Fatalf("Unchanged col mismatch: %v", r1.Cols[1])
+	}
+
+	r2 := decoded.Rows[2]
+	if r2.Op != model.OpDelete {
+		t.Fatalf("r2 Op mismatch: got %v, want OpDelete", r2.Op)
+	}
+	if r2.Key[0] != 789 {
+		t.Fatalf("r2 Key mismatch: %v", r2.Key)
 	}
 }

@@ -341,7 +341,16 @@ func decodeTxn(data []byte) (*model.Txn, error) {
 			if err := binary.Read(r, binary.LittleEndian, &opByte); err != nil {
 				return nil, err
 			}
-			rc.Op = model.Op(opByte)
+			switch opByte {
+			case 1:
+				rc.Op = model.OpInsert
+			case 2:
+				rc.Op = model.OpUpdate
+			case 3:
+				rc.Op = model.OpDelete
+			default:
+				return nil, fmt.Errorf("unknown op byte: %d", opByte)
+			}
 
 			// Key
 			var numKeys uint32

@@ -3,6 +3,7 @@ package spool
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -45,6 +46,10 @@ func New(dir string) (*PebbleSpool, error) {
 
 	// Đọc sequence tiếp theo
 	val, closer, err := db.Get(metaNextSeqKey)
+	if err != nil && !errors.Is(err, pebble.ErrNotFound) {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to read next_seq: %w", err)
+	}
 	if err == nil {
 		if len(val) >= 8 {
 			s.nextSeq = binary.BigEndian.Uint64(val)
@@ -54,6 +59,10 @@ func New(dir string) (*PebbleSpool, error) {
 
 	// Đọc dung lượng usage hiện tại
 	val, closer, err = db.Get(metaUsageKey)
+	if err != nil && !errors.Is(err, pebble.ErrNotFound) {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to read usage_bytes: %w", err)
+	}
 	if err == nil {
 		if len(val) >= 8 {
 			s.usage.LocalBytes = int64(binary.BigEndian.Uint64(val))
@@ -66,12 +75,19 @@ func New(dir string) (*PebbleSpool, error) {
 			LowerBound: []byte("txn/"),
 			UpperBound: []byte("txn/\xff"),
 		})
-		if err == nil {
-			for ok := iter.First(); ok; ok = iter.Next() {
-				totalBytes += int64(len(iter.Value()))
-			}
-			_ = iter.Close()
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("failed to scan txns for usage: %w", err)
 		}
+		for ok := iter.First(); ok; ok = iter.Next() {
+			totalBytes += int64(len(iter.Value()))
+		}
+		if err := iter.Error(); err != nil {
+			_ = iter.Close()
+			_ = db.Close()
+			return nil, fmt.Errorf("failed to read iter during usage scan: %w", err)
+		}
+		_ = iter.Close()
 		s.usage.LocalBytes = totalBytes
 	}
 
@@ -110,7 +126,9 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 	}
 
 	seq := s.nextSeq
-	s.nextSeq++
+	newNextSeq := seq + 1
+	dataLen := int64(len(data))
+	newLocalBytes := s.usage.LocalBytes + dataLen
 
 	batch := s.db.NewBatch()
 	defer batch.Close()
@@ -131,20 +149,26 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 
 	// Cập nhật next_seq
 	var nextSeqBuf [8]byte
-	binary.BigEndian.PutUint64(nextSeqBuf[:], s.nextSeq)
+	binary.BigEndian.PutUint64(nextSeqBuf[:], newNextSeq)
 	if err := batch.Set(metaNextSeqKey, nextSeqBuf[:], nil); err != nil {
 		return err
 	}
 
 	// Cập nhật usage bytes
-	s.usage.LocalBytes += int64(len(data))
 	var usageBuf [8]byte
-	binary.BigEndian.PutUint64(usageBuf[:], uint64(s.usage.LocalBytes))
+	binary.BigEndian.PutUint64(usageBuf[:], uint64(newLocalBytes))
 	if err := batch.Set(metaUsageKey, usageBuf[:], nil); err != nil {
 		return err
 	}
 
-	return batch.Commit(pebble.Sync)
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return err
+	}
+
+	// Cập nhật trạng thái in-memory sau khi ghi đĩa thành công
+	s.nextSeq = newNextSeq
+	s.usage.LocalBytes = newLocalBytes
+	return nil
 }
 
 // Iter mở một iterator đọc tuần tự từ vị trí `from` (nếu from rỗng thì đọc từ đầu).
@@ -164,13 +188,17 @@ func (s *PebbleSpool) Iter(ctx context.Context, from model.Pos) (SpoolIter, erro
 	if from.GTID != "" || from.LSN != 0 {
 		pKey := posKey(from)
 		val, closer, err := s.db.Get(pKey)
-		if err == nil {
-			if len(val) >= 8 {
-				seq := binary.BigEndian.Uint64(val)
-				startKey = txnKey(seq)
+		if err != nil {
+			if errors.Is(err, pebble.ErrNotFound) {
+				return nil, fmt.Errorf("start position %v not found in spool: %w", from, err)
 			}
-			_ = closer.Close()
+			return nil, fmt.Errorf("failed to lookup position %v: %w", from, err)
 		}
+		if len(val) >= 8 {
+			seq := binary.BigEndian.Uint64(val)
+			startKey = txnKey(seq)
+		}
+		_ = closer.Close()
 	}
 
 	iter, err := s.db.NewIter(&pebble.IterOptions{
@@ -224,31 +252,41 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 		val := iter.Value()
 		t, err := decodeTxn(val)
 		if err != nil {
-			continue
+			return fmt.Errorf("corrupted txn in spool: %w", err)
 		}
 
 		if applied.Contains(t.SourcePos) {
-			_ = batch.Delete(iter.Key(), nil)
+			if err := batch.Delete(iter.Key(), nil); err != nil {
+				return err
+			}
 			if t.SourcePos.GTID != "" || t.SourcePos.LSN != 0 {
-				_ = batch.Delete(posKey(t.SourcePos), nil)
+				if err := batch.Delete(posKey(t.SourcePos), nil); err != nil {
+					return err
+				}
 			}
 			deletedBytes += int64(len(val))
 		}
 	}
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("iterator error during truncate: %w", err)
+	}
 
 	if deletedBytes > 0 {
-		s.usage.LocalBytes -= deletedBytes
-		if s.usage.LocalBytes < 0 {
-			s.usage.LocalBytes = 0
+		newLocalBytes := s.usage.LocalBytes - deletedBytes
+		if newLocalBytes < 0 {
+			newLocalBytes = 0
 		}
 		var usageBuf [8]byte
-		binary.BigEndian.PutUint64(usageBuf[:], uint64(s.usage.LocalBytes))
+		binary.BigEndian.PutUint64(usageBuf[:], uint64(newLocalBytes))
 		if err := batch.Set(metaUsageKey, usageBuf[:], nil); err != nil {
 			return err
 		}
 		if err := batch.Commit(pebble.Sync); err != nil {
 			return err
 		}
+
+		// Cập nhật trạng thái in-memory sau khi commit thành công
+		s.usage.LocalBytes = newLocalBytes
 	}
 
 	return nil
