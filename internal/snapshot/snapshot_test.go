@@ -43,7 +43,7 @@ func getMySQLDSNs(t *testing.T) (string, string) {
 			fmt.Sprintf("root:dev@tcp(%s:3306)/app?multiStatements=true&parseTime=true", dstIP)
 	}
 
-	t.Skip("MySQL dev containers strand-dev-mysql-* not found")
+	t.Fatalf("MySQL dev containers strand-dev-mysql-* not found")
 	return "", ""
 }
 
