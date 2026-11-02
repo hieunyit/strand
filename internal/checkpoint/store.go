@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -51,19 +52,14 @@ type CheckpointStore interface {
 }
 
 // ParseAppliedSet phân tích chuỗi applied thành AppliedSet tương ứng với engine.
+// Chuỗi hỏng luôn trả lỗi: một checkpoint đọc sai im lặng có thể làm mất (CP-1)
+// hoặc apply lại (CP-2) dữ liệu.
 func ParseAppliedSet(engine model.Engine, appliedStr string) (AppliedSet, error) {
 	switch engine {
 	case model.EngineMySQL:
 		set := NewMySQLAppliedSet()
-		if appliedStr != "" {
-			// Chuỗi GTID set có thể chứa nhiều uuid:intervals cách nhau bởi dấu phẩy
-			for _, part := range splitGTIDSet(appliedStr) {
-				if part == "" {
-					continue
-				}
-				// Thêm từng vị trí GTID
-				set.Add(model.Pos{Engine: model.EngineMySQL, GTID: part})
-			}
+		if err := set.AddGTIDSet(appliedStr); err != nil {
+			return nil, fmt.Errorf("parse MySQL applied set: %w", err)
 		}
 		return set, nil
 	case model.EnginePG:
@@ -72,44 +68,54 @@ func ParseAppliedSet(engine model.Engine, appliedStr string) (AppliedSet, error)
 		if appliedStr == "" {
 			return set, nil
 		}
-		var pj PGAppliedJSON
-		if err := json.Unmarshal([]byte(appliedStr), &pj); err == nil && pj.High != "" {
-			high, err := ParseLSN(pj.High)
-			if err == nil && high > 0 {
-				var holes []uint64
-				for _, hStr := range pj.Holes {
-					if hLSN, err := ParseLSN(hStr); err == nil {
-						holes = append(holes, hLSN)
-					}
-				}
-				sort.Slice(holes, func(i, j int) bool { return holes[i] < holes[j] })
-				cur := uint64(1)
-				for _, h := range holes {
-					if h > cur {
-						set.ranges.AddRange(cur, h-1)
-					}
-					cur = h + 1
-				}
-				if cur <= high {
-					set.ranges.AddRange(cur, high)
-				}
+		if strings.HasPrefix(appliedStr, "{") {
+			var pj PGAppliedJSON
+			if err := json.Unmarshal([]byte(appliedStr), &pj); err != nil {
+				return nil, fmt.Errorf("parse PG applied JSON: %w", err)
+			}
+			if pj.High == "" {
 				return set, nil
 			}
+			high, err := ParseLSN(pj.High)
+			if err != nil {
+				return nil, fmt.Errorf("parse PG applied high %q: %w", pj.High, err)
+			}
+			var holes []uint64
+			for _, hStr := range pj.Holes {
+				hLSN, err := ParseLSN(hStr)
+				if err != nil {
+					return nil, fmt.Errorf("parse PG applied hole %q: %w", hStr, err)
+				}
+				holes = append(holes, hLSN)
+			}
+			sort.Slice(holes, func(i, j int) bool { return holes[i] < holes[j] })
+			cur := uint64(1)
+			for _, h := range holes {
+				if h > cur {
+					set.ranges.AddRange(cur, h-1)
+				}
+				cur = h + 1
+			}
+			if cur <= high {
+				set.ranges.AddRange(cur, high)
+			}
+			return set, nil
 		}
-		// Fallback parse comma-separated LSNs
-		parts := strings.Split(appliedStr, ",")
-		for _, p := range parts {
+		// Dạng danh sách LSN cách nhau bởi dấu phẩy
+		for _, p := range strings.Split(appliedStr, ",") {
 			p = strings.TrimSpace(p)
 			if p == "" {
 				continue
 			}
-			if lsn, err := ParseLSN(p); err == nil && lsn > 0 {
-				set.Add(model.Pos{Engine: model.EnginePG, LSN: lsn})
+			lsn, err := ParseLSN(p)
+			if err != nil {
+				return nil, fmt.Errorf("parse PG applied LSN %q: %w", p, err)
 			}
+			set.Add(model.Pos{Engine: model.EnginePG, LSN: lsn})
 		}
 		return set, nil
 	default:
-		return NewMySQLAppliedSet(), nil
+		return nil, fmt.Errorf("unknown source engine %q", engine)
 	}
 }
 

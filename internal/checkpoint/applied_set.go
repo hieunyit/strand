@@ -206,7 +206,8 @@ func (s *MySQLAppliedSet) parseGTID(gtid string) (string, uint64, error) {
 		return "", 0, err
 	}
 
-	prefix := strings.Join(parts[:len(parts)-1], ":")
+	// UUID và tag của MySQL không phân biệt hoa thường; chuẩn hóa về chữ thường.
+	prefix := strings.ToLower(strings.Join(parts[:len(parts)-1], ":"))
 	return prefix, gno, nil
 }
 
@@ -252,76 +253,166 @@ func (s *MySQLAppliedSet) Add(p model.Pos) {
 	if p.Engine != model.EngineMySQL {
 		return
 	}
-	s.ParseAndAddRange(p.GTID)
+	_ = s.addSegment(p.GTID)
 }
 
-// ParseAndAddRange phân tích một phân đoạn GTID set (ví dụ "uuid:1-10:15-20" hoặc "uuid:5") và thêm vào RangeSet tương ứng.
+// ParseAndAddRange phân tích một phân đoạn GTID set và thêm vào tập.
+// Phân đoạn hỏng bị bỏ qua; dùng AddGTIDSet khi cần biết lỗi.
 func (s *MySQLAppliedSet) ParseAndAddRange(segment string) {
-	segment = strings.TrimSpace(segment)
-	if segment == "" {
-		return
-	}
-	parts := strings.Split(segment, ":")
-	if len(parts) == 0 {
-		return
-	}
-
-	splitIdx := len(parts)
-	for i := len(parts) - 1; i >= 1; i-- {
-		p := parts[i]
-		if isIntervalStr(p) {
-			splitIdx = i
-		} else {
-			break
-		}
-	}
-
-	var prefix string
-	var intervalParts []string
-
-	if splitIdx < len(parts) {
-		prefix = strings.Join(parts[:splitIdx], ":")
-		intervalParts = parts[splitIdx:]
-	} else {
-		if isIntervalStr(parts[0]) {
-			prefix = s.defaultUUID
-			intervalParts = parts
-		} else {
-			prefix = parts[0]
-		}
-	}
-
-	rs := s.getOrCreateRangeSet(prefix)
-	for _, ivStr := range intervalParts {
-		if strings.Contains(ivStr, "-") {
-			sub := strings.SplitN(ivStr, "-", 2)
-			start, err1 := strconv.ParseUint(strings.TrimSpace(sub[0]), 10, 64)
-			end, err2 := strconv.ParseUint(strings.TrimSpace(sub[1]), 10, 64)
-			if err1 == nil && err2 == nil && start <= end {
-				rs.AddRange(start, end)
-			}
-		} else {
-			val, err := strconv.ParseUint(strings.TrimSpace(ivStr), 10, 64)
-			if err == nil && val > 0 {
-				rs.Add(val)
-			}
-		}
-	}
+	_ = s.addSegment(segment)
 }
 
-func isIntervalStr(s string) bool {
-	s = strings.TrimSpace(s)
-	if s == "" {
+// AddGTIDSet thêm một GTID set đầy đủ (các phân đoạn cách nhau bởi dấu phẩy/xuống dòng),
+// theo đúng định dạng của MySQL kể cả tagged GTID: "uuid:1-5:tag:1-3,uuid2:7".
+// Trả lỗi nếu có phân đoạn hỏng; khi lỗi, tập không bị thay đổi.
+func (s *MySQLAppliedSet) AddGTIDSet(set string) error {
+	tmp := NewMySQLAppliedSet(s.defaultUUID)
+	for _, seg := range splitGTIDSet(set) {
+		if err := tmp.addSegment(seg); err != nil {
+			return err
+		}
+	}
+	s.Merge(tmp)
+	return nil
+}
+
+// ParseMySQLGTIDSet phân tích một GTID set, trả lỗi nếu hỏng.
+func ParseMySQLGTIDSet(set string, defaultUUID ...string) (*MySQLAppliedSet, error) {
+	s := NewMySQLAppliedSet(defaultUUID...)
+	if err := s.AddGTIDSet(set); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func parseInterval(tok string) (uint64, uint64, bool) {
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		return 0, 0, false
+	}
+	a, b, isRange := strings.Cut(tok, "-")
+	start, err := strconv.ParseUint(strings.TrimSpace(a), 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	end := start
+	if isRange {
+		if end, err = strconv.ParseUint(strings.TrimSpace(b), 10, 64); err != nil {
+			return 0, 0, false
+		}
+	}
+	return start, end, true
+}
+
+// looksNumeric: token có dạng interval "n" hoặc "a-b" (chỉ chữ số và một dấu '-').
+// UUID như "3e11fa47-..." có chữ cái nên không khớp; tag MySQL không được bắt đầu bằng chữ số.
+func looksNumeric(tok string) bool {
+	tok = strings.TrimSpace(tok)
+	if tok == "" || tok[0] < '0' || tok[0] > '9' {
 		return false
 	}
-	if strings.Contains(s, "-") {
-		sub := strings.SplitN(s, "-", 2)
-		_, err1 := strconv.ParseUint(strings.TrimSpace(sub[0]), 10, 64)
-		_, err2 := strconv.ParseUint(strings.TrimSpace(sub[1]), 10, 64)
-		return err1 == nil && err2 == nil
+	dashes := 0
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c == '-':
+			dashes++
+		case c == ' ':
+		default:
+			return false
+		}
 	}
-	_, err := strconv.ParseUint(s, 10, 64)
-	return err == nil
+	return dashes <= 1
+}
+
+// addSegment phân tích "uuid[:interval|:tag]..." trong đó interval sau một tag thuộc về uuid:tag.
+func (s *MySQLAppliedSet) addSegment(segment string) error {
+	segment = strings.TrimSpace(segment)
+	if segment == "" {
+		return nil
+	}
+	parts := strings.Split(segment, ":")
+
+	type ival struct {
+		prefix     string
+		start, end uint64
+	}
+	var ivals []ival
+
+	var uuid string
+	i := 0
+	if looksNumeric(parts[0]) {
+		uuid = s.defaultUUID // chỉ có GNO/interval, dùng UUID mặc định
+	} else {
+		uuid = strings.ToLower(strings.TrimSpace(parts[0]))
+		if uuid == "" {
+			return fmt.Errorf("invalid GTID segment %q: empty source id", segment)
+		}
+		i = 1
+	}
+	if i >= len(parts) {
+		return fmt.Errorf("invalid GTID segment %q: no intervals", segment)
+	}
+
+	prefix := uuid
+	pendingTag := false
+	for ; i < len(parts); i++ {
+		tok := strings.TrimSpace(parts[i])
+		if tok == "" {
+			return fmt.Errorf("invalid GTID segment %q: empty element", segment)
+		}
+		if looksNumeric(tok) {
+			start, end, ok := parseInterval(tok)
+			if !ok || start == 0 || start > end {
+				return fmt.Errorf("invalid GTID interval %q in %q", tok, segment)
+			}
+			ivals = append(ivals, ival{prefix, start, end})
+			pendingTag = false
+			continue
+		}
+		if pendingTag {
+			return fmt.Errorf("invalid GTID segment %q: tag %q has no intervals", segment, parts[i-1])
+		}
+		prefix = uuid + ":" + strings.ToLower(tok)
+		pendingTag = true
+	}
+	if pendingTag {
+		return fmt.Errorf("invalid GTID segment %q: trailing tag without intervals", segment)
+	}
+	for _, iv := range ivals {
+		s.getOrCreateRangeSet(iv.prefix).AddRange(iv.start, iv.end)
+	}
+	return nil
+}
+
+// Subtract loại khỏi s mọi GTID có trong other.
+func (s *MySQLAppliedSet) Subtract(other *MySQLAppliedSet) {
+	if other == nil {
+		return
+	}
+	for prefix, rs := range s.sets {
+		if ors, ok := other.sets[prefix]; ok {
+			rs.Subtract(ors)
+		}
+	}
+}
+
+// IsSubsetOf kiểm tra mọi GTID của s đều có trong other.
+func (s *MySQLAppliedSet) IsSubsetOf(other *MySQLAppliedSet) bool {
+	for prefix, rs := range s.sets {
+		if rs.IsEmpty() {
+			continue
+		}
+		if other == nil {
+			return false
+		}
+		ors, ok := other.sets[prefix]
+		if !ok || !rs.IsSubsetOf(ors) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *MySQLAppliedSet) Merge(other AppliedSet) {

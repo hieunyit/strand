@@ -223,3 +223,45 @@ func (rs *RangeSet) Equal(other *RangeSet) bool {
 	}
 	return true
 }
+
+// Subtract loại khỏi tập mọi giá trị thuộc other.
+func (rs *RangeSet) Subtract(other *RangeSet) {
+	if rs.IsEmpty() || other.IsEmpty() {
+		return
+	}
+	var out []Interval
+	for _, cur := range rs.intervals {
+		pieces := []Interval{cur}
+		for _, o := range other.intervals {
+			var next []Interval
+			for _, p := range pieces {
+				if o.End < p.Start || o.Start > p.End {
+					next = append(next, p)
+					continue
+				}
+				if o.Start > p.Start {
+					next = append(next, Interval{p.Start, o.Start - 1})
+				}
+				if o.End < p.End {
+					next = append(next, Interval{o.End + 1, p.End})
+				}
+			}
+			pieces = next
+			if len(pieces) == 0 {
+				break
+			}
+		}
+		out = append(out, pieces...)
+	}
+	rs.intervals = out
+}
+
+// IsSubsetOf kiểm tra mọi giá trị của rs đều thuộc other.
+func (rs *RangeSet) IsSubsetOf(other *RangeSet) bool {
+	if rs.IsEmpty() {
+		return true
+	}
+	c := rs.Clone()
+	c.Subtract(other)
+	return c.IsEmpty()
+}
