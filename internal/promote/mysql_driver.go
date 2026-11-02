@@ -68,6 +68,12 @@ type MySQLTargetDriver struct {
 	logger          *slog.Logger
 }
 
+// WithPipeline gán pipelineID để đọc được checkpoint của pipeline ngay cả khi không cấu hình source.
+func (d *MySQLTargetDriver) WithPipeline(id string) *MySQLTargetDriver {
+	d.pipelineID = id
+	return d
+}
+
 // WithCatchUpCheck cấu hình cách bước 3 xác minh target đã apply hết log của source.
 func (d *MySQLTargetDriver) WithCatchUpCheck(source *sql.DB, pipelineID string, timeout time.Duration, logger *slog.Logger) *MySQLTargetDriver {
 	d.source = source
@@ -191,4 +197,56 @@ func (d *MySQLTargetDriver) OpenWrites(ctx context.Context) error {
 	}
 	_, err := d.db.ExecContext(ctx, "SET GLOBAL read_only = OFF")
 	return err
+}
+
+// FailoverSummary đọc tập GTID đã apply và thời điểm cập nhật checkpoint trên target để báo cho
+// người vận hành biết mức mất dữ liệu phải chấp nhận khi dừng ở exit 10 (quyết định P1-17, câu 3).
+func (d *MySQLTargetDriver) FailoverSummary(ctx context.Context) (string, error) {
+	if d.db == nil || d.pipelineID == "" {
+		return "", fmt.Errorf("target db or pipeline id not configured")
+	}
+	applied, err := checkpoint.LoadAppliedSnapshotMySQL(ctx, d.db, d.pipelineID, model.EngineMySQL)
+	if err != nil {
+		return "", fmt.Errorf("load applied snapshot: %w", err)
+	}
+	var rawUpdated any
+	if err := d.db.QueryRowContext(ctx, "SELECT updated_at FROM _strand_checkpoint WHERE pipeline_id = ?", d.pipelineID).Scan(&rawUpdated); err != nil {
+		return "", fmt.Errorf("read checkpoint updated_at: %w", err)
+	}
+	updatedAt, err := parseCheckpointTime(rawUpdated)
+	if err != nil {
+		return "", fmt.Errorf("parse checkpoint updated_at: %w", err)
+	}
+	ageSec := int64(time.Since(updatedAt).Seconds())
+	if ageSec < 0 {
+		ageSec = 0
+	}
+	return fmt.Sprintf(
+		"target applied up to %s (checkpoint updated %s, %ds ago); transactions committed on the old source after this are LOST if you continue",
+		applied.String(),
+		updatedAt.UTC().Format(time.RFC3339),
+		ageSec,
+	), nil
+}
+
+func parseCheckpointTime(raw any) (time.Time, error) {
+	switch v := raw.(type) {
+	case time.Time:
+		return v, nil
+	case []byte:
+		return parseCheckpointTimeString(string(v))
+	case string:
+		return parseCheckpointTimeString(v)
+	default:
+		return time.Time{}, fmt.Errorf("unsupported updated_at type %T", raw)
+	}
+}
+
+func parseCheckpointTimeString(s string) (time.Time, error) {
+	for _, layout := range []string{"2006-01-02 15:04:05.999999", time.RFC3339Nano} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse timestamp %q", s)
 }

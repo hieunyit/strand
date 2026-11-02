@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 
 	"strand/internal/exitcode"
@@ -45,8 +45,13 @@ func newPromoteCmd() *cobra.Command {
 				}
 			}
 
-			// Kết nối Target DB
-			targetDB, err := sql.Open("mysql", promoteTargetDSN)
+			// Kết nối Target DB (bật parseTime để đọc cột TIMESTAMP của _strand_promote / _strand_checkpoint)
+			targetDSN := promoteTargetDSN
+			if c, err := drivermysql.ParseDSN(promoteTargetDSN); err == nil {
+				c.ParseTime = true
+				targetDSN = c.FormatDSN()
+			}
+			targetDB, err := sql.Open("mysql", targetDSN)
 			if err != nil {
 				return fmt.Errorf("connect target DB: %w", err)
 			}
@@ -54,6 +59,7 @@ func newPromoteCmd() *cobra.Command {
 
 			logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 			targetDriver := promote.NewMySQLTargetDriver(targetDB)
+			targetDriver.WithPipeline(promotePipelineID)
 			stateStore := promote.NewDBStateStore(targetDB)
 
 			// Kết nối Source DB (nếu có)
@@ -89,6 +95,9 @@ func newPromoteCmd() *cobra.Command {
 					if !progress.IsStepCompleted(promote.StepFenceSource) {
 						fmt.Printf("Không fence được source cũ (không truy cập được hoặc thiếu --fence).\n")
 						fmt.Printf("Cô lập source bằng cách khác rồi chạy lại với --source-fenced-externally.\n")
+					}
+					if progress.FailoverSummary != "" {
+						fmt.Printf("Dữ liệu sẽ mất nếu tiếp tục: %s\n", progress.FailoverSummary)
 					}
 					if len(progress.SuggestedSequences) > 0 {
 						fmt.Printf("Các sequence độc lập không đọc được từ source:\n")

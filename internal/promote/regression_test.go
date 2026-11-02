@@ -5,6 +5,7 @@ package promote_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"strand/internal/exitcode"
@@ -95,5 +96,55 @@ func TestPR1_ReachableSourceFenceFailureIsError(t *testing.T) {
 	}
 	if target.openCalls != 0 {
 		t.Fatalf("target writes opened after failed fence")
+	}
+}
+
+type mockSummarizingTargetDriver struct {
+	*mockTargetDriver
+	summary    string
+	summaryErr error
+}
+
+func (m *mockSummarizingTargetDriver) FailoverSummary(ctx context.Context) (string, error) {
+	return m.summary, m.summaryErr
+}
+
+// invariant: PR-1 (decision P1-17, câu 3 = "gộp")
+// Khi dừng exit 10 vì không fence được source, progress và message lỗi phải hiển thị
+// tập giao dịch đã apply ở target để người vận hành biết mức mất dữ liệu.
+func TestPR1_UnfencedStopShowsFailoverSummary(t *testing.T) {
+	ctx := context.Background()
+	source := newMockSourceDriver(false)
+	target := &mockSummarizingTargetDriver{
+		mockTargetDriver: newMockTargetDriver(),
+		summary:          "target applied up to u:1-100",
+	}
+	store := promote.NewMemoryStateStore()
+	cfg := promote.Config{PipelineID: "pr1-summary"}
+
+	progress, err := promote.NewPromoter(cfg, store, source, target, nil, nil).Run(ctx)
+	var ee *exitcode.Error
+	if !errors.As(err, &ee) || ee.ExitCode != exitcode.NeedsDecision || ee.Code != exitcode.ErrPromoteNeedsDecision {
+		t.Fatalf("expected exit 10 promote_needs_decision, got %v", err)
+	}
+	if !strings.Contains(progress.FailoverSummary, "u:1-100") {
+		t.Fatalf("progress.FailoverSummary = %q, want containing u:1-100", progress.FailoverSummary)
+	}
+	if !strings.Contains(err.Error(), "u:1-100") {
+		t.Fatalf("error message = %q, want containing u:1-100", err.Error())
+	}
+
+	// Khi đọc checkpoint lỗi, summary bắt đầu bằng "unknown" và vẫn dừng với exit 10.
+	targetErr := &mockSummarizingTargetDriver{
+		mockTargetDriver: newMockTargetDriver(),
+		summaryErr:       errors.New("checkpoint table unreadable"),
+	}
+	storeErr := promote.NewMemoryStateStore()
+	progress2, err2 := promote.NewPromoter(cfg, storeErr, source, targetErr, nil, nil).Run(ctx)
+	if !errors.As(err2, &ee) || ee.ExitCode != exitcode.NeedsDecision || ee.Code != exitcode.ErrPromoteNeedsDecision {
+		t.Fatalf("expected exit 10 promote_needs_decision on summary error, got %v", err2)
+	}
+	if !strings.HasPrefix(progress2.FailoverSummary, "unknown") {
+		t.Fatalf("progress.FailoverSummary = %q, want prefix \"unknown\"", progress2.FailoverSummary)
 	}
 }
