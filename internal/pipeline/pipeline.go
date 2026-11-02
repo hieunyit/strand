@@ -239,11 +239,14 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return err
 	}
 	defer func() { _ = p.release() }()
+	// Đã giữ khóa pipeline: mọi instance khác cùng pipeline_id là instance cũ. Ngắt kết nối
+	// target của chúng TRƯỚC khi tăng epoch, vì transaction dở của chúng giữ row lock trên
+	// chính row delta mà bước tăng epoch phải cập nhật.
+	p.killStaleInstances(ctx)
 	if p.epoch, err = p.store.AdvanceEpoch(ctx, p.id, fmt.Sprintf("%s/%d", host, os.Getpid()), configHash(p.cfg)); err != nil {
 		return fmt.Errorf("advance epoch: %w", err)
 	}
 	p.log = p.log.With("epoch", p.epoch)
-	p.killStaleInstances(ctx)
 	p.log.Info("pipeline lock acquired")
 
 	// --- Metadata source ---
@@ -538,7 +541,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 }
 
 // killStaleInstances ngắt mọi kết nối target của instance khác cùng pipeline_id (sau khi đã
-// tăng epoch). Instance cũ bị đóng băng hoặc bị phân vùng có thể đang giữ transaction mở và
+// giữ khóa pipeline, trước khi tăng epoch). Instance cũ bị đóng băng hoặc bị phân vùng có thể đang giữ transaction mở và
 // row lock trên target: epoch chặn nó commit, nhưng lock chỉ được nhả khi kết nối bị ngắt.
 func (p *Pipeline) killStaleInstances(ctx context.Context) {
 	rows, err := p.dst.QueryContext(ctx, `
