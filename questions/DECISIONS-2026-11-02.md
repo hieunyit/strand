@@ -12,14 +12,18 @@ Trả lời: `1A, 2B, 3B, 4A, 5 ok, 6 ok, 7 gộp` (cùng với P1-17 câu 1 và
 | 5b | Instance mới (đã giữ khóa pipeline) `KILL` mọi kết nối target của instance khác cùng `pipeline_id` trước khi tăng epoch; nhận diện bằng `connectionAttributes` (`strand_pipeline`, `strand_instance`) | `killStaleInstances`, `targetDSN` | 02 §4 quy tắc 1–2 và SG-1 (02 §2); 03 §2: ghi rõ `CONNECTION_ADMIN` còn dùng để ngắt kết nối instance cũ |
 | 6 | Cờ/khóa mới (cộng thêm) | xem dưới | 02 §10 |
 | 7 | Failover: lần dừng exit 10 (không fence được source) hiển thị tập GTID đã apply ở target và thời điểm checkpoint cuối — phần dữ liệu mất nếu tiếp tục; xác nhận một lần bằng `--source-fenced-externally` | Task 7 | 02 §8 bước 1–3 và 05 §5 cột "Failover khẩn cấp" |
+<<<<<<< HEAD
 | 8 | Thêm seed `--type mysqldump` để nhận file dump có sẵn; luôn in cảnh báo không kiểm được --single-transaction; từ chối file thiếu GTID_PURGED hoặc thiếu trailer | internal/seed/mysqldump.go, cmd/strand/seed.go | 02 §9 bảng công cụ seed: thêm dòng mysqldump (8.0.32+/8.4, bắt buộc --single-transaction --set-gtid-purged=ON), ghi rõ cảnh báo |
+=======
+| 9 | mydumper v1.0.3-1 không ghi chế độ khóa vào metadata; seed plan bắt buộc --dump-log (log stderr của mydumper), từ chối NO_LOCK; backup cũ không log phải dùng --accept-unverified-lock-mode và nhận cảnh báo | internal/seed/mydumper.go, cmd/strand/seed.go | 02 §9: ghi rõ cách kiểm NO_LOCK và cờ mới; 02 §10 thêm --dump-log, --accept-unverified-lock-mode |
+>>>>>>> agent/dumplog
 
 ## Mục 6 — cờ và khóa cấu hình mới cần thêm vào 02 §10
 
 | Lệnh / khóa | Thêm |
 |---|---|
 | `strand sync` | `--seed-manifest <path>` (mặc định `seed.json`) |
-| `strand seed plan` | `--source <dsn>`, `--target <dsn>`, `--archive-until <gtid>`, `--tables`, `--out` |
+| `strand seed plan` | `--source <dsn>`, `--target <dsn>`, `--archive-until <gtid>`, `--tables`, `--out`, --dump-log <file>, --accept-unverified-lock-mode |
 | `strand seed apply` | `--target <dsn>`, `--prefetch` (mặc định bật), `--spool <dir>`, `--spool-hard <bytes>`, `--spool-local-hard <bytes>`, `--overflow s3://bucket/prefix`, `--archive <dir>`, `--source <dsn>` |
 | `strand plan` | `--force` (đã có trong mô tả 02 §10, nay hiện thực) |
 | `strand verify` | `--rate <0..1>`, `--socket <path>` (delta qua admin socket) |

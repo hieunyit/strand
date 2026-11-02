@@ -8,6 +8,7 @@ import (
 
 // SeedSource biểu diễn thông tin đầu vào cho một kế hoạch seed.
 type SeedSource struct {
+<<<<<<< HEAD
 	Engine              string   `json:"engine"` // mysql | pg
 	Kind                string   `json:"kind"`   // xtrabackup | clone | mydumper | mysqldump | pgbackrest
 	BackupRef           string   `json:"backup_ref"`
@@ -18,6 +19,20 @@ type SeedSource struct {
 	TargetRestoredGTID  string   `json:"target_restored_gtid"`
 	SourcePurgedGTID    string   `json:"source_purged_gtid"`
 	ArchiveUntilGTID    string   `json:"archive_until_gtid"`
+=======
+	Engine                   string   `json:"engine"` // mysql | pg
+	Kind                     string   `json:"kind"`   // xtrabackup | clone | mydumper | pgbackrest
+	BackupRef                string   `json:"backup_ref"`
+	AllowPrereleaseTool      bool     `json:"allow_prerelease_tool"`
+	Tables                   []string `json:"tables"`
+	TargetVersion            string   `json:"target_version"`
+	TargetCompatible         bool     `json:"target_compatible"`
+	TargetRestoredGTID       string   `json:"target_restored_gtid"`
+	SourcePurgedGTID         string   `json:"source_purged_gtid"`
+	ArchiveUntilGTID         string   `json:"archive_until_gtid"`
+	DumpLog                  string   `json:"dump_log,omitempty"`
+	AcceptUnverifiedLockMode bool     `json:"accept_unverified_lock_mode,omitempty"`
+>>>>>>> agent/dumplog
 }
 
 // StartPosition biểu diễn vị trí P nhất quán của backup.

@@ -43,12 +43,14 @@ Lock Mode: LOCK TABLES
 
 		planner := seed.NewMydumperPlanner()
 		src := seed.SeedSource{
-			Engine:             "mysql",
-			Kind:               "mydumper",
-			BackupRef:          dir,
-			Tables:             []string{"app.orders"},
-			TargetVersion:      "8.4.6",
-			TargetRestoredGTID: gtid,
+			Engine:    "mysql",
+			Kind:      "mydumper",
+			BackupRef: dir,
+			// Test này kiểm SD-1 (đối chiếu P); chế độ khóa kiểm ở mydumper_test.go.
+			AcceptUnverifiedLockMode: true,
+			Tables:                   []string{"app.orders"},
+			TargetVersion:            "8.4.6",
+			TargetRestoredGTID:       gtid,
 		}
 
 		manifest, err := planner.Plan(ctx, src)
@@ -152,7 +154,7 @@ func TestSD2_MydumperAndClone_CorruptedBackup_Rejected(t *testing.T) {
 		dir := t.TempDir()
 		meta := "Log: binlog.000001\nPos: 12345\nGTID: uuid:1-10:20-30\nLock Mode: LOCK TABLES\n"
 		_ = os.WriteFile(filepath.Join(dir, "metadata"), []byte(meta), 0644)
-		_, err := mydumperPlanner.Plan(ctx, seed.SeedSource{BackupRef: dir})
+		_, err := mydumperPlanner.Plan(ctx, seed.SeedSource{BackupRef: dir, AcceptUnverifiedLockMode: true})
 		if err == nil {
 			t.Fatalf("expected error for GTID with holes, got nil")
 		}

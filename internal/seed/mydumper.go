@@ -192,6 +192,23 @@ func (p *MydumperPlanner) Plan(ctx context.Context, src SeedSource) (*SeedManife
 		return nil, err
 	}
 
+	var warnings []string
+	if src.DumpLog == "" {
+		if !src.AcceptUnverifiedLockMode {
+			return nil, exitcode.New(
+				exitcode.ErrSeedInvariantFailed,
+				exitcode.Rejected,
+				"mydumper metadata does not record the lock mode; pass --dump-log <mydumper stderr log> (or --accept-unverified-lock-mode to accept the risk)",
+				nil,
+			)
+		}
+		warnings = append(warnings, "WARNING: mydumper lock mode not verified (--accept-unverified-lock-mode); a NO_LOCK dump silently diverges from P. Post-seed verify is the only safety net.")
+	} else {
+		if err := verifyMydumperLog(src.DumpLog); err != nil {
+			return nil, err
+		}
+	}
+
 	// 1. P hợp lệ, không có khoảng trống (SD-1)
 	pSet, err := checkPositionP("mydumper", meta.GTID)
 	if err != nil {
@@ -246,10 +263,61 @@ func (p *MydumperPlanner) Plan(ctx context.Context, src SeedSource) (*SeedManife
 			Version:    targetVer,
 			Compatible: true,
 		},
+		Warnings:  warnings,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	return manifest, nil
+}
+
+// verifyMydumperLog quét log stderr của mydumper theo dòng để kiểm tra chế độ khóa (02 §9).
+func verifyMydumperLog(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return exitcode.New(
+			exitcode.ErrSeedInvariantFailed,
+			exitcode.Rejected,
+			fmt.Sprintf("cannot open mydumper log %s", path),
+			err,
+		)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	completed := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "no_lock") {
+			return exitcode.New(
+				exitcode.ErrSeedInvariantFailed,
+				exitcode.Rejected,
+				"mydumper backup with NO_LOCK mode is rejected: snapshot is not transactionally consistent (spec 02 §9)",
+				nil,
+			)
+		}
+		if strings.Contains(lower, "finished dump at") || strings.Contains(lower, "main connection closed") {
+			completed = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return exitcode.New(
+			exitcode.ErrSeedInvariantFailed,
+			exitcode.Rejected,
+			fmt.Sprintf("read mydumper log %s: %v", path, err),
+			err,
+		)
+	}
+	if !completed {
+		return exitcode.New(
+			exitcode.ErrSeedInvariantFailed,
+			exitcode.Rejected,
+			"mydumper log does not show a completed dump",
+			nil,
+		)
+	}
+	return nil
 }
 
 func extractSourceIdentity(gtid string) string {
