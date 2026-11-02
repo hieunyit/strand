@@ -19,10 +19,11 @@ type crashingBucket struct {
 }
 
 func (b *crashingBucket) Delete(ctx context.Context, key string) error {
+	err := b.MemoryBucketBackend.Delete(ctx, key)
 	if b.crashOnDelete {
-		panic("simulated crash during bucket delete")
+		panic("simulated crash right after a bucket object was deleted")
 	}
-	return b.MemoryBucketBackend.Delete(ctx, key)
+	return err
 }
 
 func (b *crashingBucket) Close() error { return nil }
