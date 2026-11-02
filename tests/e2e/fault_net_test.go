@@ -60,14 +60,25 @@ func startToxiproxy(t *testing.T, nw *testcontainers.DockerNetwork, proxies map[
 }
 
 func (tp *toxiproxy) post(t *testing.T, path, body string) {
-	resp, err := http.Post(tp.api+path, "application/json", bytes.NewBufferString(body))
-	if err != nil {
-		t.Fatalf("toxiproxy %s: %v", path, err)
+	// API Toxiproxy đôi khi trả 5xx tạm thời khi đang có nhiều kết nối qua proxy: thử lại.
+	var last string
+	for attempt := 0; attempt < 10; attempt++ {
+		resp, err := http.Post(tp.api+path, "application/json", bytes.NewBufferString(body))
+		if err != nil {
+			last = err.Error()
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode < 300 {
+				return
+			}
+			last = fmt.Sprintf("status %d", resp.StatusCode)
+			if resp.StatusCode < 500 {
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		t.Fatalf("toxiproxy %s: status %d", path, resp.StatusCode)
-	}
+	t.Fatalf("toxiproxy %s: %s", path, last)
 }
 
 func (tp *toxiproxy) del(path string) {
