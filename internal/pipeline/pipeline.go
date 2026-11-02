@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -190,8 +191,14 @@ func targetDSN(dsn, pipelineID, instance string) (string, error) {
 	c.Params["foreign_key_checks"] = "0"
 	// Nhãn kết nối (performance_schema.session_connect_attrs): instance mới nhận pipeline có thể
 	// tìm và ngắt kết nối của instance cũ cùng pipeline_id (fencing ở mức DB, SG-1).
-	c.ConnectionAttributes = "strand_pipeline:" + pipelineID + ",strand_instance:" + instance
-	return c.FormatDSN(), nil
+	// FormatDSN của go-sql-driver v1.8.1 bỏ mất ConnectionAttributes, nên gắn thẳng vào DSN.
+	attrs := "strand_pipeline:" + pipelineID + ",strand_instance:" + instance
+	out := c.FormatDSN()
+	sep := "?"
+	if strings.Contains(out, "?") {
+		sep = "&"
+	}
+	return out + sep + "connectionAttributes=" + url.QueryEscape(attrs), nil
 }
 
 func durationOr(s string, def time.Duration) time.Duration {
