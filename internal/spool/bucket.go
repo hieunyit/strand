@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -248,8 +249,13 @@ func (b *MinIOBackend) Close() error {
 
 // MemoryBucketBackend là in-memory backend cho kiểm thử đơn vị.
 type MemoryBucketBackend struct {
-	mu      sync.RWMutex
-	objects map[string][]byte
+	mu          sync.RWMutex
+	objects     map[string][]byte
+	putCount    atomic.Int64
+	getCount    atomic.Int64
+	deleteCount atomic.Int64
+	putErr      error
+	getErr      error
 }
 
 func NewMemoryBucketBackend() *MemoryBucketBackend {
@@ -261,6 +267,10 @@ func NewMemoryBucketBackend() *MemoryBucketBackend {
 func (m *MemoryBucketBackend) Put(ctx context.Context, key string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.putCount.Add(1)
+	if m.putErr != nil {
+		return m.putErr
+	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.objects[key] = cp
@@ -270,6 +280,10 @@ func (m *MemoryBucketBackend) Put(ctx context.Context, key string, data []byte) 
 func (m *MemoryBucketBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	m.getCount.Add(1)
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	data, ok := m.objects[key]
 	if !ok {
 		return nil, errors.New("object not found")
@@ -282,8 +296,39 @@ func (m *MemoryBucketBackend) Get(ctx context.Context, key string) ([]byte, erro
 func (m *MemoryBucketBackend) Delete(ctx context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.deleteCount.Add(1)
 	delete(m.objects, key)
 	return nil
+}
+
+func (m *MemoryBucketBackend) PutCalls() int {
+	return int(m.putCount.Load())
+}
+
+func (m *MemoryBucketBackend) GetCalls() int {
+	return int(m.getCount.Load())
+}
+
+func (m *MemoryBucketBackend) DeleteCalls() int {
+	return int(m.deleteCount.Load())
+}
+
+func (m *MemoryBucketBackend) ResetCounters() {
+	m.putCount.Store(0)
+	m.getCount.Store(0)
+	m.deleteCount.Store(0)
+}
+
+func (m *MemoryBucketBackend) SetPutError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.putErr = err
+}
+
+func (m *MemoryBucketBackend) SetGetError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.getErr = err
 }
 
 func (m *MemoryBucketBackend) List(ctx context.Context, prefix string) ([]string, error) {

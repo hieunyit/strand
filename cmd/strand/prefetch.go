@@ -150,6 +150,9 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 			}
 		}
 	}
+	if err := sp.Flush(ctx); err != nil {
+		return n, err
+	}
 	return n, nil
 }
 

@@ -1,8 +1,12 @@
 package spool_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -413,5 +417,482 @@ func TestCodec_Roundtrip(t *testing.T) {
 	}
 	if r2.Key[0] != 789 {
 		t.Fatalf("r2 Key mismatch: %v", r2.Key)
+	}
+}
+
+func makeOverflowTxn(uuid string, seq int) *model.Txn {
+	return &model.Txn{
+		SourcePos: model.Pos{Engine: model.EngineMySQL, GTID: fmt.Sprintf("%s:%d", uuid, seq)},
+		SchemaVer: 1,
+		Bytes:     128,
+		RowCount:  1,
+		SourceTS:  1700000000 + int64(seq),
+		Rows: []model.RowChange{
+			{
+				Table: model.TableID{Schema: "app", Table: "events"},
+				Op:    model.OpInsert,
+				Key:   []model.Value{seq},
+				Cols: []model.ColValue{
+					{Name: "id", Value: seq},
+					{Name: "payload", Value: fmt.Sprintf("payload-data-%06d", seq)},
+				},
+			},
+		},
+	}
+}
+
+// 1. 5000 overflow txns -> Put calls <= 5000/2000+2; iterate returns all 5000 in order,
+// byte-identical to input (compare encoded form); Get calls <= number of segments.
+func TestSegment_Batch5000OverflowTxns(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	uuid := "11111111-2222-3333-4444-555555555555"
+
+	memBucket := spool.NewMemoryBucketBackend()
+	sp, err := spool.New(dir,
+		spool.WithLocalHardLimit(1),
+		spool.WithBucket(memBucket, "pref/"),
+		spool.WithSegmentMaxAge(time.Hour), // chỉ đo gom theo kích thước/số Txn, không phụ thuộc tốc độ máy (-race)
+	)
+	if err != nil {
+		t.Fatalf("spool.New failed: %v", err)
+	}
+	defer sp.Close()
+
+	const totalTxns = 5000
+	wantEncoded := make([][]byte, totalTxns)
+	for i := 1; i <= totalTxns; i++ {
+		tx := makeOverflowTxn(uuid, i)
+		enc, err := spool.EncodeTxnForTest(tx)
+		if err != nil {
+			t.Fatalf("EncodeTxnForTest(%d) failed: %v", i, err)
+		}
+		wantEncoded[i-1] = enc
+		if err := sp.Append(ctx, tx); err != nil {
+			t.Fatalf("Append(%d) failed: %v", i, err)
+		}
+	}
+
+	if err := sp.Flush(ctx); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	putCalls := memBucket.PutCalls()
+	maxPutCalls := totalTxns/2000 + 2
+	if putCalls <= 0 || putCalls > maxPutCalls {
+		t.Fatalf("PutCalls = %d, want in [1, %d]", putCalls, maxPutCalls)
+	}
+
+	keys, err := memBucket.List(ctx, "pref/seg/")
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(keys) != putCalls {
+		t.Fatalf("segment count = %d, want %d (keys=%v)", len(keys), putCalls, keys)
+	}
+	for _, k := range keys {
+		raw, err := memBucket.Get(ctx, k)
+		if err != nil {
+			t.Fatalf("Get(%s) failed: %v", k, err)
+		}
+		if len(raw) < 5 || string(raw[:5]) != "STSG1" {
+			t.Fatalf("segment %s missing STSG1 magic", k)
+		}
+	}
+	memBucket.ResetCounters()
+
+	iter, err := sp.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatalf("Iter failed: %v", err)
+	}
+	defer iter.Close()
+
+	for i := 1; i <= totalTxns; i++ {
+		got, err := iter.Next(ctx)
+		if err != nil {
+			t.Fatalf("iter.Next at %d failed: %v", i, err)
+		}
+		gotEnc, err := spool.EncodeTxnForTest(got)
+		if err != nil {
+			t.Fatalf("EncodeTxnForTest(got %d) failed: %v", i, err)
+		}
+		if !bytes.Equal(gotEnc, wantEncoded[i-1]) {
+			t.Fatalf("txn %d encoded bytes mismatch", i)
+		}
+	}
+	if _, err := iter.Next(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF after %d txns, got %v", totalTxns, err)
+	}
+
+	getCalls := memBucket.GetCalls()
+	if getCalls <= 0 || getCalls > len(keys) {
+		t.Fatalf("GetCalls = %d, want <= %d (number of segments)", getCalls, len(keys))
+	}
+}
+
+// 2. age flush: one txn, wait 600 ms, second Append triggers a PUT of the first segment.
+func TestSegment_AgeFlush(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	uuid := "22222222-3333-4444-5555-666666666666"
+
+	memBucket := spool.NewMemoryBucketBackend()
+	sp, err := spool.New(dir,
+		spool.WithLocalHardLimit(1),
+		spool.WithBucket(memBucket, "pref/"),
+	)
+	if err != nil {
+		t.Fatalf("spool.New failed: %v", err)
+	}
+	defer sp.Close()
+
+	if err := sp.Append(ctx, makeOverflowTxn(uuid, 1)); err != nil {
+		t.Fatalf("first Append failed: %v", err)
+	}
+	if got := memBucket.PutCalls(); got != 0 {
+		t.Fatalf("expected 0 PutCalls right after first Append, got %d", got)
+	}
+
+	time.Sleep(600 * time.Millisecond)
+
+	if err := sp.Append(ctx, makeOverflowTxn(uuid, 2)); err != nil {
+		t.Fatalf("second Append failed: %v", err)
+	}
+	if got := memBucket.PutCalls(); got != 1 {
+		t.Fatalf("expected second Append after 600ms to trigger 1 PutCall, got %d", got)
+	}
+
+	iter, err := sp.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatalf("Iter failed: %v", err)
+	}
+	defer iter.Close()
+
+	for i := 1; i <= 2; i++ {
+		tx, err := iter.Next(ctx)
+		if err != nil {
+			t.Fatalf("iter.Next(%d) failed: %v", i, err)
+		}
+		wantGTID := fmt.Sprintf("%s:%d", uuid, i)
+		if tx.SourcePos.GTID != wantGTID {
+			t.Fatalf("got GTID %s, want %s", tx.SourcePos.GTID, wantGTID)
+		}
+	}
+	if _, err := iter.Next(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+}
+
+// 3. crash safety: Put succeeds then simulate failure before batch commit -> reopen spool:
+// no refs, iterate returns nothing, no error.
+func TestSegment_CrashSafetyBeforeBatchCommit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	uuid := "33333333-4444-5555-6666-777777777777"
+
+	memBucket := spool.NewMemoryBucketBackend()
+	simErr := errors.New("simulated crash before pebble batch commit")
+
+	sp1, err := spool.New(dir,
+		spool.WithLocalHardLimit(1),
+		spool.WithBucket(memBucket, "pref/"),
+	)
+	if err != nil {
+		t.Fatalf("spool.New failed: %v", err)
+	}
+	spool.SetBeforeBatchCommitForTest(sp1, func() error {
+		return simErr
+	})
+
+	if err := sp1.Append(ctx, makeOverflowTxn(uuid, 1)); err != nil {
+		t.Fatalf("Append(1) failed: %v", err)
+	}
+	if err := sp1.Append(ctx, makeOverflowTxn(uuid, 2)); err != nil {
+		t.Fatalf("Append(2) failed: %v", err)
+	}
+
+	flushErr := sp1.Flush(ctx)
+	if !errors.Is(flushErr, simErr) {
+		t.Fatalf("expected Flush error %v, got %v", simErr, flushErr)
+	}
+	// Put đã thành công trước khi batch commit bị lỗi
+	if got := memBucket.PutCalls(); got != 1 {
+		t.Fatalf("expected 1 PutCall before simulated crash, got %d", got)
+	}
+
+	if err := sp1.Close(); err != nil {
+		t.Fatalf("Close sp1 failed: %v", err)
+	}
+
+	// Mở lại spool trên cùng thư mục
+	sp2, err := spool.New(dir,
+		spool.WithLocalHardLimit(1),
+		spool.WithBucket(memBucket, "pref/"),
+	)
+	if err != nil {
+		t.Fatalf("spool.New reopen failed: %v", err)
+	}
+	defer sp2.Close()
+
+	if u := sp2.Usage(); u.LocalBytes != 0 || u.BucketBytes != 0 {
+		t.Fatalf("expected 0 usage after reopen, got %+v", u)
+	}
+
+	iter, err := sp2.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatalf("Iter after reopen failed: %v", err)
+	}
+	defer iter.Close()
+
+	tx, err := iter.Next(ctx)
+	if !errors.Is(err, io.EOF) || tx != nil {
+		t.Fatalf("expected empty iter (io.EOF) after crash before batch commit, got tx=%v, err=%v", tx, err)
+	}
+}
+
+// 4. Truncate of half the txns keeps the segment object; truncate of the rest deletes it;
+// usage returns to 0.
+func TestSegment_TruncateHalfThenRest(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	uuid := "44444444-5555-6666-7777-888888888888"
+
+	memBucket := spool.NewMemoryBucketBackend()
+	sp, err := spool.New(dir,
+		spool.WithLocalHardLimit(1),
+		spool.WithBucket(memBucket, "pref/"),
+	)
+	if err != nil {
+		t.Fatalf("spool.New failed: %v", err)
+	}
+	defer sp.Close()
+
+	const count = 10
+	for i := 1; i <= count; i++ {
+		if err := sp.Append(ctx, makeOverflowTxn(uuid, i)); err != nil {
+			t.Fatalf("Append(%d) failed: %v", i, err)
+		}
+	}
+	if err := sp.Flush(ctx); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	keys, err := memBucket.List(ctx, "pref/seg/")
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("expected 1 segment object in bucket, got %v (err=%v)", keys, err)
+	}
+	fullUsage := sp.Usage().BucketBytes
+	if fullUsage <= 0 {
+		t.Fatalf("expected positive BucketBytes, got %d", fullUsage)
+	}
+
+	// Truncate nửa đầu (1..5): segment object vẫn phải được giữ lại
+	appliedHalf := checkpoint.NewMySQLAppliedSet(uuid)
+	for i := 1; i <= count/2; i++ {
+		appliedHalf.Add(model.Pos{Engine: model.EngineMySQL, GTID: fmt.Sprintf("%s:%d", uuid, i)})
+	}
+	if err := sp.Truncate(ctx, appliedHalf); err != nil {
+		t.Fatalf("Truncate first half failed: %v", err)
+	}
+
+	keysAfterHalf, err := memBucket.List(ctx, "pref/seg/")
+	if err != nil || len(keysAfterHalf) != 1 {
+		t.Fatalf("expected segment object to be kept after half truncate, got %v (err=%v)", keysAfterHalf, err)
+	}
+	halfUsage := sp.Usage().BucketBytes
+	if halfUsage <= 0 || halfUsage >= fullUsage {
+		t.Fatalf("expected BucketBytes after half truncate in (0, %d), got %d", fullUsage, halfUsage)
+	}
+
+	// Kiểm tra Iter chỉ còn lại 6..10
+	iter, err := sp.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatalf("Iter after half truncate failed: %v", err)
+	}
+	for i := count/2 + 1; i <= count; i++ {
+		tx, err := iter.Next(ctx)
+		if err != nil {
+			t.Fatalf("iter.Next(%d) failed: %v", i, err)
+		}
+		wantGTID := fmt.Sprintf("%s:%d", uuid, i)
+		if tx.SourcePos.GTID != wantGTID {
+			t.Fatalf("got GTID %s, want %s", tx.SourcePos.GTID, wantGTID)
+		}
+	}
+	if _, err := iter.Next(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+	_ = iter.Close()
+
+	// Truncate phần còn lại (6..10): segment object phải bị xóa và usage về 0
+	appliedAll := checkpoint.NewMySQLAppliedSet(uuid)
+	for i := 1; i <= count; i++ {
+		appliedAll.Add(model.Pos{Engine: model.EngineMySQL, GTID: fmt.Sprintf("%s:%d", uuid, i)})
+	}
+	if err := sp.Truncate(ctx, appliedAll); err != nil {
+		t.Fatalf("Truncate rest failed: %v", err)
+	}
+
+	keysAfterAll, err := memBucket.List(ctx, "pref/seg/")
+	if err != nil || len(keysAfterAll) != 0 {
+		t.Fatalf("expected segment object to be deleted after full truncate, got %v (err=%v)", keysAfterAll, err)
+	}
+	if u := sp.Usage(); u.BucketBytes != 0 || u.LocalBytes != 0 {
+		t.Fatalf("expected usage to return to 0 after full truncate, got %+v", u)
+	}
+}
+
+// 5. old-format BUCKET: refs written by the previous code path still iterate and truncate.
+func TestSegment_BackwardCompatLegacyBucketRefs(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	uuid := "55555555-6666-7777-8888-999999999999"
+
+	memBucket := spool.NewMemoryBucketBackend()
+	sp, err := spool.New(dir,
+		spool.WithLocalHardLimit(1),
+		spool.WithBucket(memBucket, "pref/"),
+	)
+	if err != nil {
+		t.Fatalf("spool.New failed: %v", err)
+	}
+	defer sp.Close()
+
+	// Ghi 2 txn theo định dạng cũ BUCKET:<prefix>txn/<seq>
+	if err := spool.AppendLegacyBucketForTest(ctx, sp, makeOverflowTxn(uuid, 1)); err != nil {
+		t.Fatalf("AppendLegacyBucketForTest(1) failed: %v", err)
+	}
+	if err := spool.AppendLegacyBucketForTest(ctx, sp, makeOverflowTxn(uuid, 2)); err != nil {
+		t.Fatalf("AppendLegacyBucketForTest(2) failed: %v", err)
+	}
+	// Ghi tiếp 2 txn theo định dạng mới BUCKETSEG:
+	if err := sp.Append(ctx, makeOverflowTxn(uuid, 3)); err != nil {
+		t.Fatalf("Append(3) failed: %v", err)
+	}
+	if err := sp.Append(ctx, makeOverflowTxn(uuid, 4)); err != nil {
+		t.Fatalf("Append(4) failed: %v", err)
+	}
+	if err := sp.Flush(ctx); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	legacyKeys, _ := memBucket.List(ctx, "pref/txn/")
+	segKeys, _ := memBucket.List(ctx, "pref/seg/")
+	if len(legacyKeys) != 2 || len(segKeys) != 1 {
+		t.Fatalf("expected 2 legacy keys and 1 seg key, got legacy=%v seg=%v", legacyKeys, segKeys)
+	}
+
+	// Iterate phải đọc được cả 4 txn theo đúng thứ tự
+	iter, err := sp.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatalf("Iter failed: %v", err)
+	}
+	for i := 1; i <= 4; i++ {
+		tx, err := iter.Next(ctx)
+		if err != nil {
+			t.Fatalf("iter.Next(%d) failed: %v", i, err)
+		}
+		wantGTID := fmt.Sprintf("%s:%d", uuid, i)
+		if tx.SourcePos.GTID != wantGTID {
+			t.Fatalf("got GTID %s, want %s", tx.SourcePos.GTID, wantGTID)
+		}
+	}
+	if _, err := iter.Next(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+	_ = iter.Close()
+
+	// Truncate cả 4 txn
+	applied := checkpoint.NewMySQLAppliedSet(uuid)
+	for i := 1; i <= 4; i++ {
+		applied.Add(model.Pos{Engine: model.EngineMySQL, GTID: fmt.Sprintf("%s:%d", uuid, i)})
+	}
+	if err := sp.Truncate(ctx, applied); err != nil {
+		t.Fatalf("Truncate failed: %v", err)
+	}
+
+	allKeys, _ := memBucket.List(ctx, "pref/")
+	if len(allKeys) != 0 {
+		t.Fatalf("expected all legacy and segment objects deleted, got %v", allKeys)
+	}
+	if u := sp.Usage(); u.BucketBytes != 0 || u.LocalBytes != 0 {
+		t.Fatalf("expected 0 usage after truncate, got %+v", u)
+	}
+}
+
+// 6. Put failure -> Append/Flush returns the error, nothing is referenced;
+// also verify bucket Get errors in Iter are returned and never swallowed.
+func TestSegment_PutFailureAndIterGetError(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	uuid := "66666666-7777-8888-9999-000000000000"
+
+	memBucket := spool.NewMemoryBucketBackend()
+	sp, err := spool.New(dir,
+		spool.WithLocalHardLimit(1),
+		spool.WithBucket(memBucket, "pref/"),
+	)
+	if err != nil {
+		t.Fatalf("spool.New failed: %v", err)
+	}
+	defer sp.Close()
+
+	putFailErr := errors.New("simulated bucket Put error")
+	memBucket.SetPutError(putFailErr)
+
+	// Case A: Append 1 txn rồi Flush -> Flush trả lỗi, không có gì được tham chiếu
+	if err := sp.Append(ctx, makeOverflowTxn(uuid, 1)); err != nil {
+		t.Fatalf("Append(1) failed unexpectedly before flush: %v", err)
+	}
+	if err := sp.Flush(ctx); !errors.Is(err, putFailErr) {
+		t.Fatalf("expected Flush error wrapping %v, got %v", putFailErr, err)
+	}
+
+	// Case B: Append đủ 2000 txns để kích hoạt flush ngay trong Append -> Append trả lỗi
+	var appendErr error
+	for i := 1; i <= 2000; i++ {
+		if err := sp.Append(ctx, makeOverflowTxn(uuid, i)); err != nil {
+			appendErr = err
+			break
+		}
+	}
+	if !errors.Is(appendErr, putFailErr) {
+		t.Fatalf("expected Append error wrapping %v on 2000th txn, got %v", putFailErr, appendErr)
+	}
+
+	memBucket.SetPutError(nil)
+
+	if u := sp.Usage(); u.BucketBytes != 0 || u.LocalBytes != 0 {
+		t.Fatalf("expected 0 usage after failed Put, got %+v", u)
+	}
+	iter, err := sp.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatalf("Iter failed: %v", err)
+	}
+	if tx, err := iter.Next(ctx); !errors.Is(err, io.EOF) || tx != nil {
+		t.Fatalf("expected nothing referenced (io.EOF), got tx=%v, err=%v", tx, err)
+	}
+	_ = iter.Close()
+
+	// Case C: Khi Put thành công nhưng Get trong Iter lỗi -> Iter.Next phải trả về lỗi (không nuốt lỗi)
+	if err := sp.Append(ctx, makeOverflowTxn(uuid, 10)); err != nil {
+		t.Fatalf("Append(10) failed: %v", err)
+	}
+	if err := sp.Flush(ctx); err != nil {
+		t.Fatalf("Flush(10) failed: %v", err)
+	}
+
+	getFailErr := errors.New("simulated bucket Get error")
+	memBucket.SetGetError(getFailErr)
+
+	iter2, err := sp.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatalf("Iter2 failed: %v", err)
+	}
+	defer iter2.Close()
+
+	_, nextErr := iter2.Next(ctx)
+	if !errors.Is(nextErr, getFailErr) || !strings.Contains(nextErr.Error(), "pref/seg/") {
+		t.Fatalf("expected Iter.Next to return Get error %v, got %v", getFailErr, nextErr)
 	}
 }
