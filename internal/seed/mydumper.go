@@ -64,17 +64,43 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 	}
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // dòng GTID nhiều UUID có thể rất dài
+	// mydumper ≥ 0.12 (gồm v1.0.3-1) ghi metadata dạng INI: vị trí của server được dump nằm trong
+	// section [source] (bản cũ: [master]) dưới dạng dòng comment
+	//   # executed_gtid_set = "uuid:1-N"   # SOURCE_LOG_FILE = "binlog.000002"   # SOURCE_LOG_POS = 850
+	// Các section khác (vd. [replication] mô tả source của replica) KHÔNG phải P.
+	// Bản cũ (0.x) ghi khối "SHOW MASTER STATUS:" với "Log:", "Pos:", "GTID:" — vẫn đọc được.
+	section := ""
+	inPosSection := func() bool { return section == "" || section == "source" || section == "master" }
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-
-		// Nhận diện phiên bản mydumper từ comment
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.ToLower(strings.Trim(line, "[]"))
+			continue
+		}
 		if strings.HasPrefix(line, "#") {
+			body := strings.TrimSpace(strings.TrimLeft(line, "#"))
+			if k, v, ok := strings.Cut(body, "="); ok && inPosSection() {
+				key := strings.ToLower(strings.TrimSpace(k))
+				val := strings.Trim(strings.TrimSpace(v), `"'`)
+				switch key {
+				case "executed_gtid_set":
+					meta.GTID = val
+					continue
+				case "source_log_file", "master_log_file":
+					meta.BinlogFile = val
+					continue
+				case "source_log_pos", "master_log_pos":
+					_, _ = fmt.Sscanf(val, "%d", &meta.BinlogPos)
+					continue
+				}
+			}
+			// Nhận diện phiên bản mydumper từ comment (nếu có)
 			if strings.Contains(strings.ToLower(line), "mydumper") {
-				fields := strings.Fields(line)
-				for _, f := range fields {
+				for _, f := range strings.Fields(line) {
 					if strings.HasPrefix(f, "v") || strings.HasPrefix(f, "1.") {
 						meta.ToolVersion = strings.TrimPrefix(f, "v")
 					}
@@ -82,12 +108,17 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 			}
 			continue
 		}
-
-		// Phân tích Log = ... hoặc Log: ...
+		if !inPosSection() {
+			continue
+		}
+		// Dạng cũ: Log = ... / Log: ...
 		cleanLine := strings.ReplaceAll(line, "\t", " ")
 		lower := strings.ToLower(cleanLine)
-
-		if strings.Contains(lower, "log =") || strings.Contains(lower, "log:") {
+		if strings.HasPrefix(lower, "executed_gtid_set") {
+			if _, v, ok := strings.Cut(cleanLine, "="); ok {
+				meta.GTID = strings.Trim(strings.TrimSpace(v), `"'`)
+			}
+		} else if strings.Contains(lower, "log =") || strings.Contains(lower, "log:") {
 			parts := strings.SplitN(cleanLine, "=", 2)
 			if len(parts) < 2 {
 				parts = strings.SplitN(cleanLine, ":", 2)
@@ -111,7 +142,7 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 			if len(parts) == 2 {
 				meta.GTID = strings.TrimSpace(parts[1])
 			}
-		} else if strings.Contains(lower, "lock mode") || strings.Contains(lower, "lock_mode") || strings.Contains(lower, "no-locks") || strings.Contains(lower, "no_locks") || strings.Contains(lower, "no-lock") || strings.Contains(lower, "no_lock") {
+		} else if strings.Contains(lower, "lock mode") || strings.Contains(lower, "lock_mode") || strings.Contains(lower, "sync-thread-lock-mode") || strings.Contains(lower, "no-locks") || strings.Contains(lower, "no_locks") || strings.Contains(lower, "no-lock") || strings.Contains(lower, "no_lock") {
 			if strings.Contains(lower, "no-locks") || strings.Contains(lower, "no_locks") || strings.Contains(lower, "no-lock") || strings.Contains(lower, "no_lock") {
 				meta.LockMode = "NO_LOCK"
 			} else {
@@ -127,7 +158,6 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 			}
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, "failed reading mydumper metadata", err)
 	}
