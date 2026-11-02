@@ -169,6 +169,7 @@ type MySQLWriter struct {
 	epoch               int64
 	orderer             *CommitOrderer
 	pk                  pkRegistry
+	pipelining          bool
 	mu                  sync.Mutex
 	MultiRowUpsertCount int64
 	TotalUpsertRows     int64
@@ -183,6 +184,10 @@ func NewMySQLWriter(db *sql.DB, pipelineID string, workerID int, epoch int64) *M
 		epoch:      epoch,
 	}
 }
+
+// SetStatementPipelining bật gửi các câu lệnh dữ liệu theo lô multi-statement (DSN phải có
+// multiStatements=true và interpolateParams=true).
+func (w *MySQLWriter) SetStatementPipelining(on bool) { w.pipelining = on }
 
 // SetPrimaryKey khai báo tên các cột khóa chính của bảng (theo thứ tự của RowChange.Key).
 func (w *MySQLWriter) SetPrimaryKey(t model.TableID, cols []string) { w.pk.set(t, cols) }
@@ -250,11 +255,23 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 	defer tx.Rollback()
 	committing := false
 
-	// 1. Ghi dữ liệu vào các bảng ứng dụng (kể cả Txn đã tràn đĩa)
+	// 1. Ghi dữ liệu vào các bảng ứng dụng (kể cả Txn đã tràn đĩa). Upsert liên tiếp cùng bảng,
+	// cùng tập cột được gom thành multi-row qua ranh giới các Txn của batch: thứ tự row trong
+	// transaction đích giữ nguyên, nhưng số round-trip giảm (quan trọng ở strict, một worker).
+	var cur *mysqlUpsertBatch
+	q := &stmtQueue{tx: tx, on: w.pipelining}
 	for _, txn := range batch {
-		if err := w.applyTxnMySQL(ctx, tx, txn); err != nil {
+		if err := w.applyTxnMySQL(ctx, q, txn, &cur); err != nil {
 			return fmt.Errorf("failed to apply row changes: %w", err)
 		}
+	}
+	if cur != nil {
+		if err := cur.flush(ctx, q); err != nil {
+			return fmt.Errorf("failed to apply row changes: %w", err)
+		}
+	}
+	if err := q.flush(ctx); err != nil {
+		return fmt.Errorf("failed to apply row changes: %w", err)
 	}
 
 	pid, wid, ep := resolveDelta(delta, w.pipelineID, w.workerID, w.epoch)
@@ -316,6 +333,54 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 	return nil
 }
 
+// stmtQueue gửi các câu lệnh dữ liệu của một batch theo lô nhiều câu trong một round-trip
+// (multi-statement, tham số được driver interpolate phía client), đúng thứ tự. Với một kết
+// nối (strict), độ trễ round-trip cho từng câu lệnh là trần thông lượng; gửi theo lô bỏ trần này.
+// Câu lệnh cần kiểm số row bị ảnh hưởng (row delta, row toàn cục) không đi qua hàng đợi.
+type stmtQueue struct {
+	tx   *sql.Tx
+	on   bool
+	sb   strings.Builder
+	args []any
+	n    int
+}
+
+const (
+	stmtQueueMaxBytes = 512 * 1024 // dưới max_allowed_packet mặc định (64 MiB) với biên rộng
+	stmtQueueMaxArgs  = 20000
+)
+
+func (q *stmtQueue) exec(ctx context.Context, query string, args ...any) error {
+	if !q.on {
+		_, err := q.tx.ExecContext(ctx, query, args...)
+		return err
+	}
+	if q.n > 0 {
+		q.sb.WriteString(";\n")
+	}
+	q.sb.WriteString(query)
+	q.args = append(q.args, args...)
+	q.n++
+	if q.sb.Len() >= stmtQueueMaxBytes || len(q.args) >= stmtQueueMaxArgs {
+		return q.flush(ctx)
+	}
+	return nil
+}
+
+func (q *stmtQueue) flush(ctx context.Context) error {
+	if q.n == 0 {
+		return nil
+	}
+	_, err := q.tx.ExecContext(ctx, q.sb.String(), q.args...)
+	q.sb.Reset()
+	q.args = q.args[:0]
+	q.n = 0
+	if err != nil {
+		return fmt.Errorf("apply statements: %w", err)
+	}
+	return nil
+}
+
 // mysqlUpsertBatch gom các upsert liên tiếp cùng bảng, cùng tập cột thành một câu multi-row.
 type mysqlUpsertBatch struct {
 	w      *MySQLWriter
@@ -325,7 +390,7 @@ type mysqlUpsertBatch struct {
 	vals   [][]any
 }
 
-func (b *mysqlUpsertBatch) flush(ctx context.Context, tx *sql.Tx) error {
+func (b *mysqlUpsertBatch) flush(ctx context.Context, q *stmtQueue) error {
 	if len(b.vals) == 0 {
 		return nil
 	}
@@ -358,35 +423,35 @@ func (b *mysqlUpsertBatch) flush(ctx context.Context, tx *sql.Tx) error {
 		phs[i] = rowPH
 		args = append(args, v...)
 	}
-	q := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s",
+	stmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s",
 		quoteMySQLTable(b.table), strings.Join(quoted, ", "), strings.Join(phs, ", "), strings.Join(updates, ", "))
-	if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+	if err := q.exec(ctx, stmt, args...); err != nil {
 		return fmt.Errorf("multi-row upsert on %s: %w", b.table, err)
 	}
 	b.vals = nil
 	return nil
 }
 
-func (w *MySQLWriter) deleteByKey(ctx context.Context, tx *sql.Tx, t model.TableID, pkCols []string, key []model.Value) error {
+func (w *MySQLWriter) deleteByKey(ctx context.Context, q *stmtQueue, t model.TableID, pkCols []string, key []model.Value) error {
 	conds := make([]string, len(pkCols))
 	for i, c := range pkCols {
 		conds[i] = quoteMySQL(c) + " = ?"
 	}
-	q := fmt.Sprintf("DELETE FROM %s WHERE %s", quoteMySQLTable(t), strings.Join(conds, " AND "))
-	_, err := tx.ExecContext(ctx, q, toArgs(key)...)
-	return err
+	stmt := fmt.Sprintf("DELETE FROM %s WHERE %s", quoteMySQLTable(t), strings.Join(conds, " AND "))
+	return q.exec(ctx, stmt, toArgs(key)...)
 }
 
 // applyTxnMySQL áp dụng mọi row của Txn. Với row image FULL (bắt buộc ở source MySQL,
 // spec 02 §8), INSERT và UPDATE đều là upsert theo khóa chính, nên UPDATE của row
 // chưa có ở target không bị mất im lặng. UPDATE đổi PK = DELETE khóa cũ + upsert khóa mới.
-func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, tx *sql.Tx, txn *model.Txn) error {
-	var cur *mysqlUpsertBatch
+func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *model.Txn, curp **mysqlUpsertBatch) error {
+	cur := *curp
+	defer func() { *curp = cur }()
 	flush := func() error {
 		if cur == nil {
 			return nil
 		}
-		err := cur.flush(ctx, tx)
+		err := cur.flush(ctx, q)
 		cur = nil
 		return err
 	}
@@ -411,7 +476,7 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, tx *sql.Tx, txn *model.
 				if err != nil {
 					return err
 				}
-				if err := w.deleteByKey(ctx, tx, row.Table, delCols, row.OldKey); err != nil {
+				if err := w.deleteByKey(ctx, q, row.Table, delCols, row.OldKey); err != nil {
 					return err
 				}
 			}
@@ -439,7 +504,7 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, tx *sql.Tx, txn *model.
 			if err != nil {
 				return err
 			}
-			return w.deleteByKey(ctx, tx, row.Table, pkCols, row.Key)
+			return w.deleteByKey(ctx, q, row.Table, pkCols, row.Key)
 		default:
 			return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)
 		}
@@ -447,7 +512,7 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, tx *sql.Tx, txn *model.
 	if err != nil {
 		return err
 	}
-	return flush()
+	return nil // phần upsert còn dở được gom tiếp với Txn kế trong batch
 }
 
 func sameStringSlice(a, b []string) bool {

@@ -20,6 +20,9 @@ func TestSG1_TargetDSNCarriesConnectionAttributes(t *testing.T) {
 	if c.ConnectionAttributes != "strand_pipeline:pipe-1,strand_instance:host/42/7" {
 		t.Fatalf("connection attributes lost: %q (dsn %s)", c.ConnectionAttributes, dsn)
 	}
+	if !c.MultiStatements || !c.InterpolateParams {
+		t.Fatalf("writer statement pipelining needs multiStatements and interpolateParams: %s", dsn)
+	}
 	if c.Params["foreign_key_checks"] != "0" || c.Params["time_zone"] == "" {
 		t.Fatalf("session params lost: %v", c.Params)
 	}

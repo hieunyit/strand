@@ -193,6 +193,10 @@ func targetDSN(dsn, pipelineID, instance string) (string, error) {
 	// target chưa nhất quán về FK cho tới khi snapshot xong. Khi stream, thứ tự cha–con do
 	// writeset (FK) bảo đảm. Vì vậy phiên ghi của Strand không kiểm FK (như applier sao chép).
 	c.Params["foreign_key_checks"] = "0"
+	// Writer gửi câu lệnh dữ liệu theo lô multi-statement (một round-trip cho nhiều câu lệnh);
+	// tham số được driver escape phía client.
+	c.MultiStatements = true
+	c.InterpolateParams = true
 	// Nhãn kết nối (performance_schema.session_connect_attrs): instance mới nhận pipeline có thể
 	// tìm và ngắt kết nối của instance cũ cùng pipeline_id (fencing ở mức DB, SG-1).
 	// FormatDSN của go-sql-driver v1.8.1 bỏ mất ConnectionAttributes, nên gắn thẳng vào DSN.
@@ -367,7 +371,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 
 	// --- Scheduler, writer, coordinator ---
-	p.sched = sched.NewScheduler(sched.DefaultConfig())
+	scfg := sched.DefaultConfig()
+	scfg.Serial = p.strict // strict: một writer, apply tuần tự theo seq (xem sched.Config.Serial)
+	p.sched = sched.NewScheduler(scfg)
 	nWorkers := p.cfg.Resources.Workers.Max
 	if nWorkers <= 0 {
 		nWorkers = 8
@@ -381,6 +387,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	for i := 1; i <= nWorkers; i++ {
 		w := writer.NewMySQLWriter(p.dst, p.id, i, p.epoch)
+		w.SetStatementPipelining(true)
 		for id, m := range p.tables {
 			w.SetPrimaryKey(p.filter.Target(id), m.PK)
 		}

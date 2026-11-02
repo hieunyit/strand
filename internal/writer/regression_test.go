@@ -265,3 +265,60 @@ func TestCP5_StrictGlobalCheckpointNoLostUpdate(t *testing.T) {
 		t.Fatalf("global checkpoint = %q, want u:1-2 (a committed txn was lost)", applied)
 	}
 }
+
+// Gửi câu lệnh theo lô multi-statement phải cho đúng cùng trạng thái như gửi từng câu
+// (thứ tự giữ nguyên, kể cả đổi PK, xóa, giá trị đặc biệt cần escape).
+func TestCP1_StatementPipeliningSameResult(t *testing.T) {
+	ctx := context.Background()
+	_, dsn := getMySQL(t)
+	db, err := sql.Open("mysql", dsn+"&multiStatements=true&interpolateParams=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pid := fmt.Sprintf("pipe-%d", time.Now().UnixNano())
+	ensureMySQLMetadataTables(t, db, pid)
+	store := checkpoint.NewMySQLStore(db, pid, model.EngineMySQL)
+	epoch, _ := store.AdvanceEpoch(ctx, pid, "o", "h")
+	mustExec(t, db, "DROP TABLE IF EXISTS `pl_items`")
+	mustExec(t, db, "CREATE TABLE `pl_items` (id BIGINT PRIMARY KEY, s VARCHAR(64), b VARBINARY(16))")
+	tbl := model.TableID{Schema: "strand", Table: "pl_items"}
+	w := writer.NewMySQLWriter(db, pid, 1, epoch)
+	w.SetStatementPipelining(true)
+	w.SetPrimaryKey(tbl, []string{"id"})
+	if err := w.EnsureWorkerRow(ctx); err != nil {
+		t.Fatal(err)
+	}
+	row := func(op model.Op, id int64, sv string, old ...model.Value) model.RowChange {
+		rc := model.RowChange{Table: tbl, Op: op, Key: []model.Value{id},
+			Cols: []model.ColValue{{Name: "id", Value: id}, {Name: "s", Value: sv}, {Name: "b", Value: []byte{0, '\'', ';', 0xff}}}}
+		if len(old) > 0 {
+			rc.OldKey = old
+		}
+		return rc
+	}
+	var batch []*model.Txn
+	for i := int64(1); i <= 300; i++ {
+		batch = append(batch, &model.Txn{Rows: []model.RowChange{row(model.OpInsert, i, fmt.Sprintf("v'%d;--", i))}})
+	}
+	batch = append(batch,
+		&model.Txn{Rows: []model.RowChange{row(model.OpUpdate, 1000, "moved", int64(5))}},
+		&model.Txn{Rows: []model.RowChange{{Table: tbl, Op: model.OpDelete, Key: []model.Value{int64(7)}}}},
+		&model.Txn{Rows: []model.RowChange{row(model.OpUpdate, 2, "last")}})
+	if err := w.ApplyBatch(ctx, batch, writer.DeltaRow{Applied: "uuid:1-303"}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	var n int
+	var s2, s300 string
+	var b []byte
+	_ = db.QueryRow("SELECT COUNT(*) FROM pl_items").Scan(&n)
+	_ = db.QueryRow("SELECT s, b FROM pl_items WHERE id = 2").Scan(&s2, &b)
+	_ = db.QueryRow("SELECT s FROM pl_items WHERE id = 300").Scan(&s300)
+	var moved, gone5, gone7 int
+	_ = db.QueryRow("SELECT COUNT(*) FROM pl_items WHERE id = 1000").Scan(&moved)
+	_ = db.QueryRow("SELECT COUNT(*) FROM pl_items WHERE id = 5").Scan(&gone5)
+	_ = db.QueryRow("SELECT COUNT(*) FROM pl_items WHERE id = 7").Scan(&gone7)
+	if n != 299 || s2 != "last" || s300 != "v'300;--" || string(b) != string([]byte{0, '\'', ';', 0xff}) || moved != 1 || gone5 != 0 || gone7 != 0 {
+		t.Fatalf("pipelined apply wrong: n=%d s2=%q s300=%q b=%v moved=%d gone5=%d gone7=%d", n, s2, s300, b, moved, gone5, gone7)
+	}
+}

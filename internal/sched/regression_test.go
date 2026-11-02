@@ -184,3 +184,36 @@ func TestCO2_DoneCostIndependentOfLiveWriteset(t *testing.T) {
 		t.Fatalf("Done scales with live writeset size: %v vs %v", large, small)
 	}
 }
+
+// Serial (strict, một writer): mọi Txn được phát ngay theo đúng thứ tự seq, kể cả khi xung đột,
+// để writer gom được batch lớn; thứ tự apply chính là thứ tự nguồn.
+func TestCO1_SerialModeEmitsInSeqOrderImmediately(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Serial = true
+	s := NewScheduler(cfg)
+	ctx := context.Background()
+	var txns []*model.Txn
+	for i := 0; i < 5; i++ {
+		tx := regTxn("t", 1) // cùng một khóa: xung đột với nhau
+		if err := s.Admit(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+		txns = append(txns, tx)
+	}
+	for _, want := range txns {
+		select {
+		case got := <-s.Ready():
+			if got.Seq() != want.Seq() {
+				t.Fatalf("got seq %d, want %d", got.Seq(), want.Seq())
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("seq %d not emitted immediately in serial mode", want.Seq())
+		}
+	}
+	for _, tx := range txns {
+		s.Done(tx.Seq(), nil)
+	}
+	if s.Lwd() != txns[len(txns)-1].Seq() {
+		t.Fatalf("lwd = %d", s.Lwd())
+	}
+}

@@ -15,6 +15,10 @@ type Config struct {
 	TableLevelThreshold int // Mặc định: 50.000 khóa/bảng/Txn
 	WritesetBudget      int // Mặc định: 2.000.000 entry
 	MaxHoles            int // Mặc định: 4.096
+	// Serial: mọi Txn được phát ngay theo thứ tự seq, không dựng DAG writeset. Dùng cho
+	// commit_order=strict với một writer: Txn được apply tuần tự đúng thứ tự nguồn (kể cả khi
+	// chung một batch), nên phụ thuộc writeset là thừa và chỉ làm batch nhỏ lại.
+	Serial bool
 }
 
 func DefaultConfig() Config {
@@ -259,6 +263,12 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 		t.SetSeq(s.nextSeq)
 	}
 	seq := t.Seq()
+
+	if s.cfg.Serial {
+		s.activeSeqs[seq] = struct{}{}
+		s.emitReady(t)
+		return nil
+	}
 
 	s.checkBudgetLocked()
 
