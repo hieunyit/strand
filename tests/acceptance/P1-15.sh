@@ -4,33 +4,18 @@ set -uo pipefail
 echo "=== Kiểm tra P1-15: Verify sample/delta ==="
 FAIL=0
 
-echo "--- AC1: phát hiện lệch được cài sẵn ---"
-out1=$(go test -race -v -run ^TestVF1_VerifyDetectsInjectedMismatch$ ./internal/verify 2>&1 || true)
-if echo "$out1" | grep -q "PASS: TestVF1_VerifyDetectsInjectedMismatch"; then
+# Verifier/ImageTracker cũ (chỉ chạy trên dữ liệu trong RAM) đã bị xóa; verify thật là
+# LiveVerifier, kiểm bằng e2e trên MySQL thật dưới tải có hot row:
+# AC1 lệch cài vào target bị phát hiện (exit 5), AC2 không báo lệch giả dưới tải nóng,
+# AC3 chạy cả --mode sample và --mode delta.
+out=$(go test -v -timeout 60m -run '^TestP1_E2E_VerifySampleDeltaRepair$' ./tests/e2e 2>&1 || true)
+if echo "$out" | grep -q -- "--- PASS: TestP1_E2E_VerifySampleDeltaRepair"; then
   echo "  [PASS] AC1: phát hiện lệch được cài sẵn"
-else
-  echo "$out1"
-  echo "  [FAIL] AC1: phát hiện lệch được cài sẵn"
-  FAIL=1
-fi
-
-echo "--- AC2: hot row được báo unverifiable_hot, không báo lệch giả ---"
-out2=$(go test -race -v -run ^TestVF2_HotRow_ReportedUnverifiableHot_NoFalsePositive$ ./internal/verify 2>&1 || true)
-if echo "$out2" | grep -q "PASS: TestVF2_HotRow_ReportedUnverifiableHot_NoFalsePositive"; then
   echo "  [PASS] AC2: hot row được báo unverifiable_hot, không báo lệch giả"
-else
-  echo "$out2"
-  echo "  [FAIL] AC2: hot row được báo unverifiable_hot, không báo lệch giả"
-  FAIL=1
-fi
-
-echo "--- AC3: hoạt động đúng trên cả hai chế độ sample và delta ---"
-out3=$(go test -race -v -run ^TestVF3_VerifyModes_SampleAndDelta$ ./internal/verify 2>&1 || true)
-if echo "$out3" | grep -q "PASS: TestVF3_VerifyModes_SampleAndDelta"; then
   echo "  [PASS] AC3: hoạt động đúng trên cả hai chế độ sample và delta"
 else
-  echo "$out3"
-  echo "  [FAIL] AC3: hoạt động đúng trên cả hai chế độ sample và delta"
+  echo "$out"
+  echo "  [FAIL] AC1-AC3: TestP1_E2E_VerifySampleDeltaRepair"
   FAIL=1
 fi
 

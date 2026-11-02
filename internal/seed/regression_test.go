@@ -169,3 +169,29 @@ func TestSD1_CloneCrossCheckMismatchRejected(t *testing.T) {
 		t.Fatalf("expected cross-check rejection, got %v", err)
 	}
 }
+
+// IsPrereleaseToolVersion khớp chuỗi con nên "percona" (chứa "rc") bị coi là bản RC.
+// Từ khóa pre-release chỉ được khớp khi là một thành phần riêng của phiên bản.
+func TestSD4_PrereleaseTokenMustBeSeparateVersionComponent(t *testing.T) {
+	cases := []struct {
+		ver  string
+		want bool
+	}{
+		{"8.4.0-2", false},
+		{"percona-xtrabackup 8.4.0-2", false},
+		{"8.4.0-rc1", true},
+		{"9.7.0-beta", true},
+		{"8.0.35-30.1", false},
+		{"", false},
+		{"9.7.0-RC", true},
+		{"8.4.0-alpha2", true},
+		{"8.4.0-dev", true},
+		{"8.4.0-preview.1", true},
+		{"xtrabackup version 8.4.0-1 based on MySQL server 8.4.0 Linux (x86_64) (revision id: 1fca8f5f)", false},
+	}
+	for _, tc := range cases {
+		if got := seed.IsPrereleaseToolVersion(tc.ver); got != tc.want {
+			t.Errorf("IsPrereleaseToolVersion(%q) = %v, muốn %v", tc.ver, got, tc.want)
+		}
+	}
+}

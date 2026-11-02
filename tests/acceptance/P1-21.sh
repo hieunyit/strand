@@ -25,8 +25,12 @@ else
 fi
 
 echo "--- AC3: các kịch bản fault chạy được bằng make fault ---"
+# make fault chạy các kịch bản fault thật trong tests/e2e (Toxiproxy, kill -9, hai instance).
 out3=$(make fault 2>&1 || true)
-if echo "$out3" | grep -q "PASS: TestCK3_MakeFaultRunsSuccessfully"; then
+if echo "$out3" | grep -q -- "--- PASS: TestG1_E2E_NetworkFaultsSourceAndTarget" \
+  && echo "$out3" | grep -q -- "--- PASS: TestG1_E2E_Kill9RandomCrashes" \
+  && echo "$out3" | grep -q -- "--- PASS: TestG1_E2E_TwoInstancesSamePipeline" \
+  && ! echo "$out3" | grep -q -- "--- FAIL"; then
   echo "  [PASS] AC3: các kịch bản fault chạy được bằng make fault"
 else
   echo "$out3"
