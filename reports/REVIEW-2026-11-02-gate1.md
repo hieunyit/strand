@@ -122,3 +122,48 @@ Log đầy đủ nằm ở scratchpad: `gate1-kill9-1000.txt`, `matrix-src80-dst
 - Giảm quy mô: kill -9 100 lần, TXN 2 triệu row.
 
 Chưa chạy: MySQL 9.7, bảng 1 TB trên staging, soak 72 giờ.
+
+## Hoàn thiện P1 (cập nhật 2026-11-02 tối)
+
+Đã làm thêm, mỗi mục có e2e trên MySQL thật:
+
+- **P1-15 `strand verify sample|delta --repair report|fix`**: verify khi pipeline đang chạy,
+  kiểm lại theo vị trí log nên không báo lệch giả. **Verify sau seed / `--start-at`** chặn trạng
+  thái `synced` (02 §9; cửa sổ CDC cấu hình bằng `verify.post_seed_window`, mặc định 30m), giữ
+  qua restart; lệch thì exit 5 `verify_mismatch`.
+- **`strand plan`**: từ chối chế độ A khi ETA > 50% retention binlog (exit 3), cho qua khi có
+  `--force`.
+- **P1-16**: governor `onoff` + breaker theo tín hiệu đọc thẳng từ DB, nối vào nhịp snapshot.
+  Có tick ngay khi khởi động, khung giờ `bootstrap.logical.windows`, `throttle set` đổi nóng.
+  Breaker luôn thắng ưu tiên do `bootstrap_retention_risk`.
+- **P1-14**: `seed apply --prefetch` (archive rồi source) ghi vào spool Pebble, tầng bucket
+  S3/MinIO (`--overflow`, `resources.spool.overflow`), `prefetch_exhausted`. `sync --start-at seed`
+  phát lại spool rồi stream; kiểm `log_gap` có tính phần spool đã phủ.
+- **P1-19**: đủ metric 02 §11 và `strand_spool_capacity_bytes`, có label `pipeline`.
+
+Lỗi thật phát hiện và đã sửa trong lượt này:
+
+1. Lag replica luôn đọc thành 0 (driver trả `uint64`), nên breaker theo lag không bao giờ chạy.
+2. Codec spool làm mất UK/FK (writeset), DDL, SourceTS.
+3. Archive reader không truyền cột/PK của TABLE_MAP.
+4. **Instance zombie** (bị đóng băng giữa transaction) giữ row lock trên target, làm instance
+   mới kẹt ở bước tăng epoch hoặc snapshot. Sửa: kết nối target mang `connectionAttributes`
+   (pipeline, instance); instance mới, sau khi lấy khóa và trước khi tăng epoch, `KILL` mọi kết
+   nối của instance khác cùng pipeline. Lưu ý: `FormatDSN` của go-sql-driver v1.8.1 làm rơi
+   attribute, nên attribute được gắn thẳng vào DSN.
+
+Hồi quy cuối trên 8.4 → 8.4 (kill -9 ×100, TXN 2 triệu row):
+
+- 21/22 PASS. Test duy nhất fail là test hai instance chạy bằng binary trước khi sửa mục 4;
+  bản đã sửa chạy riêng 5/5 PASS.
+- Unit test (`-race`): 26/26 package PASS.
+
+Còn lại của P1, **cần owner quyết định**:
+
+- strict chưa theo quy tắc 5;
+- snapshot chỉ hỗ trợ PK một cột số nguyên;
+- `resume --snapshot-only` trả lỗi;
+- có thêm bảng `_strand_promote` (bảng metadata thứ 4);
+- `--overflow` và `post_seed_window` là cờ/khóa cấu hình mới (cộng thêm), cần đưa vào 02 §10.
+
+**Cần môi trường thật:** bảng 1 TB trên staging với XtraBackup, soak 72 giờ.
