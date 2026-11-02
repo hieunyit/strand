@@ -1249,7 +1249,17 @@ func (p *Pipeline) updateMetrics() {
 		m.WritesetEntries.WithLabelValues(p.id, t).Set(float64(p.sched.TableWritesetEntries(t)))
 	}
 	p.tablesMu.RUnlock()
-	for table, counts := range p.snap.Manager.StateCounts() {
+	active := p.snap.Manager.StateCounts()
+	p.tablesMu.RLock()
+	for id := range p.tables {
+		name := id.String()
+		if _, ok := active[name]; !ok && p.state.IsDone(name) {
+			m.SnapshotRanges.WithLabelValues(p.id, name, "Done").Set(1)
+			m.SeedProgressRatio.WithLabelValues(p.id, name).Set(1)
+		}
+	}
+	p.tablesMu.RUnlock()
+	for table, counts := range active {
 		for _, st := range []string{"Pending", "Reading", "Rendezvous", "Flushing", "Done"} {
 			m.SnapshotRanges.WithLabelValues(p.id, table, st).Set(float64(counts[st]))
 		}
