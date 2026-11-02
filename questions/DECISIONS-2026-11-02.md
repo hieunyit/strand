@@ -12,6 +12,7 @@ Trả lời: `1A, 2B, 3B, 4A, 5 ok, 6 ok, 7 gộp` (cùng với P1-17 câu 1 và
 | 5b | Instance mới (đã giữ khóa pipeline) `KILL` mọi kết nối target của instance khác cùng `pipeline_id` trước khi tăng epoch; nhận diện bằng `connectionAttributes` (`strand_pipeline`, `strand_instance`) | `killStaleInstances`, `targetDSN` | 02 §4 quy tắc 1–2 và SG-1 (02 §2); 03 §2: ghi rõ `CONNECTION_ADMIN` còn dùng để ngắt kết nối instance cũ |
 | 6 | Cờ/khóa mới (cộng thêm) | xem dưới | 02 §10 |
 | 7 | Failover: lần dừng exit 10 (không fence được source) hiển thị tập GTID đã apply ở target và thời điểm checkpoint cuối — phần dữ liệu mất nếu tiếp tục; xác nhận một lần bằng `--source-fenced-externally` | Task 7 | 02 §8 bước 1–3 và 05 §5 cột "Failover khẩn cấp" |
+| 8 | Thêm seed `--type mysqldump` để nhận file dump có sẵn; luôn in cảnh báo không kiểm được --single-transaction; từ chối file thiếu GTID_PURGED hoặc thiếu trailer | internal/seed/mysqldump.go, cmd/strand/seed.go | 02 §9 bảng công cụ seed: thêm dòng mysqldump (8.0.32+/8.4, bắt buộc --single-transaction --set-gtid-purged=ON), ghi rõ cảnh báo |
 
 ## Mục 6 — cờ và khóa cấu hình mới cần thêm vào 02 §10
 

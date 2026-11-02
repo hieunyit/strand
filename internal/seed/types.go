@@ -9,7 +9,7 @@ import (
 // SeedSource biểu diễn thông tin đầu vào cho một kế hoạch seed.
 type SeedSource struct {
 	Engine              string   `json:"engine"` // mysql | pg
-	Kind                string   `json:"kind"`   // xtrabackup | clone | mydumper | pgbackrest
+	Kind                string   `json:"kind"`   // xtrabackup | clone | mydumper | mysqldump | pgbackrest
 	BackupRef           string   `json:"backup_ref"`
 	AllowPrereleaseTool bool     `json:"allow_prerelease_tool"`
 	Tables              []string `json:"tables"`
@@ -69,6 +69,7 @@ type SeedManifest struct {
 	LegalHoldRef       *string             `json:"legal_hold_ref,omitempty"`
 	BackupExpiresAt    *string             `json:"backup_expires_at,omitempty"`
 	Target             TargetInfo          `json:"target"`
+	Warnings           []string            `json:"warnings,omitempty"`
 	CreatedAt          string              `json:"created_at"`
 }
 
