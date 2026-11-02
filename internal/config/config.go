@@ -29,7 +29,7 @@ type SourceConfig struct {
 	Kind     string `yaml:"kind" json:"kind"` // mysql | postgres
 	DSN      string `yaml:"dsn" json:"dsn"`
 	ServerID uint32 `yaml:"server_id" json:"server_id"`
-	ReadFrom string `yaml:"read_from" json:"read_from"` // replica | primary
+	ReadFrom string `yaml:"read_from" json:"read_from"` // primary | replica | standby (PG16+, chưa triển khai)
 }
 
 type TargetConfig struct {
@@ -50,6 +50,9 @@ type TablesConfig struct {
 	Include []string          `yaml:"include" json:"include"`
 	Exclude []string          `yaml:"exclude,omitempty" json:"exclude,omitempty"`
 	Rename  map[string]string `yaml:"rename,omitempty" json:"rename,omitempty"`
+	// Mask: cột -> hàm mask, ví dụ "app.users.phone": sha256 (design §4). Chỉ áp được cho snapshot
+	// logic và seed logic (03 §8). Chưa triển khai: nhận key và cảnh báo ở validate.
+	Mask map[string]string `yaml:"mask,omitempty" json:"mask,omitempty"`
 }
 
 type BootstrapConfig struct {
@@ -65,8 +68,26 @@ type BootstrapTableMode struct {
 }
 
 type SeedConfig struct {
-	Type string `yaml:"type" json:"type"` // xtrabackup | mydumper | clone | pgbackrest
+	Type string `yaml:"type" json:"type"` // xtrabackup | clone | mydumper | mysqldump | pgbackrest | walg | strand-export | volume-snapshot
 	URI  string `yaml:"uri" json:"uri"`
+	// Các key dưới đây theo ví dụ đầy đủ ở design §4; chưa triển khai, chỉ nhận và cảnh báo ở validate.
+	Credentials   string            `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	EncryptionKey string            `yaml:"encryption_key,omitempty" json:"encryption_key,omitempty"`
+	Load          *SeedLoadConfig   `yaml:"load,omitempty" json:"load,omitempty"`
+	VerifyAfter   *SeedVerifyConfig `yaml:"verify_after,omitempty" json:"verify_after,omitempty"`
+}
+
+// SeedLoadConfig: tham số nạp backup logic (design §4). Chưa triển khai.
+type SeedLoadConfig struct {
+	Threads      int    `yaml:"threads,omitempty" json:"threads,omitempty"`
+	DeferIndexes bool   `yaml:"defer_indexes,omitempty" json:"defer_indexes,omitempty"`
+	Bandwidth    string `yaml:"bandwidth,omitempty" json:"bandwidth,omitempty"` // kích thước/giây, ví dụ 200MiB
+}
+
+// SeedVerifyConfig: verify sau seed (design §4). Chưa triển khai.
+type SeedVerifyConfig struct {
+	SampleRanges string `yaml:"sample_ranges,omitempty" json:"sample_ranges,omitempty"` // ví dụ 1%
+	DeltaWindow  string `yaml:"delta_window,omitempty" json:"delta_window,omitempty"`   // ví dụ 30m
 }
 
 type CatchUpConfig struct {
@@ -95,6 +116,29 @@ type ResourcesConfig struct {
 	Source  IOPSLimits    `yaml:"source" json:"source"`
 	Target  IOPSLimits    `yaml:"target" json:"target"`
 	Workers WorkersLimits `yaml:"workers" json:"workers"`
+	// Network: giới hạn băng thông mạng, ví dụ backup_read khi đọc backup từ S3 (design §4). Chưa triển khai.
+	Network NetworkLimits `yaml:"network,omitempty" json:"network,omitempty"`
+	// Schedule: đổi limit theo lịch cron (design §4). Chưa triển khai.
+	Schedule []ScheduleEntry `yaml:"schedule,omitempty" json:"schedule,omitempty"`
+}
+
+// ByteRateLimits: cặp soft/hard theo kích thước/giây, ví dụ { soft: 40MiB, hard: 60MiB }.
+type ByteRateLimits struct {
+	Soft string `yaml:"soft,omitempty" json:"soft,omitempty"`
+	Hard string `yaml:"hard,omitempty" json:"hard,omitempty"`
+}
+
+func (b ByteRateLimits) isSet() bool { return b.Soft != "" || b.Hard != "" }
+
+type NetworkLimits struct {
+	BackupRead ByteRateLimits `yaml:"backup_read,omitempty" json:"backup_read,omitempty"`
+}
+
+// ScheduleEntry: một mốc lịch; ngoài cron là các key ghi đè dạng đường dẫn chấm,
+// ví dụ { cron: "0 8 * * 1-5", source.iops.soft: 300 }.
+type ScheduleEntry struct {
+	Cron      string         `yaml:"cron" json:"cron"`
+	Overrides map[string]any `yaml:",inline" json:"overrides,omitempty"`
 }
 
 type MemoryLimits struct {
@@ -114,6 +158,8 @@ type IOPSLimits struct {
 		Soft int `yaml:"soft" json:"soft"`
 		Hard int `yaml:"hard" json:"hard"`
 	} `yaml:"iops" json:"iops"`
+	// Bandwidth: giới hạn băng thông đọc/ghi (design §4). Chưa triển khai.
+	Bandwidth ByteRateLimits `yaml:"bandwidth,omitempty" json:"bandwidth,omitempty"`
 }
 
 type WorkersLimits struct {
@@ -193,6 +239,11 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 	var cfg Config
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax, fmt.Sprintf("invalid config syntax: %v", err), err)
+	}
+
+	// 02 §10: YAML, rồi biến môi trường STRAND_*, rồi flag. Ghi đè env trước khi kiểm tra.
+	if err := applyProcessEnv(&cfg); err != nil {
+		return nil, err
 	}
 
 	// Kiểm tra các trường bắt buộc cơ bản

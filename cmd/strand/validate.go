@@ -33,6 +33,11 @@ func newValidateCmd() *cobra.Command {
 				return err
 			}
 
+			// Key đã nhận nhưng chưa triển khai: luôn cảnh báo, không bỏ qua im lặng.
+			for _, k := range cfg.UnimplementedKeys() {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", config.UnimplementedWarning(k))
+			}
+
 			if err := validate.Preflight(cmd.Context(), cfg); err != nil {
 				return err
 			}

@@ -8,6 +8,17 @@ const JSONSchema = `{
   "type": "object",
   "required": ["version", "name", "source", "target", "tables"],
   "additionalProperties": false,
+  "definitions": {
+    "byteRate": {
+      "type": "object",
+      "description": "Cặp soft/hard theo kích thước mỗi giây, ví dụ { soft: 40MiB, hard: 60MiB } (chưa triển khai, validate cảnh báo)",
+      "additionalProperties": false,
+      "properties": {
+        "soft": { "type": "string" },
+        "hard": { "type": "string" }
+      }
+    }
+  },
   "properties": {
     "version": {
       "type": "integer",
@@ -25,7 +36,7 @@ const JSONSchema = `{
         "kind": { "type": "string", "enum": ["mysql", "postgres"] },
         "dsn": { "type": "string" },
         "server_id": { "type": "integer" },
-        "read_from": { "type": "string", "enum": ["replica", "primary"] }
+        "read_from": { "type": "string", "enum": ["primary", "replica", "standby"], "description": "standby: decode trên standby PG16+ (chưa triển khai, validate cảnh báo)" }
       }
     },
     "target": {
@@ -58,6 +69,11 @@ const JSONSchema = `{
         "rename": {
           "type": "object",
           "additionalProperties": { "type": "string" }
+        },
+        "mask": {
+          "type": "object",
+          "description": "Cột -> hàm mask, ví dụ \"app.users.phone\": sha256; chỉ cho snapshot/seed logic (chưa triển khai, validate cảnh báo)",
+          "additionalProperties": { "type": "string" }
         }
       }
     },
@@ -75,8 +91,27 @@ const JSONSchema = `{
               "seed": {
                 "type": "object",
                 "properties": {
-                  "type": { "type": "string", "enum": ["xtrabackup", "mydumper", "clone", "pgbackrest"] },
-                  "uri": { "type": "string" }
+                  "type": { "type": "string", "enum": ["xtrabackup", "clone", "mydumper", "mysqldump", "pgbackrest", "walg", "strand-export", "volume-snapshot"] },
+                  "uri": { "type": "string" },
+                  "credentials": { "type": "string" },
+                  "encryption_key": { "type": "string" },
+                  "load": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "threads": { "type": "integer" },
+                      "defer_indexes": { "type": "boolean" },
+                      "bandwidth": { "type": "string" }
+                    }
+                  },
+                  "verify_after": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "sample_ranges": { "type": "string" },
+                      "delta_window": { "type": "string" }
+                    }
+                  }
                 }
               }
             }
@@ -145,7 +180,8 @@ const JSONSchema = `{
                 "soft": { "type": "integer" },
                 "hard": { "type": "integer" }
               }
-            }
+            },
+            "bandwidth": { "$ref": "#/definitions/byteRate" }
           }
         },
         "target": {
@@ -157,7 +193,8 @@ const JSONSchema = `{
                 "soft": { "type": "integer" },
                 "hard": { "type": "integer" }
               }
-            }
+            },
+            "bandwidth": { "$ref": "#/definitions/byteRate" }
           }
         },
         "workers": {
@@ -165,6 +202,26 @@ const JSONSchema = `{
           "properties": {
             "min": { "type": "integer" },
             "max": { "type": "integer" }
+          }
+        },
+        "network": {
+          "type": "object",
+          "description": "Giới hạn băng thông mạng (chưa triển khai, validate cảnh báo)",
+          "additionalProperties": false,
+          "properties": {
+            "backup_read": { "$ref": "#/definitions/byteRate" }
+          }
+        },
+        "schedule": {
+          "type": "array",
+          "description": "Đổi limit theo lịch; ngoài cron là các key dạng đường dẫn chấm, ví dụ source.iops.soft (chưa triển khai, validate cảnh báo)",
+          "items": {
+            "type": "object",
+            "required": ["cron"],
+            "properties": {
+              "cron": { "type": "string" }
+            },
+            "additionalProperties": { "type": ["string", "number", "boolean"] }
           }
         }
       }
