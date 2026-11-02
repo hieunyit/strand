@@ -2,13 +2,11 @@ package seed
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 )
 
@@ -27,20 +25,23 @@ func NewClonePlanner() *ClonePlanner {
 func (p *ClonePlanner) Plan(ctx context.Context, src SeedSource) (*SeedManifest, error) {
 	// Vị trí P của CLONE lấy từ gtid_executed trên đích sau khi clone xong (design §3.3)
 	// hoặc từ file manifest trong BackupRef
-	var pGTID string
-	if src.TargetRestoredGTID != "" {
-		pGTID = strings.TrimSpace(src.TargetRestoredGTID)
-	} else if src.BackupRef != "" {
-		// Thử đọc từ file gtid_executed hoặc clone_status trong BackupRef
+	// P lấy từ trạng thái clone của donor (BackupRef) và/hoặc gtid_executed sau clone.
+	var donorGTID string
+	if src.BackupRef != "" {
 		cloneFile := src.BackupRef
 		if fi, err := os.Stat(cloneFile); err == nil && fi.IsDir() {
 			cloneFile = filepath.Join(src.BackupRef, "clone_status.txt")
 		}
 		if data, err := os.ReadFile(cloneFile); err == nil {
-			pGTID = strings.TrimSpace(string(data))
+			donorGTID = strings.TrimSpace(string(data))
 		}
 	}
+	restored := strings.TrimSpace(src.TargetRestoredGTID)
 
+	pGTID := donorGTID
+	if pGTID == "" {
+		pGTID = restored
+	}
 	if pGTID == "" {
 		return nil, exitcode.New(
 			exitcode.ErrSeedInvariantFailed,
@@ -50,79 +51,26 @@ func (p *ClonePlanner) Plan(ctx context.Context, src SeedSource) (*SeedManifest,
 		)
 	}
 
-	// 1. Kiểm tra GTID set hợp lệ và không có holes (SD-1, SD-2)
-	pSet := checkpoint.NewMySQLAppliedSet()
-	for _, seg := range strings.Split(pGTID, ",") {
-		seg = strings.TrimSpace(seg)
-		if seg != "" {
-			pSet.ParseAndAddRange(seg)
-		}
+	pSet, err := checkPositionP("clone", pGTID)
+	if err != nil {
+		return nil, err
 	}
 
-	holes := pSet.Holes()
-	if len(holes) > 0 {
-		return nil, exitcode.New(
-			exitcode.ErrLogGap,
-			exitcode.DataError,
-			fmt.Sprintf("CLONE GTID set %q contains %d holes: non-contiguous log", pGTID, len(holes)),
-			nil,
-		)
-	}
-
-	// 2. Đối chiếu chéo nếu có cả hai nguồn
+	// Đối chiếu chéo khi có cả hai nguồn (SD-1)
 	var crossCheck *PositionCrossCheck
-	if src.TargetRestoredGTID != "" && src.BackupRef != "" {
-		crossCheck = &PositionCrossCheck{
-			RestoredGTIDExecuted: src.TargetRestoredGTID,
-			Match:                true,
+	if donorGTID != "" && restored != "" {
+		if crossCheck, err = checkCrossCheck(pSet, pGTID, restored); err != nil {
+			return nil, err
 		}
 	}
 
-	// 3. Kiểm tra độ phủ của log (SD-2): log_gap
-	if src.SourcePurgedGTID != "" {
-		purgedSet := checkpoint.NewMySQLAppliedSet()
-		for _, seg := range strings.Split(src.SourcePurgedGTID, ",") {
-			seg = strings.TrimSpace(seg)
-			if seg != "" {
-				purgedSet.ParseAndAddRange(seg)
-			}
-		}
-
-		pHigh := pSet.High()
-		if purgedSet.Contains(pHigh) {
-			if src.ArchiveUntilGTID == "" {
-				return nil, exitcode.New(
-					exitcode.ErrLogGap,
-					exitcode.DataError,
-					fmt.Sprintf("log gap: source has purged past P (%s) and no archive is available", pGTID),
-					nil,
-				)
-			}
-
-			archiveSet := checkpoint.NewMySQLAppliedSet()
-			for _, seg := range strings.Split(src.ArchiveUntilGTID, ",") {
-				seg = strings.TrimSpace(seg)
-				if seg != "" {
-					archiveSet.ParseAndAddRange(seg)
-				}
-			}
-
-			if !archiveSet.Contains(pHigh) {
-				return nil, exitcode.New(
-					exitcode.ErrLogGap,
-					exitcode.DataError,
-					fmt.Sprintf("log gap: archive until GTID (%s) does not cover start position P (%s)",
-						src.ArchiveUntilGTID, pGTID),
-					nil,
-				)
-			}
-		}
+	// Độ phủ của log (SD-2)
+	if err := checkLogCoverage(pSet, src.SourcePurgedGTID, src.ArchiveUntilGTID); err != nil {
+		return nil, err
 	}
 
+	// SD-4: CLONE plugin tự từ chối donor/recipient khác version, nên tương thích được MySQL bảo đảm.
 	targetVer := src.TargetVersion
-	if targetVer == "" {
-		targetVer = "8.4.6"
-	}
 
 	tables := src.Tables
 	if len(tables) == 0 {

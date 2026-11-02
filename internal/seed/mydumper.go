@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 )
 
@@ -163,91 +162,21 @@ func (p *MydumperPlanner) Plan(ctx context.Context, src SeedSource) (*SeedManife
 		return nil, err
 	}
 
-	// 1. Kiểm tra GTID set hợp lệ và không có holes (SD-1, SD-2)
-	pSet := checkpoint.NewMySQLAppliedSet()
-	for _, seg := range strings.Split(meta.GTID, ",") {
-		seg = strings.TrimSpace(seg)
-		if seg != "" {
-			pSet.ParseAndAddRange(seg)
-		}
+	// 1. P hợp lệ, không có khoảng trống (SD-1)
+	pSet, err := checkPositionP("mydumper", meta.GTID)
+	if err != nil {
+		return nil, err
 	}
 
-	holes := pSet.Holes()
-	if len(holes) > 0 {
-		return nil, exitcode.New(
-			exitcode.ErrLogGap,
-			exitcode.DataError,
-			fmt.Sprintf("mydumper backup GTID set %q contains %d holes: non-contiguous log", meta.GTID, len(holes)),
-			nil,
-		)
+	// 2. Đối chiếu chéo vị trí P với instance sau load (SD-1)
+	crossCheck, err := checkCrossCheck(pSet, meta.GTID, src.TargetRestoredGTID)
+	if err != nil {
+		return nil, err
 	}
 
-	// 2. Đối chiếu chéo vị trí P với instance sau restore/load (SD-1)
-	var crossCheck *PositionCrossCheck
-	if src.TargetRestoredGTID != "" {
-		restoredSet := checkpoint.NewMySQLAppliedSet()
-		for _, seg := range strings.Split(src.TargetRestoredGTID, ",") {
-			seg = strings.TrimSpace(seg)
-			if seg != "" {
-				restoredSet.ParseAndAddRange(seg)
-			}
-		}
-
-		if !pSet.Equal(restoredSet) {
-			return nil, exitcode.New(
-				exitcode.ErrSeedInvariantFailed,
-				exitcode.Rejected,
-				fmt.Sprintf("position cross-check mismatch: restored gtid_executed (%s) != backup P (%s)",
-					src.TargetRestoredGTID, meta.GTID),
-				nil,
-			)
-		}
-
-		crossCheck = &PositionCrossCheck{
-			RestoredGTIDExecuted: src.TargetRestoredGTID,
-			Match:                true,
-		}
-	}
-
-	// 3. Kiểm tra độ phủ của log (SD-2): log_gap
-	if src.SourcePurgedGTID != "" {
-		purgedSet := checkpoint.NewMySQLAppliedSet()
-		for _, seg := range strings.Split(src.SourcePurgedGTID, ",") {
-			seg = strings.TrimSpace(seg)
-			if seg != "" {
-				purgedSet.ParseAndAddRange(seg)
-			}
-		}
-
-		pHigh := pSet.High()
-		if purgedSet.Contains(pHigh) {
-			if src.ArchiveUntilGTID == "" {
-				return nil, exitcode.New(
-					exitcode.ErrLogGap,
-					exitcode.DataError,
-					fmt.Sprintf("log gap: source has purged past P (%s) and no archive is available", meta.GTID),
-					nil,
-				)
-			}
-
-			archiveSet := checkpoint.NewMySQLAppliedSet()
-			for _, seg := range strings.Split(src.ArchiveUntilGTID, ",") {
-				seg = strings.TrimSpace(seg)
-				if seg != "" {
-					archiveSet.ParseAndAddRange(seg)
-				}
-			}
-
-			if !archiveSet.Contains(pHigh) {
-				return nil, exitcode.New(
-					exitcode.ErrLogGap,
-					exitcode.DataError,
-					fmt.Sprintf("log gap: archive until GTID (%s) does not cover start position P (%s)",
-						src.ArchiveUntilGTID, meta.GTID),
-					nil,
-				)
-			}
-		}
+	// 3. Độ phủ của log (SD-2)
+	if err := checkLogCoverage(pSet, src.SourcePurgedGTID, src.ArchiveUntilGTID); err != nil {
+		return nil, err
 	}
 
 	engine := src.Engine
@@ -255,10 +184,8 @@ func (p *MydumperPlanner) Plan(ctx context.Context, src SeedSource) (*SeedManife
 		engine = "mysql"
 	}
 
+	// Backup logic: tương thích = map được kiểu dữ liệu (design §3.1); MySQL→MySQL luôn map được.
 	targetVer := src.TargetVersion
-	if targetVer == "" {
-		targetVer = "8.4.6"
-	}
 
 	tables := src.Tables
 	if len(tables) == 0 {

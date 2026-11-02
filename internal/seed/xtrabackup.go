@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 )
 
@@ -147,9 +146,6 @@ func ParseBackupMetadata(backupDir string) (*XtraBackupMeta, error) {
 		}
 	}
 
-	if meta.ToolVersion == "" {
-		meta.ToolVersion = "8.4.0-6" // Phiên bản mặc định ổn định theo spec 02 §9
-	}
 	meta.ToolPrerelease = IsPrereleaseToolVersion(meta.ToolVersion)
 
 	if meta.ServerUUID == "" {
@@ -181,17 +177,6 @@ func (p *XtraBackupPlanner) Plan(ctx context.Context, src SeedSource) (*SeedMani
 		return nil, err
 	}
 
-	// 3. Kiểm tra công cụ pre-release / RC (issue 15, SD-4)
-	isRC := meta.ToolPrerelease || IsPrereleaseToolVersion(meta.ToolVersion)
-	if isRC && !src.AllowPrereleaseTool {
-		return nil, exitcode.New(
-			exitcode.ErrPrereleaseTool,
-			exitcode.Rejected,
-			fmt.Sprintf("backup created with prerelease tool %q is rejected without --allow-prerelease-tool", meta.ToolVersion),
-			nil,
-		)
-	}
-
 	// 4. Kiểm tra vị trí P và GTID set (SD-1)
 	if meta.GTIDSet == "" {
 		return nil, exitcode.New(
@@ -202,103 +187,42 @@ func (p *XtraBackupPlanner) Plan(ctx context.Context, src SeedSource) (*SeedMani
 		)
 	}
 
-	pSet := checkpoint.NewMySQLAppliedSet(meta.ServerUUID)
-	for _, seg := range strings.Split(meta.GTIDSet, ",") {
-		seg = strings.TrimSpace(seg)
-		if seg != "" {
-			pSet.ParseAndAddRange(seg)
-		}
+	pSet, err := checkPositionP("xtrabackup", meta.GTIDSet)
+	if err != nil {
+		return nil, err
 	}
 
-	// Kiểm tra nếu GTID set bị hỏng hoặc có khoảng trống (holes)
-	holes := pSet.Holes()
-	if len(holes) > 0 {
+	// 5. Đối chiếu chéo vị trí P với instance sau restore nếu có (SD-1)
+	crossCheck, err := checkCrossCheck(pSet, meta.GTIDSet, src.TargetRestoredGTID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 6. Độ phủ của log (SD-2)
+	if err := checkLogCoverage(pSet, src.SourcePurgedGTID, src.ArchiveUntilGTID); err != nil {
+		return nil, err
+	}
+
+	// 6b. Kiểm tra công cụ pre-release / RC (issue 15)
+	if meta.ToolVersion == "" {
+		// Không đoán phiên bản công cụ: không biết thì không chứng minh được issue 15 / SD-4.
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			"cannot determine XtraBackup tool_version (xtrabackup_info missing or incomplete)", nil)
+	}
+	isRC := meta.ToolPrerelease || IsPrereleaseToolVersion(meta.ToolVersion)
+	if isRC && !src.AllowPrereleaseTool {
 		return nil, exitcode.New(
-			exitcode.ErrLogGap,
-			exitcode.DataError,
-			fmt.Sprintf("backup GTID set %q contains %d holes: corrupted or non-contiguous log", meta.GTIDSet, len(holes)),
+			exitcode.ErrPrereleaseTool,
+			exitcode.Rejected,
+			fmt.Sprintf("backup created with prerelease tool %q is rejected without --allow-prerelease-tool", meta.ToolVersion),
 			nil,
 		)
 	}
 
-	// 5. Đối chiếu chéo vị trí P với instance sau restore nếu có (SD-1)
-	var crossCheck *PositionCrossCheck
-	if src.TargetRestoredGTID != "" {
-		restoredSet := checkpoint.NewMySQLAppliedSet(meta.ServerUUID)
-		for _, seg := range strings.Split(src.TargetRestoredGTID, ",") {
-			seg = strings.TrimSpace(seg)
-			if seg != "" {
-				restoredSet.ParseAndAddRange(seg)
-			}
-		}
-
-		if !pSet.Equal(restoredSet) {
-			return nil, exitcode.New(
-				exitcode.ErrSeedInvariantFailed,
-				exitcode.Rejected,
-				fmt.Sprintf("position cross-check mismatch: restored gtid_executed (%s) != backup P (%s)",
-					src.TargetRestoredGTID, meta.GTIDSet),
-				nil,
-			)
-		}
-
-		crossCheck = &PositionCrossCheck{
-			RestoredGTIDExecuted: src.TargetRestoredGTID,
-			Match:                true,
-		}
-	}
-
-	// 6. Kiểm tra độ phủ của log (SD-2): chống mất log giữa P và hiện tại (log_gap)
-	if src.SourcePurgedGTID != "" {
-		purgedSet := checkpoint.NewMySQLAppliedSet(meta.ServerUUID)
-		for _, seg := range strings.Split(src.SourcePurgedGTID, ",") {
-			seg = strings.TrimSpace(seg)
-			if seg != "" {
-				purgedSet.ParseAndAddRange(seg)
-			}
-		}
-
-		pHigh := pSet.High()
-		// Nếu source đã purge vượt qua mốc P (tức là P đã bị purge)
-		if purgedSet.Contains(pHigh) {
-			// Cần có archive bù đắp
-			if src.ArchiveUntilGTID == "" {
-				return nil, exitcode.New(
-					exitcode.ErrLogGap,
-					exitcode.DataError,
-					fmt.Sprintf("log gap: source purged GTID set (%s) has purged start position P (%s), and no archive is available",
-						src.SourcePurgedGTID, meta.GTIDSet),
-					nil,
-				)
-			}
-
-			archiveSet := checkpoint.NewMySQLAppliedSet(meta.ServerUUID)
-			for _, seg := range strings.Split(src.ArchiveUntilGTID, ",") {
-				seg = strings.TrimSpace(seg)
-				if seg != "" {
-					archiveSet.ParseAndAddRange(seg)
-				}
-			}
-
-			if !archiveSet.Contains(pHigh) {
-				return nil, exitcode.New(
-					exitcode.ErrLogGap,
-					exitcode.DataError,
-					fmt.Sprintf("log gap: archive until GTID (%s) does not cover start position P (%s)",
-						src.ArchiveUntilGTID, meta.GTIDSet),
-					nil,
-				)
-			}
-		}
-	}
-
-	// 7. Kiểm tra tính tương thích của Target (SD-4)
-	targetVer := src.TargetVersion
-	if targetVer == "" {
-		targetVer = meta.ServerVersion
-		if targetVer == "" {
-			targetVer = "8.4.6"
-		}
+	// 7. Tương thích target (SD-4): backup vật lý cần cùng dòng version
+	target, err := checkPhysicalCompat(meta.ServerVersion, src.TargetVersion)
+	if err != nil {
+		return nil, err
 	}
 
 	tables := src.Tables
@@ -320,16 +244,13 @@ func (p *XtraBackupPlanner) Plan(ctx context.Context, src SeedSource) (*SeedMani
 		PositionCrossCheck: crossCheck,
 		SchemaSnapshot:     schemaSnapshot,
 		Tables:             tables,
-		Integrity:          &IntegrityInfo{PrepareOK: true},
+		Integrity:          &IntegrityInfo{PrepareOK: isPrepared(meta.Checkpoints["backup_type"])},
 		LogCoverage: &LogCoverageInfo{
 			SourceGTIDPurged: src.SourcePurgedGTID,
 			ArchiveUntil:     src.ArchiveUntilGTID,
 			OK:               true,
 		},
-		Target: TargetInfo{
-			Version:    targetVer,
-			Compatible: true,
-		},
+		Target:    target,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -339,4 +260,13 @@ func (p *XtraBackupPlanner) Plan(ctx context.Context, src SeedSource) (*SeedMani
 // Apply thực hiện điều phối restore theo manifest (placeholder cho bước apply).
 func (p *XtraBackupPlanner) Apply(ctx context.Context, m *SeedManifest) error {
 	return nil
+}
+
+// isPrepared: chỉ backup đã chạy xtrabackup --prepare mới nhất quán (design §3.3).
+func isPrepared(backupType string) bool {
+	switch strings.TrimSpace(backupType) {
+	case "full-prepared", "log-applied":
+		return true
+	}
+	return false
 }

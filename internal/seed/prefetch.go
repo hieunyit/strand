@@ -51,8 +51,9 @@ type ApplyResult struct {
 // 1. Nếu PrefetchEnabled=true: khởi chạy prefetch đọc từ P vào spool (archive trước, source sau).
 // 2. Chạy OnRestore (nếu có).
 // 3. Tiến hành Catch-up:
-//    - Nếu prefetch bật: catch-up đọc từ Spool (kể cả khi archive bị xóa giữa chừng).
-//    - Nếu prefetch tắt: catch-up đọc trực tiếp từ Archive/Source; nếu thiếu log thì báo log_gap (exit 5).
+//   - Nếu prefetch bật: catch-up đọc từ Spool (kể cả khi archive bị xóa giữa chừng).
+//   - Nếu prefetch tắt: catch-up đọc trực tiếp từ Archive/Source; nếu thiếu log thì báo log_gap (exit 5).
+//
 // 4. Nếu bất kỳ tầng spool nào chạm hard limit: báo prefetch_exhausted (exit 5).
 func ApplySeed(ctx context.Context, m *SeedManifest, cfg ApplyConfig) (*ApplyResult, error) {
 	if m == nil {

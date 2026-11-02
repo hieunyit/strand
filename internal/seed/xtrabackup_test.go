@@ -228,6 +228,7 @@ func TestSD4_PrereleaseTool_RejectedWithoutFlag(t *testing.T) {
 		Kind:                "xtrabackup",
 		BackupRef:           backupDir,
 		AllowPrereleaseTool: true,
+		TargetVersion:       "9.7.1", // SD-4: target version is required to prove compatibility
 	}
 
 	manifest, err := planner.Plan(ctx, srcWithFlag)
