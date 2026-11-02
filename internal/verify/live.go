@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"time"
 
@@ -295,11 +296,33 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 	return out, nil
 }
 
-// KeyRanges gom các khóa thành range điểm [k, k] (verify mọi range xuất hiện trong CDC).
+// KeyRanges gom các khóa CDC đã chạm thành range để verify: khóa được sắp xếp, khóa kế tiếp nhập vào
+// range hiện tại nếu cách khóa trước ≤ keyRangeMaxGap và range không rộng quá keyRangeMaxSpan.
+// Range gộp có thể kiểm thêm vài row không bị chạm (an toàn), nhưng số query giảm từ 2/khóa xuống
+// 2/range — post-seed verify trên hàng chục nghìn khóa không còn mất hàng phút.
+const (
+	keyRangeMaxGap  = 64
+	keyRangeMaxSpan = 1000
+)
+
 func KeyRanges(keys []int64) [][2]int64 {
-	out := make([][2]int64, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, [2]int64{k, k})
+	if len(keys) == 0 {
+		return nil
 	}
-	return out
+	ks := append([]int64(nil), keys...)
+	sort.Slice(ks, func(i, j int) bool { return ks[i] < ks[j] })
+	var out [][2]int64
+	start, prev := ks[0], ks[0]
+	for _, k := range ks[1:] {
+		if k == prev {
+			continue
+		}
+		if k-prev <= keyRangeMaxGap && k-start < keyRangeMaxSpan {
+			prev = k
+			continue
+		}
+		out = append(out, [2]int64{start, prev})
+		start, prev = k, k
+	}
+	return append(out, [2]int64{start, prev})
 }
