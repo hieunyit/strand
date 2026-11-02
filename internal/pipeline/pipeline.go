@@ -104,7 +104,8 @@ type Pipeline struct {
 	curAvgRow     atomic.Int64
 	touched       *touchedKeys
 
-	runCtx context.Context
+	runCtx   context.Context
+	instance string
 
 	failMu  sync.Mutex
 	failErr error
@@ -173,7 +174,7 @@ func (p *Pipeline) failed() error {
 	return p.failErr
 }
 
-func targetDSN(dsn string) (string, error) {
+func targetDSN(dsn, pipelineID, instance string) (string, error) {
 	c, err := drivermysql.ParseDSN(dsn)
 	if err != nil {
 		return "", err
@@ -187,6 +188,9 @@ func targetDSN(dsn string) (string, error) {
 	// target chưa nhất quán về FK cho tới khi snapshot xong. Khi stream, thứ tự cha–con do
 	// writeset (FK) bảo đảm. Vì vậy phiên ghi của Strand không kiểm FK (như applier sao chép).
 	c.Params["foreign_key_checks"] = "0"
+	// Nhãn kết nối (performance_schema.session_connect_attrs): instance mới nhận pipeline có thể
+	// tìm và ngắt kết nối của instance cũ cùng pipeline_id (fencing ở mức DB, SG-1).
+	c.ConnectionAttributes = "strand_pipeline:" + pipelineID + ",strand_instance:" + instance
 	return c.FormatDSN(), nil
 }
 
@@ -214,7 +218,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 	}
 	defer p.src.Close()
-	dstDSN, err := targetDSN(p.cfg.Target.DSN)
+	host, _ := os.Hostname()
+	p.instance = fmt.Sprintf("%s/%d/%d", host, os.Getpid(), time.Now().UnixNano())
+	dstDSN, err := targetDSN(p.cfg.Target.DSN, p.id, p.instance)
 	if err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid target DSN: %v", err), err)
 	}
@@ -233,11 +239,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return err
 	}
 	defer func() { _ = p.release() }()
-	host, _ := os.Hostname()
 	if p.epoch, err = p.store.AdvanceEpoch(ctx, p.id, fmt.Sprintf("%s/%d", host, os.Getpid()), configHash(p.cfg)); err != nil {
 		return fmt.Errorf("advance epoch: %w", err)
 	}
 	p.log = p.log.With("epoch", p.epoch)
+	p.killStaleInstances(ctx)
 	p.log.Info("pipeline lock acquired")
 
 	// --- Metadata source ---
@@ -529,6 +535,37 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	p.log.Info("pipeline stopped cleanly")
 	return nil
+}
+
+// killStaleInstances ngắt mọi kết nối target của instance khác cùng pipeline_id (sau khi đã
+// tăng epoch). Instance cũ bị đóng băng hoặc bị phân vùng có thể đang giữ transaction mở và
+// row lock trên target: epoch chặn nó commit, nhưng lock chỉ được nhả khi kết nối bị ngắt.
+func (p *Pipeline) killStaleInstances(ctx context.Context) {
+	rows, err := p.dst.QueryContext(ctx, `
+		SELECT a.PROCESSLIST_ID FROM performance_schema.session_connect_attrs a
+		  JOIN performance_schema.session_connect_attrs b ON b.PROCESSLIST_ID = a.PROCESSLIST_ID
+		 WHERE a.ATTR_NAME = 'strand_pipeline' AND a.ATTR_VALUE = ?
+		   AND b.ATTR_NAME = 'strand_instance' AND b.ATTR_VALUE <> ?`, p.id, p.instance)
+	if err != nil {
+		p.log.Warn("cannot list stale instance connections", "error", err)
+		return
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		if _, err := p.dst.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
+			p.log.Warn("cannot kill stale instance connection", "id", id, "error", err)
+		}
+	}
+	if len(ids) > 0 {
+		p.log.Warn("killed target connections of a previous instance of this pipeline", "connections", len(ids))
+	}
 }
 
 func configHash(cfg *config.Config) string {

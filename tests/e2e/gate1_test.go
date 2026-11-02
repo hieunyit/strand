@@ -99,10 +99,27 @@ func TestG1_E2E_TwoInstancesSamePipeline(t *testing.T) {
 		a.kill9()
 		t.Fatalf("frozen old instance was not fenced after resuming")
 	}
-	if code := a.exitCode(); code != 4 || !strings.Contains(a.output.String(), "fenced") {
-		t.Fatalf("old instance: exit %d, want 4 fenced\n%s", code, a.tail())
+	// Instance mới đã ngắt kết nối target của instance cũ (transaction dở bị rollback). Khi chạy
+	// lại, instance cũ hoặc bị fence (exit 4), hoặc gặp lỗi kết nối (exit 1, systemd restart) và
+	// lần khởi động lại bị từ chối pipeline_locked (exit 4). Cả hai đều đúng 04 §4.
+	switch code := a.exitCode(); code {
+	case 4:
+		t.Logf("old instance fenced with exit 4 after SIGCONT")
+	case 1:
+		a2 := startStrand(t, cfgA.write(t))
+		select {
+		case <-a2.done:
+		case <-time.After(60 * time.Second):
+			a2.kill9()
+			t.Fatalf("restarted old instance did not refuse to start")
+		}
+		if c := a2.exitCode(); c != 4 || !strings.Contains(a2.output.String(), "pipeline_locked") {
+			t.Fatalf("restarted old instance: exit %d, want 4 pipeline_locked\n%s", c, a2.tail())
+		}
+		t.Logf("old instance lost its connections (exit 1); its restart was refused with pipeline_locked")
+	default:
+		t.Fatalf("old instance: exit %d, want 4 or 1\n%s", code, a.tail())
 	}
-	t.Logf("old instance fenced with exit 4 after SIGCONT")
 
 	wl.Stop()
 	waitCaughtUp(t, src, dst, &cfgB, b, 5*time.Minute)
