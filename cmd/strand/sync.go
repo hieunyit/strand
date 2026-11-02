@@ -136,6 +136,9 @@ func newSyncCmd() *cobra.Command {
 				handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 			}
 			logger := slog.New(handler)
+			for _, k := range cfg.UnimplementedKeys() {
+				logger.Warn(config.UnimplementedWarning(k), "key", k)
+			}
 
 			// SIGTERM/SIGINT: ngừng đọc, chờ writer xong, ghi checkpoint rồi thoát (01 §3).
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
