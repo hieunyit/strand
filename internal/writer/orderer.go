@@ -2,6 +2,7 @@ package writer
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type CommitOrderer struct {
 	mu         sync.Mutex
 	waitCh     chan struct{}
 	nextCommit uint64
+	failed     error // khi một commit thất bại, mọi worker đang chờ nhận lỗi thay vì treo
 }
 
 // NewCommitOrderer khởi tạo CommitOrderer mới với mode ("strict" hoặc "relaxed").
@@ -55,9 +57,19 @@ func (co *CommitOrderer) WaitTurn(ctx context.Context, seq uint64) error {
 	}
 	for {
 		co.mu.Lock()
-		if co.nextCommit >= seq {
+		if co.failed != nil {
+			err := co.failed
+			co.mu.Unlock()
+			return fmt.Errorf("strict commit order halted: %w", err)
+		}
+		if co.nextCommit == seq {
 			co.mu.Unlock()
 			return nil
+		}
+		if co.nextCommit > seq {
+			next := co.nextCommit
+			co.mu.Unlock()
+			return fmt.Errorf("strict commit order: seq %d already behind next commit %d", seq, next)
 		}
 		ch := co.waitCh
 		co.mu.Unlock()
@@ -83,6 +95,27 @@ func (co *CommitOrderer) CommitDone(seq uint64) {
 		close(co.waitCh)
 		co.waitCh = make(chan struct{})
 	}
+}
+
+// Fail dừng orderer: mọi WaitTurn hiện tại và sau này trả lỗi (CP-5: không commit
+// Txn sau khi Txn trước nó thất bại).
+func (co *CommitOrderer) Fail(err error) {
+	if co == nil || err == nil {
+		return
+	}
+	co.mu.Lock()
+	defer co.mu.Unlock()
+	if co.failed == nil {
+		co.failed = err
+		close(co.waitCh)
+		co.waitCh = make(chan struct{})
+	}
+}
+
+// Skip đánh dấu seq không cần commit (ví dụ Txn đã có trong tập applied, CP-2),
+// để các seq sau không chờ mãi.
+func (co *CommitOrderer) Skip(seq uint64) {
+	co.CommitDone(seq)
 }
 
 // GroupCommitConfig cấu hình giới hạn cho group commit.

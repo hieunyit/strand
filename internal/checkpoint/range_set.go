@@ -78,51 +78,33 @@ func (rs *RangeSet) Add(val uint64) {
 }
 
 // AddRange thêm một khoảng [start, end] vào tập và tự động gộp/chuẩn hóa.
+// Tìm vị trí bằng tìm kiếm nhị phân, sửa slice tại chỗ: O(log n) + memmove,
+// O(1) khấu hao khi thêm vào cuối (trường hợp phổ biến).
 func (rs *RangeSet) AddRange(start, end uint64) {
 	if start > end {
 		return
 	}
+	iv := rs.intervals
+	// i: khoảng đầu tiên có thể chạm/giao [start, end] (End+1 >= start).
+	i := sort.Search(len(iv), func(k int) bool { return iv[k].End >= start || iv[k].End+1 == start })
+	// j: khoảng đầu tiên nằm hẳn sau [start, end] (Start > end+1).
+	j := i + sort.Search(len(iv)-i, func(k int) bool { return end != ^uint64(0) && iv[i+k].Start > end+1 })
 
-	newInterval := Interval{Start: start, End: end}
-	if len(rs.intervals) == 0 {
-		rs.intervals = []Interval{newInterval}
+	if i == j {
+		iv = append(iv, Interval{})
+		copy(iv[i+1:], iv[i:])
+		iv[i] = Interval{Start: start, End: end}
+		rs.intervals = iv
 		return
 	}
-
-	// Ghép newInterval vào danh sách và gộp
-	result := make([]Interval, 0, len(rs.intervals)+1)
-	inserted := false
-
-	for _, cur := range rs.intervals {
-		if inserted {
-			result = append(result, cur)
-			continue
-		}
-
-		if newInterval.End+1 < cur.Start {
-			// newInterval nằm hoàn toàn trước cur
-			result = append(result, newInterval, cur)
-			inserted = true
-		} else if cur.End+1 < newInterval.Start {
-			// cur nằm hoàn toàn trước newInterval
-			result = append(result, cur)
-		} else {
-			// Có giao nhau hoặc liền kề: mở rộng newInterval
-			if cur.Start < newInterval.Start {
-				newInterval.Start = cur.Start
-			}
-			if cur.End > newInterval.End {
-				newInterval.End = cur.End
-			}
-		}
+	if iv[i].Start < start {
+		start = iv[i].Start
 	}
-
-	if !inserted {
-		result = append(result, newInterval)
+	if iv[j-1].End > end {
+		end = iv[j-1].End
 	}
-
-	// Chuẩn hóa một lần nữa để gộp các khoảng liền kề nếu có
-	rs.intervals = normalizeIntervals(result)
+	iv[i] = Interval{Start: start, End: end}
+	rs.intervals = append(iv[:i+1], iv[j:]...)
 }
 
 func normalizeIntervals(src []Interval) []Interval {

@@ -93,6 +93,24 @@ type Compactor struct {
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 	stepHook func(step CompactionStep) error
+
+	lastErr     error     // lỗi của chu kỳ nền gần nhất (nil nếu thành công)
+	lastSuccess time.Time // thời điểm compaction nền thành công gần nhất
+}
+
+// Err trả về lỗi của chu kỳ compaction nền gần nhất.
+func (c *Compactor) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastErr
+}
+
+// LastSuccess trả về thời điểm compaction nền thành công gần nhất
+// (nguồn cho strand_checkpoint_compaction_lag_seconds).
+func (c *Compactor) LastSuccess() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastSuccess
 }
 
 // NewCompactor khởi tạo một instance Compactor mới.
@@ -133,6 +151,13 @@ func (c *Compactor) SetStepHook(hook func(step CompactionStep) error) {
 func (c *Compactor) Compact(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_, err := c.compactLocked(ctx)
+	return err
+}
+
+// compactLocked chạy một chu kỳ compaction và trả về tập toàn cục sau khi gộp
+// (nil nếu không có gì để gộp và chưa đọc row toàn cục).
+func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 
 	epoch := c.cfg.Epoch
 	if c.store != nil && c.store.Epoch() != 0 {
@@ -141,7 +166,7 @@ func (c *Compactor) Compact(ctx context.Context) error {
 
 	if c.stepHook != nil {
 		if err := c.stepHook(StepStart); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -156,24 +181,24 @@ func (c *Compactor) Compact(ctx context.Context) error {
 
 	rows, err := c.db.QueryContext(ctx, query, c.pipelineID, epoch)
 	if err != nil {
-		return fmt.Errorf("failed to query worker deltas for compaction: %w", err)
+		return nil, fmt.Errorf("failed to query worker deltas for compaction: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var d WorkerDelta
 		if err := rows.Scan(&d.WorkerID, &d.Epoch, &d.BatchNo, &d.Applied); err != nil {
-			return fmt.Errorf("failed to scan worker delta: %w", err)
+			return nil, fmt.Errorf("failed to scan worker delta: %w", err)
 		}
 		deltas = append(deltas, d)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error querying deltas: %w", err)
+		return nil, fmt.Errorf("rows error querying deltas: %w", err)
 	}
 
 	if c.stepHook != nil {
 		if err := c.stepHook(StepReadDeltas); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -186,7 +211,7 @@ func (c *Compactor) Compact(ctx context.Context) error {
 		}
 	}
 	if !hasWork {
-		return nil
+		return nil, nil
 	}
 
 	// 2. Đọc row toàn cục hiện tại và gộp deltas vào
@@ -200,12 +225,12 @@ func (c *Compactor) Compact(ctx context.Context) error {
 
 	err = c.db.QueryRowContext(ctx, globalQuery, c.pipelineID, epoch).Scan(&globalAppliedStr)
 	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("failed to read global checkpoint: %w", err)
+		return nil, fmt.Errorf("failed to read global checkpoint: %w", err)
 	}
 
 	globalSet, err := ParseAppliedSet(c.sourceEngine, globalAppliedStr)
 	if err != nil {
-		return fmt.Errorf("failed to parse global applied set: %w", err)
+		return nil, fmt.Errorf("failed to parse global applied set: %w", err)
 	}
 
 	for _, d := range deltas {
@@ -214,14 +239,14 @@ func (c *Compactor) Compact(ctx context.Context) error {
 		}
 		workerSet, err := ParseAppliedSet(c.sourceEngine, d.Applied)
 		if err != nil {
-			return fmt.Errorf("failed to parse worker delta: %w", err)
+			return nil, fmt.Errorf("failed to parse worker delta: %w", err)
 		}
 		globalSet.Merge(workerSet)
 	}
 
 	if c.stepHook != nil {
 		if err := c.stepHook(StepMerge); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -238,19 +263,19 @@ func (c *Compactor) Compact(ctx context.Context) error {
 
 	res, err := c.db.ExecContext(ctx, updateGlobalQuery, newGlobalStr, now, c.pipelineID, epoch)
 	if err != nil {
-		return fmt.Errorf("failed to update global checkpoint: %w", err)
+		return nil, fmt.Errorf("failed to update global checkpoint: %w", err)
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
+		return nil, fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if affected != 1 {
-		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, "checkpoint compaction fenced: epoch has changed", nil)
+		return nil, exitcode.New(exitcode.ErrFenced, exitcode.Fenced, "checkpoint compaction fenced: epoch has changed", nil)
 	}
 
 	if c.stepHook != nil {
 		if err := c.stepHook(StepWriteGlobal); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -269,23 +294,23 @@ func (c *Compactor) Compact(ctx context.Context) error {
 		}
 		_, err := c.db.ExecContext(ctx, pruneQuery, c.pipelineID, d.WorkerID, epoch, d.BatchNo)
 		if err != nil {
-			return fmt.Errorf("failed to prune worker delta: %w", err)
+			return nil, fmt.Errorf("failed to prune worker delta: %w", err)
 		}
 	}
 
 	if c.stepHook != nil {
 		if err := c.stepHook(StepPruneDeltas); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if c.stepHook != nil {
 		if err := c.stepHook(StepComplete); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return globalSet, nil
 }
 
 // Start kích hoạt compaction chạy ngầm định kỳ (mỗi 100–500 ms).
@@ -312,7 +337,20 @@ func (c *Compactor) Start(ctx context.Context) {
 			case <-c.stopCh:
 				return
 			case <-ticker.C:
-				_ = c.Compact(ctx)
+				if err := c.Compact(ctx); err != nil {
+					c.mu.Lock()
+					c.lastErr = err
+					c.mu.Unlock()
+					// Bị fence: instance khác đã nhận pipeline, dừng hẳn (02 §4 quy tắc 6).
+					if exitcode.GetExitCode(err) == exitcode.Fenced {
+						return
+					}
+				} else {
+					c.mu.Lock()
+					c.lastErr = nil
+					c.lastSuccess = time.Now()
+					c.mu.Unlock()
+				}
 			}
 		}
 	}()
@@ -336,72 +374,106 @@ func (c *Compactor) Stop() {
 }
 
 // RecordWorkerDelta ghi nhận row delta cho một worker có kiểm tra rào chắn 64 KB (CP-4).
-// Nếu delta vượt 64 KB, tự kích hoạt compaction đồng bộ. Nếu vẫn vượt thì từ chối (trả về ErrDeltaExceededLimit).
-// invariant: CP-4
+// applied được chuẩn hóa (gộp khoảng) trước khi đo. Nếu vẫn vượt 64 KB thì chạy
+// compaction đồng bộ rồi loại khỏi delta mọi Txn đã nằm trong row toàn cục; vẫn vượt
+// thì trả ErrDeltaExceededLimit để worker ngừng. Ghi luôn có điều kiện epoch (SG-1).
+// invariant: CP-4, SG-1
 func (c *Compactor) RecordWorkerDelta(ctx context.Context, tx *sql.Tx, workerID int, applied string) error {
 	epoch := c.cfg.Epoch
 	if c.store != nil && c.store.Epoch() != 0 {
 		epoch = c.store.Epoch()
 	}
 
-	// Kiểm tra nếu delta vượt 64 KB: kích hoạt compaction đồng bộ
-	if len(applied) > c.cfg.MaxDeltaBytes {
-		if err := c.Compact(ctx); err != nil {
+	set, perr := ParseAppliedSet(c.sourceEngine, applied)
+	if perr != nil {
+		if len(applied) > c.cfg.MaxDeltaBytes {
+			return fmt.Errorf("%w: delta cannot be parsed to compact it: %v", ErrDeltaExceededLimit, perr)
+		}
+		return fmt.Errorf("invalid worker delta: %w", perr)
+	}
+	canonical := formatAppliedSet(set)
+
+	if len(canonical) > c.cfg.MaxDeltaBytes {
+		c.mu.Lock()
+		global, err := c.compactLocked(ctx)
+		c.mu.Unlock()
+		if err != nil {
 			return fmt.Errorf("sync compaction failed: %w", err)
 		}
-		// Sau khi compaction hoàn tất, kiểm tra lại nếu một đơn vị delta duy nhất vẫn vượt 64 KB
-		if len(applied) > c.cfg.MaxDeltaBytes {
+		if global == nil {
+			var globalStr string
+			q := "SELECT applied FROM _strand_checkpoint WHERE pipeline_id = ? AND epoch = ?"
+			if c.targetEngine == model.EnginePG {
+				q = "SELECT applied FROM _strand_checkpoint WHERE pipeline_id = $1 AND epoch = $2"
+			}
+			if err := c.db.QueryRowContext(ctx, q, c.pipelineID, epoch).Scan(&globalStr); err != nil && err != sql.ErrNoRows {
+				return fmt.Errorf("read global checkpoint: %w", err)
+			}
+			if global, err = ParseAppliedSet(c.sourceEngine, globalStr); err != nil {
+				return err
+			}
+		}
+		subtractApplied(set, global)
+		canonical = formatAppliedSet(set)
+		if len(canonical) > c.cfg.MaxDeltaBytes {
 			return ErrDeltaExceededLimit
 		}
 	}
 
-	// Ghi vào _strand_worker_delta
-	var err error
+	var (
+		query string
+		args  = []any{c.pipelineID, workerID, epoch, canonical}
+	)
 	if c.targetEngine == model.EnginePG {
-		query := `
+		query = `
 			INSERT INTO _strand_worker_delta (pipeline_id, worker_id, epoch, batch_no, applied)
 			VALUES ($1, $2, $3, 1, $4)
 			ON CONFLICT (pipeline_id, worker_id) DO UPDATE
-			SET applied = EXCLUDED.applied, batch_no = _strand_worker_delta.batch_no + 1, epoch = EXCLUDED.epoch
-			WHERE _strand_worker_delta.epoch = EXCLUDED.epoch
-		`
-		if tx != nil {
-			var res sql.Result
-			res, err = tx.ExecContext(ctx, query, c.pipelineID, workerID, epoch, applied)
-			if err == nil {
-				affected, _ := res.RowsAffected()
-				if affected == 0 {
-					return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, "worker delta write fenced: epoch changed", nil)
-				}
-			}
-		} else {
-			var res sql.Result
-			res, err = c.db.ExecContext(ctx, query, c.pipelineID, workerID, epoch, applied)
-			if err == nil {
-				affected, _ := res.RowsAffected()
-				if affected == 0 {
-					return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, "worker delta write fenced: epoch changed", nil)
-				}
-			}
-		}
+			SET applied = EXCLUDED.applied, batch_no = _strand_worker_delta.batch_no + 1
+			WHERE _strand_worker_delta.epoch = EXCLUDED.epoch`
 	} else {
-		query := `
+		// Không ghi đè epoch; chỉ cập nhật khi epoch khớp. batch_no luôn tăng nên
+		// rows affected = 2 khi cập nhật, 1 khi chèn mới, 0 khi bị fence.
+		query = `
 			INSERT INTO _strand_worker_delta (pipeline_id, worker_id, epoch, batch_no, applied)
 			VALUES (?, ?, ?, 1, ?)
-			ON DUPLICATE KEY UPDATE applied = VALUES(applied), batch_no = batch_no + 1, epoch = VALUES(epoch)
-		`
-		if tx != nil {
-			_, err = tx.ExecContext(ctx, query, c.pipelineID, workerID, epoch, applied)
-		} else {
-			_, err = c.db.ExecContext(ctx, query, c.pipelineID, workerID, epoch, applied)
-		}
+			ON DUPLICATE KEY UPDATE
+				applied = IF(epoch = VALUES(epoch), VALUES(applied), applied),
+				batch_no = IF(epoch = VALUES(epoch), batch_no + 1, batch_no)`
 	}
 
+	var res sql.Result
+	var err error
+	if tx != nil {
+		res, err = tx.ExecContext(ctx, query, args...)
+	} else {
+		res, err = c.db.ExecContext(ctx, query, args...)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to record worker delta: %w", err)
 	}
-
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if affected == 0 {
+		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, "worker delta write fenced: epoch changed", nil)
+	}
 	return nil
+}
+
+// subtractApplied loại khỏi set mọi vị trí đã có trong global.
+func subtractApplied(set, global AppliedSet) {
+	switch s := set.(type) {
+	case *MySQLAppliedSet:
+		if g, ok := global.(*MySQLAppliedSet); ok {
+			s.Subtract(g)
+		}
+	case *PGAppliedSet:
+		if g, ok := global.(*PGAppliedSet); ok {
+			s.ranges.Subtract(g.ranges)
+		}
+	}
 }
 
 func formatAppliedSet(set AppliedSet) string {
