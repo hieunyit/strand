@@ -1201,6 +1201,7 @@ func (p *Pipeline) monitor(ctx context.Context) {
 		}
 		p.metrics.LagSeconds.WithLabelValues(p.id, phase).Set(lag)
 		p.metrics.Holes.WithLabelValues(p.id).Set(float64(p.sched.Holes()))
+		p.updateMetrics()
 		if ls := p.comp.LastSuccess(); !ls.IsZero() {
 			p.metrics.CheckpointCompactionLagSeconds.WithLabelValues(p.id).Set(time.Since(ls).Seconds())
 		}
@@ -1220,6 +1221,71 @@ func (p *Pipeline) monitor(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func parseBytes(s string) float64 {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	mult := 1.0
+	for _, u := range []struct {
+		suf string
+		m   float64
+	}{{"GIB", 1 << 30}, {"MIB", 1 << 20}, {"KIB", 1 << 10}, {"TIB", 1 << 40}, {"GB", 1e9}, {"MB", 1e6}, {"KB", 1e3}} {
+		if strings.HasSuffix(s, u.suf) {
+			s, mult = strings.TrimSuffix(s, u.suf), u.m
+			break
+		}
+	}
+	var v float64
+	fmt.Sscanf(s, "%f", &v)
+	return v * mult
+}
+
+// updateMetrics cập nhật các gauge theo 02 §11 mà không có nơi phát sinh tự nhiên.
+func (p *Pipeline) updateMetrics() {
+	m := p.metrics
+	p.tablesMu.RLock()
+	for id := range p.tables {
+		t := p.filter.Target(id).String()
+		m.WritesetEntries.WithLabelValues(p.id, t).Set(float64(p.sched.TableWritesetEntries(t)))
+	}
+	p.tablesMu.RUnlock()
+	for table, counts := range p.snap.Manager.StateCounts() {
+		for _, st := range []string{"Pending", "Reading", "Rendezvous", "Flushing", "Done"} {
+			m.SnapshotRanges.WithLabelValues(p.id, table, st).Set(float64(counts[st]))
+		}
+		if pl, ok := p.state.Plan(table); ok && pl.MaxPK > pl.MinPK {
+			m.SeedProgressRatio.WithLabelValues(p.id, table).Set(float64(pl.NextPK-pl.MinPK) / float64(pl.MaxPK-pl.MinPK+1))
+		}
+	}
+	// MySQL→MySQL không có thao tác đổi PK phải chờ (chỉ PG + TOAST, 02 §8).
+	m.PendingCrossRange.WithLabelValues(p.id).Set(0)
+	m.PendingCrossRangeOldestSeconds.WithLabelValues(p.id).Set(0)
+	// onoff không ước lượng độ nhạy (GRACE v2 ở P2).
+	m.SensitivityUnknown.WithLabelValues(p.id).Set(0)
+	if p.prefetch != nil {
+		u := p.prefetch.Usage()
+		m.SpoolBytes.WithLabelValues(p.id, "local").Set(float64(u.LocalBytes))
+		m.SpoolBytes.WithLabelValues(p.id, "bucket").Set(float64(u.BucketBytes))
+	} else {
+		m.SpoolBytes.WithLabelValues(p.id, "local").Set(0)
+		m.SpoolBytes.WithLabelValues(p.id, "bucket").Set(0)
+	}
+	m.SpoolCapacityBytes.WithLabelValues(p.id, "local").Set(parseBytes(p.cfg.Resources.Spool.Hard))
+	m.SpoolCapacityBytes.WithLabelValues(p.id, "bucket").Set(0)
+	if p.gov != nil && p.govAlgo == "static" {
+		m.GovernorRateTokens.WithLabelValues(p.id, "source_iops").Set(float64(p.cfg.Resources.Source.IOPS.Soft))
+	}
+	m.VerifyMismatchTotal.WithLabelValues(p.id, "").Add(0)
+	m.VerifyUnverifiableHotTotal.WithLabelValues(p.id, "").Add(0)
+	m.FencedTotal.WithLabelValues(p.id).Add(0)
+	m.ApplyTxnTotal.WithLabelValues(p.id).Add(0)
+	m.ApplyRowsTotal.WithLabelValues(p.id).Add(0)
+	m.RetentionHeadroomSeconds.WithLabelValues(p.id)
+	m.GovernorZone.WithLabelValues(p.id)
+	m.GovernorPressure.WithLabelValues(p.id, "replica_lag")
+	m.BreakerOpen.WithLabelValues(p.id)
+	m.CheckpointCompactionLagSeconds.WithLabelValues(p.id)
+	m.LagSeconds.WithLabelValues(p.id, "synced")
 }
 
 func (p *Pipeline) caughtUpWithSource(ctx context.Context) bool {

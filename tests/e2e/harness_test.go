@@ -219,6 +219,7 @@ type strandCfg struct {
 	VerifyDelta    string
 	SourceIOPS     int
 	BreakerLag     string // governor.breaker.replica_lag.max
+	MetricsAddr    string // observability.metrics, ví dụ 127.0.0.1:19464
 }
 
 func (c *strandCfg) write(t *testing.T) string {
@@ -277,9 +278,9 @@ resources:
   workers: { min: 1, max: %d }
 governor: { algorithm: onoff, tick: 1s, lag_slo: %s, breaker: { strand_query_p99: { max_ratio: 1000 }, replica_lag: { max: %s } } }
 verify: { delta: %s, post_seed_window: %s }
-observability: { admin_socket: %q, log: { level: info, format: json } }
+observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceDSN, 40000+rand.Intn(20000), c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, filepath.Join(c.Dir, "state"), c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.socket(t))
+		c.Bootstrap, filepath.Join(c.Dir, "state"), c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)

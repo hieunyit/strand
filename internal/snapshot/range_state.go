@@ -95,6 +95,21 @@ func (m *RangeStateManager) CarveChunk(table model.TableID, start, end int64) (*
 	return nil, fmt.Errorf("no pending chunk starts at %d in %s", start, table)
 }
 
+// StateCounts trả về số range theo trạng thái của từng bảng đang snapshot (metric).
+func (m *RangeStateManager) StateCounts() map[string]map[string]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := map[string]map[string]int{}
+	for name, tr := range m.tables {
+		c := map[string]int{}
+		for _, ch := range tr.Chunks {
+			c[ch.State.String()]++
+		}
+		out[name] = c
+	}
+	return out
+}
+
 // TableCount trả về số bảng đang snapshot.
 func (m *RangeStateManager) TableCount() int {
 	m.mu.RLock()
