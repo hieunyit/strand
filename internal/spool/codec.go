@@ -176,249 +176,85 @@ func decodeValue(r io.Reader) (model.Value, error) {
 	}
 }
 
+// Định dạng v2 (không mất dữ liệu): magic, các trường của Txn, rồi các row theo codec spill
+// của model (giữ UniqueKeys/ForeignKeys cho writeset, mọi kiểu giá trị).
+const txnMagicV2 = "STX2"
+
 // encodeTxn tuần tự hóa model.Txn thành byte buffer.
 func encodeTxn(t *model.Txn) ([]byte, error) {
 	var buf bytes.Buffer
-
-	// SourcePos
-	if err := writeString(&buf, string(t.SourcePos.Engine)); err != nil {
-		return nil, err
+	buf.WriteString(txnMagicV2)
+	for _, s := range []string{string(t.SourcePos.Engine), t.SourcePos.GTID, t.SpillPath, t.DDL} {
+		if err := writeString(&buf, s); err != nil {
+			return nil, err
+		}
 	}
-	if err := writeString(&buf, t.SourcePos.GTID); err != nil {
-		return nil, err
+	for _, v := range []any{t.SourcePos.LSN, t.SchemaVer, t.Bytes, t.RowCount, t.SourceTS, uint32(len(t.SpilledTables)), uint32(len(t.Rows))} {
+		if err := binary.Write(&buf, binary.LittleEndian, v); err != nil {
+			return nil, err
+		}
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, t.SourcePos.LSN); err != nil {
-		return nil, err
+	for _, tb := range t.SpilledTables {
+		if err := writeString(&buf, tb.Schema); err != nil {
+			return nil, err
+		}
+		if err := writeString(&buf, tb.Table); err != nil {
+			return nil, err
+		}
 	}
-
-	// SchemaVer, Bytes, RowCount, SpillPath
-	if err := binary.Write(&buf, binary.LittleEndian, t.SchemaVer); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buf, binary.LittleEndian, t.Bytes); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buf, binary.LittleEndian, t.RowCount); err != nil {
-		return nil, err
-	}
-	if err := writeString(&buf, t.SpillPath); err != nil {
-		return nil, err
-	}
-
-	// Rows
-	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(t.Rows))); err != nil {
-		return nil, err
-	}
+	sw := model.NewSpillWriter(&buf)
+	sw.PreserveGoInt = true
 	for i := range t.Rows {
-		rc := &t.Rows[i]
-		if err := writeString(&buf, rc.Table.Schema); err != nil {
+		if err := sw.Write(&t.Rows[i]); err != nil {
 			return nil, err
-		}
-		if err := writeString(&buf, rc.Table.Table); err != nil {
-			return nil, err
-		}
-		var opByte byte = 1
-		if rc.Op == model.OpUpdate {
-			opByte = 2
-		} else if rc.Op == model.OpDelete {
-			opByte = 3
-		}
-		if err := binary.Write(&buf, binary.LittleEndian, opByte); err != nil {
-			return nil, err
-		}
-
-		// Key
-		if err := binary.Write(&buf, binary.LittleEndian, uint32(len(rc.Key))); err != nil {
-			return nil, err
-		}
-		for _, kv := range rc.Key {
-			if err := encodeValue(&buf, kv); err != nil {
-				return nil, err
-			}
-		}
-
-		// OldKey
-		hasOldKey := byte(0)
-		if len(rc.OldKey) > 0 {
-			hasOldKey = 1
-		}
-		if err := binary.Write(&buf, binary.LittleEndian, hasOldKey); err != nil {
-			return nil, err
-		}
-		if hasOldKey == 1 {
-			if err := binary.Write(&buf, binary.LittleEndian, uint32(len(rc.OldKey))); err != nil {
-				return nil, err
-			}
-			for _, okv := range rc.OldKey {
-				if err := encodeValue(&buf, okv); err != nil {
-					return nil, err
-				}
-			}
-		}
-
-		// Cols
-		if err := binary.Write(&buf, binary.LittleEndian, uint32(len(rc.Cols))); err != nil {
-			return nil, err
-		}
-		for _, col := range rc.Cols {
-			if err := writeString(&buf, col.Name); err != nil {
-				return nil, err
-			}
-			if err := encodeValue(&buf, col.Value); err != nil {
-				return nil, err
-			}
-			unchanged := byte(0)
-			if col.Unchanged {
-				unchanged = 1
-			}
-			if err := binary.Write(&buf, binary.LittleEndian, unchanged); err != nil {
-				return nil, err
-			}
 		}
 	}
-
+	if err := sw.Flush(); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
 
 // decodeTxn giải mã byte buffer thành model.Txn.
 func decodeTxn(data []byte) (*model.Txn, error) {
-	r := bytes.NewReader(data)
+	if len(data) < len(txnMagicV2) || string(data[:len(txnMagicV2)]) != txnMagicV2 {
+		return nil, fmt.Errorf("spool: unknown txn encoding")
+	}
+	r := bytes.NewReader(data[len(txnMagicV2):])
 	t := &model.Txn{}
-
-	// SourcePos
-	engine, err := readString(r)
-	if err != nil {
-		return nil, err
+	strs := make([]string, 4)
+	for i := range strs {
+		s, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		strs[i] = s
 	}
-	t.SourcePos.Engine = model.Engine(engine)
-
-	gtid, err := readString(r)
-	if err != nil {
-		return nil, err
-	}
-	t.SourcePos.GTID = gtid
-
-	if err := binary.Read(r, binary.LittleEndian, &t.SourcePos.LSN); err != nil {
-		return nil, err
-	}
-
-	// SchemaVer, Bytes, RowCount, SpillPath
-	if err := binary.Read(r, binary.LittleEndian, &t.SchemaVer); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(r, binary.LittleEndian, &t.Bytes); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(r, binary.LittleEndian, &t.RowCount); err != nil {
-		return nil, err
-	}
-	spillPath, err := readString(r)
-	if err != nil {
-		return nil, err
-	}
-	t.SpillPath = spillPath
-
-	// Rows
-	var numRows uint32
-	if err := binary.Read(r, binary.LittleEndian, &numRows); err != nil {
-		return nil, err
-	}
-	if numRows > 0 {
-		t.Rows = make([]model.RowChange, numRows)
-		for i := uint32(0); i < numRows; i++ {
-			rc := &t.Rows[i]
-			schema, err := readString(r)
-			if err != nil {
-				return nil, err
-			}
-			tbl, err := readString(r)
-			if err != nil {
-				return nil, err
-			}
-			rc.Table = model.TableID{Schema: schema, Table: tbl}
-
-			var opByte byte
-			if err := binary.Read(r, binary.LittleEndian, &opByte); err != nil {
-				return nil, err
-			}
-			switch opByte {
-			case 1:
-				rc.Op = model.OpInsert
-			case 2:
-				rc.Op = model.OpUpdate
-			case 3:
-				rc.Op = model.OpDelete
-			default:
-				return nil, fmt.Errorf("unknown op byte: %d", opByte)
-			}
-
-			// Key
-			var numKeys uint32
-			if err := binary.Read(r, binary.LittleEndian, &numKeys); err != nil {
-				return nil, err
-			}
-			if numKeys > 0 {
-				rc.Key = make([]model.Value, numKeys)
-				for k := uint32(0); k < numKeys; k++ {
-					v, err := decodeValue(r)
-					if err != nil {
-						return nil, err
-					}
-					rc.Key[k] = v
-				}
-			}
-
-			// OldKey
-			var hasOldKey byte
-			if err := binary.Read(r, binary.LittleEndian, &hasOldKey); err != nil {
-				return nil, err
-			}
-			if hasOldKey == 1 {
-				var numOldKeys uint32
-				if err := binary.Read(r, binary.LittleEndian, &numOldKeys); err != nil {
-					return nil, err
-				}
-				if numOldKeys > 0 {
-					rc.OldKey = make([]model.Value, numOldKeys)
-					for k := uint32(0); k < numOldKeys; k++ {
-						v, err := decodeValue(r)
-						if err != nil {
-							return nil, err
-						}
-						rc.OldKey[k] = v
-					}
-				}
-			}
-
-			// Cols
-			var numCols uint32
-			if err := binary.Read(r, binary.LittleEndian, &numCols); err != nil {
-				return nil, err
-			}
-			if numCols > 0 {
-				rc.Cols = make([]model.ColValue, numCols)
-				for c := uint32(0); c < numCols; c++ {
-					colName, err := readString(r)
-					if err != nil {
-						return nil, err
-					}
-					colVal, err := decodeValue(r)
-					if err != nil {
-						return nil, err
-					}
-					var unchanged byte
-					if err := binary.Read(r, binary.LittleEndian, &unchanged); err != nil {
-						return nil, err
-					}
-					rc.Cols[c] = model.ColValue{
-						Name:      colName,
-						Value:     colVal,
-						Unchanged: unchanged == 1,
-					}
-				}
-			}
+	t.SourcePos.Engine, t.SourcePos.GTID, t.SpillPath, t.DDL = model.Engine(strs[0]), strs[1], strs[2], strs[3]
+	var nTables, nRows uint32
+	for _, v := range []any{&t.SourcePos.LSN, &t.SchemaVer, &t.Bytes, &t.RowCount, &t.SourceTS, &nTables, &nRows} {
+		if err := binary.Read(r, binary.LittleEndian, v); err != nil {
+			return nil, err
 		}
 	}
-
+	for i := uint32(0); i < nTables; i++ {
+		s, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		tb, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		t.SpilledTables = append(t.SpilledTables, model.TableID{Schema: s, Table: tb})
+	}
+	sr := model.NewSpillReader(r)
+	for i := uint32(0); i < nRows; i++ {
+		rc, err := sr.Next()
+		if err != nil {
+			return nil, fmt.Errorf("spool: decode row %d: %w", i, err)
+		}
+		t.Rows = append(t.Rows, *rc)
+	}
 	return t, nil
 }

@@ -32,14 +32,17 @@ const (
 	valFloat32
 	valBool
 	valTime
+	valGoInt // kiểu Go `int` (chỉ khi PreserveGoInt)
 )
 
 // SpillWriter ghi tuần tự các RowChange ra file tràn.
 type SpillWriter struct {
-	w      *bufio.Writer
-	tables map[TableID]uint32
-	names  map[string]uint32
-	buf    []byte
+	// PreserveGoInt giữ kiểu Go `int` khi đọc lại (mặc định int → int64).
+	PreserveGoInt bool
+	w             *bufio.Writer
+	tables        map[TableID]uint32
+	names         map[string]uint32
+	buf           []byte
 }
 
 // NewSpillWriter tạo SpillWriter ghi vào w.
@@ -135,22 +138,29 @@ func AppendValue(b []byte, v Value) ([]byte, error) {
 	}
 }
 
-func appendValues(b []byte, vs []Value) ([]byte, error) {
+func (sw *SpillWriter) appendValue(b []byte, v Value) ([]byte, error) {
+	if x, ok := v.(int); ok && sw.PreserveGoInt {
+		return binary.AppendVarint(append(b, valGoInt), int64(x)), nil
+	}
+	return AppendValue(b, v)
+}
+
+func (sw *SpillWriter) appendValues(b []byte, vs []Value) ([]byte, error) {
 	b = binary.AppendUvarint(b, uint64(len(vs)))
 	var err error
 	for _, v := range vs {
-		if b, err = AppendValue(b, v); err != nil {
+		if b, err = sw.appendValue(b, v); err != nil {
 			return nil, err
 		}
 	}
 	return b, nil
 }
 
-func appendOptValues(b []byte, vs []Value) ([]byte, error) {
+func (sw *SpillWriter) appendOptValues(b []byte, vs []Value) ([]byte, error) {
 	if vs == nil {
 		return append(b, 0), nil
 	}
-	return appendValues(append(b, 1), vs)
+	return sw.appendValues(append(b, 1), vs)
 }
 
 func opByte(op Op) byte {
@@ -199,33 +209,33 @@ func (sw *SpillWriter) Write(rc *RowChange) error {
 	b := append(sw.buf[:0], recRow)
 	b = binary.AppendUvarint(b, uint64(ti))
 	b = append(b, opByte(rc.Op))
-	if b, err = appendValues(b, rc.Key); err != nil {
+	if b, err = sw.appendValues(b, rc.Key); err != nil {
 		return err
 	}
-	if b, err = appendOptValues(b, rc.OldKey); err != nil {
+	if b, err = sw.appendOptValues(b, rc.OldKey); err != nil {
 		return err
 	}
 	b = binary.AppendUvarint(b, uint64(len(rc.UniqueKeys)))
 	for _, uk := range rc.UniqueKeys {
 		b = appendString(b, uk.Name)
-		if b, err = appendValues(b, uk.Key); err != nil {
+		if b, err = sw.appendValues(b, uk.Key); err != nil {
 			return err
 		}
-		if b, err = appendOptValues(b, uk.OldKey); err != nil {
+		if b, err = sw.appendOptValues(b, uk.OldKey); err != nil {
 			return err
 		}
 	}
 	b = binary.AppendUvarint(b, uint64(len(rc.ForeignKeys)))
 	for i, fk := range rc.ForeignKeys {
 		b = binary.AppendUvarint(b, uint64(fkIdx[i]))
-		if b, err = appendValues(b, fk.ParentKey); err != nil {
+		if b, err = sw.appendValues(b, fk.ParentKey); err != nil {
 			return err
 		}
 	}
 	b = binary.AppendUvarint(b, uint64(len(rc.Cols)))
 	for i, c := range rc.Cols {
 		b = binary.AppendUvarint(b, uint64(colIdx[i]))
-		if b, err = AppendValue(b, c.Value); err != nil {
+		if b, err = sw.appendValue(b, c.Value); err != nil {
 			return err
 		}
 		if c.Unchanged {
@@ -248,6 +258,11 @@ type SpillReader struct {
 	r      *bufio.Reader
 	tables []TableID
 	names  []string
+}
+
+// NewSpillReader đọc luồng spill từ r (không cần file).
+func NewSpillReader(r io.Reader) *SpillReader {
+	return &SpillReader{r: bufio.NewReader(r)}
 }
 
 // OpenSpillReader mở file tràn tại path.
@@ -281,6 +296,9 @@ func (sr *SpillReader) readValue() (Value, error) {
 		return nil, nil
 	case valInt:
 		return binary.ReadVarint(sr.r)
+	case valGoInt:
+		v, err := binary.ReadVarint(sr.r)
+		return int(v), err
 	case valUint:
 		return binary.ReadUvarint(sr.r)
 	case valString:
@@ -496,8 +514,13 @@ func (sr *SpillReader) readRecord(kind byte) (*RowChange, error) {
 	return rc, nil
 }
 
-// Close đóng file.
-func (sr *SpillReader) Close() error { return sr.f.Close() }
+// Close đóng file (nếu có).
+func (sr *SpillReader) Close() error {
+	if sr.f == nil {
+		return nil
+	}
+	return sr.f.Close()
+}
 
 // ForEachRow duyệt mọi RowChange của Txn, kể cả khi Txn đã tràn đĩa.
 func (t *Txn) ForEachRow(fn func(*RowChange) error) error {
