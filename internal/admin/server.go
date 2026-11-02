@@ -46,35 +46,58 @@ func (s *Server) Start() error {
 		return errors.New("server already started")
 	}
 
-	// Đảm bảo thư mục chứa socket tồn tại
+	// Đảm bảo thư mục chứa socket tồn tại với quyền 0700 (spec: 03 §4, §7).
+	// Nếu thư mục đã tồn tại trước đó thì không tự đổi quyền của thư mục có sẵn.
 	dir := filepath.Dir(s.socketPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	_, dirStatErr := os.Stat(dir)
+	dirCreated := errors.Is(dirStatErr, os.ErrNotExist)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
 	}
+	if dirCreated {
+		if err := os.Chmod(dir, 0700); err != nil {
+			return fmt.Errorf("chmod socket dir: %w", err)
+		}
+	}
 
-	// Xóa socket cũ nếu còn tồn tại
-	_ = os.Remove(s.socketPath)
+	// Nếu đường dẫn socket đã tồn tại, thử kết nối trước khi xóa: nếu kết nối thành công
+	// thì đang có một instance sống lắng nghe trên socket này.
+	if _, err := os.Lstat(s.socketPath); err == nil {
+		conn, dialErr := net.DialTimeout("unix", s.socketPath, 500*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			return fmt.Errorf("admin socket %s already in use by a live server", s.socketPath)
+		}
+		if err := os.Remove(s.socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale socket %s: %w", s.socketPath, err)
+		}
+	}
 
 	ln, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listen unix socket %s: %w", s.socketPath, err)
 	}
-	_ = os.Chmod(s.socketPath, 0660)
+	// spec: 03 §4, §7 — Unix socket 0700 (chạy Chmod sau Listen để không phụ thuộc umask).
+	if err := os.Chmod(s.socketPath, 0700); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(s.socketPath)
+		return fmt.Errorf("chmod unix socket %s: %w", s.socketPath, err)
+	}
 
 	s.listener = ln
 	s.closed = false
 
 	s.wg.Add(1)
-	go s.acceptLoop()
+	go s.acceptLoop(ln)
 
 	s.logger.Info("admin socket server started", "path", s.socketPath)
 	return nil
 }
 
-func (s *Server) acceptLoop() {
+func (s *Server) acceptLoop(ln net.Listener) {
 	defer s.wg.Done()
 	for {
-		conn, err := s.listener.Accept()
+		conn, err := ln.Accept() // không đọc s.listener: Close() đặt nó về nil
 		if err != nil {
 			s.mu.Lock()
 			isClosed := s.closed
@@ -216,12 +239,16 @@ func (s *Server) Close() error {
 	}
 	s.closed = true
 	var err error
-	if s.listener != nil {
+	hadListener := s.listener != nil
+	if hadListener {
 		err = s.listener.Close()
+		s.listener = nil
 	}
 	s.mu.Unlock()
 
 	s.wg.Wait()
-	_ = os.Remove(s.socketPath)
+	if hadListener {
+		_ = os.Remove(s.socketPath)
+	}
 	return err
 }

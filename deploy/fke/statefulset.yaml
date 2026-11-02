@@ -58,3 +58,15 @@ spec:
         - name: config
           configMap:
             name: strand-orders-sync
+        - name: run
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: spool
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: <block-storage-class-cua-FKE>
+        resources:
+          requests:
+            storage: 50Gi

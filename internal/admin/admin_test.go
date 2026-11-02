@@ -3,6 +3,8 @@ package admin_test
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -353,5 +355,136 @@ func TestAD5_PauseSnapshotOverSocket(t *testing.T) {
 
 	if _, err := clientUnsupported.PauseSnapshot(ctx); err == nil {
 		t.Fatalf("client.PauseSnapshot phải trả lỗi khi handler không cài đặt SnapshotPauser")
+	}
+}
+
+// TestAD6_SocketAndDirPermissions kiểm tra quyền 0700 của thư mục tạo mới và file socket sau Start (spec/03 §4, §7),
+// đồng thời không tự chmod thư mục đã tồn tại sẵn.
+func TestAD6_SocketAndDirPermissions(t *testing.T) {
+	baseDir := t.TempDir()
+
+	// 1. Thư mục chưa tồn tại -> Start tạo mới với 0700, socket có mode 0700.
+	newDir := filepath.Join(baseDir, "orders-sync")
+	sockPath := filepath.Join(newDir, "admin.sock")
+
+	srv := admin.NewServer(sockPath, newMockHandler(), nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("srv.Start failed: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	dirInfo, err := os.Stat(newDir)
+	if err != nil {
+		t.Fatalf("stat socket dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0700 {
+		t.Errorf("quyền thư mục tạo mới mong muốn 0700, nhận được %04o", perm)
+	}
+
+	sockInfo, err := os.Lstat(sockPath)
+	if err != nil {
+		t.Fatalf("lstat socket file: %v", err)
+	}
+	if perm := sockInfo.Mode().Perm(); perm != 0700 {
+		t.Errorf("quyền file socket mong muốn 0700, nhận được %04o", perm)
+	}
+
+	// 2. Thư mục đã tồn tại sẵn với quyền 0755 -> Start không đổi quyền thư mục có sẵn, socket vẫn 0700.
+	existingDir := filepath.Join(baseDir, "existing-dir")
+	if err := os.Mkdir(existingDir, 0755); err != nil {
+		t.Fatalf("mkdir existing-dir: %v", err)
+	}
+	if err := os.Chmod(existingDir, 0755); err != nil {
+		t.Fatalf("chmod existing-dir: %v", err)
+	}
+	sockPath2 := filepath.Join(existingDir, "admin.sock")
+	srv2 := admin.NewServer(sockPath2, newMockHandler(), nil)
+	if err := srv2.Start(); err != nil {
+		t.Fatalf("srv2.Start failed: %v", err)
+	}
+	defer func() { _ = srv2.Close() }()
+
+	existingInfo, err := os.Stat(existingDir)
+	if err != nil {
+		t.Fatalf("stat existing-dir: %v", err)
+	}
+	if perm := existingInfo.Mode().Perm(); perm != 0755 {
+		t.Errorf("quyền thư mục có sẵn không được bị đổi (mong muốn 0755, nhận được %04o)", perm)
+	}
+
+	sockInfo2, err := os.Lstat(sockPath2)
+	if err != nil {
+		t.Fatalf("lstat socket file 2: %v", err)
+	}
+	if perm := sockInfo2.Mode().Perm(); perm != 0700 {
+		t.Errorf("quyền file socket 2 mong muốn 0700, nhận được %04o", perm)
+	}
+}
+
+// TestAD7_StartFailsWhenLiveServerListening kiểm tra Start trả lỗi khi đã có server sống
+// đang lắng nghe trên cùng đường dẫn socket và không làm hỏng socket của server đang chạy.
+func TestAD7_StartFailsWhenLiveServerListening(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "admin.sock")
+
+	srv1 := admin.NewServer(sockPath, newMockHandler(), nil)
+	if err := srv1.Start(); err != nil {
+		t.Fatalf("srv1.Start failed: %v", err)
+	}
+	defer func() { _ = srv1.Close() }()
+
+	srv2 := admin.NewServer(sockPath, newMockHandler(), nil)
+	if err := srv2.Start(); err == nil {
+		_ = srv2.Close()
+		t.Fatalf("srv2.Start phải thất bại khi srv1 đang lắng nghe trên cùng đường dẫn")
+	}
+
+	// Đảm bảo srv1 vẫn tiếp tục phục vụ bình thường (socket không bị xóa mất).
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	top, err := admin.NewClient(sockPath).Top(ctx)
+	if err != nil {
+		t.Fatalf("client.Top tới srv1 sau khi srv2.Start thất bại bị lỗi: %v", err)
+	}
+	if top.PipelineID != "orders-sync" {
+		t.Errorf("pipelineID mong muốn 'orders-sync', nhận được %q", top.PipelineID)
+	}
+}
+
+// TestAD8_StaleSocketReplacedOnStart kiểm tra file socket cũ không còn listener
+// được thay thế thành công khi gọi Start.
+func TestAD8_StaleSocketReplacedOnStart(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "admin.sock")
+
+	// Tạo một UNIX socket rồi đóng listener nhưng giữ lại file socket trên đĩa (stale socket).
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix to create stale socket: %v", err)
+	}
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	if _, err := os.Lstat(sockPath); err != nil {
+		t.Fatalf("stale socket file phải còn tồn tại trên đĩa trước khi Start: %v", err)
+	}
+
+	srv := admin.NewServer(sockPath, newMockHandler(), nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("srv.Start phải thay thế được stale socket nhưng trả lỗi: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	top, err := admin.NewClient(sockPath).Top(ctx)
+	if err != nil {
+		t.Fatalf("client.Top sau khi thay thế stale socket thất bại: %v", err)
+	}
+	if top.PipelineID != "orders-sync" {
+		t.Errorf("pipelineID mong muốn 'orders-sync', nhận được %q", top.PipelineID)
 	}
 }
