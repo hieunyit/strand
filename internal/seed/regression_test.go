@@ -52,6 +52,7 @@ func planners(t *testing.T, gtid string) map[string]planFn {
 		},
 		"mydumper": func(src seed.SeedSource) error {
 			src.Kind, src.BackupRef = "mydumper", mydumperDir(t, gtid)
+			src.AcceptUnverifiedLockMode = true // test này kiểm SD-2, không kiểm chế độ khóa
 			_, err := seed.NewMydumperPlanner().Plan(ctx, src)
 			return err
 		},

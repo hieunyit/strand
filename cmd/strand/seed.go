@@ -25,9 +25,9 @@ func newSeedCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "seed", Short: "Seed từ backup (chế độ B): plan kiểm SD-1..SD-4, apply điều phối restore"}
 
 	var (
-		backup, kind, sourceDSN, targetDSN, archiveUntil, out string
-		tables                                                []string
-		allowPre                                              bool
+		backup, kind, sourceDSN, targetDSN, archiveUntil, out, dumpLog string
+		tables                                                         []string
+		allowPre, acceptUnverifiedLockMode                             bool
 	)
 	plan := &cobra.Command{
 		Use:   "plan",
@@ -37,8 +37,16 @@ func newSeedCmd() *cobra.Command {
 				return exitcode.New("missing_type", exitcode.InvalidSyntax, "missing --type xtrabackup|mydumper|clone", nil)
 			}
 			ctx := cmd.Context()
-			src := seed.SeedSource{Engine: "mysql", Kind: kind, BackupRef: backup, AllowPrereleaseTool: allowPre,
-				Tables: tables, ArchiveUntilGTID: archiveUntil}
+			src := seed.SeedSource{
+				Engine:                   "mysql",
+				Kind:                     kind,
+				BackupRef:                backup,
+				AllowPrereleaseTool:      allowPre,
+				Tables:                   tables,
+				ArchiveUntilGTID:         archiveUntil,
+				DumpLog:                  dumpLog,
+				AcceptUnverifiedLockMode: acceptUnverifiedLockMode,
+			}
 			if sourceDSN != "" {
 				db, err := sql.Open("mysql", sourceDSN)
 				if err != nil {
@@ -78,6 +86,9 @@ func newSeedCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			for _, w := range m.Warnings {
+				fmt.Fprintln(os.Stderr, w)
+			}
 			raw, _ := json.MarshalIndent(m, "", "  ")
 			if dryRun {
 				fmt.Println(string(raw))
@@ -97,6 +108,8 @@ func newSeedCmd() *cobra.Command {
 	plan.Flags().StringVar(&archiveUntil, "archive-until", "", "GTID set đã có trong archive binlog")
 	plan.Flags().StringSliceVar(&tables, "tables", nil, "Danh sách bảng")
 	plan.Flags().BoolVar(&allowPre, "allow-prerelease-tool", false, "Chấp nhận backup tạo bằng công cụ bản RC")
+	plan.Flags().StringVar(&dumpLog, "dump-log", "", "log stderr của mydumper (bắt buộc với --type mydumper, để kiểm chế độ khóa)")
+	plan.Flags().BoolVar(&acceptUnverifiedLockMode, "accept-unverified-lock-mode", false, "Chấp nhận backup mydumper không có log xác minh chế độ khóa")
 	plan.Flags().StringVar(&out, "out", "seed.json", "File seed.json")
 
 	var manifestPath, applyTarget, pfSpool, pfArchive, pfSource string

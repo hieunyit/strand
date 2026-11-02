@@ -46,6 +46,7 @@ func TestG1_E2E_SeedFromMydumperUnderLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	dumpLog := dumpDir + ".log"
 	dumpCmd := exec.Command("docker", "run", "--rm",
 		"--network", nw.Name,
 		"-v", dumpDir+":/dump",
@@ -57,9 +58,14 @@ func TestG1_E2E_SeedFromMydumperUnderLoad(t *testing.T) {
 		"--database=app",
 		"--outputdir=/dump",
 		"--threads=4",
+		"-v", "3",
 	)
-	if out, err := dumpCmd.CombinedOutput(); err != nil {
-		t.Fatalf("mydumper failed: %v\n%s", err, out)
+	dumpOut, err := dumpCmd.CombinedOutput()
+	if err := os.WriteFile(dumpLog, dumpOut, 0o644); err != nil {
+		t.Fatalf("write mydumper log: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("mydumper failed: %v\n%s", err, dumpOut)
 	}
 
 	chmodCmd := exec.Command("docker", "run", "--rm",
@@ -116,6 +122,7 @@ func TestG1_E2E_SeedFromMydumperUnderLoad(t *testing.T) {
 	out, code := runStrandCLI(t, time.Minute, "seed", "plan",
 		"--type", "mydumper",
 		"--backup", dumpDir,
+		"--dump-log", dumpLog,
 		"--source", src.RootDSN,
 		"--target", dst.RootDSN,
 		"--out", manifest,
@@ -180,6 +187,84 @@ func TestG1_E2E_SeedFromMydumperUnderLoad(t *testing.T) {
 		t.Fatalf("exit %d\n%s", code, sp.tail())
 	}
 	compareFinal(t, src, dst, appTables...)
+}
+
+// spec: 02 §9, design §3.3
+// Invariants: SD-1
+func TestP1_E2E_MydumperNoLockRejected(t *testing.T) {
+	seedVal := seedFromEnv(t)
+	ctx := context.Background()
+	nw, err := network.New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = nw.Remove(context.Background()) })
+
+	src := startMySQL(t, mysqlImage("source"), "src", 1, nw)
+	dst := startMySQL(t, mysqlImage("target"), "dst", 2, nw)
+	createSchema(t, src)
+
+	wl := newWorkload(src.DB, seedVal)
+	wl.Preload(t, 1000)
+	wl.Start(2, 1000)
+	defer wl.Stop()
+
+	dir := testDir(t)
+	dumpDir := filepath.Join(dir, "dump")
+	if err := os.MkdirAll(dumpDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dumpDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	dumpLog := dumpDir + ".log"
+	dumpCmd := exec.Command("docker", "run", "--rm",
+		"--network", nw.Name,
+		"-v", dumpDir+":/dump",
+		mydumperImage,
+		"mydumper",
+		"--host=src",
+		"--user=root",
+		"--password=dev",
+		"--database=app",
+		"--outputdir=/dump",
+		"--threads=4",
+		"--sync-thread-lock-mode=NO_LOCK",
+		"-v", "3",
+	)
+	dumpOut, err := dumpCmd.CombinedOutput()
+	if err := os.WriteFile(dumpLog, dumpOut, 0o644); err != nil {
+		t.Fatalf("write mydumper log: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("mydumper failed: %v\n%s", err, dumpOut)
+	}
+
+	chmodCmd := exec.Command("docker", "run", "--rm",
+		"-v", dumpDir+":/dump",
+		mydumperImage,
+		"chmod", "-R", "a+rwX", "/dump",
+	)
+	if out, err := chmodCmd.CombinedOutput(); err != nil {
+		t.Fatalf("chmod dumpDir failed: %v\n%s", err, out)
+	}
+
+	manifest := filepath.Join(dir, "seed.json")
+	out, code := runStrandCLI(t, time.Minute, "seed", "plan",
+		"--type", "mydumper",
+		"--backup", dumpDir,
+		"--source", src.RootDSN,
+		"--target", dst.RootDSN,
+		"--dump-log", dumpLog,
+		"--out", manifest,
+	)
+	if code != 3 {
+		t.Fatalf("seed plan with NO_LOCK: want exit 3, got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "NO_LOCK") {
+		t.Fatalf("seed plan output must mention NO_LOCK, got:\n%s", out)
+	}
 }
 
 // spec: 02 §9, design §3.3
