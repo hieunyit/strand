@@ -5,7 +5,6 @@ package e2e
 // (không dùng code decode của Strand).
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -707,16 +705,6 @@ func (vs *verSampler) check(t *testing.T) {
 }
 
 var appTables = []string{"app.accounts", "app.orders", "app.events"}
-
-func mustLines(s string) []string {
-	var out []string
-	sc := bufio.NewScanner(strings.NewReader(s))
-	for sc.Scan() {
-		out = append(out, sc.Text())
-	}
-	sort.Strings(out)
-	return out
-}
 
 // checkNoOrphans: ràng buộc FK phải đúng ở target sau khi đồng bộ (04 §3, phép kiểm "Ràng buộc").
 func checkNoOrphans(t *testing.T, dst *mysqlNode) {

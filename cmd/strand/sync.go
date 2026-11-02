@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"strand/internal/admin"
-	"strand/internal/checkpoint"
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/pipeline"
@@ -106,19 +105,6 @@ func (c *SyncCoordinator) gracefulStop() error {
 
 	elapsed := time.Since(start)
 	c.logger.Info("checkpoint flushed and shutdown completed successfully", "duration", elapsed.String())
-	return nil
-}
-
-// mockCheckpointFlusher phục vụ trường hợp chạy mặc định hoặc test
-type mockCheckpointFlusher struct {
-	store  checkpoint.CheckpointStore
-	global checkpoint.Global
-}
-
-func (m *mockCheckpointFlusher) FlushCheckpoint(ctx context.Context) error {
-	if m.store != nil {
-		return m.store.WriteGlobal(ctx, m.global)
-	}
 	return nil
 }
 
