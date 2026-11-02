@@ -27,6 +27,12 @@ type TableRanges struct {
 	TailBLast    int64 // b_last: max(pk) sau khi đọc low
 	HasTailBLast bool
 	Chunks       []*Chunk
+
+	// PendingDiscards: GTID của các event stream đã BỎ vì range còn "Chưa đọc". Ở MySQL, event
+	// có trong binlog (stream thấy) TRƯỚC khi InnoDB commit xong (2PC: flush/sync binlog rồi mới
+	// commit engine), nên SELECT của chunk đọc ngay sau đó có thể chưa thấy nó. Trước SELECT phải
+	// chờ WAIT_FOR_EXECUTED_GTID_SET(tập này) để mọi event đã bỏ chắc chắn nằm trong read view.
+	PendingDiscards *checkpoint.MySQLAppliedSet
 }
 
 // NewRangeStateManager khởi tạo RangeStateManager mới.
@@ -223,7 +229,14 @@ func (m *RangeStateManager) HandleStreamEvent(event *model.RowChange, pos model.
 
 	switch chunk.State {
 	case StatePending:
-		// spec: 02 §5 "Chưa đọc: Bỏ. Chunk đọc sau đó có read view mới hơn, nên đã thấy event này"
+		// spec: 02 §5 "Chưa đọc: Bỏ. Chunk đọc sau đó có read view mới hơn, nên đã thấy event này".
+		// Điều này chỉ đúng khi event đã commit ở engine: ghi lại GTID để BeginReading/chờ (xem PendingDiscards).
+		if pos.GTID != "" {
+			if tr.PendingDiscards == nil {
+				tr.PendingDiscards = checkpoint.NewMySQLAppliedSet()
+			}
+			tr.PendingDiscards.Add(pos)
+		}
 		return ActionDiscard, chunk
 
 	case StateReading, StateRendezvous, StateFlushing:
@@ -297,6 +310,31 @@ func (m *RangeStateManager) HandleStreamEventWithPKSplit(event *model.RowChange,
 		})
 	}
 	return results
+}
+
+// BeginReading chuyển chunk sang "Đang đọc" khi CHƯA có low watermark (mọi event sau đó được
+// buffer, không bỏ) và trả về tập GTID các event đã bị bỏ của bảng. Bên đọc phải chờ tập đó
+// visible trên kết nối đọc chunk (WAIT_FOR_EXECUTED_GTID_SET) trước SELECT, rồi gọi
+// ConfirmVisible để thu gọn tập.
+func (m *RangeStateManager) BeginReading(chunk *Chunk) *checkpoint.MySQLAppliedSet {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	chunk.LowWatermark = nil
+	chunk.State = StateReading
+	if tr, ok := m.tables[chunk.Table.String()]; ok && tr.PendingDiscards != nil {
+		return tr.PendingDiscards.Clone().(*checkpoint.MySQLAppliedSet)
+	}
+	return checkpoint.NewMySQLAppliedSet()
+}
+
+// ConfirmVisible loại khỏi PendingDiscards các GTID đã được xác nhận visible (đã commit nên
+// visible với mọi read view sau này).
+func (m *RangeStateManager) ConfirmVisible(table model.TableID, visible *checkpoint.MySQLAppliedSet) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if tr, ok := m.tables[table.String()]; ok && tr.PendingDiscards != nil && visible != nil {
+		tr.PendingDiscards.Subtract(visible)
+	}
 }
 
 // StartReading chuyển trạng thái chunk sang StateReading kèm low watermark.

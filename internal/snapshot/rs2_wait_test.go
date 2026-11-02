@@ -102,7 +102,7 @@ func TestRS2_WaitRunsOnSameConnBetweenLowAndSelect(t *testing.T) {
 		"select@conn1",
 		"gtid:" + high,
 	}
-	if strings.Join(src.log, "|") != strings.Join(want, "|") {
+	if !strings.EqualFold(strings.Join(src.log, "|"), strings.Join(want, "|")) { // UUID được chuẩn hóa chữ thường
 		t.Fatalf("order:\n got %v\nwant %v", src.log, want)
 	}
 }
@@ -121,7 +121,7 @@ func TestRS2_WaitTimeoutIsRetriedThenSelect(t *testing.T) {
 		"select@conn1",
 		"gtid:" + low,
 	}
-	if strings.Join(src.log, "|") != strings.Join(want, "|") {
+	if !strings.EqualFold(strings.Join(src.log, "|"), strings.Join(want, "|")) { // UUID được chuẩn hóa chữ thường
 		t.Fatalf("order:\n got %v\nwant %v", src.log, want)
 	}
 }
@@ -167,5 +167,55 @@ func TestRS2_PersistentTimeoutFails(t *testing.T) {
 		if strings.HasPrefix(l, "select") {
 			t.Fatalf("SELECT must not run before low is visible: %v", src.log)
 		}
+	}
+}
+
+// invariant: RS-1
+// Event của range "Chưa đọc" bị bỏ, nhưng ở MySQL stream thấy event (binlog đã flush/sync) TRƯỚC khi
+// InnoDB commit xong: gtid_executed lúc đọc low có thể chưa chứa nó và SELECT có thể chưa thấy nó.
+// Trước SELECT phải chờ cả các GTID đã bỏ, nếu không thay đổi đó mất vĩnh viễn (vd. row đổi PK đi
+// nơi khác vẫn nằm lại ở target).
+func TestRS1_PendingDiscardMustBeVisibleBeforeChunkSelect(t *testing.T) {
+	s, chunk := rs2Snapshotter()
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	ev := &model.RowChange{Table: chunk.Table, Op: model.OpDelete, Key: []model.Value{int64(3)}}
+	if act, _ := s.Manager.HandleStreamEvent(ev, model.Pos{Engine: model.EngineMySQL, GTID: u + ":7"}); act != ActionDiscard {
+		t.Fatalf("pending range: action %v, want discard", act)
+	}
+	// low đọc ngay sau đó CHƯA chứa :7 (engine chưa commit xong).
+	src := &fakeSource{gtids: []string{u + ":1-5", u + ":1-8"}}
+	if _, _, err := s.readChunkWatermarked(context.Background(), src, chunk, "SELECT", []string{"id"}, 0, chunk.Table); err != nil {
+		t.Fatal(err)
+	}
+	var wait string
+	for _, l := range src.log {
+		if strings.HasPrefix(l, "wait:") {
+			wait = l
+			break
+		}
+		if strings.HasPrefix(l, "select") {
+			t.Fatalf("SELECT ran before any wait: %v", src.log)
+		}
+	}
+	set := ParseMySQLGTIDSet(strings.TrimSuffix(strings.TrimPrefix(wait, "wait:"), "@conn1/30"))
+	if !set.Contains(model.Pos{Engine: model.EngineMySQL, GTID: u + ":7"}) {
+		t.Fatalf("wait set %q does not include the discarded GTID :7 (log %v)", wait, src.log)
+	}
+	// Sau khi đã chờ, GTID :7 visible với mọi read view: chunk sau không phải chờ lại.
+	s.Manager.mu.RLock()
+	left := s.Manager.tables[chunk.Table.String()].PendingDiscards.String()
+	s.Manager.mu.RUnlock()
+	if left != "" {
+		t.Fatalf("PendingDiscards not trimmed after confirmed wait: %q", left)
+	}
+}
+
+// Event đến trong lúc chunk đã chuyển "Đang đọc" nhưng chưa có low phải được buffer (không bỏ).
+func TestRS1_EventBetweenBeginReadingAndLowIsBuffered(t *testing.T) {
+	s, chunk := rs2Snapshotter()
+	s.Manager.BeginReading(chunk)
+	ev := &model.RowChange{Table: chunk.Table, Op: model.OpDelete, Key: []model.Value{int64(4)}}
+	if act, _ := s.Manager.HandleStreamEvent(ev, model.Pos{Engine: model.EngineMySQL, GTID: "3e11fa47-71ca-11e1-9e33-c80aa9429562:9"}); act != ActionBuffer {
+		t.Fatalf("action %v, want buffer", act)
 	}
 }

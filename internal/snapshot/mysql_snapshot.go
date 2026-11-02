@@ -176,11 +176,18 @@ func (s *MySQLSnapshotter) readChunkWatermarked(
 	pkIdx int,
 	table model.TableID,
 ) ([]*model.RowChange, checkpoint.AppliedSet, error) {
+	// Event bị bỏ khi range còn "Chưa đọc" có thể chưa commit ở engine (2PC): chuyển chunk sang
+	// "Đang đọc" (buffer mọi event mới) rồi chờ các GTID đó visible trên kết nối đọc chunk.
+	discarded := s.Manager.BeginReading(chunk)
 	chunkLowStr, err := src.GetGlobalGTIDExecuted(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read chunk low watermark: %w", err)
 	}
-	s.Manager.StartReading(chunk, ParseMySQLGTIDSet(chunkLowStr))
+	chunkLow := ParseMySQLGTIDSet(chunkLowStr)
+	s.Manager.StartReading(chunk, chunkLow)
+	waitSet := chunkLow.Clone().(*checkpoint.MySQLAppliedSet)
+	waitSet.Merge(discarded)
+	waitStr := waitSet.String()
 
 	queryFn := func(qCtx context.Context, c *Chunk) ([]*model.RowChange, int64, error) {
 		conn, err := src.OpenChunkConn(ctx)
@@ -190,7 +197,7 @@ func (s *MySQLSnapshotter) readChunkWatermarked(
 		defer conn.Close()
 		// Chờ dùng ctx cha: timeout của SELECT (5 s) không áp cho bước chờ replica.
 		for attempt := 1; ; attempt++ {
-			err = WaitForExecutedGTIDSet(ctx, conn, chunkLowStr, WaitExecutedGTIDTimeoutSeconds)
+			err = WaitForExecutedGTIDSet(ctx, conn, waitStr, WaitExecutedGTIDTimeoutSeconds)
 			if err == nil {
 				break
 			}
@@ -207,6 +214,8 @@ func (s *MySQLSnapshotter) readChunkWatermarked(
 	if err != nil {
 		return nil, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
 	}
+
+	s.Manager.ConfirmVisible(chunk.Table, discarded)
 
 	chunkHighStr, err := src.GetGlobalGTIDExecuted(ctx)
 	if err != nil {
