@@ -24,6 +24,7 @@ type SpoolIter interface {
 // Spool là interface hàng đợi log trên đĩa cho transaction theo spec/02-specs.md §3.
 type Spool interface {
 	Append(ctx context.Context, t *model.Txn) error
+	Flush(ctx context.Context) error
 	Iter(ctx context.Context, from model.Pos) (SpoolIter, error)
 	Truncate(ctx context.Context, applied checkpoint.AppliedSet) error
 	Usage() SpoolUsage // số byte theo từng tầng
