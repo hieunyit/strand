@@ -171,7 +171,7 @@ func TestVF3_VerifyModes_SampleAndDelta(t *testing.T) {
 		Table:        "users",
 		PKColumns:    []string{"id"},
 		ValueColumns: []string{"name", "amount", "status"},
-		ChunkSize:    10, // 100 rows / 10 = 10 ranges
+		ChunkSize:    10,  // 100 rows / 10 = 10 ranges
 		SampleRate:   0.2, // 20% = 2 ranges
 	}
 

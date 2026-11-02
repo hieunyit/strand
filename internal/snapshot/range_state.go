@@ -66,6 +66,13 @@ func (m *RangeStateManager) RemoveTable(table model.TableID) {
 	delete(m.tables, table.String())
 }
 
+// TableCount trả về số bảng đang snapshot.
+func (m *RangeStateManager) TableCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.tables)
+}
+
 // IsRegistered cho biết bảng có đang được snapshot không.
 func (m *RangeStateManager) IsRegistered(table model.TableID) bool {
 	m.mu.RLock()

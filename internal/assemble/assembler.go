@@ -50,7 +50,18 @@ type KeyMeta struct {
 // và RowChange.ForeignKeys (gồm cả giá trị cũ khi UPDATE đổi unique key).
 func WithKeyMetadata(meta map[model.TableID]KeyMeta) Option {
 	return func(a *Assembler) {
-		a.keyMeta = meta
+		a.keyMeta = func(t model.TableID) (KeyMeta, bool) {
+			m, ok := meta[t]
+			return m, ok
+		}
+	}
+}
+
+// WithKeyMetadataFunc như WithKeyMetadata nhưng tra cứu qua hàm (metadata có thể thay đổi
+// khi pipeline đang chạy, ví dụ snapshot add một bảng mới).
+func WithKeyMetadataFunc(fn func(model.TableID) (KeyMeta, bool)) Option {
+	return func(a *Assembler) {
+		a.keyMeta = fn
 	}
 }
 
@@ -73,7 +84,7 @@ type Assembler struct {
 	currentSpill *SpillBuffer
 	inTxn        bool
 	sawBegin     bool // đã thấy QUERY "BEGIN" (Txn DML); chưa thấy mà gặp QUERY khác => DDL
-	keyMeta      map[model.TableID]KeyMeta
+	keyMeta      func(model.TableID) (KeyMeta, bool)
 }
 
 // colIndex trả về vị trí cột theo tên trong schema, -1 nếu không có.
@@ -106,7 +117,10 @@ func pickValues(t *TableSchema, row []any, cols []string) ([]model.Value, bool) 
 
 // enrichKeys điền unique key và FK cho row từ metadata (before có thể nil).
 func (a *Assembler) enrichKeys(tid model.TableID, t *TableSchema, before, after []any, rc *model.RowChange) {
-	meta, ok := a.keyMeta[tid]
+	if a.keyMeta == nil {
+		return
+	}
+	meta, ok := a.keyMeta(tid)
 	if !ok {
 		return
 	}

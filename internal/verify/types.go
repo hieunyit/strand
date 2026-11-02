@@ -20,8 +20,8 @@ type TableConfig struct {
 	Table        string
 	PKColumns    []string
 	ValueColumns []string
-	SampleRate   float64 // 0.0 -> 1.0 (ví dụ 0.1 là 10% số range)
-	ChunkSize    int     // Số dòng trong mỗi chunk/range để tính hash
+	SampleRate   float64  // 0.0 -> 1.0 (ví dụ 0.1 là 10% số range)
+	ChunkSize    int      // Số dòng trong mỗi chunk/range để tính hash
 	DeltaRanges  [][2]any // Khoảng PK [min, max] được chỉ định khi chạy ModeDelta
 }
 

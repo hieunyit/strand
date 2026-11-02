@@ -11,18 +11,18 @@ import (
 
 // Config mô tả đầy đủ tệp cấu hình pipeline Strand theo spec/02-specs.md §10
 type Config struct {
-	Version       int                  `yaml:"version" json:"version"`
-	Name          string               `yaml:"name" json:"name"`
-	Source        SourceConfig         `yaml:"source" json:"source"`
-	Target        TargetConfig         `yaml:"target" json:"target"`
-	Tables        TablesConfig         `yaml:"tables" json:"tables"`
-	Bootstrap     BootstrapConfig      `yaml:"bootstrap" json:"bootstrap"`
-	Schema        SchemaConfig         `yaml:"schema" json:"schema"`
-	Checkpoint    CheckpointConfig     `yaml:"checkpoint" json:"checkpoint"`
-	Resources     ResourcesConfig      `yaml:"resources" json:"resources"`
-	Governor      GovernorConfig       `yaml:"governor" json:"governor"`
-	Verify        VerifyConfig         `yaml:"verify" json:"verify"`
-	Observability ObservabilityConfig  `yaml:"observability" json:"observability"`
+	Version       int                 `yaml:"version" json:"version"`
+	Name          string              `yaml:"name" json:"name"`
+	Source        SourceConfig        `yaml:"source" json:"source"`
+	Target        TargetConfig        `yaml:"target" json:"target"`
+	Tables        TablesConfig        `yaml:"tables" json:"tables"`
+	Bootstrap     BootstrapConfig     `yaml:"bootstrap" json:"bootstrap"`
+	Schema        SchemaConfig        `yaml:"schema" json:"schema"`
+	Checkpoint    CheckpointConfig    `yaml:"checkpoint" json:"checkpoint"`
+	Resources     ResourcesConfig     `yaml:"resources" json:"resources"`
+	Governor      GovernorConfig      `yaml:"governor" json:"governor"`
+	Verify        VerifyConfig        `yaml:"verify" json:"verify"`
+	Observability ObservabilityConfig `yaml:"observability" json:"observability"`
 }
 
 type SourceConfig struct {
@@ -90,11 +90,11 @@ type CheckpointConfig struct {
 }
 
 type ResourcesConfig struct {
-	Memory  MemoryLimits   `yaml:"memory" json:"memory"`
-	Spool   SpoolLimits    `yaml:"spool" json:"spool"`
-	Source  IOPSLimits     `yaml:"source" json:"source"`
-	Target  IOPSLimits     `yaml:"target" json:"target"`
-	Workers WorkersLimits  `yaml:"workers" json:"workers"`
+	Memory  MemoryLimits  `yaml:"memory" json:"memory"`
+	Spool   SpoolLimits   `yaml:"spool" json:"spool"`
+	Source  IOPSLimits    `yaml:"source" json:"source"`
+	Target  IOPSLimits    `yaml:"target" json:"target"`
+	Workers WorkersLimits `yaml:"workers" json:"workers"`
 }
 
 type MemoryLimits struct {

@@ -63,6 +63,7 @@ type Pipeline struct {
 	epoch   int64
 
 	filter   *tableFilter
+	tablesMu sync.RWMutex
 	tables   map[model.TableID]*tableMeta
 	state    *localState
 	applied0 *checkpoint.MySQLAppliedSet // tập đã apply lúc khởi động (CP-2)
@@ -346,9 +347,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.snap.SavePlan = func(t model.TableID, pl snapshot.SnapshotPlan) error { return p.state.SetPlan(t.String(), pl) }
 
 	// --- Reader + Assembler ---
-	keyMeta := make(map[model.TableID]assemble.KeyMeta, len(p.tables))
-	for id, m := range p.tables {
-		keyMeta[id] = m.Keys
+	keyMeta := func(id model.TableID) (assemble.KeyMeta, bool) {
+		m := p.table(id)
+		if m == nil {
+			return assemble.KeyMeta{}, false
+		}
+		return m.Keys, true
 	}
 	spillDir := filepath.Join(p.cfg.Resources.Spool.Path, "spill")
 	if err := os.MkdirAll(spillDir, 0o750); err != nil {
@@ -365,7 +369,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return err
 	}
 	defer rd.Close()
-	asm := assemble.New(assemble.WithKeyMetadata(keyMeta), assemble.WithSpillDir(spillDir))
+	asm := assemble.New(assemble.WithKeyMetadataFunc(keyMeta), assemble.WithSpillDir(spillDir))
 	for id, m := range p.tables {
 		asm.Registry().RegisterTable(id.Schema, id.Table, m.PK, m.Columns)
 	}
@@ -578,8 +582,16 @@ func (p *Pipeline) markSeen(pos model.Pos) {
 	p.seenMu.Unlock()
 }
 
+func (p *Pipeline) table(id model.TableID) *tableMeta {
+	p.tablesMu.RLock()
+	defer p.tablesMu.RUnlock()
+	return p.tables[id]
+}
+
 func (p *Pipeline) ddlTouchesIncluded(t *model.Txn) bool {
 	q := strings.ToLower(t.DDL)
+	p.tablesMu.RLock()
+	defer p.tablesMu.RUnlock()
 	for id := range p.tables {
 		if strings.Contains(q, strings.ToLower(id.Table)) {
 			return true
@@ -605,8 +617,8 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 
 	out := &model.Txn{SourcePos: pos, SourceTS: t.SourceTS}
 	keep := func(rc *model.RowChange, emit func(model.RowChange) error) error {
-		if !p.filter.Included(rc.Table) {
-			return nil
+		if p.table(rc.Table) == nil {
+			return nil // ngoài pipeline (bộ lọc, hoặc chưa snapshot add)
 		}
 		parts := []*model.RowChange{rc}
 		if p.snap.Manager.IsRegistered(rc.Table) {
@@ -897,7 +909,7 @@ func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {
 }
 
 func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
-	m := p.tables[id]
+	m := p.table(id)
 	start := time.Now()
 	p.log.Info("snapshot start", "table", id.String())
 	if err := p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], m.Columns, p.rendezvous); err != nil {
@@ -913,29 +925,60 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	return nil
 }
 
-// SnapshotAdd thêm một bảng khi pipeline đang chạy (strand snapshot add).
+// SnapshotAdd thêm một bảng khi pipeline đang chạy (strand snapshot add, 02 §10).
+// Bảng chưa có trong pipeline được thêm vào ngay (metadata đọc từ source); để giữ bảng sau
+// khi restart, người vận hành phải thêm nó vào tables.include.
 func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	s, t, ok := strings.Cut(table, ".")
 	if !ok {
 		return fmt.Errorf("table must be schema.table")
 	}
 	id := model.TableID{Schema: s, Table: t}
-	m, ok := p.tables[id]
-	if !ok {
-		return fmt.Errorf("table %s is not in tables.include (update the config and restart)", id)
+	if p.snap.Manager.IsRegistered(id) {
+		return fmt.Errorf("table %s is already being snapshotted", id)
+	}
+	m := p.table(id)
+	if m == nil {
+		one, err := newTableFilter([]string{id.String()}, nil, p.cfg.Tables.Rename)
+		if err != nil {
+			return err
+		}
+		metas, err := loadSourceTables(ctx, p.src, one)
+		if err != nil {
+			return err
+		}
+		if m = metas[id]; m == nil {
+			return fmt.Errorf("table %s does not exist on source", id)
+		}
+		if len(m.PK) == 0 {
+			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("table %s has no primary key", id), nil)
+		}
 	}
 	if !m.PKNumeric {
 		return fmt.Errorf("table %s: logical snapshot needs a single integer primary key", id)
 	}
-	if p.snap.Manager.IsRegistered(id) {
-		return fmt.Errorf("table %s is already being snapshotted", id)
-	}
 	if err := p.state.SetDone(id.String(), false); err != nil {
 		return err
 	}
+	// Đăng ký PK cho writer trước khi router bắt đầu đưa event của bảng vào pipeline.
+	for _, w := range p.writers {
+		w.SetPrimaryKey(p.filter.Target(id), m.PK)
+	}
+	p.routeMu.Lock()
+	p.tablesMu.Lock()
+	added := p.tables[id] == nil
+	p.tables[id] = m
+	p.tablesMu.Unlock()
+	p.routeMu.Unlock()
+	p.log.Info("snapshot add requested", "table", id.String(), "new_table", added)
+	p.bootstrap.Store(true)
 	go func() {
 		if err := p.snapshotTable(ctx, id); err != nil && ctx.Err() == nil {
 			p.fail(fmt.Errorf("snapshot add %s: %w", id, err))
+			return
+		}
+		if p.snap.Manager.TableCount() == 0 {
+			p.bootstrap.Store(false)
 		}
 	}()
 	return nil
