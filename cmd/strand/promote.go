@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
@@ -21,6 +22,7 @@ var (
 	promoteOverrideSeqsJSON string
 	promotePeakRate         float64
 	promoteSyncIntervalSec  float64
+	promoteCatchUpTimeout   time.Duration
 )
 
 func newPromoteCmd() *cobra.Command {
@@ -49,6 +51,7 @@ func newPromoteCmd() *cobra.Command {
 			}
 			defer targetDB.Close()
 
+			logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 			targetDriver := promote.NewMySQLTargetDriver(targetDB)
 			stateStore := promote.NewDBStateStore(targetDB)
 
@@ -56,10 +59,12 @@ func newPromoteCmd() *cobra.Command {
 			var sourceDriver promote.SourceDriver
 			if promoteFenceSourceDSN != "" {
 				sourceDB, err := sql.Open("mysql", promoteFenceSourceDSN)
-				if err == nil {
-					defer sourceDB.Close()
-					sourceDriver = promote.NewMySQLSourceDriver(sourceDB)
+				if err != nil {
+					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 				}
+				defer sourceDB.Close()
+				sourceDriver = promote.NewMySQLSourceDriver(sourceDB)
+				targetDriver.WithCatchUpCheck(sourceDB, promotePipelineID, promoteCatchUpTimeout, logger)
 			}
 
 			cfg := promote.Config{
@@ -72,7 +77,6 @@ func newPromoteCmd() *cobra.Command {
 				SequenceOverrides: seqOverrides,
 			}
 
-			logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 			p := promote.NewPromoter(cfg, stateStore, sourceDriver, targetDriver, nil, logger)
 
 			progress, err := p.Run(cmd.Context())
@@ -104,6 +108,7 @@ func newPromoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&promotePipelineID, "pipeline", "default", "ID định danh của pipeline")
 	cmd.Flags().StringVar(&promoteOverrideSeqsJSON, "override-sequences", "", "JSON chỉ định giá trị cho các sequence độc lập khi source hỏng")
 	cmd.Flags().Float64Var(&promotePeakRate, "peak-rate", 1000, "Tốc độ cấp phát đỉnh r_peak (keys/giây)")
+	cmd.Flags().DurationVar(&promoteCatchUpTimeout, "catchup-timeout", 5*time.Minute, "Thời gian tối đa chờ target apply hết log của source ở bước 3")
 	cmd.Flags().Float64Var(&promoteSyncIntervalSec, "sync-interval", 5, "Chu kỳ đồng bộ sequence Delta t_sync (giây)")
 
 	return cmd

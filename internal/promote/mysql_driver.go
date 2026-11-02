@@ -4,6 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"time"
+
+	"strand/internal/checkpoint"
+	"strand/internal/model"
 )
 
 // MySQLSourceDriver thực thi các thao tác trên MySQL source.
@@ -54,6 +59,41 @@ func (d *MySQLSourceDriver) ReadSequenceLastValue(ctx context.Context, seqName s
 // MySQLTargetDriver thực thi các thao tác trên MySQL target.
 type MySQLTargetDriver struct {
 	db *sql.DB
+
+	// Kiểm tra bước 3 (apply nốt log): source đã fence, pipeline trên target.
+	source          *sql.DB
+	pipelineID      string
+	catchUpTimeout  time.Duration
+	catchUpInterval time.Duration
+	logger          *slog.Logger
+}
+
+// WithCatchUpCheck cấu hình cách bước 3 xác minh target đã apply hết log của source.
+func (d *MySQLTargetDriver) WithCatchUpCheck(source *sql.DB, pipelineID string, timeout time.Duration, logger *slog.Logger) *MySQLTargetDriver {
+	d.source = source
+	d.pipelineID = pipelineID
+	d.catchUpTimeout = timeout
+	d.catchUpInterval = 500 * time.Millisecond
+	if logger == nil {
+		logger = slog.Default()
+	}
+	d.logger = logger
+	return d
+}
+
+// MissingFromApplied trả về các GTID đã executed trên source nhưng chưa có trong tập đã apply
+// của target ("" nghĩa là target đã theo kịp).
+func MissingFromApplied(sourceExecuted string, applied checkpoint.AppliedSet) (string, error) {
+	src, err := checkpoint.ParseMySQLGTIDSet(sourceExecuted)
+	if err != nil {
+		return "", fmt.Errorf("parse source gtid_executed: %w", err)
+	}
+	if my, ok := applied.(*checkpoint.MySQLAppliedSet); ok {
+		src.Subtract(my)
+	} else if applied != nil {
+		return "", fmt.Errorf("applied set is not a MySQL GTID set")
+	}
+	return src.String(), nil
 }
 
 // NewMySQLTargetDriver khởi tạo MySQLTargetDriver.
@@ -77,10 +117,45 @@ func (d *MySQLTargetDriver) IsReadOnly(ctx context.Context) (bool, error) {
 	return val == 1, nil
 }
 
-// ApplyRemaining xả hết các log còn lại vào target.
+// ApplyRemaining (bước 3) chờ đến khi mọi GTID đã executed trên source (đã fence) nằm trong
+// tập đã apply của pipeline trên target. Không xác minh được thì trả lỗi, để promote
+// không bao giờ mở ghi khi target còn thiếu dữ liệu (PR-1).
+// Failover khẩn cấp (source không truy cập được): theo 05 §5, mất dữ liệu bằng lag là
+// chấp nhận được, nên chỉ cảnh báo và đi tiếp.
 func (d *MySQLTargetDriver) ApplyRemaining(ctx context.Context) error {
-	// Trong thực tế, gọi pipeline writer để flush nốt buffer
-	return nil
+	if d.source == nil || d.pipelineID == "" || d.db == nil {
+		return fmt.Errorf("apply remaining: cannot verify the target caught up (no source connection / pipeline id configured)")
+	}
+	if err := d.source.PingContext(ctx); err != nil {
+		d.logger.Warn("source unreachable: cannot verify remaining log was applied (failover; data loss bounded by lag)", "error", err)
+		return nil
+	}
+	var executed string
+	if err := d.source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&executed); err != nil {
+		return fmt.Errorf("apply remaining: read source gtid_executed: %w", err)
+	}
+	deadline := time.Now().Add(d.catchUpTimeout)
+	for {
+		applied, err := checkpoint.LoadAppliedSnapshotMySQL(ctx, d.db, d.pipelineID, model.EngineMySQL)
+		if err != nil {
+			return fmt.Errorf("apply remaining: load target applied set: %w", err)
+		}
+		missing, err := MissingFromApplied(executed, applied)
+		if err != nil {
+			return err
+		}
+		if missing == "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("apply remaining: target still missing %s after %s", missing, d.catchUpTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d.catchUpInterval):
+		}
+	}
 }
 
 // FindColumnMax tìm giá trị MAX của cột trong bảng target.

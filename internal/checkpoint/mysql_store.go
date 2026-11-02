@@ -246,3 +246,38 @@ func (s *MySQLStore) WriteGlobal(ctx context.Context, g Global) error {
 func (s *MySQLStore) Close() error {
 	return nil
 }
+
+// LoadAppliedSnapshotMySQL đọc tập đã apply hiện hành của pipeline trên target MySQL
+// (row toàn cục ∪ mọi row delta của epoch hiện tại) mà không cần giữ khóa pipeline.
+// Dùng cho promote để kiểm target đã theo kịp source.
+func LoadAppliedSnapshotMySQL(ctx context.Context, db *sql.DB, pipelineID string, sourceEngine model.Engine) (AppliedSet, error) {
+	var epoch int64
+	if err := db.QueryRowContext(ctx, "SELECT epoch FROM _strand_pipeline WHERE pipeline_id = ?", pipelineID).Scan(&epoch); err != nil {
+		return nil, fmt.Errorf("read pipeline epoch: %w", err)
+	}
+	var global string
+	if err := db.QueryRowContext(ctx, "SELECT applied FROM _strand_checkpoint WHERE pipeline_id = ?", pipelineID).Scan(&global); err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("read global checkpoint: %w", err)
+	}
+	set, err := ParseAppliedSet(sourceEngine, global)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, "SELECT applied FROM _strand_worker_delta WHERE pipeline_id = ? AND epoch = ?", pipelineID, epoch)
+	if err != nil {
+		return nil, fmt.Errorf("read worker deltas: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		ds, err := ParseAppliedSet(sourceEngine, d)
+		if err != nil {
+			return nil, err
+		}
+		set.Merge(ds)
+	}
+	return set, rows.Err()
+}
