@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"sync/atomic"
+	"syscall"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
@@ -98,7 +102,7 @@ func newSeedCmd() *cobra.Command {
 	var manifestPath, applyTarget, pfSpool, pfArchive, pfSource string
 	var printOnly, pfOn bool
 	var pfHard, pfLocalHard int64
-	var pfOverflow string
+	var pfOverflow, restoreCmd string
 	apply := &cobra.Command{
 		Use:   "apply",
 		Short: "Điều phối restore/load rồi chuẩn bị target cho catch-up; chạy lại được khi bị ngắt",
@@ -120,11 +124,28 @@ func newSeedCmd() *cobra.Command {
 			}
 			// Prefetch (mặc định bật): đọc log từ P vào spool trong lúc restore (02 §9).
 			if pfOn && pfSpool != "" {
-				n, err := prefetch(cmd.Context(), &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource)
+				var n int
+				if restoreCmd != "" {
+					n, err = coordinateRestoreAndPrefetch(
+						cmd.Context(),
+						func(rctx context.Context) error {
+							return runRestoreShellCmd(rctx, restoreCmd)
+						},
+						func(pctx context.Context, until <-chan struct{}) (int, error) {
+							return prefetch(pctx, &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource, until)
+						},
+					)
+				} else {
+					n, err = prefetch(cmd.Context(), &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource, nil)
+				}
 				if err != nil {
 					return err
 				}
 				fmt.Printf("prefetch: %d transactions after P stored in spool %s\n", n, pfSpool)
+			} else if restoreCmd != "" {
+				if err := runRestoreShellCmd(cmd.Context(), restoreCmd); err != nil {
+					return fmt.Errorf("restore-cmd failed: %w", err)
+				}
 			}
 			if applyTarget == "" {
 				return exitcode.New("missing_target", exitcode.InvalidSyntax, "missing --target", nil)
@@ -156,6 +177,7 @@ func newSeedCmd() *cobra.Command {
 	apply.Flags().Int64Var(&pfLocalHard, "spool-local-hard", 0, "Hard limit (byte) tầng local; vượt thì tràn sang --overflow")
 	apply.Flags().StringVar(&pfOverflow, "overflow", "", "Tầng bucket s3://bucket/prefix (endpoint/credential qua STRAND_S3_*)")
 	apply.Flags().StringVar(&pfSource, "source", "", "DSN source/replica để prefetch phần chưa archive")
+	apply.Flags().StringVar(&restoreCmd, "restore-cmd", "", "Lệnh restore chạy bằng sh -c song song với prefetch")
 
 	cmd.AddCommand(plan, apply)
 	return cmd
@@ -214,4 +236,67 @@ func prepareRestoredTarget(ctx context.Context, db *sql.DB, m *seed.SeedManifest
 	}
 	m.PositionCrossCheck = &seed.PositionCrossCheck{RestoredGTIDExecuted: executed, Match: true}
 	return nil
+}
+
+// runRestoreShellCmd chạy lệnh restore qua sh -c, chuyển toàn bộ stdout/stderr sang stderr của strand.
+// Đặt process group riêng để khi hủy context (do prefetch lỗi) thì dừng cả tiến trình con.
+func runRestoreShellCmd(ctx context.Context, cmdStr string) error {
+	c := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	c.Stdout = os.Stderr
+	c.Stderr = os.Stderr
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		if c.Process != nil {
+			_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+			return c.Process.Kill()
+		}
+		return nil
+	}
+	return c.Run()
+}
+
+// coordinateRestoreAndPrefetch điều phối restoreFn chạy song song với prefetchFn:
+//   - restoreFn thoát 0 -> đóng until để prefetchFn đọc nốt tới gtid_executed hiện tại rồi dừng;
+//   - restoreFn thoát != 0 -> hủy context của prefetchFn và trả lỗi restore (exit 1);
+//   - prefetchFn lỗi -> hủy context của restoreFn và trả nguyên lỗi prefetch (giữ exit code).
+func coordinateRestoreAndPrefetch(
+	ctx context.Context,
+	restoreFn func(ctx context.Context) error,
+	prefetchFn func(ctx context.Context, until <-chan struct{}) (int, error),
+) (int, error) {
+	rctx, cancelRestore := context.WithCancel(ctx)
+	defer cancelRestore()
+	pctx, cancelPrefetch := context.WithCancel(ctx)
+	defer cancelPrefetch()
+
+	until := make(chan struct{})
+	var prefetchFailed atomic.Bool
+	restoreErrCh := make(chan error, 1)
+	go func() {
+		err := restoreFn(rctx)
+		if err == nil {
+			close(until)
+		} else if !prefetchFailed.Load() {
+			cancelPrefetch()
+		}
+		restoreErrCh <- err
+	}()
+
+	n, pErr := prefetchFn(pctx, until)
+	if pErr != nil {
+		prefetchFailed.Store(true)
+		cancelRestore()
+	}
+	rErr := <-restoreErrCh
+	if pErr != nil {
+		// Nếu prefetchFn chỉ dừng vì restoreFn lỗi và hủy pctx, trả lỗi của restore-cmd (exit 1).
+		if rErr != nil && errors.Is(pErr, context.Canceled) && ctx.Err() == nil {
+			return n, fmt.Errorf("restore-cmd failed: %w", rErr)
+		}
+		return n, pErr
+	}
+	if rErr != nil {
+		return n, fmt.Errorf("restore-cmd failed: %w", rErr)
+	}
+	return n, nil
 }

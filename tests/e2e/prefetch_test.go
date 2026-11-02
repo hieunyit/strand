@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,6 +119,42 @@ func setupPurgedAfterP(t *testing.T, seed int64) *prefetchEnv {
 	return e
 }
 
+// setupSeedAtP dựng env tại vị trí P: target đã STOP/RESET replica và tạo DB strand trước khi
+// chụp P, chạy seed plan --type clone; không archive, không purge.
+func setupSeedAtP(t *testing.T, seed int64) *prefetchEnv {
+	t.Helper()
+	ctx := context.Background()
+	nw, err := network.New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = nw.Remove(context.Background()) })
+	e := &prefetchEnv{}
+	e.src = startMySQL(t, mysqlImage("source"), "src", 1, nw)
+	e.dst = startMySQL(t, mysqlImage("target"), "dst", 2, nw)
+	makeReplica(t, e.dst, "src")
+	createSchema(t, e.src)
+	wl := newWorkload(e.src.DB, seed)
+	wl.Preload(t, 3000)
+	waitReplicaCaughtUp(t, e.src, e.dst)
+	e.dst.exec(t, "STOP REPLICA", "RESET REPLICA ALL")
+	e.dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
+	p := strings.ReplaceAll(e.dst.gtidExecuted(t), "\n", "")
+
+	e.dir = testDir(t)
+	backup := filepath.Join(e.dir, "backup")
+	_ = os.MkdirAll(backup, 0o750)
+	_ = os.WriteFile(filepath.Join(backup, "clone_status.txt"), []byte(p), 0o640)
+	e.manifest = filepath.Join(e.dir, "seed.json")
+	if out, code := runStrandCLI(t, time.Minute, "seed", "plan", "--type", "clone", "--backup", backup,
+		"--source", e.src.RootDSN, "--out", e.manifest); code != 0 {
+		t.Fatalf("seed plan: exit %d\n%s", code, out)
+	}
+	e.cfg = strandCfg{Name: "e2e-prefetch", SourceDSN: e.src.RootDSN, TargetDSN: e.dst.RootDSN + "strand",
+		Include: []string{"app.*"}, Exclude: []string{"app.ignored"}, Dir: e.dir, Bootstrap: "seed"}
+	return e
+}
+
 // P1-14 / Gate 1: archive bị xóa trong lúc seed apply — prefetch đã đưa log vào spool nên
 // catch-up vẫn đủ; 0 lệch.
 func TestG1_E2E_PrefetchRescuesDeletedArchive(t *testing.T) {
@@ -202,6 +239,83 @@ func TestG1_E2E_PrefetchSpoolOverflowsToBucket(t *testing.T) {
 	}
 	t.Logf("%s", strings.TrimSpace(out))
 	_ = os.RemoveAll(e.archive)
+	p := startStrand(t, e.cfg.write(t), "--start-at", "seed", "--seed-manifest", e.manifest)
+	waitSynced(t, &e.cfg, p, 3*time.Minute)
+	waitCaughtUp(t, e.src, e.dst, &e.cfg, p, 3*time.Minute)
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("exit %d\n%s", code, p.tail())
+	}
+	compareFinal(t, e.src, e.dst, appTables...)
+}
+
+// P1-14 / Gate 1: restore kéo dài (--restore-cmd), source ghi liên tục và mỗi 5 s FLUSH + PURGE
+// binlog; prefetch đọc liên tục từ source vào spool (tràn sang bucket) trong suốt lúc restore,
+// cứu phần log đã bị purge; sau đó sync --start-at seed bắt kịp 0 lệch.
+func TestG1_E2E_PrefetchDuringLongRestore(t *testing.T) {
+	ctx := context.Background()
+	mc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image: "minio:latest", ExposedPorts: []string{"9000/tcp"},
+			Env:        map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
+			Cmd:        []string{"server", "/data"},
+			WaitingFor: wait.ForListeningPort("9000/tcp").WithStartupTimeout(90 * time.Second),
+		}, Started: true})
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() { _ = mc.Terminate(context.Background()) })
+	host, _ := mc.Host(ctx)
+	port, _ := mc.MappedPort(ctx, "9000")
+	t.Setenv("STRAND_S3_ENDPOINT", "http://"+net.JoinHostPort(host, port.Port()))
+	t.Setenv("STRAND_S3_ACCESS_KEY", "minioadmin")
+	t.Setenv("STRAND_S3_SECRET_KEY", "minioadmin")
+
+	seed := seedFromEnv(t)
+	e := setupSeedAtP(t, seed)
+	e.cfg.Overflow = "s3://strand-staging/e2e-long-restore"
+
+	wl := newWorkload(e.src.DB, seed+1)
+	wl.nextID = 2_000_000
+	wl.Start(6, 3000)
+
+	stopPurge := make(chan struct{})
+	var purgeWG sync.WaitGroup
+	purgeWG.Add(1)
+	go func() {
+		defer purgeWG.Done()
+		tk := time.NewTicker(5 * time.Second)
+		defer tk.Stop()
+		for {
+			select {
+			case <-stopPurge:
+				return
+			case <-tk.C:
+				// Tránh chạy sát ranh giới giây khiến FLUSH ở giây T còn PURGE ở giây T+1.
+				if rem := time.Second - time.Duration(time.Now().Nanosecond()); rem < 150*time.Millisecond {
+					select {
+					case <-stopPurge:
+						return
+					case <-time.After(rem + 10*time.Millisecond):
+					}
+				}
+				_, _ = e.src.DB.Exec("FLUSH BINARY LOGS")
+				_, _ = e.src.DB.Exec("PURGE BINARY LOGS BEFORE NOW()")
+			}
+		}
+	}()
+
+	spoolDir := filepath.Join(e.dir, "state", "prefetch")
+	out, code := runStrandCLI(t, 5*time.Minute, "seed", "apply", "--manifest", e.manifest, "--target", e.dst.RootDSN,
+		"--spool", spoolDir, "--spool-local-hard", "200000", "--overflow", e.cfg.Overflow,
+		"--source", e.src.RootDSN, "--restore-cmd", "sleep 40")
+	close(stopPurge)
+	purgeWG.Wait()
+	wl.Stop()
+	if code != 0 || !strings.Contains(out, "bucket ") || strings.Contains(out, "bucket 0 bytes") {
+		t.Fatalf("seed apply with long restore: exit %d (expected some bytes in the bucket tier)\n%s", code, out)
+	}
+	t.Logf("%s", strings.TrimSpace(out))
+
 	p := startStrand(t, e.cfg.write(t), "--start-at", "seed", "--seed-manifest", e.manifest)
 	waitSynced(t, &e.cfg, p, 3*time.Minute)
 	waitCaughtUp(t, e.src, e.dst, &e.cfg, p, 3*time.Minute)

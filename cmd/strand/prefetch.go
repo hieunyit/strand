@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,10 +19,26 @@ import (
 	"strand/internal/spool"
 )
 
+func readSourceGTID(ctx context.Context, sourceDSN string) (*checkpoint.MySQLAppliedSet, error) {
+	db, err := sql.Open("mysql", sourceDSN)
+	if err != nil {
+		return nil, err
+	}
+	var executed string
+	err = db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&executed)
+	_ = db.Close()
+	if err != nil {
+		return nil, err
+	}
+	return checkpoint.ParseMySQLGTIDSet(strings.ReplaceAll(executed, "\n", ""))
+}
+
 // prefetch (02 §9, P1-14): đọc log từ P vào spool, archive trước rồi source, song song với
 // restore. Nhờ vậy archive hoặc binlog trên source bị xóa sau đó vẫn không gây log_gap.
-// Dừng khi đã phủ tới gtid_executed của source tại lúc bắt đầu đọc source.
-func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHard, hardLimit int64, overflow, archiveDir, sourceDSN string) (int, error) {
+// Nếu until == nil: dừng khi đã phủ tới gtid_executed của source tại lúc bắt đầu đọc source.
+// Nếu until != nil: đọc source liên tục cho tới khi until đóng, rồi đọc tiếp tới gtid_executed
+// của source tại thời điểm until đóng.
+func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHard, hardLimit int64, overflow, archiveDir, sourceDSN string, until <-chan struct{}) (int, error) {
 	if err := os.MkdirAll(spoolDir, 0o750); err != nil {
 		return 0, err
 	}
@@ -44,8 +61,10 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 	}
 	sp, err := spool.New(spoolDir, opts...)
 	defer func() {
-		u := sp.Usage()
-		fmt.Printf("spool usage: local %d bytes, bucket %d bytes\n", u.LocalBytes, u.BucketBytes)
+		if sp != nil {
+			u := sp.Usage()
+			fmt.Printf("spool usage: local %d bytes, bucket %d bytes\n", u.LocalBytes, u.BucketBytes)
+		}
 	}()
 	if err != nil {
 		return 0, err
@@ -70,31 +89,73 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 	spillDir := filepath.Join(spoolDir, "spill")
 	_ = os.MkdirAll(spillDir, 0o750)
 	n := 0
-	consume := func(events <-chan reader.Event, stopAt *checkpoint.MySQLAppliedSet) error {
+	consume := func(events <-chan reader.Event, stopAt *checkpoint.MySQLAppliedSet, untilCh <-chan struct{}) error {
 		asm := assemble.New(assemble.WithSpillDir(spillDir))
-		for ev := range events {
-			if ev.Type == reader.EventError {
-				return ev.Err
-			}
-			t, err := asm.Push(ev)
-			if err != nil {
-				return err
-			}
-			if t == nil {
-				continue
-			}
-			if !covered.Contains(t.SourcePos) {
-				if err := sp.Append(ctx, t); err != nil {
-					return err // prefetch_exhausted khi mọi tầng spool chạm hard limit
+		inTxn := false
+		// Khi untilCh đóng (restore-cmd kết thúc), chốt stopAt bằng gtid_executed hiện tại của source.
+		checkUntil := func() error {
+			untilCh = nil
+			var err error
+			stopAt, err = readSourceGTID(ctx, sourceDSN)
+			return err
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-untilCh:
+				if err := checkUntil(); err != nil {
+					return err
 				}
-				covered.Add(t.SourcePos)
-				n++
-			}
-			if stopAt != nil && stopAt.IsSubsetOf(covered) {
-				return nil
+				if !inTxn && stopAt.IsSubsetOf(covered) {
+					return nil
+				}
+			case ev, ok := <-events:
+				if !ok {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					if stopAt != nil && !stopAt.IsSubsetOf(covered) {
+						return fmt.Errorf("source event stream closed before reaching %s", stopAt)
+					}
+					return nil
+				}
+				if ev.Type == reader.EventError {
+					return ev.Err
+				}
+				switch ev.Type {
+				case reader.EventGTID, reader.EventQuery, reader.EventTableMap, reader.EventRows:
+					inTxn = true
+				}
+				t, err := asm.Push(ev)
+				if err != nil {
+					return err
+				}
+				if t == nil {
+					continue
+				}
+				inTxn = false
+				if !covered.Contains(t.SourcePos) {
+					if err := sp.Append(ctx, t); err != nil {
+						return err // prefetch_exhausted khi mọi tầng spool chạm hard limit
+					}
+					covered.Add(t.SourcePos)
+					n++
+				}
+				if untilCh != nil {
+					select {
+					case <-untilCh:
+						if err := checkUntil(); err != nil {
+							return err
+						}
+					default:
+					}
+				}
+				if stopAt != nil && stopAt.IsSubsetOf(covered) {
+					return nil
+				}
 			}
 		}
-		return nil
 	}
 
 	if archiveDir != "" {
@@ -105,30 +166,37 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 		actx, cancel := context.WithCancel(ctx)
 		events, err := ar.Start(actx, nil)
 		if err == nil {
-			err = consume(events, nil)
+			err = consume(events, nil, nil)
 		}
 		cancel()
 		_ = ar.Close()
 		if err != nil {
+			if ctx.Err() != nil {
+				return n, ctx.Err()
+			}
+			var se *exitcode.Error
+			if errors.As(err, &se) && se.Code == exitcode.ErrPrefetchExhausted {
+				return n, err
+			}
 			fmt.Printf("archive prefetch stopped: %v (continuing from source)\n", err)
 		}
 	}
 	if sourceDSN != "" {
-		db, err := sql.Open("mysql", sourceDSN)
-		if err != nil {
-			return n, err
+		var stopAt *checkpoint.MySQLAppliedSet
+		if until != nil {
+			select {
+			case <-until:
+				until = nil
+			default:
+			}
 		}
-		var executed string
-		err = db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&executed)
-		db.Close()
-		if err != nil {
-			return n, err
+		if until == nil {
+			stopAt, err = readSourceGTID(ctx, sourceDSN)
+			if err != nil {
+				return n, err
+			}
 		}
-		stopAt, err := checkpoint.ParseMySQLGTIDSet(strings.ReplaceAll(executed, "\n", ""))
-		if err != nil {
-			return n, err
-		}
-		if !stopAt.IsSubsetOf(covered) {
+		if until != nil || !stopAt.IsSubsetOf(covered) {
 			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000)})
 			if err != nil {
 				return n, err
@@ -137,12 +205,18 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 			events, err := rd.Start(sctx, covered.Clone())
 			if err != nil {
 				cancel()
+				if ctx.Err() != nil {
+					return n, ctx.Err()
+				}
 				return n, exitcode.New(exitcode.ErrLogGap, exitcode.DataError, fmt.Sprintf("prefetch from source: %v", err), err)
 			}
-			err = consume(events, stopAt)
+			err = consume(events, stopAt, until)
 			cancel()
 			_ = rd.Close()
 			if err != nil {
+				if ctx.Err() != nil {
+					return n, ctx.Err()
+				}
 				if exitcode.GetExitCode(err) == exitcode.DataError {
 					return n, err
 				}
