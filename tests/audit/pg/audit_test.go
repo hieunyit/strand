@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/jackc/pglogrepl"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -462,7 +462,7 @@ func TestAC3_ExportSnapshot_ConsistentPoint(t *testing.T) {
 	receivedRow2 := false
 	receivedRow1 := false
 
-	readLoop:
+readLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -535,7 +535,7 @@ func TestAC4_StandbyLogicalDecoding_PG16(t *testing.T) {
 
 	// Khởi tạo Primary
 	priReq := testcontainers.ContainerRequest{
-		Image: "postgres:16",
+		Image:    "postgres:16",
 		Networks: []string{nw.Name},
 		NetworkAliases: map[string][]string{
 			nw.Name: {"primary"},
@@ -599,7 +599,7 @@ func TestAC4_StandbyLogicalDecoding_PG16(t *testing.T) {
 		"exec gosu postgres postgres -D /tmp/standby_data -c wal_level=logical -c hot_standby_feedback=on"
 
 	stbReq := testcontainers.ContainerRequest{
-		Image: "postgres:16",
+		Image:    "postgres:16",
 		Networks: []string{nw.Name},
 		NetworkAliases: map[string][]string{
 			nw.Name: {"standby"},

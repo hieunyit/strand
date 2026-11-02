@@ -376,6 +376,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.setupGovernor(); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 	}
+	// Tick đầu tiên trước khi snapshot chạy: breaker phải có hiệu lực ngay từ chunk đầu.
+	if p.govAlgo != "static" {
+		if err := p.gov.Tick(ctx); err != nil {
+			p.log.Warn("initial governor tick failed", "error", err)
+		}
+	}
 
 	// --- Snapshot ---
 	opts := snapshot.DefaultChunkOptions()

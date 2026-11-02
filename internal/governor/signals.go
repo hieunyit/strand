@@ -165,16 +165,7 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 				for i, col := range cols {
 					if col == "Seconds_Behind_Source" || col == "Seconds_Behind_Master" {
 						if vals[i] != nil {
-							if sec, ok := vals[i].(int64); ok {
-								signals.ReplicaLagSeconds = float64(sec)
-							} else if b, ok := vals[i].([]byte); ok {
-								// Text protocol: giá trị cột trả về dạng []byte.
-								signals.ReplicaLagSeconds = parseSecondsBytes(b)
-							} else if s, ok := vals[i].(string); ok {
-								var secFloat float64
-								fmt.Sscanf(s, "%f", &secFloat)
-								signals.ReplicaLagSeconds = secFloat
-							}
+							signals.ReplicaLagSeconds = parseLagValue(vals[i])
 						}
 						break
 					}
@@ -230,4 +221,28 @@ func parseSecondsBytes(b []byte) float64 {
 	var v float64
 	fmt.Sscanf(string(b), "%f", &v)
 	return v
+}
+
+// parseLagValue đọc Seconds_Behind_Source với mọi kiểu driver có thể trả (int64, uint64,
+// []byte của text protocol, string...). Trước đây chỉ nhận int64/string nên uint64 thành 0.
+func parseLagValue(v any) float64 {
+	switch x := v.(type) {
+	case int64:
+		return float64(x)
+	case uint64:
+		return float64(x)
+	case int32:
+		return float64(x)
+	case uint32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case float64:
+		return x
+	case []byte:
+		return parseSecondsBytes(x)
+	case string:
+		return parseSecondsBytes([]byte(x))
+	}
+	return 0
 }

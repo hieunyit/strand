@@ -52,12 +52,16 @@ func (p *Pipeline) setupGovernor() error {
 func (p *Pipeline) governorLoop(ctx context.Context) {
 	t := time.NewTicker(p.govTick)
 	defer t.Stop()
+	first := true
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
+		if !first {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
 		}
+		first = false
 		if p.govAlgo == "static" {
 			continue
 		}

@@ -73,6 +73,9 @@ func setupPurgedAfterP(t *testing.T, seed int64) *prefetchEnv {
 	wl.Preload(t, 3000)
 	waitReplicaCaughtUp(t, e.src, e.dst)
 	e.dst.exec(t, "STOP REPLICA", "RESET REPLICA ALL")
+	// Schema metadata của Strand tạo TRƯỚC khi chụp P (mọi ghi cục bộ trên target sau P sẽ
+	// làm seed apply từ chối, đúng thiết kế).
+	e.dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
 	p := strings.ReplaceAll(e.dst.gtidExecuted(t), "\n", "")
 
 	wl.Start(4, 3000) // Txn sau P
@@ -107,7 +110,6 @@ func setupPurgedAfterP(t *testing.T, seed int64) *prefetchEnv {
 		"--source", e.src.RootDSN, "--archive-until", archived, "--out", e.manifest); code != 0 {
 		t.Fatalf("seed plan: exit %d\n%s", code, out)
 	}
-	e.dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
 	e.cfg = strandCfg{Name: "e2e-prefetch", SourceDSN: e.src.RootDSN, TargetDSN: e.dst.RootDSN + "strand",
 		Include: []string{"app.*"}, Exclude: []string{"app.ignored"}, Dir: e.dir, Bootstrap: "seed"}
 	return e

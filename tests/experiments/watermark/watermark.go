@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 // Config chứa các cấu hình cho thí nghiệm watermark RS-2.
