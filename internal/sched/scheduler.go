@@ -25,11 +25,16 @@ func DefaultConfig() Config {
 	}
 }
 
+type tableKey struct {
+	table string
+	key   uint64
+}
+
 type tableState struct {
 	rows             map[uint64]uint64   // hash khóa -> seq của writer cuối
 	tableWriter      uint64              // seq của Txn cấp bảng gần nhất
 	active           map[uint64]struct{} // seq đang chạy có chạm bảng này
-	forcedTableLevel bool               // bật khi vượt writeset_budget
+	forcedTableLevel bool                // bật khi vượt writeset_budget
 }
 
 func newTableState() *tableState {
@@ -52,8 +57,15 @@ type Scheduler struct {
 	inDegree    map[uint64]int
 	dependents  map[uint64][]uint64
 	readyCh     chan *model.Txn
+	overflow    []*model.Txn  // Txn sẵn sàng khi readyCh đầy; không bao giờ gửi blocking khi giữ mu
+	spaceCh     chan struct{} // đóng/tạo lại mỗi khi overflow được rút bớt
 	totalRows   int
 	isClosed    bool
+	failed      error // lỗi apply đầu tiên; sau đó scheduler ngừng nhận Txn
+
+	// Theo dõi khóa và bảng của từng seq để Done chỉ tốn O(số khóa của Txn).
+	keysBySeq   map[uint64][]tableKey
+	tablesBySeq map[uint64][]string
 
 	// Holes tracking (spec 02 §1, §2 CP-4, §6)
 	lwd        uint64
@@ -87,6 +99,9 @@ func NewScheduler(cfg Config) *Scheduler {
 		inDegree:       make(map[uint64]int),
 		dependents:     make(map[uint64][]uint64),
 		readyCh:        make(chan *model.Txn, 1024),
+		spaceCh:        make(chan struct{}),
+		keysBySeq:      make(map[uint64][]tableKey),
+		tablesBySeq:    make(map[uint64][]string),
 		readyWidthHist: make(map[int]int),
 		completed:      make(map[uint64]struct{}),
 		holeWaitCh:     make(chan struct{}),
@@ -194,33 +209,49 @@ func (s *Scheduler) checkBudgetLocked() {
 	}
 }
 
+// Err trả về lỗi apply đầu tiên được báo qua Done (nil nếu chưa có).
+func (s *Scheduler) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failed
+}
+
 // Admit tiếp nhận một Txn theo đúng thuật toán spec 02 §6.
 func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
+	if t.IsSpilled() && len(t.SpilledTables) == 0 {
+		return fmt.Errorf("spilled txn %v has no table list: cannot build table-level dependencies (CO-1)", t.SourcePos)
+	}
+
 	s.mu.Lock()
 
-	// Chặn nhận Txn mới khi số holes vượt ngưỡng max_holes (spec 02 §2 CP-4, §6)
-	for s.holesLocked() > s.cfg.MaxHoles {
-		if s.isClosed {
-			s.mu.Unlock()
-			return fmt.Errorf("scheduler is closed")
-		}
-		ch := s.holeWaitCh
+	// Chặn nhận Txn mới khi số holes vượt ngưỡng max_holes (spec 02 §2 CP-4, §6),
+	// hoặc khi hàng đợi sẵn sàng đã đầy (back-pressure, không giữ mu khi chờ).
+	for s.failed == nil && !s.isClosed &&
+		(s.holesLocked() > s.cfg.MaxHoles || len(s.overflow) >= cap(s.readyCh)) {
+		holeCh, spaceCh := s.holeWaitCh, s.spaceCh
 		s.mu.Unlock()
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ch:
+		case <-holeCh:
+		case <-spaceCh:
 		}
 
 		s.mu.Lock()
 	}
 
+	if s.failed != nil {
+		err := s.failed
+		s.mu.Unlock()
+		return fmt.Errorf("scheduler stopped after apply failure: %w", err)
+	}
 	if s.isClosed {
 		s.mu.Unlock()
 		return fmt.Errorf("scheduler is closed")
 	}
 	defer s.mu.Unlock()
+	s.drainOverflowLocked()
 
 	// Tự động gán seq nếu chưa có
 	if t.Seq() == 0 {
@@ -232,17 +263,29 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	s.checkBudgetLocked()
 
 	writeset := t.WritesetByTable()
+	spilledTables := make(map[string]bool)
+	if t.IsSpilled() {
+		// Txn tràn đĩa không có Rows trong RAM: luôn nâng lên cấp bảng cho mọi bảng nó chạm.
+		for _, tid := range t.SpilledTables {
+			name := tid.String()
+			spilledTables[name] = true
+			if _, ok := writeset[name]; !ok {
+				writeset[name] = nil
+			}
+		}
+	}
 	var deps []uint64
 
 	for tbl, keys := range writeset {
 		st := s.table(tbl)
 		s.totalKeyCount += int64(len(keys))
+		s.tablesBySeq[seq] = append(s.tablesBySeq[seq], tbl)
 
 		if st.tableWriter != 0 {
 			deps = append(deps, st.tableWriter)
 		}
 
-		isTableLevel := len(keys) > s.cfg.TableLevelThreshold || st.forcedTableLevel
+		isTableLevel := spilledTables[tbl] || len(keys) > s.cfg.TableLevelThreshold || st.forcedTableLevel
 		if !isTableLevel && s.totalRows+len(keys) > s.cfg.WritesetBudget {
 			// Bảng chiếm nhiều entry nhất chuyển sang cấp bảng
 			isMax := true
@@ -281,6 +324,7 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 					s.totalRows++
 				}
 				st.rows[k] = seq
+				s.keysBySeq[seq] = append(s.keysBySeq[seq], tableKey{table: tbl, key: k})
 			}
 		}
 		st.active[seq] = struct{}{}
@@ -315,31 +359,88 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 
 func (s *Scheduler) emitReady(t *model.Txn) {
 	// Ghi nhận histogram độ rộng DAG (số txn trong ready queue)
-	curWidth := len(s.readyCh) + 1
+	curWidth := len(s.readyCh) + len(s.overflow) + 1
 	bucket := (curWidth / 4) * 4
 	s.readyWidthHist[bucket]++
 
-	s.readyCh <- t
+	// Không bao giờ gửi blocking khi đang giữ mu: nếu readyCh đầy thì đưa vào overflow,
+	// overflow được rút ở Done/Admit kế tiếp (worker luôn gọi Done sau khi lấy Txn).
+	if len(s.overflow) == 0 {
+		select {
+		case s.readyCh <- t:
+			return
+		default:
+		}
+	}
+	s.overflow = append(s.overflow, t)
+}
+
+// drainOverflowLocked chuyển Txn từ overflow sang readyCh khi còn chỗ (không blocking).
+func (s *Scheduler) drainOverflowLocked() {
+	moved := false
+	for len(s.overflow) > 0 {
+		select {
+		case s.readyCh <- s.overflow[0]:
+			s.overflow[0] = nil
+			s.overflow = s.overflow[1:]
+			moved = true
+		default:
+			goto out
+		}
+	}
+out:
+	if moved {
+		close(s.spaceCh)
+		s.spaceCh = make(chan struct{})
+	}
 }
 
 // Done thông báo một Txn đã hoàn thành apply.
+// Nếu err != nil, Txn KHÔNG được coi là đã apply: các Txn phụ thuộc vẫn bị chặn,
+// lwd không vượt qua nó, và scheduler ngừng nhận Txn mới (Err() trả về lỗi).
 func (s *Scheduler) Done(seq uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Dọn trạng thái bảng
-	for _, st := range s.tables {
+	if err != nil {
+		if s.failed == nil {
+			s.failed = fmt.Errorf("txn seq=%d failed: %w", seq, err)
+		}
+		// Đánh thức các Admit đang chờ để chúng trả lỗi.
+		if s.holeWaitCh != nil {
+			close(s.holeWaitCh)
+			s.holeWaitCh = make(chan struct{})
+		}
+		return
+	}
+
+	// Dọn khóa cấp row của chính Txn này: O(số khóa của Txn).
+	for _, tk := range s.keysBySeq[seq] {
+		st := s.tables[tk.table]
+		if st == nil {
+			continue
+		}
+		if w, ok := st.rows[tk.key]; ok && w == seq {
+			delete(st.rows, tk.key)
+			s.totalRows--
+		}
+	}
+	delete(s.keysBySeq, seq)
+
+	for _, tbl := range s.tablesBySeq[seq] {
+		st := s.tables[tbl]
+		if st == nil {
+			continue
+		}
 		delete(st.active, seq)
 		if st.tableWriter == seq {
 			st.tableWriter = 0
 		}
-		for k, writerSeq := range st.rows {
-			if writerSeq == seq {
-				delete(st.rows, k)
-				s.totalRows--
-			}
-		}
-		if len(st.rows) == 0 && st.tableWriter == 0 && s.totalRows <= s.cfg.WritesetBudget {
+	}
+	delete(s.tablesBySeq, seq)
+
+	for _, st := range s.tables {
+		if st.forcedTableLevel && len(st.rows) == 0 && st.tableWriter == 0 && s.totalRows <= s.cfg.WritesetBudget {
 			st.forcedTableLevel = false
 		}
 	}
@@ -384,6 +485,8 @@ func (s *Scheduler) Done(seq uint64, err error) {
 			s.holeWaitCh = make(chan struct{})
 		}
 	}
+
+	s.drainOverflowLocked()
 }
 
 // Close đóng scheduler khi không còn transaction mới.
