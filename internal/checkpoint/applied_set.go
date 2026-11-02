@@ -1,7 +1,6 @@
 package checkpoint
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -22,123 +21,6 @@ type AppliedSet interface {
 	Holes() []model.Pos
 	Equal(AppliedSet) bool
 	Clone() AppliedSet
-}
-
-// -----------------------------------------------------------------------------
-// PGAppliedSet
-// -----------------------------------------------------------------------------
-
-// PGAppliedSet cài đặt AppliedSet cho PostgreSQL dựa trên LSN và RangeSet.
-type PGAppliedSet struct {
-	ranges *RangeSet
-}
-
-// NewPGAppliedSet tạo mới PGAppliedSet với baseLSN quy định (mặc định 1).
-func NewPGAppliedSet(baseLSN uint64) *PGAppliedSet {
-	return &PGAppliedSet{
-		ranges: NewRangeSet(baseLSN),
-	}
-}
-
-func (s *PGAppliedSet) Clone() AppliedSet {
-	if s == nil {
-		return nil
-	}
-	return &PGAppliedSet{
-		ranges: s.ranges.Clone(),
-	}
-}
-
-func (s *PGAppliedSet) Contains(p model.Pos) bool {
-	if p.Engine != model.EnginePG {
-		return false
-	}
-	return s.ranges.Contains(p.LSN)
-}
-
-func (s *PGAppliedSet) Add(p model.Pos) {
-	if p.Engine != model.EnginePG || p.LSN == 0 {
-		return
-	}
-	s.ranges.Add(p.LSN)
-}
-
-func (s *PGAppliedSet) Merge(other AppliedSet) {
-	if other == nil {
-		return
-	}
-	if pgOther, ok := other.(*PGAppliedSet); ok {
-		s.ranges.Merge(pgOther.ranges)
-	}
-}
-
-func (s *PGAppliedSet) Lwd() model.Pos {
-	return model.Pos{
-		Engine: model.EnginePG,
-		LSN:    s.ranges.Lwd(),
-	}
-}
-
-func (s *PGAppliedSet) High() model.Pos {
-	return model.Pos{
-		Engine: model.EnginePG,
-		LSN:    s.ranges.High(),
-	}
-}
-
-func (s *PGAppliedSet) Holes() []model.Pos {
-	holes := s.ranges.Holes()
-	if len(holes) == 0 {
-		return nil
-	}
-	res := make([]model.Pos, len(holes))
-	for i, h := range holes {
-		res[i] = model.Pos{
-			Engine: model.EnginePG,
-			LSN:    h,
-		}
-	}
-	return res
-}
-
-func (s *PGAppliedSet) Equal(other AppliedSet) bool {
-	if other == nil {
-		return false
-	}
-	pgOther, ok := other.(*PGAppliedSet)
-	if !ok {
-		return false
-	}
-	return s.ranges.Equal(pgOther.ranges)
-}
-
-// PGAppliedJSON biểu diễn JSON metadata applied của PostgreSQL theo spec/02 §4.
-type PGAppliedJSON struct {
-	Lwd   string   `json:"lwd"`
-	High  string   `json:"high"`
-	Holes []string `json:"holes"`
-}
-
-func (s *PGAppliedSet) String() string {
-	if s == nil || s.ranges == nil || s.ranges.IsEmpty() {
-		return ""
-	}
-	lwdPos := s.Lwd()
-	highPos := s.High()
-	holesPos := s.Holes()
-
-	holesStr := make([]string, len(holesPos))
-	for i, h := range holesPos {
-		holesStr[i] = fmt.Sprintf("%X/%X", h.LSN>>32, h.LSN&0xFFFFFFFF)
-	}
-
-	payload := PGAppliedJSON{
-		Lwd:   fmt.Sprintf("%X/%X", lwdPos.LSN>>32, lwdPos.LSN&0xFFFFFFFF),
-		High:  fmt.Sprintf("%X/%X", highPos.LSN>>32, highPos.LSN&0xFFFFFFFF),
-		Holes: holesStr,
-	}
-	bytes, _ := json.Marshal(payload)
-	return string(bytes)
 }
 
 // ParseLSN phân tích chuỗi LSN dạng "X/Y" (hex) hoặc decimal thành uint64.

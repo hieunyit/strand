@@ -494,7 +494,7 @@ func subtractApplied(set, global AppliedSet) {
 		}
 	case *PGAppliedSet:
 		if g, ok := global.(*PGAppliedSet); ok {
-			s.ranges.Subtract(g.ranges)
+			s.subtract(g)
 		}
 	}
 }

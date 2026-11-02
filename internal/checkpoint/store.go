@@ -2,10 +2,7 @@ package checkpoint
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
 	"time"
 
 	"strand/internal/exitcode"
@@ -63,57 +60,7 @@ func ParseAppliedSet(engine model.Engine, appliedStr string) (AppliedSet, error)
 		}
 		return set, nil
 	case model.EnginePG:
-		set := NewPGAppliedSet(1)
-		appliedStr = strings.TrimSpace(appliedStr)
-		if appliedStr == "" {
-			return set, nil
-		}
-		if strings.HasPrefix(appliedStr, "{") {
-			var pj PGAppliedJSON
-			if err := json.Unmarshal([]byte(appliedStr), &pj); err != nil {
-				return nil, fmt.Errorf("parse PG applied JSON: %w", err)
-			}
-			if pj.High == "" {
-				return set, nil
-			}
-			high, err := ParseLSN(pj.High)
-			if err != nil {
-				return nil, fmt.Errorf("parse PG applied high %q: %w", pj.High, err)
-			}
-			var holes []uint64
-			for _, hStr := range pj.Holes {
-				hLSN, err := ParseLSN(hStr)
-				if err != nil {
-					return nil, fmt.Errorf("parse PG applied hole %q: %w", hStr, err)
-				}
-				holes = append(holes, hLSN)
-			}
-			sort.Slice(holes, func(i, j int) bool { return holes[i] < holes[j] })
-			cur := uint64(1)
-			for _, h := range holes {
-				if h > cur {
-					set.ranges.AddRange(cur, h-1)
-				}
-				cur = h + 1
-			}
-			if cur <= high {
-				set.ranges.AddRange(cur, high)
-			}
-			return set, nil
-		}
-		// Dạng danh sách LSN cách nhau bởi dấu phẩy
-		for _, p := range strings.Split(appliedStr, ",") {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			lsn, err := ParseLSN(p)
-			if err != nil {
-				return nil, fmt.Errorf("parse PG applied LSN %q: %w", p, err)
-			}
-			set.Add(model.Pos{Engine: model.EnginePG, LSN: lsn})
-		}
-		return set, nil
+		return parsePGApplied(appliedStr)
 	default:
 		return nil, fmt.Errorf("unknown source engine %q", engine)
 	}
