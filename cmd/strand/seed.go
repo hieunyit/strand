@@ -34,7 +34,7 @@ func newSeedCmd() *cobra.Command {
 		Short: "Kiểm SD-1..SD-4 và ghi seed.json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if kind == "" {
-				return exitcode.New("missing_type", exitcode.InvalidSyntax, "missing --type xtrabackup|mydumper|clone", nil)
+				return exitcode.New("missing_type", exitcode.InvalidSyntax, "missing --type xtrabackup|mydumper|mysqldump|clone", nil)
 			}
 			ctx := cmd.Context()
 			src := seed.SeedSource{Engine: "mysql", Kind: kind, BackupRef: backup, AllowPrereleaseTool: allowPre,
@@ -69,6 +69,8 @@ func newSeedCmd() *cobra.Command {
 				planner = seed.NewXtraBackupPlanner()
 			case "mydumper":
 				planner = seed.NewMydumperPlanner()
+			case "mysqldump":
+				planner = seed.NewMysqldumpPlanner()
 			case "clone":
 				planner = seed.NewClonePlanner()
 			default:
@@ -77,6 +79,9 @@ func newSeedCmd() *cobra.Command {
 			m, err := planner.Plan(ctx, src)
 			if err != nil {
 				return err
+			}
+			for _, w := range m.Warnings {
+				fmt.Fprintln(os.Stderr, w)
 			}
 			raw, _ := json.MarshalIndent(m, "", "  ")
 			if dryRun {
@@ -91,7 +96,7 @@ func newSeedCmd() *cobra.Command {
 		},
 	}
 	plan.Flags().StringVar(&backup, "backup", "", "Đường dẫn/URI bản backup")
-	plan.Flags().StringVar(&kind, "type", "", "xtrabackup | mydumper | clone")
+	plan.Flags().StringVar(&kind, "type", "", "xtrabackup | mydumper | mysqldump | clone")
 	plan.Flags().StringVar(&sourceDSN, "source", "", "DSN source (đọc gtid_purged, SD-2)")
 	plan.Flags().StringVar(&targetDSN, "target", "", "DSN target sau restore (đối chiếu P, SD-1; version, SD-4)")
 	plan.Flags().StringVar(&archiveUntil, "archive-until", "", "GTID set đã có trong archive binlog")
@@ -193,6 +198,8 @@ func restoreCommands(m *seed.SeedManifest) []string {
 		}
 	case "mydumper":
 		return []string{"myloader --directory=" + m.BackupRef + " --overwrite-tables"}
+	case "mysqldump":
+		return []string{"mysql < " + m.BackupRef}
 	case "clone":
 		return []string{"CLONE INSTANCE FROM <user>@<donor>:<port> IDENTIFIED BY <password>   # trên target"}
 	}
