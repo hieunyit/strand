@@ -135,6 +135,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		return fmt.Errorf("snapshot add %s: rendezvous wait function is required", table)
 	}
 	var chunks []*Chunk
+	var cur SnapshotPlan
 	register := func() error {
 		var plan SnapshotPlan
 		resumed := false
@@ -169,12 +170,18 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			s.Manager.RegisterTable(table, pkCol, nil, math.MinInt64)
 			return nil
 		}
-		// 2. Chia các chunk trong khoảng [MinPK, MaxPK] (tất định theo plan).
-		chunks = s.Chunker.PlanChunks(table, pkCol, plan.MinPK, plan.MaxPK, plan.ChunkRows)
-		for _, c := range chunks {
-			if c.EndPK < plan.NextPK {
-				c.State = StateDone // đã flush ở lần chạy trước
-			}
+		// 2. Keyset walk (02 §5): chỉ đăng ký phần đã xong [Min, Next-1] và phần chưa đọc
+		// [Next, Max]; chunk kế tiếp được cắt động theo khóa thật ngay trước khi đọc, nên PK
+		// thưa hay lệch không sinh ra hàng nghìn chunk rỗng.
+		cur = plan
+		chunks = nil
+		if plan.NextPK > plan.MinPK {
+			chunks = append(chunks, &Chunk{ID: 0, Table: table, PKCol: pkCol, StartPK: plan.MinPK,
+				EndPK: plan.NextPK - 1, State: StateDone, BufferedChanges: map[int64]*model.RowChange{}})
+		}
+		if plan.NextPK <= plan.MaxPK {
+			chunks = append(chunks, &Chunk{ID: 1, Table: table, PKCol: pkCol, StartPK: plan.NextPK,
+				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[int64]*model.RowChange{}})
 		}
 		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
 		return nil
@@ -204,15 +211,21 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 	}
 	colsStr := strings.Join(quotedSel, ", ")
 
-	for _, chunk := range chunks {
+	for next := cur.NextPK; !cur.Empty && next <= cur.MaxPK; {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		if chunk.State == StateDone {
-			continue
+		end, err := keysetEnd(ctx, srcDB, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+		if err != nil {
+			return fmt.Errorf("keyset walk %s from %d: %w", table, next, err)
 		}
+		chunk, err := s.Manager.CarveChunk(table, next, end)
+		if err != nil {
+			return err
+		}
+		next = end + 1
 
 		// Watermark: mỗi chunk đọc low = @@GLOBAL.gtid_executed
 		chunkLowStr, err := GetGlobalGTIDExecuted(srcDB)
@@ -326,6 +339,25 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 	}
 
 	return nil
+}
+
+// keysetEnd trả về khóa cuối của chunk bắt đầu ở start: khóa thứ `rows` tính từ start
+// (SELECT pk ... LIMIT 1 OFFSET rows-1), hoặc max nếu không còn đủ khóa.
+func keysetEnd(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, start, max, rows int64) (int64, error) {
+	if rows <= 0 {
+		rows = 5000
+	}
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s LIMIT 1 OFFSET %d",
+		quoteIdent(pkCol), quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol), rows-1)
+	var end int64
+	err := db.QueryRowContext(ctx, q, start, max).Scan(&end)
+	if err == sql.ErrNoRows {
+		return max, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return end, nil
 }
 
 // flushRowsToTarget ghi các row đã merge vào target database trong một transaction duy nhất.

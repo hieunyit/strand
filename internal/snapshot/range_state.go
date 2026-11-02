@@ -66,6 +66,35 @@ func (m *RangeStateManager) RemoveTable(table model.TableID) {
 	delete(m.tables, table.String())
 }
 
+// CarveChunk cắt chunk [start, end] ra khỏi range "Chưa đọc" bắt đầu đúng ở start
+// (phần còn lại [end+1, cũ.End] vẫn "Chưa đọc"). Dùng cho keyset walk.
+func (m *RangeStateManager) CarveChunk(table model.TableID, start, end int64) (*Chunk, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tr, ok := m.tables[table.String()]
+	if !ok {
+		return nil, fmt.Errorf("table %s not registered", table)
+	}
+	for i, c := range tr.Chunks {
+		if c.StartPK != start {
+			continue
+		}
+		if c.State != StatePending || end < start || end > c.EndPK {
+			return nil, fmt.Errorf("cannot carve [%d,%d] from chunk [%d,%d] in state %s", start, end, c.StartPK, c.EndPK, c.State)
+		}
+		if end == c.EndPK {
+			return c, nil
+		}
+		rest := &Chunk{ID: c.ID + 1, Table: c.Table, PKCol: c.PKCol, StartPK: end + 1, EndPK: c.EndPK,
+			State: StatePending, BufferedChanges: map[int64]*model.RowChange{}}
+		c.EndPK = end
+		c.EstimatedRows = end - start + 1
+		tr.Chunks = append(tr.Chunks[:i+1], append([]*Chunk{rest}, tr.Chunks[i+1:]...)...)
+		return c, nil
+	}
+	return nil, fmt.Errorf("no pending chunk starts at %d in %s", start, table)
+}
+
 // TableCount trả về số bảng đang snapshot.
 func (m *RangeStateManager) TableCount() int {
 	m.mu.RLock()
