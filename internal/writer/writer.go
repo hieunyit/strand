@@ -235,6 +235,12 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 		if err := validateStrictBatch(batch); err != nil {
 			return err
 		}
+		// Chờ đến lượt TRƯỚC khi mở transaction (CP-5). Nếu thực thi câu lệnh trước rồi mới chờ,
+		// batch đang chờ giữ row/gap lock mà batch seq nhỏ hơn cần: seq nhỏ chờ lock, seq lớn chờ
+		// lượt — InnoDB không thấy vòng chờ này (chỉ hết hạn lock wait rồi lặp lại).
+		if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
+			return err
+		}
 	}
 
 	tx, err := w.db.BeginTx(ctx, nil)
@@ -242,6 +248,7 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+	committing := false
 
 	// 1. Ghi dữ liệu vào các bảng ứng dụng (kể cả Txn đã tràn đĩa)
 	for _, txn := range batch {
@@ -270,12 +277,10 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 
 	// 3. Chờ đến lượt commit ở chế độ strict (CP-5)
 	if strict {
-		if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
-			return err
-		}
-		// Từ đây, mọi lỗi đều phải báo cho orderer để worker khác không chờ mãi.
+		// Lỗi TRƯỚC commit: batch chưa commit, lượt vẫn thuộc về nó (caller có thể retry cùng seq).
+		// Lỗi KHI commit: kết quả không chắc chắn, dừng orderer để không seq nào commit sau nó.
 		defer func() {
-			if err != nil {
+			if err != nil && committing {
 				orderer.Fail(err)
 			}
 		}()
@@ -299,6 +304,7 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 	}
 
 	// 4. Commit cả dữ liệu và delta
+	committing = true
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
@@ -524,6 +530,12 @@ func (w *PGWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta Del
 		if err := validateStrictBatch(batch); err != nil {
 			return err
 		}
+		// Chờ đến lượt TRƯỚC khi mở transaction (CP-5). Nếu thực thi câu lệnh trước rồi mới chờ,
+		// batch đang chờ giữ row/gap lock mà batch seq nhỏ hơn cần: seq nhỏ chờ lock, seq lớn chờ
+		// lượt — InnoDB không thấy vòng chờ này (chỉ hết hạn lock wait rồi lặp lại).
+		if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
+			return err
+		}
 	}
 
 	tx, err := w.db.BeginTx(ctx, nil)
@@ -531,6 +543,7 @@ func (w *PGWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta Del
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+	committing := false
 
 	for _, txn := range batch {
 		if err := w.applyTxnPG(ctx, tx, txn); err != nil {
@@ -553,16 +566,14 @@ func (w *PGWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta Del
 	}
 
 	if strict {
-		if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
-			return err
-		}
 		defer func() {
-			if err != nil {
+			if err != nil && committing {
 				orderer.Fail(err)
 			}
 		}()
 	}
 
+	committing = true
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
