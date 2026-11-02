@@ -39,14 +39,25 @@ func (p *Pipeline) setupGovernor() error {
 		// Mở lại sau 60 giây liên tục dưới ngưỡng (02 §7).
 		CooldownTicks: int((60 * time.Second) / p.govTick),
 	}
+	// Tín hiệu cứng (02 §7): delta counter InnoDB trên source và spool local ≥ 95% spool.hard.
+	reader := governor.NewMySQLDBSignalReader(p.src, nil)
+	reader.SpoolUsage = p.spoolUsage
 	p.gov = governor.NewOnoffGovernor(governor.OnoffConfig{
 		SoftRate:     soft,
 		HardRate:     hard,
 		LagSLO:       durationOr(p.cfg.Governor.LagSLO, 5*time.Second),
 		Breaker:      governor.NewBreaker(bcfg),
-		SignalReader: governor.NewMySQLDBSignalReader(p.src, nil),
+		SignalReader: reader,
 	})
 	return nil
+}
+
+// spoolUsage trả về số byte spool local đang dùng (spool prefetch) và resources.spool.hard.
+func (p *Pipeline) spoolUsage() (used, hard int64) {
+	if p.prefetch != nil {
+		used = p.prefetch.Usage().LocalBytes
+	}
+	return used, int64(parseBytes(p.cfg.Resources.Spool.Hard))
 }
 
 func (p *Pipeline) governorLoop(ctx context.Context) {

@@ -35,6 +35,7 @@ type DBSignals struct {
 	QueryP99          time.Duration // Latency p99 của truy vấn Strand
 	QueryBaseline     time.Duration // Latency baseline ban đầu
 	HardSignal        bool          // Tín hiệu khẩn cấp tác dụng ngay (ví dụ disk critical / out of space)
+	HardReason        string        // Lý do của tín hiệu cứng (rỗng khi HardSignal = false)
 }
 
 // DBSignalReader là interface thu thập tín hiệu trực tiếp từ DB.

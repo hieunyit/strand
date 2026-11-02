@@ -16,12 +16,214 @@ import (
 )
 
 // spec: 02 §5, design §6.1
+// invariant: RS-1, RS-2
+
+// WaitExecutedGTIDTimeoutSeconds là timeout (giây) của WAIT_FOR_EXECUTED_GTID_SET trước SELECT
+// của chunk (02 §2 RS-2, §5 Watermark).
+const WaitExecutedGTIDTimeoutSeconds = 30
+
+// waitGTIDMaxAttempts giới hạn số lần chờ lại khi WAIT_FOR_EXECUTED_GTID_SET hết giờ (replica trễ).
+const waitGTIDMaxAttempts = 10
+
+// ChunkConn là một kết nối đọc chunk. WAIT_FOR_EXECUTED_GTID_SET và SELECT của chunk phải
+// chạy trên CÙNG kết nối (cùng server) thì kết quả chờ mới có nghĩa với read view của SELECT (RS-2).
+type ChunkConn interface {
+	WaitForExecutedGTIDSet(ctx context.Context, gtidSet string, timeoutSeconds int) (sql.NullInt64, error)
+	QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID) ([]*model.RowChange, int64, error)
+	Close() error
+}
+
+// SourceQuerier là seam truy vấn watermark và mở kết nối đọc chunk trên source/replica.
+type SourceQuerier interface {
+	GetGlobalGTIDExecuted(ctx context.Context) (string, error)
+	OpenChunkConn(ctx context.Context) (ChunkConn, error)
+}
+
+// WaitForExecutedGTIDSet chạy WAIT_FOR_EXECUTED_GTID_SET(low, timeout) trên conn (RS-2):
+//   - 0: mọi GTID trong low đã visible ở server này -> nil.
+//   - 1: hết giờ -> lỗi bọc MySQL 1205 (lock wait timeout), để đường retry 1213/1205 xử lý.
+//   - NULL hoặc giá trị khác: lỗi.
+//
+// low rỗng thì không có gì phải chờ.
+func WaitForExecutedGTIDSet(ctx context.Context, conn ChunkConn, gtidSet string, timeoutSeconds int) error {
+	if strings.TrimSpace(gtidSet) == "" {
+		return nil
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = WaitExecutedGTIDTimeoutSeconds
+	}
+	res, err := conn.WaitForExecutedGTIDSet(ctx, gtidSet, timeoutSeconds)
+	if err != nil {
+		return fmt.Errorf("wait for executed gtid set: %w", err)
+	}
+	if !res.Valid {
+		return fmt.Errorf("WAIT_FOR_EXECUTED_GTID_SET(%q, %d) returned NULL", gtidSet, timeoutSeconds)
+	}
+	switch res.Int64 {
+	case 0:
+		return nil
+	case 1:
+		return fmt.Errorf("WAIT_FOR_EXECUTED_GTID_SET(%q, %d) timed out: %w", gtidSet, timeoutSeconds,
+			&drivermysql.MySQLError{Number: 1205, Message: "WAIT_FOR_EXECUTED_GTID_SET timed out"})
+	default:
+		return fmt.Errorf("WAIT_FOR_EXECUTED_GTID_SET(%q, %d) returned unexpected result %d", gtidSet, timeoutSeconds, res.Int64)
+	}
+}
+
+// isRetryableMySQLError: lỗi khóa của InnoDB (1213 deadlock, 1205 lock wait timeout).
+func isRetryableMySQLError(err error) bool {
+	var me *drivermysql.MySQLError
+	return errors.As(err, &me) && (me.Number == 1213 || me.Number == 1205)
+}
+
+// sqlSourceQuerier là SourceQuerier mặc định trên *sql.DB của source (hoặc replica).
+type sqlSourceQuerier struct {
+	db *sql.DB
+}
+
+func (q *sqlSourceQuerier) GetGlobalGTIDExecuted(ctx context.Context) (string, error) {
+	var gtid string
+	if err := q.db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&gtid); err != nil {
+		return "", err
+	}
+	return gtid, nil
+}
+
+func (q *sqlSourceQuerier) OpenChunkConn(ctx context.Context) (ChunkConn, error) {
+	conn, err := q.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &sqlChunkConn{conn: conn}, nil
+}
+
+type sqlChunkConn struct {
+	conn *sql.Conn
+}
+
+func (c *sqlChunkConn) WaitForExecutedGTIDSet(ctx context.Context, gtidSet string, timeoutSeconds int) (sql.NullInt64, error) {
+	var res sql.NullInt64
+	err := c.conn.QueryRowContext(ctx, "SELECT WAIT_FOR_EXECUTED_GTID_SET(?, ?)", gtidSet, timeoutSeconds).Scan(&res)
+	return res, err
+}
+
+func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID) ([]*model.RowChange, int64, error) {
+	rows, err := c.conn.QueryContext(ctx, query, startPK, endPK)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var result []*model.RowChange
+	var totalBytes int64
+
+	for rows.Next() {
+		// Quét các cột
+		colVals := make([]any, len(columnNames))
+		colValPtrs := make([]any, len(columnNames))
+		for i := range colVals {
+			colValPtrs[i] = &colVals[i]
+		}
+		if err := rows.Scan(colValPtrs...); err != nil {
+			return nil, 0, err
+		}
+
+		// Tạo row change
+		rc := &model.RowChange{
+			Table: table,
+			Op:    model.OpInsert,
+			Key:   []model.Value{colVals[pkIdx]},
+		}
+		for i, colName := range columnNames {
+			var rawBytes []byte
+			if b, ok := colVals[i].([]byte); ok {
+				rawBytes = b
+				rc.Cols = append(rc.Cols, model.ColValue{
+					Name:  colName,
+					Value: string(b),
+				})
+			} else {
+				rc.Cols = append(rc.Cols, model.ColValue{
+					Name:  colName,
+					Value: colVals[i],
+				})
+				rawBytes = []byte(fmt.Sprintf("%v", colVals[i]))
+			}
+			totalBytes += int64(len(rawBytes))
+		}
+		result = append(result, rc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return result, totalBytes, nil
+}
+
+func (c *sqlChunkConn) Close() error {
+	return c.conn.Close()
+}
+
+// readChunkWatermarked đọc một chunk theo đúng thứ tự RS-2 (02 §5): low = gtid_executed →
+// WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high. Chờ và SELECT chạy trên cùng một kết nối;
+// mỗi lần SELECT (kể cả sub-chunk sau khi chia đôi vì timeout) mở kết nối mới và chờ lại,
+// vì kết nối bị hủy giữa chừng không dùng lại được. Chờ hết giờ (1205) thì chờ lại có giới hạn.
+func (s *MySQLSnapshotter) readChunkWatermarked(
+	ctx context.Context,
+	src SourceQuerier,
+	chunk *Chunk,
+	query string,
+	columnNames []string,
+	pkIdx int,
+	table model.TableID,
+) ([]*model.RowChange, checkpoint.AppliedSet, error) {
+	chunkLowStr, err := src.GetGlobalGTIDExecuted(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read chunk low watermark: %w", err)
+	}
+	s.Manager.StartReading(chunk, ParseMySQLGTIDSet(chunkLowStr))
+
+	queryFn := func(qCtx context.Context, c *Chunk) ([]*model.RowChange, int64, error) {
+		conn, err := src.OpenChunkConn(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer conn.Close()
+		// Chờ dùng ctx cha: timeout của SELECT (5 s) không áp cho bước chờ replica.
+		for attempt := 1; ; attempt++ {
+			err = WaitForExecutedGTIDSet(ctx, conn, chunkLowStr, WaitExecutedGTIDTimeoutSeconds)
+			if err == nil {
+				break
+			}
+			if !isRetryableMySQLError(err) || attempt >= waitGTIDMaxAttempts || ctx.Err() != nil {
+				return nil, 0, err
+			}
+			time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
+		}
+		return conn.QueryChunk(qCtx, query, c.StartPK, c.EndPK, columnNames, pkIdx, table)
+	}
+
+	// Đọc chunk có cơ chế adaptive split và timeout (spec 02 §5)
+	rows, err := s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+	}
+
+	chunkHighStr, err := src.GetGlobalGTIDExecuted(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read chunk high watermark: %w", err)
+	}
+	return rows, ParseMySQLGTIDSet(chunkHighStr), nil
+}
 
 // MySQLSnapshotter điều phối quá trình snapshot chunking và range-state cho MySQL source sang MySQL target.
 type MySQLSnapshotter struct {
 	Manager *RangeStateManager
 	Chunker *Chunker
 	opts    ChunkOptions
+
+	// Source (tùy chọn) thay srcDB cho bước đọc watermark và SELECT của chunk (seam kiểm thử RS-2).
+	// Khi nil, dùng srcDB; WAIT_FOR_EXECUTED_GTID_SET luôn chạy cùng kết nối với SELECT.
+	Source SourceQuerier
 
 	// Barrier (tùy chọn) bao quanh bước đọc biên + đăng ký range + dọn target. Pipeline
 	// truyền vào hàm dừng router và chờ mọi Txn đã nhận được apply xong, để không Txn cũ
@@ -100,8 +302,7 @@ func (s *MySQLSnapshotter) FlushChunk(
 		if err == nil {
 			break
 		}
-		var me *drivermysql.MySQLError
-		if !errors.As(err, &me) || (me.Number != 1213 && me.Number != 1205) || attempt >= 20 {
+		if !isRetryableMySQLError(err) || attempt >= 20 {
 			return err
 		}
 		time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
@@ -210,6 +411,10 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		quotedSel[i] = quoteIdent(c)
 	}
 	colsStr := strings.Join(quotedSel, ", ")
+	src := s.Source
+	if src == nil {
+		src = &sqlSourceQuerier{db: srcDB}
+	}
 
 	for next := cur.NextPK; !cur.Empty && next <= cur.MaxPK; {
 		select {
@@ -227,83 +432,13 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		}
 		next = end + 1
 
-		// Watermark: mỗi chunk đọc low = @@GLOBAL.gtid_executed
-		chunkLowStr, err := GetGlobalGTIDExecuted(srcDB)
+		// Watermark (RS-2): low → WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high, cùng server.
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
+			colsStr, quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol))
+		rows, chunkHigh, err := s.readChunkWatermarked(ctx, src, chunk, query, columnNames, pkIdx, table)
 		if err != nil {
-			return fmt.Errorf("failed to read chunk low watermark: %w", err)
+			return err
 		}
-		chunkLow := ParseMySQLGTIDSet(chunkLowStr)
-
-		// Bắt đầu đọc chunk
-		s.Manager.StartReading(chunk, chunkLow)
-
-		// Đọc chunk có cơ chế adaptive split và timeout (spec 02 §5)
-		queryFn := func(qCtx context.Context, c *Chunk) ([]*model.RowChange, int64, error) {
-			query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
-				colsStr, quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol))
-			rows, err := srcDB.QueryContext(qCtx, query, c.StartPK, c.EndPK)
-			if err != nil {
-				return nil, 0, err
-			}
-			defer rows.Close()
-
-			var result []*model.RowChange
-			var totalBytes int64
-
-			for rows.Next() {
-				// Quét các cột
-				colVals := make([]any, len(columnNames))
-				colValPtrs := make([]any, len(columnNames))
-				for i := range colVals {
-					colValPtrs[i] = &colVals[i]
-				}
-				if err := rows.Scan(colValPtrs...); err != nil {
-					return nil, 0, err
-				}
-
-				// Tạo row change
-				rc := &model.RowChange{
-					Table: table,
-					Op:    model.OpInsert,
-					Key:   []model.Value{colVals[pkIdx]},
-				}
-				for i, colName := range columnNames {
-					var rawBytes []byte
-					if b, ok := colVals[i].([]byte); ok {
-						rawBytes = b
-						rc.Cols = append(rc.Cols, model.ColValue{
-							Name:  colName,
-							Value: string(b),
-						})
-					} else {
-						rc.Cols = append(rc.Cols, model.ColValue{
-							Name:  colName,
-							Value: colVals[i],
-						})
-						rawBytes = []byte(fmt.Sprintf("%v", colVals[i]))
-					}
-					totalBytes += int64(len(rawBytes))
-				}
-				result = append(result, rc)
-			}
-			if err := rows.Err(); err != nil {
-				return nil, 0, err
-			}
-			return result, totalBytes, nil
-		}
-
-		rows, err := s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn)
-		if err != nil {
-			return fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
-		}
-
-		// Đọc high watermark
-		chunkHighStr, err := GetGlobalGTIDExecuted(srcDB)
-		if err != nil {
-			return fmt.Errorf("failed to read chunk high watermark: %w", err)
-		}
-		chunkHigh := ParseMySQLGTIDSet(chunkHighStr)
-
 		s.Manager.FinishReading(chunk, chunkHigh, rows)
 
 		// Rendezvous: chờ stream xử lý hết high watermark

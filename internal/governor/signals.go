@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -121,6 +122,11 @@ func (t *LatencyTracker) Baseline() time.Duration {
 type MySQLDBSignalReader struct {
 	db             *sql.DB
 	latencyTracker *LatencyTracker
+	hard           *HardSignalDetector
+
+	// SpoolUsage (tùy chọn) trả về số byte spool local đang dùng và hard limit của nó;
+	// dùng cho tín hiệu cứng "spool local ≥ 95% hard limit".
+	SpoolUsage func() (used, hard int64)
 }
 
 func NewMySQLDBSignalReader(db *sql.DB, tracker *LatencyTracker) *MySQLDBSignalReader {
@@ -130,6 +136,7 @@ func NewMySQLDBSignalReader(db *sql.DB, tracker *LatencyTracker) *MySQLDBSignalR
 	return &MySQLDBSignalReader{
 		db:             db,
 		latencyTracker: tracker,
+		hard:           NewHardSignalDetector(),
 	}
 }
 
@@ -138,6 +145,16 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 		QueryP99:      r.latencyTracker.P99(),
 		QueryBaseline: r.latencyTracker.Baseline(),
 	}
+
+	var status map[string]uint64
+	if r.db != nil {
+		status = readGlobalStatus(ctx, r.db, HardSignalCounters)
+	}
+	var used, hard int64
+	if r.SpoolUsage != nil {
+		used, hard = r.SpoolUsage()
+	}
+	signals.HardSignal, signals.HardReason = r.hard.Evaluate(status, used, hard)
 
 	if r.db == nil {
 		return signals, nil
@@ -175,6 +192,87 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 	}
 
 	return signals, nil
+}
+
+// HardSignalCounters là các counter của SHOW GLOBAL STATUS tạo tín hiệu cứng cho MySQL
+// (design: bảng loại tín hiệu, hàng "Cứng"): Δ > 0 giữa hai tick là tác dụng ngay. Deadlock và
+// lock wait (Innodb_row_lock_waits) thuộc tín hiệu mềm theo đồng thời, chỉ hạ trần L, nên không ở đây.
+var HardSignalCounters = []string{"Innodb_buffer_pool_wait_free", "Innodb_log_waits"}
+
+// SpoolHardSignalRatio: spool local chạm 95% hard limit là tín hiệu cứng.
+const SpoolHardSignalRatio = 0.95
+
+// HardSignalDetector biến counter cộng dồn thành tín hiệu cứng bằng delta giữa hai lần đọc
+// (02 §7: "Tín hiệu cứng tác dụng ngay, và luôn lấy delta của counter"). Lần đọc đầu của một
+// counter chỉ lấy mốc, không bao giờ kích hoạt; counter giảm (server restart, FLUSH STATUS)
+// cũng chỉ đặt lại mốc.
+type HardSignalDetector struct {
+	mu   sync.Mutex
+	last map[string]uint64
+}
+
+func NewHardSignalDetector() *HardSignalDetector {
+	return &HardSignalDetector{last: map[string]uint64{}}
+}
+
+// Evaluate nhận giá trị counter hiện tại và mức dùng spool, trả về tín hiệu cứng kèm lý do.
+func (d *HardSignalDetector) Evaluate(status map[string]uint64, spoolUsed, spoolHard int64) (bool, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var reasons []string
+	for _, name := range HardSignalCounters {
+		v, ok := status[name]
+		if !ok {
+			continue
+		}
+		prev, seen := d.last[name]
+		d.last[name] = v
+		if seen && v > prev {
+			reasons = append(reasons, fmt.Sprintf("Δ%s = %d", name, v-prev))
+		}
+	}
+	if SpoolNearFull(spoolUsed, spoolHard) {
+		reasons = append(reasons, fmt.Sprintf("local spool %d/%d bytes ≥ %.0f%% of hard limit",
+			spoolUsed, spoolHard, SpoolHardSignalRatio*100))
+	}
+	if len(reasons) == 0 {
+		return false, ""
+	}
+	return true, strings.Join(reasons, "; ")
+}
+
+// SpoolNearFull: spool local đã dùng ≥ 95% hard limit (hard ≤ 0 = không cấu hình, không kích hoạt).
+func SpoolNearFull(used, hard int64) bool {
+	return hard > 0 && float64(used) >= SpoolHardSignalRatio*float64(hard)
+}
+
+// readGlobalStatus đọc các counter cần thiết từ SHOW GLOBAL STATUS. Lỗi thì trả map rỗng:
+// thiếu một lần đọc chỉ làm lỡ một delta, không được làm hỏng tick của governor.
+func readGlobalStatus(ctx context.Context, db *sql.DB, names []string) map[string]uint64 {
+	out := map[string]uint64{}
+	if len(names) == 0 {
+		return out
+	}
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = "'" + strings.ReplaceAll(n, "'", "''") + "'"
+	}
+	rows, err := db.QueryContext(ctx, "SHOW GLOBAL STATUS WHERE Variable_name IN ("+strings.Join(quoted, ", ")+")")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, val string
+		if err := rows.Scan(&name, &val); err != nil {
+			return out
+		}
+		var v uint64
+		if _, err := fmt.Sscanf(strings.TrimSpace(val), "%d", &v); err == nil {
+			out[name] = v
+		}
+	}
+	return out
 }
 
 // SimulatedSignalReader là reader mô phỏng phục vụ unit test.
