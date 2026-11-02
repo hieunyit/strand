@@ -1,10 +1,13 @@
 package checker_test
 
 import (
+	"strings"
 	"testing"
 
 	"strand/tests/checker"
 )
+
+const testUUID = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
 
 // TestCK1_FiveVerificationChecks kiểm tra AC1:
 // Đầy đủ 5 phép kiểm của spec/04 §3 hoạt động chính xác khi dữ liệu chuẩn.
@@ -71,7 +74,7 @@ func TestCK1_FiveVerificationChecks(t *testing.T) {
 
 	// 4. Phép kiểm 4: Không hồi sinh (No resurrection)
 	deletedKeys := []checker.DeletedKey{
-		{Table: "orders", PK: "2", Pos: "001"},
+		{Table: "orders", PK: "2", Pos: testUUID + ":1"},
 	}
 	targetAfterDelete := map[string]map[string]checker.RowState{
 		"orders": {
@@ -79,7 +82,7 @@ func TestCK1_FiveVerificationChecks(t *testing.T) {
 			"2": {Table: "orders", PK: "2", Ver: 1, Deleted: true},
 		},
 	}
-	r4 := chk.CheckNoResurrection(targetAfterDelete, deletedKeys, "002")
+	r4 := chk.CheckNoResurrection(targetAfterDelete, deletedKeys, testUUID+":1-2")
 	if !r4.Passed {
 		t.Fatalf("CheckNoResurrection mong muốn Passed=true, nhận được vi phạm: %v", r4.Violations)
 	}
@@ -161,4 +164,103 @@ func TestCK2_CheckerCatchesThreeInjectedBugs(t *testing.T) {
 		t.Fatalf("Bản lỗi 3 (reorder_conflicting_txns): Checker KHÔNG phát hiện vi phạm khi đảo thứ tự!")
 	}
 	t.Logf("Bản lỗi 3 (reorder_conflicting_txns) đã bị bắt thành công: %v", resBug3.Violations)
+}
+
+// TestCK_NoResurrectionComparesGTIDSetsNotStrings: so chuỗi coi "uuid:10" <= "uuid:9" là đúng
+// và "uuid:9" <= "uuid:10" là sai; checker phải so theo quan hệ tập con của GTID set.
+func TestCK_NoResurrectionComparesGTIDSetsNotStrings(t *testing.T) {
+	chk := checker.NewChecker()
+	target := map[string]map[string]checker.RowState{
+		"orders": {
+			"7": {Table: "orders", PK: "7", Ver: 1, Values: map[string]interface{}{"amount": 1.0}},
+		},
+	}
+
+	cases := []struct {
+		name       string
+		delPos     string
+		checkpoint string
+		wantPassed bool
+	}{
+		// DELETE ở GNO 9, checkpoint đến 10: DELETE thuộc checkpoint, row còn ở target là hồi sinh.
+		// So chuỗi "…:9" <= "…:10" là false nên bản cũ bỏ sót.
+		{"delete 9 trong checkpoint 1-10", testUUID + ":9", testUUID + ":1-10", false},
+		// Checkpoint có lỗ ở 9: DELETE chưa thuộc checkpoint dù GNO 9 < 10.
+		{"delete 9 rơi vào lỗ của checkpoint 1-8,10", testUUID + ":9", testUUID + ":1-8," + testUUID + ":10", true},
+		// DELETE ở GNO 10, checkpoint chỉ đến 9: DELETE chưa thuộc checkpoint, không kiểm.
+		// So chuỗi "…:10" <= "…:9" là true nên bản cũ báo sai.
+		{"delete 10 ngoài checkpoint 1-9", testUUID + ":10", testUUID + ":1-9", true},
+		// Khác UUID thì không thuộc checkpoint.
+		{"delete ở uuid khác", "4e11fa47-71ca-11e1-9e33-c80aa9429562:1", testUUID + ":1-100", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := chk.CheckNoResurrection(target, []checker.DeletedKey{{Table: "orders", PK: "7", Pos: tc.delPos}}, tc.checkpoint)
+			if r.Passed != tc.wantPassed {
+				t.Fatalf("Passed=%v, muốn %v; vi phạm: %v", r.Passed, tc.wantPassed, r.Violations)
+			}
+			if !tc.wantPassed && (len(r.Violations) != 1 || !strings.Contains(r.Violations[0], "hồi sinh")) {
+				t.Fatalf("muốn đúng một vi phạm hồi sinh, nhận: %v", r.Violations)
+			}
+		})
+	}
+
+	// Vị trí không phải GTID set thì phải báo lỗi, không được lặng lẽ bỏ qua.
+	if r := chk.CheckNoResurrection(target, nil, "khong-phai-gtid"); r.Passed {
+		t.Fatalf("checkpoint hỏng phải làm phép kiểm thất bại")
+	}
+	if r := chk.CheckNoResurrection(target, []checker.DeletedKey{{Table: "orders", PK: "7", Pos: "x:y"}}, testUUID+":1-10"); r.Passed {
+		t.Fatalf("vị trí DELETE hỏng phải làm phép kiểm thất bại")
+	}
+}
+
+// TestCK_CheckpointPrefixRejectsDataAfterCheckpoint: target chứa row/version của TXN sau
+// checkpoint thì không phải prefix tại checkpoint.
+func TestCK_CheckpointPrefixRejectsDataAfterCheckpoint(t *testing.T) {
+	chk := checker.NewChecker()
+	history := checker.NewClientHistory()
+	history.Add(checker.TxnRecord{TxnID: "txn-1", Pos: testUUID + ":1", Seq: 1, Ops: []checker.RowOp{
+		{Table: "orders", PK: "1", Type: checker.OpInsert, Ver: 1, Values: map[string]interface{}{"amount": 100.0}},
+	}})
+	history.Add(checker.TxnRecord{TxnID: "txn-2", Pos: testUUID + ":2", Seq: 2, Ops: []checker.RowOp{
+		{Table: "orders", PK: "1", Type: checker.OpUpdate, Ver: 2, Values: map[string]interface{}{"amount": 200.0}},
+	}})
+	history.Add(checker.TxnRecord{TxnID: "txn-3", Pos: testUUID + ":3", Seq: 3, Ops: []checker.RowOp{
+		{Table: "orders", PK: "2", Type: checker.OpInsert, Ver: 1, Values: map[string]interface{}{"amount": 300.0}},
+	}})
+	history.Add(checker.TxnRecord{TxnID: "txn-4", Pos: testUUID + ":4", Seq: 4, Ops: []checker.RowOp{
+		{Table: "items", PK: "9", Type: checker.OpInsert, Ver: 1, Values: map[string]interface{}{"qty": 1.0}},
+	}})
+
+	row1v1 := checker.RowState{Table: "orders", PK: "1", Ver: 1, Values: map[string]interface{}{"amount": 100.0}}
+	row1v2 := checker.RowState{Table: "orders", PK: "1", Ver: 2, Values: map[string]interface{}{"amount": 200.0}}
+	row2 := checker.RowState{Table: "orders", PK: "2", Ver: 1, Values: map[string]interface{}{"amount": 300.0}}
+	item9 := checker.RowState{Table: "items", PK: "9", Ver: 1, Values: map[string]interface{}{"qty": 1.0}}
+	cp := testUUID + ":1"
+
+	cases := []struct {
+		name       string
+		target     map[string]map[string]checker.RowState
+		wantPassed bool
+	}{
+		{"đúng prefix", map[string]map[string]checker.RowState{"orders": {"1": row1v1}}, true},
+		{"version mới hơn của TXN sau checkpoint", map[string]map[string]checker.RowState{"orders": {"1": row1v2}}, false},
+		{"row mới của TXN sau checkpoint cùng bảng", map[string]map[string]checker.RowState{"orders": {"1": row1v1, "2": row2}}, false},
+		{"row của TXN sau checkpoint ở bảng chưa có trong prefix", map[string]map[string]checker.RowState{"orders": {"1": row1v1}, "items": {"9": item9}}, false},
+		{"thiếu row của prefix", map[string]map[string]checker.RowState{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := chk.CheckCheckpointPrefix(tc.target, history, cp)
+			if r.Passed != tc.wantPassed {
+				t.Fatalf("Passed=%v, muốn %v; vi phạm: %v", r.Passed, tc.wantPassed, r.Violations)
+			}
+		})
+	}
+
+	// Checkpoint không có trong lịch sử: không được so với toàn bộ lịch sử rồi báo PASS.
+	full := map[string]map[string]checker.RowState{"orders": {"1": row1v2, "2": row2}, "items": {"9": item9}}
+	if r := chk.CheckCheckpointPrefix(full, history, testUUID+":99"); r.Passed {
+		t.Fatalf("checkpoint không có trong lịch sử phải làm phép kiểm thất bại")
+	}
 }

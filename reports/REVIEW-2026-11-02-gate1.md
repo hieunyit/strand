@@ -24,7 +24,7 @@ riêng CP-4 ở `internal/checkpoint/compaction_regression_test.go`). Test đư�
 | C7 | Promote bước 3 `ApplyRemaining` là `return nil` | `TestPR1_ApplyRemainingWithoutSourceRefuses`, `TestPR1_MissingFromApplied` | promote, cmd |
 | C9 (một phần) | Snapshot: PK không ánh xạ được thì `ActionApply` (bỏ qua range-state); PK `[]byte`; tìm chunk tuyến tính; rendezvous được phép nil; giả định PK là cột đầu | `TestRS1_UnmappablePKIsRejectedNotApplied`, `TestRS1_ByteSlicePKRouted`, `TestRS1_SnapshotAddRequiresRendezvous`, `TestRS1_FindChunkIsNotLinear` | snapshot |
 | H | Spool xóa object trong bucket trước khi commit Pebble, crash ở giữa làm spool không đọc được | `TestSpoolTruncateCrashNeverLeavesDanglingBucketRefs` | spool |
-| H | Verify panic khi PK là `[]byte` | `TestVerifyByteSlicePKDoesNotPanic` | verify |
+| H | Verify panic khi PK là `[]byte` | `TestVerifyByteSlicePKDoesNotPanic` (đã xóa ở review R1 cùng `Verifier` cũ; `LiveVerifier` dùng PK dạng chuỗi) | verify |
 | G1 | `validate` không kết nối source: không chặn partial JSON, row image, thiếu PK | `TestValidateChecksLiveMySQLSource` | validate, cmd |
 | H | Lỗi kết nối reader bị gán exit 3; systemd `RestartPreventExitStatus=3` nên không restart | `TestReaderConnectFailureIsNotConfigRejection` | reader/mysql |
 
@@ -52,6 +52,8 @@ Thay đổi hành vi cần biết:
    (c) gọi `CommitOrderer.Skip` cho TXN đã apply (CP-2) ở chế độ strict.
 2. **Test Gate 1 và test fault vẫn là test giả** (`tests/gate1`, `tests/fault`). Chúng không chạy
    process, không kill, không dùng Toxiproxy. Chỉ viết lại được sau mục 1. Tôi không xóa chúng (R9).
+   Cập nhật (review R1): đã xóa cả hai thư mục; bằng chứng thật là `TestG1_E2E_*` trong
+   `tests/e2e`, và `make fault` chạy các kịch bản fault e2e.
 3. **Snapshot flush không ghi checkpoint hay trạng thái range.** Crash giữa chừng thì chạy lại từ
    đầu, và các event đã buffer có thể đã bị coi là applied. Cần thiết kế chỗ lưu trạng thái range.
 4. **AppliedSet của PG coi LSN là các số nguyên liền nhau**, nên 2 commit liên tiếp sinh ~1,7 triệu

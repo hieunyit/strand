@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,7 +28,8 @@ type XtraBackupMeta struct {
 	ServerVersion  string
 }
 
-// XtraBackupPlanner cài đặt Seeder cho công cụ XtraBackup theo spec: 02 §9 và design §3.3.
+// XtraBackupPlanner lập kế hoạch seed (bước Plan, SD-1..SD-4) cho công cụ XtraBackup theo spec: 02 §9
+// và design §3.3. Bước apply do lệnh `strand seed apply` (cmd) thực hiện.
 type XtraBackupPlanner struct{}
 
 // NewXtraBackupPlanner tạo XtraBackupPlanner mới.
@@ -35,19 +37,13 @@ func NewXtraBackupPlanner() *XtraBackupPlanner {
 	return &XtraBackupPlanner{}
 }
 
+// prereleaseToolRe: từ khóa pre-release chỉ khớp khi là một thành phần riêng của chuỗi phiên bản
+// (đứng sau/trước dấu phân cách hoặc đầu/cuối chuỗi), để "percona" không bị coi là chứa "rc".
+var prereleaseToolRe = regexp.MustCompile(`(?i)(^|[-._+ ])(rc|alpha|beta|preview|dev|prerelease)\d*($|[-._+ ])`)
+
 // IsPrereleaseToolVersion kiểm tra xem phiên bản công cụ có phải là bản pre-release / RC hay không.
 func IsPrereleaseToolVersion(ver string) bool {
-	v := strings.ToLower(strings.TrimSpace(ver))
-	if v == "" {
-		return false
-	}
-	prereleaseTokens := []string{"-rc", "rc", "-alpha", "alpha", "-beta", "beta", "-preview", "-dev", "prerelease"}
-	for _, token := range prereleaseTokens {
-		if strings.Contains(v, token) {
-			return true
-		}
-	}
-	return false
+	return prereleaseToolRe.MatchString(strings.TrimSpace(ver))
 }
 
 // ParseBackupMetadata đọc và phân tích metadata từ thư mục bản backup XtraBackup.
@@ -255,11 +251,6 @@ func (p *XtraBackupPlanner) Plan(ctx context.Context, src SeedSource) (*SeedMani
 	}
 
 	return manifest, nil
-}
-
-// Apply thực hiện điều phối restore theo manifest (placeholder cho bước apply).
-func (p *XtraBackupPlanner) Apply(ctx context.Context, m *SeedManifest) error {
-	return nil
 }
 
 // isPrepared: chỉ backup đã chạy xtrabackup --prepare mới nhất quán (design §3.3).
