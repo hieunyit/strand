@@ -909,14 +909,15 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 
 func (p *Pipeline) pace(ctx context.Context) error {
 	for {
-		// bootstrap_retention_risk: ưu tiên snapshot, không giãn cũng không dừng (02 §7,
-		// P_lag theo pha) — nếu không, snapshot dừng vì lag và lag lại tăng: tự khóa chết.
-		if p.retentionRisk.Load() {
+		breaker := p.govAlgo != "static" && p.gov.BreakerOpen()
+		// Breaker luôn thắng: background dừng (02 §7). bootstrap_retention_risk chỉ ghi đè việc
+		// onoff dừng vì áp suất lag (P_lag theo pha), để snapshot không tự khóa chết.
+		if p.retentionRisk.Load() && !breaker {
 			return nil
 		}
 		windowOK := inWindows(p.cfg.Bootstrap.Logical.Windows, time.Now())
 		running := p.govAlgo == "static" || p.gov.BackgroundRunning()
-		if windowOK && running {
+		if windowOK && running && !breaker {
 			break
 		}
 		select {
