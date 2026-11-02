@@ -9,12 +9,12 @@ import (
 type PromoteStep string
 
 const (
-	StepFenceSource     PromoteStep = "fence_source"     // Bước 1: Fence source cũ
-	StepHoldReadOnly    PromoteStep = "hold_readonly"    // Bước 2: Giữ target read-only
-	StepApplyRemaining  PromoteStep = "apply_remaining"  // Bước 3: Apply nốt phần log còn lại
-	StepSetval          PromoteStep = "setval"           // Bước 4: Chạy setval cho mọi sequence và identity
-	StepOpenWrites      PromoteStep = "open_writes"      // Bước 5: Mở quyền ghi
-	StepSwitchDNS       PromoteStep = "switch_dns"       // Bước 6: Chuyển DNS hoặc VIP
+	StepFenceSource    PromoteStep = "fence_source"    // Bước 1: Fence source cũ
+	StepHoldReadOnly   PromoteStep = "hold_readonly"   // Bước 2: Giữ target read-only
+	StepApplyRemaining PromoteStep = "apply_remaining" // Bước 3: Apply nốt phần log còn lại
+	StepSetval         PromoteStep = "setval"          // Bước 4: Chạy setval cho mọi sequence và identity
+	StepOpenWrites     PromoteStep = "open_writes"     // Bước 5: Mở quyền ghi
+	StepSwitchDNS      PromoteStep = "switch_dns"      // Bước 6: Chuyển DNS hoặc VIP
 )
 
 // State đại diện trạng thái pipeline liên quan promote theo spec/02 §12.
@@ -58,6 +58,9 @@ type Config struct {
 	PeakRate          float64          `json:"peak_rate"`          // r_peak (keys/sec)
 	SyncIntervalSec   float64          `json:"sync_interval_sec"`  // Delta t_sync (seconds)
 	SequenceOverrides map[string]int64 `json:"sequence_overrides"` // Giá trị do người vận hành chỉ định
+	// SourceFencedExternally: người vận hành xác nhận source cũ đã bị cô lập bằng cách khác
+	// (tắt máy, STONITH, chặn mạng) khi Strand không fence được vì source không truy cập được.
+	SourceFencedExternally bool `json:"source_fenced_externally"`
 }
 
 // Progress lưu trữ tiến trình promote để có thể resume từ bước đang dở.
