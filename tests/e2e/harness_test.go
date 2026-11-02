@@ -217,6 +217,7 @@ type strandCfg struct {
 	// PostSeedWindow: cửa sổ verify sau seed (mặc định 5s trong test; production 30m).
 	PostSeedWindow string
 	VerifyDelta    string
+	SourceIOPS     int
 }
 
 func (c *strandCfg) write(t *testing.T) string {
@@ -242,6 +243,9 @@ func (c *strandCfg) write(t *testing.T) string {
 	if c.VerifyDelta == "" {
 		c.VerifyDelta = "off"
 	}
+	if c.SourceIOPS == 0 {
+		c.SourceIOPS = 600
+	}
 	q := func(xs []string) string {
 		var out []string
 		for _, x := range xs {
@@ -265,12 +269,13 @@ bootstrap: { default: %s }
 checkpoint: { store: target, flush_every: 200ms }
 resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB }
+  source: { iops: { soft: %d, hard: %d } }
   workers: { min: 1, max: %d }
 governor: { algorithm: onoff, tick: 1s, lag_slo: %s }
 verify: { delta: %s, post_seed_window: %s }
 observability: { admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceDSN, 40000+rand.Intn(20000), c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, filepath.Join(c.Dir, "state"), c.Workers, c.LagSLO, c.VerifyDelta, c.PostSeedWindow, c.socket(t))
+		c.Bootstrap, filepath.Join(c.Dir, "state"), c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.VerifyDelta, c.PostSeedWindow, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)

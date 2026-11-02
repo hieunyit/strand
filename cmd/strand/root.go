@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 )
 
@@ -37,14 +35,4 @@ func init() {
 	rootCmd.AddCommand(newSnapshotCmd())
 	rootCmd.AddCommand(newSeedCmd())
 	rootCmd.AddCommand(newVerifyCmd())
-}
-
-func newPlanCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "plan",
-		Short: "Ước lượng ETA; từ chối chế độ A khi ETA > 50% retention",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("plan command not yet implemented")
-		},
-	}
 }
