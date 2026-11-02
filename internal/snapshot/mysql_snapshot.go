@@ -166,6 +166,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 				}
 			}
 		}
+		cur = plan
 		if plan.Empty {
 			s.Manager.RegisterTable(table, pkCol, nil, math.MinInt64)
 			return nil
@@ -173,7 +174,6 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		// 2. Keyset walk (02 §5): chỉ đăng ký phần đã xong [Min, Next-1] và phần chưa đọc
 		// [Next, Max]; chunk kế tiếp được cắt động theo khóa thật ngay trước khi đọc, nên PK
 		// thưa hay lệch không sinh ra hàng nghìn chunk rỗng.
-		cur = plan
 		chunks = nil
 		if plan.NextPK > plan.MinPK {
 			chunks = append(chunks, &Chunk{ID: 0, Table: table, PKCol: pkCol, StartPK: plan.MinPK,

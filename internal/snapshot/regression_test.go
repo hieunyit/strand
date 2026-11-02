@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"strand/internal/checkpoint"
 	"strand/internal/model"
 	"strand/internal/snapshot"
 )
@@ -67,4 +68,20 @@ func TestRS1_FindChunkIsNotLinear(t *testing.T) {
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("20k events took %v with 500k chunks: chunk lookup is linear", d)
 	}
+}
+
+// Bảng nguồn rỗng: snapshot phải kết thúc ngay (không chạy keyset walk với plan rỗng).
+func TestRS1_EmptyTableSnapshotFinishes(t *testing.T) {
+	s := snapshot.NewMySQLSnapshotter(snapshot.DefaultChunkOptions())
+	saved := false
+	s.LoadPlan = func(model.TableID) (snapshot.SnapshotPlan, bool) {
+		return snapshot.SnapshotPlan{Empty: true, ChunkRows: 5000}, true
+	}
+	s.SavePlan = func(model.TableID, snapshot.SnapshotPlan) error { saved = true; return nil }
+	err := s.SnapshotAdd(context.Background(), nil, nil, regTable, "id", []string{"id"},
+		func(context.Context, checkpoint.AppliedSet) error { return nil })
+	if err != nil {
+		t.Fatalf("empty table snapshot failed: %v", err)
+	}
+	_ = saved
 }
