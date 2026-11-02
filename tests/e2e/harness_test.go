@@ -229,7 +229,11 @@ func (c *strandCfg) write(t *testing.T) string {
 		c.Socket = filepath.Join(t.TempDir(), "admin.sock")
 	}
 	if c.CommitOrder == "" {
-		c.CommitOrder = "relaxed"
+		// STRAND_E2E_COMMIT_ORDER=strict chạy toàn bộ e2e ở chế độ strict (mặc định của spec).
+		c.CommitOrder = os.Getenv("STRAND_E2E_COMMIT_ORDER")
+		if c.CommitOrder == "" {
+			c.CommitOrder = "relaxed"
+		}
 	}
 	if c.Workers == 0 {
 		c.Workers = 8
