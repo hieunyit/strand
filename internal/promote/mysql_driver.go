@@ -101,16 +101,21 @@ func NewMySQLTargetDriver(db *sql.DB) *MySQLTargetDriver {
 	return &MySQLTargetDriver{db: db}
 }
 
-// HoldReadOnly thiết lập target ở chế độ super_read_only để ứng dụng không ghi được.
+// HoldReadOnly (bước 2) chặn ghi của ứng dụng nhưng để Strand vẫn apply được ở bước 3:
+// read_only=ON, super_read_only=OFF. User của Strand có CONNECTION_ADMIN nên ghi được;
+// super_read_only=ON sẽ chặn cả Strand (design §6.5 rev 90, 03 §2; quyết định P1-17 câu 1).
 func (d *MySQLTargetDriver) HoldReadOnly(ctx context.Context) error {
-	_, err := d.db.ExecContext(ctx, "SET GLOBAL super_read_only = ON;")
+	if _, err := d.db.ExecContext(ctx, "SET GLOBAL super_read_only = OFF"); err != nil {
+		return err
+	}
+	_, err := d.db.ExecContext(ctx, "SET GLOBAL read_only = ON")
 	return err
 }
 
 // IsReadOnly kiểm tra xem target có đang ở chế độ read-only hay không.
 func (d *MySQLTargetDriver) IsReadOnly(ctx context.Context) (bool, error) {
 	var val int
-	err := d.db.QueryRowContext(ctx, "SELECT @@GLOBAL.super_read_only;").Scan(&val)
+	err := d.db.QueryRowContext(ctx, "SELECT @@GLOBAL.read_only").Scan(&val)
 	if err != nil {
 		return false, err
 	}
@@ -179,8 +184,11 @@ func (d *MySQLTargetDriver) Setval(ctx context.Context, seq SequenceInfo, val in
 	return err
 }
 
-// OpenWrites mở lại quyền ghi trên target bằng super_read_only = OFF.
+// OpenWrites (bước 5) mở quyền ghi cho ứng dụng: tắt cả super_read_only lẫn read_only.
 func (d *MySQLTargetDriver) OpenWrites(ctx context.Context) error {
-	_, err := d.db.ExecContext(ctx, "SET GLOBAL super_read_only = OFF;")
+	if _, err := d.db.ExecContext(ctx, "SET GLOBAL super_read_only = OFF"); err != nil {
+		return err
+	}
+	_, err := d.db.ExecContext(ctx, "SET GLOBAL read_only = OFF")
 	return err
 }

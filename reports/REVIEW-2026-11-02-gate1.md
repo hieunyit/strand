@@ -56,7 +56,8 @@ Thay đổi hành vi cần biết:
    đầu, và các event đã buffer có thể đã bị coi là applied. Cần thiết kế chỗ lưu trạng thái range.
 4. **AppliedSet của PG coi LSN là các số nguyên liền nhau**, nên 2 commit liên tiếp sinh ~1,7 triệu
    "holes". Cần thiết kế lại trước P2: holes phải là các commit LSN đã thấy mà chưa apply.
-5. **Spec mâu thuẫn ở promote (MySQL):**
+5. ~~**Spec mâu thuẫn ở promote (MySQL)**~~: đã có quyết định, đã sửa (xem `questions/P1-17.md`).
+   Câu 3 (bước 3 khi failover) còn mở. Nội dung gốc:
    (a) bước 2 bật `super_read_only` thì writer của Strand không apply được bước 3;
    (b) failover với source không truy cập được thì MySQL không có sequence, nên promote mở ghi mà
    không có điểm dừng hỏi người vận hành, dù source chưa bị fence (nguy cơ split-brain khi bị

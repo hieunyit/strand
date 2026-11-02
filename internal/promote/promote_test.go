@@ -13,12 +13,12 @@ import (
 
 // mockSourceDriver giả lập source driver.
 type mockSourceDriver struct {
-	mu          sync.Mutex
-	reachable   bool
-	fenceCalls  int
-	readCalls   map[string]int
-	lastValues  map[string]int64
-	fenceHook   func() error
+	mu         sync.Mutex
+	reachable  bool
+	fenceCalls int
+	readCalls  map[string]int
+	lastValues map[string]int64
+	fenceHook  func() error
 }
 
 func newMockSourceDriver(reachable bool) *mockSourceDriver {
@@ -64,15 +64,15 @@ func (m *mockSourceDriver) ReadSequenceLastValue(ctx context.Context, seqName st
 
 // mockTargetDriver giả lập target driver kiểm tra trạng thái read-only.
 type mockTargetDriver struct {
-	mu             sync.Mutex
-	readOnly       bool
-	holdCalls      int
-	applyCalls     int
-	openCalls      int
-	setvalCalls    int
-	maxColValues   map[string]int64
-	setvalValues   map[string]int64
-	applyHook      func() error
+	mu               sync.Mutex
+	readOnly         bool
+	holdCalls        int
+	applyCalls       int
+	openCalls        int
+	setvalCalls      int
+	maxColValues     map[string]int64
+	setvalValues     map[string]int64
+	applyHook        func() error
 	beforeSetvalHook func() error
 }
 
@@ -370,6 +370,9 @@ func TestPM3_UnreachableSource_Exit10PromoteNeedsDecision(t *testing.T) {
 	cfg.SequenceOverrides = map[string]int64{
 		"global_txn_seq": suggestedVal + 500, // người vận hành có thể chấp nhận hoặc nâng cao hơn
 	}
+	// Quyết định P1-17 (câu 2, hướng 1): source không fence được thì người vận hành phải
+	// xác nhận đã cô lập source bằng cách khác.
+	cfg.SourceFencedExternally = true
 
 	promoter2 := promote.NewPromoter(cfg, store, source, target, seqs, nil)
 	resumedP, err := promoter2.Run(ctx)

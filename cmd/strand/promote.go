@@ -23,6 +23,7 @@ var (
 	promotePeakRate         float64
 	promoteSyncIntervalSec  float64
 	promoteCatchUpTimeout   time.Duration
+	promoteSourceFencedExt  bool
 )
 
 func newPromoteCmd() *cobra.Command {
@@ -68,13 +69,14 @@ func newPromoteCmd() *cobra.Command {
 			}
 
 			cfg := promote.Config{
-				PipelineID:        promotePipelineID,
-				TargetDSN:         promoteTargetDSN,
-				SourceDSN:         promoteFenceSourceDSN,
-				DryRun:            dryRun,
-				PeakRate:          promotePeakRate,
-				SyncIntervalSec:   promoteSyncIntervalSec,
-				SequenceOverrides: seqOverrides,
+				PipelineID:             promotePipelineID,
+				TargetDSN:              promoteTargetDSN,
+				SourceDSN:              promoteFenceSourceDSN,
+				DryRun:                 dryRun,
+				PeakRate:               promotePeakRate,
+				SyncIntervalSec:        promoteSyncIntervalSec,
+				SequenceOverrides:      seqOverrides,
+				SourceFencedExternally: promoteSourceFencedExt,
 			}
 
 			p := promote.NewPromoter(cfg, stateStore, sourceDriver, targetDriver, nil, logger)
@@ -84,11 +86,17 @@ func newPromoteCmd() *cobra.Command {
 				if progress != nil && progress.State == promote.StateAwaitingOperator {
 					fmt.Printf("\n=== PROMOTE NEEDS OPERATOR DECISION ===\n")
 					fmt.Printf("Trạng thái pipeline: %s\n", progress.State)
-					fmt.Printf("Các sequence độc lập không đọc được từ source:\n")
-					for seqName, suggested := range progress.SuggestedSequences {
-						fmt.Printf("  - %s: gợi ý %d (lần sync cuối + margin)\n", seqName, suggested)
+					if !progress.IsStepCompleted(promote.StepFenceSource) {
+						fmt.Printf("Không fence được source cũ (không truy cập được hoặc thiếu --fence).\n")
+						fmt.Printf("Cô lập source bằng cách khác rồi chạy lại với --source-fenced-externally.\n")
 					}
-					fmt.Printf("Vui lòng duyệt hoặc chỉ định giá trị qua --override-sequences '<json>' và chạy lại.\n")
+					if len(progress.SuggestedSequences) > 0 {
+						fmt.Printf("Các sequence độc lập không đọc được từ source:\n")
+						for seqName, suggested := range progress.SuggestedSequences {
+							fmt.Printf("  - %s: gợi ý %d (lần sync cuối + margin)\n", seqName, suggested)
+						}
+						fmt.Printf("Duyệt hoặc chỉ định giá trị qua --override-sequences '<json>' khi chạy lại.\n")
+					}
 				}
 				return err
 			}
@@ -108,6 +116,7 @@ func newPromoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&promotePipelineID, "pipeline", "default", "ID định danh của pipeline")
 	cmd.Flags().StringVar(&promoteOverrideSeqsJSON, "override-sequences", "", "JSON chỉ định giá trị cho các sequence độc lập khi source hỏng")
 	cmd.Flags().Float64Var(&promotePeakRate, "peak-rate", 1000, "Tốc độ cấp phát đỉnh r_peak (keys/giây)")
+	cmd.Flags().BoolVar(&promoteSourceFencedExt, "source-fenced-externally", false, "Xác nhận source cũ đã bị cô lập bằng cách khác khi Strand không fence được (failover)")
 	cmd.Flags().DurationVar(&promoteCatchUpTimeout, "catchup-timeout", 5*time.Minute, "Thời gian tối đa chờ target apply hết log của source ở bước 3")
 	cmd.Flags().Float64Var(&promoteSyncIntervalSec, "sync-interval", 5, "Chu kỳ đồng bộ sequence Delta t_sync (giây)")
 

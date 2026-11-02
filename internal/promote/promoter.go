@@ -50,6 +50,23 @@ func NewPromoter(
 	}
 }
 
+// suggestIndependentSequences ghi giá trị gợi ý (lần đồng bộ cuối + margin) cho các
+// sequence độc lập chưa có giá trị do người vận hành chỉ định, để in ra cùng lúc dừng hỏi.
+func (p *Promoter) suggestIndependentSequences(progress *Progress) {
+	for i, seq := range progress.Sequences {
+		if seq.Type != SequenceTypeIndependent {
+			continue
+		}
+		if _, ok := p.cfg.SequenceOverrides[seq.Name]; ok {
+			continue
+		}
+		margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
+		suggested := seq.LastSyncedValue + margin
+		progress.SuggestedSequences[seq.Name] = suggested
+		progress.Sequences[i].SuggestedValue = suggested
+	}
+}
+
 // Run thực thi quy trình promote 6 bước theo spec/02 §8:
 // 1. Fence source cũ
 // 2. Giữ target read-only
@@ -101,15 +118,34 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 		progress.CurrentStep = StepFenceSource
 		_ = p.stateStore.SaveProgress(ctx, progress)
 
+		fenced := false
 		if p.sourceDriver != nil {
-			if err := p.sourceDriver.Fence(ctx); err != nil {
-				// Nếu source không kết nối được trong failover khẩn cấp, tiếp tục nếu cho phép
-				if !p.sourceDriver.IsReachable(ctx) {
-					p.logger.Warn("source unreachable during fence (failover scenario)", "pipeline", p.cfg.PipelineID)
-				} else {
-					return progress, fmt.Errorf("fence source failed: %w", err)
-				}
+			err := p.sourceDriver.Fence(ctx)
+			if err == nil {
+				fenced = true
+			} else if p.sourceDriver.IsReachable(ctx) {
+				// Source còn truy cập được mà fence thất bại: lỗi thật, cờ xác nhận không thay được.
+				return progress, fmt.Errorf("fence source failed: %w", err)
+			} else {
+				p.logger.Warn("source unreachable: cannot fence", "pipeline", p.cfg.PipelineID, "error", err)
 			}
+		}
+		if !fenced {
+			// Không fence được (không truy cập được, hoặc không có --fence). "Strand không thấy
+			// source" không có nghĩa "source đã chết": mở ghi lúc này có thể sinh hai nơi nhận ghi.
+			// Dừng hỏi người vận hành (quyết định P1-17, câu 2, hướng 1).
+			if !p.cfg.SourceFencedExternally {
+				p.suggestIndependentSequences(progress)
+				progress.State = StateAwaitingOperator
+				_ = p.stateStore.SaveProgress(ctx, progress)
+				return progress, exitcode.New(
+					exitcode.ErrPromoteNeedsDecision,
+					exitcode.NeedsDecision,
+					"source could not be fenced: isolate the old source by other means (power off, STONITH, block application traffic), then re-run with --source-fenced-externally",
+					nil,
+				)
+			}
+			p.logger.Warn("operator confirmed the old source is fenced externally", "pipeline", p.cfg.PipelineID)
 		}
 		progress.MarkStepCompleted(StepFenceSource)
 		if err := p.stateStore.SaveProgress(ctx, progress); err != nil {
