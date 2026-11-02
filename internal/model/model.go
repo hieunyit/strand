@@ -116,6 +116,11 @@ type Txn struct {
 	// Hỗ trợ transaction lớn tràn đĩa theo spec: design §6.4
 	SpillPath string `json:"spill_path,omitempty"`
 	RowCount  int64  `json:"row_count,omitempty"`
+
+	// SpilledTables liệt kê mọi bảng (kể cả bảng cha qua FK) mà Txn đã tràn đĩa chạm tới.
+	// Txn tràn đĩa không có Rows trong RAM, nên scheduler dùng danh sách này để
+	// dựng phụ thuộc cấp bảng (CO-1).
+	SpilledTables []TableID `json:"spilled_tables,omitempty"`
 }
 
 // IsSpilled kiểm tra transaction có bị tràn xuống đĩa không.
