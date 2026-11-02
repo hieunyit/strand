@@ -142,6 +142,17 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		}
 		return Response{OK: true, PauseResult: res}
 
+	case CmdPauseSnapshot:
+		sp, ok := s.handler.(SnapshotPauser)
+		if !ok {
+			return Response{OK: false, Error: "pause snapshot is not supported by this pipeline"}
+		}
+		res, err := sp.PauseSnapshot(ctx)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, PauseResult: res}
+
 	case CmdResume:
 		res, err := s.handler.Resume(ctx, req.SnapshotOnly)
 		if err != nil {

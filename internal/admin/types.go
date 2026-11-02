@@ -9,6 +9,7 @@ import (
 const (
 	CmdTop              = "top"
 	CmdPause            = "pause"
+	CmdPauseSnapshot    = "pause_snapshot"
 	CmdResume           = "resume"
 	CmdThrottleSet      = "throttle_set"
 	CmdCheckpointShow   = "checkpoint_show"
@@ -25,6 +26,11 @@ type DeltaVerifier interface {
 // SnapshotAdder là interface tùy chọn cho `strand snapshot add --table <t>` (02 §10).
 type SnapshotAdder interface {
 	SnapshotAdd(ctx context.Context, table string) error
+}
+
+// SnapshotPauser là interface tùy chọn cho `strand pause --snapshot` (02 §10).
+type SnapshotPauser interface {
+	PauseSnapshot(ctx context.Context) (*PauseResult, error)
 }
 
 // Request chứa thông tin yêu cầu gửi qua admin socket.

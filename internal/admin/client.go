@@ -74,6 +74,18 @@ func (c *Client) Pause(ctx context.Context) (*PauseResult, error) {
 	return resp.PauseResult, nil
 }
 
+// PauseSnapshot chỉ tạm dừng phần snapshot logic qua socket, giữ stream CDC chạy.
+func (c *Client) PauseSnapshot(ctx context.Context) (*PauseResult, error) {
+	resp, err := c.Call(ctx, Request{Command: CmdPauseSnapshot})
+	if err != nil {
+		return nil, err
+	}
+	if resp.PauseResult == nil {
+		return nil, errors.New("empty pause result returned")
+	}
+	return resp.PauseResult, nil
+}
+
 // Resume tiếp tục pipeline qua socket.
 func (c *Client) Resume(ctx context.Context, snapshotOnly bool) (*ResumeResult, error) {
 	resp, err := c.Call(ctx, Request{Command: CmdResume, SnapshotOnly: snapshotOnly})
