@@ -114,7 +114,7 @@ Log đầy đủ nằm ở scratchpad: `gate1-kill9-1000.txt`, `matrix-src80-dst
 - kill -9 **1.000 lần** (SEED=20261102): 337.234 thao tác tải, **2.218.262 row giống hệt**, ver không giảm.
 - Đổi replica, seed (0 lượt đọc bảng trên source), fault mạng Toxiproxy, promote dưới tải,
   `snapshot add` + đổi PK, retention risk, đổi bộ lọc, hai instance: PASS.
-- TXN 2 triệu row PASS. TXN 50 triệu row đang chạy.
+- TXN 2 triệu row PASS. **TXN 50 triệu row PASS**: đếm, tổng và CHECKSUM TABLE giống hệt; 1.371.291 row ở các bảng khác giống hệt; tổng 58 phút 46 giây (source commit mất 16 phút).
 
 **MySQL 8.0.46 (source) → 8.4 (target), smoke test theo 01 §2:**
 
