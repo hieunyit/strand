@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -366,4 +367,31 @@ func hmacSHA256(key, data []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write(data)
 	return h.Sum(nil)
+}
+
+// BucketFromURI tạo backend tầng bucket từ URI "s3://<bucket>/<prefix>" (resources.spool.overflow).
+// Endpoint và credential lấy từ biến môi trường STRAND_S3_ENDPOINT, STRAND_S3_ACCESS_KEY,
+// STRAND_S3_SECRET_KEY (không để credential trong YAML, 01 §3). Trả nil nếu uri rỗng.
+func BucketFromURI(uri string) (BucketBackend, string, error) {
+	if uri == "" {
+		return nil, "", nil
+	}
+	rest, ok := strings.CutPrefix(uri, "s3://")
+	if !ok {
+		return nil, "", fmt.Errorf("spool overflow must be s3://bucket/prefix, got %q", uri)
+	}
+	bucket, prefix, _ := strings.Cut(rest, "/")
+	if bucket == "" {
+		return nil, "", fmt.Errorf("spool overflow %q has no bucket", uri)
+	}
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	b, err := NewMinIOBackend(MinIOConfig{
+		Endpoint:  os.Getenv("STRAND_S3_ENDPOINT"),
+		Bucket:    bucket,
+		AccessKey: os.Getenv("STRAND_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("STRAND_S3_SECRET_KEY"),
+	})
+	return b, prefix, err
 }

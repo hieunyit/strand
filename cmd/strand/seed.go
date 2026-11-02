@@ -97,7 +97,8 @@ func newSeedCmd() *cobra.Command {
 
 	var manifestPath, applyTarget, pfSpool, pfArchive, pfSource string
 	var printOnly, pfOn bool
-	var pfHard int64
+	var pfHard, pfLocalHard int64
+	var pfOverflow string
 	apply := &cobra.Command{
 		Use:   "apply",
 		Short: "Điều phối restore/load rồi chuẩn bị target cho catch-up; chạy lại được khi bị ngắt",
@@ -119,7 +120,7 @@ func newSeedCmd() *cobra.Command {
 			}
 			// Prefetch (mặc định bật): đọc log từ P vào spool trong lúc restore (02 §9).
 			if pfOn && pfSpool != "" {
-				n, err := prefetch(cmd.Context(), &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfHard, pfArchive, pfSource)
+				n, err := prefetch(cmd.Context(), &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource)
 				if err != nil {
 					return err
 				}
@@ -152,6 +153,8 @@ func newSeedCmd() *cobra.Command {
 	apply.Flags().StringVar(&pfSpool, "spool", "", "Thư mục spool prefetch (= <resources.spool.path>/prefetch của pipeline)")
 	apply.Flags().Int64Var(&pfHard, "spool-hard", 0, "Hard limit (byte) của spool; 0 = không giới hạn")
 	apply.Flags().StringVar(&pfArchive, "archive", "", "Thư mục binlog archive")
+	apply.Flags().Int64Var(&pfLocalHard, "spool-local-hard", 0, "Hard limit (byte) tầng local; vượt thì tràn sang --overflow")
+	apply.Flags().StringVar(&pfOverflow, "overflow", "", "Tầng bucket s3://bucket/prefix (endpoint/credential qua STRAND_S3_*)")
 	apply.Flags().StringVar(&pfSource, "source", "", "DSN source/replica để prefetch phần chưa archive")
 
 	cmd.AddCommand(plan, apply)

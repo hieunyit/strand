@@ -4,13 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // archiveBinlogs đóng binlog hiện tại rồi chép mọi file binlog của source ra dir (archive).
@@ -166,4 +169,44 @@ func TestG1_E2E_PrefetchExhausted(t *testing.T) {
 	if code != 5 || !strings.Contains(out, "prefetch_exhausted") {
 		t.Fatalf("exit %d, want 5 prefetch_exhausted\n%s", code, out)
 	}
+}
+
+// P1-14 / Gate 1: spool local đầy (restore lâu) thì prefetch tràn sang bucket staging (MinIO);
+// catch-up đọc lại được từ cả hai tầng; 0 lệch.
+func TestG1_E2E_PrefetchSpoolOverflowsToBucket(t *testing.T) {
+	ctx := context.Background()
+	mc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image: "minio:latest", ExposedPorts: []string{"9000/tcp"},
+			Env:        map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
+			Cmd:        []string{"server", "/data"},
+			WaitingFor: wait.ForListeningPort("9000/tcp").WithStartupTimeout(90 * time.Second),
+		}, Started: true})
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() { _ = mc.Terminate(context.Background()) })
+	host, _ := mc.Host(ctx)
+	port, _ := mc.MappedPort(ctx, "9000")
+	t.Setenv("STRAND_S3_ENDPOINT", "http://"+net.JoinHostPort(host, port.Port()))
+	t.Setenv("STRAND_S3_ACCESS_KEY", "minioadmin")
+	t.Setenv("STRAND_S3_SECRET_KEY", "minioadmin")
+
+	e := setupPurgedAfterP(t, seedFromEnv(t))
+	e.cfg.Overflow = "s3://strand-staging/e2e-prefetch"
+	out, code := runStrandCLI(t, 5*time.Minute, "seed", "apply", "--manifest", e.manifest, "--target", e.dst.RootDSN,
+		"--spool", filepath.Join(e.dir, "state", "prefetch"), "--spool-local-hard", "50000",
+		"--overflow", e.cfg.Overflow, "--archive", e.archive, "--source", e.src.RootDSN)
+	if code != 0 || strings.Contains(out, "bucket 0 bytes") {
+		t.Fatalf("seed apply with bucket overflow: exit %d (expected some bytes in the bucket tier)\n%s", code, out)
+	}
+	t.Logf("%s", strings.TrimSpace(out))
+	_ = os.RemoveAll(e.archive)
+	p := startStrand(t, e.cfg.write(t), "--start-at", "seed", "--seed-manifest", e.manifest)
+	waitSynced(t, &e.cfg, p, 3*time.Minute)
+	waitCaughtUp(t, e.src, e.dst, &e.cfg, p, 3*time.Minute)
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("exit %d\n%s", code, p.tail())
+	}
+	compareFinal(t, e.src, e.dst, appTables...)
 }

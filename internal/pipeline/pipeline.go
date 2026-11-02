@@ -271,7 +271,15 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.prefetchDir = filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")
 	streamFrom := applied.Clone().(*checkpoint.MySQLAppliedSet)
 	if fi, err := os.Stat(p.prefetchDir); err == nil && fi.IsDir() {
-		if p.prefetch, err = spool.New(p.prefetchDir); err != nil {
+		var opts []spool.Option
+		bucket, prefix, berr := spool.BucketFromURI(p.cfg.Resources.Spool.Overflow)
+		if berr != nil {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, berr.Error(), berr)
+		}
+		if bucket != nil {
+			opts = append(opts, spool.WithBucket(bucket, prefix))
+		}
+		if p.prefetch, err = spool.New(p.prefetchDir, opts...); err != nil {
 			return fmt.Errorf("open prefetch spool: %w", err)
 		}
 		defer p.prefetch.Close()

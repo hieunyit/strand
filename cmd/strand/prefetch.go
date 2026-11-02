@@ -21,15 +21,32 @@ import (
 // prefetch (02 §9, P1-14): đọc log từ P vào spool, archive trước rồi source, song song với
 // restore. Nhờ vậy archive hoặc binlog trên source bị xóa sau đó vẫn không gây log_gap.
 // Dừng khi đã phủ tới gtid_executed của source tại lúc bắt đầu đọc source.
-func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, hardLimit int64, archiveDir, sourceDSN string) (int, error) {
+func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHard, hardLimit int64, overflow, archiveDir, sourceDSN string) (int, error) {
 	if err := os.MkdirAll(spoolDir, 0o750); err != nil {
 		return 0, err
 	}
 	var opts []spool.Option
+	// Tầng local đầy thì tràn sang bucket staging; mọi tầng chạm hard limit → prefetch_exhausted.
+	bucket, prefix, err := spool.BucketFromURI(overflow)
+	if err != nil {
+		return 0, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
+	}
+	if bucket != nil {
+		opts = append(opts, spool.WithBucket(bucket, prefix))
+	}
+	if localHard > 0 {
+		opts = append(opts, spool.WithLocalHardLimit(localHard))
+	} else if hardLimit > 0 && bucket == nil {
+		opts = append(opts, spool.WithLocalHardLimit(hardLimit))
+	}
 	if hardLimit > 0 {
-		opts = append(opts, spool.WithLocalHardLimit(hardLimit), spool.WithTotalHardLimit(hardLimit))
+		opts = append(opts, spool.WithTotalHardLimit(hardLimit))
 	}
 	sp, err := spool.New(spoolDir, opts...)
+	defer func() {
+		u := sp.Usage()
+		fmt.Printf("spool usage: local %d bytes, bucket %d bytes\n", u.LocalBytes, u.BucketBytes)
+	}()
 	if err != nil {
 		return 0, err
 	}
