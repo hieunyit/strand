@@ -103,3 +103,22 @@ Còn lại cho Gate 1:
 - Fault Toxiproxy.
 - Staging 1 TB và soak 72 giờ (cần môi trường thật).
 - Bảng `_strand_promote` là bảng metadata thứ 4, lệch với 02 §4.
+
+## Kết quả e2e Gate 1 (cập nhật 2026-11-02 chiều)
+
+Log đầy đủ nằm ở scratchpad: `gate1-kill9-1000.txt`, `matrix-src80-dst84.txt`, `e2e-batch*.txt`.
+
+**MySQL 8.4 → 8.4** (các test chạy theo lô):
+
+- Mọi test e2e PASS.
+- kill -9 **1.000 lần** (SEED=20261102): 337.234 thao tác tải, **2.218.262 row giống hệt**, ver không giảm.
+- Đổi replica, seed (0 lượt đọc bảng trên source), fault mạng Toxiproxy, promote dưới tải,
+  `snapshot add` + đổi PK, retention risk, đổi bộ lọc, hai instance: PASS.
+- TXN 2 triệu row PASS. TXN 50 triệu row đang chạy.
+
+**MySQL 8.0.46 (source) → 8.4 (target), smoke test theo 01 §2:**
+
+- 13/13 PASS.
+- Giảm quy mô: kill -9 100 lần, TXN 2 triệu row.
+
+Chưa chạy: MySQL 9.7, bảng 1 TB trên staging, soak 72 giờ.
