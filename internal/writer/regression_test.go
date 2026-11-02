@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,5 +212,56 @@ func mustExec(t *testing.T, db *sql.DB, q string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), q); err != nil {
 		t.Fatalf("%s: %v", q, err)
+	}
+}
+
+// invariant: CP-5, CP-1 (quy tắc 5)
+// Strict: row toàn cục ghi trong transaction commit. Chuỗi applied phải được tính sau khi đến
+// lượt; nếu tính trước, worker của seq 2 (chạy trước) ghi đè và làm mất GTID của seq 1.
+func TestCP5_StrictGlobalCheckpointNoLostUpdate(t *testing.T) {
+	ctx := context.Background()
+	db, _ := getMySQL(t)
+	pid := fmt.Sprintf("strict-global-%d", time.Now().UnixNano())
+	ensureMySQLMetadataTables(t, db, pid)
+	store := checkpoint.NewMySQLStore(db, pid, model.EngineMySQL)
+	epoch, _ := store.AdvanceEpoch(ctx, pid, "o", "h")
+	mustExec(t, db, "CREATE TABLE IF NOT EXISTS strict_global (id INT PRIMARY KEY, v INT)")
+
+	co := writer.NewCommitOrderer("strict", 1)
+	var mu sync.Mutex
+	global, _ := checkpoint.ParseMySQLGTIDSet("")
+	mk := func(seq uint64, id int) *model.Txn {
+		tx := &model.Txn{SourcePos: model.Pos{Engine: model.EngineMySQL, GTID: fmt.Sprintf("u:%d", seq)},
+			Rows: []model.RowChange{{Table: model.TableID{Schema: "strand", Table: "strict_global"}, Op: model.OpInsert,
+				Key: []model.Value{int64(id)}, Cols: []model.ColValue{{Name: "id", Value: int64(id)}, {Name: "v", Value: int64(seq)}}}}}
+		tx.SetSeq(seq)
+		return tx
+	}
+	apply := func(w *writer.MySQLWriter, tx *model.Txn) error {
+		return w.ApplyBatch(ctx, []*model.Txn{tx}, writer.DeltaRow{Global: func() (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			global.Add(tx.SourcePos)
+			return global.String(), nil
+		}})
+	}
+	w1, w2 := writer.NewMySQLWriter(db, pid, 1, epoch), writer.NewMySQLWriter(db, pid, 2, epoch)
+	w1.SetCommitOrderer(co)
+	w2.SetCommitOrderer(co)
+	errs := make(chan error, 2)
+	go func() { errs <- apply(w2, mk(2, 20)) }() // seq 2 bắt đầu trước
+	time.Sleep(200 * time.Millisecond)
+	go func() { errs <- apply(w1, mk(1, 10)) }()
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var applied string
+	if err := db.QueryRow("SELECT applied FROM _strand_checkpoint WHERE pipeline_id = ?", pid).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != "u:1-2" {
+		t.Fatalf("global checkpoint = %q, want u:1-2 (a committed txn was lost)", applied)
 	}
 }

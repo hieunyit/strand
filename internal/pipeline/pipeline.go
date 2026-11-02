@@ -97,6 +97,9 @@ type Pipeline struct {
 	bootstrap     atomic.Bool
 	retentionRisk atomic.Bool
 	verifying     atomic.Bool // chờ verify sau seed (02 §9)
+	strictMu      sync.Mutex
+	strictApplied *checkpoint.MySQLAppliedSet // row toàn cục ở chế độ strict (02 §4 quy tắc 5)
+	readyCh       <-chan *model.Txn           // nguồn Txn cho worker (strict: đã sắp theo seq)
 	prefetchDir   string
 	prefetch      *spool.PebbleSpool
 	gov           *governor.OnoffGovernor
@@ -282,6 +285,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return err
 	}
 	p.applied0 = applied.Clone().(*checkpoint.MySQLAppliedSet)
+	p.strictApplied = applied.Clone().(*checkpoint.MySQLAppliedSet)
 	p.seen = applied.Clone().(*checkpoint.MySQLAppliedSet)
 	// Spool prefetch của `seed apply` (02 §9): phủ phần log từ P mà source/archive có thể đã xóa.
 	p.prefetchDir = filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")
@@ -484,6 +488,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	var workersWG, bgWG sync.WaitGroup
 	wctx, wcancel := context.WithCancel(ctx)
 	defer wcancel()
+	p.readyCh = p.sched.Ready()
+	if p.strict {
+		ordered := make(chan *model.Txn, 1024)
+		go p.strictDispatcher(wctx, p.sched.Ready(), ordered)
+		p.readyCh = ordered
+	}
 	for i, w := range p.writers {
 		workersWG.Add(1)
 		go func(i int, w *writer.MySQLWriter) {
@@ -938,32 +948,66 @@ func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
 		maxRows = 2000
 	}
 	mine := checkpoint.NewMySQLAppliedSet()
+	var stash *model.Txn // strict: Txn lấy ra nhưng không liền seq với batch, xử lý ở lượt sau
 	for {
 		var first *model.Txn
-		select {
-		case <-ctx.Done():
-			return
-		case first = <-p.sched.Ready():
+		if stash != nil {
+			first, stash = stash, nil
+		} else {
+			select {
+			case <-ctx.Done():
+				return
+			case first = <-p.readyCh:
+			}
 		}
 		if first == nil {
 			return
 		}
 		batch := []*model.Txn{first}
 		rows := first.TotalRows()
-		if !p.strict {
-		gather:
-			for rows < int64(maxRows) && len(batch) < 256 {
-				select {
-				case t := <-p.sched.Ready():
-					if t == nil {
-						break gather
-					}
-					batch = append(batch, t)
-					rows += t.TotalRows()
-				default:
+	gather:
+		for rows < int64(maxRows) && len(batch) < 256 {
+			select {
+			case t := <-p.readyCh:
+				if t == nil {
 					break gather
 				}
+				if p.strict && t.Seq() != batch[len(batch)-1].Seq()+1 {
+					stash = t // strict: batch phải gồm seq liên tiếp (CP-5)
+					break gather
+				}
+				batch = append(batch, t)
+				rows += t.TotalRows()
+			default:
+				break gather
 			}
+		}
+		if p.strict {
+			b := batch
+			err := w.ApplyBatch(ctx, b, writer.DeltaRow{Global: func() (string, error) {
+				// Gọi sau khi đến lượt commit: mọi batch có seq nhỏ hơn đã commit vào row toàn cục.
+				p.strictMu.Lock()
+				defer p.strictMu.Unlock()
+				for _, t := range b {
+					p.strictApplied.Add(t.SourcePos)
+				}
+				return p.strictApplied.String(), nil
+			}})
+			for attempt := 1; err != nil && isRetryable(err) && attempt < 20 && ctx.Err() == nil; attempt++ {
+				time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
+				err = w.ApplyBatch(ctx, b, writer.DeltaRow{Global: func() (string, error) {
+					p.strictMu.Lock()
+					defer p.strictMu.Unlock()
+					for _, t := range b {
+						p.strictApplied.Add(t.SourcePos)
+					}
+					return p.strictApplied.String(), nil
+				}})
+			}
+			if !p.finishBatch(ctx, id, batch, rows, err) {
+				return
+			}
+			continue
 		}
 		for _, t := range batch {
 			mine.Add(t.SourcePos)
@@ -980,30 +1024,38 @@ func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
 				time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
 			}
 		}
-		if err != nil {
-			for _, t := range batch {
-				p.sched.Done(t.Seq(), err)
-			}
-			if ctx.Err() == nil {
-				p.fail(fmt.Errorf("worker %d: %w", id, err))
-			}
+		if !p.finishBatch(ctx, id, batch, rows, err) {
 			return
 		}
-		for _, t := range batch {
-			p.sched.Done(t.Seq(), nil)
-			if t.IsSpilled() {
-				_ = os.Remove(t.SpillPath)
-			}
-			if t.SourceTS > 0 {
-				p.lastSourceTS.Store(t.SourceTS)
-			}
-		}
-		p.appliedTxns.Add(int64(len(batch)))
-		p.appliedRows.Add(rows)
-		p.metrics.ApplyTxnTotal.WithLabelValues(p.id).Add(float64(len(batch)))
-		p.metrics.ApplyRowsTotal.WithLabelValues(p.id).Add(float64(rows))
-		p.health.RecordProgress()
 	}
+}
+
+// finishBatch báo kết quả batch cho scheduler; false nếu worker phải dừng.
+func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, rows int64, err error) bool {
+	if err != nil {
+		for _, t := range batch {
+			p.sched.Done(t.Seq(), err)
+		}
+		if ctx.Err() == nil {
+			p.fail(fmt.Errorf("worker %d: %w", id, err))
+		}
+		return false
+	}
+	for _, t := range batch {
+		p.sched.Done(t.Seq(), nil)
+		if t.IsSpilled() {
+			_ = os.Remove(t.SpillPath)
+		}
+		if t.SourceTS > 0 {
+			p.lastSourceTS.Store(t.SourceTS)
+		}
+	}
+	p.appliedTxns.Add(int64(len(batch)))
+	p.appliedRows.Add(rows)
+	p.metrics.ApplyTxnTotal.WithLabelValues(p.id).Add(float64(len(batch)))
+	p.metrics.ApplyRowsTotal.WithLabelValues(p.id).Add(float64(rows))
+	p.health.RecordProgress()
+	return true
 }
 
 // deltaFor cắt khỏi tập của worker phần đã có trong row toàn cục (design §1, bước 3 của
@@ -1263,7 +1315,10 @@ func (p *Pipeline) monitor(ctx context.Context) {
 		p.metrics.LagSeconds.WithLabelValues(p.id, phase).Set(lag)
 		p.metrics.Holes.WithLabelValues(p.id).Set(float64(p.sched.Holes()))
 		p.updateMetrics()
-		if ls := p.comp.LastSuccess(); !ls.IsZero() {
+		if p.strict {
+			// strict: không có row delta, row toàn cục ghi cùng mỗi commit (quy tắc 5).
+			p.metrics.CheckpointCompactionLagSeconds.WithLabelValues(p.id).Set(0)
+		} else if ls := p.comp.LastSuccess(); !ls.IsZero() {
 			p.metrics.CheckpointCompactionLagSeconds.WithLabelValues(p.id).Set(time.Since(ls).Seconds())
 		}
 		if p.sched.Lwd() >= p.admitted.Load() {

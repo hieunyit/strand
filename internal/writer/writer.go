@@ -21,6 +21,11 @@ type DeltaRow struct {
 	Epoch      int64
 	BatchNo    int64
 	Applied    string
+
+	// Global (chế độ strict, 02 §4 quy tắc 5): không ghi row delta; thay vào đó ghi row toàn cục
+	// trong chính transaction commit, có điều kiện epoch. Hàm được gọi SAU khi đến lượt commit
+	// (mọi batch có seq nhỏ hơn đã commit), trả chuỗi applied mới của row toàn cục.
+	Global func() (string, error)
 }
 
 // Writer là interface áp dụng các batch transaction vào target database.
@@ -245,20 +250,22 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 		}
 	}
 
-	// 2. Ghi row delta có điều kiện epoch trong CÙNG transaction (CP-1)
 	pid, wid, ep := resolveDelta(delta, w.pipelineID, w.workerID, w.epoch)
-	query := "UPDATE _strand_worker_delta SET applied = ?, batch_no = batch_no + 1 WHERE pipeline_id = ? AND worker_id = ? AND epoch = ?"
-	res, err := tx.ExecContext(ctx, query, delta.Applied, pid, wid, ep)
-	if err != nil {
-		return fmt.Errorf("failed to update worker delta: %w", err)
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if affected != 1 {
-		// spec: 02 §4 quy tắc 3: số row != 1 -> rollback và dừng với mã fenced
-		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: expected 1 row affected, got %d", affected), nil)
+	if delta.Global == nil {
+		// 2. Ghi row delta có điều kiện epoch trong CÙNG transaction (CP-1)
+		query := "UPDATE _strand_worker_delta SET applied = ?, batch_no = batch_no + 1 WHERE pipeline_id = ? AND worker_id = ? AND epoch = ?"
+		res, err := tx.ExecContext(ctx, query, delta.Applied, pid, wid, ep)
+		if err != nil {
+			return fmt.Errorf("failed to update worker delta: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %w", err)
+		}
+		if affected != 1 {
+			// spec: 02 §4 quy tắc 3: số row != 1 -> rollback và dừng với mã fenced
+			return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: expected 1 row affected, got %d", affected), nil)
+		}
 	}
 
 	// 3. Chờ đến lượt commit ở chế độ strict (CP-5)
@@ -272,6 +279,23 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 				orderer.Fail(err)
 			}
 		}()
+	}
+
+	// 3b. Strict, quy tắc 5: row toàn cục ghi trong transaction commit của batch, có điều kiện epoch.
+	if delta.Global != nil {
+		applied, gerr := delta.Global()
+		if gerr != nil {
+			return gerr
+		}
+		res, gerr := tx.ExecContext(ctx,
+			"UPDATE _strand_checkpoint SET applied = ?, updated_at = NOW(6) WHERE pipeline_id = ? AND epoch = ?",
+			applied, pid, ep)
+		if gerr != nil {
+			return fmt.Errorf("failed to update global checkpoint: %w", gerr)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: global checkpoint update affected %d rows", n), nil)
+		}
 	}
 
 	// 4. Commit cả dữ liệu và delta
