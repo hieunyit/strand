@@ -71,3 +71,35 @@ Thay đổi hành vi cần biết:
 9. `deps.allow` thiếu `github.com/google/uuid`. `go.mod` ghi pebble, prometheus, cobra là `indirect`.
 10. Verify: placeholder `?` không chạy trên PG; source và target đọc không cùng watermark.
     Interface `Governor` (`Decide`/`Mode`) chưa đúng spec §3.
+
+## Tiến độ Gate 1 (cập nhật 2026-11-02, phiên bị dừng do hết hạn mức)
+
+Đã có pipeline thật (`internal/pipeline`, `strand sync`) và bộ e2e trong `tests/e2e`. Các test
+dưới đây dùng MySQL 8.4 thật và binary `strand` chạy như process riêng.
+
+| Test e2e | Kết quả |
+|---|---|
+| `TestE2E_BootstrapAndStreamUnderLoad` | PASS (49.223 row giống hệt) |
+| `TestG1_E2E_Kill9RandomCrashes` | PASS với 50 lần kill -9 (155.394 row). Bản 1.000 lần CHƯA chạy xong: đã dừng vì harness dùng 18 GB RAM (đã sửa bộ lấy mẫu ver, cần chạy lại) |
+| `TestG1_E2E_TwoInstancesSamePipeline` | PASS (exit 4 `pipeline_locked`; instance cũ bị đóng băng thì bị `fenced`) |
+| `TestG1_E2E_ValidateRejectsPartialJSON` | PASS (exit 3) |
+| `TestG1_E2E_FilterChangeBetweenRestarts` | PASS (124.654 row) |
+| `TestG1_E2E_SnapshotAddUnderLoadWithPKChangeAcrossRanges` | FAIL: chưa sync sau 5 phút. Nguyên nhân: PK thưa → chia chunk theo dải số sinh hàng nghìn chunk rỗng. Cần hiện thực keyset walk (02 §5) |
+| `TestG1_E2E_PromoteUnderLoad`, `TestG1_E2E_RetentionRiskNoLivelock` | Đã viết, CHƯA chạy |
+
+Lỗi thật mà e2e bắt được và đã sửa:
+- CP-1: worker cắt delta theo "toàn cục ∪ delta" lúc khởi động, làm Txn bị apply lại.
+- Snapshot lại sau crash bị trùng unique key: lưu plan theo chunk, snapshot mới bắt đầu từ bảng
+  target rỗng, flush trong barrier.
+- Deadlock InnoDB: retry.
+- FK ở target trong lúc bootstrap: tắt `foreign_key_checks` trong phiên ghi.
+
+Còn lại cho Gate 1:
+- Keyset walk.
+- Chạy lại kill -9 đủ 1.000 lần.
+- Chạy test promote và test retention risk.
+- Viết test đổi replica, TXN 50 triệu row, ma trận MySQL 9.7 và 8.0.
+- Lệnh `seed plan`/`seed apply` (CLONE / XtraBackup 0 IOPS, chặn replica tự replicate).
+- Fault Toxiproxy.
+- Staging 1 TB và soak 72 giờ (cần môi trường thật).
+- Bảng `_strand_promote` là bảng metadata thứ 4, lệch với 02 §4.

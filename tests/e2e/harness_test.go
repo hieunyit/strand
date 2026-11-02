@@ -650,37 +650,46 @@ func compareFinal(t *testing.T, src, dst *mysqlNode, tables ...string) {
 }
 
 // verSampler lấy mẫu ver trên target liên tục (phép kiểm "ver không giảm", RS-1).
+// Chỉ giữ ver lớn nhất đã thấy của mỗi khóa (bộ nhớ O(số khóa)), ghi vi phạm ngay khi gặp.
 type verSampler struct {
-	stop    atomic.Bool
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	samples []map[string]map[string]int64
+	stop       atomic.Bool
+	wg         sync.WaitGroup
+	mu         sync.Mutex
+	last       map[string]int64
+	violations []string
+	samples    int
 }
 
 func startVerSampler(dst *mysqlNode, tables ...string) *verSampler {
-	vs := &verSampler{}
+	vs := &verSampler{last: map[string]int64{}}
 	vs.wg.Add(1)
 	go func() {
 		defer vs.wg.Done()
 		for !vs.stop.Load() {
-			snap := map[string]map[string]int64{}
 			for _, tb := range tables {
 				rows, err := dst.DB.Query(fmt.Sprintf("SELECT id, ver FROM %s", tb))
 				if err != nil {
 					continue
 				}
-				m := map[string]int64{}
+				vs.mu.Lock()
 				for rows.Next() {
 					var id string
 					var v int64
 					_ = rows.Scan(&id, &v)
-					m[id] = v
+					k := tb + "/" + id
+					if prev, ok := vs.last[k]; ok && v < prev {
+						if len(vs.violations) < 50 {
+							vs.violations = append(vs.violations, fmt.Sprintf("%s ver %d -> %d", k, prev, v))
+						}
+					} else {
+						vs.last[k] = v
+					}
 				}
+				vs.mu.Unlock()
 				rows.Close()
-				snap[tb] = m
 			}
 			vs.mu.Lock()
-			vs.samples = append(vs.samples, snap)
+			vs.samples++
 			vs.mu.Unlock()
 			time.Sleep(300 * time.Millisecond)
 		}
@@ -691,11 +700,10 @@ func startVerSampler(dst *mysqlNode, tables ...string) *verSampler {
 func (vs *verSampler) check(t *testing.T) {
 	vs.stop.Store(true)
 	vs.wg.Wait()
-	r := checker.NewChecker().CheckVerMonotonic(vs.samples)
-	if !r.Passed {
-		t.Fatalf("ver decreased on target (RS-1): %v", r.Violations)
+	if len(vs.violations) > 0 {
+		t.Fatalf("ver decreased on target (RS-1): %v", vs.violations)
 	}
-	t.Logf("ver monotonic over %d samples", len(vs.samples))
+	t.Logf("ver monotonic over %d samples", vs.samples)
 }
 
 var appTables = []string{"app.accounts", "app.orders", "app.events"}
