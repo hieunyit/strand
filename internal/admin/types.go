@@ -13,7 +13,13 @@ const (
 	CmdThrottleSet      = "throttle_set"
 	CmdCheckpointShow   = "checkpoint_show"
 	CmdCheckpointRewind = "checkpoint_rewind"
+	CmdSnapshotAdd      = "snapshot_add"
 )
+
+// SnapshotAdder là interface tùy chọn cho `strand snapshot add --table <t>` (02 §10).
+type SnapshotAdder interface {
+	SnapshotAdd(ctx context.Context, table string) error
+}
 
 // Request chứa thông tin yêu cầu gửi qua admin socket.
 type Request struct {
@@ -23,6 +29,7 @@ type Request struct {
 	TargetIOPS   int    `json:"target_iops,omitempty"`   // Dùng cho throttle set
 	Soft         bool   `json:"soft,omitempty"`          // Dùng cho throttle set
 	RewindTo     string `json:"rewind_to,omitempty"`     // Dùng cho checkpoint rewind
+	Table        string `json:"table,omitempty"`         // Dùng cho snapshot add
 }
 
 // Response chứa kết quả trả về từ admin socket.

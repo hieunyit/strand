@@ -6,13 +6,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"strand/internal/admin"
 	"strand/internal/checkpoint"
+	"strand/internal/config"
+	"strand/internal/exitcode"
+	"strand/internal/pipeline"
 )
 
 var syncStartAt string
@@ -117,16 +122,74 @@ func (m *mockCheckpointFlusher) FlushCheckpoint(ctx context.Context) error {
 	return nil
 }
 
+var syncSeedManifest string
+
 func newSyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Chạy pipeline đồng bộ CDC (spec/02 §10, spec/03 §4)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-			coordinator := NewSyncCoordinator(&mockCheckpointFlusher{}, 120*time.Second, logger)
-			return coordinator.Run(cmd.Context())
+			if cfgPath == "" {
+				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing config file path (use -c or --config)", nil)
+			}
+			cfg, err := config.LoadFile(cfgPath)
+			if err != nil {
+				return err
+			}
+			level := slog.LevelInfo
+			switch strings.ToLower(cfg.Observability.Log.Level) {
+			case "debug":
+				level = slog.LevelDebug
+			case "warn":
+				level = slog.LevelWarn
+			case "error":
+				level = slog.LevelError
+			}
+			var handler slog.Handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+			if strings.EqualFold(cfg.Observability.Log.Format, "text") {
+				handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+			}
+			logger := slog.New(handler)
+
+			// SIGTERM/SIGINT: ngừng đọc, chờ writer xong, ghi checkpoint rồi thoát (01 §3).
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+			defer stop()
+			return pipeline.Run(ctx, pipeline.Options{
+				Config:       cfg,
+				StartAt:      syncStartAt,
+				SeedManifest: syncSeedManifest,
+				Logger:       logger,
+			})
 		},
 	}
-	cmd.Flags().StringVar(&syncStartAt, "start-at", "", "Vị trí bắt đầu: seed | <gtid> | <lsn>")
+	cmd.Flags().StringVar(&syncStartAt, "start-at", "", "Vị trí bắt đầu: seed | <gtid>")
+	cmd.Flags().StringVar(&syncSeedManifest, "seed-manifest", "seed.json", "Đường dẫn seed.json khi --start-at seed")
+	return cmd
+}
+
+func newSnapshotCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "snapshot", Short: "Snapshot logic bảng khi pipeline đang chạy (spec/02 §10)"}
+	var table string
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Thêm và snapshot một bảng khi pipeline đang chạy",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if table == "" {
+				return exitcode.New("missing_table", exitcode.InvalidSyntax, "missing --table", nil)
+			}
+			if dryRun {
+				fmt.Printf("snapshot add %s (dry-run)\n", table)
+				return nil
+			}
+			if err := admin.NewClient(getAdminSocketPath()).SnapshotAdd(cmd.Context(), table); err != nil {
+				return fmt.Errorf("strand snapshot add failed: %w", err)
+			}
+			fmt.Printf("Đã bắt đầu snapshot bảng %s\n", table)
+			return nil
+		},
+	}
+	add.Flags().StringVar(&table, "table", "", "Bảng schema.table")
+	add.Flags().StringVar(&adminSocketPath, "socket", "", "Đường dẫn admin socket UNIX")
+	cmd.AddCommand(add)
 	return cmd
 }

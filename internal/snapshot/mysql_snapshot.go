@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -18,6 +19,17 @@ type MySQLSnapshotter struct {
 	Manager *RangeStateManager
 	Chunker *Chunker
 	opts    ChunkOptions
+
+	// Barrier (tùy chọn) bao quanh bước đọc biên + đăng ký range + dọn target. Pipeline
+	// truyền vào hàm dừng router và chờ mọi Txn đã nhận được apply xong, để không Txn cũ
+	// nào của bảng còn nằm trong hàng đợi khi range-state bắt đầu có hiệu lực.
+	Barrier func(ctx context.Context, fn func() error) error
+
+	// TargetName (tùy chọn) ánh xạ tên bảng nguồn sang tên bảng đích (tables.rename).
+	TargetName func(model.TableID) model.TableID
+
+	// Pace (tùy chọn) được gọi giữa các chunk; governor dùng để giãn khoảng cách chunk.
+	Pace func(ctx context.Context) error
 }
 
 // NewMySQLSnapshotter tạo mới MySQLSnapshotter.
@@ -38,9 +50,14 @@ type TableBounds struct {
 
 // GetTableBounds truy vấn min(pk), max(pk) và count(*) của bảng nguồn.
 func GetTableBounds(ctx context.Context, db *sql.DB, table model.TableID, pkCol string) (*TableBounds, error) {
-	query := fmt.Sprintf("SELECT COALESCE(MIN(%s), 0), COALESCE(MAX(%s), 0), COUNT(*) FROM %s", pkCol, pkCol, table.String())
+	// Chỉ MIN/MAX (đọc đầu/cuối index, O(1)); COUNT(*) trên bảng TB tốn IO source không cần thiết.
+	query := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s", quoteIdent(pkCol), quoteIdent(pkCol), quoteTable(table))
 	var b TableBounds
-	err := db.QueryRowContext(ctx, query).Scan(&b.MinPK, &b.MaxPK, &b.Count)
+	var minV, maxV sql.NullInt64
+	err := db.QueryRowContext(ctx, query).Scan(&minV, &maxV)
+	if err == nil && minV.Valid && maxV.Valid {
+		b.MinPK, b.MaxPK, b.Count = minV.Int64, maxV.Int64, maxV.Int64-minV.Int64+1
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query table bounds: %w", err)
 	}
@@ -60,7 +77,7 @@ func (s *MySQLSnapshotter) FlushChunk(
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
-	if err := flushRowsToTarget(ctx, dstDB, table, pkCol, columnNames, mergedRows); err != nil {
+	if err := flushRowsToTarget(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, chunk.StartPK, chunk.EndPK); err != nil {
 		return err
 	}
 	s.Manager.MarkDoneLocked(chunk)
@@ -86,37 +103,47 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 	if pkIdx < 0 {
 		return fmt.Errorf("snapshot add %s: pk column %q not in column list", table, pkCol)
 	}
+	var err error
 	if rendezvousWaitFn == nil {
 		// Thiếu điểm hẹn thì chunk được flush trước khi stream xử lý hết high watermark (RS-1).
 		return fmt.Errorf("snapshot add %s: rendezvous wait function is required", table)
 	}
-	// 1. Quy tắc chunk đuôi [b_last, +inf):
-	// spec: 02 §5: "Đọc max(pk) sau low; khóa lớn hơn thuộc range Xong ngay từ đầu"
-	lowGTIDStr, err := GetGlobalGTIDExecuted(srcDB)
-	if err != nil {
-		return fmt.Errorf("failed to get low gtid: %w", err)
-	}
-	_ = ParseMySQLGTIDSet(lowGTIDStr)
-
-	bounds, err := GetTableBounds(ctx, srcDB, table, pkCol)
-	if err != nil {
+	var chunks []*Chunk
+	register := func() error {
+		// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
+		bounds, err := GetTableBounds(ctx, srcDB, table, pkCol)
+		if err != nil {
+			return err
+		}
+		if bounds.Count == 0 || bounds.MaxPK < bounds.MinPK {
+			s.Manager.RegisterTable(table, pkCol, nil, math.MinInt64)
+			// Source rỗng: target cũng phải rỗng (dọn row thừa từ lần chạy trước).
+			_, err := dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(s.target(table))))
+			return err
+		}
+		// 2. Chia các chunk trong khoảng [MinPK, MaxPK]
+		chunks = s.Chunker.PlanChunks(table, pkCol, bounds.MinPK, bounds.MaxPK, s.opts.DefaultChunkRows)
+		s.Manager.RegisterTable(table, pkCol, chunks, bounds.MaxPK)
+		// Row ở target nằm ngoài [min, max] không còn ở source tại thời điểm này.
+		_, err = dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s < ? OR %s > ?",
+			quoteTable(s.target(table)), quoteIdent(pkCol), quoteIdent(pkCol)), bounds.MinPK, bounds.MaxPK)
 		return err
 	}
-
-	if bounds.Count == 0 || bounds.MaxPK < bounds.MinPK {
-		// Bảng trống: không có chunk nào cần đọc
-		s.Manager.RegisterTable(table, pkCol, nil, 0)
-		return nil
+	if s.Barrier != nil {
+		err = s.Barrier(ctx, register)
+	} else {
+		err = register()
+	}
+	if err != nil {
+		return fmt.Errorf("snapshot add %s: register ranges: %w", table, err)
 	}
 
-	bLast := bounds.MaxPK
-
-	// 2. Chia các chunk trong khoảng [MinPK, bLast]
-	chunks := s.Chunker.PlanChunks(table, pkCol, bounds.MinPK, bLast, s.opts.DefaultChunkRows)
-	s.Manager.RegisterTable(table, pkCol, chunks, bLast)
-
 	// 3. Xử lý lần lượt từng chunk
-	colsStr := strings.Join(columnNames, ", ")
+	quotedSel := make([]string, len(columnNames))
+	for i, c := range columnNames {
+		quotedSel[i] = quoteIdent(c)
+	}
+	colsStr := strings.Join(quotedSel, ", ")
 
 	for _, chunk := range chunks {
 		select {
@@ -138,7 +165,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		// Đọc chunk có cơ chế adaptive split và timeout (spec 02 §5)
 		queryFn := func(qCtx context.Context, c *Chunk) ([]*model.RowChange, int64, error) {
 			query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
-				colsStr, table.String(), pkCol, pkCol, pkCol)
+				colsStr, quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol))
 			rows, err := srcDB.QueryContext(qCtx, query, c.StartPK, c.EndPK)
 			if err != nil {
 				return nil, 0, err
@@ -215,7 +242,11 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		}
 
 		// Throttling nếu có
-		if s.opts.SleepBetweenChunks > 0 {
+		if s.Pace != nil {
+			if err := s.Pace(ctx); err != nil {
+				return err
+			}
+		} else if s.opts.SleepBetweenChunks > 0 {
 			time.Sleep(s.opts.SleepBetweenChunks)
 		}
 	}
@@ -231,16 +262,37 @@ func flushRowsToTarget(
 	pkCol string,
 	columnNames []string,
 	rows []*model.RowChange,
+	startPK, endPK int64,
 ) error {
-	if len(rows) == 0 {
-		return nil
+	// Kết nối riêng: tắt kiểm tra FK chỉ trong phiên flush (bảng con có thể được flush trước khi
+	// Txn của row cha còn trong hàng đợi được apply; thứ tự stream vẫn do writeset bảo đảm).
+	conn, err := dstDB.Conn(ctx)
+	if err != nil {
+		return err
 	}
-
-	tx, err := dstDB.BeginTx(ctx, nil)
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), "SET SESSION foreign_key_checks = 1")
+		_ = conn.Close()
+	}()
+	if _, err := conn.ExecContext(ctx, "SET SESSION foreign_key_checks = 0"); err != nil {
+		return err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	// Range [startPK, endPK] ở target phải đúng bằng ảnh đã merge: xóa row không còn ở source
+	// (bị DELETE trong lúc range "Chưa đọc", hoặc còn sót từ lần snapshot trước khi crash),
+	// cùng transaction với upsert nên target không bao giờ hiển thị trạng thái lùi (RS-1).
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s >= ? AND %s <= ?",
+		quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol)), startPK, endPK); err != nil {
+		return fmt.Errorf("clear chunk range on target: %w", err)
+	}
+	if len(rows) == 0 {
+		return tx.Commit()
+	}
 
 	// Ghi theo batch multi-row upsert
 	const batchSize = 1000
@@ -269,14 +321,21 @@ func flushRowsToTarget(
 		var updateExprs []string
 		for _, col := range columnNames {
 			if col != pkCol {
-				updateExprs = append(updateExprs, fmt.Sprintf("%s = VALUES(%s)", col, col))
+				updateExprs = append(updateExprs, fmt.Sprintf("%s = VALUES(%s)", quoteIdent(col), quoteIdent(col)))
 			}
 		}
 
+		if len(updateExprs) == 0 {
+			updateExprs = append(updateExprs, fmt.Sprintf("%s = %s", quoteIdent(pkCol), quoteIdent(pkCol)))
+		}
+		quotedCols := make([]string, len(columnNames))
+		for i, c := range columnNames {
+			quotedCols[i] = quoteIdent(c)
+		}
 		query := fmt.Sprintf(
 			"INSERT INTO %s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s",
-			table.String(),
-			strings.Join(columnNames, ", "),
+			quoteTable(table),
+			strings.Join(quotedCols, ", "),
 			strings.Join(valPlaceholders, ", "),
 			strings.Join(updateExprs, ", "),
 		)
@@ -287,4 +346,22 @@ func flushRowsToTarget(
 	}
 
 	return tx.Commit()
+}
+
+func quoteIdent(name string) string {
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+}
+
+func quoteTable(t model.TableID) string {
+	if t.Schema == "" {
+		return quoteIdent(t.Table)
+	}
+	return quoteIdent(t.Schema) + "." + quoteIdent(t.Table)
+}
+
+func (s *MySQLSnapshotter) target(t model.TableID) model.TableID {
+	if s.TargetName != nil {
+		return s.TargetName(t)
+	}
+	return t
 }

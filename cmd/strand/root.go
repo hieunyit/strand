@@ -34,6 +34,7 @@ func init() {
 	rootCmd.AddCommand(newThrottleCmd())
 	rootCmd.AddCommand(newCheckpointCmd())
 	rootCmd.AddCommand(newPromoteCmd())
+	rootCmd.AddCommand(newSnapshotCmd())
 }
 
 func newPlanCmd() *cobra.Command {

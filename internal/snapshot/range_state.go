@@ -59,6 +59,21 @@ func (m *RangeStateManager) RegisterTable(table model.TableID, pkCol string, chu
 	m.tables[table.String()] = tr
 }
 
+// RemoveTable gỡ bảng khỏi range-state sau khi snapshot xong (mọi event apply bình thường).
+func (m *RangeStateManager) RemoveTable(table model.TableID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.tables, table.String())
+}
+
+// IsRegistered cho biết bảng có đang được snapshot không.
+func (m *RangeStateManager) IsRegistered(table model.TableID) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.tables[table.String()]
+	return ok
+}
+
 // SetTailBLast thiết lập mốc max(pk) cho chunk đuôi [b_last, +inf).
 func (m *RangeStateManager) SetTailBLast(table model.TableID, bLast int64) {
 	m.mu.Lock()

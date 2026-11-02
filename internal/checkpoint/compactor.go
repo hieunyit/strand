@@ -94,8 +94,9 @@ type Compactor struct {
 	doneCh   chan struct{}
 	stepHook func(step CompactionStep) error
 
-	lastErr     error     // lỗi của chu kỳ nền gần nhất (nil nếu thành công)
-	lastSuccess time.Time // thời điểm compaction nền thành công gần nhất
+	lastGlobal  AppliedSet // tập toàn cục đã commit gần nhất (để worker cắt delta)
+	lastErr     error      // lỗi của chu kỳ nền gần nhất (nil nếu thành công)
+	lastSuccess time.Time  // thời điểm compaction nền thành công gần nhất
 }
 
 // Err trả về lỗi của chu kỳ compaction nền gần nhất.
@@ -310,7 +311,28 @@ func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 		}
 	}
 
+	c.lastGlobal = globalSet.Clone()
 	return globalSet, nil
+}
+
+// LastGlobal trả về bản sao tập toàn cục đã commit gần nhất (nil nếu chưa có).
+// Worker dùng để cắt khỏi row delta phần đã nằm trong row toàn cục (design §1).
+func (c *Compactor) LastGlobal() AppliedSet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastGlobal == nil {
+		return nil
+	}
+	return c.lastGlobal.Clone()
+}
+
+// SetLastGlobal đặt tập toàn cục ban đầu (sau LoadApplied lúc khởi động).
+func (c *Compactor) SetLastGlobal(g AppliedSet) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if g != nil {
+		c.lastGlobal = g.Clone()
+	}
 }
 
 // Start kích hoạt compaction chạy ngầm định kỳ (mỗi 100–500 ms).

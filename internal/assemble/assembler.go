@@ -28,6 +28,32 @@ func WithSpillDir(dir string) Option {
 	}
 }
 
+// UniqueIndex mô tả một unique index (ngoài PK) theo tên cột.
+type UniqueIndex struct {
+	Name    string
+	Columns []string
+}
+
+// ForeignKeyMeta mô tả một khóa ngoại: các cột ở bảng con tham chiếu tới bảng cha.
+type ForeignKeyMeta struct {
+	Columns     []string
+	ParentTable model.TableID
+}
+
+// KeyMeta là metadata unique key và FK của một bảng, dùng để dựng writeset (spec 02 §6).
+type KeyMeta struct {
+	Unique      []UniqueIndex
+	ForeignKeys []ForeignKeyMeta
+}
+
+// WithKeyMetadata cung cấp metadata unique key / FK để Assembler điền RowChange.UniqueKeys
+// và RowChange.ForeignKeys (gồm cả giá trị cũ khi UPDATE đổi unique key).
+func WithKeyMetadata(meta map[model.TableID]KeyMeta) Option {
+	return func(a *Assembler) {
+		a.keyMeta = meta
+	}
+}
+
 // WithSchemaRegistry đặt SchemaRegistry tùy biến.
 func WithSchemaRegistry(reg *SchemaRegistry) Option {
 	return func(a *Assembler) {
@@ -47,6 +73,75 @@ type Assembler struct {
 	currentSpill *SpillBuffer
 	inTxn        bool
 	sawBegin     bool // đã thấy QUERY "BEGIN" (Txn DML); chưa thấy mà gặp QUERY khác => DDL
+	keyMeta      map[model.TableID]KeyMeta
+}
+
+// colIndex trả về vị trí cột theo tên trong schema, -1 nếu không có.
+func colIndex(t *TableSchema, name string) int {
+	if t == nil {
+		return -1
+	}
+	for i, c := range t.Columns {
+		if c == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func pickValues(t *TableSchema, row []any, cols []string) ([]model.Value, bool) {
+	out := make([]model.Value, len(cols))
+	for i, c := range cols {
+		idx := colIndex(t, c)
+		if idx < 0 || idx >= len(row) {
+			return nil, false
+		}
+		if row[idx] == nil {
+			return nil, false // NULL không tham gia unique/FK
+		}
+		out[i] = row[idx]
+	}
+	return out, true
+}
+
+// enrichKeys điền unique key và FK cho row từ metadata (before có thể nil).
+func (a *Assembler) enrichKeys(tid model.TableID, t *TableSchema, before, after []any, rc *model.RowChange) {
+	meta, ok := a.keyMeta[tid]
+	if !ok {
+		return
+	}
+	for _, uk := range meta.Unique {
+		var key, old []model.Value
+		var okNew, okOld bool
+		if after != nil {
+			key, okNew = pickValues(t, after, uk.Columns)
+		}
+		if before != nil {
+			old, okOld = pickValues(t, before, uk.Columns)
+		}
+		switch {
+		case okNew && okOld:
+			if KeysEqual(key, old) {
+				rc.AddUniqueKey(uk.Name, key)
+			} else {
+				rc.AddUniqueKey(uk.Name, key, old)
+			}
+		case okNew:
+			rc.AddUniqueKey(uk.Name, key)
+		case okOld:
+			rc.AddUniqueKey(uk.Name, old)
+		}
+	}
+	for _, fk := range meta.ForeignKeys {
+		for _, img := range [][]any{after, before} {
+			if img == nil {
+				continue
+			}
+			if v, ok := pickValues(t, img, fk.Columns); ok {
+				rc.AddForeignKey(fk.ParentTable, v)
+			}
+		}
+	}
 }
 
 // New khởi tạo Assembler mới.
@@ -89,6 +184,9 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		}
 		a.ensureTxnStarted(ev.Pos)
 		a.currentTxn.SourcePos = ev.Pos
+		if !ev.Timestamp.IsZero() {
+			a.currentTxn.SourceTS = ev.Timestamp.Unix()
+		}
 
 	case reader.EventQuery:
 		q := strings.ToUpper(strings.TrimSpace(ev.Query))
@@ -136,6 +234,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 					Key:   key,
 					Cols:  cols,
 				}
+				a.enrichKeys(tableID, tbl, nil, row, &rc)
 				if err := a.currentSpill.Append(rc); err != nil {
 					return nil, err
 				}
@@ -151,6 +250,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 					Key:   key,
 					Cols:  cols,
 				}
+				a.enrichKeys(tableID, tbl, row, nil, &rc)
 				if err := a.currentSpill.Append(rc); err != nil {
 					return nil, err
 				}
@@ -184,6 +284,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 					OldKey: oldKey,
 					Cols:   cols,
 				}
+				a.enrichKeys(tableID, tbl, before, after, &rc)
 				if err := a.currentSpill.Append(rc); err != nil {
 					return nil, err
 				}

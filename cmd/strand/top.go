@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"strand/internal/admin"
+	"strand/internal/config"
 )
 
 var adminSocketPath string
@@ -38,6 +39,11 @@ func newTopCmd() *cobra.Command {
 func getAdminSocketPath() string {
 	if adminSocketPath != "" {
 		return adminSocketPath
+	}
+	if cfgPath != "" {
+		if cfg, err := config.LoadFile(cfgPath); err == nil && cfg.Observability.AdminSocket != "" {
+			return cfg.Observability.AdminSocket
+		}
 	}
 	return "/run/strand/default.sock"
 }

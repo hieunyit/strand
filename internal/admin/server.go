@@ -164,6 +164,16 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		}
 		return Response{OK: true, CheckpointResult: res}
 
+	case CmdSnapshotAdd:
+		sa, ok := s.handler.(SnapshotAdder)
+		if !ok {
+			return Response{OK: false, Error: "snapshot add is not supported by this pipeline"}
+		}
+		if err := sa.SnapshotAdd(ctx, req.Table); err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true}
+
 	default:
 		return Response{OK: false, Error: fmt.Sprintf("unknown command: %s", req.Command)}
 	}

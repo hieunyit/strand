@@ -139,6 +139,9 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		Port:     r.cfg.Port,
 		User:     r.cfg.User,
 		Password: r.cfg.Password,
+		// Giá trị thời gian giữ dạng chuỗi, TIMESTAMP quy về UTC; writer đặt session time_zone='+00:00'.
+		ParseTime:               false,
+		TimestampStringLocation: time.UTC,
 	}
 
 	syncer := replication.NewBinlogSyncer(syncerCfg)

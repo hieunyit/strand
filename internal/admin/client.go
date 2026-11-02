@@ -126,3 +126,15 @@ func (c *Client) CheckpointRewind(ctx context.Context, to string) (*CheckpointRe
 	}
 	return resp.CheckpointResult, nil
 }
+
+// SnapshotAdd yêu cầu pipeline đang chạy snapshot thêm một bảng.
+func (c *Client) SnapshotAdd(ctx context.Context, table string) error {
+	resp, err := c.Call(ctx, Request{Command: CmdSnapshotAdd, Table: table})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
