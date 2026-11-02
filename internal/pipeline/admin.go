@@ -49,11 +49,17 @@ func (h *adminHandler) Pause(ctx context.Context) (*admin.PauseResult, error) {
 	return &admin.PauseResult{State: "paused", Paused: true}, nil
 }
 
+// PauseSnapshot chỉ tạm dừng phần snapshot logic, giữ stream CDC vẫn chạy (02 §10).
+func (h *adminHandler) PauseSnapshot(ctx context.Context) (*admin.PauseResult, error) {
+	h.p.snapPaused.Store(true)
+	return &admin.PauseResult{State: "snapshot_paused", Paused: true}, nil
+}
+
 func (h *adminHandler) Resume(ctx context.Context, snapshotOnly bool) (*admin.ResumeResult, error) {
 	if snapshotOnly {
-		// Snapshot cần stream đi qua điểm hẹn (high watermark), nên không thể chạy snapshot
-		// trong khi stream bị dừng. Trả lỗi rõ ràng thay vì treo ở rendezvous.
-		return nil, fmt.Errorf("resume --snapshot-only is not supported: logical snapshot needs the stream to reach each chunk's high watermark")
+		// Chỉ chạy lại snapshot đã dừng bằng `pause --snapshot`; không đổi trạng thái pause của stream.
+		h.p.snapPaused.Store(false)
+		return &admin.ResumeResult{State: h.state(), SnapshotOnly: true, Resumed: true}, nil
 	}
 	h.p.pauseMu.Lock()
 	h.p.paused.Store(false)

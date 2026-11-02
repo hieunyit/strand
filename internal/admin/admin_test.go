@@ -308,3 +308,50 @@ func TestAD4_CheckpointShowAndRewindOverSocket(t *testing.T) {
 		t.Fatalf("rewind tới vị trí purged phải bị lỗi nhưng lại thành công")
 	}
 }
+
+type snapshotPauseMockHandler struct {
+	*mockHandler
+	snapPaused bool
+}
+
+func (h *snapshotPauseMockHandler) PauseSnapshot(ctx context.Context) (*admin.PauseResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.snapPaused = true
+	return &admin.PauseResult{
+		State:  "snapshot_paused",
+		Paused: true,
+	}, nil
+}
+
+// TestAD5_PauseSnapshotOverSocket kiểm tra `pause_snapshot` qua socket:
+// handler cài đặt SnapshotPauser trả Paused=true; handler không cài đặt trả lỗi.
+func TestAD5_PauseSnapshotOverSocket(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 1. Handler cài đặt SnapshotPauser
+	withPauseSnap := &snapshotPauseMockHandler{mockHandler: newMockHandler()}
+	_, clientOK, cleanupOK := setupTestServer(t, withPauseSnap)
+	defer cleanupOK()
+
+	res, err := clientOK.PauseSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("client.PauseSnapshot failed: %v", err)
+	}
+	if !res.Paused || res.State != "snapshot_paused" {
+		t.Errorf("PauseSnapshot kết quả không đúng: %+v", res)
+	}
+	if !withPauseSnap.snapPaused {
+		t.Errorf("handler chưa ghi nhận snapPaused = true")
+	}
+
+	// 2. Handler không cài đặt SnapshotPauser -> trả lỗi
+	withoutPauseSnap := newMockHandler()
+	_, clientUnsupported, cleanupUnsupported := setupTestServer(t, withoutPauseSnap)
+	defer cleanupUnsupported()
+
+	if _, err := clientUnsupported.PauseSnapshot(ctx); err == nil {
+		t.Fatalf("client.PauseSnapshot phải trả lỗi khi handler không cài đặt SnapshotPauser")
+	}
+}

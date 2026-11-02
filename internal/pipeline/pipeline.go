@@ -94,6 +94,7 @@ type Pipeline struct {
 	paused        atomic.Bool
 	pauseMu       sync.Mutex
 	pauseCond     *sync.Cond
+	snapPaused    atomic.Bool // tạm dừng riêng phần snapshot logic (strand pause --snapshot)
 	bootstrap     atomic.Bool
 	retentionRisk atomic.Bool
 	verifying     atomic.Bool // chờ verify sau seed (02 §9)
@@ -1127,16 +1128,19 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 
 func (p *Pipeline) pace(ctx context.Context) error {
 	for {
-		breaker := p.govAlgo != "static" && p.gov.BreakerOpen()
-		// Breaker luôn thắng: background dừng (02 §7). bootstrap_retention_risk chỉ ghi đè việc
-		// onoff dừng vì áp suất lag (P_lag theo pha), để snapshot không tự khóa chết.
-		if p.retentionRisk.Load() && !breaker {
-			return nil
-		}
-		windowOK := inWindows(p.cfg.Bootstrap.Logical.Windows, time.Now())
-		running := p.govAlgo == "static" || p.gov.BackgroundRunning()
-		if windowOK && running && !breaker {
-			break
+		// Lệnh `pause --snapshot` dừng riêng snapshot, thắng cả nhánh retentionRisk.
+		if !p.snapPaused.Load() {
+			breaker := p.govAlgo != "static" && p.gov.BreakerOpen()
+			// Breaker luôn thắng: background dừng (02 §7). bootstrap_retention_risk chỉ ghi đè việc
+			// onoff dừng vì áp suất lag (P_lag theo pha), để snapshot không tự khóa chết.
+			if p.retentionRisk.Load() && !breaker {
+				return nil
+			}
+			windowOK := inWindows(p.cfg.Bootstrap.Logical.Windows, time.Now())
+			running := p.govAlgo == "static" || p.gov.BackgroundRunning()
+			if windowOK && running && !breaker {
+				break
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -1145,7 +1149,10 @@ func (p *Pipeline) pace(ctx context.Context) error {
 		}
 	}
 	// Chi phí chunk ước lượng (trang 16 KiB) chia cho tốc độ background R (token/giây).
-	_, rate := p.gov.CurrentRate()
+	var rate float64
+	if p.govAlgo != "static" && p.gov != nil {
+		_, rate = p.gov.CurrentRate()
+	}
 	if p.govAlgo == "static" || rate <= 0 {
 		rate = float64(p.cfg.Resources.Source.IOPS.Soft)
 	}
@@ -1162,8 +1169,16 @@ func (p *Pipeline) pace(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(d):
-		return nil
 	}
+	// Nếu `pause --snapshot` được bật trong lúc đang ngủ giãn nhịp giữa hai chunk, chờ tiếp.
+	for p.snapPaused.Load() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(p.govTick):
+		}
+	}
+	return nil
 }
 
 func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {

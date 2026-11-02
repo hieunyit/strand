@@ -8,7 +8,10 @@ import (
 	"strand/internal/admin"
 )
 
-var snapshotOnly bool
+var (
+	pauseSnapshot bool
+	snapshotOnly  bool
+)
 
 func newPauseCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -16,6 +19,14 @@ func newPauseCmd() *cobra.Command {
 		Short: "Tạm dừng pipeline đồng bộ qua admin socket (spec/02 §10)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli := admin.NewClient(getAdminSocketPath())
+			if pauseSnapshot {
+				res, err := cli.PauseSnapshot(cmd.Context())
+				if err != nil {
+					return fmt.Errorf("strand pause failed: %w", err)
+				}
+				fmt.Printf("Snapshot đã tạm dừng; stream vẫn chạy. Trạng thái: %s\n", res.State)
+				return nil
+			}
 			res, err := cli.Pause(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("strand pause failed: %w", err)
@@ -25,6 +36,7 @@ func newPauseCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&adminSocketPath, "socket", "", "Đường dẫn admin socket UNIX")
+	cmd.Flags().BoolVar(&pauseSnapshot, "snapshot", false, "Chỉ tạm dừng phần snapshot logic, giữ stream CDC chạy")
 	return cmd
 }
 
