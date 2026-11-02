@@ -102,6 +102,8 @@ func startMySQL(t *testing.T, image, alias string, serverID int, nw *testcontain
 		"--gtid-mode=ON", "--enforce-gtid-consistency=ON",
 		"--binlog-format=ROW", "--binlog-row-image=FULL", "--binlog-row-metadata=FULL",
 		"--log-replica-updates=ON", "--max-connections=500",
+		// Không dùng native AIO: máy test chạy nhiều MySQL cùng lúc dễ cạn fs.aio-max-nr khiến mysqld không khởi động.
+		"--innodb-use-native-aio=OFF",
 	}
 	args = append(args, extra...)
 	req := testcontainers.ContainerRequest{

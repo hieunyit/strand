@@ -278,6 +278,9 @@ func TestG1_E2E_PrefetchDuringLongRestore(t *testing.T) {
 	wl.nextID = 2_000_000
 	wl.Start(6, 3000)
 
+	// Restore kết thúc thì tạo file đánh dấu; vòng purge dừng ở đó. Ghi sau lúc restore xong nằm ngoài phạm vi
+	// prefetch (sync live đọc tiếp từ source), nên purge chúng trước khi sync chạy là kịch bản không hợp lệ.
+	restoreDone := filepath.Join(e.dir, "restore.done")
 	stopPurge := make(chan struct{})
 	var purgeWG sync.WaitGroup
 	purgeWG.Add(1)
@@ -290,6 +293,9 @@ func TestG1_E2E_PrefetchDuringLongRestore(t *testing.T) {
 			case <-stopPurge:
 				return
 			case <-tk.C:
+				if _, err := os.Stat(restoreDone); err == nil {
+					return
+				}
 				// Tránh chạy sát ranh giới giây khiến FLUSH ở giây T còn PURGE ở giây T+1.
 				if rem := time.Second - time.Duration(time.Now().Nanosecond()); rem < 150*time.Millisecond {
 					select {
@@ -307,7 +313,7 @@ func TestG1_E2E_PrefetchDuringLongRestore(t *testing.T) {
 	spoolDir := filepath.Join(e.dir, "state", "prefetch")
 	out, code := runStrandCLI(t, 5*time.Minute, "seed", "apply", "--manifest", e.manifest, "--target", e.dst.RootDSN,
 		"--spool", spoolDir, "--spool-local-hard", "200000", "--overflow", e.cfg.Overflow,
-		"--source", e.src.RootDSN, "--restore-cmd", "sleep 40")
+		"--source", e.src.RootDSN, "--restore-cmd", "sleep 40 && touch "+restoreDone)
 	close(stopPurge)
 	purgeWG.Wait()
 	wl.Stop()

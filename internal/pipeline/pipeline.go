@@ -315,8 +315,13 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		n := 0
 		for {
 			t, err := it.Next(ctx)
-			if err != nil {
+			if errors.Is(err, io.EOF) {
 				break
+			}
+			if err != nil {
+				it.Close()
+				// Không được nuốt lỗi: đếm thiếu ở đây biến thành log_gap giả (hoặc bỏ sót Txn).
+				return fmt.Errorf("read prefetch spool: %w", err)
 			}
 			streamFrom.Add(t.SourcePos)
 			n++
