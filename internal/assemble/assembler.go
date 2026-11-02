@@ -3,6 +3,7 @@ package assemble
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -37,14 +38,15 @@ func WithSchemaRegistry(reg *SchemaRegistry) Option {
 // Assembler lắp ráp các sự kiện từ reader thành các Txn hoàn chỉnh.
 // spec: 02 §3, D §1
 type Assembler struct {
-	mu           sync.Mutex
-	registry     *SchemaRegistry
-	maxInMem     int
-	spillDir     string
+	mu       sync.Mutex
+	registry *SchemaRegistry
+	maxInMem int
+	spillDir string
 
 	currentTxn   *model.Txn
 	currentSpill *SpillBuffer
 	inTxn        bool
+	sawBegin     bool // đã thấy QUERY "BEGIN" (Txn DML); chưa thấy mà gặp QUERY khác => DDL
 }
 
 // New khởi tạo Assembler mới.
@@ -81,23 +83,36 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 
 	switch ev.Type {
 	case reader.EventGTID:
+		if a.inTxn {
+			return nil, fmt.Errorf("GTID %s arrived before transaction %s terminated: events lost",
+				ev.Pos.GTID, a.currentTxn.SourcePos.GTID)
+		}
 		a.ensureTxnStarted(ev.Pos)
 		a.currentTxn.SourcePos = ev.Pos
 
 	case reader.EventQuery:
 		q := strings.ToUpper(strings.TrimSpace(ev.Query))
-		if q == "BEGIN" {
+		switch {
+		case q == "BEGIN":
 			a.ensureTxnStarted(ev.Pos)
-		} else if q == "COMMIT" {
+			a.sawBegin = true
+		case q == "COMMIT":
 			if a.inTxn {
 				return a.finishTxn()
 			}
+		case !a.sawBegin:
+			// Txn DDL: GTID + QUERY, không có BEGIN/XID. Phát thành Txn riêng để GTID được ghi nhận.
+			a.ensureTxnStarted(ev.Pos)
+			a.currentTxn.DDL = ev.Query
+			return a.finishTxn()
 		}
 
 	case reader.EventTableMap:
 		a.ensureTxnStarted(ev.Pos)
-		// Đảm bảo bảng có trong registry
-		if a.registry.GetTable(ev.Schema, ev.Table) == nil {
+		// Schema lấy từ metadata của TABLE_MAP (binlog_row_metadata=FULL) khi có.
+		if len(ev.Columns) > 0 {
+			a.registry.RegisterTable(ev.Schema, ev.Table, ev.PKColumns, ev.Columns)
+		} else if a.registry.GetTable(ev.Schema, ev.Table) == nil {
 			a.registry.RegisterTable(ev.Schema, ev.Table, nil, nil)
 		}
 
@@ -108,61 +123,6 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		if tbl == nil {
 			a.registry.RegisterTable(ev.Schema, ev.Table, nil, nil)
 			tbl = a.registry.GetTable(ev.Schema, ev.Table)
-		}
-
-		// FAST PATH: Nếu giao dịch đã tràn đĩa, ghi trực tiếp nhị phân mà không cấp phát lát cắt (slice)
-		if a.currentSpill.IsSpilled() {
-			tIdx := a.currentSpill.getTableIdx(tableID)
-			pkIdx := 0
-			if tbl != nil && tbl.SinglePKIndex >= 0 {
-				pkIdx = tbl.SinglePKIndex
-			}
-
-			switch ev.Op {
-			case model.OpInsert:
-				for _, row := range ev.Rows {
-					var keyVal int64
-					if pkIdx < len(row) {
-						keyVal = extractInt64Val(row[pkIdx])
-					}
-					if err := a.currentSpill.AppendFast(tIdx, 1, keyVal, 0, 0); err != nil {
-						return nil, err
-					}
-				}
-			case model.OpDelete:
-				for _, row := range ev.Rows {
-					var keyVal int64
-					if pkIdx < len(row) {
-						keyVal = extractInt64Val(row[pkIdx])
-					}
-					if err := a.currentSpill.AppendFast(tIdx, 3, keyVal, 0, 0); err != nil {
-						return nil, err
-					}
-				}
-			case model.OpUpdate:
-				for i := 0; i < len(ev.Rows); i += 2 {
-					before := ev.Rows[i]
-					after := before
-					if i+1 < len(ev.Rows) {
-						after = ev.Rows[i+1]
-					}
-					var oldKeyVal, newKeyVal int64
-					if pkIdx < len(before) {
-						oldKeyVal = extractInt64Val(before[pkIdx])
-					}
-					if pkIdx < len(after) {
-						newKeyVal = extractInt64Val(after[pkIdx])
-					}
-					var hasOldKey byte = 0
-					if oldKeyVal != newKeyVal {
-						hasOldKey = 1
-					}
-					if err := a.currentSpill.AppendFast(tIdx, 2, newKeyVal, hasOldKey, oldKeyVal); err != nil {
-						return nil, err
-					}
-				}
-			}
-			return nil, nil
 		}
 
 		switch ev.Op {
@@ -246,6 +206,7 @@ func (a *Assembler) finishTxn() (*model.Txn, error) {
 	res := a.currentTxn
 
 	a.inTxn = false
+	a.sawBegin = false
 	a.currentTxn = nil
 	a.currentSpill = nil
 

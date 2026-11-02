@@ -121,6 +121,10 @@ type Txn struct {
 	// Txn tràn đĩa không có Rows trong RAM, nên scheduler dùng danh sách này để
 	// dựng phụ thuộc cấp bảng (CO-1).
 	SpilledTables []TableID `json:"spilled_tables,omitempty"`
+
+	// DDL chứa câu lệnh DDL khi Txn là một transaction DDL (không có row).
+	// Txn DDL vẫn có GTID riêng và phải được ghi nhận vào tập đã apply (CP-1, CP-2).
+	DDL string `json:"ddl,omitempty"`
 }
 
 // IsSpilled kiểm tra transaction có bị tràn xuống đĩa không.

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 
 	"strand/internal/checkpoint"
@@ -33,13 +33,13 @@ type Config struct {
 // MySQLReader hiện thực interface reader.Reader cho MySQL binlog.
 // spec: 02 §3, D §1
 type MySQLReader struct {
-	cfg       Config
-	mu        sync.RWMutex
+	cfg        Config
+	mu         sync.RWMutex
 	currentPos model.Pos
-	syncer    *replication.BinlogSyncer
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	closed    bool
+	syncer     *replication.BinlogSyncer
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	closed     bool
 }
 
 // New khởi tạo MySQLReader từ Config.
@@ -254,6 +254,15 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 			case replication.TABLE_MAP_EVENT:
 				if tmEv, ok := ev.Event.(*replication.TableMapEvent); ok {
 					tableMap[tmEv.TableID] = tmEv
+					var cols, pkCols []string
+					if len(tmEv.ColumnName) > 0 {
+						cols = tmEv.ColumnNameString()
+						for _, idx := range tmEv.PrimaryKey {
+							if int(idx) < len(cols) {
+								pkCols = append(pkCols, cols[idx])
+							}
+						}
+					}
 					select {
 					case out <- reader.Event{
 						Type:      reader.EventTableMap,
@@ -261,6 +270,8 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 						TableID:   tmEv.TableID,
 						Schema:    string(tmEv.Schema),
 						Table:     string(tmEv.Table),
+						Columns:   cols,
+						PKColumns: pkCols,
 						Timestamp: ts,
 					}:
 					case <-ctxRead.Done():
