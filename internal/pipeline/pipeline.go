@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ import (
 	"strand/internal/sched"
 	"strand/internal/seed"
 	"strand/internal/snapshot"
+	"strand/internal/spool"
 	"strand/internal/writer"
 )
 
@@ -94,6 +96,8 @@ type Pipeline struct {
 	bootstrap     atomic.Bool
 	retentionRisk atomic.Bool
 	verifying     atomic.Bool // chờ verify sau seed (02 §9)
+	prefetchDir   string
+	prefetch      *spool.PebbleSpool
 	gov           *governor.OnoffGovernor
 	govAlgo       string
 	govTick       time.Duration
@@ -263,7 +267,31 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	p.applied0 = applied.Clone().(*checkpoint.MySQLAppliedSet)
 	p.seen = applied.Clone().(*checkpoint.MySQLAppliedSet)
-	if err := p.checkLogAvailable(ctx, applied); err != nil {
+	// Spool prefetch của `seed apply` (02 §9): phủ phần log từ P mà source/archive có thể đã xóa.
+	p.prefetchDir = filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")
+	streamFrom := applied.Clone().(*checkpoint.MySQLAppliedSet)
+	if fi, err := os.Stat(p.prefetchDir); err == nil && fi.IsDir() {
+		if p.prefetch, err = spool.New(p.prefetchDir); err != nil {
+			return fmt.Errorf("open prefetch spool: %w", err)
+		}
+		defer p.prefetch.Close()
+		it, err := p.prefetch.Iter(ctx, model.Pos{})
+		if err != nil {
+			return err
+		}
+		n := 0
+		for {
+			t, err := it.Next(ctx)
+			if err != nil {
+				break
+			}
+			streamFrom.Add(t.SourcePos)
+			n++
+		}
+		it.Close()
+		p.log.Info("prefetch spool found", "transactions", n)
+	}
+	if err := p.checkLogAvailable(ctx, streamFrom); err != nil {
 		return err
 	}
 
@@ -376,16 +404,51 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	rctx, rcancel := context.WithCancel(ctx)
 	defer rcancel()
-	events, err := rd.Start(rctx, applied)
-	if err != nil {
-		return err
-	}
 	defer rd.Close()
 	asm := assemble.New(assemble.WithKeyMetadataFunc(keyMeta), assemble.WithSpillDir(spillDir))
 	for id, m := range p.tables {
 		asm.Registry().RegisterTable(id.Schema, id.Table, m.PK, m.Columns)
 	}
-	txns, asmErr := asm.Process(rctx, events)
+	// Nguồn Txn cho router: spool prefetch (nếu có) trước, rồi stream trực tiếp từ
+	// applied ∪ spool (server gửi đúng phần còn thiếu theo GTID).
+	txns := make(chan *model.Txn, 128)
+	asmErr := make(chan error, 1)
+	go func() {
+		defer close(txns)
+		if p.prefetch != nil {
+			if err := p.drainPrefetch(rctx, txns); err != nil {
+				asmErr <- err
+				return
+			}
+		}
+		events, err := rd.Start(rctx, streamFrom)
+		if err != nil {
+			asmErr <- err
+			return
+		}
+		live, liveErr := asm.Process(rctx, events)
+		for {
+			select {
+			case <-rctx.Done():
+				return
+			case err, ok := <-liveErr:
+				if ok && err != nil {
+					asmErr <- err
+					return
+				}
+				liveErr = nil
+			case t, ok := <-live:
+				if !ok {
+					return
+				}
+				select {
+				case txns <- t:
+				case <-rctx.Done():
+					return
+				}
+			}
+		}
+	}()
 
 	// --- Goroutine ---
 	var workersWG, bgWG sync.WaitGroup
@@ -742,6 +805,48 @@ func (p *Pipeline) waitIfPaused(ctx context.Context) {
 		p.pauseCond.Wait()
 	}
 	p.pauseMu.Unlock()
+}
+
+// drainPrefetch đưa các Txn trong spool prefetch vào router; khi chúng đã apply hết ở target,
+// spool được xóa.
+func (p *Pipeline) drainPrefetch(ctx context.Context, out chan<- *model.Txn) error {
+	it, err := p.prefetch.Iter(ctx, model.Pos{})
+	if err != nil {
+		return err
+	}
+	n := 0
+	for {
+		t, err := it.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			it.Close()
+			return fmt.Errorf("read prefetch spool: %w", err)
+		}
+		select {
+		case out <- t:
+			n++
+		case <-ctx.Done():
+			it.Close()
+			return nil
+		}
+	}
+	it.Close()
+	p.log.Info("prefetch spool replayed; switching to live stream", "transactions", n)
+	go func() {
+		for p.sched.Lwd() < p.admitted.Load() && ctx.Err() == nil && p.failed() == nil {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if ctx.Err() != nil || p.failed() != nil {
+			return
+		}
+		_ = p.prefetch.Close()
+		if err := os.RemoveAll(p.prefetchDir); err == nil {
+			p.log.Info("prefetch spool applied and removed")
+		}
+	}()
+	return nil
 }
 
 // drain chờ mọi Txn đã Admit được commit ở target (hoặc hết timeout / lỗi).

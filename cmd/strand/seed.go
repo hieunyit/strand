@@ -95,8 +95,9 @@ func newSeedCmd() *cobra.Command {
 	plan.Flags().BoolVar(&allowPre, "allow-prerelease-tool", false, "Chấp nhận backup tạo bằng công cụ bản RC")
 	plan.Flags().StringVar(&out, "out", "seed.json", "File seed.json")
 
-	var manifestPath, applyTarget string
-	var printOnly bool
+	var manifestPath, applyTarget, pfSpool, pfArchive, pfSource string
+	var printOnly, pfOn bool
+	var pfHard int64
 	apply := &cobra.Command{
 		Use:   "apply",
 		Short: "Điều phối restore/load rồi chuẩn bị target cho catch-up; chạy lại được khi bị ngắt",
@@ -115,6 +116,14 @@ func newSeedCmd() *cobra.Command {
 			}
 			if printOnly || dryRun {
 				return nil
+			}
+			// Prefetch (mặc định bật): đọc log từ P vào spool trong lúc restore (02 §9).
+			if pfOn && pfSpool != "" {
+				n, err := prefetch(cmd.Context(), &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfHard, pfArchive, pfSource)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("prefetch: %d transactions after P stored in spool %s\n", n, pfSpool)
 			}
 			if applyTarget == "" {
 				return exitcode.New("missing_target", exitcode.InvalidSyntax, "missing --target", nil)
@@ -139,6 +148,11 @@ func newSeedCmd() *cobra.Command {
 	apply.Flags().StringVar(&manifestPath, "manifest", "seed.json", "File seed.json")
 	apply.Flags().StringVar(&applyTarget, "target", "", "DSN target đã restore")
 	apply.Flags().BoolVar(&printOnly, "print-only", false, "Chỉ in các bước, không thực hiện")
+	apply.Flags().BoolVar(&pfOn, "prefetch", true, "Đọc log từ P vào spool trong lúc restore (02 §9)")
+	apply.Flags().StringVar(&pfSpool, "spool", "", "Thư mục spool prefetch (= <resources.spool.path>/prefetch của pipeline)")
+	apply.Flags().Int64Var(&pfHard, "spool-hard", 0, "Hard limit (byte) của spool; 0 = không giới hạn")
+	apply.Flags().StringVar(&pfArchive, "archive", "", "Thư mục binlog archive")
+	apply.Flags().StringVar(&pfSource, "source", "", "DSN source/replica để prefetch phần chưa archive")
 
 	cmd.AddCommand(plan, apply)
 	return cmd
