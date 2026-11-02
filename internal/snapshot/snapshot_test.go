@@ -557,12 +557,12 @@ func TestRS_TailChunk_HandledCorrectly(t *testing.T) {
 	// Các chunk được chia từ 1 đến 50
 	chunks := []*snapshot.Chunk{
 		{
-			ID:      1,
-			Table:   table,
-			PKCol:   pkCol,
-			StartPK: 1,
-			EndPK:   50,
-			State:   snapshot.StateReading,
+			ID:           1,
+			Table:        table,
+			PKCol:        pkCol,
+			StartPK:      1,
+			EndPK:        50,
+			State:        snapshot.StateReading,
 			LowWatermark: checkpoint.NewMySQLAppliedSet("uuid"),
 		},
 	}

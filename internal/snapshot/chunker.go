@@ -109,10 +109,10 @@ func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool)
 type QueryChunkFunc func(ctx context.Context, chunk *Chunk) ([]*model.RowChange, int64, error)
 
 // ReadChunkAdaptive đọc dữ liệu của một chunk và tự động thích ứng theo các quy tắc trong spec/02 §5:
-// 1. Timeout SELECT của chunk (mặc định 5s): Hủy, chia đôi, chạy lại.
-//    QUY TẮC BẮT BUỘC: Không áp timeout khi chunk chỉ còn 1 row (min_chunk_rows = 1).
-// 2. max_chunk_bytes (mặc định 64MB): Vượt ngân sách thì chia đôi.
-//    QUY TẮC BẮT BUỘC: Row lớn hơn max_chunk_bytes không gây vòng lặp chia chunk vô tận (chặn bởi min_chunk_rows = 1).
+//  1. Timeout SELECT của chunk (mặc định 5s): Hủy, chia đôi, chạy lại.
+//     QUY TẮC BẮT BUỘC: Không áp timeout khi chunk chỉ còn 1 row (min_chunk_rows = 1).
+//  2. max_chunk_bytes (mặc định 64MB): Vượt ngân sách thì chia đôi.
+//     QUY TẮC BẮT BUỘC: Row lớn hơn max_chunk_bytes không gây vòng lặp chia chunk vô tận (chặn bởi min_chunk_rows = 1).
 func (c *Chunker) ReadChunkAdaptive(
 	ctx context.Context,
 	chunk *Chunk,

@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"sync"
@@ -54,6 +55,7 @@ func (m *RangeStateManager) RegisterTable(table model.TableID, pkCol string, chu
 			c.BufferedChanges = make(map[int64]*model.RowChange)
 		}
 	}
+	sort.Slice(tr.Chunks, func(i, j int) bool { return tr.Chunks[i].StartPK < tr.Chunks[j].StartPK })
 	m.tables[table.String()] = tr
 }
 
@@ -70,6 +72,7 @@ func (m *RangeStateManager) SetTailBLast(table model.TableID, bLast int64) {
 }
 
 // extractInt64PK trích xuất giá trị int64 của PK từ slice model.Value.
+// Giá trị không biểu diễn chính xác được bằng int64 thì trả lỗi (không làm tròn, không tràn).
 func extractInt64PK(key []model.Value) (int64, error) {
 	if len(key) == 0 || key[0] == nil {
 		return 0, fmt.Errorf("empty key")
@@ -77,35 +80,53 @@ func extractInt64PK(key []model.Value) (int64, error) {
 	switch v := key[0].(type) {
 	case int:
 		return int64(v), nil
+	case int8:
+		return int64(v), nil
+	case int16:
+		return int64(v), nil
 	case int32:
 		return int64(v), nil
 	case int64:
 		return v, nil
 	case uint:
+		if uint64(v) > math.MaxInt64 {
+			return 0, fmt.Errorf("pk %d overflows int64", v)
+		}
+		return int64(v), nil
+	case uint8:
+		return int64(v), nil
+	case uint16:
 		return int64(v), nil
 	case uint32:
 		return int64(v), nil
 	case uint64:
+		if v > math.MaxInt64 {
+			return 0, fmt.Errorf("pk %d overflows int64", v)
+		}
 		return int64(v), nil
 	case float64:
+		if v != math.Trunc(v) || v > math.MaxInt64 || v < math.MinInt64 {
+			return 0, fmt.Errorf("pk %v is not an exact integer", v)
+		}
 		return int64(v), nil
 	case string:
 		return strconv.ParseInt(v, 10, 64)
+	case []byte:
+		return strconv.ParseInt(string(v), 10, 64)
 	default:
 		return 0, fmt.Errorf("unsupported pk type %T", key[0])
 	}
 }
 
-// FindChunk tìm chunk chứa PK tương ứng.
+// FindChunk tìm chunk chứa PK tương ứng (tìm kiếm nhị phân; Chunks được sắp theo StartPK).
 func (tr *TableRanges) FindChunk(pk int64) *Chunk {
 	// Quy tắc chunk đuôi: nếu pk > TailBLast, thuộc range "Xong" ngay từ đầu
 	if tr.HasTailBLast && pk > tr.TailBLast {
 		return nil // Nil biểu thị ngoài phạm vi snapshot -> Done
 	}
-	for _, c := range tr.Chunks {
-		if pk >= c.StartPK && pk <= c.EndPK {
-			return c
-		}
+	i := sort.Search(len(tr.Chunks), func(k int) bool { return tr.Chunks[k].EndPK >= pk })
+	if i < len(tr.Chunks) && pk >= tr.Chunks[i].StartPK {
+		return tr.Chunks[i]
 	}
 	return nil
 }
@@ -124,7 +145,8 @@ func (m *RangeStateManager) HandleStreamEvent(event *model.RowChange, pos model.
 
 	pk, err := extractInt64PK(event.Key)
 	if err != nil {
-		return ActionApply, nil
+		// Bảng đang snapshot nhưng không xác định được range: KHÔNG được apply thẳng (RS-1).
+		return ActionReject, nil
 	}
 
 	chunk := tr.FindChunk(pk)

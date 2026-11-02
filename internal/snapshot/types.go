@@ -52,6 +52,9 @@ const (
 	ActionDiscard Action = iota
 	ActionBuffer
 	ActionApply
+	// ActionReject: event thuộc bảng đang snapshot nhưng PK không ánh xạ được vào range.
+	// Không được apply (vi phạm RS-1); pipeline phải dừng.
+	ActionReject
 )
 
 func (a Action) String() string {
@@ -62,6 +65,8 @@ func (a Action) String() string {
 		return "Buffer"
 	case ActionApply:
 		return "Apply"
+	case ActionReject:
+		return "Reject"
 	default:
 		return "Unknown"
 	}
@@ -170,4 +175,3 @@ func StreamHasReachedHigh(streamPos model.Pos, high checkpoint.AppliedSet) bool 
 	streamGNO := ParseGNO(streamPos)
 	return streamGNO >= highGNO
 }
-

@@ -77,6 +77,19 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 	columnNames []string,
 	rendezvousWaitFn func(ctx context.Context, high checkpoint.AppliedSet) error,
 ) error {
+	pkIdx := -1
+	for i, c := range columnNames {
+		if c == pkCol {
+			pkIdx = i
+		}
+	}
+	if pkIdx < 0 {
+		return fmt.Errorf("snapshot add %s: pk column %q not in column list", table, pkCol)
+	}
+	if rendezvousWaitFn == nil {
+		// Thiếu điểm hẹn thì chunk được flush trước khi stream xử lý hết high watermark (RS-1).
+		return fmt.Errorf("snapshot add %s: rendezvous wait function is required", table)
+	}
 	// 1. Quy tắc chunk đuôi [b_last, +inf):
 	// spec: 02 §5: "Đọc max(pk) sau low; khóa lớn hơn thuộc range Xong ngay từ đầu"
 	lowGTIDStr, err := GetGlobalGTIDExecuted(srcDB)
@@ -150,7 +163,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 				rc := &model.RowChange{
 					Table: table,
 					Op:    model.OpInsert,
-					Key:   []model.Value{colVals[0]}, // Giả định cột đầu tiên là PK
+					Key:   []model.Value{colVals[pkIdx]},
 				}
 				for i, colName := range columnNames {
 					var rawBytes []byte
@@ -192,10 +205,8 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		s.Manager.FinishReading(chunk, chunkHigh, rows)
 
 		// Rendezvous: chờ stream xử lý hết high watermark
-		if rendezvousWaitFn != nil {
-			if err := rendezvousWaitFn(ctx, chunkHigh); err != nil {
-				return fmt.Errorf("rendezvous wait failed: %w", err)
-			}
+		if err := rendezvousWaitFn(ctx, chunkHigh); err != nil {
+			return fmt.Errorf("rendezvous wait failed: %w", err)
 		}
 
 		// Flush: merge có thứ tự snapshot và buffer trong 1 transaction ở target và chuyển sang StateDone
