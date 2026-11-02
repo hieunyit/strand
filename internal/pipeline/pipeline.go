@@ -374,6 +374,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	if p.strict {
 		p.orderer = writer.NewCommitOrderer("strict", 1)
+		// strict apply tuần tự (chờ lượt trước khi mở transaction), nên nhiều worker không thêm
+		// song song mà chỉ chia nhỏ batch (mỗi worker một seq → một commit mỗi Txn). Một worker
+		// gom tối đa các Txn liên tiếp vào một commit (group commit).
+		nWorkers = 1
 	}
 	for i := 1; i <= nWorkers; i++ {
 		w := writer.NewMySQLWriter(p.dst, p.id, i, p.epoch)
