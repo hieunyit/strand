@@ -251,6 +251,27 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 	if !mn.Valid {
 		return [][2]int64{{-(1 << 62), 1 << 62}}, nil // bảng rỗng: phát hiện row thừa ở target
 	}
+	if rate >= 1 {
+		// Toàn bộ bảng: keyset walk, mỗi range `rows` khóa thật (không lệch khi PK thưa).
+		var out [][2]int64
+		next := mn.Int64
+		for next <= mx.Int64 {
+			var end sql.NullInt64
+			q := fmt.Sprintf("SELECT MAX(%s) FROM (SELECT %s FROM %s WHERE %s >= ? ORDER BY %s LIMIT %d) x",
+				qi(pk), qi(pk), qt(t), qi(pk), qi(pk), rows)
+			if err := db.QueryRowContext(ctx, q, next).Scan(&end); err != nil {
+				return nil, err
+			}
+			if !end.Valid {
+				break
+			}
+			out = append(out, [2]int64{next, end.Int64})
+			next = end.Int64 + 1
+		}
+		// Hai đầu mở để phát hiện row thừa ở target ngoài [min, max].
+		out = append(out, [2]int64{-(1 << 62), mn.Int64 - 1}, [2]int64{mx.Int64 + 1, 1 << 62})
+		return out, nil
+	}
 	_ = db.QueryRowContext(ctx, "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 		t.Schema, t.Table).Scan(&est)
 	n := int(float64(est)*rate/float64(rows)) + 1

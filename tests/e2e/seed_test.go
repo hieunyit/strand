@@ -75,12 +75,26 @@ func TestG1_E2E_SeedFromReplicaBackupNoAutoReplicateZeroTableReads(t *testing.T)
 	cfg := strandCfg{Name: "e2e-seed", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
 		Include: []string{"app.*"}, Exclude: []string{"app.ignored"}, Dir: dir, Bootstrap: "seed"}
 	sp := startStrand(t, cfg.write(t), "--start-at", "seed", "--seed-manifest", manifest)
-	waitSynced(t, &cfg, sp, 2*time.Minute)
-	time.Sleep(3 * time.Second)
-	if d := sourceTableReads(t, src) - readsBefore; d != 0 {
+	// Đo tới ngay trước lúc verify sau seed bắt đầu (verify đọc ~1% mẫu theo 02 §9, không
+	// thuộc phần seed). Pipeline chỉ bắt đầu verify sau khi catch-up xong.
+	var readsSeed int64 = -1
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		r := sourceTableReads(t, src)
+		if strings.Contains(sp.output.String(), "post-seed verify started") {
+			break
+		}
+		readsSeed = r
+		time.Sleep(100 * time.Millisecond)
+	}
+	if readsSeed < 0 {
+		t.Fatalf("post-seed verify never started\n%s", sp.tail())
+	}
+	if d := readsSeed - readsBefore; d != 0 {
 		t.Fatalf("seed + catch-up read %d rows of table data on source; want 0", d)
 	}
-	t.Logf("seed plan + apply + catch-up: 0 table-data reads on source")
+	t.Logf("seed plan + apply + catch-up: 0 table-data reads on source (before post-seed verify)")
+	waitSynced(t, &cfg, sp, 3*time.Minute)
 
 	// Ghi tiếp trên source: target chỉ nhận qua Strand (không còn replication riêng).
 	wl2 := newWorkload(src.DB, seed+1)
