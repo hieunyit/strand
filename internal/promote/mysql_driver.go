@@ -223,7 +223,7 @@ func (d *MySQLTargetDriver) FailoverSummary(ctx context.Context) (string, error)
 	}
 	return fmt.Sprintf(
 		"target applied up to %s (checkpoint updated %s, %ds ago); transactions committed on the old source after this are LOST if you continue",
-		applied.String(),
+		appliedString(applied),
 		updatedAt.UTC().Format(time.RFC3339),
 		ageSec,
 	), nil
@@ -249,4 +249,11 @@ func parseCheckpointTimeString(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("cannot parse timestamp %q", s)
+}
+
+func appliedString(a checkpoint.AppliedSet) string {
+	if s, ok := a.(fmt.Stringer); ok {
+		return s.String()
+	}
+	return fmt.Sprintf("%v", a)
 }
