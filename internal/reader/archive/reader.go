@@ -83,6 +83,7 @@ func (r *ArchiveReader) Start(ctx context.Context, from checkpoint.AppliedSet) (
 
 		tableMap := make(map[uint64]*replication.TableMapEvent)
 		parser := replication.NewBinlogParser()
+		parser.SetTimestampStringLocation(time.UTC) // như reader trực tiếp
 		parser.SetFlavor("mysql")
 
 		for _, filePath := range files {
@@ -178,6 +179,15 @@ func (r *ArchiveReader) Start(ctx context.Context, from checkpoint.AppliedSet) (
 				case replication.TABLE_MAP_EVENT:
 					if tmEv, ok := ev.Event.(*replication.TableMapEvent); ok {
 						tableMap[tmEv.TableID] = tmEv
+						var cols, pkCols []string
+						if len(tmEv.ColumnName) > 0 {
+							cols = tmEv.ColumnNameString()
+							for _, idx := range tmEv.PrimaryKey {
+								if int(idx) < len(cols) {
+									pkCols = append(pkCols, cols[idx])
+								}
+							}
+						}
 						select {
 						case out <- reader.Event{
 							Type:      reader.EventTableMap,
@@ -185,6 +195,8 @@ func (r *ArchiveReader) Start(ctx context.Context, from checkpoint.AppliedSet) (
 							TableID:   tmEv.TableID,
 							Schema:    string(tmEv.Schema),
 							Table:     string(tmEv.Table),
+							Columns:   cols,
+							PKColumns: pkCols,
 							Timestamp: ts,
 						}:
 						case <-ctxRead.Done():
