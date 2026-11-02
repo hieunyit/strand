@@ -107,27 +107,6 @@ func (rs *RangeSet) AddRange(start, end uint64) {
 	rs.intervals = append(iv[:i+1], iv[j:]...)
 }
 
-func normalizeIntervals(src []Interval) []Interval {
-	if len(src) <= 1 {
-		return src
-	}
-	out := make([]Interval, 0, len(src))
-	cur := src[0]
-	for i := 1; i < len(src); i++ {
-		next := src[i]
-		if cur.End+1 >= next.Start {
-			if next.End > cur.End {
-				cur.End = next.End
-			}
-		} else {
-			out = append(out, cur)
-			cur = next
-		}
-	}
-	out = append(out, cur)
-	return out
-}
-
 // Merge hợp nhất hai RangeSet (phép hội: rs = rs ∪ other).
 func (rs *RangeSet) Merge(other *RangeSet) {
 	if other.IsEmpty() {

@@ -44,7 +44,7 @@ type DiskRowIterator struct {
 }
 
 func (it *DiskRowIterator) Next() (*model.RowChange, error) { return it.r.Next() }
-func (it *DiskRowIterator) Close() error                   { return it.r.Close() }
+func (it *DiskRowIterator) Close() error                    { return it.r.Close() }
 
 // SpillBuffer quản lý việc đệm RowChange cho một transaction, tự động tràn đĩa khi vượt ngưỡng RAM.
 // spec: design §6.4
