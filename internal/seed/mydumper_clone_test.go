@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"strand/internal/exitcode"
@@ -220,4 +221,28 @@ func TestSD1_Mydumper_NoLock_Rejected(t *testing.T) {
 	}
 
 	t.Logf("PASS AC3: mydumper with NO_LOCK is rejected 100%% across all variations")
+}
+
+// Metadata THẬT của mydumper v1.0.3-1 (dạng INI, vị trí nằm trong comment của section [source]).
+// Bản parser cũ bỏ qua mọi dòng '#' nên không đọc được P từ backup thật.
+func TestSD1_MydumperRealV103MetadataFormat(t *testing.T) {
+	dir := t.TempDir()
+	content := "# Started dump at: 2026-11-02 21:07:26\n[config]\nquote-character = BACKTICK\n\n" +
+		"[myloader_session_variables]\nSQL_MODE='NO_AUTO_VALUE_ON_ZERO' /*!40101\n\n" +
+		"[source]\n# Channel_Name = '' # It can be use to setup replication FOR CHANNEL\n" +
+		"# executed_gtid_set = \"5d902a33-d701-11f1-8e86-8643e6815ce4:1-8,\n" +
+		"[replication]\n# executed_gtid_set = \"99999999-0000-0000-0000-000000000000:1-5\"\n" +
+		"[`app`.`t`]\nreal_table_name=t\nrows = 2\n[config]\nmax-statement-size = 283\n# Finished dump at: 2026-11-02 21:07:26\n"
+	// Dòng GTID trên không đóng ngoặc: dùng bản đúng dưới đây.
+	content = strings.Replace(content, "1-8,\n", "1-8\"\n# SOURCE_LOG_FILE = \"binlog.000002\"\n# SOURCE_LOG_POS = 850\n", 1)
+	if err := os.WriteFile(filepath.Join(dir, "metadata"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := seed.ParseMydumperMetadata(dir)
+	if err != nil {
+		t.Fatalf("parse real v1.0.3 metadata: %v", err)
+	}
+	if m.GTID != "5d902a33-d701-11f1-8e86-8643e6815ce4:1-8" || m.BinlogFile != "binlog.000002" || m.BinlogPos != 850 {
+		t.Fatalf("got GTID=%q file=%q pos=%d (must come from [source], not [replication])", m.GTID, m.BinlogFile, m.BinlogPos)
+	}
 }

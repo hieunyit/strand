@@ -197,7 +197,7 @@ func restoreCommands(m *seed.SeedManifest) []string {
 			"khởi động mysqld với skip_replica_start=ON",
 		}
 	case "mydumper":
-		return []string{"myloader --directory=" + m.BackupRef + " --overwrite-tables"}
+		return []string{"myloader --directory=" + m.BackupRef + " --drop-table=DROP"}
 	case "mysqldump":
 		return []string{"mysql < " + m.BackupRef}
 	case "clone":
