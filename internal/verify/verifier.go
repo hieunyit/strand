@@ -220,10 +220,19 @@ func indexRowsByPK(rows []map[string]any, pkCol string) map[any]map[string]any {
 	m := make(map[any]map[string]any, len(rows))
 	for _, r := range rows {
 		if pk, ok := r[pkCol]; ok {
-			m[pk] = r
+			m[pkMapKey(pk)] = r
 		}
 	}
 	return m
+}
+
+// pkMapKey chuẩn hóa giá trị PK để dùng làm khóa map: []byte (MySQL trả về khi scan
+// vào any) không hash được nên đổi sang string.
+func pkMapKey(pk any) any {
+	if b, ok := pk.([]byte); ok {
+		return string(b)
+	}
+	return pk
 }
 
 func hashRows(rows []map[string]any, cols []string) uint64 {

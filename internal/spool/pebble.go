@@ -17,10 +17,10 @@ import (
 )
 
 var (
-	metaNextSeqKey       = []byte("meta/next_seq")
-	metaUsageKey         = []byte("meta/usage_bytes")
-	metaBucketUsageKey   = []byte("meta/bucket_usage_bytes")
-	bucketRefPrefix      = []byte("BUCKET:")
+	metaNextSeqKey     = []byte("meta/next_seq")
+	metaUsageKey       = []byte("meta/usage_bytes")
+	metaBucketUsageKey = []byte("meta/bucket_usage_bytes")
+	bucketRefPrefix    = []byte("BUCKET:")
 )
 
 // Option cấu hình PebbleSpool.
@@ -343,6 +343,9 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 
 	var deletedLocalBytes int64
 	var deletedBucketBytes int64
+	// Object trong bucket chỉ được xóa SAU khi batch Pebble gỡ tham chiếu đã commit;
+	// crash ở giữa chỉ để lại object mồ côi, không để lại tham chiếu treo.
+	var bucketKeysToDelete []string
 
 	for ok := iter.First(); ok; ok = iter.Next() {
 		if err := ctx.Err(); err != nil {
@@ -354,6 +357,7 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 		var isBucket bool
 		var bKey string
 
+		var rawLen int64
 		if bytes.HasPrefix(val, bucketRefPrefix) {
 			isBucket = true
 			bKey = string(val[len(bucketRefPrefix):])
@@ -361,6 +365,7 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 				raw, bErr := s.bucket.Get(ctx, bKey)
 				if bErr == nil {
 					t, _ = decodeTxn(raw)
+					rawLen = int64(len(raw))
 				}
 			}
 		} else {
@@ -381,10 +386,8 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 				}
 			}
 			if isBucket {
-				if s.bucket != nil {
-					_ = s.bucket.Delete(ctx, bKey)
-				}
-				deletedBucketBytes += int64(t.Bytes)
+				bucketKeysToDelete = append(bucketKeysToDelete, bKey)
+				deletedBucketBytes += rawLen
 			} else {
 				deletedLocalBytes += int64(len(val))
 			}
@@ -424,6 +427,11 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 		s.usage.BucketBytes = newBucketBytes
 	}
 
+	if s.bucket != nil {
+		for _, k := range bucketKeysToDelete {
+			_ = s.bucket.Delete(ctx, k) // lỗi chỉ để lại object mồ côi, không ảnh hưởng tính đúng
+		}
+	}
 	return nil
 }
 
