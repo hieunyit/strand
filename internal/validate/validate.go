@@ -3,6 +3,7 @@ package validate
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -102,6 +103,64 @@ func CheckMySQLBinlogRowValueOptions(val string) error {
 			fmt.Sprintf("binlog_row_value_options must be empty, partial JSON rejected: %q", val),
 			nil,
 		)
+	}
+	return nil
+}
+
+// CheckMySQLSource kiểm cấu hình bắt buộc của source MySQL (spec 02 §8) trên DB thật:
+// binlog_format=ROW, binlog_row_image=FULL, gtid_mode=ON, binlog_row_value_options rỗng,
+// và mọi bảng trong tables ("schema.table", không hỗ trợ wildcard) tồn tại và có PK.
+func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
+	var format, image, gtidMode, valueOpts string
+	err := db.QueryRowContext(ctx,
+		"SELECT @@GLOBAL.binlog_format, @@GLOBAL.binlog_row_image, @@GLOBAL.gtid_mode, @@GLOBAL.binlog_row_value_options").
+		Scan(&format, &image, &gtidMode, &valueOpts)
+	if err != nil {
+		return fmt.Errorf("read source binlog settings: %w", err)
+	}
+	reject := func(msg string) error {
+		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, msg, nil)
+	}
+	if !strings.EqualFold(format, "ROW") {
+		return reject(fmt.Sprintf("binlog_format must be ROW, got %q", format))
+	}
+	if !strings.EqualFold(image, "FULL") {
+		return reject(fmt.Sprintf("binlog_row_image must be FULL, got %q", image))
+	}
+	if !strings.EqualFold(gtidMode, "ON") {
+		return reject(fmt.Sprintf("gtid_mode must be ON, got %q", gtidMode))
+	}
+	if err := CheckMySQLBinlogRowValueOptions(valueOpts); err != nil {
+		return err
+	}
+
+	for _, t := range tables {
+		schema, table, ok := strings.Cut(t, ".")
+		if !ok || strings.ContainsAny(t, "*?") {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("table %q: expected schema.table (wildcards are not supported by validate yet)", t), nil)
+		}
+		var exists, hasPK int
+		err := db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+			schema, table).Scan(&exists)
+		if err == nil && exists > 0 {
+			err = db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+				  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_TYPE = 'PRIMARY KEY'`,
+				schema, table).Scan(&hasPK)
+		}
+		if err != nil {
+			return fmt.Errorf("inspect table %s: %w", t, err)
+		}
+		if exists == 0 {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("table %s does not exist on source", t), nil)
+		}
+		if hasPK == 0 {
+			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
+				fmt.Sprintf("table %s has no primary key", t), nil)
+		}
 	}
 	return nil
 }
