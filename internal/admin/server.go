@@ -109,7 +109,13 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Verify delta có thể chạy lâu (đọc range ở cả hai phía): cho phép tới 30 phút.
+	timeout := 10 * time.Second
+	if req.Command == CmdVerifyDelta {
+		timeout = 30 * time.Minute
+	}
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	resp := s.dispatch(ctx, req)
@@ -163,6 +169,17 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 			return Response{OK: false, Error: err.Error()}
 		}
 		return Response{OK: true, CheckpointResult: res}
+
+	case CmdVerifyDelta:
+		dv, ok := s.handler.(DeltaVerifier)
+		if !ok {
+			return Response{OK: false, Error: "verify delta is not supported by this pipeline"}
+		}
+		msg, err := dv.VerifyDelta(ctx)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Message: msg}
 
 	case CmdSnapshotAdd:
 		sa, ok := s.handler.(SnapshotAdder)

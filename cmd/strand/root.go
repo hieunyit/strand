@@ -36,6 +36,7 @@ func init() {
 	rootCmd.AddCommand(newPromoteCmd())
 	rootCmd.AddCommand(newSnapshotCmd())
 	rootCmd.AddCommand(newSeedCmd())
+	rootCmd.AddCommand(newVerifyCmd())
 }
 
 func newPlanCmd() *cobra.Command {

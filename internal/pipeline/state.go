@@ -27,6 +27,22 @@ type stateFile struct {
 	PipelineID string                           `json:"pipeline_id"`
 	Done       map[string]bool                  `json:"snapshot_done"`
 	Plans      map[string]snapshot.SnapshotPlan `json:"snapshot_plans,omitempty"`
+	// VerifyPending: sau seed / --start-at, pipeline chưa được chuyển sang synced cho tới khi
+	// verify sau seed báo 0 lệch (02 §9). Giữ qua restart.
+	VerifyPending bool `json:"post_seed_verify_pending,omitempty"`
+}
+
+func (s *localState) VerifyPending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.VerifyPending
+}
+
+func (s *localState) SetVerifyPending(v bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.VerifyPending = v
+	return s.flushLocked()
 }
 
 func (s *localState) Plan(table string) (snapshot.SnapshotPlan, bool) {

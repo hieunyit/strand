@@ -214,6 +214,9 @@ type strandCfg struct {
 	Workers     int
 	LagSLO      string
 	Bootstrap   string
+	// PostSeedWindow: cửa sổ verify sau seed (mặc định 5s trong test; production 30m).
+	PostSeedWindow string
+	VerifyDelta    string
 }
 
 func (c *strandCfg) write(t *testing.T) string {
@@ -232,6 +235,12 @@ func (c *strandCfg) write(t *testing.T) string {
 	}
 	if c.Bootstrap == "" {
 		c.Bootstrap = "logical"
+	}
+	if c.PostSeedWindow == "" {
+		c.PostSeedWindow = "5s"
+	}
+	if c.VerifyDelta == "" {
+		c.VerifyDelta = "off"
 	}
 	q := func(xs []string) string {
 		var out []string
@@ -258,9 +267,10 @@ resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB }
   workers: { min: 1, max: %d }
 governor: { algorithm: onoff, tick: 1s, lag_slo: %s }
+verify: { delta: %s, post_seed_window: %s }
 observability: { admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceDSN, 40000+rand.Intn(20000), c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, filepath.Join(c.Dir, "state"), c.Workers, c.LagSLO, c.socket(t))
+		c.Bootstrap, filepath.Join(c.Dir, "state"), c.Workers, c.LagSLO, c.VerifyDelta, c.PostSeedWindow, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)

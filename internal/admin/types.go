@@ -14,7 +14,13 @@ const (
 	CmdCheckpointShow   = "checkpoint_show"
 	CmdCheckpointRewind = "checkpoint_rewind"
 	CmdSnapshotAdd      = "snapshot_add"
+	CmdVerifyDelta      = "verify_delta"
 )
+
+// DeltaVerifier là interface tùy chọn cho `strand verify --mode delta`.
+type DeltaVerifier interface {
+	VerifyDelta(ctx context.Context) (string, error)
+}
 
 // SnapshotAdder là interface tùy chọn cho `strand snapshot add --table <t>` (02 §10).
 type SnapshotAdder interface {
@@ -36,6 +42,7 @@ type Request struct {
 type Response struct {
 	OK               bool              `json:"ok"`
 	Error            string            `json:"error,omitempty"`
+	Message          string            `json:"message,omitempty"`
 	Top              *TopInfo          `json:"top,omitempty"`
 	PauseResult      *PauseResult      `json:"pause_result,omitempty"`
 	ResumeResult     *ResumeResult     `json:"resume_result,omitempty"`

@@ -93,6 +93,8 @@ type Pipeline struct {
 	bootstrap     atomic.Bool
 	chunkSleep    atomic.Int64 // ns giữa các chunk snapshot (throttle)
 	retentionRisk atomic.Bool
+	verifying     atomic.Bool // chờ verify sau seed (02 §9)
+	touched       *touchedKeys
 
 	runCtx context.Context
 
@@ -123,6 +125,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	p.seenCond = sync.NewCond(&p.seenMu)
 	p.pauseCond = sync.NewCond(&p.pauseMu)
+	p.touched = newTouchedKeys(200000)
 	return p.run(ctx)
 }
 
@@ -394,6 +397,14 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	bgWG.Add(2)
 	go func() { defer bgWG.Done(); p.monitor(ctx) }()
 	go func() { defer bgWG.Done(); p.watchCompactor(ctx) }()
+	if strings.EqualFold(p.cfg.Verify.Delta, "on") {
+		p.touched.enable(true)
+	}
+	if p.state.VerifyPending() {
+		p.verifying.Store(true)
+		bgWG.Add(1)
+		go func() { defer bgWG.Done(); p.postSeedVerify(ctx) }()
+	}
 	if len(pending) > 0 {
 		p.bootstrap.Store(true)
 		bgWG.Add(1)
@@ -472,7 +483,11 @@ func (p *Pipeline) initialPosition(ctx context.Context, applied *checkpoint.MySQ
 		if err != nil || set.String() == "" {
 			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid start position %q: %v", setStr, err), err)
 		}
-		// Dữ liệu đã có sẵn ở target (seed hoặc --start-at): không snapshot.
+		// Dữ liệu đã có sẵn ở target (seed hoặc --start-at): không snapshot, nhưng phải verify
+		// trước khi chuyển sang synced (02 §9; chế độ C: verify bắt buộc).
+		if err := p.state.SetVerifyPending(true); err != nil {
+			return nil, err
+		}
 		for id := range p.tables {
 			if err := p.state.SetDone(id.String(), true); err != nil {
 				return nil, err
@@ -633,6 +648,10 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			}
 		}
 		for _, part := range parts {
+			p.touched.add(rc.Table, part.Key)
+			if len(part.OldKey) > 0 {
+				p.touched.add(rc.Table, part.OldKey)
+			}
 			c := *part
 			c.Table = p.filter.Target(c.Table)
 			for i := range c.ForeignKeys {

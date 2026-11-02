@@ -138,3 +138,12 @@ func (c *Client) SnapshotAdd(ctx context.Context, table string) error {
 	}
 	return nil
 }
+
+// VerifyDelta yêu cầu pipeline verify các khóa CDC đã chạm.
+func (c *Client) VerifyDelta(ctx context.Context) (string, error) {
+	resp, err := c.Call(ctx, Request{Command: CmdVerifyDelta})
+	if err != nil {
+		return "", err
+	}
+	return resp.Message, nil
+}

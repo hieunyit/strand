@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+	_ "github.com/go-sql-driver/mysql"
 
 	"strand/internal/model"
 	"strand/internal/sched"

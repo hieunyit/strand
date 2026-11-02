@@ -151,6 +151,9 @@ type MetricsSourceConfig struct {
 type VerifyConfig struct {
 	Delta string           `yaml:"delta" json:"delta"` // on | off
 	Full  FullVerifyConfig `yaml:"full" json:"full"`
+	// PostSeedWindow: cửa sổ CDC đầu tiên sau seed/--start-at mà mọi range xuất hiện trong đó
+	// phải verify 0 lệch trước khi chuyển sang synced (02 §9). Mặc định 30m.
+	PostSeedWindow string `yaml:"post_seed_window,omitempty" json:"post_seed_window,omitempty"`
 }
 
 type FullVerifyConfig struct {

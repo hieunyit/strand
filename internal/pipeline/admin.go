@@ -22,7 +22,7 @@ func (h *adminHandler) state() string {
 		return "failed"
 	case h.p.paused.Load():
 		return "paused"
-	case h.p.bootstrap.Load():
+	case h.p.bootstrap.Load(), h.p.verifying.Load():
 		return "bootstrapping"
 	default:
 		return "synced"
@@ -142,4 +142,9 @@ func (h *adminHandler) CheckpointRewind(ctx context.Context, to string) (*admin.
 // SnapshotAdd: `strand snapshot add --table <t>`.
 func (h *adminHandler) SnapshotAdd(ctx context.Context, table string) error {
 	return h.p.SnapshotAdd(h.p.runCtx, table)
+}
+
+// VerifyDelta: `strand verify --mode delta`.
+func (h *adminHandler) VerifyDelta(ctx context.Context) (string, error) {
+	return h.p.VerifyDelta(ctx)
 }

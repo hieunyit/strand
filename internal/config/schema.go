@@ -186,6 +186,7 @@ const JSONSchema = `{
       "additionalProperties": false,
       "properties": {
         "delta": { "type": "string", "enum": ["on", "off"] },
+        "post_seed_window": { "type": "string" },
         "full": {
           "type": "object",
           "properties": {
