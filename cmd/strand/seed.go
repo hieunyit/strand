@@ -1,0 +1,200 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/spf13/cobra"
+
+	"strand/internal/checkpoint"
+	"strand/internal/exitcode"
+	"strand/internal/seed"
+)
+
+// `strand seed plan` / `strand seed apply` (02 §9, §10; design §3.3).
+func newSeedCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "seed", Short: "Seed từ backup (chế độ B): plan kiểm SD-1..SD-4, apply điều phối restore"}
+
+	var (
+		backup, kind, sourceDSN, targetDSN, archiveUntil, out string
+		tables                                                []string
+		allowPre                                              bool
+	)
+	plan := &cobra.Command{
+		Use:   "plan",
+		Short: "Kiểm SD-1..SD-4 và ghi seed.json",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if kind == "" {
+				return exitcode.New("missing_type", exitcode.InvalidSyntax, "missing --type xtrabackup|mydumper|clone", nil)
+			}
+			ctx := cmd.Context()
+			src := seed.SeedSource{Engine: "mysql", Kind: kind, BackupRef: backup, AllowPrereleaseTool: allowPre,
+				Tables: tables, ArchiveUntilGTID: archiveUntil}
+			if sourceDSN != "" {
+				db, err := sql.Open("mysql", sourceDSN)
+				if err != nil {
+					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
+				}
+				defer db.Close()
+				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_purged").Scan(&src.SourcePurgedGTID); err != nil {
+					return fmt.Errorf("read source gtid_purged: %w", err)
+				}
+			}
+			if targetDSN != "" {
+				db, err := sql.Open("mysql", targetDSN)
+				if err != nil {
+					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
+				}
+				defer db.Close()
+				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.version, @@GLOBAL.gtid_executed").
+					Scan(&src.TargetVersion, &src.TargetRestoredGTID); err != nil {
+					return fmt.Errorf("read target version/gtid_executed: %w", err)
+				}
+				src.TargetRestoredGTID = strings.ReplaceAll(src.TargetRestoredGTID, "\n", "")
+			}
+			var planner interface {
+				Plan(context.Context, seed.SeedSource) (*seed.SeedManifest, error)
+			}
+			switch kind {
+			case "xtrabackup":
+				planner = seed.NewXtraBackupPlanner()
+			case "mydumper":
+				planner = seed.NewMydumperPlanner()
+			case "clone":
+				planner = seed.NewClonePlanner()
+			default:
+				return exitcode.New("invalid_type", exitcode.InvalidSyntax, "unknown --type "+kind, nil)
+			}
+			m, err := planner.Plan(ctx, src)
+			if err != nil {
+				return err
+			}
+			raw, _ := json.MarshalIndent(m, "", "  ")
+			if dryRun {
+				fmt.Println(string(raw))
+				return nil
+			}
+			if err := os.WriteFile(out, raw, 0o640); err != nil {
+				return err
+			}
+			fmt.Printf("seed plan OK: P = %s, manifest %s\n", m.StartPosition.GTIDSet, out)
+			return nil
+		},
+	}
+	plan.Flags().StringVar(&backup, "backup", "", "Đường dẫn/URI bản backup")
+	plan.Flags().StringVar(&kind, "type", "", "xtrabackup | mydumper | clone")
+	plan.Flags().StringVar(&sourceDSN, "source", "", "DSN source (đọc gtid_purged, SD-2)")
+	plan.Flags().StringVar(&targetDSN, "target", "", "DSN target sau restore (đối chiếu P, SD-1; version, SD-4)")
+	plan.Flags().StringVar(&archiveUntil, "archive-until", "", "GTID set đã có trong archive binlog")
+	plan.Flags().StringSliceVar(&tables, "tables", nil, "Danh sách bảng")
+	plan.Flags().BoolVar(&allowPre, "allow-prerelease-tool", false, "Chấp nhận backup tạo bằng công cụ bản RC")
+	plan.Flags().StringVar(&out, "out", "seed.json", "File seed.json")
+
+	var manifestPath, applyTarget string
+	var printOnly bool
+	apply := &cobra.Command{
+		Use:   "apply",
+		Short: "Điều phối restore/load rồi chuẩn bị target cho catch-up; chạy lại được khi bị ngắt",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			raw, err := os.ReadFile(manifestPath)
+			if err != nil {
+				return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, err.Error(), err)
+			}
+			var m seed.SeedManifest
+			if err := json.Unmarshal(raw, &m); err != nil {
+				return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, err.Error(), err)
+			}
+			fmt.Println("# Bước restore (Strand gọi công cụ native, không tự restore — design §3):")
+			for _, c := range restoreCommands(&m) {
+				fmt.Println("  " + c)
+			}
+			if printOnly || dryRun {
+				return nil
+			}
+			if applyTarget == "" {
+				return exitcode.New("missing_target", exitcode.InvalidSyntax, "missing --target", nil)
+			}
+			db, err := sql.Open("mysql", applyTarget)
+			if err != nil {
+				return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
+			}
+			defer db.Close()
+			if err := prepareRestoredTarget(cmd.Context(), db, &m); err != nil {
+				return err
+			}
+			raw, _ = json.MarshalIndent(m, "", "  ")
+			if err := os.WriteFile(manifestPath, raw, 0o640); err != nil {
+				return err
+			}
+			fmt.Printf("seed apply OK: target at P = %s; next: strand sync --start-at seed --seed-manifest %s\n",
+				m.StartPosition.GTIDSet, manifestPath)
+			return nil
+		},
+	}
+	apply.Flags().StringVar(&manifestPath, "manifest", "seed.json", "File seed.json")
+	apply.Flags().StringVar(&applyTarget, "target", "", "DSN target đã restore")
+	apply.Flags().BoolVar(&printOnly, "print-only", false, "Chỉ in các bước, không thực hiện")
+
+	cmd.AddCommand(plan, apply)
+	return cmd
+}
+
+func restoreCommands(m *seed.SeedManifest) []string {
+	switch m.Kind {
+	case "xtrabackup":
+		return []string{
+			"xtrabackup --prepare --target-dir=" + m.BackupRef,
+			"xtrabackup --copy-back --target-dir=" + m.BackupRef + "   # trên máy target, mysqld đang dừng",
+			"khởi động mysqld với skip_replica_start=ON",
+		}
+	case "mydumper":
+		return []string{"myloader --directory=" + m.BackupRef + " --overwrite-tables"}
+	case "clone":
+		return []string{"CLONE INSTANCE FROM <user>@<donor>:<port> IDENTIFIED BY <password>   # trên target"}
+	}
+	return []string{"(không có lệnh restore cho kind " + m.Kind + ")"}
+}
+
+// prepareRestoredTarget là phần idempotent sau restore:
+//  1. Backup lấy từ replica mang theo cấu hình replication; target không được tự replicate
+//     (nếu không, dữ liệu trôi khỏi P và Strand apply chồng lên): dừng và xóa mọi channel.
+//  2. gtid_executed của target phải đúng bằng P (SD-1).
+func prepareRestoredTarget(ctx context.Context, db *sql.DB, m *seed.SeedManifest) error {
+	var channels int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM performance_schema.replication_connection_configuration").Scan(&channels); err != nil {
+		return fmt.Errorf("check target replication: %w", err)
+	}
+	if channels > 0 {
+		if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
+			return fmt.Errorf("stop replication on target: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, "RESET REPLICA ALL"); err != nil {
+			return fmt.Errorf("reset replication on target: %w", err)
+		}
+		fmt.Printf("target had %d replication channel(s) from the backup: stopped and removed\n", channels)
+	}
+	var executed string
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&executed); err != nil {
+		return err
+	}
+	executed = strings.ReplaceAll(executed, "\n", "")
+	got, err := checkpoint.ParseMySQLGTIDSet(executed)
+	if err != nil {
+		return err
+	}
+	want, err := checkpoint.ParseMySQLGTIDSet(m.StartPosition.GTIDSet)
+	if err != nil {
+		return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, "invalid P in manifest", err)
+	}
+	if !got.Equal(want) {
+		return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("target gtid_executed (%s) != P (%s): restore incomplete or target replicated past P", executed, m.StartPosition.GTIDSet), nil)
+	}
+	m.PositionCrossCheck = &seed.PositionCrossCheck{RestoredGTIDExecuted: executed, Match: true}
+	return nil
+}

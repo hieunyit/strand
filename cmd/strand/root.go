@@ -35,6 +35,7 @@ func init() {
 	rootCmd.AddCommand(newCheckpointCmd())
 	rootCmd.AddCommand(newPromoteCmd())
 	rootCmd.AddCommand(newSnapshotCmd())
+	rootCmd.AddCommand(newSeedCmd())
 }
 
 func newPlanCmd() *cobra.Command {
