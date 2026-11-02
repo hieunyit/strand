@@ -136,12 +136,25 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			// Dừng hỏi người vận hành (quyết định P1-17, câu 2, hướng 1).
 			if !p.cfg.SourceFencedExternally {
 				p.suggestIndependentSequences(progress)
+				// Đính kèm tóm tắt tập GTID đã apply ở target ngay ở lần dừng exit 10 để người vận hành
+				// biết mức mất dữ liệu trước khi xác nhận (quyết định P1-17, câu 3 = "gộp").
+				if summarizer, ok := p.targetDriver.(FailoverSummarizer); ok {
+					summary, err := summarizer.FailoverSummary(ctx)
+					if err != nil {
+						summary = "unknown: " + err.Error()
+					}
+					progress.FailoverSummary = summary
+				}
 				progress.State = StateAwaitingOperator
 				_ = p.stateStore.SaveProgress(ctx, progress)
+				msg := "source could not be fenced: isolate the old source by other means (power off, STONITH, block application traffic), then re-run with --source-fenced-externally"
+				if progress.FailoverSummary != "" {
+					msg += " (" + progress.FailoverSummary + ")"
+				}
 				return progress, exitcode.New(
 					exitcode.ErrPromoteNeedsDecision,
 					exitcode.NeedsDecision,
-					"source could not be fenced: isolate the old source by other means (power off, STONITH, block application traffic), then re-run with --source-fenced-externally",
+					msg,
 					nil,
 				)
 			}

@@ -71,6 +71,7 @@ type Progress struct {
 	CompletedSteps     []PromoteStep    `json:"completed_steps"`
 	Sequences          []SequenceInfo   `json:"sequences"`
 	SuggestedSequences map[string]int64 `json:"suggested_sequences"`
+	FailoverSummary    string           `json:"failover_summary,omitempty"`
 	UpdatedAt          time.Time        `json:"updated_at"`
 }
 
@@ -107,6 +108,12 @@ type TargetDriver interface {
 	FindColumnMax(ctx context.Context, table, column string) (int64, error)
 	Setval(ctx context.Context, seq SequenceInfo, val int64) error
 	OpenWrites(ctx context.Context) error
+}
+
+// FailoverSummarizer là interface tùy chọn cho TargetDriver để tóm tắt tập giao dịch đã apply
+// tại target khi promote dừng vì không fence được source (quyết định P1-17, câu 3).
+type FailoverSummarizer interface {
+	FailoverSummary(ctx context.Context) (string, error)
 }
 
 // StateStore quản lý lưu và nạp tiến trình promote.
