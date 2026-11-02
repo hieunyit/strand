@@ -145,12 +145,9 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 	streamer, err := syncer.StartSyncGTID(gset)
 	if err != nil {
 		syncer.Close()
-		return nil, exitcode.New(
-			exitcode.ErrBinlogConfigInvalid,
-			exitcode.Rejected,
-			fmt.Sprintf("StartSyncGTID failed: %v", err),
-			err,
-		)
+		// Lỗi kết nối/mạng là lỗi tạm thời (exit 1, systemd sẽ restart), không phải
+		// "cấu hình bị từ chối" (exit 3, RestartPreventExitStatus).
+		return nil, fmt.Errorf("start binlog stream from %s:%d: %w", r.cfg.Host, r.cfg.Port, err)
 	}
 
 	ctxRead, cancel := context.WithCancel(ctx)
