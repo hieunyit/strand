@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -325,7 +326,13 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	ccfg := checkpoint.DefaultCompactorConfig(p.id, p.epoch)
 	ccfg.Interval = durationOr(p.cfg.Checkpoint.FlushEvery, 500*time.Millisecond)
 	p.comp = checkpoint.NewCompactor(p.dst, p.store, p.id, model.EngineMySQL, model.EngineMySQL, ccfg)
-	p.comp.SetLastGlobal(loaded)
+	// Gộp row delta còn lại từ lần chạy trước vào row toàn cục TRƯỚC khi worker chạy.
+	// Worker cắt delta theo LastGlobal, nên LastGlobal chỉ được là row toàn cục đã commit,
+	// không bao giờ là "toàn cục ∪ delta" (nếu không, GTID chỉ có trong delta cũ bị cắt mất
+	// khi worker ghi đè row delta của mình: vi phạm CP-1, Txn bị apply lại sau restart).
+	if err := p.comp.Compact(ctx); err != nil {
+		return fmt.Errorf("startup compaction: %w", err)
+	}
 	p.comp.Start(ctx)
 	defer p.comp.Stop()
 
@@ -335,6 +342,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.snap.Barrier = p.barrier
 	p.snap.Pace = p.pace
 	p.snap.TargetName = p.filter.Target
+	p.snap.LoadPlan = func(t model.TableID) (snapshot.SnapshotPlan, bool) { return p.state.Plan(t.String()) }
+	p.snap.SavePlan = func(t model.TableID, pl snapshot.SnapshotPlan) error { return p.state.SetPlan(t.String(), pl) }
 
 	// --- Reader + Assembler ---
 	keyMeta := make(map[model.TableID]assemble.KeyMeta, len(p.tables))
@@ -754,7 +763,15 @@ func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
 		}
 		delta, err := p.deltaFor(ctx, mine)
 		if err == nil {
-			err = w.ApplyBatch(ctx, batch, writer.DeltaRow{Applied: delta})
+			// Deadlock / lock wait timeout ở target: cả transaction (dữ liệu + row delta) đã
+			// rollback, nên apply lại là an toàn (04 §4 "Khóa phía target: retry").
+			for attempt := 1; ; attempt++ {
+				err = w.ApplyBatch(ctx, batch, writer.DeltaRow{Applied: delta})
+				if err == nil || !isRetryable(err) || attempt >= 20 || ctx.Err() != nil {
+					break
+				}
+				time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
+			}
 		}
 		if err != nil {
 			for _, t := range batch {
@@ -1031,4 +1048,13 @@ func (p *Pipeline) retentionHeadroom(ctx context.Context) (float64, bool) {
 		return float64(expire), true
 	}
 	return float64(expire) - time.Since(time.Unix(ts, 0)).Seconds(), true
+}
+
+// isRetryable: lỗi khóa của InnoDB (1213 deadlock, 1205 lock wait timeout).
+func isRetryable(err error) bool {
+	var me *drivermysql.MySQLError
+	if errors.As(err, &me) {
+		return me.Number == 1213 || me.Number == 1205
+	}
+	return false
 }

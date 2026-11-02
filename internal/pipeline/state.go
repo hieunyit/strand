@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"strand/internal/snapshot"
 )
 
 // localState lưu cục bộ (thư mục resources.spool.path) những bảng đã snapshot xong.
@@ -22,8 +24,26 @@ type localState struct {
 }
 
 type stateFile struct {
-	PipelineID string          `json:"pipeline_id"`
-	Done       map[string]bool `json:"snapshot_done"`
+	PipelineID string                           `json:"pipeline_id"`
+	Done       map[string]bool                  `json:"snapshot_done"`
+	Plans      map[string]snapshot.SnapshotPlan `json:"snapshot_plans,omitempty"`
+}
+
+func (s *localState) Plan(table string) (snapshot.SnapshotPlan, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.data.Plans[table]
+	return p, ok
+}
+
+func (s *localState) SetPlan(table string, p snapshot.SnapshotPlan) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.Plans == nil {
+		s.data.Plans = map[string]snapshot.SnapshotPlan{}
+	}
+	s.data.Plans[table] = p
+	return s.flushLocked()
 }
 
 func openLocalState(dir, pipelineID string) (*localState, error) {
@@ -80,6 +100,8 @@ func (s *localState) SetDone(table string, done bool) error {
 	} else {
 		delete(s.data.Done, table)
 	}
+	// Bảng xong hoặc phải snapshot lại từ đầu: bỏ plan cũ.
+	delete(s.data.Plans, table)
 	return s.flushLocked()
 }
 

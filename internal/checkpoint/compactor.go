@@ -326,7 +326,8 @@ func (c *Compactor) LastGlobal() AppliedSet {
 	return c.lastGlobal.Clone()
 }
 
-// SetLastGlobal đặt tập toàn cục ban đầu (sau LoadApplied lúc khởi động).
+// SetLastGlobal đặt tập toàn cục ban đầu. Chỉ được truyền row toàn cục ĐÃ COMMIT;
+// không truyền kết quả LoadApplied (toàn cục ∪ delta).
 func (c *Compactor) SetLastGlobal(g AppliedSet) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -27,7 +27,7 @@ func TestE2E_BootstrapAndStreamUnderLoad(t *testing.T) {
 	wl.Stop()
 	t.Logf("workload: %d ops, %d client-side errors (deadlocks/dup keys are expected)", wl.ops.Load(), wl.errs.Load())
 
-	waitCaughtUp(t, src, dst, cfg.Name, p, 3*time.Minute)
+	waitCaughtUp(t, src, dst, &cfg, p, 3*time.Minute)
 	if code := p.stop(t); code != 0 {
 		t.Fatalf("strand exit code %d on SIGTERM\n%s", code, p.tail())
 	}

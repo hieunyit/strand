@@ -3,10 +3,13 @@ package snapshot
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"time"
+
+	drivermysql "github.com/go-sql-driver/mysql"
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
@@ -28,6 +31,12 @@ type MySQLSnapshotter struct {
 	// TargetName (tùy chọn) ánh xạ tên bảng nguồn sang tên bảng đích (tables.rename).
 	TargetName func(model.TableID) model.TableID
 
+	// LoadPlan / SavePlan (tùy chọn) lưu tiến độ snapshot của bảng, để restart làm tiếp
+	// thay vì đọc lại từ đầu. Plan gồm biên [Min, Max], cỡ chunk và khóa bắt đầu của
+	// chunk chưa flush kế tiếp (chunk được đọc tuần tự theo PK nên một con trỏ là đủ).
+	LoadPlan func(table model.TableID) (SnapshotPlan, bool)
+	SavePlan func(table model.TableID, plan SnapshotPlan) error
+
 	// Pace (tùy chọn) được gọi giữa các chunk; governor dùng để giãn khoảng cách chunk.
 	Pace func(ctx context.Context) error
 }
@@ -39,6 +48,15 @@ func NewMySQLSnapshotter(opts ChunkOptions) *MySQLSnapshotter {
 		Chunker: NewChunker(),
 		opts:    opts,
 	}
+}
+
+// SnapshotPlan là tiến độ snapshot của một bảng.
+type SnapshotPlan struct {
+	Empty     bool  `json:"empty"`
+	MinPK     int64 `json:"min_pk"`
+	MaxPK     int64 `json:"max_pk"`
+	ChunkRows int64 `json:"chunk_rows"`
+	NextPK    int64 `json:"next_pk"` // mọi chunk có EndPK < NextPK đã flush
 }
 
 // TableBounds chứa thông tin biên khóa chính của bảng.
@@ -77,8 +95,16 @@ func (s *MySQLSnapshotter) FlushChunk(
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
-	if err := flushRowsToTarget(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, chunk.StartPK, chunk.EndPK); err != nil {
-		return err
+	for attempt := 1; ; attempt++ {
+		err := flushRowsToTarget(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, chunk.StartPK, chunk.EndPK)
+		if err == nil {
+			break
+		}
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || (me.Number != 1213 && me.Number != 1205) || attempt >= 20 {
+			return err
+		}
+		time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
 	}
 	s.Manager.MarkDoneLocked(chunk)
 	return nil
@@ -110,24 +136,57 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 	}
 	var chunks []*Chunk
 	register := func() error {
-		// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
-		bounds, err := GetTableBounds(ctx, srcDB, table, pkCol)
-		if err != nil {
-			return err
+		var plan SnapshotPlan
+		resumed := false
+		if s.LoadPlan != nil {
+			plan, resumed = s.LoadPlan(table)
 		}
-		if bounds.Count == 0 || bounds.MaxPK < bounds.MinPK {
+		if !resumed {
+			// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
+			bounds, err := GetTableBounds(ctx, srcDB, table, pkCol)
+			if err != nil {
+				return err
+			}
+			plan = SnapshotPlan{ChunkRows: s.opts.DefaultChunkRows}
+			if bounds.Count == 0 || bounds.MaxPK < bounds.MinPK {
+				plan.Empty = true
+			} else {
+				plan.MinPK, plan.MaxPK, plan.NextPK = bounds.MinPK, bounds.MaxPK, bounds.MinPK
+			}
+			// Snapshot mới của bảng bắt đầu từ target rỗng: row cũ còn sót (lần chạy trước,
+			// hoặc dữ liệu có sẵn khi snapshot add) có thể giữ giá trị unique key mà row mới
+			// cần, và không bao giờ được dọn nếu range của nó bị DELETE ở source.
+			if _, err := dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(s.target(table)))); err != nil {
+				return err
+			}
+			if s.SavePlan != nil {
+				if err := s.SavePlan(table, plan); err != nil {
+					return err
+				}
+			}
+		}
+		if plan.Empty {
 			s.Manager.RegisterTable(table, pkCol, nil, math.MinInt64)
-			// Source rỗng: target cũng phải rỗng (dọn row thừa từ lần chạy trước).
-			_, err := dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(s.target(table))))
-			return err
+			return nil
 		}
-		// 2. Chia các chunk trong khoảng [MinPK, MaxPK]
-		chunks = s.Chunker.PlanChunks(table, pkCol, bounds.MinPK, bounds.MaxPK, s.opts.DefaultChunkRows)
-		s.Manager.RegisterTable(table, pkCol, chunks, bounds.MaxPK)
-		// Row ở target nằm ngoài [min, max] không còn ở source tại thời điểm này.
-		_, err = dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s < ? OR %s > ?",
-			quoteTable(s.target(table)), quoteIdent(pkCol), quoteIdent(pkCol)), bounds.MinPK, bounds.MaxPK)
-		return err
+		// 2. Chia các chunk trong khoảng [MinPK, MaxPK] (tất định theo plan).
+		chunks = s.Chunker.PlanChunks(table, pkCol, plan.MinPK, plan.MaxPK, plan.ChunkRows)
+		for _, c := range chunks {
+			if c.EndPK < plan.NextPK {
+				c.State = StateDone // đã flush ở lần chạy trước
+			}
+		}
+		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
+		return nil
+	}
+	var savePlan func(next int64) error
+	savePlan = func(next int64) error { return nil }
+	if s.SavePlan != nil && s.LoadPlan != nil {
+		savePlan = func(next int64) error {
+			plan, _ := s.LoadPlan(table)
+			plan.NextPK = next
+			return s.SavePlan(table, plan)
+		}
 	}
 	if s.Barrier != nil {
 		err = s.Barrier(ctx, register)
@@ -150,6 +209,9 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+		if chunk.State == StateDone {
+			continue
 		}
 
 		// Watermark: mỗi chunk đọc low = @@GLOBAL.gtid_executed
@@ -237,7 +299,19 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		}
 
 		// Flush: merge có thứ tự snapshot và buffer trong 1 transaction ở target và chuyển sang StateDone
-		if err := s.FlushChunk(ctx, dstDB, chunk, table, pkCol, columnNames); err != nil {
+		// Flush trong barrier: mọi Txn router đã nhận phải commit xong trước, để cả bảng ở
+		// target nhất quán tại đúng vị trí của router (không xung đột unique key giữa row
+		// của chunk và row ở range khác do Txn còn trong hàng đợi).
+		flush := func() error { return s.FlushChunk(ctx, dstDB, chunk, table, pkCol, columnNames) }
+		if s.Barrier != nil {
+			err = s.Barrier(ctx, flush)
+		} else {
+			err = flush()
+		}
+		if err == nil {
+			err = savePlan(chunk.EndPK + 1)
+		}
+		if err != nil {
 			return fmt.Errorf("failed to flush chunk [%d, %d] to target: %w", chunk.StartPK, chunk.EndPK, err)
 		}
 
@@ -270,10 +344,9 @@ func flushRowsToTarget(
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_, _ = conn.ExecContext(context.Background(), "SET SESSION foreign_key_checks = 1")
-		_ = conn.Close()
-	}()
+	// Kết nối trở lại pool với foreign_key_checks=0, đúng mặc định phiên ghi của pipeline
+	// (DSN target). Không đặt lại 1, vì writer dùng chung pool.
+	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, "SET SESSION foreign_key_checks = 0"); err != nil {
 		return err
 	}

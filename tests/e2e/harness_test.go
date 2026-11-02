@@ -28,6 +28,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"strand/internal/admin"
 	"strand/internal/checkpoint"
 	"strand/tests/checker"
 )
@@ -200,7 +201,11 @@ func createSchema(t *testing.T, nodes ...*mysqlNode) {
 // Strand process
 // --------------------------------------------------------------------------
 
+// socket: unix socket cần đường dẫn ngắn (< 108 byte), nên đặt trong t.TempDir() riêng.
+func (c *strandCfg) socket(t *testing.T) string { return c.Socket }
+
 type strandCfg struct {
+	Socket      string
 	Name        string
 	SourceDSN   string
 	TargetDSN   string
@@ -213,8 +218,11 @@ type strandCfg struct {
 	Bootstrap   string
 }
 
-func (c strandCfg) write(t *testing.T) string {
+func (c *strandCfg) write(t *testing.T) string {
 	t.Helper()
+	if c.Socket == "" {
+		c.Socket = filepath.Join(t.TempDir(), "admin.sock")
+	}
 	if c.CommitOrder == "" {
 		c.CommitOrder = "relaxed"
 	}
@@ -254,7 +262,7 @@ resources:
 governor: { algorithm: onoff, tick: 1s, lag_slo: %s }
 observability: { admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceDSN, 40000+rand.Intn(20000), c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, filepath.Join(c.Dir, "state"), c.Workers, c.LagSLO, filepath.Join(c.Dir, "admin.sock"))
+		c.Bootstrap, filepath.Join(c.Dir, "state"), c.Workers, c.LagSLO, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
@@ -366,7 +374,8 @@ func (p *strandProc) tail() string {
 }
 
 // waitCaughtUp chờ tập đã apply trên target phủ toàn bộ gtid_executed của source.
-func waitCaughtUp(t *testing.T, src, dst *mysqlNode, pipelineID string, p *strandProc, timeout time.Duration) {
+func waitCaughtUp(t *testing.T, src, dst *mysqlNode, cfg *strandCfg, p *strandProc, timeout time.Duration) {
+	pipelineID := cfg.Name
 	t.Helper()
 	executed := src.gtidExecuted(t)
 	want, err := checkpoint.ParseMySQLGTIDSet(executed)
@@ -387,7 +396,7 @@ func waitCaughtUp(t *testing.T, src, dst *mysqlNode, pipelineID string, p *stran
 		if err == nil {
 			miss := want.Clone().(*checkpoint.MySQLAppliedSet)
 			miss.Subtract(got.(*checkpoint.MySQLAppliedSet))
-			if miss.String() == "" && snapshotDone(dst, pipelineID) {
+			if miss.String() == "" && pipelineSynced(cfg.Socket) {
 				return
 			}
 			if time.Now().After(deadline) {
@@ -407,8 +416,13 @@ func tailOf(p *strandProc) string {
 	return p.tail()
 }
 
-// snapshotDone: không đọc được trạng thái nội bộ từ ngoài, nên dựa vào checker; luôn true ở đây.
-func snapshotDone(_ *mysqlNode, _ string) bool { return true }
+// pipelineSynced hỏi trạng thái qua admin socket: bootstrap (snapshot) phải xong.
+func pipelineSynced(socket string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	top, err := admin.NewClient(socket).Top(ctx)
+	return err == nil && top.State == "synced"
+}
 
 // --------------------------------------------------------------------------
 // Bộ sinh tải (04 §3): khóa nóng, đổi PK, unique key phụ, FK cha–con, Txn nhiều row
@@ -706,4 +720,22 @@ func checkNoOrphans(t *testing.T, dst *mysqlNode) {
 	if n != 0 {
 		t.Fatalf("FK violated on target: %d orphan orders", n)
 	}
+}
+
+// testDir: thư mục làm việc của test; đặt STRAND_E2E_KEEP_DIR=1 để giữ lại log sau khi chạy.
+func testDir(t *testing.T) string {
+	keep := os.Getenv("STRAND_E2E_KEEP_DIR")
+	if keep == "" {
+		return t.TempDir()
+	}
+	parent := ""
+	if keep != "1" {
+		parent = keep // STRAND_E2E_KEEP_DIR=<thư mục cha>
+	}
+	d, err := os.MkdirTemp(parent, "strand-e2e-"+strings.ReplaceAll(t.Name(), "/", "_")+"-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("keeping test dir %s", d)
+	return d
 }
