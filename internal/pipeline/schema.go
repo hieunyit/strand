@@ -70,7 +70,8 @@ type tableMeta struct {
 	ID        model.TableID
 	Columns   []string
 	PK        []string
-	PKNumeric bool // PK một cột kiểu số nguyên (điều kiện của snapshot logic hiện tại)
+	PKNumeric bool  // PK một cột kiểu số nguyên (điều kiện của snapshot logic hiện tại)
+	AvgRow    int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
 	Keys      assemble.KeyMeta
 }
 
@@ -103,6 +104,8 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 	out := make(map[model.TableID]*tableMeta, len(ids))
 	for _, id := range ids {
 		m := &tableMeta{ID: id}
+		_ = db.QueryRowContext(ctx, "SELECT COALESCE(AVG_ROW_LENGTH, 0) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+			id.Schema, id.Table).Scan(&m.AvgRow)
 		cr, err := db.QueryContext(ctx, `
 			SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS
 			 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`, id.Schema, id.Table)

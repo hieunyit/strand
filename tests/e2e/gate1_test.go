@@ -323,7 +323,7 @@ func TestG1_E2E_RetentionRiskNoLivelock(t *testing.T) {
 	p := startStrand(t, path)
 	// Throttle cao để snapshot chậm và lag vượt lag_slo: governor phải tăng ưu tiên snapshot.
 	time.Sleep(500 * time.Millisecond)
-	_, _ = runStrandCLI(t, 10*time.Second, "throttle", "set", "--source-iops", "200", "--socket", cfg.Socket)
+	_, _ = runStrandCLI(t, 10*time.Second, "throttle", "set", "--source-iops", "1", "--socket", cfg.Socket)
 	waitSynced(t, &cfg, p, 10*time.Minute)
 	wl.Stop()
 	waitCaughtUp(t, src, dst, &cfg, p, 5*time.Minute)

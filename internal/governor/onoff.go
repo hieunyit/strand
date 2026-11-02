@@ -230,3 +230,22 @@ func (g *OnoffGovernor) RecordQueryLatency(d time.Duration) {
 		s.latencyTracker.Record(d)
 	}
 }
+
+// SetSoftRate đổi soft limit nóng (strand throttle set --soft).
+func (g *OnoffGovernor) SetSoftRate(r float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if r > 0 {
+		g.cfg.SoftRate = r
+		if g.backgroundRunning {
+			g.backgroundRate = r
+		}
+	}
+}
+
+// BackgroundRunning cho biết background (snapshot, prefetch) đang được chạy hay bị dừng.
+func (g *OnoffGovernor) BackgroundRunning() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.backgroundRunning
+}

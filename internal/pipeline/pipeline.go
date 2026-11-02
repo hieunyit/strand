@@ -28,6 +28,7 @@ import (
 	"strand/internal/checkpoint"
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/governor"
 	"strand/internal/metrics"
 	"strand/internal/model"
 	mysqlreader "strand/internal/reader/mysql"
@@ -91,9 +92,12 @@ type Pipeline struct {
 	pauseMu       sync.Mutex
 	pauseCond     *sync.Cond
 	bootstrap     atomic.Bool
-	chunkSleep    atomic.Int64 // ns giữa các chunk snapshot (throttle)
 	retentionRisk atomic.Bool
 	verifying     atomic.Bool // chờ verify sau seed (02 §9)
+	gov           *governor.OnoffGovernor
+	govAlgo       string
+	govTick       time.Duration
+	curAvgRow     atomic.Int64
 	touched       *touchedKeys
 
 	runCtx context.Context
@@ -340,6 +344,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.comp.Start(ctx)
 	defer p.comp.Stop()
 
+	// --- Governor ---
+	if err := p.setupGovernor(); err != nil {
+		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
+	}
+
 	// --- Snapshot ---
 	opts := snapshot.DefaultChunkOptions()
 	p.snap = snapshot.NewMySQLSnapshotter(opts)
@@ -394,7 +403,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		defer close(routerDone)
 		p.router(ctx, txns, asmErr)
 	}()
-	bgWG.Add(2)
+	bgWG.Add(3)
+	go func() { defer bgWG.Done(); p.governorLoop(ctx) }()
 	go func() { defer bgWG.Done(); p.monitor(ctx) }()
 	go func() { defer bgWG.Done(); p.watchCompactor(ctx) }()
 	if strings.EqualFold(p.cfg.Verify.Delta, "on") {
@@ -898,13 +908,37 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 }
 
 func (p *Pipeline) pace(ctx context.Context) error {
-	if p.retentionRisk.Load() {
-		return nil // bootstrap_retention_risk: ưu tiên snapshot, không giãn (02 §7, P_lag theo pha)
+	for {
+		// bootstrap_retention_risk: ưu tiên snapshot, không giãn cũng không dừng (02 §7,
+		// P_lag theo pha) — nếu không, snapshot dừng vì lag và lag lại tăng: tự khóa chết.
+		if p.retentionRisk.Load() {
+			return nil
+		}
+		windowOK := inWindows(p.cfg.Bootstrap.Logical.Windows, time.Now())
+		running := p.govAlgo == "static" || p.gov.BackgroundRunning()
+		if windowOK && running {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(p.govTick):
+		}
 	}
-	d := time.Duration(p.chunkSleep.Load())
-	if d <= 0 {
+	// Chi phí chunk ước lượng (trang 16 KiB) chia cho tốc độ background R (token/giây).
+	_, rate := p.gov.CurrentRate()
+	if p.govAlgo == "static" || rate <= 0 {
+		rate = float64(p.cfg.Resources.Source.IOPS.Soft)
+	}
+	if rate <= 0 {
 		return nil
 	}
+	avg := p.curAvgRow.Load()
+	if avg <= 0 {
+		avg = 200
+	}
+	pages := float64(avg*snapshot.DefaultChunkOptions().DefaultChunkRows) / 16384
+	d := time.Duration(pages / rate * float64(time.Second))
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -929,6 +963,7 @@ func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {
 
 func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	m := p.table(id)
+	p.curAvgRow.Store(m.AvgRow)
 	start := time.Now()
 	p.log.Info("snapshot start", "table", id.String())
 	if err := p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], m.Columns, p.rendezvous); err != nil {

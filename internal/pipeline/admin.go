@@ -63,13 +63,9 @@ func (h *adminHandler) Resume(ctx context.Context, snapshotOnly bool) (*admin.Re
 }
 
 func (h *adminHandler) ThrottleSet(ctx context.Context, req admin.Request) (*admin.ThrottleResult, error) {
-	// Throttle tĩnh cho snapshot: giãn khoảng cách giữa các chunk theo IOPS source cho phép
-	// (governor điều tiết bằng khoảng cách chunk, không làm chậm SELECT đang chạy, 02 §5).
+	// Đổi soft limit IOPS source của governor nóng (02 §10).
 	if req.SourceIOPS > 0 {
-		perChunk := time.Duration(float64(time.Second) * float64(5000) / float64(req.SourceIOPS))
-		h.p.chunkSleep.Store(int64(perChunk))
-	} else {
-		h.p.chunkSleep.Store(0)
+		h.p.gov.SetSoftRate(float64(req.SourceIOPS))
 	}
 	res := &admin.ThrottleResult{}
 	if req.Soft {

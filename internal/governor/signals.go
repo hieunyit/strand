@@ -167,6 +167,9 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 						if vals[i] != nil {
 							if sec, ok := vals[i].(int64); ok {
 								signals.ReplicaLagSeconds = float64(sec)
+							} else if b, ok := vals[i].([]byte); ok {
+								// Text protocol: giá trị cột trả về dạng []byte.
+								signals.ReplicaLagSeconds = parseSecondsBytes(b)
 							} else if s, ok := vals[i].(string); ok {
 								var secFloat float64
 								fmt.Sscanf(s, "%f", &secFloat)
@@ -221,4 +224,10 @@ func (r *SimulatedSignalReader) ReadSignals(ctx context.Context) (DBSignals, err
 		sig.QueryBaseline = r.latencyTracker.Baseline()
 	}
 	return sig, nil
+}
+
+func parseSecondsBytes(b []byte) float64 {
+	var v float64
+	fmt.Sscanf(string(b), "%f", &v)
+	return v
 }

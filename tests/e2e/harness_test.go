@@ -218,6 +218,7 @@ type strandCfg struct {
 	PostSeedWindow string
 	VerifyDelta    string
 	SourceIOPS     int
+	BreakerLag     string // governor.breaker.replica_lag.max
 }
 
 func (c *strandCfg) write(t *testing.T) string {
@@ -246,6 +247,9 @@ func (c *strandCfg) write(t *testing.T) string {
 	if c.SourceIOPS == 0 {
 		c.SourceIOPS = 600
 	}
+	if c.BreakerLag == "" {
+		c.BreakerLag = "1h"
+	}
 	q := func(xs []string) string {
 		var out []string
 		for _, x := range xs {
@@ -271,11 +275,11 @@ resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB }
   source: { iops: { soft: %d, hard: %d } }
   workers: { min: 1, max: %d }
-governor: { algorithm: onoff, tick: 1s, lag_slo: %s }
+governor: { algorithm: onoff, tick: 1s, lag_slo: %s, breaker: { strand_query_p99: { max_ratio: 1000 }, replica_lag: { max: %s } } }
 verify: { delta: %s, post_seed_window: %s }
 observability: { admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceDSN, 40000+rand.Intn(20000), c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, filepath.Join(c.Dir, "state"), c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.VerifyDelta, c.PostSeedWindow, c.socket(t))
+		c.Bootstrap, filepath.Join(c.Dir, "state"), c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
