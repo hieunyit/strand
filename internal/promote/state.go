@@ -32,10 +32,8 @@ func (m *MemoryStateStore) LoadProgress(ctx context.Context, pipelineID string) 
 	if !ok {
 		return nil, nil
 	}
-	// Trả về bản sao
-	copyP := *p
-	copyP.CompletedSteps = append([]PromoteStep(nil), p.CompletedSteps...)
-	return &copyP, nil
+	// Trả về bản sao sâu để thay đổi của bên gọi không lọt vào bản đã lưu
+	return cloneProgress(p), nil
 }
 
 // SaveProgress lưu progress theo pipelineID.
@@ -44,14 +42,26 @@ func (m *MemoryStateStore) SaveProgress(ctx context.Context, progress *Progress)
 	defer m.mu.Unlock()
 
 	progress.UpdatedAt = time.Now()
-	copyP := *progress
-	copyP.CompletedSteps = append([]PromoteStep(nil), progress.CompletedSteps...)
-	m.store[progress.PipelineID] = &copyP
+	copyP := cloneProgress(progress)
+	m.store[progress.PipelineID] = copyP
 
 	for _, hook := range m.saveHooks {
-		hook(&copyP)
+		hook(copyP)
 	}
 	return nil
+}
+
+func cloneProgress(p *Progress) *Progress {
+	c := *p
+	c.CompletedSteps = append([]PromoteStep(nil), p.CompletedSteps...)
+	c.Sequences = append([]SequenceInfo(nil), p.Sequences...)
+	if p.SuggestedSequences != nil {
+		c.SuggestedSequences = make(map[string]int64, len(p.SuggestedSequences))
+		for k, v := range p.SuggestedSequences {
+			c.SuggestedSequences[k] = v
+		}
+	}
+	return &c
 }
 
 // OnSave đăng ký hook khi lưu (hữu ích cho testing kiểm tra trạng thái tức thời).
@@ -61,18 +71,40 @@ func (m *MemoryStateStore) OnSave(hook func(p *Progress)) {
 	m.saveHooks = append(m.saveHooks, hook)
 }
 
-// DBStateStore lưu trữ tiến trình promote vào bảng _strand_promote trong target DB.
+// DBStateStore lưu trữ tiến trình promote vào bảng _strand_promote trong target DB (MySQL hoặc PostgreSQL).
 type DBStateStore struct {
-	db *sql.DB
+	db   *sql.DB
+	isPG bool
 }
 
-// NewDBStateStore khởi tạo DBStateStore.
+// NewDBStateStore khởi tạo DBStateStore cho target MySQL.
 func NewDBStateStore(db *sql.DB) *DBStateStore {
 	return &DBStateStore{db: db}
 }
 
+// NewPGStateStore khởi tạo DBStateStore cho target PostgreSQL.
+func NewPGStateStore(db *sql.DB) *DBStateStore {
+	return &DBStateStore{db: db, isPG: true}
+}
+
+func (s *DBStateStore) isPostgres() bool { return s.isPG }
+
 // EnsureTable tạo bảng _strand_promote nếu chưa tồn tại.
 func (s *DBStateStore) EnsureTable(ctx context.Context) error {
+	if s.isPostgres() {
+		q := `CREATE TABLE IF NOT EXISTS _strand_promote (
+			pipeline_id VARCHAR(64) PRIMARY KEY,
+			state VARCHAR(32) NOT NULL,
+			current_step VARCHAR(32) NOT NULL,
+			completed_steps JSONB NOT NULL,
+			sequences JSONB,
+			suggested_sequences JSONB,
+			updated_at TIMESTAMPTZ NOT NULL
+		);`
+		_, err := s.db.ExecContext(ctx, q)
+		return err
+	}
+
 	q := `CREATE TABLE IF NOT EXISTS _strand_promote (
 		pipeline_id VARCHAR(64) PRIMARY KEY,
 		state VARCHAR(32) NOT NULL,
@@ -92,8 +124,14 @@ func (s *DBStateStore) LoadProgress(ctx context.Context, pipelineID string) (*Pr
 		return nil, fmt.Errorf("ensure _strand_promote table: %w", err)
 	}
 
-	q := `SELECT pipeline_id, state, current_step, completed_steps, sequences, suggested_sequences, updated_at
-		FROM _strand_promote WHERE pipeline_id = ?;`
+	var q string
+	if s.isPostgres() {
+		q = `SELECT pipeline_id, state, current_step, completed_steps, sequences, suggested_sequences, updated_at
+			FROM _strand_promote WHERE pipeline_id = $1;`
+	} else {
+		q = `SELECT pipeline_id, state, current_step, completed_steps, sequences, suggested_sequences, updated_at
+			FROM _strand_promote WHERE pipeline_id = ?;`
+	}
 	row := s.db.QueryRowContext(ctx, q, pipelineID)
 
 	var p Progress
@@ -127,6 +165,31 @@ func (s *DBStateStore) SaveProgress(ctx context.Context, progress *Progress) err
 	completedJSON, _ := json.Marshal(progress.CompletedSteps)
 	seqsJSON, _ := json.Marshal(progress.Sequences)
 	suggJSON, _ := json.Marshal(progress.SuggestedSequences)
+
+	if s.isPostgres() {
+		q := `INSERT INTO _strand_promote (pipeline_id, state, current_step, completed_steps, sequences, suggested_sequences, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (pipeline_id) DO UPDATE SET
+				state = EXCLUDED.state,
+				current_step = EXCLUDED.current_step,
+				completed_steps = EXCLUDED.completed_steps,
+				sequences = EXCLUDED.sequences,
+				suggested_sequences = EXCLUDED.suggested_sequences,
+				updated_at = EXCLUDED.updated_at;`
+		_, err := s.db.ExecContext(ctx, q,
+			progress.PipelineID,
+			string(progress.State),
+			string(progress.CurrentStep),
+			completedJSON,
+			seqsJSON,
+			suggJSON,
+			progress.UpdatedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("save _strand_promote (PG): %w", err)
+		}
+		return nil
+	}
 
 	q := `REPLACE INTO _strand_promote (pipeline_id, state, current_step, completed_steps, sequences, suggested_sequences, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?);`
