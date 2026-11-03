@@ -9,9 +9,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +28,9 @@ import (
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/promote"
+	pgreader "strand/internal/reader/pg"
+	"strand/internal/seed"
+	"strand/internal/snapshot"
 	"strand/internal/typemap"
 	"strand/internal/writer"
 )
@@ -246,10 +252,13 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 	return out, nil
 }
 
-// initialPositionPG: điểm bắt đầu cho source PG (02 §1, §10). Snapshot logic từ source PG chưa
-// được hỗ trợ (design §6.1 cần snapshot export giữ trên kết nối tạo slot, reader hiện không giữ),
-// nên pipeline mới bắt buộc --start-at <LSN>: dữ liệu ở target đã khớp source tại LSN đó
-// (thường là consistent_point của slot), mọi Txn có commit LSN ≤ LSN coi như đã apply.
+// initialPositionPG: điểm bắt đầu cho source PG (02 §1, §10):
+//   - --start-at <LSN>: dữ liệu ở target đã khớp source tại LSN đó, mọi Txn có commit LSN ≤ LSN coi như
+//     đã apply;
+//   - --start-at seed: đọc seed.json PG (strand export / pgBackRest / WAL-G): P = consistent_point của
+//     slot trong seed; Txn có commit LSN < P nằm trong seed, ≥ P đi qua slot (startFromSeedPG);
+//   - bootstrap logic (mặc định): stream từ confirmed_flush của slot (consistent_point nếu slot mới),
+//     mọi bảng được snapshot logic song song với stream (snapshot.PGChunkSource).
 func (p *Pipeline) initialPositionPG(ctx context.Context, applied checkpoint.AppliedSet) (checkpoint.AppliedSet, error) {
 	empty := applied.(*checkpoint.PGAppliedSet).String() == ""
 	if p.opts.StartAt != "" {
@@ -258,8 +267,7 @@ func (p *Pipeline) initialPositionPG(ctx context.Context, applied checkpoint.App
 				"--start-at is only valid for a new pipeline; a checkpoint already exists (use strand checkpoint rewind)", nil)
 		}
 		if p.opts.StartAt == "seed" {
-			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-				"--start-at seed is not supported for a PostgreSQL source yet; pass --start-at <LSN> (the consistent_point of the slot the target data matches)", nil)
+			return p.startFromSeedPG(ctx)
 		}
 		lsn, err := checkpoint.ParseLSN(p.opts.StartAt)
 		if err != nil || lsn == 0 {
@@ -282,15 +290,83 @@ func (p *Pipeline) initialPositionPG(ctx context.Context, applied checkpoint.App
 	mode := strings.ToLower(p.cfg.Bootstrap.Default)
 	switch mode {
 	case "", "logical":
-		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-			"bootstrap.default=logical is not supported for a PostgreSQL source yet (no logical snapshot from PG): "+
-				"copy the data to the target consistently with the slot's consistent_point and start with --start-at <LSN>", nil)
+		// Chế độ A: chưa có Txn nào được apply bền vững. Stream bắt đầu từ confirmed_flush của slot
+		// (slot chỉ tiến theo lwd bền vững, nên đây vẫn là consistent_point nếu lần chạy trước dừng
+		// trước checkpoint đầu tiên); mọi bảng snapshot lại từ đầu (SetDone(false) xóa cả plan cũ).
+		for id := range p.tables {
+			if err := p.state.SetDone(id.String(), false); err != nil {
+				return nil, err
+			}
+		}
+		return applied, nil
 	case "seed", "start_at":
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax,
 			fmt.Sprintf("bootstrap.default=%s requires --start-at <LSN> for a new pipeline", mode), nil)
 	default:
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, "unknown bootstrap.default "+mode, nil)
 	}
+}
+
+// startFromSeedPG đọc seed.json PG. P = start_position.lsn (consistent_point của slot), slot =
+// start_position.slot. Ranh giới chính xác (reports/P2-05): seed chứa Txn có commit LSN < P, slot stream
+// Txn có commit LSN ≥ P — commit record có thể bắt đầu ĐÚNG tại P. Vì vậy tập đã apply là "≤ P−1",
+// không phải NewPGAppliedSet(P) (sẽ bỏ Txn commit tại đúng P). Reader chấp nhận confirmed_flush = lwd+1.
+func (p *Pipeline) startFromSeedPG(ctx context.Context) (checkpoint.AppliedSet, error) {
+	path := p.opts.SeedManifest
+	if path == "" {
+		path = "seed.json"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, fmt.Sprintf("read seed manifest: %v", err), err)
+	}
+	var m seed.SeedManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, fmt.Sprintf("parse seed manifest: %v", err), err)
+	}
+	if m.Engine != "pg" && m.Engine != "postgres" {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("seed manifest engine is %q, the source is PostgreSQL", m.Engine), nil)
+	}
+	if m.LogCoverage != nil && !m.LogCoverage.OK {
+		return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError, "seed manifest reports log coverage not OK", nil)
+	}
+	lsn, err := checkpoint.ParseLSN(m.StartPosition.LSN)
+	if err != nil || lsn == 0 {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("seed manifest start_position.lsn %q is not a valid LSN: %v", m.StartPosition.LSN, err), err)
+	}
+	slot := m.StartPosition.Slot
+	if slot == "" {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			"seed manifest has no start_position.slot: the CDC catch-up must read the slot whose consistent_point is P", nil)
+	}
+	if p.cfg.Source.Slot != "" && p.cfg.Source.Slot != slot {
+		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+			fmt.Sprintf("source.slot is %q but the seed was taken at the consistent_point of slot %q", p.cfg.Source.Slot, slot), nil)
+	}
+	if err := p.state.SetPGSlot(slot); err != nil {
+		return nil, err
+	}
+	// Bảng có trong seed thì xong; bảng của pipeline không có trong seed được snapshot logic.
+	seeded := map[string]bool{}
+	for _, t := range m.Tables {
+		seeded[strings.Trim(t, `"`)] = true
+	}
+	for id := range p.tables {
+		done := len(m.Tables) == 0 || seeded[id.String()] || (id.Schema == "public" && seeded[id.Table])
+		if err := p.state.SetDone(id.String(), done); err != nil {
+			return nil, err
+		}
+		if !done {
+			p.log.Warn("table is not in the seed: it will be snapshotted logically", "table", id.String())
+		}
+	}
+	set := checkpoint.NewPGAppliedSet(lsn - 1)
+	p.log.Info("start from PostgreSQL seed", "kind", m.Kind, "p", checkpoint.FormatLSN(lsn), "slot", slot,
+		"source_identity", m.SourceIdentity)
+	p.log.Warn("automatic post-seed verify is MySQL→MySQL only; run `strand verify --mode full` for this pipeline after catch-up")
+	return set, p.writeGlobal(ctx, set.String())
 }
 
 // pgSlotNames trả tên slot / publication theo cấu hình hoặc mặc định strand_<name> (đã chuẩn hóa).
@@ -311,6 +387,9 @@ func (p *Pipeline) pgSlotNames() (slot, pub string) {
 		return out
 	}
 	slot, pub = p.cfg.Source.Slot, p.cfg.Source.Publication
+	if slot == "" && p.state != nil {
+		slot = p.state.PGSlot() // slot của seed (--start-at seed)
+	}
 	if slot == "" {
 		slot = norm(p.id)
 	}
@@ -351,6 +430,13 @@ func (t *lsnTracker) routed(lsn, seq uint64) {
 	if lsn > t.seen {
 		t.seen = lsn
 	}
+}
+
+// seenLSN trả LSN lớn nhất router đã xử lý xong.
+func (t *lsnTracker) seenLSN() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.seen
 }
 
 // point trả mốc lớn nhất có thể xác nhận khi mọi seq ≤ lwd đã commit ở target (0 = chưa có gì).
@@ -561,6 +647,13 @@ func (p *Pipeline) pgFlushRows(ctx context.Context, table model.TableID, pkCol s
 	}
 	out := make([]*model.RowChange, 0, len(rows))
 	for _, r := range rows {
+		for _, cv := range r.Cols {
+			if cv.Unchanged {
+				// Không dựng lại được giá trị cột TOAST (không có ảnh trước): không ghi row thiếu.
+				return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError,
+					fmt.Sprintf("snapshot flush: row %v of %s has an unchanged TOAST column %s without a base image", r.Key, table, cv.Name), nil)
+			}
+		}
 		c := *r
 		if p.conv != nil {
 			if err := p.conv.row(src, &c, p.table(src).PK); err != nil {
@@ -601,4 +694,199 @@ func pgColumns(ctx context.Context, db *sql.DB, id model.TableID) ([]string, boo
 		cols = append(cols, n)
 	}
 	return cols, len(cols) > 0, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot logic từ source PG (snapshot.PGChunkSource)
+// ---------------------------------------------------------------------------
+
+// openPGSnapshotSource mở pool đọc chunk ở source PG với GUC phiên giống kết nối replication, để
+// `col::text` có đúng định dạng text của pgoutput (row snapshot và row stream cùng dạng Go).
+func openPGSnapshotSource(dsn string) (*sql.DB, error) {
+	cc, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if cc.RuntimeParams == nil {
+		cc.RuntimeParams = map[string]string{}
+	}
+	for k, v := range pgreader.SessionParams {
+		cc.RuntimeParams[k] = v
+	}
+	return stdlib.OpenDB(*cc), nil
+}
+
+// setupPGSnapshotGate dựng cổng visibility khởi động của snapshot logic: mọi Txn có commit LSN nhỏ hơn
+// điểm bắt đầu stream (không đi qua router của tiến trình này) phải visible trước khi đăng ký bảng.
+//   - Slot vừa được tạo (export snapshot E tại consistent_point C, stream bắt đầu tại C): E thấy đúng
+//     các Txn có commit LSN < C, nên chỉ cần snapshot S "phủ" E (S.Covers(E)).
+//   - Slot có sẵn: X = pg_current_xact_id() lấy SAU khi điểm bắt đầu stream đã chốt; Txn có commit LSN
+//     nhỏ hơn đã được cấp xid trước X, nên S.xmin > X đủ (có thể phải chờ Txn chạy lâu kết thúc).
+//
+// Không dựng được (vd. source là standby: không ghi được watermark) thì GateErr ≠ nil.
+func (p *Pipeline) setupPGSnapshotGate(ctx context.Context, prd *pgreader.Reader) {
+	c := p.pgChunks
+	c.ServerVersion = prd.ServerVersion()
+	defer func() { _ = prd.ReleaseSnapshot() }()
+	if prd.InRecovery() {
+		c.GateErr = fmt.Errorf("the source is a standby: logical snapshot needs the primary (watermark via pg_logical_emit_message)")
+		return
+	}
+	if name := prd.SnapshotName(); name != "" {
+		e, err := importPGSnapshot(ctx, p.src, name)
+		if err == nil {
+			c.Gate = func(s *snapshot.PGSnapshot) bool { return s.Covers(e) }
+			p.log.Info("snapshot visibility gate: exported snapshot of the new slot", "snapshot", e.String())
+			return
+		}
+		p.log.Warn("cannot import the exported snapshot of the new slot; falling back to the xid gate", "error", err)
+	}
+	xs, err := currentXactID(ctx, p.src)
+	if err != nil {
+		c.GateErr = fmt.Errorf("read pg_current_xact_id: %w", err)
+		return
+	}
+	x, err := strconv.ParseUint(xs, 10, 64)
+	if err != nil {
+		c.GateErr = fmt.Errorf("parse pg_current_xact_id %q: %w", xs, err)
+		return
+	}
+	c.Gate = func(s *snapshot.PGSnapshot) bool { return s.Xmin > x }
+}
+
+// currentXactID cấp một xid (pg_current_xact_id) trong Txn riêng. synchronous_commit=local: commit của
+// Txn này không chờ standby đồng bộ (walsender của chính Strand có thể là standby đồng bộ duy nhất và
+// chưa kết nối lúc khởi động).
+func currentXactID(ctx context.Context, db *sql.DB) (string, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "SET LOCAL synchronous_commit TO local"); err != nil {
+		return "", err
+	}
+	var xs string
+	if err := tx.QueryRowContext(ctx, "SELECT pg_current_xact_id()::text").Scan(&xs); err != nil {
+		return "", err
+	}
+	return xs, tx.Commit()
+}
+
+// importPGSnapshot đọc (xmin, xmax, xip) của snapshot export name (kết nối tạo slot còn mở).
+func importPGSnapshot(ctx context.Context, db *sql.DB, name string) (*snapshot.PGSnapshot, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "SET TRANSACTION SNAPSHOT '"+strings.ReplaceAll(name, "'", "''")+"'"); err != nil {
+		return nil, err
+	}
+	var s string
+	if err := tx.QueryRowContext(ctx, "SELECT pg_current_snapshot()::text").Scan(&s); err != nil {
+		return nil, err
+	}
+	return snapshot.ParsePGSnapshot(s)
+}
+
+// pgPruneXIDs định kỳ gỡ khỏi XIDTracker các xid đã visible ở source (giữ tập nhỏ khi không snapshot).
+func (p *Pipeline) pgPruneXIDs(ctx context.Context) {
+	t := time.NewTicker(500 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if p.xids.Len() == 0 {
+			continue
+		}
+		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		s, err := snapshot.CurrentPGSnapshot(qctx, p.src)
+		cancel()
+		if err == nil {
+			p.xids.Prune(s)
+		}
+	}
+}
+
+// rendezvousPG chờ router xử lý xong một Txn (thật hoặc watermark) có LSN ≥ high: stream phát theo
+// thứ tự commit LSN nên mọi Txn có commit LSN < high đã đi qua range-state (pg_snapshot.go).
+func (p *Pipeline) rendezvousPG(ctx context.Context, high uint64) error {
+	if p.pgReader != nil {
+		if proto, _, _ := p.pgReader.Protocol(); proto != 0 && !p.pgReader.Messages() {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				"logical snapshot from PostgreSQL needs pgoutput messages (PostgreSQL 14+)", nil)
+		}
+	}
+	stop := context.AfterFunc(ctx, func() {
+		p.seenMu.Lock()
+		p.seenCond.Broadcast()
+		p.seenMu.Unlock()
+	})
+	defer stop()
+	p.seenMu.Lock()
+	defer p.seenMu.Unlock()
+	for p.lsns.seenLSN() < high {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := p.failed(); err != nil {
+			return err
+		}
+		p.seenCond.Wait()
+	}
+	return nil
+}
+
+// keepBeforeRegisterPG (source PG): event của bảng đang chờ snapshot mà range chưa được đăng ký.
+// Phần sẽ được đọc lại bởi snapshot (bảng mới: cả bảng — ClearTarget xóa sạch khi đăng ký; plan dở
+// từ lần chạy trước: [NextPK, MaxPK]) thì BỎ: Txn của nó nằm trong XIDTracker nên biên và chunk đọc
+// sau đều thấy nó (BeforeRegister). Bỏ thay vì apply rồi bị xóa, vì UPDATE của PG có thể thiếu cột TOAST
+// mà row chưa có ở target. Phần đã flush của plan dở ([MinPK, NextPK−1]) và phần đuôi (> MaxPK) thì
+// apply như range "Xong". UPDATE đổi PK được tách thành tombstone + upsert, xét từng nửa.
+func (p *Pipeline) keepBeforeRegisterPG(rc *model.RowChange) []*model.RowChange {
+	plan, ok := p.state.Plan(rc.Table.String())
+	if !ok {
+		return nil
+	}
+	var out []*model.RowChange
+	for _, part := range snapshot.SplitStreamEvent(rc) {
+		if plan.Empty {
+			out = append(out, part)
+			continue
+		}
+		pk, err := snapshotPK(part.Key)
+		if err != nil || (pk >= plan.NextPK && pk <= plan.MaxPK) {
+			continue
+		}
+		out = append(out, part)
+	}
+	if len(rc.OldKey) > 0 && len(out) == 2 {
+		return []*model.RowChange{rc} // cả hai nửa đều apply: giữ UPDATE gốc
+	}
+	return out
+}
+
+// snapshotPK đọc PK số nguyên một cột (int64 từ reader PG).
+func snapshotPK(key []model.Value) (int64, error) {
+	if len(key) != 1 {
+		return 0, fmt.Errorf("composite key")
+	}
+	switch v := key[0].(type) {
+	case int64:
+		return v, nil
+	case int32:
+		return int64(v), nil
+	case int:
+		return int64(v), nil
+	}
+	return 0, fmt.Errorf("unsupported key type %T", key[0])
 }

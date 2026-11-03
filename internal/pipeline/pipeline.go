@@ -90,6 +90,9 @@ type Pipeline struct {
 	reorderRetry  atomic.Int64 // số batch phải apply lại theo seq vì unique_violation (applyInSeqOrder)
 	// MySQL→PG: chuyển giá trị theo typemap (nil = giá trị đi thẳng).
 	conv *valueConverter
+	// Source PG: xid các Txn đã route chưa xác nhận visible, và phần đọc source của snapshot logic.
+	xids     *snapshot.XIDTracker
+	pgChunks *snapshot.PGChunkSource
 
 	metrics *metrics.Metrics
 	health  *metrics.HealthChecker
@@ -160,6 +163,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if srcEngine == model.EnginePG {
 		p.lsns = &lsnTracker{}
+		p.xids = snapshot.NewXIDTracker()
 	}
 	if srcEngine == model.EngineMySQL && dstEngine == model.EnginePG {
 		p.conv = newValueConverter()
@@ -415,16 +419,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].String() < pending[j].String() })
-	if p.srcEngine == model.EnginePG && len(pending) > 0 {
-		names := make([]string, len(pending))
-		for i, id := range pending {
-			names[i] = id.String()
-		}
-		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-			fmt.Sprintf("table(s) %s need a logical snapshot, which is not supported for a PostgreSQL source yet; "+
-				"copy them consistently and start a new pipeline with --start-at <LSN>", strings.Join(names, ", ")), nil)
-	}
-	if p.dstEngine == model.EnginePG {
+	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EnginePG {
 		// MySQL→PG: bảng có PK không phải một cột số nguyên chỉ được nhận khi RỖNG ở source tại thời
 		// điểm này (sau khi vị trí stream đã chốt): mọi row của nó sau đó đều đi qua stream, nên
 		// "snapshot" là xóa sạch bảng đích. Bảng còn dữ liệu thì từ chối như trước.
@@ -553,6 +548,15 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.snap.FlushRows = p.pgFlushRows
 		p.snap.ClearTarget = func(ctx context.Context, t model.TableID) error { return writer.PGClearTable(ctx, p.dst, t) }
 	}
+	if p.srcEngine == model.EnginePG {
+		snapDB, err := openPGSnapshotSource(p.srcDSN)
+		if err != nil {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
+		}
+		defer snapDB.Close()
+		p.pgChunks = &snapshot.PGChunkSource{DB: snapDB, Tracker: p.xids, Log: p.log}
+		p.snap.Chunks = p.pgChunks
+	}
 
 	// --- Reader + Assembler ---
 	keyMeta := func(id model.TableID) (assemble.KeyMeta, bool) {
@@ -570,11 +574,18 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.srcEngine == model.EnginePG {
 		slot, pub := p.pgSlotNames()
 		prd, err := pgreader.New(pgreader.Config{DSN: p.srcDSN, Slot: slot, Publication: pub,
-			CreateSlot: p.cfg.Source.CreateSlot, Failover: p.cfg.Source.FailoverSlot})
+			CreateSlot: p.cfg.Source.CreateSlot, Failover: p.cfg.Source.FailoverSlot,
+			ExportOnCreate: len(pending) > 0 && p.cfg.Source.CreateSlot})
 		if err != nil {
 			return err
 		}
 		p.pgReader, rd = prd, prd
+		// Cổng visibility của snapshot logic (xem snapshot.PGChunkSource.Gate).
+		p.setupPGSnapshotGate(ctx, prd)
+		if len(pending) > 0 && p.pgChunks.GateErr != nil {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("logical snapshot from this PostgreSQL source is not possible: %v", p.pgChunks.GateErr), p.pgChunks.GateErr)
+		}
 	} else {
 		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID})
 		if err != nil {
@@ -660,8 +671,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.touched.enable(true)
 	}
 	if p.pgReader != nil {
-		bgWG.Add(1)
+		bgWG.Add(2)
 		go func() { defer bgWG.Done(); p.pgConfirmLoop(ctx) }()
+		go func() { defer bgWG.Done(); p.pgPruneXIDs(ctx) }()
 		if p.dstEngine == model.EnginePG {
 			stopSeq := p.startSequenceSync(ctx)
 			defer stopSeq()
@@ -910,6 +922,10 @@ func (p *Pipeline) table(id model.TableID) *tableMeta {
 
 func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	pos := t.SourcePos
+	if p.xids != nil {
+		// Trước range-state: snapshot logic phải chờ Txn này visible (snapshot.XIDTracker).
+		p.xids.Add(t.XID)
+	}
 	if t.TotalRows() == 0 && t.DDL == "" && pos.GTID == "" {
 		p.noteRouted(pos, 0) // Txn PG rỗng: không có gì để apply
 		return nil
@@ -933,9 +949,18 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			return nil // ngoài pipeline (bộ lọc, hoặc chưa snapshot add)
 		}
 		parts := []*model.RowChange{rc}
-		if p.snap.Manager.IsRegistered(rc.Table) {
+		if p.srcEngine == model.EnginePG && !p.snap.Manager.IsRegistered(rc.Table) && !p.state.IsDone(rc.Table.String()) {
+			// Bảng chờ snapshot mà range chưa được đăng ký: xem keepBeforeRegisterPG.
+			parts = p.keepBeforeRegisterPG(rc)
+		} else if p.snap.Manager.IsRegistered(rc.Table) {
+			if len(rc.OldKey) > 0 && snapshot.HasUnchanged(rc) {
+				// UPDATE đổi PK mà cột TOAST không đổi: nửa upsert của khóa mới không có giá trị cột đó
+				// (nằm ở row cũ, có thể thuộc range khác). Chưa hỗ trợ trong lúc snapshot bảng (02 §8).
+				return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected,
+					fmt.Sprintf("table %s: primary-key change with an unchanged TOAST column while the table is being snapshotted is not supported yet (key %v)", rc.Table, rc.Key), nil)
+			}
 			parts = parts[:0]
-			for _, r := range p.snap.Manager.HandleStreamEventWithPKSplit(rc, pos) {
+			for _, r := range p.snap.Manager.HandleStreamEventWithPKSplitXID(rc, pos, t.XID) {
 				switch r.Action {
 				case snapshot.ActionApply:
 					parts = append(parts, r.Event)
@@ -1035,6 +1060,10 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 func (p *Pipeline) noteRouted(pos model.Pos, seq uint64) {
 	if p.lsns != nil && pos.Engine == model.EnginePG {
 		p.lsns.routed(pos.LSN, seq)
+		// Điểm hẹn của snapshot PG chờ LSN router đã xử lý (rendezvousPG).
+		p.seenMu.Lock()
+		p.seenCond.Broadcast()
+		p.seenMu.Unlock()
 	}
 }
 
@@ -1344,6 +1373,9 @@ func (p *Pipeline) barrier(ctx context.Context, fn func() error) error {
 
 // rendezvous chờ router đã xử lý mọi GTID trong high watermark.
 func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) error {
+	if hs, ok := high.(*checkpoint.PGAppliedSet); ok {
+		return p.rendezvousPG(ctx, hs.Lwd().LSN)
+	}
 	h, ok := high.(*checkpoint.MySQLAppliedSet)
 	if !ok {
 		return fmt.Errorf("unexpected high watermark type %T", high)
@@ -1446,6 +1478,14 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	p.curAvgRow.Store(m.AvgRow)
 	start := time.Now()
 	p.log.Info("snapshot start", "table", id.String())
+	if pl, ok := p.state.Plan(id.String()); ok && !pl.Empty && pl.NextPK > pl.MinPK {
+		p.log.Info("snapshot resumes from saved plan", "table", id.String(), "next_pk", pl.NextPK, "max_pk", pl.MaxPK)
+	}
+	if p.pgChunks != nil {
+		if err := p.pgChunks.WaitGate(ctx); err != nil {
+			return err
+		}
+	}
 	if err := p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], m.Columns, p.rendezvous); err != nil {
 		return err
 	}
@@ -1468,8 +1508,8 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		return fmt.Errorf("table must be schema.table")
 	}
 	id := model.TableID{Schema: s, Table: t}
-	if p.srcEngine != model.EngineMySQL {
-		return fmt.Errorf("snapshot add is not supported for a PostgreSQL source yet")
+	if p.pgChunks != nil && p.pgChunks.GateErr != nil {
+		return fmt.Errorf("logical snapshot from this PostgreSQL source is not possible: %w", p.pgChunks.GateErr)
 	}
 	if p.snap.Manager.IsRegistered(id) {
 		return fmt.Errorf("table %s is already being snapshotted", id)

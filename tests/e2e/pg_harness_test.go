@@ -65,16 +65,17 @@ type pgNode struct {
 
 // startPG khởi động postgres với wal_level=logical, PREPARE TRANSACTION, logical_decoding_work_mem
 // nhỏ (Txn lớn bị stream).
-func startPG(t *testing.T, alias string) *pgNode {
+// extra: tham số "-c k=v" thêm (đứng sau nên ghi đè mặc định).
+func startPG(t *testing.T, alias string, extra ...string) *pgNode {
 	t.Helper()
 	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
 		Image:        pgImage(),
 		ExposedPorts: []string{"5432/tcp"},
 		Env:          map[string]string{"POSTGRES_USER": "strand", "POSTGRES_PASSWORD": "dev", "POSTGRES_DB": "strand"},
-		Cmd: []string{"postgres", "-c", "wal_level=logical", "-c", "max_wal_senders=20", "-c", "max_replication_slots=20",
+		Cmd: append([]string{"postgres", "-c", "wal_level=logical", "-c", "max_wal_senders=20", "-c", "max_replication_slots=20",
 			"-c", "max_prepared_transactions=50", "-c", "logical_decoding_work_mem=64kB", "-c", "max_connections=300",
-			"-c", "fsync=off", "-c", "synchronous_commit=off"},
+			"-c", "fsync=off", "-c", "synchronous_commit=off"}, extra...),
 		WaitingFor: wait.ForAll(
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 			wait.ForListeningPort("5432/tcp"),

@@ -16,8 +16,11 @@ type Config struct {
 	Slot           string
 	Publication    string
 	CreateSlot     bool
-	Failover       bool          /* PG17+ */
-	ExportSnapshot bool          // tạo slot với SNAPSHOT 'export' và giữ kết nối replication mở tới ReleaseSnapshot/Close; mặc định false = SNAPSHOT 'nothing'
+	Failover       bool /* PG17+ */
+	ExportSnapshot bool // tạo slot với SNAPSHOT 'export' và giữ kết nối replication mở tới ReleaseSnapshot/Close; mặc định false = SNAPSHOT 'nothing'
+	// ExportOnCreate: như ExportSnapshot nhưng chỉ khi slot được tạo trong New (slot có sẵn thì không
+	// lỗi, SnapshotName() rỗng). Pipeline dùng snapshot này làm mốc visibility khi bootstrap logic.
+	ExportOnCreate bool
 	StatusInterval time.Duration // chu kỳ gửi StandbyStatusUpdate, mặc định 10s
 	BufferSize     int           // dung lượng kênh Event, mặc định 1024
 }

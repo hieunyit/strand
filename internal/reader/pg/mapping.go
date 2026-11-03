@@ -165,6 +165,15 @@ func parseTextValue(oid uint32, s string) (any, error) {
 	}
 }
 
+// ParseTextValue: như parseTextValue, cho giá trị đọc bằng SQL dạng text (snapshot logic đọc
+// `col::text` với cùng GUC của phiên replication) để row snapshot có đúng dạng Go như row từ stream.
+func ParseTextValue(oid uint32, s string) (any, error) { return parseTextValue(oid, s) }
+
+// SessionParams là các GUC phiên cố định định dạng text (giống replicationConfig).
+var SessionParams = map[string]string{
+	"DateStyle": "ISO, YMD", "TimeZone": "UTC", "IntervalStyle": "postgres", "bytea_output": "hex", "extra_float_digits": "3",
+}
+
 // isSpecialTemporal nhận diện giá trị ngày giờ không map được sang time.Time.
 func isSpecialTemporal(s string) bool {
 	return s == "infinity" || s == "-infinity" || strings.HasSuffix(s, " BC")

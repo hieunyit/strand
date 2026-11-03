@@ -64,6 +64,10 @@ type streamState struct {
 	prepared map[uint32]*txnBuf // Txn đã PREPARE, chờ COMMIT/ROLLBACK PREPARED
 }
 
+// WatermarkPrefix là prefix của logical decoding message (pg_logical_emit_message, không
+// transactional) mà snapshot logic ghi sau khi đọc một chunk; reader phát nó thành một Txn rỗng.
+const WatermarkPrefix = "strand_watermark"
+
 // errStop báo readLoop dừng (ctx hủy khi đang gửi Event).
 var errStop = fmt.Errorf("dừng")
 
@@ -259,7 +263,26 @@ func (st *streamState) handle(data []byte) error {
 		}
 		return nil
 
-	case *pglogrepl.OriginMessage, *pglogrepl.TypeMessageV2, *pglogrepl.LogicalDecodingMessageV2:
+	case *pglogrepl.LogicalDecodingMessageV2:
+		if m.Transactional || m.Prefix != WatermarkPrefix || st.cur != nil || st.prep != nil || st.inStream {
+			return nil // message của ứng dụng khác: không ảnh hưởng dữ liệu
+		}
+		// Watermark của snapshot logic (02 §5): message không transactional được giải mã đúng tại vị
+		// trí của nó trong WAL, nên mọi Txn có commit LSN nhỏ hơn đã được phát trước. Phát thành một
+		// Txn rỗng có "commit LSN" = LSN của message để pipeline biết stream đã qua điểm này.
+		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.LSN)}
+		if !st.contains(pos) {
+			if err := st.emit(reader.Event{Type: reader.EventQuery, Query: "BEGIN", Pos: pos}); err != nil {
+				return err
+			}
+			if err := st.emit(reader.Event{Type: reader.EventQuery, Query: "COMMIT", Pos: pos}); err != nil {
+				return err
+			}
+		}
+		st.done(pos)
+		return nil
+
+	case *pglogrepl.OriginMessage, *pglogrepl.TypeMessageV2:
 		// Origin, kiểu tự định nghĩa (giá trị vẫn ở dạng text) và pg_logical_emit_message: không ảnh hưởng dữ liệu.
 		return nil
 	}
