@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"strand/internal/model"
@@ -184,7 +185,11 @@ const txnMagicV2 = "STX2"
 func encodeTxn(t *model.Txn) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(txnMagicV2)
-	for _, s := range []string{string(t.SourcePos.Engine), t.SourcePos.GTID, t.SpillPath, t.DDL} {
+	ddl := t.DDL
+	if t.DDLSchema != "" && ddl != "" {
+		ddl = t.DDLSchema + "\x00" + ddl // tương thích ngược: bản ghi cũ không có NUL
+	}
+	for _, s := range []string{string(t.SourcePos.Engine), t.SourcePos.GTID, t.SpillPath, ddl} {
 		if err := writeString(&buf, s); err != nil {
 			return nil, err
 		}
@@ -231,6 +236,9 @@ func decodeTxn(data []byte) (*model.Txn, error) {
 		strs[i] = s
 	}
 	t.SourcePos.Engine, t.SourcePos.GTID, t.SpillPath, t.DDL = model.Engine(strs[0]), strs[1], strs[2], strs[3]
+	if i := strings.IndexByte(t.DDL, 0); i >= 0 {
+		t.DDLSchema, t.DDL = t.DDL[:i], t.DDL[i+1:]
+	}
 	var nTables, nRows uint32
 	for _, v := range []any{&t.SourcePos.LSN, &t.SchemaVer, &t.Bytes, &t.RowCount, &t.SourceTS, &nTables, &nRows} {
 		if err := binary.Read(r, binary.LittleEndian, v); err != nil {

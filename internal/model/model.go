@@ -125,6 +125,8 @@ type Txn struct {
 	// DDL chứa câu lệnh DDL khi Txn là một transaction DDL (không có row).
 	// Txn DDL vẫn có GTID riêng và phải được ghi nhận vào tập đã apply (CP-1, CP-2).
 	DDL string `json:"ddl,omitempty"`
+	// DDLSchema là schema mặc định của phiên chạy DDL (QUERY event), để định danh tên bảng không kèm schema.
+	DDLSchema string `json:"ddl_schema,omitempty"`
 
 	// SourceTS: thời điểm commit ở source (giây Unix, từ header binlog), dùng tính lag.
 	SourceTS int64 `json:"source_ts,omitempty"`

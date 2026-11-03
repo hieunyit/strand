@@ -216,6 +216,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 			// Txn DDL: GTID + QUERY, không có BEGIN/XID. Phát thành Txn riêng để GTID được ghi nhận.
 			a.ensureTxnStarted(ev.Pos)
 			a.currentTxn.DDL = ev.Query
+			a.currentTxn.DDLSchema = ev.Schema
 			return a.finishTxn()
 		}
 

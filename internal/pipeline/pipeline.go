@@ -764,18 +764,6 @@ func (p *Pipeline) table(id model.TableID) *tableMeta {
 	return p.tables[id]
 }
 
-func (p *Pipeline) ddlTouchesIncluded(t *model.Txn) bool {
-	q := strings.ToLower(t.DDL)
-	p.tablesMu.RLock()
-	defer p.tablesMu.RUnlock()
-	for id := range p.tables {
-		if strings.Contains(q, strings.ToLower(id.Table)) {
-			return true
-		}
-	}
-	return false
-}
-
 func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	pos := t.SourcePos
 	if t.TotalRows() == 0 && t.DDL == "" && pos.GTID == "" {
@@ -785,10 +773,12 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		p.markSeen(pos) // CP-2: đã apply trước đó
 		return nil
 	}
-	if t.DDL != "" && p.ddlTouchesIncluded(t) {
-		// P1–P2: DDL trên bảng thuộc pipeline thì dừng chờ (02 §12).
-		return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
-			fmt.Sprintf("DDL at %s touches a pipeline table: %q", pos.GTID, t.DDL), nil)
+	if t.DDL != "" {
+		// P1–P2 (02 §12): DDL trên bảng thuộc pipeline (kể cả bảng MỚI khớp bộ lọc do CREATE/RENAME)
+		// chỉ đi tiếp khi schema ở target đã khớp source; nếu không thì dừng schema_change_pending.
+		if err := p.handleDDL(ctx, t); err != nil {
+			return err
+		}
 	}
 
 	out := &model.Txn{SourcePos: pos, SourceTS: t.SourceTS}
