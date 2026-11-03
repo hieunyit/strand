@@ -33,9 +33,30 @@ var (
 
 	pgOnce sync.Once
 	pgDB   *sql.DB
+
+	// containers: mọi container do test của gói này tạo; TestMain dừng và xóa chúng
+	// (Ryuk bị tắt nên không có gì khác dọn hộ).
+	containersMu sync.Mutex
+	containers   []testcontainers.Container
 )
 
-func getMySQL(t *testing.T) (*sql.DB, string) {
+func trackContainer(c testcontainers.Container) {
+	containersMu.Lock()
+	defer containersMu.Unlock()
+	containers = append(containers, c)
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	containersMu.Lock()
+	for _, c := range containers {
+		_ = c.Terminate(context.Background())
+	}
+	containersMu.Unlock()
+	os.Exit(code)
+}
+
+func getMySQL(t testing.TB) (*sql.DB, string) {
 	t.Helper()
 	mysqlOnce.Do(func() {
 		ctx := context.Background()
@@ -45,6 +66,7 @@ func getMySQL(t *testing.T) (*sql.DB, string) {
 			"--enforce-gtid-consistency=ON",
 			"--binlog-format=ROW",
 			"--binlog-row-image=FULL",
+			"--innodb-use-native-aio=OFF",
 		}
 
 		req := testcontainers.ContainerRequest{
@@ -62,6 +84,9 @@ func getMySQL(t *testing.T) (*sql.DB, string) {
 			ContainerRequest: req,
 			Started:          true,
 		})
+		if container != nil {
+			trackContainer(container)
+		}
 		if err != nil {
 			t.Logf("failed to start mysql container: %v", err)
 			return
@@ -108,7 +133,7 @@ func getMySQL(t *testing.T) (*sql.DB, string) {
 	return mysqlDB, mysqlDSN
 }
 
-func getPostgres(t *testing.T) *sql.DB {
+func getPostgres(t testing.TB) *sql.DB {
 	t.Helper()
 	pgOnce.Do(func() {
 		ctx := context.Background()
@@ -127,6 +152,9 @@ func getPostgres(t *testing.T) *sql.DB {
 			ContainerRequest: req,
 			Started:          true,
 		})
+		if container != nil {
+			trackContainer(container)
+		}
 		if err != nil {
 			t.Logf("failed to start pg container: %v", err)
 			return
