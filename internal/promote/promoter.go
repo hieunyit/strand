@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"strand/internal/exitcode"
@@ -50,14 +51,68 @@ func NewPromoter(
 	}
 }
 
+func findSequenceOverride(overrides map[string]int64, name string) (int64, bool) {
+	if overrides == nil {
+		return 0, false
+	}
+	if v, ok := overrides[name]; ok {
+		return v, true
+	}
+	if idx := strings.Index(name, "."); idx != -1 {
+		if v, ok := overrides[name[idx+1:]]; ok {
+			return v, true
+		}
+	} else {
+		if v, ok := overrides["public."+name]; ok {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// mergeSequences lấy danh sách sequence vừa khám phá (fresh) làm chuẩn và giữ lại phần trạng thái
+// đã lưu (LastSyncedValue, giá trị đã chốt, gợi ý) theo tên. fresh rỗng thì giữ nguyên danh sách đã lưu.
+func mergeSequences(saved, fresh []SequenceInfo) []SequenceInfo {
+	if len(fresh) == 0 {
+		return saved
+	}
+	byName := make(map[string]SequenceInfo, len(saved))
+	for _, s := range saved {
+		byName[s.Name] = s
+	}
+	out := make([]SequenceInfo, len(fresh))
+	for i, f := range fresh {
+		if s, ok := byName[f.Name]; ok {
+			f.LastSyncedValue = maxInt64(f.LastSyncedValue, s.LastSyncedValue)
+			f.FinalValue = maxInt64(f.FinalValue, s.FinalValue)
+			f.Decided = f.Decided || s.Decided
+			if f.SuggestedValue == 0 {
+				f.SuggestedValue = s.SuggestedValue
+			}
+			if f.CurrentValue == 0 {
+				f.CurrentValue = s.CurrentValue
+			}
+		}
+		out[i] = f
+	}
+	return out
+}
+
 // suggestIndependentSequences ghi giá trị gợi ý (lần đồng bộ cuối + margin) cho các
 // sequence độc lập chưa có giá trị do người vận hành chỉ định, để in ra cùng lúc dừng hỏi.
 func (p *Promoter) suggestIndependentSequences(progress *Progress) {
 	for i, seq := range progress.Sequences {
-		if seq.Type != SequenceTypeIndependent {
+		if seq.Type != SequenceTypeIndependent || seq.Decided {
 			continue
 		}
-		if _, ok := p.cfg.SequenceOverrides[seq.Name]; ok {
+		if _, ok := findSequenceOverride(p.cfg.SequenceOverrides, seq.Name); ok {
 			continue
 		}
 		margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
@@ -97,10 +152,8 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			"current_step", progress.CurrentStep,
 			"completed_steps", progress.CompletedSteps,
 		)
-		// Cập nhật lại danh sách sequences nếu mới
-		if len(progress.Sequences) == 0 {
-			progress.Sequences = p.sequences
-		}
+		// Danh sách sequence vừa khám phá là chuẩn; giữ lại phần đã lưu (lần đồng bộ cuối, giá trị đã chốt).
+		progress.Sequences = mergeSequences(progress.Sequences, p.sequences)
 		if progress.SuggestedSequences == nil {
 			progress.SuggestedSequences = make(map[string]int64)
 		}
@@ -199,41 +252,61 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 		progress.CurrentStep = StepSetval
 		_ = p.stateStore.SaveProgress(ctx, progress)
 
-		// Kiểm tra các sequence độc lập trước
+		// Chốt giá trị cho từng sequence trước, lưu kế hoạch, rồi mới setval: nếu bị ngắt giữa chừng,
+		// lần chạy lại dùng đúng các giá trị đã chốt (không hỏi lại, không hạ xuống).
 		needsDecision := false
-		for i, seq := range progress.Sequences {
-			if seq.Type == SequenceTypeIndependent {
-				// Nếu người dùng đã cung cấp giá trị ghi đè
-				if overrideVal, ok := p.cfg.SequenceOverrides[seq.Name]; ok {
-					progress.Sequences[i].FinalValue = overrideVal
+		for i := range progress.Sequences {
+			seq := &progress.Sequences[i]
+			margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
+
+			if seq.Type == SequenceTypeColumn {
+				// spec: 02 §8: sequence gắn cột (pg_depend) lấy max(cột) + margin.
+				maxCol, err := p.targetDriver.FindColumnMax(ctx, seq.Table, seq.Column)
+				if err != nil {
+					return progress, fmt.Errorf("find max column for %s.%s: %w", seq.Table, seq.Column, err)
+				}
+				seq.CurrentValue = maxCol
+				seq.FinalValue = maxInt64(seq.FinalValue, maxCol+margin)
+				continue
+			}
+
+			// spec: 02 §8: sequence độc lập lấy last_value đọc từ source cộng margin.
+			if overrideVal, ok := findSequenceOverride(p.cfg.SequenceOverrides, seq.Name); ok {
+				suggested := seq.LastSyncedValue + margin
+				if overrideVal < suggested {
+					p.logger.Warn("operator override is below the suggested value (last sync + margin)",
+						"sequence", seq.Name, "override", overrideVal, "suggested", suggested)
+				}
+				seq.FinalValue = maxInt64(seq.FinalValue, overrideVal)
+				seq.Decided = true
+				continue
+			}
+			var readErr error
+			if p.sourceDriver != nil && p.sourceDriver.IsReachable(ctx) {
+				lastVal, err := p.sourceDriver.ReadSequenceLastValue(ctx, seq.Name)
+				if err == nil {
+					seq.CurrentValue = lastVal
+					seq.FinalValue = maxInt64(seq.FinalValue, lastVal+margin)
+					seq.Decided = true
 					continue
 				}
-
-				// Kiểm tra khả năng đọc từ source
-				sourceReachable := p.sourceDriver != nil && p.sourceDriver.IsReachable(ctx)
-				if !sourceReachable {
-					// spec: 02 §8: "Nếu sau khi fence không đọc được source, promote dừng và hỏi người vận hành,
-					// kèm giá trị gợi ý (lần đồng bộ cuối cộng margin). MySQL dùng AUTO_INCREMENT nên không gặp vấn đề này."
-					margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
-					suggested := seq.LastSyncedValue + margin
-					progress.SuggestedSequences[seq.Name] = suggested
-					progress.Sequences[i].SuggestedValue = suggested
-					needsDecision = true
-				} else {
-					lastVal, err := p.sourceDriver.ReadSequenceLastValue(ctx, seq.Name)
-					if err != nil {
-						margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
-						suggested := seq.LastSyncedValue + margin
-						progress.SuggestedSequences[seq.Name] = suggested
-						progress.Sequences[i].SuggestedValue = suggested
-						needsDecision = true
-					} else {
-						margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
-						progress.Sequences[i].CurrentValue = lastVal
-						progress.Sequences[i].FinalValue = lastVal + margin
-					}
-				}
+				readErr = err
+			} else {
+				readErr = fmt.Errorf("source unreachable")
 			}
+			if seq.Decided {
+				// Giá trị đã chốt ở lần chạy trước (đọc từ source hoặc override): dùng tiếp.
+				p.logger.Warn("cannot read independent sequence from source; using the value decided in a previous run",
+					"sequence", seq.Name, "final_value", seq.FinalValue, "error", readErr)
+				continue
+			}
+			// spec: 02 §8: "Nếu sau khi fence không đọc được source, promote dừng và hỏi người vận hành,
+			// kèm giá trị gợi ý (lần đồng bộ cuối cộng margin)."
+			p.logger.Warn("cannot read independent sequence from source after fence", "sequence", seq.Name, "error", readErr)
+			suggested := seq.LastSyncedValue + margin
+			progress.SuggestedSequences[seq.Name] = suggested
+			seq.SuggestedValue = suggested
+			needsDecision = true
 		}
 
 		if needsDecision {
@@ -242,28 +315,17 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			return progress, exitcode.New(
 				exitcode.ErrPromoteNeedsDecision,
 				exitcode.NeedsDecision,
-				"source unreachable after fence: operator decision required for independent sequences",
+				"independent sequences could not be read from the source after fence: operator decision required (re-run with --override-sequences)",
 				nil,
 			)
 		}
+		if err := p.stateStore.SaveProgress(ctx, progress); err != nil {
+			return progress, err
+		}
 
-		// Thực thi setval cho mọi sequence (cột và độc lập)
-		for i, seq := range progress.Sequences {
-			var val int64
-			if seq.Type == SequenceTypeColumn {
-				maxCol, err := p.targetDriver.FindColumnMax(ctx, seq.Table, seq.Column)
-				if err != nil {
-					return progress, fmt.Errorf("find max column for %s.%s: %w", seq.Table, seq.Column, err)
-				}
-				margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
-				val = maxCol + margin
-				progress.Sequences[i].CurrentValue = maxCol
-				progress.Sequences[i].FinalValue = val
-			} else {
-				val = progress.Sequences[i].FinalValue
-			}
-
-			if err := p.targetDriver.Setval(ctx, progress.Sequences[i], val); err != nil {
+		// Setval cho mọi sequence (cột và độc lập); driver không bao giờ hạ sequence xuống.
+		for _, seq := range progress.Sequences {
+			if err := p.targetDriver.Setval(ctx, seq, seq.FinalValue); err != nil {
 				return progress, fmt.Errorf("setval failed for %s: %w", seq.Name, err)
 			}
 		}

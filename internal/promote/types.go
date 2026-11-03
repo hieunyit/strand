@@ -47,6 +47,10 @@ type SequenceInfo struct {
 	CurrentValue    int64        `json:"current_value"`
 	SuggestedValue  int64        `json:"suggested_value"`
 	FinalValue      int64        `json:"final_value"`
+	// Decided: FinalValue của sequence độc lập đã được chốt (đọc từ source sau fence, hoặc người vận hành
+	// chỉ định qua override) và đã lưu vào _strand_promote. Chạy lại promote dùng tiếp giá trị này,
+	// không hỏi lại người vận hành, và không bao giờ hạ nó xuống.
+	Decided bool `json:"decided,omitempty"`
 }
 
 // Config cấu hình cho lệnh promote.
