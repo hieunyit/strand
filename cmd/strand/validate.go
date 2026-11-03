@@ -7,10 +7,12 @@ import (
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/spf13/cobra"
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/typemap"
 	"strand/internal/validate"
 )
 
@@ -62,6 +64,26 @@ func newValidateCmd() *cobra.Command {
 				}
 				if err != nil {
 					return err
+				}
+
+				// spec 02 §8, TASK P2-04: Khi target là postgres, kiểm tra mapping kiểu, collation cột khóa và giá trị thực tế
+				if strings.EqualFold(cfg.Target.Kind, "postgres") {
+					var dstDB *sql.DB
+					if cfg.Target.DSN != "" {
+						var dstErr error
+						dstDB, dstErr = sql.Open("pgx", cfg.Target.DSN)
+						if dstErr != nil {
+							return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid target DSN: %v", dstErr), dstErr)
+						}
+						defer dstDB.Close()
+					}
+					mpWarns, mpErr := validate.CheckMySQLToPGTables(cmd.Context(), db, dstDB, cfg.Tables.Include, typemap.DefaultOptions())
+					for _, w := range mpWarns {
+						fmt.Fprintln(os.Stderr, "warning: "+w)
+					}
+					if mpErr != nil {
+						return mpErr
+					}
 				}
 			}
 
