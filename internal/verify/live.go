@@ -32,6 +32,11 @@ type LiveConfig struct {
 	TargetName   func(model.TableID) model.TableID
 	Retries      int           // số lần kiểm lại một PK (mặc định 5)
 	CatchUpLimit time.Duration // thời gian tối đa chờ target theo kịp G (mặc định 2 phút)
+	// SkipApplyWait bỏ bước 2 (chờ target apply G) khi kiểm lại một PK. Dùng khi verify chạy
+	// độc lập, không có pipeline đang apply (vd. `strand verify --mode full` sau setup): khi đó
+	// không ai ghi tiến độ vào _strand_checkpoint nên chờ chỉ hết hạn rồi lỗi. Vẫn giữ S1 == S2
+	// để row đang đổi ở source được báo unverifiable_hot thay vì lệch. Mặc định false: hành vi cũ.
+	SkipApplyWait bool
 }
 
 // LiveReport là kết quả verify một bảng.
@@ -188,12 +193,14 @@ func (v *LiveVerifier) recheck(ctx context.Context, t model.TableID, pk, list, k
 		if err != nil {
 			return false, false, err
 		}
-		var g string
-		if err := v.cfg.Source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&g); err != nil {
-			return false, false, err
-		}
-		if err := v.waitApplied(ctx, g); err != nil {
-			return false, false, err
+		if !v.cfg.SkipApplyWait {
+			var g string
+			if err := v.cfg.Source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&g); err != nil {
+				return false, false, err
+			}
+			if err := v.waitApplied(ctx, g); err != nil {
+				return false, false, err
+			}
 		}
 		d, _, err := readRows(ctx, v.cfg.Target, dstQ, key)
 		if err != nil {
