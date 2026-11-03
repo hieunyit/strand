@@ -164,3 +164,64 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 	}
 	return nil
 }
+
+// SessionBinlogIssue là một thread trên source còn ghi binlog với giá trị session khác yêu cầu.
+type SessionBinlogIssue struct {
+	ThreadID uint64
+	User     string
+	Host     string
+	Name     string // tên thread (vd. thread/sql/one_connection, thread/sql/replica_sql)
+	Variable string
+	Value    string
+}
+
+// CheckMySQLSessionBinlog kiểm từng session đang mở trên source (performance_schema.variables_by_thread):
+// binlog_format và binlog_row_image có phạm vi session, `SET GLOBAL` không đổi các kết nối đang mở, nên
+// kết nối cũ (pool sống lâu, luồng applier của replica) vẫn có thể ghi binlog STATEMENT/MIXED hay MINIMAL.
+// Còn session như vậy thì từ chối (exit 3). Không đọc được bảng (thiếu quyền SELECT trên
+// performance_schema, hoặc performance_schema tắt) thì chỉ trả về cảnh báo. Cảnh báo cả khi
+// binlog_row_metadata khác FULL (02 §11: nên bật).
+func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string, err error) {
+	var meta string
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.binlog_row_metadata").Scan(&meta); err == nil && !strings.EqualFold(meta, "FULL") {
+		warnings = append(warnings, fmt.Sprintf("binlog_row_metadata is %q; FULL is recommended (column names and PK in TABLE_MAP): SET PERSIST binlog_row_metadata = FULL", meta))
+	}
+	rows, qerr := db.QueryContext(ctx, `
+		SELECT v.THREAD_ID, COALESCE(t.PROCESSLIST_USER, ''), COALESCE(t.PROCESSLIST_HOST, ''), COALESCE(t.NAME, ''),
+		       v.VARIABLE_NAME, v.VARIABLE_VALUE
+		  FROM performance_schema.variables_by_thread v
+		  LEFT JOIN performance_schema.threads t ON t.THREAD_ID = v.THREAD_ID
+		 WHERE (v.VARIABLE_NAME = 'binlog_format'    AND UPPER(v.VARIABLE_VALUE) <> 'ROW')
+		    OR (v.VARIABLE_NAME = 'binlog_row_image' AND UPPER(v.VARIABLE_VALUE) <> 'FULL')
+		 ORDER BY v.THREAD_ID`)
+	if qerr != nil {
+		warnings = append(warnings, fmt.Sprintf("cannot verify per-session binlog settings (%v); grant SELECT ON performance_schema.variables_by_thread and performance_schema.threads to the strand user, or check manually", qerr))
+		return warnings, nil
+	}
+	defer rows.Close()
+	var issues []SessionBinlogIssue
+	for rows.Next() {
+		var is SessionBinlogIssue
+		if err := rows.Scan(&is.ThreadID, &is.User, &is.Host, &is.Name, &is.Variable, &is.Value); err != nil {
+			return warnings, fmt.Errorf("read performance_schema.variables_by_thread: %w", err)
+		}
+		issues = append(issues, is)
+	}
+	if err := rows.Err(); err != nil {
+		return warnings, fmt.Errorf("read performance_schema.variables_by_thread: %w", err)
+	}
+	if len(issues) == 0 {
+		return warnings, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d open session(s) on the source still log with an old session value (SET GLOBAL does not change open connections):", len(issues))
+	for i, is := range issues {
+		if i == 5 {
+			fmt.Fprintf(&b, " ... and %d more", len(issues)-5)
+			break
+		}
+		fmt.Fprintf(&b, " [thread %d %s@%s %s: %s=%s]", is.ThreadID, is.User, is.Host, is.Name, is.Variable, is.Value)
+	}
+	b.WriteString(". Reconnect these clients (restart the application pool; on a replica run STOP REPLICA; START REPLICA) and validate again")
+	return warnings, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, b.String(), nil)
+}

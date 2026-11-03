@@ -55,6 +55,14 @@ func newValidateCmd() *cobra.Command {
 				if err := validate.CheckMySQLSource(cmd.Context(), db, cfg.Tables.Include); err != nil {
 					return err
 				}
+				// Giá trị session của binlog_format/binlog_row_image trên các kết nối đang mở.
+				warns, err := validate.CheckMySQLSessionBinlog(cmd.Context(), db)
+				for _, w := range warns {
+					fmt.Fprintln(os.Stderr, "warning: "+w)
+				}
+				if err != nil {
+					return err
+				}
 			}
 
 			fmt.Fprintf(os.Stdout, "Preflight validation passed for pipeline: %s\n", cfg.Name)
