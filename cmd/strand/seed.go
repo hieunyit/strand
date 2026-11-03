@@ -33,6 +33,9 @@ func newSeedCmd() *cobra.Command {
 		Use:   "plan",
 		Short: "Kiểm SD-1..SD-4 và ghi seed.json",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := normalizeDSNFlags(&sourceDSN, &targetDSN); err != nil {
+				return err
+			}
 			if kind == "" {
 				return exitcode.New("missing_type", exitcode.InvalidSyntax, "missing --type xtrabackup|mydumper|mysqldump|clone", nil)
 			}
@@ -122,6 +125,9 @@ func newSeedCmd() *cobra.Command {
 		Use:   "apply",
 		Short: "Điều phối restore/load rồi chuẩn bị target cho catch-up; chạy lại được khi bị ngắt",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := normalizeDSNFlags(&applyTarget, &pfSource); err != nil {
+				return err
+			}
 			raw, err := os.ReadFile(manifestPath)
 			if err != nil {
 				return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, err.Error(), err)

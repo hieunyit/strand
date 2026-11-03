@@ -29,12 +29,29 @@ type SourceConfig struct {
 	Kind     string `yaml:"kind" json:"kind"` // mysql | postgres
 	DSN      string `yaml:"dsn" json:"dsn"`
 	ServerID uint32 `yaml:"server_id" json:"server_id"`
+	// Kết nối dạng tách trường (thay cho dsn): host, port (mặc định 3306), user, password hoặc
+	// password_env (tên biến môi trường chứa mật khẩu), database. dsn còn nhận dạng URL mysql://.
+	Host        string `yaml:"host,omitempty" json:"host,omitempty"`
+	Port        int    `yaml:"port,omitempty" json:"port,omitempty"`
+	User        string `yaml:"user,omitempty" json:"user,omitempty"`
+	Password    string `yaml:"password,omitempty" json:"password,omitempty"`
+	PasswordEnv string `yaml:"password_env,omitempty" json:"password_env,omitempty"`
+	Database    string `yaml:"database,omitempty" json:"database,omitempty"`
+
 	ReadFrom string `yaml:"read_from" json:"read_from"` // primary | replica | standby (PG16+, chưa triển khai)
 }
 
 type TargetConfig struct {
-	Kind        string      `yaml:"kind" json:"kind"` // mysql | postgres
-	DSN         string      `yaml:"dsn" json:"dsn"`
+	Kind string `yaml:"kind" json:"kind"` // mysql | postgres
+	DSN  string `yaml:"dsn" json:"dsn"`
+	// Kết nối dạng tách trường (thay cho dsn): host, port (mặc định 3306), user, password hoặc
+	// password_env (tên biến môi trường chứa mật khẩu), database. dsn còn nhận dạng URL mysql://.
+	Host        string      `yaml:"host,omitempty" json:"host,omitempty"`
+	Port        int         `yaml:"port,omitempty" json:"port,omitempty"`
+	User        string      `yaml:"user,omitempty" json:"user,omitempty"`
+	Password    string      `yaml:"password,omitempty" json:"password,omitempty"`
+	PasswordEnv string      `yaml:"password_env,omitempty" json:"password_env,omitempty"`
+	Database    string      `yaml:"database,omitempty" json:"database,omitempty"`
 	WriteMode   string      `yaml:"write_mode" json:"write_mode"`     // upsert | insert
 	CommitOrder string      `yaml:"commit_order" json:"commit_order"` // strict | relaxed
 	Batch       BatchConfig `yaml:"batch" json:"batch"`
@@ -243,6 +260,11 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 
 	// 02 §10: YAML, rồi biến môi trường STRAND_*, rồi flag. Ghi đè env trước khi kiểm tra.
 	if err := applyProcessEnv(&cfg); err != nil {
+		return nil, err
+	}
+
+	// DSN dạng URL (mysql://) hoặc tách trường (host/port/user/...) → DSN của driver.
+	if err := resolveConnections(&cfg); err != nil {
 		return nil, err
 	}
 

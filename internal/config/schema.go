@@ -30,22 +30,34 @@ const JSONSchema = `{
     },
     "source": {
       "type": "object",
-      "required": ["kind", "dsn"],
+      "required": ["kind"],
       "additionalProperties": false,
       "properties": {
         "kind": { "type": "string", "enum": ["mysql", "postgres"] },
-        "dsn": { "type": "string" },
+        "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/db hoặc user:pass@tcp(host:3306)/db; bỏ trống khi dùng host/user" },
+        "host": { "type": "string" },
+        "port": { "type": "integer" },
+        "user": { "type": "string" },
+        "password": { "type": "string" },
+        "password_env": { "type": "string", "description": "Tên biến môi trường chứa mật khẩu" },
+        "database": { "type": "string" },
         "server_id": { "type": "integer" },
         "read_from": { "type": "string", "enum": ["primary", "replica", "standby"], "description": "standby: decode trên standby PG16+ (chưa triển khai, validate cảnh báo)" }
       }
     },
     "target": {
       "type": "object",
-      "required": ["kind", "dsn"],
+      "required": ["kind"],
       "additionalProperties": false,
       "properties": {
         "kind": { "type": "string", "enum": ["mysql", "postgres"] },
-        "dsn": { "type": "string" },
+        "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/strand hoặc user:pass@tcp(host:3306)/strand; bỏ trống khi dùng host/user" },
+        "host": { "type": "string" },
+        "port": { "type": "integer" },
+        "user": { "type": "string" },
+        "password": { "type": "string" },
+        "password_env": { "type": "string", "description": "Tên biến môi trường chứa mật khẩu" },
+        "database": { "type": "string" },
         "write_mode": { "type": "string", "enum": ["upsert", "insert"] },
         "commit_order": { "type": "string", "enum": ["strict", "relaxed"] },
         "batch": {

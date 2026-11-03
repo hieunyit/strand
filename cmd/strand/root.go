@@ -2,6 +2,9 @@ package main
 
 import (
 	"github.com/spf13/cobra"
+
+	"strand/internal/config"
+	"strand/internal/exitcode"
 )
 
 var (
@@ -35,4 +38,19 @@ func init() {
 	rootCmd.AddCommand(newSnapshotCmd())
 	rootCmd.AddCommand(newSeedCmd())
 	rootCmd.AddCommand(newVerifyCmd())
+}
+
+// normalizeDSNFlags đổi các cờ DSN dạng mysql://... sang DSN của driver (cùng cú pháp với file cấu hình).
+func normalizeDSNFlags(ptrs ...*string) error {
+	for _, p := range ptrs {
+		if p == nil || *p == "" {
+			continue
+		}
+		v, err := config.NormalizeMySQLDSN(*p)
+		if err != nil {
+			return exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)
+		}
+		*p = v
+	}
+	return nil
 }

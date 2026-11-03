@@ -41,17 +41,56 @@ Strand không ghi gì vào source khi đồng bộ; metadata (`_strand_pipeline`
 
 ## 2. File cấu hình pipeline.yaml
 
-Mỗi pipeline có một file YAML; thứ tự ưu tiên là YAML, rồi biến môi trường `STRAND_*`, rồi cờ dòng lệnh. Khóa lạ bị từ chối (exit 2). Xem schema đầy đủ bằng `strand config schema`.
+Mỗi pipeline có một file YAML; chỉ cần vài dòng, mọi khóa khác có mặc định. Thứ tự ưu tiên là YAML, rồi biến môi trường `STRAND_*`, rồi cờ dòng lệnh. Khóa lạ bị từ chối (exit 2). Xem schema đầy đủ bằng `strand config schema`.
 
-### Ví dụ tối thiểu
+### Cấu hình tối thiểu
 
 ```yaml
 version: 1
 name: orders-sync
-source: { kind: mysql, dsn: "strand:***@tcp(10.0.0.11:3306)/", server_id: 47001 }
+source:
+  kind: mysql
+  host: 10.0.0.11
+  user: strand
+  password_env: STRAND_SOURCE_PASSWORD   # mật khẩu lấy từ biến môi trường, không nằm trong file
 target:
   kind: mysql
-  dsn: "strand:***@tcp(10.0.0.21:3306)/strand"   # schema chứa bảng _strand_*
+  host: 10.0.0.21
+  user: strand
+  password_env: STRAND_TARGET_PASSWORD
+  database: strand                       # schema chứa bảng _strand_*
+tables:
+  include: ["app.*"]
+resources:
+  spool: { path: /var/lib/strand }
+```
+
+Chạy: `STRAND_SOURCE_PASSWORD=... STRAND_TARGET_PASSWORD=... strand sync -c orders-sync.yaml`.
+
+### Ba cách khai báo kết nối
+
+Chọn một trong ba cho mỗi phía; không dùng `dsn` cùng lúc với `host`.
+
+| Cách | Ví dụ | Ghi chú |
+| --- | --- | --- |
+| Tách trường (khuyến nghị) | `host: db1`, `port: 3306`, `user: strand`, `password_env: SRC_PW`, `database: strand` | `port` mặc định 3306; `password` ghi thẳng hoặc `password_env` (tên biến môi trường) |
+| URL | `dsn: "mysql://strand:p%40ss@db1:3306/strand?tls=true"` | Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`, `:` → `%3A`, `/` → `%2F`); tham số sau `?` như `tls`, `timeout` |
+| DSN của driver Go (cách cũ) | `dsn: "strand:pass@tcp(db1:3306)/strand"` | Vẫn nhận nguyên như trước |
+
+Các cờ DSN trên dòng lệnh (`seed plan --source/--target`, `seed apply --target/--source`, `promote --target/--fence`) nhận cả dạng URL `mysql://` và dạng driver. Trong file YAML còn dùng được `${TÊN_BIẾN}`, giá trị được thay từ biến môi trường khi đọc file.
+
+### Ví dụ đầy đủ (tùy chọn nâng cao)
+
+```yaml
+version: 1
+name: orders-sync
+source: { kind: mysql, host: 10.0.0.11, user: strand, password_env: SRC_PW, server_id: 47001 }
+target:
+  kind: mysql
+  host: 10.0.0.21
+  user: strand
+  password_env: DST_PW
+  database: strand
   commit_order: relaxed                          # hoặc strict
   batch: { max_rows: 2000, max_bytes: 4MiB, max_wait: 50ms }
 tables:
@@ -82,9 +121,9 @@ observability:
 | --- | --- | --- |
 | `name` | bắt buộc | ID pipeline (khóa chống chạy trùng, checkpoint) |
 | `source.kind` / `target.kind` | bắt buộc | `mysql` (PG ở P2) |
-| `source.dsn` | bắt buộc | Source hoặc replica có `log_replica_updates=ON` |
+| `source.host` / `port` / `user` / `password` / `password_env` / `database` hoặc `source.dsn` | bắt buộc (một trong hai) | Source hoặc replica có `log_replica_updates=ON` |
 | `source.server_id` | tự sinh | Server ID khi đọc binlog; phải duy nhất trong cụm |
-| `target.dsn` | bắt buộc | Schema trong DSN chứa bảng `_strand_*` |
+| `target.host` ... hoặc `target.dsn` | bắt buộc (một trong hai) | `database` (hoặc schema trong DSN) chứa bảng `_strand_*` |
 | `target.commit_order` | `relaxed` | `relaxed`: song song theo writeset, nhanh hơn; `strict`: đúng thứ tự source, target luôn là một tiền tố của source |
 | `target.batch.max_rows` | 2000 | Đóng batch group commit khi đủ số row |
 | `target.batch.max_bytes` | 4MiB | Đóng batch khi đủ dung lượng (ước lượng theo dữ liệu row) |
@@ -218,8 +257,8 @@ Các lệnh dưới đây nói chuyện với `strand sync` đang chạy qua adm
 
 ```bash
 strand promote --pipeline orders-sync \
-  --target "strand_admin:***@tcp(10.0.0.21:3306)/strand" \
-  --fence  "strand_admin:***@tcp(10.0.0.11:3306)/" \
+  --target "mysql://strand_admin:***@10.0.0.21:3306/strand" \
+  --fence  "mysql://strand_admin:***@10.0.0.11:3306/" \
   --catchup-timeout 5m
 ```
 

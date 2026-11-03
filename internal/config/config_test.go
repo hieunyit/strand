@@ -102,8 +102,9 @@ target: { kind: postgres, dsn: "${TEST_DST_DSN}" }
 	if err != nil {
 		t.Fatalf("LoadFile failed: %v", err)
 	}
-	if cfg.Source.DSN != "mysql://root:secret@127.0.0.1:3306/db" {
-		t.Errorf("expected expanded DSN, got %s", cfg.Source.DSN)
+	// mysql:// được mở rộng từ biến môi trường rồi chuẩn hóa sang DSN của driver.
+	if cfg.Source.DSN != "root:secret@tcp(127.0.0.1:3306)/db" {
+		t.Errorf("expected expanded and normalized DSN, got %s", cfg.Source.DSN)
 	}
 	if cfg.Target.DSN != "postgres://user:pass@127.0.0.1:5432/db" {
 		t.Errorf("expected expanded DSN, got %s", cfg.Target.DSN)

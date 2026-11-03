@@ -31,6 +31,9 @@ func newPromoteCmd() *cobra.Command {
 		Use:   "promote",
 		Short: "Mở quyền ghi cho target sau khi fence source và setval (spec/02 §8, §10)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := normalizeDSNFlags(&promoteTargetDSN, &promoteFenceSourceDSN); err != nil {
+				return err
+			}
 			if promoteTargetDSN == "" {
 				return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, "missing required flag --target", nil)
 			}
