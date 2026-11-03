@@ -242,6 +242,11 @@ func (m *RangeStateManager) HandleStreamEvent(event *model.RowChange, pos model.
 	case StateReading, StateRendezvous, StateFlushing:
 		// spec: 02 §5 "Đang đọc / Chờ điểm hẹn: GTID ∈ low: bỏ. Ngược lại: gộp theo PK vào buffer có thứ tự, chỉ giữ image cuối"
 		if chunk.LowWatermark != nil && chunk.LowWatermark.Contains(pos) {
+			// Read view của chunk (sau low) đã phản ánh event này hoặc trạng thái mới hơn, nên mọi
+			// ảnh CŨ HƠN của cùng PK còn trong buffer (vd. buffer lúc chunk chưa có low) đã lỗi thời:
+			// phải bỏ cả nó, nếu không flush sẽ ghi ảnh cũ đè lên snapshot (vd. INSERT rồi DELETE ∈ low
+			// → row "hồi sinh" ở target).
+			delete(chunk.BufferedChanges, pk)
 			return ActionDiscard, chunk
 		}
 		// Gộp theo PK vào buffer

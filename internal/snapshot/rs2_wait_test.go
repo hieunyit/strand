@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -217,5 +218,36 @@ func TestRS1_EventBetweenBeginReadingAndLowIsBuffered(t *testing.T) {
 	ev := &model.RowChange{Table: chunk.Table, Op: model.OpDelete, Key: []model.Value{int64(4)}}
 	if act, _ := s.Manager.HandleStreamEvent(ev, model.Pos{Engine: model.EngineMySQL, GTID: "3e11fa47-71ca-11e1-9e33-c80aa9429562:9"}); act != ActionBuffer {
 		t.Fatalf("action %v, want buffer", act)
+	}
+}
+
+// invariant: RS-1
+// Tái hiện từ trace e2e (snapshot add dưới tải, khóa 49200): INSERT được buffer khi chunk "Đang đọc"
+// chưa có low; low đọc sau chứa DELETE kế tiếp nên DELETE bị bỏ — ảnh INSERT cũ trong buffer phải bị
+// bỏ theo, nếu không flush ghi lại row đã xóa.
+func TestRS1_DiscardInLowDropsOlderBufferedImage(t *testing.T) {
+	s, chunk := rs2Snapshotter()
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	pos := func(n int) model.Pos { return model.Pos{Engine: model.EngineMySQL, GTID: fmt.Sprintf("%s:%d", u, n)} }
+	s.Manager.BeginReading(chunk)
+	ins := &model.RowChange{Table: chunk.Table, Op: model.OpInsert, Key: []model.Value{int64(7)},
+		Cols: []model.ColValue{{Name: "id", Value: int64(7)}}}
+	if act, _ := s.Manager.HandleStreamEvent(ins, pos(1964)); act != ActionBuffer {
+		t.Fatalf("insert: %v", act)
+	}
+	s.Manager.StartReading(chunk, ParseMySQLGTIDSet(u+":1-2128"))
+	del := &model.RowChange{Table: chunk.Table, Op: model.OpDelete, Key: []model.Value{int64(7)}}
+	if act, _ := s.Manager.HandleStreamEvent(del, pos(1968)); act != ActionDiscard {
+		t.Fatalf("delete in low: %v", act)
+	}
+	// Snapshot (read view sau low) không còn row 7.
+	s.Manager.FinishReading(chunk, ParseMySQLGTIDSet(u+":1-2140"), nil)
+	s.Manager.mu.Lock()
+	merged := s.Manager.MergeLocked(chunk)
+	s.Manager.mu.Unlock()
+	for _, r := range merged {
+		if r.Key[0] == int64(7) {
+			t.Fatalf("deleted row 7 resurrected by a stale buffered INSERT")
+		}
 	}
 }
