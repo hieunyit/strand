@@ -28,6 +28,7 @@ func newSeedCmd() *cobra.Command {
 		backup, kind, sourceDSN, targetDSN, archiveUntil, out, dumpLog string
 		tables                                                         []string
 		allowPre, acceptUnverifiedLockMode                             bool
+		pgf                                                            pgPlanFlags
 	)
 	plan := &cobra.Command{
 		Use:   "plan",
@@ -37,7 +38,7 @@ func newSeedCmd() *cobra.Command {
 				return err
 			}
 			if kind == "" {
-				return exitcode.New("missing_type", exitcode.InvalidSyntax, "missing --type xtrabackup|mydumper|mysqldump|clone", nil)
+				return exitcode.New("missing_type", exitcode.InvalidSyntax, "missing --type xtrabackup|mydumper|mysqldump|clone|pgbackrest|walg", nil)
 			}
 			ctx := cmd.Context()
 			src := seed.SeedSource{
@@ -50,7 +51,13 @@ func newSeedCmd() *cobra.Command {
 				DumpLog:                  dumpLog,
 				AcceptUnverifiedLockMode: acceptUnverifiedLockMode,
 			}
-			if sourceDSN != "" {
+			isPG := isPGKind(kind)
+			if isPG {
+				if err := fillPGSeedSource(ctx, &src, sourceDSN, targetDSN, pgf); err != nil {
+					return err
+				}
+			}
+			if sourceDSN != "" && !isPG {
 				db, err := sql.Open("mysql", sourceDSN)
 				if err != nil {
 					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
@@ -60,7 +67,7 @@ func newSeedCmd() *cobra.Command {
 					return fmt.Errorf("read source gtid_purged: %w", err)
 				}
 			}
-			if targetDSN != "" {
+			if targetDSN != "" && !isPG {
 				db, err := sql.Open("mysql", targetDSN)
 				if err != nil {
 					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
@@ -84,6 +91,10 @@ func newSeedCmd() *cobra.Command {
 				planner = seed.NewMysqldumpPlanner()
 			case "clone":
 				planner = seed.NewClonePlanner()
+			case "pgbackrest":
+				planner = seed.NewPgBackRestPlanner()
+			case "walg", "wal-g":
+				planner = seed.NewWalgPlanner()
 			default:
 				return exitcode.New("invalid_type", exitcode.InvalidSyntax, "unknown --type "+kind, nil)
 			}
@@ -102,12 +113,13 @@ func newSeedCmd() *cobra.Command {
 			if err := os.WriteFile(out, raw, 0o640); err != nil {
 				return err
 			}
-			fmt.Printf("seed plan OK: P = %s, manifest %s\n", m.StartPosition.GTIDSet, out)
+			fmt.Printf("seed plan OK: P = %s, manifest %s\n", manifestP(m), out)
 			return nil
 		},
 	}
 	plan.Flags().StringVar(&backup, "backup", "", "Đường dẫn/URI bản backup")
-	plan.Flags().StringVar(&kind, "type", "", "xtrabackup | mydumper | mysqldump | clone")
+	plan.Flags().StringVar(&kind, "type", "", "xtrabackup | mydumper | mysqldump | clone | pgbackrest | walg")
+	pgf.register(plan)
 	plan.Flags().StringVar(&sourceDSN, "source", "", "DSN source (đọc gtid_purged, SD-2)")
 	plan.Flags().StringVar(&targetDSN, "target", "", "DSN target sau restore (đối chiếu P, SD-1; version, SD-4)")
 	plan.Flags().StringVar(&archiveUntil, "archive-until", "", "GTID set đã có trong archive binlog")
@@ -141,6 +153,19 @@ func newSeedCmd() *cobra.Command {
 				fmt.Println("  " + c)
 			}
 			if printOnly || dryRun {
+				return nil
+			}
+			if m.Engine == "pg" || m.Engine == "postgres" || isPGKind(m.Kind) {
+				// PG: slot logical giữ WAL từ P trên source nên không cần prefetch.
+				if err := applyPGSeed(cmd.Context(), &m, applyTarget, restoreCmd); err != nil {
+					return err
+				}
+				raw, _ = json.MarshalIndent(m, "", "  ")
+				if err := os.WriteFile(manifestPath, raw, 0o640); err != nil {
+					return err
+				}
+				fmt.Printf("seed apply OK: target at P = %s (slot %s); next: strand sync --start-at seed --seed-manifest %s\n",
+					m.StartPosition.LSN, m.StartPosition.Slot, manifestPath)
 				return nil
 			}
 			// Prefetch (mặc định bật): đọc log từ P vào spool trong lúc restore (02 §9).
@@ -218,6 +243,8 @@ func restoreCommands(m *seed.SeedManifest) []string {
 		return []string{"mysql < " + m.BackupRef}
 	case "clone":
 		return []string{"CLONE INSTANCE FROM <user>@<donor>:<port> IDENTIFIED BY <password>   # trên target"}
+	case "pgbackrest", "walg", "wal-g", "strand-export", "strand_export":
+		return pgRestoreCommands(m)
 	}
 	return []string{"(không có lệnh restore cho kind " + m.Kind + ")"}
 }

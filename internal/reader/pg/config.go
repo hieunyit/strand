@@ -17,6 +17,7 @@ type Config struct {
 	Publication    string
 	CreateSlot     bool
 	Failover       bool          /* PG17+ */
+	ExportSnapshot bool          // tạo slot với SNAPSHOT 'export' và giữ kết nối replication mở tới ReleaseSnapshot/Close; mặc định false = SNAPSHOT 'nothing'
 	StatusInterval time.Duration // chu kỳ gửi StandbyStatusUpdate, mặc định 10s
 	BufferSize     int           // dung lượng kênh Event, mặc định 1024
 }
@@ -50,7 +51,9 @@ func (c *Config) validate() error {
 			nil,
 		)
 	}
-	if c.Publication == "" {
+	// Publication chỉ cần khi stream (Start). Reader dùng riêng để tạo slot + export snapshot
+	// (strand export) được phép bỏ trống; Start sẽ từ chối nếu Publication rỗng.
+	if c.Publication == "" && !(c.ExportSnapshot && c.CreateSlot) {
 		return exitcode.New(
 			exitcode.ErrBinlogConfigInvalid,
 			exitcode.Rejected,
@@ -68,6 +71,6 @@ func (c *Config) validate() error {
 }
 
 func (c Config) String() string {
-	return fmt.Sprintf("pg.Config{Slot:%s, Publication:%s, CreateSlot:%v, Failover:%v, StatusInterval:%v}",
-		c.Slot, c.Publication, c.CreateSlot, c.Failover, c.StatusInterval)
+	return fmt.Sprintf("pg.Config{Slot:%s, Publication:%s, CreateSlot:%v, Failover:%v, ExportSnapshot:%v, StatusInterval:%v}",
+		c.Slot, c.Publication, c.CreateSlot, c.Failover, c.ExportSnapshot, c.StatusInterval)
 }

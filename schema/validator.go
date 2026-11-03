@@ -59,7 +59,8 @@ func (v *SeedSchemaValidator) Validate(documentJSON []byte) error {
 	kind, ok := doc["kind"].(string)
 	validKinds := map[string]bool{
 		"xtrabackup": true, "clone": true, "mydumper": true,
-		"pgbackrest": true, "wal-g": true, "strand_export": true,
+		"pgbackrest": true, "wal-g": true, "walg": true,
+		"strand_export": true, "strand-export": true,
 	}
 	if !ok || !validKinds[kind] {
 		return fmt.Errorf("trường kind không hợp lệ: %v", doc["kind"])
