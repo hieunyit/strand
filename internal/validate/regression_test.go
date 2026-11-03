@@ -164,3 +164,33 @@ func TestValidateRejectsOpenSessionWithOldBinlogSettings(t *testing.T) {
 		t.Fatalf("expected a warning about performance_schema access, got %v", w)
 	}
 }
+
+// tables.include dùng mẫu glob ("app.*") như mọi ví dụ cấu hình; validate phải mở rộng mẫu thành bảng thật
+// thay vì từ chối, và báo lỗi khi một mẫu không khớp bảng nào.
+func TestValidateExpandsTablePatterns(t *testing.T) {
+	ctx := context.Background()
+	db := startMySQL(t)
+	for _, q := range []string{
+		"CREATE TABLE app.a (id INT PRIMARY KEY)",
+		"CREATE TABLE app.b (id INT PRIMARY KEY)",
+		"CREATE TABLE app.audit (id INT PRIMARY KEY)",
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := validate.ExpandTables(ctx, db, []string{"app.*"}, []string{"app.audit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "app.a,app.b" {
+		t.Fatalf("expanded = %v, want [app.a app.b]", got)
+	}
+	if err := validate.CheckMySQLSource(ctx, db, got); err != nil {
+		t.Fatalf("expanded tables rejected: %v", err)
+	}
+	if _, err := validate.ExpandTables(ctx, db, []string{"app.*", "shop.*"}, nil); exitcode.GetExitCode(err) != exitcode.Rejected ||
+		!strings.Contains(err.Error(), "shop.*") {
+		t.Fatalf("pattern matching nothing must be rejected naming it, got %v", err)
+	}
+}

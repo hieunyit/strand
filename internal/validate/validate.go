@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path"
 	"strings"
 
 	"strand/internal/config"
@@ -224,4 +225,64 @@ func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string
 	}
 	b.WriteString(". Reconnect these clients (restart the application pool; on a replica run STOP REPLICA; START REPLICA) and validate again")
 	return warnings, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, b.String(), nil)
+}
+
+// ExpandTables mở rộng các mẫu glob tables.include / tables.exclude (path.Match trên "schema.table",
+// như pipeline) thành danh sách bảng thật trên source. Mẫu include không khớp bảng nào bị từ chối,
+// để lỗi gõ tên không âm thầm thành "không đồng bộ gì".
+func ExpandTables(ctx context.Context, db *sql.DB, include, exclude []string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) FROM information_schema.TABLES
+		 WHERE TABLE_TYPE = 'BASE TABLE'
+		   AND TABLE_SCHEMA NOT IN ('mysql','sys','information_schema','performance_schema')
+		 ORDER BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("list source tables: %w", err)
+	}
+	defer rows.Close()
+	var all []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		all = append(all, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []string
+	matched := make([]bool, len(include))
+	for _, n := range all {
+		in := false
+		for i, p := range include {
+			ok, err := path.Match(p, n)
+			if err != nil {
+				return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid table pattern %q: %v", p, err), err)
+			}
+			if ok {
+				in, matched[i] = true, true
+			}
+		}
+		if !in {
+			continue
+		}
+		ex := false
+		for _, p := range exclude {
+			if ok, _ := path.Match(p, n); ok {
+				ex = true
+				break
+			}
+		}
+		if !ex {
+			out = append(out, n)
+		}
+	}
+	for i, p := range include {
+		if !matched[i] {
+			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("tables.include pattern %q matches no table on source", p), nil)
+		}
+	}
+	return out, nil
 }

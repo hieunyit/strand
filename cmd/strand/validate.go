@@ -52,7 +52,11 @@ func newValidateCmd() *cobra.Command {
 					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 				}
 				defer db.Close()
-				if err := validate.CheckMySQLSource(cmd.Context(), db, cfg.Tables.Include); err != nil {
+				tables, err := validate.ExpandTables(cmd.Context(), db, cfg.Tables.Include, cfg.Tables.Exclude)
+				if err != nil {
+					return err
+				}
+				if err := validate.CheckMySQLSource(cmd.Context(), db, tables); err != nil {
 					return err
 				}
 				// Giá trị session của binlog_format/binlog_row_image trên các kết nối đang mở.
