@@ -9,6 +9,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/cobra"
 
 	"strand/internal/admin"
@@ -20,11 +21,12 @@ import (
 
 // `strand verify --table <t> --mode sample|delta|full --repair report|fix` (02 §10).
 func newVerifyCmd() *cobra.Command {
-	var table, mode, repair string
+	var table, mode, repair, replicaDSN string
 	var rate float64
+	var resume bool
 	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Đối chiếu source với target theo range (sample | delta); full ở P2",
+		Short: "Đối chiếu source với target theo range (sample | delta | full)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfgPath == "" {
 				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing -c", nil)
@@ -48,34 +50,41 @@ func newVerifyCmd() *cobra.Command {
 				return nil
 			case "sample":
 			case "full":
-				return exitcode.New("not_available", exitcode.InvalidSyntax, "verify --mode full (Merkle) is a Phase 2 feature", nil)
 			default:
 				return exitcode.New("invalid_mode", exitcode.InvalidSyntax, "--mode must be sample|delta|full", nil)
 			}
 			if repair != "report" && repair != "fix" {
 				return exitcode.New("invalid_repair", exitcode.InvalidSyntax, "--repair must be report|fix", nil)
 			}
-			s, t, ok := strings.Cut(table, ".")
-			if !ok {
-				return exitcode.New("invalid_table", exitcode.InvalidSyntax, "--table must be schema.table", nil)
+
+			srcEngine, dstEngine := engineOf(cfg.Source.Kind), engineOf(cfg.Target.Kind)
+			if mode == "sample" && (srcEngine != model.EngineMySQL || dstEngine != model.EngineMySQL) {
+				return exitcode.New("invalid_mode", exitcode.InvalidSyntax, "verify --mode sample supports mysql -> mysql only; use --mode full", nil)
 			}
-			id := model.TableID{Schema: s, Table: t}
-			src, err := sql.Open("mysql", cfg.Source.DSN)
+			if repair == "fix" && srcEngine != dstEngine {
+				return exitcode.New("invalid_repair", exitcode.InvalidSyntax, "--repair fix needs source and target of the same engine", nil)
+			}
+			// --replica-dsn: đọc phía source từ replica (design §7: full chạy trên replica).
+			srcDSN := cfg.Source.DSN
+			if replicaDSN != "" {
+				if srcEngine == model.EngineMySQL {
+					if err := normalizeDSNFlags(&replicaDSN); err != nil {
+						return err
+					}
+				}
+				srcDSN = replicaDSN
+			}
+			src, err := sql.Open(driverOf(srcEngine), srcDSN)
 			if err != nil {
 				return err
 			}
 			defer src.Close()
-			dst, err := sql.Open("mysql", cfg.Target.DSN)
+			dst, err := sql.Open(driverOf(dstEngine), cfg.Target.DSN)
 			if err != nil {
 				return err
 			}
 			defer dst.Close()
-			var pk string
-			var npk int
-			if err := src.QueryRowContext(cmd.Context(), `SELECT MIN(COLUMN_NAME), COUNT(*) FROM information_schema.KEY_COLUMN_USAGE
-				WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'`, s, t).Scan(&pk, &npk); err != nil || npk != 1 {
-				return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a single-column primary key", err)
-			}
+
 			target := func(x model.TableID) model.TableID {
 				if r, ok := cfg.Tables.Rename[x.String()]; ok {
 					if rs, rt, ok := strings.Cut(r, "."); ok {
@@ -84,6 +93,80 @@ func newVerifyCmd() *cobra.Command {
 				}
 				return x
 			}
+
+			if mode == "full" {
+				var ids []model.TableID
+				names := cfg.Tables.Include
+				if table != "" {
+					names = []string{table}
+				}
+				if len(names) == 0 {
+					return exitcode.New("missing_tables", exitcode.InvalidSyntax, "verify --mode full needs --table or tables.include", nil)
+				}
+				for _, n := range names {
+					s, t, ok := strings.Cut(n, ".")
+					if !ok || strings.ContainsAny(n, "*?") {
+						return exitcode.New("invalid_table", exitcode.InvalidSyntax, fmt.Sprintf("table %q must be schema.table (no wildcard)", n), nil)
+					}
+					ids = append(ids, model.TableID{Schema: s, Table: t})
+				}
+				// --rate mặc định 0.01 là tỉ lệ của sample; với full, không đặt thì dùng DefaultFullRate chunk/giây.
+				fullRate := verify.DefaultFullRate
+				if cmd.Flags().Changed("rate") {
+					fullRate = rate
+				}
+				var bad []string
+				for _, id := range ids {
+					pk, err := verify.FindSinglePKColumn(cmd.Context(), src, srcEngine, id)
+					if err != nil {
+						return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a single-column primary key: "+err.Error(), err)
+					}
+					var lv *verify.LiveVerifier
+					if srcEngine == model.EngineMySQL && dstEngine == model.EngineMySQL {
+						// Chạy độc lập, không có pipeline ghi _strand_checkpoint: không chờ target apply.
+						lv = verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
+							TargetName: target, SkipApplyWait: true})
+					}
+					mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{
+						Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
+						SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target,
+						ChunkRows: verify.DefaultChunkRows, Rate: fullRate, Resume: resume, LiveVerifier: lv,
+					})
+					rep, err := mv.VerifyTableFull(cmd.Context(), id, pk)
+					if err != nil {
+						return err
+					}
+					fmt.Printf("verify %s (full): %d chunks (%d hashed, %d resumed), %d mismatched chunks, %d rows compared, %d mismatches, %d unverifiable_hot\n",
+						id, rep.TotalChunks, rep.HashedChunks, rep.ResumedChunks, rep.MismatchedChunks, rep.RowsChecked, len(rep.Mismatches), len(rep.UnverifiableHot))
+					if len(rep.Mismatches) == 0 {
+						continue
+					}
+					if repair == "fix" && !dryRun {
+						if err := repairRows(cmd.Context(), src, dst, srcEngine, dstEngine, id, target(id), pk, rep.Mismatches); err != nil {
+							return err
+						}
+						fmt.Printf("repaired %d rows of %s from source\n", len(rep.Mismatches), id)
+						continue
+					}
+					bad = append(bad, fmt.Sprintf("%d mismatched rows in %s (pk %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), ",")))
+				}
+				if len(bad) > 0 {
+					return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError, strings.Join(bad, "; "), nil)
+				}
+				return nil
+			}
+			// Chế độ sample (mặc định của Phase 1)
+			s, t, ok := strings.Cut(table, ".")
+			if !ok {
+				return exitcode.New("invalid_table", exitcode.InvalidSyntax, "--table must be schema.table", nil)
+			}
+			id := model.TableID{Schema: s, Table: t}
+
+			pk, err := verify.FindSinglePKColumn(cmd.Context(), src, srcEngine, id)
+			if err != nil {
+				return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a single-column primary key", err)
+			}
+
 			lv := verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name, TargetName: target})
 			ranges, err := verify.SampleRanges(cmd.Context(), src, id, pk, rate, 1000, rand.New(rand.NewSource(time.Now().UnixNano())))
 			if err != nil {
@@ -99,7 +182,7 @@ func newVerifyCmd() *cobra.Command {
 				return nil
 			}
 			if repair == "fix" && !dryRun {
-				if err := repairRows(cmd.Context(), src, dst, id, target(id), pk, rep.Mismatches); err != nil {
+				if err := repairRows(cmd.Context(), src, dst, srcEngine, dstEngine, id, target(id), pk, rep.Mismatches); err != nil {
 					return err
 				}
 				fmt.Printf("repaired %d rows from source\n", len(rep.Mismatches))
@@ -109,12 +192,29 @@ func newVerifyCmd() *cobra.Command {
 				fmt.Sprintf("%d mismatched rows in %s (pk %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), ",")), nil)
 		},
 	}
-	cmd.Flags().StringVar(&table, "table", "", "Bảng schema.table (sample)")
+	cmd.Flags().StringVar(&table, "table", "", "Bảng schema.table (mặc định tất cả bảng của pipeline khi mode=full)")
 	cmd.Flags().StringVar(&mode, "mode", "sample", "sample | delta | full")
 	cmd.Flags().StringVar(&repair, "repair", "report", "report | fix")
-	cmd.Flags().Float64Var(&rate, "rate", 0.01, "Tỉ lệ row lấy mẫu (sample)")
+	cmd.Flags().Float64Var(&rate, "rate", 0.01, "Tỉ lệ row lấy mẫu (sample) hoặc số chunk/giây (full)")
+	cmd.Flags().BoolVar(&resume, "resume", false, "Chạy tiếp từ tiến độ đã lưu trong _strand_verify (mode full)")
+	cmd.Flags().StringVar(&replicaDSN, "replica-dsn", "", "DSN của replica để đọc (thay cho source DSN)")
 	cmd.Flags().StringVar(&adminSocketPath, "socket", "", "Admin socket (delta)")
 	return cmd
+}
+
+// engineOf đổi kind trong cấu hình (mysql | postgres) sang model.Engine.
+func engineOf(kind string) model.Engine {
+	if kind == "postgres" || kind == string(model.EnginePG) {
+		return model.EnginePG
+	}
+	return model.EngineMySQL
+}
+
+func driverOf(e model.Engine) string {
+	if e == model.EnginePG {
+		return "pgx"
+	}
+	return "mysql"
 }
 
 func firstN(xs []string, n int) []string {
@@ -126,11 +226,18 @@ func firstN(xs []string, n int) []string {
 
 // repairRows chép lại row lệch từ source (xóa ở target nếu source không còn). Pipeline vẫn
 // stream sau đó nên trạng thái hội tụ về source; trong lúc sửa, row có thể tạm lùi rồi tiến lại.
-func repairRows(ctx context.Context, src, dst *sql.DB, srcT, dstT model.TableID, pk string, keys []string) error {
-	qi := func(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
-	qt := func(t model.TableID) string { return qi(t.Schema) + "." + qi(t.Table) }
+func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine model.Engine, srcT, dstT model.TableID, pk string, keys []string) error {
+	srcQPK := verify.QuoteIdent(srcEngine, pk)
+	srcQT := verify.QuoteTable(srcEngine, srcT)
+	dstQPK := verify.QuoteIdent(dstEngine, pk)
+	dstQT := verify.QuoteTable(dstEngine, dstT)
+
 	for _, k := range keys {
-		rows, err := src.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", qt(srcT), qi(pk)), k)
+		srcQ := fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", srcQT, srcQPK)
+		if srcEngine == model.EnginePG {
+			srcQ = fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", srcQT, srcQPK)
+		}
+		rows, err := src.QueryContext(ctx, srcQ, k)
 		if err != nil {
 			return err
 		}
@@ -159,7 +266,11 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcT, dstT model.TableID,
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = ?", qt(dstT), qi(pk)), k); err != nil {
+		delQ := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", dstQT, dstQPK)
+		if dstEngine == model.EnginePG {
+			delQ = fmt.Sprintf("DELETE FROM %s WHERE %s = $1", dstQT, dstQPK)
+		}
+		if _, err := tx.ExecContext(ctx, delQ, k); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -167,9 +278,14 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcT, dstT model.TableID,
 			q := make([]string, len(cols))
 			ph := make([]string, len(cols))
 			for i, c := range cols {
-				q[i], ph[i] = qi(c), "?"
+				q[i] = verify.QuoteIdent(dstEngine, c)
+				if dstEngine == model.EnginePG {
+					ph[i] = fmt.Sprintf("$%d", i+1)
+				} else {
+					ph[i] = "?"
+				}
 			}
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", qt(dstT), strings.Join(q, ","), strings.Join(ph, ",")), vals...); err != nil {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", dstQT, strings.Join(q, ","), strings.Join(ph, ",")), vals...); err != nil {
 				tx.Rollback()
 				return err
 			}
