@@ -130,6 +130,10 @@ type Txn struct {
 
 	// SourceTS: thời điểm commit ở source (giây Unix, từ header binlog), dùng tính lag.
 	SourceTS int64 `json:"source_ts,omitempty"`
+
+	// XID: xid top-level của Txn ở source PG (từ BEGIN của pgoutput; 0 = không có / MySQL). Snapshot
+	// logic từ source PG dùng nó để biết Txn có visible với snapshot đọc chunk hay không (02 §5).
+	XID uint64 `json:"xid,omitempty"`
 }
 
 // IsSpilled kiểm tra transaction có bị tràn xuống đĩa không.

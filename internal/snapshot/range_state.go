@@ -206,6 +206,12 @@ func (tr *TableRanges) FindChunk(pk int64) *Chunk {
 // HandleStreamEvent quyết định hành vi (Discard, Buffer, Apply) đối với một stream row change.
 // spec: 02 §5, design §6.1
 func (m *RangeStateManager) HandleStreamEvent(event *model.RowChange, pos model.Pos) (Action, *Chunk) {
+	return m.HandleStreamEventXID(event, pos, 0)
+}
+
+// HandleStreamEventXID như HandleStreamEvent, kèm xid top-level của Txn (source PG; 0 với MySQL).
+// Chunk có LowSnapshot (PG) bỏ event khi Txn visible với snapshot đó, ngược lại gộp theo PK.
+func (m *RangeStateManager) HandleStreamEventXID(event *model.RowChange, pos model.Pos, xid uint64) (Action, *Chunk) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -241,7 +247,12 @@ func (m *RangeStateManager) HandleStreamEvent(event *model.RowChange, pos model.
 
 	case StateReading, StateRendezvous, StateFlushing:
 		// spec: 02 §5 "Đang đọc / Chờ điểm hẹn: GTID ∈ low: bỏ. Ngược lại: gộp theo PK vào buffer có thứ tự, chỉ giữ image cuối"
-		if chunk.LowWatermark != nil && chunk.LowWatermark.Contains(pos) {
+		// Source PG: "∈ low" là "Txn visible với snapshot S0 của chunk" (pg_watermark.go).
+		inLow := chunk.LowWatermark != nil && chunk.LowWatermark.Contains(pos)
+		if chunk.LowSnapshot != nil {
+			inLow = chunk.LowSnapshot.Visible(xid)
+		}
+		if inLow {
 			// Read view của chunk (sau low) đã phản ánh event này hoặc trạng thái mới hơn, nên mọi
 			// ảnh CŨ HƠN của cùng PK còn trong buffer (vd. buffer lúc chunk chưa có low) đã lỗi thời:
 			// phải bỏ cả nó, nếu không flush sẽ ghi ảnh cũ đè lên snapshot (vd. INSERT rồi DELETE ∈ low
@@ -252,6 +263,11 @@ func (m *RangeStateManager) HandleStreamEvent(event *model.RowChange, pos model.
 		// Gộp theo PK vào buffer
 		if chunk.BufferedChanges == nil {
 			chunk.BufferedChanges = make(map[int64]*model.RowChange)
+		}
+		if prev, ok := chunk.BufferedChanges[pk]; ok && prev.Op != model.OpDelete && hasUnchanged(event) {
+			// UPDATE của PG không gửi cột TOAST không đổi: giá trị của nó là giá trị của ảnh trước
+			// (ảnh đang nằm trong buffer). Ảnh cuối phải đầy đủ để flush thay cả row.
+			event = fillUnchanged(event, prev)
 		}
 		chunk.BufferedChanges[pk] = event
 		return ActionBuffer, chunk
@@ -304,10 +320,15 @@ func SplitStreamEvent(event *model.RowChange) []*model.RowChange {
 
 // HandleStreamEventWithPKSplit xử lý một stream event, tự động tách thành tombstone và upsert nếu là UPDATE đổi PK.
 func (m *RangeStateManager) HandleStreamEventWithPKSplit(event *model.RowChange, pos model.Pos) []StreamActionResult {
+	return m.HandleStreamEventWithPKSplitXID(event, pos, 0)
+}
+
+// HandleStreamEventWithPKSplitXID như HandleStreamEventWithPKSplit, kèm xid top-level (source PG).
+func (m *RangeStateManager) HandleStreamEventWithPKSplitXID(event *model.RowChange, pos model.Pos, xid uint64) []StreamActionResult {
 	subEvents := SplitStreamEvent(event)
 	results := make([]StreamActionResult, 0, len(subEvents))
 	for _, sub := range subEvents {
-		action, chunk := m.HandleStreamEvent(sub, pos)
+		action, chunk := m.HandleStreamEventXID(sub, pos, xid)
 		results = append(results, StreamActionResult{
 			Action: action,
 			Chunk:  chunk,
@@ -351,6 +372,14 @@ func (m *RangeStateManager) StartReading(chunk *Chunk, low checkpoint.AppliedSet
 	chunk.State = StateReading
 }
 
+// StartReadingPG gắn low = snapshot S0 (source PG) cho chunk đang "Đang đọc".
+func (m *RangeStateManager) StartReadingPG(chunk *Chunk, low *PGSnapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	chunk.LowSnapshot = low
+	chunk.State = StateReading
+}
+
 // FinishReading chuyển trạng thái chunk sang StateRendezvous kèm high watermark và rows snapshot.
 func (m *RangeStateManager) FinishReading(chunk *Chunk, high checkpoint.AppliedSet, rows []*model.RowChange) {
 	m.mu.Lock()
@@ -381,6 +410,11 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 			// Tombstone: xóa khỏi tập merge
 			delete(mergedMap, pk)
 		} else {
+			if base, ok := mergedMap[pk]; ok && hasUnchanged(bufChange) {
+				// Cột TOAST không đổi từ ảnh đầu tiên trong buffer trở đi: giá trị = giá trị của row
+				// trước ảnh đó, mà row snapshot phản ánh (đọc sau S0, xem pg_snapshot.go).
+				bufChange = fillUnchanged(bufChange, base)
+			}
 			// Update hoặc Insert mới: override giá trị snapshot
 			mergedMap[pk] = bufChange
 		}
@@ -401,6 +435,38 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 	}
 
 	return result
+}
+
+// HasUnchanged: row có cột TOAST không đổi (giá trị vắng mặt, chỉ source PG).
+func HasUnchanged(rc *model.RowChange) bool { return hasUnchanged(rc) }
+
+func hasUnchanged(rc *model.RowChange) bool {
+	for _, c := range rc.Cols {
+		if c.Unchanged {
+			return true
+		}
+	}
+	return false
+}
+
+// fillUnchanged trả bản sao rc với cột Unchanged lấy giá trị từ base (cùng tên cột); cột base không có
+// thì giữ nguyên dấu Unchanged (bên flush sẽ từ chối).
+func fillUnchanged(rc, base *model.RowChange) *model.RowChange {
+	vals := make(map[string]model.ColValue, len(base.Cols))
+	for _, c := range base.Cols {
+		vals[c.Name] = c
+	}
+	out := *rc
+	out.Cols = make([]model.ColValue, len(rc.Cols))
+	for i, c := range rc.Cols {
+		out.Cols[i] = c
+		if c.Unchanged {
+			if b, ok := vals[c.Name]; ok && !b.Unchanged {
+				out.Cols[i] = model.ColValue{Name: c.Name, Value: b.Value}
+			}
+		}
+	}
+	return &out
 }
 
 // MarkDoneLocked đánh dấu hoàn thành cho chunk và chuyển sang StateDone trong khi đã giữ lock.

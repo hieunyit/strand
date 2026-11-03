@@ -104,6 +104,9 @@ type Chunk struct {
 	State         RangeState
 	LowWatermark  checkpoint.AppliedSet
 	HighWatermark checkpoint.AppliedSet
+	// LowSnapshot (source PG): snapshot MVCC S0 lấy trước mọi SELECT của chunk; event của Txn
+	// visible với S0 bị bỏ (thay cho "GTID ∈ low" của MySQL, xem pg_watermark.go).
+	LowSnapshot *PGSnapshot
 
 	SnapshotRows    []*model.RowChange
 	BufferedChanges map[int64]*model.RowChange // PK -> last image / tombstone

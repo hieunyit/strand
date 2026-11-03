@@ -53,6 +53,7 @@ type Reader struct {
 	protoVersion int
 	twoPhase     bool
 	streaming    bool
+	messages     bool
 
 	// confirmed: lwd do pipeline báo qua SetConfirmed (chỉ tăng).
 	// progress: commit LSN của Txn cuối cùng reader đã xử lý xong (phát hoặc bỏ qua) trong phiên này.
@@ -134,7 +135,7 @@ func New(cfg Config) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	if found && cfg.ExportSnapshot {
+	if found && cfg.ExportSnapshot && !cfg.ExportOnCreate {
 		// Snapshot chỉ export được lúc tạo slot; slot có sẵn không cho vị trí khớp snapshot nào.
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 			fmt.Sprintf("replication slot %q đã tồn tại: ExportSnapshot cần tạo slot mới", cfg.Slot), nil)
@@ -257,14 +258,14 @@ func (r *Reader) createSlot(ctx context.Context) error {
 	var sql string
 	if r.serverVersion >= 150000 {
 		snapOpt := "SNAPSHOT 'nothing'"
-		if r.cfg.ExportSnapshot {
+		if r.cfg.ExportSnapshot || r.cfg.ExportOnCreate {
 			snapOpt = "SNAPSHOT 'export'"
 		}
 		opts = append([]string{snapOpt}, opts...)
 		sql = fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL pgoutput (%s)", r.cfg.Slot, strings.Join(opts, ", "))
 	} else {
 		snapOpt := "NOEXPORT_SNAPSHOT"
-		if r.cfg.ExportSnapshot {
+		if r.cfg.ExportSnapshot || r.cfg.ExportOnCreate {
 			snapOpt = "EXPORT_SNAPSHOT"
 		}
 		sql = fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL pgoutput %s", r.cfg.Slot, snapOpt)
@@ -295,7 +296,7 @@ func (r *Reader) createSlot(ctx context.Context) error {
 	r.consistentPoint = uint64(lsn)
 	r.snapshotName = res.SnapshotName
 	r.pos.LSN = r.consistentPoint
-	if r.cfg.ExportSnapshot {
+	if r.cfg.ExportSnapshot || r.cfg.ExportOnCreate {
 		if res.SnapshotName == "" {
 			_ = conn.Close(context.Background())
 			return fmt.Errorf("CREATE_REPLICATION_SLOT %q không trả snapshot_name dù yêu cầu export", r.cfg.Slot)
@@ -346,6 +347,20 @@ func (r *Reader) Position() model.Pos {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.pos
+}
+
+// ServerVersion trả server_version_num của source; InRecovery cho biết source là standby.
+func (r *Reader) ServerVersion() int { return r.serverVersion }
+
+// InRecovery cho biết source là standby (pg_is_in_recovery()).
+func (r *Reader) InRecovery() bool { return r.inRecovery }
+
+// Messages cho biết pgoutput có gửi logical decoding message (option messages, PG14+) hay không:
+// watermark của snapshot logic từ source PG cần nó (xem WatermarkPrefix).
+func (r *Reader) Messages() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.messages
 }
 
 // Protocol trả proto_version, streaming, two_phase thực sự đã thương lượng được với server.
@@ -436,7 +451,10 @@ func (r *Reader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-chan 
 	switch {
 	case lwd == 0:
 		startLSN = info.confirmedFlush
-	case info.confirmedFlush > lwd:
+	case info.confirmedFlush > lwd+1:
+		// Server stream mọi Txn có commit LSN ≥ confirmed_flush (commit record bắt đầu đúng tại
+		// confirmed_flush KHÔNG bị bỏ). Đã apply mọi Txn ≤ lwd nên confirmed_flush = lwd+1 không hổng
+		// (vd. seed tại P: tập đã apply là ≤ P−1, slot ở P).
 		return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError,
 			fmt.Sprintf("slot %q đã xác nhận tới %s, vượt lwd đã apply %s: Txn ở giữa không đọc lại được",
 				r.cfg.Slot, pglogrepl.LSN(info.confirmedFlush), pglogrepl.LSN(lwd)), nil)
@@ -450,7 +468,7 @@ func (r *Reader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-chan 
 	}
 
 	r.conn = conn
-	r.protoVersion, r.streaming, r.twoPhase = opts.proto, opts.streaming, opts.twoPhase
+	r.protoVersion, r.streaming, r.twoPhase, r.messages = opts.proto, opts.streaming, opts.twoPhase, opts.messages
 	r.started = true
 	r.pos = model.Pos{Engine: model.EnginePG, LSN: startLSN}
 	r.confirmed.Store(lwd)
@@ -472,6 +490,7 @@ type streamOpts struct {
 	proto     int
 	streaming bool
 	twoPhase  bool
+	messages  bool
 }
 
 func (o streamOpts) pluginArgs(pub string) []string {
@@ -484,6 +503,9 @@ func (o streamOpts) pluginArgs(pub string) []string {
 	}
 	if o.twoPhase {
 		args = append(args, "two_phase 'on'")
+	}
+	if o.messages {
+		args = append(args, "messages 'true'")
 	}
 	return args
 }
@@ -500,7 +522,7 @@ var protoMaxRe = regexp.MustCompile(`server only supports protocol (\d+) or lowe
 //
 // Mỗi lần thử dùng một kết nối mới.
 func (r *Reader) startReplication(ctx context.Context, startLSN uint64) (*pgconn.PgConn, streamOpts, error) {
-	o := streamOpts{proto: 4, streaming: true, twoPhase: true}
+	o := streamOpts{proto: 4, streaming: true, twoPhase: true, messages: true}
 	for attempt := 0; attempt < 6; attempt++ {
 		conn, err := pgconn.ConnectConfig(ctx, r.replicationConfig())
 		if err != nil {
@@ -512,7 +534,7 @@ func (r *Reader) startReplication(ctx context.Context, startLSN uint64) (*pgconn
 		})
 		if err == nil {
 			slog.Info("pg reader bắt đầu stream", "slot", r.cfg.Slot, "start_lsn", pglogrepl.LSN(startLSN),
-				"proto_version", o.proto, "streaming", o.streaming, "two_phase", o.twoPhase)
+				"proto_version", o.proto, "streaming", o.streaming, "two_phase", o.twoPhase, "messages", o.messages)
 			return conn, o, nil
 		}
 		_ = conn.Close(context.Background())
@@ -540,6 +562,8 @@ func (r *Reader) startReplication(ctx context.Context, startLSN uint64) (*pgconn
 			next.twoPhase = false
 		case strings.Contains(msg, "unrecognized pgoutput option") && strings.Contains(msg, "streaming") && o.streaming:
 			next.streaming = false
+		case strings.Contains(msg, "unrecognized pgoutput option") && strings.Contains(msg, "messages") && o.messages:
+			next.messages = false
 		case o.twoPhase && (strings.Contains(msg, "two-phase") || strings.Contains(msg, "two_phase")):
 			next.twoPhase = false
 		default:

@@ -257,6 +257,23 @@ type MySQLSnapshotter struct {
 	// table là tên bảng ĐÍCH (đã qua TargetName). Khi nil: ghi MySQL như cũ.
 	FlushRows   func(ctx context.Context, table model.TableID, pkCol string, columnNames []string, rows []*model.RowChange, startPK, endPK int64) error
 	ClearTarget func(ctx context.Context, table model.TableID) error
+
+	// Chunks (tùy chọn) thay phần đọc source khi source không phải MySQL (PG: PGChunkSource).
+	// Khi nil: đọc MySQL như cũ (srcDB, Source).
+	Chunks ChunkSource
+}
+
+// ChunkSource là phần phụ thuộc engine của SOURCE khi snapshot một bảng: biên PK, keyset walk và đọc
+// một chunk kèm watermark (02 §5). Range-state, barrier, rendezvous, flush và plan là phần chung.
+type ChunkSource interface {
+	// BeforeRegister chạy trong barrier (router đã dừng, mọi Txn đã nhận đã commit ở target), trước khi
+	// đọc biên và đăng ký range của bảng.
+	BeforeRegister(ctx context.Context) error
+	Bounds(ctx context.Context, table model.TableID, pkCol string) (*TableBounds, error)
+	KeysetEnd(ctx context.Context, table model.TableID, pkCol string, start, max, rows int64) (int64, error)
+	// ReadChunk chuyển chunk qua "Đang đọc" (low), đọc rows của chunk và trả high watermark: khi
+	// stream đã xử lý hết high thì mọi Txn mà rows phản ánh đều đã đi qua range-state.
+	ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdx int, table model.TableID) ([]*model.RowChange, checkpoint.AppliedSet, error)
 }
 
 // NewMySQLSnapshotter tạo mới MySQLSnapshotter.
@@ -366,9 +383,20 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		if s.LoadPlan != nil {
 			plan, resumed = s.LoadPlan(table)
 		}
+		if s.Chunks != nil {
+			if err := s.Chunks.BeforeRegister(ctx); err != nil {
+				return err
+			}
+		}
 		if !resumed {
 			// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
-			bounds, err := GetTableBounds(ctx, srcDB, table, pkCol)
+			var bounds *TableBounds
+			var err error
+			if s.Chunks != nil {
+				bounds, err = s.Chunks.Bounds(ctx, table, pkCol)
+			} else {
+				bounds, err = GetTableBounds(ctx, srcDB, table, pkCol)
+			}
 			if err != nil {
 				return err
 			}
@@ -449,7 +477,12 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			return ctx.Err()
 		default:
 		}
-		end, err := keysetEnd(ctx, srcDB, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+		var end int64
+		if s.Chunks != nil {
+			end, err = s.Chunks.KeysetEnd(ctx, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+		} else {
+			end, err = keysetEnd(ctx, srcDB, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+		}
 		if err != nil {
 			return fmt.Errorf("keyset walk %s from %d: %w", table, next, err)
 		}
@@ -462,7 +495,13 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		// Watermark (RS-2): low → WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high, cùng server.
 		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
 			colsStr, quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol))
-		rows, chunkHigh, err := s.readChunkWatermarked(ctx, src, chunk, query, columnNames, pkIdx, table)
+		var rows []*model.RowChange
+		var chunkHigh checkpoint.AppliedSet
+		if s.Chunks != nil {
+			rows, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdx, table)
+		} else {
+			rows, chunkHigh, err = s.readChunkWatermarked(ctx, src, chunk, query, columnNames, pkIdx, table)
+		}
 		if err != nil {
 			return err
 		}

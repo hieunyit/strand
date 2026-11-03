@@ -221,6 +221,9 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 			if ev.Pos.Engine == model.EnginePG && a.currentTxn.SourceTS == 0 && !ev.Timestamp.IsZero() {
 				a.currentTxn.SourceTS = ev.Timestamp.Unix()
 			}
+			if ev.Pos.Engine == model.EnginePG && ev.XID != 0 {
+				a.currentTxn.XID = ev.XID // xid top-level: snapshot PG xét visibility theo nó
+			}
 		case q == "COMMIT":
 			if a.inTxn {
 				return a.finishTxn()

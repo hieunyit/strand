@@ -30,6 +30,22 @@ type stateFile struct {
 	// VerifyPending: sau seed / --start-at, pipeline chưa được chuyển sang synced cho tới khi
 	// verify sau seed báo 0 lệch (02 §9). Giữ qua restart.
 	VerifyPending bool `json:"post_seed_verify_pending,omitempty"`
+	// PGSlot: slot của source PG lấy từ seed.json (--start-at seed) khi cấu hình không đặt source.slot;
+	// các lần chạy sau dùng lại slot này.
+	PGSlot string `json:"pg_slot,omitempty"`
+}
+
+func (s *localState) PGSlot() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.PGSlot
+}
+
+func (s *localState) SetPGSlot(slot string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.PGSlot = slot
+	return s.flushLocked()
 }
 
 func (s *localState) VerifyPending() bool {
