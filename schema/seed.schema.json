@@ -30,7 +30,7 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["xtrabackup", "clone", "mydumper", "pgbackrest", "wal-g", "strand_export"],
+      "enum": ["xtrabackup", "clone", "mydumper", "pgbackrest", "wal-g", "walg", "strand_export", "strand-export"],
       "description": "Công cụ thực hiện seed/backup"
     },
     "tool_version": {

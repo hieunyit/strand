@@ -40,6 +40,9 @@ type Reader struct {
 	serverVersion   int
 	inRecovery      bool
 	consistentPoint uint64
+	snapshotName    string         // tên snapshot export (chỉ khi cfg.ExportSnapshot)
+	systemID        string         // systemid từ IDENTIFY_SYSTEM trên kết nối replication tạo slot
+	exportConn      *pgconn.PgConn // kết nối replication giữ snapshot export sống; nil sau ReleaseSnapshot/Close
 
 	mu           sync.Mutex
 	conn         *pgconn.PgConn
@@ -130,6 +133,11 @@ func New(cfg Config) (*Reader, error) {
 	info, found, err := r.inspectSlot(ctx, conn)
 	if err != nil {
 		return nil, err
+	}
+	if found && cfg.ExportSnapshot {
+		// Snapshot chỉ export được lúc tạo slot; slot có sẵn không cho vị trí khớp snapshot nào.
+		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+			fmt.Sprintf("replication slot %q đã tồn tại: ExportSnapshot cần tạo slot mới", cfg.Slot), nil)
 	}
 	if !found {
 		if !cfg.CreateSlot {
@@ -226,7 +234,9 @@ func (r *Reader) checkSlot(database string, info slotInfo) error {
 }
 
 // createSlot chạy CREATE_REPLICATION_SLOT … LOGICAL pgoutput, kèm FAILOVER khi cfg.Failover và server ≥ 17.
-// Không export snapshot: kết nối tạo slot đóng ngay nên snapshot export không dùng được.
+// Mặc định SNAPSHOT 'nothing' và đóng kết nối ngay. Với cfg.ExportSnapshot: SNAPSHOT 'export' và giữ
+// kết nối replication mở (snapshot chỉ sống khi kết nối chưa chạy lệnh khác / chưa đóng) tới
+// ReleaseSnapshot hoặc Close. Trước đó chạy IDENTIFY_SYSTEM trên cùng kết nối để lấy systemid.
 func (r *Reader) createSlot(ctx context.Context) error {
 	var opts []string
 	failover := false
@@ -246,36 +256,89 @@ func (r *Reader) createSlot(ctx context.Context) error {
 	}
 	var sql string
 	if r.serverVersion >= 150000 {
-		opts = append([]string{"SNAPSHOT 'nothing'"}, opts...)
+		snapOpt := "SNAPSHOT 'nothing'"
+		if r.cfg.ExportSnapshot {
+			snapOpt = "SNAPSHOT 'export'"
+		}
+		opts = append([]string{snapOpt}, opts...)
 		sql = fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL pgoutput (%s)", r.cfg.Slot, strings.Join(opts, ", "))
 	} else {
-		sql = fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL pgoutput NOEXPORT_SNAPSHOT", r.cfg.Slot)
+		snapOpt := "NOEXPORT_SNAPSHOT"
+		if r.cfg.ExportSnapshot {
+			snapOpt = "EXPORT_SNAPSHOT"
+		}
+		sql = fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL pgoutput %s", r.cfg.Slot, snapOpt)
 	}
 
 	conn, err := pgconn.ConnectConfig(ctx, r.replicationConfig())
 	if err != nil {
 		return fmt.Errorf("kết nối replication để tạo slot: %w", err)
 	}
-	defer func() { _ = conn.Close(context.Background()) }()
+
+	ident, err := pglogrepl.IdentifySystem(ctx, conn)
+	if err != nil {
+		_ = conn.Close(context.Background())
+		return fmt.Errorf("IDENTIFY_SYSTEM: %w", err)
+	}
+	r.systemID = ident.SystemID
 
 	res, err := pglogrepl.ParseCreateReplicationSlot(conn.Exec(ctx, sql))
 	if err != nil {
+		_ = conn.Close(context.Background())
 		return classifyErr(fmt.Errorf("tạo replication slot %q: %w", r.cfg.Slot, err))
 	}
 	lsn, err := pglogrepl.ParseLSN(res.ConsistentPoint)
 	if err != nil {
+		_ = conn.Close(context.Background())
 		return fmt.Errorf("parse consistent_point %q: %w", res.ConsistentPoint, err)
 	}
 	r.consistentPoint = uint64(lsn)
+	r.snapshotName = res.SnapshotName
 	r.pos.LSN = r.consistentPoint
+	if r.cfg.ExportSnapshot {
+		if res.SnapshotName == "" {
+			_ = conn.Close(context.Background())
+			return fmt.Errorf("CREATE_REPLICATION_SLOT %q không trả snapshot_name dù yêu cầu export", r.cfg.Slot)
+		}
+		r.exportConn = conn
+	} else {
+		_ = conn.Close(context.Background())
+	}
 	slog.Info("đã tạo replication slot", "slot", r.cfg.Slot, "consistent_point", res.ConsistentPoint,
-		"failover", failover, "standby", r.inRecovery)
+		"snapshot_name", res.SnapshotName, "failover", failover, "standby", r.inRecovery)
 	return nil
 }
 
 // ConsistentPoint trả consistent_point khi slot được tạo bởi New (0 nếu slot có sẵn).
 func (r *Reader) ConsistentPoint() model.Pos {
 	return model.Pos{Engine: model.EnginePG, LSN: r.consistentPoint}
+}
+
+// SnapshotName trả snapshot_name do CREATE_REPLICATION_SLOT export khi cfg.ExportSnapshot ("" nếu không).
+// Snapshot chỉ dùng được (SET TRANSACTION SNAPSHOT / pg_dump --snapshot) trước ReleaseSnapshot/Close.
+func (r *Reader) SnapshotName() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snapshotName
+}
+
+// SystemID trả systemid (system_identifier của cluster) đọc bằng IDENTIFY_SYSTEM khi reader tạo slot
+// ("" nếu slot có sẵn).
+func (r *Reader) SystemID() string { return r.systemID }
+
+// ReleaseSnapshot đóng kết nối replication đang giữ snapshot export (giải phóng xmin trên source).
+// Slot vẫn còn trên server. Gọi lại nhiều lần không sao.
+func (r *Reader) ReleaseSnapshot() error {
+	r.mu.Lock()
+	conn := r.exportConn
+	r.exportConn = nil
+	r.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return conn.Close(ctx)
 }
 
 // Position trả commit LSN của Txn cuối cùng reader đã xử lý (hoặc điểm bắt đầu).
@@ -336,6 +399,10 @@ func (r *Reader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-chan 
 	}
 	if r.started {
 		return nil, errors.New("pg reader đã Start; mỗi Reader chỉ Start một lần")
+	}
+	if r.cfg.Publication == "" {
+		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+			"PostgreSQL publication name is required", nil)
 	}
 
 	var applied checkpoint.AppliedSet
@@ -559,6 +626,7 @@ func (r *Reader) Close() error {
 	r.mu.Unlock()
 
 	r.wg.Wait()
+	_ = r.ReleaseSnapshot()
 
 	r.mu.Lock()
 	conn := r.conn
