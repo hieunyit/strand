@@ -39,6 +39,19 @@ type SourceConfig struct {
 	Database    string `yaml:"database,omitempty" json:"database,omitempty"`
 
 	ReadFrom string `yaml:"read_from" json:"read_from"` // primary | replica | standby (PG16+, chưa triển khai)
+
+	// Chỉ dùng khi kind = postgres (logical replication pgoutput, 02 §3, §8):
+	//   - slot: tên replication slot logic (a-z, 0-9, _), mặc định "strand_<name>" đã chuẩn hóa;
+	//   - publication: tên publication do DBA tạo trước, mặc định "strand_<name>";
+	//   - create_slot: tạo slot khi chưa có (mặc định false: slot thiếu → log_gap, exit 5);
+	//   - failover_slot: tạo slot FAILOVER (PG17+) khi create_slot;
+	//   - sequence_sync_interval: Δt_sync — chu kỳ đồng bộ last_value của sequence độc lập vào
+	//     _strand_promote khi sync (02 §8), mặc định 5s như `promote --sync-interval`.
+	Slot                 string `yaml:"slot,omitempty" json:"slot,omitempty"`
+	Publication          string `yaml:"publication,omitempty" json:"publication,omitempty"`
+	CreateSlot           bool   `yaml:"create_slot,omitempty" json:"create_slot,omitempty"`
+	FailoverSlot         bool   `yaml:"failover_slot,omitempty" json:"failover_slot,omitempty"`
+	SequenceSyncInterval string `yaml:"sequence_sync_interval,omitempty" json:"sequence_sync_interval,omitempty"`
 }
 
 type TargetConfig struct {

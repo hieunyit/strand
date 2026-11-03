@@ -250,6 +250,13 @@ type MySQLSnapshotter struct {
 
 	// Pace (tùy chọn) được gọi giữa các chunk; governor dùng để giãn khoảng cách chunk.
 	Pace func(ctx context.Context) error
+
+	// FlushRows / ClearTarget (tùy chọn) thay phần ghi target khi target không phải MySQL
+	// (MySQL→PG). FlushRows phải thay nguyên range [startPK, endPK] của bảng đích bằng rows trong
+	// MỘT transaction (RS-1) và tự retry lỗi tạm thời; ClearTarget xóa mọi row của bảng đích.
+	// table là tên bảng ĐÍCH (đã qua TargetName). Khi nil: ghi MySQL như cũ.
+	FlushRows   func(ctx context.Context, table model.TableID, pkCol string, columnNames []string, rows []*model.RowChange, startPK, endPK int64) error
+	ClearTarget func(ctx context.Context, table model.TableID) error
 }
 
 // NewMySQLSnapshotter tạo mới MySQLSnapshotter.
@@ -306,6 +313,13 @@ func (s *MySQLSnapshotter) FlushChunk(
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
+	if s.FlushRows != nil {
+		if err := s.FlushRows(ctx, s.target(table), pkCol, columnNames, mergedRows, chunk.StartPK, chunk.EndPK); err != nil {
+			return err
+		}
+		s.Manager.MarkDoneLocked(chunk)
+		return nil
+	}
 	for attempt := 1; ; attempt++ {
 		err := flushRowsToTarget(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, chunk.StartPK, chunk.EndPK)
 		if err == nil {
@@ -367,7 +381,11 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			// Snapshot mới của bảng bắt đầu từ target rỗng: row cũ còn sót (lần chạy trước,
 			// hoặc dữ liệu có sẵn khi snapshot add) có thể giữ giá trị unique key mà row mới
 			// cần, và không bao giờ được dọn nếu range của nó bị DELETE ở source.
-			if _, err := dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(s.target(table)))); err != nil {
+			if s.ClearTarget != nil {
+				if err := s.ClearTarget(ctx, s.target(table)); err != nil {
+					return err
+				}
+			} else if _, err := dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(s.target(table)))); err != nil {
 				return err
 			}
 			if s.SavePlan != nil {

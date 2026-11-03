@@ -128,11 +128,18 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		if err != nil {
 			return err
 		}
-		metas, err := loadSourceTables(ctx, p.src, one)
+		metas, err := p.loadTables(ctx, one)
 		if err != nil {
 			return err
 		}
 		m := metas[id]
+		if p.conv != nil {
+			if m == nil {
+				p.conv.forget(id)
+			} else if err := p.conv.load(ctx, p.src, id); err != nil {
+				return err
+			}
+		}
 		p.tablesMu.Lock()
 		if m == nil {
 			delete(p.tables, id) // bảng đã bị DROP/RENAME đi ở source
@@ -164,7 +171,15 @@ func (p *Pipeline) schemaDiff(ctx context.Context, id model.TableID) (string, er
 		return "", fmt.Errorf("read source schema of %s: %w", id, err)
 	}
 	tid := p.filter.Target(id)
-	dstCols, dstOK, err := tableColumns(ctx, p.dst, tid)
+	readDst := tableColumns
+	if p.dstEngine == model.EnginePG {
+		// MySQL→PG: kiểu cột khác nhau theo typemap, chỉ so tên cột theo thứ tự.
+		readDst = pgColumns
+		for i, c := range srcCols {
+			srcCols[i], _, _ = strings.Cut(c, " ")
+		}
+	}
+	dstCols, dstOK, err := readDst(ctx, p.dst, tid)
 	if err != nil {
 		return "", fmt.Errorf("read target schema of %s: %w", tid, err)
 	}

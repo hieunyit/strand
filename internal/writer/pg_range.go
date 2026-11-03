@@ -1,0 +1,99 @@
+package writer
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"strand/internal/model"
+)
+
+// spec: 02 §5 (flush chunk snapshot: range ở target đúng bằng ảnh đã merge, trong một transaction)
+
+// IsPGRetryable: lỗi tạm thời của PostgreSQL mà cả transaction đã rollback, nên chạy lại an toàn
+// (40001 serialization_failure, 40P01 deadlock_detected, 55P03 lock_not_available).
+func IsPGRetryable(err error) bool {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		switch pe.Code {
+		case "40001", "40P01", "55P03":
+			return true
+		}
+	}
+	return false
+}
+
+// IsPGUniqueViolation: vi phạm UNIQUE (23505) hoặc ràng buộc loại trừ (23P01) ở target PG.
+func IsPGUniqueViolation(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && (pe.Code == "23505" || pe.Code == "23P01")
+}
+
+// PGReplaceRange thay nguyên range [startPK, endPK] (PK một cột số nguyên) của bảng đích PG bằng
+// rows trong MỘT transaction: DELETE range rồi INSERT … ON CONFLICT (pk) DO UPDATE theo khối.
+// Target không bao giờ hiển thị trạng thái lùi của range (RS-1). Lỗi tạm thời được retry.
+// db mở bằng driver pgx stdlib. Giá trị trong rows phải đã ở dạng PG (typemap đã chuyển).
+func PGReplaceRange(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
+	rows []*model.RowChange, startPK, endPK int64) error {
+	var err error
+	for attempt := 1; attempt <= 20; attempt++ {
+		err = pgReplaceRangeOnce(ctx, db, table, pkCol, columnNames, rows, startPK, endPK)
+		if err == nil || !IsPGRetryable(err) || ctx.Err() != nil {
+			return err
+		}
+		time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
+	}
+	return err
+}
+
+func pgReplaceRangeOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
+	rows []*model.RowChange, startPK, endPK int64) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := fmt.Sprintf("DELETE FROM %s WHERE %s >= $1 AND %s <= $2", quotePGTable(table), quotePG(pkCol), quotePG(pkCol))
+	if _, err := tx.ExecContext(ctx, q, startPK, endPK); err != nil {
+		return fmt.Errorf("clear chunk range on target: %w", err)
+	}
+	if len(rows) > 0 && len(columnNames) > 0 {
+		per := pgMaxParams / len(columnNames)
+		if per > 1000 {
+			per = 1000
+		}
+		for i := 0; i < len(rows); i += per {
+			end := i + per
+			if end > len(rows) {
+				end = len(rows)
+			}
+			vals := make([][]any, 0, end-i)
+			for _, r := range rows[i:end] {
+				m := make(map[string]any, len(r.Cols))
+				for _, c := range r.Cols {
+					m[c.Name] = c.Value
+				}
+				v := make([]any, len(columnNames))
+				for j, c := range columnNames {
+					v[j] = m[c]
+				}
+				vals = append(vals, v)
+			}
+			uq, args := buildUpsert(table, columnNames, []string{pkCol}, vals)
+			if _, err := tx.ExecContext(ctx, uq, args...); err != nil {
+				return fmt.Errorf("upsert flush batch into %s: %w", table, err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// PGClearTable xóa mọi row của bảng đích PG (bắt đầu snapshot mới của bảng, 02 §5).
+func PGClearTable(ctx context.Context, db *sql.DB, table model.TableID) error {
+	_, err := db.ExecContext(ctx, "DELETE FROM "+quotePGTable(table))
+	return err
+}

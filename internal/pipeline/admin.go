@@ -9,6 +9,7 @@ import (
 	"strand/internal/admin"
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
+	"strand/internal/model"
 )
 
 // adminHandler phục vụ admin socket (02 §10) bằng trạng thái thật của pipeline.
@@ -86,14 +87,17 @@ func (h *adminHandler) CheckpointShow(ctx context.Context) (*admin.CheckpointRes
 	p := h.p
 	var applied string
 	var updated time.Time
-	err := p.dst.QueryRowContext(ctx,
-		"SELECT applied, updated_at FROM _strand_checkpoint WHERE pipeline_id = ?", p.id).Scan(&applied, &updated)
+	q := "SELECT applied, updated_at FROM _strand_checkpoint WHERE pipeline_id = ?"
+	if p.dstEngine == model.EnginePG {
+		q = "SELECT applied, updated_at FROM _strand_checkpoint WHERE pipeline_id = $1"
+	}
+	err := p.dst.QueryRowContext(ctx, q, p.id).Scan(&applied, &updated)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
 	all, err := p.store.LoadApplied(ctx)
 	if err == nil {
-		applied = all.(*checkpoint.MySQLAppliedSet).String()
+		applied = all.(fmt.Stringer).String()
 	}
 	return &admin.CheckpointResult{PipelineID: p.id, Epoch: p.epoch, Applied: applied, UpdatedAt: updated}, nil
 }
@@ -102,6 +106,9 @@ func (h *adminHandler) CheckpointShow(ctx context.Context) (*admin.CheckpointRes
 // supervisor khởi động lại và stream lại từ vị trí mới (02 §10).
 func (h *adminHandler) CheckpointRewind(ctx context.Context, to string) (*admin.CheckpointResult, error) {
 	p := h.p
+	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
+		return nil, fmt.Errorf("checkpoint rewind is supported for MySQL → MySQL pipelines only")
+	}
 	set, err := checkpoint.ParseMySQLGTIDSet(to)
 	if err != nil || set.String() == "" {
 		return nil, fmt.Errorf("invalid GTID set %q: %v", to, err)

@@ -46,6 +46,7 @@ func TestMain(m *testing.M) {
 		panic("build strand: " + err.Error())
 	}
 	code := m.Run()
+	cleanupTracked()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -223,6 +224,11 @@ type strandCfg struct {
 	BreakerLag     string // governor.breaker.replica_lag.max
 	MetricsAddr    string // observability.metrics, ví dụ 127.0.0.1:19464
 	Overflow       string // resources.spool.overflow (s3://bucket/prefix)
+	// SourceKind / TargetKind: mysql (mặc định) | postgres. SourceExtra: các khóa thêm trong source
+	// (dạng YAML flow, ví dụ ", slot: s1, publication: p1").
+	SourceKind  string
+	TargetKind  string
+	SourceExtra string
 }
 
 func (c *strandCfg) write(t *testing.T) string {
@@ -258,6 +264,12 @@ func (c *strandCfg) write(t *testing.T) string {
 	if c.BreakerLag == "" {
 		c.BreakerLag = "1h"
 	}
+	if c.SourceKind == "" {
+		c.SourceKind = "mysql"
+	}
+	if c.TargetKind == "" {
+		c.TargetKind = "mysql"
+	}
 	q := func(xs []string) string {
 		var out []string
 		for _, x := range xs {
@@ -267,9 +279,9 @@ func (c *strandCfg) write(t *testing.T) string {
 	}
 	yaml := fmt.Sprintf(`version: 1
 name: %s
-source: { kind: mysql, dsn: %q, server_id: %d, read_from: primary }
+source: { kind: %s, dsn: %q, server_id: %d, read_from: primary%s }
 target:
-  kind: mysql
+  kind: %s
   dsn: %q
   write_mode: upsert
   commit_order: %s
@@ -286,7 +298,7 @@ resources:
 governor: { algorithm: onoff, tick: 1s, lag_slo: %s, breaker: { strand_query_p99: { max_ratio: 1000 }, replica_lag: { max: %s } } }
 verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
-`, c.Name, c.SourceDSN, 40000+rand.Intn(20000), c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
+`, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
 		c.Bootstrap, filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {

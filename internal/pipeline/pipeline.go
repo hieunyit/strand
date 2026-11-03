@@ -1,6 +1,7 @@
-// Package pipeline nối các tầng của Strand thành một pipeline MySQL→MySQL chạy được
-// (design §1, spec 02 §3–§6): Reader → Txn Assembler → Router (lọc, rename, bỏ Txn đã
-// apply, range-state của snapshot) → Scheduler → Writer pool → Coordinator (compaction).
+// Package pipeline nối các tầng của Strand thành một pipeline chạy được (design §1, spec 02
+// §3–§6): Reader → Txn Assembler → Router (lọc, rename, bỏ Txn đã apply, range-state của
+// snapshot) → Scheduler → Writer pool → Coordinator (compaction). Cặp engine hỗ trợ:
+// MySQL→MySQL, MySQL→PostgreSQL, PostgreSQL→PostgreSQL (phần riêng của PG ở engine.go).
 package pipeline
 
 import (
@@ -33,7 +34,9 @@ import (
 	"strand/internal/governor"
 	"strand/internal/metrics"
 	"strand/internal/model"
+	"strand/internal/reader"
 	mysqlreader "strand/internal/reader/mysql"
+	pgreader "strand/internal/reader/pg"
 	"strand/internal/sched"
 	"strand/internal/seed"
 	"strand/internal/snapshot"
@@ -44,7 +47,7 @@ import (
 // Options là tham số chạy một pipeline.
 type Options struct {
 	Config       *config.Config
-	StartAt      string // "" | "seed" | GTID set (chế độ C)
+	StartAt      string // "" | "seed" | GTID set (chế độ C, source MySQL) | LSN X/Y (source PG)
 	SeedManifest string // đường dẫn seed.json khi StartAt = "seed"
 	Logger       *slog.Logger
 	// ShutdownTimeout: thời gian tối đa chờ writer xong khi nhận SIGTERM (03 §4).
@@ -62,7 +65,9 @@ type Pipeline struct {
 	src, dst *sql.DB
 	srcDSN   string
 
-	store   *checkpoint.MySQLStore
+	srcEngine, dstEngine model.Engine
+
+	store   checkpoint.CheckpointStore
 	release func() error
 	epoch   int64
 
@@ -70,13 +75,21 @@ type Pipeline struct {
 	tablesMu sync.RWMutex
 	tables   map[model.TableID]*tableMeta
 	state    *localState
-	applied0 *checkpoint.MySQLAppliedSet // tập đã apply lúc khởi động (CP-2)
+	applied0 checkpoint.AppliedSet // tập đã apply lúc khởi động (CP-2)
 
 	sched   *sched.Scheduler
 	comp    *checkpoint.Compactor
 	orderer *writer.CommitOrderer
-	writers []*writer.MySQLWriter
+	writers []batchWriter
 	snap    *snapshot.MySQLSnapshotter
+
+	// Source PG: reader (để báo lwd bền vững), bộ theo dõi LSN cho Vouch, lwd bền vững ở strict.
+	pgReader      *pgreader.Reader
+	lsns          *lsnTracker
+	strictDurable atomic.Uint64
+	reorderRetry  atomic.Int64 // số batch phải apply lại theo seq vì unique_violation (applyInSeqOrder)
+	// MySQL→PG: chuyển giá trị theo typemap (nil = giá trị đi thẳng).
+	conv *valueConverter
 
 	metrics *metrics.Metrics
 	health  *metrics.HealthChecker
@@ -84,7 +97,7 @@ type Pipeline struct {
 	routeMu  sync.Mutex // giữ trong lúc route một Txn; barrier của snapshot lấy khóa này
 	seenMu   sync.Mutex
 	seenCond *sync.Cond
-	seen     *checkpoint.MySQLAppliedSet // applied0 ∪ mọi Txn router đã xử lý
+	seen     checkpoint.AppliedSet // applied0 ∪ mọi Txn router đã xử lý (chỉ source MySQL)
 
 	admitted      atomic.Uint64 // seq lớn nhất đã Admit
 	appliedTxns   atomic.Int64
@@ -99,8 +112,8 @@ type Pipeline struct {
 	retentionRisk atomic.Bool
 	verifying     atomic.Bool // chờ verify sau seed (02 §9)
 	strictMu      sync.Mutex
-	strictApplied *checkpoint.MySQLAppliedSet // row toàn cục ở chế độ strict (02 §4 quy tắc 5)
-	readyCh       <-chan *model.Txn           // nguồn Txn cho worker (strict: đã sắp theo seq)
+	strictApplied checkpoint.AppliedSet // row toàn cục ở chế độ strict (02 §4 quy tắc 5)
+	readyCh       <-chan *model.Txn     // nguồn Txn cho worker (strict: đã sắp theo seq)
 	prefetchDir   string
 	prefetch      *spool.PebbleSpool
 	gov           *governor.OnoffGovernor
@@ -126,16 +139,30 @@ func Run(ctx context.Context, opts Options) error {
 		opts.ShutdownTimeout = 100 * time.Second
 	}
 	cfg := opts.Config
-	if !strings.EqualFold(cfg.Source.Kind, "mysql") || !strings.EqualFold(cfg.Target.Kind, "mysql") {
+	srcEngine, dstEngine := engineOf(cfg.Source.Kind), engineOf(cfg.Target.Kind)
+	switch {
+	case srcEngine == model.EngineMySQL && dstEngine == model.EngineMySQL,
+		srcEngine == model.EngineMySQL && dstEngine == model.EnginePG,
+		srcEngine == model.EnginePG && dstEngine == model.EnginePG:
+	default:
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-			"this build supports MySQL → MySQL pipelines only (PostgreSQL is Phase 2)", nil)
+			fmt.Sprintf("unsupported pipeline %s → %s (supported: mysql→mysql, mysql→postgres, postgres→postgres)",
+				cfg.Source.Kind, cfg.Target.Kind), nil)
 	}
 	p := &Pipeline{
-		opts:   opts,
-		cfg:    cfg,
-		log:    opts.Logger.With("pipeline", cfg.Name),
-		id:     cfg.Name,
-		strict: !strings.EqualFold(cfg.Target.CommitOrder, "relaxed"),
+		opts:      opts,
+		cfg:       cfg,
+		log:       opts.Logger.With("pipeline", cfg.Name),
+		id:        cfg.Name,
+		strict:    !strings.EqualFold(cfg.Target.CommitOrder, "relaxed"),
+		srcEngine: srcEngine,
+		dstEngine: dstEngine,
+	}
+	if srcEngine == model.EnginePG {
+		p.lsns = &lsnTracker{}
+	}
+	if srcEngine == model.EngineMySQL && dstEngine == model.EnginePG {
+		p.conv = newValueConverter()
 	}
 	p.seenCond = sync.NewCond(&p.seenMu)
 	p.pauseCond = sync.NewCond(&p.pauseMu)
@@ -229,24 +256,43 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 
 	// --- Kết nối ---
 	p.srcDSN = p.cfg.Source.DSN
-	if p.src, err = sql.Open("mysql", p.srcDSN); err != nil {
+	srcDriver, srcSQLDSN := "mysql", p.srcDSN
+	switch {
+	case p.srcEngine == model.EnginePG:
+		srcDriver = "pgx"
+	case p.dstEngine == model.EnginePG:
+		if srcSQLDSN, err = mysqlSourceUTC(p.srcDSN); err != nil {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
+		}
+	}
+	if p.src, err = sql.Open(srcDriver, srcSQLDSN); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 	}
 	defer p.src.Close()
 	host, _ := os.Hostname()
 	p.instance = fmt.Sprintf("%s/%d/%d", host, os.Getpid(), time.Now().UnixNano())
-	dstDSN, err := targetDSN(p.cfg.Target.DSN, p.id, p.instance)
-	if err != nil {
-		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid target DSN: %v", err), err)
-	}
-	if p.dst, err = sql.Open("mysql", dstDSN); err != nil {
-		return err
+	if p.dstEngine == model.EnginePG {
+		if p.dst, err = openPGTarget(p.cfg.Target.DSN, pgAppName(p.id, p.instance)); err != nil {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid target DSN: %v", err), err)
+		}
+	} else {
+		dstDSN, err := targetDSN(p.cfg.Target.DSN, p.id, p.instance)
+		if err != nil {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid target DSN: %v", err), err)
+		}
+		if p.dst, err = sql.Open("mysql", dstDSN); err != nil {
+			return err
+		}
 	}
 	defer p.dst.Close()
 	p.dst.SetMaxOpenConns(64)
 
 	// --- Khóa pipeline, epoch (02 §4 quy tắc 1–2) ---
-	p.store = checkpoint.NewMySQLStore(p.dst, p.id, model.EngineMySQL)
+	if p.dstEngine == model.EnginePG {
+		p.store = checkpoint.NewPGStore(p.dst, p.id, p.srcEngine)
+	} else {
+		p.store = checkpoint.NewMySQLStore(p.dst, p.id, model.EngineMySQL)
+	}
 	if err := p.store.EnsureTables(ctx); err != nil {
 		return fmt.Errorf("ensure metadata tables: %w", err)
 	}
@@ -265,7 +311,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.log.Info("pipeline lock acquired")
 
 	// --- Metadata source ---
-	if p.tables, err = loadSourceTables(ctx, p.src, p.filter); err != nil {
+	if p.tables, err = p.loadTables(ctx, p.filter); err != nil {
 		return fmt.Errorf("load source schema: %w", err)
 	}
 	if len(p.tables) == 0 {
@@ -279,23 +325,39 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.state, err = openLocalState(p.cfg.Resources.Spool.Path, p.id); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 	}
+	if p.conv != nil {
+		for id := range p.tables {
+			if err := p.conv.load(ctx, p.src, id); err != nil {
+				return err
+			}
+		}
+	}
 
 	// --- Tập đã apply và điểm bắt đầu ---
 	loaded, err := p.store.LoadApplied(ctx)
 	if err != nil {
 		return fmt.Errorf("load applied set: %w", err)
 	}
-	applied := loaded.(*checkpoint.MySQLAppliedSet)
-	if applied, err = p.initialPosition(ctx, applied); err != nil {
-		return err
+	var applied checkpoint.AppliedSet
+	if p.srcEngine == model.EnginePG {
+		if applied, err = p.initialPositionPG(ctx, loaded); err != nil {
+			return err
+		}
+	} else {
+		ma, err := p.initialPosition(ctx, loaded.(*checkpoint.MySQLAppliedSet))
+		if err != nil {
+			return err
+		}
+		applied = ma
 	}
-	p.applied0 = applied.Clone().(*checkpoint.MySQLAppliedSet)
-	p.strictApplied = applied.Clone().(*checkpoint.MySQLAppliedSet)
-	p.seen = applied.Clone().(*checkpoint.MySQLAppliedSet)
+	p.applied0 = applied.Clone()
+	p.strictApplied = applied.Clone()
+	p.seen = applied.Clone()
+	p.strictDurable.Store(applied.Lwd().LSN)
 	// Spool prefetch của `seed apply` (02 §9): phủ phần log từ P mà source/archive có thể đã xóa.
 	p.prefetchDir = filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")
-	streamFrom := applied.Clone().(*checkpoint.MySQLAppliedSet)
-	if fi, err := os.Stat(p.prefetchDir); err == nil && fi.IsDir() {
+	streamFrom := applied.Clone()
+	if fi, err := os.Stat(p.prefetchDir); err == nil && fi.IsDir() && p.srcEngine == model.EngineMySQL {
 		var opts []spool.Option
 		bucket, prefix, berr := spool.BucketFromURI(p.cfg.Resources.Spool.Overflow)
 		if berr != nil {
@@ -329,8 +391,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		it.Close()
 		p.log.Info("prefetch spool found", "transactions", n)
 	}
-	if err := p.checkLogAvailable(ctx, streamFrom); err != nil {
-		return err
+	if p.srcEngine == model.EngineMySQL {
+		// Source PG: slot quyết định log còn đọc được (reader.Start trả log_gap khi slot đã vượt lwd).
+		if err := p.checkLogAvailable(ctx, streamFrom.(*checkpoint.MySQLAppliedSet)); err != nil {
+			return err
+		}
 	}
 
 	// Bảng không còn trong bộ lọc: quên trạng thái "đã snapshot" (thêm lại sau này phải snapshot lại,
@@ -350,6 +415,43 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].String() < pending[j].String() })
+	if p.srcEngine == model.EnginePG && len(pending) > 0 {
+		names := make([]string, len(pending))
+		for i, id := range pending {
+			names[i] = id.String()
+		}
+		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+			fmt.Sprintf("table(s) %s need a logical snapshot, which is not supported for a PostgreSQL source yet; "+
+				"copy them consistently and start a new pipeline with --start-at <LSN>", strings.Join(names, ", ")), nil)
+	}
+	if p.dstEngine == model.EnginePG {
+		// MySQL→PG: bảng có PK không phải một cột số nguyên chỉ được nhận khi RỖNG ở source tại thời
+		// điểm này (sau khi vị trí stream đã chốt): mọi row của nó sau đó đều đi qua stream, nên
+		// "snapshot" là xóa sạch bảng đích. Bảng còn dữ liệu thì từ chối như trước.
+		kept := pending[:0]
+		for _, id := range pending {
+			if p.tables[id].PKNumeric {
+				kept = append(kept, id)
+				continue
+			}
+			empty, err := p.emptyOnSource(ctx, id)
+			if err != nil {
+				return fmt.Errorf("check %s is empty: %w", id, err)
+			}
+			if !empty {
+				kept = append(kept, id)
+				continue
+			}
+			if err := writer.PGClearTable(ctx, p.dst, p.filter.Target(id)); err != nil {
+				return fmt.Errorf("clear target table of %s: %w", id, err)
+			}
+			if err := p.state.SetDone(id.String(), true); err != nil {
+				return err
+			}
+			p.log.Info("empty source table with a non-integer primary key joins the pipeline without snapshot", "table", id.String())
+		}
+		pending = kept
+	}
 	for _, id := range pending {
 		if !p.tables[id].PKNumeric {
 			return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected,
@@ -391,8 +493,14 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		nWorkers = 1
 	}
 	for i := 1; i <= nWorkers; i++ {
-		w := writer.NewMySQLWriter(p.dst, p.id, i, p.epoch)
-		w.SetStatementPipelining(true)
+		var w batchWriter
+		if p.dstEngine == model.EnginePG {
+			w = writer.NewPGWriter(p.dst, p.id, i, p.epoch)
+		} else {
+			mw := writer.NewMySQLWriter(p.dst, p.id, i, p.epoch)
+			mw.SetStatementPipelining(true)
+			w = mw
+		}
 		for id, m := range p.tables {
 			w.SetPrimaryKey(p.filter.Target(id), m.PK)
 		}
@@ -406,7 +514,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	ccfg := checkpoint.DefaultCompactorConfig(p.id, p.epoch)
 	ccfg.Interval = durationOr(p.cfg.Checkpoint.FlushEvery, 500*time.Millisecond)
-	p.comp = checkpoint.NewCompactor(p.dst, p.store, p.id, model.EngineMySQL, model.EngineMySQL, ccfg)
+	p.comp = checkpoint.NewCompactor(p.dst, p.store, p.id, p.srcEngine, p.dstEngine, ccfg)
+	if p.srcEngine == model.EnginePG && !p.strict {
+		// Relaxed: row delta chỉ chứa LSN tường minh; coordinator dời mốc của row toàn cục tới
+		// phần scheduler đã commit, để lwd (và slot) tiến (02 §4 quy tắc 4).
+		p.comp.SetVouch(p.vouchGlobal)
+	}
 	// Gộp row delta còn lại từ lần chạy trước vào row toàn cục TRƯỚC khi worker chạy.
 	// Worker cắt delta theo LastGlobal, nên LastGlobal chỉ được là row toàn cục đã commit,
 	// không bao giờ là "toàn cục ∪ delta" (nếu không, GTID chỉ có trong delta cũ bị cắt mất
@@ -436,6 +549,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.snap.TargetName = p.filter.Target
 	p.snap.LoadPlan = func(t model.TableID) (snapshot.SnapshotPlan, bool) { return p.state.Plan(t.String()) }
 	p.snap.SavePlan = func(t model.TableID, pl snapshot.SnapshotPlan) error { return p.state.SetPlan(t.String(), pl) }
+	if p.dstEngine == model.EnginePG {
+		p.snap.FlushRows = p.pgFlushRows
+		p.snap.ClearTarget = func(ctx context.Context, t model.TableID) error { return writer.PGClearTable(ctx, p.dst, t) }
+	}
 
 	// --- Reader + Assembler ---
 	keyMeta := func(id model.TableID) (assemble.KeyMeta, bool) {
@@ -449,9 +566,21 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := os.MkdirAll(spillDir, 0o750); err != nil {
 		return err
 	}
-	rd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID})
-	if err != nil {
-		return err
+	var rd reader.Reader
+	if p.srcEngine == model.EnginePG {
+		slot, pub := p.pgSlotNames()
+		prd, err := pgreader.New(pgreader.Config{DSN: p.srcDSN, Slot: slot, Publication: pub,
+			CreateSlot: p.cfg.Source.CreateSlot, Failover: p.cfg.Source.FailoverSlot})
+		if err != nil {
+			return err
+		}
+		p.pgReader, rd = prd, prd
+	} else {
+		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID})
+		if err != nil {
+			return err
+		}
+		rd = mrd
 	}
 	rctx, rcancel := context.WithCancel(ctx)
 	defer rcancel()
@@ -513,7 +642,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	for i, w := range p.writers {
 		workersWG.Add(1)
-		go func(i int, w *writer.MySQLWriter) {
+		go func(i int, w batchWriter) {
 			defer workersWG.Done()
 			p.worker(wctx, i+1, w)
 		}(i, w)
@@ -530,6 +659,14 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if strings.EqualFold(p.cfg.Verify.Delta, "on") {
 		p.touched.enable(true)
 	}
+	if p.pgReader != nil {
+		bgWG.Add(1)
+		go func() { defer bgWG.Done(); p.pgConfirmLoop(ctx) }()
+		if p.dstEngine == model.EnginePG {
+			stopSeq := p.startSequenceSync(ctx)
+			defer stopSeq()
+		}
+	}
 	if p.state.VerifyPending() {
 		p.verifying.Store(true)
 		bgWG.Add(1)
@@ -541,7 +678,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		go func() { defer bgWG.Done(); p.runSnapshots(ctx, pending) }()
 	}
 	p.log.Info("pipeline running", "workers", nWorkers, "strict", p.strict, "snapshot_pending", len(pending),
-		"start", applied.String())
+		"start", applied.(fmt.Stringer).String())
 
 	// --- Chờ dừng ---
 	select {
@@ -570,7 +707,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.comp.Compact(fctx); err != nil {
 		return fmt.Errorf("final checkpoint flush: %w", err)
 	}
-	p.log.Info("pipeline stopped cleanly")
+	p.log.Info("pipeline stopped cleanly", "applied_txns", p.appliedTxns.Load(), "reapplied_in_seq_order", p.reorderRetry.Load())
 	return nil
 }
 
@@ -578,6 +715,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 // giữ khóa pipeline, trước khi tăng epoch). Instance cũ bị đóng băng hoặc bị phân vùng có thể đang giữ transaction mở và
 // row lock trên target: epoch chặn nó commit, nhưng lock chỉ được nhả khi kết nối bị ngắt.
 func (p *Pipeline) killStaleInstances(ctx context.Context) {
+	if p.dstEngine == model.EnginePG {
+		p.killStalePG(ctx)
+		return
+	}
 	rows, err := p.dst.QueryContext(ctx, `
 		SELECT a.PROCESSLIST_ID FROM performance_schema.session_connect_attrs a
 		  JOIN performance_schema.session_connect_attrs b ON b.PROCESSLIST_ID = a.PROCESSLIST_ID
@@ -654,7 +795,7 @@ func (p *Pipeline) initialPosition(ctx context.Context, applied *checkpoint.MySQ
 				return nil, err
 			}
 		}
-		return set, p.writeGlobal(ctx, set)
+		return set, p.writeGlobal(ctx, set.String())
 	}
 	if !empty {
 		return applied, nil
@@ -685,11 +826,11 @@ func (p *Pipeline) initialPosition(ctx context.Context, applied *checkpoint.MySQ
 	if set.String() == "" {
 		return set, nil // source chưa có transaction nào
 	}
-	return set, p.writeGlobal(ctx, set)
+	return set, p.writeGlobal(ctx, set.String())
 }
 
-func (p *Pipeline) writeGlobal(ctx context.Context, set *checkpoint.MySQLAppliedSet) error {
-	err := p.store.WriteGlobal(ctx, checkpoint.Global{PipelineID: p.id, Epoch: p.epoch, Applied: set.String()})
+func (p *Pipeline) writeGlobal(ctx context.Context, applied string) error {
+	err := p.store.WriteGlobal(ctx, checkpoint.Global{PipelineID: p.id, Epoch: p.epoch, Applied: applied})
 	if err != nil {
 		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("write initial checkpoint: %v", err), err)
 	}
@@ -753,7 +894,10 @@ func (p *Pipeline) router(ctx context.Context, txns <-chan *model.Txn, asmErr <-
 
 func (p *Pipeline) markSeen(pos model.Pos) {
 	p.seenMu.Lock()
-	p.seen.Add(pos)
+	if p.srcEngine == model.EngineMySQL {
+		// Chỉ snapshot (source MySQL) đọc p.seen; với PG tập LSN tường minh sẽ phình mãi.
+		p.seen.Add(pos)
+	}
 	p.seenCond.Broadcast()
 	p.seenMu.Unlock()
 }
@@ -767,10 +911,12 @@ func (p *Pipeline) table(id model.TableID) *tableMeta {
 func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	pos := t.SourcePos
 	if t.TotalRows() == 0 && t.DDL == "" && pos.GTID == "" {
+		p.noteRouted(pos, 0) // Txn PG rỗng: không có gì để apply
 		return nil
 	}
 	if p.applied0.Contains(pos) {
 		p.markSeen(pos) // CP-2: đã apply trước đó
+		p.noteRouted(pos, 0)
 		return nil
 	}
 	if t.DDL != "" {
@@ -798,12 +944,19 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 				}
 			}
 		}
+		meta := p.table(rc.Table)
 		for _, part := range parts {
 			p.touched.add(rc.Table, part.Key)
 			if len(part.OldKey) > 0 {
 				p.touched.add(rc.Table, part.OldKey)
 			}
 			c := *part
+			if p.conv != nil {
+				// MySQL→PG: giá trị đổi sang dạng PG (02 §8) sau range-state (range dùng khóa gốc).
+				if err := p.conv.row(rc.Table, &c, meta.PK); err != nil {
+					return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, err.Error(), err)
+				}
+			}
 			c.Table = p.filter.Target(c.Table)
 			for i := range c.ForeignKeys {
 				c.ForeignKeys[i].ParentTable = p.filter.Target(c.ForeignKeys[i].ParentTable)
@@ -874,7 +1027,15 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		p.lastRoutedTS.Store(t.SourceTS)
 	}
 	p.markSeen(pos)
+	p.noteRouted(pos, out.Seq())
 	return nil
+}
+
+// noteRouted báo bộ theo dõi LSN (chỉ source PG) rằng router đã xử lý xong Txn pos.
+func (p *Pipeline) noteRouted(pos model.Pos, seq uint64) {
+	if p.lsns != nil && pos.Engine == model.EnginePG {
+		p.lsns.routed(pos.LSN, seq)
+	}
 }
 
 func (p *Pipeline) waitIfPaused(ctx context.Context) {
@@ -949,7 +1110,7 @@ func (p *Pipeline) drain(timeout time.Duration) bool {
 // Worker
 // ---------------------------------------------------------------------------
 
-func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
+func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 	lim := batchLimits{maxRows: int64(p.cfg.Target.Batch.MaxRows), strict: p.strict,
 		maxBytes: int64(parseBytes(p.cfg.Target.Batch.MaxBytes)), maxWait: durationOr(p.cfg.Target.Batch.MaxWait, 0)}
 	if lim.maxRows <= 0 {
@@ -958,7 +1119,10 @@ func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
 	if lim.maxBytes <= 0 {
 		lim.maxBytes = 4 << 20 // 4 MiB (02 §10)
 	}
-	mine := checkpoint.NewMySQLAppliedSet()
+	var mine checkpoint.AppliedSet = checkpoint.NewMySQLAppliedSet()
+	if p.srcEngine == model.EnginePG {
+		mine = checkpoint.NewPGAppliedSet(0)
+	}
 	var stash *model.Txn // strict: Txn lấy ra nhưng không liền seq với batch, xử lý ở lượt sau
 	for {
 		var first *model.Txn
@@ -980,28 +1144,28 @@ func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
 			b := batch
 			err := w.ApplyBatch(ctx, b, writer.DeltaRow{Global: func() (string, error) {
 				// Gọi sau khi đến lượt commit: mọi batch có seq nhỏ hơn đã commit vào row toàn cục.
-				p.strictMu.Lock()
-				defer p.strictMu.Unlock()
-				for _, t := range b {
-					p.strictApplied.Add(t.SourcePos)
-				}
-				return p.strictApplied.String(), nil
+				return p.strictGlobal(b), nil
 			}})
 			for attempt := 1; err != nil && isRetryable(err) && attempt < 20 && ctx.Err() == nil; attempt++ {
 				time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
 				err = w.ApplyBatch(ctx, b, writer.DeltaRow{Global: func() (string, error) {
-					p.strictMu.Lock()
-					defer p.strictMu.Unlock()
-					for _, t := range b {
-						p.strictApplied.Add(t.SourcePos)
-					}
-					return p.strictApplied.String(), nil
+					return p.strictGlobal(b), nil
 				}})
+			}
+			if err == nil && p.srcEngine == model.EnginePG {
+				// Row toàn cục vừa commit: lwd của nó là lwd bền vững cho slot.
+				p.strictMu.Lock()
+				p.strictDurable.Store(p.strictApplied.Lwd().LSN)
+				p.strictMu.Unlock()
 			}
 			if !p.finishBatch(ctx, id, batch, rows, err) {
 				return
 			}
 			continue
+		}
+		var prev checkpoint.AppliedSet
+		if p.srcEngine == model.EnginePG {
+			prev = mine.Clone() // để apply lại theo seq nếu batch vi phạm unique (applyInSeqOrder)
 		}
 		for _, t := range batch {
 			mine.Add(t.SourcePos)
@@ -1018,10 +1182,84 @@ func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
 				time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
 			}
 		}
+		if err != nil && p.srcEngine == model.EnginePG && writer.IsPGUniqueViolation(err) && ctx.Err() == nil {
+			// Batch đã rollback. Xem applyInSeqOrder: apply lại từng Txn theo seq.
+			p.reorderRetry.Add(1)
+			mine = prev
+			if !p.applyInSeqOrder(ctx, id, w, batch, mine) {
+				return
+			}
+			continue
+		}
 		if !p.finishBatch(ctx, id, batch, rows, err) {
 			return
 		}
 	}
+}
+
+// applyInSeqOrder (relaxed, source PG): pgoutput không gửi giá trị cũ của cột UNIQUE ngoài PK
+// (trừ REPLICA IDENTITY FULL), nên writeset không thấy xung đột kiểu "T1 giải phóng giá trị X,
+// T2 sau đó chiếm X" và có thể apply T2 trước T1 → unique_violation ở target. Lỗi này chỉ là
+// tạm thời: apply lại từng Txn theo seq, Txn nào vẫn vi phạm thì chờ mọi Txn có seq nhỏ hơn commit
+// xong (target khi đó đúng bằng trạng thái source ngay trước Txn) rồi thử lại. Ghi theo PK không bao
+// giờ bị ảnh hưởng (writeset theo PK vẫn đúng), vi phạm unique luôn là lỗi chứ không im lặng, nên
+// thứ tự apply khác không thể cho trạng thái cuối khác. Trả false nếu worker phải dừng.
+func (p *Pipeline) applyInSeqOrder(ctx context.Context, id int, w batchWriter, batch []*model.Txn, mine checkpoint.AppliedSet) bool {
+	ordered := append([]*model.Txn(nil), batch...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Seq() < ordered[j].Seq() })
+	for _, t := range ordered {
+		one := []*model.Txn{t}
+		var err error
+	retry:
+		for attempt := 1; ; attempt++ {
+			m := mine.Clone()
+			m.Add(t.SourcePos)
+			var delta string
+			if delta, err = p.deltaFor(ctx, m); err == nil {
+				if err = w.ApplyBatch(ctx, one, writer.DeltaRow{Applied: delta}); err == nil {
+					mine.Add(t.SourcePos)
+					break
+				}
+			}
+			if attempt >= 100 || ctx.Err() != nil {
+				break
+			}
+			switch {
+			case writer.IsPGUniqueViolation(err):
+				p.waitLwd(ctx, t.Seq()-1, 2*time.Second)
+			case isRetryable(err):
+				time.Sleep(time.Duration(min(attempt, 20)*min(attempt, 20)) * 5 * time.Millisecond)
+			default:
+				break retry
+			}
+		}
+		if !p.finishBatch(ctx, id, one, t.TotalRows(), err) {
+			return false
+		}
+	}
+	return true
+}
+
+// waitLwd chờ tới khi mọi seq ≤ seq đã commit ở target (hoặc hết timeout / pipeline dừng).
+func (p *Pipeline) waitLwd(ctx context.Context, seq uint64, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for p.sched.Lwd() < seq && time.Now().Before(deadline) && ctx.Err() == nil && p.failed() == nil {
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// strictGlobal thêm batch b vào row toàn cục của strict và trả chuỗi applied mới. Source PG: mọi Txn
+// có seq ≤ seq cuối của b đã commit hoặc commit cùng transaction này, nên mốc được xác nhận tới đó.
+func (p *Pipeline) strictGlobal(b []*model.Txn) string {
+	p.strictMu.Lock()
+	defer p.strictMu.Unlock()
+	for _, t := range b {
+		p.strictApplied.Add(t.SourcePos)
+	}
+	if s, ok := p.strictApplied.(*checkpoint.PGAppliedSet); ok && len(b) > 0 {
+		s.Vouch(p.lsns.point(b[len(b)-1].Seq()), nil)
+	}
+	return p.strictApplied.(fmt.Stringer).String()
 }
 
 // finishBatch báo kết quả batch cho scheduler; false nếu worker phải dừng.
@@ -1031,6 +1269,19 @@ func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, 
 			p.sched.Done(t.Seq(), err)
 		}
 		if ctx.Err() == nil {
+			var te *writer.ToastRowMissingError
+			if errors.As(err, &te) {
+				// 02 §8: partial UPDATE (TOAST) mà row không có ở target. Không dựng lại được row nên
+				// pipeline dừng với verify_mismatch (exit 5) và chỉ ra range cần verify/sửa.
+				src := te.Table
+				if s, ok := p.sourceOf(te.Table); ok {
+					src = s
+				}
+				p.metrics.VerifyMismatchTotal.WithLabelValues(p.id, src.String()).Inc()
+				p.log.Error("toast row missing at target: verify and repair this key, then restart",
+					"code", exitcode.ErrVerifyMismatch, "table", src.String(), "key", fmt.Sprint(te.Key),
+					"hint", fmt.Sprintf("strand verify --mode full --table %s --repair fix", src))
+			}
 			p.fail(fmt.Errorf("worker %d: %w", id, err))
 		}
 		return false
@@ -1054,14 +1305,12 @@ func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, 
 
 // deltaFor cắt khỏi tập của worker phần đã có trong row toàn cục (design §1, bước 3 của
 // compaction) và bảo đảm row delta ≤ 64 KB (CP-4).
-func (p *Pipeline) deltaFor(ctx context.Context, mine *checkpoint.MySQLAppliedSet) (string, error) {
+func (p *Pipeline) deltaFor(ctx context.Context, mine checkpoint.AppliedSet) (string, error) {
 	trim := func() {
-		if g, ok := p.comp.LastGlobal().(*checkpoint.MySQLAppliedSet); ok && g != nil {
-			mine.Subtract(g)
-		}
+		checkpoint.SubtractApplied(mine, p.comp.LastGlobal())
 	}
 	trim()
-	s := mine.String()
+	s := mine.(fmt.Stringer).String()
 	if len(s) <= checkpoint.MaxDeltaBytes {
 		return s, nil
 	}
@@ -1069,7 +1318,7 @@ func (p *Pipeline) deltaFor(ctx context.Context, mine *checkpoint.MySQLAppliedSe
 		return "", fmt.Errorf("sync compaction: %w", err)
 	}
 	trim()
-	s = mine.String()
+	s = mine.(fmt.Stringer).String()
 	if len(s) > checkpoint.MaxDeltaBytes {
 		return "", checkpoint.ErrDeltaExceededLimit
 	}
@@ -1107,7 +1356,11 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 	defer stop()
 	p.seenMu.Lock()
 	defer p.seenMu.Unlock()
-	for !h.IsSubsetOf(p.seen) {
+	seen, ok := p.seen.(*checkpoint.MySQLAppliedSet)
+	if !ok {
+		return fmt.Errorf("snapshot rendezvous needs a MySQL source")
+	}
+	for !h.IsSubsetOf(seen) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -1215,6 +1468,9 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		return fmt.Errorf("table must be schema.table")
 	}
 	id := model.TableID{Schema: s, Table: t}
+	if p.srcEngine != model.EngineMySQL {
+		return fmt.Errorf("snapshot add is not supported for a PostgreSQL source yet")
+	}
 	if p.snap.Manager.IsRegistered(id) {
 		return fmt.Errorf("table %s is already being snapshotted", id)
 	}
@@ -1224,7 +1480,7 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		if err != nil {
 			return err
 		}
-		metas, err := loadSourceTables(ctx, p.src, one)
+		metas, err := p.loadTables(ctx, one)
 		if err != nil {
 			return err
 		}
@@ -1237,6 +1493,11 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	}
 	if !m.PKNumeric {
 		return fmt.Errorf("table %s: logical snapshot needs a single integer primary key", id)
+	}
+	if p.conv != nil {
+		if err := p.conv.load(ctx, p.src, id); err != nil {
+			return err
+		}
 	}
 	if err := p.state.SetDone(id.String(), false); err != nil {
 		return err
@@ -1423,6 +1684,9 @@ func (p *Pipeline) updateMetrics() {
 }
 
 func (p *Pipeline) caughtUpWithSource(ctx context.Context) bool {
+	if p.srcEngine != model.EngineMySQL {
+		return false
+	}
 	var executed string
 	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -1435,7 +1699,7 @@ func (p *Pipeline) caughtUpWithSource(ctx context.Context) bool {
 	}
 	p.seenMu.Lock()
 	defer p.seenMu.Unlock()
-	return set.IsSubsetOf(p.seen)
+	return set.IsSubsetOf(p.seen.(*checkpoint.MySQLAppliedSet))
 }
 
 // retentionHeadroom ước lượng số giây còn lại trước khi source xóa binlog mà reader chưa đọc.
@@ -1453,11 +1717,12 @@ func (p *Pipeline) retentionHeadroom(ctx context.Context) (float64, bool) {
 	return float64(expire) - time.Since(time.Unix(ts, 0)).Seconds(), true
 }
 
-// isRetryable: lỗi khóa của InnoDB (1213 deadlock, 1205 lock wait timeout).
+// isRetryable: lỗi khóa của InnoDB (1213 deadlock, 1205 lock wait timeout) hoặc lỗi tạm thời
+// của PG (deadlock, serialization failure): cả transaction đã rollback nên apply lại là an toàn.
 func isRetryable(err error) bool {
 	var me *drivermysql.MySQLError
 	if errors.As(err, &me) {
 		return me.Number == 1213 || me.Number == 1205
 	}
-	return false
+	return writer.IsPGRetryable(err)
 }

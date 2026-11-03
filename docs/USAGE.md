@@ -120,7 +120,7 @@ observability:
 | Khóa | Mặc định | Ý nghĩa |
 | --- | --- | --- |
 | `name` | bắt buộc | ID pipeline (khóa chống chạy trùng, checkpoint) |
-| `source.kind` / `target.kind` | bắt buộc | `mysql` (PG ở P2) |
+| `source.kind` / `target.kind` | bắt buộc | `mysql` hoặc `postgres`; cặp được hỗ trợ: MySQL→MySQL, MySQL→PG, PG→PG (xem "Pipeline PostgreSQL (P2)") |
 | `source.host` / `port` / `user` / `password` / `password_env` / `database` hoặc `source.dsn` | bắt buộc (một trong hai) | Source hoặc replica có `log_replica_updates=ON` |
 | `source.server_id` | tự sinh | Server ID khi đọc binlog; phải duy nhất trong cụm |
 | `target.host` ... hoặc `target.dsn` | bắt buộc (một trong hai) | `database` (hoặc schema trong DSN) chứa bảng `_strand_*` |
@@ -147,6 +147,21 @@ observability:
 | `observability.metrics` | tắt | Địa chỉ HTTP cho `/metrics` và `/healthz` |
 | `observability.admin_socket` | tắt | Unix socket (quyền 0700) cho `top`, `pause`, `throttle`, `snapshot add`, `checkpoint`, `verify --mode delta` |
 | `observability.log.level` / `format` | `info` / `json` | Mức và định dạng log |
+
+### Pipeline PostgreSQL (P2)
+
+| Khóa | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `source.slot` | `strand_<name>` (ký tự lạ → `_`) | Replication slot logic (pgoutput) mà Strand đọc |
+| `source.publication` | `strand_<name>` | Publication do DBA tạo trước (`CREATE PUBLICATION … WITH (publish = 'insert, update, delete')`; TRUNCATE chưa hỗ trợ) |
+| `source.create_slot` | `false` | Tạo slot khi chưa có; mặc định slot thiếu → `log_gap` (exit 5) |
+| `source.failover_slot` | `false` | PG17+: tạo slot `FAILOVER` khi `create_slot` |
+| `source.sequence_sync_interval` | 5s | Δt_sync: chu kỳ ghi `last_value` của sequence độc lập ở source vào `_strand_promote` khi sync (dùng làm gợi ý nếu promote không đọc được source); dùng cùng giá trị cho `promote --sync-interval` |
+
+- Source PG chưa có snapshot logic: pipeline mới bắt buộc `strand sync --start-at <LSN>`, với dữ liệu target đã khớp source tại LSN đó (thường là `consistent_point` khi tạo slot, ví dụ `SELECT lsn FROM pg_create_logical_replication_slot('s', 'pgoutput', false, true)` rồi sao chép dữ liệu nhất quán). `bootstrap.default: logical` với source PG bị từ chối (exit 3). Strand chỉ báo slot tiến tới lwd đã ghi bền vững trong `_strand_checkpoint`.
+- MySQL→PG: bảng đích tạo sẵn theo mapping của `typemap` (`strand validate`); giá trị được chuyển khi apply (DATETIME→timestamp, TIMESTAMP→timestamptz UTC, BIGINT UNSIGNED→numeric(20,0), JSON→jsonb…). Snapshot logic như MySQL→MySQL (PK một cột số nguyên); bảng có PK khác chỉ được nhận khi rỗng ở source lúc khởi động (sau đó đi qua stream).
+- Bảng PG có UNIQUE ngoài PK được apply tuần tự theo thứ tự commit (pgoutput không gửi giá trị unique cũ). Partial UPDATE (cột TOAST không đổi) mà row không có ở target → dừng `verify_mismatch` (exit 5), log chỉ ra bảng và khóa; chạy `strand verify --mode full --table … --repair fix` rồi khởi động lại.
+- Chỉ có ở MySQL→MySQL: verify tự động sau seed / `--start-at`, `verify --mode delta`, `checkpoint rewind`, governor `onoff` (source PG dùng `static`). Pipeline khác engine chạy `strand verify --mode full` sau khi setup (02 §8).
 
 ### Biến môi trường
 
@@ -249,7 +264,7 @@ Các lệnh dưới đây nói chuyện với `strand sync` đang chạy qua adm
 | `strand verify --mode sample --table app.t [--rate 0.01] [--repair report\|fix] -c p.yaml` | Lấy mẫu theo khoảng PK, so source và target; `fix` sửa row lệch |
 | `strand verify --mode delta -c p.yaml` | Verify các khóa CDC vừa chạm (qua socket); lệch thì exit 5 |
 
-`verify --mode full` (cây Merkle) thuộc P2 và hiện trả lỗi. Thay đổi `tables.include`/`exclude` cần khởi động lại: bảng mới được snapshot, bảng bị loại thôi đồng bộ.
+`verify --mode full` (cây Merkle, PK một cột số nguyên) so source và target, kể cả MySQL→PG và PG→PG. Thay đổi `tables.include`/`exclude` cần khởi động lại: bảng mới được snapshot, bảng bị loại thôi đồng bộ.
 
 ## 6. Promote và failover
 

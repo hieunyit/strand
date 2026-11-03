@@ -94,6 +94,11 @@ type Compactor struct {
 	doneCh   chan struct{}
 	stepHook func(step CompactionStep) error
 
+	// vouch (tùy chọn, source PG): coordinator — bên duy nhất biết luồng Txn — dời mốc base của
+	// tập toàn cục (PGAppliedSet.Vouch) ngay trước khi ghi. Khi đặt, compaction chạy cả khi không
+	// có row delta nào, miễn là vouch làm đổi tập toàn cục (để lwd tiến khi mọi worker rảnh).
+	vouch func(global AppliedSet)
+
 	lastGlobal  AppliedSet // tập toàn cục đã commit gần nhất (để worker cắt delta)
 	lastErr     error      // lỗi của chu kỳ nền gần nhất (nil nếu thành công)
 	lastSuccess time.Time  // thời điểm compaction nền thành công gần nhất
@@ -145,6 +150,14 @@ func (c *Compactor) SetStepHook(hook func(step CompactionStep) error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stepHook = hook
+}
+
+// SetVouch gán hàm xác nhận mốc của tập toàn cục (xem trường vouch). Hàm chỉ được khẳng định
+// những Txn đã commit ở target; nó chạy trong khóa của compactor, trước bước ghi row toàn cục.
+func (c *Compactor) SetVouch(fn func(global AppliedSet)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.vouch = fn
 }
 
 // Compact thực hiện một chu kỳ compaction: đọc row delta, gộp vào row toàn cục, ghi lại với điều kiện epoch, rồi cắt tỉa delta.
@@ -211,7 +224,7 @@ func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 			break
 		}
 	}
-	if !hasWork {
+	if !hasWork && c.vouch == nil {
 		return nil, nil
 	}
 
@@ -243,6 +256,14 @@ func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 			return nil, fmt.Errorf("failed to parse worker delta: %w", err)
 		}
 		globalSet.Merge(workerSet)
+	}
+
+	if c.vouch != nil {
+		before := globalSet.Clone()
+		c.vouch(globalSet)
+		if !hasWork && globalSet.Equal(before) {
+			return nil, nil // không có delta, mốc không đổi: không cần ghi
+		}
 	}
 
 	if c.stepHook != nil {
@@ -484,6 +505,10 @@ func (c *Compactor) RecordWorkerDelta(ctx context.Context, tx *sql.Tx, workerID 
 	}
 	return nil
 }
+
+// SubtractApplied loại khỏi set mọi vị trí đã có trong global (cùng engine; khác engine hoặc
+// global nil thì không làm gì). Worker dùng để thu nhỏ row delta sau compaction.
+func SubtractApplied(set, global AppliedSet) { subtractApplied(set, global) }
 
 // subtractApplied loại khỏi set mọi vị trí đã có trong global.
 func subtractApplied(set, global AppliedSet) {

@@ -217,6 +217,10 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		case q == "BEGIN":
 			a.ensureTxnStarted(ev.Pos)
 			a.sawBegin = true
+			// Source PG không có event GTID: thời điểm commit đi kèm BEGIN (dùng để tính lag).
+			if ev.Pos.Engine == model.EnginePG && a.currentTxn.SourceTS == 0 && !ev.Timestamp.IsZero() {
+				a.currentTxn.SourceTS = ev.Timestamp.Unix()
+			}
 		case q == "COMMIT":
 			if a.inTxn {
 				return a.finishTxn()

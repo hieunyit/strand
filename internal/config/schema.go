@@ -42,7 +42,12 @@ const JSONSchema = `{
         "password_env": { "type": "string", "description": "Tên biến môi trường chứa mật khẩu" },
         "database": { "type": "string" },
         "server_id": { "type": "integer" },
-        "read_from": { "type": "string", "enum": ["primary", "replica", "standby"], "description": "standby: decode trên standby PG16+ (chưa triển khai, validate cảnh báo)" }
+        "read_from": { "type": "string", "enum": ["primary", "replica", "standby"], "description": "standby: decode trên standby PG16+ (chưa triển khai, validate cảnh báo)" },
+        "slot": { "type": "string", "description": "PG: tên replication slot logic (mặc định strand_<name>)" },
+        "publication": { "type": "string", "description": "PG: tên publication (mặc định strand_<name>)" },
+        "create_slot": { "type": "boolean", "description": "PG: tạo slot khi chưa có (mặc định false)" },
+        "failover_slot": { "type": "boolean", "description": "PG17+: tạo slot FAILOVER khi create_slot" },
+        "sequence_sync_interval": { "type": "string", "description": "PG: Δt_sync đồng bộ last_value sequence độc lập khi sync (mặc định 5s)" }
       }
     },
     "target": {

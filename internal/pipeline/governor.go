@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"strand/internal/governor"
+	"strand/internal/model"
 )
 
 // Governor (02 §7, P1-16): onoff (mặc định ở P1) hoặc static; breaker theo tín hiệu đọc thẳng
@@ -26,8 +27,14 @@ func (p *Pipeline) setupGovernor() error {
 	if algo == "" {
 		algo = "onoff"
 	}
-	p.govAlgo = algo
 	p.govTick = durationOr(p.cfg.Governor.Tick, time.Second)
+	if algo != "static" && p.srcEngine != model.EngineMySQL {
+		// Tín hiệu onoff đọc từ MySQL, và governor chỉ điều tiết snapshot logic — thứ source PG
+		// chưa có: dùng static.
+		p.log.Warn("governor onoff reads MySQL signals; using static for a PostgreSQL source")
+		algo = "static"
+	}
+	p.govAlgo = algo
 	soft := float64(p.cfg.Resources.Source.IOPS.Soft)
 	if soft <= 0 {
 		soft = 600

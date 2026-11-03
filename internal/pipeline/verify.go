@@ -165,6 +165,16 @@ func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[mode
 // postSeedVerify (02 §9): sau seed / --start-at, chỉ chuyển sang synced khi checksum ngẫu nhiên
 // ~1% range PK và verify mọi range xuất hiện trong cửa sổ CDC đầu tiên đều 0 lệch.
 func (p *Pipeline) postSeedVerify(ctx context.Context) {
+	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
+		// LiveVerifier chỉ so MySQL→MySQL. Cặp khác engine bắt buộc verify --mode full (02 §8).
+		p.log.Warn("automatic post-seed verify is MySQL→MySQL only; run `strand verify --mode full` for this pipeline")
+		if err := p.state.SetVerifyPending(false); err != nil {
+			p.fail(err)
+			return
+		}
+		p.verifying.Store(false)
+		return
+	}
 	window := durationOr(p.cfg.Verify.PostSeedWindow, 30*time.Minute)
 	p.touched.enable(true)
 	// Verify chỉ có nghĩa khi target đã theo kịp phần log từ P (catch-up xong).
@@ -209,6 +219,9 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 // VerifyDelta (strand verify --mode delta): verify các khóa CDC đã chạm từ lần gọi trước
 // (cần verify.delta: on), trả báo cáo theo bảng.
 func (p *Pipeline) VerifyDelta(ctx context.Context) (string, error) {
+	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
+		return "", fmt.Errorf("verify --mode delta is supported for MySQL → MySQL pipelines only; use verify --mode full")
+	}
 	keys, _ := p.touched.take()
 	if err := p.verifyTables(ctx, 0, keys); err != nil {
 		return "", err
