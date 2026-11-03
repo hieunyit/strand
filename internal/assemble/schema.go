@@ -21,22 +21,31 @@ type TableSchema struct {
 func (t *TableSchema) ExtractPK(row []any) []model.Value {
 	if t == nil || len(t.PKIndices) == 0 {
 		if len(row) > 0 {
-			return []model.Value{row[0]}
+			return []model.Value{unwrapColValue(row[0])}
 		}
 		return nil
 	}
 
 	if t.SinglePKIndex >= 0 && t.SinglePKIndex < len(row) {
-		return []model.Value{row[t.SinglePKIndex]}
+		return []model.Value{unwrapColValue(row[t.SinglePKIndex])}
 	}
 
 	pk := make([]model.Value, len(t.PKIndices))
 	for i, idx := range t.PKIndices {
 		if idx < len(row) {
-			pk[i] = row[idx]
+			pk[i] = unwrapColValue(row[idx])
 		}
 	}
 	return pk
+}
+
+// unwrapColValue lấy giá trị thật khi phần tử của row là model.ColValue (reader PG dùng cho cột TOAST
+// không đổi, khi đó Value = nil). Reader MySQL không bao giờ đưa ColValue vào row nên không bị ảnh hưởng.
+func unwrapColValue(v any) model.Value {
+	if cv, ok := v.(model.ColValue); ok {
+		return cv.Value
+	}
+	return v
 }
 
 // ExtractCols trích xuất danh sách ColValue từ hàng dữ liệu.
@@ -49,9 +58,17 @@ func (t *TableSchema) ExtractCols(row []any) []model.ColValue {
 		} else {
 			name = fmt.Sprintf("col_%d", i)
 		}
-		cols[i] = model.ColValue{
-			Name:  name,
-			Value: v,
+		if cv, ok := v.(model.ColValue); ok {
+			// Giữ nguyên cờ Unchanged (spec 02 §3: cột TOAST vắng mặt), chỉ điền tên cột khi thiếu.
+			if cv.Name == "" {
+				cv.Name = name
+			}
+			cols[i] = cv
+		} else {
+			cols[i] = model.ColValue{
+				Name:  name,
+				Value: v,
+			}
 		}
 	}
 	return cols

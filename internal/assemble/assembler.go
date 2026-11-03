@@ -107,10 +107,19 @@ func pickValues(t *TableSchema, row []any, cols []string) ([]model.Value, bool) 
 		if idx < 0 || idx >= len(row) {
 			return nil, false
 		}
-		if row[idx] == nil {
+		v := row[idx]
+		if cv, ok := v.(model.ColValue); ok {
+			// Reader PG gửi cột TOAST không đổi dạng ColValue{Unchanged: true}: giá trị không có mặt nên
+			// không tham gia unique/FK (cột không đổi thì không tạo/xóa chiếm chỗ khóa nào).
+			if cv.Unchanged {
+				return nil, false
+			}
+			v = cv.Value
+		}
+		if v == nil {
 			return nil, false // NULL không tham gia unique/FK
 		}
-		out[i] = row[idx]
+		out[i] = v
 	}
 	return out, true
 }
