@@ -249,3 +249,8 @@ func (g *OnoffGovernor) BackgroundRunning() bool {
 	defer g.mu.RUnlock()
 	return g.backgroundRunning
 }
+
+// SensitivityUnknown trả về false cho onoff vì onoff không dùng RLS (spec: 02 §7).
+func (g *OnoffGovernor) SensitivityUnknown() bool {
+	return false
+}

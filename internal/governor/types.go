@@ -62,4 +62,13 @@ type Governor interface {
 
 	// RecordQueryLatency ghi nhận thời gian thực thi truy vấn của Strand
 	RecordQueryLatency(d time.Duration)
+
+	// SetSoftRate đổi soft limit nóng (strand throttle set --soft)
+	SetSoftRate(r float64)
+
+	// BackgroundRunning cho biết background đang được chạy hay bị dừng
+	BackgroundRunning() bool
+
+	// SensitivityUnknown trả về true khi độ nhạy của hệ chưa xác định được (RLS covariance cao)
+	SensitivityUnknown() bool
 }

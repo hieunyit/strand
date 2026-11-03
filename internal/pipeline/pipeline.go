@@ -103,7 +103,7 @@ type Pipeline struct {
 	readyCh       <-chan *model.Txn           // nguồn Txn cho worker (strict: đã sắp theo seq)
 	prefetchDir   string
 	prefetch      *spool.PebbleSpool
-	gov           *governor.OnoffGovernor
+	gov           governor.Governor
 	govAlgo       string
 	govTick       time.Duration
 	curAvgRow     atomic.Int64
@@ -1394,8 +1394,10 @@ func (p *Pipeline) updateMetrics() {
 	// MySQL→MySQL không có thao tác đổi PK phải chờ (chỉ PG + TOAST, 02 §8).
 	m.PendingCrossRange.WithLabelValues(p.id).Set(0)
 	m.PendingCrossRangeOldestSeconds.WithLabelValues(p.id).Set(0)
-	// onoff không ước lượng độ nhạy (GRACE v2 ở P2).
-	m.SensitivityUnknown.WithLabelValues(p.id).Set(0)
+	// onoff/static không ước lượng độ nhạy; GRACE v2 tự xuất metric này mỗi tick.
+	if _, grace := p.gov.(*governor.GraceGovernor); !grace {
+		m.SensitivityUnknown.WithLabelValues(p.id).Set(0)
+	}
 	if p.prefetch != nil {
 		u := p.prefetch.Usage()
 		m.SpoolBytes.WithLabelValues(p.id, "local").Set(float64(u.LocalBytes))
