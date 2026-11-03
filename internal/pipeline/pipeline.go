@@ -950,9 +950,13 @@ func (p *Pipeline) drain(timeout time.Duration) bool {
 // ---------------------------------------------------------------------------
 
 func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
-	maxRows := p.cfg.Target.Batch.MaxRows
-	if maxRows <= 0 {
-		maxRows = 2000
+	lim := batchLimits{maxRows: int64(p.cfg.Target.Batch.MaxRows), strict: p.strict,
+		maxBytes: int64(parseBytes(p.cfg.Target.Batch.MaxBytes)), maxWait: durationOr(p.cfg.Target.Batch.MaxWait, 0)}
+	if lim.maxRows <= 0 {
+		lim.maxRows = 2000
+	}
+	if lim.maxBytes <= 0 {
+		lim.maxBytes = 4 << 20 // 4 MiB (02 §10)
 	}
 	mine := checkpoint.NewMySQLAppliedSet()
 	var stash *model.Txn // strict: Txn lấy ra nhưng không liền seq với batch, xử lý ở lượt sau
@@ -970,25 +974,8 @@ func (p *Pipeline) worker(ctx context.Context, id int, w *writer.MySQLWriter) {
 		if first == nil {
 			return
 		}
-		batch := []*model.Txn{first}
-		rows := first.TotalRows()
-	gather:
-		for rows < int64(maxRows) && len(batch) < 256 {
-			select {
-			case t := <-p.readyCh:
-				if t == nil {
-					break gather
-				}
-				if p.strict && t.Seq() != batch[len(batch)-1].Seq()+1 {
-					stash = t // strict: batch phải gồm seq liên tiếp (CP-5)
-					break gather
-				}
-				batch = append(batch, t)
-				rows += t.TotalRows()
-			default:
-				break gather
-			}
-		}
+		batch, rows, next := gatherBatch(ctx, first, p.readyCh, lim)
+		stash = next
 		if p.strict {
 			b := batch
 			err := w.ApplyBatch(ctx, b, writer.DeltaRow{Global: func() (string, error) {

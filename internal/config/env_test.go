@@ -280,6 +280,7 @@ func TestNewKeys_ParseFromYAML(t *testing.T) {
 		"resources.target.bandwidth",
 		"resources.network.backup_read",
 		"resources.schedule",
+		"resources.workers.min (adaptive worker count; workers.max is used)",
 		`bootstrap.per_table."app.orders".seed.credentials`,
 		`bootstrap.per_table."app.orders".seed.encryption_key`,
 		`bootstrap.per_table."app.orders".seed.load`,
@@ -293,10 +294,13 @@ func TestNewKeys_ParseFromYAML(t *testing.T) {
 	}
 }
 
-func TestUnimplementedKeys_NoneForSpecExample(t *testing.T) {
+// Ví dụ 02 §10 đặt workers {min: 1, max: 32}: số worker tự co giãn chưa có nên phải được cảnh báo,
+// ngoài ra không còn key nào chưa hỗ trợ.
+func TestUnimplementedKeys_SpecExampleOnlyWorkersMin(t *testing.T) {
 	cfg := mustLoad(t, sampleSpecYAML)
-	if k := cfg.UnimplementedKeys(); len(k) != 0 {
-		t.Errorf("unexpected unimplemented keys for 02 §10 example: %v", k)
+	k := cfg.UnimplementedKeys()
+	if len(k) != 1 || k[0] != "resources.workers.min (adaptive worker count; workers.max is used)" {
+		t.Errorf("unimplemented keys for 02 §10 example: %v", k)
 	}
 }
 

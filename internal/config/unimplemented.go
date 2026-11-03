@@ -32,6 +32,10 @@ func (c *Config) UnimplementedKeys() []string {
 	if len(c.Resources.Schedule) > 0 {
 		keys = append(keys, "resources.schedule")
 	}
+	if c.Resources.Workers.Min > 0 && c.Resources.Workers.Min != c.Resources.Workers.Max {
+		// Số worker cố định = workers.max; tự co giãn trong [min, max] chưa có.
+		keys = append(keys, "resources.workers.min (adaptive worker count; workers.max is used)")
+	}
 
 	tables := make([]string, 0, len(c.Bootstrap.PerTable))
 	for t := range c.Bootstrap.PerTable {
