@@ -10,17 +10,14 @@ import (
 	"strand/internal/model"
 )
 
-// Governor (02 §7, P1-16): onoff (mặc định ở P1) hoặc static; breaker theo tín hiệu đọc thẳng
+// Governor (02 §7, P1-16, P2-07): grace-v2, onoff (mặc định) hoặc static; breaker theo tín hiệu đọc thẳng
 // từ DB (p99 query của chính Strand, replica lag), không phụ thuộc metrics_source.
 // Governor điều tiết snapshot (background) bằng khoảng cách giữa các chunk.
 
 func (p *Pipeline) setupGovernor() error {
 	algo := strings.ToLower(p.cfg.Governor.Algorithm)
 	switch algo {
-	case "", "onoff", "static":
-	case "grace-v2":
-		p.log.Warn("governor grace-v2 is a Phase 2 feature; using onoff (02 §7 fallback)")
-		algo = "onoff"
+	case "", "onoff", "static", "grace-v2":
 	default:
 		return fmt.Errorf("unknown governor.algorithm %q", p.cfg.Governor.Algorithm)
 	}
@@ -49,6 +46,24 @@ func (p *Pipeline) setupGovernor() error {
 	// Tín hiệu cứng (02 §7): delta counter InnoDB trên source và spool local ≥ 95% spool.hard.
 	reader := governor.NewMySQLDBSignalReader(p.src, nil)
 	reader.SpoolUsage = p.spoolUsage
+
+	if algo == "grace-v2" {
+		// GRACE v2 (02 §7); probe: off tắt dither ±1%.
+		p.gov = governor.NewGraceGovernor(governor.GraceConfig{
+			SoftRate:     soft,
+			HardRate:     hard,
+			LagSLO:       durationOr(p.cfg.Governor.LagSLO, 5*time.Second),
+			Tick:         p.govTick,
+			DelayTicks:   1,
+			Probe:        !strings.EqualFold(strings.TrimSpace(p.cfg.Governor.Probe), "off"),
+			Breaker:      governor.NewBreaker(bcfg),
+			SignalReader: reader,
+			PipelineID:   p.id,
+			Metrics:      p.metrics,
+		})
+		return nil
+	}
+	// onoff và static giữ nguyên như P1 (static chỉ bỏ qua governor qua govAlgo).
 	p.gov = governor.NewOnoffGovernor(governor.OnoffConfig{
 		SoftRate:     soft,
 		HardRate:     hard,
@@ -71,6 +86,7 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 	t := time.NewTicker(p.govTick)
 	defer t.Stop()
 	first := true
+	var alerts graceAlertState
 	for {
 		if !first {
 			select {
@@ -83,8 +99,18 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 		if p.govAlgo == "static" {
 			continue
 		}
+
+		gg, isGrace := p.gov.(*governor.GraceGovernor)
+		if isGrace {
+			p.feedGrace(ctx, gg)
+		}
 		if err := p.gov.Tick(ctx); err != nil {
 			p.log.Warn("governor tick failed", "error", err)
+			continue
+		}
+		if isGrace {
+			// GRACE tự xuất metric §11 (zone, pressure theo signal, rate, breaker, sensitivity_unknown).
+			p.graceAlerts(gg, &alerts)
 			continue
 		}
 		_, bg := p.gov.CurrentRate()
@@ -96,6 +122,41 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 			open = 1
 		}
 		p.metrics.BreakerOpen.WithLabelValues(p.id).Set(open)
+	}
+}
+
+// feedGrace truyền pha và P_lag theo pha cho GRACE trước mỗi tick (02 §7 bảng P_lag):
+// bootstrap = khoảng cách reader → head của source; synced = độ trễ apply ở target.
+func (p *Pipeline) feedGrace(ctx context.Context, gg *governor.GraceGovernor) {
+	slo := durationOr(p.cfg.Governor.LagSLO, 5*time.Second).Seconds()
+	phase, lag := "synced", p.lagSeconds()
+	if p.bootstrap.Load() || p.verifying.Load() {
+		phase = "bootstrap"
+		lag = 0
+		if ts := p.lastRoutedTS.Load(); ts > 0 && !p.caughtUpWithSource(ctx) {
+			lag = time.Since(time.Unix(ts, 0)).Seconds()
+		}
+	}
+	gg.SetPhase(phase)
+	gg.SetLagPressure(lag / slo)
+}
+
+// graceAlerts ghi log cảnh báo của GRACE khi cờ chuyển từ tắt sang bật (02 §7, §12).
+// bootstrap_retention_risk do monitor() xử lý (cùng định nghĩa P_lag bootstrap).
+type graceAlertState struct{ lagUnsustainable, pressureExternal bool }
+
+func (p *Pipeline) graceAlerts(gg *governor.GraceGovernor, st *graceAlertState) {
+	if v := gg.LagUnsustainable(); v != st.lagUnsustainable {
+		st.lagUnsustainable = v
+		if v {
+			p.log.Warn("lag_unsustainable: foreground floor exceeds hard limit; holding hard limit", "code", "lag_unsustainable")
+		}
+	}
+	if v := gg.PressureExternal(); v != st.pressureExternal {
+		st.pressureExternal = v
+		if v {
+			p.log.Warn("pressure_external: sensitivity ~0 with high confidence for > 5m; holding at polite floor", "code", "pressure_external")
+		}
 	}
 }
 
