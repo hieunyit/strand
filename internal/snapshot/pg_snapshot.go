@@ -173,7 +173,7 @@ func (c *PGChunkSource) Bounds(ctx context.Context, table model.TableID, pkCol s
 	}
 	var b TableBounds
 	if minV.Valid && maxV.Valid {
-		b.MinPK, b.MaxPK, b.Count = minV.Int64, maxV.Int64, maxV.Int64-minV.Int64+1
+		b.MinPK, b.MaxPK, b.Count = minV.Int64, maxV.Int64, SpanRows(minV.Int64, maxV.Int64)
 	}
 	return &b, nil
 }

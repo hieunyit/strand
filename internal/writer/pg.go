@@ -398,7 +398,10 @@ func (a *pgApplier) applyOrdered(row *model.RowChange) error {
 			if err != nil {
 				return err
 			}
-			q, args := buildDelete(row.Table, oldCols, [][]model.Value{row.OldKey})
+			q, args, err := buildDelete(row.Table, oldCols, [][]model.Value{row.OldKey})
+			if err != nil {
+				return err
+			}
 			if err := a.enqueue(row.Table, q, args); err != nil {
 				return err
 			}
@@ -421,7 +424,10 @@ func (a *pgApplier) applyOrdered(row *model.RowChange) error {
 		if err != nil {
 			return err
 		}
-		q, args := buildDelete(row.Table, pkCols, [][]model.Value{row.Key})
+		q, args, err := buildDelete(row.Table, pkCols, [][]model.Value{row.Key})
+		if err != nil {
+			return err
+		}
 		return a.enqueue(row.Table, q, args)
 	default:
 		return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)
@@ -786,7 +792,10 @@ func (b *pgDeleteBatch) flush(ctx context.Context, tx pgx.Tx) error {
 }
 
 func execDelete(ctx context.Context, tx pgx.Tx, t model.TableID, pkCols []string, keys [][]model.Value) error {
-	q, args := buildDelete(t, pkCols, keys)
+	q, args, err := buildDelete(t, pkCols, keys)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, q, args...); err != nil {
 		return fmt.Errorf("delete on %s: %w", t, err)
 	}
@@ -794,7 +803,20 @@ func execDelete(ctx context.Context, tx pgx.Tx, t model.TableID, pkCols []string
 }
 
 // buildDelete dựng DELETE … WHERE (pk) IN (…), danh sách IN đệm tới lũy thừa của 2.
-func buildDelete(t model.TableID, pkCols []string, keys [][]model.Value) (string, []any) {
+// Không có khóa nào (hoặc khóa không đủ cột) là lỗi: keys[len(keys)-1] sẽ panic, và DELETE rỗng là dấu
+// hiệu lỗi ở phía gọi chứ không phải thao tác hợp lệ.
+func buildDelete(t model.TableID, pkCols []string, keys [][]model.Value) (string, []any, error) {
+	if len(keys) == 0 {
+		return "", nil, fmt.Errorf("delete on %s: no keys", t)
+	}
+	if len(pkCols) == 0 {
+		return "", nil, fmt.Errorf("delete on %s: no primary key columns", t)
+	}
+	for _, k := range keys {
+		if len(k) != len(pkCols) {
+			return "", nil, fmt.Errorf("delete on %s: key has %d value(s), primary key has %d column(s)", t, len(k), len(pkCols))
+		}
+	}
 	n := 1
 	for n < len(keys) {
 		n *= 2
@@ -818,7 +840,7 @@ func buildDelete(t model.TableID, pkCols []string, keys [][]model.Value) (string
 		quoted[i] = quotePG(c)
 	}
 	q := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)", quotePGTable(t), strings.Join(quoted, ", "), strings.Join(tuples, ", "))
-	return q, args
+	return q, args, nil
 }
 
 // -----------------------------------------------------------------------------

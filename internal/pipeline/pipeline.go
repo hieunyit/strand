@@ -1689,7 +1689,12 @@ func (p *Pipeline) updateMetrics() {
 			m.SnapshotRanges.WithLabelValues(p.id, table, st).Set(float64(counts[st]))
 		}
 		if pl, ok := p.state.Plan(table); ok && pl.MaxPK > pl.MinPK {
-			m.SeedProgressRatio.WithLabelValues(p.id, table).Set(float64(pl.NextPK-pl.MinPK) / float64(pl.MaxPK-pl.MinPK+1))
+			// Tính trên float64: NextPK-MinPK / MaxPK-MinPK+1 tràn int64 khi khoảng PK rộng hơn MaxInt64.
+			ratio := (float64(pl.NextPK) - float64(pl.MinPK)) / (float64(pl.MaxPK) - float64(pl.MinPK) + 1)
+			if pl.Finished {
+				ratio = 1
+			}
+			m.SeedProgressRatio.WithLabelValues(p.id, table).Set(ratio)
 		}
 	}
 	// MySQL→MySQL không có thao tác đổi PK phải chờ (chỉ PG + TOAST, 02 §8).

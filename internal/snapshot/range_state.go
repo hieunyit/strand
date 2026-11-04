@@ -94,7 +94,7 @@ func (m *RangeStateManager) CarveChunk(table model.TableID, start, end int64) (*
 		rest := &Chunk{ID: c.ID + 1, Table: c.Table, PKCol: c.PKCol, StartPK: end + 1, EndPK: c.EndPK,
 			State: StatePending, BufferedChanges: map[int64]*model.RowChange{}}
 		c.EndPK = end
-		c.EstimatedRows = end - start + 1
+		c.EstimatedRows = SpanRows(start, end)
 		tr.Chunks = append(tr.Chunks[:i+1], append([]*Chunk{rest}, tr.Chunks[i+1:]...)...)
 		return c, nil
 	}
