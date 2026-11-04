@@ -180,6 +180,12 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 				return err
 			}
 		}
+		if m != nil {
+			// Schema target vừa khớp (hoặc vừa được tạo): đọc lại cột generated ở target.
+			if err := p.loadTargetGenerated(ctx, map[model.TableID]*tableMeta{id: m}); err != nil {
+				return err
+			}
+		}
 		p.tablesMu.Lock()
 		if m == nil {
 			delete(p.tables, id) // bảng đã bị DROP/RENAME đi ở source

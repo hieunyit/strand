@@ -438,6 +438,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			return err
 		}
 	}
+	// Cột generated ở target không nhận giá trị: đọc sau khi bảng đích chắc chắn đã có.
+	if err := p.loadTargetGenerated(ctx, p.tables); err != nil {
+		return err
+	}
 
 	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EnginePG {
 		// MySQL→PG: bảng có PK không phải một cột số nguyên chỉ được nhận khi RỖNG ở source tại thời
@@ -1018,6 +1022,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 					return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, err.Error(), err)
 				}
 			}
+			c.Cols = dropTargetGenerated(c.Cols, meta.TargetGenerated)
 			c.Table = p.filter.Target(c.Table)
 			for i := range c.ForeignKeys {
 				c.ForeignKeys[i].ParentTable = p.filter.Target(c.ForeignKeys[i].ParentTable)
@@ -1530,7 +1535,7 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 		}
 	}
 	rereads := p.snap.RereadKeysTotal.Load()
-	if err := p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], m.Columns, p.rendezvous); err != nil {
+	if err := p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], writableColumns(m), p.rendezvous); err != nil {
 		return err
 	}
 	rereads = p.snap.RereadKeysTotal.Load() - rereads
@@ -1590,6 +1595,9 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		if err := p.createTargetTables(ctx, []model.TableID{id}); err != nil {
 			return err
 		}
+	}
+	if err := p.loadTargetGenerated(ctx, map[model.TableID]*tableMeta{id: m}); err != nil {
+		return err
 	}
 	if err := p.state.SetDone(id.String(), false); err != nil {
 		return err

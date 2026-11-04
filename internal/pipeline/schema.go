@@ -73,6 +73,8 @@ type tableMeta struct {
 	PKNumeric bool  // PK một cột kiểu số nguyên (điều kiện của snapshot logic hiện tại)
 	AvgRow    int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
 	Keys      assemble.KeyMeta
+	// TargetGenerated: cột generated ở bảng ĐÍCH — không ghi giá trị (generated.go).
+	TargetGenerated map[string]bool
 }
 
 // loadSourceTables đọc từ information_schema của source mọi bảng thỏa bộ lọc,
