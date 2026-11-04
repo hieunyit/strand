@@ -1,0 +1,223 @@
+# Bàn giao Strand CDC cho Codex — trạng thái ngày 2026-11-04
+
+Tài liệu này dành cho agent tiếp quản (Codex). Đọc hết trước khi sửa code. Mọi trạng thái dưới đây đã được kiểm chứng tại thời điểm viết; chỗ nào chưa kiểm chứng được ghi rõ "chưa kiểm".
+
+---
+
+## 0. Đọc gì trước
+
+| Thứ tự | File | Vì sao |
+|---|---|---|
+| 1 | `spec/02-specs.md` | Đặc tả kỹ thuật — nguồn sự thật. **Không sửa `spec/`** (thuộc owner). |
+| 2 | `spec/design.md` | Thiết kế, lý do, bất biến |
+| 3 | `TASKS.md` | Danh sách task theo phase + tiêu chí nghiệm thu (AC) |
+| 4 | `questions/DECISIONS-2026-11-02.md` | 18 quyết định đã chốt trong code mà spec chưa cập nhật. Khi bạn phải lệch spec: thêm một dòng vào đây (số tiếp theo), không sửa spec |
+| 5 | `spec/04-testing.md` | Cách test, gate, soak |
+| 6 | `reports/` | Báo cáo từng task (`P1-xx.md`, `P2-0x.md`, `REVIEW-2026-11-02-gate1.md`) |
+| 7 | `docs/USAGE.md` | Tài liệu người dùng (đang thiếu — xem việc D) |
+
+Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoint), **RS-1/RS-2** (range-state snapshot + watermark), **SD-1..4** (seed), **SG-1**, **CO-1/CO-2** (thứ tự commit). Mọi thay đổi ở `internal/snapshot`, `internal/pipeline`, `internal/sched`, `internal/checkpoint`, `internal/writer`, `internal/reader` phải giải thích vì sao bất biến vẫn đúng (comment trong code + báo cáo).
+
+---
+
+## 1. Repo và nhánh
+
+- GitHub: `hieunyit/strand` (private). Bản clone của người dùng: `/home/hellc/strand` (remote `origin` = GitHub).
+- **GitHub `main` = `9281ffa`** — chứa Gate 1 (P1) + P2 đợt 1 (P2-01 reader PG, P2-02 writer PG, P2-04 typemap, P2-08 Merkle) + seed mysqldump/mydumper.
+- **Nhánh tích hợp `review/gate1-fixes` = `f4664a7`** (chưa đẩy lên GitHub) — chứa toàn bộ việc đã xong và đã review:
+
+| Commit merge | Nhánh | Nội dung (task trong TASKS.md) |
+|---|---|---|
+| `5bfb96f` | `agent/p2-pipe` | `strand sync` chạy được PG→PG và MySQL→PG: engine abstraction (store/applied set/batch writer), checkpoint PG ở target, typemap khi apply, fencing PG, sequence sync |
+| `308d87c` | `agent/p2-07` | P2-07 GRACE v2 governor |
+| (trong chuỗi) | `agent/p2-06` | P2-06 sequence khi promote (PG) — đã lên main |
+| `93f7f2d` | `agent/p2-05` | P2-05 seed PG: pgBackRest / WAL-G / `strand export` |
+| `be155d5` | `agent/p2-pgboot` | Snapshot logic từ source PG (low watermark = MVCC snapshot, high = LSN + `pg_logical_emit_message`) và `--start-at seed` cho PG |
+| `0354e7e` | `agent/review-fixes` | 5 lỗi thật từ review ngoài + 2 mục phụ (xem §5) |
+| `b56c722` | `agent/soak-mem` | Driver soak: so sánh cuối dạng streaming, giới hạn RSS driver |
+| `3645f78` | `agent/p2-03` | P2-03 đổi PK khi cột TOAST không đổi (re-read khóa, quyết định 18) |
+| `bc8e1e2` | — | Quyết định 17, 18 |
+| `f4664a7` | — | Sửa admin báo `synced` sớm (thêm trạng thái `starting`) |
+
+- Nhánh dở dang (worktree, chưa commit, xem §4): `agent/schema-init` (mới có khóa config), `agent/generic-pk` (chưa có gì), `agent/docs` (chưa có gì).
+- Quy ước: mỗi việc một nhánh `agent/<tên>` tách từ `review/gate1-fixes`; merge `--no-ff` vào `review/gate1-fixes`; chạy full e2e cả hai chế độ; qua thì fast-forward `main` và đẩy lên GitHub. Commit message tiếng Anh, comment code tiếng Việt (theo style sẵn có).
+
+---
+
+## 2. Môi trường và cách chạy test
+
+```bash
+export PATH=$PATH:/usr/local/go/bin GOFLAGS=-buildvcs=false   # go không có trong PATH mặc định
+gofmt -l internal cmd tests tools        # phải rỗng
+go build ./... && go vet ./...
+go test -count=1 $(go list ./... | grep -v tests/e2e)          # 28 package, cần Docker (testcontainers)
+STRAND_E2E_COMMIT_ORDER=relaxed go test -count=1 -v -timeout 240m ./tests/e2e/
+STRAND_E2E_COMMIT_ORDER=strict  go test -count=1 -v -timeout 240m ./tests/e2e/
+```
+
+- Full e2e: ~39 test mỗi chế độ, ~3 giờ mỗi chế độ trên máy này (31 GB RAM). Chạy tuần tự relaxed rồi strict.
+- Biến e2e hữu ích: `SEED=<n>` (chạy lại đúng kịch bản; mỗi test in `SEED=` ở dòng đầu), `STRAND_E2E_COMMIT_ORDER`, `STRAND_E2E_PG_SNAPSHOT_ITERATIONS`, `STRAND_E2E_PG_LOAD_SECONDS`.
+- Container MySQL trong test phải chạy với `--innodb-use-native-aio=OFF` (máy hết AIO slot khi nhiều container). Harness đã làm sẵn.
+- **Không động vào** container `strand-dev-*` (compose của người dùng) và container của người khác. Chỉ xoá container do chính test của bạn tạo (testcontainers/ryuk tự dọn). Có thể còn container rò từ trước (`hardcore_wing`, `musing_elgamal`, …): hỏi người dùng trước khi xoá.
+- Không xoá nội dung `/tmp` dùng chung.
+- RAM: driver soak cũ từng ăn 21 GB và bị OOM-kill; đã sửa (§3). Khi chạy nhiều e2e song song, theo dõi `free -h`.
+
+Quy tắc chất lượng (người dùng đặt):
+- Không dùng `t.Skip`.
+- Mỗi bug fix có regression test **thất bại ở code cũ, qua ở code mới** — xác nhận và ghi vào báo cáo.
+- Báo cáo trung thực: test fail thì nói fail kèm output; flaky thì nói flaky, không chạy lại cho tới khi xanh rồi im lặng.
+- Lệch spec → ghi `questions/DECISIONS-2026-11-02.md`.
+- Không commit bí mật.
+
+---
+
+## 3. Gate 1 (P1, MySQL→MySQL) — đã đủ bằng chứng
+
+| Bằng chứng | Kết quả |
+|---|---|
+| kill -9 ×1.000 (strict, code cuối) | Qua |
+| TXN 50 triệu row ở strict | Qua |
+| Full e2e (relaxed + strict) | Qua (34/34 mỗi chế độ trên `308d87c`; xem §4.A cho lần cuối) |
+| Soak 12 giờ (owner rút từ 72h, quyết định 14) | **0 lệch** — chi tiết `reports/GATE1-soak12.md` |
+
+Soak: 10,65 triệu ops, 103 restart (kill9 ×45, SIGTERM ×43, SIGSTOP ×54), RSS strand ~30 MB phẳng. Driver soak bị OOM-kill ở pha so sánh cuối (nạp 65 triệu row vào RAM) nên không có `report.json`; thay bằng: strand bắt kịp (GTID `1-4452513` = source) rồi `strand verify --mode full` cả 3 bảng: 0 chunk lệch (accounts 1,6M, orders 3,0M, events 65,1M row). Driver đã sửa ở `agent/soak-mem`; **nên chạy lại một soak ngắn (≥1h) với driver mới** để có `report.json` sạch (chưa làm).
+
+Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc file gate riêng) dẫn tới các bằng chứng trên, đẩy lên main.
+
+---
+
+## 4. Việc còn lại — theo thứ tự ưu tiên
+
+### A. Chốt full e2e trên `f4664a7` rồi đẩy lên GitHub main  ⏳ đang chạy
+
+- Full e2e trên `f4664a7` đã được khởi chạy lúc 2026-11-04 ~12:30 (log: `<scratchpad>/e2e-final-relaxed.txt`, `e2e-final-strict.txt` — nếu bạn không thấy log thì chạy lại).
+- Lần trước (trên `be155d5`): relaxed 37 qua / 1 lỗi, strict 38/38. Lỗi duy nhất là `TestP2_E2E_MySQLToPGSnapshotAndStream` ("snapshot finished before the load started") — nguyên nhân thật là **admin báo `synced` trước khi pipeline quyết định bootstrap** (admin socket mở ở đầu `Run`, cờ `bootstrap` bật muộn hơn). Đã sửa ở `f4664a7` (trạng thái `starting`, test `TestAdminStateStartingBeforeRunning`). Cần xác nhận test này hết flaky trong lần chạy mới.
+- Khi cả hai chế độ qua: `git push origin review/gate1-fixes:main` (từ `/home/hellc/strand` sau khi pull nhánh về; repo đó có cảnh báo `dubious ownership` khi chạy git bằng user khác — dùng đúng user sở hữu hoặc `safe.directory`). Hỏi người dùng nếu không chắc quyền.
+
+### B. Tự tạo schema/bảng ở target (quyết định 17)  🟡 mới bắt đầu
+
+**Vấn đề:** Strand hiện **không tạo** schema/bảng ở target. Với bootstrap logic (kịch bản phổ biến nhất) người dùng phải tạo tay mọi bảng trước. Spec chỉ giả định schema đến từ backup khi seed. Người dùng yêu cầu: phải tự tạo.
+
+**Trạng thái:** nhánh `agent/schema-init` (worktree `<scratchpad>/wt/SCHEMA`) mới có: khóa `bootstrap.create_schema` (`auto|off`, mặc định `auto`) trong `internal/config/config.go` (+ `CreateSchemaAuto()`, validate giá trị) và `internal/config/schema.go`. Chưa commit — commit nó làm điểm xuất phát (hoặc làm lại, rất nhỏ).
+
+**Yêu cầu đầy đủ:**
+1. `bootstrap.create_schema: auto | off` (mặc định auto) — xong phần config; cần `strand config schema` hiển thị, env override chạy.
+2. Khi `strand sync` khởi động (sau khi lọc bảng include/exclude, trước khi đăng ký snapshot/stream): với mỗi bảng source chưa có ở target → tạo database/schema nếu thiếu, rồi tạo bảng. Bảng đã có: **không sửa**, kiểm tương thích như cũ. Ở chế độ seed/`--start-at`: bảng có trong bản restore thì đã có; bảng sẽ snapshot logic (thiếu trong seed) thì tạo. Ghi rõ lựa chọn.
+3. Lệnh mới `strand schema init -c pipeline.yaml [--dry-run]`: in DDL (dry-run) hoặc áp; idempotent; exit code theo `internal/exitcode`.
+4. Sinh DDL theo hướng:
+   - **MySQL→MySQL:** `SHOW CREATE TABLE` từ source; bỏ option `AUTO_INCREMENT=N` của bảng (giữ thuộc tính cột); giữ PK, index, FK, charset/collation, partition; tạo với `FOREIGN_KEY_CHECKS=0` trong session; `CREATE DATABASE` theo charset/collation mặc định của source. **Không copy trigger/event/routine** (chúng sẽ chạy lại trên row Strand ghi → nhân đôi) — log danh sách bị bỏ. View: bỏ qua (log). Tôn trọng `tables.rename` (tên đích qua `filter.Target`).
+   - **PG→PG:** dựng từ catalog (không gọi pg_dump): `CREATE SCHEMA IF NOT EXISTS`; cột (`format_type`), NOT NULL, default (sequence `nextval` → tạo sequence sở hữu, hoặc identity đúng increment/start), COLLATE, PK, UNIQUE/CHECK/exclusion qua `pg_get_constraintdef`, index qua `pg_get_indexdef` (đổi schema/tên bảng), FK sau cùng. Cột generated: xem writer xử lý thế nào rồi quyết. Kiểu người dùng (enum, domain): tạo nếu thiếu, hoặc báo lỗi rõ.
+   - **MySQL→PG:** dùng lại mapping của `internal/typemap` (đừng nhân bản): kiểu cột, NOT NULL, PK, UNIQUE, index phụ; cột khóa dùng collation deterministic sao cho `strand validate` **qua** trên schema sinh ra; `AUTO_INCREMENT` → `GENERATED BY DEFAULT AS IDENTITY` (promote cần sequence gắn qua `pg_depend` — kiểm `internal/promote`); ENUM theo enum policy; default chỉ khi dịch an toàn. Quyết định cách quote tên (nhiều khả năng giữ nguyên tên có quote) và bảo đảm writer dùng cùng tên.
+5. Bảng mới tạo ở source khi đang chạy (CREATE TABLE khớp bộ lọc — `internal/pipeline/ddl.go` `handleDDL`, `ddlNewTables`): với auto, tạo bảng ở target tại barrier DDL (MySQL: `SHOW CREATE TABLE` hiện tại; nếu bảng source đã bị ALTER sau vị trí đó thì quay về đường exit 10), rồi đi tiếp. ALTER/DROP/RENAME bảng có sẵn: giữ nguyên exit 10 (02 §12).
+6. `strand validate` với auto: báo "N bảng sẽ được tạo" thay vì lỗi bảng thiếu.
+
+**Test:** unit kiểu golden cho DDL cả 3 hướng (kiểu khó, PK nhiều cột, FK, enum, identity, bảng partition, tên cần quote, rename); integration với container mỗi hướng (~6 bảng đa dạng → `schema init` → so cấu trúc qua information_schema/catalog, validate qua); e2e bootstrap logic dưới tải vào target **rỗng** cho MySQL→MySQL, MySQL→PG, PG→PG với `app.*`/`*.*` — trạng thái cuối giống hệt, `verify --mode full` 0 lệch; CREATE TABLE khi đang stream được tạo + replicate. Các e2e cũ tạo sẵn bảng ở target phải vẫn chạy (bảng có rồi → không đụng).
+
+Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", ghi file).
+
+### C. Snapshot logic cho PK không phải một cột số nguyên  ⬜ chưa bắt đầu (người dùng đã duyệt)
+
+**Hiện trạng:** chunk là khoảng `int64` `[StartPK, EndPK]`; `range_state` giữ `BufferedChanges map[int64]…`; event stream được gán chunk bằng so sánh int64 trong Go. Bảng có PK không phải một cột số nguyên bị từ chối nếu có dữ liệu (`internal/pipeline/pipeline.go` quanh dòng 423–453: "needs a logical snapshot but its primary key is not a single integer column"), chỉ nhận khi rỗng. Merkle (`internal/verify/merkle.go` ~629) và verify sau seed/sample/delta (`internal/verify/live.go`, `internal/pipeline/verify.go` ~121) cũng chỉ hỗ trợ PK số nguyên. Snapshot PG (`internal/snapshot/pg_snapshot.go`, `pg_watermark.go`) dùng cùng khoảng int64.
+
+**Yêu cầu cốt lõi:** thứ tự Go dùng để quyết "khóa thuộc chunk nào" và biên keyset phải **giống hệt** thứ tự DB dùng cho `ORDER BY pk` / `WHERE pk > ?`; phép bằng trong Go phải khớp phép bằng của unique index trong DB. Lệch = mất dữ liệu âm thầm.
+
+Phạm vi (người dùng đã duyệt mức 1–2, mức 3 để mở):
+- **Mức 1:** PK nhiều cột và PK đơn không phải số nguyên gồm: số nguyên (kể cả BIGINT UNSIGNED), DECIMAL, DATE/DATETIME/TIMESTAMP/TIME, YEAR, BINARY/VARBINARY, CHAR/VARCHAR collation nhị phân (MySQL `*_bin`, charset binary; PG `"C"`/`"POSIX"`, bytea), PG uuid, PG text `"C"`. So tuple theo thứ tự cột PK. Cẩn thận: MySQL PAD SPACE (`utf8mb4_bin` là PAD SPACE: `'a' = 'a '`) vs NO PAD (`utf8mb4_0900_bin`), chuẩn hoá DECIMAL (1.0 vs 1.00), TIMESTAMP và múi giờ.
+- **Mức 2:** MySQL CHAR/VARCHAR collation không nhị phân (`utf8mb4_0900_ai_ci`, `general_ci`…): lấy khóa sắp xếp từ chính MySQL bằng `WEIGHT_STRING(col)`. Biên chunk đọc kèm weight; với event stream phải có weight — thiết kế cách lấy (query theo lô tới source chỉ khi bảng đang snapshot là chấp nhận được; tự cài lại collation trong Go **không** được trừ khi chứng minh giống hệt). Danh tính khóa trong buffer phải theo weight (`'a'` và `'A'` dưới ci là một khóa). Kiểm thứ tự WEIGHT_STRING == ORDER BY trên nhiều chuỗi Unicode ngẫu nhiên (khoảng trắng cuối, dấu, hoa/thường, emoji, chuỗi rỗng). Xét cả event đổi PK (khóa cũ/mới) và phép bằng khóa của writer.
+- **Mức 3 (ngoài phạm vi):** PG collation ICU/libc không phải "C" — tiếp tục từ chối với thông báo rõ (gợi ý seed hoặc collation "C"); viết câu hỏi mở `questions/OPEN-generic-pk-pg-collation.md` kèm phương án.
+- Merkle full verify và live verify (sample/delta/sau seed) phải chạy cho bảng mức 1/2 (keyset theo tuple; với key chuỗi ci khi khác engine MySQL→PG, bảo đảm chuẩn hoá khóa nhất quán hoặc từ chối rõ ràng).
+
+**Gợi ý thiết kế:** mã hoá tuple PK thành `[]byte` giữ thứ tự (memcomparable như TiDB/CockroachDB: int big-endian lật bit dấu, bytes có escape, weight string cho ci), để `range_state` dùng khóa chuỗi + so byte thống nhất; đường int64 hiện tại biểu diễn được bằng cùng mã hoá — đo benchmark trước/sau, không được chậm đi đáng kể. Viết ghi chú thiết kế + lập luận đúng đắn (file mới, ví dụ `internal/snapshot/pkey.go`). Lưu ý xung đột: P2-03 vừa thêm `SnapshotPlan.Reread []int64` và chunk theo tập khóa (`Chunk.Keys`) — phải chuyển sang khóa mã hoá luôn.
+
+**Test:** unit cho mã hoá (tính giữ thứ tự so với DB thật MySQL 8.4 + PG 17, nhiều giá trị ngẫu nhiên mỗi kiểu/collation, các ca bằng/PAD SPACE); unit range_state với khóa ghép và chuỗi; e2e: MySQL→MySQL snapshot dưới tải với (a) PK int ghép, (b) varchar `utf8mb4_0900_ai_ci` có biến thể hoa/dấu và UPDATE đổi PK xuyên chunk, (c) varchar `_bin`, (d) datetime+int ghép; MySQL→PG với PK int ghép và varchar ci (hoặc test từ chối rõ ràng); PG→PG với PK ghép, text `COLLATE "C"`, uuid. Mỗi e2e: trạng thái cuối giống hệt, mỗi phiên bản row apply đúng một lần, `verify --mode full` 0 lệch; chạy ≥3 lần ở mỗi chế độ relaxed/strict. Regression: các e2e snapshot hiện có + test resume sau kill -9.
+
+### D. Viết lại `docs/USAGE.md` đầy đủ  ⬜ chưa bắt đầu
+
+Người dùng phàn nàn: (1) không hiểu tại sao "phải cho table vào mà không đồng bộ full cả db" — tài liệu không nói `tables.include` là glob (`app.*` = cả database, `*.*` = mọi schema người dùng; schema hệ thống tự bỏ: MySQL `mysql/sys/information_schema/performance_schema` — `internal/pipeline/schema.go` `loadSourceTables`; PG `pg_catalog/information_schema/pg_*` — `internal/pipeline/engine.go` ~132); (2) tài liệu chưa đầy đủ (tiêu đề còn "P1 / Gate 1", P2 bị nhét vào một mục).
+
+**Quy tắc cứng:** mọi câu phải kiểm với code (build `./cmd/strand`, chạy `strand <cmd> --help`, `strand config schema`). Khóa được nhận mà không có tác dụng → ghi rõ. Không hỗ trợ → ghi rõ.
+
+Cấu trúc đề xuất:
+1. Tổng quan + ma trận hỗ trợ (MySQL→MySQL, MySQL→PG, PG→PG; PG→MySQL có/không — kiểm): snapshot logic, loại seed, verify sample/delta/full, promote, governor, checkpoint rewind; phiên bản tối thiểu.
+2. Chọn phạm vi đồng bộ: một bảng / nhiều / cả DB / cả instance; include/exclude/rename; bảng mới (CREATE/RENAME); đổi include giữa các lần chạy; checklist "đồng bộ cả instance".
+3. Chuẩn bị target (sau việc B: mặc định tự tạo; trước đó: phải tạo sẵn — `mysqldump --no-data` không kèm trigger/event, `pg_dump --schema-only`, MySQL→PG theo typemap). Bảng mapping kiểu MySQL→PG đầy đủ từ `internal/typemap` + policy (zero date, bigint unsigned, enum, collation cột khóa, JSON…), những gì `validate` kiểm. DDL về sau: luồng exit 10.
+4. Yêu cầu theo engine: biến MySQL (đã có), PG source (`wal_level=logical`, slot/wal_senders, publication `FOR ALL TABLES`/`FOR TABLE`, REPLICA IDENTITY, quyền REPLICATION/SELECT/`pg_logical_emit_message`, `create_slot`, failover slot PG17+, decode trên standby PG16+), quyền target PG.
+5. Yêu cầu/giới hạn bảng: cần PK; snapshot logic chỉ PK một cột số nguyên (cho tới khi việc C xong) — **giải thích lý do** (gán chunk cần thứ tự giống hệt collation DB); TOAST; bảng có UNIQUE ngoài PK apply tuần tự; partial update lỗi; TRUNCATE chưa hỗ trợ; không hỗ trợ đồng bộ hai chiều.
+6. Tham chiếu cấu hình: mọi khóa (sinh từ code), mặc định, có tác dụng hay không; 3 dạng kết nối (tách trường / URL / DSN, `password_env`).
+7. Tham chiếu CLI: mọi lệnh và cờ (`--help`), ví dụ: validate, plan, sync (`--start-at` các dạng), seed plan/apply theo loại (xtrabackup, mysqldump, mydumper bắt buộc `--dump-log`, pgBackRest, WAL-G, `strand export`), snapshot add, verify (sample/delta/full, `--repair`), pause/resume/throttle/checkpoint/top, promote, export, config.
+8. Vận hành, tuning, metric (danh sách từ `internal/metrics` + ý nghĩa, chỉ metric thật sự được cập nhật), bảng exit code (`internal/exitcode`) kèm cách xử lý.
+9. Công thức đầu-cuối: (a) MySQL→MySQL cả instance bootstrap logic; (b) MySQL→MySQL seed xtrabackup; (c) MySQL→PG cả database; (d) PG→PG seed `strand export`; (e) cutover/promote.
+10. FAQ / xử lý sự cố / giới hạn đã biết.
+
+Admin state mới: `starting` → `bootstrapping` → `synced` (+ `paused`, `failed`) — ghi vào tài liệu.
+
+### E. P2-09 Benchmark Gate 2  ⬜ chưa bắt đầu
+
+`TASKS.md` dòng 166: "Đọc S04 §5. AC: chạy 3 governor theo đúng giao thức, xuất JSON." Chạy sau khi máy rảnh (không chạy song song e2e/soak vì tranh tài nguyên làm sai số đo). Governor: `onoff`, `static`, `grace` (GRACE v2, `internal/governor/grace.go`).
+
+### F. Soak lại với driver mới  ⬜
+
+Driver đã sửa (`tools/soak/compare.go`, `--driver-rss-limit-mb` mặc định 2048, `--compare-only`, `--pprof-addr`). Chạy một soak ≥1h (hoặc 12h nếu owner muốn) để có `report.json` với `pass=true`. Lệnh mẫu trong `tools/soak/README.md`. Driver cũng đã sửa lỗi mẫu RSS = 0 khi strand đang restart làm `rss_growth` giả.
+
+---
+
+## 5. Danh sách lỗi đã biết / backlog nhỏ
+
+| # | Mô tả | Mức |
+|---|---|---|
+| 1 | Merkle: target có cột PK unsigned với row > MaxInt64 (source ≤ MaxInt64) → row đó không được hash | Thấp |
+| 2 | Không dùng được chính Strand làm synchronous standby của PG (confirm start-LSN commit record, sync rep chờ end; hold 2PC chặn PREPARE) → đăng ký snapshot khóa chết trong barrier. Ghi vào USAGE như giới hạn | Trung bình |
+| 3 | Verify tự động sau seed chưa có cho PG (chỉ log cảnh báo, người dùng chạy `verify --mode full`) | Trung bình |
+| 4 | P2-03: ưu tiên 30 s chỉ có unit test; kill -9 giữa lúc re-read chỉ có unit test restart | Thấp |
+| 5 | Harness e2e `waitSynced`: trước `f4664a7` có thể trả sớm; sau fix nên ổn — xác nhận rồi gỡ workaround "chờ log bootstrap finished" trong `tests/e2e/pg_toast_pk_test.go` nếu thừa | Thấp |
+| 6 | `bootstrap_retention_risk` tắt giãn nhịp chunk khi lag > `lag_slo` — đúng thiết kế nhưng làm e2e khó tạo tải đồng thời; test cần đặt `lag_slo` lớn | Ghi chú |
+| 7 | Promote sequence giảm dần trên bảng rỗng: `0 ∓ margin` có thể chạm MINVALUE → setval lỗi (giống trường hợp tăng dần) | Thấp |
+| 8 | Logical snapshot PG cần PG14+ (pgoutput `messages`), primary (không phải standby), quyền `pg_logical_emit_message`; PG < 17 watermark dựa vào WAL writer flush | Ghi chú |
+
+**Review ngoài 2026-11-04 — các mục đã kết luận KHÔNG phải lỗi (đừng sửa lại):** 1.1 FORMAT() (code không dùng), 1.3 đổi PK TOAST giữ row đích (đúng 02 §8), 1.4 `%T` trong pkString (một cột luôn một kiểu Go), 2.1 Stream Abort subxact (PG gửi abort trước event của savepoint sau, giống apply worker của PG), 2.2 2PC sau restart (cơ chế hold; test `TestAC3_StreamingAndTwoPhase` phần g), 3.2 collation mặc định DB ICU (luôn deterministic, đã thử PG17), 4.4 spool Truncate (không có code production gọi). Đã sửa: 3.1, 4.1, 1.2, 4.3, 3.3, 1.5, 4.2.
+
+---
+
+## 6. Bản đồ code
+
+| Package | Vai trò |
+|---|---|
+| `cmd/strand` | CLI (cobra): sync, validate, plan, seed, snapshot, verify, promote, export, pause/resume/throttle/checkpoint/top, config |
+| `internal/config` | YAML + env `STRAND_*` + kết nối 3 dạng (`conn.go`), JSON schema (`schema.go`), cảnh báo khóa chưa có tác dụng (`unimplemented.go`) |
+| `internal/pipeline` | Điều phối: `pipeline.go` (Run, router, snapshot), `engine.go` (trừu tượng MySQL/PG, snapshot PG), `ddl.go`, `batch.go` (group commit), `verify.go`, `admin.go`, `state.go` (state file local) |
+| `internal/reader/mysql`, `internal/reader/pg` | Đọc binlog (go-mysql) / pgoutput v4 (streaming, two-phase, messages) |
+| `internal/assemble` | Ghép event thành `model.Txn` |
+| `internal/sched` | Scheduler writeset, CO-1/CO-2, chế độ serial (strict) |
+| `internal/writer` | Writer MySQL; writer PG (`pg.go`: COPY+MERGE / INSERT ON CONFLICT, partial TOAST; `pg_range.go`: thay range / tập khóa) |
+| `internal/snapshot` | Range-state (`range_state.go`), snapshot MySQL (`mysql_snapshot.go`), PG (`pg_snapshot.go`, `pg_watermark.go`), P2-03 (`toast_pk.go`), chunker |
+| `internal/checkpoint` | Applied set GTID / LSN thưa (PGAppliedSet), store |
+| `internal/seed` | xtrabackup, mysqldump, mydumper, pgBackRest, WAL-G, export, prefetch |
+| `internal/spool` | Pebble + tầng bucket S3 (chỉ dùng khi prefetch) |
+| `internal/governor` | onoff, static, GRACE v2 |
+| `internal/verify` | Merkle full, live (sample/delta/sau seed) |
+| `internal/typemap` | Mapping MySQL→PG, validate kiểu/collation |
+| `internal/promote` | Promote/failover, sequence (driver MySQL/PG) |
+| `internal/validate` | Preflight (biến binlog từng session, quyền, glob bảng) |
+| `tools/soak` | Driver soak |
+| `tests/e2e` | E2E (harness MySQL `harness_test.go`, PG `pg_harness_test.go`) |
+
+---
+
+## 7. Bài học đã trả giá (đừng lặp lại)
+
+1. **MySQL ghi binlog trước khi engine commit** → event bị bỏ ở range "Chưa đọc" có thể chưa visible với SELECT của chunk. Phải `WAIT_FOR_EXECUTED_GTID_SET` các GTID đã bỏ trên kết nối đọc chunk (quyết định 10).
+2. **PG stream commit record trước `ProcArrayEndTransaction`** → low watermark của PG phải là MVCC snapshot (`pg_current_snapshot()`), không phải LSN (`pg_watermark.go`). Test race dùng `pg_receivewal --synchronous`.
+3. **`sql_log_bin=0` trên kết nối pool** rò sang lần dùng sau (bug XtraBackup 1062): luôn `SET SESSION sql_log_bin = 1` trước khi trả kết nối. Tương tự `sql_mode` trong test typemap.
+4. **Tràn int64**: không bao giờ `end+1`/`max-min+1` khi có thể chạm MaxInt64 (dùng `SpanRows`, `MidPK`, cờ `SnapshotPlan.Finished`).
+5. **Admin `synced`** phải phản ánh trạng thái thật (đã sửa `starting`).
+6. **Đừng so sánh cuối bằng cách nạp cả bảng vào RAM** (soak OOM).
+7. **Vòng lặp shell chạy `go` nhớ `PATH`** — từng có "pass" giả vì `go` không tìm thấy.
+8. **Theo dõi đúng PID** khi gửi tín hiệu (pgrep có thể khớp chính shell bọc lệnh) — dùng `pgrep -x` hoặc lưu PID lúc khởi chạy.
+9. MySQL 8.4 strict + `NO_ZERO_DATE`: so cột với `'0000-00-00'` là ERROR 1525 — dùng `CAST(col AS CHAR) LIKE …`.
+10. Agent `agy` (Gemini CLI) đã dùng cho P2 đợt 1: không đọc được file ngoài worktree (phải chép tài liệu API vào `.ref/`), hay lỗi compile/logic — luôn review và chạy test độc lập.
+
+---
+
+## 8. Cách báo cáo cho người dùng
+
+Người dùng đọc tiếng Việt. Báo cáo ngắn, có số liệu thật (số test qua/lỗi, thời gian, commit hash), nói rõ việc nào chưa kiểm. Hỏi trước khi: đẩy lên `main`, xoá container không phải của mình, thay đổi lệch spec lớn.
