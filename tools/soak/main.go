@@ -14,6 +14,8 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net/http"
+	_ "net/http/pprof" // --pprof-addr: hồ sơ heap của chính driver soak
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,13 +33,15 @@ import (
 	"strand/internal/checkpoint"
 	"strand/internal/config"
 	"strand/internal/model"
-	"strand/tests/checker"
 )
 
 // Các ngưỡng mặc định cho kết luận soak test (02 §2 CP-4, 04 §2).
 const (
 	DefaultMaxCheckpointBytes    = 65536
 	DefaultMaxRSSGrowthMBPerHour = 5.0
+	// DefaultDriverRSSLimitMB là trần RSS của chính driver soak; vượt trần thì đợt soak FAIL
+	// với lý do rõ ràng thay vì bị OOM-killer giết mà không có báo cáo.
+	DefaultDriverRSSLimitMB = 2048
 )
 
 // Danh sách bảng ứng dụng cần đối chiếu trạng thái cuối.
@@ -88,6 +92,9 @@ type Sample struct {
 	WorkerDeltaAppliedBytes int       `json:"worker_delta_applied_bytes"`
 	LagGTIDs                int64     `json:"lag_gtids"`
 	Restarts                int       `json:"restarts"`
+	// DriverRSSBytes là VmRSS của chính tiến trình driver soak (không phải strand).
+	DriverRSSBytes int64   `json:"driver_rss_bytes"`
+	DriverRSSMB    float64 `json:"driver_rss_mb"`
 }
 
 // Conclusion tóm tắt các chỉ số đánh giá điều kiện đạt của đợt soak test.
@@ -122,6 +129,11 @@ type SoakReport struct {
 	Pass               bool        `json:"pass"`
 	Conclusion         Conclusion  `json:"conclusion"`
 	Violations         []string    `json:"violations,omitempty"`
+	ViolationsTotal    int64       `json:"violations_total,omitempty"`
+	ComparedRowsSource int64       `json:"compared_rows_source,omitempty"`
+	ComparedRowsTarget int64       `json:"compared_rows_target,omitempty"`
+	DriverRSSMaxBytes  int64       `json:"driver_rss_max_bytes"`
+	DriverRSSLimit     int64       `json:"driver_rss_limit_bytes"`
 	ErrorReason        string      `json:"error_reason,omitempty"`
 }
 
@@ -149,7 +161,17 @@ func isForbiddenExitCode(code int) bool {
 
 // computeRSSGrowthMBPerHour tính tốc độ tăng RSS (MB/giờ) bằng hồi quy tuyến tính
 // bình phương tối thiểu (OLS) trên nửa sau thời gian của chuỗi mẫu.
+// Mẫu có RSS = 0 (strand không chạy đúng lúc lấy mẫu, ví dụ đang restart sau kill -9/SIGTERM)
+// bị loại vì đó là "không có số đo", không phải RSS bằng 0; nếu giữ lại, một mẫu 0 ở giữa nửa sau
+// làm lệch hệ số góc (đợt soak 15 phút cho 128 MB/h giả dù RSS thực phẳng ~31 MB).
 func computeRSSGrowthMBPerHour(samples []Sample) float64 {
+	measured := make([]Sample, 0, len(samples))
+	for _, s := range samples {
+		if s.RSSMB != 0 || s.RSSBytes != 0 {
+			measured = append(measured, s)
+		}
+	}
+	samples = measured
 	secondHalf := selectSecondHalfSamples(samples)
 	if len(secondHalf) < 2 {
 		return 0
@@ -429,6 +451,78 @@ func measureCheckpointBytes(ctx context.Context, dstDB *sql.DB, pipelineID strin
 	}
 	return ckptLen, deltaLen, nil
 }
+
+// ---------------------------------------------------------------------------
+// Giám sát RSS của chính driver soak
+// ---------------------------------------------------------------------------
+
+// rssGuard định kỳ đọc VmRSS của tiến trình driver; khi vượt limit thì ghi lý do và gọi onTrip
+// (hủy pha chạy và pha kiểm tra cuối) để đợt soak kết thúc với báo cáo FAIL thay vì bị OOM-kill.
+type rssGuard struct {
+	limit   int64
+	readRSS func() (int64, error)
+	onTrip  func(reason string)
+
+	max     atomic.Int64
+	tripped atomic.Bool
+	mu      sync.Mutex
+	reason  string
+}
+
+func newRSSGuard(limit int64, readRSS func() (int64, error), onTrip func(string)) *rssGuard {
+	return &rssGuard{limit: limit, readRSS: readRSS, onTrip: onTrip}
+}
+
+// check đọc RSS một lần, cập nhật max và kích hoạt guard nếu vượt limit; trả về RSS đọc được.
+func (g *rssGuard) check() int64 {
+	rss, err := g.readRSS()
+	if err != nil {
+		return 0
+	}
+	for {
+		cur := g.max.Load()
+		if rss <= cur || g.max.CompareAndSwap(cur, rss) {
+			break
+		}
+	}
+	if g.limit > 0 && rss > g.limit && g.tripped.CompareAndSwap(false, true) {
+		reason := fmt.Sprintf("soak driver RSS %.1f MiB exceeds --driver-rss-limit-mb %.0f MiB; aborting soak to avoid OOM kill",
+			float64(rss)/(1<<20), float64(g.limit)/(1<<20))
+		g.mu.Lock()
+		g.reason = reason
+		g.mu.Unlock()
+		if g.onTrip != nil {
+			g.onTrip(reason)
+		}
+	}
+	return rss
+}
+
+// Reason trả về lý do guard đã kích hoạt (rỗng nếu chưa).
+func (g *rssGuard) Reason() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.reason
+}
+
+// run kiểm tra RSS mỗi every cho tới khi ctx bị hủy.
+func (g *rssGuard) run(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = 5 * time.Second
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		g.check()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func readSelfRSSBytes() (int64, error) { return readProcessRSSBytes(os.Getpid()) }
 
 // ---------------------------------------------------------------------------
 // Bộ sinh tải liên tục trên source (04 §3)
@@ -1025,72 +1119,6 @@ func isPipelineSyncedIfSocketPresent(socket string) bool {
 	return top.State == "synced"
 }
 
-// dumpTable đọc toàn bộ các dòng của bảng theo thứ tự PK giống tests/e2e/harness_test.go.
-func dumpTable(ctx context.Context, db *sql.DB, table string) (map[string]checker.RowState, error) {
-	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s ORDER BY 1", table))
-	if err != nil {
-		return nil, fmt.Errorf("dump %s: %w", table, err)
-	}
-	defer rows.Close()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]checker.RowState)
-	for rows.Next() {
-		vals := make([]sql.RawBytes, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
-		}
-		m := make(map[string]interface{}, len(cols))
-		var ver int64
-		for i, c := range cols {
-			if vals[i] == nil {
-				m[c] = nil
-			} else {
-				m[c] = string(vals[i])
-			}
-			if c == "ver" {
-				ver, _ = strconv.ParseInt(string(vals[i]), 10, 64)
-			}
-		}
-		pk := string(vals[0])
-		out[pk] = checker.RowState{Table: table, PK: pk, Ver: ver, Values: m}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func compareFinalState(ctx context.Context, srcDB, dstDB *sql.DB, tables []string) (bool, []string, error) {
-	srcState := make(map[string]map[string]checker.RowState, len(tables))
-	dstState := make(map[string]map[string]checker.RowState, len(tables))
-	for _, tb := range tables {
-		sRows, err := dumpTable(ctx, srcDB, tb)
-		if err != nil {
-			return false, nil, err
-		}
-		dRows, err := dumpTable(ctx, dstDB, tb)
-		if err != nil {
-			return false, nil, err
-		}
-		srcState[tb] = sRows
-		dstState[tb] = dRows
-	}
-	res := checker.NewChecker().CheckFinalState(srcState, dstState)
-	violations := res.Violations
-	if len(violations) > 20 {
-		violations = violations[:20]
-	}
-	return res.Passed, violations, nil
-}
-
 // ---------------------------------------------------------------------------
 // Khởi tạo kết nối MySQL và tạo schema
 // ---------------------------------------------------------------------------
@@ -1177,6 +1205,11 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		sampleEvery           time.Duration
 		progressEvery         time.Duration
 		catchupTimeout        time.Duration
+		pprofAddr             string
+		driverRSSLimitMB      int64
+		driverRSSCheckEvery   time.Duration
+		compareChunkRows      int
+		compareOnly           bool
 	)
 
 	fs.StringVar(&strandBin, "strand", "strand", "Đường dẫn binary strand")
@@ -1197,8 +1230,21 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.DurationVar(&progressEvery, "progress-every", 10*time.Minute, "Chu kỳ in tiến độ ra stdout")
 	fs.DurationVar(&catchupTimeout, "catchup-timeout", 30*time.Minute, "Thời gian chờ tối đa để target theo kịp source")
 
+	fs.Int64Var(&driverRSSLimitMB, "driver-rss-limit-mb", DefaultDriverRSSLimitMB, "Trần RSS (MiB) của chính driver soak; vượt trần thì FAIL với lý do rõ ràng (0 = tắt)")
+	fs.DurationVar(&driverRSSCheckEvery, "driver-rss-check-every", 5*time.Second, "Chu kỳ kiểm tra RSS của driver soak")
+	fs.IntVar(&compareChunkRows, "compare-chunk-rows", DefaultCompareChunkRows, "Số dòng mỗi chunk keyset khi so sánh trạng thái cuối")
+	fs.BoolVar(&compareOnly, "compare-only", false, "Chỉ chạy so sánh trạng thái cuối (streaming) giữa source và target rồi thoát; không sinh tải, không chạy strand")
+	fs.StringVar(&pprofAddr, "pprof-addr", "", "Địa chỉ HTTP phục vụ net/http/pprof của driver soak (ví dụ 127.0.0.1:6060; rỗng = tắt)")
+
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if pprofAddr != "" {
+		go func() {
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				fmt.Fprintf(stderr, "pprof server: %v\n", err)
+			}
+		}()
 	}
 	if configPath == "" {
 		fmt.Fprintln(stderr, "thiếu cờ bắt buộc: --config <pipeline.yaml>")
@@ -1261,6 +1307,24 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if compareOnly {
+		res, err := compareFinalState(rootCtx, srcDB, dstDB, appTables, compareChunkRows, DefaultMaxViolations)
+		if err != nil {
+			fmt.Fprintf(stderr, "so sánh trạng thái cuối thất bại: %v\n", err)
+			return 1
+		}
+		for _, v := range res.Violations {
+			fmt.Fprintln(stdout, "VIOLATION:", v)
+		}
+		rss, _ := readSelfRSSBytes()
+		fmt.Fprintf(stdout, "COMPARE RESULT: equal=%v compared_rows=%d/%d violations=%d driver_rss=%.1fMB\n",
+			res.Equal, res.SourceRows, res.TargetRows, res.ViolationsTotal, float64(rss)/(1024.0*1024.0))
+		if !res.Equal {
+			return 1
+		}
+		return 0
+	}
+
 	wl := newWorkload(srcDB, seed)
 	preloadCount := 1000
 	if span > 0 && int(span) < preloadCount {
@@ -1274,6 +1338,17 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	startTime := time.Now()
 	soakCtx, cancelSoak := context.WithTimeout(rootCtx, duration)
 	defer cancelSoak()
+	// finalCtx dùng cho pha bắt kịp + so sánh cuối; guard RSS hủy cả soakCtx và finalCtx.
+	finalCtx, cancelFinal := context.WithCancelCause(rootCtx)
+	defer cancelFinal(nil)
+	guard := newRSSGuard(driverRSSLimitMB<<20, readSelfRSSBytes, func(reason string) {
+		fmt.Fprintf(stderr, "SOAK ABORT: %s\n", reason)
+		cancelFinal(errors.New(reason))
+		cancelSoak()
+	})
+	guardCtx, stopGuard := context.WithCancel(rootCtx)
+	guardDone := make(chan struct{})
+	go func() { defer close(guardDone); guard.run(guardCtx, driverRSSCheckEvery) }()
 
 	// 1. Bắt đầu sinh tải liên tục trên source.
 	wl.Start(workloadClients, span)
@@ -1305,6 +1380,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		ckptLen, deltaLen, _ := measureCheckpointBytes(sCtx, dstDB, cfg.Name)
 		lagGTIDs, _ := measureLagGTIDs(sCtx, srcDB, dstDB, cfg.Name)
 		restarts, _, _, _ := sup.stats()
+		driverRSS := guard.check()
 
 		s := Sample{
 			Timestamp:               now,
@@ -1316,6 +1392,8 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 			WorkerDeltaAppliedBytes: deltaLen,
 			LagGTIDs:                lagGTIDs,
 			Restarts:                restarts,
+			DriverRSSBytes:          driverRSS,
+			DriverRSSMB:             float64(driverRSS) / (1024.0 * 1024.0),
 		}
 		samplesMu.Lock()
 		samples = append(samples, s)
@@ -1390,10 +1468,10 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 					countsMu.Unlock()
 					restarts, _, _, _ := sup.stats()
 					fmt.Fprintf(stdout,
-						"[progress %s] ops=%d errs=%d rss=%.2fMB ckpt=%dB lag_gtids=%d restarts=%d faults(kill9=%d,sigterm=%d,sigstop=%d)\n",
+						"[progress %s] ops=%d errs=%d rss=%.2fMB driver_rss=%.2fMB ckpt=%dB lag_gtids=%d restarts=%d faults(kill9=%d,sigterm=%d,sigstop=%d)\n",
 						time.Since(startTime).Round(time.Second),
 						wl.ops.Load(), wl.errs.Load(),
-						last.RSSMB, last.CheckpointBytes, last.LagGTIDs,
+						last.RSSMB, float64(guard.check())/(1024.0*1024.0), last.CheckpointBytes, last.LagGTIDs,
 						restarts, fc.Kill9, fc.SIGTERM, fc.SIGSTOP,
 					)
 				}
@@ -1422,20 +1500,25 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		violations      []string
 	)
 
-	if !forbiddenExit {
+	var cmpRes CompareResult
+	if guard.Reason() != "" {
+		_ = sup.StopGracefully(30 * time.Second)
+	} else if !forbiddenExit {
 		// Đảm bảo strand đang chạy để bắt kịp toàn bộ GTID trên source.
-		_ = sup.waitRunningProc(rootCtx, 15*time.Second)
-		if err := waitCaughtUp(rootCtx, srcDB, dstDB, cfg.Name, cfg.Observability.AdminSocket, sup, catchupTimeout); err != nil {
+		_ = sup.waitRunningProc(finalCtx, 15*time.Second)
+		if err := waitCaughtUp(finalCtx, srcDB, dstDB, cfg.Name, cfg.Observability.AdminSocket, sup, catchupTimeout); err != nil {
 			errReason = err.Error()
+			_ = sup.StopGracefully(30 * time.Second)
 		} else if err := sup.StopGracefully(120 * time.Second); err != nil {
 			errReason = err.Error()
 		} else {
-			eq, v, err := compareFinalState(rootCtx, srcDB, dstDB, appTables)
+			res, err := compareFinalState(finalCtx, srcDB, dstDB, appTables, compareChunkRows, DefaultMaxViolations)
 			if err != nil {
 				errReason = err.Error()
 			} else {
-				finalStateEqual = eq
-				violations = v
+				cmpRes = res
+				finalStateEqual = res.Equal
+				violations = res.Violations
 			}
 		}
 	} else {
@@ -1445,6 +1528,13 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	restarts, forbiddenExit, forbiddenCode, supReason := sup.stats()
 	if errReason == "" && supReason != "" {
 		errReason = supReason
+	}
+	stopGuard()
+	<-guardDone
+	guard.check()
+	if gr := guard.Reason(); gr != "" {
+		// Lý do guard RSS được ưu tiên: các lỗi khác (context canceled) chỉ là hệ quả.
+		errReason = gr
 	}
 
 	finishTime := time.Now()
@@ -1486,6 +1576,11 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		Pass:               conclusion.Pass,
 		Conclusion:         conclusion,
 		Violations:         violations,
+		ViolationsTotal:    cmpRes.ViolationsTotal,
+		ComparedRowsSource: cmpRes.SourceRows,
+		ComparedRowsTarget: cmpRes.TargetRows,
+		DriverRSSMaxBytes:  guard.max.Load(),
+		DriverRSSLimit:     driverRSSLimitMB << 20,
 		ErrorReason:        errReason,
 	}
 
@@ -1495,11 +1590,22 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout,
-		"SOAK RESULT: pass=%v final_state_equal=%v rss_growth=%.3fMB/h checkpoint_max_bytes=%d restarts=%d report=%s\n",
-		rep.Pass, rep.FinalStateEqual, rep.RSSGrowth, rep.CheckpointMaxBytes, rep.Restarts, reportPath,
+		"SOAK RESULT: pass=%v final_state_equal=%v rss_growth=%.3fMB/h checkpoint_max_bytes=%d restarts=%d driver_rss_max=%.1fMB compared_rows=%d/%d violations=%d report=%s\n",
+		rep.Pass, rep.FinalStateEqual, rep.RSSGrowth, rep.CheckpointMaxBytes, rep.Restarts,
+		float64(rep.DriverRSSMaxBytes)/(1024.0*1024.0), rep.ComparedRowsSource, rep.ComparedRowsTarget, rep.ViolationsTotal, reportPath,
 	)
+	if rep.ErrorReason != "" {
+		fmt.Fprintf(stdout, "SOAK ERROR: %s\n", firstLine(rep.ErrorReason))
+	}
 	if !rep.Pass {
 		return 1
 	}
 	return 0
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

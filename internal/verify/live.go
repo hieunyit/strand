@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 	"strings"
@@ -257,7 +258,7 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 		return nil, err
 	}
 	if !mn.Valid {
-		return [][2]int64{{-(1 << 62), 1 << 62}}, nil // bảng rỗng: phát hiện row thừa ở target
+		return [][2]int64{{math.MinInt64, math.MaxInt64}}, nil // bảng rỗng: phát hiện row thừa ở target
 	}
 	if rate >= 1 {
 		// Toàn bộ bảng: keyset walk, mỗi range `rows` khóa thật (không lệch khi PK thưa).
@@ -274,10 +275,18 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 				break
 			}
 			out = append(out, [2]int64{next, end.Int64})
+			if end.Int64 >= mx.Int64 || end.Int64 == math.MaxInt64 {
+				break // end+1 tràn int64 khi end == MaxInt64
+			}
 			next = end.Int64 + 1
 		}
-		// Hai đầu mở để phát hiện row thừa ở target ngoài [min, max].
-		out = append(out, [2]int64{-(1 << 62), mn.Int64 - 1}, [2]int64{mx.Int64 + 1, 1 << 62})
+		// Hai đầu mở (phủ toàn bộ int64) để phát hiện row thừa ở target ngoài [min, max].
+		if mn.Int64 > math.MinInt64 {
+			out = append(out, [2]int64{math.MinInt64, mn.Int64 - 1})
+		}
+		if mx.Int64 < math.MaxInt64 {
+			out = append(out, [2]int64{mx.Int64 + 1, math.MaxInt64})
+		}
 		return out, nil
 	}
 	_ = db.QueryRowContext(ctx, "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
@@ -287,7 +296,14 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 	for i := 0; i < n; i++ {
 		start := mn.Int64
 		if mx.Int64 > mn.Int64 {
-			start += rng.Int63n(mx.Int64 - mn.Int64 + 1)
+			// mx-mn+1 tràn int64 (Int63n panic với n <= 0) khi khoảng PK rộng hơn MaxInt64.
+			if span := uint64(mx.Int64) - uint64(mn.Int64); span < math.MaxInt64 {
+				start += rng.Int63n(int64(span) + 1)
+			} else if span == math.MaxUint64 {
+				start += int64(rng.Uint64()) // [MinInt64, MaxInt64]: mọi giá trị (cộng có wrap)
+			} else {
+				start += int64(rng.Uint64() % (span + 1))
+			}
 		}
 		var end sql.NullInt64
 		q := fmt.Sprintf("SELECT MAX(%s) FROM (SELECT %s FROM %s WHERE %s >= ? ORDER BY %s LIMIT %d) x",
@@ -324,7 +340,8 @@ func KeyRanges(keys []int64) [][2]int64 {
 		if k == prev {
 			continue
 		}
-		if k-prev <= keyRangeMaxGap && k-start < keyRangeMaxSpan {
+		// Hiệu tính trên uint64 (k > prev >= start): k-prev tràn int64 khi khóa ở hai đầu int64.
+		if uint64(k)-uint64(prev) <= keyRangeMaxGap && uint64(k)-uint64(start) < keyRangeMaxSpan {
 			prev = k
 			continue
 		}

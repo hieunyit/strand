@@ -23,6 +23,8 @@ func (h *adminHandler) state() string {
 		return "failed"
 	case h.p.paused.Load():
 		return "paused"
+	case !h.p.running.Load():
+		return "starting"
 	case h.p.bootstrap.Load(), h.p.verifying.Load():
 		return "bootstrapping"
 	default:

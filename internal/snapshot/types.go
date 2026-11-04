@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"database/sql"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -110,6 +111,14 @@ type Chunk struct {
 
 	SnapshotRows    []*model.RowChange
 	BufferedChanges map[int64]*model.RowChange // PK -> last image / tombstone
+
+	// Keys khác nil: chunk "đọc lại" (re-read) một TẬP khóa rời rạc thay vì đoạn [StartPK, EndPK]
+	// (StartPK/EndPK khi đó chỉ là min/max để ghi log). Dùng cho UPDATE đổi PK mà cột TOAST không
+	// đổi (02 §8): khóa mới được đọc lại từ source qua đúng giao thức chunk (low, SELECT, high,
+	// điểm hẹn, flush trong barrier). Xem RangeStateManager.HandleToastPKChangeXID.
+	Keys []int64
+	// Since: thời điểm khóa sớm nhất của chunk re-read được đánh dấu (metric tuổi, luật 30 s).
+	Since time.Time
 }
 
 // RowCount trả về số lượng hàng ước tính trong chunk.
@@ -117,10 +126,25 @@ func (c *Chunk) RowCount() int64 {
 	if c.IsTail {
 		return 1
 	}
-	if c.EndPK < c.StartPK {
+	return SpanRows(c.StartPK, c.EndPK)
+}
+
+// SpanRows trả số khóa trong [start, end] (0 nếu end < start), bão hòa ở math.MaxInt64: end-start+1
+// tràn int64 khi range rộng hơn MaxInt64 (ví dụ [MinInt64, MaxInt64]).
+func SpanRows(start, end int64) int64 {
+	if end < start {
 		return 0
 	}
-	return c.EndPK - c.StartPK + 1
+	d := uint64(end) - uint64(start) // đúng kể cả khi end-start tràn int64
+	if d >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(d) + 1
+}
+
+// MidPK trả điểm giữa của [start, end] (start <= end) không tràn: start + (end-start)/2 tính trên uint64.
+func MidPK(start, end int64) int64 {
+	return start + int64((uint64(end)-uint64(start))/2)
 }
 
 // ParseMySQLGTIDSet chuyển chuỗi GTID executed (có thể gồm nhiều uuid cách nhau bởi dấu phẩy) thành MySQLAppliedSet.

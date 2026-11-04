@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"math"
 	"reflect"
 	"testing"
 )
@@ -40,5 +41,19 @@ func TestKeyRangesCoalescesAndCoversEveryKey(t *testing.T) {
 	}
 	if KeyRanges(nil) != nil {
 		t.Fatal("nil keys must give nil")
+	}
+}
+
+// Review 4.1: k-prev tràn int64 khi khóa ở hai đầu int64 → hai khóa xa nhau bị gộp thành
+// range [MinInt64, MaxInt64] (đọc lại cả bảng).
+func TestKeyRangesInt64Extremes(t *testing.T) {
+	got := KeyRanges([]int64{math.MaxInt64, math.MinInt64, 0})
+	want := [][2]int64{{math.MinInt64, math.MinInt64}, {0, 0}, {math.MaxInt64, math.MaxInt64}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	got = KeyRanges([]int64{math.MaxInt64 - 2, math.MaxInt64})
+	if want := [][2]int64{{math.MaxInt64 - 2, math.MaxInt64}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
 }

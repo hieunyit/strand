@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"strand/internal/model"
@@ -28,6 +29,32 @@ func TestDDLNewTables(t *testing.T) {
 		cr, rn := ddlNewTables(c.ddl, "def")
 		if !reflect.DeepEqual(cr, c.created) || !reflect.DeepEqual(rn, c.renam) {
 			t.Errorf("%q: created=%v renamed=%v, want %v %v", c.ddl, cr, rn, c.created, c.renam)
+		}
+	}
+}
+
+// Review 4.2: bảng `user` không được bị coi là bị DDL đụng tới chỉ vì DDL nhắc `user_id`, nhưng phải
+// khớp mọi cách viết tên bảng thật (không được bỏ sót).
+func TestDDLMentionsTableWholeIdentifier(t *testing.T) {
+	cases := []struct {
+		ddl  string
+		want bool
+	}{
+		{"ALTER TABLE orders ADD COLUMN user_id INT", false},
+		{"ALTER TABLE users ADD COLUMN x INT", false},
+		{"ALTER TABLE appuser ADD COLUMN x INT", false},
+		{"ALTER TABLE user ADD COLUMN x INT", true},
+		{"ALTER TABLE app.user ADD COLUMN x INT", true},
+		{"ALTER TABLE `user` ADD COLUMN x INT", true},
+		{"ALTER TABLE `app`.`user` ADD COLUMN x INT", true},
+		{"DROP TABLE user", true},
+		{"RENAME TABLE user_id_map TO x, user TO y", true},
+		{"CREATE INDEX i ON user(id)", true},
+		{"alter table APP.USER add x int", true},
+	}
+	for _, c := range cases {
+		if got := ddlMentionsTable(strings.ToLower(c.ddl), "user"); got != c.want {
+			t.Errorf("%q: got %v want %v", c.ddl, got, c.want)
 		}
 	}
 }

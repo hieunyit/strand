@@ -17,6 +17,9 @@ package snapshot
 //  6. Rendezvous: chờ router xử lý xong một Txn (thật, hoặc Txn rỗng của watermark) có LSN ≥ H.
 //  7. Flush trong barrier: merge row snapshot với buffer theo PK, thay nguyên range ở target.
 //
+// Chunk re-read (Chunk.Keys, UPDATE đổi PK mà cột TOAST không đổi — toast_pk.go) đi đúng các bước trên,
+// chỉ khác SELECT theo tập khóa và flush thay đúng tập khóa đó.
+//
 // Vì sao đúng (với mỗi PK p của chunk; các Txn chạm p có thứ tự commit LSN T1 < T2 < …):
 //   - Visibility theo PK là một TIỀN TỐ của thứ tự stream: Tk+1 chỉ sửa được row p sau khi chờ khóa
 //     row của Tk, mà khóa đó chỉ nhả sau ProcArrayEndTransaction của Tk; nên Tk+1 visible ⇒ Tk visible
@@ -173,7 +176,7 @@ func (c *PGChunkSource) Bounds(ctx context.Context, table model.TableID, pkCol s
 	}
 	var b TableBounds
 	if minV.Valid && maxV.Valid {
-		b.MinPK, b.MaxPK, b.Count = minV.Int64, maxV.Int64, maxV.Int64-minV.Int64+1
+		b.MinPK, b.MaxPK, b.Count = minV.Int64, maxV.Int64, SpanRows(minV.Int64, maxV.Int64)
 	}
 	return &b, nil
 }
@@ -259,14 +262,24 @@ func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chun
 		sel[i] = quotePGIdent(col) + "::text"
 	}
 	pk := quotePGIdent(columnNames[pkIdx])
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= $1 AND %s <= $2 ORDER BY %s",
-		strings.Join(sel, ", "), quotePGTable(table), pk, pk, pk)
-	queryFn := func(qCtx context.Context, ch *Chunk) ([]*model.RowChange, int64, error) {
-		return c.queryChunk(qCtx, query, ch.StartPK, ch.EndPK, columnNames, pkIdx, types, table)
-	}
-	rows, err := s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn)
-	if err != nil {
-		return nil, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+	var rows []*model.RowChange
+	if chunk.Keys != nil {
+		// Chunk re-read (02 §8, toast_pk.go): tập khóa rời rạc, tra theo index PK (≤ max_pending_cross_range
+		// khóa) nên không cần chia đôi theo timeout.
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ANY($1::bigint[]) ORDER BY %s",
+			strings.Join(sel, ", "), quotePGTable(table), pk, pk)
+		if rows, _, err = c.queryChunk(ctx, query, columnNames, pkIdx, types, table, chunk.Keys); err != nil {
+			return nil, nil, fmt.Errorf("re-read %d keys of %s: %w", len(chunk.Keys), table, err)
+		}
+	} else {
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= $1 AND %s <= $2 ORDER BY %s",
+			strings.Join(sel, ", "), quotePGTable(table), pk, pk, pk)
+		queryFn := func(qCtx context.Context, ch *Chunk) ([]*model.RowChange, int64, error) {
+			return c.queryChunk(qCtx, query, columnNames, pkIdx, types, table, ch.StartPK, ch.EndPK)
+		}
+		if rows, err = s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn); err != nil {
+			return nil, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+		}
 	}
 
 	// 5. High = insert LSN sau mọi SELECT, rồi watermark (record bắt đầu ở LSN ≥ high).
@@ -298,9 +311,9 @@ func EmitPGWatermark(ctx context.Context, db *sql.DB, serverVersion int, content
 	return nil
 }
 
-func (c *PGChunkSource) queryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int,
-	types map[string]uint32, table model.TableID) ([]*model.RowChange, int64, error) {
-	rows, err := c.DB.QueryContext(ctx, query, startPK, endPK)
+func (c *PGChunkSource) queryChunk(ctx context.Context, query string, columnNames []string, pkIdx int,
+	types map[string]uint32, table model.TableID, args ...any) ([]*model.RowChange, int64, error) {
+	rows, err := c.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}

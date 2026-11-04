@@ -39,9 +39,23 @@ func IsPGUniqueViolation(err error) bool {
 // db mở bằng driver pgx stdlib. Giá trị trong rows phải đã ở dạng PG (typemap đã chuyển).
 func PGReplaceRange(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
 	rows []*model.RowChange, startPK, endPK int64) error {
+	q := fmt.Sprintf("DELETE FROM %s WHERE %s >= $1 AND %s <= $2", quotePGTable(table), quotePG(pkCol), quotePG(pkCol))
+	return pgReplaceRetry(ctx, db, table, pkCol, columnNames, rows, q, startPK, endPK)
+}
+
+// PGReplaceKeys như PGReplaceRange nhưng thay đúng TẬP khóa keys (chunk re-read, 02 §8): DELETE các khóa
+// đó rồi upsert rows (rows chỉ chứa khóa trong keys), trong MỘT transaction.
+func PGReplaceKeys(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
+	rows []*model.RowChange, keys []int64) error {
+	q := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1::bigint[])", quotePGTable(table), quotePG(pkCol))
+	return pgReplaceRetry(ctx, db, table, pkCol, columnNames, rows, q, keys)
+}
+
+func pgReplaceRetry(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
+	rows []*model.RowChange, del string, delArgs ...any) error {
 	var err error
 	for attempt := 1; attempt <= 20; attempt++ {
-		err = pgReplaceRangeOnce(ctx, db, table, pkCol, columnNames, rows, startPK, endPK)
+		err = pgReplaceOnce(ctx, db, table, pkCol, columnNames, rows, del, delArgs...)
 		if err == nil || !IsPGRetryable(err) || ctx.Err() != nil {
 			return err
 		}
@@ -50,15 +64,14 @@ func PGReplaceRange(ctx context.Context, db *sql.DB, table model.TableID, pkCol 
 	return err
 }
 
-func pgReplaceRangeOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
-	rows []*model.RowChange, startPK, endPK int64) error {
+func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
+	rows []*model.RowChange, del string, delArgs ...any) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	q := fmt.Sprintf("DELETE FROM %s WHERE %s >= $1 AND %s <= $2", quotePGTable(table), quotePG(pkCol), quotePG(pkCol))
-	if _, err := tx.ExecContext(ctx, q, startPK, endPK); err != nil {
+	if _, err := tx.ExecContext(ctx, del, delArgs...); err != nil {
 		return fmt.Errorf("clear chunk range on target: %w", err)
 	}
 	if len(rows) > 0 && len(columnNames) > 0 {

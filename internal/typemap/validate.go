@@ -130,11 +130,17 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 			err := dst.QueryRowContext(ctx,
 				"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
 				targetSchema, table).Scan(&dstTableExists)
-			if err != nil || dstTableExists == 0 {
+			if err != nil {
+				// Không nuốt lỗi: lỗi ở đây trước kia dẫn tới bỏ qua toàn bộ kiểm tra collation target.
+				return warnings, fmt.Errorf("check target table %s.%s existence: %w", targetSchema, table, err)
+			}
+			if dstTableExists == 0 {
 				targetSchema = "public"
-				_ = dst.QueryRowContext(ctx,
+				if err := dst.QueryRowContext(ctx,
 					"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
-					targetSchema, table).Scan(&dstTableExists)
+					targetSchema, table).Scan(&dstTableExists); err != nil {
+					return warnings, fmt.Errorf("check target table %s.%s existence: %w", targetSchema, table, err)
+				}
 			}
 
 			if dstTableExists > 0 {
@@ -165,8 +171,12 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 						}
 
 						// b) Kiểm tra collation deterministic trong PG
-						if dc.CollationName != "" && dc.CollationName != "default" {
-							cm, err := InspectPGCollation(ctx, dst, dc.CollationName)
+						// Resolve theo pg_attribute.attcollation (OID) chứ không theo tên: tên collation có thể
+						// trùng giữa các schema, tra theo tên + LIMIT 1 có thể chọn nhầm bản deterministic.
+						// Luôn kiểm tra (kể cả khi information_schema.collation_name rỗng, ví dụ cột kiểu domain
+						// mang collation của domain): attcollation là collation hiệu lực của cột.
+						{
+							cm, err := InspectPGColumnCollation(ctx, dst, targetSchema, table, dc.Name)
 							if err != nil {
 								// Không được bỏ qua: không xác định được collation thì không kết luận "an toàn".
 								return warnings, err
@@ -176,7 +186,7 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 									return warnings, exitcode.New(
 										exitcode.ErrCollationLooser,
 										exitcode.Rejected,
-										fmt.Sprintf("table %s.%s key column %s on target uses non-deterministic collation %s (spec: 02 §8)", targetSchema, table, dc.Name, dc.CollationName),
+										fmt.Sprintf("table %s.%s key column %s on target uses non-deterministic collation %s (spec: 02 §8)", targetSchema, table, dc.Name, cm.Name),
 										nil,
 									)
 								}
@@ -184,7 +194,7 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 									return warnings, exitcode.New(
 										exitcode.ErrCollationLooser,
 										exitcode.Rejected,
-										fmt.Sprintf("table %s.%s key column %s on target uses case-insensitive collation %s (spec: 02 §8)", targetSchema, table, dc.Name, dc.CollationName),
+										fmt.Sprintf("table %s.%s key column %s on target uses case-insensitive collation %s (spec: 02 §8)", targetSchema, table, dc.Name, cm.Name),
 										nil,
 									)
 								}
@@ -209,20 +219,25 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 		for _, col := range cols {
 			// 6.1. Zero Date: khi policy là reject (mặc định)
 			if (col.DataType == "date" || col.DataType == "datetime" || col.DataType == "timestamp") && opts.ZeroDatePolicy == "reject" {
+				// Chỉ so sánh trên chuỗi CAST(col AS CHAR): KHÔNG dùng literal '0000-00-00' vì dưới sql_mode
+				// mặc định (strict + NO_ZERO_DATE) MySQL trả ERROR 1525 "Incorrect DATE/TIMESTAMP value" cho
+				// `col = '0000-00-00'`. Đọc giá trị zero rồi đổi sang chuỗi không phụ thuộc sql_mode.
 				q := fmt.Sprintf(`
 					SELECT COUNT(*) FROM (
 						SELECT 1 FROM `+"`%s`.`%s`"+`
-						 WHERE `+"`%s`"+` = '0000-00-00'
-						    OR `+"`%s`"+` = '0000-00-00 00:00:00'
-						    OR CAST(`+"`%s`"+` AS CHAR) LIKE '0000-00-00%%'
+						 WHERE CAST(`+"`%s`"+` AS CHAR) LIKE '0000-00-00%%'
 						    OR CAST(`+"`%s`"+` AS CHAR) LIKE '%%-00-%%'
 						    OR CAST(`+"`%s`"+` AS CHAR) LIKE '%%-00'
 						    OR CAST(`+"`%s`"+` AS CHAR) LIKE '%%-00 %%'
 						 LIMIT %d
-					) _cnt`, schema, table, col.Name, col.Name, col.Name, col.Name, col.Name, col.Name, opts.ScanLimit)
+					) _cnt`, schema, table, col.Name, col.Name, col.Name, col.Name, opts.ScanLimit)
 
 				var zeroCount int
-				if err := src.QueryRowContext(ctx, q).Scan(&zeroCount); err == nil && zeroCount > 0 {
+				if err := src.QueryRowContext(ctx, q).Scan(&zeroCount); err != nil {
+					// Không được nuốt lỗi: quét thất bại thì không thể kết luận bảng "sạch".
+					return warnings, fmt.Errorf("validate %s.%s column %s: zero-date scan failed (cannot conclude table is safe): %w", schema, table, col.Name, err)
+				}
+				if zeroCount > 0 {
 					return warnings, exitcode.New(
 						exitcode.ErrTypeUnmappable,
 						exitcode.Rejected,
@@ -242,7 +257,10 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 					) _cnt`, schema, table, col.Name, opts.ScanLimit)
 
 				var overCount int
-				if err := src.QueryRowContext(ctx, q).Scan(&overCount); err == nil && overCount > 0 {
+				if err := src.QueryRowContext(ctx, q).Scan(&overCount); err != nil {
+					return warnings, fmt.Errorf("validate %s.%s column %s: unsigned bigint range scan failed (cannot conclude table is safe): %w", schema, table, col.Name, err)
+				}
+				if overCount > 0 {
 					return warnings, exitcode.New(
 						exitcode.ErrTypeUnmappable,
 						exitcode.Rejected,
@@ -268,7 +286,10 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 					) _cnt`, schema, table, col.Name, col.Name, inList, opts.ScanLimit)
 
 				var invalidEnumCount int
-				if err := src.QueryRowContext(ctx, q).Scan(&invalidEnumCount); err == nil && invalidEnumCount > 0 {
+				if err := src.QueryRowContext(ctx, q).Scan(&invalidEnumCount); err != nil {
+					return warnings, fmt.Errorf("validate %s.%s column %s: enum value scan failed (cannot conclude table is safe): %w", schema, table, col.Name, err)
+				}
+				if invalidEnumCount > 0 {
 					return warnings, exitcode.New(
 						exitcode.ErrTypeUnmappable,
 						exitcode.Rejected,

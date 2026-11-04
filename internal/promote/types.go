@@ -110,8 +110,16 @@ type TargetDriver interface {
 	IsReadOnly(ctx context.Context) (bool, error)
 	ApplyRemaining(ctx context.Context) error
 	FindColumnMax(ctx context.Context, table, column string) (int64, error)
+	// Setval đặt sequence tới val, không bao giờ lùi theo chiều của sequence (tăng: GREATEST, giảm: LEAST).
 	Setval(ctx context.Context, seq SequenceInfo, val int64) error
 	OpenWrites(ctx context.Context) error
+}
+
+// ColumnMinFinder là interface tùy chọn cho TargetDriver: MIN của cột, dùng cho sequence gắn cột GIẢM
+// dần (INCREMENT âm) — giá trị kế tiếp phải thấp hơn mọi giá trị đã dùng nên lấy min(cột) - margin.
+// Driver không hỗ trợ thì promote dừng hỏi người vận hành (exit 10) thay vì setval sai chiều.
+type ColumnMinFinder interface {
+	FindColumnMin(ctx context.Context, table, column string) (int64, error)
 }
 
 // FailoverSummarizer là interface tùy chọn cho TargetDriver để tóm tắt tập giao dịch đã apply
