@@ -70,13 +70,6 @@ func findSequenceOverride(overrides map[string]int64, name string) (int64, bool)
 	return 0, false
 }
 
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // mergeSequences lấy danh sách sequence vừa khám phá (fresh) làm chuẩn và giữ lại phần trạng thái
 // đã lưu (LastSyncedValue, giá trị đã chốt, gợi ý) theo tên. fresh rỗng thì giữ nguyên danh sách đã lưu.
 func mergeSequences(saved, fresh []SequenceInfo) []SequenceInfo {
@@ -90,8 +83,8 @@ func mergeSequences(saved, fresh []SequenceInfo) []SequenceInfo {
 	out := make([]SequenceInfo, len(fresh))
 	for i, f := range fresh {
 		if s, ok := byName[f.Name]; ok {
-			f.LastSyncedValue = maxInt64(f.LastSyncedValue, s.LastSyncedValue)
-			f.FinalValue = maxInt64(f.FinalValue, s.FinalValue)
+			f.LastSyncedValue = further(f, f.LastSyncedValue, s.LastSyncedValue)
+			f.FinalValue = further(f, f.FinalValue, s.FinalValue)
 			f.Decided = f.Decided || s.Decided
 			if f.SuggestedValue == 0 {
 				f.SuggestedValue = s.SuggestedValue
@@ -116,7 +109,7 @@ func (p *Promoter) suggestIndependentSequences(progress *Progress) {
 			continue
 		}
 		margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
-		suggested := seq.LastSyncedValue + margin
+		suggested := stepAhead(seq, seq.LastSyncedValue, margin)
 		progress.SuggestedSequences[seq.Name] = suggested
 		progress.Sequences[i].SuggestedValue = suggested
 	}
@@ -260,24 +253,45 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
 
 			if seq.Type == SequenceTypeColumn {
+				if isDescending(*seq) {
+					// Sequence giảm dần: giá trị kế tiếp phải THẤP hơn mọi giá trị đã dùng → min(cột) - margin
+					// (max(cột) + margin sẽ đưa sequence quay lại vùng đã cấp → trùng khóa).
+					mf, ok := p.targetDriver.(ColumnMinFinder)
+					if !ok {
+						return progress, exitcode.New(
+							exitcode.ErrPromoteNeedsDecision,
+							exitcode.NeedsDecision,
+							fmt.Sprintf("sequence %s has negative increment %d (descending) but the target driver cannot read min(%s.%s): operator decision required",
+								seq.Name, seq.IncrementBy, seq.Table, seq.Column),
+							nil,
+						)
+					}
+					minCol, err := mf.FindColumnMin(ctx, seq.Table, seq.Column)
+					if err != nil {
+						return progress, fmt.Errorf("find min column for %s.%s: %w", seq.Table, seq.Column, err)
+					}
+					seq.CurrentValue = minCol
+					seq.FinalValue = further(*seq, seq.FinalValue, stepAhead(*seq, minCol, margin))
+					continue
+				}
 				// spec: 02 §8: sequence gắn cột (pg_depend) lấy max(cột) + margin.
 				maxCol, err := p.targetDriver.FindColumnMax(ctx, seq.Table, seq.Column)
 				if err != nil {
 					return progress, fmt.Errorf("find max column for %s.%s: %w", seq.Table, seq.Column, err)
 				}
 				seq.CurrentValue = maxCol
-				seq.FinalValue = maxInt64(seq.FinalValue, maxCol+margin)
+				seq.FinalValue = further(*seq, seq.FinalValue, stepAhead(*seq, maxCol, margin))
 				continue
 			}
 
 			// spec: 02 §8: sequence độc lập lấy last_value đọc từ source cộng margin.
 			if overrideVal, ok := findSequenceOverride(p.cfg.SequenceOverrides, seq.Name); ok {
-				suggested := seq.LastSyncedValue + margin
-				if overrideVal < suggested {
-					p.logger.Warn("operator override is below the suggested value (last sync + margin)",
-						"sequence", seq.Name, "override", overrideVal, "suggested", suggested)
+				suggested := stepAhead(*seq, seq.LastSyncedValue, margin)
+				if behind(*seq, overrideVal, suggested) {
+					p.logger.Warn("operator override is behind the suggested value (last sync + margin in the sequence direction)",
+						"sequence", seq.Name, "override", overrideVal, "suggested", suggested, "increment_by", seq.IncrementBy)
 				}
-				seq.FinalValue = maxInt64(seq.FinalValue, overrideVal)
+				seq.FinalValue = further(*seq, seq.FinalValue, overrideVal)
 				seq.Decided = true
 				continue
 			}
@@ -286,7 +300,7 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 				lastVal, err := p.sourceDriver.ReadSequenceLastValue(ctx, seq.Name)
 				if err == nil {
 					seq.CurrentValue = lastVal
-					seq.FinalValue = maxInt64(seq.FinalValue, lastVal+margin)
+					seq.FinalValue = further(*seq, seq.FinalValue, stepAhead(*seq, lastVal, margin))
 					seq.Decided = true
 					continue
 				}
@@ -303,7 +317,7 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			// spec: 02 §8: "Nếu sau khi fence không đọc được source, promote dừng và hỏi người vận hành,
 			// kèm giá trị gợi ý (lần đồng bộ cuối cộng margin)."
 			p.logger.Warn("cannot read independent sequence from source after fence", "sequence", seq.Name, "error", readErr)
-			suggested := seq.LastSyncedValue + margin
+			suggested := stepAhead(*seq, seq.LastSyncedValue, margin)
 			progress.SuggestedSequences[seq.Name] = suggested
 			seq.SuggestedValue = suggested
 			needsDecision = true

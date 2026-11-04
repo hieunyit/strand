@@ -39,9 +39,10 @@ func (c *Chunker) PlanChunks(table model.TableID, pkCol string, minPK, maxPK int
 	var chunkID int64 = 1
 	curr := minPK
 	for curr <= maxPK {
-		end := curr + defaultRows - 1
-		if end > maxPK {
-			end = maxPK
+		// Không tính curr+defaultRows-1 trực tiếp: tràn int64 khi curr gần MaxInt64.
+		end := maxPK
+		if uint64(maxPK)-uint64(curr) >= uint64(defaultRows) {
+			end = curr + defaultRows - 1
 		}
 		chunks = append(chunks, &Chunk{
 			ID:              chunkID,
@@ -49,11 +50,14 @@ func (c *Chunker) PlanChunks(table model.TableID, pkCol string, minPK, maxPK int
 			PKCol:           pkCol,
 			StartPK:         curr,
 			EndPK:           end,
-			EstimatedRows:   end - curr + 1,
+			EstimatedRows:   SpanRows(curr, end),
 			State:           StatePending,
 			BufferedChanges: make(map[int64]*model.RowChange),
 		})
 		chunkID++
+		if end >= maxPK {
+			break // end == maxPK có thể là MaxInt64: end+1 tràn thành MinInt64 và lặp vô hạn
+		}
 		curr = end + 1
 	}
 	return chunks
@@ -69,7 +73,7 @@ func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool)
 		return nil, nil, false
 	}
 
-	mid := chunk.StartPK + (chunk.EndPK-chunk.StartPK)/2
+	mid := MidPK(chunk.StartPK, chunk.EndPK)
 	if mid >= chunk.EndPK {
 		mid = chunk.StartPK
 	}
@@ -80,7 +84,7 @@ func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool)
 		PKCol:           chunk.PKCol,
 		StartPK:         chunk.StartPK,
 		EndPK:           mid,
-		EstimatedRows:   mid - chunk.StartPK + 1,
+		EstimatedRows:   SpanRows(chunk.StartPK, mid),
 		State:           chunk.State,
 		LowWatermark:    chunk.LowWatermark,
 		HighWatermark:   chunk.HighWatermark,
@@ -93,7 +97,7 @@ func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool)
 		PKCol:           chunk.PKCol,
 		StartPK:         mid + 1,
 		EndPK:           chunk.EndPK,
-		EstimatedRows:   chunk.EndPK - (mid + 1) + 1,
+		EstimatedRows:   SpanRows(mid+1, chunk.EndPK),
 		State:           chunk.State,
 		LowWatermark:    chunk.LowWatermark,
 		HighWatermark:   chunk.HighWatermark,

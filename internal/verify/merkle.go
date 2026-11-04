@@ -6,7 +6,7 @@ package verify
 //
 // Cách làm:
 //  1. Chia bảng (PK một cột số nguyên) theo keyset walk trên source thành chunk ~ChunkRows row,
-//     cộng hai chunk biên mở (-inf, min-1] và [max+1, +inf) để bắt row thừa ở target.
+//     cộng hai chunk biên mở [MinInt64, min-1] và [max+1, MaxInt64] để bắt row thừa ở target.
 //  2. Hash từng chunk ngay trong DB ở cả hai phía, không kéo row về: mỗi row được chuẩn hóa thành
 //     một chuỗi text chính tắc (canonicalValueExpr), hash row = 60 bit đầu của MD5, hash chunk =
 //     "COUNT:SUM(hash row)". Cùng một thuật toán cho MySQL và PG nên MySQL→PG, PG→PG,
@@ -371,7 +371,9 @@ func isIntegerType(engine model.Engine, dt string) bool {
 }
 
 // DivideTableChunks chia bảng theo keyset walk trên PK số nguyên. Thêm hai chunk biên mở
-// [-(1<<62), min-1] và [max+1, 1<<62] để phát hiện row thừa ở target ngoài [min, max].
+// [MinInt64, min-1] và [max+1, MaxInt64] (phủ TOÀN BỘ int64) để phát hiện row thừa ở target ngoài
+// [min, max]. Biên chỉ thêm khi min > MinInt64 / max < MaxInt64 nên min-1, max+1 không tràn.
+// PK BIGINT UNSIGNED > MaxInt64 ở source: MIN/MAX không đọc được vào int64 → trả lỗi (không bỏ qua).
 func DivideTableChunks(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID, pkCol string, chunkSize int) ([]ChunkRange, error) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkRows
@@ -381,7 +383,7 @@ func DivideTableChunks(ctx context.Context, db *sql.DB, engine model.Engine, t m
 	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s", qpk, qpk, qt)).Scan(&mn, &mx); err != nil {
 		return nil, fmt.Errorf("min/max pk of %s: %w", t, err)
 	}
-	const infMin, infMax = int64(-(1 << 62)), int64(1 << 62)
+	const infMin, infMax = int64(math.MinInt64), int64(math.MaxInt64)
 	if !mn.Valid {
 		// Source rỗng: một chunk phủ mọi khóa để bắt row thừa ở target.
 		return []ChunkRange{{ID: 0, Start: infMin, End: infMax}}, nil

@@ -407,8 +407,23 @@ func (d *PGTargetDriver) FindColumnMax(ctx context.Context, table, column string
 	return maxVal, nil
 }
 
+// FindColumnMin tìm giá trị MIN của cột trong bảng target PostgreSQL (0 nếu bảng rỗng), cho sequence
+// giảm dần (đối xứng với FindColumnMax).
+func (d *PGTargetDriver) FindColumnMin(ctx context.Context, table, column string) (int64, error) {
+	if d.db == nil {
+		return 0, fmt.Errorf("target db not configured")
+	}
+	q := fmt.Sprintf("SELECT COALESCE(MIN(%s), 0)::bigint FROM %s", quoteIdent(column), quoteQualified(table))
+	var minVal int64
+	if err := d.db.QueryRowContext(ctx, q).Scan(&minVal); err != nil {
+		return 0, fmt.Errorf("find min column for %s.%s: %w", table, column, err)
+	}
+	return minVal, nil
+}
+
 // Setval (bước 4) đặt sequence trên target bằng một câu lệnh duy nhất, không bao giờ lùi:
-// setval(seq, GREATEST(val, last_value hiện tại), true). Áp dụng cho cả sequence của identity.
+// setval(seq, GREATEST(val, last_value hiện tại), true) cho sequence tăng; sequence giảm dần
+// (INCREMENT âm) dùng LEAST để không quay về phía các giá trị đã cấp. Áp dụng cho cả identity.
 func (d *PGTargetDriver) Setval(ctx context.Context, seq SequenceInfo, val int64) error {
 	if d.db == nil {
 		return fmt.Errorf("target db not configured")
@@ -418,7 +433,11 @@ func (d *PGTargetDriver) Setval(ctx context.Context, seq SequenceInfo, val int64
 		return fmt.Errorf("setval: sequence name is empty")
 	}
 	qn := quoteQualified(name)
-	q := fmt.Sprintf("SELECT setval($1::regclass, GREATEST($2::bigint, (SELECT last_value FROM %s)), true)", qn)
+	fn := "GREATEST"
+	if isDescending(seq) {
+		fn = "LEAST"
+	}
+	q := fmt.Sprintf("SELECT setval($1::regclass, %s($2::bigint, (SELECT last_value FROM %s)), true)", fn, qn)
 	if _, err := d.db.ExecContext(ctx, q, qn, val); err != nil {
 		return fmt.Errorf("setval %s to %d: %w", name, val, err)
 	}
@@ -662,9 +681,8 @@ func SyncIndependentSequences(
 		if err != nil {
 			continue
 		}
-		if lastVal > seq.LastSyncedValue {
-			progress.Sequences[i].LastSyncedValue = lastVal
-		}
+		// Không bao giờ lùi theo chiều của sequence (giảm dần: chỉ nhận giá trị nhỏ hơn).
+		progress.Sequences[i].LastSyncedValue = further(seq, seq.LastSyncedValue, lastVal)
 		progress.Sequences[i].CurrentValue = lastVal
 		updated = true
 	}

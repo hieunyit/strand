@@ -51,6 +51,35 @@ func ddlNewTables(ddl, defSchema string) (created, renamedTo []model.TableID) {
 	return created, renamedTo
 }
 
+// isDDLIdentByte: byte có thể nằm trong định danh MySQL không quote (ASCII chữ, số, '_', '$').
+// Byte khác (kể cả byte UTF-8 không phải ASCII) coi như ranh giới: thà khớp thừa còn hơn bỏ sót.
+func isDDLIdentByte(c byte) bool {
+	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// ddlMentionsTable: q (DDL chữ thường) có nhắc tới bảng table (chữ thường) như MỘT định danh trọn vẹn
+// không: `user`, app.user, `app`.`user`, user( ... khớp; user_id, users, appuser thì không. Đây là
+// xấp xỉ an toàn: khớp thừa (tên xuất hiện trong chuỗi/comment/tên cột trùng tên bảng) chấp nhận được,
+// không được bỏ sót, nên chỉ xét hai byte kề bên mỗi lần xuất hiện.
+func ddlMentionsTable(q, table string) bool {
+	if table == "" {
+		return false
+	}
+	for from := 0; from <= len(q)-len(table); {
+		i := strings.Index(q[from:], table)
+		if i < 0 {
+			return false
+		}
+		i += from
+		end := i + len(table)
+		if (i == 0 || !isDDLIdentByte(q[i-1])) && (end == len(q) || !isDDLIdentByte(q[end])) {
+			return true
+		}
+		from = i + 1
+	}
+	return false
+}
+
 // handleDDL quyết định một Txn DDL: không đụng bảng nào của pipeline thì bỏ qua; có đụng thì chỉ đi
 // tiếp khi cột của mọi bảng liên quan ở target đã khớp source (DBA đã áp DDL ở target), và nạp lại
 // metadata bảng. Bảng MỚI khớp bộ lọc:
@@ -63,7 +92,7 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 	q := strings.ToLower(t.DDL)
 	p.tablesMu.RLock()
 	for id := range p.tables {
-		if strings.Contains(q, strings.ToLower(id.Table)) {
+		if ddlMentionsTable(q, strings.ToLower(id.Table)) {
 			affected[id] = true
 		}
 	}

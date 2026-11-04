@@ -292,6 +292,28 @@ type SnapshotPlan struct {
 	MaxPK     int64 `json:"max_pk"`
 	ChunkRows int64 `json:"chunk_rows"`
 	NextPK    int64 `json:"next_pk"` // mọi chunk có EndPK < NextPK đã flush
+	// Finished: đã flush tới MaxPK. Cần cờ riêng vì khi MaxPK == MaxInt64 thì NextPK = MaxPK+1
+	// không biểu diễn được (tràn thành MinInt64 → resume đọc lại cả bảng).
+	Finished bool `json:"finished,omitempty"`
+}
+
+// Pending trả về true nếu key thuộc phần chưa flush [NextPK, MaxPK] của plan.
+func (p SnapshotPlan) Pending(key int64) bool {
+	return !p.Empty && !p.Finished && key >= p.NextPK && key <= p.MaxPK
+}
+
+// FlushedEnd trả khóa cuối đã flush (ok=false nếu chưa flush gì).
+func (p SnapshotPlan) FlushedEnd() (int64, bool) {
+	if p.Empty {
+		return 0, false
+	}
+	if p.Finished {
+		return p.MaxPK, true
+	}
+	if p.NextPK > p.MinPK {
+		return p.NextPK - 1, true
+	}
+	return 0, false
 }
 
 // TableBounds chứa thông tin biên khóa chính của bảng.
@@ -309,7 +331,7 @@ func GetTableBounds(ctx context.Context, db *sql.DB, table model.TableID, pkCol 
 	var minV, maxV sql.NullInt64
 	err := db.QueryRowContext(ctx, query).Scan(&minV, &maxV)
 	if err == nil && minV.Valid && maxV.Valid {
-		b.MinPK, b.MaxPK, b.Count = minV.Int64, maxV.Int64, maxV.Int64-minV.Int64+1
+		b.MinPK, b.MaxPK, b.Count = minV.Int64, maxV.Int64, SpanRows(minV.Int64, maxV.Int64)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query table bounds: %w", err)
@@ -431,23 +453,31 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		// [Next, Max]; chunk kế tiếp được cắt động theo khóa thật ngay trước khi đọc, nên PK
 		// thưa hay lệch không sinh ra hàng nghìn chunk rỗng.
 		chunks = nil
-		if plan.NextPK > plan.MinPK {
+		if doneEnd, ok := plan.FlushedEnd(); ok {
 			chunks = append(chunks, &Chunk{ID: 0, Table: table, PKCol: pkCol, StartPK: plan.MinPK,
-				EndPK: plan.NextPK - 1, State: StateDone, BufferedChanges: map[int64]*model.RowChange{}})
+				EndPK: doneEnd, State: StateDone, BufferedChanges: map[int64]*model.RowChange{}})
 		}
-		if plan.NextPK <= plan.MaxPK {
+		if !plan.Finished && plan.NextPK <= plan.MaxPK {
 			chunks = append(chunks, &Chunk{ID: 1, Table: table, PKCol: pkCol, StartPK: plan.NextPK,
 				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[int64]*model.RowChange{}})
 		}
 		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
 		return nil
 	}
-	var savePlan func(next int64) error
-	savePlan = func(next int64) error { return nil }
+	// savePlan ghi tiến độ sau khi chunk kết thúc ở end đã flush.
+	var savePlan func(end int64) error
+	savePlan = func(end int64) error { return nil }
 	if s.SavePlan != nil && s.LoadPlan != nil {
-		savePlan = func(next int64) error {
+		savePlan = func(end int64) error {
 			plan, _ := s.LoadPlan(table)
-			plan.NextPK = next
+			if end >= plan.MaxPK {
+				plan.Finished = true
+			}
+			if end < math.MaxInt64 {
+				plan.NextPK = end + 1
+			} else {
+				plan.NextPK = end // không tràn; Finished đã đánh dấu xong
+			}
 			return s.SavePlan(table, plan)
 		}
 	}
@@ -471,7 +501,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		src = &sqlSourceQuerier{db: srcDB}
 	}
 
-	for next := cur.NextPK; !cur.Empty && next <= cur.MaxPK; {
+	for next := cur.NextPK; !cur.Empty && !cur.Finished && next <= cur.MaxPK; {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -490,7 +520,11 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		if err != nil {
 			return err
 		}
-		next = end + 1
+		// Chunk cuối: KHÔNG tính end+1 (end == MaxInt64 thì tràn thành MinInt64 và đi lại cả bảng mãi).
+		last := end >= cur.MaxPK
+		if !last {
+			next = end + 1
+		}
 
 		// Watermark (RS-2): low → WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high, cùng server.
 		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
@@ -523,7 +557,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			err = flush()
 		}
 		if err == nil {
-			err = savePlan(chunk.EndPK + 1)
+			err = savePlan(chunk.EndPK)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to flush chunk [%d, %d] to target: %w", chunk.StartPK, chunk.EndPK, err)
@@ -536,6 +570,9 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			}
 		} else if s.opts.SleepBetweenChunks > 0 {
 			time.Sleep(s.opts.SleepBetweenChunks)
+		}
+		if last {
+			break
 		}
 	}
 

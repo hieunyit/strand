@@ -864,7 +864,7 @@ func (p *Pipeline) keepBeforeRegisterPG(rc *model.RowChange) []*model.RowChange 
 			continue
 		}
 		pk, err := snapshotPK(part.Key)
-		if err != nil || (pk >= plan.NextPK && pk <= plan.MaxPK) {
+		if err != nil || plan.Pending(pk) {
 			continue
 		}
 		out = append(out, part)

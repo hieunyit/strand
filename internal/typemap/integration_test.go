@@ -28,6 +28,7 @@ func init() {
 var (
 	mysqlOnce sync.Once
 	mysqlDB   *sql.DB
+	mysqlDSN  string
 	mysqlStop func()
 
 	pgOnce sync.Once
@@ -99,6 +100,7 @@ func getMySQL(t *testing.T) *sql.DB {
 		}
 
 		mysqlDB = db
+		mysqlDSN = dsn
 		mysqlStop = func() {
 			_ = db.Close()
 			_ = container.Terminate(context.Background())
