@@ -26,7 +26,7 @@ Kết quả trên máy dev **chỉ để tham khảo**, không dùng để chố
 | Tải nền | Sóng vuông giữa mức thấp và mức cao, chu kỳ 10 phút (5 phút mỗi mức); spike ×2 mức cao trong 10 giây, mỗi 3 phút. Dev: thấp 50 txn/s, cao 200 txn/s, 16 client. Biên độ chính thức chốt theo năng lực staging (02/04 §5) |
 | Việc của Strand | Snapshot logic `bench.big` + stream liên tục (tải ứng dụng ghi `bench.sbtest`, cũng thuộc pipeline) |
 | Khởi động mỗi lần | Dựng lại `bench` ở source từ seed (tương đương khôi phục cùng snapshot dữ liệu; buffer pool không được khôi phục — ghi chú hạn chế), xoá database đích + metadata `_strand_*`, khởi động lại cả hai container MySQL để buffer pool lạnh như nhau |
-| Trình tự một lần | Dựng dữ liệu → khởi động lại MySQL → tải ứng dụng chạy 120 s khởi động → khởi động Strand → đo tới khi log `bootstrap finished` → thêm 120 s stream → dừng Strand (SIGTERM, phải exit 0) → dừng tải |
+| Trình tự một lần | Dựng dữ liệu → khởi động lại MySQL → tải ứng dụng chạy 120 s khởi động → khởi động Strand → đo tới khi log `bootstrap finished` → thêm 120 s stream → dừng tải → chờ target bắt kịp (`gtid_executed` của source ⊆ tập đã apply, tối đa 10 phút) → dừng Strand (SIGTERM, phải exit 0) → so khớp |
 | Lặp | 3 lần cho mỗi governor (9 lần), thứ tự ngẫu nhiên theo seed in ở đầu báo cáo |
 | Pha sóng | Sóng vuông bắt đầu ở mức thấp tại thời điểm khởi động tải, độc lập với Strand |
 
@@ -68,4 +68,4 @@ Sau mỗi lần chạy: so khớp `bench.big` và `bench.sbtest` giữa source v
 
 ## Thay đổi giao thức
 
-(chưa có)
+- (trước lần đo đầu tiên) Dừng tải và chờ target bắt kịp trước khi dừng Strand, để so khớp cuối có nghĩa.
