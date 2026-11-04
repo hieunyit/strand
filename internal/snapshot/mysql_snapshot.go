@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"math"
@@ -831,12 +832,30 @@ func (s *MySQLSnapshotter) clearUnread(ctx context.Context, dstDB *sql.DB, table
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	// FOREIGN_KEY_CHECKS=0: không cascade xóa/đổi row con ở bảng khác (giống flushRowsToTarget).
+	// FOREIGN_KEY_CHECKS=0: không cascade xóa/đổi row con ở bảng khác (giống flushRowsToTarget). Trả
+	// kết nối về pool với ĐÚNG giá trị cũ của phiên: kết nối ghi của pipeline mặc định
+	// foreign_key_checks=0 (pipeline.targetDSN); để lại 1 thì writer dùng lại kết nối này sẽ bị 1452
+	// khi row cha còn ở phần chưa đọc (đã gặp ở e2e kill -9). Không khôi phục được thì bỏ kết nối.
+	var prev int
+	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.foreign_key_checks").Scan(&prev); err != nil {
+		conn.Close()
+		return err
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn }) // loại khỏi pool
+		}
+		conn.Close()
+	}()
 	if _, err := conn.ExecContext(ctx, "SET SESSION FOREIGN_KEY_CHECKS = 0"); err != nil {
 		return err
 	}
-	defer func() { _, _ = conn.ExecContext(context.Background(), "SET SESSION FOREIGN_KEY_CHECKS = 1") }()
+	restore := func() error {
+		_, err := conn.ExecContext(context.Background(), fmt.Sprintf("SET SESSION FOREIGN_KEY_CHECKS = %d", prev))
+		restored = err == nil
+		return err
+	}
 	if hasRange {
 		q := fmt.Sprintf("DELETE FROM %s WHERE %s >= ? AND %s <= ?", quoteTable(t), quoteIdent(pkCol), quoteIdent(pkCol))
 		if _, err := conn.ExecContext(ctx, q, lo, hi); err != nil {
@@ -858,5 +877,5 @@ func (s *MySQLSnapshotter) clearUnread(ctx context.Context, dstDB *sql.DB, table
 			return err
 		}
 	}
-	return nil
+	return restore()
 }

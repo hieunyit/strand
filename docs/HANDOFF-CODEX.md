@@ -346,6 +346,7 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 31 (mở) | Source PG: mọi governor bị ép về `static` (`internal/pipeline/governor.go` ~28); comment "PG chưa có snapshot logic" đã lỗi thời từ PGBOOT → **không benchmark được GRACE cho PG** (Gate 2) | Tín hiệu onoff/GRACE chỉ đọc từ MySQL | **Chưa sửa** — cần tín hiệu áp suất cho source PG rồi bỏ ép static | — |
 | 32 (mở) | `resources.memory.*`, `resources.target.iops`, `target.write_mode` không có tác dụng và không có cảnh báo | Thiếu trong `internal/config/unimplemented.go` | **Chưa sửa** — thêm cảnh báo (hoặc từ chối) | — |
 | 33 (mở) | `strand validate` không kiểm điều kiện PG logical replication (`wal_level`, publication, slot, quyền REPLICATION) | Validate chỉ có kiểm MySQL | **Chưa sửa** | — |
+| 34 | Bản sửa đầu tiên của #28 làm `TestG1_E2E_Kill9RandomCrashes` lỗi 6/6 với 1452 (FK) | `clearUnread` đặt `FOREIGN_KEY_CHECKS = 1` khi trả kết nối về pool, trong khi kết nối ghi của pipeline mặc định `foreign_key_checks=0` (`pipeline.targetDSN`) — đúng bài học §7.3 | Lưu giá trị cũ của phiên và khôi phục đúng nó; khôi phục lỗi thì loại kết nối khỏi pool | Kill -9 + snapshot add: relaxed 6/6, strict 6/6 |
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 
 ---
