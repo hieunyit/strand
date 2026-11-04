@@ -218,6 +218,102 @@ Driver đã sửa (`tools/soak/compare.go`, `--driver-rss-limit-mb` mặc địn
 
 ---
 
-## 8. Cách báo cáo cho người dùng
+## 8. Bám sát plan: ma trận Gate 2 (spec/01-plan.md dòng 122–128, spec/04-testing.md §5)
+
+P2 chỉ được coi là xong khi **Gate 2** đạt. Bảng dưới đối chiếu từng test bắt buộc của Gate 2 với test hiện có (đã grep ngày 2026-11-04). Cột "Cần làm" là việc còn thiếu — đây là phần **chưa** nằm trong §4 và phải làm trước khi tuyên bố Gate 2.
+
+| # | Test bắt buộc Gate 2 | Hiện có | Cần làm |
+|---|---|---|---|
+| G2-1 | Chạy trên **PG 16, 17, 18** và MySQL→PG | e2e PG dùng `pgImage()` = `postgres:18` mặc định, đổi bằng `STRAND_E2E_PG_IMAGE` | Chạy toàn bộ e2e PG/MySQL→PG với `STRAND_E2E_PG_IMAGE=postgres:16` và `postgres:17` (ảnh đã có trên máy), ghi kết quả. PG16 không có failover slot / tham số flush của `pg_logical_emit_message` — kiểm đường dự phòng |
+| G2-2 | TOAST > 2 KB không bị NULL ghi đè | `tests/e2e/pg_test.go`, `pg_toast_pk_test.go`, `pg_snapshot_test.go` (kiểm `doc` không NULL) | Đủ; giữ trong matrix PG 16–18 |
+| G2-3 | Commit đúng tại `consistent_point` (không trùng, không hổng) | `internal/reader/pg/pg_test.go`, `internal/seed/export_integration_test.go`, `pgbackrest_test.go`, e2e `TestP2_E2E_PGSeedExportStartAtSeed` | Kiểm lại có ca Txn commit **đúng tại** LSN P (applied set ≤ P−1, gap check `cf > lwd+1`) |
+| G2-4 | Failover rồi insert ngay không trùng key | `internal/promote/pg_driver_test.go` (+ `descending_test.go`) | Cần e2e: PG→PG và MySQL→PG dưới tải → `promote` → ứng dụng insert ngay trên target, 0 lỗi duplicate key (bảng identity + sequence độc lập) |
+| G2-5 | Collation `_ci` sang `C`, 0 lệch | `tests/e2e/mysql_pg_test.go` (bảng PK varchar `utf8mb4_0900_ai_ci`), `internal/typemap/*` | Hiện bảng đó chỉ đi qua stream (rỗng lúc đầu). Sau việc C, thêm ca có dữ liệu sẵn + snapshot |
+| G2-6 | Transaction 30 phút ở chế độ `relaxed` | **Không có** | Viết e2e: một Txn mở 30 phút (ghi rải rác, có lúc im lặng) trên PG và MySQL→PG ở relaxed, các Txn khác chạy song song; checkpoint không phình (02 §6: delta ≤ 64 KB, holes ≤ 4096), không mất, 0 lệch. Có thể chạy với biến môi trường rút ngắn trong CI nhưng bản gate phải đủ 30 phút |
+| G2-7 | Đổi PK với partial TOAST, kể cả PK mới trong range "đang đọc" | `tests/e2e/pg_toast_pk_test.go` (3/3 relaxed, 3/3 strict), unit `toast_pk_test.go`, mô phỏng `toast_pk_sim_test.go` | Thêm e2e kill -9 giữa lúc re-read; e2e chứng minh ưu tiên 30 s (hiện chỉ unit) |
+| G2-8 | 100 transaction × 49.999 khóa không OOM | Chỉ unit `internal/sched/scheduler_test.go` | Viết e2e đo RSS: 100 Txn, mỗi Txn 49.999 khóa (ngay dưới ngưỡng `table_level_threshold` 50.000), cả MySQL→PG và PG→PG; RSS đỉnh có giới hạn (ghi số), `writeset_budget` hoạt động |
+| G2-9 | Breaker khi RLS chưa đủ dữ liệu bật `strand_sensitivity_unknown` | `internal/governor/grace_test.go`, `tests/e2e/metrics_test.go` | Kiểm e2e có thật sự đưa GRACE vào trạng thái thiếu dữ liệu và quan sát metric = 1 (không chỉ kiểm metric tồn tại) |
+| G2-10 | `promote` khi source không truy cập được với `CACHE 1000` → dừng và hỏi (exit 10) | `internal/promote/pg_driver_test.go` | Thêm e2e: source PG/MySQL bị cắt (toxiproxy hoặc dừng container) → `promote` trả exit 10 với thông tin quyết định |
+| G2-11 | Hot row 1.000 update/s báo `unverifiable_hot`, nhưng lệch thật cài vào vẫn bị phát hiện | `tests/e2e/metrics_test.go` (kiểm metric) | Viết e2e: 1 row nóng 1.000 update/s + cài lệch thật vào một row khác ở target → `verify` báo `unverifiable_hot` cho row nóng **và** báo mismatch cho row bị cài |
+| G2-12 | Benchmark 3 governor (`static`, `onoff`, `grace-v2`), giao thức cố định | Chưa có (việc E) | Theo 04 §5: sysbench/pgbench p99 phía client, tải sóng vuông 10 phút + spike, 3 lần/governor thứ tự ngẫu nhiên, khôi phục source về cùng snapshot mỗi lần; đo thời gian snapshot, p99, số lần vượt hard limit, peak-to-peak log R (grace ≤ 0,3); quy tắc: grace mặc định khi snapshot ngắn hơn onoff ≥ 30% và p99 không xấu hơn; xuất JSON + biểu đồ từ dữ liệu thật. **Không đổi giao thức sau khi thấy số** (nếu đổi, ghi lý do) |
+
+Tương tự cho **Gate 1** (dòng 113–120): e2e mặc định chạy `mysql:8.4` (`mysqlImage()` trong `harness_test.go`); phải chạy thêm toàn bộ e2e MySQL với `STRAND_E2E_MYSQL_IMAGE=mysql:9.7` và smoke với `STRAND_E2E_SOURCE_IMAGE=mysql:8.0` (ảnh đã có trên máy) rồi ghi vào báo cáo gate — **chưa xác nhận đã từng chạy**; "seed bảng 1 TB trên staging, 0 IOPS đọc bảng" cần staging thật (không làm được trên máy dev — ghi rõ là chờ owner).
+
+Rủi ro trong `spec/01-plan.md` §7 gắn Gate 2: #4 TOAST, #5 đổi PK TOAST, #6 RAM writeset, #7 checkpoint phình, #9 breaker RLS, #10 collation, #11 hot row — mỗi rủi ro phải trỏ được tới một test ở bảng trên trong báo cáo Gate 2.
+
+---
+
+## 9. Checklist review — áp dụng cho MỌI thay đổi trước khi merge
+
+Người review (bạn) không tin báo cáo của agent/người viết; tự chạy lại.
+
+**Tính đúng**
+- [ ] Đọc lại đoạn spec liên quan (ghi số mục 02 §x trong mô tả commit/báo cáo). Lệch spec → có dòng trong DECISIONS kèm lý do và ví dụ phản chứng.
+- [ ] Bất biến bị chạm (CP/RS/SD/CO) được nêu và có lập luận trong comment code.
+- [ ] Không đọc trạng thái "tương lai" vượt checkpoint (lý do 02 §8 cấm point read).
+- [ ] Mọi lỗi I/O/SQL được trả lên — không `err == nil && …` nuốt lỗi; không `_ =` với lỗi có ý nghĩa.
+- [ ] Số học khóa: không `x+1`, `max-min+1`, `(a+b)/2` khi có thể tràn int64.
+- [ ] Kết nối pool: mọi `SET SESSION` đổi trạng thái (sql_log_bin, sql_mode, time_zone, FOREIGN_KEY_CHECKS) được trả lại hoặc dùng `db.Conn` riêng rồi đóng.
+- [ ] Khóa (mutex) — không vòng khóa giữa routeMu / planMu / range-state mu / failMu.
+- [ ] Trạng thái hiển thị (admin, metric, log) phản ánh đúng sự thật, không báo "xong/synced" sớm.
+
+**Test**
+- [ ] Regression test thất bại ở code cũ (tự kiểm bằng `git stash` phần sửa hoặc revert tạm) và qua ở code mới.
+- [ ] Không `t.Skip`; không sleep cố định thay cho điều kiện; điều kiện tiền đề của test (ví dụ "snapshot phải chạy dưới tải") được kiểm và báo fail rõ ràng.
+- [ ] E2E tính đúng chạy ở **cả** `relaxed` và `strict`; việc chạm snapshot/pipeline chạy ≥3 lần.
+- [ ] Có ca kill -9 / restart nếu thay đổi có trạng thái bền (plan, checkpoint, state file).
+- [ ] Unit (28 package) + full e2e cả hai chế độ trên **nhánh tích hợp sau merge**, không chỉ trên nhánh tính năng.
+- [ ] Ghi số liệu thật: số test qua/lỗi, thời gian, SEED của test lỗi.
+
+**Vận hành / tài liệu**
+- [ ] Khóa cấu hình mới: struct + JSON schema (`internal/config/schema.go`) + env override + `docs/USAGE.md` + `strand config schema`.
+- [ ] Cờ CLI mới: `--help` đúng, ghi vào USAGE và DECISIONS mục 6 (cờ mới cho 02 §10).
+- [ ] Metric mới: thật sự được cập nhật (không hằng 0), có trong tài liệu.
+- [ ] Exit code: đúng bảng `internal/exitcode`, đúng nhóm (Rejected/DataError/NeedsDecision…) — exit 2/3/4/5/10 không được systemd tự restart (03 §4).
+
+**Merge**
+- [ ] Merge `--no-ff` vào `review/gate1-fixes`; xung đột ở `internal/snapshot`/`internal/pipeline` phải giữ ý nghĩa của **cả hai** bên (xem ví dụ merge `3645f78`: giữ `Finished` + `Reread`, vòng walk dùng `mainDone`).
+- [ ] Sau merge: build/vet/unit/full e2e lại rồi mới đẩy `main`.
+
+### Checklist riêng cho từng việc còn lại
+
+**B (schema-init)** — review kỹ: (1) không bao giờ sửa/xoá bảng đã có ở target; (2) trigger/event/routine không bị copy; (3) MySQL→PG: `strand validate` qua trên schema sinh ra, writer ghi đúng tên (quote/case), promote tìm được sequence identity qua `pg_depend`; (4) idempotent khi chạy lại/khi crash giữa chừng (một nửa bảng đã tạo); (5) quyền: user `strand` cần CREATE ở target — cập nhật bảng quyền 03 §2 trong USAGE; (6) `CREATE TABLE` trong stream: bảng được tạo đúng tại barrier, không có row nào của bảng mới bị bỏ trước khi tạo; (7) `tables.rename` được tôn trọng.
+
+**C (generic PK)** — review kỹ: (1) có test chứng minh thứ tự mã hoá == `ORDER BY` của DB thật cho từng kiểu/collation (không chỉ test Go với Go); (2) PAD SPACE: `'a'` và `'a '` là cùng khóa dưới `utf8mb4_bin`/`_ci` PAD SPACE; (3) `'a'`/`'A'`/`'á'` cùng khóa dưới `_0900_ai_ci`; (4) event đổi PK giữa hai khóa "bằng nhau theo collation" (`'a'` → `'A'`) — DB coi là UPDATE cùng row hay đổi PK? xử lý đúng; (5) BufferedChanges, `Reread`, plan JSON, metric đều dùng khóa mã hoá; state file cũ (int64) vẫn đọc được; (6) benchmark đường int64 trước/sau; (7) Merkle cross-engine với khóa chuỗi ci: hoặc đúng hoặc từ chối rõ.
+
+**D (docs)** — review: chọn ngẫu nhiên ≥15 khẳng định trong tài liệu và kiểm với code/`--help`; mọi khóa trong `strand config schema` có mặt; không có khóa nào được mô tả "có tác dụng" mà `internal/config/unimplemented.go` cảnh báo là chưa có.
+
+**E (benchmark)** — review: giao thức được commit **trước** khi chạy; dữ liệu thô (JSON) được lưu; biểu đồ sinh từ dữ liệu; không chạy song song việc khác.
+
+---
+
+## 10. Nhật ký vấn đề đã gặp (triệu chứng → nguyên nhân gốc → sửa → test)
+
+| # | Triệu chứng | Nguyên nhân gốc | Sửa | Test giữ lại |
+|---|---|---|---|---|
+| 1 | Snapshot add dưới tải thiếu row (`pk tồn tại ở source nhưng thiếu ở target`), hiếm | MySQL ghi binlog trước engine commit: event bị bỏ (range chưa đọc) chưa visible với SELECT chunk | Chờ GTID đã bỏ (`WAIT_FOR_EXECUTED_GTID_SET`) trước SELECT; RS-1: event nằm trong low watermark thì xoá luôn ảnh buffer cũ hơn (quyết định 10) | `TestRS1_*` trong `internal/snapshot/rs2_wait_test.go`; e2e `TestG1_E2E_SnapshotAddUnderLoadWithPKChangeAcrossRanges` |
+| 2 | Seed XtraBackup: lỗi 1062 duplicate sau restore | Kết nối bulk-load đặt `sql_log_bin=0` rồi trả về pool | `SET SESSION sql_log_bin = 1` trước Close. (Giả thuyết sai đã loại: PS-7873, binlog truncation, XA recovery) | `tests/e2e/xtrabackup_test.go` |
+| 3 | Soak treo không kết thúc | Supervisor gắn với `soakCtx` đã huỷ | Dùng rootCtx, fail nhanh khi supervisor chết | `tools/soak` |
+| 4 | Test prefetch C lỗi exit 5 | Test purge binlog sau restore (sai kịch bản); pipeline nuốt lỗi đọc spool | Marker `restore.done`; trả lỗi đọc spool; KeyRanges gộp range | `tests/e2e/prefetch_test.go` |
+| 5 | Validate từ chối `app.*` | Glob không được mở rộng trong validate | `ExpandTables` | `internal/validate` |
+| 6 | Vòng lặp tái hiện báo "pass" giả | `go` không có trong PATH của shell vòng lặp | Luôn `export PATH` | — |
+| 7 | AIO cạn, container MySQL không khởi động | Quá nhiều container cũ | `--innodb-use-native-aio=OFF`; dọn container (hỏi người dùng) | harness |
+| 8 | Writer PG: MERGE vi phạm unique khi hoán đổi giá trị UNIQUE | MERGE gộp ảnh của nhiều row | Bảng có UNIQUE/exclusion ngoài PK apply tuần tự (quyết định 16) | `internal/writer` |
+| 9 | Reader PG: tag two-phase sai; P2-04 `colliculocale` đổi tên ở PG17 và lỗi bị nuốt | Code agy | Đọc qua `to_jsonb`; trả lỗi | `internal/typemap`, `internal/reader/pg` |
+| 10 | GRACE: breaker giảm một nửa mỗi tick | Logic agy | Sửa theo §7 spec 02 | `internal/governor/grace_test.go` |
+| 11 | Soak 12h không có report | Driver nạp 65M row × 2 vào map (~536 B/row) → OOM-kill 21 GB | So sánh streaming, giới hạn RSS driver | `tools/soak/compare_test.go` |
+| 12 | SIGTERM tới strand cứu soak không có tác dụng | `pgrep -f` khớp shell bọc lệnh | Dùng PID lưu lúc chạy | — |
+| 13 | `TestP2_E2E_MySQLToPGSnapshotAndStream` flaky "snapshot finished before the load started" | Admin báo `synced` trước khi pipeline bật cờ bootstrap | Trạng thái `starting` (`f4664a7`) | `TestAdminStateStartingBeforeRunning` |
+| 14 | Validate cho PASS bảng có zero date | So `= '0000-00-00'` lỗi 1525 dưới NO_ZERO_DATE, lỗi bị nuốt | `CAST … LIKE`, trả lỗi scan | `TestReview31_*` |
+| 15 | Snapshot/verify treo hoặc coi bảng là rỗng khi PK chạm MaxInt64 | Tràn int64 | `Finished`, `SpanRows`, `MidPK`, break tường minh | `TestReview41_*`, `TestKeyRangesInt64Extremes` |
+| 16 | P2-03: "chờ hai range flush rồi SQL điều kiện" (theo spec) làm mất row / row sống lại | Spec không xét range khóa cũ chưa đọc và event sau chạm khóa mới | Re-read khóa mới qua giao thức chunk (quyết định 18) | `toast_pk_*_test.go`, `pg_toast_pk_test.go` |
+| 17 | P2-03 e2e strict "not synced after 10m" (2 lần, trước khi sửa test) | Tải không giới hạn + strict một worker → lag mãi; chưa loại trừ hoàn toàn khả năng khoá chết (không có goroutine dump) | Giới hạn tải 60 s; watcher SIGQUIT chưa từng kích hoạt sau đó | Theo dõi: nếu gặp lại, lấy `kill -QUIT` goroutine dump |
+| 18 | Logical snapshot PG với sync rep trỏ vào Strand khoá chết | Strand xác nhận start-LSN, sync rep chờ end-LSN; hold 2PC | Chưa sửa — giới hạn đã biết | test dùng `pg_receivewal` thay |
+
+Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
+
+---
+
+## 11. Cách báo cáo cho người dùng
 
 Người dùng đọc tiếng Việt. Báo cáo ngắn, có số liệu thật (số test qua/lỗi, thời gian, commit hash), nói rõ việc nào chưa kiểm. Hỏi trước khi: đẩy lên `main`, xoá container không phải của mình, thay đổi lệch spec lớn.
