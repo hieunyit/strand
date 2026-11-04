@@ -110,3 +110,27 @@ func PGClearTable(ctx context.Context, db *sql.DB, table model.TableID) error {
 	_, err := db.ExecContext(ctx, "DELETE FROM "+quotePGTable(table))
 	return err
 }
+
+// PGDeleteUnread xóa ở bảng đích PG các row PK trong [lo, hi] (khi hasRange) và các khóa keys, trong một
+// transaction: phần "Chưa đọc" của snapshot dở khi chạy tiếp (MySQLSnapshotter.ClearUnread). Bảng con
+// đích có FK ON DELETE trỏ tới bảng này thì PG cascade như với mọi DELETE (giới hạn đã ghi ở handoff).
+func PGDeleteUnread(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, lo, hi int64, hasRange bool, keys []int64) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if hasRange {
+		q := fmt.Sprintf("DELETE FROM %s WHERE %s >= $1 AND %s <= $2", quotePGTable(table), quotePG(pkCol), quotePG(pkCol))
+		if _, err := tx.ExecContext(ctx, q, lo, hi); err != nil {
+			return err
+		}
+	}
+	if len(keys) > 0 {
+		q := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1::bigint[])", quotePGTable(table), quotePG(pkCol))
+		if _, err := tx.ExecContext(ctx, q, keys); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

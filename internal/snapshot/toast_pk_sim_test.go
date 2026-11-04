@@ -60,6 +60,17 @@ func newToastSim(t *testing.T, seed int64, rows int) *toastSim {
 	s.LoadPlan = func(model.TableID) (snapshot.SnapshotPlan, bool) { return sim.plan, sim.hasPl }
 	s.SavePlan = func(_ model.TableID, p snapshot.SnapshotPlan) error { sim.plan, sim.hasPl = p, true; return nil }
 	s.ClearTarget = func(context.Context, model.TableID) error { sim.dst = map[int64]simRow{}; return nil }
+	s.ClearUnread = func(_ context.Context, _ model.TableID, _ string, lo, hi int64, hasRange bool, keys []int64) error {
+		for k := range sim.dst {
+			if hasRange && k >= lo && k <= hi {
+				delete(sim.dst, k)
+			}
+		}
+		for _, k := range keys {
+			delete(sim.dst, k)
+		}
+		return nil
+	}
 	s.FlushRows = func(_ context.Context, _ model.TableID, _ string, _ []string, rows []*model.RowChange, a, b int64) error {
 		for k := range sim.dst {
 			if k >= a && k <= b {
