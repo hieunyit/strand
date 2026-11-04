@@ -546,6 +546,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.snap.SavePlan = func(t model.TableID, pl snapshot.SnapshotPlan) error { return p.state.SetPlan(t.String(), pl) }
 	if p.dstEngine == model.EnginePG {
 		p.snap.FlushRows = p.pgFlushRows
+		p.snap.FlushKeys = p.pgFlushKeys
 		p.snap.ClearTarget = func(ctx context.Context, t model.TableID) error { return writer.PGClearTable(ctx, p.dst, t) }
 	}
 	if p.srcEngine == model.EnginePG {
@@ -944,6 +945,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	}
 
 	out := &model.Txn{SourcePos: pos, SourceTS: t.SourceTS}
+	// rereadTables: bảng vừa có khóa được đánh dấu đọc lại (UPDATE đổi PK mà cột TOAST không đổi, 02 §8);
+	// plan của chúng phải được lưu bền TRƯỚC khi Txn này được Admit (xem snapshot/toast_pk.go).
+	var rereadTables map[model.TableID]bool
 	keep := func(rc *model.RowChange, emit func(model.RowChange) error) error {
 		if p.table(rc.Table) == nil {
 			return nil // ngoài pipeline (bộ lọc, hoặc chưa snapshot add)
@@ -951,16 +955,27 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		parts := []*model.RowChange{rc}
 		if p.srcEngine == model.EnginePG && !p.snap.Manager.IsRegistered(rc.Table) && !p.state.IsDone(rc.Table.String()) {
 			// Bảng chờ snapshot mà range chưa được đăng ký: xem keepBeforeRegisterPG.
-			parts = p.keepBeforeRegisterPG(rc)
+			var err error
+			if parts, err = p.keepBeforeRegisterPG(rc); err != nil {
+				return err
+			}
 		} else if p.snap.Manager.IsRegistered(rc.Table) {
+			results := []snapshot.StreamActionResult(nil)
 			if len(rc.OldKey) > 0 && snapshot.HasUnchanged(rc) {
-				// UPDATE đổi PK mà cột TOAST không đổi: nửa upsert của khóa mới không có giá trị cột đó
-				// (nằm ở row cũ, có thể thuộc range khác). Chưa hỗ trợ trong lúc snapshot bảng (02 §8).
-				return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected,
-					fmt.Sprintf("table %s: primary-key change with an unchanged TOAST column while the table is being snapshotted is not supported yet (key %v)", rc.Table, rc.Key), nil)
+				// UPDATE đổi PK mà cột TOAST không đổi: không gộp, không point read (02 §8, toast_pk.go).
+				var reread bool
+				results, reread = p.snap.Manager.HandleToastPKChangeXID(rc, pos, t.XID, time.Now())
+				if reread {
+					if rereadTables == nil {
+						rereadTables = map[model.TableID]bool{}
+					}
+					rereadTables[rc.Table] = true
+				}
+			} else {
+				results = p.snap.Manager.HandleStreamEventWithPKSplitXID(rc, pos, t.XID)
 			}
 			parts = parts[:0]
-			for _, r := range p.snap.Manager.HandleStreamEventWithPKSplitXID(rc, pos, t.XID) {
+			for _, r := range results {
 				switch r.Action {
 				case snapshot.ActionApply:
 					parts = append(parts, r.Event)
@@ -1041,6 +1056,13 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		}
 	}
 	out.Bytes = t.Bytes
+
+	// Nghĩa vụ đọc lại phải bền trước khi Txn có thể commit ở target (checkpoint vượt Txn).
+	for tid := range rereadTables {
+		if err := p.snap.PersistReread(tid); err != nil {
+			return fmt.Errorf("persist re-read keys of %s: %w", tid, err)
+		}
+	}
 
 	// Txn rỗng sau khi lọc (bảng ngoài pipeline, DDL ngoài pipeline, event bị range-state bỏ)
 	// vẫn đi qua scheduler để GTID của nó được ghi vào tập đã apply: không sinh holes vĩnh viễn.
@@ -1486,16 +1508,19 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 			return err
 		}
 	}
+	rereads := p.snap.RereadKeysTotal.Load()
 	if err := p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], m.Columns, p.rendezvous); err != nil {
 		return err
 	}
+	rereads = p.snap.RereadKeysTotal.Load() - rereads
 	if err := p.state.SetDone(id.String(), true); err != nil {
 		return err
 	}
 	p.routeMu.Lock()
 	p.snap.Manager.RemoveTable(id)
 	p.routeMu.Unlock()
-	p.log.Info("snapshot done", "table", id.String(), "duration", time.Since(start).String())
+	p.log.Info("snapshot done", "table", id.String(), "duration", time.Since(start).String(),
+		"reread_keys", rereads) // khóa được đọc lại do UPDATE đổi PK mà cột TOAST không đổi (02 §8)
 	return nil
 }
 
@@ -1697,9 +1722,11 @@ func (p *Pipeline) updateMetrics() {
 			m.SeedProgressRatio.WithLabelValues(p.id, table).Set(ratio)
 		}
 	}
-	// MySQL→MySQL không có thao tác đổi PK phải chờ (chỉ PG + TOAST, 02 §8).
-	m.PendingCrossRange.WithLabelValues(p.id).Set(0)
-	m.PendingCrossRangeOldestSeconds.WithLabelValues(p.id).Set(0)
+	// Thao tác xuyên range đang chờ: khóa chờ đọc lại do UPDATE đổi PK mà cột TOAST không đổi (chỉ
+	// source PG, 02 §8; MySQL luôn 0).
+	pending, oldest := p.snap.Manager.PendingCrossRange(time.Now())
+	m.PendingCrossRange.WithLabelValues(p.id).Set(float64(pending))
+	m.PendingCrossRangeOldestSeconds.WithLabelValues(p.id).Set(oldest.Seconds())
 	// onoff/static không ước lượng độ nhạy; GRACE v2 tự xuất metric này mỗi tick.
 	if _, grace := p.gov.(*governor.GraceGovernor); !grace {
 		m.SensitivityUnknown.WithLabelValues(p.id).Set(0)

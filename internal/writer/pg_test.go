@@ -615,6 +615,37 @@ func TestPGWriter_InsertWithUnchangedRejected(t *testing.T) {
 	}
 }
 
+// PGReplaceKeys (chunk re-read, 02 §8): chỉ đúng tập khóa được thay trong một transaction — khóa trong
+// tập mà không có row thì bị xóa, khóa ngoài tập (kể cả nằm giữa min/max của tập) giữ nguyên.
+func TestPGReplaceKeys_OnlyTheKeySet(t *testing.T) {
+	e := newPGEnv(t, "pg-replace-keys")
+	tbl := pgTable(t, e.db, "pg_replace_keys", "id bigint PRIMARY KEY, v text")
+	pgExec(t, e.db, `INSERT INTO public.pg_replace_keys SELECT g, 'old' FROM generate_series(1, 10) g`)
+	rows := []*model.RowChange{{Table: tbl, Op: model.OpInsert, Key: []model.Value{int64(3)}, Cols: []model.ColValue{cv("id", int64(3)), cv("v", "new3")}},
+		{Table: tbl, Op: model.OpInsert, Key: []model.Value{int64(20)}, Cols: []model.ColValue{cv("id", int64(20)), cv("v", "new20")}}}
+	if err := writer.PGReplaceKeys(context.Background(), e.db, tbl, "id", []string{"id", "v"}, rows, []int64{3, 7, 20}); err != nil {
+		t.Fatal(err)
+	}
+	got := map[int64]string{}
+	rs, err := e.db.Query(`SELECT id, v FROM public.pg_replace_keys`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rs.Close()
+	for rs.Next() {
+		var id int64
+		var v string
+		_ = rs.Scan(&id, &v)
+		got[id] = v
+	}
+	if len(got) != 10 || got[3] != "new3" || got[20] != "new20" || got[4] != "old" || got[10] != "old" {
+		t.Fatalf("target %v: want 1..10 except 7 (old, 3 replaced) plus 20", got)
+	}
+	if _, ok := got[7]; ok {
+		t.Fatal("key 7 is in the key set without a row: must be deleted")
+	}
+}
+
 // BenchmarkPGWriter_10k so sánh 10.000 row upsert trên PostgreSQL:
 //   - CopyMerge: PGWriter.ApplyBatch (COPY vào bảng tạm rồi MERGE, kèm row delta).
 //   - MultiRowOnConflict: INSERT … VALUES (…),(…) ON CONFLICT DO UPDATE theo khối 500 row trong một transaction.
