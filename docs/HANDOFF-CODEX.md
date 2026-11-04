@@ -111,6 +111,7 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 ### A. Chốt full e2e trên `f4664a7` rồi đẩy lên GitHub main  ⏳ đang chạy
 
 - Full e2e trên `f4664a7` đã được khởi chạy lúc 2026-11-04 16:39 (log: `<scratchpad>/e2e-final-relaxed.txt`, rồi `e2e-final-strict.txt`; file strict có sẵn trước 16:39 là log cũ của lần chạy khác — nếu bạn không thấy log mới thì chạy lại).
+- Tiến độ lần chạy này khi bàn giao: relaxed: 9 pass, 0 fail (lúc 17:00); strict chạy sau relaxed.
 - Lần trước (trên `be155d5`): relaxed 37 qua / 1 lỗi, strict 38/38. Lỗi duy nhất là `TestP2_E2E_MySQLToPGSnapshotAndStream` ("snapshot finished before the load started") — nguyên nhân thật là **admin báo `synced` trước khi pipeline quyết định bootstrap** (admin socket mở ở đầu `Run`, cờ `bootstrap` bật muộn hơn). Đã sửa ở `f4664a7` (trạng thái `starting`, test `TestAdminStateStartingBeforeRunning`). Cần xác nhận test này hết flaky trong lần chạy mới.
 - Khi cả hai chế độ qua: `git push origin review/gate1-fixes:main` (từ `/home/hellc/strand` sau khi pull nhánh về; repo đó có cảnh báo `dubious ownership` khi chạy git bằng user khác — dùng đúng user sở hữu hoặc `safe.directory`). Hỏi người dùng nếu không chắc quyền.
 
@@ -134,6 +135,16 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 **Test:** unit kiểu golden cho DDL cả 3 hướng (kiểu khó, PK nhiều cột, FK, enum, identity, bảng partition, tên cần quote, rename); integration với container mỗi hướng (~6 bảng đa dạng → `schema init` → so cấu trúc qua information_schema/catalog, validate qua); e2e bootstrap logic dưới tải vào target **rỗng** cho MySQL→MySQL, MySQL→PG, PG→PG với `app.*`/`*.*` — trạng thái cuối giống hệt, `verify --mode full` 0 lệch; CREATE TABLE khi đang stream được tạo + replicate. Các e2e cũ tạo sẵn bảng ở target phải vẫn chạy (bảng có rồi → không đụng).
 
 Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", ghi file).
+
+**Khảo sát đã làm (2026-11-04, Claude) — dùng làm điểm xuất phát:**
+- Nhánh `agent/schema-init` đã merge `review/gate1-fixes` (commit `27c3e1f`, chỉ trong worktree `<scratchpad>/wt/SCHEMA`) — đã có P2-03, review-fixes… Chưa có code sinh DDL.
+- **Điểm cài vào `strand sync`** (`internal/pipeline/pipeline.go`, hàm `Run`): sau khối tính `pending` (danh sách bảng chưa `IsDone` — khoảng dòng 410–420 bản hiện tại) và **trước** khối "MySQL→PG: bảng PK không phải số nguyên rỗng → `writer.PGClearTable`" (khối đó cần bảng đích đã tồn tại). Chỉ tạo cho bảng trong `pending`: bảng đã `Done` (vd. đến từ seed/restore) mà thiếu ở target thì **không** tạo rỗng (sẽ che mất việc restore thiếu) — giữ lỗi như cũ.
+- `p.conv.load` (MySQL→PG, `engine.go` ~534) chỉ đọc **source** (`InspectMySQLColumns`), không đọc target → không cần dời. `p.loadTables` cũng chỉ đọc source. Metadata `_strand_*` được `p.store.EnsureTables` tạo trước đó (schema của target DSN).
+- Tên đích: `p.filter.Target(id)` (áp `tables.rename`).
+- MySQL→PG: `typemap.MapMySQLColumn(col, typemap.DefaultOptions())` trả `ColumnMapping.TargetType` (chuỗi kiểu PG: smallint/integer/bigint/numeric(20,0)/text/varchar(n)/bytea/timestamp(p)/timestamptz(p)/jsonb/text[]/`<col>_enum`…). Với `EnumPolicy=check` kiểu là `text` → phải tự thêm `CHECK (col IN (...))` từ `col.EnumValues`; với `type` cần `CREATE TYPE <col>_enum AS ENUM`. Cột khóa: sinh `COLLATE "C"` cho text/varchar để qua `typemap.CheckKeyCollation` (02 §8: `_ci` → `C` an toàn; cấm citext). Cột khóa PK lấy bằng `typemap.InspectMySQLPrimaryKey`.
+- MySQL→MySQL: `SHOW CREATE TABLE` đã không chứa trigger; vẫn nên đọc `information_schema.TRIGGERS` để log bảng nào có trigger bị bỏ qua. Bỏ `AUTO_INCREMENT=N` bằng regex trên phần table options (sau dấu `)` cuối).
+- Gợi ý package mới `internal/schemagen` (3 hàm `MySQLToMySQL`, `MySQLToPG`, `PGToPG` trả `[]string` câu DDL + cảnh báo), dùng chung cho `strand sync` và lệnh `strand schema init` (file mới `cmd/strand/schema.go`, đăng ký trong `root.go`).
+- Chỗ khác cần gọi: `handleDDL` (`internal/pipeline/ddl.go`) — với bảng trong `newCreated` khi auto: tạo ở target trước bước `schemaDiff`; và đường `strand snapshot add` / thêm bảng do đổi `tables.include` (đi qua `pending` lúc restart nên đã được phủ).
 
 ### C. Snapshot logic cho PK không phải một cột số nguyên  ⬜ chưa bắt đầu (người dùng đã duyệt)
 
