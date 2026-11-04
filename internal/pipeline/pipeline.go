@@ -73,6 +73,8 @@ type Pipeline struct {
 
 	filter   *tableFilter
 	tablesMu sync.RWMutex
+	// partRoots: cache partition lá → bảng gốc (source PG, pg_partition.go).
+	partRoots pgPartitionRoots
 	tables   map[model.TableID]*tableMeta
 	state    *localState
 	applied0 checkpoint.AppliedSet // tập đã apply lúc khởi động (CP-2)
@@ -327,6 +329,15 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	for id, m := range p.tables {
 		if len(m.PK) == 0 {
 			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("table %s has no primary key", id), nil)
+		}
+	}
+	{
+		ids := make([]model.TableID, 0, len(p.tables))
+		for id := range p.tables {
+			ids = append(ids, id)
+		}
+		if err := p.checkPGPartitionPublication(ctx, ids); err != nil {
+			return err
 		}
 	}
 	if p.state, err = openLocalState(p.cfg.Resources.Spool.Path, p.id); err != nil {
@@ -978,6 +989,16 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	var rereadTables map[model.TableID]bool
 	keep := func(rc *model.RowChange, emit func(model.RowChange) error) error {
 		if p.table(rc.Table) == nil {
+			// Partition lá của một bảng thuộc pipeline (publication không publish_via_partition_root):
+			// bỏ qua là mất row âm thầm — dừng (review R02, pg_partition.go).
+			if root, ok, err := p.leafOfPipelineTable(ctx, rc.Table); err != nil {
+				return err
+			} else if ok {
+				return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
+					"change at %s on partition %s of replicated table %s: the publication must use publish_via_partition_root = true "+
+						"(ALTER PUBLICATION ... SET (publish_via_partition_root = true)), otherwise these rows are lost",
+					pos, rc.Table, root), nil)
+			}
 			return nil // ngoài pipeline (bộ lọc, hoặc chưa snapshot add)
 		}
 		parts := []*model.RowChange{rc}
@@ -1587,6 +1608,9 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	}
 	if !m.PKNumeric {
 		return fmt.Errorf("table %s: logical snapshot needs a single integer primary key", id)
+	}
+	if err := p.checkPGPartitionPublication(ctx, []model.TableID{id}); err != nil {
+		return err
 	}
 	if p.conv != nil {
 		if err := p.conv.load(ctx, p.src, id); err != nil {
