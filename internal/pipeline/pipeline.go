@@ -75,9 +75,9 @@ type Pipeline struct {
 	tablesMu sync.RWMutex
 	// partRoots: cache partition lá → bảng gốc (source PG, pg_partition.go).
 	partRoots pgPartitionRoots
-	tables   map[model.TableID]*tableMeta
-	state    *localState
-	applied0 checkpoint.AppliedSet // tập đã apply lúc khởi động (CP-2)
+	tables    map[model.TableID]*tableMeta
+	state     *localState
+	applied0  checkpoint.AppliedSet // tập đã apply lúc khởi động (CP-2)
 
 	sched   *sched.Scheduler
 	comp    *checkpoint.Compactor

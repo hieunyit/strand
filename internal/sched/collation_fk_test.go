@@ -24,11 +24,11 @@ func readyNow(s *Scheduler) *model.Txn {
 func TestCO1_CaseInsensitiveUniqueKeysConflict(t *testing.T) {
 	tid := model.TableID{Schema: "app", Table: "ci"}
 	cases := []struct{ old, new, other string }{
-		{"a", "b", "A"},             // hoa/thường
-		{"cafe", "x", "café"},       // dấu (ai)
-		{"strasse", "x", "STRAßE"},  // ß = ss (UCA) — và 's' (general_ci)
-		{"abc", "x", "abc  "},       // PAD SPACE
-		{"ǆ", "x", "Ǆ"},             // chữ ghép titlecase
+		{"a", "b", "A"},            // hoa/thường
+		{"cafe", "x", "café"},      // dấu (ai)
+		{"strasse", "x", "STRAßE"}, // ß = ss (UCA) — và 's' (general_ci)
+		{"abc", "x", "abc  "},      // PAD SPACE
+		{"ǆ", "x", "Ǆ"},            // chữ ghép titlecase
 	}
 	for _, c := range cases {
 		first := &model.Txn{Rows: []model.RowChange{{Table: tid, Op: model.OpUpdate, Key: []model.Value{int64(1)},
