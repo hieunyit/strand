@@ -33,7 +33,8 @@ func (p *Pipeline) createTargetTables(ctx context.Context, ids []model.TableID) 
 // đủ, dừng exit 10; không đánh dấu DDL là applied. Không đọc row tương lai.
 // invariant: CO-1, SG-1 — caller giữ routeMu, đã drain worker và giữ khóa pipeline.
 func (p *Pipeline) createAtDDL(ctx context.Context, t *model.Txn, ids []model.TableID) error {
-	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Quét log sau CREATE: thường nhỏ (đường nhanh theo vị trí); giới hạn để không giữ lock đọc mãi.
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	conn, err := p.src.Conn(checkCtx)
 	if err != nil {
@@ -130,41 +131,18 @@ func (p *Pipeline) checkCreateSchemaAtPosition(ctx context.Context, t *model.Txn
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	found := false
-	for i := len(files) - 1; i >= 0; i-- {
-		// Tìm file chứa GTID, từ file mới nhất; log bị purge thì không đoán schema.
-		targetFound := false
-		for from := uint64(4); from < files[i].size; {
-			events, err := readBinlogEvents(ctx, p.src, files[i].name, from)
-			if err != nil {
-				return err
-			}
-			if len(events) == 0 {
-				break
-			}
-			for _, e := range events {
-				if e.hasGTID(t.SourcePos.GTID) {
-					targetFound = true
-					found = true
-					break
-				}
-			}
-			if targetFound {
-				break
-			}
-			next := events[len(events)-1].end
-			if next <= from {
-				return fmt.Errorf("binlog cursor did not advance")
-			}
-			from = next
-		}
-		if !targetFound {
-			continue
-		}
+	// scanAfterCreate quét tiến từ (files[startFile], startPos) — phải là event GTID của CREATE hoặc
+	// trước nó trong cùng file — tới kích thước đã chụp của mọi file sau: Query đầu tiên sau GTID là
+	// chính CREATE; mọi DDL sau đó nhắc tới bảng mới thì không chứng minh được schema tại CREATE.
+	scanAfterCreate := func(startFile int, startPos uint64) error {
 		afterCreate := false
 		own := false
-		for j := i; j < len(files); j++ {
-			for from := uint64(4); from < files[j].size; {
+		for j := startFile; j < len(files); j++ {
+			from := uint64(4)
+			if j == startFile {
+				from = startPos
+			}
+			for from < files[j].size {
 				events, err := readBinlogEvents(ctx, p.src, files[j].name, from)
 				if err != nil {
 					return err
@@ -202,6 +180,56 @@ func (p *Pipeline) checkCreateSchemaAtPosition(ctx context.Context, t *model.Txn
 			return fmt.Errorf("CREATE query not found after GTID")
 		}
 		return nil
+	}
+	// Đường nhanh: reader biết file/vị trí event GTID của CREATE → quét tiến từ đó tới head đã chụp
+	// (chi phí theo lượng log SAU CREATE, không theo kích thước file). Vị trí không khớp GTID (vd. log
+	// đã bị thay) → về đường chậm tìm theo GTID.
+	if t.BinlogFile != "" {
+		for i := range files {
+			if files[i].name != t.BinlogFile {
+				continue
+			}
+			events, err := readBinlogEvents(ctx, p.src, files[i].name, t.BinlogPos)
+			if err == nil && len(events) > 0 && events[0].hasGTID(t.SourcePos.GTID) {
+				p.log.Info("schema at CREATE: scanning binlog from the CREATE position", "gtid", t.SourcePos.GTID, "file", t.BinlogFile, "pos", t.BinlogPos)
+				return scanAfterCreate(i, t.BinlogPos)
+			}
+			break
+		}
+	}
+	p.log.Warn("schema at CREATE: binlog position unknown, searching binlogs for the GTID (slow)", "gtid", t.SourcePos.GTID)
+	found := false
+	for i := len(files) - 1; i >= 0; i-- {
+		// Tìm file chứa GTID, từ file mới nhất; log bị purge thì không đoán schema.
+		targetFound := false
+		for from := uint64(4); from < files[i].size; {
+			events, err := readBinlogEvents(ctx, p.src, files[i].name, from)
+			if err != nil {
+				return err
+			}
+			if len(events) == 0 {
+				break
+			}
+			for _, e := range events {
+				if e.hasGTID(t.SourcePos.GTID) {
+					targetFound = true
+					found = true
+					break
+				}
+			}
+			if targetFound {
+				break
+			}
+			next := events[len(events)-1].end
+			if next <= from {
+				return fmt.Errorf("binlog cursor did not advance")
+			}
+			from = next
+		}
+		if !targetFound {
+			continue
+		}
+		return scanAfterCreate(i, 4)
 	}
 	if !found {
 		return fmt.Errorf("CREATE GTID is not available in source binlogs")

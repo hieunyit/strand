@@ -207,6 +207,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		}
 		a.ensureTxnStarted(ev.Pos)
 		a.currentTxn.SourcePos = ev.Pos
+		a.currentTxn.BinlogFile, a.currentTxn.BinlogPos = ev.BinlogFile, ev.BinlogPos
 		if !ev.Timestamp.IsZero() {
 			a.currentTxn.SourceTS = ev.Timestamp.Unix()
 		}

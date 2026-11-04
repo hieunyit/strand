@@ -168,6 +168,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		defer syncer.Close()
 
 		tableMap := make(map[uint64]*replication.TableMapEvent)
+		curFile := "" // file binlog hiện tại (từ ROTATE, kể cả rotate giả lúc kết nối)
 
 		for {
 			select {
@@ -194,6 +195,11 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 			}
 
 			ts := time.Unix(int64(ev.Header.Timestamp), 0)
+			// Vị trí bắt đầu của event trong file binlog hiện tại (LogPos là vị trí KẾT THÚC).
+			var evStart uint64
+			if ev.Header.LogPos >= ev.Header.EventSize {
+				evStart = uint64(ev.Header.LogPos - ev.Header.EventSize)
+			}
 
 			switch ev.Header.EventType {
 			case replication.GTID_EVENT:
@@ -206,10 +212,12 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					r.setPos(gtid)
 					select {
 					case out <- reader.Event{
-						Type:      reader.EventGTID,
-						Pos:       r.Position(),
-						GTID:      gtid,
-						Timestamp: ts,
+						Type:       reader.EventGTID,
+						Pos:        r.Position(),
+						GTID:       gtid,
+						Timestamp:  ts,
+						BinlogFile: curFile,
+						BinlogPos:  evStart,
 					}:
 					case <-ctxRead.Done():
 						return
@@ -226,10 +234,12 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					r.setPos(gtid)
 					select {
 					case out <- reader.Event{
-						Type:      reader.EventGTID,
-						Pos:       r.Position(),
-						GTID:      gtid,
-						Timestamp: ts,
+						Type:       reader.EventGTID,
+						Pos:        r.Position(),
+						GTID:       gtid,
+						Timestamp:  ts,
+						BinlogFile: curFile,
+						BinlogPos:  evStart,
 					}:
 					case <-ctxRead.Done():
 						return
@@ -361,6 +371,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 
 			case replication.ROTATE_EVENT:
 				if rotEv, ok := ev.Event.(*replication.RotateEvent); ok {
+					curFile = string(rotEv.NextLogName)
 					select {
 					case out <- reader.Event{
 						Type:      reader.EventRotate,

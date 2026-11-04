@@ -183,6 +183,10 @@ func TestSchemaInit_E2E_EmptyTarget(t *testing.T) {
 				}
 				t.Logf("%s rows=%d verify=%s", table, len(a), out)
 			}
+			// CREATE trong stream phải đi đường nhanh theo vị trí binlog (không quét log từ đầu file).
+			if srcMy != nil && !strings.Contains(p.output.String(), "scanning binlog from the CREATE position") {
+				t.Fatalf("CREATE proof did not use the known binlog position\n%s", p.tail())
+			}
 			if code := p.stop(t); code != 0 {
 				t.Fatalf("stop code=%d\n%s", code, p.tail())
 			}

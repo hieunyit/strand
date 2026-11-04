@@ -127,6 +127,10 @@ type Txn struct {
 	DDL string `json:"ddl,omitempty"`
 	// DDLSchema là schema mặc định của phiên chạy DDL (QUERY event), để định danh tên bảng không kèm schema.
 	DDLSchema string `json:"ddl_schema,omitempty"`
+	// BinlogFile/BinlogPos: vị trí event GTID của Txn trong binlog source (MySQL, chỉ khi reader biết;
+	// không đi qua spool). Rỗng thì bên dùng phải tự tìm theo GTID.
+	BinlogFile string `json:"binlog_file,omitempty"`
+	BinlogPos  uint64 `json:"binlog_pos,omitempty"`
 
 	// SourceTS: thời điểm commit ở source (giây Unix, từ header binlog), dùng tính lag.
 	SourceTS int64 `json:"source_ts,omitempty"`

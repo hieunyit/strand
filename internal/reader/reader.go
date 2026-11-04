@@ -40,6 +40,10 @@ type Event struct {
 	Rows      [][]any  `json:"rows,omitempty"`
 	XID       uint64   `json:"xid,omitempty"`
 	Err       error    `json:"error,omitempty"`
+	// BinlogFile/BinlogPos: vị trí bắt đầu của event GTID trong file binlog của source (MySQL; rỗng nếu
+	// không biết). Dùng để kiểm schema tại vị trí CREATE TABLE mà không phải quét binlog từ đầu file.
+	BinlogFile string `json:"binlog_file,omitempty"`
+	BinlogPos  uint64 `json:"binlog_pos,omitempty"`
 }
 
 // Reader là hợp đồng giữa tầng Reader và Txn Assembler theo spec/02 §3.
