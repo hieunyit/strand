@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"math"
@@ -259,6 +260,10 @@ type MySQLSnapshotter struct {
 	// table là tên bảng ĐÍCH (đã qua TargetName). Khi nil: ghi MySQL như cũ.
 	FlushRows   func(ctx context.Context, table model.TableID, pkCol string, columnNames []string, rows []*model.RowChange, startPK, endPK int64) error
 	ClearTarget func(ctx context.Context, table model.TableID) error
+	// ClearUnread (tùy chọn, target không phải MySQL) xóa ở bảng đích các row PK trong [lo, hi] (khi
+	// hasRange) và các khóa keys — phần CHƯA ĐỌC của plan dở khi chạy tiếp. Khi nil: DELETE trên MySQL
+	// với FOREIGN_KEY_CHECKS=0 (không cascade sang bảng con).
+	ClearUnread func(ctx context.Context, table model.TableID, pkCol string, lo, hi int64, hasRange bool, keys []int64) error
 	// FlushKeys (tùy chọn) như FlushRows cho chunk re-read (Chunk.Keys): thay đúng tập khóa keys của bảng
 	// đích bằng rows trong MỘT transaction. Bắt buộc khi source có thể sinh chunk re-read (PG, 02 §8).
 	FlushKeys func(ctx context.Context, table model.TableID, pkCol string, columnNames []string, rows []*model.RowChange, keys []int64) error
@@ -502,6 +507,21 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			if s.SavePlan != nil {
 				if err := s.SavePlan(table, plan); err != nil {
 					return err
+				}
+			}
+		}
+		if resumed && !plan.Empty {
+			// Chạy tiếp plan dở: flush chunk và lưu plan là hai bước (target commit rồi mới fsync plan).
+			// Crash ở giữa để lại ở target row của phần plan còn coi là "Chưa đọc" — ảnh tại high watermark
+			// CŨ. Event của phần đó bị bỏ (chờ chunk đọc lại) nên các row cũ không bao giờ được cập nhật
+			// trước lần flush, mà vẫn giữ giá trị unique key: event của range "Xong" nhận lại giá trị đó
+			// (source đã giải phóng nó) → 1062 (kill -9 e2e, 2026-11-04). Xóa phần chưa đọc trước khi
+			// đăng ký: chunk walk sẽ đọc lại toàn bộ phần này, nên không mất gì (RS-1/2, CP-5).
+			lo, hi := plan.NextPK, plan.MaxPK
+			hasRange := !plan.Finished && lo <= hi
+			if hasRange || len(plan.Reread) > 0 {
+				if err := s.clearUnread(ctx, dstDB, table, pkCol, lo, hi, hasRange, plan.Reread); err != nil {
+					return fmt.Errorf("clear unread part of resumed snapshot of %s: %w", table, err)
 				}
 			}
 		}
@@ -797,4 +817,65 @@ func (s *MySQLSnapshotter) target(t model.TableID) model.TableID {
 		return s.TargetName(t)
 	}
 	return t
+}
+
+// clearUnread xóa phần "Chưa đọc" của plan dở ở bảng đích (xem SnapshotAdd, nhánh resumed).
+func (s *MySQLSnapshotter) clearUnread(ctx context.Context, dstDB *sql.DB, table model.TableID, pkCol string, lo, hi int64, hasRange bool, keys []int64) error {
+	t := s.target(table)
+	if s.ClearUnread != nil {
+		return s.ClearUnread(ctx, t, pkCol, lo, hi, hasRange, keys)
+	}
+	if dstDB == nil {
+		return fmt.Errorf("no target to clear (set ClearUnread when FlushRows replaces the MySQL target)")
+	}
+	conn, err := dstDB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	// FOREIGN_KEY_CHECKS=0: không cascade xóa/đổi row con ở bảng khác (giống flushRowsToTarget). Trả
+	// kết nối về pool với ĐÚNG giá trị cũ của phiên: kết nối ghi của pipeline mặc định
+	// foreign_key_checks=0 (pipeline.targetDSN); để lại 1 thì writer dùng lại kết nối này sẽ bị 1452
+	// khi row cha còn ở phần chưa đọc (đã gặp ở e2e kill -9). Không khôi phục được thì bỏ kết nối.
+	var prev int
+	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.foreign_key_checks").Scan(&prev); err != nil {
+		conn.Close()
+		return err
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn }) // loại khỏi pool
+		}
+		conn.Close()
+	}()
+	if _, err := conn.ExecContext(ctx, "SET SESSION FOREIGN_KEY_CHECKS = 0"); err != nil {
+		return err
+	}
+	restore := func() error {
+		_, err := conn.ExecContext(context.Background(), fmt.Sprintf("SET SESSION FOREIGN_KEY_CHECKS = %d", prev))
+		restored = err == nil
+		return err
+	}
+	if hasRange {
+		q := fmt.Sprintf("DELETE FROM %s WHERE %s >= ? AND %s <= ?", quoteTable(t), quoteIdent(pkCol), quoteIdent(pkCol))
+		if _, err := conn.ExecContext(ctx, q, lo, hi); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < len(keys); i += 1000 {
+		end := i + 1000
+		if end > len(keys) {
+			end = len(keys)
+		}
+		ph := strings.TrimSuffix(strings.Repeat("?,", end-i), ",")
+		args := make([]any, 0, end-i)
+		for _, k := range keys[i:end] {
+			args = append(args, k)
+		}
+		q := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", quoteTable(t), quoteIdent(pkCol), ph)
+		if _, err := conn.ExecContext(ctx, q, args...); err != nil {
+			return err
+		}
+	}
+	return restore()
 }

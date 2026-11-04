@@ -114,6 +114,7 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 ### A. Chốt full e2e trên `f4664a7` rồi đẩy lên GitHub main  ⏳ đang chạy
 
 - Full e2e trên `f4664a7` đã được khởi chạy lúc 2026-11-04 16:39 (log: `<scratchpad>/e2e-final-relaxed.txt`, rồi `e2e-final-strict.txt`; file strict có sẵn trước 16:39 là log cũ của lần chạy khác — nếu bạn không thấy log mới thì chạy lại).
+- Tiến độ lần chạy này khi bàn giao: relaxed: 9 pass, 0 fail (lúc 17:00); strict chạy sau relaxed.
 - Lần trước (trên `be155d5`): relaxed 37 qua / 1 lỗi, strict 38/38. Lỗi duy nhất là `TestP2_E2E_MySQLToPGSnapshotAndStream` ("snapshot finished before the load started") — nguyên nhân thật là **admin báo `synced` trước khi pipeline quyết định bootstrap** (admin socket mở ở đầu `Run`, cờ `bootstrap` bật muộn hơn). Đã sửa ở `f4664a7` (trạng thái `starting`, test `TestAdminStateStartingBeforeRunning`). Cần xác nhận test này hết flaky trong lần chạy mới.
 - Khi cả hai chế độ qua: `git push origin review/gate1-fixes:main` (từ `/home/hellc/strand` sau khi pull nhánh về; repo đó có cảnh báo `dubious ownership` khi chạy git bằng user khác — dùng đúng user sở hữu hoặc `safe.directory`). Hỏi người dùng nếu không chắc quyền.
 
@@ -137,6 +138,16 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 **Test:** unit kiểu golden cho DDL cả 3 hướng (kiểu khó, PK nhiều cột, FK, enum, identity, bảng partition, tên cần quote, rename); integration với container mỗi hướng (~6 bảng đa dạng → `schema init` → so cấu trúc qua information_schema/catalog, validate qua); e2e bootstrap logic dưới tải vào target **rỗng** cho MySQL→MySQL, MySQL→PG, PG→PG với `app.*`/`*.*` — trạng thái cuối giống hệt, `verify --mode full` 0 lệch; CREATE TABLE khi đang stream được tạo + replicate. Các e2e cũ tạo sẵn bảng ở target phải vẫn chạy (bảng có rồi → không đụng).
 
 Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", ghi file).
+
+**Khảo sát đã làm (2026-11-04, Claude) — dùng làm điểm xuất phát:**
+- Nhánh `agent/schema-init` đã merge `review/gate1-fixes` (commit `27c3e1f`, chỉ trong worktree `<scratchpad>/wt/SCHEMA`) — đã có P2-03, review-fixes… Chưa có code sinh DDL.
+- **Điểm cài vào `strand sync`** (`internal/pipeline/pipeline.go`, hàm `Run`): sau khối tính `pending` (danh sách bảng chưa `IsDone` — khoảng dòng 410–420 bản hiện tại) và **trước** khối "MySQL→PG: bảng PK không phải số nguyên rỗng → `writer.PGClearTable`" (khối đó cần bảng đích đã tồn tại). Chỉ tạo cho bảng trong `pending`: bảng đã `Done` (vd. đến từ seed/restore) mà thiếu ở target thì **không** tạo rỗng (sẽ che mất việc restore thiếu) — giữ lỗi như cũ.
+- `p.conv.load` (MySQL→PG, `engine.go` ~534) chỉ đọc **source** (`InspectMySQLColumns`), không đọc target → không cần dời. `p.loadTables` cũng chỉ đọc source. Metadata `_strand_*` được `p.store.EnsureTables` tạo trước đó (schema của target DSN).
+- Tên đích: `p.filter.Target(id)` (áp `tables.rename`).
+- MySQL→PG: `typemap.MapMySQLColumn(col, typemap.DefaultOptions())` trả `ColumnMapping.TargetType` (chuỗi kiểu PG: smallint/integer/bigint/numeric(20,0)/text/varchar(n)/bytea/timestamp(p)/timestamptz(p)/jsonb/text[]/`<col>_enum`…). Với `EnumPolicy=check` kiểu là `text` → phải tự thêm `CHECK (col IN (...))` từ `col.EnumValues`; với `type` cần `CREATE TYPE <col>_enum AS ENUM`. Cột khóa: sinh `COLLATE "C"` cho text/varchar để qua `typemap.CheckKeyCollation` (02 §8: `_ci` → `C` an toàn; cấm citext). Cột khóa PK lấy bằng `typemap.InspectMySQLPrimaryKey`.
+- MySQL→MySQL: `SHOW CREATE TABLE` đã không chứa trigger; vẫn nên đọc `information_schema.TRIGGERS` để log bảng nào có trigger bị bỏ qua. Bỏ `AUTO_INCREMENT=N` bằng regex trên phần table options (sau dấu `)` cuối).
+- Gợi ý package mới `internal/schemagen` (3 hàm `MySQLToMySQL`, `MySQLToPG`, `PGToPG` trả `[]string` câu DDL + cảnh báo), dùng chung cho `strand sync` và lệnh `strand schema init` (file mới `cmd/strand/schema.go`, đăng ký trong `root.go`).
+- Chỗ khác cần gọi: `handleDDL` (`internal/pipeline/ddl.go`) — với bảng trong `newCreated` khi auto: tạo ở target trước bước `schemaDiff`; và đường `strand snapshot add` / thêm bảng do đổi `tables.include` (đi qua `pending` lúc restart nên đã được phủ).
 
 ### C. Snapshot logic cho PK không phải một cột số nguyên  ⬜ chưa bắt đầu (người dùng đã duyệt)
 
@@ -341,7 +352,13 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 25 | `CREATE TABLE` trong stream → exit 10 trên server binlog lớn | Kiểm schema tại CREATE quét `SHOW BINLOG EVENTS` từ offset 4 của từng file, giới hạn 30 s | Reader gắn file/vị trí event GTID vào Txn; quét tiến từ chính CREATE; timeout 2 phút; GTID-search chỉ còn là đường dự phòng | `TestSchemaInit_E2E_EmptyTarget` khẳng định dùng đường nhanh |
 | 26 (mở) | Bật `target.batch.max_wait` thì một khóa nóng chỉ apply ≈ 1/max_wait Txn/s (fixture schema-init: 18,5 batch/s với 50 ms; Codex giảm tải fixture thay vì sửa) | Có thể gatherBatch vẫn chờ max_wait khi Txn kế tiếp bị chặn bởi phụ thuộc | **Chưa sửa** — cần đo và sửa: không chờ max_wait khi không Txn nào có thể vào batch | — |
 | 27 (mở, hiếm) | PG PK identity ALWAYS bị `UPDATE … SET id = DEFAULT` cùng cột TOAST không đổi → writer `UPDATE SET pk` lỗi 428C9 | partialUpdate đặt PK tường minh | **Chưa sửa** (hiếm) | — |
-
+| 28 | (review Codex 2026-11-05) `TestG1_E2E_Kill9RandomCrashes` iteration 7: 1062 `accounts.uk_code` ngay sau resume snapshot | Flush chunk (target commit) và lưu plan (fsync local) là hai bước; crash ở giữa để lại row cũ trong phần plan coi là "Chưa đọc" — event của phần đó bị bỏ nên row cũ giữ giá trị unique mà source đã giải phóng | Resume: xóa ở target phần `[NextPK, MaxPK]` + khóa Reread trước khi đăng ký range (`agent/resume-clear`, `fef4762`) | `TestRS1_ResumeClearsUnreadPartBeforeRegister` (đỏ khi tắt bước xóa); e2e kill -9 lặp lại |
+| 29 (mở) | Reader PG giữ toàn bộ event của Txn streaming/two-phase trong RAM (`buf.events`, `internal/reader/pg/stream.go` ~417) tới khi biết kết cục → Txn lớn / nhiều Txn mở có thể OOM | Chưa có spill ở reader PG | **Chưa sửa** — cần spill ra đĩa theo byte (như assembler MySQL) + test Txn lớn streaming | — |
+| 30 (mở) | Assembler spill theo số row (`maxInMem`), không theo byte (`internal/assemble/spill.go` ~143) | Row lớn → RAM vượt dự kiến | **Chưa sửa** — ngưỡng theo byte | — |
+| 31 (mở) | Source PG: mọi governor bị ép về `static` (`internal/pipeline/governor.go` ~28); comment "PG chưa có snapshot logic" đã lỗi thời từ PGBOOT → **không benchmark được GRACE cho PG** (Gate 2) | Tín hiệu onoff/GRACE chỉ đọc từ MySQL | **Chưa sửa** — cần tín hiệu áp suất cho source PG rồi bỏ ép static | — |
+| 32 (mở) | `resources.memory.*`, `resources.target.iops`, `target.write_mode` không có tác dụng và không có cảnh báo | Thiếu trong `internal/config/unimplemented.go` | **Chưa sửa** — thêm cảnh báo (hoặc từ chối) | — |
+| 33 (mở) | `strand validate` không kiểm điều kiện PG logical replication (`wal_level`, publication, slot, quyền REPLICATION) | Validate chỉ có kiểm MySQL | **Chưa sửa** | — |
+| 34 | Bản sửa đầu tiên của #28 làm `TestG1_E2E_Kill9RandomCrashes` lỗi 6/6 với 1452 (FK) | `clearUnread` đặt `FOREIGN_KEY_CHECKS = 1` khi trả kết nối về pool, trong khi kết nối ghi của pipeline mặc định `foreign_key_checks=0` (`pipeline.targetDSN`) — đúng bài học §7.3 | Lưu giá trị cũ của phiên và khôi phục đúng nó; khôi phục lỗi thì loại kết nối khỏi pool | Kill -9 + snapshot add: relaxed 6/6, strict 6/6 |
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 
 ---
