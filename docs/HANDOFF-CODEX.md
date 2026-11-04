@@ -340,7 +340,12 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 16 | P2-03: "chờ hai range flush rồi SQL điều kiện" (theo spec) làm mất row / row sống lại | Spec không xét range khóa cũ chưa đọc và event sau chạm khóa mới | Re-read khóa mới qua giao thức chunk (quyết định 18) | `toast_pk_*_test.go`, `pg_toast_pk_test.go` |
 | 17 | P2-03 e2e strict "not synced after 10m" (2 lần, trước khi sửa test) | Tải không giới hạn + strict một worker → lag mãi; chưa loại trừ hoàn toàn khả năng khoá chết (không có goroutine dump) | Giới hạn tải 60 s; watcher SIGQUIT chưa từng kích hoạt sau đó | Theo dõi: nếu gặp lại, lấy `kill -QUIT` goroutine dump |
 | 18 | Logical snapshot PG với sync rep trỏ vào Strand khoá chết | Strand xác nhận start-LSN, sync rep chờ end-LSN; hold 2PC | Chưa sửa — giới hạn đã biết | test dùng `pg_receivewal` thay |
-
+| 23 | (review Codex 2026-11-05) `TestG1_E2E_Kill9RandomCrashes` iteration 7: 1062 `accounts.uk_code` ngay sau resume snapshot | Flush chunk (target commit) và lưu plan (fsync local) là hai bước; crash ở giữa để lại row cũ trong phần plan coi là "Chưa đọc" — event của phần đó bị bỏ nên row cũ giữ giá trị unique mà source đã giải phóng | Resume: xóa ở target phần `[NextPK, MaxPK]` + khóa Reread trước khi đăng ký range (`agent/resume-clear`, `fef4762`) | `TestRS1_ResumeClearsUnreadPartBeforeRegister` (đỏ khi tắt bước xóa); e2e kill -9 lặp lại |
+| 24 (mở) | Reader PG giữ toàn bộ event của Txn streaming/two-phase trong RAM (`buf.events`, `internal/reader/pg/stream.go` ~417) tới khi biết kết cục → Txn lớn / nhiều Txn mở có thể OOM | Chưa có spill ở reader PG | **Chưa sửa** — cần spill ra đĩa theo byte (như assembler MySQL) + test Txn lớn streaming | — |
+| 25 (mở) | Assembler spill theo số row (`maxInMem`), không theo byte (`internal/assemble/spill.go` ~143) | Row lớn → RAM vượt dự kiến | **Chưa sửa** — ngưỡng theo byte | — |
+| 26 (mở) | Source PG: mọi governor bị ép về `static` (`internal/pipeline/governor.go` ~28); comment "PG chưa có snapshot logic" đã lỗi thời từ PGBOOT → **không benchmark được GRACE cho PG** (Gate 2) | Tín hiệu onoff/GRACE chỉ đọc từ MySQL | **Chưa sửa** — cần tín hiệu áp suất cho source PG rồi bỏ ép static | — |
+| 27 (mở) | `resources.memory.*`, `resources.target.iops`, `target.write_mode` không có tác dụng và không có cảnh báo | Thiếu trong `internal/config/unimplemented.go` | **Chưa sửa** — thêm cảnh báo (hoặc từ chối) | — |
+| 28 (mở) | `strand validate` không kiểm điều kiện PG logical replication (`wal_level`, publication, slot, quyền REPLICATION) | Validate chỉ có kiểm MySQL | **Chưa sửa** | — |
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 
 ---
