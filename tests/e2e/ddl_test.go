@@ -20,7 +20,7 @@ func TestP1_E2E_DDLStopsUntilTargetSchemaMatches(t *testing.T) {
 	defer wl.Stop()
 
 	dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
-	cfg := strandCfg{Name: "e2e-ddl", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
+	cfg := strandCfg{Name: "e2e-ddl", CreateSchema: "off", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
 		Include: []string{"app.*"}, Exclude: []string{"app.ignored"}, Dir: testDir(t)}
 	p := startStrand(t, cfg.write(t))
 	waitSynced(t, &cfg, p, 3*time.Minute)

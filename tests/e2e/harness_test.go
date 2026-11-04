@@ -206,17 +206,18 @@ func createSchema(t *testing.T, nodes ...*mysqlNode) {
 func (c *strandCfg) socket(t *testing.T) string { return c.Socket }
 
 type strandCfg struct {
-	Socket      string
-	Name        string
-	SourceDSN   string
-	TargetDSN   string
-	Include     []string
-	Exclude     []string
-	Dir         string
-	CommitOrder string
-	Workers     int
-	LagSLO      string
-	Bootstrap   string
+	Socket       string
+	Name         string
+	SourceDSN    string
+	TargetDSN    string
+	Include      []string
+	Exclude      []string
+	Dir          string
+	CommitOrder  string
+	Workers      int
+	LagSLO       string
+	Bootstrap    string
+	CreateSchema string
 	// PostSeedWindow: cửa sổ verify sau seed (mặc định 5s trong test; production 30m).
 	PostSeedWindow string
 	VerifyDelta    string
@@ -251,6 +252,9 @@ func (c *strandCfg) write(t *testing.T) string {
 	}
 	if c.Bootstrap == "" {
 		c.Bootstrap = "logical"
+	}
+	if c.CreateSchema == "" {
+		c.CreateSchema = "auto"
 	}
 	if c.PostSeedWindow == "" {
 		c.PostSeedWindow = "5s"
@@ -289,7 +293,7 @@ target:
 tables:
   include: %s
   exclude: %s
-bootstrap: { default: %s }
+bootstrap: { default: %s, create_schema: %s }
 checkpoint: { store: target, flush_every: 200ms }
 resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB, overflow: %q }
@@ -299,7 +303,7 @@ governor: { algorithm: onoff, tick: 1s, lag_slo: %s, breaker: { strand_query_p99
 verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
+		c.Bootstrap, c.CreateSchema, filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)

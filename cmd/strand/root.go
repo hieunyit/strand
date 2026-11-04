@@ -26,6 +26,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "Chế độ chạy thử không tác động đích")
 
 	rootCmd.AddCommand(newConfigCmd())
+	rootCmd.AddCommand(newSchemaCmd())
 	rootCmd.AddCommand(newValidateCmd())
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newSyncCmd())

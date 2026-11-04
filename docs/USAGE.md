@@ -4,6 +4,36 @@ Cập nhật: 2026-11-03
 
 Strand P1 đồng bộ một chiều MySQL → MySQL (8.0/8.4), một process `strand sync` cho mỗi pipeline; tài liệu này ứng với nhánh `review/gate1-fixes` (commit `2332300`).
 
+## Chuẩn bị schema đích (việc B)
+
+`bootstrap.create_schema: auto` là mặc định. Với MySQL→MySQL, MySQL→PostgreSQL và PostgreSQL→PostgreSQL, `sync` tạo schema/database và bảng còn thiếu trước snapshot logic. Phạm vi lấy từ `tables.include`, `tables.exclude` và `tables.rename`; ví dụ `app.*` chọn cả schema `app`. Bảng đã tồn tại không bị sửa cấu trúc bởi bộ tạo schema. Snapshot logic vẫn có hành vi thay dữ liệu đích như trước.
+
+Có thể xem và tạo schema riêng:
+
+```bash
+strand schema init -c pipeline.yaml --dry-run
+strand schema init -c pipeline.yaml
+strand validate -c pipeline.yaml
+```
+
+`--dry-run` chỉ in DDL, không áp vào target. Chạy lại `schema init` bỏ qua bảng đã có. Lệnh tường minh này vẫn tạo bảng khi cấu hình `create_schema: off`; `off` tắt việc tự tạo của `sync`. Biến môi trường tương ứng là `STRAND_BOOTSTRAP_CREATE_SCHEMA=off`. `validate` với `auto` báo số bảng sẽ được tạo; với `off`, bảng đích thiếu làm validate trả exit 3.
+
+- MySQL→MySQL: lấy `SHOW CREATE TABLE`, giữ PK/index/FK/partition và charset/collation, bỏ bộ đếm `AUTO_INCREMENT=N` ở cấp bảng. Không sao chép trigger, event hay routine. Bỏ qua view. Đích cần bảng InnoDB để dữ liệu và checkpoint commit nguyên tử. Source cần quyền đọc metadata; danh sách đối tượng được log phụ thuộc quyền xem metadata của tài khoản nguồn.
+- MySQL→PostgreSQL: dùng mapping mặc định của `internal/typemap`, cột khóa chuỗi dùng collation `"C"`, ENUM thành text + CHECK. AUTO_INCREMENT ánh xạ sang identity khi kiểu đích là smallint/integer/bigint. Default chỉ giữ khi dịch được an toàn; default bị bỏ có cảnh báo. Index prefix/biểu thức/fulltext, cột generated của MySQL và AUTO_INCREMENT ánh xạ sang numeric bị từ chối bằng exit 3, cần tạo bảng đích thủ công.
+- PostgreSQL→PostgreSQL: dựng từ catalog, không gọi `pg_dump`; giữ NOT NULL/default/collation, PK/UNIQUE/CHECK/exclusion, index, FK sau cùng, identity và sequence sở hữu (increment/start/cache/min/max/cycle). Giữ biểu thức generated. Hỗ trợ bảng partition một cấp; subpartition và kiểu enum/domain do người dùng định nghĩa được từ chối rõ để tạo bảng thủ công. Sequence độc lập không được bộ tạo schema sao chép.
+
+DDL PostgreSQL của một lần init được áp trong một transaction. MySQL tự commit từng DDL; nếu bị ngắt, lần chạy kế tiếp tạo các bảng còn thiếu. Không có bước tự sửa bảng đã tồn tại.
+
+`sync` chỉ tự tạo cho bảng còn chờ snapshot. Bảng đã được đánh dấu xong từ seed/restore hoặc `--start-at` mà bị thiếu không được tạo rỗng để che lỗi restore. Database chứa metadata trong DSN target phải kết nối được trước khi chạy; bộ tạo schema không thay bước chuẩn bị database metadata.
+
+Với target PostgreSQL và `auto`, snapshot bảng cha trước bảng con để giữ FK có hiệu lực. FK vòng/tự tham chiếu trong tập bảng chờ snapshot bị từ chối trước khi tạo DDL; cần seed nhất quán hoặc một thiết kế riêng. Xem `questions/OPEN-schema-init-fk.md`.
+
+CREATE TABLE từ source MySQL khớp bộ lọc được tạo tại barrier trước khi nhận row của bảng mới. Strand giữ metadata lock đọc và kiểm binlog để tránh lấy schema đã bị ALTER sau vị trí CREATE. Không kiểm được trong 30 giây, log không còn phủ đủ, hoặc có DDL mới hơn thì dừng exit 10. ALTER/DROP/RENAME vẫn đi theo cơ chế kiểm schema và exit 10 hiện có. Với source PostgreSQL, DDL không đi qua pgoutput; dùng `snapshot add` hoặc khởi động lại để nhận bảng mới.
+
+Quyền target để tạo schema: MySQL cần CREATE trên database/schema được đồng bộ (và quyền tạo database nếu database chưa có); PostgreSQL cần CREATE trên database để tạo schema, USAGE/CREATE trên schema đích. Quyền apply/promote vẫn cần chuẩn bị riêng. Source không bị tạo đối tượng hoặc ghi row bởi `schema init`.
+
+Phần còn lại của tài liệu bên dưới đang chờ việc D viết lại và còn mô tả P1; phần schema ở trên là phần cập nhật cho việc B.
+
 ## 1. Yêu cầu môi trường
 
 Source phải bật GTID và binlog ROW đầy đủ; tất cả đổi được online, riêng `log_bin` và `log_replica_updates` cần restart nếu chưa bật. `strand validate` kiểm các điều kiện này, kể cả từng session đang mở.

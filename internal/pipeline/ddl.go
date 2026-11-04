@@ -127,6 +127,17 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 
+	if p.cfg.Bootstrap.CreateSchemaAuto() && len(newCreated) > 0 {
+		var newIDs []model.TableID
+		for _, id := range ids {
+			if newCreated[id] {
+				newIDs = append(newIDs, id)
+			}
+		}
+		if err := p.createAtDDL(ctx, t, newIDs); err != nil {
+			return err
+		}
+	}
 	var diffs []string
 	for _, id := range ids {
 		d, err := p.schemaDiff(ctx, id)

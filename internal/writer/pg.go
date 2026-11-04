@@ -707,7 +707,7 @@ func (b *pgUpsertBlock) flush(a *pgApplier) error {
 	}
 	tmpQ := "pg_temp." + quotePG(tmp)
 	// MERGE và TRUNCATE bảng tạm gửi chung một round-trip (simple protocol, không tham số).
-	q := fmt.Sprintf("MERGE INTO %s AS _strand_t USING %s AS _strand_s ON (%s) %s WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s); TRUNCATE %s",
+	q := fmt.Sprintf("MERGE INTO %s AS _strand_t USING %s AS _strand_s ON (%s) %s WHEN NOT MATCHED THEN INSERT (%s) OVERRIDING SYSTEM VALUE VALUES (%s); TRUNCATE %s",
 		quotePGTable(b.table), tmpQ, strings.Join(on, " AND "), matched,
 		strings.Join(quoted, ", "), strings.Join(src, ", "), tmpQ)
 	if _, err := a.tx.Exec(a.ctx, q, pgx.QueryExecModeSimpleProtocol); err != nil {
@@ -729,6 +729,9 @@ func (b *pgUpsertBlock) insertOnConflict(a *pgApplier) error {
 	return nil
 }
 
+// invariant: CP-1/2, CP-5 — OVERRIDING SYSTEM VALUE giữ ID tường minh từ source
+// cho cả identity ALWAYS; không gọi nextval sinh ID khác. Không đổi ranh giới Txn,
+// checkpoint, epoch hoặc thứ tự commit (SG-1, CO-1/2).
 // buildUpsert dựng INSERT … VALUES (…),(…) ON CONFLICT (pk) DO UPDATE SET <cột không-PK>.
 func buildUpsert(table model.TableID, cols, pkCols []string, rows [][]any) (string, []any) {
 	isPK := make(map[string]bool, len(pkCols))
@@ -759,7 +762,7 @@ func buildUpsert(table model.TableID, cols, pkCols []string, rows [][]any) (stri
 		}
 		tuples[i] = "(" + strings.Join(phs, ", ") + ")"
 	}
-	q := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON CONFLICT (%s) %s", quotePGTable(table),
+	q := fmt.Sprintf("INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE VALUES %s ON CONFLICT (%s) %s", quotePGTable(table),
 		strings.Join(quoted, ", "), strings.Join(tuples, ", "), strings.Join(quotedPK, ", "), conflict)
 	return q, args
 }

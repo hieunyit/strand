@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/schemagen"
 	"strand/internal/typemap"
 	"strand/internal/validate"
 )
@@ -81,7 +82,7 @@ func newValidateCmd() *cobra.Command {
 						}
 						defer dstDB.Close()
 					}
-					mpWarns, mpErr := validate.CheckMySQLToPGTables(cmd.Context(), db, dstDB, cfg.Tables.Include, typemap.DefaultOptions())
+					mpWarns, mpErr := typemap.CheckMySQLToPGTablesMapped(cmd.Context(), db, dstDB, tables, typemap.DefaultOptions(), cfg.Tables.Rename)
 					for _, w := range mpWarns {
 						fmt.Fprintln(os.Stderr, "warning: "+w)
 					}
@@ -91,6 +92,31 @@ func newValidateCmd() *cobra.Command {
 				}
 			}
 
+			r, err := schemaRequest(cfg)
+			if err != nil {
+				return err
+			}
+			defer r.Source.Close()
+			defer r.Target.Close()
+			tables, warnings, err := schemagen.Discover(cmd.Context(), r.Source, r.SourceKind, cfg.Tables.Include, cfg.Tables.Exclude)
+			if err != nil {
+				return err
+			}
+			r.Tables = tables
+			plan, err := schemagen.Build(cmd.Context(), r)
+			if err != nil {
+				return err
+			}
+			if len(plan.Tables) > 0 && !cfg.Bootstrap.CreateSchemaAuto() {
+				return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.Rejected,
+					fmt.Sprintf("%d target table(s) missing and bootstrap.create_schema=off; run strand schema init", len(plan.Tables)), nil)
+			}
+			for _, w := range append(warnings, plan.Warnings...) {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+w)
+			}
+			if len(plan.Tables) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "%d table(s) will be created on target\n", len(plan.Tables))
+			}
 			fmt.Fprintf(os.Stdout, "Preflight validation passed for pipeline: %s\n", cfg.Name)
 			return nil
 		},

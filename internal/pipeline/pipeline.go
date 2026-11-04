@@ -422,6 +422,23 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].String() < pending[j].String() })
+	if p.dstEngine == model.EnginePG && p.cfg.Bootstrap.CreateSchemaAuto() {
+		pending, err = orderSnapshotTables(pending, p.tables)
+		if err != nil {
+			return err
+		}
+	}
+
+	// invariant: SD-1..4 — chỉ bảng pending được tạo từ schema hiện tại. Bảng Done
+	// (seed/restore hoặc --start-at) mà thiếu không được tạo rỗng để che lỗi restore.
+	// invariant: CP-1..5, RS-1/2, CO-1/2, SG-1 — đang giữ khóa pipeline, chưa chạy
+	// snapshot/worker; tạo schema không thay tập applied, watermark hay thứ tự commit.
+	if p.cfg.Bootstrap.CreateSchemaAuto() {
+		if err := p.createTargetTables(ctx, pending); err != nil {
+			return err
+		}
+	}
+
 	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EnginePG {
 		// MySQL→PG: bảng có PK không phải một cột số nguyên chỉ được nhận khi RỖNG ở source tại thời
 		// điểm này (sau khi vị trí stream đã chốt): mọi row của nó sau đó đều đi qua stream, nên
@@ -1565,6 +1582,12 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	}
 	if p.conv != nil {
 		if err := p.conv.load(ctx, p.src, id); err != nil {
+			return err
+		}
+	}
+	// invariant: RS-1/2 — bảng đích sẵn sàng trước đăng ký range và trước event mới.
+	if p.cfg.Bootstrap.CreateSchemaAuto() {
+		if err := p.createTargetTables(ctx, []model.TableID{id}); err != nil {
 			return err
 		}
 	}

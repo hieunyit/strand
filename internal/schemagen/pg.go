@@ -1,0 +1,233 @@
+package schemagen
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"strand/internal/model"
+)
+
+func pgToPG(ctx context.Context, r Request, t model.TableID) ([]string, []string, []string, error) {
+	dst := r.target(t)
+	var oid int64
+	var partition string
+	err := r.Source.QueryRowContext(ctx, `SELECT c.oid::bigint,COALESCE(pg_get_partkeydef(c.oid),'') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind IN ('r','p')`, t.Schema, t.Table).Scan(&oid, &partition)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	rows, err := r.Source.QueryContext(ctx, `SELECT a.attname,format_type(a.atttypid,a.atttypmod),a.attnotnull,COALESCE(pg_get_expr(d.adbin,d.adrelid),''),a.attidentity::text,a.attgenerated::text,COALESCE(cn.nspname,''),COALESCE(co.collname,''),tn.nspname
+ FROM pg_attribute a JOIN pg_type ty ON ty.oid=a.atttypid JOIN pg_namespace tn ON tn.oid=ty.typnamespace
+ LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+ LEFT JOIN pg_collation co ON co.oid=a.attcollation AND a.attcollation<>ty.typcollation LEFT JOIN pg_namespace cn ON cn.oid=co.collnamespace
+ WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`, oid)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	type column struct {
+		n, typ, def, identity, generated, collschema, coll, typeschema string
+		notnull                                                        bool
+	}
+	var cols []column
+	for rows.Next() {
+		var c column
+		if err := rows.Scan(&c.n, &c.typ, &c.notnull, &c.def, &c.identity, &c.generated, &c.collschema, &c.coll, &c.typeschema); err != nil {
+			rows.Close()
+			return nil, nil, nil, err
+		}
+		cols = append(cols, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	ddl := []string{"CREATE SCHEMA IF NOT EXISTS " + quote(dst.Schema, true)}
+	var defs, owned, warnings []string
+	for _, c := range cols {
+		if c.typeschema != "pg_catalog" {
+			return nil, nil, nil, reject("user-defined type %s on %s.%s: create and map the target table manually", c.typ, t, c.n)
+		}
+		d := quote(c.n, true) + " " + c.typ
+		if c.coll != "" {
+			d += " COLLATE " + quote(c.collschema, true) + "." + quote(c.coll, true)
+		}
+		var seqschema, seqname string
+		var start, inc, min, max, cache int64
+		var cycle bool
+		err := r.Source.QueryRowContext(ctx, `SELECT sn.nspname,s.relname,q.seqstart,q.seqincrement,q.seqmin,q.seqmax,q.seqcache,q.seqcycle
+ FROM pg_depend dep JOIN pg_class s ON s.oid=dep.objid AND s.relkind='S' JOIN pg_namespace sn ON sn.oid=s.relnamespace JOIN pg_sequence q ON q.seqrelid=s.oid JOIN pg_attribute a ON a.attrelid=dep.refobjid AND a.attnum=dep.refobjsubid
+ WHERE dep.classid='pg_class'::regclass AND dep.refclassid='pg_class'::regclass AND dep.refobjid=$1 AND a.attname=$2 AND dep.deptype IN ('a','i')`, oid, c.n).Scan(&seqschema, &seqname, &start, &inc, &min, &max, &cache, &cycle)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, nil, nil, err
+		}
+		if err == nil {
+			opts := fmt.Sprintf("START WITH %d INCREMENT BY %d MINVALUE %d MAXVALUE %d CACHE %d", start, inc, min, max, cache)
+			if cycle {
+				opts += " CYCLE"
+			} else {
+				opts += " NO CYCLE"
+			}
+			if c.identity != "" {
+				mode := "BY DEFAULT"
+				if c.identity == "a" {
+					mode = "ALWAYS"
+				}
+				d += " GENERATED " + mode + " AS IDENTITY (" + opts + ")"
+			} else {
+				seq := model.TableID{Schema: dst.Schema, Table: seqname}
+				if dst != t {
+					seq.Table = dst.Table + "_" + c.n + "_seq"
+				}
+				ddl = append(ddl, "CREATE SEQUENCE "+name(seq, true)+" AS "+c.typ+" "+opts)
+				d += " DEFAULT nextval(" + literal(name(seq, true)) + "::regclass)"
+				owned = append(owned, "ALTER SEQUENCE "+name(seq, true)+" OWNED BY "+name(dst, true)+"."+quote(c.n, true))
+			}
+		} else if c.generated != "" {
+			storage := "STORED"
+			if c.generated == "v" {
+				storage = "VIRTUAL"
+			}
+			d += " GENERATED ALWAYS AS (" + c.def + ") " + storage
+		} else if c.def != "" {
+			if strings.Contains(c.def, "nextval(") {
+				return nil, nil, nil, reject("unowned sequence default on %s.%s requires manual mapping", t, c.n)
+			}
+			d += " DEFAULT " + c.def
+		}
+		if c.notnull {
+			d += " NOT NULL"
+		}
+		defs = append(defs, d)
+	}
+	constraints, err := r.Source.QueryContext(ctx, `SELECT conname,contype::text,pg_get_constraintdef(oid,true) FROM pg_constraint WHERE conrelid=$1 AND conparentid=0 ORDER BY conname`, oid)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var foreign []string
+	for constraints.Next() {
+		var n, typ, def string
+		if err := constraints.Scan(&n, &typ, &def); err != nil {
+			constraints.Close()
+			return nil, nil, nil, err
+		}
+		if t != dst {
+			n = dst.Table + "_" + n
+		}
+		if len(n) > 63 {
+			constraints.Close()
+			return nil, nil, nil, reject("mapped constraint name %s exceeds 63 bytes", n)
+		}
+		if typ == "f" {
+			rewritten, err := pgReferences(def, t, dst, r.Rename)
+			if err != nil {
+				constraints.Close()
+				return nil, nil, nil, err
+			}
+			foreign = append(foreign, "ALTER TABLE "+name(dst, true)+" ADD CONSTRAINT "+quote(n, true)+" "+rewritten)
+		} else {
+			defs = append(defs, "CONSTRAINT "+quote(n, true)+" "+def)
+		}
+	}
+	constraints.Close()
+	if err := constraints.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	create := "CREATE TABLE " + name(dst, true) + " (\n  " + strings.Join(defs, ",\n  ") + "\n)"
+	if partition != "" {
+		create += " PARTITION BY " + partition
+	}
+	ddl = append(ddl, create)
+	ddl = append(ddl, owned...)
+	indexes, err := r.Source.QueryContext(ctx, `SELECT ic.relname,pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid WHERE i.indrelid=$1 AND NOT EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conindid=i.indexrelid AND c.conrelid=i.indrelid AND c.contype IN ('p','u','x')) ORDER BY ic.relname`, oid)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for indexes.Next() {
+		var n, def string
+		if err := indexes.Scan(&n, &def); err != nil {
+			indexes.Close()
+			return nil, nil, nil, err
+		}
+		at := strings.Index(def, " USING ")
+		if at < 0 {
+			indexes.Close()
+			return nil, nil, nil, reject("cannot map index %s", n)
+		}
+		unique := ""
+		if strings.HasPrefix(def, "CREATE UNIQUE INDEX ") {
+			unique = "UNIQUE "
+		}
+		if t != dst {
+			n = dst.Table + "_" + n
+		}
+		if len(n) > 63 {
+			indexes.Close()
+			return nil, nil, nil, reject("mapped index name %s exceeds 63 bytes", n)
+		}
+		ddl = append(ddl, "CREATE "+unique+"INDEX "+quote(n, true)+" ON "+name(dst, true)+def[at:])
+	}
+	indexes.Close()
+	if err := indexes.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	// Partition con giữ bound và cây phân vùng; cột/index thừa kế từ bảng cha vừa tạo.
+	children, err := r.Source.QueryContext(ctx, `SELECT n.nspname,c.relname,pg_get_expr(c.relpartbound,c.oid),COALESCE(pg_get_partkeydef(c.oid),'') FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE i.inhparent=$1 ORDER BY n.nspname,c.relname`, oid)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	type child struct {
+		id         model.TableID
+		bound, key string
+	}
+	var kids []child
+	for children.Next() {
+		var c child
+		if err := children.Scan(&c.id.Schema, &c.id.Table, &c.bound, &c.key); err != nil {
+			children.Close()
+			return nil, nil, nil, err
+		}
+		kids = append(kids, c)
+	}
+	children.Close()
+	if err := children.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	for _, c := range kids {
+		if c.key != "" {
+			return nil, nil, nil, reject("subpartitioned table %s requires manual schema initialization", c.id)
+		}
+		cdst := r.target(c.id)
+		if c.id.Schema == t.Schema {
+			cdst.Schema = dst.Schema
+		}
+		ddl = append(ddl, "CREATE SCHEMA IF NOT EXISTS "+quote(cdst.Schema, true), "CREATE TABLE "+name(cdst, true)+" PARTITION OF "+name(dst, true)+" "+c.bound)
+	}
+	return ddl, foreign, warnings, nil
+}
+
+func pgReferences(def string, src, dst model.TableID, rename map[string]string) (string, error) {
+	ts, err := lex(def)
+	if err != nil {
+		return "", err
+	}
+	for i, t := range ts {
+		if t.keyword(def, "REFERENCES") && i+1 < len(ts) {
+			a := ts[i+1]
+			ref := model.TableID{Schema: src.Schema, Table: a.value}
+			end := a.end
+			if i+3 < len(ts) && ts[i+2].value == "." {
+				ref.Schema = a.value
+				ref.Table = ts[i+3].value
+				end = ts[i+3].end
+			}
+			if mapped, ok := rename[ref.String()]; ok {
+				s, t, _ := strings.Cut(mapped, ".")
+				ref = model.TableID{Schema: s, Table: t}
+
+			}
+			return def[:a.start] + name(ref, true) + def[end:], nil
+		}
+	}
+	return "", fmt.Errorf("foreign key has no REFERENCES clause")
+}

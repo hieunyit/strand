@@ -22,6 +22,9 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 
 ## 1. Repo và nhánh
 
+**Codex đang làm việc B (2026-11-04):** clone riêng `/home/hellc/strand-codex`, nguồn local scratchpad; tiếp tục `agent/schema-init` từ `27c3e1f`. Đã triển khai sinh/apply DDL ba hướng, CLI, validate và bootstrap/CREATE barrier. Chưa merge/push. Báo cáo đang cập nhật ở `reports/SCHEMA-INIT.md`; chưa được coi là xong trước checklist §9 và full e2e hai chế độ. C–F và Gate 2 vẫn chưa bắt đầu trong phiên Codex.
+
+
 - GitHub: `hieunyit/strand` (private). Bản clone của người dùng: `/home/hellc/strand` (remote `origin` = GitHub).
 - **GitHub `main` = `9281ffa`** — chứa Gate 1 (P1) + P2 đợt 1 (P2-01 reader PG, P2-02 writer PG, P2-04 typemap, P2-08 Merkle) + seed mysqldump/mydumper.
 - **Nhánh tích hợp `review/gate1-fixes` = `f4664a7`** (chưa đẩy lên GitHub) — chứa toàn bộ việc đã xong và đã review:
@@ -329,6 +332,10 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 16 | P2-03: "chờ hai range flush rồi SQL điều kiện" (theo spec) làm mất row / row sống lại | Spec không xét range khóa cũ chưa đọc và event sau chạm khóa mới | Re-read khóa mới qua giao thức chunk (quyết định 18) | `toast_pk_*_test.go`, `pg_toast_pk_test.go` |
 | 17 | P2-03 e2e strict "not synced after 10m" (2 lần, trước khi sửa test) | Tải không giới hạn + strict một worker → lag mãi; chưa loại trừ hoàn toàn khả năng khoá chết (không có goroutine dump) | Giới hạn tải 60 s; watcher SIGQUIT chưa từng kích hoạt sau đó | Theo dõi: nếu gặp lại, lấy `kill -QUIT` goroutine dump |
 | 18 | Logical snapshot PG với sync rep trỏ vào Strand khoá chết | Strand xác nhận start-LSN, sync rep chờ end-LSN; hold 2PC | Chưa sửa — giới hạn đã biết | test dùng `pg_receivewal` thay |
+| 19 | Target PG có identity ALWAYS không nhận ID tường minh của source (SQLSTATE 428C9) | INSERT/MERGE thiếu OVERRIDING SYSTEM VALUE | Thêm override cho cả hai đường và upsert snapshot dùng chung; giữ ID, Txn và checkpoint | `TestCP1_PGAlwaysIdentityExplicitSourceValues`: đỏ khi tạm revert writer, xanh khi khôi phục |
+| 20 | Bootstrap target PG mới có FK: snapshot bảng con trước cha, SQLSTATE 23503 | Thứ tự alphabet không phải thứ tự phụ thuộc FK | Với auto, snapshot cha trước con; FK vòng/tự tham chiếu từ chối trước DDL, câu hỏi mở `OPEN-schema-init-fk.md` | `TestRS1_SnapshotParentsBeforeChildren`, `TestSchemaInit_E2E_EmptyTarget` |
+| 21 | E2E schema-init mới hết timeout catch-up (MySQL→PG, PG→PG) sau snapshot, không phải treo | Fixture ghi 100 update/s vào một khóa trong khi DAG + max_wait=50ms chỉ apply khoảng 18,5 batch/s; quan sát batch tăng 2174→2879 trong 38s, checkpoint vẫn tiến | Giới hạn tải fixture 10 update/s; vẫn kiểm có commit khi snapshot đang chạy; lưu cả log lỗi | `schema-e2e-relaxed-2.log` ngoài repo; ca đúng với fixture cuối đã qua ba hướng |
+
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 

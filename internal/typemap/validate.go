@@ -20,6 +20,14 @@ type Warning = string
 //  3. Quét giá trị thực tế gây lỗi (zero date, unsigned bigint vượt int8 khi dùng int8-checked, ENUM ngoài danh sách)
 //     bằng truy vấn đếm có giới hạn (LIMIT) nhằm tránh quét toàn bảng khi không cần thiết.
 func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables []string, opts Options) ([]string, error) {
+	return checkMySQLToPGTables(ctx, src, dst, tables, opts, nil, false)
+}
+
+// CheckMySQLToPGTablesMapped kiểm đúng tên đích sau tables.rename, không đoán schema public.
+func CheckMySQLToPGTablesMapped(ctx context.Context, src, dst *sql.DB, tables []string, opts Options, rename map[string]string) ([]string, error) {
+	return checkMySQLToPGTables(ctx, src, dst, tables, opts, rename, true)
+}
+func checkMySQLToPGTables(ctx context.Context, src, dst *sql.DB, tables []string, opts Options, rename map[string]string, exact bool) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -126,29 +134,33 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 		if dst != nil {
 			// Xác định target schema: ưu tiên schema gốc, sau đó thử "public"
 			targetSchema := schema
+			targetTable := table
+			if mapped, ok := rename[schema+"."+table]; ok {
+				targetSchema, targetTable, _ = strings.Cut(mapped, ".")
+			}
 			var dstTableExists int
 			err := dst.QueryRowContext(ctx,
 				"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
-				targetSchema, table).Scan(&dstTableExists)
+				targetSchema, targetTable).Scan(&dstTableExists)
 			if err != nil {
 				// Không nuốt lỗi: lỗi ở đây trước kia dẫn tới bỏ qua toàn bộ kiểm tra collation target.
-				return warnings, fmt.Errorf("check target table %s.%s existence: %w", targetSchema, table, err)
+				return warnings, fmt.Errorf("check target table %s.%s existence: %w", targetSchema, targetTable, err)
 			}
-			if dstTableExists == 0 {
+			if dstTableExists == 0 && !exact {
 				targetSchema = "public"
 				if err := dst.QueryRowContext(ctx,
 					"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
-					targetSchema, table).Scan(&dstTableExists); err != nil {
-					return warnings, fmt.Errorf("check target table %s.%s existence: %w", targetSchema, table, err)
+					targetSchema, targetTable).Scan(&dstTableExists); err != nil {
+					return warnings, fmt.Errorf("check target table %s.%s existence: %w", targetSchema, targetTable, err)
 				}
 			}
 
 			if dstTableExists > 0 {
-				dstCols, err := InspectPGColumns(ctx, dst, targetSchema, table)
+				dstCols, err := InspectPGColumns(ctx, dst, targetSchema, targetTable)
 				if err != nil {
 					return warnings, err
 				}
-				dstPKs, err := InspectPGPrimaryKey(ctx, dst, targetSchema, table)
+				dstPKs, err := InspectPGPrimaryKey(ctx, dst, targetSchema, targetTable)
 				if err != nil {
 					return warnings, err
 				}
@@ -165,7 +177,7 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 							return warnings, exitcode.New(
 								exitcode.ErrCollationLooser,
 								exitcode.Rejected,
-								fmt.Sprintf("table %s.%s key column %s on target uses citext: citext is forbidden for key columns (spec: 02 §8)", targetSchema, table, dc.Name),
+								fmt.Sprintf("table %s.%s key column %s on target uses citext: citext is forbidden for key columns (spec: 02 §8)", targetSchema, targetTable, dc.Name),
 								nil,
 							)
 						}
@@ -176,7 +188,7 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 						// Luôn kiểm tra (kể cả khi information_schema.collation_name rỗng, ví dụ cột kiểu domain
 						// mang collation của domain): attcollation là collation hiệu lực của cột.
 						{
-							cm, err := InspectPGColumnCollation(ctx, dst, targetSchema, table, dc.Name)
+							cm, err := InspectPGColumnCollation(ctx, dst, targetSchema, targetTable, dc.Name)
 							if err != nil {
 								// Không được bỏ qua: không xác định được collation thì không kết luận "an toàn".
 								return warnings, err
@@ -186,7 +198,7 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 									return warnings, exitcode.New(
 										exitcode.ErrCollationLooser,
 										exitcode.Rejected,
-										fmt.Sprintf("table %s.%s key column %s on target uses non-deterministic collation %s (spec: 02 §8)", targetSchema, table, dc.Name, cm.Name),
+										fmt.Sprintf("table %s.%s key column %s on target uses non-deterministic collation %s (spec: 02 §8)", targetSchema, targetTable, dc.Name, cm.Name),
 										nil,
 									)
 								}
@@ -194,7 +206,7 @@ func CheckMySQLToPGTables(ctx context.Context, src *sql.DB, dst *sql.DB, tables 
 									return warnings, exitcode.New(
 										exitcode.ErrCollationLooser,
 										exitcode.Rejected,
-										fmt.Sprintf("table %s.%s key column %s on target uses case-insensitive collation %s (spec: 02 §8)", targetSchema, table, dc.Name, cm.Name),
+										fmt.Sprintf("table %s.%s key column %s on target uses case-insensitive collation %s (spec: 02 §8)", targetSchema, targetTable, dc.Name, cm.Name),
 										nil,
 									)
 								}
