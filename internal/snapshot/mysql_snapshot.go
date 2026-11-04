@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
@@ -257,6 +259,14 @@ type MySQLSnapshotter struct {
 	// table là tên bảng ĐÍCH (đã qua TargetName). Khi nil: ghi MySQL như cũ.
 	FlushRows   func(ctx context.Context, table model.TableID, pkCol string, columnNames []string, rows []*model.RowChange, startPK, endPK int64) error
 	ClearTarget func(ctx context.Context, table model.TableID) error
+	// FlushKeys (tùy chọn) như FlushRows cho chunk re-read (Chunk.Keys): thay đúng tập khóa keys của bảng
+	// đích bằng rows trong MỘT transaction. Bắt buộc khi source có thể sinh chunk re-read (PG, 02 §8).
+	FlushKeys func(ctx context.Context, table model.TableID, pkCol string, columnNames []string, rows []*model.RowChange, keys []int64) error
+
+	// planMu tuần tự hóa đọc-sửa-ghi plan giữa router (lưu khóa re-read) và vòng snapshot (NextPK).
+	planMu sync.Mutex
+	// RereadKeysTotal: tổng số khóa đã được đọc lại (chunk re-read đã flush, 02 §8), để ghi log.
+	RereadKeysTotal atomic.Int64
 
 	// Chunks (tùy chọn) thay phần đọc source khi source không phải MySQL (PG: PGChunkSource).
 	// Khi nil: đọc MySQL như cũ (srcDB, Source).
@@ -292,6 +302,47 @@ type SnapshotPlan struct {
 	MaxPK     int64 `json:"max_pk"`
 	ChunkRows int64 `json:"chunk_rows"`
 	NextPK    int64 `json:"next_pk"` // mọi chunk có EndPK < NextPK đã flush
+	// Reread: khóa phải đọc lại (UPDATE đổi PK mà cột TOAST không đổi, 02 §8; xem toast_pk.go). Được lưu
+	// bền trước khi Txn sinh ra nó được Admit, gỡ sau khi chunk re-read của khóa đã flush.
+	Reread []int64 `json:"reread_keys,omitempty"`
+}
+
+// updatePlan đọc-sửa-ghi plan của bảng dưới planMu (không có plan / không lưu plan thì bỏ qua).
+func (s *MySQLSnapshotter) updatePlan(table model.TableID, fn func(*SnapshotPlan)) error {
+	if s.SavePlan == nil || s.LoadPlan == nil {
+		return nil
+	}
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+	plan, ok := s.LoadPlan(table)
+	if !ok {
+		return nil
+	}
+	fn(&plan)
+	return s.SavePlan(table, plan)
+}
+
+// PersistReread lưu bền tập khóa chờ đọc lại hiện tại của bảng (đang snapshot) vào plan. Router gọi
+// trước khi Admit Txn đã đánh dấu khóa (HandleToastPKChangeXID); tập được đọc từ range-state dưới
+// planMu nên lần ghi sau cùng luôn chứa mọi khóa chưa flush.
+func (s *MySQLSnapshotter) PersistReread(table model.TableID) error {
+	return s.updatePlan(table, func(p *SnapshotPlan) { p.Reread = s.Manager.RereadKeys(table) })
+}
+
+// AddPlanReread thêm khóa vào plan của bảng CHƯA đăng ký range (chờ tới lượt snapshot); đăng ký sẽ nạp
+// lại thành chunk re-read. Trả false nếu bảng không có plan (cả bảng sẽ được đọc, không cần ghi gì).
+func (s *MySQLSnapshotter) AddPlanReread(table model.TableID, key int64) (bool, error) {
+	found := false
+	err := s.updatePlan(table, func(p *SnapshotPlan) {
+		found = true
+		for _, k := range p.Reread {
+			if k == key {
+				return
+			}
+		}
+		p.Reread = append(p.Reread, key)
+	})
+	return found, err
 }
 
 // TableBounds chứa thông tin biên khóa chính của bảng.
@@ -330,6 +381,16 @@ func (s *MySQLSnapshotter) FlushChunk(
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
+	if chunk.Keys != nil {
+		if s.FlushKeys == nil {
+			return fmt.Errorf("snapshot flush: re-read chunk of %s needs FlushKeys", table)
+		}
+		if err := s.FlushKeys(ctx, s.target(table), pkCol, columnNames, mergedRows, chunk.Keys); err != nil {
+			return err
+		}
+		s.Manager.MarkDoneLocked(chunk)
+		return nil
+	}
 	if s.FlushRows != nil {
 		if err := s.FlushRows(ctx, s.target(table), pkCol, columnNames, mergedRows, chunk.StartPK, chunk.EndPK); err != nil {
 			return err
@@ -440,16 +501,21 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[int64]*model.RowChange{}})
 		}
 		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
+		if len(plan.Reread) > 0 {
+			// Khóa chờ đọc lại từ lần chạy trước (hoặc từ lúc bảng chờ đăng ký): nghĩa vụ vẫn còn.
+			s.Manager.AddReread(table, plan.Reread, time.Now())
+		}
 		return nil
 	}
-	var savePlan func(next int64) error
-	savePlan = func(next int64) error { return nil }
-	if s.SavePlan != nil && s.LoadPlan != nil {
-		savePlan = func(next int64) error {
-			plan, _ := s.LoadPlan(table)
-			plan.NextPK = next
-			return s.SavePlan(table, plan)
-		}
+	// savePlan ghi tiến độ sau mỗi flush: NextPK (chunk chính, next > 0 hoặc chunk chính bất kỳ) và
+	// tập khóa còn chờ đọc lại.
+	savePlan := func(c *Chunk) error {
+		return s.updatePlan(table, func(p *SnapshotPlan) {
+			if c.Keys == nil {
+				p.NextPK = c.EndPK + 1
+			}
+			p.Reread = s.Manager.RereadKeys(table)
+		})
 	}
 	if s.Barrier != nil {
 		err = s.Barrier(ctx, register)
@@ -471,35 +537,19 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		src = &sqlSourceQuerier{db: srcDB}
 	}
 
-	for next := cur.NextPK; !cur.Empty && next <= cur.MaxPK; {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		var end int64
-		if s.Chunks != nil {
-			end, err = s.Chunks.KeysetEnd(ctx, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
-		} else {
-			end, err = keysetEnd(ctx, srcDB, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
-		}
-		if err != nil {
-			return fmt.Errorf("keyset walk %s from %d: %w", table, next, err)
-		}
-		chunk, err := s.Manager.CarveChunk(table, next, end)
-		if err != nil {
-			return err
-		}
-		next = end + 1
-
-		// Watermark (RS-2): low → WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high, cùng server.
-		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
-			colsStr, quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol))
+	// processChunk: đọc (low → SELECT → high), điểm hẹn, flush trong barrier, lưu plan, giãn nhịp.
+	processChunk := func(chunk *Chunk) error {
 		var rows []*model.RowChange
 		var chunkHigh checkpoint.AppliedSet
+		var err error
 		if s.Chunks != nil {
 			rows, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdx, table)
+		} else if chunk.Keys != nil {
+			return fmt.Errorf("snapshot %s: re-read chunks need a PostgreSQL chunk source", table)
 		} else {
+			// Watermark (RS-2): low → WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high, cùng server.
+			query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
+				colsStr, quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol))
 			rows, chunkHigh, err = s.readChunkWatermarked(ctx, src, chunk, query, columnNames, pkIdx, table)
 		}
 		if err != nil {
@@ -523,7 +573,10 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			err = flush()
 		}
 		if err == nil {
-			err = savePlan(chunk.EndPK + 1)
+			err = savePlan(chunk)
+		}
+		if err == nil && chunk.Keys != nil {
+			s.RereadKeysTotal.Add(int64(len(chunk.Keys)))
 		}
 		if err != nil {
 			return fmt.Errorf("failed to flush chunk [%d, %d] to target: %w", chunk.StartPK, chunk.EndPK, err)
@@ -536,6 +589,46 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			}
 		} else if s.opts.SleepBetweenChunks > 0 {
 			time.Sleep(s.opts.SleepBetweenChunks)
+		}
+		return nil
+	}
+
+	for next := cur.NextPK; ; {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		// Chunk re-read (02 §8) đến hạn — đạt max_pending_cross_range, chờ quá 30 s, hoặc walk chính đã
+		// xong — được đọc trước chunk chính kế tiếp (đầu hàng đợi đọc).
+		mainDone := cur.Empty || next > cur.MaxPK
+		if k := s.Manager.TakeReread(table, time.Now(), mainDone); k != nil {
+			if err := processChunk(k); err != nil {
+				return err
+			}
+			continue
+		}
+		if mainDone {
+			// Không còn khóa chờ đọc lại và mọi range đã "Xong": từ đây không thể phát sinh khóa mới
+			// (HandleToastPKChangeXID chỉ đánh dấu khi có range chưa xong), bảng snapshot xong.
+			break
+		}
+		var end int64
+		if s.Chunks != nil {
+			end, err = s.Chunks.KeysetEnd(ctx, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+		} else {
+			end, err = keysetEnd(ctx, srcDB, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+		}
+		if err != nil {
+			return fmt.Errorf("keyset walk %s from %d: %w", table, next, err)
+		}
+		chunk, err := s.Manager.CarveChunk(table, next, end)
+		if err != nil {
+			return err
+		}
+		next = end + 1
+		if err := processChunk(chunk); err != nil {
+			return err
 		}
 	}
 

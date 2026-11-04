@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
@@ -14,10 +15,24 @@ import (
 // spec: 02 §5, design §6.1
 // Invariant: RS-1 (Target không bao giờ hiển thị một row cũ hơn trạng thái nó đã có)
 
+// DefaultMaxPendingCrossRange: mặc định của max_pending_cross_range (02 §6).
+const DefaultMaxPendingCrossRange = 1024
+
+// DefaultPendingMaxWait: thao tác xuyên range chờ quá mức này thì được đẩy lên đầu hàng đợi đọc (02 §6).
+const DefaultPendingMaxWait = 30 * time.Second
+
 // RangeStateManager điều phối trạng thái range cho các bảng trong quá trình snapshot song song với stream.
 type RangeStateManager struct {
 	mu     sync.RWMutex
 	tables map[string]*TableRanges // schema.table -> TableRanges
+
+	// MaxPendingCrossRange (max_pending_cross_range, 02 §6): số khóa chờ đọc lại của một bảng mà khi
+	// đạt tới thì chúng được đọc ngay ở ranh giới chunk kế tiếp (đầu hàng đợi đọc), và cũng là số khóa
+	// tối đa của một chunk re-read. ≤ 0 = DefaultMaxPendingCrossRange.
+	MaxPendingCrossRange int
+	// PendingMaxWait: khóa chờ lâu hơn mức này thì được đọc ngay ở ranh giới chunk kế tiếp.
+	// ≤ 0 = DefaultPendingMaxWait.
+	PendingMaxWait time.Duration
 }
 
 // TableRanges quản lý tập các chunk/range của một bảng.
@@ -33,6 +48,15 @@ type TableRanges struct {
 	// commit engine), nên SELECT của chunk đọc ngay sau đó có thể chưa thấy nó. Trước SELECT phải
 	// chờ WAIT_FOR_EXECUTED_GTID_SET(tập này) để mọi event đã bỏ chắc chắn nằm trong read view.
 	PendingDiscards *checkpoint.MySQLAppliedSet
+
+	// Reread (chỉ source PG, 02 §8): khóa phải đọc lại từ source vì một UPDATE đổi PK mà cột TOAST
+	// không đổi đã chuyển row tới khóa đó khi range của nó không còn "Chưa đọc". Giá trị là chunk
+	// re-read hiện hành của khóa: rereadPending (đang gom khóa, "Chưa đọc") hoặc chunk đang đọc.
+	// FindChunk tra map này TRƯỚC các chunk chính, nên khóa đang chờ đọc lại được xử lý như một range
+	// "Chưa đọc" (event bị bỏ) dù range chính của nó đã "Xong".
+	Reread        map[int64]*Chunk
+	rereadPending *Chunk
+	rereadSince   []time.Time // thời điểm đánh dấu từng khóa, song song rereadPending.Keys
 }
 
 // NewRangeStateManager khởi tạo RangeStateManager mới.
@@ -51,6 +75,7 @@ func (m *RangeStateManager) RegisterTable(table model.TableID, pkCol string, chu
 		Table:  table,
 		PKCol:  pkCol,
 		Chunks: chunks,
+		Reread: map[int64]*Chunk{},
 	}
 	if len(tailBLast) > 0 {
 		tr.TailBLast = tailBLast[0]
@@ -190,8 +215,17 @@ func extractInt64PK(key []model.Value) (int64, error) {
 	}
 }
 
-// FindChunk tìm chunk chứa PK tương ứng (tìm kiếm nhị phân; Chunks được sắp theo StartPK).
+// FindChunk tìm chunk chứa PK tương ứng: chunk re-read của khóa nếu có (xem Reread), ngược lại
+// chunk chính (tìm kiếm nhị phân; Chunks được sắp theo StartPK).
 func (tr *TableRanges) FindChunk(pk int64) *Chunk {
+	if c := tr.Reread[pk]; c != nil {
+		return c
+	}
+	return tr.findMain(pk)
+}
+
+// findMain tìm chunk chính (keyset walk) chứa pk; nil = "Xong".
+func (tr *TableRanges) findMain(pk int64) *Chunk {
 	// Quy tắc chunk đuôi: nếu pk > TailBLast, thuộc range "Xong" ngay từ đầu
 	if tr.HasTailBLast && pk > tr.TailBLast {
 		return nil // Nil biểu thị ngoài phạm vi snapshot -> Done
@@ -220,7 +254,11 @@ func (m *RangeStateManager) HandleStreamEventXID(event *model.RowChange, pos mod
 		// Bảng không nằm trong snapshot -> Apply trực tiếp
 		return ActionApply, nil
 	}
+	return m.handleLocked(tr, event, pos, xid)
+}
 
+// handleLocked: phần chung của HandleStreamEventXID (đã giữ m.mu, bảng đã đăng ký).
+func (m *RangeStateManager) handleLocked(tr *TableRanges, event *model.RowChange, pos model.Pos, xid uint64) (Action, *Chunk) {
 	pk, err := extractInt64PK(event.Key)
 	if err != nil {
 		// Bảng đang snapshot nhưng không xác định được range: KHÔNG được apply thẳng (RS-1).
@@ -248,11 +286,7 @@ func (m *RangeStateManager) HandleStreamEventXID(event *model.RowChange, pos mod
 	case StateReading, StateRendezvous, StateFlushing:
 		// spec: 02 §5 "Đang đọc / Chờ điểm hẹn: GTID ∈ low: bỏ. Ngược lại: gộp theo PK vào buffer có thứ tự, chỉ giữ image cuối"
 		// Source PG: "∈ low" là "Txn visible với snapshot S0 của chunk" (pg_watermark.go).
-		inLow := chunk.LowWatermark != nil && chunk.LowWatermark.Contains(pos)
-		if chunk.LowSnapshot != nil {
-			inLow = chunk.LowSnapshot.Visible(xid)
-		}
-		if inLow {
+		if inLow(chunk, pos, xid) {
 			// Read view của chunk (sau low) đã phản ánh event này hoặc trạng thái mới hơn, nên mọi
 			// ảnh CŨ HƠN của cùng PK còn trong buffer (vd. buffer lúc chunk chưa có low) đã lỗi thời:
 			// phải bỏ cả nó, nếu không flush sẽ ghi ảnh cũ đè lên snapshot (vd. INSERT rồi DELETE ∈ low
@@ -279,6 +313,16 @@ func (m *RangeStateManager) HandleStreamEventXID(event *model.RowChange, pos mod
 	default:
 		return ActionApply, chunk
 	}
+}
+
+// inLow: event (Txn pos/xid) đã được phản ánh trong read view của chunk đang đọc — GTID ∈ low (MySQL)
+// hoặc Txn visible với S0 (PG).
+func inLow(chunk *Chunk, pos model.Pos, xid uint64) bool {
+	in := chunk.LowWatermark != nil && chunk.LowWatermark.Contains(pos)
+	if chunk.LowSnapshot != nil {
+		in = chunk.LowSnapshot.Visible(xid)
+	}
+	return in
 }
 
 // StreamActionResult chứa kết quả xử lý của một stream event hoặc sub-event (sau khi tách đổi PK).
@@ -394,18 +438,36 @@ func (m *RangeStateManager) FinishReading(chunk *Chunk, high checkpoint.AppliedS
 func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 	chunk.State = StateFlushing
 
+	// Khóa đang chờ một lần đọc lại KHÁC (Reread trỏ tới chunk khác chunk này) không được ghi ở flush
+	// này: flush xóa nó ở target (DELETE cả range/tập khóa), và lần đọc lại sau đó — luôn chạy sau flush
+	// này vì chunk được đọc tuần tự — mang về trạng thái đúng (xem HandleToastPKChangeXID).
+	var tr *TableRanges
+	if t, ok := m.tables[chunk.Table.String()]; ok && len(t.Reread) > 0 {
+		tr = t
+	}
+	skip := func(pk int64) bool {
+		if tr == nil {
+			return false
+		}
+		c := tr.Reread[pk]
+		return c != nil && c != chunk
+	}
+
 	mergedMap := make(map[int64]*model.RowChange)
 
 	// 1. Nạp snapshot rows
 	for _, row := range chunk.SnapshotRows {
 		pk, err := extractInt64PK(row.Key)
-		if err == nil {
+		if err == nil && !skip(pk) {
 			mergedMap[pk] = row
 		}
 	}
 
 	// 2. Gộp buffer (buffer override snapshot)
 	for pk, bufChange := range chunk.BufferedChanges {
+		if skip(pk) {
+			continue
+		}
 		if bufChange.Op == model.OpDelete {
 			// Tombstone: xóa khỏi tập merge
 			delete(mergedMap, pk)
@@ -471,6 +533,17 @@ func fillUnchanged(rc, base *model.RowChange) *model.RowChange {
 
 // MarkDoneLocked đánh dấu hoàn thành cho chunk và chuyển sang StateDone trong khi đã giữ lock.
 func (m *RangeStateManager) MarkDoneLocked(chunk *Chunk) {
+	if chunk.Keys != nil {
+		// Chunk re-read xong: khóa của nó về lại range chính (đã "Xong"), trừ khóa đã được đánh dấu
+		// đọc lại lần nữa trong lúc chunk này đang đọc.
+		if tr, ok := m.tables[chunk.Table.String()]; ok {
+			for _, k := range chunk.Keys {
+				if tr.Reread[k] == chunk {
+					delete(tr.Reread, k)
+				}
+			}
+		}
+	}
 	chunk.State = StateDone
 	chunk.SnapshotRows = nil
 	chunk.BufferedChanges = make(map[int64]*model.RowChange)

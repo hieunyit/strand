@@ -641,28 +641,48 @@ func (p *Pipeline) sourceOf(t model.TableID) (model.TableID, bool) {
 // thay nguyên range ở target trong một transaction.
 func (p *Pipeline) pgFlushRows(ctx context.Context, table model.TableID, pkCol string, columnNames []string,
 	rows []*model.RowChange, startPK, endPK int64) error {
+	out, err := p.pgFlushImages(table, rows)
+	if err != nil {
+		return err
+	}
+	return writer.PGReplaceRange(ctx, p.dst, table, pkCol, columnNames, out, startPK, endPK)
+}
+
+// pgFlushKeys là FlushKeys của snapshotter (chunk re-read, 02 §8): như pgFlushRows nhưng thay đúng
+// tập khóa keys.
+func (p *Pipeline) pgFlushKeys(ctx context.Context, table model.TableID, pkCol string, columnNames []string,
+	rows []*model.RowChange, keys []int64) error {
+	out, err := p.pgFlushImages(table, rows)
+	if err != nil {
+		return err
+	}
+	return writer.PGReplaceKeys(ctx, p.dst, table, pkCol, columnNames, out, keys)
+}
+
+// pgFlushImages kiểm tra ảnh đã merge (không còn cột TOAST thiếu giá trị) và chuyển giá trị sang PG.
+func (p *Pipeline) pgFlushImages(table model.TableID, rows []*model.RowChange) ([]*model.RowChange, error) {
 	src, ok := p.sourceOf(table)
 	if !ok {
-		return fmt.Errorf("snapshot flush: no source table maps to %s", table)
+		return nil, fmt.Errorf("snapshot flush: no source table maps to %s", table)
 	}
 	out := make([]*model.RowChange, 0, len(rows))
 	for _, r := range rows {
 		for _, cv := range r.Cols {
 			if cv.Unchanged {
 				// Không dựng lại được giá trị cột TOAST (không có ảnh trước): không ghi row thiếu.
-				return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError,
+				return nil, exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError,
 					fmt.Sprintf("snapshot flush: row %v of %s has an unchanged TOAST column %s without a base image", r.Key, table, cv.Name), nil)
 			}
 		}
 		c := *r
 		if p.conv != nil {
 			if err := p.conv.row(src, &c, p.table(src).PK); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		out = append(out, &c)
 	}
-	return writer.PGReplaceRange(ctx, p.dst, table, pkCol, columnNames, out, startPK, endPK)
+	return out, nil
 }
 
 // emptyOnSource: bảng nguồn không có row nào (đọc SAU khi vị trí stream đã chốt).
@@ -852,27 +872,58 @@ func (p *Pipeline) rendezvousPG(ctx context.Context, high uint64) error {
 // sau đều thấy nó (BeforeRegister). Bỏ thay vì apply rồi bị xóa, vì UPDATE của PG có thể thiếu cột TOAST
 // mà row chưa có ở target. Phần đã flush của plan dở ([MinPK, NextPK−1]) và phần đuôi (> MaxPK) thì
 // apply như range "Xong". UPDATE đổi PK được tách thành tombstone + upsert, xét từng nửa.
-func (p *Pipeline) keepBeforeRegisterPG(rc *model.RowChange) []*model.RowChange {
+// Khóa trong plan.Reread (chờ đọc lại, 02 §8) được coi như phần sẽ đọc lại. UPDATE đổi PK mà cột TOAST
+// không đổi, khóa cũ sẽ được đọc lại còn khóa mới thì không: nửa upsert thiếu giá trị TOAST nên khóa mới
+// được thêm vào plan.Reread (lưu bền ngay, trước khi Txn được Admit) và nửa upsert bị bỏ (toast_pk.go).
+func (p *Pipeline) keepBeforeRegisterPG(rc *model.RowChange) ([]*model.RowChange, error) {
 	plan, ok := p.state.Plan(rc.Table.String())
 	if !ok {
-		return nil
+		return nil, nil
+	}
+	if plan.Empty {
+		return []*model.RowChange{rc}, nil
+	}
+	reread := make(map[int64]bool, len(plan.Reread))
+	for _, k := range plan.Reread {
+		reread[k] = true
+	}
+	inside := func(key []model.Value) bool {
+		pk, err := snapshotPK(key)
+		return err != nil || (pk >= plan.NextPK && pk <= plan.MaxPK) || reread[pk]
+	}
+	if len(rc.OldKey) > 0 && snapshot.HasUnchanged(rc) {
+		oldIn, newIn := inside(rc.OldKey), inside(rc.Key)
+		switch {
+		case !oldIn && !newIn:
+			return []*model.RowChange{rc}, nil // SQL điều kiện của writer (cả hai khóa đã ở target)
+		case newIn:
+			parts := snapshot.SplitStreamEvent(rc)
+			if oldIn {
+				return nil, nil
+			}
+			return parts[:1], nil // chỉ xóa khóa cũ; khóa mới sẽ được đọc
+		default:
+			newPK, err := snapshotPK(rc.Key)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.snap.AddPlanReread(rc.Table, newPK); err != nil {
+				return nil, fmt.Errorf("persist re-read key of %s: %w", rc.Table, err)
+			}
+			return nil, nil // khóa cũ sẽ được đọc lại (vắng mặt), khóa mới được đọc lại
+		}
 	}
 	var out []*model.RowChange
 	for _, part := range snapshot.SplitStreamEvent(rc) {
-		if plan.Empty {
-			out = append(out, part)
-			continue
-		}
-		pk, err := snapshotPK(part.Key)
-		if err != nil || (pk >= plan.NextPK && pk <= plan.MaxPK) {
+		if inside(part.Key) {
 			continue
 		}
 		out = append(out, part)
 	}
 	if len(rc.OldKey) > 0 && len(out) == 2 {
-		return []*model.RowChange{rc} // cả hai nửa đều apply: giữ UPDATE gốc
+		return []*model.RowChange{rc}, nil // cả hai nửa đều apply: giữ UPDATE gốc
 	}
-	return out
+	return out, nil
 }
 
 // snapshotPK đọc PK số nguyên một cột (int64 từ reader PG).

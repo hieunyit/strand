@@ -110,6 +110,14 @@ type Chunk struct {
 
 	SnapshotRows    []*model.RowChange
 	BufferedChanges map[int64]*model.RowChange // PK -> last image / tombstone
+
+	// Keys khác nil: chunk "đọc lại" (re-read) một TẬP khóa rời rạc thay vì đoạn [StartPK, EndPK]
+	// (StartPK/EndPK khi đó chỉ là min/max để ghi log). Dùng cho UPDATE đổi PK mà cột TOAST không
+	// đổi (02 §8): khóa mới được đọc lại từ source qua đúng giao thức chunk (low, SELECT, high,
+	// điểm hẹn, flush trong barrier). Xem RangeStateManager.HandleToastPKChangeXID.
+	Keys []int64
+	// Since: thời điểm khóa sớm nhất của chunk re-read được đánh dấu (metric tuổi, luật 30 s).
+	Since time.Time
 }
 
 // RowCount trả về số lượng hàng ước tính trong chunk.
