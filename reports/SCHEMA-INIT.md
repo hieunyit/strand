@@ -1,6 +1,6 @@
 # Việc B — target schema init (đang kiểm tra)
 
-Nhánh `agent/schema-init`, base `27c3e1f`, clone `/home/hellc/strand-codex`. **NOT DONE**: chờ owner chốt giới hạn FK vòng/tự tham chiếu, chưa full e2e toàn repo trên nhánh và chưa merge/push. Code chính `efb3b1b`, sửa sequence/default `cdd7f6c`.
+Nhánh `agent/schema-init`, base `27c3e1f`, clone `/home/hellc/strand-codex`. **NOT DONE**: đã chốt quyết định 19; còn full e2e toàn repo trên nhánh và chưa merge/push. Code chính `efb3b1b`, sửa sequence/default `cdd7f6c`.
 
 ## Thiết kế và file
 
@@ -49,7 +49,7 @@ Log gốc tại `/home/hellc/strand-codex-evidence/` và các file `/home/hellc/
 
 ## Giới hạn và việc chưa kiểm
 
-- FK vòng/tự tham chiếu: logical bootstrap auto target PG từ chối sớm; câu hỏi mở cần owner review.
+- FK vòng/tự tham chiếu: logical bootstrap auto target PG từ chối sớm; giới hạn đã được owner duyệt theo quyết định 19.
 - Enum/domain PG và subpartition: cần tạo bảng thủ công; lỗi rõ trước Apply. MySQL→PG từ chối generated, index prefix/expression/fulltext và AUTO_INCREMENT→numeric.
 - Database metadata trong DSN target cần tồn tại/kết nối được; tự tạo chỉ các schema/bảng dữ liệu. Runtime CREATE tự động hiện là đường source MySQL; source PG dùng snapshot add/restart.
 - Chưa có kiểm tự động quyền tối thiểu mới trên tài khoản không phải admin; chưa thử timeout/cancel đúng lúc trả session MySQL.
@@ -68,4 +68,6 @@ Code giữ `pg_sequence.seqtypid` thay vì lấy kiểu cột sở hữu. Giữ 
 
 E2E DDL cũ với `create_schema: off` đã qua trên `cdd7f6c`: relaxed 62,22s (12.303 row / 5 bảng giống hệt), strict 62,47s (11.472 row / 5 bảng giống hệt). Log `legacy-ddl-relaxed.log`, `legacy-ddl-strict.log`.
 
-Chưa chốt thiết kế/đề nghị merge: cần owner chọn chính sách FK vòng trong `questions/OPEN-schema-init-fk.md` theo quy tắc hỏi trước khi lệch spec lớn; sau đó mới chốt kiểm tra full e2e trên thiết kế cuối. C–F giữ nguyên thứ tự và chưa bắt đầu.
+Owner đã chọn giữ FK hoạt động, dùng seed cho FK vòng/tự tham chiếu (quyết định 19). Tiếp tục full e2e relaxed rồi strict và checklist §9 trước khi đề nghị merge. C–F giữ nguyên thứ tự và chưa bắt đầu.
+
+Đã tiếp tục sau sự cố hết dung lượng: `/` hiện còn 129 GiB (đọc bằng df lúc tiếp tục). Worktree regression và hai bản code dự phòng do Codex tạo đã được dọn; giữ log kiểm chứng. Không dọn container hoặc /tmp của người khác.

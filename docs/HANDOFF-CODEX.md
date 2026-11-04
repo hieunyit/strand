@@ -54,7 +54,7 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 | `agent/review-fixes` | `4f08bd8` | Đã gộp vào review | Theo `review/gate1-fixes` |
 | `agent/soak-mem` | `45ab339` | Đã gộp vào review | Theo `review/gate1-fixes` |
 | `agent/p2-03` | `f969770` | Đã gộp vào review (xung đột đã giải ở `3645f78`) | Theo `review/gate1-fixes` |
-| `agent/schema-init` | `cdd7f6c` (code, local Codex) | **WIP** — DDL 3 hướng/CLI/bootstrap/barrier; targeted 18/18; core 29 package test qua | Owner chốt FK vòng; full e2e hai chế độ + checklist §9; chưa merge/push |
+| `agent/schema-init` | `cdd7f6c` (code, local Codex) | **WIP** — DDL 3 hướng/CLI/bootstrap/barrier; targeted 18/18; core 29 package test qua | FK vòng đã chốt quyết định 19; full e2e hai chế độ + checklist §9; chưa merge/push |
 | `agent/generic-pk` | `be155d5` | **Trống** (chưa có commit riêng) | Tạo lại từ đầu nhánh review khi bắt đầu việc C |
 | `agent/docs` | `be155d5` | **Trống** | Tạo lại từ đầu nhánh review khi bắt đầu việc D |
 
@@ -121,7 +121,7 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 
 **Vấn đề:** Strand hiện **không tạo** schema/bảng ở target. Với bootstrap logic (kịch bản phổ biến nhất) người dùng phải tạo tay mọi bảng trước. Spec chỉ giả định schema đến từ backup khi seed. Người dùng yêu cầu: phải tự tạo.
 
-**Trạng thái Codex:** đã có DDL 3 hướng, `schema init`, validate, bootstrap và CREATE barrier; code local `efb3b1b` + `cdd7f6c`. Targeted e2e 18/18 (3 lần mỗi chế độ), core 29 package có test qua, generator sửa bổ sung qua. **Chưa xong**: owner chốt FK vòng và chạy full e2e toàn repo/checklist §9. Chi tiết cùng log lỗi ở `reports/SCHEMA-INIT.md`, JSON `reports/SCHEMA-INIT-results.json`. Worktree nguồn của Claude không bị sửa.
+**Trạng thái Codex:** đã có DDL 3 hướng, `schema init`, validate, bootstrap và CREATE barrier; code local `efb3b1b` + `cdd7f6c`. Targeted e2e 18/18 (3 lần mỗi chế độ), core 29 package có test qua, generator sửa bổ sung qua. **Chưa xong**: đã chốt FK vòng (quyết định 19), còn chạy full e2e toàn repo/checklist §9. Chi tiết cùng log lỗi ở `reports/SCHEMA-INIT.md`, JSON `reports/SCHEMA-INIT-results.json`. Worktree nguồn của Claude không bị sửa.
 
 **Yêu cầu đầy đủ:**
 1. `bootstrap.create_schema: auto | off` (mặc định auto) — xong phần config; cần `strand config schema` hiển thị, env override chạy.
@@ -346,3 +346,7 @@ Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit s�
 ## 11. Cách báo cáo cho người dùng
 
 Người dùng đọc tiếng Việt. Báo cáo ngắn, có số liệu thật (số test qua/lỗi, thời gian, commit hash), nói rõ việc nào chưa kiểm. Hỏi trước khi: đẩy lên `main`, xoá container không phải của mình, thay đổi lệch spec lớn.
+
+### Tiếp tục việc B sau quyết định 19
+
+Owner đã chọn giữ FK hoạt động và seed cho FK vòng/tự tham chiếu. Đã ghi quyết định 19; không sửa spec. Dung lượng `/` đã được khôi phục (129 GiB available khi tiếp tục). Tiếp tục full e2e relaxed rồi strict trên nhánh `agent/schema-init`; chưa merge/push. Giữ log lỗi và các lần chạy trước ở `/home/hellc/strand-codex-evidence/`.
