@@ -1,6 +1,6 @@
 # Việc B — target schema init (đang kiểm tra)
 
-Nhánh `agent/schema-init`, base `27c3e1f`, clone `/home/hellc/strand-codex`. **NOT DONE**: chưa đủ ba lượt mỗi chế độ trên code cuối, chưa full e2e/build/vet/unit cuối và chưa merge/push.
+Nhánh `agent/schema-init`, base `27c3e1f`, clone `/home/hellc/strand-codex`. **NOT DONE**: chờ owner chốt giới hạn FK vòng/tự tham chiếu, chưa full e2e toàn repo trên nhánh và chưa merge/push. Code chính `efb3b1b`, sửa sequence/default `cdd7f6c`.
 
 ## Thiết kế và file
 
@@ -37,7 +37,7 @@ Log gốc tại `/home/hellc/strand-codex-evidence/` và các file `/home/hellc/
 | CLI help / JSON schema | Đã chạy, `schema-init-help.txt`, `config-schema.json` |
 | Build/vet trong khi phát triển | Qua; cần chạy lại trên code cuối |
 
-E2E đang chạy ba lượt relaxed và ba lượt strict. Lượt relaxed đầu bắt đầu trước guard giữ nguyên hành vi `off`; cần tính relaxed 2, 3 và thêm lượt 4 cho code cuối. Chưa tuyên bố đủ ma trận.
+Đã đủ ma trận targeted cho core `efb3b1b`: relaxed 2, 3, 4 và strict 1, 2, 3, tổng **18/18 ca theo hướng qua**, tổng thời gian test 305,27s relaxed và 310,77s strict. Không tính lượt relaxed 1 vào bộ ba vì guard `off` được chốt sau khi lượt đó bắt đầu. JSON dẫn tới log gốc: `SCHEMA-INIT-results.json`. Bản sửa bổ sung `cdd7f6c` chỉ ở generator, được chạy lại riêng toàn package; chưa có full e2e toàn repo trên bản này.
 
 ## Các lần lỗi, không che bằng rerun
 
@@ -53,7 +53,7 @@ E2E đang chạy ba lượt relaxed và ba lượt strict. Lượt relaxed đầ
 - Enum/domain PG và subpartition: cần tạo bảng thủ công; lỗi rõ trước Apply. MySQL→PG từ chối generated, index prefix/expression/fulltext và AUTO_INCREMENT→numeric.
 - Database metadata trong DSN target cần tồn tại/kết nối được; tự tạo chỉ các schema/bảng dữ liệu. Runtime CREATE tự động hiện là đường source MySQL; source PG dùng snapshot add/restart.
 - Chưa có kiểm tự động quyền tối thiểu mới trên tài khoản không phải admin; chưa thử timeout/cancel đúng lúc trả session MySQL.
-- Chưa đủ unit toàn repo, full e2e relaxed/strict trên code cuối; chưa kiểm đầy đủ kill -9 giữa tạo schema bằng process (integration đã mô phỏng partial commit MySQL và rollback PG).
+- Đã kiểm 29 package có test + 4 package không có test trên core; generator được chạy lại sau sửa bổ sung. Chưa full e2e relaxed/strict toàn repo; chưa kiểm đầy đủ kill -9 giữa tạo schema bằng process (integration đã mô phỏng partial commit MySQL và rollback PG).
 - C–F, Gate 2 còn thiếu và staging 1TB chưa làm; không dùng số liệu việc B để tuyên bố các gate đó đạt.
 
 ## Sửa bổ sung sau review: sequence/default PG
@@ -64,4 +64,8 @@ Code giữ `pg_sequence.seqtypid` thay vì lấy kiểu cột sở hữu. Giữ 
 - Sau sửa kiểu nhưng trước sửa default: `sequence-default-red.log`, đọc ID=9 thay vì 18.
 - Sau cả hai sửa: toàn package generator qua, 29,511s, log `sequence-default-green.log` trong worktree kiểm chứng.
 - Tạm revert từng phần: `sequence-type-revert-red.log` và `sequence-default-revert-red.log`, đều exit 1 đúng lỗi tương ứng; đã khôi phục.
-- Lượt toàn repo trên `efb3b1b`: 29 package có test qua, 4 package không có test, 0 lỗi (`unit-final.log`). Bản sửa bổ sung sẽ được chạy lại package bị ảnh hưởng trên nhánh chính của việc B; chưa có full e2e toàn repo cho nhánh.
+- Lượt toàn repo trên `efb3b1b`: 29 package có test qua, 4 package không có test, 0 lỗi (`unit-final.log`). Bản sửa bổ sung đã chạy lại toàn package bị ảnh hưởng trên nhánh chính của việc B, qua trong 29,248s (`schemagen-final.log`); build/vet mới nhất qua, gofmt rỗng. Chưa có full e2e toàn repo cho nhánh.
+
+E2E DDL cũ với `create_schema: off` đã qua trên `cdd7f6c`: relaxed 62,22s (12.303 row / 5 bảng giống hệt), strict 62,47s (11.472 row / 5 bảng giống hệt). Log `legacy-ddl-relaxed.log`, `legacy-ddl-strict.log`.
+
+Chưa chốt thiết kế/đề nghị merge: cần owner chọn chính sách FK vòng trong `questions/OPEN-schema-init-fk.md` theo quy tắc hỏi trước khi lệch spec lớn; sau đó mới chốt kiểm tra full e2e trên thiết kế cuối. C–F giữ nguyên thứ tự và chưa bắt đầu.

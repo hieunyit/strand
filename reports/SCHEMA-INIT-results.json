@@ -1,0 +1,350 @@
+{
+  "implementation_commit": "efb3b1b",
+  "targeted_e2e": [
+    {
+      "mode": "relaxed",
+      "iteration": 2,
+      "seed": 2026110412,
+      "seconds": 103.16,
+      "cases": [
+        {
+          "direction": "mysql-mysql",
+          "seconds": 51.26
+        },
+        {
+          "direction": "mysql-postgres",
+          "seconds": 36.28
+        },
+        {
+          "direction": "postgres-postgres",
+          "seconds": 15.62
+        }
+      ],
+      "verify_output": [
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot"
+      ],
+      "log": "/home/hellc/strand-codex-evidence/schema-matrix-relaxed-2.log"
+    },
+    {
+      "mode": "relaxed",
+      "iteration": 3,
+      "seed": 2026110413,
+      "seconds": 101.3,
+      "cases": [
+        {
+          "direction": "mysql-mysql",
+          "seconds": 49.46
+        },
+        {
+          "direction": "mysql-postgres",
+          "seconds": 36.09
+        },
+        {
+          "direction": "postgres-postgres",
+          "seconds": 15.75
+        }
+      ],
+      "verify_output": [
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot"
+      ],
+      "log": "/home/hellc/strand-codex-evidence/schema-matrix-relaxed-3.log"
+    },
+    {
+      "mode": "relaxed",
+      "iteration": 4,
+      "seed": 2026110414,
+      "seconds": 100.81,
+      "cases": [
+        {
+          "direction": "mysql-mysql",
+          "seconds": 50.48
+        },
+        {
+          "direction": "mysql-postgres",
+          "seconds": 35.18
+        },
+        {
+          "direction": "postgres-postgres",
+          "seconds": 15.15
+        }
+      ],
+      "verify_output": [
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot"
+      ],
+      "log": "/home/hellc/strand-codex-evidence/schema-matrix-relaxed-4.log"
+    },
+    {
+      "mode": "strict",
+      "iteration": 1,
+      "seed": 2026110411,
+      "seconds": 103.28,
+      "cases": [
+        {
+          "direction": "mysql-mysql",
+          "seconds": 51.33
+        },
+        {
+          "direction": "mysql-postgres",
+          "seconds": 36.45
+        },
+        {
+          "direction": "postgres-postgres",
+          "seconds": 15.51
+        }
+      ],
+      "verify_output": [
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot"
+      ],
+      "log": "/home/hellc/strand-codex-evidence/schema-matrix-strict-1.log"
+    },
+    {
+      "mode": "strict",
+      "iteration": 2,
+      "seed": 2026110412,
+      "seconds": 104.54,
+      "cases": [
+        {
+          "direction": "mysql-mysql",
+          "seconds": 50.38
+        },
+        {
+          "direction": "mysql-postgres",
+          "seconds": 37.79
+        },
+        {
+          "direction": "postgres-postgres",
+          "seconds": 16.37
+        }
+      ],
+      "verify_output": [
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot"
+      ],
+      "log": "/home/hellc/strand-codex-evidence/schema-matrix-strict-2.log"
+    },
+    {
+      "mode": "strict",
+      "iteration": 3,
+      "seed": 2026110413,
+      "seconds": 102.95,
+      "cases": [
+        {
+          "direction": "mysql-mysql",
+          "seconds": 51.81
+        },
+        {
+          "direction": "mysql-postgres",
+          "seconds": 35.6
+        },
+        {
+          "direction": "postgres-postgres",
+          "seconds": 15.54
+        }
+      ],
+      "verify_output": [
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.new_table (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.items (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot",
+        "verify app.children (full): 3 chunks (3 hashed, 0 resumed), 0 mismatched chunks, 0 rows compared, 0 mismatches, 0 unverifiable_hot"
+      ],
+      "log": "/home/hellc/strand-codex-evidence/schema-matrix-strict-3.log"
+    }
+  ],
+  "passed_direction_runs": 18,
+  "full_repo_e2e": "not_run_for_this_branch",
+  "all_non_e2e_packages": {
+    "commit": "efb3b1b",
+    "passed_with_tests": 29,
+    "without_tests": 4,
+    "failed": 0,
+    "packages": [
+      {
+        "package": "strand/cmd/strand",
+        "seconds": 28.728
+      },
+      {
+        "package": "strand/internal/admin",
+        "seconds": 0.05
+      },
+      {
+        "package": "strand/internal/assemble",
+        "seconds": 56.795
+      },
+      {
+        "package": "strand/internal/checkpoint",
+        "seconds": 29.459
+      },
+      {
+        "package": "strand/internal/config",
+        "seconds": 0.047
+      },
+      {
+        "package": "strand/internal/exitcode",
+        "seconds": 0.013
+      },
+      {
+        "package": "strand/internal/governor",
+        "seconds": 0.071
+      },
+      {
+        "package": "strand/internal/metrics",
+        "seconds": 0.185
+      },
+      {
+        "package": "strand/internal/model",
+        "seconds": 0.013
+      },
+      {
+        "package": "strand/internal/pipeline",
+        "seconds": 0.484
+      },
+      {
+        "package": "strand/internal/promote",
+        "seconds": 45.321
+      },
+      {
+        "package": "strand/internal/reader/mysql",
+        "seconds": 97.568
+      },
+      {
+        "package": "strand/internal/reader/pg",
+        "seconds": 101.37
+      },
+      {
+        "package": "strand/internal/sched",
+        "seconds": 16.859
+      },
+      {
+        "package": "strand/internal/schemagen",
+        "seconds": 30.376
+      },
+      {
+        "package": "strand/internal/seed",
+        "seconds": 16.508
+      },
+      {
+        "package": "strand/internal/snapshot",
+        "seconds": 26.107
+      },
+      {
+        "package": "strand/internal/spool",
+        "seconds": 5.411
+      },
+      {
+        "package": "strand/internal/typemap",
+        "seconds": 30.654
+      },
+      {
+        "package": "strand/internal/validate",
+        "seconds": 69.242
+      },
+      {
+        "package": "strand/internal/verify",
+        "seconds": 95.144
+      },
+      {
+        "package": "strand/internal/writer",
+        "seconds": 47.4
+      },
+      {
+        "package": "strand/schema",
+        "seconds": 0.015
+      },
+      {
+        "package": "strand/tests/audit/mysql",
+        "seconds": 69.225
+      },
+      {
+        "package": "strand/tests/audit/pg",
+        "seconds": 48.835
+      },
+      {
+        "package": "strand/tests/checker",
+        "seconds": 0.014
+      },
+      {
+        "package": "strand/tests/experiments/watermark",
+        "seconds": 112.52
+      },
+      {
+        "package": "strand/tests/replay",
+        "seconds": 6.779
+      },
+      {
+        "package": "strand/tools/soak",
+        "seconds": 0.089
+      }
+    ],
+    "log": "/home/hellc/strand-codex-evidence/unit-final.log"
+  },
+  "generator_followup": {
+    "commit": "cdd7f6c",
+    "seconds": 29.248,
+    "status": "passed",
+    "log": "/home/hellc/strand-codex-evidence/schemagen-final.log",
+    "red_before_fix": true,
+    "red_when_each_fix_reverted": true
+  },
+  "format_build_vet": {
+    "commit": "cdd7f6c",
+    "gofmt_output_empty": true,
+    "build_exit": 0,
+    "vet_exit": 0
+  },
+  "legacy_ddl_e2e": [
+    {
+      "mode": "relaxed",
+      "commit": "cdd7f6c",
+      "seconds": 62.22,
+      "final_rows": 12303,
+      "tables": 5,
+      "log": "/home/hellc/strand-codex-evidence/legacy-ddl-relaxed.log"
+    },
+    {
+      "mode": "strict",
+      "commit": "cdd7f6c",
+      "seconds": 62.47,
+      "final_rows": 11472,
+      "tables": 5,
+      "log": "/home/hellc/strand-codex-evidence/legacy-ddl-strict.log"
+    }
+  ]
+}

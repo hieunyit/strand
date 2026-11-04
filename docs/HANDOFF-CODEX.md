@@ -22,7 +22,7 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 
 ## 1. Repo và nhánh
 
-**Codex đang làm việc B (2026-11-04):** clone riêng `/home/hellc/strand-codex`, nguồn local scratchpad; tiếp tục `agent/schema-init` từ `27c3e1f`. Đã triển khai sinh/apply DDL ba hướng, CLI, validate và bootstrap/CREATE barrier. Chưa merge/push. Báo cáo đang cập nhật ở `reports/SCHEMA-INIT.md`; chưa được coi là xong trước checklist §9 và full e2e hai chế độ. C–F và Gate 2 vẫn chưa bắt đầu trong phiên Codex.
+**Codex đang làm việc B (2026-11-04):** clone riêng `/home/hellc/strand-codex`, nguồn local scratchpad; tiếp tục `agent/schema-init` từ `27c3e1f`; code `efb3b1b` + sửa sequence/default `cdd7f6c`. Đã triển khai sinh/apply DDL ba hướng, CLI, validate và bootstrap/CREATE barrier. Chưa merge/push. Báo cáo đang cập nhật ở `reports/SCHEMA-INIT.md`; chưa được coi là xong trước checklist §9 và full e2e hai chế độ. C–F và Gate 2 vẫn chưa bắt đầu trong phiên Codex.
 
 
 - GitHub: `hieunyit/strand` (private). Bản clone của người dùng: `/home/hellc/strand` (remote `origin` = GitHub).
@@ -54,7 +54,7 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 | `agent/review-fixes` | `4f08bd8` | Đã gộp vào review | Theo `review/gate1-fixes` |
 | `agent/soak-mem` | `45ab339` | Đã gộp vào review | Theo `review/gate1-fixes` |
 | `agent/p2-03` | `f969770` | Đã gộp vào review (xung đột đã giải ở `3645f78`) | Theo `review/gate1-fixes` |
-| `agent/schema-init` | `ff963a9` | **WIP** — chỉ có khóa `bootstrap.create_schema` | Làm xong việc B (§4.B), review, gộp vào review, full e2e |
+| `agent/schema-init` | `cdd7f6c` (code, local Codex) | **WIP** — DDL 3 hướng/CLI/bootstrap/barrier; targeted 18/18; core 29 package test qua | Owner chốt FK vòng; full e2e hai chế độ + checklist §9; chưa merge/push |
 | `agent/generic-pk` | `be155d5` | **Trống** (chưa có commit riêng) | Tạo lại từ đầu nhánh review khi bắt đầu việc C |
 | `agent/docs` | `be155d5` | **Trống** | Tạo lại từ đầu nhánh review khi bắt đầu việc D |
 
@@ -121,7 +121,7 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 
 **Vấn đề:** Strand hiện **không tạo** schema/bảng ở target. Với bootstrap logic (kịch bản phổ biến nhất) người dùng phải tạo tay mọi bảng trước. Spec chỉ giả định schema đến từ backup khi seed. Người dùng yêu cầu: phải tự tạo.
 
-**Trạng thái:** nhánh `agent/schema-init` (worktree `<scratchpad>/wt/SCHEMA`) mới có: khóa `bootstrap.create_schema` (`auto|off`, mặc định `auto`) trong `internal/config/config.go` (+ `CreateSchemaAuto()`, validate giá trị) và `internal/config/schema.go`. Chưa commit — commit nó làm điểm xuất phát (hoặc làm lại, rất nhỏ).
+**Trạng thái Codex:** đã có DDL 3 hướng, `schema init`, validate, bootstrap và CREATE barrier; code local `efb3b1b` + `cdd7f6c`. Targeted e2e 18/18 (3 lần mỗi chế độ), core 29 package có test qua, generator sửa bổ sung qua. **Chưa xong**: owner chốt FK vòng và chạy full e2e toàn repo/checklist §9. Chi tiết cùng log lỗi ở `reports/SCHEMA-INIT.md`, JSON `reports/SCHEMA-INIT-results.json`. Worktree nguồn của Claude không bị sửa.
 
 **Yêu cầu đầy đủ:**
 1. `bootstrap.create_schema: auto | off` (mặc định auto) — xong phần config; cần `strand config schema` hiển thị, env override chạy.
