@@ -145,13 +145,13 @@ type runResult struct {
 	Governor         string    `json:"governor"`
 	Repeat           int       `json:"repeat"`
 	Start            time.Time `json:"start"`
-	SnapshotSeconds  float64   `json:"snapshot_seconds"`
-	AppP99Ms         float64   `json:"app_p99_ms_during_snapshot"`
+	SnapshotSeconds  jf        `json:"snapshot_seconds"`
+	AppP99Ms         jf        `json:"app_p99_ms_during_snapshot"`
 	AppTxns          int       `json:"app_txns_during_snapshot"`
 	AppErrors        int64     `json:"app_errors"`
 	HardLimitExceed  int       `json:"hard_limit_exceed_samples"`
-	P2PLogRMedian    float64   `json:"p2p_log_r_median"`
-	P2PLogRMax       float64   `json:"p2p_log_r_max"`
+	P2PLogRMedian    jf        `json:"p2p_log_r_median"`
+	P2PLogRMax       jf        `json:"p2p_log_r_max"`
 	P2PWindows       int       `json:"p2p_windows"`
 	P2PZeroWindows   int       `json:"p2p_windows_with_r_zero"`
 	Samples          int       `json:"samples"`
@@ -163,20 +163,34 @@ type runResult struct {
 	OK               bool      `json:"ok"`
 	Error            string    `json:"error,omitempty"`
 	TimeseriesCSV    string    `json:"timeseries_csv"`
-	SnapshotStartRel float64   `json:"snapshot_start_rel_s"`
+	SnapshotStartRel jf        `json:"snapshot_start_rel_s"`
 }
 
 type govSummary struct {
-	Runs                  int     `json:"runs"`
-	OKRuns                int     `json:"ok_runs"`
-	MedianSnapshotSeconds float64 `json:"median_snapshot_seconds"`
-	MedianAppP99Ms        float64 `json:"median_app_p99_ms"`
-	HardLimitExceedTotal  int     `json:"hard_limit_exceed_total"`
-	MaxP2PMedian          float64 `json:"max_p2p_log_r_median"`
+	Runs                  int `json:"runs"`
+	OKRuns                int `json:"ok_runs"`
+	MedianSnapshotSeconds jf  `json:"median_snapshot_seconds"`
+	MedianAppP99Ms        jf  `json:"median_app_p99_ms"`
+	HardLimitExceedTotal  int `json:"hard_limit_exceed_total"`
+	MaxP2PMedian          jf  `json:"max_p2p_log_r_median"`
+}
+
+// jf là float64 ghi JSON được: NaN/±Inf (chưa đo được) thành null thay vì làm hỏng cả file.
+type jf float64
+
+func (f jf) MarshalJSON() ([]byte, error) {
+	if math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
+		return []byte("null"), nil
+	}
+	return json.Marshal(float64(f))
 }
 
 func writeJSON(path string, v any) {
-	b, _ := json.MarshalIndent(v, "", "  ")
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		log.Printf("encode %s: %v", path, err) // không ghi file rỗng âm thầm
+		return
+	}
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		log.Printf("write %s: %v", path, err)
 	}
@@ -268,7 +282,7 @@ func runOnce(ctx context.Context, o options, name, gov string) (res runResult) {
 		}
 	}()
 	strandStart := time.Now()
-	res.SnapshotStartRel = strandStart.Sub(ld.t0).Seconds()
+	res.SnapshotStartRel = jf(strandStart.Sub(ld.t0).Seconds())
 	if err := cmd.Start(); err != nil {
 		return fail(err)
 	}
@@ -291,7 +305,7 @@ func runOnce(ctx context.Context, o options, name, gov string) (res runResult) {
 		scancel()
 		return fail(fmt.Errorf("snapshot did not finish within %s", o.SnapshotTimeout))
 	}
-	res.SnapshotSeconds = snapEnd.Sub(strandStart).Seconds()
+	res.SnapshotSeconds = jf(snapEnd.Sub(strandStart).Seconds())
 	time.Sleep(o.StreamAfter)
 	scancel()
 	stopLoad()
@@ -313,7 +327,7 @@ func runOnce(ctx context.Context, o options, name, gov string) (res runResult) {
 	// 6. Số liệu.
 	lat := ld.latenciesBetween(strandStart, snapEnd)
 	res.AppTxns = len(lat)
-	res.AppP99Ms = percentile(lat, 0.99)
+	res.AppP99Ms = jf(percentile(lat, 0.99))
 	samples := smp.snapshot()
 	res.Samples = len(samples)
 	for _, s := range samples {
@@ -321,7 +335,8 @@ func runOnce(ctx context.Context, o options, name, gov string) (res runResult) {
 			res.HardLimitExceed++
 		}
 	}
-	res.P2PLogRMedian, res.P2PLogRMax, res.P2PWindows, res.P2PZeroWindows = p2pLogR(samples, ld, strandStart, snapEnd, o)
+	med, mx, nw, zw := p2pLogR(samples, ld, strandStart, snapEnd, o)
+	res.P2PLogRMedian, res.P2PLogRMax, res.P2PWindows, res.P2PZeroWindows = jf(med), jf(mx), nw, zw
 	res.TimeseriesCSV = filepath.Join(runDir, "timeseries.csv")
 	writeCSV(res.TimeseriesCSV, samples, ld, strandStart, snapEnd)
 
@@ -863,17 +878,17 @@ func decide(runs []runResult) (map[string]govSummary, string) {
 		g.HardLimitExceedTotal += r.HardLimitExceed
 		if r.OK {
 			g.OKRuns++
-			snaps[r.Governor] = append(snaps[r.Governor], r.SnapshotSeconds)
-			p99s[r.Governor] = append(p99s[r.Governor], r.AppP99Ms)
+			snaps[r.Governor] = append(snaps[r.Governor], float64(r.SnapshotSeconds))
+			p99s[r.Governor] = append(p99s[r.Governor], float64(r.AppP99Ms))
 		}
-		if !math.IsNaN(r.P2PLogRMedian) && r.P2PLogRMedian > g.MaxP2PMedian {
+		if !math.IsNaN(float64(r.P2PLogRMedian)) && r.P2PLogRMedian > g.MaxP2PMedian {
 			g.MaxP2PMedian = r.P2PLogRMedian
 		}
 		sum[r.Governor] = g
 	}
 	for k, g := range sum {
-		g.MedianSnapshotSeconds = median(snaps[k])
-		g.MedianAppP99Ms = median(p99s[k])
+		g.MedianSnapshotSeconds = jf(median(snaps[k]))
+		g.MedianAppP99Ms = jf(median(p99s[k]))
 		sum[k] = g
 	}
 	var why []string

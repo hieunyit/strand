@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -77,7 +78,7 @@ func TestP2PLogRPerHalfPeriodSkipsTransientSpikesAndZero(t *testing.T) {
 
 func TestDecideRules(t *testing.T) {
 	mk := func(g string, snap, p99, p2p float64, hard int) runResult {
-		return runResult{Governor: g, SnapshotSeconds: snap, AppP99Ms: p99, P2PLogRMedian: p2p, HardLimitExceed: hard, OK: true}
+		return runResult{Governor: g, SnapshotSeconds: jf(snap), AppP99Ms: jf(p99), P2PLogRMedian: jf(p2p), HardLimitExceed: hard, OK: true}
 	}
 	var runs []runResult
 	for i := 0; i < 3; i++ {
@@ -107,5 +108,14 @@ func TestDecideRules(t *testing.T) {
 	}
 	if _, d := decide(runs); !strings.Contains(d, "p99") {
 		t.Fatalf("worse p99 must fail, got %s", d)
+	}
+}
+
+func TestWriteJSONWithNaNIsNotEmpty(t *testing.T) {
+	path := t.TempDir() + "/r.json"
+	writeJSON(path, runResult{P2PLogRMedian: jf(math.NaN()), AppP99Ms: 12.5})
+	b, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(b), `"p2p_log_r_median": null`) || !strings.Contains(string(b), "12.5") {
+		t.Fatalf("results file %q err=%v", b, err)
 	}
 }
