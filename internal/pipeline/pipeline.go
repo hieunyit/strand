@@ -102,16 +102,19 @@ type Pipeline struct {
 	seenCond *sync.Cond
 	seen     checkpoint.AppliedSet // applied0 ∪ mọi Txn router đã xử lý (chỉ source MySQL)
 
-	admitted      atomic.Uint64 // seq lớn nhất đã Admit
-	appliedTxns   atomic.Int64
-	appliedRows   atomic.Int64
-	lastSourceTS  atomic.Int64 // SourceTS của Txn mới nhất đã commit ở target
-	lastRoutedTS  atomic.Int64
-	paused        atomic.Bool
-	pauseMu       sync.Mutex
-	pauseCond     *sync.Cond
-	snapPaused    atomic.Bool // tạm dừng riêng phần snapshot logic (strand pause --snapshot)
-	bootstrap     atomic.Bool
+	admitted     atomic.Uint64 // seq lớn nhất đã Admit
+	appliedTxns  atomic.Int64
+	appliedRows  atomic.Int64
+	lastSourceTS atomic.Int64 // SourceTS của Txn mới nhất đã commit ở target
+	lastRoutedTS atomic.Int64
+	paused       atomic.Bool
+	pauseMu      sync.Mutex
+	pauseCond    *sync.Cond
+	snapPaused   atomic.Bool // tạm dừng riêng phần snapshot logic (strand pause --snapshot)
+	bootstrap    atomic.Bool
+	// running: khởi động xong (đã quyết định snapshot/verify sau seed). Trước đó admin báo "starting",
+	// không bao giờ "synced" — admin socket mở sớm hơn lúc biết có bootstrap hay không.
+	running       atomic.Bool
 	retentionRisk atomic.Bool
 	verifying     atomic.Bool // chờ verify sau seed (02 §9)
 	strictMu      sync.Mutex
@@ -690,6 +693,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		bgWG.Add(1)
 		go func() { defer bgWG.Done(); p.runSnapshots(ctx, pending) }()
 	}
+	p.running.Store(true)
 	p.log.Info("pipeline running", "workers", nWorkers, "strict", p.strict, "snapshot_pending", len(pending),
 		"start", applied.(fmt.Stringer).String())
 
