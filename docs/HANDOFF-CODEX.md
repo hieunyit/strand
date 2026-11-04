@@ -39,7 +39,27 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 | `bc8e1e2` | — | Quyết định 17, 18 |
 | `f4664a7` | — | Sửa admin báo `synced` sớm (thêm trạng thái `starting`) |
 
-- Nhánh dở dang (worktree, chưa commit, xem §4): `agent/schema-init` (mới có khóa config), `agent/generic-pk` (chưa có gì), `agent/docs` (chưa có gì).
+### Danh sách nhánh CHƯA vào GitHub `main` (`9281ffa`) — kiểm ngày 2026-11-04
+
+| Nhánh | Đầu nhánh | Trạng thái | Việc phải làm để vào main |
+|---|---|---|---|
+| `review/gate1-fixes` | `a6b65be` (18 commit hơn main) | Tích hợp, đã review; chứa mọi nhánh dưới đây trừ 3 nhánh WIP | Full e2e relaxed + strict qua trên đầu nhánh (đang chạy, §4.A) → đẩy lên `main` |
+| `agent/p2-pipe` | `5bfb96f` | Đã gộp vào review | Theo `review/gate1-fixes` |
+| `agent/p2-07` | `82bd14c` | Đã gộp vào review | Theo `review/gate1-fixes` |
+| `agent/p2-05` | `2e4b964` | Đã gộp vào review | Theo `review/gate1-fixes` |
+| `agent/p2-pgboot` | `f5fc112` | Đã gộp vào review | Theo `review/gate1-fixes` |
+| `agent/review-fixes` | `4f08bd8` | Đã gộp vào review | Theo `review/gate1-fixes` |
+| `agent/soak-mem` | `45ab339` | Đã gộp vào review | Theo `review/gate1-fixes` |
+| `agent/p2-03` | `f969770` | Đã gộp vào review (xung đột đã giải ở `3645f78`) | Theo `review/gate1-fixes` |
+| `agent/schema-init` | `ff963a9` | **WIP** — chỉ có khóa `bootstrap.create_schema` | Làm xong việc B (§4.B), review, gộp vào review, full e2e |
+| `agent/generic-pk` | `be155d5` | **Trống** (chưa có commit riêng) | Tạo lại từ đầu nhánh review khi bắt đầu việc C |
+| `agent/docs` | `be155d5` | **Trống** | Tạo lại từ đầu nhánh review khi bắt đầu việc D |
+
+Commit trực tiếp trên `review/gate1-fixes` (không qua nhánh agent): `bc8e1e2` quyết định 17/18, `f4664a7` sửa admin `starting`, `a59f190`/`589debc`/`a6b65be` tài liệu bàn giao + `reports/GATE1-soak12.md`.
+
+Các nhánh `agent/*` khác (1TB-A, 1TB-C, 3B, 7, R1–R4, dumplog, mydumper, mysqldump, p2-01, p2-02, p2-04, p2-06, p2-08, soak, spool-seg) **đã nằm trong main**.
+
+Kho chứa các nhánh trên hiện là bản clone làm việc của Claude (`/tmp/claude-1000/.../scratchpad/strand`), **chưa đẩy lên GitHub** — hỏi người dùng nơi lấy (đẩy nhánh lên GitHub hoặc `git fetch` trực tiếp từ đường dẫn đó).
 - Quy ước: mỗi việc một nhánh `agent/<tên>` tách từ `review/gate1-fixes`; merge `--no-ff` vào `review/gate1-fixes`; chạy full e2e cả hai chế độ; qua thì fast-forward `main` và đẩy lên GitHub. Commit message tiếng Anh, comment code tiếng Việt (theo style sẵn có).
 
 ---
