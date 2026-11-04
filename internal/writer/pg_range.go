@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -34,21 +35,71 @@ func IsPGUniqueViolation(err error) bool {
 }
 
 // PGReplaceRange thay nguyên range [startPK, endPK] (PK một cột số nguyên) của bảng đích PG bằng
-// rows trong MỘT transaction: DELETE range rồi INSERT … ON CONFLICT (pk) DO UPDATE theo khối.
+// rows trong MỘT transaction: DELETE các khóa của range KHÔNG có trong rows, rồi INSERT … ON CONFLICT
+// (pk) DO UPDATE theo khối. Không DELETE khóa còn trong rows: bảng đích có thể có FK ON DELETE
+// CASCADE / SET NULL trỏ tới bảng này (schema-init tạo FK như source) — DELETE rồi INSERT lại cùng
+// khóa sẽ cascade xoá/đổi row con đang đúng. Khóa vắng mặt thì đã bị xoá ở source tại high watermark,
+// nên cascade ở target khớp với source. Trạng thái cuối của range vẫn đúng bằng rows.
 // Target không bao giờ hiển thị trạng thái lùi của range (RS-1). Lỗi tạm thời được retry.
 // db mở bằng driver pgx stdlib. Giá trị trong rows phải đã ở dạng PG (typemap đã chuyển).
 func PGReplaceRange(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
 	rows []*model.RowChange, startPK, endPK int64) error {
-	q := fmt.Sprintf("DELETE FROM %s WHERE %s >= $1 AND %s <= $2", quotePGTable(table), quotePG(pkCol), quotePG(pkCol))
-	return pgReplaceRetry(ctx, db, table, pkCol, columnNames, rows, q, startPK, endPK)
+	keep, err := rowPKs(rows)
+	if err != nil {
+		return err
+	}
+	q := fmt.Sprintf("DELETE FROM %s WHERE %s >= $1 AND %s <= $2 AND %s <> ALL($3::bigint[])",
+		quotePGTable(table), quotePG(pkCol), quotePG(pkCol), quotePG(pkCol))
+	return pgReplaceRetry(ctx, db, table, pkCol, columnNames, rows, q, startPK, endPK, keep)
 }
 
 // PGReplaceKeys như PGReplaceRange nhưng thay đúng TẬP khóa keys (chunk re-read, 02 §8): DELETE các khóa
 // đó rồi upsert rows (rows chỉ chứa khóa trong keys), trong MỘT transaction.
 func PGReplaceKeys(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
 	rows []*model.RowChange, keys []int64) error {
-	q := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1::bigint[])", quotePGTable(table), quotePG(pkCol))
-	return pgReplaceRetry(ctx, db, table, pkCol, columnNames, rows, q, keys)
+	keep, err := rowPKs(rows)
+	if err != nil {
+		return err
+	}
+	q := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1::bigint[]) AND %s <> ALL($2::bigint[])",
+		quotePGTable(table), quotePG(pkCol), quotePG(pkCol))
+	return pgReplaceRetry(ctx, db, table, pkCol, columnNames, rows, q, keys, keep)
+}
+
+// rowPKs lấy PK (một cột số nguyên) của rows để loại khỏi DELETE.
+func rowPKs(rows []*model.RowChange) ([]int64, error) {
+	out := make([]int64, 0, len(rows))
+	for _, r := range rows {
+		if len(r.Key) != 1 {
+			return nil, fmt.Errorf("replace range: row of %s has a %d-column key, want 1", r.Table, len(r.Key))
+		}
+		switch v := r.Key[0].(type) {
+		case int64:
+			out = append(out, v)
+		case int32:
+			out = append(out, int64(v))
+		case int:
+			out = append(out, int64(v))
+		case int16:
+			out = append(out, int64(v))
+		case int8:
+			out = append(out, int64(v))
+		case uint32:
+			out = append(out, int64(v))
+		case uint16:
+			out = append(out, int64(v))
+		case uint8:
+			out = append(out, int64(v))
+		case uint64:
+			if v > math.MaxInt64 {
+				return nil, fmt.Errorf("replace range: key %d of %s exceeds bigint", v, r.Table)
+			}
+			out = append(out, int64(v))
+		default:
+			return nil, fmt.Errorf("replace range: unsupported key type %T in %s", v, r.Table)
+		}
+	}
+	return out, nil
 }
 
 func pgReplaceRetry(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
