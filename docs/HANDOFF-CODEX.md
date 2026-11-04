@@ -90,7 +90,7 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 
 ### A. Chốt full e2e trên `f4664a7` rồi đẩy lên GitHub main  ⏳ đang chạy
 
-- Full e2e trên `f4664a7` đã được khởi chạy lúc 2026-11-04 ~12:30 (log: `<scratchpad>/e2e-final-relaxed.txt`, `e2e-final-strict.txt` — nếu bạn không thấy log thì chạy lại).
+- Full e2e trên `f4664a7` đã được khởi chạy lúc 2026-11-04 16:39 (log: `<scratchpad>/e2e-final-relaxed.txt`, rồi `e2e-final-strict.txt`; file strict có sẵn trước 16:39 là log cũ của lần chạy khác — nếu bạn không thấy log mới thì chạy lại).
 - Lần trước (trên `be155d5`): relaxed 37 qua / 1 lỗi, strict 38/38. Lỗi duy nhất là `TestP2_E2E_MySQLToPGSnapshotAndStream` ("snapshot finished before the load started") — nguyên nhân thật là **admin báo `synced` trước khi pipeline quyết định bootstrap** (admin socket mở ở đầu `Run`, cờ `bootstrap` bật muộn hơn). Đã sửa ở `f4664a7` (trạng thái `starting`, test `TestAdminStateStartingBeforeRunning`). Cần xác nhận test này hết flaky trong lần chạy mới.
 - Khi cả hai chế độ qua: `git push origin review/gate1-fixes:main` (từ `/home/hellc/strand` sau khi pull nhánh về; repo đó có cảnh báo `dubious ownership` khi chạy git bằng user khác — dùng đúng user sở hữu hoặc `safe.directory`). Hỏi người dùng nếu không chắc quyền.
 
