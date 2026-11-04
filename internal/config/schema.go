@@ -149,6 +149,12 @@ const JSONSchema = `{
             "max_parallel": { "type": "integer" },
             "windows": { "type": "array", "items": { "type": "string" } }
           }
+        },
+        "create_schema": {
+          "type": "string",
+          "enum": ["auto", "off"],
+          "default": "auto",
+          "description": "auto: strand sync / strand schema init tạo schema và bảng còn thiếu ở target (bảng đã có không bị sửa); off: bảng thiếu là lỗi"
         }
       }
     },

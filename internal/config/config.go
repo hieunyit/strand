@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	"strand/internal/exitcode"
@@ -90,6 +91,15 @@ type BootstrapConfig struct {
 	PerTable map[string]BootstrapTableMode `yaml:"per_table,omitempty" json:"per_table,omitempty"`
 	CatchUp  CatchUpConfig                 `yaml:"catch_up,omitempty" json:"catch_up,omitempty"`
 	Logical  LogicalBootstrapConfig        `yaml:"logical,omitempty" json:"logical,omitempty"`
+	// CreateSchema: auto (mặc định) — `strand sync` tạo schema/database và bảng còn thiếu ở target
+	// cho các bảng sẽ snapshot logic (và bảng mới CREATE TABLE trong lúc stream); off — không tạo,
+	// bảng thiếu là lỗi như trước. Quyết định 17 (questions/DECISIONS-2026-11-02.md).
+	CreateSchema string `yaml:"create_schema,omitempty" json:"create_schema,omitempty"`
+}
+
+// CreateSchemaAuto: bootstrap.create_schema khác "off" (mặc định auto).
+func (b BootstrapConfig) CreateSchemaAuto() bool {
+	return !strings.EqualFold(strings.TrimSpace(b.CreateSchema), "off")
 }
 
 type BootstrapTableMode struct {
@@ -290,6 +300,16 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 	}
 	if cfg.Target.Kind == "" || cfg.Target.DSN == "" {
 		return nil, exitcode.New("missing_target", exitcode.InvalidSyntax, "missing required target configuration", nil)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.Bootstrap.CreateSchema)) {
+	case "":
+		cfg.Bootstrap.CreateSchema = "auto"
+	case "auto", "off":
+		cfg.Bootstrap.CreateSchema = strings.ToLower(strings.TrimSpace(cfg.Bootstrap.CreateSchema))
+	default:
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("invalid bootstrap.create_schema %q (want auto | off)", cfg.Bootstrap.CreateSchema), nil)
 	}
 
 	// Thiết lập giá trị mặc định theo spec nếu chưa có
