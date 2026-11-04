@@ -117,10 +117,39 @@ func (p *Pipeline) killStalePG(ctx context.Context) {
 
 // loadTables đọc metadata các bảng nguồn thỏa bộ lọc, theo engine của source.
 func (p *Pipeline) loadTables(ctx context.Context, f *tableFilter) (map[model.TableID]*tableMeta, error) {
+	var out map[model.TableID]*tableMeta
+	var err error
 	if p.srcEngine == model.EnginePG {
-		return loadSourceTablesPG(ctx, p.src, f)
+		out, err = loadSourceTablesPG(ctx, p.src, f)
+	} else {
+		out, err = loadSourceTables(ctx, p.src, f)
 	}
-	return loadSourceTables(ctx, p.src, f)
+	if err != nil {
+		return nil, err
+	}
+	resolveForeignKeys(out, p.table)
+	return out, nil
+}
+
+// resolveForeignKeys gắn mỗi FK với khóa cha nó tham chiếu (PK hoặc unique index), để writeset của
+// row con trùng hash với khóa của row cha (invariant: CO-1, review R11). Bảng cha tìm trong metas,
+// rồi qua fallback (metadata đang chạy của pipeline). Bảng cha ngoài pipeline: giữ namespace PK —
+// không có Txn nào ghi bảng cha đó để xung đột.
+func resolveForeignKeys(metas map[model.TableID]*tableMeta, fallback func(model.TableID) *tableMeta) {
+	for _, m := range metas {
+		for i, fk := range m.Keys.ForeignKeys {
+			parent := metas[fk.ParentTable]
+			if parent == nil && fallback != nil {
+				parent = fallback(fk.ParentTable)
+			}
+			if parent == nil {
+				continue
+			}
+			if r, ok := assemble.ResolveForeignKey(fk, parent.PK, parent.Keys.Unique); ok {
+				m.Keys.ForeignKeys[i] = r
+			}
+		}
+	}
 }
 
 // loadSourceTablesPG đọc từ catalog của source PG: cột (bỏ cột generated — pgoutput không gửi),
@@ -216,10 +245,11 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 		}
 
 		fr, err := db.QueryContext(ctx, `
-			SELECT con.conname, a.attname, pn.nspname, pc.relname
+			SELECT con.conname, a.attname, pn.nspname, pc.relname, ra.attname
 			  FROM pg_constraint con
-			  JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+			  JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, refnum, ord) ON true
 			  JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+			  JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refnum
 			  JOIN pg_class pc ON pc.oid = con.confrelid
 			  JOIN pg_namespace pn ON pn.oid = pc.relnamespace
 			 WHERE con.conrelid = $1 AND con.contype = 'f'
@@ -230,8 +260,8 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 		fks := map[string]*assemble.ForeignKeyMeta{}
 		var fkNames []string
 		for fr.Next() {
-			var cn, col, ps, pt string
-			if err := fr.Scan(&cn, &col, &ps, &pt); err != nil {
+			var cn, col, ps, pt, rcol string
+			if err := fr.Scan(&cn, &col, &ps, &pt, &rcol); err != nil {
 				fr.Close()
 				return nil, err
 			}
@@ -242,6 +272,7 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 				fkNames = append(fkNames, cn)
 			}
 			fk.Columns = append(fk.Columns, col)
+			fk.RefColumns = append(fk.RefColumns, rcol)
 		}
 		fr.Close()
 		for _, n := range fkNames {

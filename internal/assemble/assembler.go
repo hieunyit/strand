@@ -38,6 +38,50 @@ type UniqueIndex struct {
 type ForeignKeyMeta struct {
 	Columns     []string
 	ParentTable model.TableID
+	// RefColumns: cột được tham chiếu ở bảng cha, cùng thứ tự với Columns.
+	RefColumns []string
+	// ParentIndex: unique index của bảng cha mà FK trỏ tới (rỗng = PK). Khi đã phân giải
+	// (ResolveForeignKeys), Columns được sắp lại theo thứ tự cột của index/PK cha để khóa FK của
+	// con hash trùng với khóa của cha (invariant: CO-1, review R11).
+	ParentIndex string
+}
+
+// ResolveForeignKey phân giải FK theo PK và các unique index của bảng cha. Trả về bản đã sắp
+// Columns theo thứ tự cột của khóa cha và ParentIndex tương ứng. ok=false khi không khớp khóa nào
+// (giữ nguyên fk: hash theo namespace PK như trước).
+func ResolveForeignKey(fk ForeignKeyMeta, parentPK []string, parentUnique []UniqueIndex) (ForeignKeyMeta, bool) {
+	if len(fk.RefColumns) != len(fk.Columns) || len(fk.RefColumns) == 0 {
+		return fk, false
+	}
+	childOf := make(map[string]string, len(fk.RefColumns))
+	for i, rc := range fk.RefColumns {
+		childOf[rc] = fk.Columns[i]
+	}
+	match := func(cols []string) ([]string, bool) {
+		if len(cols) != len(childOf) {
+			return nil, false
+		}
+		out := make([]string, len(cols))
+		for i, c := range cols {
+			cc, ok := childOf[c]
+			if !ok {
+				return nil, false
+			}
+			out[i] = cc
+		}
+		return out, true
+	}
+	if cols, ok := match(parentPK); ok {
+		fk.Columns, fk.ParentIndex = cols, ""
+		return fk, true
+	}
+	for _, uk := range parentUnique {
+		if cols, ok := match(uk.Columns); ok {
+			fk.Columns, fk.ParentIndex = cols, uk.Name
+			return fk, true
+		}
+	}
+	return fk, false
 }
 
 // KeyMeta là metadata unique key và FK của một bảng, dùng để dựng writeset (spec 02 §6).
@@ -161,7 +205,7 @@ func (a *Assembler) enrichKeys(tid model.TableID, t *TableSchema, before, after 
 				continue
 			}
 			if v, ok := pickValues(t, img, fk.Columns); ok {
-				rc.AddForeignKey(fk.ParentTable, v)
+				rc.AddForeignKeyIndex(fk.ParentTable, fk.ParentIndex, v)
 			}
 		}
 	}

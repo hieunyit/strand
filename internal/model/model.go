@@ -72,6 +72,9 @@ type UniqueKey struct {
 // ForeignKey định danh khóa ngoại tham chiếu tới bảng cha theo spec: 02 §6.
 type ForeignKey struct {
 	ParentTable TableID `json:"parent_table"`
+	// ParentIndex: tên unique index ở bảng cha mà FK tham chiếu; rỗng = PK của bảng cha.
+	// ParentKey theo đúng thứ tự cột của index đó (review R11: FK tới UNIQUE ngoài PK).
+	ParentIndex string  `json:"parent_index,omitempty"`
 	ParentKey   []Value `json:"parent_key"`
 }
 
@@ -95,10 +98,17 @@ func (r *RowChange) AddUniqueKey(name string, key []Value, oldKey ...[]Value) {
 	r.UniqueKeys = append(r.UniqueKeys, uk)
 }
 
-// AddForeignKey thêm tham chiếu khóa ngoại tới bảng cha vào row change.
+// AddForeignKey thêm tham chiếu khóa ngoại tới PK của bảng cha vào row change.
 func (r *RowChange) AddForeignKey(parentTable TableID, parentKey []Value) {
+	r.AddForeignKeyIndex(parentTable, "", parentKey)
+}
+
+// AddForeignKeyIndex thêm tham chiếu khóa ngoại tới unique index parentIndex của bảng cha
+// (rỗng = PK).
+func (r *RowChange) AddForeignKeyIndex(parentTable TableID, parentIndex string, parentKey []Value) {
 	r.ForeignKeys = append(r.ForeignKeys, ForeignKey{
 		ParentTable: parentTable,
+		ParentIndex: parentIndex,
 		ParentKey:   parentKey,
 	})
 }
@@ -181,51 +191,45 @@ func (t *Txn) WritesetByTable() map[string][]uint64 {
 	if t == nil {
 		return ws
 	}
+	// Khóa được chuẩn hóa bảo thủ theo collation (keycanon.go, invariant: CO-1): hai giá trị DB coi
+	// là bằng nhau luôn cho cùng hash.
+	pkHash := func(tbl string, key []Value) uint64 { return xxh3.HashString(tbl + "|" + canonKey(key)) }
+	ukHash := func(tbl, name string, key []Value) uint64 {
+		if name != "" {
+			return xxh3.HashString(tbl + "|uk|" + name + "|" + canonKey(key))
+		}
+		return xxh3.HashString(tbl + "|uk|" + canonKey(key))
+	}
 	for _, row := range t.Rows {
 		tbl := row.Table.String()
 		// 1. (table, PK) và OldKey nếu đổi PK
 		if len(row.Key) > 0 {
-			keyStr := fmt.Sprintf("%v", row.Key)
-			h := xxh3.HashString(tbl + "|" + keyStr)
-			ws[tbl] = append(ws[tbl], h)
+			ws[tbl] = append(ws[tbl], pkHash(tbl, row.Key))
 		}
 		if len(row.OldKey) > 0 {
-			oldStr := fmt.Sprintf("%v", row.OldKey)
-			hOld := xxh3.HashString(tbl + "|" + oldStr)
-			ws[tbl] = append(ws[tbl], hOld)
+			ws[tbl] = append(ws[tbl], pkHash(tbl, row.OldKey))
 		}
 
 		// 2. (table, unique_key) cho mọi unique index
 		for _, uk := range row.UniqueKeys {
 			if len(uk.Key) > 0 {
-				ukStr := fmt.Sprintf("%v", uk.Key)
-				var hUK uint64
-				if uk.Name != "" {
-					hUK = xxh3.HashString(tbl + "|uk|" + uk.Name + "|" + ukStr)
-				} else {
-					hUK = xxh3.HashString(tbl + "|uk|" + ukStr)
-				}
-				ws[tbl] = append(ws[tbl], hUK)
+				ws[tbl] = append(ws[tbl], ukHash(tbl, uk.Name, uk.Key))
 			}
 			if len(uk.OldKey) > 0 {
-				oldUkStr := fmt.Sprintf("%v", uk.OldKey)
-				var hOldUK uint64
-				if uk.Name != "" {
-					hOldUK = xxh3.HashString(tbl + "|uk|" + uk.Name + "|" + oldUkStr)
-				} else {
-					hOldUK = xxh3.HashString(tbl + "|uk|" + oldUkStr)
-				}
-				ws[tbl] = append(ws[tbl], hOldUK)
+				ws[tbl] = append(ws[tbl], ukHash(tbl, uk.Name, uk.OldKey))
 			}
 		}
 
-		// 3. (parent_table, parent_key) cho FK
+		// 3. (parent_table, parent_key) cho FK — cùng namespace với khóa được tham chiếu ở bảng cha:
+		// PK, hoặc unique index ParentIndex.
 		for _, fk := range row.ForeignKeys {
 			if len(fk.ParentKey) > 0 {
 				parentTbl := fk.ParentTable.String()
-				fkStr := fmt.Sprintf("%v", fk.ParentKey)
-				hFK := xxh3.HashString(parentTbl + "|" + fkStr)
-				ws[parentTbl] = append(ws[parentTbl], hFK)
+				if fk.ParentIndex != "" {
+					ws[parentTbl] = append(ws[parentTbl], ukHash(parentTbl, fk.ParentIndex, fk.ParentKey))
+				} else {
+					ws[parentTbl] = append(ws[parentTbl], pkHash(parentTbl, fk.ParentKey))
+				}
 			}
 		}
 	}

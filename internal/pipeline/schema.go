@@ -164,7 +164,7 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		}
 
 		fr, err := db.QueryContext(ctx, `
-			SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME
+			SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
 			  FROM information_schema.KEY_COLUMN_USAGE
 			 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
 			 ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`, id.Schema, id.Table)
@@ -174,8 +174,8 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		fks := map[string]*assemble.ForeignKeyMeta{}
 		var fkNames []string
 		for fr.Next() {
-			var cn, col, ps, pt string
-			if err := fr.Scan(&cn, &col, &ps, &pt); err != nil {
+			var cn, col, ps, pt, rcol string
+			if err := fr.Scan(&cn, &col, &ps, &pt, &rcol); err != nil {
 				fr.Close()
 				return nil, err
 			}
@@ -186,6 +186,7 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 				fkNames = append(fkNames, cn)
 			}
 			fk.Columns = append(fk.Columns, col)
+			fk.RefColumns = append(fk.RefColumns, rcol)
 		}
 		fr.Close()
 		for _, n := range fkNames {

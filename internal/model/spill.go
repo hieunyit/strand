@@ -20,6 +20,9 @@ const (
 	recTable byte = 'T'
 	recName  byte = 'N'
 	recRow   byte = 'R'
+	// recRowFK như recRow nhưng mỗi FK có thêm tên unique index được tham chiếu (ForeignKey.ParentIndex).
+	// Chỉ dùng khi có FK như vậy, để file của bản cũ vẫn đọc được và ngược lại khi không dùng tới.
+	recRowFK byte = 'S'
 )
 
 const (
@@ -206,7 +209,14 @@ func (sw *SpillWriter) Write(rc *RowChange) error {
 		}
 	}
 
-	b := append(sw.buf[:0], recRow)
+	kind := recRow
+	for _, fk := range rc.ForeignKeys {
+		if fk.ParentIndex != "" {
+			kind = recRowFK
+			break
+		}
+	}
+	b := append(sw.buf[:0], kind)
 	b = binary.AppendUvarint(b, uint64(ti))
 	b = append(b, opByte(rc.Op))
 	if b, err = sw.appendValues(b, rc.Key); err != nil {
@@ -228,6 +238,9 @@ func (sw *SpillWriter) Write(rc *RowChange) error {
 	b = binary.AppendUvarint(b, uint64(len(rc.ForeignKeys)))
 	for i, fk := range rc.ForeignKeys {
 		b = binary.AppendUvarint(b, uint64(fkIdx[i]))
+		if kind == recRowFK {
+			b = appendString(b, fk.ParentIndex)
+		}
 		if b, err = sw.appendValues(b, fk.ParentKey); err != nil {
 			return err
 		}
@@ -425,7 +438,7 @@ func (sr *SpillReader) readRecord(kind byte) (*RowChange, error) {
 		}
 		sr.names = append(sr.names, name)
 		return nil, nil
-	case recRow:
+	case recRow, recRowFK:
 	default:
 		return nil, fmt.Errorf("spill: unknown record kind %q", kind)
 	}
@@ -480,6 +493,11 @@ func (sr *SpillReader) readRecord(kind byte) (*RowChange, error) {
 		}
 		if fk.ParentTable, err = sr.table(pi); err != nil {
 			return nil, err
+		}
+		if kind == recRowFK {
+			if fk.ParentIndex, err = sr.readString(); err != nil {
+				return nil, err
+			}
 		}
 		if fk.ParentKey, err = sr.readValues(); err != nil {
 			return nil, err
