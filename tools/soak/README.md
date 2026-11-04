@@ -11,7 +11,8 @@ Công cụ `tools/soak` thực hiện kiểm thử bền bỉ (soak test) cho pi
    - `SIGTERM`: yêu cầu dừng an toàn và kiểm tra mã thoát phải bằng `0`.
    - `SIGSTOP` trong 30–120 giây rồi `SIGCONT`: đóng băng tạm thời tiến trình rồi cho chạy tiếp.
 4. **Lấy mẫu mỗi 60 giây**: ghi nhận bộ nhớ thực `VmRSS` từ `/proc/<pid>/status`, độ dài cột `applied` của `_strand_checkpoint` cộng tổng độ dài `_strand_worker_delta.applied`, độ trễ tính bằng số GTID chênh lệch giữa `@@GLOBAL.gtid_executed` trên source và tập đã apply trên target (`checkpoint.LoadAppliedSnapshotMySQL`), cùng tổng số lần restart.
-5. **Đối chiếu trạng thái cuối**: khi hết `--duration`, dừng bộ sinh tải, chờ target bắt kịp toàn bộ `gtid_executed` của source (tối đa 30 phút), gửi `SIGTERM` dừng `strand`, sau đó đọc toàn bộ các bảng `app.accounts`, `app.orders`, `app.events` theo PK và kiểm tra bằng `checker.CheckFinalState`.
+5. **Đối chiếu trạng thái cuối**: khi hết `--duration`, dừng bộ sinh tải, chờ target bắt kịp toàn bộ `gtid_executed` của source (tối đa 30 phút), gửi `SIGTERM` dừng `strand`, sau đó so sánh streaming các bảng `app.accounts`, `app.orders`, `app.events`: đọc song song source và target theo PK tăng dần bằng keyset pagination (`WHERE id > ? ORDER BY id LIMIT --compare-chunk-rows`, mặc định 10000) rồi merge-compare (thiếu ở target, thừa ở target, lệch giá trị theo từng cột), giữ tối đa 20 vi phạm và đếm tổng. Bộ nhớ là O(chunk), không phụ thuộc kích thước bảng (bản cũ dump toàn bộ bảng vào map ≈ 536 B/dòng nên với `app.events` 65M dòng cần >35 GB và driver bị OOM-kill).
+6. **Trần RSS của chính driver** (`--driver-rss-limit-mb`, mặc định 2048): RSS của driver được kiểm tra mỗi `--driver-rss-check-every` (5s) suốt cả pha chạy lẫn pha kiểm tra cuối, in ra dòng tiến độ (`driver_rss=`) và lưu trong mẫu/báo cáo. Vượt trần thì đợt soak dừng với `pass=false` và `error_reason` nêu rõ thay vì bị OOM-killer giết mà không có báo cáo.
 
 ---
 
@@ -139,6 +140,11 @@ Chạy lại đúng kịch bản ngẫu nhiên từ một `seed` đã in ra log:
 | `--seed` | Thời gian hiện tại | Hạt giống ngẫu nhiên (in ra stdout khi khởi chạy để tái lập) |
 | `--checkpoint-max-bytes` | `65536` | Ngưỡng kích thước checkpoint tối đa cho phép (byte, theo CP-4) |
 | `--rss-growth-max` | `5.0` | Ngưỡng tốc độ tăng RSS tối đa cho phép trên nửa sau thời gian (MB/giờ) |
+| `--driver-rss-limit-mb` | `2048` | Trần RSS (MiB) của chính driver soak; vượt trần thì FAIL với lý do rõ ràng (`0` = tắt) |
+| `--driver-rss-check-every` | `5s` | Chu kỳ kiểm tra RSS của driver |
+| `--compare-chunk-rows` | `10000` | Số dòng mỗi chunk keyset khi so sánh trạng thái cuối |
+| `--compare-only` | `false` | Chỉ chạy so sánh streaming source/target rồi thoát (không sinh tải, không chạy `strand`) |
+| `--pprof-addr` | *(tắt)* | Phục vụ `net/http/pprof` của driver (ví dụ `127.0.0.1:6060`) để lấy hồ sơ heap |
 
 ---
 
@@ -156,10 +162,13 @@ Chạy lại đúng kịch bản ngẫu nhiên từ một `seed` đã in ra log:
   - `checkpoint_bytes`: Tổng `checkpoint_applied_bytes + worker_delta_applied_bytes`.
   - `lag_gtids`: Số GTID đã thực thi trên source nhưng chưa có trong tập đã apply trên target.
   - `restarts`: Số lần restart tính đến thời điểm lấy mẫu.
+  - `driver_rss_bytes`, `driver_rss_mb`: `VmRSS` của chính tiến trình driver soak.
+- `driver_rss_max_bytes`, `driver_rss_limit_bytes`: RSS lớn nhất của driver trong cả đợt (gồm pha so sánh cuối) và trần đã cấu hình.
+- `violations` (tối đa 20), `violations_total`, `compared_rows_source`, `compared_rows_target`: Kết quả so sánh streaming trạng thái cuối.
 - Kết luận (`conclusion` và các trường cùng tên ở cấp cao nhất):
   - `rss_growth`: Hệ số góc hồi quy tuyến tính (MB/giờ) của `rss_mb` theo thời gian trên **nửa sau** khoảng thời gian chạy (loại bỏ giai đoạn cấp phát bộ nhớ/cache ban đầu).
   - `checkpoint_max_bytes`: Giá trị `checkpoint_bytes` lớn nhất ghi nhận được trong suốt đợt chạy.
-  - `final_state_equal`: `true` khi target bắt kịp source, dừng an toàn và toàn bộ dữ liệu trên `app.accounts`, `app.orders`, `app.events` khớp hoàn toàn với source qua `checker.CheckFinalState`.
+  - `final_state_equal`: `true` khi target bắt kịp source, dừng an toàn và toàn bộ dữ liệu trên `app.accounts`, `app.orders`, `app.events` khớp hoàn toàn với source (so sánh streaming theo PK, cùng ngữ nghĩa giá trị với `checker.RowState.Hash`).
   - `forbidden_exit`, `forbidden_exit_code`: Ghi nhận nếu `strand` thoát với mã cấm tự động restart (`{2, 3, 4, 5, 10}`) hoặc thoát khác `0` khi nhận `SIGTERM`.
   - `pass`: Kết quả tổng hợp cuối cùng:
     $$\text{pass} = \text{final\_state\_equal} \land \neg\text{forbidden\_exit} \land (\text{checkpoint\_max\_bytes} \le 65536) \land (\text{rss\_growth} \le 5\,\text{MB/giờ})$$
