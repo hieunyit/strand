@@ -55,3 +55,13 @@ E2E đang chạy ba lượt relaxed và ba lượt strict. Lượt relaxed đầ
 - Chưa có kiểm tự động quyền tối thiểu mới trên tài khoản không phải admin; chưa thử timeout/cancel đúng lúc trả session MySQL.
 - Chưa đủ unit toàn repo, full e2e relaxed/strict trên code cuối; chưa kiểm đầy đủ kill -9 giữa tạo schema bằng process (integration đã mô phỏng partial commit MySQL và rollback PG).
 - C–F, Gate 2 còn thiếu và staging 1TB chưa làm; không dùng số liệu việc B để tuyên bố các gate đó đạt.
+
+## Sửa bổ sung sau review: sequence/default PG
+
+Code giữ `pg_sequence.seqtypid` thay vì lấy kiểu cột sở hữu. Giữ nguyên biểu thức default (ví dụ `nextval(seq)*2`), chỉ đổi literal regclass sang sequence đích; không đổi literal thường hay toán tử. Không chạm pipeline/snapshot/writer hoặc các bất biến commit/checkpoint.
+
+- Code cũ: `sequence-type-red.log`, lỗi 22023 do MAXVALUE bigint với AS integer.
+- Sau sửa kiểu nhưng trước sửa default: `sequence-default-red.log`, đọc ID=9 thay vì 18.
+- Sau cả hai sửa: toàn package generator qua, 29,511s, log `sequence-default-green.log` trong worktree kiểm chứng.
+- Tạm revert từng phần: `sequence-type-revert-red.log` và `sequence-default-revert-red.log`, đều exit 1 đúng lỗi tương ứng; đã khôi phục.
+- Lượt toàn repo trên `efb3b1b`: 29 package có test qua, 4 package không có test, 0 lỗi (`unit-final.log`). Bản sửa bổ sung sẽ được chạy lại package bị ảnh hưởng trên nhánh chính của việc B; chưa có full e2e toàn repo cho nhánh.

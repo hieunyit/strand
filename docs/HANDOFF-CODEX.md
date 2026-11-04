@@ -335,6 +335,8 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 19 | Target PG có identity ALWAYS không nhận ID tường minh của source (SQLSTATE 428C9) | INSERT/MERGE thiếu OVERRIDING SYSTEM VALUE | Thêm override cho cả hai đường và upsert snapshot dùng chung; giữ ID, Txn và checkpoint | `TestCP1_PGAlwaysIdentityExplicitSourceValues`: đỏ khi tạm revert writer, xanh khi khôi phục |
 | 20 | Bootstrap target PG mới có FK: snapshot bảng con trước cha, SQLSTATE 23503 | Thứ tự alphabet không phải thứ tự phụ thuộc FK | Với auto, snapshot cha trước con; FK vòng/tự tham chiếu từ chối trước DDL, câu hỏi mở `OPEN-schema-init-fk.md` | `TestRS1_SnapshotParentsBeforeChildren`, `TestSchemaInit_E2E_EmptyTarget` |
 | 21 | E2E schema-init mới hết timeout catch-up (MySQL→PG, PG→PG) sau snapshot, không phải treo | Fixture ghi 100 update/s vào một khóa trong khi DAG + max_wait=50ms chỉ apply khoảng 18,5 batch/s; quan sát batch tăng 2174→2879 trong 38s, checkpoint vẫn tiến | Giới hạn tải fixture 10 update/s; vẫn kiểm có commit khi snapshot đang chạy; lưu cả log lỗi | `schema-e2e-relaxed-2.log` ngoài repo; ca đúng với fixture cuối đã qua ba hướng |
+| 22 | Init PG: sequence AS bigint sở hữu cột integer lỗi MAXVALUE 22023; default nextval(seq)*2 sinh 9 thay vì 18 | Lấy kiểu từ cột thay vì pg_sequence.seqtypid; thay toàn biểu thức default bằng nextval đơn | Giữ kiểu sequence và chỉ rewrite literal regclass của sequence sở hữu, giữ toàn biểu thức | `OwnedSequenceKeepsSequenceType`, `TestSequenceDefaultPreservesExpressionAndLiterals`; tạm revert từng sửa đều đỏ |
+
 
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.

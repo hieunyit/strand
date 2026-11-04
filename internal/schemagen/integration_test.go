@@ -93,6 +93,21 @@ func TestSchemaInitThreeDirections(t *testing.T) {
 	my := schemaDB(t, false)
 	pg := schemaDB(t, true)
 	ctx := context.Background()
+
+	t.Run("OwnedSequenceKeepsSequenceType", func(t *testing.T) {
+		execSchema(t, pg, "CREATE SCHEMA sequence_source", "CREATE SEQUENCE sequence_source.counter AS bigint START 9 CACHE 7", `CREATE TABLE sequence_source.t(id integer DEFAULT (nextval('sequence_source.counter')*2) PRIMARY KEY)`, "ALTER SEQUENCE sequence_source.counter OWNED BY sequence_source.t.id")
+		r := Request{Source: pg, Target: pg, SourceKind: "postgres", TargetKind: "postgres", Tables: []model.TableID{{Schema: "sequence_source", Table: "t"}}, Rename: map[string]string{"sequence_source.t": "sequence_target.t"}}
+		applyTwice(t, r)
+		var typ string
+		if err := pg.QueryRow(`SELECT format_type(s.seqtypid,NULL) FROM pg_sequence s JOIN pg_class c ON c.oid=s.seqrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='sequence_target'`).Scan(&typ); err != nil || typ != "bigint" {
+			t.Fatalf("sequence type=%s err=%v", typ, err)
+		}
+		execSchema(t, pg, "INSERT INTO sequence_target.t DEFAULT VALUES")
+		var id int
+		if err := pg.QueryRow("SELECT id FROM sequence_target.t").Scan(&id); err != nil || id != 18 {
+			t.Fatalf("id=%d err=%v", id, err)
+		}
+	})
 	t.Run("MySQLToMySQL", func(t *testing.T) {
 		execSchema(t, my, "CREATE DATABASE src CHARACTER SET utf8mb4 COLLATE utf8mb4_bin", "CREATE TABLE src.parent (id bigint NOT NULL AUTO_INCREMENT PRIMARY KEY, code varchar(32) UNIQUE) AUTO_INCREMENT=543", "CREATE TABLE src.child (id bigint PRIMARY KEY, pid bigint, CONSTRAINT fk FOREIGN KEY (pid) REFERENCES src.parent(id))", "CREATE TABLE src.part (id bigint PRIMARY KEY) PARTITION BY HASH(id) PARTITIONS 2", "CREATE TRIGGER src.trig BEFORE INSERT ON src.parent FOR EACH ROW SET NEW.code=UPPER(NEW.code)")
 		tables := []model.TableID{{Schema: "src", Table: "child"}, {Schema: "src", Table: "parent"}, {Schema: "src", Table: "part"}}

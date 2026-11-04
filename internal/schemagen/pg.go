@@ -52,12 +52,12 @@ func pgToPG(ctx context.Context, r Request, t model.TableID) ([]string, []string
 		if c.coll != "" {
 			d += " COLLATE " + quote(c.collschema, true) + "." + quote(c.coll, true)
 		}
-		var seqschema, seqname string
+		var seqschema, seqname, seqtype string
 		var start, inc, min, max, cache int64
 		var cycle bool
-		err := r.Source.QueryRowContext(ctx, `SELECT sn.nspname,s.relname,q.seqstart,q.seqincrement,q.seqmin,q.seqmax,q.seqcache,q.seqcycle
+		err := r.Source.QueryRowContext(ctx, `SELECT sn.nspname,s.relname,format_type(q.seqtypid,NULL),q.seqstart,q.seqincrement,q.seqmin,q.seqmax,q.seqcache,q.seqcycle
  FROM pg_depend dep JOIN pg_class s ON s.oid=dep.objid AND s.relkind='S' JOIN pg_namespace sn ON sn.oid=s.relnamespace JOIN pg_sequence q ON q.seqrelid=s.oid JOIN pg_attribute a ON a.attrelid=dep.refobjid AND a.attnum=dep.refobjsubid
- WHERE dep.classid='pg_class'::regclass AND dep.refclassid='pg_class'::regclass AND dep.refobjid=$1 AND a.attname=$2 AND dep.deptype IN ('a','i')`, oid, c.n).Scan(&seqschema, &seqname, &start, &inc, &min, &max, &cache, &cycle)
+ WHERE dep.classid='pg_class'::regclass AND dep.refclassid='pg_class'::regclass AND dep.refobjid=$1 AND a.attname=$2 AND dep.deptype IN ('a','i')`, oid, c.n).Scan(&seqschema, &seqname, &seqtype, &start, &inc, &min, &max, &cache, &cycle)
 		if err != nil && err != sql.ErrNoRows {
 			return nil, nil, nil, err
 		}
@@ -79,8 +79,16 @@ func pgToPG(ctx context.Context, r Request, t model.TableID) ([]string, []string
 				if dst != t {
 					seq.Table = dst.Table + "_" + c.n + "_seq"
 				}
-				ddl = append(ddl, "CREATE SEQUENCE "+name(seq, true)+" AS "+c.typ+" "+opts)
-				d += " DEFAULT nextval(" + literal(name(seq, true)) + "::regclass)"
+				// Kiểu sequence độc lập với kiểu cột sở hữu; dùng seqtypid để giữ nguyên
+				// MIN/MAX và không sinh AS integer MAXVALUE của bigint (02 §8).
+				ddl = append(ddl, "CREATE SEQUENCE "+name(seq, true)+" AS "+seqtype+" "+opts)
+				if c.def != "" {
+					def, err := rewriteSequenceDefault(c.def, model.TableID{Schema: seqschema, Table: seqname}, seq)
+					if err != nil {
+						return nil, nil, nil, err
+					}
+					d += " DEFAULT " + def
+				}
 				owned = append(owned, "ALTER SEQUENCE "+name(seq, true)+" OWNED BY "+name(dst, true)+"."+quote(c.n, true))
 			}
 		} else if c.generated != "" {
@@ -230,4 +238,48 @@ func pgReferences(def string, src, dst model.TableID, rename map[string]string) 
 		}
 	}
 	return "", fmt.Errorf("foreign key has no REFERENCES clause")
+}
+
+// rewriteSequenceDefault chỉ thay literal regclass của sequence đã biết. Giữ
+// nguyên toán tử, hàm, cast và mọi literal thường; không biến nextval(seq)*2
+// thành nextval(seq). Không phân tích/đoán giá trị row từ source (02 §8).
+func rewriteSequenceDefault(expr string, src, dst model.TableID) (string, error) {
+	tokens, err := lex(expr)
+	if err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	last, matches := 0, 0
+	for i, t := range tokens {
+		if t.ident || expr[t.start] != '\'' || i+3 >= len(tokens) || tokens[i+1].value != ":" || tokens[i+2].value != ":" {
+			continue
+		}
+		regclass := tokens[i+3].value == "regclass"
+		if i+5 < len(tokens) && tokens[i+3].value == "pg_catalog" && tokens[i+4].value == "." && tokens[i+5].value == "regclass" {
+			regclass = true
+		}
+		if !regclass {
+			continue
+		}
+		names, err := lex(t.value)
+		if err != nil {
+			return "", err
+		}
+		same := len(names) == 1 && names[0].ident && names[0].value == src.Table
+		if len(names) == 3 && names[0].ident && names[1].value == "." && names[2].ident {
+			same = names[0].value == src.Schema && names[2].value == src.Table
+		}
+		if !same {
+			continue
+		}
+		out.WriteString(expr[last:t.start])
+		out.WriteString(literal(name(dst, true)))
+		last = t.end
+		matches++
+	}
+	if matches == 0 && strings.Contains(expr, "nextval(") {
+		return "", reject("default has no canonical reference to owned sequence %s; initialize table manually", src)
+	}
+	out.WriteString(expr[last:])
+	return out.String(), nil
 }

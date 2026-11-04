@@ -65,3 +65,29 @@ func TestDDLQuotedKeywordColumnsAreNotRewritten(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestSequenceDefaultPreservesExpressionAndLiterals(t *testing.T) {
+	src := model.TableID{Schema: "old", Table: "counter"}
+	dst := model.TableID{Schema: "new", Table: "seq"}
+	expr := `(nextval('old.counter'::regclass) * 2 + length('old.counter'))`
+	got, err := rewriteSequenceDefault(expr, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `(nextval('"new"."seq"'::regclass) * 2 + length('old.counter'))` {
+		t.Fatal(got)
+	}
+	src = model.TableID{Schema: `a"b`, Table: "c'd"}
+	expr = "nextval(" + literal(name(src, true)) + "::pg_catalog.regclass)"
+	got, err = rewriteSequenceDefault(expr, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `nextval('"new"."seq"'::pg_catalog.regclass)` {
+		t.Fatal(got)
+	}
+	got, err = rewriteSequenceDefault("42", src, dst)
+	if err != nil || got != "42" {
+		t.Fatalf("default=%s err=%v", got, err)
+	}
+}
