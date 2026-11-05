@@ -38,6 +38,7 @@ func startMySQLServer(t *testing.T, serverID int, extraArgs ...string) (*sql.DB,
 		"--binlog-row-image=FULL",
 		"--binlog-row-metadata=FULL",
 	}
+	cmd = append(cmd, "--innodb-use-native-aio=OFF") // không phụ thuộc fs.aio-max-nr khi nhiều MySQL chạy cùng lúc
 	cmd = append(cmd, extraArgs...)
 
 	req := testcontainers.ContainerRequest{
