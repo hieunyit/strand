@@ -21,7 +21,9 @@ func TestC_E2E_PGGenericPKSnapshotAdd(t *testing.T) {
 	src.exec(t, ddl, "ALTER TABLE app.gk ALTER COLUMN doc SET STORAGE EXTERNAL", "ALTER PUBLICATION "+pub+" ADD TABLE app.gk")
 	dst.exec(t, ddl)
 	words := []string{"a", "A", "b", "ab", "é", "中", "😀", "0", "10", "9", "z"}
-	key := func(r *rand.Rand) (int, string) { return r.Intn(200) - 100, words[r.Intn(len(words))] + fmt.Sprint(r.Intn(30)) }
+	key := func(r *rand.Rand) (int, string) {
+		return r.Intn(200) - 100, words[r.Intn(len(words))] + fmt.Sprint(r.Intn(30))
+	}
 	r := rand.New(rand.NewSource(seed))
 	doc := strings.Repeat("d", 3000)
 	for i := 0; i < 4000; i++ {
