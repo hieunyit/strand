@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"strand/internal/admin"
+	"strand/internal/checkpoint"
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -84,6 +86,20 @@ func newVerifyCmd() *cobra.Command {
 				return err
 			}
 			defer dst.Close()
+
+			// --repair fix chỉ chạy khi pipeline đã dừng, và giữ khóa pipeline suốt lúc verify + sửa
+			// (review R04): nếu CDC chạy song song, repair có thể đọc ảnh source cũ, CDC ghi ảnh mới +
+			// checkpoint, rồi repair ghi đè ảnh cũ — checkpoint không lùi nên không gì chữa lại. Khi
+			// pipeline dừng, mọi thay đổi source sau lần đọc của repair nằm sau checkpoint và được phát lại
+			// khi pipeline chạy tiếp, nên target hội tụ về source.
+			fixing := repair == "fix" && !dryRun
+			if fixing {
+				release, err := lockPipelineForRepair(cmd.Context(), dst, dstEngine, cfg.Name)
+				if err != nil {
+					return err
+				}
+				defer release()
+			}
 
 			target := func(x model.TableID) model.TableID {
 				if r, ok := cfg.Tables.Rename[x.String()]; ok {
@@ -167,7 +183,8 @@ func newVerifyCmd() *cobra.Command {
 				return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a single-column primary key", err)
 			}
 
-			lv := verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name, TargetName: target})
+			// Đang giữ khóa để sửa: pipeline không chạy, không chờ target apply (sẽ không bao giờ tới).
+			lv := verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name, TargetName: target, SkipApplyWait: fixing})
 			ranges, err := verify.SampleRanges(cmd.Context(), src, id, pk, rate, 1000, rand.New(rand.NewSource(time.Now().UnixNano())))
 			if err != nil {
 				return err
@@ -224,13 +241,42 @@ func firstN(xs []string, n int) []string {
 	return xs
 }
 
-// repairRows chép lại row lệch từ source (xóa ở target nếu source không còn). Pipeline vẫn
-// stream sau đó nên trạng thái hội tụ về source; trong lúc sửa, row có thể tạm lùi rồi tiến lại.
+// lockPipelineForRepair lấy khóa advisory của pipeline trên target (cùng khóa `strand sync` giữ).
+func lockPipelineForRepair(ctx context.Context, dst *sql.DB, engine model.Engine, pipelineID string) (func() error, error) {
+	var lock func(context.Context, string) (func() error, error)
+	if engine == model.EnginePG {
+		lock = checkpoint.NewPGStore(dst, pipelineID, engine).Lock
+	} else {
+		lock = checkpoint.NewMySQLStore(dst, pipelineID, engine).Lock
+	}
+	release, err := lock(ctx, pipelineID)
+	if errors.Is(err, checkpoint.ErrPipelineLocked) {
+		return nil, exitcode.New(exitcode.ErrPipelineLocked, exitcode.Fenced, fmt.Sprintf(
+			"pipeline %s is running: stop `strand sync` before --repair fix (a repair concurrent with the stream can overwrite newer, already checkpointed rows with a stale image); "+
+				"use --repair report while it runs", pipelineID), err)
+	}
+	return release, err
+}
+
+// repairRows chép lại row lệch từ source: upsert ảnh source, hoặc xóa ở target nếu source không còn
+// row. Gọi khi đang giữ khóa pipeline (lockPipelineForRepair). Không DELETE rồi INSERT row còn tồn tại:
+// với FK ON DELETE CASCADE/SET NULL ở target, DELETE row cha xóa/sửa row con mà không chép lại. Cột
+// generated ở target không được ghi; cột identity ALWAYS (PG) ghi bằng OVERRIDING SYSTEM VALUE.
 func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine model.Engine, srcT, dstT model.TableID, pk string, keys []string) error {
 	srcQPK := verify.QuoteIdent(srcEngine, pk)
 	srcQT := verify.QuoteTable(srcEngine, srcT)
 	dstQPK := verify.QuoteIdent(dstEngine, pk)
 	dstQT := verify.QuoteTable(dstEngine, dstT)
+	skip, identityAlways, err := targetWriteExclusions(ctx, dst, dstEngine, dstT)
+	if err != nil {
+		return err
+	}
+	ph := func(i int) string {
+		if dstEngine == model.EnginePG {
+			return fmt.Sprintf("$%d", i)
+		}
+		return "?"
+	}
 
 	for _, k := range keys {
 		srcQ := fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", srcQT, srcQPK)
@@ -242,6 +288,7 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 			return err
 		}
 		cols, _ := rows.Columns()
+		var names []string
 		var vals []any
 		if rows.Next() {
 			raw := make([]sql.RawBytes, len(cols))
@@ -253,7 +300,11 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 				rows.Close()
 				return err
 			}
-			for _, r := range raw {
+			for i, r := range raw {
+				if skip[cols[i]] {
+					continue
+				}
+				names = append(names, cols[i])
 				if r == nil {
 					vals = append(vals, nil)
 				} else {
@@ -261,38 +312,117 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 				}
 			}
 		}
-		rows.Close()
-		tx, err := dst.BeginTx(ctx, nil)
-		if err != nil {
+		if err := rows.Close(); err != nil {
 			return err
 		}
-		delQ := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", dstQT, dstQPK)
-		if dstEngine == model.EnginePG {
-			delQ = fmt.Sprintf("DELETE FROM %s WHERE %s = $1", dstQT, dstQPK)
-		}
-		if _, err := tx.ExecContext(ctx, delQ, k); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if vals != nil {
-			q := make([]string, len(cols))
-			ph := make([]string, len(cols))
-			for i, c := range cols {
-				q[i] = verify.QuoteIdent(dstEngine, c)
-				if dstEngine == model.EnginePG {
-					ph[i] = fmt.Sprintf("$%d", i+1)
-				} else {
-					ph[i] = "?"
-				}
-			}
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", dstQT, strings.Join(q, ","), strings.Join(ph, ",")), vals...); err != nil {
-				tx.Rollback()
+		if names == nil {
+			delQ := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", dstQT, dstQPK, ph(1))
+			if _, err := dst.ExecContext(ctx, delQ, k); err != nil {
 				return err
 			}
+			continue
 		}
-		if err := tx.Commit(); err != nil {
-			return err
+		q := make([]string, len(names))
+		phs := make([]string, len(names))
+		var set []string
+		for i, c := range names {
+			q[i] = verify.QuoteIdent(dstEngine, c)
+			phs[i] = ph(i + 1)
+			if c == pk {
+				continue
+			}
+			set = append(set, fmt.Sprintf("%s = EXCLUDED.%s", q[i], q[i]))
+		}
+		if dstEngine == model.EnginePG {
+			over := ""
+			if identityAlways {
+				over = " OVERRIDING SYSTEM VALUE"
+			}
+			action := "DO NOTHING"
+			if len(set) > 0 {
+				action = "DO UPDATE SET " + strings.Join(set, ", ")
+			}
+			// ON CONFLICT (pk): chỉ xung đột PK được gộp; trùng unique khác báo lỗi.
+			stmt := fmt.Sprintf("INSERT INTO %s (%s)%s VALUES (%s) ON CONFLICT (%s) %s", dstQT, strings.Join(q, ","), over, strings.Join(phs, ","), dstQPK, action)
+			if _, err := dst.ExecContext(ctx, stmt, vals...); err != nil {
+				return fmt.Errorf("repair %s pk %s: %w", dstT, k, err)
+			}
+			continue
+		}
+		// MySQL: không dùng ON DUPLICATE KEY UPDATE — nó cũng kích hoạt khi trùng UNIQUE phụ và ghi đè
+		// row KHÁC (cùng lỗi của review R01). Khóa row theo PK rồi UPDATE hoặc INSERT; trùng unique báo lỗi.
+		if err := repairMySQLRow(ctx, dst, dstQT, dstQPK, k, q, names, pk, vals); err != nil {
+			return fmt.Errorf("repair %s pk %s: %w", dstT, k, err)
 		}
 	}
 	return nil
+}
+
+// repairMySQLRow ghi ảnh source của một PK lên target MySQL trong một transaction.
+func repairMySQLRow(ctx context.Context, dst *sql.DB, qt, qpk, k string, qcols, names []string, pk string, vals []any) error {
+	tx, err := dst.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var one int
+	err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE %s = ? FOR UPDATE", qt, qpk), k).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(qcols)), ",")
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", qt, strings.Join(qcols, ","), ph), vals...); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	default:
+		var set []string
+		var args []any
+		for i, c := range names {
+			if c == pk {
+				continue
+			}
+			set = append(set, qcols[i]+" = ?")
+			args = append(args, vals[i])
+		}
+		if len(set) > 0 {
+			args = append(args, k)
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s = ?", qt, strings.Join(set, ", "), qpk), args...); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// targetWriteExclusions trả cột generated của bảng đích (không ghi được) và có cột identity ALWAYS không.
+func targetWriteExclusions(ctx context.Context, dst *sql.DB, engine model.Engine, t model.TableID) (map[string]bool, bool, error) {
+	skip := map[string]bool{}
+	var q string
+	if engine == model.EnginePG {
+		q = `SELECT a.attname, a.attgenerated <> '', a.attidentity = 'a' FROM pg_attribute a
+			JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped`
+	} else {
+		q = `SELECT COLUMN_NAME, GENERATION_EXPRESSION <> '', FALSE FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`
+	}
+	rows, err := dst.QueryContext(ctx, q, t.Schema, t.Table)
+	if err != nil {
+		return nil, false, fmt.Errorf("read target columns of %s: %w", t, err)
+	}
+	defer rows.Close()
+	identity := false
+	for rows.Next() {
+		var c string
+		var gen, ident bool
+		if err := rows.Scan(&c, &gen, &ident); err != nil {
+			return nil, false, err
+		}
+		if gen {
+			skip[c] = true
+		}
+		identity = identity || ident
+	}
+	return skip, identity, rows.Err()
 }
