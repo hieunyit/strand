@@ -20,6 +20,8 @@ import (
 	"strand/internal/snapshot"
 )
 
+var lastPGKeysDSN string
+
 func startPGForKeys(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
@@ -34,7 +36,8 @@ func startPGForKeys(t *testing.T) *sql.DB {
 	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	host, _ := c.Host(ctx)
 	port, _ := c.MappedPort(ctx, nat.Port("5432/tcp"))
-	cc, err := pgx.ParseConfig(fmt.Sprintf("postgres://strand:dev@%s:%s/app?sslmode=disable", host, port.Port()))
+	lastPGKeysDSN = fmt.Sprintf("postgres://strand:dev@%s:%s/app?sslmode=disable", host, port.Port())
+	cc, err := pgx.ParseConfig(lastPGKeysDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,4 +185,32 @@ func TestGPK_PGKeyEncodingMatchesDBOrder(t *testing.T) {
 		t.Fatal("non-C text collation must be rejected")
 	}
 	t.Logf("%d tables, %d keys in ORDER BY order", len(cases), total)
+}
+
+// Việc C: text PK không COLLATE (collation "default") được nhận khi collation mặc định của database là
+// thứ tự byte (LOCALE 'C'), và bị từ chối trên database en_US.utf8 (mặc định của image).
+func TestGPK_PGDefaultCollationResolved(t *testing.T) {
+	db := startPGForKeys(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "CREATE TABLE public.dk (k text PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.PGPKCodec(ctx, db, model.TableID{Schema: "public", Table: "dk"}, []string{"k"}); err == nil {
+		t.Fatal("text PK under the en_US.utf8 default collation must be rejected")
+	}
+	if _, err := db.ExecContext(ctx, "CREATE DATABASE cdb TEMPLATE template0 LOCALE 'C'"); err != nil {
+		t.Fatal(err)
+	}
+	cdb, err := sql.Open("pgx", strings.Replace(lastPGKeysDSN, "/app?", "/cdb?", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cdb.Close()
+	if _, err := cdb.ExecContext(ctx, "CREATE TABLE public.dk (k text PRIMARY KEY, b char(4))"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := snapshot.PGPKCodec(ctx, cdb, model.TableID{Schema: "public", Table: "dk"}, []string{"k"})
+	if err != nil || c.Cols[0].Kind != snapshot.PKBytes || c.Cols[0].Collation != "C" {
+		t.Fatalf("text PK in a LOCALE 'C' database: codec %+v err %v", c, err)
+	}
 }

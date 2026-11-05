@@ -46,6 +46,12 @@ func PGPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (
 		if err != nil {
 			return nil, fmt.Errorf("read primary key column %s.%s: %w", id, col, err)
 		}
+		if coll == "default" {
+			// Collation mặc định của database: nhận khi nó là thứ tự byte (xem pgDefaultCollation).
+			if coll, err = pgDefaultCollation(ctx, db); err != nil {
+				return nil, err
+			}
+		}
 		pc, err := PGPKColumn(col, typ, coll)
 		if err != nil {
 			return nil, err
@@ -53,4 +59,28 @@ func PGPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (
 		c.Cols = append(c.Cols, pc)
 	}
 	return c, nil
+}
+
+// pgDefaultCollation trả tên collation tương đương của collation "default" của database hiện tại khi nó
+// là thứ tự byte — "C" (provider libc C/POSIX, hoặc builtin C / C.UTF-8 của PG 17+: thứ tự code point =
+// thứ tự byte UTF-8); ngược lại trả "default:<provider>:<locale>" (PGPKColumn từ chối, mức 3). Đọc qua
+// to_jsonb để chạy được trên mọi phiên bản (datlocprovider từ PG 15, datlocale từ PG 17).
+func pgDefaultCollation(ctx context.Context, db *sql.DB) (string, error) {
+	var provider, collate, locale sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT to_jsonb(d)->>'datlocprovider', d.datcollate, to_jsonb(d)->>'datlocale'
+		FROM pg_database d WHERE d.datname = current_database()`).Scan(&provider, &collate, &locale)
+	if err != nil {
+		return "", fmt.Errorf("read database collation: %w", err)
+	}
+	p := provider.String
+	if p == "" {
+		p = "c" // trước PG 15: chỉ có libc
+	}
+	switch {
+	case p == "c" && (collate.String == "C" || collate.String == "POSIX"):
+		return "C", nil
+	case p == "b" && (locale.String == "C" || locale.String == "C.UTF-8"):
+		return "C", nil
+	}
+	return fmt.Sprintf("default:%s:%s%s", p, collate.String, locale.String), nil
 }
