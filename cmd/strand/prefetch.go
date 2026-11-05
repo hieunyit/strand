@@ -159,7 +159,15 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 	}
 
 	if archiveDir != "" {
-		ar, err := archivereader.New(archivereader.Config{Dir: archiveDir})
+		var charsets map[uint64]string
+		if sourceDSN != "" {
+			if charsets, err = loadSourceCharsets(ctx, sourceDSN); err != nil {
+				return n, err
+			}
+		} else {
+			fmt.Println("archive prefetch: no --source; values of non-UTF-8 string columns are not converted")
+		}
+		ar, err := archivereader.New(archivereader.Config{Dir: archiveDir, CollationCharsets: charsets})
 		if err != nil {
 			return n, err
 		}

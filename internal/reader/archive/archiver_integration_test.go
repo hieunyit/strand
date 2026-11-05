@@ -21,6 +21,7 @@ import (
 	"strand/internal/exitcode"
 	"strand/internal/reader"
 	"strand/internal/reader/archive"
+	mysqlreader "strand/internal/reader/mysql"
 )
 
 type mysqlNode struct {
@@ -158,6 +159,9 @@ func waitArchived(t *testing.T, r *runningArchiver, want *gomysql.MysqlGTIDSet) 
 func TestArchiverIntegration_ResumesWithoutGapOrDuplicate(t *testing.T) {
 	n := startMySQL(t)
 	n.exec(t, "CREATE DATABASE app; CREATE TABLE app.t (id INT PRIMARY KEY, v VARCHAR(32))")
+	// Review F8: giá trị đọc qua archive phải được chuẩn hóa như reader trực tiếp (latin1 → UTF-8, BINARY đệm 0x00).
+	n.exec(t, "CREATE TABLE app.x (id INT PRIMARY KEY, s VARCHAR(20) CHARACTER SET latin1, b BINARY(4))")
+	n.exec(t, "INSERT INTO app.x VALUES (1, 'café Ñandú', X'61000000')")
 	n.insert(t, 0, 40)
 	n.exec(t, "FLUSH BINARY LOGS")
 	n.insert(t, 40, 40)
@@ -182,7 +186,11 @@ func TestArchiverIntegration_ResumesWithoutGapOrDuplicate(t *testing.T) {
 	// Source không còn file cũ: archive phải tự đủ.
 	n.exec(t, "PURGE BINARY LOGS BEFORE NOW() + INTERVAL 1 DAY")
 
-	ar, err := archive.New(archive.Config{Dir: dir})
+	cs, err := mysqlreader.LoadCollationCharsets(context.Background(), n.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, err := archive.New(archive.Config{Dir: dir, CollationCharsets: cs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +203,7 @@ func TestArchiverIntegration_ResumesWithoutGapOrDuplicate(t *testing.T) {
 	seen := map[string]int{}
 	got := gomysql.MysqlGTIDSet{}
 	ids := map[int64]bool{}
+	xRows := 0
 	for ev := range evs {
 		switch ev.Type {
 		case reader.EventError:
@@ -205,6 +214,17 @@ func TestArchiverIntegration_ResumesWithoutGapOrDuplicate(t *testing.T) {
 				t.Fatal(err)
 			}
 		case reader.EventRows:
+			if ev.Schema == "app" && ev.Table == "x" {
+				for _, row := range ev.Rows {
+					if s := fmt.Sprint(asString(row[1])); s != "café Ñandú" {
+						t.Errorf("latin1 value via archive = %q", s)
+					}
+					if b := asString(row[2]); b != "a\x00\x00\x00" {
+						t.Errorf("BINARY(4) via archive = %x, want 61000000", b)
+					}
+					xRows++
+				}
+			}
 			if ev.Schema == "app" && ev.Table == "t" {
 				for _, row := range ev.Rows {
 					ids[toInt64(t, row[0])] = true
@@ -220,6 +240,9 @@ func TestArchiverIntegration_ResumesWithoutGapOrDuplicate(t *testing.T) {
 	}
 	if !got.Equal(want) {
 		t.Fatalf("archive GTIDs %s, source executed %s", got.String(), want.String())
+	}
+	if xRows != 1 {
+		t.Fatalf("archive has %d rows of app.x, want 1", xRows)
 	}
 	if len(ids) != 170 {
 		t.Fatalf("archive has %d rows of app.t, want 170", len(ids))
@@ -253,6 +276,16 @@ func TestArchiverIntegration_PurgedGapIsLogGap(t *testing.T) {
 		t.Fatal("archiver did not report the gap")
 	}
 	_ = r.a.Close()
+}
+
+func asString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case []byte:
+		return string(x)
+	}
+	return fmt.Sprint(v)
 }
 
 func toInt64(t *testing.T, v any) int64 {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"golang.org/x/text/encoding/charmap"
 )
@@ -111,6 +112,72 @@ func convertCharsets(tm *replication.TableMapEvent, rows [][]any, charsets map[u
 		}
 	}
 	return nil
+}
+
+// binaryCollationID: collation "binary" (charset binary) của MySQL.
+const binaryCollationID = 63
+
+// fixedStringLen: độ dài khai báo (byte) của cột MYSQL_TYPE_STRING thật (CHAR/BINARY, không phải
+// ENUM/SET) — cùng cách giải mã meta với go-mysql RowsEvent.decodeValue. ok=false nếu không phải.
+func fixedStringLen(tm *replication.TableMapEvent, i int) (int, bool) {
+	if i >= len(tm.ColumnType) || tm.ColumnType[i] != gomysql.MYSQL_TYPE_STRING {
+		return 0, false
+	}
+	meta := tm.ColumnMeta[i]
+	tp, length := byte(gomysql.MYSQL_TYPE_STRING), int(meta)
+	if meta >= 256 {
+		b0, b1 := uint8(meta>>8), uint8(meta&0xFF)
+		if b0&0x30 != 0x30 {
+			length = int(uint16(b1) | (uint16((b0&0x30)^0x30) << 4))
+			tp = b0 | 0x30
+		} else {
+			length = int(meta & 0xFF)
+			tp = b0
+		}
+	}
+	return length, tp == gomysql.MYSQL_TYPE_STRING
+}
+
+// padBinary đệm 0x00 tới độ dài khai báo cho cột BINARY(n) (review F1): MySQL lưu và SELECT trả đủ n
+// byte, nhưng binlog ROW cắt các byte đệm cuối (Field_string::pack bỏ pad char, với charset binary là
+// 0x00). Không đệm thì cùng một giá trị cho hai byte khác nhau ở stream và snapshot: khóa range-state
+// lệch, đọc lại theo khóa trượt, MySQL→PG ghi bytea thiếu byte. Cần collation của cột (metadata FULL);
+// binlog_row_metadata=MINIMAL đã ghi charset của cột (COLUMN_CHARSET), nên luôn có với MySQL 8.0+.
+func padBinary(tm *replication.TableMapEvent, rows [][]any) {
+	if tm == nil {
+		return
+	}
+	for idx, coll := range tm.CollationMap() {
+		if coll != binaryCollationID {
+			continue
+		}
+		n, ok := fixedStringLen(tm, idx)
+		if !ok {
+			continue
+		}
+		for _, row := range rows {
+			if idx >= len(row) || row[idx] == nil {
+				continue
+			}
+			switch v := row[idx].(type) {
+			case string:
+				if len(v) < n {
+					row[idx] = v + string(make([]byte, n-len(v)))
+				}
+			case []byte:
+				if len(v) < n {
+					row[idx] = append(append(make([]byte, 0, n), v...), make([]byte, n-len(v))...)
+				}
+			}
+		}
+	}
+}
+
+// NormalizeRows đưa giá trị row của binlog về đúng dạng SELECT trả: đệm BINARY(n), rồi chuyển chuỗi
+// sang UTF-8 (convertCharsets). Dùng cho mọi reader đọc binlog MySQL (trực tiếp và archive).
+func NormalizeRows(tm *replication.TableMapEvent, rows [][]any, charsets map[uint64]string) error {
+	padBinary(tm, rows)
+	return convertCharsets(tm, rows, charsets)
 }
 
 // LoadCollationCharsets: collation id -> charset của source (information_schema.COLLATIONS), cho

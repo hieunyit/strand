@@ -17,6 +17,7 @@ import (
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/reader"
+	mysqlreader "strand/internal/reader/mysql"
 )
 
 // Config cấu hình cho ArchiveReader.
@@ -24,6 +25,9 @@ type Config struct {
 	Dir        string
 	StartPos   model.Pos
 	BufferSize int
+	// CollationCharsets: collation id -> charset của source (mysqlreader.LoadCollationCharsets), để chuyển
+	// chuỗi không phải UTF-8 như reader trực tiếp. nil: không chuyển (BINARY(n) vẫn được đệm).
+	CollationCharsets map[uint64]string
 }
 
 // ArchiveReader đọc sự kiện binlog từ các file archive trên đĩa.
@@ -209,6 +213,10 @@ func (r *ArchiveReader) Start(ctx context.Context, from checkpoint.AppliedSet) (
 						schema, table := "", ""
 						if tm, found := tableMap[rowsEv.TableID]; found {
 							schema, table = string(tm.Schema), string(tm.Table)
+							// Như reader trực tiếp: đệm BINARY(n), chuyển chuỗi sang UTF-8 (review F1/F8).
+							if err := mysqlreader.NormalizeRows(tm, rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+								return err
+							}
 						}
 						select {
 						case out <- reader.Event{
@@ -231,6 +239,10 @@ func (r *ArchiveReader) Start(ctx context.Context, from checkpoint.AppliedSet) (
 						schema, table := "", ""
 						if tm, found := tableMap[rowsEv.TableID]; found {
 							schema, table = string(tm.Schema), string(tm.Table)
+							// Như reader trực tiếp: đệm BINARY(n), chuyển chuỗi sang UTF-8 (review F1/F8).
+							if err := mysqlreader.NormalizeRows(tm, rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+								return err
+							}
 						}
 						select {
 						case out <- reader.Event{
@@ -253,6 +265,10 @@ func (r *ArchiveReader) Start(ctx context.Context, from checkpoint.AppliedSet) (
 						schema, table := "", ""
 						if tm, found := tableMap[rowsEv.TableID]; found {
 							schema, table = string(tm.Schema), string(tm.Table)
+							// Như reader trực tiếp: đệm BINARY(n), chuyển chuỗi sang UTF-8 (review F1/F8).
+							if err := mysqlreader.NormalizeRows(tm, rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+								return err
+							}
 						}
 						select {
 						case out <- reader.Event{

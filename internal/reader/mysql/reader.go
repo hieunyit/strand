@@ -311,7 +311,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					if tm, found := tableMap[rowsEv.TableID]; found {
 						schema, table = string(tm.Schema), string(tm.Table)
 					}
-					if err := convertCharsets(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+					if err := NormalizeRows(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
 						select {
 						case out <- reader.Event{Type: reader.EventError, Err: err}:
 						case <-ctxRead.Done():
@@ -340,7 +340,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					if tm, found := tableMap[rowsEv.TableID]; found {
 						schema, table = string(tm.Schema), string(tm.Table)
 					}
-					if err := convertCharsets(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+					if err := NormalizeRows(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
 						select {
 						case out <- reader.Event{Type: reader.EventError, Err: err}:
 						case <-ctxRead.Done():
@@ -369,7 +369,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					if tm, found := tableMap[rowsEv.TableID]; found {
 						schema, table = string(tm.Schema), string(tm.Table)
 					}
-					if err := convertCharsets(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+					if err := NormalizeRows(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
 						select {
 						case out <- reader.Event{Type: reader.EventError, Err: err}:
 						case <-ctxRead.Done():
