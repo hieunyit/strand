@@ -1,0 +1,49 @@
+# Gói .deb/.rpm của strand (spec 01 §3, 03 §4). Dựng bằng scripts/package.sh — không gọi nfpm tay:
+# script đặt VERSION, ARCH, BIN và sinh unit systemd cho /usr/bin.
+# Đường dẫn src tính từ thư mục gốc repo.
+name: strand
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: none
+section: database
+priority: optional
+maintainer: Strand team
+description: |
+  Strand CDC: dong bo du lieu mot chieu MySQL -> MySQL, MySQL -> PostgreSQL,
+  PostgreSQL -> PostgreSQL bang binlog / logical replication.
+homepage: https://example.invalid/strand
+
+contents:
+  - src: ${BIN}
+    dst: /usr/bin/strand
+    file_info: { mode: 0755, owner: root, group: root }
+
+  # Unit template: một instance cho mỗi pipeline (strand@<name>.service).
+  - src: dist/pkgroot/strand@.service
+    dst: /usr/lib/systemd/system/strand@.service
+    file_info: { mode: 0644, owner: root, group: root }
+
+  - src: packaging/pipeline.yaml.example
+    dst: /usr/share/doc/strand/examples/pipeline.yaml
+    file_info: { mode: 0644, owner: root, group: root }
+  - src: packaging/pipeline.env.example
+    dst: /usr/share/doc/strand/examples/pipeline.env
+    file_info: { mode: 0644, owner: root, group: root }
+  - src: docs/USAGE.md
+    dst: /usr/share/doc/strand/USAGE.md
+    file_info: { mode: 0644, owner: root, group: root }
+
+# /etc/strand (root:strand 0750) và user strand được tạo trong script, vì group strand chưa có
+# lúc giải nén. /var/lib/strand/<pipeline> và /run/strand/<pipeline> do systemd tạo
+# (StateDirectory / RuntimeDirectory trong unit).
+scripts:
+  preinstall: packaging/scripts/preinstall.sh
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+# useradd/groupadd: gói passwd (Debian/Ubuntu, có sẵn) hoặc shadow-utils (RHEL/Rocky).
+overrides:
+  rpm:
+    depends: [shadow-utils]

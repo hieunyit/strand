@@ -670,6 +670,51 @@ strand promote --pipeline billing --engine pg \
 
 `strand config schema` in JSON Schema của file cấu hình.
 
+### 7.12 `archive binlog` (MySQL)
+
+```bash
+strand archive binlog --from "mysql://archiver:***@replica1:3306/" --to /archive/orders-db [--server-id 42001]
+```
+
+Lưu binlog liên tục từ một MySQL (nên là replica) vào thư mục, thay cho script `mysqlbinlog --raw --stop-never`. Thư mục này dùng trực tiếp cho `seed apply --archive`.
+
+- Quyền: `REPLICATION SLAVE, REPLICATION CLIENT`. Cờ `tls=` trong DSN được áp cho kết nối binlog.
+- File chỉ xuất hiện dưới tên `NNNNNNNN-<tên trên server>` khi server rotate (đủ transaction, đã fsync). File đang ghi tên `.partial-*`, reader bỏ qua. Số thứ tự ở đầu tên giữ đúng thứ tự cả khi replica được dựng lại và đánh số binlog lại từ đầu.
+- Chạy lại sau khi dừng hoặc crash: tiếp tục theo GTID (trạng thái ở `.strand-archive.json`), không lặp, không hở. Có thể trỏ `--from` sang replica khác có cùng GTID.
+- Lần chạy đầu bắt đầu từ `gtid_purged` của source (mọi binlog còn trên server), hoặc `--start-gtid`.
+- Source đã purge phần chưa lưu thì dừng exit 5 `log_gap`. Hai archiver cùng thư mục: exit 4.
+- Phần cuối chỉ được lưu sau khi server rotate. Muốn chốt thường xuyên hơn: giảm `max_binlog_size` hoặc chạy `FLUSH BINARY LOGS` định kỳ.
+- Chưa có: đẩy thẳng lên S3 (`--to` chỉ nhận thư mục; đồng bộ thư mục lên bucket bằng công cụ riêng), dọn file cũ theo retention, GTID có tag (MySQL 8.4 `gtid tags`: bị từ chối).
+
+### 7.13 `version`
+
+`strand version` (hoặc `strand --version`) in phiên bản, commit, nền tảng.
+
+### 7.14 Cài đặt bằng gói `.deb` / `.rpm`
+
+`scripts/package.sh` dựng vào `dist/`: tarball + SHA-256 và gói `.deb`/`.rpm` cho linux/amd64 và linux/arm64 (binary tĩnh).
+
+| Đường dẫn | Nội dung |
+| --- | --- |
+| `/usr/bin/strand` | Binary (gói dùng `/usr/bin`; tarball theo 03 §4 dùng `/usr/local/bin`) |
+| `/usr/lib/systemd/system/strand@.service` | Unit template, một instance mỗi pipeline |
+| `/etc/strand/` | root:strand 0750; đặt `<name>.yaml` (0640) và `<name>.env` (0600) |
+| `/usr/share/doc/strand/` | `USAGE.md`, ví dụ `pipeline.yaml`, `pipeline.env` |
+| `/var/lib/strand/<name>`, `/run/strand/<name>` | systemd tạo (StateDirectory / RuntimeDirectory) |
+
+```bash
+sudo dpkg -i strand_<ver>_amd64.deb      # hoặc: sudo rpm -i strand-<ver>.x86_64.rpm
+sudo cp /usr/share/doc/strand/examples/pipeline.yaml /etc/strand/orders-sync.yaml
+sudo cp /usr/share/doc/strand/examples/pipeline.env  /etc/strand/orders-sync.env
+sudo chown root:strand /etc/strand/orders-sync.*; sudo chmod 0640 /etc/strand/orders-sync.yaml; sudo chmod 0600 /etc/strand/orders-sync.env
+sudo systemctl enable --now strand@orders-sync
+```
+
+- Cài gói tạo user/group hệ thống `strand`, không tự bật pipeline nào.
+- Nâng cấp: pipeline đang chạy giữ binary cũ tới khi `systemctl restart strand@<name>` (an toàn nhờ checkpoint).
+- Gỡ gói: dừng và disable mọi `strand@*`. Không xóa `/etc/strand`, `/var/lib/strand` hay user, kể cả khi purge.
+- Chưa có: chữ ký gói (03 §4 yêu cầu ký); ký file `.sha256` bằng khóa phát hành của tổ chức.
+
 ---
 
 ## 8. Vận hành, tuning, metric, exit code

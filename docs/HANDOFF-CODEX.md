@@ -218,6 +218,11 @@ Cấu trúc đề xuất:
 
 Admin state mới: `starting` → `bootstrapping` → `synced` (+ `paused`, `failed`) — ghi vào tài liệu.
 
+### P3 làm sớm (owner duyệt 2026-11-05, nhánh `agent/generic-pk-v2`)  🟡
+
+- **`strand archive binlog`** (`internal/reader/archive/archiver.go`, `cmd/strand/archive.go`): binlog thô vào thư mục; file `.partial-*` → tên chốt `NNNNNNNN-<file>` khi rotate (fsync file + thư mục, rồi trạng thái `.strand-archive.json`); khởi động lại: xóa partial, quét lại file chốt sau lần ghi trạng thái cuối, GTID auto-position từ tập đã chốt (DisableRetrySync: syncer không tự nối lại ở raw mode). 1236 → `log_gap`. Unit test 7 ca (kể cả crash giữa đổi tên và ghi trạng thái; regression đặt nhầm tên khi file kết thúc không có ROTATE). **Test tích hợp MySQL thật viết sẵn (`archiver_integration_test.go`), chưa chạy** — chờ máy rảnh. Chưa có: upload S3 (client bucket hiện đọc cả object vào RAM), retention, GTID có tag.
+- **Gói `.deb`/`.rpm`** (`packaging/`, `scripts/package.sh`, `strand version`): nfpm qua `go run` (không vào go.mod), binary tĩnh amd64/arm64, `/usr/bin/strand`, unit sinh từ `deploy/systemd` (đổi đường dẫn), user `strand`, `/etc/strand` root:strand 0750; gỡ gói dừng `strand@*`, không xóa state. **Chưa dựng thử gói** (chạy nfpm cần owner cho phép); chưa có chữ ký.
+
 ### E. P2-09 Benchmark Gate 2  ⬜ chưa bắt đầu
 
 `TASKS.md` dòng 166: "Đọc S04 §5. AC: chạy 3 governor theo đúng giao thức, xuất JSON." Chạy sau khi máy rảnh (không chạy song song e2e/soak vì tranh tài nguyên làm sai số đo). Governor: `onoff`, `static`, `grace` (GRACE v2, `internal/governor/grace.go`).

@@ -1,0 +1,23 @@
+# Ví dụ /etc/strand/<name>.yaml cho strand@<name>.service (root:strand 0640).
+# Mật khẩu đặt trong /etc/strand/<name>.env (root:strand 0600), không đặt ở đây.
+# Tham chiếu đầy đủ: /usr/share/doc/strand/USAGE.md, hoặc `strand config schema`.
+version: 1
+name: orders-sync                      # trùng <name> của unit
+source:
+  kind: mysql
+  host: 10.0.0.11                      # nên là replica có log_replica_updates=ON
+  user: strand
+  password_env: SRC_PW
+target:
+  kind: mysql
+  host: 10.0.0.21
+  user: strand
+  password_env: DST_PW
+  database: strand                     # schema chứa bảng _strand_*
+tables:
+  include: ["app.*"]
+resources:
+  spool: { path: /var/lib/strand/orders-sync }   # StateDirectory của unit
+observability:
+  admin_socket: /run/strand/orders-sync/admin.sock  # RuntimeDirectory của unit
+  metrics: ":9464"

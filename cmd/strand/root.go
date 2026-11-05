@@ -40,6 +40,10 @@ func init() {
 	rootCmd.AddCommand(newSeedCmd())
 	rootCmd.AddCommand(newExportCmd())
 	rootCmd.AddCommand(newVerifyCmd())
+	rootCmd.AddCommand(newVersionCmd())
+	rootCmd.AddCommand(newArchiveCmd())
+	rootCmd.Version = versionString()
+	rootCmd.SetVersionTemplate("strand {{.Version}}\n")
 }
 
 // normalizeDSNFlags đổi các cờ DSN dạng mysql://... sang DSN của driver (cùng cú pháp với file cấu hình).
