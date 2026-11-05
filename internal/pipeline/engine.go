@@ -80,8 +80,9 @@ func openPGTarget(dsn, appName string) (*sql.DB, error) {
 	return stdlib.OpenDB(*cc), nil
 }
 
-// mysqlSourceUTC đặt time_zone='+00:00' cho phiên SQL tới source MySQL khi target là PG: typemap
-// đổi TIMESTAMP→timestamptz với giả định session UTC (02 §8 "time_zone của session được cố định").
+// mysqlSourceUTC đặt time_zone='+00:00' cho phiên SQL tới source MySQL (mọi target): snapshot, stream
+// và target cùng quy ước UTC; typemap đổi TIMESTAMP→timestamptz với giả định session UTC
+// (02 §8 "time_zone của session được cố định").
 func mysqlSourceUTC(dsn string) (string, error) {
 	c, err := drivermysql.ParseDSN(dsn)
 	if err != nil {

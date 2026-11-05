@@ -266,10 +266,13 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	// --- Kết nối ---
 	p.srcDSN = p.cfg.Source.DSN
 	srcDriver, srcSQLDSN := "mysql", p.srcDSN
+	// Source MySQL: phiên SQL luôn ở UTC, như reader binlog (TimestampStringLocation=UTC) và phiên ghi
+	// target. Trước đây chỉ ép khi target là PG; MySQL→MySQL với source ở múi giờ khác thì snapshot đọc
+	// TIMESTAMP theo giờ địa phương rồi ghi vào target UTC — lệch đúng bằng độ lệch múi giờ (review R05).
 	switch {
 	case p.srcEngine == model.EnginePG:
 		srcDriver = "pgx"
-	case p.dstEngine == model.EnginePG:
+	default:
 		if srcSQLDSN, err = mysqlSourceUTC(p.srcDSN); err != nil {
 			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 		}
