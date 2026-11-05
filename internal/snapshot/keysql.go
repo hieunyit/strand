@@ -69,7 +69,45 @@ func (q keySQL) cmp(op string, b Bound) (string, []any, error) {
 			phs[i] = "CAST(? AS " + col.SQLType + ")"
 		}
 	}
-	return fmt.Sprintf("%s %s %s", q.tuple(q.cols()), op, q.tuple(strings.Join(phs, ", "))), args, nil
+	if len(q.codec.Cols) == 1 || op == "=" {
+		return fmt.Sprintf("%s %s %s", q.tuple(q.cols()), op, q.tuple(strings.Join(phs, ", "))), args, nil
+	}
+	return q.expanded(op, phs, args)
+}
+
+// expanded viết so sánh tuple bất đẳng thức dạng từ điển khai triển (review F3): MySQL không dùng range
+// trên index cho row constructor "(a, b) > (?, ?)" — mỗi chunk quét index từ đầu (O(n²) cho cả bảng) —
+// nhưng tối ưu được "a > ? OR (a = ? AND b > ?)". Hai dạng tương đương: so tuple của MySQL là so từ điển
+// từng cột với collation của cột, đúng như dạng khai triển. Với >= / <= chỉ thành phần cuối không chặt.
+func (q keySQL) expanded(op string, phs []string, args []any) (string, []any, error) {
+	strict := op
+	switch op {
+	case ">=":
+		strict = ">"
+	case "<=":
+		strict = "<"
+	case ">", "<":
+	default:
+		return "", nil, fmt.Errorf("unsupported key comparison %q", op)
+	}
+	n := len(q.codec.Cols)
+	terms := make([]string, 0, n)
+	var out []any
+	for i := 0; i < n; i++ {
+		parts := make([]string, 0, i+1)
+		for j := 0; j < i; j++ {
+			parts = append(parts, quoteIdent(q.codec.Cols[j].Name)+" = "+phs[j])
+			out = append(out, args[j])
+		}
+		o := strict
+		if i == n-1 {
+			o = op
+		}
+		parts = append(parts, quoteIdent(q.codec.Cols[i].Name)+" "+o+" "+phs[i])
+		out = append(out, args[i])
+		terms = append(terms, "("+strings.Join(parts, " AND ")+")")
+	}
+	return "(" + strings.Join(terms, " OR ") + ")", out, nil
 }
 
 // rangeCond: điều kiện của range [lo, hi] (lo có thể loại trừ).

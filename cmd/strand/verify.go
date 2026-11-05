@@ -79,12 +79,25 @@ func newVerifyCmd() *cobra.Command {
 				}
 				srcDSN = replicaDSN
 			}
+			dstDSN := cfg.Target.DSN
+			// Phiên MySQL ở UTC như pipeline (R05, review F2): repair chép giá trị dạng text, TIMESTAMP dạng
+			// text phụ thuộc time_zone của phiên — hai server khác múi giờ (hoặc giờ DST lặp) làm row sửa lệch.
+			if srcEngine == model.EngineMySQL {
+				if srcDSN, err = mysqlUTCDSN(srcDSN); err != nil {
+					return err
+				}
+			}
+			if dstEngine == model.EngineMySQL {
+				if dstDSN, err = mysqlUTCDSN(dstDSN); err != nil {
+					return err
+				}
+			}
 			src, err := sql.Open(driverOf(srcEngine), srcDSN)
 			if err != nil {
 				return err
 			}
 			defer src.Close()
-			dst, err := sql.Open(driverOf(dstEngine), cfg.Target.DSN)
+			dst, err := sql.Open(driverOf(dstEngine), dstDSN)
 			if err != nil {
 				return err
 			}
@@ -296,6 +309,20 @@ func newVerifyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&replicaDSN, "replica-dsn", "", "DSN của replica để đọc (thay cho source DSN)")
 	cmd.Flags().StringVar(&adminSocketPath, "socket", "", "Admin socket (delta)")
 	return cmd
+}
+
+// mysqlUTCDSN: DSN MySQL với phiên time_zone='+00:00' và time.Time ở UTC.
+func mysqlUTCDSN(dsn string) (string, error) {
+	c, err := drivermysql.ParseDSN(dsn)
+	if err != nil {
+		return "", exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)
+	}
+	if c.Params == nil {
+		c.Params = map[string]string{}
+	}
+	c.Params["time_zone"] = "'+00:00'"
+	c.Loc = time.UTC
+	return c.FormatDSN(), nil
 }
 
 // engineOf đổi kind trong cấu hình (mysql | postgres) sang model.Engine.
