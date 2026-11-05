@@ -165,15 +165,20 @@ Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", gh
 - Lỗi có sẵn được sửa trên đường đi: PK `BIGINT UNSIGNED` > MaxInt64 (biên lỗi), `bootstrap.logical.chunk_rows` bị bỏ qua, `ORDER BY pk` trỏ vào cột `pk::text` ở PG (mất row khi cắt chunk — `9f614ab` trên review-deep).
 - Test: `TestGPK_*` (snapshot, pipeline, verify), e2e `TestC_E2E_GenericPKSnapshotUnderLoad` (binary thật, schema-init, ~9.000 ghi đồng thời, verify full 0 lệch: relaxed 1/1, strict 2/2 — cần chạy ≥3 mỗi chế độ trên máy rảnh).
 
-**Còn thiếu (theo thứ tự nên làm):**
-1. Live verify (sample / delta / sau seed) cho PK tổng quát — hiện `verify skipped` cảnh báo; `--repair fix` và `--resume` của full verify từ chối rõ cho bảng PK tổng quát.
-2. E2e: kill -9 + snapshot add với PK tổng quát (bước xóa phần chưa đọc chỉ được kiểm gián tiếp); PG→PG / MySQL→PG bằng binary thật (đã có test mức pipeline `TestGPK_PGToPG…`, `TestGPK_MySQLToPG…`).
-3. PG text không COLLATE (`collname = default`): đang từ chối như mức 3; nếu `datcollate` của DB là C/POSIX thì nhận được.
-4. Chia đôi theo timeout chỉ có cho khóa số nguyên (khóa tổng quát dựa vào giới hạn số row + cắt theo byte).
-5. Mức 2 (`WEIGHT_STRING` cho collation không nhị phân) và câu hỏi mở mức 3 — chưa làm.
-6. Chi phí định tuyến: 1,84 µs/event (trước 1,52 µs) cho bảng đang snapshot — `BenchmarkHandleStreamEventIntPK`.
+**Bổ sung sau đó (cùng nhánh):**
+- Verify trực tiếp theo tuple (sample / delta / sau seed, MySQL→MySQL) và `--repair fix` cho PK tổng quát (MySQL→MySQL; khác engine từ chối). E2e: sample 100% dưới tải 0 lệch giả, delta 2.845 khóa 0 lệch.
+- PG text không COLLATE: nhận khi collation mặc định của DB là C/POSIX (libc) hoặc builtin C/C.UTF-8.
+- Kill -9: e2e 60 lần kill trong snapshot (UNIQUE phụ bị đổi liên tục) + test tất định cho khe flush↔lưu plan (`TestGPK_ResumeClearsUnreadPartBeforeStreamApplies`, đỏ 1062 khi tắt xóa phần chưa đọc).
+- E2e PG→PG binary (`TestC_E2E_PGGenericPKSnapshotAdd`, đổi PK + TOAST): relaxed + strict 0 lệch.
+- **Mức 2 (WIP, `fc16596`):** collation không nhị phân của MySQL → `WEIGHT_STRING` do MySQL tính (không cài collation trong Go). Thứ tự == ORDER BY và binlog == SELECT trên 5 collation (0900_ai_ci, 0900_as_cs, general_ci PAD SPACE, unicode_ci, latin1_swedish_ci). Test pipeline có tải: 2/3 qua, lần 3 lỗi lúc máy hết RAM (container test bị bỏ lại) — CHƯA giải thích, phải chạy lại trên máy rảnh trước khi coi là xong.
 
----
+**Còn thiếu:**
+1. Chạy lại test mức 2 (≥3 lần) khi máy rảnh; e2e cho PK `_ci`.
+2. `verify --resume` cho PK tổng quát (bảng tiến độ lưu biên BIGINT) — đang từ chối.
+3. Repair PG→PG cho PK tổng quát — đang từ chối.
+4. Chia đôi theo timeout chỉ có cho khóa số nguyên.
+5. Mức 3 (PG ICU/libc khác C): vẫn từ chối; câu hỏi mở chưa viết.
+6. Chạy mỗi e2e việc C ≥3 lần mỗi chế độ trên máy rảnh.
 
 **Spec gốc của việc C (giữ để đối chiếu):**
 
@@ -403,6 +408,10 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 50 (R08 = dòng 29) | Reader PG giữ Txn streaming/2PC trong RAM | — | `eventLog`: RAM tới tổng `MaxBufferedBytes` (64 MiB) mọi Txn treo, vượt thì Txn lớn nhất đổ ra file trong spool (`pg-reader-<pipeline>`); rollback savepoint cắt theo mốc byte; file xóa khi commit/abort/thoát, file cũ dọn khi Start (`bc5a8f8`) | `TestR08_EventLogSpillRoundTripAndSubxactTruncate`, `TestR08_StreamingAndTwoPhaseSpillToDisk` (kịch bản AC3 trên PG 18 với trần 4 KiB). Chưa đo RSS với Gate 2 "100 Txn × 49.999 khóa"; trần chưa đọc từ `resources.memory` |
 | 51 (mở, review) | `verify --mode full` không tự mở rộng wildcard `tables.include` như `sync` (đòi `--table` cụ thể) | — | **Chưa sửa** — UX dễ khiến tưởng đã verify toàn pipeline | — |
 | 52 (mở, review) | Post-seed verify ngoài MySQL→MySQL chỉ cảnh báo rồi xóa VerifyPending → pipeline báo `synced` dù chưa verify (`internal/pipeline/verify.go` ~167) | — | **Chưa sửa** — tối thiểu: trạng thái/metric phân biệt synced-chưa-verify | — |
+
+| 53 | (việc C) Cột chuỗi charset khác UTF-8 (latin1…) có ký tự ngoài ASCII: stream MySQL→MySQL dừng với 1366 (hoặc ghi `?` khi sql_mode không strict) | Binlog đưa byte theo charset CỦA CỘT, writer gửi qua kết nối utf8mb4 | Reader chuyển giá trị chuỗi sang UTF-8 theo collation của cột trong TABLE_MAP (bảng collation đọc từ source); latin1 = cp1252 của MySQL; charset khác chỉ nhận ASCII, có byte ≥ 0x80 thì dừng rõ (`806402a`); áp cả cho `strand prefetch` | `TestCharset_Latin1ValuesSurviveSnapshotAndStream` (đỏ 1366 trước), `TestLatin1DecodeMatchesMySQL` (256 byte) |
+| 54 | (việc C) Khóa VARBINARY rỗng `''` bind thành NULL → snapshot chép 0 row mà báo xong | `[]byte(nil)` từ RawBytes | Giữ `[]byte{}` khi đọc, đổi nil → rỗng khi bind | `TestGPK_EmptyBinaryKeyIsABoundNotNull` |
+| 55 (vận hành) | Test chạy với `TESTCONTAINERS_RYUK_DISABLED=true`: tiến trình test bị kill (OOM, timeout) để lại container MySQL ~570 MB mỗi cái; 2026-11-05 có ~50 cái, RAM cạn, lượt e2e strict bị OOM-kill | Không có reaper | Không chạy test nặng song song với full e2e; dọn bằng lệnh lọc theo nhãn `org.testcontainers` trừ session đang chạy | — |
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 
