@@ -16,6 +16,7 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,16 +95,18 @@ func readRows(ctx context.Context, db *sql.DB, q string, args ...any) (rowImg, [
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, nil, err
 		}
+		// Mã hóa không mơ hồ: mỗi cột là "N" (NULL) hoặc "V<độ dài>:<byte>" — dữ liệu chứa dấu phân cách
+		// hay chuỗi giống marker NULL không thể làm hai row khác nhau trùng ảnh (review R03).
 		var b strings.Builder
-		for i, val := range vals {
-			if i > 0 {
-				b.WriteByte(0x1f)
-			}
+		for _, val := range vals {
 			if val == nil {
-				b.WriteString("\x00NULL")
-			} else {
-				b.Write(val)
+				b.WriteByte('N')
+				continue
 			}
+			b.WriteByte('V')
+			b.WriteString(strconv.Itoa(len(val)))
+			b.WriteByte(':')
+			b.Write(val)
 		}
 		pk := string(vals[0])
 		out[pk] = b.String()

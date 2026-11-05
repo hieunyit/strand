@@ -664,8 +664,9 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 	dstLeaves := make([]*MerkleNode, 0, len(chunks))
 	for _, c := range chunks {
 		var sh, th string
-		// Chunk đã hash ở lượt trước (cùng ranh giới) thì dùng lại, không hash lại.
-		if cc, ok := cached[c.ID]; ok && cc.start == c.Start && cc.end == c.End && cc.src != "" && cc.dst != "" {
+		// Chunk đã hash KHỚP ở lượt trước bị ngắt (cùng ranh giới) thì dùng lại, không hash lại. Chunk
+		// từng lệch luôn hash lại để báo đúng trạng thái hiện tại.
+		if cc, ok := cached[c.ID]; ok && cc.start == c.Start && cc.end == c.End && cc.src != "" && cc.src == cc.dst {
 			sh, th = cc.src, cc.dst
 			rep.ResumedChunks++
 		} else {
@@ -694,6 +695,11 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 		dstLeaves = append(dstLeaves, &MerkleNode{Hash: th, Range: c, IsLeaf: true})
 	}
 
+	// Lượt đã hash đủ mọi chunk: xóa tiến độ. --resume chỉ để chạy tiếp một lượt BỊ NGẮT; nếu giữ lại,
+	// lượt --resume sau đó tin hash cũ dù dữ liệu đã đổi và báo sạch sai (review R12).
+	if err := mv.clearProgress(ctx, tableKey); err != nil {
+		return nil, fmt.Errorf("clear _strand_verify progress: %w", err)
+	}
 	bad := DiffMerkleTrees(BuildMerkleTree(srcLeaves), BuildMerkleTree(dstLeaves))
 	rep.MismatchedChunks = len(bad)
 	if len(bad) == 0 {

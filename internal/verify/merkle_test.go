@@ -243,12 +243,13 @@ func TestAC1_SingleMismatchOneMillionRows(t *testing.T) {
 		t.Fatalf("rows compared = %d, want 10000 (one chunk)", rep.RowsChecked)
 	}
 
-	// Lượt 2: drill-down bằng so chuỗi chính tắc (không LiveVerifier), dùng lại hash đã lưu.
+	// Lượt 2: drill-down bằng so chuỗi chính tắc (không LiveVerifier). --resume sau một lượt đã chạy
+	// hết không dùng lại hash cũ (review R12): mọi chunk được hash lại.
 	rep2, err := mysqlFull(src, dst, "pipe_ac1", 10000, nil, func(c *verify.FullVerifyConfig) { c.Resume = true }).VerifyTableFull(ctx, tbl, "id")
 	if err != nil {
 		t.Fatalf("VerifyTableFull (resume, canonical compare): %v", err)
 	}
-	if !reflect.DeepEqual(rep2.Mismatches, []string{"543210"}) || rep2.RangesChecked != 1 || rep2.HashedChunks != 0 || rep2.ResumedChunks != 102 {
+	if !reflect.DeepEqual(rep2.Mismatches, []string{"543210"}) || rep2.RangesChecked != 1 || rep2.HashedChunks != 102 || rep2.ResumedChunks != 0 {
 		t.Fatalf("run 2: %+v", *rep2)
 	}
 }

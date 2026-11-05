@@ -196,7 +196,7 @@ func newVerifyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", "sample", "sample | delta | full")
 	cmd.Flags().StringVar(&repair, "repair", "report", "report | fix")
 	cmd.Flags().Float64Var(&rate, "rate", 0.01, "Tỉ lệ row lấy mẫu (sample) hoặc số chunk/giây (full)")
-	cmd.Flags().BoolVar(&resume, "resume", false, "Chạy tiếp từ tiến độ đã lưu trong _strand_verify (mode full)")
+	cmd.Flags().BoolVar(&resume, "resume", false, "Chạy tiếp một lượt full verify bị ngắt: chunk đã hash khớp ở lượt đó không hash lại (lượt chạy hết thì tiến độ bị xóa)")
 	cmd.Flags().StringVar(&replicaDSN, "replica-dsn", "", "DSN của replica để đọc (thay cho source DSN)")
 	cmd.Flags().StringVar(&adminSocketPath, "socket", "", "Admin socket (delta)")
 	return cmd

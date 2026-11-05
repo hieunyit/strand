@@ -145,8 +145,9 @@ tables:
 		t.Fatalf("mysql->mysql after repair: exit %d, want 0", code)
 	}
 	var n int
-	if err := root.QueryRow("SELECT COUNT(*) FROM vd._strand_verify WHERE pipeline_id = 'cli-full' AND table_name = 'vs.t'").Scan(&n); err != nil || n == 0 {
-		t.Fatalf("progress rows in vd._strand_verify = %d (%v)", n, err)
+	// Lượt đã chạy hết thì tiến độ bị xóa (--resume chỉ chạy tiếp lượt bị ngắt, review R12).
+	if err := root.QueryRow("SELECT COUNT(*) FROM vd._strand_verify WHERE pipeline_id = 'cli-full' AND table_name = 'vs.t'").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("progress rows in vd._strand_verify after a completed run = %d (%v), want 0", n, err)
 	}
 	if code := runVerifyFull(t, pgYAML, "--table", "vs.t", "--repair", "fix"); code != exitcode.InvalidSyntax {
 		t.Fatalf("cross-engine repair fix: exit %d, want %d", code, exitcode.InvalidSyntax)
