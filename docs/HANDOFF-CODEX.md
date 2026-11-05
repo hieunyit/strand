@@ -223,6 +223,21 @@ Admin state mới: `starting` → `bootstrapping` → `synced` (+ `paused`, `fai
 - **`strand archive binlog`** (`internal/reader/archive/archiver.go`, `cmd/strand/archive.go`): binlog thô vào thư mục; file `.partial-*` → tên chốt `NNNNNNNN-<file>` khi rotate (fsync file + thư mục, rồi trạng thái `.strand-archive.json`); khởi động lại: xóa partial, quét lại file chốt sau lần ghi trạng thái cuối, GTID auto-position từ tập đã chốt (DisableRetrySync: syncer không tự nối lại ở raw mode). 1236 → `log_gap`. Unit test 7 ca (kể cả crash giữa đổi tên và ghi trạng thái; regression đặt nhầm tên khi file kết thúc không có ROTATE). **Test tích hợp MySQL thật viết sẵn (`archiver_integration_test.go`), chưa chạy** — chờ máy rảnh. Chưa có: upload S3 (client bucket hiện đọc cả object vào RAM), retention, GTID có tag.
 - **Gói `.deb`/`.rpm`** (`packaging/`, `scripts/package.sh`, `strand version`): nfpm qua `go run` (không vào go.mod), binary tĩnh amd64/arm64, `/usr/bin/strand`, unit sinh từ `deploy/systemd` (đổi đường dẫn), user `strand`, `/etc/strand` root:strand 0750; gỡ gói dừng `strand@*`, không xóa state. **Chưa dựng thử gói** (chạy nfpm cần owner cho phép); chưa có chữ ký.
 
+### G. Web GUI kiểu Flink  ⬜ giao Codex (owner, 2026-11-05)
+
+Kế hoạch: **`docs/PLAN-WEB-UI.md`**. Đọc hết trước khi code. Tóm tắt: lệnh `strand web` (package mới `internal/web` — viết ADR), một tài khoản admin (bcrypt, session, CSRF, TLS), đủ thao tác của CLI (start/stop/restart, pause/resume, throttle, snapshot add, checkpoint rewind, verify, wizard repair và promote), HTML render server + htmx + uPlot nhúng `go:embed`, quản lý pipeline trên cùng máy qua `/etc/strand/*.yaml`. Làm theo mốc M0→M4 (M5 sau). **Trước M1 hỏi owner 3 điểm ở mục 7 của kế hoạch.** Thêm quyết định mới vào `questions/DECISIONS-2026-11-02.md` (Web UI làm sớm hơn P4). Không đụng đường dữ liệu; chỉ thêm 3 lệnh admin socket chỉ-đọc (mục 5). Nhánh: `agent/web-ui` tách từ `agent/generic-pk-v2`.
+
+### H. Review đầy đủ trước khi lên `main`  ⬜ giao Codex (owner, 2026-11-05)
+
+Phạm vi: `git diff 9281ffa..agent/generic-pk-v2` (77 commit, 190 file, ~26.000 dòng) — mọi thứ chưa lên GitHub `main`: P2 phần còn lại, việc B (schema init + fixes), resume-clear, 15 bản sửa review sâu (R01–R18), việc C (PK tổng quát, mức 1–2), việc D (USAGE.md), cảnh báo khóa không tác dụng, `strand archive binlog`, đóng gói.
+
+- Ưu tiên phần **chưa ai review**: việc C (`internal/snapshot/pkey*.go`, `keysql*.go`, `generic_walk.go`, `range_state.go`, `toast_pk.go`, `internal/verify/*_keys.go`, `cmd/strand/verify.go` repairKeysMySQL, `internal/reader/mysql/charset.go`), `internal/reader/archive/archiver.go`, `packaging/`, và kiểm lại các bản sửa R01–R18 có đúng và đủ không.
+- Đối chiếu bất biến CP-1..5, RS-1/2, SD-1..4, CO-1/2 cho mọi thay đổi ở snapshot/pipeline/sched/checkpoint/writer/reader.
+- `docs/USAGE.md`: mỗi khẳng định phải đúng với code (`--help`, `config schema`).
+- Mỗi lỗi: file:dòng, kịch bản tái hiện, mức độ; lỗi nghiêm trọng cần probe/test tái hiện (fail trên code hiện tại). Kết quả: `/tmp/strand-review-codex/review-full-2026-11-05.md` (+ probe, log), cùng dạng các lần trước.
+- **Tài nguyên máy:** Claude đang chạy full e2e (đến khoảng 23:30 ngày 2026-11-05) và sau đó test tích hợp archive + điều tra `TestP2_E2E_PGSnapshotAddWhileStreaming` relaxed. Trong thời gian đó **không chạy test container nặng song song** (đã có sự cố OOM/rò container — dòng 55); review tĩnh, unit test và probe nhỏ một container là được. Không xóa container của người khác; dọn container của chính mình (`RYUK` tắt).
+- Không sửa code trên nhánh của Claude; đề xuất sửa trong báo cáo.
+
 ### E. P2-09 Benchmark Gate 2  ⬜ chưa bắt đầu
 
 `TASKS.md` dòng 166: "Đọc S04 §5. AC: chạy 3 governor theo đúng giao thức, xuất JSON." Chạy sau khi máy rảnh (không chạy song song e2e/soak vì tranh tài nguyên làm sai số đo). Governor: `onoff`, `static`, `grace` (GRACE v2, `internal/governor/grace.go`).
