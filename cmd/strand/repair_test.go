@@ -72,12 +72,20 @@ tables:
 		t.Fatalf("after repair: children of p1=%d (want 1, not cascaded), extra row=%d (want 0), g=%d (want 20)", children, extra, g)
 	}
 
-	// Trùng UNIQUE phụ với một row KHÁC ở target: báo lỗi, không ghi đè row đó.
-	mustExecSQL(t, root, "INSERT INTO rs.p (id, v, code) VALUES (4, 40, 'q')", "INSERT INTO rd.p (id, v, code) VALUES (5, 50, 'q')")
-	if code := runVerifyFull(t, yaml, "--table", "rs.p", "--repair", "fix"); code == exitcode.Success {
-		t.Fatal("repair succeeded although pk 4 collides with pk 5 on uk_code")
+	// Các row lệch đổi chéo giá trị UNIQUE (target tụt sau source, như khi pipeline dừng giữa tải): sửa
+	// từng row thì row nào trước cũng va uk_code; sửa cả lô trong một transaction thì được, và không
+	// cascade xóa row con của chúng.
+	mustExecSQL(t, root,
+		"INSERT INTO rs.p (id, v, code) VALUES (10, 1, 'x'), (11, 2, 'y')", "INSERT INTO rs.c VALUES (110, 10), (111, 11)",
+		"INSERT INTO rd.p (id, v, code) VALUES (10, 1, 'y'), (11, 2, 'x')", "INSERT INTO rd.c VALUES (110, 10), (111, 11)")
+	if code := runVerifyFull(t, yaml, "--table", "rs.p", "--repair", "fix"); code != exitcode.Success {
+		t.Fatalf("repair of rows that swap a UNIQUE value: exit %d", code)
 	}
-	if err := root.QueryRow("SELECT v FROM rd.p WHERE id = 5").Scan(&v); err != nil || v != 50 {
-		t.Fatalf("row pk 5 was overwritten by repair of pk 4: v=%d err=%v", v, err)
+	if code := runVerifyFull(t, yaml, "--table", "rs.p"); code != exitcode.Success {
+		t.Fatalf("verify after swap repair: exit %d", code)
+	}
+	_ = root.QueryRow("SELECT COUNT(*) FROM rd.c WHERE pid IN (10, 11)").Scan(&children)
+	if children != 2 {
+		t.Fatalf("children of swapped parents after repair = %d, want 2 (not cascaded)", children)
 	}
 }

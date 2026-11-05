@@ -265,31 +265,23 @@ func lockPipelineForRepair(ctx context.Context, dst *sql.DB, engine model.Engine
 func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine model.Engine, srcT, dstT model.TableID, pk string, keys []string) error {
 	srcQPK := verify.QuoteIdent(srcEngine, pk)
 	srcQT := verify.QuoteTable(srcEngine, srcT)
-	dstQPK := verify.QuoteIdent(dstEngine, pk)
-	dstQT := verify.QuoteTable(dstEngine, dstT)
 	skip, identityAlways, err := targetWriteExclusions(ctx, dst, dstEngine, dstT)
 	if err != nil {
 		return err
 	}
-	ph := func(i int) string {
-		if dstEngine == model.EnginePG {
-			return fmt.Sprintf("$%d", i)
-		}
-		return "?"
+	srcQ := fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", srcQT, srcQPK)
+	if srcEngine == model.EnginePG {
+		srcQ = fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", srcQT, srcQPK)
 	}
-
+	// 1. Ảnh source của mọi khóa lệch (nil = source không còn row).
+	imgs := make([]repairImage, 0, len(keys))
 	for _, k := range keys {
-		srcQ := fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", srcQT, srcQPK)
-		if srcEngine == model.EnginePG {
-			srcQ = fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", srcQT, srcQPK)
-		}
+		img := repairImage{key: k}
 		rows, err := src.QueryContext(ctx, srcQ, k)
 		if err != nil {
 			return err
 		}
 		cols, _ := rows.Columns()
-		var names []string
-		var vals []any
 		if rows.Next() {
 			raw := make([]sql.RawBytes, len(cols))
 			ptrs := make([]any, len(cols))
@@ -304,17 +296,141 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 				if skip[cols[i]] {
 					continue
 				}
-				names = append(names, cols[i])
+				img.names = append(img.names, cols[i])
 				if r == nil {
-					vals = append(vals, nil)
+					img.vals = append(img.vals, nil)
 				} else {
-					vals = append(vals, string(r))
+					img.vals = append(img.vals, string(r))
 				}
 			}
 		}
 		if err := rows.Close(); err != nil {
 			return err
 		}
+		imgs = append(imgs, img)
+	}
+	// 2. Ghi mọi khóa lệch trong MỘT transaction: xóa rồi chèn lại ảnh source. Sửa từng row không được
+	// khi các row lệch đổi chéo giá trị UNIQUE với nhau (target tụt sau source: row nào sửa trước cũng
+	// va UNIQUE của row chưa sửa — e2e P1-15). Không cascade sang bảng con: MySQL foreign_key_checks=0,
+	// PG session_replication_role=replica (cần quyền; không có thì sửa từng row như trước).
+	const batch = 20000
+	for lo := 0; lo < len(imgs); lo += batch {
+		hi := min(lo+batch, len(imgs))
+		var ok bool
+		if dstEngine == model.EnginePG {
+			ok, err = repairBulkPG(ctx, dst, dstT, pk, identityAlways, imgs[lo:hi])
+		} else {
+			ok, err = true, repairBulkMySQL(ctx, dst, dstT, pk, imgs[lo:hi])
+		}
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if err := repairOneByOne(ctx, dst, dstEngine, dstT, pk, identityAlways, imgs[lo:hi]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// repairImage: ảnh source của một khóa lệch (names == nil: source không còn row).
+type repairImage struct {
+	key   string
+	names []string
+	vals  []any
+}
+
+func repairBulkMySQL(ctx context.Context, dst *sql.DB, t model.TableID, pk string, imgs []repairImage) error {
+	conn, err := dst.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var prev int
+	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.foreign_key_checks").Scan(&prev); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "SET SESSION foreign_key_checks = 0"); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.Background(), fmt.Sprintf("SET SESSION foreign_key_checks = %d", prev))
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	qt, qpk := verify.QuoteTable(model.EngineMySQL, t), verify.QuoteIdent(model.EngineMySQL, pk)
+	for _, img := range imgs {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = ?", qt, qpk), img.key); err != nil {
+			return fmt.Errorf("repair %s pk %s: %w", t, img.key, err)
+		}
+	}
+	for _, img := range imgs {
+		if img.names == nil {
+			continue
+		}
+		q := make([]string, len(img.names))
+		for i, c := range img.names {
+			q[i] = verify.QuoteIdent(model.EngineMySQL, c)
+		}
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(q)), ",")
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", qt, strings.Join(q, ","), ph), img.vals...); err != nil {
+			return fmt.Errorf("repair %s pk %s: %w", t, img.key, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// repairBulkPG: ok=false (không lỗi) khi phiên không được đặt session_replication_role.
+func repairBulkPG(ctx context.Context, dst *sql.DB, t model.TableID, pk string, identityAlways bool, imgs []repairImage) (bool, error) {
+	tx, err := dst.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "SET LOCAL session_replication_role = replica"); err != nil {
+		return false, nil
+	}
+	qt, qpk := verify.QuoteTable(model.EnginePG, t), verify.QuoteIdent(model.EnginePG, pk)
+	for _, img := range imgs {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", qt, qpk), img.key); err != nil {
+			return false, fmt.Errorf("repair %s pk %s: %w", t, img.key, err)
+		}
+	}
+	over := ""
+	if identityAlways {
+		over = " OVERRIDING SYSTEM VALUE"
+	}
+	for _, img := range imgs {
+		if img.names == nil {
+			continue
+		}
+		q := make([]string, len(img.names))
+		ph := make([]string, len(img.names))
+		for i, c := range img.names {
+			q[i], ph[i] = verify.QuoteIdent(model.EnginePG, c), fmt.Sprintf("$%d", i+1)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s)%s VALUES (%s)", qt, strings.Join(q, ","), over, strings.Join(ph, ",")), img.vals...); err != nil {
+			return false, fmt.Errorf("repair %s pk %s: %w", t, img.key, err)
+		}
+	}
+	return true, tx.Commit()
+}
+
+// repairOneByOne: sửa từng khóa tại chỗ (PG ON CONFLICT (pk); MySQL khóa row rồi UPDATE/INSERT) — đường
+// dự phòng khi không tắt được cascade cho cả lô.
+func repairOneByOne(ctx context.Context, dst *sql.DB, dstEngine model.Engine, dstT model.TableID, pk string, identityAlways bool, imgs []repairImage) error {
+	dstQPK := verify.QuoteIdent(dstEngine, pk)
+	dstQT := verify.QuoteTable(dstEngine, dstT)
+	ph := func(i int) string {
+		if dstEngine == model.EnginePG {
+			return fmt.Sprintf("$%d", i)
+		}
+		return "?"
+	}
+	for _, img := range imgs {
+		k, names, vals := img.key, img.names, img.vals
 		if names == nil {
 			delQ := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", dstQT, dstQPK, ph(1))
 			if _, err := dst.ExecContext(ctx, delQ, k); err != nil {
