@@ -15,6 +15,11 @@ type Config struct {
 	TableLevelThreshold int // Mặc định: 50.000 khóa/bảng/Txn
 	WritesetBudget      int // Mặc định: 2.000.000 entry
 	MaxHoles            int // Mặc định: 4.096
+	// MaxPending / MaxPendingBytes: trần số Txn và tổng Txn.Bytes đang chờ phụ thuộc trong DAG (chưa
+	// emit). Cùng với trần entry khóa giữ theo seq (≤ WritesetBudget), đây là backpressure của
+	// Admit (invariant: CO-2, review R09): một Txn kẹt ở target không làm RAM tăng vô hạn.
+	MaxPending      int   // Mặc định: 65.536
+	MaxPendingBytes int64 // Mặc định: 512 MiB
 	// Serial: mọi Txn được phát ngay theo thứ tự seq, không dựng DAG writeset. Dùng cho
 	// commit_order=strict với một writer: Txn được apply tuần tự đúng thứ tự nguồn (kể cả khi
 	// chung một batch), nên phụ thuộc writeset là thừa và chỉ làm batch nhỏ lại.
@@ -26,6 +31,8 @@ func DefaultConfig() Config {
 		TableLevelThreshold: 50000,
 		WritesetBudget:      2000000,
 		MaxHoles:            4096,
+		MaxPending:          65536,
+		MaxPendingBytes:     512 << 20,
 	}
 }
 
@@ -68,8 +75,10 @@ type Scheduler struct {
 	failed      error // lỗi apply đầu tiên; sau đó scheduler ngừng nhận Txn
 
 	// Theo dõi khóa và bảng của từng seq để Done chỉ tốn O(số khóa của Txn).
-	keysBySeq   map[uint64][]tableKey
-	tablesBySeq map[uint64][]string
+	keysBySeq    map[uint64][]tableKey
+	tablesBySeq  map[uint64][]string
+	retainedKeys int   // tổng len(keysBySeq[*])
+	pendingBytes int64 // tổng Txn.Bytes của pendingTxns
 
 	// Holes tracking (spec 02 §1, §2 CP-4, §6)
 	lwd        uint64
@@ -93,6 +102,12 @@ func NewScheduler(cfg Config) *Scheduler {
 	}
 	if cfg.MaxHoles <= 0 {
 		cfg.MaxHoles = 4096
+	}
+	if cfg.MaxPending <= 0 {
+		cfg.MaxPending = 65536
+	}
+	if cfg.MaxPendingBytes <= 0 {
+		cfg.MaxPendingBytes = 512 << 20
 	}
 
 	return &Scheduler{
@@ -213,6 +228,21 @@ func (s *Scheduler) checkBudgetLocked() {
 	}
 }
 
+// overBudgetLocked: nhận t lúc này có vượt trần RAM của DAG không (CO-2, review R09). Trần entry khóa
+// giữ theo seq là WritesetBudget — map row có thể chỉ có một khóa nóng trong khi mỗi Txn chờ vẫn giữ
+// bản sao khóa của mình. Khi DAG không còn Txn nào chờ thì luôn nhận (Txn đơn lẻ lớn hơn trần vẫn
+// đi qua, nó đã bị nâng cấp bảng ở Admit), nên không bao giờ tự khóa chết: Txn đang chờ chỉ phụ
+// thuộc Txn đã nhận trước đó, và mỗi Done đánh thức Admit.
+func (s *Scheduler) overBudgetLocked(t *model.Txn) bool {
+	if s.cfg.Serial || len(s.pendingTxns) == 0 {
+		return false
+	}
+	if len(s.pendingTxns) >= s.cfg.MaxPending || s.pendingBytes+t.Bytes > s.cfg.MaxPendingBytes {
+		return true
+	}
+	return s.retainedKeys+len(t.Rows) > s.cfg.WritesetBudget // ≥ 1 khóa mỗi row (Txn tràn đĩa: cấp bảng, không giữ khóa)
+}
+
 // Err trả về lỗi apply đầu tiên được báo qua Done (nil nếu chưa có).
 func (s *Scheduler) Err() error {
 	s.mu.Lock()
@@ -231,7 +261,7 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	// Chặn nhận Txn mới khi số holes vượt ngưỡng max_holes (spec 02 §2 CP-4, §6),
 	// hoặc khi hàng đợi sẵn sàng đã đầy (back-pressure, không giữ mu khi chờ).
 	for s.failed == nil && !s.isClosed &&
-		(s.holesLocked() > s.cfg.MaxHoles || len(s.overflow) >= cap(s.readyCh)) {
+		(s.holesLocked() > s.cfg.MaxHoles || len(s.overflow) >= cap(s.readyCh) || s.overBudgetLocked(t)) {
 		holeCh, spaceCh := s.holeWaitCh, s.spaceCh
 		s.mu.Unlock()
 
@@ -335,6 +365,7 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 				}
 				st.rows[k] = seq
 				s.keysBySeq[seq] = append(s.keysBySeq[seq], tableKey{table: tbl, key: k})
+				s.retainedKeys++
 			}
 		}
 		st.active[seq] = struct{}{}
@@ -358,6 +389,7 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 		s.emitReady(t)
 	} else {
 		s.pendingTxns[seq] = t
+		s.pendingBytes += t.Bytes
 		s.inDegree[seq] = len(activeDeps)
 		for _, dep := range activeDeps {
 			s.dependents[dep] = append(s.dependents[dep], seq)
@@ -435,6 +467,7 @@ func (s *Scheduler) Done(seq uint64, err error) {
 			s.totalRows--
 		}
 	}
+	s.retainedKeys -= len(s.keysBySeq[seq])
 	delete(s.keysBySeq, seq)
 
 	for _, tbl := range s.tablesBySeq[seq] {
@@ -464,6 +497,7 @@ func (s *Scheduler) Done(seq uint64, err error) {
 				delete(s.inDegree, depSeq)
 				if readyTxn, exists := s.pendingTxns[depSeq]; exists {
 					delete(s.pendingTxns, depSeq)
+					s.pendingBytes -= readyTxn.Bytes
 					s.emitReady(readyTxn)
 				}
 			}
@@ -471,7 +505,10 @@ func (s *Scheduler) Done(seq uint64, err error) {
 		delete(s.dependents, seq)
 	}
 
-	delete(s.pendingTxns, seq)
+	if t, ok := s.pendingTxns[seq]; ok {
+		s.pendingBytes -= t.Bytes
+		delete(s.pendingTxns, seq)
+	}
 	delete(s.activeSeqs, seq)
 
 	// Cập nhật mốc hoàn thành và holes
