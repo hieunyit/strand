@@ -147,7 +147,7 @@ func TestRS_PG_LowSnapshotDecisions(t *testing.T) {
 	if a, _ := m.HandleStreamEventXID(pgRow(7, col("v", "visible")), pos, 102); a != snapshot.ActionDiscard {
 		t.Fatalf("visible txn: %s, want Discard", a)
 	}
-	if _, ok := c.BufferedChanges[7]; ok {
+	if _, ok := c.BufferedChanges[snapshot.EncodeInt64(7)]; ok {
 		t.Fatal("older buffered image of pk 7 must be dropped when a later visible event is discarded")
 	}
 	// Txn trong xip (commit record đã stream nhưng chưa visible lúc S0): gộp.

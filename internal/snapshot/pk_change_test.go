@@ -70,7 +70,7 @@ func TestRS_UpdatePK_AcrossDifferentRangeStates(t *testing.T) {
 		StartPK:         1,
 		EndPK:           50,
 		State:           snapshot.StatePending,
-		BufferedChanges: make(map[int64]*model.RowChange),
+		BufferedChanges: make(map[snapshot.Key]*model.RowChange),
 	}
 	chunk2 := &snapshot.Chunk{
 		ID:              2,
@@ -79,7 +79,7 @@ func TestRS_UpdatePK_AcrossDifferentRangeStates(t *testing.T) {
 		StartPK:         51,
 		EndPK:           100,
 		State:           snapshot.StatePending,
-		BufferedChanges: make(map[int64]*model.RowChange),
+		BufferedChanges: make(map[snapshot.Key]*model.RowChange),
 	}
 	manager.RegisterTable(table, pkCol, []*snapshot.Chunk{chunk1, chunk2}, 100)
 
@@ -261,7 +261,7 @@ func TestRS_UpdatePK_SequentialChain(t *testing.T) {
 		StartPK:         1,
 		EndPK:           10,
 		State:           snapshot.StateReading,
-		BufferedChanges: make(map[int64]*model.RowChange),
+		BufferedChanges: make(map[snapshot.Key]*model.RowChange),
 	}
 	chunk2 := &snapshot.Chunk{
 		ID:              2,
@@ -270,7 +270,7 @@ func TestRS_UpdatePK_SequentialChain(t *testing.T) {
 		StartPK:         11,
 		EndPK:           20,
 		State:           snapshot.StateReading,
-		BufferedChanges: make(map[int64]*model.RowChange),
+		BufferedChanges: make(map[snapshot.Key]*model.RowChange),
 	}
 	chunk3 := &snapshot.Chunk{
 		ID:              3,
@@ -279,7 +279,7 @@ func TestRS_UpdatePK_SequentialChain(t *testing.T) {
 		StartPK:         21,
 		EndPK:           30,
 		State:           snapshot.StateReading,
-		BufferedChanges: make(map[int64]*model.RowChange),
+		BufferedChanges: make(map[snapshot.Key]*model.RowChange),
 	}
 	manager.RegisterTable(table, pkCol, []*snapshot.Chunk{chunk1, chunk2, chunk3}, 30)
 
@@ -302,10 +302,10 @@ func TestRS_UpdatePK_SequentialChain(t *testing.T) {
 	}
 
 	// Kiểm tra: chunk1 có tombstone cho 1, chunk2 có upsert cho 15
-	if chunk1.BufferedChanges[1] == nil || chunk1.BufferedChanges[1].Op != model.OpDelete {
+	if chunk1.BufferedChanges[snapshot.EncodeInt64(1)] == nil || chunk1.BufferedChanges[snapshot.EncodeInt64(1)].Op != model.OpDelete {
 		t.Fatalf("expected tombstone for PK 1 in chunk1 buffer")
 	}
-	if chunk2.BufferedChanges[15] == nil || chunk2.BufferedChanges[15].Op != model.OpInsert {
+	if chunk2.BufferedChanges[snapshot.EncodeInt64(15)] == nil || chunk2.BufferedChanges[snapshot.EncodeInt64(15)].Op != model.OpInsert {
 		t.Fatalf("expected upsert for PK 15 in chunk2 buffer")
 	}
 
@@ -328,11 +328,11 @@ func TestRS_UpdatePK_SequentialChain(t *testing.T) {
 
 	// Kiểm tra:
 	// Khóa 15 trong chunk2: ban đầu là Upsert, giờ bị ghi đè thành Tombstone (OpDelete)!
-	if chunk2.BufferedChanges[15] == nil || chunk2.BufferedChanges[15].Op != model.OpDelete {
-		t.Fatalf("expected PK 15 in chunk2 buffer to be overwritten with tombstone (OpDelete), got %v", chunk2.BufferedChanges[15])
+	if chunk2.BufferedChanges[snapshot.EncodeInt64(15)] == nil || chunk2.BufferedChanges[snapshot.EncodeInt64(15)].Op != model.OpDelete {
+		t.Fatalf("expected PK 15 in chunk2 buffer to be overwritten with tombstone (OpDelete), got %v", chunk2.BufferedChanges[snapshot.EncodeInt64(15)])
 	}
 	// Khóa 25 trong chunk3: có upsert
-	if chunk3.BufferedChanges[25] == nil || chunk3.BufferedChanges[25].Op != model.OpInsert {
+	if chunk3.BufferedChanges[snapshot.EncodeInt64(25)] == nil || chunk3.BufferedChanges[snapshot.EncodeInt64(25)].Op != model.OpInsert {
 		t.Fatalf("expected upsert for PK 25 in chunk3 buffer")
 	}
 

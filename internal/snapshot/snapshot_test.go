@@ -549,7 +549,7 @@ func TestRS_LargeRowExceedsMaxChunkBytes_NoInfiniteLoop(t *testing.T) {
 		for _, r := range read.Rows {
 			got = append(got, r.Key[0].(int64))
 		}
-		start = read.Cut + 1
+		start = read.CutPK + 1
 	}
 	if fmt.Sprint(got) != "[1 2 3 4]" {
 		t.Fatalf("rows read = %v, want [1 2 3 4]", got)
@@ -579,9 +579,9 @@ func TestR10_ByteBudgetTruncatesInsteadOfReassembling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !read.Truncated || read.Cut != 2 || len(read.Rows) != 2 || read.Bytes > opts.MaxChunkBytes || calls != 1 {
+	if !read.Truncated || read.CutPK != 2 || len(read.Rows) != 2 || read.Bytes > opts.MaxChunkBytes || calls != 1 {
 		t.Fatalf("read = {rows %d, bytes %d, cut %d, truncated %v}, calls %d; want 2 rows cut at 2 in one query",
-			len(read.Rows), read.Bytes, read.Cut, read.Truncated, calls)
+			len(read.Rows), read.Bytes, read.CutPK, read.Truncated, calls)
 	}
 }
 

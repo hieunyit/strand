@@ -399,11 +399,11 @@ func (sim *toastSim) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, 
 		}
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	read := snapshot.ChunkRead{Cut: chunk.EndPK}
+	read := snapshot.ChunkRead{Cut: chunk.Hi, CutPK: chunk.EndPK}
 	// maxRows > 0: giả lập chạm max_chunk_bytes — SELECT dừng sau maxRows row (review R10).
 	if sim.maxRows > 0 && chunk.Keys == nil && len(keys) > sim.maxRows && keys[sim.maxRows-1] < chunk.EndPK {
 		keys = keys[:sim.maxRows]
-		read.Cut, read.Truncated = keys[len(keys)-1], true
+		read.Cut, read.CutPK, read.Truncated = snapshot.IntBound(keys[len(keys)-1]), keys[len(keys)-1], true
 		sim.truncated++
 	}
 	for _, k := range keys {

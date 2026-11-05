@@ -39,9 +39,13 @@ type RangeStateManager struct {
 type TableRanges struct {
 	Table        model.TableID
 	PKCol        string
-	TailBLast    int64 // b_last: max(pk) sau khi đọc low
+	TailBLast    int64 // b_last: max(pk) sau khi đọc low (bản sao int64; xem Tail)
 	HasTailBLast bool
 	Chunks       []*Chunk
+	// Codec: mã hóa PK của bảng (việc C); nil = PK một cột số nguyên. Tail: khóa b_last đã mã hóa —
+	// khóa > Tail thuộc range "Xong" ngay từ đầu.
+	Codec *PKCodec
+	Tail  Bound
 
 	// PendingDiscards: GTID của các event stream đã BỎ vì range còn "Chưa đọc". Ở MySQL, event
 	// có trong binlog (stream thấy) TRƯỚC khi InnoDB commit xong (2PC: flush/sync binlog rồi mới
@@ -54,7 +58,7 @@ type TableRanges struct {
 	// re-read hiện hành của khóa: rereadPending (đang gom khóa, "Chưa đọc") hoặc chunk đang đọc.
 	// FindChunk tra map này TRƯỚC các chunk chính, nên khóa đang chờ đọc lại được xử lý như một range
 	// "Chưa đọc" (event bị bỏ) dù range chính của nó đã "Xong".
-	Reread        map[int64]*Chunk
+	Reread        map[Key]*Chunk
 	rereadPending *Chunk
 	rereadSince   []time.Time // thời điểm đánh dấu từng khóa, song song rereadPending.Keys
 }
@@ -66,8 +70,18 @@ func NewRangeStateManager() *RangeStateManager {
 	}
 }
 
-// RegisterTable đăng ký bảng và các chunk cần snapshot.
+// RegisterTable đăng ký bảng có PK một cột số nguyên với các chunk tạo theo StartPK/EndPK (API cũ).
 func (m *RangeStateManager) RegisterTable(table model.TableID, pkCol string, chunks []*Chunk, tailBLast ...int64) {
+	var tail *Bound
+	if len(tailBLast) > 0 {
+		b := IntBound(tailBLast[0])
+		tail = &b
+	}
+	m.RegisterTableKeys(table, pkCol, nil, chunks, tail)
+}
+
+// RegisterTableKeys đăng ký bảng với codec PK (nil = số nguyên) và các chunk; tail (nếu có) là b_last.
+func (m *RangeStateManager) RegisterTableKeys(table model.TableID, pkCol string, codec *PKCodec, chunks []*Chunk, tail *Bound) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -75,19 +89,45 @@ func (m *RangeStateManager) RegisterTable(table model.TableID, pkCol string, chu
 		Table:  table,
 		PKCol:  pkCol,
 		Chunks: chunks,
-		Reread: map[int64]*Chunk{},
+		Reread: map[Key]*Chunk{},
+		Codec:  codec,
 	}
-	if len(tailBLast) > 0 {
-		tr.TailBLast = tailBLast[0]
-		tr.HasTailBLast = true
-	}
-	for _, c := range chunks {
-		if c.BufferedChanges == nil {
-			c.BufferedChanges = make(map[int64]*model.RowChange)
+	if tail != nil {
+		tr.Tail, tr.HasTailBLast = *tail, true
+		if len(tail.V) == 1 {
+			if v, err := toInt64(tail.V[0]); err == nil && codecOrInt(codec).IsSingleInt() {
+				tr.TailBLast = v
+			}
 		}
 	}
-	sort.Slice(tr.Chunks, func(i, j int) bool { return tr.Chunks[i].StartPK < tr.Chunks[j].StartPK })
+	for _, c := range chunks {
+		c.codec = codec
+		c.fillFromIntFields()
+		c.syncIntFields()
+		if c.BufferedChanges == nil {
+			c.BufferedChanges = make(map[Key]*model.RowChange)
+		}
+	}
+	sort.Slice(tr.Chunks, func(i, j int) bool { return tr.Chunks[i].Lo.K < tr.Chunks[j].Lo.K })
 	m.tables[table.String()] = tr
+}
+
+// encodeKey mã hóa PK của bảng.
+func (tr *TableRanges) encodeKey(vals []model.Value) (Key, error) {
+	return codecOrInt(tr.Codec).Encode(vals)
+}
+
+// keyBound: cận gồm khóa vals của bảng.
+func (tr *TableRanges) keyBound(vals []model.Value) (Bound, error) {
+	k, err := tr.encodeKey(vals)
+	if err != nil {
+		return Bound{}, err
+	}
+	if codecOrInt(tr.Codec).IsSingleInt() {
+		v, _ := toInt64(vals[0])
+		return IntBound(v), nil // giá trị bind chuẩn hóa thành int64
+	}
+	return Bound{K: k, V: append([]model.Value(nil), vals...)}, nil
 }
 
 // RemoveTable gỡ bảng khỏi range-state sau khi snapshot xong (mọi event apply bình thường).
@@ -97,9 +137,14 @@ func (m *RangeStateManager) RemoveTable(table model.TableID) {
 	delete(m.tables, table.String())
 }
 
-// CarveChunk cắt chunk [start, end] ra khỏi range "Chưa đọc" bắt đầu đúng ở start
-// (phần còn lại [end+1, cũ.End] vẫn "Chưa đọc"). Dùng cho keyset walk.
+// CarveChunk cắt chunk [start, end] ra khỏi range "Chưa đọc" bắt đầu đúng ở start (API số nguyên).
 func (m *RangeStateManager) CarveChunk(table model.TableID, start, end int64) (*Chunk, error) {
+	return m.CarveChunkKeys(table, IntBound(start), IntBound(end))
+}
+
+// CarveChunkKeys cắt chunk [lo, hi] ra khỏi range "Chưa đọc" bắt đầu đúng ở cận lo (phần còn lại — sau
+// hi — vẫn "Chưa đọc"). Dùng cho keyset walk.
+func (m *RangeStateManager) CarveChunkKeys(table model.TableID, lo, hi Bound) (*Chunk, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	tr, ok := m.tables[table.String()]
@@ -107,23 +152,31 @@ func (m *RangeStateManager) CarveChunk(table model.TableID, start, end int64) (*
 		return nil, fmt.Errorf("table %s not registered", table)
 	}
 	for i, c := range tr.Chunks {
-		if c.StartPK != start {
+		if c.Lo.K != lo.K || c.Lo.Excl != lo.Excl {
 			continue
 		}
-		if c.State != StatePending || end < start || end > c.EndPK {
-			return nil, fmt.Errorf("cannot carve [%d,%d] from chunk [%d,%d] in state %s", start, end, c.StartPK, c.EndPK, c.State)
+		if c.State != StatePending || !geLo(hi.K, c.Lo) || hi.K > c.Hi.K {
+			return nil, fmt.Errorf("cannot carve [%x,%x] from chunk [%x,%x] in state %s", lo.K, hi.K, c.Lo.K, c.Hi.K, c.State)
 		}
-		if end == c.EndPK {
+		if hi.K == c.Hi.K {
 			return c, nil
 		}
-		rest := &Chunk{ID: c.ID + 1, Table: c.Table, PKCol: c.PKCol, StartPK: end + 1, EndPK: c.EndPK,
-			State: StatePending, BufferedChanges: map[int64]*model.RowChange{}}
-		c.EndPK = end
-		c.EstimatedRows = SpanRows(start, end)
+		restLo, ok := after(codecOrInt(tr.Codec), hi)
+		if !ok {
+			return c, nil
+		}
+		rest := &Chunk{ID: c.ID + 1, Table: c.Table, PKCol: c.PKCol, Lo: restLo, Hi: c.Hi,
+			State: StatePending, BufferedChanges: map[Key]*model.RowChange{}, codec: tr.Codec}
+		rest.syncIntFields()
+		c.Hi = hi
+		c.syncIntFields()
+		if codecOrInt(tr.Codec).IsSingleInt() {
+			c.EstimatedRows = SpanRows(c.StartPK, c.EndPK)
+		}
 		tr.Chunks = append(tr.Chunks[:i+1], append([]*Chunk{rest}, tr.Chunks[i+1:]...)...)
 		return c, nil
 	}
-	return nil, fmt.Errorf("no pending chunk starts at %d in %s", start, table)
+	return nil, fmt.Errorf("no pending chunk starts at %x in %s", lo.K, table)
 }
 
 // StateCounts trả về số range theo trạng thái của từng bảng đang snapshot (metric).
@@ -156,7 +209,7 @@ func (m *RangeStateManager) IsRegistered(table model.TableID) bool {
 	return ok
 }
 
-// SetTailBLast thiết lập mốc max(pk) cho chunk đuôi [b_last, +inf).
+// SetTailBLast thiết lập mốc max(pk) cho chunk đuôi [b_last, +inf) (API số nguyên).
 func (m *RangeStateManager) SetTailBLast(table model.TableID, bLast int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -165,6 +218,7 @@ func (m *RangeStateManager) SetTailBLast(table model.TableID, bLast int64) {
 	if ok {
 		tr.TailBLast = bLast
 		tr.HasTailBLast = true
+		tr.Tail = IntBound(bLast)
 	}
 }
 
@@ -215,23 +269,28 @@ func extractInt64PK(key []model.Value) (int64, error) {
 	}
 }
 
-// FindChunk tìm chunk chứa PK tương ứng: chunk re-read của khóa nếu có (xem Reread), ngược lại
-// chunk chính (tìm kiếm nhị phân; Chunks được sắp theo StartPK).
+// FindChunk tìm chunk chứa khóa số nguyên pk (API số nguyên, xem FindChunkKey).
 func (tr *TableRanges) FindChunk(pk int64) *Chunk {
-	if c := tr.Reread[pk]; c != nil {
-		return c
-	}
-	return tr.findMain(pk)
+	return tr.FindChunkKey(EncodeInt64(pk))
 }
 
-// findMain tìm chunk chính (keyset walk) chứa pk; nil = "Xong".
-func (tr *TableRanges) findMain(pk int64) *Chunk {
-	// Quy tắc chunk đuôi: nếu pk > TailBLast, thuộc range "Xong" ngay từ đầu
-	if tr.HasTailBLast && pk > tr.TailBLast {
-		return nil // Nil biểu thị ngoài phạm vi snapshot -> Done
+// FindChunkKey tìm chunk chứa khóa k: chunk re-read của khóa nếu có (xem Reread), ngược lại chunk chính
+// (tìm kiếm nhị phân; Chunks được sắp theo Lo, các range không giao nhau).
+func (tr *TableRanges) FindChunkKey(k Key) *Chunk {
+	if c := tr.Reread[k]; c != nil {
+		return c
 	}
-	i := sort.Search(len(tr.Chunks), func(k int) bool { return tr.Chunks[k].EndPK >= pk })
-	if i < len(tr.Chunks) && pk >= tr.Chunks[i].StartPK {
+	return tr.findMain(k)
+}
+
+// findMain tìm chunk chính (keyset walk) chứa k; nil = "Xong".
+func (tr *TableRanges) findMain(k Key) *Chunk {
+	// Quy tắc chunk đuôi: khóa > b_last thuộc range "Xong" ngay từ đầu.
+	if tr.HasTailBLast && k > tr.Tail.K {
+		return nil
+	}
+	i := sort.Search(len(tr.Chunks), func(n int) bool { return tr.Chunks[n].Hi.K >= k })
+	if i < len(tr.Chunks) && tr.Chunks[i].contains(k) {
 		return tr.Chunks[i]
 	}
 	return nil
@@ -259,13 +318,13 @@ func (m *RangeStateManager) HandleStreamEventXID(event *model.RowChange, pos mod
 
 // handleLocked: phần chung của HandleStreamEventXID (đã giữ m.mu, bảng đã đăng ký).
 func (m *RangeStateManager) handleLocked(tr *TableRanges, event *model.RowChange, pos model.Pos, xid uint64) (Action, *Chunk) {
-	pk, err := extractInt64PK(event.Key)
+	pk, err := tr.encodeKey(event.Key)
 	if err != nil {
 		// Bảng đang snapshot nhưng không xác định được range: KHÔNG được apply thẳng (RS-1).
 		return ActionReject, nil
 	}
 
-	chunk := tr.FindChunk(pk)
+	chunk := tr.FindChunkKey(pk)
 	if chunk == nil {
 		// Không thuộc bất kỳ chunk snapshot nào (ví dụ nằm sau b_last hoặc đã xong) -> Apply bình thường
 		return ActionApply, nil
@@ -296,7 +355,7 @@ func (m *RangeStateManager) handleLocked(tr *TableRanges, event *model.RowChange
 		}
 		// Gộp theo PK vào buffer
 		if chunk.BufferedChanges == nil {
-			chunk.BufferedChanges = make(map[int64]*model.RowChange)
+			chunk.BufferedChanges = make(map[Key]*model.RowChange)
 		}
 		if prev, ok := chunk.BufferedChanges[pk]; ok && prev.Op != model.OpDelete && hasUnchanged(event) {
 			// UPDATE của PG không gửi cột TOAST không đổi: giá trị của nó là giá trị của ảnh trước
@@ -416,11 +475,11 @@ func (m *RangeStateManager) ConfirmVisible(table model.TableID, visible *checkpo
 // phụ thuộc lúc SELECT; khóa không có event thì row SELECT ở bất kỳ thời điểm nào trong (low, high] đều
 // bằng nhau. Chỉ cần SELECT sau low (visible mọi Txn ∈ low) và high lấy sau SELECT — như chia đôi theo
 // timeout vẫn làm. Event của phần đuôi tiếp tục được buffer (không bị bỏ).
-func (m *RangeStateManager) SplitReading(chunk *Chunk, cut int64) (*Chunk, error) {
+func (m *RangeStateManager) SplitReading(chunk *Chunk, cut Bound) (*Chunk, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if chunk.State != StateReading || chunk.Keys != nil || cut < chunk.StartPK || cut >= chunk.EndPK {
-		return nil, fmt.Errorf("cannot split chunk [%d,%d] (state %s) at %d", chunk.StartPK, chunk.EndPK, chunk.State, cut)
+	if chunk.State != StateReading || chunk.KeySet != nil || !geLo(cut.K, chunk.Lo) || cut.K >= chunk.Hi.K {
+		return nil, fmt.Errorf("cannot split chunk [%x,%x] (state %s) at %x", chunk.Lo.K, chunk.Hi.K, chunk.State, cut.K)
 	}
 	tr, ok := m.tables[chunk.Table.String()]
 	if !ok {
@@ -434,20 +493,29 @@ func (m *RangeStateManager) SplitReading(chunk *Chunk, cut int64) (*Chunk, error
 		}
 	}
 	if idx < 0 {
-		return nil, fmt.Errorf("chunk [%d,%d] of %s is not a main range", chunk.StartPK, chunk.EndPK, chunk.Table)
+		return nil, fmt.Errorf("chunk [%x,%x] of %s is not a main range", chunk.Lo.K, chunk.Hi.K, chunk.Table)
 	}
-	rest := &Chunk{ID: chunk.ID*10 + 3, Table: chunk.Table, PKCol: chunk.PKCol, StartPK: cut + 1, EndPK: chunk.EndPK,
-		IsTail: chunk.IsTail, EstimatedRows: SpanRows(cut+1, chunk.EndPK), State: StateReading,
+	restLo, ok := after(codecOrInt(tr.Codec), cut)
+	if !ok {
+		return nil, fmt.Errorf("cannot split chunk of %s after the largest key", chunk.Table)
+	}
+	rest := &Chunk{ID: chunk.ID*10 + 3, Table: chunk.Table, PKCol: chunk.PKCol, Lo: restLo, Hi: chunk.Hi,
+		IsTail: chunk.IsTail, EstimatedRows: chunk.EstimatedRows, State: StateReading,
 		LowWatermark: chunk.LowWatermark, LowSnapshot: chunk.LowSnapshot,
-		BufferedChanges: map[int64]*model.RowChange{}, Continuation: true}
+		BufferedChanges: map[Key]*model.RowChange{}, Continuation: true, codec: tr.Codec}
 	for pk, rc := range chunk.BufferedChanges {
-		if pk > cut {
+		if pk > cut.K {
 			rest.BufferedChanges[pk] = rc
 			delete(chunk.BufferedChanges, pk)
 		}
 	}
-	chunk.EndPK, chunk.IsTail = cut, false
-	chunk.EstimatedRows = SpanRows(chunk.StartPK, cut)
+	chunk.Hi, chunk.IsTail = cut, false
+	chunk.syncIntFields()
+	rest.syncIntFields()
+	if codecOrInt(tr.Codec).IsSingleInt() {
+		chunk.EstimatedRows = SpanRows(chunk.StartPK, chunk.EndPK)
+		rest.EstimatedRows = SpanRows(rest.StartPK, rest.EndPK)
+	}
 	tr.Chunks = append(tr.Chunks[:idx+1], append([]*Chunk{rest}, tr.Chunks[idx+1:]...)...)
 	return rest, nil
 }
@@ -490,7 +558,11 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 	if t, ok := m.tables[chunk.Table.String()]; ok && len(t.Reread) > 0 {
 		tr = t
 	}
-	skip := func(pk int64) bool {
+	codec := intCodec
+	if t, ok := m.tables[chunk.Table.String()]; ok {
+		codec = codecOrInt(t.Codec)
+	}
+	skip := func(pk Key) bool {
 		if tr == nil {
 			return false
 		}
@@ -498,11 +570,11 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 		return c != nil && c != chunk
 	}
 
-	mergedMap := make(map[int64]*model.RowChange)
+	mergedMap := make(map[Key]*model.RowChange)
 
 	// 1. Nạp snapshot rows
 	for _, row := range chunk.SnapshotRows {
-		pk, err := extractInt64PK(row.Key)
+		pk, err := codec.Encode(row.Key)
 		if err == nil && !skip(pk) {
 			mergedMap[pk] = row
 		}
@@ -528,7 +600,7 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 	}
 
 	// 3. Sắp xếp kết quả theo thứ tự PK
-	var keys []int64
+	var keys []Key
 	for k := range mergedMap {
 		keys = append(keys, k)
 	}
@@ -578,20 +650,20 @@ func fillUnchanged(rc, base *model.RowChange) *model.RowChange {
 
 // MarkDoneLocked đánh dấu hoàn thành cho chunk và chuyển sang StateDone trong khi đã giữ lock.
 func (m *RangeStateManager) MarkDoneLocked(chunk *Chunk) {
-	if chunk.Keys != nil {
+	if chunk.KeySet != nil {
 		// Chunk re-read xong: khóa của nó về lại range chính (đã "Xong"), trừ khóa đã được đánh dấu
 		// đọc lại lần nữa trong lúc chunk này đang đọc.
 		if tr, ok := m.tables[chunk.Table.String()]; ok {
-			for _, k := range chunk.Keys {
-				if tr.Reread[k] == chunk {
-					delete(tr.Reread, k)
+			for _, b := range chunk.KeySet {
+				if tr.Reread[b.K] == chunk {
+					delete(tr.Reread, b.K)
 				}
 			}
 		}
 	}
 	chunk.State = StateDone
 	chunk.SnapshotRows = nil
-	chunk.BufferedChanges = make(map[int64]*model.RowChange)
+	chunk.BufferedChanges = make(map[Key]*model.RowChange)
 }
 
 // MergeAndFlush thực hiện merge có thứ tự row snapshot với buffer theo PK (phiên bản thread-safe).

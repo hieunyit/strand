@@ -52,7 +52,7 @@ func (c *Chunker) PlanChunks(table model.TableID, pkCol string, minPK, maxPK int
 			EndPK:           end,
 			EstimatedRows:   SpanRows(curr, end),
 			State:           StatePending,
-			BufferedChanges: make(map[int64]*model.RowChange),
+			BufferedChanges: make(map[Key]*model.RowChange),
 		})
 		chunkID++
 		if end >= maxPK {
@@ -68,6 +68,11 @@ func (c *Chunker) PlanChunks(table model.TableID, pkCol string, minPK, maxPK int
 func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool) {
 	if minRows <= 0 {
 		minRows = 1
+	}
+	if !codecOrInt(chunk.codec).IsSingleInt() {
+		// Khóa tổng quát không có "điểm giữa" tính được trong Go: không chia đôi theo khóa (chunk của
+		// keyset walk đã giới hạn theo số row; byte được giới hạn bằng cắt chunk, xem ReadChunkAdaptive).
+		return nil, nil, false
 	}
 	if chunk.RowCount() <= minRows || chunk.EndPK <= chunk.StartPK {
 		return nil, nil, false
@@ -88,7 +93,7 @@ func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool)
 		State:           chunk.State,
 		LowWatermark:    chunk.LowWatermark,
 		HighWatermark:   chunk.HighWatermark,
-		BufferedChanges: make(map[int64]*model.RowChange),
+		BufferedChanges: make(map[Key]*model.RowChange),
 	}
 
 	right := &Chunk{
@@ -101,9 +106,12 @@ func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool)
 		State:           chunk.State,
 		LowWatermark:    chunk.LowWatermark,
 		HighWatermark:   chunk.HighWatermark,
-		BufferedChanges: make(map[int64]*model.RowChange),
+		BufferedChanges: make(map[Key]*model.RowChange),
 	}
 
+	left.codec, right.codec = chunk.codec, chunk.codec
+	left.fillFromIntFields()
+	right.fillFromIntFields()
 	c.splitCounter.Add(1)
 	return left, right, true
 }
@@ -120,7 +128,8 @@ type QueryChunkFunc func(ctx context.Context, chunk *Chunk, maxBytes int64) ([]*
 type ChunkRead struct {
 	Rows      []*model.RowChange
 	Bytes     int64
-	Cut       int64
+	Cut       Bound
+	CutPK     int64 // Cut của PK số nguyên (bản sao int64)
 	Truncated bool
 }
 
@@ -142,6 +151,7 @@ func (c *Chunker) ReadChunkAdaptive(
 	if opts.MaxChunkBytes <= 0 {
 		opts.MaxChunkBytes = 64 * 1024 * 1024
 	}
+	chunk.fillFromIntFields() // chunk dựng bằng API int64 (không qua range-state)
 	return c.readBounded(ctx, chunk, opts, queryFn, opts.MaxChunkBytes)
 }
 
@@ -168,25 +178,31 @@ func (c *Chunker) readBounded(ctx context.Context, chunk *Chunk, opts ChunkOptio
 					return l, nil
 				}
 				if l.Bytes >= budget {
-					return ChunkRead{Rows: l.Rows, Bytes: l.Bytes, Cut: left.EndPK, Truncated: true}, nil
+					return ChunkRead{Rows: l.Rows, Bytes: l.Bytes, Cut: left.Hi, CutPK: left.EndPK, Truncated: true}, nil
 				}
 				r, err := c.readBounded(ctx, right, opts, queryFn, budget-l.Bytes)
 				if err != nil {
 					return ChunkRead{}, err
 				}
-				return ChunkRead{Rows: append(l.Rows, r.Rows...), Bytes: l.Bytes + r.Bytes, Cut: r.Cut, Truncated: r.Truncated}, nil
+				return ChunkRead{Rows: append(l.Rows, r.Rows...), Bytes: l.Bytes + r.Bytes, Cut: r.Cut, CutPK: r.CutPK, Truncated: r.Truncated}, nil
 			}
 		}
 		return ChunkRead{}, fmt.Errorf("chunk read query failed (chunk [%d, %d]): %w", chunk.StartPK, chunk.EndPK, err)
 	}
-	out := ChunkRead{Rows: rows, Bytes: totalBytes, Cut: chunk.EndPK}
+	out := ChunkRead{Rows: rows, Bytes: totalBytes, Cut: chunk.Hi, CutPK: chunk.EndPK}
 	if budget > 0 && totalBytes >= budget && len(rows) > 0 {
-		last, err := extractInt64PK(rows[len(rows)-1].Key)
+		codec := codecOrInt(chunk.codec)
+		vals := rows[len(rows)-1].Key
+		k, err := codec.Encode(vals)
 		if err != nil {
-			return ChunkRead{}, fmt.Errorf("chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+			return ChunkRead{}, fmt.Errorf("chunk [%x, %x]: %w", chunk.Lo.K, chunk.Hi.K, err)
 		}
-		if last < chunk.EndPK {
-			out.Cut, out.Truncated = last, true
+		if k < chunk.Hi.K {
+			out.Cut, out.Truncated = Bound{K: k, V: append([]model.Value(nil), vals...)}, true
+			if codec.IsSingleInt() {
+				out.CutPK, _ = toInt64(vals[0])
+				out.Cut = IntBound(out.CutPK)
+			}
 		}
 	}
 	return out, nil

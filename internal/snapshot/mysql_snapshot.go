@@ -433,7 +433,7 @@ func (s *MySQLSnapshotter) FlushChunk(
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
-	if chunk.Keys != nil {
+	if chunk.KeySet != nil {
 		if s.FlushKeys == nil {
 			return fmt.Errorf("snapshot flush: re-read chunk of %s needs FlushKeys", table)
 		}
@@ -561,11 +561,11 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		chunks = nil
 		if doneEnd, ok := plan.FlushedEnd(); ok {
 			chunks = append(chunks, &Chunk{ID: 0, Table: table, PKCol: pkCol, StartPK: plan.MinPK,
-				EndPK: doneEnd, State: StateDone, BufferedChanges: map[int64]*model.RowChange{}})
+				EndPK: doneEnd, State: StateDone, BufferedChanges: map[Key]*model.RowChange{}})
 		}
 		if !plan.Finished && plan.NextPK <= plan.MaxPK {
 			chunks = append(chunks, &Chunk{ID: 1, Table: table, PKCol: pkCol, StartPK: plan.NextPK,
-				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[int64]*model.RowChange{}})
+				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[Key]*model.RowChange{}})
 		}
 		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
 		if len(plan.Reread) > 0 {
@@ -578,7 +578,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 	// Không tính EndPK+1 khi EndPK == MaxInt64 (tràn); Finished đánh dấu đã flush tới MaxPK.
 	savePlan := func(c *Chunk) error {
 		return s.updatePlan(table, func(p *SnapshotPlan) {
-			if c.Keys == nil {
+			if c.KeySet == nil {
 				if c.EndPK >= p.MaxPK {
 					p.Finished = true
 				}
@@ -618,7 +618,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		var err error
 		if s.Chunks != nil {
 			read, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdx, table)
-		} else if chunk.Keys != nil {
+		} else if chunk.KeySet != nil {
 			return nil, fmt.Errorf("snapshot %s: re-read chunks need a PostgreSQL chunk source", table)
 		} else {
 			// Watermark (RS-2): low → WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high, cùng server.
@@ -661,8 +661,8 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 		if err == nil {
 			err = savePlan(chunk)
 		}
-		if err == nil && chunk.Keys != nil {
-			s.RereadKeysTotal.Add(int64(len(chunk.Keys)))
+		if err == nil && chunk.KeySet != nil {
+			s.RereadKeysTotal.Add(int64(len(chunk.KeySet)))
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to flush chunk [%d, %d] to target: %w", chunk.StartPK, chunk.EndPK, err)

@@ -62,7 +62,7 @@ func (m *memChunkSource) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshott
 				Cols: []model.ColValue{{Name: "id", Value: k}}})
 		}
 	}
-	return snapshot.ChunkRead{Rows: rows, Cut: chunk.EndPK}, checkpoint.NewMySQLAppliedSet(), nil
+	return snapshot.ChunkRead{Rows: rows, Cut: chunk.Hi, CutPK: chunk.EndPK}, checkpoint.NewMySQLAppliedSet(), nil
 }
 
 func runMaxIntSnapshot(t *testing.T, keys []int64, plans map[string]snapshot.SnapshotPlan) (map[int64]bool, *memChunkSource) {

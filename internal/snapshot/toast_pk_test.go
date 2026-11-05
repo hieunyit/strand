@@ -141,7 +141,7 @@ func TestToastPK_NewKeyReading(t *testing.T) {
 	if !reread || actions(rs) != "Apply:delete[6] Discard:insert[160] " {
 		t.Fatalf("invisible txn: %s reread=%v", actions(rs), reread)
 	}
-	if _, ok := b.BufferedChanges[160]; ok {
+	if _, ok := b.BufferedChanges[snapshot.EncodeInt64(160)]; ok {
 		t.Fatal("buffered image of the re-read key must be dropped")
 	}
 	m.FinishReading(b, nil, []*model.RowChange{snapRow(150, "D150"), snapRow(160, "stale")})

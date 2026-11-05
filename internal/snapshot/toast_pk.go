@@ -79,12 +79,13 @@ func (m *RangeStateManager) HandleToastPKChangeXID(event *model.RowChange, pos m
 	if !ok {
 		return []StreamActionResult{{Action: ActionApply, Event: event}}, false
 	}
-	oldPK, err1 := extractInt64PK(event.OldKey)
-	newPK, err2 := extractInt64PK(event.Key)
+	oldPK, err1 := tr.encodeKey(event.OldKey)
+	newB, err2 := tr.keyBound(event.Key)
 	if err1 != nil || err2 != nil {
 		return []StreamActionResult{{Action: ActionReject, Event: event}}, false
 	}
-	oldC, newC := tr.FindChunk(oldPK), tr.FindChunk(newPK)
+	newPK := newB.K
+	oldC, newC := tr.FindChunkKey(oldPK), tr.FindChunkKey(newPK)
 	if isDoneChunk(oldC) && isDoneChunk(newC) {
 		// 1. Cả hai range đã flush: SQL điều kiện của writer, trong transaction của T.
 		return []StreamActionResult{{Action: ActionApply, Chunk: newC, Event: event}}, false
@@ -107,16 +108,17 @@ func (m *RangeStateManager) HandleToastPKChangeXID(event *model.RowChange, pos m
 		delete(newC.BufferedChanges, newPK)
 	default:
 		// 4. Đọc lại n.
-		m.markRereadLocked(tr, newPK, now)
+		m.markRereadLocked(tr, newB, now)
 		reread = true
 	}
 	return append(res, StreamActionResult{Action: ActionDiscard, Chunk: newC, Event: ups}), reread
 }
 
 // markRereadLocked đánh dấu khóa pk phải đọc lại (đã giữ m.mu).
-func (m *RangeStateManager) markRereadLocked(tr *TableRanges, pk int64, now time.Time) {
+func (m *RangeStateManager) markRereadLocked(tr *TableRanges, b Bound, now time.Time) {
+	pk := b.K
 	if tr.Reread == nil {
-		tr.Reread = map[int64]*Chunk{}
+		tr.Reread = map[Key]*Chunk{}
 	}
 	cur := tr.Reread[pk]
 	if cur != nil && cur.State == StatePending {
@@ -132,11 +134,12 @@ func (m *RangeStateManager) markRereadLocked(tr *TableRanges, pk int64, now time
 		delete(mc.BufferedChanges, pk)
 	}
 	if tr.rereadPending == nil {
-		tr.rereadPending = &Chunk{Table: tr.Table, PKCol: tr.PKCol, State: StatePending, Keys: []int64{},
-			BufferedChanges: map[int64]*model.RowChange{}, Since: now}
+		tr.rereadPending = &Chunk{Table: tr.Table, PKCol: tr.PKCol, State: StatePending, KeySet: []Bound{},
+			BufferedChanges: map[Key]*model.RowChange{}, Since: now, codec: tr.Codec}
 		tr.rereadSince = nil
 	}
-	tr.rereadPending.Keys = append(tr.rereadPending.Keys, pk)
+	tr.rereadPending.KeySet = append(tr.rereadPending.KeySet, b)
+	tr.rereadPending.syncIntFields()
 	tr.rereadSince = append(tr.rereadSince, now)
 	tr.Reread[pk] = tr.rereadPending
 }
@@ -162,28 +165,30 @@ func (m *RangeStateManager) TakeReread(table model.TableID, now time.Time, force
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	tr, ok := m.tables[table.String()]
-	if !ok || tr.rereadPending == nil || len(tr.rereadPending.Keys) == 0 {
+	if !ok || tr.rereadPending == nil || len(tr.rereadPending.KeySet) == 0 {
 		return nil
 	}
 	pc, limit := tr.rereadPending, m.maxPending()
-	if !force && len(pc.Keys) < limit && now.Sub(tr.rereadSince[0]) < m.maxWait() {
+	if !force && len(pc.KeySet) < limit && now.Sub(tr.rereadSince[0]) < m.maxWait() {
 		return nil
 	}
-	n := len(pc.Keys)
+	n := len(pc.KeySet)
 	if n > limit {
 		n = limit
 	}
-	keys := append([]int64(nil), pc.Keys[:n]...)
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	k := &Chunk{ID: -1, Table: tr.Table, PKCol: tr.PKCol, StartPK: keys[0], EndPK: keys[len(keys)-1],
-		State: StatePending, Keys: keys, Since: tr.rereadSince[0], BufferedChanges: map[int64]*model.RowChange{}}
+	keys := append([]Bound(nil), pc.KeySet[:n]...)
+	sort.Slice(keys, func(i, j int) bool { return keys[i].K < keys[j].K })
+	k := &Chunk{ID: -1, Table: tr.Table, PKCol: tr.PKCol, Lo: keys[0], Hi: keys[len(keys)-1],
+		State: StatePending, KeySet: keys, Since: tr.rereadSince[0], BufferedChanges: map[Key]*model.RowChange{}, codec: tr.Codec}
+	k.syncIntFields()
 	for _, key := range keys {
-		tr.Reread[key] = k
+		tr.Reread[key.K] = k
 	}
-	if n == len(pc.Keys) {
+	if n == len(pc.KeySet) {
 		tr.rereadPending, tr.rereadSince = nil, nil
 	} else {
-		pc.Keys = append([]int64(nil), pc.Keys[n:]...)
+		pc.KeySet = append([]Bound(nil), pc.KeySet[n:]...)
+		pc.syncIntFields()
 		tr.rereadSince = append([]time.Time(nil), tr.rereadSince[n:]...)
 		pc.Since = tr.rereadSince[0]
 	}
@@ -193,6 +198,15 @@ func (m *RangeStateManager) TakeReread(table model.TableID, now time.Time, force
 // AddReread nạp lại các khóa chờ đọc lại từ plan (restart). Khóa thuộc phần "Chưa đọc" của walk chính
 // bị bỏ qua: walk chính sẽ đọc chúng.
 func (m *RangeStateManager) AddReread(table model.TableID, keys []int64, now time.Time) {
+	b := make([]Bound, len(keys))
+	for i, k := range keys {
+		b[i] = IntBound(k)
+	}
+	m.AddRereadKeys(table, b, now)
+}
+
+// AddRereadKeys như AddReread với khóa tổng quát.
+func (m *RangeStateManager) AddRereadKeys(table model.TableID, keys []Bound, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	tr, ok := m.tables[table.String()]
@@ -200,32 +214,45 @@ func (m *RangeStateManager) AddReread(table model.TableID, keys []int64, now tim
 		return
 	}
 	for _, k := range keys {
-		if mc := tr.findMain(k); mc != nil && mc.State == StatePending {
+		if mc := tr.findMain(k.K); mc != nil && mc.State == StatePending {
 			continue
 		}
 		m.markRereadLocked(tr, k, now)
 	}
 }
 
-// RereadKeys trả (sắp tăng) mọi khóa của bảng còn chờ đọc lại hoặc đang đọc lại — tập phải lưu bền
-// trong plan.
+// RereadKeys trả khóa số nguyên đang chờ đọc lại (API số nguyên; xem RereadBounds).
 func (m *RangeStateManager) RereadKeys(table model.TableID) []int64 {
+	var out []int64
+	for _, b := range m.RereadBounds(table) {
+		if v, err := toInt64(b.V[0]); err == nil {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// RereadBounds trả các khóa đang chờ đọc lại, theo thứ tự khóa.
+func (m *RangeStateManager) RereadBounds(table model.TableID) []Bound {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	tr, ok := m.tables[table.String()]
 	if !ok || len(tr.Reread) == 0 {
 		return nil
 	}
-	out := make([]int64, 0, len(tr.Reread))
-	for k := range tr.Reread {
-		out = append(out, k)
+	out := make([]Bound, 0, len(tr.Reread))
+	for k, c := range tr.Reread {
+		for _, b := range c.KeySet {
+			if b.K == k {
+				out = append(out, b)
+				break
+			}
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	sort.Slice(out, func(i, j int) bool { return out[i].K < out[j].K })
 	return out
 }
 
-// PendingCrossRange trả số thao tác xuyên range đang chờ (khóa chờ/đang đọc lại, mọi bảng) và tuổi của
-// thao tác chờ lâu nhất (metric strand_pending_cross_range, strand_pending_cross_range_oldest_seconds).
 func (m *RangeStateManager) PendingCrossRange(now time.Time) (int, time.Duration) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -110,7 +110,14 @@ type Chunk struct {
 	LowSnapshot *PGSnapshot
 
 	SnapshotRows    []*model.RowChange
-	BufferedChanges map[int64]*model.RowChange // PK -> last image / tombstone
+	BufferedChanges map[Key]*model.RowChange // khóa mã hóa -> ảnh cuối / tombstone
+
+	// Lo/Hi: range khóa của chunk chính (việc C, keyspace.go) — biểu diễn CHUẨN mà range-state dùng.
+	// StartPK/EndPK/Keys ở trên chỉ là bản sao cho PK một cột số nguyên (log, test cũ).
+	Lo, Hi Bound
+	// KeySet: tập khóa của chunk re-read (song song Keys).
+	KeySet []Bound
+	codec  *PKCodec // codec PK của bảng (nil = số nguyên)
 
 	// Keys khác nil: chunk "đọc lại" (re-read) một TẬP khóa rời rạc thay vì đoạn [StartPK, EndPK]
 	// (StartPK/EndPK khi đó chỉ là min/max để ghi log). Dùng cho UPDATE đổi PK mà cột TOAST không
@@ -129,6 +136,13 @@ type Chunk struct {
 func (c *Chunk) RowCount() int64 {
 	if c.IsTail {
 		return 1
+	}
+	if !codecOrInt(c.codec).IsSingleInt() {
+		// Khóa tổng quát: không suy ra số khóa từ cận; dùng ước lượng (keyset walk theo số row).
+		if c.EstimatedRows > 0 {
+			return c.EstimatedRows
+		}
+		return math.MaxInt64
 	}
 	return SpanRows(c.StartPK, c.EndPK)
 }

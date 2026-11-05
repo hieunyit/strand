@@ -87,9 +87,9 @@ func TestR10_PGTruncatedChunkCoversItsWholeRange(t *testing.T) {
 	for _, r := range read.Rows {
 		got[r.Key[0].(int64)] = true
 	}
-	for k := int64(1); k <= read.Cut; k++ {
+	for k := int64(1); k <= read.CutPK; k++ {
 		if !got[k] {
-			t.Fatalf("truncated read cut at %d but key %d of [1,%d] was not read (rows %v)", read.Cut, k, read.Cut, got)
+			t.Fatalf("truncated read cut at %d but key %d of [1,%d] was not read (rows %v)", read.CutPK, k, read.CutPK, got)
 		}
 	}
 }

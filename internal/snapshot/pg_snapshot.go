@@ -265,7 +265,7 @@ func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chun
 	}
 	pk := quotePGIdent(columnNames[pkIdx])
 	var read ChunkRead
-	if chunk.Keys != nil {
+	if chunk.KeySet != nil {
 		// Chunk re-read (02 §8, toast_pk.go): tập khóa rời rạc, tra theo index PK (≤ max_pending_cross_range
 		// khóa) nên không cần chia đôi theo timeout hay cắt theo byte.
 		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE t.%s = ANY($1::bigint[]) ORDER BY t.%s",
