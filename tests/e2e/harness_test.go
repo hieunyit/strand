@@ -230,6 +230,15 @@ type strandCfg struct {
 	SourceKind  string
 	TargetKind  string
 	SourceExtra string
+	// ChunkRows: bootstrap.logical.chunk_rows (rỗng = auto).
+	ChunkRows string
+}
+
+func (c *strandCfg) chunkRows() string {
+	if c.ChunkRows == "" {
+		return "auto"
+	}
+	return c.ChunkRows
 }
 
 func (c *strandCfg) write(t *testing.T) string {
@@ -293,7 +302,7 @@ target:
 tables:
   include: %s
   exclude: %s
-bootstrap: { default: %s, create_schema: %s }
+bootstrap: { default: %s, create_schema: %s, logical: { chunk_rows: %s } }
 checkpoint: { store: target, flush_every: 200ms }
 resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB, overflow: %q }
@@ -303,7 +312,7 @@ governor: { algorithm: onoff, tick: 1s, lag_slo: %s, breaker: { strand_query_p99
 verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, c.CreateSchema, filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
+		c.Bootstrap, c.CreateSchema, c.chunkRows(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)

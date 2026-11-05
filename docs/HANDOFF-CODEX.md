@@ -153,7 +153,29 @@ Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", gh
 - Gợi ý package mới `internal/schemagen` (3 hàm `MySQLToMySQL`, `MySQLToPG`, `PGToPG` trả `[]string` câu DDL + cảnh báo), dùng chung cho `strand sync` và lệnh `strand schema init` (file mới `cmd/strand/schema.go`, đăng ký trong `root.go`).
 - Chỗ khác cần gọi: `handleDDL` (`internal/pipeline/ddl.go`) — với bảng trong `newCreated` khi auto: tạo ở target trước bước `schemaDiff`; và đường `strand snapshot add` / thêm bảng do đổi `tables.include` (đi qua `pending` lúc restart nên đã được phủ).
 
-### C. Snapshot logic cho PK không phải một cột số nguyên  ⬜ chưa bắt đầu (người dùng đã duyệt)
+### C. Snapshot logic cho PK không phải một cột số nguyên  🟡 mức 1 xong trên `agent/generic-pk-v2` (Claude, 2026-11-05)
+
+**Đã làm (mức 1, nhánh `agent/generic-pk-v2`, tách từ `agent/review-deep`):**
+- `internal/snapshot/pkey.go`: codec tuple PK → byte memcomparable; bảng kiểu được nhận + lý do đúng thứ tự ở đầu file. Thứ tự đã đối chiếu với ORDER BY thật (MySQL 8.4: 13 dạng / 3.805 khóa, kèm mã từ binlog == mã từ SELECT; PG 18: 10 dạng / 3.562 khóa).
+- Range-state chạy trên `Bound` (khóa mã hóa + giá trị gốc để bind; cận dưới có thể loại trừ) — `keyspace.go`; API int64 cũ giữ làm lớp mỏng, mọi test cũ chạy nguyên.
+- SQL theo tuple: MySQL `keysql.go` (bind theo kiểu: int64/uint64, `CAST(? AS DECIMAL(p,s))`, string cho chuỗi có collation, `[]byte` cho nhị phân), PG `keysql_pg.go` (`$n::kiểu`, ORDER BY cột của bảng).
+- Plan khóa tổng quát (`GenericKey`, `MinKey/MaxKey/LastKey`, `RereadKeyVals`), resume, xóa phần chưa đọc theo tuple; đọc lại khóa (P2-03) với khóa tổng quát.
+- Cổng pipeline `checkSnapshotKey`: cùng engine cần cùng thứ tự khóa (`SameOrder`); MySQL→PG chỉ lớp thứ tự độc lập engine (số, thời gian, VARBINARY↔bytea; chuỗi bị từ chối).
+- `verify --mode full` theo tuple (`merkle_keys.go`).
+- Lỗi có sẵn được sửa trên đường đi: PK `BIGINT UNSIGNED` > MaxInt64 (biên lỗi), `bootstrap.logical.chunk_rows` bị bỏ qua, `ORDER BY pk` trỏ vào cột `pk::text` ở PG (mất row khi cắt chunk — `9f614ab` trên review-deep).
+- Test: `TestGPK_*` (snapshot, pipeline, verify), e2e `TestC_E2E_GenericPKSnapshotUnderLoad` (binary thật, schema-init, ~9.000 ghi đồng thời, verify full 0 lệch: relaxed 1/1, strict 2/2 — cần chạy ≥3 mỗi chế độ trên máy rảnh).
+
+**Còn thiếu (theo thứ tự nên làm):**
+1. Live verify (sample / delta / sau seed) cho PK tổng quát — hiện `verify skipped` cảnh báo; `--repair fix` và `--resume` của full verify từ chối rõ cho bảng PK tổng quát.
+2. E2e: kill -9 + snapshot add với PK tổng quát (bước xóa phần chưa đọc chỉ được kiểm gián tiếp); PG→PG / MySQL→PG bằng binary thật (đã có test mức pipeline `TestGPK_PGToPG…`, `TestGPK_MySQLToPG…`).
+3. PG text không COLLATE (`collname = default`): đang từ chối như mức 3; nếu `datcollate` của DB là C/POSIX thì nhận được.
+4. Chia đôi theo timeout chỉ có cho khóa số nguyên (khóa tổng quát dựa vào giới hạn số row + cắt theo byte).
+5. Mức 2 (`WEIGHT_STRING` cho collation không nhị phân) và câu hỏi mở mức 3 — chưa làm.
+6. Chi phí định tuyến: 1,84 µs/event (trước 1,52 µs) cho bảng đang snapshot — `BenchmarkHandleStreamEventIntPK`.
+
+---
+
+**Spec gốc của việc C (giữ để đối chiếu):**
 
 **Hiện trạng:** chunk là khoảng `int64` `[StartPK, EndPK]`; `range_state` giữ `BufferedChanges map[int64]…`; event stream được gán chunk bằng so sánh int64 trong Go. Bảng có PK không phải một cột số nguyên bị từ chối nếu có dữ liệu (`internal/pipeline/pipeline.go` quanh dòng 423–453: "needs a logical snapshot but its primary key is not a single integer column"), chỉ nhận khi rỗng. Merkle (`internal/verify/merkle.go` ~629) và verify sau seed/sample/delta (`internal/verify/live.go`, `internal/pipeline/verify.go` ~121) cũng chỉ hỗ trợ PK số nguyên. Snapshot PG (`internal/snapshot/pg_snapshot.go`, `pg_watermark.go`) dùng cùng khoảng int64.
 
