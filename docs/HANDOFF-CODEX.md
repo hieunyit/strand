@@ -176,7 +176,7 @@ Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", gh
 2. `verify --resume` cho PK tổng quát (bảng tiến độ lưu biên BIGINT) — đang từ chối.
 3. Repair PG→PG cho PK tổng quát — đang từ chối.
 4. Chia đôi theo timeout chỉ có cho khóa số nguyên.
-5. Mức 3 (PG ICU/libc khác C): vẫn từ chối; câu hỏi mở chưa viết.
+5. Mức 3 (PG ICU/libc khác C): vẫn từ chối; câu hỏi mở `questions/OPEN-generic-pk-pg-collation.md` (đề xuất: chunk theo `COLLATE "C"` + index biểu thức do DBA tạo, chờ owner).
 6. Chạy mỗi e2e việc C ≥3 lần mỗi chế độ trên máy rảnh.
 
 **Spec gốc của việc C (giữ để đối chiếu):**
