@@ -284,6 +284,10 @@ func TestNewKeys_ParseFromYAML(t *testing.T) {
 		"resources.target.iops (target writes are not paced)",
 		"resources.spool.soft (only spool.hard is used, as a hard-signal threshold)",
 		"resources.workers.min (adaptive worker count; workers.max is used)",
+		"bootstrap.catch_up.binlog_archive (use strand seed apply --archive)",
+		"bootstrap.logical.max_parallel",
+		"schema.additive=auto (DDL is never applied; the pipeline stops with schema_change_pending)",
+		"verify.full (no scheduled full verify; run strand verify --mode full)",
 		`bootstrap.per_table."app.orders".seed.credentials`,
 		`bootstrap.per_table."app.orders".seed.encryption_key`,
 		`bootstrap.per_table."app.orders".seed.load`,
@@ -307,9 +311,61 @@ func TestUnimplementedKeys_SpecExampleWarnsEveryUnenforcedLimit(t *testing.T) {
 		"resources.target.iops (target writes are not paced)",
 		"resources.spool.soft (only spool.hard is used, as a hard-signal threshold)",
 		"resources.workers.min (adaptive worker count; workers.max is used)",
+		"source.read_from=replica (point the source connection at the replica)",
+		"bootstrap.catch_up.binlog_archive (use strand seed apply --archive)",
+		"bootstrap.logical.max_parallel",
+		"schema.additive=auto (DDL is never applied; the pipeline stops with schema_change_pending)",
+		"verify.full (no scheduled full verify; run strand verify --mode full)",
 	})
 	if got != want {
 		t.Errorf("unimplemented keys for 02 §10 example:\n %s\nwant\n %s", got, want)
+	}
+}
+
+// Khóa được parse mà runtime không đọc: cảnh báo khi giá trị khác hành vi thật, im lặng khi giá trị
+// đúng là điều Strand làm (schema pause, checkpoint ở target, đọc primary).
+func TestUnimplementedKeys_AcceptedButIgnoredKeys(t *testing.T) {
+	// Cấu hình nền không sinh cảnh báo nào; srcExtra thêm trường vào source, extra thêm khối cấp đầu.
+	base := func(srcExtra, extra string) string {
+		return `version: 1
+name: warn-test
+source: { kind: mysql, dsn: "root@tcp(127.0.0.1:3306)/db"` + srcExtra + ` }
+target: { kind: mysql, dsn: "root@tcp(127.0.0.1:3307)/db" }
+tables: { include: ["app.orders"] }
+resources: { spool: { path: /var/lib/strand/a } }
+` + extra
+	}
+	cases := []struct {
+		name, srcExtra, extra, want string // want rỗng: không có cảnh báo
+	}{
+		{"none", "", "", ""},
+		{"read_from replica", ", read_from: replica", "", "source.read_from=replica"},
+		{"read_from primary", ", read_from: primary", "", ""},
+		{"binlog_archive", "", "bootstrap: { catch_up: { binlog_archive: /arch } }\n", "bootstrap.catch_up.binlog_archive"},
+		{"max_parallel", "", "bootstrap: { logical: { max_parallel: 4 } }\n", "bootstrap.logical.max_parallel"},
+		{"additive auto", "", "schema: { additive: auto }\n", "schema.additive=auto"},
+		{"additive pause", "", "schema: { additive: pause }\n", ""},
+		{"destructive approve", "", "schema: { destructive: approve }\n", "schema.destructive=approve"},
+		{"destructive pause", "", "schema: { destructive: pause }\n", ""},
+		{"store other", "", "checkpoint: { store: etcd }\n", "checkpoint.store=etcd"},
+		{"store target", "", "checkpoint: { store: target }\n", ""},
+		{"metrics_source", "", "governor: { metrics_source: { kind: prometheus, url: \"http://p:9090\" } }\n", "governor.metrics_source"},
+		{"verify.full cron", "", "verify: { full: { cron: \"0 2 * * 0\" } }\n", "verify.full"},
+		{"verify.full rate", "", "verify: { full: { rate: 10MiB } }\n", "verify.full"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mustLoad(t, base(tc.srcExtra, tc.extra)).UnimplementedKeys()
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("unexpected warnings %v", got)
+				}
+				return
+			}
+			if len(got) != 1 || !strings.HasPrefix(got[0], tc.want) {
+				t.Fatalf("warnings = %v, want one starting with %q", got, tc.want)
+			}
+		})
 	}
 }
 

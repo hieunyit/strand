@@ -406,13 +406,14 @@ Biến môi trường:
 - `resources.workers.min` khi khác `workers.max` (số worker cố định)
 - `bootstrap.per_table.<t>.seed.{credentials, encryption_key, load, verify_after}`
 
-**Không có cảnh báo** (đặt vào không đổi hành vi):
-
-- `source.read_from` với `primary`/`replica`: muốn đọc replica thì trỏ kết nối vào replica.
-- `schema.additive`, `schema.destructive`
+- `source.read_from=replica`: muốn đọc replica thì trỏ kết nối vào replica.
+- `schema.additive=auto`, `schema.destructive=approve`: DDL không bao giờ được áp tự động; pipeline dừng exit 10.
+- `checkpoint.store` khác `target`: checkpoint luôn nằm ở target.
 - `governor.metrics_source`
 - `verify.full.cron`, `verify.full.rate`: không có verify full theo lịch; chạy `strand verify --mode full` bằng cron ngoài.
-- `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive` (dùng `seed apply --archive`), `checkpoint.store` (checkpoint luôn ở target).
+- `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive` (dùng `seed apply --archive`).
+
+Không cảnh báo khi giá trị đúng là hành vi thật: `read_from: primary`, `schema.additive: pause`, `schema.destructive: pause`, `checkpoint.store: target`.
 
 ### 6.4 Ví dụ
 

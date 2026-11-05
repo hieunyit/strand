@@ -176,7 +176,7 @@ Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", gh
 2. `verify --resume` cho PK tổng quát (bảng tiến độ lưu biên BIGINT) — đang từ chối.
 3. Repair PG→PG cho PK tổng quát — đang từ chối.
 4. Chia đôi theo timeout chỉ có cho khóa số nguyên.
-5. Mức 3 (PG ICU/libc khác C): vẫn từ chối; câu hỏi mở `questions/OPEN-generic-pk-pg-collation.md` (đề xuất: chunk theo `COLLATE "C"` + index biểu thức do DBA tạo, chờ owner).
+5. Mức 3 (PG ICU/libc khác C): vẫn từ chối; câu hỏi mở `questions/OPEN-generic-pk-pg-collation.md` — **owner chốt giữ từ chối (hướng 1)**, việc C mức 3 đóng.
 6. Chạy mỗi e2e việc C ≥3 lần mỗi chế độ trên máy rảnh.
 
 **Spec gốc của việc C (giữ để đối chiếu):**
@@ -197,7 +197,7 @@ Phạm vi (người dùng đã duyệt mức 1–2, mức 3 để mở):
 
 ### D. Viết lại `docs/USAGE.md` đầy đủ  ✅ viết lại (Claude, 2026-11-05, nhánh `agent/generic-pk-v2`)
 
-Đủ 10 mục theo cấu trúc dưới; mọi khóa/cờ đối chiếu với code và `--help`. Sai lệch của bản cũ đã sửa: mặc định `commit_order` là **strict** (code: trống → strict; bản cũ ghi relaxed); `grace-v2` đã chạy thật (bản cũ ghi lùi về onoff); `throttle set` luôn đổi soft; kết nối tách trường chỉ cho MySQL (PG chỉ `dsn`); `validate` không kiểm quyền (spec 03 §2 nói có `insufficient_privilege` — mã lỗi có nhưng không có chỗ nào trả). Khóa không tác dụng mà **không** cảnh báo vẫn còn: `source.read_from` (primary/replica), `schema.*`, `governor.metrics_source`, `verify.full.*`, `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive`, `checkpoint.store` — nên thêm vào `UnimplementedKeys`.
+Đủ 10 mục theo cấu trúc dưới; mọi khóa/cờ đối chiếu với code và `--help`. Sai lệch của bản cũ đã sửa: mặc định `commit_order` là **strict** (code: trống → strict; bản cũ ghi relaxed); `grace-v2` đã chạy thật (bản cũ ghi lùi về onoff); `throttle set` luôn đổi soft; kết nối tách trường chỉ cho MySQL (PG chỉ `dsn`); `validate` không kiểm quyền (spec 03 §2 nói có `insufficient_privilege` — mã lỗi có nhưng không có chỗ nào trả). Các khóa không tác dụng còn lại (`source.read_from=replica`, `schema.additive=auto`/`destructive=approve`, `governor.metrics_source`, `verify.full.*`, `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive`, `checkpoint.store`≠target) nay có cảnh báo (`TestUnimplementedKeys_AcceptedButIgnoredKeys`).
 
 
 Người dùng phàn nàn: (1) không hiểu tại sao "phải cho table vào mà không đồng bộ full cả db" — tài liệu không nói `tables.include` là glob (`app.*` = cả database, `*.*` = mọi schema người dùng; schema hệ thống tự bỏ: MySQL `mysql/sys/information_schema/performance_schema` — `internal/pipeline/schema.go` `loadSourceTables`; PG `pg_catalog/information_schema/pg_*` — `internal/pipeline/engine.go` ~132); (2) tài liệu chưa đầy đủ (tiêu đề còn "P1 / Gate 1", P2 bị nhét vào một mục).

@@ -1,6 +1,8 @@
 # Snapshot logic cho PK chuỗi PostgreSQL có collation khác "C" (việc C, mức 3)
 
-Phạm vi việc C, 2026-11-05. Không sửa spec. Chưa có quyết định của owner.
+Phạm vi việc C, 2026-11-05. Không sửa spec.
+
+**Đã chốt (owner, 2026-11-05): hướng 1 — giữ từ chối.** Bảng có PK chuỗi PG collation khác C dùng seed (pgBackRest, WAL-G, `strand export`), `--start-at`, hoặc đổi cột khóa sang `COLLATE "C"`. Hướng 2 và 3 ghi lại dưới đây để tham khảo nếu nhu cầu thay đổi.
 
 ## Hiện trạng
 
