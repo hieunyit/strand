@@ -48,15 +48,15 @@ import (
 type PKKind int
 
 const (
-	PKInt      PKKind = iota + 1 // số nguyên có dấu (kể cả YEAR)
-	PKUint                       // số nguyên không dấu
-	PKDecimal                    // DECIMAL / NUMERIC
-	PKDateTime                   // DATE, DATETIME, TIMESTAMP (MySQL chuỗi; PG time.Time)
-	PKTime                       // MySQL TIME
-	PKBytes                      // so byte không đệm
-	PKPadBytes                   // MySQL PAD SPACE nhị phân
-	PKTrimBytes                  // PG bpchar "C"
-	PKUUID                       // PG uuid
+	PKInt       PKKind = iota + 1 // số nguyên có dấu (kể cả YEAR)
+	PKUint                        // số nguyên không dấu
+	PKDecimal                     // DECIMAL / NUMERIC
+	PKDateTime                    // DATE, DATETIME, TIMESTAMP (MySQL chuỗi; PG time.Time)
+	PKTime                        // MySQL TIME
+	PKBytes                       // so byte không đệm
+	PKPadBytes                    // MySQL PAD SPACE nhị phân
+	PKTrimBytes                   // PG bpchar "C"
+	PKUUID                        // PG uuid
 )
 
 func (k PKKind) String() string {

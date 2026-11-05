@@ -34,7 +34,9 @@ func mysqlString(r *rand.Rand, alphabet []rune, maxLen int) string {
 	return b.String()
 }
 
-func sqlQuote(s string) string { return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''") + "'" }
+func sqlQuote(s string) string {
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''") + "'"
+}
 
 func mysqlPKCases() []pkCase {
 	uni := []rune("aAbBzZ09 -_.~éÉèñßÆøĐđ中文😀 ")
