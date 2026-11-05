@@ -147,41 +147,12 @@ func (p *Pipeline) checkSnapshotKey(ctx context.Context, id model.TableID, m *ta
 	if p.srcEngine == p.dstEngine {
 		err = m.PKCodec.SameOrder(dc)
 	} else {
-		err = crossEngineSameOrder(m.PKCodec, dc)
+		err = snapshot.CrossEngineSameOrder(m.PKCodec, dc)
 	}
 	if err != nil {
 		return reject(fmt.Sprintf("target table %s orders its primary key differently from the source: %v", tgt, err))
 	}
 	m.TargetPKCodec = dc
-	return nil
-}
-
-// crossEngineSameOrder: MySQL→PG — từng cột PK cùng lớp thứ tự (xem checkSnapshotKey).
-func crossEngineSameOrder(src, dst *snapshot.PKCodec) error {
-	class := func(k snapshot.PKKind) string {
-		switch k {
-		case snapshot.PKInt, snapshot.PKUint, snapshot.PKDecimal:
-			return "number"
-		case snapshot.PKDateTime:
-			return "datetime"
-		case snapshot.PKBytes:
-			return "bytes"
-		}
-		return ""
-	}
-	if len(src.Cols) != len(dst.Cols) {
-		return fmt.Errorf("primary key has %d columns on the source and %d on the target", len(src.Cols), len(dst.Cols))
-	}
-	for i := range src.Cols {
-		a, b := src.Cols[i], dst.Cols[i]
-		ca := class(a.Kind)
-		if a.Kind == snapshot.PKBytes && a.Collation != "" {
-			ca = "" // chuỗi có collation (kể cả _0900_bin): không đối chiếu với text "C" của PG
-		}
-		if a.Name != b.Name || ca == "" || ca != class(b.Kind) {
-			return fmt.Errorf("primary key column %s (%s → %s %s) has no engine-independent order", a.Name, a.Kind, b.Kind, b.SQLType)
-		}
-	}
 	return nil
 }
 

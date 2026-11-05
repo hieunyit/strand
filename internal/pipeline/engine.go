@@ -994,27 +994,7 @@ func snapshotPK(key []model.Value) (int64, error) {
 	return 0, fmt.Errorf("unsupported key type %T", key[0])
 }
 
-// pgPKCodec dựng codec PK (snapshot.PGPKColumn) từ catalog: kiểu gốc (typname, qua domain) và collation.
+// pgPKCodec: xem snapshot.PGPKCodec.
 func pgPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (*snapshot.PKCodec, error) {
-	c := &snapshot.PKCodec{}
-	for _, col := range pk {
-		var typ, coll string
-		err := db.QueryRowContext(ctx, `
-			SELECT COALESCE(bt.typname, ty.typname), COALESCE(co.collname, '')
-			  FROM pg_attribute a
-			  JOIN pg_class cl ON cl.oid = a.attrelid JOIN pg_namespace n ON n.oid = cl.relnamespace
-			  JOIN pg_type ty ON ty.oid = a.atttypid
-			  LEFT JOIN pg_type bt ON ty.typtype = 'd' AND bt.oid = ty.typbasetype
-			  LEFT JOIN pg_collation co ON co.oid = a.attcollation
-			 WHERE n.nspname = $1 AND cl.relname = $2 AND a.attname = $3`, id.Schema, id.Table, col).Scan(&typ, &coll)
-		if err != nil {
-			return nil, fmt.Errorf("read primary key column %s.%s: %w", id, col, err)
-		}
-		pc, err := snapshot.PGPKColumn(col, typ, coll)
-		if err != nil {
-			return nil, err
-		}
-		c.Cols = append(c.Cols, pc)
-	}
-	return c, nil
+	return snapshot.PGPKCodec(ctx, db, id, pk)
 }

@@ -218,6 +218,27 @@ func schemaOrDefault(ctx context.Context, db *sql.DB, engine model.Engine, t mod
 
 // FindSinglePKColumn trả tên cột PK khi PK có đúng một cột.
 func FindSinglePKColumn(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID) (string, error) {
+	cols, err := FindPKColumns(ctx, db, engine, t)
+	if err != nil {
+		return "", err
+	}
+	if len(cols) != 1 {
+		return "", fmt.Errorf("table %s has %d primary key columns, need exactly 1", t, len(cols))
+	}
+	return cols[0], nil
+}
+
+// IsIntegerPK: cột pk của bảng là kiểu số nguyên (đường full verify int64).
+func IsIntegerPK(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID, pk string) (bool, error) {
+	cols, err := GetTableColumns(ctx, db, engine, t, pk)
+	if err != nil {
+		return false, err
+	}
+	return isIntegerType(engine, cols[0].DataType), nil
+}
+
+// FindPKColumns trả các cột PK theo thứ tự PK.
+func FindPKColumns(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID) ([]string, error) {
 	schema := schemaOrDefault(ctx, db, engine, t)
 	var q string
 	if engine == model.EnginePG {
@@ -235,24 +256,24 @@ func FindSinglePKColumn(ctx context.Context, db *sql.DB, engine model.Engine, t 
 	}
 	rows, err := db.QueryContext(ctx, q, schema, t.Table)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer rows.Close()
 	var cols []string
 	for rows.Next() {
 		var c string
 		if err := rows.Scan(&c); err != nil {
-			return "", err
+			return nil, err
 		}
 		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(cols) != 1 {
-		return "", fmt.Errorf("table %s has %d primary key columns, need exactly 1", t, len(cols))
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("table %s has no primary key", t)
 	}
-	return cols[0], nil
+	return cols, nil
 }
 
 // EnsureVerifyTable tạo _strand_verify (tiến độ full verify) trên target; gọi lại nhiều lần không lỗi.

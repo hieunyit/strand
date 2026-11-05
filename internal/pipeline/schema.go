@@ -212,24 +212,7 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 	return out, nil
 }
 
-// mysqlPKCodec dựng codec PK (snapshot.MySQLPKColumn) từ information_schema của bảng.
+// mysqlPKCodec: xem snapshot.MySQLPKCodec.
 func mysqlPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (*snapshot.PKCodec, error) {
-	c := &snapshot.PKCodec{}
-	for _, col := range pk {
-		var dt, ct string
-		var cs, coll, pad sql.NullString
-		err := db.QueryRowContext(ctx, `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME, co.PAD_ATTRIBUTE
-			FROM information_schema.COLUMNS c LEFT JOIN information_schema.COLLATIONS co ON co.COLLATION_NAME = c.COLLATION_NAME
-			WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`, id.Schema, id.Table, col).Scan(&dt, &ct, &cs, &coll, &pad)
-		if err != nil {
-			return nil, fmt.Errorf("read primary key column %s.%s: %w", id, col, err)
-		}
-		pc, err := snapshot.MySQLPKColumn(col, dt, ct, cs.String, coll.String, pad.String)
-		if err != nil {
-			return nil, err
-		}
-		pc.Collation = coll.String
-		c.Cols = append(c.Cols, pc)
-	}
-	return c, nil
+	return snapshot.MySQLPKCodec(ctx, db, id, pk)
 }

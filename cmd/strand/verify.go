@@ -20,6 +20,7 @@ import (
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/snapshot"
 	"strand/internal/verify"
 )
 
@@ -135,10 +136,36 @@ func newVerifyCmd() *cobra.Command {
 				}
 				var bad []string
 				for _, id := range ids {
-					pk, err := verify.FindSinglePKColumn(cmd.Context(), src, srcEngine, id)
+					pkCols, err := verify.FindPKColumns(cmd.Context(), src, srcEngine, id)
 					if err != nil {
-						return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a single-column primary key: "+err.Error(), err)
+						return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a primary key: "+err.Error(), err)
 					}
+					intPK := false
+					if len(pkCols) == 1 {
+						if intPK, err = verify.IsIntegerPK(cmd.Context(), src, srcEngine, id, pkCols[0]); err != nil {
+							return err
+						}
+					}
+					if !intPK {
+						// Việc C: PK nhiều cột / không phải số nguyên — full verify theo tuple.
+						rep, err := verifyFullKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, fullRate)
+						if err != nil {
+							return err
+						}
+						fmt.Printf("verify %s (full, key %s): %d chunks, %d mismatched chunks, %d rows compared, %d mismatches\n",
+							id, strings.Join(pkCols, ","), rep.TotalChunks, rep.MismatchedChunks, rep.RowsChecked, len(rep.Mismatches))
+						if len(rep.Mismatches) == 0 {
+							continue
+						}
+						if repair == "fix" {
+							return exitcode.New("invalid_repair", exitcode.InvalidSyntax,
+								fmt.Sprintf("--repair fix is not supported yet for %s (primary key %s is not a single integer column); %d mismatched rows",
+									id, strings.Join(pkCols, ","), len(rep.Mismatches)), nil)
+						}
+						bad = append(bad, fmt.Sprintf("%d mismatched rows in %s (key %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), "; ")))
+						continue
+					}
+					pk := pkCols[0]
 					var lv *verify.LiveVerifier
 					if srcEngine == model.EngineMySQL && dstEngine == model.EngineMySQL {
 						// Chạy độc lập, không có pipeline ghi _strand_checkpoint: không chờ target apply.
@@ -241,6 +268,41 @@ func firstN(xs []string, n int) []string {
 		return xs[:n]
 	}
 	return xs
+}
+
+// verifyFullKeys: full verify theo tuple PK (việc C) sau khi kiểm hai phía cùng thứ tự khóa.
+func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
+	pkCols []string, rate float64) (*verify.FullVerifyReport, error) {
+	ctx := cmd.Context()
+	codecOf := func(db *sql.DB, engine model.Engine, t model.TableID) (*snapshot.PKCodec, error) {
+		if engine == model.EnginePG {
+			return snapshot.PGPKCodec(ctx, db, t, pkCols)
+		}
+		return snapshot.MySQLPKCodec(ctx, db, t, pkCols)
+	}
+	reject := func(why string) error {
+		return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, fmt.Sprintf("full verify of %s: %s", id, why), nil)
+	}
+	sc, err := codecOf(src, srcEngine, id)
+	if err != nil {
+		return nil, reject(err.Error())
+	}
+	dc, err := codecOf(dst, dstEngine, dstID)
+	if err != nil {
+		return nil, reject(err.Error())
+	}
+	if srcEngine == dstEngine {
+		err = sc.SameOrder(dc)
+	} else {
+		err = snapshot.CrossEngineSameOrder(sc, dc)
+	}
+	if err != nil {
+		return nil, reject("source and target order the primary key differently: " + err.Error())
+	}
+	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst,
+		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
+		ChunkRows: verify.DefaultChunkRows, Rate: rate})
+	return mv.VerifyTableFullKeys(ctx, id, sc, dc)
 }
 
 // lockPipelineForRepair lấy khóa advisory của pipeline trên target (cùng khóa `strand sync` giữ).

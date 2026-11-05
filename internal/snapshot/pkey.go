@@ -599,3 +599,34 @@ func timeMicros(s string) (int64, error) {
 	}
 	return t, nil
 }
+
+// CrossEngineSameOrder (MySQL→PG): từng cột PK thuộc cùng lớp thứ tự độc lập engine — số (INT/UNSIGNED/
+// DECIMAL ↔ int/numeric), thời gian, VARBINARY ↔ bytea. Chuỗi có collation không được nhận (PAD SPACE /
+// collation MySQL khác "C" của PG).
+func CrossEngineSameOrder(src, dst *PKCodec) error {
+	class := func(k PKKind) string {
+		switch k {
+		case PKInt, PKUint, PKDecimal:
+			return "number"
+		case PKDateTime:
+			return "datetime"
+		case PKBytes:
+			return "bytes"
+		}
+		return ""
+	}
+	if len(src.Cols) != len(dst.Cols) {
+		return fmt.Errorf("primary key has %d columns on the source and %d on the target", len(src.Cols), len(dst.Cols))
+	}
+	for i := range src.Cols {
+		a, b := src.Cols[i], dst.Cols[i]
+		ca := class(a.Kind)
+		if a.Kind == PKBytes && a.Collation != "" {
+			ca = "" // chuỗi có collation (kể cả _0900_bin): không đối chiếu với text "C" của PG
+		}
+		if a.Name != b.Name || ca == "" || ca != class(b.Kind) {
+			return fmt.Errorf("primary key column %s (%s → %s %s) has no engine-independent order", a.Name, a.Kind, b.Kind, b.SQLType)
+		}
+	}
+	return nil
+}

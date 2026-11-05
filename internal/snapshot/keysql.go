@@ -199,3 +199,30 @@ func (q keySQL) mysqlKeysetEnd(ctx context.Context, db *sql.DB, lo, max Bound, n
 	}
 	return q.scanBound(rows)
 }
+
+// MySQLKeySQL: phần SQL theo tuple PK cho MySQL dùng ngoài package (verify full, việc C).
+type MySQLKeySQL struct {
+	Table model.TableID
+	Codec *PKCodec
+}
+
+func (q MySQLKeySQL) k() keySQL { return newKeySQL(q.Table, q.Codec) }
+
+// Cmp: "(cột PK) op (tham số của b)".
+func (q MySQLKeySQL) Cmp(op string, b Bound) (string, []any, error) { return q.k().cmp(op, b) }
+
+// RangeCond: điều kiện range [lo, hi].
+func (q MySQLKeySQL) RangeCond(lo, hi Bound) (string, []any, error) { return q.k().rangeCond(lo, hi) }
+
+// Bounds: khóa nhỏ nhất / lớn nhất của bảng.
+func (q MySQLKeySQL) Bounds(ctx context.Context, db *sql.DB) (Bound, Bound, bool, error) {
+	return q.k().mysqlKeyBounds(ctx, db)
+}
+
+// KeysetEnd: khóa thứ n trong [lo, max].
+func (q MySQLKeySQL) KeysetEnd(ctx context.Context, db *sql.DB, lo, max Bound, n int64) (Bound, error) {
+	return q.k().mysqlKeysetEnd(ctx, db, lo, max, n)
+}
+
+// After trả cận dưới loại trừ ngay sau b (ok=false nếu không còn khóa nào sau b).
+func After(codec *PKCodec, b Bound) (Bound, bool) { return after(codecOrInt(codec), b) }

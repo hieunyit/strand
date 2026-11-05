@@ -3,6 +3,7 @@ package snapshot
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"strand/internal/model"
 )
@@ -63,6 +64,11 @@ func (q PGKeySQL) params(b Bound, arg int) (string, []any, int, error) {
 		v, err := bindValue(c, b.V[i])
 		if err != nil {
 			return "", nil, arg, fmt.Errorf("key column %s: %w", c.Name, err)
+		}
+		if t, ok := b.V[i].(time.Time); ok {
+			// Kèm offset: chuỗi không offset bị ::timestamptz hiểu theo TimeZone của phiên (phiên verify từ CLI
+			// có thể không ở UTC). ::timestamp bỏ offset, giữ giờ tường (đã ở UTC khi parse).
+			v = t.UTC().Format("2006-01-02 15:04:05.999999") + "+00"
 		}
 		if c.SQLType == "bytea" {
 			// bytea phải bind dạng []byte: binlog đưa VARBINARY dưới dạng string, gửi như text thì byte
