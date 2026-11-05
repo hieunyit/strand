@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -72,7 +74,33 @@ func TestGPK_VerifyFullWithGenericKeys(t *testing.T) {
 	if code := runVerifyFull(t, pgYAML, "--table", "ks.d"); code != exitcode.DataError {
 		t.Fatalf("mysql->pg with a difference: exit %d, want %d", code, exitcode.DataError)
 	}
-	if code := runVerifyFull(t, myYAML, "--table", "ks.s", "--repair", "fix"); code != exitcode.InvalidSyntax {
-		t.Fatalf("repair fix on a composite key: exit %d, want %d", code, exitcode.InvalidSyntax)
+	// repair fix (MySQL→MySQL) sửa cả 4 khác biệt, kể cả row thừa trước min / sau max.
+	if code := runVerifyFull(t, myYAML, "--table", "ks.s", "--repair", "fix"); code != exitcode.Success {
+		t.Fatalf("repair fix on a composite key: exit %d", code)
 	}
+	if code := runVerifyFull(t, myYAML, "--table", "ks.s"); code != exitcode.Success {
+		t.Fatalf("verify after repair: exit %d", code)
+	}
+	// sample theo tuple (100%) + repair: không chờ apply (pipeline dừng), sửa row vừa hỏng.
+	mustExecSQL(t, root, "UPDATE kd.s SET v = 'Y' WHERE k = 'b333' AND n = 4")
+	rootCmd.SetArgs([]string{"verify", "-c", writeYAML(t, myYAML), "--table", "ks.s", "--mode", "sample", "--rate", "1.0", "--repair", "fix"})
+	if err := rootCmd.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("sample repair on composite key: %v", err)
+	}
+	if code := runVerifyFull(t, myYAML, "--table", "ks.s"); code != exitcode.Success {
+		t.Fatalf("verify after sample repair: exit %d", code)
+	}
+	// MySQL→PG: repair không hỗ trợ (khác engine) — từ chối rõ.
+	if code := runVerifyFull(t, pgYAML, "--table", "ks.d", "--repair", "fix"); code != exitcode.InvalidSyntax {
+		t.Fatalf("cross-engine repair: exit %d, want %d", code, exitcode.InvalidSyntax)
+	}
+}
+
+func writeYAML(t *testing.T, y string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "strand.yaml")
+	if err := os.WriteFile(path, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

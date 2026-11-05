@@ -83,39 +83,62 @@ func (s keySide) hash(ctx context.Context, c keyChunk, cols []ColumnInfo) (strin
 	return cnt + ":" + sum, nil
 }
 
-// rows: khóa (các cột PK chính tắc, nối có độ dài) -> row chính tắc của chunk.
+// rows: khóa (các cột PK chính tắc) -> row chính tắc của chunk; bounds: cùng khóa -> cận khóa từ giá trị
+// gốc (chỉ phía MySQL; để repair).
 func (s keySide) rows(ctx context.Context, c keyChunk, cols []ColumnInfo, pkCols []ColumnInfo) (map[string]string, error) {
+	out, _, err := s.rowsBounds(ctx, c, cols, pkCols)
+	return out, err
+}
+
+func (s keySide) rowsBounds(ctx context.Context, c keyChunk, cols []ColumnInfo, pkCols []ColumnInfo) (map[string]string, map[string]snapshot.Bound, error) {
 	w, args, err := s.cond(c)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	sel := make([]string, len(pkCols))
-	for i, pc := range pkCols {
-		sel[i] = canonicalValueExpr(s.engine, pc)
+	raw := s.engine == model.EngineMySQL
+	sel := make([]string, 0, 2*len(pkCols))
+	for _, pc := range pkCols {
+		sel = append(sel, canonicalValueExpr(s.engine, pc))
+	}
+	if raw {
+		for _, pc := range pkCols {
+			sel = append(sel, QuoteIdent(s.engine, pc.Name))
+		}
 	}
 	q := fmt.Sprintf("SELECT %s, %s FROM %s WHERE %s", strings.Join(sel, ", "), rowExpression(s.engine, cols), QuoteTable(s.engine, s.table), w)
 	rs, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("read rows of %s: %w", s.table, err)
+		return nil, nil, fmt.Errorf("read rows of %s: %w", s.table, err)
 	}
 	defer rs.Close()
 	out := map[string]string{}
+	bounds := map[string]snapshot.Bound{}
 	for rs.Next() {
-		parts := make([]sql.NullString, len(pkCols)+1)
+		parts := make([]sql.RawBytes, len(sel)+1)
 		ptrs := make([]any, len(parts))
 		for i := range parts {
 			ptrs[i] = &parts[i]
 		}
 		if err := rs.Scan(ptrs...); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		keys := make([]string, len(pkCols))
 		for i := range pkCols {
-			keys[i] = parts[i].String
+			keys[i] = string(parts[i])
 		}
-		out[strings.Join(keys, ",")] = parts[len(pkCols)].String
+		k := strings.Join(keys, ",")
+		out[k] = string(parts[len(parts)-1])
+		if raw {
+			vals := make([]model.Value, len(pkCols))
+			for i := range pkCols {
+				vals[i] = append([]byte{}, parts[len(pkCols)+i]...)
+			}
+			if b, err := s.codec.BoundOf(vals); err == nil {
+				bounds[k] = b
+			}
+		}
 	}
-	return out, rs.Err()
+	return out, bounds, rs.Err()
 }
 
 // VerifyTableFullKeys: full verify của bảng t có PK tổng quát. srcCodec/dstCodec: codec PK hai phía (cùng
@@ -197,11 +220,11 @@ func (mv *MerkleVerifier) VerifyTableFullKeys(ctx context.Context, t model.Table
 	}
 	rep.MismatchedChunks = len(bad)
 	for _, c := range bad {
-		s, err := src.rows(ctx, c, srcCols, srcPK)
+		s, sb, err := src.rowsBounds(ctx, c, srcCols, srcPK)
 		if err != nil {
 			return nil, fmt.Errorf("source: %w", err)
 		}
-		d, err := dst.rows(ctx, c, dstCols, dstPK)
+		d, db, err := dst.rowsBounds(ctx, c, dstCols, dstPK)
 		if err != nil {
 			return nil, fmt.Errorf("target: %w", err)
 		}
@@ -210,11 +233,17 @@ func (mv *MerkleVerifier) VerifyTableFullKeys(ctx context.Context, t model.Table
 		for k, sv := range s {
 			if dv, ok := d[k]; !ok || dv != sv {
 				rep.Mismatches = append(rep.Mismatches, k)
+				if b, ok := sb[k]; ok {
+					rep.MismatchKeys = append(rep.MismatchKeys, b)
+				}
 			}
 		}
 		for k := range d {
 			if _, ok := s[k]; !ok {
 				rep.Mismatches = append(rep.Mismatches, k)
+				if b, ok := db[k]; ok {
+					rep.MismatchKeys = append(rep.MismatchKeys, b)
+				}
 			}
 		}
 	}

@@ -11,6 +11,7 @@ import (
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/snapshot"
 	"strand/internal/verify"
 )
 
@@ -21,16 +22,60 @@ type touchedKeys struct {
 	limit int
 	keys  map[model.TableID]map[int64]struct{}
 	over  map[model.TableID]bool
+	// gen: khóa đã chạm của bảng PK tổng quát (việc C), theo khóa mã hóa.
+	gen map[model.TableID]map[snapshot.Key]snapshot.Bound
 }
 
 func newTouchedKeys(limit int) *touchedKeys {
-	return &touchedKeys{limit: limit, keys: map[model.TableID]map[int64]struct{}{}, over: map[model.TableID]bool{}}
+	return &touchedKeys{limit: limit, keys: map[model.TableID]map[int64]struct{}{}, over: map[model.TableID]bool{},
+		gen: map[model.TableID]map[snapshot.Key]snapshot.Bound{}}
 }
 
 func (tk *touchedKeys) enable(on bool) {
 	tk.mu.Lock()
 	tk.on = on
 	tk.mu.Unlock()
+}
+
+// addKey: như add; codec khác nil (bảng PK tổng quát) thì lưu khóa mã hóa.
+func (tk *touchedKeys) addKey(t model.TableID, key []model.Value, codec *snapshot.PKCodec) {
+	if codec == nil {
+		tk.add(t, key)
+		return
+	}
+	b, err := codec.BoundOf(key)
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	if !tk.on || err != nil {
+		return
+	}
+	m := tk.gen[t]
+	if m == nil {
+		m = map[snapshot.Key]snapshot.Bound{}
+		tk.gen[t] = m
+	}
+	if len(m) >= tk.limit {
+		tk.over[t] = true
+		return
+	}
+	m[b.K] = b
+}
+
+// takeGeneric lấy (và xóa) khóa đã chạm của bảng PK tổng quát.
+func (tk *touchedKeys) takeGeneric() map[model.TableID][]snapshot.Bound {
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	out := map[model.TableID][]snapshot.Bound{}
+	for t, m := range tk.gen {
+		bs := make([]snapshot.Bound, 0, len(m))
+		for _, b := range m {
+			bs = append(bs, b)
+		}
+		sort.Slice(bs, func(i, j int) bool { return bs[i].K < bs[j].K })
+		out[t] = bs
+	}
+	tk.gen = map[model.TableID]map[snapshot.Key]snapshot.Bound{}
+	return out
 }
 
 func (tk *touchedKeys) add(t model.TableID, key []model.Value) {
@@ -110,15 +155,24 @@ func (p *Pipeline) liveVerifier() *verify.LiveVerifier {
 // verifyTables chạy sample (rate) cho mọi bảng và verify các khóa trong keys; trả lỗi
 // verify_mismatch nếu có lệch thật.
 func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[model.TableID][]int64) error {
+	return p.verifyTablesKeys(ctx, rate, keys, nil)
+}
+
+// verifyTablesKeys như verifyTables, kèm khóa đã chạm của bảng PK tổng quát (gen).
+func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[model.TableID][]int64, gen map[model.TableID][]snapshot.Bound) error {
 	lv := p.liveVerifier()
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	p.tablesMu.RLock()
 	ids := make([]model.TableID, 0, len(p.tables))
+	var genIDs []model.TableID
 	for id, m := range p.tables {
-		if m.PKNumeric {
+		switch {
+		case m.PKNumeric:
 			ids = append(ids, id)
-		} else {
-			p.log.Warn("verify skipped: primary key is not a single integer column", "table", id.String())
+		case m.PKCodec != nil:
+			genIDs = append(genIDs, id) // việc C: verify theo tuple PK
+		default:
+			p.log.Warn("verify skipped: primary key type is not supported", "table", id.String(), "reason", fmt.Sprint(m.PKCodecErr))
 		}
 	}
 	p.tablesMu.RUnlock()
@@ -154,6 +208,39 @@ func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[mode
 				pks = pks[:10]
 			}
 			bad = append(bad, fmt.Sprintf("%s: %d rows (pk %s)", id, n, strings.Join(pks, ",")))
+		}
+	}
+	sort.Slice(genIDs, func(i, j int) bool { return genIDs[i].String() < genIDs[j].String() })
+	for _, id := range genIDs {
+		m := p.table(id)
+		var ranges []verify.KeyRange
+		if rate > 0 {
+			r, err := verify.SampleKeyRanges(ctx, p.src, id, m.PKCodec, rate, 1000, rng)
+			if err != nil {
+				return err
+			}
+			ranges = append(ranges, r...)
+		}
+		ranges = append(ranges, verify.PointRanges(gen[id])...)
+		if len(ranges) == 0 {
+			continue
+		}
+		rep, err := lv.VerifyKeyRanges(ctx, id, m.PKCodec, ranges)
+		if err != nil {
+			return err
+		}
+		p.log.Info("verify", "table", id.String(), "ranges", rep.RangesChecked, "rows", rep.RowsChecked,
+			"mismatches", len(rep.Mismatches), "unverifiable_hot", len(rep.UnverifiableHot))
+		if n := len(rep.UnverifiableHot); n > 0 {
+			p.metrics.VerifyUnverifiableHotTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
+		}
+		if n := len(rep.Mismatches); n > 0 {
+			p.metrics.VerifyMismatchTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
+			pks := rep.Mismatches
+			if len(pks) > 10 {
+				pks = pks[:10]
+			}
+			bad = append(bad, fmt.Sprintf("%s: %d rows (key %s)", id, n, strings.Join(pks, "; ")))
 		}
 	}
 	if len(bad) > 0 {
@@ -198,11 +285,12 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	case <-time.After(window):
 	}
 	keys, over := p.touched.take()
+	gen := p.touched.takeGeneric()
 	p.touched.enable(false)
 	for t := range over {
 		p.log.Warn("post-seed verify: too many changed keys, verifying a sample of them", "table", t.String())
 	}
-	if err := p.verifyTables(ctx, 0, keys); err != nil {
+	if err := p.verifyTablesKeys(ctx, 0, keys, gen); err != nil {
 		if ctx.Err() == nil {
 			p.fail(err)
 		}
@@ -223,12 +311,16 @@ func (p *Pipeline) VerifyDelta(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("verify --mode delta is supported for MySQL → MySQL pipelines only; use verify --mode full")
 	}
 	keys, _ := p.touched.take()
-	if err := p.verifyTables(ctx, 0, keys); err != nil {
+	gen := p.touched.takeGeneric()
+	if err := p.verifyTablesKeys(ctx, 0, keys, gen); err != nil {
 		return "", err
 	}
 	n := 0
 	for _, ks := range keys {
 		n += len(ks)
 	}
-	return fmt.Sprintf("delta verify: %d changed keys in %d tables, 0 mismatches", n, len(keys)), nil
+	for _, ks := range gen {
+		n += len(ks)
+	}
+	return fmt.Sprintf("delta verify: %d changed keys in %d tables, 0 mismatches", n, len(keys)+len(gen)), nil
 }

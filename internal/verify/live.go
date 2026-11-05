@@ -22,6 +22,7 @@ import (
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
+	"strand/internal/snapshot"
 )
 
 // LiveConfig cấu hình LiveVerifier.
@@ -48,6 +49,8 @@ type LiveReport struct {
 	RowsChecked     int
 	Mismatches      []string // PK lệch thật
 	UnverifiableHot []string // PK quá nóng
+	// MismatchKeys: cận khóa của các row lệch (PK tổng quát, việc C) — để repair.
+	MismatchKeys []snapshot.Bound
 }
 
 // LiveVerifier — xem chú thích package.
@@ -352,4 +355,45 @@ func KeyRanges(keys []int64) [][2]int64 {
 		start, prev = k, k
 	}
 	return append(out, [2]int64{start, prev})
+}
+
+type rawRow struct {
+	raw [][]byte
+	img string
+}
+
+// readRowsAll như readRows nhưng giữ byte gốc của từng cột (dựng khóa tuple, việc C).
+func readRowsAll(ctx context.Context, db *sql.DB, q string, args ...any) ([]rawRow, []string, error) {
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	var out []rawRow
+	for rows.Next() {
+		vals := make([]sql.RawBytes, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, nil, err
+		}
+		var b strings.Builder
+		raw := make([][]byte, len(vals))
+		for i, val := range vals {
+			raw[i] = append([]byte{}, val...)
+			if val == nil {
+				b.WriteByte('N')
+				continue
+			}
+			b.WriteByte('V')
+			b.WriteString(strconv.Itoa(len(val)))
+			b.WriteByte(':')
+			b.Write(val)
+		}
+		out = append(out, rawRow{raw: raw, img: b.String()})
+	}
+	return out, cols, rows.Err()
 }

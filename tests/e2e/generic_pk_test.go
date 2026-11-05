@@ -94,11 +94,24 @@ func TestC_E2E_GenericPKSnapshotUnderLoad(t *testing.T) {
 	}
 
 	cfg := strandCfg{Name: "e2e-generic-pk", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
-		Include: include, Dir: testDir(t), CreateSchema: "auto", ChunkRows: "50"}
+		Include: include, Dir: testDir(t), CreateSchema: "auto", ChunkRows: "50", VerifyDelta: "on"}
 	path := cfg.write(t)
 	p := startStrand(t, path)
 	waitSynced(t, &cfg, p, 5*time.Minute)
 	time.Sleep(2 * time.Second)
+	// Verify trực tiếp theo tuple PK khi pipeline đang chạy dưới tải: không báo lệch giả.
+	for _, tb := range tables {
+		out, code := runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--table", "app."+tb.name, "--mode", "sample", "--rate", "1.0")
+		if code != 0 {
+			t.Fatalf("verify sample app.%s under load: exit %d\n%s", tb.name, code, out)
+		}
+		t.Logf("%s", strings.TrimSpace(out))
+	}
+	out, code := runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--mode", "delta", "--socket", cfg.Socket)
+	if code != 0 || !strings.Contains(out, "changed keys") {
+		t.Fatalf("verify delta under load: exit %d\n%s", code, out)
+	}
+	t.Logf("%s", strings.TrimSpace(out))
 	close(stop)
 	wg.Wait()
 	waitCaughtUp(t, src, dst, &cfg, p, 3*time.Minute)

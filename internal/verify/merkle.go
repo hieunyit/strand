@@ -43,6 +43,7 @@ import (
 
 	"strand/internal/metrics"
 	"strand/internal/model"
+	"strand/internal/snapshot"
 )
 
 // DefaultChunkRows là kích thước chunk mặc định (10.000 row).
@@ -109,6 +110,8 @@ type FullVerifyReport struct {
 	RowsChecked      int
 	Mismatches       []string // PK lệch thật
 	UnverifiableHot  []string // PK quá nóng
+	// MismatchKeys: cận khóa của các row lệch (PK tổng quát, việc C; chỉ khi source là MySQL) — để repair.
+	MismatchKeys []snapshot.Bound
 }
 
 // VerifyMode là chế độ verify (02 §3, §10).

@@ -157,10 +157,17 @@ func newVerifyCmd() *cobra.Command {
 						if len(rep.Mismatches) == 0 {
 							continue
 						}
-						if repair == "fix" {
-							return exitcode.New("invalid_repair", exitcode.InvalidSyntax,
-								fmt.Sprintf("--repair fix is not supported yet for %s (primary key %s is not a single integer column); %d mismatched rows",
-									id, strings.Join(pkCols, ","), len(rep.Mismatches)), nil)
+						if repair == "fix" && !dryRun {
+							if srcEngine != model.EngineMySQL {
+								return exitcode.New("invalid_repair", exitcode.InvalidSyntax,
+									fmt.Sprintf("--repair fix of %s (primary key %s) is supported from MySQL to MySQL only; %d mismatched rows",
+										id, strings.Join(pkCols, ","), len(rep.Mismatches)), nil)
+							}
+							if err := repairKeysMySQL(cmd.Context(), src, dst, id, target(id), pkCols, rep.MismatchKeys); err != nil {
+								return err
+							}
+							fmt.Printf("repaired %d rows of %s from source\n", len(rep.MismatchKeys), id)
+							continue
 						}
 						bad = append(bad, fmt.Sprintf("%d mismatched rows in %s (key %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), "; ")))
 						continue
@@ -207,13 +214,56 @@ func newVerifyCmd() *cobra.Command {
 			}
 			id := model.TableID{Schema: s, Table: t}
 
-			pk, err := verify.FindSinglePKColumn(cmd.Context(), src, srcEngine, id)
+			pkCols, err := verify.FindPKColumns(cmd.Context(), src, srcEngine, id)
 			if err != nil {
-				return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a single-column primary key", err)
+				return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a primary key", err)
 			}
+			intPK := false
+			if len(pkCols) == 1 {
+				if intPK, err = verify.IsIntegerPK(cmd.Context(), src, srcEngine, id, pkCols[0]); err != nil {
+					return err
+				}
+			}
+			pk := pkCols[0]
 
 			// Đang giữ khóa để sửa: pipeline không chạy, không chờ target apply (sẽ không bao giờ tới).
 			lv := verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name, TargetName: target, SkipApplyWait: fixing})
+			if !intPK {
+				// Việc C: PK nhiều cột / không phải số nguyên — sample theo tuple PK.
+				codec, err := snapshot.MySQLPKCodec(cmd.Context(), src, id, pkCols)
+				if err != nil {
+					return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, "verify: "+err.Error(), err)
+				}
+				dc, err := snapshot.MySQLPKCodec(cmd.Context(), dst, target(id), pkCols)
+				if err == nil {
+					err = codec.SameOrder(dc)
+				}
+				if err != nil {
+					return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, "verify: target primary key: "+err.Error(), err)
+				}
+				ranges, err := verify.SampleKeyRanges(cmd.Context(), src, id, codec, rate, 1000, rand.New(rand.NewSource(time.Now().UnixNano())))
+				if err != nil {
+					return err
+				}
+				rep, err := lv.VerifyKeyRanges(cmd.Context(), id, codec, ranges)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("verify %s (sample %.2f%%, key %s): %d ranges, %d rows, %d mismatches, %d unverifiable_hot\n",
+					id, rate*100, strings.Join(pkCols, ","), rep.RangesChecked, rep.RowsChecked, len(rep.Mismatches), len(rep.UnverifiableHot))
+				if len(rep.Mismatches) == 0 {
+					return nil
+				}
+				if repair == "fix" && !dryRun {
+					if err := repairKeysMySQL(cmd.Context(), src, dst, id, target(id), pkCols, rep.MismatchKeys); err != nil {
+						return err
+					}
+					fmt.Printf("repaired %d rows from source\n", len(rep.MismatchKeys))
+					return nil
+				}
+				return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError,
+					fmt.Sprintf("%d mismatched rows in %s (key %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), "; ")), nil)
+			}
 			ranges, err := verify.SampleRanges(cmd.Context(), src, id, pk, rate, 1000, rand.New(rand.NewSource(time.Now().UnixNano())))
 			if err != nil {
 				return err
@@ -303,6 +353,108 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
 		ChunkRows: verify.DefaultChunkRows, Rate: rate})
 	return mv.VerifyTableFullKeys(ctx, id, sc, dc)
+}
+
+// repairKeysMySQL: repair của PK tổng quát (việc C), MySQL→MySQL — như repairRows: đọc ảnh source của
+// mọi khóa lệch rồi, trong MỘT transaction với FOREIGN_KEY_CHECKS=0, xóa các khóa đó ở target và chèn lại
+// ảnh source (bỏ cột generated). Gọi khi đang giữ khóa pipeline.
+func repairKeysMySQL(ctx context.Context, src, dst *sql.DB, srcT, dstT model.TableID, pkCols []string, keys []snapshot.Bound) error {
+	codec, err := snapshot.MySQLPKCodec(ctx, src, srcT, pkCols)
+	if err != nil {
+		return err
+	}
+	skip, _, err := targetWriteExclusions(ctx, dst, model.EngineMySQL, dstT)
+	if err != nil {
+		return err
+	}
+	sq := snapshot.MySQLKeySQL{Table: srcT, Codec: codec}
+	dq := snapshot.MySQLKeySQL{Table: dstT, Codec: codec}
+	type img struct {
+		del   string
+		dargs []any
+		names []string
+		vals  []any
+	}
+	var imgs []img
+	for _, k := range keys {
+		w, a, err := sq.Cmp("=", k)
+		if err != nil {
+			return err
+		}
+		rows, err := src.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s WHERE %s", verify.QuoteTable(model.EngineMySQL, srcT), w), a...)
+		if err != nil {
+			return err
+		}
+		cols, _ := rows.Columns()
+		var it img
+		if it.del, it.dargs, err = dq.Cmp("=", k); err != nil {
+			rows.Close()
+			return err
+		}
+		if rows.Next() {
+			raw := make([]sql.RawBytes, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range raw {
+				ptrs[i] = &raw[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				rows.Close()
+				return err
+			}
+			for i, r := range raw {
+				if skip[cols[i]] {
+					continue
+				}
+				it.names = append(it.names, verify.QuoteIdent(model.EngineMySQL, cols[i]))
+				if r == nil {
+					it.vals = append(it.vals, nil)
+				} else {
+					it.vals = append(it.vals, string(r))
+				}
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		imgs = append(imgs, it)
+	}
+	conn, err := dst.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var prev int
+	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.foreign_key_checks").Scan(&prev); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "SET SESSION foreign_key_checks = 0"); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.Background(), fmt.Sprintf("SET SESSION foreign_key_checks = %d", prev))
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	qt := verify.QuoteTable(model.EngineMySQL, dstT)
+	for _, it := range imgs {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+qt+" WHERE "+it.del, it.dargs...); err != nil {
+			return fmt.Errorf("repair %s: %w", dstT, err)
+		}
+	}
+	for _, it := range imgs {
+		if it.names == nil {
+			continue
+		}
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(it.names)), ",")
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", qt, strings.Join(it.names, ","), ph), it.vals...); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("repair %s: %w — the source changed while repairing: let the pipeline catch up, stop it and repair again", dstT, err)
+			}
+			return fmt.Errorf("repair %s: %w", dstT, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // lockPipelineForRepair lấy khóa advisory của pipeline trên target (cùng khóa `strand sync` giữ).

@@ -1056,10 +1056,14 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			}
 		}
 		meta := p.table(rc.Table)
+		var keyCodec *snapshot.PKCodec // PK tổng quát: khóa đã chạm lưu theo khóa mã hóa (việc C)
+		if meta != nil && !meta.PKNumeric {
+			keyCodec = meta.PKCodec
+		}
 		for _, part := range parts {
-			p.touched.add(rc.Table, part.Key)
+			p.touched.addKey(rc.Table, part.Key, keyCodec)
 			if len(part.OldKey) > 0 {
-				p.touched.add(rc.Table, part.OldKey)
+				p.touched.addKey(rc.Table, part.OldKey, keyCodec)
 			}
 			c := *part
 			if p.conv != nil {
