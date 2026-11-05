@@ -76,7 +76,7 @@ func TestR10_PGTruncatedChunkCoversItsWholeRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read, _, err := src.ReadChunk(ctx, s, chunk, []string{"id", "pad"}, 0, table)
+	read, _, err := src.ReadChunk(ctx, s, chunk, []string{"id", "pad"}, []int{0}, table)
 	if err != nil {
 		t.Fatal(err)
 	}

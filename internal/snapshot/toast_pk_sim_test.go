@@ -368,7 +368,7 @@ func (sim *toastSim) KeysetEnd(_ context.Context, _ model.TableID, _ string, sta
 }
 
 // ReadChunk: các bước 1–5 của pg_snapshot.go; Txn xen vào giữa mọi bước.
-func (sim *toastSim) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, chunk *snapshot.Chunk, _ []string, _ int,
+func (sim *toastSim) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, chunk *snapshot.Chunk, _ []string, _ []int,
 	_ model.TableID) (snapshot.ChunkRead, checkpoint.AppliedSet, error) {
 	if chunk.Keys != nil {
 		sim.order = append(sim.order, fmt.Sprintf("reread%v", chunk.Keys))

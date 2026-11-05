@@ -3,6 +3,9 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strand/internal/snapshot"
+	"strand/internal/writer"
+	"strings"
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -109,9 +112,12 @@ func dropTargetGenerated(cols []model.ColValue, skip map[string]bool) []model.Co
 }
 
 // checkSnapshotKey: bảng có thể snapshot logic với PK của nó không (việc C). PK một cột số nguyên: đường
-// int64. PK khác: chỉ MySQL→MySQL (mức 1), khi codec dựng được (kiểu/collation có thứ tự chứng minh được)
-// và PK ở bảng đích cùng thứ tự — flush xóa range khóa ở target bằng cận đọc từ source, nên thứ tự hai
-// phía phải giống hệt.
+// int64. PK khác cần codec (kiểu/collation có thứ tự chứng minh được) và PK ở bảng đích có CÙNG thứ tự:
+// flush xóa range khóa ở target bằng cận đọc từ source.
+//   - cùng engine: cùng cột, cùng kiểu mã hóa, cùng kiểu SQL và collation (PKCodec.SameOrder);
+//   - MySQL→PG: chỉ kiểu mà thứ tự hai engine trùng nhau — số (INT/UNSIGNED/DECIMAL ↔ int/numeric), thời
+//     gian (DATE/DATETIME/TIMESTAMP ↔ date/timestamp/timestamptz), VARBINARY ↔ bytea. Chuỗi bị từ chối
+//     (PAD SPACE / collation MySQL khác "C" của PG).
 func (p *Pipeline) checkSnapshotKey(ctx context.Context, id model.TableID, m *tableMeta) error {
 	if m.PKNumeric {
 		return nil
@@ -119,9 +125,6 @@ func (p *Pipeline) checkSnapshotKey(ctx context.Context, id model.TableID, m *ta
 	reject := func(why string) error {
 		return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected,
 			fmt.Sprintf("table %s needs a logical snapshot but its primary key is not supported: %s; seed it from a backup instead", id, why), nil)
-	}
-	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
-		return reject("a primary key that is not a single integer column is only supported from MySQL to MySQL yet")
 	}
 	if m.PKCodec == nil {
 		why := "unknown key type"
@@ -131,12 +134,140 @@ func (p *Pipeline) checkSnapshotKey(ctx context.Context, id model.TableID, m *ta
 		return reject(why)
 	}
 	tgt := p.filter.Target(id)
-	dc, err := mysqlPKCodec(ctx, p.dst, tgt, m.PK)
+	var dc *snapshot.PKCodec
+	var err error
+	if p.dstEngine == model.EnginePG {
+		dc, err = pgPKCodec(ctx, p.dst, tgt, m.PK)
+	} else {
+		dc, err = mysqlPKCodec(ctx, p.dst, tgt, m.PK)
+	}
 	if err != nil {
 		return reject(fmt.Sprintf("target table %s: %v", tgt, err))
 	}
-	if err := m.PKCodec.SameOrder(dc); err != nil {
+	if p.srcEngine == p.dstEngine {
+		err = m.PKCodec.SameOrder(dc)
+	} else {
+		err = crossEngineSameOrder(m.PKCodec, dc)
+	}
+	if err != nil {
 		return reject(fmt.Sprintf("target table %s orders its primary key differently from the source: %v", tgt, err))
 	}
+	m.TargetPKCodec = dc
 	return nil
+}
+
+// crossEngineSameOrder: MySQL→PG — từng cột PK cùng lớp thứ tự (xem checkSnapshotKey).
+func crossEngineSameOrder(src, dst *snapshot.PKCodec) error {
+	class := func(k snapshot.PKKind) string {
+		switch k {
+		case snapshot.PKInt, snapshot.PKUint, snapshot.PKDecimal:
+			return "number"
+		case snapshot.PKDateTime:
+			return "datetime"
+		case snapshot.PKBytes:
+			return "bytes"
+		}
+		return ""
+	}
+	if len(src.Cols) != len(dst.Cols) {
+		return fmt.Errorf("primary key has %d columns on the source and %d on the target", len(src.Cols), len(dst.Cols))
+	}
+	for i := range src.Cols {
+		a, b := src.Cols[i], dst.Cols[i]
+		ca := class(a.Kind)
+		if a.Kind == snapshot.PKBytes && a.Collation != "" {
+			ca = "" // chuỗi có collation (kể cả _0900_bin): không đối chiếu với text "C" của PG
+		}
+		if a.Name != b.Name || ca == "" || ca != class(b.Kind) {
+			return fmt.Errorf("primary key column %s (%s → %s %s) has no engine-independent order", a.Name, a.Kind, b.Kind, b.SQLType)
+		}
+	}
+	return nil
+}
+
+// pgFlushRange (FlushRange của snapshotter, target PG, việc C): thay range khóa [lo, hi] của bảng đích bằng
+// rows — chỉ DELETE khóa của range VẮNG trong rows (không cascade row con của khóa còn lại), upsert phần
+// còn lại, trong một transaction.
+func (p *Pipeline) pgFlushRange(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, lo, hi snapshot.Bound) error {
+	return p.pgFlushGeneric(ctx, table, columnNames, rows, func(q snapshot.PGKeySQL) (string, []any, int, error) {
+		return q.RangeCond(lo, hi, 1)
+	})
+}
+
+// pgFlushKeySet (FlushKeySet, chunk re-read): như pgFlushRange cho đúng tập khóa keys.
+func (p *Pipeline) pgFlushKeySet(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, keys []snapshot.Bound) error {
+	return p.pgFlushGeneric(ctx, table, columnNames, rows, func(q snapshot.PGKeySQL) (string, []any, int, error) {
+		return q.InList(keys, 1)
+	})
+}
+
+func (p *Pipeline) pgFlushGeneric(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange,
+	scope func(snapshot.PGKeySQL) (string, []any, int, error)) error {
+	src, ok := p.sourceOf(table)
+	m := p.table(src)
+	if !ok || m == nil || m.PKCodec == nil || m.TargetPKCodec == nil {
+		return fmt.Errorf("flush %s: no primary key codec", table)
+	}
+	q := snapshot.PGKeySQL{Table: table, Codec: m.TargetPKCodec}
+	cond, args, next, err := scope(q)
+	if err != nil {
+		return err
+	}
+	keep := make([]snapshot.Bound, 0, len(rows))
+	for _, r := range rows {
+		b, err := m.PKCodec.BoundOf(r.Key)
+		if err != nil {
+			return fmt.Errorf("flush %s: %w", table, err)
+		}
+		keep = append(keep, b)
+	}
+	if len(keep) > 0 {
+		in, ka, _, err := q.InList(keep, next)
+		if err != nil {
+			return err
+		}
+		cond += " AND NOT (" + in + ")"
+		args = append(args, ka...)
+	}
+	out, err := p.pgFlushImages(table, rows)
+	if err != nil {
+		return err
+	}
+	pkCols := make([]string, len(m.TargetPKCodec.Cols))
+	for i, c := range m.TargetPKCodec.Cols {
+		pkCols[i] = c.Name
+	}
+	return writer.PGReplaceWhere(ctx, p.dst, table, pkCols, columnNames, out, "DELETE FROM "+pgQuoteTable(table)+" WHERE "+cond, args...)
+}
+
+// pgClearUnreadRange (ClearUnreadRange): xóa ở bảng đích PG range [lo, hi] (khi hasRange) và các khóa keys.
+func (p *Pipeline) pgClearUnreadRange(ctx context.Context, table model.TableID, lo, hi snapshot.Bound, hasRange bool, keys []snapshot.Bound) error {
+	src, ok := p.sourceOf(table)
+	m := p.table(src)
+	if !ok || m == nil || m.TargetPKCodec == nil {
+		return fmt.Errorf("clear unread %s: no primary key codec", table)
+	}
+	q := snapshot.PGKeySQL{Table: table, Codec: m.TargetPKCodec}
+	var stmts []string
+	var args [][]any
+	if hasRange {
+		cond, a, _, err := q.RangeCond(lo, hi, 1)
+		if err != nil {
+			return err
+		}
+		stmts, args = append(stmts, "DELETE FROM "+pgQuoteTable(table)+" WHERE "+cond), append(args, a)
+	}
+	if len(keys) > 0 {
+		cond, a, _, err := q.InList(keys, 1)
+		if err != nil {
+			return err
+		}
+		stmts, args = append(stmts, "DELETE FROM "+pgQuoteTable(table)+" WHERE "+cond), append(args, a)
+	}
+	return writer.PGExecFenced(ctx, p.dst, stmts, args)
+}
+
+func pgQuoteTable(t model.TableID) string {
+	q := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	return q(t.Schema) + "." + q(t.Table)
 }

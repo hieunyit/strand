@@ -76,8 +76,10 @@ type tableMeta struct {
 	// của PK chưa được hỗ trợ — PKCodecErr nói vì sao.
 	PKCodec    *snapshot.PKCodec
 	PKCodecErr error
-	AvgRow     int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
-	Keys       assemble.KeyMeta
+	// TargetPKCodec: codec PK của bảng đích (đã kiểm cùng thứ tự với source; checkSnapshotKey).
+	TargetPKCodec *snapshot.PKCodec
+	AvgRow        int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
+	Keys          assemble.KeyMeta
 	// TargetGenerated: cột generated ở bảng ĐÍCH — không ghi giá trị (generated.go).
 	TargetGenerated map[string]bool
 }

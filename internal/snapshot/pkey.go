@@ -159,6 +159,14 @@ func MySQLPKColumn(name, dataType, columnType, charset, collation, padAttribute 
 // gốc, ví dụ int8, numeric, text, bpchar, uuid) và tên collation của cột (rỗng nếu kiểu không có
 // collation).
 func PGPKColumn(name, typname, collation string) (PKColumn, error) {
+	c, err := pgPKColumn(name, typname, collation)
+	if err == nil {
+		c.SQLType, c.Collation = typname, collation
+	}
+	return c, err
+}
+
+func pgPKColumn(name, typname, collation string) (PKColumn, error) {
 	unsupported := func(reason string) (PKColumn, error) {
 		return PKColumn{}, &PKUnsupportedError{Column: name, Type: typname, Reason: reason}
 	}

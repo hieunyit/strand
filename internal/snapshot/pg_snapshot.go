@@ -48,7 +48,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -238,7 +237,7 @@ func (c *PGChunkSource) columnTypes(ctx context.Context, table model.TableID) (m
 }
 
 // ReadChunk: các bước 1–5 ở đầu file.
-func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdx int,
+func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdxs []int,
 	table model.TableID) (ChunkRead, checkpoint.AppliedSet, error) {
 	types, err := c.columnTypes(ctx, table)
 	if err != nil {
@@ -258,31 +257,44 @@ func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chun
 		s.Manager.StartReadingPG(chunk, low)
 	}
 
-	// 4. SELECT (mỗi lần một snapshot mới, đều sau S0).
+	// 4. SELECT (mỗi lần một snapshot mới, đều sau S0), theo tuple PK (việc C).
 	sel := make([]string, len(columnNames))
 	for i, col := range columnNames {
-		sel[i] = quotePGIdent(col) + "::text"
+		sel[i] = "t." + quotePGIdent(col) + "::text"
 	}
-	pk := quotePGIdent(columnNames[pkIdx])
+	codec := chunk.codec
+	if codec == nil {
+		codec = &PKCodec{Cols: []PKColumn{{Name: columnNames[pkIdxs[0]], Kind: PKInt, SQLType: "int8"}}}
+	}
+	kq := PGKeySQL{Table: table, Codec: codec, Alias: "t"}
 	var read ChunkRead
 	if chunk.KeySet != nil {
 		// Chunk re-read (02 §8, toast_pk.go): tập khóa rời rạc, tra theo index PK (≤ max_pending_cross_range
 		// khóa) nên không cần chia đôi theo timeout hay cắt theo byte.
-		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE t.%s = ANY($1::bigint[]) ORDER BY t.%s",
-			strings.Join(sel, ", "), quotePGTable(table), pk, pk)
-		if read.Rows, read.Bytes, err = c.queryChunk(ctx, query, columnNames, pkIdx, types, table, 0, chunk.Keys); err != nil {
-			return ChunkRead{}, nil, fmt.Errorf("re-read %d keys of %s: %w", len(chunk.Keys), table, err)
+		cond, args, _, err := kq.InList(chunk.KeySet, 1)
+		if err != nil {
+			return ChunkRead{}, nil, err
+		}
+		// ORDER BY t.pk (cột của BẢNG), không phải cột kết quả pk::text (xem 9f614ab).
+		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s",
+			strings.Join(sel, ", "), quotePGTable(table), cond, kq.OrderBy(false))
+		if read.Rows, read.Bytes, err = c.queryChunk(ctx, query, columnNames, pkIdxs, types, table, 0, args...); err != nil {
+			return ChunkRead{}, nil, fmt.Errorf("re-read %d keys of %s: %w", len(chunk.KeySet), table, err)
 		}
 	} else {
-		// ORDER BY t.pk (cột của BẢNG): `ORDER BY pk` trỏ vào cột kết quả `pk::text` và sắp theo chuỗi
-		// ("10" < "9") — chunk bị cắt theo max_chunk_bytes khi đó không phủ trọn [Start, Cut] (mất row).
-		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE t.%s >= $1 AND t.%s <= $2 ORDER BY t.%s",
-			strings.Join(sel, ", "), quotePGTable(table), pk, pk, pk)
 		queryFn := func(qCtx context.Context, ch *Chunk, maxBytes int64) ([]*model.RowChange, int64, error) {
-			return c.queryChunk(qCtx, query, columnNames, pkIdx, types, table, maxBytes, ch.StartPK, ch.EndPK)
+			cond, args, _, err := kq.RangeCond(ch.Lo, ch.Hi, 1)
+			if err != nil {
+				return nil, 0, err
+			}
+			// ORDER BY t.pk (cột của BẢNG): `ORDER BY pk` trỏ vào cột kết quả `pk::text` và sắp theo chuỗi
+			// ("10" < "9") — chunk bị cắt theo max_chunk_bytes khi đó không phủ trọn [Start, Cut] (mất row).
+			query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s",
+				strings.Join(sel, ", "), quotePGTable(table), cond, kq.OrderBy(false))
+			return c.queryChunk(qCtx, query, columnNames, pkIdxs, types, table, maxBytes, args...)
 		}
 		if read, err = s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn); err != nil {
-			return ChunkRead{}, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+			return ChunkRead{}, nil, fmt.Errorf("adaptive read failed for chunk [%x, %x]: %w", chunk.Lo.K, chunk.Hi.K, err)
 		}
 	}
 
@@ -317,7 +329,7 @@ func EmitPGWatermark(ctx context.Context, db *sql.DB, serverVersion int, content
 
 // queryChunk chạy SELECT của chunk; maxBytes > 0 thì dừng (và hủy query) ngay sau row làm tổng byte
 // đạt maxBytes (xem QueryChunkFunc).
-func (c *PGChunkSource) queryChunk(ctx context.Context, query string, columnNames []string, pkIdx int,
+func (c *PGChunkSource) queryChunk(ctx context.Context, query string, columnNames []string, pkIdxs []int,
 	types map[string]uint32, table model.TableID, maxBytes int64, args ...any) ([]*model.RowChange, int64, error) {
 	qctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -348,14 +360,13 @@ func (c *PGChunkSource) queryChunk(ctx context.Context, query string, columnName
 			}
 			rc.Cols[i] = model.ColValue{Name: col, Value: v}
 		}
-		if !vals[pkIdx].Valid {
-			return nil, 0, fmt.Errorf("%s: NULL primary key", table)
+		rc.Key = make([]model.Value, len(pkIdxs)) // mọi cột PK theo thứ tự PK, đã parse như row stream
+		for i, idx := range pkIdxs {
+			if !vals[idx].Valid {
+				return nil, 0, fmt.Errorf("%s: NULL primary key", table)
+			}
+			rc.Key[i] = rc.Cols[idx].Value
 		}
-		pkv, err := strconv.ParseInt(vals[pkIdx].String, 10, 64)
-		if err != nil {
-			return nil, 0, fmt.Errorf("%s: primary key %q is not an integer: %w", table, vals[pkIdx].String, err)
-		}
-		rc.Key = []model.Value{pkv}
 		out = append(out, rc)
 		if maxBytes > 0 && total >= maxBytes {
 			cancel()
@@ -363,4 +374,89 @@ func (c *PGChunkSource) queryChunk(ctx context.Context, query string, columnName
 		}
 	}
 	return out, total, rows.Err()
+}
+
+// KeyChunkSource: ChunkSource có biên và keyset walk theo tuple PK (việc C).
+type KeyChunkSource interface {
+	KeyBounds(ctx context.Context, table model.TableID, codec *PKCodec) (lo, hi Bound, ok bool, err error)
+	KeyKeysetEnd(ctx context.Context, table model.TableID, codec *PKCodec, lo, max Bound, n int64) (Bound, error)
+}
+
+// pgScanBound đọc các cột PK (SELECT col::text theo thứ tự codec) và parse như row stream.
+func (c *PGChunkSource) pgScanBound(ctx context.Context, table model.TableID, codec *PKCodec, query string, args ...any) (Bound, bool, error) {
+	types, err := c.columnTypes(ctx, table)
+	if err != nil {
+		return Bound{}, false, err
+	}
+	rows, err := c.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return Bound{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return Bound{}, false, rows.Err()
+	}
+	txt := make([]sql.NullString, len(codec.Cols))
+	ptrs := make([]any, len(txt))
+	for i := range txt {
+		ptrs[i] = &txt[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return Bound{}, false, err
+	}
+	vals := make([]model.Value, len(txt))
+	for i, col := range codec.Cols {
+		if !txt[i].Valid {
+			return Bound{}, false, fmt.Errorf("%s: NULL primary key", table)
+		}
+		if vals[i], err = pgreader.ParseTextValue(types[col.Name], txt[i].String); err != nil {
+			return Bound{}, false, err
+		}
+	}
+	b, err := codec.BoundOf(vals)
+	return b, err == nil, err
+}
+
+func (c *PGChunkSource) keyCols(codec *PKCodec) string {
+	q := PGKeySQL{Codec: codec, Alias: "t"}
+	cols := q.Cols()
+	for i := range cols {
+		cols[i] += "::text"
+	}
+	return strings.Join(cols, ", ")
+}
+
+// KeyBounds: khóa nhỏ nhất / lớn nhất (ORDER BY cột của bảng, LIMIT 1).
+func (c *PGChunkSource) KeyBounds(ctx context.Context, table model.TableID, codec *PKCodec) (lo, hi Bound, ok bool, err error) {
+	q := PGKeySQL{Table: table, Codec: codec, Alias: "t"}
+	one := func(desc bool) (Bound, bool, error) {
+		return c.pgScanBound(ctx, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t ORDER BY %s LIMIT 1",
+			c.keyCols(codec), quotePGTable(table), q.OrderBy(desc)))
+	}
+	if lo, ok, err = one(false); err != nil || !ok {
+		return
+	}
+	hi, ok, err = one(true)
+	return
+}
+
+// KeyKeysetEnd: khóa thứ n trong [lo, max] (hoặc max nếu không đủ khóa).
+func (c *PGChunkSource) KeyKeysetEnd(ctx context.Context, table model.TableID, codec *PKCodec, lo, max Bound, n int64) (Bound, error) {
+	if n <= 0 {
+		n = 5000
+	}
+	q := PGKeySQL{Table: table, Codec: codec, Alias: "t"}
+	cond, args, _, err := q.RangeCond(lo, max, 1)
+	if err != nil {
+		return Bound{}, err
+	}
+	b, ok, err := c.pgScanBound(ctx, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s LIMIT 1 OFFSET %d",
+		c.keyCols(codec), quotePGTable(table), cond, q.OrderBy(false), n-1), args...)
+	if err != nil {
+		return Bound{}, err
+	}
+	if !ok {
+		return max, nil
+	}
+	return b, nil
 }

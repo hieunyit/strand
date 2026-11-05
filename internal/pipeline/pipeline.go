@@ -603,6 +603,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.snap.ClearUnread = func(ctx context.Context, t model.TableID, pk string, lo, hi int64, hasRange bool, keys []int64) error {
 			return writer.PGDeleteUnread(ctx, p.dst, t, pk, lo, hi, hasRange, keys)
 		}
+		p.snap.FlushRange = p.pgFlushRange
+		p.snap.FlushKeySet = p.pgFlushKeySet
+		p.snap.ClearUnreadRange = p.pgClearUnreadRange
 	}
 	if p.srcEngine == model.EnginePG {
 		snapDB, err := openPGSnapshotSource(p.srcDSN)

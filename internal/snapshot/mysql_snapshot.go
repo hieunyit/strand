@@ -304,6 +304,12 @@ type MySQLSnapshotter struct {
 	// RereadKeysTotal: tổng số khóa đã được đọc lại (chunk re-read đã flush, 02 §8), để ghi log.
 	RereadKeysTotal atomic.Int64
 
+	// FlushRange / FlushKeySet / ClearUnreadRange (việc C): như FlushRows / FlushKeys / ClearUnread cho
+	// bảng có PK tổng quát, với cận khóa thay vì int64. Bắt buộc khi target không phải MySQL.
+	FlushRange       func(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, lo, hi Bound) error
+	FlushKeySet      func(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, keys []Bound) error
+	ClearUnreadRange func(ctx context.Context, table model.TableID, lo, hi Bound, hasRange bool, keys []Bound) error
+
 	// OnTruncatedRead (tùy chọn) được gọi mỗi lần đọc chunk dừng ở max_chunk_bytes (metric / test).
 	OnTruncatedRead func()
 
@@ -324,7 +330,7 @@ type ChunkSource interface {
 	// stream đã xử lý hết high thì mọi Txn mà rows phản ánh đều đã đi qua range-state.
 	// Chunk.Continuation: phần đuôi của SplitReading — đã "Đang đọc" với low của chunk gốc, không lấy low
 	// mới. Kết quả có thể bị cắt theo max_chunk_bytes (ChunkRead.Truncated).
-	ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdx int, table model.TableID) (ChunkRead, checkpoint.AppliedSet, error)
+	ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdxs []int, table model.TableID) (ChunkRead, checkpoint.AppliedSet, error)
 }
 
 // NewMySQLSnapshotter tạo mới MySQLSnapshotter.
@@ -443,7 +449,16 @@ func (s *MySQLSnapshotter) updatePlan(table model.TableID, fn func(*SnapshotPlan
 // trước khi Admit Txn đã đánh dấu khóa (HandleToastPKChangeXID); tập được đọc từ range-state dưới
 // planMu nên lần ghi sau cùng luôn chứa mọi khóa chưa flush.
 func (s *MySQLSnapshotter) PersistReread(table model.TableID) error {
-	return s.updatePlan(table, func(p *SnapshotPlan) { p.Reread = s.Manager.RereadKeys(table) })
+	return s.updatePlan(table, func(p *SnapshotPlan) {
+		if p.GenericKey { // việc C: khóa tổng quát lưu theo giá trị có kiểu
+			p.RereadKeyVals = nil
+			for _, b := range s.Manager.RereadBounds(table) {
+				p.RereadKeyVals = append(p.RereadKeyVals, toKeyVals(b.V))
+			}
+			return
+		}
+		p.Reread = s.Manager.RereadKeys(table)
+	})
 }
 
 // AddPlanReread thêm khóa vào plan của bảng CHƯA đăng ký range (chờ tới lượt snapshot); đăng ký sẽ nạp
@@ -498,6 +513,20 @@ func (s *MySQLSnapshotter) FlushChunk(
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
+	if !codecOrInt(chunk.codec).IsSingleInt() && s.FlushRows != nil {
+		// Khóa tổng quát, target không phải MySQL (việc C).
+		var err error
+		if chunk.KeySet != nil {
+			err = s.FlushKeySet(ctx, s.target(table), columnNames, mergedRows, chunk.KeySet)
+		} else {
+			err = s.FlushRange(ctx, s.target(table), columnNames, mergedRows, chunk.Lo, chunk.Hi)
+		}
+		if err != nil {
+			return err
+		}
+		s.Manager.MarkDoneLocked(chunk)
+		return nil
+	}
 	if chunk.KeySet != nil {
 		if s.FlushKeys == nil {
 			return fmt.Errorf("snapshot flush: re-read chunk of %s needs FlushKeys", table)
@@ -565,8 +594,13 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	codec = codecOrInt(codec)
 	generic := !codec.IsSingleInt()
 	pkCol := codec.Cols[0].Name
-	if generic && (s.Chunks != nil || s.FlushRows != nil || s.ClearTarget != nil || s.ClearUnread != nil) {
-		return fmt.Errorf("snapshot add %s: a primary key that is not a single integer column is only supported from MySQL to MySQL yet", table)
+	if generic {
+		if _, ok := s.Chunks.(KeyChunkSource); s.Chunks != nil && !ok {
+			return fmt.Errorf("snapshot add %s: the source does not support a primary key that is not a single integer column", table)
+		}
+		if s.FlushRows != nil && (s.FlushRange == nil || s.FlushKeySet == nil || s.ClearUnreadRange == nil) {
+			return fmt.Errorf("snapshot add %s: the target does not support a primary key that is not a single integer column", table)
+		}
 	}
 	kq := newKeySQL(table, codec)
 	pkIdxs := make([]int, len(codec.Cols))
@@ -581,7 +615,6 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			return fmt.Errorf("snapshot add %s: pk column %q not in column list", table, c.Name)
 		}
 	}
-	pkIdx := pkIdxs[0]
 	var err error
 	if rendezvousWaitFn == nil {
 		// Thiếu điểm hẹn thì chunk được flush trước khi stream xử lý hết high watermark (RS-1).
@@ -604,7 +637,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
 			plan = SnapshotPlan{ChunkRows: s.opts.DefaultChunkRows}
 			if generic {
-				lo, hi, ok, err := kq.mysqlKeyBounds(ctx, srcDB)
+				lo, hi, ok, err := s.keyBounds(ctx, srcDB, kq)
 				if err != nil {
 					return err
 				}
@@ -748,7 +781,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		var chunkHigh checkpoint.AppliedSet
 		var err error
 		if s.Chunks != nil {
-			read, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdx, table)
+			read, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdxs, table)
 		} else if chunk.KeySet != nil {
 			return nil, fmt.Errorf("snapshot %s: re-read chunks need a PostgreSQL chunk source", table)
 		} else {

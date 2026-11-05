@@ -50,15 +50,15 @@ func (s *MySQLSnapshotter) registerGeneric(ctx context.Context, dstDB *sql.DB, t
 		}
 	}
 	unread := !plan.Finished && geLo(maxB.K, pendLo)
-	if resumed {
-		var keys []Bound
-		for _, kv := range plan.RereadKeyVals {
-			b, err := kq.bound(fromKeyVals(kv))
-			if err != nil {
-				return err
-			}
-			keys = append(keys, b)
+	var keys []Bound // khóa chờ đọc lại từ lần chạy trước / lúc bảng chờ đăng ký: nghĩa vụ vẫn còn
+	for _, kv := range plan.RereadKeyVals {
+		b, err := kq.bound(fromKeyVals(kv))
+		if err != nil {
+			return err
 		}
+		keys = append(keys, b)
+	}
+	if resumed {
 		if unread || len(keys) > 0 {
 			if err := s.clearUnreadKeys(ctx, dstDB, kq, pendLo, maxB, unread, keys); err != nil {
 				return fmt.Errorf("clear unread part of resumed snapshot of %s: %w", table, err)
@@ -75,6 +75,9 @@ func (s *MySQLSnapshotter) registerGeneric(ctx context.Context, dstDB *sql.DB, t
 			BufferedChanges: map[Key]*model.RowChange{}})
 	}
 	s.Manager.RegisterTableKeys(table, pkCol, kq.codec, chunks, &maxB)
+	if len(keys) > 0 {
+		s.Manager.AddRereadKeys(table, keys, time.Now())
+	}
 	return nil
 }
 
@@ -114,7 +117,7 @@ func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table
 		if mainDone {
 			return nil
 		}
-		end, err := kq.mysqlKeysetEnd(ctx, srcDB, next, maxB, cur.ChunkRows)
+		end, err := s.keysetEndKeys(ctx, srcDB, kq, next, maxB, cur.ChunkRows)
 		if err != nil {
 			return fmt.Errorf("keyset walk %s: %w", table, err)
 		}
@@ -137,6 +140,9 @@ func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table
 // clearUnreadKeys: phần "Chưa đọc" của plan khóa tổng quát ở target MySQL — range [lo, hi] (khi
 // hasRange) và các khóa keys — xóa với FOREIGN_KEY_CHECKS=0 (không cascade), trong transaction có fence.
 func (s *MySQLSnapshotter) clearUnreadKeys(ctx context.Context, dstDB *sql.DB, kq keySQL, lo, hi Bound, hasRange bool, keys []Bound) error {
+	if s.ClearUnreadRange != nil {
+		return s.ClearUnreadRange(ctx, s.target(kq.table), lo, hi, hasRange, keys)
+	}
 	if dstDB == nil {
 		return fmt.Errorf("no target to clear")
 	}
@@ -202,4 +208,77 @@ func execNoFKChecks(ctx context.Context, dstDB *sql.DB, stmts []string, args [][
 		restored = true
 	}
 	return err
+}
+
+// keyBounds / keysetEndKeys: biên và keyset walk theo tuple, ở source MySQL (srcDB) hoặc qua ChunkSource
+// (PG) khi nó hỗ trợ khóa tổng quát.
+func (s *MySQLSnapshotter) keyBounds(ctx context.Context, srcDB *sql.DB, kq keySQL) (Bound, Bound, bool, error) {
+	if s.Chunks != nil {
+		kc, ok := s.Chunks.(KeyChunkSource)
+		if !ok {
+			return Bound{}, Bound{}, false, fmt.Errorf("chunk source of %s does not support this primary key", kq.table)
+		}
+		return kc.KeyBounds(ctx, kq.table, kq.codec)
+	}
+	return kq.mysqlKeyBounds(ctx, srcDB)
+}
+
+func (s *MySQLSnapshotter) keysetEndKeys(ctx context.Context, srcDB *sql.DB, kq keySQL, lo, max Bound, n int64) (Bound, error) {
+	if s.Chunks != nil {
+		kc, ok := s.Chunks.(KeyChunkSource)
+		if !ok {
+			return Bound{}, fmt.Errorf("chunk source of %s does not support this primary key", kq.table)
+		}
+		return kc.KeyKeysetEnd(ctx, kq.table, kq.codec, lo, max, n)
+	}
+	return kq.mysqlKeysetEnd(ctx, srcDB, lo, max, n)
+}
+
+// PendingKey (plan khóa tổng quát): khóa thuộc phần sẽ được snapshot đọc — chưa flush (sau LastKey,
+// ≤ MaxKey, plan chưa Finished) hoặc đang chờ đọc lại.
+func (p SnapshotPlan) PendingKey(codec *PKCodec, key []model.Value) (bool, error) {
+	if p.Empty {
+		return false, nil
+	}
+	kq := newKeySQL(model.TableID{}, codec)
+	k, err := kq.codec.Encode(key)
+	if err != nil {
+		return false, err
+	}
+	for _, kv := range p.RereadKeyVals {
+		if rk, err := kq.codec.Encode(fromKeyVals(kv)); err == nil && rk == k {
+			return true, nil
+		}
+	}
+	if p.Finished {
+		return false, nil
+	}
+	minB, maxB, last, hasLast, err := planBounds(kq, &p)
+	if err != nil {
+		return false, err
+	}
+	lo := minB
+	if hasLast {
+		lo = Bound{K: last.K, Excl: true}
+	}
+	return geLo(k, lo) && k <= maxB.K, nil
+}
+
+// AddPlanRereadKey thêm khóa (tổng quát) vào RereadKeyVals của plan đã lưu (ok=false nếu bảng không có plan).
+func (s *MySQLSnapshotter) AddPlanRereadKey(table model.TableID, codec *PKCodec, vals []model.Value) (bool, error) {
+	b, err := codecOrInt(codec).BoundOf(vals)
+	if err != nil {
+		return false, err
+	}
+	found := false
+	err = s.updatePlan(table, func(p *SnapshotPlan) {
+		found = true
+		for _, kv := range p.RereadKeyVals {
+			if k, err := codecOrInt(codec).Encode(fromKeyVals(kv)); err == nil && k == b.K {
+				return
+			}
+		}
+		p.RereadKeyVals = append(p.RereadKeyVals, toKeyVals(b.V))
+	})
+	return found, err
 }

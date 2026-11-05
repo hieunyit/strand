@@ -105,9 +105,40 @@ func rowPKs(rows []*model.RowChange) ([]int64, error) {
 
 func pgReplaceRetry(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
 	rows []*model.RowChange, del string, delArgs ...any) error {
+	return pgReplaceRetryCols(ctx, db, table, []string{pkCol}, columnNames, rows, del, delArgs...)
+}
+
+// PGReplaceWhere thay các row của bảng đích PG khớp điều kiện del (một câu DELETE đầy đủ, thường là
+// "range khóa AND khóa NOT IN ảnh mới") bằng rows, trong MỘT transaction có fence; upsert theo các cột
+// PK pkCols (việc C: PK tổng quát). Lỗi tạm thời được retry.
+func PGReplaceWhere(ctx context.Context, db *sql.DB, table model.TableID, pkCols []string, columnNames []string,
+	rows []*model.RowChange, del string, delArgs ...any) error {
+	return pgReplaceRetryCols(ctx, db, table, pkCols, columnNames, rows, del, delArgs...)
+}
+
+// PGExecFenced chạy các câu lệnh trong một transaction có fence (xóa phần chưa đọc theo tuple).
+func PGExecFenced(ctx context.Context, db *sql.DB, stmts []string, args [][]any) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := checkpoint.CheckFence(ctx, tx, true); err != nil {
+		return err
+	}
+	for i, q := range stmts {
+		if _, err := tx.ExecContext(ctx, q, args[i]...); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func pgReplaceRetryCols(ctx context.Context, db *sql.DB, table model.TableID, pkCols []string, columnNames []string,
+	rows []*model.RowChange, del string, delArgs ...any) error {
 	var err error
 	for attempt := 1; attempt <= 20; attempt++ {
-		err = pgReplaceOnce(ctx, db, table, pkCol, columnNames, rows, del, delArgs...)
+		err = pgReplaceOnce(ctx, db, table, pkCols, columnNames, rows, del, delArgs...)
 		if err == nil || !IsPGRetryable(err) || ctx.Err() != nil {
 			return err
 		}
@@ -116,7 +147,7 @@ func pgReplaceRetry(ctx context.Context, db *sql.DB, table model.TableID, pkCol 
 	return err
 }
 
-func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCol string, columnNames []string,
+func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCols []string, columnNames []string,
 	rows []*model.RowChange, del string, delArgs ...any) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -151,7 +182,7 @@ func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCol s
 				}
 				vals = append(vals, v)
 			}
-			uq, args := buildUpsert(table, columnNames, []string{pkCol}, vals)
+			uq, args := buildUpsert(table, columnNames, pkCols, vals)
 			if _, err := tx.ExecContext(ctx, uq, args...); err != nil {
 				return fmt.Errorf("upsert flush batch into %s: %w", table, err)
 			}

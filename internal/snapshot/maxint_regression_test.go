@@ -51,7 +51,7 @@ func (m *memChunkSource) KeysetEnd(_ context.Context, _ model.TableID, _ string,
 	return in[rows-1], nil
 }
 
-func (m *memChunkSource) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, chunk *snapshot.Chunk, _ []string, _ int,
+func (m *memChunkSource) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, chunk *snapshot.Chunk, _ []string, _ []int,
 	table model.TableID) (snapshot.ChunkRead, checkpoint.AppliedSet, error) {
 	s.Manager.BeginReading(chunk)
 	s.Manager.StartReading(chunk, checkpoint.NewMySQLAppliedSet())
