@@ -321,6 +321,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	p.log = p.log.With("epoch", p.epoch)
 	p.log.Info("pipeline lock acquired")
+	// Mọi ghi snapshot dùng ctx này kiểm epoch trong transaction của chính nó (SG-1, review R07).
+	ctx = checkpoint.WithFence(ctx, checkpoint.Fence{PipelineID: p.id, Epoch: p.epoch})
+	p.runCtx = ctx
 
 	// --- Metadata source ---
 	if p.tables, err = p.loadTables(ctx, p.filter); err != nil {

@@ -501,7 +501,7 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 				if err := s.ClearTarget(ctx, s.target(table)); err != nil {
 					return err
 				}
-			} else if _, err := dstDB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(s.target(table)))); err != nil {
+			} else if err := clearMySQLTable(ctx, dstDB, s.target(table)); err != nil {
 				return err
 			}
 			if s.SavePlan != nil {
@@ -735,6 +735,9 @@ func flushRowsToTarget(
 		return err
 	}
 	defer tx.Rollback()
+	if err := checkpoint.CheckFence(ctx, tx, false); err != nil { // SG-1, review R07
+		return err
+	}
 
 	// Range [startPK, endPK] ở target phải đúng bằng ảnh đã merge: xóa row không còn ở source
 	// (bị DELETE trong lúc range "Chưa đọc", hoặc còn sót từ lần snapshot trước khi crash),
@@ -819,6 +822,22 @@ func (s *MySQLSnapshotter) target(t model.TableID) model.TableID {
 	return t
 }
 
+// clearMySQLTable xóa mọi row của bảng đích MySQL trong một transaction có kiểm fence (SG-1, R07).
+func clearMySQLTable(ctx context.Context, dstDB *sql.DB, t model.TableID) error {
+	tx, err := dstDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := checkpoint.CheckFence(ctx, tx, false); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteTable(t))); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // clearUnread xóa phần "Chưa đọc" của plan dở ở bảng đích (xem SnapshotAdd, nhánh resumed).
 func (s *MySQLSnapshotter) clearUnread(ctx context.Context, dstDB *sql.DB, table model.TableID, pkCol string, lo, hi int64, hasRange bool, keys []int64) error {
 	t := s.target(table)
@@ -856,26 +875,39 @@ func (s *MySQLSnapshotter) clearUnread(ctx context.Context, dstDB *sql.DB, table
 		restored = err == nil
 		return err
 	}
-	if hasRange {
-		q := fmt.Sprintf("DELETE FROM %s WHERE %s >= ? AND %s <= ?", quoteTable(t), quoteIdent(pkCol), quoteIdent(pkCol))
-		if _, err := conn.ExecContext(ctx, q, lo, hi); err != nil {
+	if err := func() error {
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
 			return err
 		}
-	}
-	for i := 0; i < len(keys); i += 1000 {
-		end := i + 1000
-		if end > len(keys) {
-			end = len(keys)
-		}
-		ph := strings.TrimSuffix(strings.Repeat("?,", end-i), ",")
-		args := make([]any, 0, end-i)
-		for _, k := range keys[i:end] {
-			args = append(args, k)
-		}
-		q := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", quoteTable(t), quoteIdent(pkCol), ph)
-		if _, err := conn.ExecContext(ctx, q, args...); err != nil {
+		defer tx.Rollback()
+		if err := checkpoint.CheckFence(ctx, tx, false); err != nil { // SG-1, review R07
 			return err
 		}
+		if hasRange {
+			q := fmt.Sprintf("DELETE FROM %s WHERE %s >= ? AND %s <= ?", quoteTable(t), quoteIdent(pkCol), quoteIdent(pkCol))
+			if _, err := tx.ExecContext(ctx, q, lo, hi); err != nil {
+				return err
+			}
+		}
+		for i := 0; i < len(keys); i += 1000 {
+			end := i + 1000
+			if end > len(keys) {
+				end = len(keys)
+			}
+			ph := strings.TrimSuffix(strings.Repeat("?,", end-i), ",")
+			args := make([]any, 0, end-i)
+			for _, k := range keys[i:end] {
+				args = append(args, k)
+			}
+			q := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", quoteTable(t), quoteIdent(pkCol), ph)
+			if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}(); err != nil {
+		return err
 	}
 	return restore()
 }

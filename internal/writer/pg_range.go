@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"strand/internal/checkpoint"
 	"strand/internal/model"
 )
 
@@ -122,6 +123,9 @@ func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCol s
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := checkpoint.CheckFence(ctx, tx, true); err != nil { // SG-1, review R07
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, del, delArgs...); err != nil {
 		return fmt.Errorf("clear chunk range on target: %w", err)
 	}
@@ -158,8 +162,18 @@ func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCol s
 
 // PGClearTable xóa mọi row của bảng đích PG (bắt đầu snapshot mới của bảng, 02 §5).
 func PGClearTable(ctx context.Context, db *sql.DB, table model.TableID) error {
-	_, err := db.ExecContext(ctx, "DELETE FROM "+quotePGTable(table))
-	return err
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := checkpoint.CheckFence(ctx, tx, true); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM "+quotePGTable(table)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PGDeleteUnread xóa ở bảng đích PG các row PK trong [lo, hi] (khi hasRange) và các khóa keys, trong một
@@ -171,6 +185,9 @@ func PGDeleteUnread(ctx context.Context, db *sql.DB, table model.TableID, pkCol 
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := checkpoint.CheckFence(ctx, tx, true); err != nil {
+		return err
+	}
 	if hasRange {
 		q := fmt.Sprintf("DELETE FROM %s WHERE %s >= $1 AND %s <= $2", quotePGTable(table), quotePG(pkCol), quotePG(pkCol))
 		if _, err := tx.ExecContext(ctx, q, lo, hi); err != nil {
