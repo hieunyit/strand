@@ -197,7 +197,12 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 			}
 		}
 		if until != nil || !stopAt.IsSubsetOf(covered) {
-			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000)})
+			charsets, err := loadSourceCharsets(ctx, sourceDSN)
+			if err != nil {
+				return n, err
+			}
+			// Giá trị chuỗi của cột không phải UTF-8 chuyển sang UTF-8 như reader của pipeline (charset.go).
+			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000), CollationCharsets: charsets})
 			if err != nil {
 				return n, err
 			}
@@ -231,3 +236,13 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 }
 
 type seedManifestLite struct{ P string }
+
+// loadSourceCharsets đọc bảng collation id -> charset của source.
+func loadSourceCharsets(ctx context.Context, dsn string) (map[uint64]string, error) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return mysqlreader.LoadCollationCharsets(ctx, db)
+}

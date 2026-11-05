@@ -32,6 +32,9 @@ type Config struct {
 	// TLS cho kết nối replication; New lấy từ tham số tls= của DSN (true, skip-verify, preferred hoặc
 	// tên đã RegisterTLSConfig). Thiếu bước này thì binlog đi plaintext dù DSN yêu cầu TLS (review R15).
 	TLS *tls.Config
+	// CollationCharsets: collation id -> charset (information_schema.COLLATIONS của source). Khác nil thì
+	// giá trị chuỗi của cột không phải UTF-8 được chuyển sang UTF-8 (charset.go). nil = giữ byte nguyên.
+	CollationCharsets map[uint64]string
 }
 
 // MySQLReader hiện thực interface reader.Reader cho MySQL binlog.
@@ -308,6 +311,13 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					if tm, found := tableMap[rowsEv.TableID]; found {
 						schema, table = string(tm.Schema), string(tm.Table)
 					}
+					if err := convertCharsets(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+						select {
+						case out <- reader.Event{Type: reader.EventError, Err: err}:
+						case <-ctxRead.Done():
+						}
+						return
+					}
 					select {
 					case out <- reader.Event{
 						Type:      reader.EventRows,
@@ -330,6 +340,13 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					if tm, found := tableMap[rowsEv.TableID]; found {
 						schema, table = string(tm.Schema), string(tm.Table)
 					}
+					if err := convertCharsets(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+						select {
+						case out <- reader.Event{Type: reader.EventError, Err: err}:
+						case <-ctxRead.Done():
+						}
+						return
+					}
 					select {
 					case out <- reader.Event{
 						Type:      reader.EventRows,
@@ -351,6 +368,13 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 					schema, table := "", ""
 					if tm, found := tableMap[rowsEv.TableID]; found {
 						schema, table = string(tm.Schema), string(tm.Table)
+					}
+					if err := convertCharsets(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+						select {
+						case out <- reader.Event{Type: reader.EventError, Err: err}:
+						case <-ctxRead.Done():
+						}
+						return
 					}
 					select {
 					case out <- reader.Event{

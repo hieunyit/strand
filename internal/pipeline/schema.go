@@ -10,6 +10,7 @@ import (
 
 	"strand/internal/assemble"
 	"strand/internal/model"
+	mysqlreader "strand/internal/reader/mysql"
 	"strand/internal/snapshot"
 )
 
@@ -215,4 +216,9 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 // mysqlPKCodec: xem snapshot.MySQLPKCodec.
 func mysqlPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (*snapshot.PKCodec, error) {
 	return snapshot.MySQLPKCodec(ctx, db, id, pk)
+}
+
+// mysqlCollationCharsets: xem mysqlreader.LoadCollationCharsets.
+func mysqlCollationCharsets(ctx context.Context, db *sql.DB) (map[uint64]string, error) {
+	return mysqlreader.LoadCollationCharsets(ctx, db)
 }

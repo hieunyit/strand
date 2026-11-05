@@ -648,7 +648,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 				fmt.Sprintf("logical snapshot from this PostgreSQL source is not possible: %v", p.pgChunks.GateErr), p.pgChunks.GateErr)
 		}
 	} else {
-		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID})
+		charsets, err := mysqlCollationCharsets(ctx, p.src)
+		if err != nil {
+			return err
+		}
+		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID, CollationCharsets: charsets})
 		if err != nil {
 			return err
 		}
