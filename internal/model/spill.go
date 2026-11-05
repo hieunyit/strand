@@ -299,8 +299,11 @@ func (sr *SpillReader) readString() (string, error) {
 	return string(buf), nil
 }
 
-func (sr *SpillReader) readValue() (Value, error) {
-	tag, err := sr.r.ReadByte()
+func (sr *SpillReader) readValue() (Value, error) { return ReadValue(sr.r) }
+
+// ReadValue đọc một giá trị đã ghi bằng AppendValue (cùng định dạng spill).
+func ReadValue(r *bufio.Reader) (Value, error) {
+	tag, err := r.ReadByte()
 	if err != nil {
 		return nil, err
 	}
@@ -308,44 +311,44 @@ func (sr *SpillReader) readValue() (Value, error) {
 	case valNil:
 		return nil, nil
 	case valInt:
-		return binary.ReadVarint(sr.r)
+		return binary.ReadVarint(r)
 	case valGoInt:
-		v, err := binary.ReadVarint(sr.r)
+		v, err := binary.ReadVarint(r)
 		return int(v), err
 	case valUint:
-		return binary.ReadUvarint(sr.r)
+		return binary.ReadUvarint(r)
 	case valString:
-		return sr.readString()
+		return readStringFrom(r)
 	case valBytes:
-		n, err := binary.ReadUvarint(sr.r)
+		n, err := binary.ReadUvarint(r)
 		if err != nil {
 			return nil, err
 		}
 		buf := make([]byte, n)
-		_, err = io.ReadFull(sr.r, buf)
+		_, err = io.ReadFull(r, buf)
 		return buf, err
 	case valFloat64:
 		var buf [8]byte
-		if _, err := io.ReadFull(sr.r, buf[:]); err != nil {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return nil, err
 		}
 		return math.Float64frombits(binary.LittleEndian.Uint64(buf[:])), nil
 	case valFloat32:
 		var buf [4]byte
-		if _, err := io.ReadFull(sr.r, buf[:]); err != nil {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return nil, err
 		}
 		return math.Float32frombits(binary.LittleEndian.Uint32(buf[:])), nil
 	case valBool:
-		c, err := sr.r.ReadByte()
+		c, err := r.ReadByte()
 		return c == 1, err
 	case valTime:
-		n, err := binary.ReadUvarint(sr.r)
+		n, err := binary.ReadUvarint(r)
 		if err != nil {
 			return nil, err
 		}
 		buf := make([]byte, n)
-		if _, err := io.ReadFull(sr.r, buf); err != nil {
+		if _, err := io.ReadFull(r, buf); err != nil {
 			return nil, err
 		}
 		var t time.Time
@@ -353,6 +356,18 @@ func (sr *SpillReader) readValue() (Value, error) {
 		return t, err
 	}
 	return nil, fmt.Errorf("spill: unknown value tag %d", tag)
+}
+
+func readStringFrom(r *bufio.Reader) (string, error) {
+	n, err := binary.ReadUvarint(r)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
 }
 
 func (sr *SpillReader) readValues() ([]Value, error) {

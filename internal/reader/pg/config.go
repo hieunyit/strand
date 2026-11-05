@@ -3,6 +3,8 @@ package pg
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"time"
 
@@ -23,6 +25,13 @@ type Config struct {
 	ExportOnCreate bool
 	StatusInterval time.Duration // chu kỳ gửi StandbyStatusUpdate, mặc định 10s
 	BufferSize     int           // dung lượng kênh Event, mặc định 1024
+	// SpillDir / MaxBufferedBytes (review R08): phần thân Txn streaming / two-phase chờ kết cục được giữ
+	// trong RAM tới tổng MaxBufferedBytes (mặc định 64 MiB) cho mọi Txn đang treo; vượt thì Txn lớn nhất
+	// được đổ ra file tạm trong SpillDir (mặc định thư mục tạm của hệ thống).
+	SpillDir         string
+	MaxBufferedBytes int64
+
+	ownSpillDir bool // SpillDir do bên gọi chỉ định (riêng của reader này): được dọn file cũ khi Start
 }
 
 // slotNameRe theo quy tắc tên slot của PostgreSQL (ReplicationSlotValidateName).
@@ -69,6 +78,14 @@ func (c *Config) validate() error {
 	}
 	if c.BufferSize <= 0 {
 		c.BufferSize = 1024
+	}
+	if c.SpillDir == "" {
+		c.SpillDir = filepath.Join(os.TempDir(), "strand-pg-reader")
+	} else {
+		c.ownSpillDir = true
+	}
+	if c.MaxBufferedBytes <= 0 {
+		c.MaxBufferedBytes = 64 << 20
 	}
 	return nil
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -62,6 +64,7 @@ type Reader struct {
 	confirmed atomic.Uint64
 	progress  atomic.Uint64
 	hold      atomic.Uint64
+	spills    atomic.Int64 // số lần phần thân Txn treo bị đổ ra file (review R08)
 
 	writeMu sync.Mutex // tuần tự hóa việc ghi StandbyStatusUpdate lên kết nối
 	wg      sync.WaitGroup
@@ -419,6 +422,13 @@ func (r *Reader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-chan 
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 			"PostgreSQL publication name is required", nil)
 	}
+	if r.cfg.ownSpillDir {
+		// File spill của lần chạy trước (bị kill): server stream lại các Txn đó, file cũ vô dụng.
+		old, _ := filepath.Glob(filepath.Join(r.cfg.SpillDir, "pgtxn-*.spill"))
+		for _, f := range old {
+			_ = os.Remove(f)
+		}
+	}
 
 	var applied checkpoint.AppliedSet
 	var lwd uint64
@@ -672,3 +682,6 @@ func quoteLiteral(s string) string { return `'` + strings.ReplaceAll(s, `'`, `''
 
 // errEvent tạo EventError.
 func errEvent(err error) reader.Event { return reader.Event{Type: reader.EventError, Err: err} }
+
+// Spills trả số lần phần thân một Txn streaming / two-phase bị đổ ra file vì vượt MaxBufferedBytes.
+func (r *Reader) Spills() int64 { return r.spills.Load() }

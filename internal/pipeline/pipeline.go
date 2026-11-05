@@ -622,6 +622,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.srcEngine == model.EnginePG {
 		slot, pub := p.pgSlotNames()
 		prd, err := pgreader.New(pgreader.Config{DSN: p.srcDSN, Slot: slot, Publication: pub,
+			// Phần thân Txn streaming / two-phase vượt trần RAM tràn vào spool của pipeline (review R08).
+			SpillDir:   filepath.Join(p.cfg.Resources.Spool.Path, "pg-reader-"+p.id),
 			CreateSlot: p.cfg.Source.CreateSlot, Failover: p.cfg.Source.FailoverSlot,
 			ExportOnCreate: len(pending) > 0 && p.cfg.Source.CreateSlot})
 		if err != nil {

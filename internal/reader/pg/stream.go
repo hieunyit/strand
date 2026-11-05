@@ -15,20 +15,56 @@ import (
 	"strand/internal/reader"
 )
 
-// txnBuf đệm Event của một Txn streaming hoặc two-phase cho tới khi biết kết cục.
+// txnBuf đệm Event của một Txn streaming hoặc two-phase cho tới khi biết kết cục. Phần thân nằm trong
+// eventLog: RAM có giới hạn, tràn ra file tạm (review R08).
 type txnBuf struct {
 	xid        uint32
 	prepareLSN uint64
-	events     []reader.Event
+	log        *eventLog
 	// relVer: phiên bản Relation đã chèn EventTableMap vào buffer này (để phát lại đúng schema lúc ghi).
 	relVer map[uint32]uint64
-	// subxOff: vị trí event đầu tiên của từng (sub)xid trong buffer, để Stream Abort một subtransaction
-	// cắt đúng phần của nó (giống apply worker của PostgreSQL).
-	subxOff map[uint32]int
 }
 
-func newTxnBuf(xid uint32) *txnBuf {
-	return &txnBuf{xid: xid, relVer: map[uint32]uint64{}, subxOff: map[uint32]int{}}
+func (st *streamState) newTxnBuf(xid uint32) *txnBuf {
+	return &txnBuf{xid: xid, relVer: map[uint32]uint64{}, log: newEventLog(st.r.cfg.SpillDir)}
+}
+
+// dropBuf giải phóng buffer (RAM và file tạm) của Txn đã phát xong hoặc đã hủy.
+func (st *streamState) dropBuf(b *txnBuf) {
+	if b != nil {
+		st.bufBytes -= b.log.close()
+	}
+}
+
+// spillIfOver: tổng RAM của mọi Txn đang treo vượt MaxBufferedBytes thì đổ buffer lớn nhất còn trong RAM
+// ra file, tới khi dưới trần (invariant: CO-2 — trần RAM xuyên reader, review R08).
+func (st *streamState) spillIfOver() error {
+	for st.bufBytes > st.r.cfg.MaxBufferedBytes {
+		var big *txnBuf
+		consider := func(b *txnBuf) {
+			if b != nil && !b.log.spilled() && (big == nil || b.log.memBytes > big.log.memBytes) {
+				big = b
+			}
+		}
+		for _, b := range st.streams {
+			consider(b)
+		}
+		for _, b := range st.prepared {
+			consider(b)
+		}
+		consider(st.prep)
+		if big == nil {
+			return nil
+		}
+		freed, err := big.log.spill()
+		if err != nil {
+			return err
+		}
+		st.bufBytes -= freed
+		st.spills++
+		st.r.spills.Add(1)
+	}
+	return nil
 }
 
 // openTxn là Txn thường (Begin…Commit) đang đọc.
@@ -62,6 +98,9 @@ type streamState struct {
 	streams  map[uint32]*txnBuf // Txn streaming đang mở, theo xid top-level
 	prep     *txnBuf            // Txn two-phase giữa Begin Prepare và Prepare
 	prepared map[uint32]*txnBuf // Txn đã PREPARE, chờ COMMIT/ROLLBACK PREPARED
+
+	bufBytes int64 // tổng RAM của phần thân các Txn đang treo (eventLog.memBytes)
+	spills   int   // số lần đổ buffer ra file (test / log)
 }
 
 // WatermarkPrefix là prefix của logical decoding message (pg_logical_emit_message, không
@@ -85,6 +124,16 @@ func (r *Reader) readLoop(ctx context.Context, stop context.CancelFunc, out chan
 		streams:   map[uint32]*txnBuf{},
 		prepared:  map[uint32]*txnBuf{},
 	}
+
+	// Thoát (lỗi, dừng): xóa file tạm của các Txn còn treo — server stream lại chúng khi kết nối lại.
+	defer func() {
+		for _, b := range st.streams {
+			st.dropBuf(b)
+		}
+		for _, b := range st.prepared {
+			st.dropBuf(b)
+		}
+	}()
 
 	fail := func(err error) {
 		if ctx.Err() != nil {
@@ -219,7 +268,7 @@ func (st *streamState) handle(data []byte) error {
 		st.inStream = true
 		st.streamX = m.Xid
 		if st.streams[m.Xid] == nil {
-			st.streams[m.Xid] = newTxnBuf(m.Xid)
+			st.streams[m.Xid] = st.newTxnBuf(m.Xid)
 		}
 		return nil
 
@@ -231,6 +280,7 @@ func (st *streamState) handle(data []byte) error {
 	case *pglogrepl.StreamCommitMessageV2:
 		buf := st.streams[m.Xid]
 		delete(st.streams, m.Xid)
+		defer st.dropBuf(buf)
 		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.CommitLSN)}
 		if !st.contains(pos) {
 			// Txn streaming luôn được server stream lại từ đầu sau restart, nên buf rỗng chỉ khi Txn
@@ -249,16 +299,16 @@ func (st *streamState) handle(data []byte) error {
 		}
 		if m.SubXid == m.Xid {
 			delete(st.streams, m.Xid) // abort cả Txn: hủy, không phát
+			st.dropBuf(buf)
 			return nil
 		}
 		// Rollback một subtransaction (ROLLBACK TO SAVEPOINT): cắt từ event đầu tiên của nó.
-		if off, ok := buf.subxOff[m.SubXid]; ok {
-			buf.events = buf.events[:off]
-			for x, o := range buf.subxOff {
-				if o >= off {
-					delete(buf.subxOff, x)
-				}
-			}
+		freed, ok, err := buf.log.truncateTo(m.SubXid)
+		if err != nil {
+			return fmt.Errorf("rollback subtransaction %d of xid %d: %w", m.SubXid, m.Xid, err)
+		}
+		if ok {
+			st.bufBytes -= freed
 			buf.relVer = map[uint32]uint64{} // TableMap có thể đã bị cắt: chèn lại khi cần
 		}
 		return nil
@@ -296,7 +346,7 @@ func (st *streamState) handleTwoPhase(pm *prepareMsg) error {
 		if st.cur != nil || st.prep != nil {
 			return fmt.Errorf("BEGIN PREPARE khi Txn trước chưa kết thúc")
 		}
-		st.prep = newTxnBuf(pm.Xid)
+		st.prep = st.newTxnBuf(pm.Xid)
 		st.prep.prepareLSN = uint64(pm.LSN)
 		st.prepared[pm.Xid] = st.prep // giữ slot ngay từ Begin Prepare
 		st.updateHold()
@@ -314,7 +364,7 @@ func (st *streamState) handleTwoPhase(pm *prepareMsg) error {
 		buf := st.streams[pm.Xid]
 		delete(st.streams, pm.Xid)
 		if buf == nil {
-			buf = newTxnBuf(pm.Xid)
+			buf = st.newTxnBuf(pm.Xid)
 		}
 		buf.prepareLSN = uint64(pm.LSN)
 		st.prepared[pm.Xid] = buf
@@ -324,6 +374,7 @@ func (st *streamState) handleTwoPhase(pm *prepareMsg) error {
 	case msgCommitPrepared:
 		buf := st.prepared[pm.Xid]
 		delete(st.prepared, pm.Xid)
+		defer st.dropBuf(buf)
 		st.updateHold()
 		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(pm.LSN)}
 		if !st.contains(pos) {
@@ -342,6 +393,7 @@ func (st *streamState) handleTwoPhase(pm *prepareMsg) error {
 
 	case msgRollbackPrepared:
 		// Hủy, không phát.
+		st.dropBuf(st.prepared[pm.Xid])
 		delete(st.prepared, pm.Xid)
 		st.updateHold()
 		return nil
@@ -382,7 +434,7 @@ func (st *streamState) row(xid uint32, relID uint32, op model.Op, oldT, newT *pg
 	case st.inStream:
 		buf = st.streams[st.streamX]
 		if buf == nil {
-			buf = newTxnBuf(st.streamX)
+			buf = st.newTxnBuf(st.streamX)
 			st.streams[st.streamX] = buf
 		}
 	case st.prep != nil:
@@ -406,16 +458,22 @@ func (st *streamState) row(xid uint32, relID uint32, op model.Op, oldT, newT *pg
 
 	if buf != nil {
 		if st.inStream {
-			if _, ok := buf.subxOff[xid]; !ok {
-				buf.subxOff[xid] = len(buf.events)
-			}
+			buf.log.mark(xid)
 		}
 		if buf.relVer[relID] != rs.ver {
-			buf.events = append(buf.events, tableMapEvent(rs.msg))
+			added, err := buf.log.append(tableMapEvent(rs.msg))
+			if err != nil {
+				return err
+			}
+			st.bufBytes += added
 			buf.relVer[relID] = rs.ver
 		}
-		buf.events = append(buf.events, ev)
-		return nil
+		added, err := buf.log.append(ev)
+		if err != nil {
+			return err
+		}
+		st.bufBytes += added
+		return st.spillIfOver()
 	}
 
 	ev.Pos, ev.Timestamp = st.cur.pos, st.cur.ts
@@ -436,11 +494,11 @@ func (st *streamState) emitBuffered(buf *txnBuf, pos model.Pos, ts time.Time, xi
 		return err
 	}
 	if buf != nil {
-		for _, ev := range buf.events {
+		if err := buf.log.replay(func(ev reader.Event) error {
 			ev.Pos, ev.Timestamp = pos, ts
-			if err := st.emit(ev); err != nil {
-				return err
-			}
+			return st.emit(ev)
+		}); err != nil {
+			return err
 		}
 		// Schema mà assembler đang giữ có thể là phiên bản cũ trong buffer: buộc phát lại TableMap.
 		clear(st.announced)

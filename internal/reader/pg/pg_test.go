@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -221,12 +222,36 @@ func TestValueMapping(t *testing.T) {
 // một lần; abort / ROLLBACK PREPARED / ROLLBACK TO SAVEPOINT không phát. Kèm restart khi đang có Txn
 // PREPARE treo: slot không được tiến quá PREPARE, COMMIT PREPARED sau restart vẫn phát đủ một lần.
 func TestAC3_StreamingAndTwoPhase(t *testing.T) {
+	runAC3(t, "ac3", nil)
+}
+
+// invariant: CO-2 — review R08. Cùng kịch bản AC3 nhưng trần RAM phần thân Txn treo chỉ 4 KiB: mọi Txn
+// streaming / two-phase lớn bị đổ ra file (kể cả khi đang có ROLLBACK TO SAVEPOINT và PREPARE treo qua
+// restart); kết quả phải giống hệt, và file tạm được xóa.
+func TestR08_StreamingAndTwoPhaseSpillToDisk(t *testing.T) {
+	dir := t.TempDir()
+	r := runAC3(t, "r08", func(c *pg.Config) { c.SpillDir, c.MaxBufferedBytes = dir, 4096 })
+	if r.Spills() == 0 {
+		t.Fatal("no pending transaction body was spilled at a 4 KiB cap")
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, "*"))
+	if len(left) != 0 {
+		t.Fatalf("spill files left behind: %v", left)
+	}
+	t.Logf("%d spills", r.Spills())
+}
+
+// runAC3 chạy kịch bản streaming / two-phase trên bảng prefix; trả reader đầu tiên (đã đóng).
+func runAC3(t *testing.T, prefix string, mod func(*pg.Config)) *pg.Reader {
 	inst := sharedPG(t)
 	db := inst.db
-	pub := setupTables(t, db, "ac3", "CREATE TABLE ac3 (id serial PRIMARY KEY, tag text, pad text)", "ac3")
-	slot := "ac3_slot"
+	pub := setupTables(t, db, prefix, "CREATE TABLE "+prefix+" (id serial PRIMARY KEY, tag text, pad text)", prefix)
+	slot := prefix + "_slot"
 	dropSlotLater(t, db, slot)
 	cfg := pg.Config{DSN: inst.dsn, Slot: slot, Publication: pub, CreateSlot: true, StatusInterval: 200 * time.Millisecond}
+	if mod != nil {
+		mod(&cfg)
+	}
 	r := newReader(t, cfg)
 	ch, err := r.Start(context.Background(), nil)
 	if err != nil {
@@ -235,7 +260,7 @@ func TestAC3_StreamingAndTwoPhase(t *testing.T) {
 	tr := newTxnReader(t, ch)
 
 	fill := func(tag string, n int) string {
-		return fmt.Sprintf("INSERT INTO ac3 (tag, pad) SELECT '%s', repeat('p', 100) FROM generate_series(1, %d);", tag, n)
+		return fmt.Sprintf("INSERT INTO "+prefix+" (tag, pad) SELECT '%s', repeat('p', 100) FROM generate_series(1, %d);", tag, n)
 	}
 
 	// (a) Txn lớn commit; (b) Txn lớn rollback; (c) Txn lớn có ROLLBACK TO SAVEPOINT.
@@ -244,15 +269,15 @@ func TestAC3_StreamingAndTwoPhase(t *testing.T) {
 	mustExec(t, db, "BEGIN;"+fill("sub_keep", 3000)+"SAVEPOINT s1;"+fill("sub_drop", 3000)+
 		"ROLLBACK TO SAVEPOINT s1;"+fill("sub_keep2", 10)+"COMMIT;")
 	// (d) PREPARE rồi ROLLBACK PREPARED; (e) PREPARE rồi COMMIT PREPARED; (f) Txn lớn PREPARE (stream prepare).
-	mustExec(t, db, "BEGIN;"+fill("p_rb", 3)+"PREPARE TRANSACTION 'g_rb';")
-	mustExec(t, db, "ROLLBACK PREPARED 'g_rb'")
-	mustExec(t, db, "BEGIN;"+fill("p_cm", 3)+"PREPARE TRANSACTION 'g_cm';")
-	mustExec(t, db, "BEGIN;"+fill("p_big", 4000)+"PREPARE TRANSACTION 'g_big';")
-	mustExec(t, db, "BEGIN;"+fill("p_big_rb", 4000)+"PREPARE TRANSACTION 'g_big_rb';")
-	mustExec(t, db, "COMMIT PREPARED 'g_cm'")
-	mustExec(t, db, "ROLLBACK PREPARED 'g_big_rb'")
-	mustExec(t, db, "COMMIT PREPARED 'g_big'")
-	insertMarker(t, db, "ac3", "m0")
+	mustExec(t, db, "BEGIN;"+fill("p_rb", 3)+"PREPARE TRANSACTION '"+prefix+"_g_rb';")
+	mustExec(t, db, "ROLLBACK PREPARED '"+prefix+"_g_rb'")
+	mustExec(t, db, "BEGIN;"+fill("p_cm", 3)+"PREPARE TRANSACTION '"+prefix+"_g_cm';")
+	mustExec(t, db, "BEGIN;"+fill("p_big", 4000)+"PREPARE TRANSACTION '"+prefix+"_g_big';")
+	mustExec(t, db, "BEGIN;"+fill("p_big_rb", 4000)+"PREPARE TRANSACTION '"+prefix+"_g_big_rb';")
+	mustExec(t, db, "COMMIT PREPARED '"+prefix+"_g_cm'")
+	mustExec(t, db, "ROLLBACK PREPARED '"+prefix+"_g_big_rb'")
+	mustExec(t, db, "COMMIT PREPARED '"+prefix+"_g_big'")
+	insertMarker(t, db, prefix, "m0")
 
 	got, m0 := tr.untilMarker("m0", 60*time.Second)
 	count := func(txn *model.Txn) map[string]int {
@@ -291,8 +316,8 @@ func TestAC3_StreamingAndTwoPhase(t *testing.T) {
 	t.Logf("stream_txns=%d", streamTxns)
 
 	// (g) PREPARE treo qua một lần restart.
-	mustExec(t, db, "BEGIN;"+fill("p_restart", 5)+"PREPARE TRANSACTION 'g_restart';")
-	insertMarker(t, db, "ac3", "m1")
+	mustExec(t, db, "BEGIN;"+fill("p_restart", 5)+"PREPARE TRANSACTION '"+prefix+"_g_restart';")
+	insertMarker(t, db, prefix, "m1")
 	got, m1 := tr.untilMarker("m1", readTimeout)
 	if len(got) != 0 {
 		t.Fatalf("Txn PREPARE chưa commit không được phát: %d Txn", len(got))
@@ -316,12 +341,13 @@ func TestAC3_StreamingAndTwoPhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, db, "COMMIT PREPARED 'g_restart'")
-	insertMarker(t, db, "ac3", "m2")
+	mustExec(t, db, "COMMIT PREPARED '"+prefix+"_g_restart'")
+	insertMarker(t, db, prefix, "m2")
 	got, _ = newTxnReader(t, ch2).untilMarker("m2", readTimeout)
 	if len(got) != 1 || fmt.Sprint(count(got[0])) != fmt.Sprint(map[string]int{"p_restart": 5}) {
 		t.Fatalf("sau restart phải phát đúng Txn g_restart một lần, được %d Txn", len(got))
 	}
+	return r
 }
 
 // AC4: consumer không đọc kênh trong 30s (backpressure), wal_sender_timeout=10s → kết nối vẫn sống
