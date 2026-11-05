@@ -41,11 +41,22 @@ func TestP1_E2E_VerifySampleDeltaRepair(t *testing.T) {
 	if code != 5 || !strings.Contains(out, "9000000001") {
 		t.Fatalf("injected mismatch not detected: exit %d\n%s", code, out)
 	}
-	// 3. Sửa.
+	// 3. Sửa. --repair fix bị từ chối khi pipeline đang chạy (review R04: repair song song với stream
+	// có thể ghi đè ảnh mới đã checkpoint bằng ảnh cũ): dừng pipeline, sửa, chạy lại.
+	out, code = runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--table", "app.accounts", "--mode", "sample", "--rate", "1.0", "--repair", "fix")
+	if code != 4 || !strings.Contains(out, "pipeline_locked") {
+		t.Fatalf("repair while the pipeline runs: exit %d, want 4 pipeline_locked\n%s", code, out)
+	}
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("stop before repair: exit %d\n%s", code, p.tail())
+	}
 	out, code = runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--table", "app.accounts", "--mode", "sample", "--rate", "1.0", "--repair", "fix")
 	if code != 0 {
 		t.Fatalf("repair: exit %d\n%s", code, out)
 	}
+	p = startStrand(t, path)
+	waitSynced(t, &cfg, p, 3*time.Minute)
+	time.Sleep(3 * time.Second)
 	out, code = runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--table", "app.accounts", "--mode", "sample", "--rate", "1.0")
 	if code != 0 {
 		t.Fatalf("after repair still mismatching: exit %d\n%s", code, out)
