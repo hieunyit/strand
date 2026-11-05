@@ -104,3 +104,30 @@ func writeYAML(t *testing.T, y string) string {
 	}
 	return path
 }
+
+// Review F6: full verify theo tuple không được trùng khóa giữa hai tuple chuỗi khác nhau — ('x','y,z') và
+// ('x,y','z') nối bằng "," cùng là "x,y,z"; row bị đè không được so và lệch của nó bị bỏ sót.
+func TestVerifyFullKeysDistinguishesAmbiguousTuples(t *testing.T) {
+	addr := startContainer(t, testcontainers.ContainerRequest{
+		Image: "mysql:8.4", ExposedPorts: []string{"3306/tcp"}, Env: map[string]string{"MYSQL_ROOT_PASSWORD": "dev"},
+		Cmd:        []string{"--innodb-use-native-aio=OFF"},
+		WaitingFor: wait.ForLog("port: 3306  MySQL Community Server").WithStartupTimeout(180 * time.Second),
+	})
+	root := openWait(t, "mysql", fmt.Sprintf("root:dev@tcp(%s)/", addr))
+	mustExecSQL(t, root, "CREATE DATABASE ss", "CREATE DATABASE dd",
+		"CREATE TABLE ss.c (a VARCHAR(8) COLLATE utf8mb4_bin NOT NULL, b VARCHAR(8) COLLATE utf8mb4_bin NOT NULL, v INT, PRIMARY KEY (a, b))",
+		"CREATE TABLE dd.c LIKE ss.c",
+		"INSERT INTO ss.c VALUES ('x', 'y,z', 1), ('x,y', 'z', 2)",
+		"INSERT INTO dd.c SELECT * FROM ss.c",
+		"UPDATE dd.c SET v = 9 WHERE a = 'x' AND b = 'y,z'")
+	y := fmt.Sprintf("name: amb\nsource: { kind: mysql, dsn: \"root:dev@tcp(%[1]s)/ss\" }\ntarget: { kind: mysql, dsn: \"root:dev@tcp(%[1]s)/dd\" }\ntables:\n  include: [\"ss.c\"]\n  rename: { \"ss.c\": \"dd.c\" }\n", addr)
+	if code := runVerifyFull(t, y, "--table", "ss.c"); code != exitcode.DataError {
+		t.Fatalf("one differing row hidden by an ambiguous key: exit %d, want %d", code, exitcode.DataError)
+	}
+	if code := runVerifyFull(t, y, "--table", "ss.c", "--repair", "fix"); code != exitcode.Success {
+		t.Fatalf("repair: exit %d", code)
+	}
+	if code := runVerifyFull(t, y, "--table", "ss.c"); code != exitcode.Success {
+		t.Fatalf("verify after repair: exit %d", code)
+	}
+}

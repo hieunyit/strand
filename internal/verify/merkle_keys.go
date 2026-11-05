@@ -122,9 +122,11 @@ func (s keySide) rowsBounds(ctx context.Context, c keyChunk, cols []ColumnInfo, 
 		if err := rs.Scan(ptrs...); err != nil {
 			return nil, nil, err
 		}
+		// Khóa map phân định từng phần (review F6): nối thẳng bằng "," làm ("x,y","z") trùng ("x","y,z"),
+		// một row bị đè và có thể không được so. Dạng "len:value" không trùng giữa hai tuple khác nhau.
 		keys := make([]string, len(pkCols))
 		for i := range pkCols {
-			keys[i] = string(parts[i])
+			keys[i] = fmt.Sprintf("%d:%s", len(parts[i]), parts[i])
 		}
 		k := strings.Join(keys, ",")
 		out[k] = string(parts[len(parts)-1])

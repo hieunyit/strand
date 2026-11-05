@@ -8,8 +8,13 @@ case "$1" in
 	*) exit 0 ;;
 esac
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+	# Instance đang nạp (list-units) và instance đã enable mà chưa nạp kể từ boot (symlink trong *.wants).
 	units=$(systemctl list-units --type=service --all --no-legend 'strand@*' 2>/dev/null | awk '{print $1}')
-	for u in $units; do
+	for l in /etc/systemd/system/*.wants/strand@*.service; do
+		[ -e "$l" ] || [ -L "$l" ] || continue
+		units="$units $(basename "$l")"
+	done
+	for u in $(printf '%s\n' $units | sort -u); do
 		systemctl disable --now "$u" || true
 	done
 fi
