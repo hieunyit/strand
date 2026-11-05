@@ -102,6 +102,12 @@ func newPromoteCmd() *cobra.Command {
 						}
 						defer sourceDB.Close()
 						sourceDriver = promote.NewPGSourceDriver(sourceDB, promoteSourceAppRoles...)
+						if len(promoteSourceAppRoles) == 0 {
+							// review R06: không biết role ứng dụng thì fence chỉ là default_transaction_read_only
+							// (role thường tự đặt lại được) + ngắt session — chặn hợp tác, không phải hàng rào cứng.
+							logger.Warn("source fence is advisory without --source-app-roles: sessions are terminated and default_transaction_read_only is set, " +
+								"but a role can override it; pass --source-app-roles to also set those roles NOLOGIN")
+						}
 						pgTargetDriver.WithCatchUpCheck(sourceDB, promotePipelineID, promoteCatchUpTimeout, logger)
 					} else {
 						sourceDB, err := sql.Open("mysql", promoteFenceSourceDSN)
@@ -208,7 +214,7 @@ func newPromoteCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&promoteSyncIntervalSec, "sync-interval", 5, "Chu kỳ đồng bộ sequence Delta t_sync (giây)")
 	cmd.Flags().StringVar(&promoteEngine, "engine", "auto", "Loại CSDL target: mysql | pg | auto (tự động nhận diện từ DSN)")
 	cmd.Flags().StringVar(&promoteAppRole, "app-role", "app_rw", "Role ứng dụng trên target PostgreSQL: bị chặn ghi đến bước 5 rồi được cấp quyền ghi")
-	cmd.Flags().StringSliceVar(&promoteSourceAppRoles, "source-app-roles", nil, "Role ứng dụng trên source PostgreSQL bị ngắt session khi fence (rỗng = mọi session client trừ user của Strand)")
+	cmd.Flags().StringSliceVar(&promoteSourceAppRoles, "source-app-roles", nil, "Role ứng dụng trên source PostgreSQL: fence đặt NOLOGIN rồi ngắt session (rỗng = chỉ ngắt mọi session client trừ user của Strand, fence mang tính hợp tác)")
 	cmd.Flags().StringSliceVar(&promoteSchemas, "schemas", []string{"public"}, "Danh sách schema PostgreSQL chứa bảng và sequence cần promote")
 
 	return cmd

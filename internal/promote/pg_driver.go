@@ -83,7 +83,14 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 		return fmt.Errorf("fence source: pg_reload_conf: %w", err)
 	}
 	if len(d.appRoles) > 0 {
+		// Hàng rào cứng cho role ứng dụng đã khai báo (review R06): default_transaction_read_only chỉ là
+		// mặc định — role thường tự đặt lại được (SET default_transaction_read_only = off). NOLOGIN trước
+		// khi ngắt session: role không kết nối lại được, nên không còn session nào để ghi. Gỡ fence là
+		// việc của người vận hành (ALTER ROLE … LOGIN), như với super_read_only của MySQL.
 		for _, role := range d.appRoles {
+			if _, err := d.db.ExecContext(ctx, "ALTER ROLE "+quoteIdent(role)+" NOLOGIN"); err != nil {
+				return fmt.Errorf("fence source: ALTER ROLE %s NOLOGIN: %w", role, err)
+			}
 			q := `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
 				WHERE usename = $1 AND pid <> pg_backend_pid() AND backend_type = 'client backend'`
 			if _, err := d.db.ExecContext(ctx, q, role); err != nil {
