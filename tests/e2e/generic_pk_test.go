@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// Việc C (mức 1), binary thật: snapshot logic MySQL→MySQL của bảng PK ghép (INT, BIGINT) và VARCHAR
-// utf8mb4_bin + INT dưới tải ghi đồng thời (INSERT, UPDATE, DELETE, UPDATE đổi PK xuyên chunk; chunk 50
+// Việc C (mức 1 + 2), binary thật: snapshot logic MySQL→MySQL của bảng PK ghép (INT, BIGINT), VARCHAR
+// utf8mb4_bin + INT và VARCHAR utf8mb4_0900_ai_ci + INT (WEIGHT_STRING) dưới tải ghi đồng thời (INSERT, UPDATE, DELETE, UPDATE đổi PK xuyên chunk; chunk 50
 // row), bảng đích do schema-init tạo; cuối: `verify --mode full` 0 lệch và dump hai phía giống hệt.
 func TestC_E2E_GenericPKSnapshotUnderLoad(t *testing.T) {
 	seed := seedFromEnv(t)
@@ -27,6 +27,11 @@ func TestC_E2E_GenericPKSnapshotUnderLoad(t *testing.T) {
 		{"gk_str", "k VARCHAR(24) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, n INT NOT NULL, v INT, PRIMARY KEY (k, n)", []string{"k", "n"},
 			func(r *rand.Rand) []any {
 				w := []string{"a", "A", "ab", "ab ", "é", "e", "中", "😀", "10", "9", "z", "Z"}
+				return []any{fmt.Sprintf("%s%d", w[r.Intn(len(w))], r.Intn(60)), r.Intn(4)}
+			}},
+		{"gk_ci", "k VARCHAR(24) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL, n INT NOT NULL, v INT, PRIMARY KEY (k, n)", []string{"k", "n"},
+			func(r *rand.Rand) []any {
+				w := []string{"a", "A", "á", "Á", "ab", "AB", "e", "é", "É", "ß", "ss", "z", "Z", "中", "😀"}
 				return []any{fmt.Sprintf("%s%d", w[r.Intn(len(w))], r.Intn(60)), r.Intn(4)}
 			}},
 	}

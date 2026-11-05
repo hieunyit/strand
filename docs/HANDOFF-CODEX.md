@@ -170,10 +170,9 @@ Sau khi xong: cập nhật dòng quyết định 17 (bỏ chữ "Đang làm", gh
 - PG text không COLLATE: nhận khi collation mặc định của DB là C/POSIX (libc) hoặc builtin C/C.UTF-8.
 - Kill -9: e2e 60 lần kill trong snapshot (UNIQUE phụ bị đổi liên tục) + test tất định cho khe flush↔lưu plan (`TestGPK_ResumeClearsUnreadPartBeforeStreamApplies`, đỏ 1062 khi tắt xóa phần chưa đọc).
 - E2e PG→PG binary (`TestC_E2E_PGGenericPKSnapshotAdd`, đổi PK + TOAST): relaxed + strict 0 lệch.
-- **Mức 2 (WIP, `fc16596`):** collation không nhị phân của MySQL → `WEIGHT_STRING` do MySQL tính (không cài collation trong Go). Thứ tự == ORDER BY và binlog == SELECT trên 5 collation (0900_ai_ci, 0900_as_cs, general_ci PAD SPACE, unicode_ci, latin1_swedish_ci). Test pipeline có tải: 2/3 qua, lần 3 lỗi lúc máy hết RAM (container test bị bỏ lại) — CHƯA giải thích, phải chạy lại trên máy rảnh trước khi coi là xong.
+- **Mức 2 (`fc16596`):** collation không nhị phân của MySQL → `WEIGHT_STRING` do MySQL tính (không cài collation trong Go). Thứ tự == ORDER BY và binlog == SELECT trên 5 collation (0900_ai_ci, 0900_as_cs, general_ci PAD SPACE, unicode_ci, latin1_swedish_ci). Chạy lại trên máy đã dọn: test pipeline có tải 8/8; e2e (binary, bảng `gk_ci`, ~120.000 ghi/lần, sample 100% + full verify 0 lệch) relaxed 3/3, strict 3/3. Lần lỗi trước rơi đúng lúc máy hết RAM, log không giữ — không tái hiện được.
 
 **Còn thiếu:**
-1. Chạy lại test mức 2 (≥3 lần) khi máy rảnh; e2e cho PK `_ci`.
 2. `verify --resume` cho PK tổng quát (bảng tiến độ lưu biên BIGINT) — đang từ chối.
 3. Repair PG→PG cho PK tổng quát — đang từ chối.
 4. Chia đôi theo timeout chỉ có cho khóa số nguyên.
