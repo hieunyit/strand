@@ -518,9 +518,35 @@ func comparePG(t *testing.T, src, dst *pgNode, tables ...string) {
 		if len(bad) > 15 {
 			bad = bad[:15]
 		}
+		t.Logf("diagnostics:\n%s", pgMismatchDiagnostics(t, src, dst, tables))
 		t.Fatalf("final state mismatch:\n%s", strings.Join(bad, "\n"))
 	}
 	t.Logf("final state: %d rows in %d tables identical", total, len(tables))
+}
+
+// pgMismatchDiagnostics: với từng row lệch/thiếu — xid (xmin) và ver ở source, và apply_log của target
+// cho đúng ver đó (vắng = phiên bản chưa từng được ghi ở target; có = đã ghi rồi bị đè).
+func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) string {
+	var out []string
+	for _, tb := range tables {
+		s, d := dumpPG(t, src.DB, tb), dumpPG(t, dst.DB, tb)
+		for id, sv := range s {
+			if d[id] == sv {
+				continue
+			}
+			var xmin, ver string
+			_ = src.DB.QueryRow(fmt.Sprintf("SELECT xmin::text, ver::text FROM %s WHERE id = $1", tb), id).Scan(&xmin, &ver)
+			var dver string
+			_ = dst.DB.QueryRow(fmt.Sprintf("SELECT ver::text FROM %s WHERE id = $1", tb), id).Scan(&dver)
+			var cnt sql.NullInt64
+			_ = dst.DB.QueryRow("SELECT cnt FROM public.apply_log WHERE tbl = $1 AND ver = $2::bigint", strings.TrimPrefix(tb, "app."), ver).Scan(&cnt)
+			out = append(out, fmt.Sprintf("%s id=%s src xmin=%s ver=%s | dst ver=%q apply_log(src ver)=%v", tb, id, xmin, ver, dver, cnt))
+			if len(out) > 30 {
+				return strings.Join(out, "\n")
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // checkPGInvariants: cột TOAST không bao giờ NULL ở target; không phiên bản row nào bị ghi hai lần.

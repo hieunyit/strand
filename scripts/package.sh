@@ -10,6 +10,12 @@
 # bằng khóa phát hành của tổ chức sau bước này.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Go cài ở /usr/local/go nhưng không có trong PATH của shell (thường gặp khi đăng nhập không qua profile).
+if ! command -v go >/dev/null 2>&1 && [ -x /usr/local/go/bin/go ]; then
+	export PATH="$PATH:/usr/local/go/bin"
+fi
+command -v go >/dev/null 2>&1 || { echo "package.sh: go not found (install Go or add it to PATH)" >&2; exit 1; }
+export GOFLAGS="${GOFLAGS:--buildvcs=false}"
 
 NFPM="github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0"
 ARCHES="${ARCHES:-amd64 arm64}"
@@ -36,11 +42,12 @@ for arch in $ARCHES; do
 	CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
 		-ldflags "-s -w -X main.version=$VERSION -X main.commit=$COMMIT" -o "$bin" ./cmd/strand
 	tar -C dist -czf "dist/strand-$VERSION-linux-$arch.tar.gz" "strand-linux-$arch"
+	cp "$bin" dist/pkgroot/strand
 	for fmt in deb rpm; do
-		ARCH="$arch" VERSION="$PKGVER" BIN="$bin" go run "$NFPM" package \
+		ARCH="$arch" VERSION="$PKGVER" go run "$NFPM" package \
 			--config packaging/nfpm.yaml --packager "$fmt" --target dist/
 	done
 done
-rm -rf dist/pkgroot
+rm -rf dist/pkgroot "dist/strand-linux-"*
 (cd dist && sha256sum *.tar.gz *.deb *.rpm > "strand-$VERSION.sha256")
 ls -l dist

@@ -1,5 +1,5 @@
 # Gói .deb/.rpm của strand (spec 01 §3, 03 §4). Dựng bằng scripts/package.sh — không gọi nfpm tay:
-# script đặt VERSION, ARCH, BIN và sinh unit systemd cho /usr/bin.
+# script đặt VERSION, ARCH, chép binary vào dist/pkgroot/strand và sinh unit systemd cho /usr/bin.
 # Đường dẫn src tính từ thư mục gốc repo.
 name: strand
 arch: ${ARCH}
@@ -15,7 +15,8 @@ description: |
 homepage: https://example.invalid/strand
 
 contents:
-  - src: ${BIN}
+  # nfpm không thay biến môi trường trong src: package.sh chép binary của kiến trúc đang đóng gói vào đây.
+  - src: dist/pkgroot/strand
     dst: /usr/bin/strand
     file_info: { mode: 0755, owner: root, group: root }
 

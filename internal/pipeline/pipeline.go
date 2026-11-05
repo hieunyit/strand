@@ -1355,6 +1355,13 @@ func (p *Pipeline) applyInSeqOrder(ctx context.Context, id int, w batchWriter, b
 			if attempt >= 100 || ctx.Err() != nil {
 				break
 			}
+			if attempt == 1 || attempt%10 == 0 {
+				// Không im lặng khi Txn không apply được trong thời gian dài: chờ seq nhỏ hơn chỉ giải
+				// được vi phạm do Txn TRƯỚC gây ra.
+				p.log.Warn("transaction still failing after re-apply in source order",
+					"seq", t.Seq(), "pos", t.SourcePos.String(), "attempt", attempt,
+					"lwd", p.sched.Lwd(), "admitted", p.admitted.Load(), "error", err.Error())
+			}
 			switch {
 			case writer.IsPGUniqueViolation(err):
 				p.waitLwd(ctx, t.Seq()-1, 2*time.Second)
