@@ -52,7 +52,7 @@ func (m *memChunkSource) KeysetEnd(_ context.Context, _ model.TableID, _ string,
 }
 
 func (m *memChunkSource) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, chunk *snapshot.Chunk, _ []string, _ int,
-	table model.TableID) ([]*model.RowChange, checkpoint.AppliedSet, error) {
+	table model.TableID) (snapshot.ChunkRead, checkpoint.AppliedSet, error) {
 	s.Manager.BeginReading(chunk)
 	s.Manager.StartReading(chunk, checkpoint.NewMySQLAppliedSet())
 	var rows []*model.RowChange
@@ -62,7 +62,7 @@ func (m *memChunkSource) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshott
 				Cols: []model.ColValue{{Name: "id", Value: k}}})
 		}
 	}
-	return rows, checkpoint.NewMySQLAppliedSet(), nil
+	return snapshot.ChunkRead{Rows: rows, Cut: chunk.EndPK}, checkpoint.NewMySQLAppliedSet(), nil
 }
 
 func runMaxIntSnapshot(t *testing.T, keys []int64, plans map[string]snapshot.SnapshotPlan) (map[int64]bool, *memChunkSource) {

@@ -108,83 +108,86 @@ func (c *Chunker) SplitChunk(chunk *Chunk, minRows int64) (*Chunk, *Chunk, bool)
 	return left, right, true
 }
 
-// QueryChunkFunc là hàm thực hiện query SELECT cho một chunk.
-// Trả về danh sách rows, kích thước bytes ước tính, và lỗi (nếu có).
-type QueryChunkFunc func(ctx context.Context, chunk *Chunk) ([]*model.RowChange, int64, error)
+// QueryChunkFunc là hàm thực hiện query SELECT cho một chunk, theo thứ tự PK tăng dần. Khi maxBytes > 0,
+// hàm PHẢI dừng quét ngay sau row làm tổng byte đạt maxBytes (các row đã trả phủ trọn [StartPK, pk của
+// row cuối]) — để RAM giữ cho một chunk không vượt trần (review R10). maxBytes ≤ 0: không giới hạn.
+// Trả về rows, tổng byte ước tính của rows, và lỗi.
+type QueryChunkFunc func(ctx context.Context, chunk *Chunk, maxBytes int64) ([]*model.RowChange, int64, error)
+
+// ChunkRead là kết quả ReadChunkAdaptive. Truncated: chỉ đọc được [chunk.StartPK, Cut] trong ngân sách
+// max_chunk_bytes; phần [Cut+1, chunk.EndPK] chưa đọc và phải được tách thành chunk riêng
+// (RangeStateManager.SplitReading) rồi đọc tiếp — KHÔNG ghép lại trong RAM.
+type ChunkRead struct {
+	Rows      []*model.RowChange
+	Bytes     int64
+	Cut       int64
+	Truncated bool
+}
 
 // ReadChunkAdaptive đọc dữ liệu của một chunk và tự động thích ứng theo các quy tắc trong spec/02 §5:
 //  1. Timeout SELECT của chunk (mặc định 5s): Hủy, chia đôi, chạy lại.
 //     QUY TẮC BẮT BUỘC: Không áp timeout khi chunk chỉ còn 1 row (min_chunk_rows = 1).
-//  2. max_chunk_bytes (mặc định 64MB): Vượt ngân sách thì chia đôi.
-//     QUY TẮC BẮT BUỘC: Row lớn hơn max_chunk_bytes không gây vòng lặp chia chunk vô tận (chặn bởi min_chunk_rows = 1).
+//  2. max_chunk_bytes (mặc định 64MB) là trần RAM của phần đã đọc (review R10): truy vấn dừng khi chạm
+//     trần và kết quả bị cắt ở khóa cuối đã đọc (Truncated). Trần vượt tối đa một row: row lớn hơn
+//     max_chunk_bytes vẫn được đọc (một mình), không gây vòng lặp.
 func (c *Chunker) ReadChunkAdaptive(
 	ctx context.Context,
 	chunk *Chunk,
 	opts ChunkOptions,
 	queryFn QueryChunkFunc,
-) ([]*model.RowChange, error) {
+) (ChunkRead, error) {
 	if opts.MinChunkRows <= 0 {
 		opts.MinChunkRows = 1
 	}
 	if opts.MaxChunkBytes <= 0 {
 		opts.MaxChunkBytes = 64 * 1024 * 1024
 	}
+	return c.readBounded(ctx, chunk, opts, queryFn, opts.MaxChunkBytes)
+}
 
+func (c *Chunker) readBounded(ctx context.Context, chunk *Chunk, opts ChunkOptions, queryFn QueryChunkFunc, budget int64) (ChunkRead, error) {
 	// Kiểm tra nếu chunk chỉ có <= min_chunk_rows:
 	// "Không áp khi chunk chỉ còn 1 row" -> Chạy trực tiếp với parent ctx (không áp opts.Timeout)
 	isSingleRow := chunk.RowCount() <= opts.MinChunkRows
 
-	var queryCtx context.Context
-	var cancel context.CancelFunc
-
-	if isSingleRow || opts.Timeout <= 0 {
-		queryCtx = ctx
-		cancel = func() {}
-	} else {
+	queryCtx, cancel := ctx, context.CancelFunc(func() {})
+	if !isSingleRow && opts.Timeout > 0 {
 		queryCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
 	}
-	defer cancel()
-
-	rows, totalBytes, err := queryFn(queryCtx, chunk)
+	rows, totalBytes, err := queryFn(queryCtx, chunk, budget)
+	cancel()
 	if err != nil {
-		// Kiểm tra nếu lỗi do timeout của câu SELECT chunk
-		if errors.Is(err, context.DeadlineExceeded) && !isSingleRow {
-			// Hủy, chia đôi chunk, chạy lại
-			left, right, ok := c.SplitChunk(chunk, opts.MinChunkRows)
-			if ok {
-				leftRows, errLeft := c.ReadChunkAdaptive(ctx, left, opts, queryFn)
-				if errLeft != nil {
-					return nil, errLeft
+		// Timeout của câu SELECT chunk: chia đôi, đọc nửa trái rồi nửa phải với phần ngân sách còn lại.
+		if errors.Is(err, context.DeadlineExceeded) && !isSingleRow && ctx.Err() == nil {
+			if left, right, ok := c.SplitChunk(chunk, opts.MinChunkRows); ok {
+				l, err := c.readBounded(ctx, left, opts, queryFn, budget)
+				if err != nil {
+					return ChunkRead{}, err
 				}
-				rightRows, errRight := c.ReadChunkAdaptive(ctx, right, opts, queryFn)
-				if errRight != nil {
-					return nil, errRight
+				if l.Truncated {
+					return l, nil
 				}
-				return append(leftRows, rightRows...), nil
+				if l.Bytes >= budget {
+					return ChunkRead{Rows: l.Rows, Bytes: l.Bytes, Cut: left.EndPK, Truncated: true}, nil
+				}
+				r, err := c.readBounded(ctx, right, opts, queryFn, budget-l.Bytes)
+				if err != nil {
+					return ChunkRead{}, err
+				}
+				return ChunkRead{Rows: append(l.Rows, r.Rows...), Bytes: l.Bytes + r.Bytes, Cut: r.Cut, Truncated: r.Truncated}, nil
 			}
 		}
-		return nil, fmt.Errorf("chunk read query failed (chunk [%d, %d]): %w", chunk.StartPK, chunk.EndPK, err)
+		return ChunkRead{}, fmt.Errorf("chunk read query failed (chunk [%d, %d]): %w", chunk.StartPK, chunk.EndPK, err)
 	}
-
-	// Kiểm tra điều kiện max_chunk_bytes
-	if totalBytes > opts.MaxChunkBytes && !isSingleRow {
-		// Kích thước chunk vượt max_chunk_bytes và còn có thể chia đôi
-		left, right, ok := c.SplitChunk(chunk, opts.MinChunkRows)
-		if ok {
-			leftRows, errLeft := c.ReadChunkAdaptive(ctx, left, opts, queryFn)
-			if errLeft != nil {
-				return nil, errLeft
-			}
-			rightRows, errRight := c.ReadChunkAdaptive(ctx, right, opts, queryFn)
-			if errRight != nil {
-				return nil, errRight
-			}
-			return append(leftRows, rightRows...), nil
+	out := ChunkRead{Rows: rows, Bytes: totalBytes, Cut: chunk.EndPK}
+	if budget > 0 && totalBytes >= budget && len(rows) > 0 {
+		last, err := extractInt64PK(rows[len(rows)-1].Key)
+		if err != nil {
+			return ChunkRead{}, fmt.Errorf("chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+		}
+		if last < chunk.EndPK {
+			out.Cut, out.Truncated = last, true
 		}
 	}
-
-	// Nếu isSingleRow nhưng row lớn hơn max_chunk_bytes:
-	// "Row lớn hơn max_chunk_bytes không gây vòng lặp":
-	// Đã chạm min_chunk_rows = 1 nên không chia đôi tiếp, trả về row trực tiếp.
-	return rows, nil
+	return out, nil
 }

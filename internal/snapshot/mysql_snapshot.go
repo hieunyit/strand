@@ -32,7 +32,9 @@ const waitGTIDMaxAttempts = 10
 // chạy trên CÙNG kết nối (cùng server) thì kết quả chờ mới có nghĩa với read view của SELECT (RS-2).
 type ChunkConn interface {
 	WaitForExecutedGTIDSet(ctx context.Context, gtidSet string, timeoutSeconds int) (sql.NullInt64, error)
-	QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID) ([]*model.RowChange, int64, error)
+	// QueryChunk: SELECT chunk theo PK; maxBytes > 0 thì dừng ngay sau row làm tổng byte đạt maxBytes
+	// (xem QueryChunkFunc).
+	QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID, maxBytes int64) ([]*model.RowChange, int64, error)
 	Close() error
 }
 
@@ -110,8 +112,12 @@ func (c *sqlChunkConn) WaitForExecutedGTIDSet(ctx context.Context, gtidSet strin
 	return res, err
 }
 
-func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID) ([]*model.RowChange, int64, error) {
-	rows, err := c.conn.QueryContext(ctx, query, startPK, endPK)
+func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID, maxBytes int64) ([]*model.RowChange, int64, error) {
+	// Hủy query khi dừng sớm vì đủ ngân sách: đóng rows mà không hủy thì driver vẫn đọc (và bỏ) phần
+	// còn lại của kết quả. Kết nối bị hủy không dùng lại (kết nối đọc chunk mở riêng cho mỗi lần đọc).
+	qctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rows, err := c.conn.QueryContext(qctx, query, startPK, endPK)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -155,6 +161,10 @@ func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, startPK, en
 			totalBytes += int64(len(rawBytes))
 		}
 		result = append(result, rc)
+		if maxBytes > 0 && totalBytes >= maxBytes {
+			cancel()
+			return result, totalBytes, nil // dừng sớm: phủ trọn [startPK, PK của row cuối]
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
@@ -178,21 +188,29 @@ func (s *MySQLSnapshotter) readChunkWatermarked(
 	columnNames []string,
 	pkIdx int,
 	table model.TableID,
-) ([]*model.RowChange, checkpoint.AppliedSet, error) {
-	// Event bị bỏ khi range còn "Chưa đọc" có thể chưa commit ở engine (2PC): chuyển chunk sang
-	// "Đang đọc" (buffer mọi event mới) rồi chờ các GTID đó visible trên kết nối đọc chunk.
-	discarded := s.Manager.BeginReading(chunk)
-	chunkLowStr, err := src.GetGlobalGTIDExecuted(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read chunk low watermark: %w", err)
+) (ChunkRead, checkpoint.AppliedSet, error) {
+	var discarded *checkpoint.MySQLAppliedSet
+	var waitStr string
+	if chunk.Continuation {
+		// Phần đuôi tách ra khi chạm max_chunk_bytes (SplitReading): giữ low của chunk gốc; tập event đã
+		// bỏ đã được xác nhận visible ở lần đọc đầu, nên chỉ cần chờ low.
+		waitStr = chunk.LowWatermark.(fmt.Stringer).String()
+	} else {
+		// Event bị bỏ khi range còn "Chưa đọc" có thể chưa commit ở engine (2PC): chuyển chunk sang
+		// "Đang đọc" (buffer mọi event mới) rồi chờ các GTID đó visible trên kết nối đọc chunk.
+		discarded = s.Manager.BeginReading(chunk)
+		chunkLowStr, err := src.GetGlobalGTIDExecuted(ctx)
+		if err != nil {
+			return ChunkRead{}, nil, fmt.Errorf("failed to read chunk low watermark: %w", err)
+		}
+		chunkLow := ParseMySQLGTIDSet(chunkLowStr)
+		s.Manager.StartReading(chunk, chunkLow)
+		waitSet := chunkLow.Clone().(*checkpoint.MySQLAppliedSet)
+		waitSet.Merge(discarded)
+		waitStr = waitSet.String()
 	}
-	chunkLow := ParseMySQLGTIDSet(chunkLowStr)
-	s.Manager.StartReading(chunk, chunkLow)
-	waitSet := chunkLow.Clone().(*checkpoint.MySQLAppliedSet)
-	waitSet.Merge(discarded)
-	waitStr := waitSet.String()
 
-	queryFn := func(qCtx context.Context, c *Chunk) ([]*model.RowChange, int64, error) {
+	queryFn := func(qCtx context.Context, c *Chunk, maxBytes int64) ([]*model.RowChange, int64, error) {
 		conn, err := src.OpenChunkConn(ctx)
 		if err != nil {
 			return nil, 0, err
@@ -209,22 +227,24 @@ func (s *MySQLSnapshotter) readChunkWatermarked(
 			}
 			time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
 		}
-		return conn.QueryChunk(qCtx, query, c.StartPK, c.EndPK, columnNames, pkIdx, table)
+		return conn.QueryChunk(qCtx, query, c.StartPK, c.EndPK, columnNames, pkIdx, table, maxBytes)
 	}
 
-	// Đọc chunk có cơ chế adaptive split và timeout (spec 02 §5)
-	rows, err := s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn)
+	// Đọc chunk có cơ chế adaptive split, timeout và trần byte (spec 02 §5)
+	read, err := s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+		return ChunkRead{}, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
 	}
 
-	s.Manager.ConfirmVisible(chunk.Table, discarded)
+	if discarded != nil {
+		s.Manager.ConfirmVisible(chunk.Table, discarded)
+	}
 
 	chunkHighStr, err := src.GetGlobalGTIDExecuted(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read chunk high watermark: %w", err)
+		return ChunkRead{}, nil, fmt.Errorf("failed to read chunk high watermark: %w", err)
 	}
-	return rows, ParseMySQLGTIDSet(chunkHighStr), nil
+	return read, ParseMySQLGTIDSet(chunkHighStr), nil
 }
 
 // MySQLSnapshotter điều phối quá trình snapshot chunking và range-state cho MySQL source sang MySQL target.
@@ -273,6 +293,9 @@ type MySQLSnapshotter struct {
 	// RereadKeysTotal: tổng số khóa đã được đọc lại (chunk re-read đã flush, 02 §8), để ghi log.
 	RereadKeysTotal atomic.Int64
 
+	// OnTruncatedRead (tùy chọn) được gọi mỗi lần đọc chunk dừng ở max_chunk_bytes (metric / test).
+	OnTruncatedRead func()
+
 	// Chunks (tùy chọn) thay phần đọc source khi source không phải MySQL (PG: PGChunkSource).
 	// Khi nil: đọc MySQL như cũ (srcDB, Source).
 	Chunks ChunkSource
@@ -288,7 +311,9 @@ type ChunkSource interface {
 	KeysetEnd(ctx context.Context, table model.TableID, pkCol string, start, max, rows int64) (int64, error)
 	// ReadChunk chuyển chunk qua "Đang đọc" (low), đọc rows của chunk và trả high watermark: khi
 	// stream đã xử lý hết high thì mọi Txn mà rows phản ánh đều đã đi qua range-state.
-	ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdx int, table model.TableID) ([]*model.RowChange, checkpoint.AppliedSet, error)
+	// Chunk.Continuation: phần đuôi của SplitReading — đã "Đang đọc" với low của chunk gốc, không lấy low
+	// mới. Kết quả có thể bị cắt theo max_chunk_bytes (ChunkRead.Truncated).
+	ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdx int, table model.TableID) (ChunkRead, checkpoint.AppliedSet, error)
 }
 
 // NewMySQLSnapshotter tạo mới MySQLSnapshotter.
@@ -587,28 +612,40 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 	}
 
 	// processChunk: đọc (low → SELECT → high), điểm hẹn, flush trong barrier, lưu plan, giãn nhịp.
-	processChunk := func(chunk *Chunk) error {
-		var rows []*model.RowChange
+	processOne := func(chunk *Chunk) (*Chunk, error) {
+		var read ChunkRead
 		var chunkHigh checkpoint.AppliedSet
 		var err error
 		if s.Chunks != nil {
-			rows, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdx, table)
+			read, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdx, table)
 		} else if chunk.Keys != nil {
-			return fmt.Errorf("snapshot %s: re-read chunks need a PostgreSQL chunk source", table)
+			return nil, fmt.Errorf("snapshot %s: re-read chunks need a PostgreSQL chunk source", table)
 		} else {
 			// Watermark (RS-2): low → WAIT_FOR_EXECUTED_GTID_SET(low) → SELECT → high, cùng server.
 			query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= ? AND %s <= ? ORDER BY %s",
 				colsStr, quoteTable(table), quoteIdent(pkCol), quoteIdent(pkCol), quoteIdent(pkCol))
-			rows, chunkHigh, err = s.readChunkWatermarked(ctx, src, chunk, query, columnNames, pkIdx, table)
+			read, chunkHigh, err = s.readChunkWatermarked(ctx, src, chunk, query, columnNames, pkIdx, table)
 		}
 		if err != nil {
-			return err
+			return nil, err
+		}
+		rows := read.Rows
+		var rest *Chunk
+		if read.Truncated {
+			// Chạm max_chunk_bytes: flush phần đã đọc như một chunk, phần còn lại đọc tiếp ngay sau
+			// (cùng low, xem SplitReading) — RAM của chunk không vượt trần (review R10).
+			if rest, err = s.Manager.SplitReading(chunk, read.Cut); err != nil {
+				return nil, err
+			}
+			if s.OnTruncatedRead != nil {
+				s.OnTruncatedRead()
+			}
 		}
 		s.Manager.FinishReading(chunk, chunkHigh, rows)
 
 		// Rendezvous: chờ stream xử lý hết high watermark
 		if err := rendezvousWaitFn(ctx, chunkHigh); err != nil {
-			return fmt.Errorf("rendezvous wait failed: %w", err)
+			return nil, fmt.Errorf("rendezvous wait failed: %w", err)
 		}
 
 		// Flush: merge có thứ tự snapshot và buffer trong 1 transaction ở target và chuyển sang StateDone
@@ -628,16 +665,27 @@ func (s *MySQLSnapshotter) SnapshotAdd(
 			s.RereadKeysTotal.Add(int64(len(chunk.Keys)))
 		}
 		if err != nil {
-			return fmt.Errorf("failed to flush chunk [%d, %d] to target: %w", chunk.StartPK, chunk.EndPK, err)
+			return nil, fmt.Errorf("failed to flush chunk [%d, %d] to target: %w", chunk.StartPK, chunk.EndPK, err)
 		}
 
 		// Throttling nếu có
 		if s.Pace != nil {
 			if err := s.Pace(ctx); err != nil {
-				return err
+				return nil, err
 			}
 		} else if s.opts.SleepBetweenChunks > 0 {
 			time.Sleep(s.opts.SleepBetweenChunks)
+		}
+		return rest, nil
+	}
+	// processChunk xử lý chunk và mọi phần đuôi tách ra khi chạm max_chunk_bytes, tuần tự.
+	processChunk := func(chunk *Chunk) error {
+		for chunk != nil {
+			rest, err := processOne(chunk)
+			if err != nil {
+				return err
+			}
+			chunk = rest
 		}
 		return nil
 	}

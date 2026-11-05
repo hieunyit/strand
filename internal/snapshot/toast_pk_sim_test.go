@@ -47,6 +47,9 @@ type toastSim struct {
 	pause  func()   // gọi trong ReadChunk (giữ chunk ở "Đang đọc" lâu hơn)
 	gen    bool     // false: không sinh Txn (kiểm tra thứ tự đọc tất định)
 	script []func() // Txn sinh theo kịch bản thay vì ngẫu nhiên
+	// maxRows > 0: SELECT chunk dừng sau maxRows row, như chạm max_chunk_bytes (review R10).
+	maxRows   int
+	truncated int
 }
 
 func newToastSim(t *testing.T, seed int64, rows int) *toastSim {
@@ -366,15 +369,17 @@ func (sim *toastSim) KeysetEnd(_ context.Context, _ model.TableID, _ string, sta
 
 // ReadChunk: các bước 1–5 của pg_snapshot.go; Txn xen vào giữa mọi bước.
 func (sim *toastSim) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, chunk *snapshot.Chunk, _ []string, _ int,
-	_ model.TableID) ([]*model.RowChange, checkpoint.AppliedSet, error) {
+	_ model.TableID) (snapshot.ChunkRead, checkpoint.AppliedSet, error) {
 	if chunk.Keys != nil {
 		sim.order = append(sim.order, fmt.Sprintf("reread%v", chunk.Keys))
 	} else {
 		sim.order = append(sim.order, fmt.Sprintf("main[%d,%d]", chunk.StartPK, chunk.EndPK))
 	}
-	s.Manager.BeginReading(chunk)
-	sim.tick() // "Đang đọc" chưa có low: gộp
-	s.Manager.StartReadingPG(chunk, sim.snap())
+	if !chunk.Continuation {
+		s.Manager.BeginReading(chunk)
+		sim.tick() // "Đang đọc" chưa có low: gộp
+		s.Manager.StartReadingPG(chunk, sim.snap())
+	}
 	sim.tick() // sau S0, trước SELECT: gộp (row SELECT cũng thấy)
 	if sim.pause != nil {
 		sim.pause()
@@ -387,14 +392,25 @@ func (sim *toastSim) ReadChunk(_ context.Context, s *snapshot.MySQLSnapshotter, 
 		}
 		in = func(k int64) bool { return set[k] }
 	}
-	var rows []*model.RowChange
-	for k, row := range sim.src {
+	var keys []int64
+	for k := range sim.src {
 		if in(k) {
-			rows = append(rows, simImage(model.OpInsert, k, row, false))
+			keys = append(keys, k)
 		}
 	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	read := snapshot.ChunkRead{Cut: chunk.EndPK}
+	// maxRows > 0: giả lập chạm max_chunk_bytes — SELECT dừng sau maxRows row (review R10).
+	if sim.maxRows > 0 && chunk.Keys == nil && len(keys) > sim.maxRows && keys[sim.maxRows-1] < chunk.EndPK {
+		keys = keys[:sim.maxRows]
+		read.Cut, read.Truncated = keys[len(keys)-1], true
+		sim.truncated++
+	}
+	for _, k := range keys {
+		read.Rows = append(read.Rows, simImage(model.OpInsert, k, sim.src[k], false))
+	}
 	sim.tick() // sau SELECT, trước high: gộp, row SELECT không thấy
-	return rows, checkpoint.NewPGAppliedSet(sim.xid), nil
+	return read, checkpoint.NewPGAppliedSet(sim.xid), nil
 }
 
 func (sim *toastSim) run(ctx context.Context) error {
@@ -473,6 +489,36 @@ func TestToastPK_SimulatedSnapshotUnderLoad(t *testing.T) {
 		t.Fatal("simulation never exercised a re-read")
 	}
 	t.Logf("60 runs: %d TOAST PK moves, %d re-read chunks", totalMoves, totalRereads)
+}
+
+// invariant: RS-1/RS-2 — review R10. Như TestToastPK_SimulatedSnapshotUnderLoad nhưng mọi SELECT chunk
+// bị cắt sau vài row (chạm max_chunk_bytes): phần đuôi được tách (SplitReading) và đọc tiếp với low của
+// chunk gốc trong khi Txn tiếp tục xen vào giữa mọi bước. Target cuối phải khớp source, không apply trùng.
+func TestR10_SimulatedSnapshotUnderLoadWithByteTruncatedChunks(t *testing.T) {
+	total := 0
+	for seed := int64(1); seed <= 60; seed++ {
+		sim := newToastSim(t, seed, 120+int(seed%5)*20)
+		sim.maxRows = 1 + int(seed%4)
+		if seed%3 == 0 {
+			sim.s.Manager.MaxPendingCrossRange = 2
+		}
+		for i := 0; i < 5; i++ {
+			sim.randomTxn()
+		}
+		if err := sim.run(context.Background()); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		sim.s.Manager.RemoveTable(toastTbl)
+		for i := 0; i < 50; i++ {
+			sim.route(sim.randomTxn())
+		}
+		sim.check(t)
+		total += sim.truncated
+	}
+	if total == 0 {
+		t.Fatal("simulation never truncated a chunk read")
+	}
+	t.Logf("60 runs: %d truncated chunk reads", total)
 }
 
 // Thứ tự đọc: khóa chờ đọc lại được đọc ở cuối walk chính khi chưa đến hạn; đẩy lên đầu hàng đợi (ngay

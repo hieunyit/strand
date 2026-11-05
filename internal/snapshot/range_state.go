@@ -407,6 +407,51 @@ func (m *RangeStateManager) ConfirmVisible(table model.TableID, visible *checkpo
 	}
 }
 
+// SplitReading cắt chunk đang "Đang đọc" ở cut (review R10: lần đọc chạm max_chunk_bytes): chunk giữ
+// [StartPK, cut]; phần [cut+1, EndPK] thành chunk mới cũng "Đang đọc", cùng low watermark / snapshot S0,
+// nhận phần buffer có khóa > cut, và được đọc tiếp sau khi chunk đầu flush.
+//
+// Vì sao đọc phần đuôi muộn hơn vẫn đúng (RS-1/2): buffer giữ ảnh CUỐI của mỗi khóa trong (low, high]
+// và ghi đè row snapshot khi merge, nên với khóa có event trong khoảng đó kết quả là ảnh cuối, không
+// phụ thuộc lúc SELECT; khóa không có event thì row SELECT ở bất kỳ thời điểm nào trong (low, high] đều
+// bằng nhau. Chỉ cần SELECT sau low (visible mọi Txn ∈ low) và high lấy sau SELECT — như chia đôi theo
+// timeout vẫn làm. Event của phần đuôi tiếp tục được buffer (không bị bỏ).
+func (m *RangeStateManager) SplitReading(chunk *Chunk, cut int64) (*Chunk, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if chunk.State != StateReading || chunk.Keys != nil || cut < chunk.StartPK || cut >= chunk.EndPK {
+		return nil, fmt.Errorf("cannot split chunk [%d,%d] (state %s) at %d", chunk.StartPK, chunk.EndPK, chunk.State, cut)
+	}
+	tr, ok := m.tables[chunk.Table.String()]
+	if !ok {
+		return nil, fmt.Errorf("table %s not registered", chunk.Table)
+	}
+	idx := -1
+	for i, c := range tr.Chunks {
+		if c == chunk {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("chunk [%d,%d] of %s is not a main range", chunk.StartPK, chunk.EndPK, chunk.Table)
+	}
+	rest := &Chunk{ID: chunk.ID*10 + 3, Table: chunk.Table, PKCol: chunk.PKCol, StartPK: cut + 1, EndPK: chunk.EndPK,
+		IsTail: chunk.IsTail, EstimatedRows: SpanRows(cut+1, chunk.EndPK), State: StateReading,
+		LowWatermark: chunk.LowWatermark, LowSnapshot: chunk.LowSnapshot,
+		BufferedChanges: map[int64]*model.RowChange{}, Continuation: true}
+	for pk, rc := range chunk.BufferedChanges {
+		if pk > cut {
+			rest.BufferedChanges[pk] = rc
+			delete(chunk.BufferedChanges, pk)
+		}
+	}
+	chunk.EndPK, chunk.IsTail = cut, false
+	chunk.EstimatedRows = SpanRows(chunk.StartPK, cut)
+	tr.Chunks = append(tr.Chunks[:idx+1], append([]*Chunk{rest}, tr.Chunks[idx+1:]...)...)
+	return rest, nil
+}
+
 // StartReading chuyển trạng thái chunk sang StateReading kèm low watermark.
 func (m *RangeStateManager) StartReading(chunk *Chunk, low checkpoint.AppliedSet) {
 	m.mu.Lock()

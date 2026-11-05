@@ -119,6 +119,10 @@ type Chunk struct {
 	Keys []int64
 	// Since: thời điểm khóa sớm nhất của chunk re-read được đánh dấu (metric tuổi, luật 30 s).
 	Since time.Time
+	// Continuation: phần đuôi tách ra khi đọc chunk chạm max_chunk_bytes (SplitReading). Đã "Đang đọc"
+	// với low watermark và buffer từ low của chunk gốc; lần đọc kế tiếp KHÔNG lấy low mới (xem
+	// SplitReading vì sao đọc muộn hơn vẫn đúng).
+	Continuation bool
 }
 
 // RowCount trả về số lượng hàng ước tính trong chunk.

@@ -133,6 +133,21 @@ func applyEventToTarget(ctx context.Context, db *sql.DB, event *model.RowChange,
 // Invariant RS-1: snapshot add dưới tải cập nhật dày, 0 lệch.
 // Target không bao giờ hiển thị một row cũ hơn trạng thái nó đã có.
 func TestRS1_SnapshotAdd_HeavyConcurrentUpdates(t *testing.T) {
+	runRS1HeavyConcurrent(t, "rs1_snapshot_test", 64*1024*1024)
+}
+
+// invariant: RS-1/RS-2 — review R10, MySQL thật: max_chunk_bytes nhỏ (~6 row) nên mọi chunk 25 row bị
+// cắt và đọc tiếp nhiều lần (SplitReading) dưới tải cập nhật/xóa dày; target cuối khớp source.
+func TestR10_SnapshotAdd_ByteTruncatedChunksUnderHeavyUpdates(t *testing.T) {
+	n := runRS1HeavyConcurrent(t, "r10_snapshot_test", 120)
+	if n == 0 {
+		t.Fatal("no chunk read was truncated by max_chunk_bytes")
+	}
+	t.Logf("%d chunk reads stopped at max_chunk_bytes", n)
+}
+
+// runRS1HeavyConcurrent chạy SnapshotAdd dưới tải và đối chiếu; trả số lần đọc chunk bị cắt theo byte.
+func runRS1HeavyConcurrent(t *testing.T, tableName string, maxChunkBytes int64) int {
 	srcDSN, dstDSN := getMySQLDSNs(t)
 
 	srcDB, err := sql.Open("mysql", srcDSN)
@@ -150,7 +165,6 @@ func TestRS1_SnapshotAdd_HeavyConcurrentUpdates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	tableName := "rs1_snapshot_test"
 	table := model.TableID{Table: tableName}
 	pkCol := "id"
 	columnNames := []string{"id", "title", "val"}
@@ -184,11 +198,13 @@ func TestRS1_SnapshotAdd_HeavyConcurrentUpdates(t *testing.T) {
 
 	opts := snapshot.ChunkOptions{
 		Timeout:          5 * time.Second,
-		MaxChunkBytes:    64 * 1024 * 1024,
+		MaxChunkBytes:    maxChunkBytes,
 		MinChunkRows:     1,
 		DefaultChunkRows: 25, // Chia thành 4 chunks [1..25], [26..50], [51..75], [76..100]
 	}
 	snapshotter := snapshot.NewMySQLSnapshotter(opts)
+	var truncations atomic.Int64
+	snapshotter.OnTruncatedRead = func() { truncations.Add(1) }
 
 	var streamPos atomic.Value // model.Pos
 	initGTID, err := snapshot.GetGlobalGTIDExecuted(srcDB)
@@ -372,6 +388,7 @@ func TestRS1_SnapshotAdd_HeavyConcurrentUpdates(t *testing.T) {
 		t.Fatalf("TestRS1 FAILED: found %d mismatches between source and target", mismatchCount)
 	}
 	t.Logf("TestRS1 PASS: snapshot add under heavy concurrent updates completed with EXACTLY 0 mismatch (%d rows)", len(srcRowsMap))
+	return int(truncations.Load())
 }
 
 // TestRS_ChunkSplitOnTimeout_SingleRowNoTimeout kiểm tra AC2:
@@ -399,7 +416,7 @@ func TestRS_ChunkSplitOnTimeout_SingleRowNoTimeout(t *testing.T) {
 		}
 
 		queryCalls := 0
-		mockQuery := func(qCtx context.Context, c *snapshot.Chunk) ([]*model.RowChange, int64, error) {
+		mockQuery := func(qCtx context.Context, c *snapshot.Chunk, _ int64) ([]*model.RowChange, int64, error) {
 			queryCalls++
 			// Nếu chunk lớn hơn 5 rows: cố tình ngủ lâu để gây timeout
 			if c.RowCount() > 5 {
@@ -422,10 +439,11 @@ func TestRS_ChunkSplitOnTimeout_SingleRowNoTimeout(t *testing.T) {
 			return rows, int64(len(rows) * 50), nil
 		}
 
-		rows, err := chunker.ReadChunkAdaptive(context.Background(), initialChunk, opts, mockQuery)
+		read, err := chunker.ReadChunkAdaptive(context.Background(), initialChunk, opts, mockQuery)
 		if err != nil {
 			t.Fatalf("ReadChunkAdaptive failed: %v", err)
 		}
+		rows := read.Rows
 
 		if len(rows) != 10 {
 			t.Fatalf("expected 10 rows, got %d", len(rows))
@@ -455,7 +473,7 @@ func TestRS_ChunkSplitOnTimeout_SingleRowNoTimeout(t *testing.T) {
 
 		splitsBefore := chunker.SplitCount()
 
-		mockQuerySingleRow := func(qCtx context.Context, c *snapshot.Chunk) ([]*model.RowChange, int64, error) {
+		mockQuerySingleRow := func(qCtx context.Context, c *snapshot.Chunk, _ int64) ([]*model.RowChange, int64, error) {
 			// Kiểm tra context: "chunk 1 row thì không áp timeout"
 			// qCtx không có deadline từ opts.Timeout
 			if _, hasDeadline := qCtx.Deadline(); hasDeadline {
@@ -473,10 +491,11 @@ func TestRS_ChunkSplitOnTimeout_SingleRowNoTimeout(t *testing.T) {
 			}, 100, nil
 		}
 
-		rows, err := chunker.ReadChunkAdaptive(context.Background(), singleRowChunk, opts, mockQuerySingleRow)
+		read, err := chunker.ReadChunkAdaptive(context.Background(), singleRowChunk, opts, mockQuerySingleRow)
 		if err != nil {
 			t.Fatalf("ReadChunkAdaptive failed for single row: %v", err)
 		}
+		rows := read.Rows
 
 		if len(rows) != 1 {
 			t.Fatalf("expected 1 row, got %d", len(rows))
@@ -488,59 +507,82 @@ func TestRS_ChunkSplitOnTimeout_SingleRowNoTimeout(t *testing.T) {
 	})
 }
 
-// TestRS_LargeRowExceedsMaxChunkBytes_NoInfiniteLoop kiểm tra AC3:
-// Row lớn hơn max_chunk_bytes không gây vòng lặp chia chunk vô hạn.
+// TestRS_LargeRowExceedsMaxChunkBytes_NoInfiniteLoop kiểm tra AC3: row lớn hơn max_chunk_bytes không gây
+// vòng lặp chia chunk vô hạn. Với trần RAM (review R10): mỗi lần đọc dừng khi chạm trần (vượt tối đa một
+// row), phần còn lại đọc ở lần sau; các lần đọc liên tiếp phủ đủ mọi row.
 func TestRS_LargeRowExceedsMaxChunkBytes_NoInfiniteLoop(t *testing.T) {
 	chunker := snapshot.NewChunker()
 	table := model.TableID{Schema: "test", Table: "large_rows"}
-
-	chunk := &snapshot.Chunk{
-		ID:            1,
-		Table:         table,
-		PKCol:         "id",
-		StartPK:       1,
-		EndPK:         4, // 4 rows
-		EstimatedRows: 4,
-	}
-
-	opts := snapshot.ChunkOptions{
-		Timeout:       5 * time.Second,
-		MaxChunkBytes: 1000, // 1 KB
-		MinChunkRows:  1,
-	}
-
-	// Giả lập: Hàng số 2 có kích thước 5000 bytes (vượt xa 1000 bytes)
-	mockQuery := func(qCtx context.Context, c *snapshot.Chunk) ([]*model.RowChange, int64, error) {
-		var rows []*model.RowChange
-		var bytesTotal int64
-		for id := c.StartPK; id <= c.EndPK; id++ {
-			rowSize := int64(100)
-			if id == 2 {
-				rowSize = 5000 // Hàng lớn vượt max_chunk_bytes
-			}
-			bytesTotal += rowSize
-			rows = append(rows, &model.RowChange{
-				Table: table,
-				Op:    model.OpInsert,
-				Key:   []model.Value{id},
-			})
+	opts := snapshot.ChunkOptions{Timeout: 5 * time.Second, MaxChunkBytes: 1000, MinChunkRows: 1}
+	size := func(id int64) int64 {
+		if id == 2 {
+			return 5000 // hàng lớn vượt max_chunk_bytes
 		}
-		return rows, bytesTotal, nil
+		return 100
 	}
-
-	// Chạy đọc adaptive với giới hạn thời gian để đảm bảo không bị lặp vô hạn
+	mockQuery := func(qCtx context.Context, c *snapshot.Chunk, maxBytes int64) ([]*model.RowChange, int64, error) {
+		var rows []*model.RowChange
+		var total int64
+		for id := c.StartPK; id <= c.EndPK; id++ {
+			total += size(id)
+			rows = append(rows, &model.RowChange{Table: table, Op: model.OpInsert, Key: []model.Value{id}})
+			if maxBytes > 0 && total >= maxBytes {
+				break
+			}
+		}
+		return rows, total, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	var got []int64
+	for start, reads := int64(1), 0; start <= 4; reads++ {
+		if reads > 10 {
+			t.Fatal("too many reads: no progress")
+		}
+		read, err := chunker.ReadChunkAdaptive(ctx, &snapshot.Chunk{ID: 1, Table: table, PKCol: "id", StartPK: start, EndPK: 4}, opts, mockQuery)
+		if err != nil {
+			t.Fatalf("ReadChunkAdaptive failed on large row: %v", err)
+		}
+		if read.Bytes > opts.MaxChunkBytes+5000 {
+			t.Fatalf("read of [%d,4] kept %d bytes, more than max_chunk_bytes plus one row", start, read.Bytes)
+		}
+		for _, r := range read.Rows {
+			got = append(got, r.Key[0].(int64))
+		}
+		start = read.Cut + 1
+	}
+	if fmt.Sprint(got) != "[1 2 3 4]" {
+		t.Fatalf("rows read = %v, want [1 2 3 4]", got)
+	}
+}
 
-	rows, err := chunker.ReadChunkAdaptive(ctx, chunk, opts, mockQuery)
+// review R10: max_chunk_bytes là trần RAM của kết quả — không chia đôi rồi ghép lại toàn bộ.
+func TestR10_ByteBudgetTruncatesInsteadOfReassembling(t *testing.T) {
+	c := snapshot.NewChunker()
+	opts := snapshot.DefaultChunkOptions()
+	opts.MaxChunkBytes = 1024
+	calls := 0
+	read, err := c.ReadChunkAdaptive(context.Background(), &snapshot.Chunk{StartPK: 1, EndPK: 8}, opts,
+		func(_ context.Context, ch *snapshot.Chunk, maxBytes int64) ([]*model.RowChange, int64, error) {
+			calls++
+			var out []*model.RowChange
+			var total int64
+			for i := ch.StartPK; i <= ch.EndPK; i++ {
+				out = append(out, &model.RowChange{Key: []model.Value{i}})
+				total += 512
+				if maxBytes > 0 && total >= maxBytes {
+					break
+				}
+			}
+			return out, total, nil
+		})
 	if err != nil {
-		t.Fatalf("ReadChunkAdaptive failed on large row: %v", err)
+		t.Fatal(err)
 	}
-
-	if len(rows) != 4 {
-		t.Fatalf("expected 4 rows returned, got %d", len(rows))
+	if !read.Truncated || read.Cut != 2 || len(read.Rows) != 2 || read.Bytes > opts.MaxChunkBytes || calls != 1 {
+		t.Fatalf("read = {rows %d, bytes %d, cut %d, truncated %v}, calls %d; want 2 rows cut at 2 in one query",
+			len(read.Rows), read.Bytes, read.Cut, read.Truncated, calls)
 	}
-	t.Logf("PASS: Row exceeding max_chunk_bytes (5000B > 1000B) was handled without infinite loop, total splits: %d", chunker.SplitCount())
 }
 
 // TestRS_TailChunk_HandledCorrectly kiểm tra AC4:

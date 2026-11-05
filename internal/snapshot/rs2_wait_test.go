@@ -68,7 +68,7 @@ func (c *fakeConn) WaitForExecutedGTIDSet(ctx context.Context, gtidSet string, t
 	return res, nil
 }
 
-func (c *fakeConn) QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID) ([]*model.RowChange, int64, error) {
+func (c *fakeConn) QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID, _ int64) ([]*model.RowChange, int64, error) {
 	c.f.record("select@conn" + itoa(c.id))
 	return []*model.RowChange{{Table: table, Op: model.OpInsert, Key: []model.Value{startPK}}}, 1, nil
 }
@@ -94,8 +94,8 @@ func TestRS2_WaitRunsOnSameConnBetweenLowAndSelect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || h == nil {
-		t.Fatalf("rows=%d high=%v", len(rows), h)
+	if len(rows.Rows) != 1 || h == nil {
+		t.Fatalf("rows=%d high=%v", len(rows.Rows), h)
 	}
 	want := []string{
 		"gtid:" + low,

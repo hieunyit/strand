@@ -239,22 +239,24 @@ func (c *PGChunkSource) columnTypes(ctx context.Context, table model.TableID) (m
 
 // ReadChunk: các bước 1–5 ở đầu file.
 func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chunk *Chunk, columnNames []string, pkIdx int,
-	table model.TableID) ([]*model.RowChange, checkpoint.AppliedSet, error) {
+	table model.TableID) (ChunkRead, checkpoint.AppliedSet, error) {
 	types, err := c.columnTypes(ctx, table)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read column types of %s: %w", table, err)
+		return ChunkRead{}, nil, fmt.Errorf("read column types of %s: %w", table, err)
 	}
-	// 1–3. "Đang đọc" không low → W → S0 thấy W.
-	s.Manager.BeginReading(chunk)
-	var xids []uint32
-	if c.Tracker != nil {
-		xids = c.Tracker.Pending()
+	if !chunk.Continuation {
+		// 1–3. "Đang đọc" không low → W → S0 thấy W. Phần đuôi của SplitReading giữ S0 của chunk gốc.
+		s.Manager.BeginReading(chunk)
+		var xids []uint32
+		if c.Tracker != nil {
+			xids = c.Tracker.Pending()
+		}
+		low, err := c.waitSnapshot(ctx, xids)
+		if err != nil {
+			return ChunkRead{}, nil, fmt.Errorf("chunk low watermark: %w", err)
+		}
+		s.Manager.StartReadingPG(chunk, low)
 	}
-	low, err := c.waitSnapshot(ctx, xids)
-	if err != nil {
-		return nil, nil, fmt.Errorf("chunk low watermark: %w", err)
-	}
-	s.Manager.StartReadingPG(chunk, low)
 
 	// 4. SELECT (mỗi lần một snapshot mới, đều sau S0).
 	sel := make([]string, len(columnNames))
@@ -262,39 +264,39 @@ func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chun
 		sel[i] = quotePGIdent(col) + "::text"
 	}
 	pk := quotePGIdent(columnNames[pkIdx])
-	var rows []*model.RowChange
+	var read ChunkRead
 	if chunk.Keys != nil {
 		// Chunk re-read (02 §8, toast_pk.go): tập khóa rời rạc, tra theo index PK (≤ max_pending_cross_range
-		// khóa) nên không cần chia đôi theo timeout.
+		// khóa) nên không cần chia đôi theo timeout hay cắt theo byte.
 		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ANY($1::bigint[]) ORDER BY %s",
 			strings.Join(sel, ", "), quotePGTable(table), pk, pk)
-		if rows, _, err = c.queryChunk(ctx, query, columnNames, pkIdx, types, table, chunk.Keys); err != nil {
-			return nil, nil, fmt.Errorf("re-read %d keys of %s: %w", len(chunk.Keys), table, err)
+		if read.Rows, read.Bytes, err = c.queryChunk(ctx, query, columnNames, pkIdx, types, table, 0, chunk.Keys); err != nil {
+			return ChunkRead{}, nil, fmt.Errorf("re-read %d keys of %s: %w", len(chunk.Keys), table, err)
 		}
 	} else {
 		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= $1 AND %s <= $2 ORDER BY %s",
 			strings.Join(sel, ", "), quotePGTable(table), pk, pk, pk)
-		queryFn := func(qCtx context.Context, ch *Chunk) ([]*model.RowChange, int64, error) {
-			return c.queryChunk(qCtx, query, columnNames, pkIdx, types, table, ch.StartPK, ch.EndPK)
+		queryFn := func(qCtx context.Context, ch *Chunk, maxBytes int64) ([]*model.RowChange, int64, error) {
+			return c.queryChunk(qCtx, query, columnNames, pkIdx, types, table, maxBytes, ch.StartPK, ch.EndPK)
 		}
-		if rows, err = s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn); err != nil {
-			return nil, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+		if read, err = s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn); err != nil {
+			return ChunkRead{}, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
 		}
 	}
 
 	// 5. High = insert LSN sau mọi SELECT, rồi watermark (record bắt đầu ở LSN ≥ high).
 	var hs string
 	if err := c.DB.QueryRowContext(ctx, "SELECT pg_current_wal_insert_lsn()::text").Scan(&hs); err != nil {
-		return nil, nil, fmt.Errorf("read chunk high watermark: %w", err)
+		return ChunkRead{}, nil, fmt.Errorf("read chunk high watermark: %w", err)
 	}
 	high, err := checkpoint.ParseLSN(hs)
 	if err != nil {
-		return nil, nil, err
+		return ChunkRead{}, nil, err
 	}
 	if err := EmitPGWatermark(ctx, c.DB, c.ServerVersion, hs); err != nil {
-		return nil, nil, err
+		return ChunkRead{}, nil, err
 	}
-	return rows, checkpoint.NewPGAppliedSet(high), nil
+	return read, checkpoint.NewPGAppliedSet(high), nil
 }
 
 // EmitPGWatermark ghi logical decoding message không transactional (reader phát thành Txn rỗng).
@@ -311,9 +313,13 @@ func EmitPGWatermark(ctx context.Context, db *sql.DB, serverVersion int, content
 	return nil
 }
 
+// queryChunk chạy SELECT của chunk; maxBytes > 0 thì dừng (và hủy query) ngay sau row làm tổng byte
+// đạt maxBytes (xem QueryChunkFunc).
 func (c *PGChunkSource) queryChunk(ctx context.Context, query string, columnNames []string, pkIdx int,
-	types map[string]uint32, table model.TableID, args ...any) ([]*model.RowChange, int64, error) {
-	rows, err := c.DB.QueryContext(ctx, query, args...)
+	types map[string]uint32, table model.TableID, maxBytes int64, args ...any) ([]*model.RowChange, int64, error) {
+	qctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rows, err := c.DB.QueryContext(qctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -349,6 +355,10 @@ func (c *PGChunkSource) queryChunk(ctx context.Context, query string, columnName
 		}
 		rc.Key = []model.Value{pkv}
 		out = append(out, rc)
+		if maxBytes > 0 && total >= maxBytes {
+			cancel()
+			return out, total, nil
+		}
 	}
 	return out, total, rows.Err()
 }
