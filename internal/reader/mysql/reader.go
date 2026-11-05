@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -28,6 +29,9 @@ type Config struct {
 	ServerID   uint32
 	Flavor     string
 	BufferSize int
+	// TLS cho kết nối replication; New lấy từ tham số tls= của DSN (true, skip-verify, preferred hoặc
+	// tên đã RegisterTLSConfig). Thiếu bước này thì binlog đi plaintext dù DSN yêu cầu TLS (review R15).
+	TLS *tls.Config
 }
 
 // MySQLReader hiện thực interface reader.Reader cho MySQL binlog.
@@ -59,6 +63,14 @@ func New(cfg Config) (*MySQLReader, error) {
 		}
 		if cfg.Password == "" {
 			cfg.Password = dbCfg.Passwd
+		}
+		if cfg.TLS == nil && dbCfg.TLS != nil {
+			cfg.TLS = dbCfg.TLS.Clone()
+			if cfg.TLS.ServerName == "" && !cfg.TLS.InsecureSkipVerify {
+				if h, _, err := net.SplitHostPort(dbCfg.Addr); err == nil {
+					cfg.TLS.ServerName = h
+				}
+			}
 		}
 		if cfg.Host == "" && dbCfg.Addr != "" {
 			h, p, err := net.SplitHostPort(dbCfg.Addr)
@@ -142,6 +154,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		// Giá trị thời gian giữ dạng chuỗi, TIMESTAMP quy về UTC; writer đặt session time_zone='+00:00'.
 		ParseTime:               false,
 		TimestampStringLocation: time.UTC,
+		TLSConfig:               r.cfg.TLS,
 	}
 
 	syncer := replication.NewBinlogSyncer(syncerCfg)
