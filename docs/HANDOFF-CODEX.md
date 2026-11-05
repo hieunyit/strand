@@ -223,11 +223,11 @@ Admin state mới: `starting` → `bootstrapping` → `synced` (+ `paused`, `fai
 - **`strand archive binlog`** (`internal/reader/archive/archiver.go`, `cmd/strand/archive.go`): binlog thô vào thư mục; file `.partial-*` → tên chốt `NNNNNNNN-<file>` khi rotate (fsync file + thư mục, rồi trạng thái `.strand-archive.json`); khởi động lại: xóa partial, quét lại file chốt sau lần ghi trạng thái cuối, GTID auto-position từ tập đã chốt (DisableRetrySync: syncer không tự nối lại ở raw mode). 1236 → `log_gap`. Unit test 7 ca (kể cả crash giữa đổi tên và ghi trạng thái; regression đặt nhầm tên khi file kết thúc không có ROTATE). **Test tích hợp MySQL thật viết sẵn (`archiver_integration_test.go`), chưa chạy** — chờ máy rảnh. Chưa có: upload S3 (client bucket hiện đọc cả object vào RAM), retention, GTID có tag.
 - **Gói `.deb`/`.rpm`** (`packaging/`, `scripts/package.sh`, `strand version`): nfpm qua `go run` (không vào go.mod), binary tĩnh amd64/arm64, `/usr/bin/strand`, unit sinh từ `deploy/systemd` (đổi đường dẫn), user `strand`, `/etc/strand` root:strand 0750; gỡ gói dừng `strand@*`, không xóa state. **Chưa dựng thử gói** (chạy nfpm cần owner cho phép); chưa có chữ ký.
 
-### G. Web GUI kiểu Flink  ⬜ giao Codex (owner, 2026-11-05)
+### G. Web GUI kiểu Flink  🟡 Claude làm (owner giao lại từ Codex, 2026-11-05; Codex không chạy được: sandbox bwrap lỗi trong môi trường này)
 
 Kế hoạch: **`docs/PLAN-WEB-UI.md`**. Đọc hết trước khi code. Tóm tắt: lệnh `strand web` (package mới `internal/web` — viết ADR), một tài khoản admin (bcrypt, session, CSRF, TLS), đủ thao tác của CLI (start/stop/restart, pause/resume, throttle, snapshot add, checkpoint rewind, verify, wizard repair và promote), HTML render server + htmx + uPlot nhúng `go:embed`, quản lý pipeline trên cùng máy qua `/etc/strand/*.yaml`. Làm theo mốc M0→M4 (M5 sau). **Trước M1 hỏi owner 3 điểm ở mục 7 của kế hoạch.** Thêm quyết định mới vào `questions/DECISIONS-2026-11-02.md` (Web UI làm sớm hơn P4). Không đụng đường dữ liệu; chỉ thêm 3 lệnh admin socket chỉ-đọc (mục 5). Nhánh: `agent/web-ui` tách từ `agent/generic-pk-v2`.
 
-### H. Review đầy đủ trước khi lên `main`  ⬜ giao Codex (owner, 2026-11-05)
+### H. Review đầy đủ trước khi lên `main`  🟡 Claude làm (owner giao lại từ Codex, 2026-11-05) — lưu ý: Claude viết phần lớn code trong phạm vi, nên đây KHÔNG phải review độc lập
 
 Phạm vi: `git diff 9281ffa..agent/generic-pk-v2` (77 commit, 190 file, ~26.000 dòng) — mọi thứ chưa lên GitHub `main`: P2 phần còn lại, việc B (schema init + fixes), resume-clear, 15 bản sửa review sâu (R01–R18), việc C (PK tổng quát, mức 1–2), việc D (USAGE.md), cảnh báo khóa không tác dụng, `strand archive binlog`, đóng gói.
 
