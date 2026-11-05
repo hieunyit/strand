@@ -106,7 +106,7 @@ func bindValue(col PKColumn, v model.Value) (any, error) {
 			return b, nil
 		}
 		return toText(v)
-	case PKPadBytes, PKDecimal, PKTime, PKTrimBytes, PKUUID:
+	case PKPadBytes, PKDecimal, PKTime, PKTrimBytes, PKUUID, PKWeight:
 		return toText(v)
 	case PKDateTime:
 		if t, ok := v.(time.Time); ok {

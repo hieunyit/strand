@@ -35,6 +35,11 @@ func gpkShapes() []gpkShape {
 			func(r *rand.Rand) []any {
 				return []any{fmt.Sprintf("%s%d%s", strs[r.Intn(len(strs))], r.Intn(40), strs[r.Intn(len(strs))])}
 			}},
+		{"str_ci", "k VARCHAR(24) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL, n INT NOT NULL, v INT, PRIMARY KEY (k, n)", []string{"k", "n"},
+			func(r *rand.Rand) []any {
+				ci := []string{"a", "A", "á", "Á", "à", "ab", "AB", "Ab ", "e", "é", "É", "ß", "ss", "SS", "z", "Z", "中", "😀", ""}
+				return []any{fmt.Sprintf("%s%d%s", ci[r.Intn(len(ci))], r.Intn(15), ci[r.Intn(len(ci))]), r.Intn(3)}
+			}},
 		{"dt_int", "d DATETIME(3) NOT NULL, n INT NOT NULL, v INT, PRIMARY KEY (d, n)", []string{"d", "n"},
 			func(r *rand.Rand) []any {
 				return []any{time.Unix(1700000000+r.Int63n(60)*3600, r.Int63n(3)*500e6).UTC().Format("2006-01-02 15:04:05.000"), r.Intn(20)}

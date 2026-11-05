@@ -41,6 +41,8 @@ func sqlQuote(s string) string {
 func mysqlPKCases() []pkCase {
 	uni := []rune("aAbBzZ09 -_.~éÉèñßÆøĐđ中文😀 ")
 	ascii := []rune("abcXYZ019 -_~!")
+	uniCI := []rune("aAáÁàâäåbBcCçeEéÉèêëiIíoOöøßssSSæÆuUüzZ0 _-😀中")
+	latCI := []rune("aAáÁäåbBeEéiIoOöuUüyYzZ0 _-")
 	return []pkCase{
 		{"bigint", "k BIGINT", []string{"k"}, func(r *rand.Rand) []string {
 			vs := []int64{math.MinInt64, math.MaxInt64, 0, -1, 1}
@@ -94,6 +96,41 @@ func mysqlPKCases() []pkCase {
 		{"char_latin1_bin", "k CHAR(6) CHARACTER SET latin1 COLLATE latin1_bin", []string{"k"}, func(r *rand.Rand) []string {
 			return []string{sqlQuote(mysqlString(r, ascii, 6))}
 		}},
+		{"ci_0900_ai", "k VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci", []string{"k"}, func(r *rand.Rand) []string {
+			s := mysqlString(r, uniCI, 6)
+			if r.Intn(3) == 0 {
+				s += "  "
+			}
+			return []string{sqlQuote(s)}
+		}},
+		{"cs_0900_as", "k VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs", []string{"k"}, func(r *rand.Rand) []string {
+			s := mysqlString(r, uniCI, 6)
+			if r.Intn(3) == 0 {
+				s += "  "
+			}
+			return []string{sqlQuote(s)}
+		}},
+		{"ci_general_pad", "k VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci", []string{"k"}, func(r *rand.Rand) []string {
+			s := mysqlString(r, uniCI, 6)
+			if r.Intn(3) == 0 {
+				s += "  "
+			}
+			return []string{sqlQuote(s)}
+		}},
+		{"ci_unicode", "k VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", []string{"k"}, func(r *rand.Rand) []string {
+			s := mysqlString(r, uniCI, 6)
+			if r.Intn(3) == 0 {
+				s += "  "
+			}
+			return []string{sqlQuote(s)}
+		}},
+		{"ci_latin1_swedish", "k VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_swedish_ci", []string{"k"}, func(r *rand.Rand) []string {
+			s := mysqlString(r, latCI, 6)
+			if r.Intn(3) == 0 {
+				s += "  "
+			}
+			return []string{sqlQuote(s)}
+		}},
 		{"composite_int_varbinary_datetime", "a INT, b VARBINARY(4), c DATETIME", []string{"a", "b", "c"}, func(r *rand.Rand) []string {
 			b := make([]byte, r.Intn(3))
 			for i := range b {
@@ -108,21 +145,13 @@ func mysqlPKCases() []pkCase {
 // mysqlCodec dựng codec từ information_schema (cùng đường như pipeline sẽ dùng).
 func mysqlCodec(t *testing.T, db *sql.DB, table string, pk []string) *snapshot.PKCodec {
 	t.Helper()
-	c := &snapshot.PKCodec{}
-	for _, col := range pk {
-		var dt, ct string
-		var cs, coll, pad sql.NullString
-		err := db.QueryRow(`SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME, co.PAD_ATTRIBUTE
-			FROM information_schema.COLUMNS c LEFT JOIN information_schema.COLLATIONS co ON co.COLLATION_NAME = c.COLLATION_NAME
-			WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`, table, col).Scan(&dt, &ct, &cs, &coll, &pad)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pc, err := snapshot.MySQLPKColumn(col, dt, ct, cs.String, coll.String, pad.String)
-		if err != nil {
-			t.Fatal(err)
-		}
-		c.Cols = append(c.Cols, pc)
+	var schema string
+	if err := db.QueryRow("SELECT DATABASE()").Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	c, err := snapshot.MySQLPKCodec(context.Background(), db, model.TableID{Schema: schema, Table: table}, pk)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return c
 }
@@ -209,7 +238,11 @@ func TestGPK_MySQLKeyEncodingMatchesDBOrderAndBinlog(t *testing.T) {
 	}
 
 	// Mã từ binlog: mọi INSERT ở trên, đọc bằng reader thật.
-	rd, err := mysqlreader.New(mysqlreader.Config{DSN: dstDSN, ServerID: 9911})
+	charsets, err := mysqlreader.LoadCollationCharsets(ctx, db) // như pipeline: chuỗi ngoài UTF-8 → UTF-8
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd, err := mysqlreader.New(mysqlreader.Config{DSN: dstDSN, ServerID: 9911, CollationCharsets: charsets})
 	if err != nil {
 		t.Fatal(err)
 	}

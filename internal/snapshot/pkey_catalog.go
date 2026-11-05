@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 
 	"strand/internal/model"
 )
@@ -24,10 +25,45 @@ func MySQLPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string
 		if err != nil {
 			return nil, err
 		}
-		pc.Collation = coll.String
+		pc.Collation, pc.Charset = coll.String, cs.String
 		c.Cols = append(c.Cols, pc)
+		if pc.Kind == PKWeight && c.Weigh == nil {
+			c.Weigh = newMySQLWeigher(db)
+		}
 	}
 	return c, nil
+}
+
+// newMySQLWeigher: WEIGHT_STRING(CONVERT(v USING charset) COLLATE collation) tính trên db, có cache (giá
+// trị lặp lại nhiều: biên chunk, khóa nóng). Weight là khóa sắp xếp của collation: so byte cho đúng thứ
+// tự ORDER BY, và hai giá trị bằng nhau theo collation có cùng weight (kiểm ở TestGPK_MySQL…).
+func newMySQLWeigher(db *sql.DB) func(PKColumn, model.Value) ([]byte, error) {
+	var mu sync.Mutex
+	cache := map[string][]byte{}
+	return func(col PKColumn, v model.Value) ([]byte, error) {
+		s, err := toText(v)
+		if err != nil {
+			return nil, err
+		}
+		ck := col.Charset + "\x00" + col.Collation + "\x00" + s
+		mu.Lock()
+		w, ok := cache[ck]
+		mu.Unlock()
+		if ok {
+			return w, nil
+		}
+		q := fmt.Sprintf("SELECT WEIGHT_STRING(CONVERT(? USING %s) COLLATE %s)", col.Charset, col.Collation)
+		if err := db.QueryRow(q, s).Scan(&w); err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		if len(cache) > 100000 {
+			cache = map[string][]byte{}
+		}
+		cache[ck] = w
+		mu.Unlock()
+		return w, nil
+	}
 }
 
 // PGPKCodec dựng codec PK (PGPKColumn) từ catalog: kiểu gốc (typname, qua domain) và collation.

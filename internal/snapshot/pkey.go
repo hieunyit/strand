@@ -57,6 +57,7 @@ const (
 	PKPadBytes                    // MySQL PAD SPACE nhị phân
 	PKTrimBytes                   // PG bpchar "C"
 	PKUUID                        // PG uuid
+	PKWeight                      // MySQL chuỗi collation không nhị phân: WEIGHT_STRING do MySQL tính (mức 2)
 )
 
 func (k PKKind) String() string {
@@ -79,6 +80,8 @@ func (k PKKind) String() string {
 		return "trimmed-bytes"
 	case PKUUID:
 		return "uuid"
+	case PKWeight:
+		return "weight-string"
 	}
 	return fmt.Sprintf("PKKind(%d)", int(k))
 }
@@ -92,11 +95,16 @@ type PKColumn struct {
 	SQLType string
 	// Collation: collation của cột chuỗi (để so khớp với bảng đích; thứ tự phải giống nhau hai phía).
 	Collation string
+	// Charset: bộ ký tự của cột chuỗi (PKWeight: để tính weight của giá trị như của cột).
+	Charset string
 }
 
 // PKCodec mã hóa tuple PK của một bảng.
 type PKCodec struct {
 	Cols []PKColumn
+	// Weigh trả WEIGHT_STRING của giá trị v theo collation của cột (PKWeight, mức 2) — tính bởi chính
+	// MySQL (MySQLPKCodec gắn sẵn, có cache). nil: codec không có cột PKWeight.
+	Weigh func(col PKColumn, v model.Value) ([]byte, error)
 }
 
 // Key là tuple PK đã mã hóa memcomparable (so sánh string = so thứ tự tuple của DB).
@@ -145,7 +153,9 @@ func MySQLPKColumn(name, dataType, columnType, charset, collation, padAttribute 
 			return unsupported("character set " + charset + " has no byte-order binary collation guarantee")
 		}
 		if !strings.HasSuffix(coll, "_bin") {
-			return unsupported("collation " + collation + " is not binary (non-binary collations are not supported yet)")
+			// Mức 2: thứ tự và phép bằng của collation lấy từ WEIGHT_STRING của chính MySQL (không cài lại
+			// collation trong Go).
+			return PKColumn{Name: name, Kind: PKWeight, Collation: collation, Charset: charset}, nil
 		}
 		if strings.EqualFold(strings.TrimSpace(padAttribute), "NO PAD") {
 			return PKColumn{Name: name, Kind: PKBytes}, nil
@@ -224,6 +234,20 @@ func (c *PKCodec) Encode(vals []model.Value) (Key, error) {
 	}
 	var b []byte
 	for i, col := range c.Cols {
+		if col.Kind == PKWeight {
+			if c.Weigh == nil {
+				return "", fmt.Errorf("primary key column %s: collation %s needs WEIGHT_STRING from the source (no weigher)", col.Name, col.Collation)
+			}
+			if vals[i] == nil {
+				return "", fmt.Errorf("primary key column %s: NULL in primary key", col.Name)
+			}
+			w, err := c.Weigh(col, vals[i])
+			if err != nil {
+				return "", fmt.Errorf("primary key column %s: weight string: %w", col.Name, err)
+			}
+			b = appendEscaped(b, w)
+			continue
+		}
 		var err error
 		if b, err = appendKeyPart(b, col.Kind, vals[i]); err != nil {
 			return "", fmt.Errorf("primary key column %s: %w", col.Name, err)
