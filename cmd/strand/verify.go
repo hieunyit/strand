@@ -10,6 +10,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	drivermysql "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/cobra"
 
@@ -313,6 +315,8 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 	// khi các row lệch đổi chéo giá trị UNIQUE với nhau (target tụt sau source: row nào sửa trước cũng
 	// va UNIQUE của row chưa sửa — e2e P1-15). Không cascade sang bảng con: MySQL foreign_key_checks=0,
 	// PG session_replication_role=replica (cần quyền; không có thì sửa từng row như trước).
+	// Trùng UNIQUE với row không nằm trong danh sách lệch chỉ xảy ra khi source đổi giữa lúc so và lúc
+	// sửa (source vẫn ghi trong khi pipeline dừng): báo rõ cách làm thay vì chỉ trả 1062.
 	const batch = 20000
 	for lo := 0; lo < len(imgs); lo += batch {
 		hi := min(lo+batch, len(imgs))
@@ -323,6 +327,10 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 			ok, err = true, repairBulkMySQL(ctx, dst, dstT, pk, imgs[lo:hi])
 		}
 		if err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w — the source changed while repairing (writes continue while the pipeline is stopped): "+
+					"start the pipeline, let the target catch up, stop it and run --repair fix again", err)
+			}
 			return err
 		}
 		if !ok {
@@ -332,6 +340,16 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 		}
 	}
 	return nil
+}
+
+// isUniqueViolation: MySQL 1062 hoặc PG 23505.
+func isUniqueViolation(err error) bool {
+	var me *drivermysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1062 {
+		return true
+	}
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23505"
 }
 
 // repairImage: ảnh source của một khóa lệch (names == nil: source không còn row).
