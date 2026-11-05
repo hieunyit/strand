@@ -171,6 +171,11 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		}
 		if len(m.PK) > 0 {
 			m.PKCodec, m.PKCodecErr = mysqlPKCodec(ctx, db, id, m.PK)
+			if m.PKNumeric && m.PKCodec != nil && !m.PKCodec.IsSingleInt() {
+				// BIGINT UNSIGNED…: giá trị > MaxInt64 không biểu diễn được bằng int64 (biên bảng lỗi, event bị
+				// từ chối) — đi đường khóa tổng quát (mã hóa uint64).
+				m.PKNumeric = false
+			}
 		}
 
 		fr, err := db.QueryContext(ctx, `

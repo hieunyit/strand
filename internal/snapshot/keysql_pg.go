@@ -64,6 +64,13 @@ func (q PGKeySQL) params(b Bound, arg int) (string, []any, int, error) {
 		if err != nil {
 			return "", nil, arg, fmt.Errorf("key column %s: %w", c.Name, err)
 		}
+		if c.SQLType == "bytea" {
+			// bytea phải bind dạng []byte: binlog đưa VARBINARY dưới dạng string, gửi như text thì byte
+			// ≥ 0x80 không phải UTF-8 hợp lệ (22021).
+			if str, ok := v.(string); ok {
+				v = []byte(str)
+			}
+		}
 		args[i] = v
 		phs[i] = fmt.Sprintf("$%d", arg)
 		if c.SQLType != "" {
