@@ -268,13 +268,15 @@ func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chun
 	if chunk.Keys != nil {
 		// Chunk re-read (02 §8, toast_pk.go): tập khóa rời rạc, tra theo index PK (≤ max_pending_cross_range
 		// khóa) nên không cần chia đôi theo timeout hay cắt theo byte.
-		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ANY($1::bigint[]) ORDER BY %s",
+		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE t.%s = ANY($1::bigint[]) ORDER BY t.%s",
 			strings.Join(sel, ", "), quotePGTable(table), pk, pk)
 		if read.Rows, read.Bytes, err = c.queryChunk(ctx, query, columnNames, pkIdx, types, table, 0, chunk.Keys); err != nil {
 			return ChunkRead{}, nil, fmt.Errorf("re-read %d keys of %s: %w", len(chunk.Keys), table, err)
 		}
 	} else {
-		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= $1 AND %s <= $2 ORDER BY %s",
+		// ORDER BY t.pk (cột của BẢNG): `ORDER BY pk` trỏ vào cột kết quả `pk::text` và sắp theo chuỗi
+		// ("10" < "9") — chunk bị cắt theo max_chunk_bytes khi đó không phủ trọn [Start, Cut] (mất row).
+		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE t.%s >= $1 AND t.%s <= $2 ORDER BY t.%s",
 			strings.Join(sel, ", "), quotePGTable(table), pk, pk, pk)
 		queryFn := func(qCtx context.Context, ch *Chunk, maxBytes int64) ([]*model.RowChange, int64, error) {
 			return c.queryChunk(qCtx, query, columnNames, pkIdx, types, table, maxBytes, ch.StartPK, ch.EndPK)
