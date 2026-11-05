@@ -40,6 +40,7 @@ func getMySQLDSNs(t *testing.T) (string, string) {
 		ctx := context.Background()
 		cmd := []string{
 			"--server-id=6001",
+			"--innodb-use-native-aio=OFF", // không phụ thuộc giới hạn fs.aio-max-nr khi nhiều MySQL chạy cùng lúc
 			"--gtid-mode=ON",
 			"--enforce-gtid-consistency=ON",
 			"--binlog-format=ROW",

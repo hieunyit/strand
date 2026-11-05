@@ -87,6 +87,9 @@ func (k PKKind) String() string {
 type PKColumn struct {
 	Name string
 	Kind PKKind
+	// SQLType: kiểu cột để ép tham số khi so sánh (MySQL DECIMAL(p,s): so DECIMAL với tham số chuỗi
+	// bị ép về double và mất chính xác). Rỗng = không ép.
+	SQLType string
 }
 
 // PKCodec mã hóa tuple PK của một bảng.
@@ -123,7 +126,7 @@ func MySQLPKColumn(name, dataType, columnType, charset, collation, padAttribute 
 	case "year":
 		return PKColumn{Name: name, Kind: PKInt}, nil
 	case "decimal", "numeric":
-		return PKColumn{Name: name, Kind: PKDecimal}, nil
+		return PKColumn{Name: name, Kind: PKDecimal, SQLType: strings.ToUpper(strings.TrimSuffix(strings.ToLower(columnType), " unsigned"))}, nil
 	case "date", "datetime", "timestamp":
 		return PKColumn{Name: name, Kind: PKDateTime}, nil
 	case "time":

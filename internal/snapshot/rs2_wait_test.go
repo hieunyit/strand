@@ -68,9 +68,9 @@ func (c *fakeConn) WaitForExecutedGTIDSet(ctx context.Context, gtidSet string, t
 	return res, nil
 }
 
-func (c *fakeConn) QueryChunk(ctx context.Context, query string, startPK, endPK int64, columnNames []string, pkIdx int, table model.TableID, _ int64) ([]*model.RowChange, int64, error) {
+func (c *fakeConn) QueryChunk(ctx context.Context, query string, args []any, columnNames []string, pkIdxs []int, table model.TableID, _ int64) ([]*model.RowChange, int64, error) {
 	c.f.record("select@conn" + itoa(c.id))
-	return []*model.RowChange{{Table: table, Op: model.OpInsert, Key: []model.Value{startPK}}}, 1, nil
+	return []*model.RowChange{{Table: table, Op: model.OpInsert, Key: []model.Value{args[0]}}}, 1, nil
 }
 
 func (c *fakeConn) Close() error { return nil }
@@ -90,7 +90,7 @@ func TestRS2_WaitRunsOnSameConnBetweenLowAndSelect(t *testing.T) {
 	low := "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
 	high := "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-7"
 	src := &fakeSource{gtids: []string{low, high}}
-	rows, h, err := s.readChunkWatermarked(context.Background(), src, chunk, "SELECT", []string{"id"}, 0, chunk.Table)
+	rows, h, err := s.readChunkWatermarked(context.Background(), src, chunk, newKeySQL(chunk.Table, nil), "`id`", []string{"id"}, []int{0}, chunk.Table)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestRS2_WaitTimeoutIsRetriedThenSelect(t *testing.T) {
 	s, chunk := rs2Snapshotter()
 	low := "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
 	src := &fakeSource{gtids: []string{low}, waitRes: []sql.NullInt64{{Int64: 1, Valid: true}, {Int64: 0, Valid: true}}}
-	if _, _, err := s.readChunkWatermarked(context.Background(), src, chunk, "SELECT", []string{"id"}, 0, chunk.Table); err != nil {
+	if _, _, err := s.readChunkWatermarked(context.Background(), src, chunk, newKeySQL(chunk.Table, nil), "`id`", []string{"id"}, []int{0}, chunk.Table); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -160,7 +160,7 @@ func TestRS2_PersistentTimeoutFails(t *testing.T) {
 		res[i] = sql.NullInt64{Int64: 1, Valid: true}
 	}
 	src := &fakeSource{gtids: []string{low}, waitRes: res}
-	_, _, err := s.readChunkWatermarked(context.Background(), src, chunk, "SELECT", []string{"id"}, 0, chunk.Table)
+	_, _, err := s.readChunkWatermarked(context.Background(), src, chunk, newKeySQL(chunk.Table, nil), "`id`", []string{"id"}, []int{0}, chunk.Table)
 	if !isRetryableMySQLError(err) {
 		t.Fatalf("want 1205 after %d attempts, got %v", waitGTIDMaxAttempts, err)
 	}
@@ -185,7 +185,7 @@ func TestRS1_PendingDiscardMustBeVisibleBeforeChunkSelect(t *testing.T) {
 	}
 	// low đọc ngay sau đó CHƯA chứa :7 (engine chưa commit xong).
 	src := &fakeSource{gtids: []string{u + ":1-5", u + ":1-8"}}
-	if _, _, err := s.readChunkWatermarked(context.Background(), src, chunk, "SELECT", []string{"id"}, 0, chunk.Table); err != nil {
+	if _, _, err := s.readChunkWatermarked(context.Background(), src, chunk, newKeySQL(chunk.Table, nil), "`id`", []string{"id"}, []int{0}, chunk.Table); err != nil {
 		t.Fatal(err)
 	}
 	var wait string
