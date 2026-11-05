@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -12,6 +13,17 @@ import (
 
 // Governor (02 §7, P1-16, P2-07): grace-v2, onoff (mặc định) hoặc static; breaker theo tín hiệu đọc thẳng
 // từ DB (p99 query của chính Strand, replica lag), không phụ thuộc metrics_source.
+// softRate trả soft limit IOPS source hiện hành (0 nếu governor chưa được dựng).
+func (p *Pipeline) softRate() float64 { return math.Float64frombits(p.softRateBits.Load()) }
+
+// setSoftRate đổi soft limit nóng: governor (onoff/GRACE) và nhịp static cùng dùng giá trị mới.
+func (p *Pipeline) setSoftRate(r float64) {
+	p.softRateBits.Store(math.Float64bits(r))
+	if p.gov != nil {
+		p.gov.SetSoftRate(r)
+	}
+}
+
 // Governor điều tiết snapshot (background) bằng khoảng cách giữa các chunk.
 
 func (p *Pipeline) setupGovernor() error {
@@ -36,6 +48,7 @@ func (p *Pipeline) setupGovernor() error {
 	if soft <= 0 {
 		soft = 600
 	}
+	p.softRateBits.Store(math.Float64bits(soft))
 	hard := float64(p.cfg.Resources.Source.IOPS.Hard)
 	bcfg := governor.BreakerConfig{
 		MaxRatio:      p.cfg.Governor.Breaker.StrandQueryP99.MaxRatio,

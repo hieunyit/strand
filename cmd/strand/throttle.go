@@ -29,9 +29,10 @@ func newThrottleCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("strand throttle set failed: %w", err)
 			}
-			fmt.Printf("Giới hạn tài nguyên đã được cập nhật thành công:\n")
-			fmt.Printf("  Source IOPS: soft=%d, hard=%d\n", res.SourceIOPSSoft, res.SourceIOPSHard)
-			fmt.Printf("  Target IOPS: soft=%d, hard=%d\n", res.TargetIOPSSoft, res.TargetIOPSHard)
+			fmt.Printf("Đã đổi soft limit IOPS source: soft=%d (hard=%d, chỉ đổi qua cấu hình + restart)\n", res.SourceIOPSSoft, res.SourceIOPSHard)
+			if !throttleSoft {
+				fmt.Printf("  Lưu ý: hard limit không đổi được khi đang chạy; giá trị đã áp cho soft limit.\n")
+			}
 			return nil
 		},
 	}

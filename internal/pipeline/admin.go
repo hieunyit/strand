@@ -42,7 +42,7 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 		PipelineID: p.id,
 		State:      h.state(),
 		LagSeconds: p.lagSeconds(),
-		Throughput: float64(p.appliedRows.Load()),
+		Throughput: p.throughput.rate(), // row/giây trong cửa sổ gần nhất (review R18)
 		Zone:       zone,
 	}, nil
 }
@@ -72,17 +72,19 @@ func (h *adminHandler) Resume(ctx context.Context, snapshotOnly bool) (*admin.Re
 }
 
 func (h *adminHandler) ThrottleSet(ctx context.Context, req admin.Request) (*admin.ThrottleResult, error) {
-	// Đổi soft limit IOPS source của governor nóng (02 §10).
-	if req.SourceIOPS > 0 {
-		h.p.gov.SetSoftRate(float64(req.SourceIOPS))
+	// Chỉ báo thành công cho thứ thực sự được thi hành (review R17): soft limit IOPS source, áp cho mọi
+	// governor (static dùng chính giá trị này làm nhịp snapshot). IOPS target chưa được thi hành — từ
+	// chối thay vì báo đã đặt.
+	if req.TargetIOPS > 0 {
+		return nil, fmt.Errorf("target IOPS limits are not enforced by this version; nothing changed")
 	}
-	res := &admin.ThrottleResult{}
-	if req.Soft {
-		res.SourceIOPSSoft, res.TargetIOPSSoft = req.SourceIOPS, req.TargetIOPS
-	} else {
-		res.SourceIOPSHard, res.TargetIOPSHard = req.SourceIOPS, req.TargetIOPS
+	if req.SourceIOPS <= 0 {
+		return nil, fmt.Errorf("--source-iops must be > 0")
 	}
-	return res, nil
+	// Không có --soft: như các bản trước, giá trị đổi soft limit (hard limit không đổi nóng được) —
+	// nhưng phản hồi báo đúng là soft, không còn báo nhầm đã đặt hard.
+	h.p.setSoftRate(float64(req.SourceIOPS))
+	return &admin.ThrottleResult{SourceIOPSSoft: req.SourceIOPS, SourceIOPSHard: h.p.cfg.Resources.Source.IOPS.Hard}, nil
 }
 
 func (h *adminHandler) CheckpointShow(ctx context.Context) (*admin.CheckpointResult, error) {

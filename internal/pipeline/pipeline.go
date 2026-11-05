@@ -73,6 +73,9 @@ type Pipeline struct {
 
 	filter   *tableFilter
 	tablesMu sync.RWMutex
+	// softRateBits: soft limit IOPS source hiện hành (math.Float64bits), dùng cho nhịp static.
+	softRateBits atomic.Uint64
+	throughput   rateMeter
 	// partRoots: cache partition lá → bảng gốc (source PG, pg_partition.go).
 	partRoots pgPartitionRoots
 	tables    map[model.TableID]*tableMeta
@@ -1510,7 +1513,7 @@ func (p *Pipeline) pace(ctx context.Context) error {
 		_, rate = p.gov.CurrentRate()
 	}
 	if p.govAlgo == "static" || rate <= 0 {
-		rate = float64(p.cfg.Resources.Source.IOPS.Soft)
+		rate = p.softRate() // soft limit hiện hành (cấu hình, hoặc `throttle set --soft`)
 	}
 	if rate <= 0 {
 		return nil
@@ -1703,6 +1706,7 @@ func (p *Pipeline) monitor(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		p.throughput.sample(p.appliedRows.Load(), time.Now())
 		phase := "synced"
 		if p.bootstrap.Load() {
 			phase = "bootstrap"
@@ -1810,7 +1814,7 @@ func (p *Pipeline) updateMetrics() {
 	m.SpoolCapacityBytes.WithLabelValues(p.id, "local").Set(parseBytes(p.cfg.Resources.Spool.Hard))
 	m.SpoolCapacityBytes.WithLabelValues(p.id, "bucket").Set(0)
 	if p.gov != nil && p.govAlgo == "static" {
-		m.GovernorRateTokens.WithLabelValues(p.id, "source_iops").Set(float64(p.cfg.Resources.Source.IOPS.Soft))
+		m.GovernorRateTokens.WithLabelValues(p.id, "source_iops").Set(p.softRate())
 	}
 	m.VerifyMismatchTotal.WithLabelValues(p.id, "").Add(0)
 	m.VerifyUnverifiableHotTotal.WithLabelValues(p.id, "").Add(0)

@@ -32,6 +32,20 @@ func (c *Config) UnimplementedKeys() []string {
 	if len(c.Resources.Schedule) > 0 {
 		keys = append(keys, "resources.schedule")
 	}
+	// review R17: các trường dưới được parse/validate nhưng runtime chưa thi hành — phải cảnh báo, để
+	// người vận hành không tin nhầm là đã có giới hạn.
+	if c.Resources.Memory.Soft != "" || c.Resources.Memory.Hard != "" {
+		keys = append(keys, "resources.memory (no RSS limit is enforced)")
+	}
+	if c.Resources.Target.IOPS.Soft > 0 || c.Resources.Target.IOPS.Hard > 0 {
+		keys = append(keys, "resources.target.iops (target writes are not paced)")
+	}
+	if c.Resources.Spool.Soft != "" {
+		keys = append(keys, "resources.spool.soft (only spool.hard is used, as a hard-signal threshold)")
+	}
+	if strings.EqualFold(c.Target.WriteMode, "insert") {
+		keys = append(keys, "target.write_mode=insert (the writer always upserts)")
+	}
 	if c.Resources.Workers.Min > 0 && c.Resources.Workers.Min != c.Resources.Workers.Max {
 		// Số worker cố định = workers.max; tự co giãn trong [min, max] chưa có.
 		keys = append(keys, "resources.workers.min (adaptive worker count; workers.max is used)")

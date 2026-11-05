@@ -280,6 +280,9 @@ func TestNewKeys_ParseFromYAML(t *testing.T) {
 		"resources.target.bandwidth",
 		"resources.network.backup_read",
 		"resources.schedule",
+		"resources.memory (no RSS limit is enforced)",
+		"resources.target.iops (target writes are not paced)",
+		"resources.spool.soft (only spool.hard is used, as a hard-signal threshold)",
 		"resources.workers.min (adaptive worker count; workers.max is used)",
 		`bootstrap.per_table."app.orders".seed.credentials`,
 		`bootstrap.per_table."app.orders".seed.encryption_key`,
@@ -294,13 +297,19 @@ func TestNewKeys_ParseFromYAML(t *testing.T) {
 	}
 }
 
-// Ví dụ 02 §10 đặt workers {min: 1, max: 32}: số worker tự co giãn chưa có nên phải được cảnh báo,
-// ngoài ra không còn key nào chưa hỗ trợ.
-func TestUnimplementedKeys_SpecExampleOnlyWorkersMin(t *testing.T) {
+// Ví dụ 02 §10 đặt memory, target.iops, spool.soft và workers {min: 1, max: 32}: runtime chưa thi hành
+// các trường này nên mỗi trường phải được cảnh báo (review R17 — bản trước chỉ cảnh báo workers.min).
+func TestUnimplementedKeys_SpecExampleWarnsEveryUnenforcedLimit(t *testing.T) {
 	cfg := mustLoad(t, sampleSpecYAML)
-	k := cfg.UnimplementedKeys()
-	if len(k) != 1 || k[0] != "resources.workers.min (adaptive worker count; workers.max is used)" {
-		t.Errorf("unimplemented keys for 02 §10 example: %v", k)
+	got := fmt.Sprint(cfg.UnimplementedKeys())
+	want := fmt.Sprint([]string{
+		"resources.memory (no RSS limit is enforced)",
+		"resources.target.iops (target writes are not paced)",
+		"resources.spool.soft (only spool.hard is used, as a hard-signal threshold)",
+		"resources.workers.min (adaptive worker count; workers.max is used)",
+	})
+	if got != want {
+		t.Errorf("unimplemented keys for 02 §10 example:\n %s\nwant\n %s", got, want)
 	}
 }
 
