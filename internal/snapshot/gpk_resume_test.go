@@ -147,3 +147,92 @@ func TestGPK_ResumeFromSavedPlanWithGenericKeys(t *testing.T) {
 		t.Fatalf("plan not finished after resume: %s", saved)
 	}
 }
+
+// invariant: RS-1/RS-2 — việc C, phiên bản tất định của lỗi kill -9 1062 với khóa tổng quát: "crash" giữa
+// flush chunk 3 và lưu plan (target có ảnh chunk 3, plan còn ở cuối chunk 2). Source: row X của chunk 3
+// nhả giá trị UNIQUE cho row Y của phần đã xong. Chạy tiếp: ngay sau đăng ký (barrier), stream áp thay
+// đổi của Y lên target — chỉ được nếu phần chưa đọc (gồm X cũ) đã bị xóa theo tuple trước đó.
+func TestGPK_ResumeClearsUnreadPartBeforeStreamApplies(t *testing.T) {
+	srcDSN, dstDSN := getMySQLDSNs(t)
+	src, _ := sql.Open("mysql", srcDSN)
+	dst, _ := sql.Open("mysql", dstDSN)
+	defer src.Close()
+	defer dst.Close()
+	ctx := context.Background()
+	ddl := "(k VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, n INT NOT NULL, code VARCHAR(10) NOT NULL, PRIMARY KEY (k, n), UNIQUE KEY uk (code))"
+	for _, db := range []*sql.DB{src, dst} {
+		db.Exec("DROP TABLE IF EXISTS gpk_uniq")
+		if _, err := db.Exec("CREATE TABLE gpk_uniq " + ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 100; i++ { // chunk 20 row: k000..k019 | k020..k039 | k040..k059 …
+		if _, err := src.Exec("INSERT INTO gpk_uniq VALUES (?, 0, ?)", fmt.Sprintf("k%03d", i), fmt.Sprintf("c%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var schema, dschema string
+	_ = src.QueryRow("SELECT DATABASE()").Scan(&schema)
+	_ = dst.QueryRow("SELECT DATABASE()").Scan(&dschema)
+	table := model.TableID{Schema: schema, Table: "gpk_uniq"}
+	codec := mysqlCodec(t, src, "gpk_uniq", []string{"k", "n"})
+	var saved []byte
+	saves := 0
+	newSnap := func(failAt int) *snapshot.MySQLSnapshotter {
+		s := snapshot.NewMySQLSnapshotter(snapshot.ChunkOptions{DefaultChunkRows: 20, MinChunkRows: 1, MaxChunkBytes: 1 << 30})
+		s.TargetName = func(model.TableID) model.TableID { return model.TableID{Schema: dschema, Table: "gpk_uniq"} }
+		s.LoadPlan = func(model.TableID) (snapshot.SnapshotPlan, bool) {
+			if saved == nil {
+				return snapshot.SnapshotPlan{}, false
+			}
+			var p snapshot.SnapshotPlan
+			_ = json.Unmarshal(saved, &p)
+			return p, true
+		}
+		s.SavePlan = func(_ model.TableID, p snapshot.SnapshotPlan) error {
+			saves++
+			if failAt > 0 && saves == failAt {
+				return errors.New("crash between flush and plan save")
+			}
+			b, err := json.Marshal(p)
+			saved = b
+			return err
+		}
+		return s
+	}
+	noWait := func(context.Context, checkpoint.AppliedSet) error { return nil }
+	cols := []string{"k", "n", "code"}
+	// Lần lưu 1 = plan mới; 2, 3 = sau chunk 1, 2; lần 4 (sau chunk 3) "crash".
+	if err := newSnap(4).SnapshotAddKeys(ctx, src, dst, table, codec, cols, noWait); err == nil {
+		t.Fatal("first run should stop at the simulated crash")
+	}
+	// X = k045 (chunk 3, đã flush ở target, plan coi là chưa đọc) nhả c045 cho Y = k005 (phần đã xong).
+	if _, err := src.Exec("UPDATE gpk_uniq SET code = 'x045' WHERE k = 'k045'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Exec("UPDATE gpk_uniq SET code = 'c045' WHERE k = 'k005'"); err != nil {
+		t.Fatal(err)
+	}
+	s := newSnap(0)
+	registered := false
+	s.Barrier = func(ctx context.Context, fn func() error) error {
+		if err := fn(); err != nil {
+			return err
+		}
+		if !registered {
+			registered = true
+			// Stream áp UPDATE của Y (range "Xong") ngay sau đăng ký.
+			if _, err := dst.Exec("UPDATE gpk_uniq SET code = 'c045' WHERE k = 'k005' AND n = 0"); err != nil {
+				return fmt.Errorf("stream apply of the done-range row: %w", err)
+			}
+		}
+		return nil
+	}
+	if err := s.SnapshotAddKeys(ctx, src, dst, table, codec, cols, noWait); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	q := "SELECT k, n, code FROM gpk_uniq"
+	if a, b := dumpRows(t, src, q), dumpRows(t, dst, q); a != b {
+		t.Fatal("target differs from source after resume")
+	}
+}
