@@ -195,7 +195,10 @@ Phạm vi (người dùng đã duyệt mức 1–2, mức 3 để mở):
 
 **Test:** unit cho mã hoá (tính giữ thứ tự so với DB thật MySQL 8.4 + PG 17, nhiều giá trị ngẫu nhiên mỗi kiểu/collation, các ca bằng/PAD SPACE); unit range_state với khóa ghép và chuỗi; e2e: MySQL→MySQL snapshot dưới tải với (a) PK int ghép, (b) varchar `utf8mb4_0900_ai_ci` có biến thể hoa/dấu và UPDATE đổi PK xuyên chunk, (c) varchar `_bin`, (d) datetime+int ghép; MySQL→PG với PK int ghép và varchar ci (hoặc test từ chối rõ ràng); PG→PG với PK ghép, text `COLLATE "C"`, uuid. Mỗi e2e: trạng thái cuối giống hệt, mỗi phiên bản row apply đúng một lần, `verify --mode full` 0 lệch; chạy ≥3 lần ở mỗi chế độ relaxed/strict. Regression: các e2e snapshot hiện có + test resume sau kill -9.
 
-### D. Viết lại `docs/USAGE.md` đầy đủ  ⬜ chưa bắt đầu
+### D. Viết lại `docs/USAGE.md` đầy đủ  ✅ viết lại (Claude, 2026-11-05, nhánh `agent/generic-pk-v2`)
+
+Đủ 10 mục theo cấu trúc dưới; mọi khóa/cờ đối chiếu với code và `--help`. Sai lệch của bản cũ đã sửa: mặc định `commit_order` là **strict** (code: trống → strict; bản cũ ghi relaxed); `grace-v2` đã chạy thật (bản cũ ghi lùi về onoff); `throttle set` luôn đổi soft; kết nối tách trường chỉ cho MySQL (PG chỉ `dsn`); `validate` không kiểm quyền (spec 03 §2 nói có `insufficient_privilege` — mã lỗi có nhưng không có chỗ nào trả). Khóa không tác dụng mà **không** cảnh báo vẫn còn: `source.read_from` (primary/replica), `schema.*`, `governor.metrics_source`, `verify.full.*`, `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive`, `checkpoint.store` — nên thêm vào `UnimplementedKeys`.
+
 
 Người dùng phàn nàn: (1) không hiểu tại sao "phải cho table vào mà không đồng bộ full cả db" — tài liệu không nói `tables.include` là glob (`app.*` = cả database, `*.*` = mọi schema người dùng; schema hệ thống tự bỏ: MySQL `mysql/sys/information_schema/performance_schema` — `internal/pipeline/schema.go` `loadSourceTables`; PG `pg_catalog/information_schema/pg_*` — `internal/pipeline/engine.go` ~132); (2) tài liệu chưa đầy đủ (tiêu đề còn "P1 / Gate 1", P2 bị nhét vào một mục).
 

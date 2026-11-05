@@ -1,115 +1,452 @@
-# Strand CDC — Hướng dẫn chạy và tùy chọn (P1 / Gate 1)
+# Strand CDC — Hướng dẫn sử dụng
 
-Cập nhật: 2026-11-03
+Cập nhật: 2026-11-05. Tài liệu ứng với code sau khi gộp các nhánh `agent/schema-init-fixes`, `agent/review-deep` và `agent/generic-pk-v2` vào `review/gate1-fixes`. Mọi câu dưới đây đã được đối chiếu với code và `strand <lệnh> --help`. Khóa được nhận mà chưa có tác dụng được ghi rõ ở mục 6.3.
 
-Strand P1 đồng bộ một chiều MySQL → MySQL (8.0/8.4), một process `strand sync` cho mỗi pipeline; tài liệu này ứng với nhánh `review/gate1-fixes` (commit `2332300`).
+Strand đồng bộ **một chiều** dữ liệu từ một CSDL nguồn (source) sang một CSDL đích (target), bằng CDC: đọc binlog (MySQL) hoặc logical replication (PostgreSQL). Mỗi pipeline là một process `strand sync`. Trạng thái (checkpoint) nằm trong target, nên dừng hoặc kill -9 rồi chạy lại không mất và không lặp dữ liệu.
 
-## Chuẩn bị schema đích (việc B)
+## Mục lục
 
-`bootstrap.create_schema: auto` là mặc định. Với MySQL→MySQL, MySQL→PostgreSQL và PostgreSQL→PostgreSQL, `sync` tạo schema/database và bảng còn thiếu trước snapshot logic. Phạm vi lấy từ `tables.include`, `tables.exclude` và `tables.rename`; ví dụ `app.*` chọn cả schema `app`. Bảng đã tồn tại không bị sửa cấu trúc bởi bộ tạo schema. Snapshot logic vẫn có hành vi thay dữ liệu đích như trước.
+1. [Tổng quan và ma trận hỗ trợ](#1-tổng-quan-và-ma-trận-hỗ-trợ)
+2. [Chọn phạm vi đồng bộ](#2-chọn-phạm-vi-đồng-bộ)
+3. [Chuẩn bị target](#3-chuẩn-bị-target)
+4. [Yêu cầu theo engine](#4-yêu-cầu-theo-engine)
+5. [Yêu cầu và giới hạn của bảng](#5-yêu-cầu-và-giới-hạn-của-bảng)
+6. [Tham chiếu cấu hình](#6-tham-chiếu-cấu-hình)
+7. [Tham chiếu lệnh](#7-tham-chiếu-lệnh)
+8. [Vận hành, tuning, metric, exit code](#8-vận-hành-tuning-metric-exit-code)
+9. [Công thức đầu-cuối](#9-công-thức-đầu-cuối)
+10. [FAQ, xử lý sự cố, giới hạn đã biết](#10-faq-xử-lý-sự-cố-giới-hạn-đã-biết)
 
-Có thể xem và tạo schema riêng:
+---
+
+## 1. Tổng quan và ma trận hỗ trợ
+
+### 1.1 Cặp engine
+
+| Source → Target | Hỗ trợ |
+| --- | --- |
+| MySQL → MySQL | Có |
+| MySQL → PostgreSQL | Có |
+| PostgreSQL → PostgreSQL | Có |
+| PostgreSQL → MySQL | **Không**. `sync` từ chối: `unsupported pipeline postgres → mysql` |
+
+Phiên bản có test tự động: MySQL 8.4, PostgreSQL 16, 17 và 18. MySQL 8.0 có trong spec nhưng chưa có test tự động. Source PostgreSQL cần ít nhất PG 14, vì watermark snapshot dùng `messages` của pgoutput.
+
+### 1.2 Tính năng theo cặp
+
+| Tính năng | MySQL→MySQL | MySQL→PG | PG→PG |
+| --- | --- | --- | --- |
+| Snapshot logic (`bootstrap.default: logical`, `snapshot add`) | Có | Có | Có (source phải là primary) |
+| Snapshot logic với PK không phải một cột số nguyên | Có (mức 1 + 2, mục 5.2) | Chỉ kiểu số, thời gian, VARBINARY | Có (mức 1, mục 5.2) |
+| Tự tạo schema đích (`create_schema: auto`, `schema init`) | Có | Có (theo typemap) | Có |
+| Seed từ backup | xtrabackup, clone, mydumper, mysqldump | — | pgBackRest, WAL-G, `strand export` |
+| `--start-at` | GTID set | — (dùng vị trí GTID của source) | LSN `X/Y` |
+| `verify --mode sample` | Có | Không | Không |
+| `verify --mode delta` / verify tự động sau seed | Có | Không (chỉ cảnh báo, xem 10.3) | Không (chỉ cảnh báo) |
+| `verify --mode full` | Có | Có | Có |
+| `verify --repair fix` | Có | Không (khác engine) | Có, trừ PK tổng quát |
+| `checkpoint rewind` | Có | Không | Không |
+| Governor `onoff` / `grace-v2` | Có | Có | Không, luôn `static` |
+| `promote` | Có | Có | Có |
+
+`--start-at` với MySQL→PG nhận GTID set của source MySQL, giống MySQL→MySQL.
+
+### 1.3 Các khái niệm
+
+- **Chế độ A (snapshot logic):** Strand tự đọc bảng nguồn theo chunk, song song với stream. Không cần backup. Có điều tốc để không đè source.
+- **Chế độ B (seed):** bạn restore một bản backup vào target. Strand kiểm vị trí P của backup rồi bắt kịp từ P. Không đọc dữ liệu bảng trên source.
+- **`--start-at`:** bạn cam kết target đã khớp source tại một vị trí. Strand chỉ stream từ đó.
+- **`commit_order`:**
+  - `strict` (mặc định): apply đúng thứ tự commit của source, một luồng ghi. Target luôn là một tiền tố của source.
+  - `relaxed`: các Txn không đụng nhau chạy song song. Nhanh hơn, nhưng target có thể tạm thời có "lỗ".
+- **Trạng thái pipeline** (`strand top`): `starting` → `bootstrapping` → `synced`. Ngoài ra còn `paused` và `failed`.
+  - `bootstrapping`: đang snapshot hoặc đang verify sau seed.
+  - `synced`: mọi bảng đã xong.
+
+---
+
+## 2. Chọn phạm vi đồng bộ
+
+Strand chỉ đồng bộ những bảng khớp `tables.include` và không khớp `tables.exclude`. Mỗi mẫu là một **glob** trên tên `schema.table`, theo cú pháp `path.Match` của Go: `*` khớp mọi chuỗi, `?` khớp một ký tự, `[abc]` khớp một lớp ký tự.
+
+| Muốn đồng bộ | `tables.include` |
+| --- | --- |
+| Một bảng | `["app.orders"]` |
+| Vài bảng | `["app.orders", "app.users"]` |
+| Cả một database (MySQL) hoặc schema (PG) | `["app.*"]` |
+| Mọi bảng có tiền tố | `["app.order_*"]` |
+| Cả instance | `["*.*"]` |
+
+Bạn **không bắt buộc** phải liệt kê từng bảng: `app.*` là cả database `app`, `*.*` là mọi schema người dùng. Schema hệ thống luôn bị bỏ qua:
+
+- MySQL: `mysql`, `sys`, `information_schema`, `performance_schema`.
+- PostgreSQL: `pg_catalog`, `information_schema` và mọi schema `pg_*`.
+
+Chỉ bảng thường (MySQL `BASE TABLE`; PG bảng thường và bảng partitioned gốc) được đồng bộ. View, bảng tạm và partition lá của PG thì không.
+
+- `tables.exclude`: cùng cú pháp, ví dụ `["app.audit_*", "app.tmp_*"]`.
+- `tables.rename`: đổi tên bảng ở target, ánh xạ **từng bảng**, ví dụ `{"app.orders": "sales.orders"}`. Không có rename theo cả schema.
+- `strand validate` từ chối (exit 3) khi một mẫu include không khớp bảng nào trên source MySQL. `sync` không kiểm điều này.
+
+**Bảng mới trong lúc chạy:**
+
+- Source MySQL: `CREATE TABLE` hoặc `RENAME TABLE` tạo ra bảng khớp bộ lọc thì được tạo ở target và nhận row (mục 3.4).
+- Source PG: DDL không đi qua pgoutput. Dùng `strand snapshot add --table s.t` hoặc khởi động lại pipeline.
+
+**Đổi `include`/`exclude` giữa các lần chạy:** dừng pipeline, sửa file, chạy lại.
+
+- Bảng mới khớp bộ lọc được snapshot logic (với PG source thì phải có trong publication).
+- Bảng bị loại thì thôi đồng bộ. Dữ liệu đã có ở target vẫn giữ nguyên.
+
+### Checklist đồng bộ cả instance
+
+1. `tables.include: ["*.*"]`. Loại bảng không cần bằng `exclude`.
+2. Mọi bảng phải có PRIMARY KEY (mục 5.1). Bảng không có PK làm `sync`/`validate` dừng với `missing_pk`.
+3. Kiểm từng bảng có PK snapshot logic được (mục 5.2). Bảng không hỗ trợ: seed từ backup hoặc đổi kiểu PK.
+4. User, quyền, view, routine, trigger và event **không** được sao chép. Tạo tay ở target. Seed bằng XtraBackup/CLONE thì backup mang theo chúng.
+5. PG source: publication phải chứa mọi bảng (`FOR ALL TABLES` hoặc liệt kê). Bảng partitioned cần `publish_via_partition_root = true`.
+6. Chạy `strand validate`, rồi `strand plan` (ETA, chọn A hay B), rồi `strand sync`.
+
+---
+
+## 3. Chuẩn bị target
+
+### 3.1 Tự tạo schema (mặc định)
+
+`bootstrap.create_schema: auto` là mặc định. `sync` tạo database/schema và các bảng còn thiếu ở target trước khi snapshot logic, theo phạm vi `tables.include`/`exclude`/`rename`. Bảng đã tồn tại không bị sửa cấu trúc.
 
 ```bash
-strand schema init -c pipeline.yaml --dry-run
-strand schema init -c pipeline.yaml
-strand validate -c pipeline.yaml
+strand schema init -c pipeline.yaml --dry-run   # chỉ in DDL
+strand schema init -c pipeline.yaml             # tạo bảng còn thiếu (chạy lại an toàn)
+strand validate   -c pipeline.yaml             # báo "N table(s) will be created on target"
 ```
 
-`--dry-run` chỉ in DDL, không áp vào target. Chạy lại `schema init` bỏ qua bảng đã có. Lệnh tường minh này vẫn tạo bảng khi cấu hình `create_schema: off`; `off` tắt việc tự tạo của `sync`. Biến môi trường tương ứng là `STRAND_BOOTSTRAP_CREATE_SCHEMA=off`. `validate` với `auto` báo số bảng sẽ được tạo; với `off`, bảng đích thiếu làm validate trả exit 3.
+- `schema init` vẫn tạo bảng khi `create_schema: off`. `off` chỉ tắt việc tự tạo của `sync`.
+- Với `off`, bảng đích thiếu làm `validate` trả exit 3.
+- Biến môi trường tương ứng: `STRAND_BOOTSTRAP_CREATE_SCHEMA=off`.
 
-- MySQL→MySQL: lấy `SHOW CREATE TABLE`, giữ PK/index/FK/partition và charset/collation, bỏ bộ đếm `AUTO_INCREMENT=N` ở cấp bảng. Không sao chép trigger, event hay routine. Bỏ qua view. Đích cần bảng InnoDB để dữ liệu và checkpoint commit nguyên tử. Source cần quyền đọc metadata; danh sách đối tượng được log phụ thuộc quyền xem metadata của tài khoản nguồn.
-- MySQL→PostgreSQL: dùng mapping mặc định của `internal/typemap`, cột khóa chuỗi dùng collation `"C"`, ENUM thành text + CHECK. AUTO_INCREMENT ánh xạ sang identity khi kiểu đích là smallint/integer/bigint. Default chỉ giữ khi dịch được an toàn; default bị bỏ có cảnh báo. Index prefix/biểu thức/fulltext, cột generated của MySQL và AUTO_INCREMENT ánh xạ sang numeric bị từ chối bằng exit 3, cần tạo bảng đích thủ công.
-- PostgreSQL→PostgreSQL: dựng từ catalog, không gọi `pg_dump`; giữ NOT NULL/default/collation, PK/UNIQUE/CHECK/exclusion, index, FK sau cùng, identity và sequence sở hữu (increment/start/cache/min/max/cycle). Giữ biểu thức generated. Hỗ trợ bảng partition một cấp; subpartition và kiểu enum/domain do người dùng định nghĩa được từ chối rõ để tạo bảng thủ công. Sequence độc lập không được bộ tạo schema sao chép.
+Theo cặp engine:
 
-DDL PostgreSQL của một lần init được áp trong một transaction. MySQL tự commit từng DDL; nếu bị ngắt, lần chạy kế tiếp tạo các bảng còn thiếu. Không có bước tự sửa bảng đã tồn tại.
+- **MySQL→MySQL:**
+  - Dùng `SHOW CREATE TABLE`, giữ PK, index, FK, partition và charset/collation.
+  - Bỏ bộ đếm `AUTO_INCREMENT=N`.
+  - Không sao chép trigger, event, routine. Bỏ qua view.
+  - Target phải là InnoDB.
+- **MySQL→PG:**
+  - Theo bảng ánh xạ ở 3.2. Cột khóa chuỗi dùng `COLLATE "C"`. ENUM thành `text` + CHECK. AUTO_INCREMENT thành identity khi kiểu đích là smallint, integer hoặc bigint.
+  - Default chỉ được giữ khi dịch được an toàn. Default bị bỏ thì có cảnh báo.
+  - Bị từ chối (exit 3, cần tạo bảng tay): index prefix, index biểu thức, fulltext, cột generated, AUTO_INCREMENT ánh xạ sang numeric.
+- **PG→PG:**
+  - Dựng từ catalog, không gọi `pg_dump`.
+  - Giữ NOT NULL, default, collation, PK/UNIQUE/CHECK/exclusion, index, FK (tạo sau cùng), identity và sequence sở hữu, biểu thức generated.
+  - Hỗ trợ partition một cấp.
+  - Từ chối subpartition và enum/domain do người dùng định nghĩa.
+  - Sequence độc lập không được sao chép.
 
-`sync` chỉ tự tạo cho bảng còn chờ snapshot. Bảng đã được đánh dấu xong từ seed/restore hoặc `--start-at` mà bị thiếu không được tạo rỗng để che lỗi restore. Database chứa metadata trong DSN target phải kết nối được trước khi chạy; bộ tạo schema không thay bước chuẩn bị database metadata.
+Về giao dịch và các trường hợp đặc biệt:
 
-Với target PostgreSQL và `auto`, snapshot bảng cha trước bảng con để giữ FK có hiệu lực. FK vòng/tự tham chiếu trong tập bảng chờ snapshot bị từ chối trước khi tạo DDL; cần seed nhất quán hoặc một thiết kế riêng. Xem `questions/OPEN-schema-init-fk.md`.
+- DDL PG của một lần init chạy trong một transaction. MySQL commit từng DDL; bị ngắt thì lần sau tạo nốt phần còn thiếu.
+- `sync` chỉ tự tạo bảng **còn chờ snapshot**. Bảng đã được đánh dấu xong qua seed hoặc `--start-at` mà bị thiếu ở target thì không được tạo rỗng (để không che lỗi restore).
+- Database metadata trong DSN target (ví dụ `strand`) phải có sẵn và kết nối được.
+- Target PG với `auto`: bảng cha được snapshot trước bảng con. FK vòng hoặc tự tham chiếu trong tập bảng chờ snapshot bị từ chối. Xem `questions/OPEN-schema-init-fk.md`.
 
-CREATE TABLE từ source MySQL khớp bộ lọc được tạo tại barrier trước khi nhận row của bảng mới. Strand giữ metadata lock đọc và kiểm binlog để tránh lấy schema đã bị ALTER sau vị trí CREATE. Không kiểm được trong 30 giây, log không còn phủ đủ, hoặc có DDL mới hơn thì dừng exit 10. ALTER/DROP/RENAME vẫn đi theo cơ chế kiểm schema và exit 10 hiện có. Với source PostgreSQL, DDL không đi qua pgoutput; dùng `snapshot add` hoặc khởi động lại để nhận bảng mới.
+### 3.2 Ánh xạ kiểu MySQL → PostgreSQL
 
-Quyền target để tạo schema: MySQL cần CREATE trên database/schema được đồng bộ (và quyền tạo database nếu database chưa có); PostgreSQL cần CREATE trên database để tạo schema, USAGE/CREATE trên schema đích. Quyền apply/promote vẫn cần chuẩn bị riêng. Source không bị tạo đối tượng hoặc ghi row bởi `schema init`.
+Mặc định cố định, chưa có khóa cấu hình để đổi chính sách (`internal/typemap`):
 
-Phần còn lại của tài liệu bên dưới đang chờ việc D viết lại và còn mô tả P1; phần schema ở trên là phần cập nhật cho việc B.
+| MySQL | PostgreSQL | Ghi chú |
+| --- | --- | --- |
+| `TINYINT` (có/không dấu) | `smallint` | Kiểm phạm vi |
+| `SMALLINT` / `SMALLINT UNSIGNED` | `smallint` / `integer` | |
+| `MEDIUMINT` (có/không dấu) | `integer` | |
+| `INT` / `INT UNSIGNED` | `integer` / `bigint` | |
+| `BIGINT` / `BIGINT UNSIGNED` | `bigint` / `numeric(20,0)` | |
+| `DECIMAL(p,s)` | `numeric(p,s)` | |
+| `FLOAT` / `DOUBLE` | `real` / `double precision` | |
+| `BIT(n)` | `bit varying(n)` | |
+| `CHAR(n)` / `VARCHAR(n)` | `char(n)` / `varchar(n)` | Cột khóa: `COLLATE "C"` |
+| `TEXT` (mọi cỡ) | `text` | |
+| `BINARY`, `VARBINARY`, `BLOB` (mọi cỡ) | `bytea` | |
+| `DATE` | `date` | Zero date bị từ chối |
+| `DATETIME(n)` | `timestamp(n)` | Giữ nguyên giờ đồng hồ |
+| `TIMESTAMP(n)` | `timestamptz(n)` | Đọc theo UTC |
+| `TIME(n)` | `time(n)` | |
+| `YEAR` | `smallint` | |
+| `JSON` | `jsonb` | |
+| `ENUM(...)` | `text` + CHECK | |
+| `SET(...)` | `text[]` | |
+| Kiểu hình học (`GEOMETRY`, `POINT`...) | Không hỗ trợ | `type_unmappable` (exit 3) |
 
-## 1. Yêu cầu môi trường
+`strand validate` với MySQL→PG kiểm ba điều:
 
-Source phải bật GTID và binlog ROW đầy đủ; tất cả đổi được online, riêng `log_bin` và `log_replica_updates` cần restart nếu chưa bật. `strand validate` kiểm các điều kiện này, kể cả từng session đang mở.
+1. Kiểu nào không ánh xạ được (`type_unmappable`).
+2. Collation cột khóa ở target không được lỏng hơn source, và không được dùng `citext` (`collation_looser`).
+3. Có giá trị thực tế gây lỗi không: zero date, giá trị ENUM ngoài danh sách. Kiểm bằng truy vấn có LIMIT.
 
-### Biến bắt buộc trên source
+### 3.3 Tạo schema bằng tay (khi `create_schema: off` hoặc bị từ chối)
+
+- MySQL: `mysqldump --no-data --skip-triggers --databases app | mysql -h target`. Trigger ở target cũng ghi khi Strand apply, nên đừng tạo trigger trùng với logic của source.
+- PG: `pg_dump --schema-only -d app | psql -h target`.
+- MySQL→PG: tạo theo bảng 3.2, rồi `strand validate` kiểm lại.
+
+### 3.4 DDL về sau
+
+Strand **không tự áp DDL**.
+
+- **Source MySQL:**
+  - `ALTER`, `DROP` hoặc `RENAME` trên bảng của pipeline làm Strand dừng với exit 10 `schema_change_pending`. Áp cùng DDL ở target rồi chạy lại `sync`; Strand so cột và đi tiếp.
+  - `CREATE TABLE` khớp bộ lọc thì được tạo ở target tại barrier, trước row đầu tiên. Strand giữ metadata lock đọc và kiểm binlog để không lấy schema đã bị ALTER sau đó. Không kiểm được trong 30 giây thì dừng exit 10.
+  - Bảng `RENAME` từ ngoài bộ lọc vào cũng dừng exit 10. Chạy lại thì bảng đó được snapshot.
+- **Source PG:** thay đổi cột được phát hiện qua message Relation của pgoutput. Không có DDL tự động.
+
+`schema.additive` và `schema.destructive` chưa có tác dụng (mục 6.3).
+
+---
+
+## 4. Yêu cầu theo engine
+
+### 4.1 Source MySQL
+
+Source phải bật GTID và binlog ROW đầy đủ. Mọi biến đổi được online, trừ `log_bin` và `log_replica_updates` (cần restart nếu chưa bật). `strand validate` kiểm cả giá trị global lẫn từng session đang mở.
 
 | Biến | Giá trị | Đổi online | Ghi chú |
 | --- | --- | --- | --- |
-| `gtid_mode` | `ON` | Có, qua `OFF_PERMISSIVE` → `ON_PERMISSIVE` → `ON` | Trước đó bật `enforce_gtid_consistency`; đợi `Ongoing_anonymous_transaction_count = 0` |
-| `binlog_format` | `ROW` | Có | Phạm vi session: kết nối cũ giữ giá trị cũ tới khi kết nối lại |
-| `binlog_row_image` | `FULL` | Có | Phạm vi session; binlog to hơn nếu đang dùng `MINIMAL` |
+| `gtid_mode` | `ON` | Có, qua `OFF_PERMISSIVE` → `ON_PERMISSIVE` → `ON` | Trước đó bật `enforce_gtid_consistency` và đợi `Ongoing_anonymous_transaction_count = 0` |
+| `binlog_format` | `ROW` | Có | Phạm vi session: kết nối cũ giữ giá trị cũ |
+| `binlog_row_image` | `FULL` | Có | Phạm vi session |
 | `binlog_row_value_options` | rỗng | Có | `PARTIAL_JSON` bị từ chối |
-| `binlog_row_metadata` | `FULL` (khuyến nghị) | Có | Mặc định `MINIMAL`; validate chỉ cảnh báo |
-| `log_bin` | bật | Không, cần restart | 8.0+ bật sẵn |
-| `log_replica_updates` | `ON` khi đọc từ replica | Không, cần restart | 8.0+ bật sẵn |
-| `server_id` | khác 0 | Có | Đặt cố định trong file cấu hình |
+| `binlog_row_metadata` | `FULL` (khuyến nghị) | Có | `MINIMAL` chỉ bị cảnh báo |
+| `log_bin` | bật | Không | 8.0+ bật sẵn |
+| `log_replica_updates` | `ON` khi đọc từ replica | Không | |
+| `server_id` | khác 0 | Có | |
 
-Quy trình đổi an toàn:
+Đổi an toàn:
 
-1. `SET PERSIST binlog_row_metadata = FULL; SET PERSIST binlog_row_image = FULL; SET PERSIST binlog_format = ROW;`
-2. Cho ứng dụng kết nối lại (khởi động lại pool); trên replica chạy `STOP REPLICA; START REPLICA;`.
-3. Chạy `strand validate -c pipeline.yaml`; nó từ chối (exit 3) nếu còn session ghi binlog với giá trị cũ và liệt kê thread.
-4. Chỉ khởi động Strand hoặc lấy điểm seed sau khi validate sạch.
+1. `SET PERSIST binlog_row_metadata=FULL; SET PERSIST binlog_row_image=FULL; SET PERSIST binlog_format=ROW;`
+2. Cho ứng dụng kết nối lại. Trên replica chạy `STOP REPLICA; START REPLICA;`.
+3. `strand validate`. Nó trả exit 3 và liệt kê thread nếu còn session ghi binlog với giá trị cũ.
 
-### Quyền DB tối thiểu (spec 03 §2)
+Nên đọc từ replica có `log_replica_updates=ON`: trỏ `source` vào replica. `source.read_from` chưa có tác dụng.
+
+Không có định vị bằng file + position; bắt buộc GTID. Retention binlog phải đủ dài để phủ thời gian snapshot logic (`strand plan` tính ETA) hoặc tuổi backup cộng thời gian restore (chế độ B).
+
+### 4.2 Source PostgreSQL
+
+| Yêu cầu | Chi tiết |
+| --- | --- |
+| `wal_level` | `logical`. Thiếu thì exit 3 |
+| `max_replication_slots`, `max_wal_senders` | Mỗi pipeline 1 slot và 1 walsender. Nên đặt `max_slot_wal_keep_size` |
+| Slot | Mặc định tên `strand_<name>`. `source.create_slot: true` để Strand tạo; mặc định `false`, slot thiếu thì exit 5 `log_gap`. PG17+: `failover_slot: true` tạo slot `FAILOVER` |
+| Publication | **DBA tạo trước**. Mặc định tên `strand_<name>`: `CREATE PUBLICATION strand_x FOR TABLE app.a, app.b WITH (publish = 'insert, update, delete');` hoặc `FOR ALL TABLES`. TRUNCATE chưa hỗ trợ: nếu publication phát TRUNCATE thì Strand dừng |
+| Bảng partitioned | `ALTER PUBLICATION … SET (publish_via_partition_root = true)`. Thiếu thì Strand từ chối chạy và in đúng lệnh cần chạy |
+| REPLICA IDENTITY | `DEFAULT` (PK) là đủ. UPDATE và DELETE gửi khóa theo replica identity |
+| Snapshot logic | Source phải là **primary**: watermark dùng `pg_logical_emit_message`. Cần PG 14+ |
+| Decode trên standby | PG 16+ và `hot_standby_feedback=on` (reader kiểm). `read_from: standby` chưa triển khai; snapshot logic trên standby bị từ chối |
+| Quyền | `LOGIN REPLICATION`, `SELECT` trên bảng, `SELECT` trên sequence (đồng bộ `last_value` cho promote), dòng `replication` trong `pg_hba.conf` |
+
+`strand validate` **chưa** kiểm các điều kiện PG ở trên. Lỗi chỉ hiện khi `sync` khởi động (handoff dòng 33).
+
+Kết nối PG chỉ khai báo được bằng `dsn` (`postgres://user:pass@host:5432/db?sslmode=require`). Các trường `host`/`user`/`password_env` chỉ dành cho `kind: mysql`.
+
+### 4.3 Quyền
 
 | User | Nơi | Quyền | Dùng cho |
 | --- | --- | --- | --- |
-| `strand` | Source | `REPLICATION SLAVE, REPLICATION CLIENT ON *.*`; `SELECT ON app.*` | Đọc binlog, snapshot, verify |
-| `strand` | Source (khuyến nghị) | `SELECT ON performance_schema.variables_by_thread`, `performance_schema.threads` | Kiểm session trong validate; thiếu thì chỉ cảnh báo |
-| `strand` | Target | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*`; `CONNECTION_ADMIN ON *.*` | Apply, bảng `_strand_*`; ghi được khi target `read_only=ON`; ngắt kết nối instance cũ |
-| `strand_admin` | Source và target | `SYSTEM_VARIABLES_ADMIN ON *.*` | Chỉ khi `promote`: fence source, mở ghi target |
+| `strand` | Source MySQL | `REPLICATION SLAVE, REPLICATION CLIENT ON *.*`; `SELECT ON app.*` | Đọc binlog, snapshot, verify |
+| `strand` | Source MySQL (khuyến nghị) | `SELECT` trên `performance_schema.variables_by_thread`, `performance_schema.threads` | validate kiểm session; thiếu thì chỉ cảnh báo |
+| `strand` | Target MySQL | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*` và trên schema metadata; `CONNECTION_ADMIN ON *.*` | Apply, bảng `_strand_*`, ghi khi `read_only=ON`, ngắt instance cũ |
+| `strand` | Target PG | `CONNECT, TEMPORARY` trên database; `USAGE, CREATE` trên schema; `SELECT, INSERT, UPDATE, DELETE` trên bảng; `UPDATE` trên sequence | Apply, `_strand_*`, setval khi promote |
+| `strand_admin` | Source và target MySQL | `SYSTEM_VARIABLES_ADMIN ON *.*` | Chỉ `promote` |
+| (PG promote) | Source và target PG | Quyền `ALTER SYSTEM`, `ALTER ROLE`, `pg_terminate_backend`, GRANT/REVOKE trên bảng của ứng dụng | Chỉ `promote` |
 
-Strand không ghi gì vào source khi đồng bộ; metadata (`_strand_pipeline`, `_strand_checkpoint`, `_strand_worker_delta`, `_strand_promote`) nằm trong schema của target DSN (ví dụ `strand`). Ngoại lệ duy nhất là `promote` bật `super_read_only` trên source cũ.
+Để tạo schema, target cần quyền CREATE trên database/schema đích (và quyền tạo database nếu chưa có). `validate` không kiểm quyền; thiếu quyền chỉ lộ ra khi chạy.
 
-## 2. File cấu hình pipeline.yaml
+Strand không ghi gì vào source khi đồng bộ, với hai ngoại lệ:
 
-Mỗi pipeline có một file YAML; chỉ cần vài dòng, mọi khóa khác có mặc định. Thứ tự ưu tiên là YAML, rồi biến môi trường `STRAND_*`, rồi cờ dòng lệnh. Khóa lạ bị từ chối (exit 2). Xem schema đầy đủ bằng `strand config schema`.
+- `promote` fence source cũ.
+- PG snapshot logic gọi `pg_logical_emit_message`. Hàm này chỉ ghi một message vào WAL, không ghi bảng.
 
-### Cấu hình tối thiểu
+Metadata `_strand_pipeline`, `_strand_checkpoint`, `_strand_worker_delta` và `_strand_promote` nằm trong database/schema của target DSN.
+
+---
+
+## 5. Yêu cầu và giới hạn của bảng
+
+### 5.1 Bắt buộc có PRIMARY KEY
+
+Mọi bảng của pipeline phải có PK. Thiếu thì exit 3 `missing_pk`.
+
+Lý do: apply dùng upsert và delete theo khóa, và việc gán thay đổi vào chunk snapshot cũng theo khóa.
+
+### 5.2 Snapshot logic với từng kiểu PK
+
+Snapshot logic chia bảng thành các range khóa. Mỗi thay đổi từ stream phải được gán đúng range bằng phép so trong Go. Vì vậy **thứ tự và phép bằng của khóa trong Go phải giống hệt DB** (`ORDER BY pk`, unique index). Lệch một chút là mất dữ liệu âm thầm. Strand chỉ nhận những kiểu có thứ tự chứng minh được, còn lại từ chối rõ ràng.
+
+| Kiểu cột PK | MySQL | PostgreSQL |
+| --- | --- | --- |
+| Số nguyên (kể cả `UNSIGNED`), `YEAR` | Có | `int2/int4/int8` |
+| `DECIMAL`/`numeric` | Có | Có |
+| `DATE`, `DATETIME`, `TIMESTAMP` | Có | `date`, `timestamp`, `timestamptz` |
+| `TIME` | Có | Không |
+| `BINARY`/`VARBINARY`, charset `binary` | Có | `bytea` |
+| `CHAR`/`VARCHAR` collation `_bin` (PAD SPACE và NO PAD) | Có (mức 1) | — |
+| `CHAR`/`VARCHAR` collation không nhị phân (`_ci`, `_ai`, `general_ci`…) | Có (mức 2: thứ tự lấy từ `WEIGHT_STRING` của chính MySQL) | — |
+| `text`/`varchar`/`char` collation `"C"`, `"POSIX"`, `ucs_basic` (hoặc collation mặc định của DB là C) | — | Có |
+| `text` collation ICU hoặc libc khác C (`en_US.UTF-8`…) | — | **Không** (mức 3, đang mở) |
+| `uuid` | — | Có |
+| Kiểu khác (`FLOAT`, `ENUM`, `JSON`…) | Không | Không |
+
+Ghi chú:
+
+- Charset chuỗi MySQL được nhận: `utf8mb4`, `utf8mb3`, `latin1`, `ascii`, `binary`. Charset khác (`gbk`, `utf16`…) bị từ chối.
+- PK nhiều cột được nhận khi mọi cột đều thuộc bảng trên. Các cột được so như tuple theo thứ tự của PK.
+- Bảng đích phải có **cùng** PK: cùng cột, cùng kiểu, cùng collation. Bảng do `schema init` tạo luôn thỏa.
+- MySQL→PG chỉ nhận khóa mà thứ tự hai engine trùng nhau: số, thời gian, `VARBINARY`↔`bytea`. Khóa chuỗi bị từ chối, vì PAD SPACE và collation MySQL khác `"C"` của PG. Bảng có khóa như vậy vẫn được nhận khi **rỗng** ở source lúc khởi động (mọi row sau đó đi qua stream).
+- Bị từ chối nghĩa là `sync` hoặc `snapshot add` dừng exit 3 với thông báo `table … needs a logical snapshot but its primary key is not supported: <lý do>; seed it from a backup instead`. Cách xử lý: seed từ backup (mục 7.5), `--start-at`, hoặc đổi kiểu/collation cột khóa.
+
+Với PK tổng quát (không phải một cột số nguyên), các phần sau còn thiếu và đều bị từ chối rõ ràng:
+
+- `verify --resume`.
+- `verify --repair fix` với PG→PG.
+- Chia đôi chunk khi query snapshot quá thời gian (chỉ có cho khóa số nguyên).
+
+### 5.3 Giới hạn khác
+
+- **UNIQUE ngoài PK:**
+  - MySQL: các Txn đụng cùng giá trị unique được xếp tuần tự. Khóa chuỗi collation `_ci` được gộp theo collation.
+  - PG: mọi thay đổi của bảng được apply tuần tự, vì pgoutput không gửi giá trị unique cũ.
+- **FK:** MySQL: phiên ghi của Strand tắt kiểm FK (`foreign_key_checks=0`). PG: FK vẫn được kiểm; snapshot chép bảng cha trước bảng con. Cả hai engine: Txn chạm cùng row cha/con được xếp theo thứ tự commit, kể cả FK tham chiếu UNIQUE ngoài PK.
+- **TOAST (PG):** UPDATE mà cột TOAST không đổi chỉ gửi các cột còn lại.
+  - Nếu row không có ở target, Strand dừng với `verify_mismatch` (exit 5). Sửa bằng `verify --mode full --table … --repair fix` rồi chạy lại.
+  - Đổi PK kèm cột TOAST không đổi khi bảng đang snapshot: Strand đọc lại khóa mới từ source. Metric `strand_pending_cross_range` và `strand_pending_cross_range_oldest_seconds` theo dõi việc này.
+- **TRUNCATE:** chưa hỗ trợ. PG: tạo publication với `publish = 'insert, update, delete'`.
+- **Charset (MySQL→MySQL):** cột `latin1` và các charset khác được đổi đúng sang chuỗi trước khi ghi. `latin1` theo biến thể cp1252 của MySQL.
+- **Múi giờ:** phiên MySQL của source luôn chạy UTC, nên `TIMESTAMP` không bị lệch theo `time_zone` của server.
+- **Không đồng bộ hai chiều:** không lọc nguồn gốc thay đổi, không giải quyết xung đột.
+- **Không đồng bộ:** user, quyền, view, routine, trigger, event, sequence độc lập (PG; promote xử lý `last_value`).
+
+---
+
+## 6. Tham chiếu cấu hình
+
+Mỗi pipeline có một file YAML. Thứ tự ưu tiên: YAML, rồi biến môi trường `STRAND_*`, rồi cờ dòng lệnh. Khóa lạ bị từ chối (exit 2). In JSON Schema đầy đủ bằng `strand config schema`.
+
+### 6.1 Kết nối
+
+Mỗi phía chọn **một** trong ba cách:
+
+| Cách | Ví dụ | Ghi chú |
+| --- | --- | --- |
+| Tách trường (chỉ MySQL) | `host: db1`, `port: 3306`, `user: strand`, `password_env: SRC_PW`, `database: strand` | `port` mặc định 3306. Dùng `password` **hoặc** `password_env` (tên biến môi trường), không dùng cả hai |
+| URL | `dsn: "mysql://strand:p%40ss@db1:3306/strand?tls=true"` / `dsn: "postgres://strand:pw@pg1:5432/app?sslmode=require"` | Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`) |
+| DSN driver Go (MySQL) | `dsn: "strand:pass@tcp(db1:3306)/strand?tls=true"` | |
+
+- Không được đặt `dsn` cùng lúc với `host`.
+- Trong YAML có thể dùng `${TÊN_BIẾN}`; giá trị được thay khi đọc file.
+- Tham số `tls` của DSN MySQL source cũng áp cho kết nối đọc binlog.
+- `target.database` (hoặc database trong DSN target) là nơi chứa bảng `_strand_*`.
+
+### 6.2 Các khóa có tác dụng
+
+| Khóa | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `version` | 1 | Phiên bản file cấu hình |
+| `name` | **bắt buộc** | ID pipeline: khóa chống chạy trùng, checkpoint, tên slot/publication mặc định |
+| `source.kind` / `target.kind` | **bắt buộc** | `mysql` \| `postgres` |
+| `source.*` / `target.*` (kết nối) | **bắt buộc** | Mục 6.1 |
+| `source.server_id` | tự sinh | Server ID khi đọc binlog; phải duy nhất trong cụm |
+| `source.slot` | `strand_<name>` | PG: slot logical (ký tự lạ thành `_`) |
+| `source.publication` | `strand_<name>` | PG: publication |
+| `source.create_slot` | `false` | PG: tạo slot khi chưa có |
+| `source.failover_slot` | `false` | PG17+: tạo slot `FAILOVER` |
+| `source.sequence_sync_interval` | `5s` | PG: chu kỳ ghi `last_value` sequence độc lập vào `_strand_promote` (dùng khi promote không đọc được source). Đặt cùng giá trị cho `promote --sync-interval` |
+| `target.commit_order` | **`strict`** | `strict` \| `relaxed` (mục 1.3) |
+| `target.batch.max_rows` | 2000 | Đóng batch khi đủ số row |
+| `target.batch.max_bytes` | `4MiB` | Đóng batch khi đủ dung lượng (ước lượng) |
+| `target.batch.max_wait` | 0 | Chờ tối đa để gom thêm Txn. Lưu ý handoff dòng 26: khóa nóng chỉ đạt khoảng 1/max_wait Txn/s |
+| `tables.include` | **bắt buộc** | Glob `schema.table` (mục 2) |
+| `tables.exclude` | rỗng | Glob |
+| `tables.rename` | rỗng | `"src.t": "dst.t"` |
+| `bootstrap.default` | `logical` | `logical` (chế độ A). `seed` hoặc `start_at` cho pipeline mới bắt buộc `--start-at`, không có thì exit 2 |
+| `bootstrap.per_table.<t>.mode` | — | Chỉ `strand plan` đọc (ETA theo bảng); `sync` không dùng |
+| `bootstrap.logical.chunk_rows` | `auto` (5000) | Số row mỗi chunk snapshot |
+| `bootstrap.logical.windows` | rỗng (mọi lúc) | Khung giờ cho phép snapshot, ví dụ `["22:00-06:00"]` (giờ địa phương của process; qua nửa đêm được). Khi `bootstrap_retention_risk` bật, snapshot chạy cả ngoài khung |
+| `bootstrap.create_schema` | `auto` | Mục 3.1 |
+| `checkpoint.flush_every` | `500ms` | Chu kỳ gộp row delta vào checkpoint toàn cục (relaxed) |
+| `resources.spool.path` | **bắt buộc** | Thư mục trạng thái cục bộ, spill, prefetch (`<path>/prefetch`), file tràn của reader PG (`<path>/pg-reader-<name>`) |
+| `resources.spool.hard` | không giới hạn | Trần spool local; từ 95% trở lên là tín hiệu cứng dừng snapshot |
+| `resources.spool.overflow` | rỗng | Tầng bucket `s3://bucket/prefix` (credential qua `STRAND_S3_*`) |
+| `resources.source.iops.soft` | 600 | Tốc độ đọc snapshot (token/giây). Đổi nóng bằng `throttle set` |
+| `resources.source.iops.hard` | không | Trần cho GRACE |
+| `resources.workers.max` | 8 | Số luồng apply (relaxed). `strict` luôn 1 |
+| `governor.algorithm` | `onoff` | `onoff` \| `grace-v2` \| `static`. Source PG luôn dùng `static` |
+| `governor.tick` / `governor.lag_slo` | `1s` / `5s` | Nhịp điều tốc và lag mục tiêu |
+| `governor.probe` | `on` | `grace-v2`: `off` tắt dither ±1% |
+| `governor.breaker.replica_lag.max` | tắt | Replica lag vượt ngưỡng thì cắt snapshot |
+| `governor.breaker.strand_query_p99.max_ratio` | tắt | Độ trễ query của Strand vượt n lần nền thì cắt snapshot |
+| `verify.delta` | `off` | `on`: verify các khóa CDC vừa chạm (MySQL→MySQL) |
+| `verify.post_seed_window` | `30m` | Cửa sổ verify sau seed / `--start-at` (MySQL→MySQL) |
+| `observability.metrics` | tắt | Địa chỉ HTTP cho `/metrics` và `/healthz`, ví dụ `":9464"` |
+| `observability.admin_socket` | tắt | Unix socket cho `top`, `pause`, `resume`, `throttle`, `snapshot add`, `checkpoint`, `verify --mode delta`. Lệnh client mặc định dùng `/run/strand/default.sock` |
+| `observability.log.level` / `format` | `info` / `json` | `debug` \| `info` \| `warn` \| `error`; `json` \| `text` |
+
+Biến môi trường:
+
+- `STRAND_<ĐƯỜNG_DẪN_KHÓA>` ghi đè khóa đơn (chuỗi, số, bool, thời lượng), không áp cho map và list. Ví dụ `STRAND_TARGET_DSN`, `STRAND_GOVERNOR_LAG_SLO=10s`, `STRAND_RESOURCES_WORKERS_MAX=16`.
+- `STRAND_S3_ENDPOINT`, `STRAND_S3_ACCESS_KEY`, `STRAND_S3_SECRET_KEY`: credential cho tầng bucket.
+
+### 6.3 Khóa được nhận nhưng chưa có tác dụng
+
+**Có cảnh báo** khi `validate`/`sync` (`config key … is accepted but not implemented in this version`):
+
+- `source.read_from=standby`, `tables.mask`
+- `resources.source.bandwidth`, `resources.target.bandwidth`, `resources.network.backup_read`, `resources.schedule`
+- `resources.memory.*` (không có giới hạn RSS), `resources.target.iops` (ghi target không bị điều tốc), `resources.spool.soft`
+- `target.write_mode=insert` (writer luôn upsert)
+- `resources.workers.min` khi khác `workers.max` (số worker cố định)
+- `bootstrap.per_table.<t>.seed.{credentials, encryption_key, load, verify_after}`
+
+**Không có cảnh báo** (đặt vào không đổi hành vi):
+
+- `source.read_from` với `primary`/`replica`: muốn đọc replica thì trỏ kết nối vào replica.
+- `schema.additive`, `schema.destructive`
+- `governor.metrics_source`
+- `verify.full.cron`, `verify.full.rate`: không có verify full theo lịch; chạy `strand verify --mode full` bằng cron ngoài.
+- `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive` (dùng `seed apply --archive`), `checkpoint.store` (checkpoint luôn ở target).
+
+### 6.4 Ví dụ
+
+Tối thiểu (MySQL→MySQL):
 
 ```yaml
 version: 1
 name: orders-sync
-source:
-  kind: mysql
-  host: 10.0.0.11
-  user: strand
-  password_env: STRAND_SOURCE_PASSWORD   # mật khẩu lấy từ biến môi trường, không nằm trong file
-target:
-  kind: mysql
-  host: 10.0.0.21
-  user: strand
-  password_env: STRAND_TARGET_PASSWORD
-  database: strand                       # schema chứa bảng _strand_*
-tables:
-  include: ["app.*"]
-resources:
-  spool: { path: /var/lib/strand }
+source: { kind: mysql, host: 10.0.0.11, user: strand, password_env: SRC_PW }
+target: { kind: mysql, host: 10.0.0.21, user: strand, password_env: DST_PW, database: strand }
+tables: { include: ["app.*"] }
+resources: { spool: { path: /var/lib/strand/orders-sync } }
+observability: { admin_socket: /run/strand/orders-sync.sock, metrics: ":9464" }
 ```
 
-Chạy: `STRAND_SOURCE_PASSWORD=... STRAND_TARGET_PASSWORD=... strand sync -c orders-sync.yaml`.
+PG→PG:
 
-### Ba cách khai báo kết nối
+```yaml
+version: 1
+name: billing
+source:
+  kind: postgres
+  dsn: "postgres://strand:${SRC_PW}@pg-src:5432/billing?sslmode=require"
+  create_slot: true            # slot strand_billing
+  publication: strand_billing  # DBA tạo trước
+target:
+  kind: postgres
+  dsn: "postgres://strand:${DST_PW}@pg-dst:5432/billing?sslmode=require"
+tables: { include: ["public.*"] }
+resources: { spool: { path: /var/lib/strand/billing } }
+observability: { admin_socket: /run/strand/billing.sock }
+```
 
-Chọn một trong ba cho mỗi phía; không dùng `dsn` cùng lúc với `host`.
-
-| Cách | Ví dụ | Ghi chú |
-| --- | --- | --- |
-| Tách trường (khuyến nghị) | `host: db1`, `port: 3306`, `user: strand`, `password_env: SRC_PW`, `database: strand` | `port` mặc định 3306; `password` ghi thẳng hoặc `password_env` (tên biến môi trường) |
-| URL | `dsn: "mysql://strand:p%40ss@db1:3306/strand?tls=true"` | Ký tự đặc biệt trong mật khẩu phải URL-encode (`@` → `%40`, `:` → `%3A`, `/` → `%2F`); tham số sau `?` như `tls`, `timeout` |
-| DSN của driver Go (cách cũ) | `dsn: "strand:pass@tcp(db1:3306)/strand"` | Vẫn nhận nguyên như trước |
-
-Các cờ DSN trên dòng lệnh (`seed plan --source/--target`, `seed apply --target/--source`, `promote --target/--fence`) nhận cả dạng URL `mysql://` và dạng driver. Trong file YAML còn dùng được `${TÊN_BIẾN}`, giá trị được thay từ biến môi trường khi đọc file.
-
-### Ví dụ đầy đủ (tùy chọn nâng cao)
+Đầy đủ (tùy chọn nâng cao):
 
 ```yaml
 version: 1
@@ -121,21 +458,21 @@ target:
   user: strand
   password_env: DST_PW
   database: strand
-  commit_order: relaxed                          # hoặc strict
-  batch: { max_rows: 2000, max_bytes: 4MiB, max_wait: 50ms }
+  commit_order: relaxed
+  batch: { max_rows: 2000, max_bytes: 4MiB }
 tables:
   include: ["app.*"]
   exclude: ["app.audit_log"]
   rename: { "app.orders": "app2.orders" }
-bootstrap: { default: logical }                  # logical | seed
-checkpoint: { store: target, flush_every: 500ms }
+bootstrap:
+  default: logical
+  logical: { chunk_rows: 10000, windows: ["22:00-06:00"] }
 resources:
-  spool: { path: /var/lib/strand, soft: 20GiB, hard: 50GiB, overflow: "s3://strand-staging/orders" }
+  spool: { path: /var/lib/strand/orders-sync, hard: 50GiB, overflow: "s3://strand-staging/orders" }
   source: { iops: { soft: 600, hard: 1200 } }
   workers: { max: 8 }
 governor:
-  algorithm: onoff
-  tick: 1s
+  algorithm: grace-v2
   lag_slo: 5s
   breaker: { replica_lag: { max: 30s }, strand_query_p99: { max_ratio: 3 } }
 verify: { delta: on, post_seed_window: 30m }
@@ -145,253 +482,399 @@ observability:
   log: { level: info, format: json }
 ```
 
-### Các khóa có tác dụng ở P1
+---
 
-| Khóa | Mặc định | Ý nghĩa |
-| --- | --- | --- |
-| `name` | bắt buộc | ID pipeline (khóa chống chạy trùng, checkpoint) |
-| `source.kind` / `target.kind` | bắt buộc | `mysql` hoặc `postgres`; cặp được hỗ trợ: MySQL→MySQL, MySQL→PG, PG→PG (xem "Pipeline PostgreSQL (P2)") |
-| `source.host` / `port` / `user` / `password` / `password_env` / `database` hoặc `source.dsn` | bắt buộc (một trong hai) | Source hoặc replica có `log_replica_updates=ON` |
-| `source.server_id` | tự sinh | Server ID khi đọc binlog; phải duy nhất trong cụm |
-| `target.host` ... hoặc `target.dsn` | bắt buộc (một trong hai) | `database` (hoặc schema trong DSN) chứa bảng `_strand_*` |
-| `target.commit_order` | `relaxed` | `relaxed`: song song theo writeset, nhanh hơn; `strict`: đúng thứ tự source, target luôn là một tiền tố của source |
-| `target.batch.max_rows` | 2000 | Đóng batch group commit khi đủ số row |
-| `target.batch.max_bytes` | 4MiB | Đóng batch khi đủ dung lượng (ước lượng theo dữ liệu row) |
-| `target.batch.max_wait` | 0 (không chờ) | Chờ tối đa để gom thêm Txn; tăng throughput, thêm độ trễ |
-| `tables.include` / `exclude` | bắt buộc / rỗng | Mẫu glob `schema.table`; đổi giữa các lần chạy được (bảng mới sẽ được snapshot) |
-| `tables.rename` | rỗng | Đổi tên bảng ở đích `"src.tbl": "dst.tbl"` |
-| `bootstrap.default` | `logical` | `logical`: Strand tự snapshot (PK một cột số nguyên); `seed`: từ backup (mục 4) |
-| `bootstrap.logical.chunk_rows` | auto (5000) | Cỡ chunk snapshot |
-| `checkpoint.flush_every` | 500ms | Chu kỳ gộp row delta vào row checkpoint toàn cục |
-| `resources.spool.path` | bắt buộc | Thư mục spool và trạng thái (prefetch dùng `<path>/prefetch`) |
-| `resources.spool.hard` | không giới hạn | Trần spool local; ≥ 95% là tín hiệu cứng dừng snapshot |
-| `resources.spool.overflow` | rỗng | Tầng bucket `s3://bucket/prefix` (endpoint, key qua `STRAND_S3_*`) |
-| `resources.source.iops.soft` / `hard` | 600 / không | Tốc độ đọc snapshot (token/giây); đổi nóng bằng `strand throttle set` |
-| `resources.workers.max` | 8 | Số luồng apply (strict luôn 1) |
-| `governor.algorithm` | `onoff` | `onoff` hoặc `static`; `grace-v2` lùi về `onoff` kèm cảnh báo (P2) |
-| `governor.tick` / `lag_slo` | 1s / 5s | Nhịp điều tốc và lag mục tiêu |
-| `governor.breaker.replica_lag.max` | tắt | Replica lag vượt ngưỡng thì ngắt snapshot |
-| `governor.breaker.strand_query_p99.max_ratio` | tắt | Độ trễ query của Strand vượt n lần nền thì ngắt |
-| `verify.delta` | `off` | `on`: verify các khóa CDC vừa chạm |
-| `verify.post_seed_window` | 30m | Cửa sổ verify sau seed |
-| `observability.metrics` | tắt | Địa chỉ HTTP cho `/metrics` và `/healthz` |
-| `observability.admin_socket` | tắt | Unix socket (quyền 0700) cho `top`, `pause`, `throttle`, `snapshot add`, `checkpoint`, `verify --mode delta` |
-| `observability.log.level` / `format` | `info` / `json` | Mức và định dạng log |
+## 7. Tham chiếu lệnh
 
-### Pipeline PostgreSQL (P2)
+Cờ chung:
 
-| Khóa | Mặc định | Ý nghĩa |
-| --- | --- | --- |
-| `source.slot` | `strand_<name>` (ký tự lạ → `_`) | Replication slot logic (pgoutput) mà Strand đọc |
-| `source.publication` | `strand_<name>` | Publication do DBA tạo trước (`CREATE PUBLICATION … WITH (publish = 'insert, update, delete')`; TRUNCATE chưa hỗ trợ) |
-| `source.create_slot` | `false` | Tạo slot khi chưa có; mặc định slot thiếu → `log_gap` (exit 5) |
-| `source.failover_slot` | `false` | PG17+: tạo slot `FAILOVER` khi `create_slot` |
-| `source.sequence_sync_interval` | 5s | Δt_sync: chu kỳ ghi `last_value` của sequence độc lập ở source vào `_strand_promote` khi sync (dùng làm gợi ý nếu promote không đọc được source); dùng cùng giá trị cho `promote --sync-interval` |
+- `-c, --config <file>`: file cấu hình.
+- `--dry-run`: chạy thử. Lệnh có hỗ trợ thì không ghi target. `verify --repair fix --dry-run` chỉ báo cáo.
 
-- Bootstrap từ source PG: (a) `bootstrap.default: logical` (mặc định) — slot được tạo khi `create_slot: true`, mọi bảng (PK một cột số nguyên) được snapshot theo chunk song song với stream; `strand snapshot add` cũng chạy được. Low watermark của chunk là snapshot MVCC (`pg_current_snapshot()`), không phải LSN: commit record có thể được stream trước khi Txn visible. Cần source primary (không phải standby), user được gọi `pg_logical_emit_message` (watermark) và PG14+ (pgoutput `messages`). (b) `--start-at <LSN>`: dữ liệu target đã khớp source tại LSN đó. (c) `--start-at seed --seed-manifest seed.json` với seed.json PG (`strand export`, pgBackRest, WAL-G): Strand đọc từ slot trong seed (`start_position.slot`, nhớ cho các lần chạy sau nếu cấu hình không đặt `source.slot`); Txn có commit LSN < P nằm trong seed, ≥ P đi qua slot. Bảng của pipeline không có trong seed được snapshot logic. Strand chỉ báo slot tiến tới lwd đã ghi bền vững trong `_strand_checkpoint`.
-- MySQL→PG: bảng đích tạo sẵn theo mapping của `typemap` (`strand validate`); giá trị được chuyển khi apply (DATETIME→timestamp, TIMESTAMP→timestamptz UTC, BIGINT UNSIGNED→numeric(20,0), JSON→jsonb…). Snapshot logic như MySQL→MySQL (PK một cột số nguyên); bảng có PK khác chỉ được nhận khi rỗng ở source lúc khởi động (sau đó đi qua stream).
-- Bảng PG có UNIQUE ngoài PK được apply tuần tự theo thứ tự commit (pgoutput không gửi giá trị unique cũ). Partial UPDATE (cột TOAST không đổi) mà row không có ở target → dừng `verify_mismatch` (exit 5), log chỉ ra bảng và khóa; chạy `strand verify --mode full --table … --repair fix` rồi khởi động lại.
-- UPDATE đổi PK mà cột TOAST không đổi khi bảng đang snapshot logic (02 §8): cả hai range đã xong → `UPDATE … WHERE NOT EXISTS` rồi `DELETE`; range của PK mới chưa đọc → chỉ xóa PK cũ; còn lại PK mới được đọc lại từ source theo giao thức chunk (khóa chờ được lưu trong state cục bộ, đọc ngay khi đạt 1.024 khóa hoặc chờ quá 30 s, nếu không thì ở cuối bảng). Metric `strand_pending_cross_range`, `strand_pending_cross_range_oldest_seconds`; log `snapshot done` có `reread_keys`.
-- Chỉ có ở MySQL→MySQL: verify tự động sau seed / `--start-at`, `verify --mode delta`, `checkpoint rewind`, governor `onoff` (source PG dùng `static`). Pipeline khác engine chạy `strand verify --mode full` sau khi setup (02 §8).
+Lệnh nói chuyện với `sync` đang chạy (`top`, `pause`, `resume`, `throttle`, `snapshot add`, `checkpoint`, `verify --mode delta`) tìm socket theo thứ tự:
 
-### Biến môi trường
+1. `--socket`
+2. `observability.admin_socket` trong file `-c`
+3. `/run/strand/default.sock`
 
-- `STRAND_<đường dẫn khóa viết hoa, nối bằng _>` ghi đè YAML, ví dụ `STRAND_TARGET_DSN`, `STRAND_GOVERNOR_LAG_SLO=10s`, `STRAND_RESOURCES_WORKERS_MAX=16`. Chỉ áp cho khóa đơn (chuỗi, số, bool, thời lượng), không áp cho map/list.
-- `STRAND_S3_ENDPOINT`, `STRAND_S3_ACCESS_KEY`, `STRAND_S3_SECRET_KEY`: credential của tầng bucket.
+### 7.1 `validate`
 
-### Khóa được chấp nhận nhưng chưa có tác dụng ở P1
+`strand validate -c p.yaml`. Exit 0 khi đạt, exit 3 kèm lý do khi bị từ chối. Cảnh báo in ra stderr.
 
-- Có cảnh báo khi `validate`/`sync`: `source.read_from=standby`, `tables.mask`, `resources.*.bandwidth`, `resources.network`, `resources.schedule`, `resources.workers.min`, các khóa `bootstrap.per_table.*.seed` (`credentials`, `encryption_key`, `load`, `verify_after`).
-- Chưa có cảnh báo (đặt cũng không đổi hành vi): `source.read_from` (mọi giá trị; muốn đọc replica thì trỏ `source.dsn` vào replica), `target.write_mode`, `resources.memory`, `resources.spool.soft`, `resources.target.iops`, `schema.additive`/`destructive`, `governor.probe`, `governor.metrics_source`, `verify.full`, `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive`.
+Nó kiểm:
 
-## 3. Khởi chạy: validate, plan, sync
+- **Cấu hình:** kind, `include` không rỗng, `commit_order`, `write_mode`, khóa chưa có tác dụng.
+- **Source MySQL:**
+  - Biến binlog/GTID global và từng session.
+  - Bảng tồn tại và có PK.
+  - Mẫu include khớp ít nhất một bảng.
+  - Partial JSON.
+- **MySQL→PG:** ánh xạ kiểu, collation khóa, giá trị không chuyển được.
+- **Schema đích:** số bảng sẽ được tạo. Với `create_schema: off`, bảng thiếu thì exit 3.
 
-Trình tự chuẩn là `validate` → `plan` → `sync`; mọi lệnh nhận file cấu hình qua `-c` / `--config`.
+Không kiểm: điều kiện PG source (mục 4.2), quyền, PK có snapshot logic được không (lỗi này chỉ hiện ở `sync`).
 
-1. **Kiểm tra điều kiện:** `strand validate -c pipeline.yaml`
-    - Kiểm cấu hình, biến binlog/GTID global, từng session đang mở, bảng tồn tại và có PK, partial JSON.
-    - Exit 0 khi đạt; exit 3 kèm lý do khi bị từ chối; cảnh báo (khóa chưa hỗ trợ, `binlog_row_metadata`) in ra stderr.
-2. **Ước lượng snapshot:** `strand plan -c pipeline.yaml [--force]`
-    - In từng bảng: số row ước lượng, dung lượng, chế độ và ETA theo `resources.source.iops.soft`.
-    - Từ chối chế độ logical khi ETA > 50% thời gian giữ binlog; `--force` để chấp nhận rủi ro, nếu không thì chuyển sang seed từ backup.
-3. **Chạy pipeline:** `strand sync -c pipeline.yaml [--start-at ...] [--seed-manifest seed.json]`
-    - Không có `--start-at`: lần đầu snapshot logic mọi bảng rồi stream; các lần sau tiếp tục từ checkpoint trong target.
-    - `--start-at seed`: bắt đầu từ điểm P trong `seed.json` sau khi `seed apply` xong (mục 4).
-    - `--start-at <gtid set>`: bỏ qua snapshot, coi target đã có dữ liệu tại GTID đó.
-    - Chạy foreground; `SIGTERM`/`Ctrl-C` dừng đọc, chờ writer, ghi checkpoint rồi thoát 0.
+### 7.2 `plan`
 
-Khởi động lại luôn an toàn: checkpoint nằm trong target nên kill -9 giữa chừng không mất hoặc lặp dữ liệu. Hai instance cùng `name` không chạy song song được: instance mới giữ khóa, tăng epoch và ngắt kết nối của instance cũ.
+`strand plan -c p.yaml [--force]` in từng bảng: số row ước lượng, dung lượng, chế độ và ETA theo `resources.source.iops.soft`. Nó từ chối chế độ A khi ETA vượt 50% thời gian giữ binlog. `--force` chấp nhận rủi ro; nếu không, dùng chế độ B.
 
-Triển khai thường trực dùng systemd (`strand@<name>.service`) hoặc StatefulSet trên FKE (`deploy/`); không tự restart sau exit 2–5 và 10 (mục 8).
+### 7.3 `sync`
 
-## 4. Seed từ backup
+```bash
+strand sync -c p.yaml                                   # lần đầu: snapshot logic rồi stream; các lần sau: từ checkpoint
+strand sync -c p.yaml --start-at seed --seed-manifest seed.json
+strand sync -c p.yaml --start-at '3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5000'   # MySQL: GTID set
+strand sync -c p.yaml --start-at 0/16B3748                                        # PG: LSN
+```
 
-Seed từ backup không đọc dữ liệu bảng trên source (0 lượt đọc, có e2e) và là cách chọn cho bảng lớn hoặc PK không phải một cột số nguyên. Strand không tự restore; nó kiểm điểm P, đọc trước binlog trong lúc restore và bắt kịp từ P.
+- `--start-at` chỉ dùng cho pipeline mới. Khi đã có checkpoint, dùng `checkpoint rewind`.
+- Chạy foreground. `SIGTERM`/`Ctrl-C` dừng đọc, chờ writer, ghi checkpoint rồi thoát 0.
+- Hai instance cùng `name`: instance mới giữ khóa, tăng epoch và ngắt instance cũ. Instance cũ dừng với exit 4 `fenced`.
+- Triển khai thường trực: systemd `strand@<name>.service` hoặc StatefulSet (`deploy/`), với `RestartPreventExitStatus=2 3 4 5 10`.
 
-### Quy trình
+### 7.4 `schema init`
 
-1. Tạo backup bằng công cụ gốc (nên chạy trên replica).
-2. `strand seed plan --type <loại> --backup <đường dẫn> --source <dsn> [--target <dsn>] --out seed.json`: kiểm SD-1..SD-4 (P hợp lệ, log còn phủ từ P, phiên bản công cụ và target) và ghi `seed.json`.
-3. Restore vào target, đồng thời prefetch binlog: `strand seed apply --manifest seed.json --target <dsn> --spool <spool.path>/prefetch --source <dsn> [--restore-cmd "<lệnh restore>"]`. Nó kiểm `gtid_executed` của target = P, gỡ cấu hình replication còn sót.
-4. `strand sync -c pipeline.yaml --start-at seed --seed-manifest seed.json`: phát lại spool prefetch, đọc tiếp từ source, chạy post-seed verify trong `verify.post_seed_window`.
+Xem mục 3.1.
 
-### Theo loại backup
+### 7.5 `seed plan` / `seed apply` (chế độ B)
 
-| `--type` | Lấy P từ | Yêu cầu riêng | Trạng thái e2e |
+Quy trình chung:
+
+1. Backup bằng công cụ gốc.
+2. `seed plan` kiểm SD-1..SD-4 và ghi `seed.json`: P hợp lệ, log còn phủ từ P, phiên bản công cụ và target.
+3. Restore, kèm `seed apply` để kiểm target đúng P và prefetch log.
+4. `sync --start-at seed`.
+
+| `--type` | Engine | Lấy P từ | Yêu cầu riêng |
 | --- | --- | --- | --- |
-| `xtrabackup` | `xtrabackup_binlog_info` | Backup đã `--prepare`; XtraBackup 8.4 | Pass 20 GB dưới tải |
-| `clone` | `gtid_executed` của target sau CLONE | Plugin clone, người dùng có `BACKUP_ADMIN` | Pass |
-| `mydumper` | file `metadata`, section `[source]` | mydumper v1.0.3-1; **bắt buộc** `--dump-log <log stderr>` (Strand từ chối `NO_LOCK`); backup cũ không có log thì `--accept-unverified-lock-mode` và nhận cảnh báo; restore bằng `myloader --drop-table=DROP` | Pass |
-| `mysqldump` | dòng `SET @@GLOBAL.GTID_PURGED` | Dump bằng `--single-transaction --source-data=2 --set-gtid-purged=ON`; file `.sql` phải còn dòng `-- Dump completed`; trên target chạy `RESET BINARY LOGS AND GTIDS` trước khi nạp; luôn có cảnh báo không kiểm được `--single-transaction` | Pass |
+| `xtrabackup` | MySQL | `xtrabackup_binlog_info` | Backup đã `--prepare` |
+| `clone` | MySQL | `gtid_executed` của target sau CLONE | Plugin clone; `BACKUP_ADMIN` trên donor |
+| `mydumper` | MySQL | `metadata`, section `[source]` | **Bắt buộc** `--dump-log <stderr của mydumper>` (từ chối `NO_LOCK`). Backup cũ không có log: `--accept-unverified-lock-mode` |
+| `mysqldump` | MySQL | `SET @@GLOBAL.GTID_PURGED` | `--single-transaction --source-data=2 --set-gtid-purged=ON`; file còn dòng `-- Dump completed`; `RESET BINARY LOGS AND GTIDS` trên target trước khi nạp. Luôn có cảnh báo |
+| `pgbackrest` | PG | slot (`--slot`) | `--retention-full`, `--backup-label`, `--eta` |
+| `walg` | PG | slot (`--slot`) | `--archive-info` (JSON của `wal-g wal-show --detailed-json`), `--tool-version` |
+| — (`strand export`) | PG | slot do export tạo | `export` ghi `seed.json` trực tiếp, không cần `seed plan` |
 
-Tạo schema `strand` trên target sau khi restore bằng `SET SESSION sql_log_bin = 0; CREATE DATABASE strand; SET SESSION sql_log_bin = 1;` để `gtid_executed` vẫn đúng bằng P.
+Cờ `seed plan`:
 
-### Cờ của seed plan
+- `--type`, `--backup`: bắt buộc.
+- `--source`: DSN source; đọc `gtid_purged` hoặc slot.
+- `--target`: DSN target đã restore; đối chiếu P và phiên bản.
+- `--archive-until`: GTID set đã có trong archive binlog.
+- `--tables`, `--out` (mặc định `seed.json`), `--allow-prerelease-tool`.
+- Riêng PG: `--slot`, `--backup-label`, `--archive-info`, `--tool-version`, `--eta` (mặc định 2h), `--retention-full`, `--full-interval`.
 
-| Cờ | Ý nghĩa |
-| --- | --- |
-| `--type` | `xtrabackup` \| `clone` \| `mydumper` \| `mysqldump` |
-| `--backup` | Thư mục backup hoặc file dump |
-| `--source` | DSN source: đọc `gtid_purged` để kiểm log còn phủ từ P |
-| `--target` | DSN target đã restore: đối chiếu P, phiên bản |
-| `--archive-until` | GTID set đã có trong archive binlog (khi source đã xóa log) |
-| `--tables` | Danh sách bảng của seed |
-| `--allow-prerelease-tool` | Chấp nhận backup tạo bằng bản RC/beta của công cụ |
-| `--dump-log`, `--accept-unverified-lock-mode` | Riêng mydumper (bảng trên) |
-| `--out` | File manifest, mặc định `seed.json` |
-| `--dry-run` | In manifest, không ghi file |
-
-### Cờ của seed apply
+Cờ `seed apply`:
 
 | Cờ | Mặc định | Ý nghĩa |
 | --- | --- | --- |
-| `--manifest` | `seed.json` | Manifest từ `seed plan` |
+| `--manifest` | `seed.json` | Manifest |
 | `--target` | bắt buộc | DSN target đã restore |
-| `--print-only` | false | Chỉ in các bước restore gợi ý, không làm gì |
-| `--prefetch` | true | Đọc binlog từ P vào spool trong lúc restore, cứu phần log source sẽ xóa |
-| `--spool` | bắt buộc khi prefetch | Phải là `<resources.spool.path>/prefetch` của pipeline |
+| `--print-only` | false | Chỉ in các bước restore gợi ý |
+| `--restore-cmd` | rỗng | Lệnh restore (`sh -c`) chạy song song với prefetch |
+| `--prefetch` | true | MySQL: đọc binlog từ P vào spool trong lúc restore |
+| `--spool` | — | Phải là `<resources.spool.path>/prefetch` |
 | `--source` | rỗng | DSN source hoặc replica để prefetch |
-| `--archive` | rỗng | Thư mục binlog archive, đọc trước phần source đã xóa |
-| `--restore-cmd` | rỗng | Lệnh restore (`sh -c`) chạy song song; prefetch đọc liên tục tới khi lệnh xong |
-| `--spool-local-hard` | 0 | Trần byte tầng local; vượt thì tràn sang `--overflow` |
-| `--overflow` | rỗng | Tầng bucket `s3://bucket/prefix` (credential qua `STRAND_S3_*`) |
-| `--spool-hard` | 0 | Trần tổng mọi tầng; chạm trần thì exit 5 `prefetch_exhausted` |
+| `--archive` | rỗng | Thư mục binlog archive |
+| `--spool-local-hard`, `--overflow`, `--spool-hard` | 0, rỗng, 0 | Trần tầng local, tầng bucket, trần tổng (chạm thì exit 5 `prefetch_exhausted`) |
 
-## 5. Vận hành khi đang chạy
+`seed apply` theo engine:
 
-Các lệnh dưới đây nói chuyện với `strand sync` đang chạy qua admin socket; socket lấy từ `--socket`, nếu không thì `observability.admin_socket` trong file `-c`, cuối cùng `/run/strand/default.sock`.
+- **MySQL:** kiểm `gtid_executed` của target bằng P và gỡ cấu hình replication còn sót. Tạo schema metadata với `SET SESSION sql_log_bin=0; CREATE DATABASE strand; SET SESSION sql_log_bin=1;` để `gtid_executed` vẫn đúng bằng P.
+- **PG (pgBackRest/WAL-G):**
+  - Restore target thành standby với `recovery_target_lsn = P`, `recovery_target_inclusive = on`, `recovery_target_action = pause`.
+  - `seed apply` kiểm `pg_last_wal_replay_lsn() = P` rồi gọi `pg_promote()`.
+  - Chạy lại sau khi đã promote vẫn an toàn.
+  - Trước khi mở ghi: tắt `archive_mode` (hoặc dùng stanza khác), xóa publication/subscription thừa kế từ source.
+- **`strand export`:** kiểm các bảng của export đã có ở target (sau `pg_restore`).
+
+### 7.6 `export` (PG)
+
+```bash
+strand export --source "postgres://strand@pg-src/app" --slot strand_billing \
+  --tables public.orders,public.users --out /backup/dump -F d -j 8 --manifest seed.json
+```
+
+Lệnh tạo slot cùng exported snapshot, rồi chạy `pg_dump --snapshot` (`--pg-dump` chỉ đường dẫn binary). P là `consistent_point` của slot. Sau đó: `pg_restore -j 8 -d <target> /backup/dump`, rồi `seed apply`, rồi `sync --start-at seed`.
+
+### 7.7 `snapshot add`
+
+`strand snapshot add --table app.t -c p.yaml` thêm bảng vào pipeline đang chạy. Bảng được snapshot logic có điều tốc, không dừng stream. PK theo mục 5.2. PG source: bảng phải có trong publication.
+
+### 7.8 `verify`
+
+| Chế độ | Lệnh | Cặp | Ghi chú |
+| --- | --- | --- | --- |
+| sample | `verify --mode sample --table app.t [--rate 0.01]` | MySQL→MySQL | Lấy mẫu `--rate` phần row theo khoảng khóa, so trực tiếp. Chờ target apply tới thời điểm đọc. Row quá nóng được đếm `unverifiable_hot` |
+| delta | `verify --mode delta` | MySQL→MySQL | Qua socket: verify các khóa CDC vừa chạm. Lệch thì exit 5 |
+| full | `verify --mode full [--table app.t] [--rate N]` | Mọi cặp | Cây Merkle theo chunk 10.000 row, rồi so từng row ở chunk lệch. `--rate` ở đây là chunk/giây (không đặt thì 10) |
+
+- `--table` của full: không đặt thì dùng `tables.include`, nhưng **không nhận wildcard**. Với `app.*`, phải chạy từng bảng (handoff dòng 51).
+- `--resume`: chạy tiếp lượt full bị ngắt. Chỉ dùng lại chunk đã khớp. Lượt chạy hết thì tiến độ bị xóa. Không có cho PK tổng quát.
+- `--replica-dsn`: đọc phía source từ replica.
+- `--repair report|fix`:
+  - `fix` chép lại row lệch từ source: một transaction, tắt kiểm FK, không ghi cột generated.
+  - Chỉ cùng engine; PK tổng quát chỉ MySQL→MySQL.
+  - **`fix` yêu cầu pipeline đã dừng.** Nó lấy khóa của pipeline; `sync` đang chạy thì exit 4. Lý do: repair song song với stream có thể ghi đè ảnh mới bằng ảnh cũ.
+  - Quy trình đúng: (1) để pipeline bắt kịp; (2) dừng `sync`; (3) `verify --mode full --table … --repair fix`; (4) chạy lại `sync`. Thay đổi source trong lúc dừng nằm sau checkpoint nên sẽ được phát lại.
+  - Nếu repair gặp trùng UNIQUE vì source vừa đổi, nó báo `the source changed while repairing`; làm lại quy trình.
+
+### 7.9 `pause` / `resume` / `throttle` / `top` / `checkpoint`
 
 | Lệnh | Tác dụng |
 | --- | --- |
-| `strand top -c p.yaml` | Trạng thái, lag (giây), tốc độ (row/s), vùng governor, tiến độ và ETA snapshot |
-| `strand pause -c p.yaml` | Dừng cả đọc và apply (giữ vị trí) |
-| `strand pause --snapshot -c p.yaml` | Chỉ dừng snapshot logic; stream CDC vẫn chạy |
-| `strand resume -c p.yaml` | Chạy lại tất cả |
-| `strand resume --snapshot-only -c p.yaml` | Chỉ chạy lại phần snapshot |
-| `strand throttle set --source-iops N [--soft] -c p.yaml` | Đổi nóng giới hạn đọc snapshot trên source; `--target-iops` được nhận nhưng chưa có tác dụng |
-| `strand snapshot add --table app.t -c p.yaml` | Thêm bảng vào pipeline đang chạy: snapshot logic có điều tốc, không dừng stream (PK một cột số nguyên) |
-| `strand checkpoint show -c p.yaml` | Pipeline, epoch, tập GTID đã apply, thời điểm cập nhật |
-| `strand checkpoint rewind --to <gtid set> -c p.yaml` | Tua vị trí về GTID set cho trước (kiểm `gtid_purged`); epoch tăng |
-| `strand verify --mode sample --table app.t [--rate 0.01] [--repair report\|fix] -c p.yaml` | Lấy mẫu theo khoảng PK, so source và target; `fix` sửa row lệch |
-| `strand verify --mode delta -c p.yaml` | Verify các khóa CDC vừa chạm (qua socket); lệch thì exit 5 |
+| `strand top` | Trạng thái, lag (giây), tốc độ (row/s giữa hai mẫu gần nhất), vùng governor, tiến độ và ETA snapshot |
+| `strand pause` | Dừng đọc và apply, giữ vị trí |
+| `strand pause --snapshot` | Chỉ dừng snapshot logic; stream vẫn chạy |
+| `strand resume` | Chạy lại tất cả |
+| `strand resume --snapshot-only` | Chỉ chạy lại snapshot, hoãn stream |
+| `strand throttle set --source-iops N [--soft]` | Đổi nóng **soft limit** đọc snapshot, áp cho mọi governor kể cả `static`. Có hay không `--soft` đều đổi soft; hard limit chỉ đổi qua cấu hình và khởi động lại. `--target-iops` bị từ chối (chưa thi hành) |
+| `strand checkpoint show` | Pipeline, epoch, vị trí đã apply, thời điểm cập nhật |
+| `strand checkpoint rewind --to <gtid set>` | MySQL→MySQL: tua vị trí (kiểm `gtid_purged`), tăng epoch, pipeline dừng và phải chạy lại |
 
-`verify --mode full` (cây Merkle, PK một cột số nguyên) so source và target, kể cả MySQL→PG và PG→PG. Thay đổi `tables.include`/`exclude` cần khởi động lại: bảng mới được snapshot, bảng bị loại thôi đồng bộ.
+### 7.10 `promote`
 
-## 6. Promote và failover
-
-`strand promote` chuyển ứng dụng sang target theo các bước có trạng thái (bảng `_strand_promote`), chạy lại được từ bước dở. Giữ `strand sync` chạy trong lúc promote; dừng nó sau khi promote xong.
+`strand promote` chuyển ứng dụng sang target theo các bước có trạng thái (bảng `_strand_promote`); chạy lại sẽ tiếp từ bước dở. Giữ `sync` chạy trong lúc promote, dừng nó sau khi promote xong.
 
 ```bash
+# MySQL
 strand promote --pipeline orders-sync \
   --target "mysql://strand_admin:***@10.0.0.21:3306/strand" \
-  --fence  "mysql://strand_admin:***@10.0.0.11:3306/" \
-  --catchup-timeout 5m
+  --fence  "mysql://strand_admin:***@10.0.0.11:3306/" --catchup-timeout 5m
+# PG
+strand promote --pipeline billing --engine pg \
+  --target "postgres://admin@pg-dst/billing" --fence "postgres://admin@pg-src/billing" \
+  --app-role app_rw --source-app-roles app_rw --schemas public
 ```
 
-1. **Fence source cũ:** `SET GLOBAL super_read_only = ON` qua `--fence`.
-2. **Giữ target chỉ đọc:** `read_only=ON`, `super_read_only=OFF`; ứng dụng không ghi được, Strand (có `CONNECTION_ADMIN`) vẫn ghi.
-3. **Bắt kịp:** chờ tới khi tập đã apply chứa toàn bộ `gtid_executed` của source, tối đa `--catchup-timeout`.
-4. **Sequence:** MySQL tự nâng `AUTO_INCREMENT` khi chèn giá trị tường minh nên không cần làm gì; `--peak-rate`, `--sync-interval`, `--override-sequences` dành cho PG (P2).
-5. **Mở ghi target:** `read_only=OFF`.
+| Bước | MySQL | PostgreSQL |
+| --- | --- | --- |
+| 1. Fence source | `SET GLOBAL super_read_only = ON` | `ALTER SYSTEM SET default_transaction_read_only = on` + reload; role trong `--source-app-roles` bị `NOLOGIN`; ngắt session client (trừ user Strand và walsender) |
+| 2. Giữ target chỉ đọc | `read_only=ON`, `super_read_only=OFF` | Role `--app-role`: `default_transaction_read_only=on`, REVOKE quyền ghi (lưu lại để cấp lại) |
+| 3. Bắt kịp | Chờ tập đã apply chứa `gtid_executed` của source, tối đa `--catchup-timeout` | Như MySQL, theo LSN |
+| 4. Sequence | Không cần (AUTO_INCREMENT tự nâng) | `setval` theo `last_value` của source cộng biên `2·cache·inc + 2·r_peak·Δt_sync·inc` (`--peak-rate`, `--sync-interval`, `--override-sequences`) |
+| 5. Mở ghi | `read_only=OFF` | Cấp lại quyền ghi cho role ứng dụng |
 
-### Failover khi source đã chết
+- `--pipeline` phải trùng `name` (mặc định `default`).
+- `--engine auto` nhận diện engine từ DSN.
+- Không có `--source-app-roles` thì fence PG chỉ mang tính hợp tác: role ứng dụng có thể tự đặt lại `default_transaction_read_only`.
 
-- Không fence được source (mất kết nối hoặc thiếu `--fence`): promote dừng exit 10 và in tập GTID đã apply ở target cùng thời điểm checkpoint cuối, tức phần dữ liệu sẽ mất nếu tiếp tục.
-- Cô lập source bằng cách khác (tắt máy, chặn mạng), rồi chạy lại cùng lệnh thêm `--source-fenced-externally` để xác nhận chấp nhận mất phần đó.
-- `--dry-run`: chạy thử, không đổi gì.
+**Failover khi source đã chết:**
 
-`--pipeline` phải trùng `name` trong cấu hình (mặc định `default`).
+1. Không fence được source thì promote dừng exit 10 `promote_needs_decision`. Nó in vị trí đã apply ở target và thời điểm checkpoint cuối, tức phần dữ liệu sẽ mất nếu tiếp tục.
+2. Cô lập source bằng cách khác: tắt máy hoặc chặn mạng.
+3. Chạy lại cùng lệnh, thêm `--source-fenced-externally`.
 
-## 7. Điều chỉnh khi tải tăng
+### 7.11 `config schema`
 
-Governor chỉ điều tốc phần đọc snapshot trên source; stream thay đổi luôn được apply nhanh nhất có thể, nên target phải chịu được tải ghi tương đương source.
+`strand config schema` in JSON Schema của file cấu hình.
 
-### Strand tự làm
+---
 
-- **Governor `onoff`** (mỗi `tick`): áp suất P đo bằng lag so với `lag_slo` và nguy cơ mất binlog; P ≥ 1 thì dừng snapshot, P < 0,9 trong 3 tick thì chạy lại ở `iops.soft`.
-- **Breaker:** replica lag hoặc độ trễ query của Strand vượt ngưỡng thì cắt snapshot; mở lại sau 60 giây liên tục dưới ngưỡng.
-- **Tín hiệu cứng:** `Innodb_buffer_pool_wait_free` hoặc `Innodb_log_waits` tăng trên source, hoặc spool local ≥ 95% `spool.hard`, thì dừng snapshot ngay trong tick đó.
-- **Stream:** Txn không đụng nhau chạy song song (relaxed), gom group commit và multi-row upsert để bắt kịp.
+## 8. Vận hành, tuning, metric, exit code
 
-### Chỉnh tay
+### 8.1 Điều tốc
+
+Governor chỉ điều tốc **phần đọc snapshot** trên source. Stream luôn được apply nhanh nhất có thể, nên target phải chịu được tải ghi tương đương source.
+
+- **`onoff`:** mỗi `tick`, áp suất P được đo bằng lag so với `lag_slo` và nguy cơ mất binlog. P ≥ 1 thì dừng snapshot. P < 0,9 trong 3 tick thì chạy lại ở `iops.soft`.
+- **`grace-v2`:** điều tốc liên tục trong khoảng [soft, hard] theo độ nhạy đo được của source. Có dither ±1% (`probe`).
+- **`static`:** nhịp cố định `iops.soft`, không breaker. Source PG luôn dùng chế độ này.
+- **Breaker:** replica lag hoặc độ trễ query vượt ngưỡng thì cắt snapshot. Mở lại sau 60 giây liên tục dưới ngưỡng.
+- **Tín hiệu cứng** (dừng snapshot ngay trong tick): `Innodb_buffer_pool_wait_free` hoặc `Innodb_log_waits` tăng trên source MySQL, hoặc spool local đạt 95% `spool.hard`.
+- **Trong bootstrap:** lag vượt `lag_slo` thì log `bootstrap_retention_risk` và **ưu tiên** snapshot thay vì dừng, để không tự khóa chết.
 
 | Mục đích | Thao tác | Hiệu lực |
 | --- | --- | --- |
-| Giảm đọc trên source khi snapshot | `strand throttle set --source-iops N [--soft]` | Ngay |
-| Nhường source trong giờ cao điểm | `strand pause --snapshot`, sau đó `strand resume --snapshot-only` | Ngay |
-| Governor nhạy hơn | `governor.lag_slo` thấp hơn, `governor.tick` | Khởi động lại |
-| Ngưỡng breaker | `governor.breaker.replica_lag.max`, `strand_query_p99.max_ratio` | Khởi động lại |
-| Target bắt kịp nhanh hơn | `commit_order: relaxed`, tăng `resources.workers.max` | Khởi động lại |
-| Batch lớn hơn, ít commit hơn | `target.batch.max_rows`, `max_bytes`, `max_wait` (ví dụ 50ms) | Khởi động lại |
-| Đệm khi target chậm hoặc source sắp xóa log | `resources.spool.hard`, `resources.spool.overflow` | Khởi động lại |
-| Không chạm primary | Trỏ `source.dsn` vào replica (`log_replica_updates=ON`) | Khởi động lại |
+| Giảm đọc trên source khi snapshot | `throttle set --source-iops N` | Ngay |
+| Nhường source giờ cao điểm | `pause --snapshot` / `resume --snapshot-only`, hoặc `bootstrap.logical.windows` | Ngay / khởi động lại |
+| Governor nhạy hơn | `governor.lag_slo`, `governor.tick` | Khởi động lại |
+| Target bắt kịp nhanh hơn | `commit_order: relaxed`, tăng `workers.max` | Khởi động lại |
+| Ít commit hơn | `target.batch.max_rows` / `max_bytes` | Khởi động lại |
+| Đệm khi target chậm | `spool.hard`, `spool.overflow` | Khởi động lại |
+| Không chạm primary (MySQL) | Trỏ source vào replica | Khởi động lại |
 
-Khởi động lại an toàn nhờ checkpoint trong target. Chưa có ở P1: tự co giãn số worker (`workers.min`), điều tốc stream, governor GRACE v2 (P2-07).
+Bộ nhớ: không có trần RSS (`resources.memory` chưa thi hành). Các phần lớn được tràn ra đĩa:
 
-## 8. Exit code, xử lý sự cố và giám sát
+- Assembler tràn theo **số row** (handoff dòng 30).
+- Reader PG giữ Txn streaming/2PC trong RAM tới tổng 64 MiB, vượt thì tràn ra `<spool.path>/pg-reader-<name>`.
+- Chunk snapshot có trần byte; đọc vượt trần thì chunk được tách.
 
-Exit 1 là lỗi tạm thời nên được tự restart; exit 2–5 và 10 cần người xem (systemd `RestartPreventExitStatus=2 3 4 5 10`).
+### 8.2 Metric (`GET /metrics` trên `observability.metrics`)
 
-| Exit | Mã lỗi | Nguyên nhân | Xử lý |
+`GET /healthz` trả 200 khi vòng chính còn tiến (liveness).
+
+| Metric | Nhãn | Ý nghĩa |
+| --- | --- | --- |
+| `strand_lag_seconds` | pipeline, phase (`bootstrap`\|`synced`) | Độ trễ. Xem 10.3: có thể báo 0 khi reader đứng sau source |
+| `strand_apply_txn_total`, `strand_apply_rows_total` | pipeline | Số Txn và row đã apply |
+| `strand_holes` | pipeline | Số lỗ chưa lấp (relaxed) |
+| `strand_checkpoint_compaction_lag_seconds` | pipeline | Tuổi lần gộp checkpoint gần nhất (strict: 0) |
+| `strand_writeset_entries` | pipeline, table | Số khóa đang giữ trong writeset |
+| `strand_pending_cross_range`, `…_oldest_seconds` | pipeline | Đổi PK xuyên range đang chờ đọc lại |
+| `strand_governor_rate_tokens` | pipeline, resource | Tốc độ cấp token |
+| `strand_governor_zone` | pipeline | 0 Green, 1 Yellow, 2 Red |
+| `strand_governor_pressure` | pipeline, signal | Áp suất theo tín hiệu |
+| `strand_sensitivity_unknown` | pipeline | GRACE chưa đo được độ nhạy (0/1) |
+| `strand_breaker_open` | pipeline | Breaker đang mở (0/1) |
+| `strand_spool_bytes`, `strand_spool_capacity_bytes` | pipeline, tier | Spool đang dùng / trần |
+| `strand_snapshot_ranges` | pipeline, table, state | Số range snapshot theo trạng thái |
+| `strand_seed_progress_ratio` | pipeline, table | Tiến độ bootstrap từng bảng (0..1) |
+| `strand_retention_headroom_seconds` | pipeline | Source MySQL, chỉ trong bootstrap: thời gian còn lại trước khi binlog cần đọc bị xóa |
+| `strand_verify_mismatch_total`, `strand_verify_unverifiable_hot_total` | pipeline, table | Row lệch / row quá nóng khi verify |
+| `strand_fenced_total` | pipeline | Số lần bị instance khác thay thế |
+
+Cảnh báo nên đặt:
+
+- Lag vượt `lag_slo` kéo dài.
+- `retention_headroom` sắp về 0.
+- Spool trên 80% trần.
+- `verify_mismatch_total` tăng.
+- Process thoát với exit 2–5 hoặc 10.
+
+### 8.3 Exit code
+
+Exit 1 là lỗi tạm, nên tự restart. Exit 2–5 và 10 cần người xem.
+
+| Exit | Mã | Nguyên nhân | Xử lý |
 | --- | --- | --- | --- |
+| 0 | — | Thành công / dừng bằng tín hiệu | — |
 | 1 | (không phân loại) | Mất kết nối, lỗi tạm | Tự restart; xem log nếu lặp lại |
-| 2 | `invalid_syntax` | Cấu hình sai, khóa lạ, cờ sai | Sửa cấu hình |
-| 3 | `binlog_config_invalid`, `missing_pk`, `type_unmappable`, `seed_invariant_failed`, `prerelease_tool` | validate, plan hoặc seed plan từ chối | Sửa đúng điều kiện nêu trong thông báo |
-| 4 | `pipeline_locked`, `fenced` | Instance khác cùng `name` đang chạy hoặc đã thay thế instance này | Bảo đảm chỉ một instance |
-| 5 | `log_gap` | Source đã xóa binlog Strand chưa apply | Cấp lại từ archive (`--archive`), hoặc seed lại |
-| 5 | `prefetch_exhausted` | Spool prefetch đầy (`--spool-hard`) | Tăng spool, thêm tầng bucket |
-| 5 | `verify_mismatch` | Verify thấy row lệch | `verify --repair fix`, điều tra nguyên nhân |
-| 10 | `schema_change_pending` | DDL trên bảng của pipeline (kể cả `CREATE`/`RENAME` tạo bảng khớp bộ lọc) mà target chưa khớp | Áp cùng DDL ở target rồi chạy lại `sync`; Strand so cột và đi tiếp |
+| 2 | `invalid_syntax`, `invalid_connection`, … | Cấu hình hoặc cờ sai, khóa lạ | Sửa cấu hình |
+| 3 | `binlog_config_invalid` | Biến binlog/GTID sai; PG `wal_level`, publication partition | Sửa theo thông báo (mục 4) |
+| 3 | `missing_pk` | Bảng không có PK | Thêm PK hoặc loại bảng |
+| 3 | `type_unmappable` | Kiểu không ánh xạ được; PK không snapshot logic được | Mục 3.2, 5.2 |
+| 3 | `collation_looser` | Collation khóa ở target lỏng hơn source | Dùng collation chặt hơn (PG: `"C"`) |
+| 3 | `seed_invariant_failed`, `prerelease_tool` | `seed plan`/`apply` từ chối | Sửa đúng điều kiện SD nêu ra |
+| 3 | `schema_change_pending` | `validate` với `create_schema: off` mà thiếu bảng | `schema init` |
+| 4 | `pipeline_locked`, `fenced` | Instance khác cùng `name` đang chạy hoặc đã thay thế; `repair fix` khi `sync` đang chạy | Bảo đảm chỉ một instance |
+| 5 | `log_gap` | Source đã xóa log chưa apply; slot PG không tồn tại | Cấp lại từ archive (`--archive`), hoặc seed lại |
+| 5 | `prefetch_exhausted` | Spool prefetch đầy | Tăng spool, thêm tầng bucket |
+| 5 | `verify_mismatch` | Verify thấy lệch; UPDATE TOAST mà row không có ở target | Quy trình repair (7.8), điều tra nguyên nhân |
+| 10 | `schema_change_pending` | DDL trên bảng của pipeline mà target chưa khớp | Áp DDL ở target rồi chạy lại |
 | 10 | `promote_needs_decision` | Promote không fence được source | Cô lập source, chạy lại với `--source-fenced-externally` |
 
-Bảng được `RENAME` từ bảng không thuộc pipeline vào bộ lọc cũng dừng exit 10; chạy lại thì Strand snapshot bảng đó. Thay đổi user và quyền không được đồng bộ; tạo tay ở cả hai bên.
+---
 
-### Giám sát
+## 9. Công thức đầu-cuối
 
-- `GET /healthz` trên `observability.metrics`: 200 khi vòng chính còn tiến (liveness probe).
-- `GET /metrics` (Prometheus): `strand_lag_seconds`, `strand_apply_txn_total`, `strand_apply_rows_total`, `strand_holes`, `strand_writeset_entries`, `strand_spool_bytes` / `strand_spool_capacity_bytes`, `strand_retention_headroom_seconds`, `strand_governor_zone` / `strand_governor_pressure` / `strand_governor_rate_tokens`, `strand_breaker_open`, `strand_snapshot_ranges`, `strand_seed_progress_ratio`, `strand_verify_mismatch_total`, `strand_verify_unverifiable_hot_total`, `strand_fenced_total`, `strand_checkpoint_compaction_lag_seconds`.
-- Cảnh báo nên có: lag vượt `lag_slo` kéo dài, `retention_headroom` sắp về 0 (sắp `log_gap`), spool > 80% dung lượng, `verify_mismatch_total` tăng, process thoát với exit 2–5 hoặc 10.
+### (a) MySQL→MySQL cả instance, bootstrap logic
 
-## 9. Giới hạn của P1 và quyết định chờ cập nhật spec
+```bash
+export SRC_PW=... DST_PW=...
+cat > all.yaml <<'EOF'
+version: 1
+name: all-sync
+source: { kind: mysql, host: replica1, user: strand, password_env: SRC_PW }
+target: { kind: mysql, host: newdb1, user: strand, password_env: DST_PW, database: strand }
+tables: { include: ["*.*"], exclude: ["tmp.*"] }
+resources: { spool: { path: /var/lib/strand/all-sync } }
+observability: { admin_socket: /run/strand/all-sync.sock, metrics: ":9464" }
+EOF
+mysql -h newdb1 -e 'CREATE DATABASE IF NOT EXISTS strand'
+strand validate -c all.yaml
+strand plan -c all.yaml          # ETA quá 50% retention: chuyển sang (b)
+strand sync -c all.yaml          # tự tạo schema, snapshot, stream
+strand top -c all.yaml           # đợi state = synced
+for t in $(mysql -h replica1 -N -e "SELECT CONCAT(table_schema,'.',table_name) FROM information_schema.tables WHERE table_schema NOT IN ('mysql','sys','information_schema','performance_schema','tmp') AND table_type='BASE TABLE'"); do
+  strand verify -c all.yaml --mode full --table "$t"
+done
+```
 
-P1 là đồng bộ một chiều MySQL → MySQL; những điểm dưới đây cần biết trước khi đưa vào dùng.
+### (b) MySQL→MySQL seed bằng XtraBackup
 
-- Bắt buộc `gtid_mode=ON`; không hỗ trợ định vị bằng file + position.
-- Không đồng bộ hai chiều (không lọc nguồn gốc thay đổi, không giải quyết xung đột).
-- Chỉ chép dữ liệu bảng có PK; không chép user, quyền, view, routine, trigger, event (seed bằng XtraBackup/CLONE thì bản backup mang theo chúng).
-- DDL không tự áp: Strand dừng `schema_change_pending` cho tới khi target khớp (`approve` ở P3).
-- Snapshot logic chỉ cho PK một cột số nguyên; bảng khác phải seed từ backup.
-- Một process cho mỗi pipeline, chưa tự failover (HA ở P4); số worker cố định.
-- Hiệu năng đo trên máy test (container): khoảng 2.100 txn/s relaxed, 1.600 txn/s strict; chưa có benchmark đối chứng.
+```bash
+xtrabackup --backup --target-dir=/bk && xtrabackup --prepare --target-dir=/bk
+strand seed plan -c p.yaml --type xtrabackup --backup /bk --source "$SRC_DSN" --out seed.json
+strand seed apply -c p.yaml --manifest seed.json --target "$DST_DSN" --source "$SRC_DSN" \
+  --spool /var/lib/strand/p/prefetch --restore-cmd "/opt/restore-xtrabackup.sh /bk"
+mysql -h newdb1 -e 'SET SESSION sql_log_bin=0; CREATE DATABASE IF NOT EXISTS strand; SET SESSION sql_log_bin=1;'
+strand sync -c p.yaml --start-at seed --seed-manifest seed.json   # verify sau seed trong post_seed_window
+```
 
-### Quyết định đã chốt trong code, chờ owner cập nhật spec
+### (c) MySQL→PG cả database
 
-Chi tiết từng dòng nằm trong `questions/DECISIONS-2026-11-02.md`.
+```bash
+# p.yaml: source kind mysql; target kind postgres, dsn postgres://...; tables.include ["app.*"]
+strand schema init -c p.yaml --dry-run    # xem DDL theo typemap
+strand validate -c p.yaml                 # kiểu, collation khóa, giá trị
+strand sync -c p.yaml
+strand verify -c p.yaml --mode full --table app.orders   # từng bảng
+```
+
+Bảng có PK chuỗi bị từ chối snapshot (mục 5.2). Hai cách xử lý: (1) để bảng đó rỗng lúc bắt đầu; (2) nạp dữ liệu tại một GTID đã biết rồi dùng `--start-at` cho pipeline riêng của bảng đó.
+
+### (d) PG→PG seed bằng `strand export`
+
+```bash
+psql "$SRC" -c "CREATE PUBLICATION strand_billing FOR TABLE public.orders, public.users WITH (publish='insert, update, delete')"
+strand export --source "$SRC" --slot strand_billing --tables public.orders,public.users \
+  --out /backup/billing -F d -j 8 --manifest seed.json
+pg_restore -j 8 -d "$DST" /backup/billing
+strand seed apply -c billing.yaml --manifest seed.json --target "$DST"
+strand sync -c billing.yaml --start-at seed --seed-manifest seed.json
+strand verify -c billing.yaml --mode full --table public.orders
+```
+
+### (e) Cutover / promote
+
+1. `strand top`: lag ổn định nhỏ, state `synced`.
+2. `verify --mode full` từng bảng, khi tải thấp. Lệch thì dùng quy trình repair ở 7.8.
+3. Ứng dụng vào chế độ bảo trì, hoặc chấp nhận vài giây chỉ đọc.
+4. `strand promote …` (7.10) khi `sync` vẫn chạy.
+5. Trỏ ứng dụng sang target, rồi dừng `sync`.
+6. Không chạy lại `sync` cũ: source đã bị fence.
+
+---
+
+## 10. FAQ, xử lý sự cố, giới hạn đã biết
+
+### 10.1 FAQ
+
+**Có phải liệt kê từng bảng không?** Không. `app.*` là cả database, `*.*` là cả instance (mục 2).
+
+**Tại sao bảng của tôi bị từ chối snapshot logic?** PK của nó có kiểu hoặc collation mà Strand không chứng minh được thứ tự (mục 5.2). Thông báo lỗi nêu cột và lý do. Cách xử lý: seed từ backup, hoặc đổi collation (PG: `COLLATE "C"`).
+
+**Đổi `commit_order` giữa chừng được không?** Được: dừng, sửa, chạy lại. Checkpoint tương thích.
+
+**Kill -9 có an toàn không?** Có. Checkpoint commit cùng dữ liệu trong target. Snapshot dở được tiếp tục, phần chunk chưa đọc được xóa trước khi stream ghi lại.
+
+**Đọc từ replica MySQL?** Trỏ `source` vào replica có `log_replica_updates=ON`. `promote --fence` vẫn trỏ vào primary cũ.
+
+### 10.2 Xử lý sự cố
+
+| Triệu chứng | Nguyên nhân thường gặp | Xử lý |
+| --- | --- | --- |
+| validate exit 3 liệt kê thread | Session cũ còn `binlog_format`/`row_image` cũ | Cho ứng dụng kết nối lại; `STOP/START REPLICA` |
+| sync exit 5 `log_gap` ngay khi khởi động (PG) | Slot chưa có, `create_slot: false` | Tạo slot hoặc đặt `create_slot: true` |
+| sync exit 3 về publication partition | Thiếu `publish_via_partition_root` | Chạy lệnh `ALTER PUBLICATION` trong thông báo |
+| sync dừng vì TRUNCATE (PG) | Publication phát truncate | `ALTER PUBLICATION … SET (publish = 'insert, update, delete')` |
+| exit 10 `schema_change_pending` | DDL ở source | Áp cùng DDL ở target, chạy lại |
+| `verify --repair fix` exit 4 | `sync` đang chạy | Dừng `sync` trước (7.8) |
+| repair báo `the source changed while repairing` | Source đổi UNIQUE trong lúc repair | Để pipeline bắt kịp, dừng, repair lại |
+| `verify --mode full` báo `must be schema.table (no wildcard)` | `tables.include` có wildcard | Dùng `--table` cho từng bảng |
+| Snapshot đứng yên | Governor dừng (zone Red), breaker mở, ngoài `windows`, `pause --snapshot` | `strand top`; xem `strand_governor_*`, `strand_breaker_open` |
+| Lag tăng mãi | Target ghi chậm hơn source | `relaxed` + tăng `workers.max`; kiểm IO target |
+
+### 10.3 Giới hạn đã biết
+
+- **Lag:** `strand_lag_seconds` và `top` báo 0 khi scheduler hết việc, kể cả khi reader đang đứng sau source (ví dụ mạng treo). Chưa có heartbeat (handoff dòng 48). Hãy theo dõi thêm `apply_txn_total` có tăng không.
+- **Verify sau seed ngoài MySQL→MySQL:** chỉ ghi cảnh báo rồi bỏ qua, pipeline vẫn báo `synced` dù chưa verify (handoff dòng 52). Hãy tự chạy `verify --mode full`.
+- **`validate` không kiểm PG source** (dòng 33) và không kiểm quyền.
+- **`target.batch.max_wait`** làm khóa nóng chậm lại (dòng 26).
+- **PG identity `ALWAYS`:** PK bị `UPDATE … SET id = DEFAULT` kèm cột TOAST không đổi làm writer lỗi 428C9 (dòng 27, hiếm).
+- **Source PG:** governor luôn `static` (dòng 31).
+- **Không có:** đồng bộ hai chiều, DDL tự động (`schema.*`), verify full theo lịch, HA tự failover của chính Strand, tự co giãn worker, mask cột, đọc từ PG standby.
+- **Hiệu năng:** đo trên máy test container, khoảng 2.100 txn/s relaxed và 1.600 txn/s strict (MySQL→MySQL). Chưa có benchmark Gate 2.
+
+### 10.4 Quyết định đã chốt trong code, chờ cập nhật spec
+
+Chi tiết nằm trong `questions/DECISIONS-2026-11-02.md` và `docs/HANDOFF-CODEX.md`.
 
 | # | Nội dung | Phần spec |
 | --- | --- | --- |
-| 1A | `strict`: một worker, row toàn cục ghi trong transaction commit | 02 §4, §6 |
-| 2B | Snapshot logic chỉ PK một cột số nguyên ở P1 | 02 §5, 01 §5 |
+| 1A | `strict`: một worker; row toàn cục ghi trong transaction commit | 02 §4, §6 |
+| 2B | Snapshot logic: ban đầu chỉ PK một cột số nguyên; nay mở rộng theo mục 5.2 (việc C) | 02 §5, 01 §5 |
 | 3B | `pause --snapshot`, `resume --snapshot-only` | 02 §10 |
 | 4A | Giữ bảng `_strand_promote` | 02 §4 |
 | 5 | `foreign_key_checks=0` cho phiên ghi; KILL kết nối instance cũ | 02 §8, 03 §2 |
@@ -403,4 +886,6 @@ Chi tiết từng dòng nằm trong `questions/DECISIONS-2026-11-02.md`.
 | 11 | validate kiểm từng session đang mở | 02 §11, 03 §2 |
 | 12 | DDL: đi tiếp khi schema target khớp; xét bảng mới | 02 §12 |
 | 13 | Mặc định group commit; `workers.min` chưa có | 02 §6, §10 |
-| 14 | Soak trước Gate 1: 12 giờ thay 72 giờ | 04 §1 |
+| 14 | Soak trước Gate 1: 12 giờ thay vì 72 giờ | 04 §1 |
+| 17 | `bootstrap.create_schema: auto` mặc định | 02 §10 |
+| — | `verify --repair fix` yêu cầu pipeline dừng và target đã bắt kịp (review R04); runbook spec cần cập nhật | 05 |
