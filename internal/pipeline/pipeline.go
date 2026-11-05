@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -492,9 +493,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		pending = kept
 	}
 	for _, id := range pending {
-		if !p.tables[id].PKNumeric {
-			return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected,
-				fmt.Sprintf("table %s needs a logical snapshot but its primary key is not a single integer column (not supported yet)", id), nil)
+		if err := p.checkSnapshotKey(ctx, id, p.tables[id]); err != nil {
+			return err
 		}
 	}
 
@@ -582,6 +582,14 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 
 	// --- Snapshot ---
 	opts := snapshot.DefaultChunkOptions()
+	if cr := strings.TrimSpace(p.cfg.Bootstrap.Logical.ChunkRows); cr != "" && !strings.EqualFold(cr, "auto") {
+		n, err := strconv.ParseInt(cr, 10, 64)
+		if err != nil || n <= 0 {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax,
+				fmt.Sprintf("bootstrap.logical.chunk_rows must be \"auto\" or a positive number, got %q", cr), nil)
+		}
+		opts.DefaultChunkRows = n
+	}
 	p.snap = snapshot.NewMySQLSnapshotter(opts)
 	p.snap.Barrier = p.barrier
 	p.snap.Pace = p.pace
@@ -1570,7 +1578,13 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 		}
 	}
 	rereads := p.snap.RereadKeysTotal.Load()
-	if err := p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], writableColumns(m), p.rendezvous); err != nil {
+	var err error
+	if m.PKNumeric {
+		err = p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], writableColumns(m), p.rendezvous)
+	} else {
+		err = p.snap.SnapshotAddKeys(ctx, p.src, p.dst, id, m.PKCodec, writableColumns(m), p.rendezvous)
+	}
+	if err != nil {
 		return err
 	}
 	rereads = p.snap.RereadKeysTotal.Load() - rereads
@@ -1617,8 +1631,8 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("table %s has no primary key", id), nil)
 		}
 	}
-	if !m.PKNumeric {
-		return fmt.Errorf("table %s: logical snapshot needs a single integer primary key", id)
+	if err := p.checkSnapshotKey(ctx, id, m); err != nil {
+		return err
 	}
 	if err := p.checkPGPartitionPublication(ctx, []model.TableID{id}); err != nil {
 		return err

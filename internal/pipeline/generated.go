@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"strand/internal/exitcode"
 	"strand/internal/model"
 )
 
@@ -105,4 +106,37 @@ func dropTargetGenerated(cols []model.ColValue, skip map[string]bool) []model.Co
 		}
 	}
 	return out
+}
+
+// checkSnapshotKey: bảng có thể snapshot logic với PK của nó không (việc C). PK một cột số nguyên: đường
+// int64. PK khác: chỉ MySQL→MySQL (mức 1), khi codec dựng được (kiểu/collation có thứ tự chứng minh được)
+// và PK ở bảng đích cùng thứ tự — flush xóa range khóa ở target bằng cận đọc từ source, nên thứ tự hai
+// phía phải giống hệt.
+func (p *Pipeline) checkSnapshotKey(ctx context.Context, id model.TableID, m *tableMeta) error {
+	if m.PKNumeric {
+		return nil
+	}
+	reject := func(why string) error {
+		return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected,
+			fmt.Sprintf("table %s needs a logical snapshot but its primary key is not supported: %s; seed it from a backup instead", id, why), nil)
+	}
+	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
+		return reject("a primary key that is not a single integer column is only supported from MySQL to MySQL yet")
+	}
+	if m.PKCodec == nil {
+		why := "unknown key type"
+		if m.PKCodecErr != nil {
+			why = m.PKCodecErr.Error()
+		}
+		return reject(why)
+	}
+	tgt := p.filter.Target(id)
+	dc, err := mysqlPKCodec(ctx, p.dst, tgt, m.PK)
+	if err != nil {
+		return reject(fmt.Sprintf("target table %s: %v", tgt, err))
+	}
+	if err := m.PKCodec.SameOrder(dc); err != nil {
+		return reject(fmt.Sprintf("target table %s orders its primary key differently from the source: %v", tgt, err))
+	}
+	return nil
 }

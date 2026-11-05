@@ -100,6 +100,9 @@ func bindValue(col PKColumn, v model.Value) (any, error) {
 		// VARBINARY/BINARY và chuỗi NO PAD nhị phân: so byte — bind []byte cho VARBINARY, string cho chuỗi
 		// (cùng byte; string giữ collation của cột).
 		if b, ok := v.([]byte); ok {
+			if b == nil {
+				b = []byte{} // nil bind thành NULL
+			}
 			return b, nil
 		}
 		return toText(v)
@@ -129,7 +132,7 @@ func (q keySQL) scanBound(rows *sql.Rows) (Bound, error) {
 		if b == nil {
 			return Bound{}, fmt.Errorf("NULL in primary key of %s", q.table)
 		}
-		vals[i] = append([]byte(nil), b...)
+		vals[i] = append([]byte{}, b...) // không nil: []byte(nil) bind thành NULL (khóa rỗng '' bị mất)
 	}
 	return q.bound(vals)
 }

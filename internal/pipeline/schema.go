@@ -10,6 +10,7 @@ import (
 
 	"strand/internal/assemble"
 	"strand/internal/model"
+	"strand/internal/snapshot"
 )
 
 // tableFilter áp dụng tables.include / exclude / rename (spec 02 §10).
@@ -70,9 +71,13 @@ type tableMeta struct {
 	ID        model.TableID
 	Columns   []string
 	PK        []string
-	PKNumeric bool  // PK một cột kiểu số nguyên (điều kiện của snapshot logic hiện tại)
-	AvgRow    int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
-	Keys      assemble.KeyMeta
+	PKNumeric bool // PK một cột kiểu số nguyên (đường snapshot int64)
+	// PKCodec: mã hóa PK giữ thứ tự cho snapshot logic với PK tổng quát (việc C); nil nếu kiểu/collation
+	// của PK chưa được hỗ trợ — PKCodecErr nói vì sao.
+	PKCodec    *snapshot.PKCodec
+	PKCodecErr error
+	AvgRow     int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
+	Keys       assemble.KeyMeta
 	// TargetGenerated: cột generated ở bảng ĐÍCH — không ghi giá trị (generated.go).
 	TargetGenerated map[string]bool
 }
@@ -162,6 +167,9 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 				m.PKNumeric = true
 			}
 		}
+		if len(m.PK) > 0 {
+			m.PKCodec, m.PKCodecErr = mysqlPKCodec(ctx, db, id, m.PK)
+		}
 
 		fr, err := db.QueryContext(ctx, `
 			SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
@@ -195,4 +203,26 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		out[id] = m
 	}
 	return out, nil
+}
+
+// mysqlPKCodec dựng codec PK (snapshot.MySQLPKColumn) từ information_schema của bảng.
+func mysqlPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (*snapshot.PKCodec, error) {
+	c := &snapshot.PKCodec{}
+	for _, col := range pk {
+		var dt, ct string
+		var cs, coll, pad sql.NullString
+		err := db.QueryRowContext(ctx, `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME, co.PAD_ATTRIBUTE
+			FROM information_schema.COLUMNS c LEFT JOIN information_schema.COLLATIONS co ON co.COLLATION_NAME = c.COLLATION_NAME
+			WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`, id.Schema, id.Table, col).Scan(&dt, &ct, &cs, &coll, &pad)
+		if err != nil {
+			return nil, fmt.Errorf("read primary key column %s.%s: %w", id, col, err)
+		}
+		pc, err := snapshot.MySQLPKColumn(col, dt, ct, cs.String, coll.String, pad.String)
+		if err != nil {
+			return nil, err
+		}
+		pc.Collation = coll.String
+		c.Cols = append(c.Cols, pc)
+	}
+	return c, nil
 }

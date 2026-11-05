@@ -92,6 +92,9 @@ func mysqlSourceUTC(dsn string) (string, error) {
 		c.Params = map[string]string{}
 	}
 	c.Params["time_zone"] = "'+00:00'"
+	// DSN có parseTime: time.Time phải ở UTC (cùng quy ước chuỗi UTC của binlog; khóa PK DATETIME mã
+	// hóa từ các trường lịch, việc C).
+	c.Loc = time.UTC
 	return c.FormatDSN(), nil
 }
 

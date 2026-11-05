@@ -90,6 +90,8 @@ type PKColumn struct {
 	// SQLType: kiểu cột để ép tham số khi so sánh (MySQL DECIMAL(p,s): so DECIMAL với tham số chuỗi
 	// bị ép về double và mất chính xác). Rỗng = không ép.
 	SQLType string
+	// Collation: collation của cột chuỗi (để so khớp với bảng đích; thứ tự phải giống nhau hai phía).
+	Collation string
 }
 
 // PKCodec mã hóa tuple PK của một bảng.
@@ -184,6 +186,22 @@ func PGPKColumn(name, typname, collation string) (PKColumn, error) {
 		return cBytes(PKTrimBytes)
 	}
 	return unsupported("type " + typname + " is not supported")
+}
+
+// SameOrder: hai codec cho cùng thứ tự và cùng phép bằng (cùng cột, cùng kiểu mã hóa, cùng collation)
+// — điều kiện để xóa theo range khóa ở target bằng cận đọc từ source.
+func (c *PKCodec) SameOrder(o *PKCodec) error {
+	if len(c.Cols) != len(o.Cols) {
+		return fmt.Errorf("primary key has %d columns on one side and %d on the other", len(c.Cols), len(o.Cols))
+	}
+	for i := range c.Cols {
+		a, b := c.Cols[i], o.Cols[i]
+		if a.Name != b.Name || a.Kind != b.Kind || !strings.EqualFold(a.SQLType, b.SQLType) || !strings.EqualFold(a.Collation, b.Collation) {
+			return fmt.Errorf("primary key column %d differs: %s %s %s %s vs %s %s %s %s", i+1,
+				a.Name, a.Kind, a.SQLType, a.Collation, b.Name, b.Kind, b.SQLType, b.Collation)
+		}
+	}
+	return nil
 }
 
 // IsSingleInt: PK một cột số nguyên có dấu — đường cũ (int64) biểu diễn được trực tiếp.
