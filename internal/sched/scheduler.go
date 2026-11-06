@@ -390,11 +390,23 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	var activeDeps []uint64
 	for _, dep := range deps {
 		if _, ok := s.activeSeqs[dep]; ok {
-			if _, lane := s.laneActive[dep]; lane && t.Lane {
-				continue // thứ tự giữa hai Txn làn do làn bảo đảm (NextLaneBatch)
-			}
 			activeDeps = append(activeDeps, dep)
+			if _, lane := s.laneActive[dep]; lane && !t.Lane && !s.cfg.Serial {
+				// Lây làn: Txn thường phụ thuộc một Txn làn chưa xong đi luôn vào làn. Không thì chuỗi
+				// khóa nóng xen kẽ làn ↔ worker thường thành một commit cho mỗi bước (mỗi bên chờ bên kia
+				// commit); trong làn cả chuỗi ra cùng một batch (group commit). Chỉ thêm ràng buộc thứ tự.
+				t.Lane = true
+			}
 		}
+	}
+	if t.Lane {
+		kept := activeDeps[:0]
+		for _, dep := range activeDeps {
+			if _, lane := s.laneActive[dep]; !lane {
+				kept = append(kept, dep) // thứ tự giữa hai Txn làn do làn bảo đảm (NextLaneBatch)
+			}
+		}
+		activeDeps = kept
 	}
 
 	s.activeSeqs[seq] = struct{}{}
