@@ -16,7 +16,8 @@ import (
 // tắc, không phụ thuộc thứ tự), Merkle, rồi so từng row ở chunk lệch. Khác: chunk là điều kiện TUPLE PK
 // (snapshot.MySQLKeySQL / PGKeySQL) dựng bằng CÙNG giá trị biên ở hai phía, với tham số ép đúng kiểu cột
 // từng phía — đúng khi hai phía có cùng thứ tự khóa, điều kiện mà caller kiểm trước (PKCodec.SameOrder,
-// hoặc lớp thứ tự độc lập engine cho MySQL→PG). Hai chunk mở "< min" và "> max" bắt row thừa ở target.
+// hoặc lớp thứ tự độc lập engine cho MySQL→PG; thứ tự khác nhau — _ci → "C" — đi VerifyTableFullKeysExact,
+// merkle_cross.go). Hai chunk mở "< min" và "> max" bắt row thừa ở target.
 // Chưa có: --resume (tiến độ lưu biên BIGINT) và so bằng LiveVerifier.
 
 // keyChunk là một lá của Merkle theo khóa: below (< Lo), above (> Hi), all (mọi row), hoặc range [Lo, Hi].
@@ -149,39 +150,9 @@ func (mv *MerkleVerifier) VerifyTableFullKeys(ctx context.Context, t model.Table
 	if mv.cfg.Resume {
 		return nil, fmt.Errorf("table %s: --resume is not supported for a primary key that is not a single integer column", t)
 	}
-	srcDB := mv.srcDB()
-	src := keySide{engine: mv.cfg.SourceEngine, db: srcDB, table: t, codec: srcCodec}
-	dst := keySide{engine: mv.cfg.TargetEngine, db: mv.cfg.Target, table: mv.targetTable(t), codec: dstCodec}
-	pkNames := make([]string, len(srcCodec.Cols))
-	for i, c := range srcCodec.Cols {
-		pkNames[i] = c.Name
-	}
-	srcCols, err := GetTableColumns(ctx, srcDB, src.engine, t, pkNames[0])
+	src, dst, srcCols, dstCols, srcPK, dstPK, err := mv.keySides(ctx, t, srcCodec, dstCodec)
 	if err != nil {
 		return nil, err
-	}
-	allDst, err := GetTableColumns(ctx, dst.db, dst.engine, dst.table, pkNames[0])
-	if err != nil {
-		return nil, err
-	}
-	dstCols, err := matchTargetColumns(srcCols, allDst, dst.table)
-	if err != nil {
-		return nil, err
-	}
-	pick := func(cols []ColumnInfo) []ColumnInfo {
-		out := make([]ColumnInfo, 0, len(pkNames))
-		for _, n := range pkNames {
-			for _, c := range cols {
-				if c.Name == n {
-					out = append(out, c)
-				}
-			}
-		}
-		return out
-	}
-	srcPK, dstPK := pick(srcCols), pick(dstCols)
-	if len(srcPK) != len(pkNames) || len(dstPK) != len(pkNames) {
-		return nil, fmt.Errorf("table %s: primary key columns not found on both sides", t)
 	}
 
 	chunks, err := mv.keyChunks(ctx, src)
@@ -296,4 +267,45 @@ func (mv *MerkleVerifier) keyChunks(ctx context.Context, src keySide) ([]keyChun
 		lo = next
 	}
 	return append(chunks, keyChunk{id: len(chunks), above: true, hi: mx}), nil
+}
+
+// keySides dựng hai phía của full verify theo khóa: bảng, cột (đã khớp tên ở target) và cột PK hai phía.
+func (mv *MerkleVerifier) keySides(ctx context.Context, t model.TableID, srcCodec, dstCodec *snapshot.PKCodec) (
+	src, dst keySide, srcCols, dstCols, srcPK, dstPK []ColumnInfo, err error) {
+	srcDB := mv.srcDB()
+	src = keySide{engine: mv.cfg.SourceEngine, db: srcDB, table: t, codec: srcCodec}
+	dst = keySide{engine: mv.cfg.TargetEngine, db: mv.cfg.Target, table: mv.targetTable(t), codec: dstCodec}
+	pkNames := make([]string, len(srcCodec.Cols))
+	for i, c := range srcCodec.Cols {
+		pkNames[i] = c.Name
+	}
+	srcCols, err = GetTableColumns(ctx, srcDB, src.engine, t, pkNames[0])
+	if err != nil {
+		return
+	}
+	allDst, err := GetTableColumns(ctx, dst.db, dst.engine, dst.table, pkNames[0])
+	if err != nil {
+		return
+	}
+	dstCols, err = matchTargetColumns(srcCols, allDst, dst.table)
+	if err != nil {
+		return
+	}
+	pick := func(cols []ColumnInfo) []ColumnInfo {
+		out := make([]ColumnInfo, 0, len(pkNames))
+		for _, n := range pkNames {
+			for _, c := range cols {
+				if c.Name == n {
+					out = append(out, c)
+				}
+			}
+		}
+		return out
+	}
+	srcPK, dstPK = pick(srcCols), pick(dstCols)
+	if len(srcPK) != len(pkNames) || len(dstPK) != len(pkNames) {
+		err = fmt.Errorf("table %s: primary key columns not found on both sides", t)
+		return
+	}
+	return
 }
