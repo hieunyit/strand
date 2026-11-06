@@ -98,6 +98,38 @@ func mergeSequences(saved, fresh []SequenceInfo) []SequenceInfo {
 	return out
 }
 
+// sourceHasNoSequences: source không có sequence (MySQL), xem SequencelessSource.
+func (p *Promoter) sourceHasNoSequences() bool {
+	sl, ok := p.sourceDriver.(SequencelessSource)
+	return ok && !sl.HasSequences()
+}
+
+// feedsBase trả giá trị xa nhất (theo chiều của sequence) đã dùng ở các cột target mà sequence độc lập
+// cấp giá trị: max(cột) với sequence tăng, min(cột) với sequence giảm dần. found = false khi sequence
+// không cấp cho cột nào (hoặc mọi cột đều rỗng với sequence giảm dần).
+func (p *Promoter) feedsBase(ctx context.Context, seq SequenceInfo) (base int64, found bool, err error) {
+	for _, f := range seq.Feeds {
+		var v int64
+		if isDescending(seq) {
+			mf, ok := p.targetDriver.(ColumnMinFinder)
+			if !ok {
+				return 0, false, fmt.Errorf("target driver cannot read min(%s.%s) for descending sequence %s", f.Table, f.Column, seq.Name)
+			}
+			if v, err = mf.FindColumnMin(ctx, f.Table, f.Column); err != nil {
+				return 0, false, fmt.Errorf("find min column for %s.%s: %w", f.Table, f.Column, err)
+			}
+		} else if v, err = p.targetDriver.FindColumnMax(ctx, f.Table, f.Column); err != nil {
+			return 0, false, fmt.Errorf("find max column for %s.%s: %w", f.Table, f.Column, err)
+		}
+		if !found {
+			base, found = v, true
+			continue
+		}
+		base = further(seq, base, v)
+	}
+	return base, found, nil
+}
+
 // suggestIndependentSequences ghi giá trị gợi ý (lần đồng bộ cuối + margin) cho các
 // sequence độc lập chưa có giá trị do người vận hành chỉ định, để in ra cùng lúc dừng hỏi.
 func (p *Promoter) suggestIndependentSequences(progress *Progress) {
@@ -290,6 +322,20 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			}
 
 			// spec: 02 §8: sequence độc lập lấy last_value đọc từ source cộng margin.
+			if _, ok := findSequenceOverride(p.cfg.SequenceOverrides, seq.Name); !ok && p.sourceHasNoSequences() {
+				// Source MySQL: sequence độc lập chỉ tồn tại ở target, không có last_value nào ở source để đọc.
+				// Giá trị đã dùng nằm trong các cột target mà nó cấp (sau bước 3 target đã có mọi row của
+				// source), nên xử lý như sequence gắn cột: max(cột) + margin; không cấp cột nào thì chỉ cần
+				// không lùi (Setval dùng GREATEST/LEAST với last_value hiện tại).
+				base, _, err := p.feedsBase(ctx, *seq)
+				if err != nil {
+					return progress, fmt.Errorf("independent sequence %s: %w", seq.Name, err)
+				}
+				seq.CurrentValue = base
+				seq.FinalValue = further(*seq, seq.FinalValue, stepAhead(*seq, base, margin))
+				seq.Decided = true
+				continue
+			}
 			if overrideVal, ok := findSequenceOverride(p.cfg.SequenceOverrides, seq.Name); ok {
 				suggested := stepAhead(*seq, seq.LastSyncedValue, margin)
 				if behind(*seq, overrideVal, suggested) {

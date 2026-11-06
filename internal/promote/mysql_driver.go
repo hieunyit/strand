@@ -44,17 +44,16 @@ func (d *MySQLSourceDriver) IsReachable(ctx context.Context) bool {
 	return d.db.PingContext(ctx) == nil
 }
 
-// ReadSequenceLastValue đọc giá trị sequence / auto_increment từ source.
+// ReadSequenceLastValue: MySQL không có sequence (AUTO_INCREMENT gắn với bảng), nên không có giá trị
+// nào để đọc cho một sequence của target PG. Trước đây hàm dựng "SELECT COALESCE(MAX(x), 0) FROM x" với
+// cùng một tên cho cột và bảng — SQL sai, khiến mọi sequence độc lập làm promote MySQL→PG dừng exit 10.
+// Promoter nhận ra source này qua HasSequences và lấy giá trị từ target (SequenceInfo.Feeds).
 func (d *MySQLSourceDriver) ReadSequenceLastValue(ctx context.Context, seqName string) (int64, error) {
-	if !d.reachable || d.db == nil {
-		return 0, fmt.Errorf("source db unreachable")
-	}
-	// seqName có định dạng "table.column" hoặc "seq_name"
-	var val int64
-	q := fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s;", seqName, seqName)
-	err := d.db.QueryRowContext(ctx, q).Scan(&val)
-	return val, err
+	return 0, fmt.Errorf("MySQL source has no sequence %q: values of independent target sequences are derived from the target columns they feed", seqName)
 }
+
+// HasSequences luôn false: xem SequencelessSource.
+func (d *MySQLSourceDriver) HasSequences() bool { return false }
 
 // MySQLTargetDriver thực thi các thao tác trên MySQL target.
 type MySQLTargetDriver struct {

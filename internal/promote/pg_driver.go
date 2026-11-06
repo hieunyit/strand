@@ -721,7 +721,8 @@ func (d *PGTargetDriver) FailoverSummary(ctx context.Context) (string, error) {
 
 // DiscoverPGSequences liệt kê mọi sequence và identity trong các schema chỉ định (rỗng = mọi schema
 // không phải hệ thống). Sequence gắn cột là sequence có pg_depend deptype 'a' (serial / OWNED BY)
-// hoặc 'i' (identity) trỏ tới một cột; còn lại là sequence độc lập (02 §8). Đọc cache và increment.
+// hoặc 'i' (identity) trỏ tới một cột; còn lại là sequence độc lập (02 §8). Đọc cache và increment, và
+// với sequence độc lập thì các cột số nguyên có DEFAULT nextval của nó (Feeds).
 // Tên trả về không kèm schema nếu schema là public.
 func DiscoverPGSequences(ctx context.Context, db *sql.DB, schemas []string) ([]SequenceInfo, error) {
 	if db == nil {
@@ -784,7 +785,46 @@ func DiscoverPGSequences(ctx context.Context, db *sql.DB, schemas []string) ([]S
 		}
 		results = append(results, info)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+
+	// Cột số nguyên có DEFAULT gọi nextval của sequence độc lập (pg_depend deptype 'n' từ pg_attrdef).
+	fq := `
+		SELECT sn.nspname, s.relname, tn.nspname, t.relname, a.attname
+		FROM pg_depend dep
+		JOIN pg_attrdef ad ON dep.classid = 'pg_attrdef'::regclass AND dep.objid = ad.oid
+		JOIN pg_class s ON dep.refclassid = 'pg_class'::regclass AND s.oid = dep.refobjid AND s.relkind = 'S'
+		JOIN pg_namespace sn ON sn.oid = s.relnamespace
+		JOIN pg_class t ON t.oid = ad.adrelid
+		JOIN pg_namespace tn ON tn.oid = t.relnamespace
+		JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+		WHERE dep.deptype = 'n'
+		  AND a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)
+		  AND (cardinality($1::text[]) = 0 OR sn.nspname = ANY($1::text[]))
+		ORDER BY 1, 2, 3, 4, 5`
+	frows, err := db.QueryContext(ctx, fq, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("discover pg sequence column defaults: %w", err)
+	}
+	defer frows.Close()
+	idx := make(map[string]int, len(results))
+	for i, r := range results {
+		idx[r.Name] = i
+	}
+	for frows.Next() {
+		var seqSchema, seqName, tblSchema, tblName, colName string
+		if err := frows.Scan(&seqSchema, &seqName, &tblSchema, &tblName, &colName); err != nil {
+			return nil, fmt.Errorf("scan sequence column default: %w", err)
+		}
+		i, ok := idx[qualify(seqSchema, seqName)]
+		if !ok || results[i].Type != SequenceTypeIndependent {
+			continue
+		}
+		results[i].Feeds = append(results[i].Feeds, ColumnRef{Table: qualify(tblSchema, tblName), Column: colName})
+	}
+	return results, frows.Err()
 }
 
 // =============================================================================

@@ -377,6 +377,9 @@ func TestDiscoverPGSequences(t *testing.T) {
 	if indep.Type != promote.SequenceTypeIndependent || indep.CacheSize != 50 || indep.IncrementBy != 5 {
 		t.Fatalf("independent sequence: %+v", indep)
 	}
+	if len(indep.Feeds) != 1 || indep.Feeds[0] != (promote.ColumnRef{Table: "test_disc_default", Column: "id"}) {
+		t.Fatalf("independent sequence feeds (DEFAULT nextval): %+v", indep.Feeds)
+	}
 	serial := findSeq(t, seqs, "test_disc_serial_id_seq")
 	if serial.Type != promote.SequenceTypeColumn || serial.Table != "test_disc_serial" || serial.Column != "id" {
 		t.Fatalf("serial sequence: %+v", serial)
