@@ -1052,10 +1052,10 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			return nil // ngoài pipeline (bộ lọc, hoặc chưa snapshot add)
 		}
 		parts := []*model.RowChange{rc}
-		if p.srcEngine == model.EnginePG && !p.snap.Manager.IsRegistered(rc.Table) && !p.state.IsDone(rc.Table.String()) {
-			// Bảng chờ snapshot mà range chưa được đăng ký: xem keepBeforeRegisterPG.
+		if p.beforeRegister(rc.Table) {
+			// Bảng chờ snapshot mà range chưa được đăng ký (source PG và MySQL, review N10): xem keepBeforeRegister.
 			var err error
-			if parts, err = p.keepBeforeRegisterPG(rc); err != nil {
+			if parts, err = p.keepBeforeRegister(rc); err != nil {
 				return err
 			}
 		} else if p.snap.Manager.IsRegistered(rc.Table) {
