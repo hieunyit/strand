@@ -67,9 +67,6 @@ func newVerifyCmd() *cobra.Command {
 			}
 
 			srcEngine, dstEngine := engineOf(cfg.Source.Kind), engineOf(cfg.Target.Kind)
-			if mode == "sample" && (srcEngine != model.EngineMySQL || dstEngine != model.EngineMySQL) {
-				return exitcode.New("invalid_mode", exitcode.InvalidSyntax, "verify --mode sample supports mysql -> mysql only; use --mode full", nil)
-			}
 			if repair == "fix" && srcEngine != dstEngine {
 				return exitcode.New("invalid_repair", exitcode.InvalidSyntax, "--repair fix needs source and target of the same engine", nil)
 			}
@@ -120,6 +117,16 @@ func newVerifyCmd() *cobra.Command {
 				}
 				defer release()
 			}
+			// Kiểm lại row lệch chỉ chờ target apply tới vị trí log của source khi có pipeline đang chạy
+			// (đang giữ khóa pipeline): không ai ghi tiến độ thì chờ chỉ hết hạn rồi lỗi. Pipeline đang chạy
+			// mà bỏ chờ thì row chưa kịp apply (target trễ) bị báo lệch giả.
+			running := false
+			if !fixing {
+				if running, err = pipelineRunning(cmd.Context(), dst, dstEngine, cfg.Name); err != nil {
+					return err
+				}
+			}
+			waiter := applyWaiter(running, src, dst, srcEngine, dstEngine, cfg.Name)
 
 			target := func(x model.TableID) model.TableID {
 				if r, ok := cfg.Tables.Rename[x.String()]; ok {
@@ -165,12 +172,15 @@ func newVerifyCmd() *cobra.Command {
 					}
 					if !intPK {
 						// Việc C: PK nhiều cột / không phải số nguyên — full verify theo tuple.
-						rep, err := verifyFullKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, fullRate)
+						rep, err := verifyFullKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, fullRate, cfg.Name, waiter)
 						if err != nil {
 							return err
 						}
 						fmt.Printf("verify %s (full, key %s): %d chunks, %d mismatched chunks, %d rows compared, %d mismatches\n",
 							id, strings.Join(pkCols, ","), rep.TotalChunks, rep.MismatchedChunks, rep.RowsChecked, len(rep.Mismatches))
+						if n := len(rep.UnverifiableHot); n > 0 {
+							fmt.Printf("verify %s (full, key %s): %d unverifiable_hot\n", id, strings.Join(pkCols, ","), n)
+						}
 						if len(rep.Mismatches) == 0 {
 							continue
 						}
@@ -192,14 +202,15 @@ func newVerifyCmd() *cobra.Command {
 					pk := pkCols[0]
 					var lv *verify.LiveVerifier
 					if srcEngine == model.EngineMySQL && dstEngine == model.EngineMySQL {
-						// Chạy độc lập, không có pipeline ghi _strand_checkpoint: không chờ target apply.
+						// Chỉ chờ target apply khi pipeline đang chạy (xem running).
 						lv = verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
-							TargetName: target, SkipApplyWait: true})
+							TargetName: target, SkipApplyWait: !running})
 					}
 					mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{
 						Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
 						SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target,
 						ChunkRows: verify.DefaultChunkRows, Rate: fullRate, Resume: resume, LiveVerifier: lv,
+						ApplyWaiter: waiter,
 					})
 					rep, err := mv.VerifyTableFull(cmd.Context(), id, pk)
 					if err != nil {
@@ -243,8 +254,17 @@ func newVerifyCmd() *cobra.Command {
 			}
 			pk := pkCols[0]
 
-			// Đang giữ khóa để sửa: pipeline không chạy, không chờ target apply (sẽ không bao giờ tới).
-			lv := verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name, TargetName: target, SkipApplyWait: fixing})
+			if srcEngine != model.EngineMySQL || dstEngine != model.EngineMySQL {
+				// PG→PG, MySQL→PG: so chuỗi chính tắc (verify.MerkleVerifier.VerifyRanges), chỉ PK một cột số
+				// nguyên.
+				if !intPK {
+					return exitcode.New("invalid_mode", exitcode.InvalidSyntax, fmt.Sprintf(
+						"verify --mode sample from %s to %s needs a single integer primary key (%s has %s); use --mode full", srcEngine, dstEngine, id, strings.Join(pkCols, ",")), nil)
+				}
+				return verifySampleCanonical(cmd, src, dst, srcEngine, dstEngine, id, pk, target, cfg.Name, waiter, rate, repair == "fix" && !dryRun)
+			}
+			// Chỉ chờ target apply khi pipeline đang chạy (xem running; đang giữ khóa để sửa thì không chạy).
+			lv := verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name, TargetName: target, SkipApplyWait: !running})
 			if !intPK {
 				// Việc C: PK nhiều cột / không phải số nguyên — sample theo tuple PK.
 				codec, err := snapshot.MySQLPKCodec(cmd.Context(), src, id, pkCols)
@@ -351,9 +371,68 @@ func firstN(xs []string, n int) []string {
 	return xs
 }
 
+// pipelineRunning: pipeline đang chạy (một tiến trình khác giữ khóa pipeline trên target — `strand sync`,
+// hoặc một `verify --repair fix` khác). Thử lấy khóa không chờ rồi trả lại ngay: verify chỉ báo cáo không
+// được chặn pipeline khởi động.
+func pipelineRunning(ctx context.Context, dst *sql.DB, engine model.Engine, pipelineID string) (bool, error) {
+	var lock func(context.Context, string) (func() error, error)
+	if engine == model.EnginePG {
+		lock = checkpoint.NewPGStore(dst, pipelineID, engine).Lock
+	} else {
+		lock = checkpoint.NewMySQLStore(dst, pipelineID, engine).Lock
+	}
+	release, err := lock(ctx, pipelineID)
+	if errors.Is(err, checkpoint.ErrPipelineLocked) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("verify: check whether pipeline %s is running: %w", pipelineID, err)
+	}
+	return false, release()
+}
+
+// applyWaiter: chờ target apply tới vị trí log của source khi kiểm lại row lệch — chỉ khi pipeline đang
+// chạy (nil = bỏ bước chờ).
+func applyWaiter(running bool, src, dst *sql.DB, srcEngine, dstEngine model.Engine, pipelineID string) verify.ApplyWaiter {
+	if !running {
+		return nil
+	}
+	return &verify.LogApplyWaiter{Source: src, Meta: dst, PipelineID: pipelineID, SourceEngine: srcEngine, TargetEngine: dstEngine}
+}
+
+// verifySampleCanonical: verify --mode sample cho cặp engine khác MySQL→MySQL (PK một cột số nguyên).
+func verifySampleCanonical(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id model.TableID, pk string,
+	target func(model.TableID) model.TableID, pipelineID string, waiter verify.ApplyWaiter, rate float64, fix bool) error {
+	ctx := cmd.Context()
+	ranges, err := verify.SampleRangesEngine(ctx, src, srcEngine, id, pk, rate, 1000, rand.New(rand.NewSource(time.Now().UnixNano())))
+	if err != nil {
+		return err
+	}
+	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
+		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target, ApplyWaiter: waiter})
+	rep, err := mv.VerifyRanges(ctx, id, pk, ranges)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("verify %s (sample %.2f%%): %d ranges, %d rows, %d mismatches, %d unverifiable_hot\n",
+		id, rate*100, rep.RangesChecked, rep.RowsChecked, len(rep.Mismatches), len(rep.UnverifiableHot))
+	if len(rep.Mismatches) == 0 {
+		return nil
+	}
+	if fix {
+		if err := repairRows(ctx, src, dst, srcEngine, dstEngine, id, target(id), pk, rep.Mismatches); err != nil {
+			return err
+		}
+		fmt.Printf("repaired %d rows from source\n", len(rep.Mismatches))
+		return nil
+	}
+	return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError,
+		fmt.Sprintf("%d mismatched rows in %s (pk %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), ",")), nil)
+}
+
 // verifyFullKeys: full verify theo tuple PK (việc C) sau khi kiểm hai phía cùng thứ tự khóa.
 func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
-	pkCols []string, rate float64) (*verify.FullVerifyReport, error) {
+	pkCols []string, rate float64, pipelineID string, waiter verify.ApplyWaiter) (*verify.FullVerifyReport, error) {
 	ctx := cmd.Context()
 	codecOf := func(db *sql.DB, engine model.Engine, t model.TableID) (*snapshot.PKCodec, error) {
 		if engine == model.EnginePG {
@@ -380,9 +459,9 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 	if err != nil {
 		return nil, reject("source and target order the primary key differently: " + err.Error())
 	}
-	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst,
+	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
 		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
-		ChunkRows: verify.DefaultChunkRows, Rate: rate})
+		ChunkRows: verify.DefaultChunkRows, Rate: rate, ApplyWaiter: waiter})
 	return mv.VerifyTableFullKeys(ctx, id, sc, dc)
 }
 

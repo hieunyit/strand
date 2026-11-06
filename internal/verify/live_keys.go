@@ -131,19 +131,14 @@ func (v *LiveVerifier) recheckKey(ctx context.Context, t model.TableID, codec *s
 	}
 	srcQ := fmt.Sprintf("SELECT %s FROM %s WHERE %s", list, qt(t), sw)
 	dstQ := fmt.Sprintf("SELECT %s FROM %s WHERE %s", list, qt(v.target(t)), dw)
+	w := v.waiter()
 	for attempt := 0; attempt < v.cfg.Retries; attempt++ {
 		s1, err := readKeyedRows(ctx, v.cfg.Source, codec, pkIdx, srcQ, sa...)
 		if err != nil {
 			return false, false, err
 		}
-		if !v.cfg.SkipApplyWait {
-			var g string
-			if err := v.cfg.Source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&g); err != nil {
-				return false, false, err
-			}
-			if err := v.waitApplied(ctx, g); err != nil {
-				return false, false, err
-			}
+		if err := waitMark(ctx, w); err != nil {
+			return false, false, err
 		}
 		d, err := readKeyedRows(ctx, v.cfg.Target, codec, pkIdx, dstQ, da...)
 		if err != nil {
@@ -153,12 +148,27 @@ func (v *LiveVerifier) recheckKey(ctx context.Context, t model.TableID, codec *s
 		if err != nil {
 			return false, false, err
 		}
-		if s1[k].img != s2[k].img {
+		switch classifyObs(keyedObs(s1, d, s2, k)) {
+		case verdictUnstable:
 			continue // row đổi trong cửa sổ: thử lại
+		case verdictMismatch:
+			return true, false, nil
 		}
-		return s1[k].img != d[k].img, false, nil
+		return false, false, nil
 	}
 	return false, true, nil
+}
+
+func keyedObs(s1, d, s2 map[snapshot.Key]keyedRow, k snapshot.Key) rowObs {
+	var o rowObs
+	var r keyedRow
+	r, o.s1ok = s1[k]
+	o.s1 = r.img
+	r, o.dok = d[k]
+	o.d = r.img
+	r, o.s2ok = s2[k]
+	o.s2 = r.img
+	return o
 }
 
 // SampleKeyRanges: keyset walk trên index PK theo khối `rows` khóa, giữ mỗi khối với xác suất rate (ít
