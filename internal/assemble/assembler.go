@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/reader"
 )
@@ -211,6 +212,35 @@ func (a *Assembler) enrichKeys(tid model.TableID, t *TableSchema, before, after 
 	}
 }
 
+// isRowFormatTxnQuery báo QUERY (đã ToUpper + TrimSpace) mà MySQL ghi hợp lệ bên trong một txn
+// binlog_format=ROW: SAVEPOINT, ROLLBACK TO [SAVEPOINT], RELEASE SAVEPOINT, XA ..., ROLLBACK
+// (txn có bảng non-transactional bị rollback). Các QUERY này không mang thay đổi hàng (review R09).
+func isRowFormatTxnQuery(q string) bool {
+	f := strings.Fields(q)
+	if len(f) == 0 {
+		return false
+	}
+	switch f[0] {
+	case "SAVEPOINT", "XA":
+		return true
+	case "ROLLBACK":
+		return len(f) == 1 || f[1] == "TO"
+	case "RELEASE":
+		return len(f) > 1 && f[1] == "SAVEPOINT"
+	}
+	return false
+}
+
+// queryPrefix rút gọn câu lệnh để đưa vào thông báo lỗi (review R09).
+func queryPrefix(q string) string {
+	q = strings.TrimSpace(q)
+	const max = 64
+	if r := []rune(q); len(r) > max {
+		return string(r[:max]) + "..."
+	}
+	return q
+}
+
 // New khởi tạo Assembler mới.
 func New(opts ...Option) *Assembler {
 	a := &Assembler{
@@ -273,6 +303,13 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 			if a.inTxn {
 				return a.finishTxn()
 			}
+		case a.sawBegin && ev.Pos.Engine != model.EnginePG && !isRowFormatTxnQuery(q):
+			// review R09: QUERY khác trong txn đã BEGIN = DML dạng statement (session đặt
+			// binlog_format=STATEMENT/MIXED). Bỏ qua sẽ để txn rỗng được checkpoint, mất dữ liệu: fail closed.
+			// (Reader PG chỉ phát QUERY "BEGIN"/"COMMIT" nên không bị ảnh hưởng.)
+			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("QUERY %q trong transaction đã BEGIN (txn %s): DML dạng statement không replicate được, binlog_format phải là ROW (kể cả ở mức session)",
+					queryPrefix(ev.Query), a.currentTxn.SourcePos.GTID), nil)
 		case !a.sawBegin:
 			// Txn DDL: GTID + QUERY, không có BEGIN/XID. Phát thành Txn riêng để GTID được ghi nhận.
 			a.ensureTxnStarted(ev.Pos)
