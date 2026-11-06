@@ -26,6 +26,7 @@ func newSeedCmd() *cobra.Command {
 
 	var (
 		backup, kind, sourceDSN, targetDSN, archiveUntil, out, dumpLog string
+		sourceArch                                                     string
 		tables                                                         []string
 		allowPre, acceptUnverifiedLockMode                             bool
 		pgf                                                            pgPlanFlags
@@ -50,6 +51,7 @@ func newSeedCmd() *cobra.Command {
 				ArchiveUntilGTID:         archiveUntil,
 				DumpLog:                  dumpLog,
 				AcceptUnverifiedLockMode: acceptUnverifiedLockMode,
+				SourceArch:               sourceArch,
 			}
 			isPG := isPGKind(kind)
 			if isPG {
@@ -63,8 +65,15 @@ func newSeedCmd() *cobra.Command {
 					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 				}
 				defer db.Close()
-				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_purged").Scan(&src.SourcePurgedGTID); err != nil {
-					return fmt.Errorf("read source gtid_purged: %w", err)
+				var srcArch string
+				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_purged, @@GLOBAL.version_compile_machine").
+					Scan(&src.SourcePurgedGTID, &srcArch); err != nil {
+					return fmt.Errorf("read source gtid_purged/version_compile_machine: %w", err)
+				}
+				// SD-4 (review R32): --source-arch khai báo tường minh thắng giá trị đọc từ source
+				// (backup có thể được tạo trên một host khác source hiện tại).
+				if src.SourceArch == "" {
+					src.SourceArch = srcArch
 				}
 			}
 			if targetDSN != "" && !isPG {
@@ -73,9 +82,9 @@ func newSeedCmd() *cobra.Command {
 					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 				}
 				defer db.Close()
-				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.version, @@GLOBAL.gtid_executed").
-					Scan(&src.TargetVersion, &src.TargetRestoredGTID); err != nil {
-					return fmt.Errorf("read target version/gtid_executed: %w", err)
+				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.version, @@GLOBAL.gtid_executed, @@GLOBAL.version_compile_machine").
+					Scan(&src.TargetVersion, &src.TargetRestoredGTID, &src.TargetArch); err != nil {
+					return fmt.Errorf("read target version/gtid_executed/version_compile_machine: %w", err)
 				}
 				src.TargetRestoredGTID = strings.ReplaceAll(src.TargetRestoredGTID, "\n", "")
 			}
@@ -122,6 +131,7 @@ func newSeedCmd() *cobra.Command {
 	pgf.register(plan)
 	plan.Flags().StringVar(&sourceDSN, "source", "", "DSN source (đọc gtid_purged, SD-2)")
 	plan.Flags().StringVar(&targetDSN, "target", "", "DSN target sau restore (đối chiếu P, SD-1; version, SD-4)")
+	plan.Flags().StringVar(&sourceArch, "source-arch", "", "Kiến trúc CPU của server tạo backup vật lý (vd x86_64, aarch64), SD-4; mặc định đọc từ --source")
 	plan.Flags().StringVar(&archiveUntil, "archive-until", "", "GTID set đã có trong archive binlog")
 	plan.Flags().StringSliceVar(&tables, "tables", nil, "Danh sách bảng")
 	plan.Flags().BoolVar(&allowPre, "allow-prerelease-tool", false, "Chấp nhận backup tạo bằng công cụ bản RC")

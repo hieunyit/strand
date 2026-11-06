@@ -47,6 +47,8 @@ func TestSD1_SeedPlan_XtraBackup_MetadataCrossCheck(t *testing.T) {
 		Tables:             []string{"app.orders", "app.users"},
 		TargetVersion:      "8.4.6",
 		TargetRestoredGTID: gtid,
+		SourceArch:         "x86_64",
+		TargetArch:         "x86_64",
 	}
 
 	manifest, err := planner.Plan(ctx, src)
@@ -229,6 +231,8 @@ func TestSD4_PrereleaseTool_RejectedWithoutFlag(t *testing.T) {
 		BackupRef:           backupDir,
 		AllowPrereleaseTool: true,
 		TargetVersion:       "9.7.1", // SD-4: target version is required to prove compatibility
+		SourceArch:          "aarch64",
+		TargetArch:          "aarch64",
 	}
 
 	manifest, err := planner.Plan(ctx, srcWithFlag)

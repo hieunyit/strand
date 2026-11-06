@@ -98,6 +98,10 @@
         },
         "compatible": {
           "type": "boolean"
+        },
+        "arch": {
+          "type": "string",
+          "description": "Kiến trúc CPU đã đối chiếu giữa source và target (backup vật lý MySQL)"
         }
       },
       "description": "Thông tin target tương thích theo SD-4"
