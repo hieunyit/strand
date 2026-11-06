@@ -20,6 +20,7 @@ func TestR17_ThrottleChangesStaticPacingAndRejectsUnenforcedLimits(t *testing.T)
 	p.gov = governor.NewOnoffGovernor(governor.OnoffConfig{SoftRate: 600})
 	p.govAlgo = "static"
 	p.setSoftRate(600)
+	p.running.Store(true) // admin chỉ nhận throttle khi pipeline đã chạy (review R12)
 	h := &adminHandler{p: p}
 	res, err := h.ThrottleSet(context.Background(), admin.Request{SourceIOPS: 123, Soft: true})
 	if err != nil || res.SourceIOPSSoft != 123 {
