@@ -89,6 +89,10 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 		return fmt.Errorf("fence source: pg_reload_conf: %w", err)
 	}
 	var killed []int64
+	// pg_terminate_backend nằm ở danh sách SELECT, KHÔNG ở WHERE: PostgreSQL không bảo đảm thứ tự đánh giá
+	// các vế AND, nên "WHERE pid <> pg_backend_pid() AND pg_terminate_backend(pid)" có thể ngắt chính
+	// session đang chạy câu lệnh (fence lỗi 57P01, rồi gỡ fence cũng lỗi). Ở danh sách SELECT, hàm chỉ chạy
+	// trên các row đã qua WHERE.
 	terminate := func(q string, args ...any) error {
 		rows, err := d.db.QueryContext(ctx, q, args...)
 		if err != nil {
@@ -97,10 +101,13 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 		defer rows.Close()
 		for rows.Next() {
 			var pid int64
-			if err := rows.Scan(&pid); err != nil {
+			var ok bool
+			if err := rows.Scan(&pid, &ok); err != nil {
 				return err
 			}
-			killed = append(killed, pid)
+			if ok {
+				killed = append(killed, pid)
+			}
 		}
 		return rows.Err()
 	}
@@ -113,17 +120,15 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 			if _, err := d.db.ExecContext(ctx, "ALTER ROLE "+quoteIdent(role)+" NOLOGIN"); err != nil {
 				return fmt.Errorf("fence source: ALTER ROLE %s NOLOGIN: %w", role, err)
 			}
-			q := `SELECT pid FROM pg_stat_activity
-				WHERE usename = $1 AND pid <> pg_backend_pid() AND backend_type = 'client backend'
-				  AND pg_terminate_backend(pid)`
+			q := `SELECT pid, pg_terminate_backend(pid) FROM pg_stat_activity
+				WHERE usename = $1 AND pid <> pg_backend_pid() AND backend_type = 'client backend'`
 			if err := terminate(q, role); err != nil {
 				return fmt.Errorf("fence source: terminate sessions for role %s: %w", role, err)
 			}
 		}
 	} else {
-		q := `SELECT pid FROM pg_stat_activity
-			WHERE pid <> pg_backend_pid() AND backend_type = 'client backend' AND usename <> current_user
-			  AND pg_terminate_backend(pid)`
+		q := `SELECT pid, pg_terminate_backend(pid) FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid() AND backend_type = 'client backend' AND usename <> current_user`
 		if err := terminate(q); err != nil {
 			return fmt.Errorf("fence source: terminate client sessions: %w", err)
 		}
