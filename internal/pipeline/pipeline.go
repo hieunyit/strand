@@ -1189,6 +1189,14 @@ func (p *Pipeline) noteRouted(pos model.Pos, seq uint64) {
 }
 
 func (p *Pipeline) waitIfPaused(ctx context.Context) {
+	// Hủy ctx (SIGTERM lúc đang pause) phải đánh thức cond, không thì router kẹt và shutdown treo
+	// ở <-routerDone (review R11).
+	stop := context.AfterFunc(ctx, func() {
+		p.pauseMu.Lock()
+		p.pauseCond.Broadcast()
+		p.pauseMu.Unlock()
+	})
+	defer stop()
 	p.pauseMu.Lock()
 	for p.paused.Load() && ctx.Err() == nil && p.failed() == nil {
 		p.pauseCond.Wait()
