@@ -141,8 +141,20 @@ func (s *Server) handleConn(conn net.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	resp := s.dispatch(ctx, req)
+	resp := s.safeDispatch(ctx, req)
 	_ = encoder.Encode(resp)
+}
+
+// safeDispatch: panic trong handler (vd lệnh tới khi pipeline chưa dựng xong) chỉ làm hỏng một
+// request, không giết cả process (review R12).
+func (s *Server) safeDispatch(ctx context.Context, req Request) (resp Response) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("admin command panicked", "command", req.Command, "panic", fmt.Sprint(r))
+			resp = Response{OK: false, Error: fmt.Sprintf("internal error handling %s: %v", req.Command, r)}
+		}
+	}()
+	return s.dispatch(ctx, req)
 }
 
 func (s *Server) dispatch(ctx context.Context, req Request) Response {

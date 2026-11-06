@@ -17,6 +17,19 @@ type adminHandler struct {
 	p *Pipeline
 }
 
+// errNotReady: admin socket mở trước khi scheduler/writer/snapshotter/governor được dựng; lệnh cần
+// chúng bị từ chối thay vì nil deref làm chết process (review R12).
+var errNotReady = fmt.Errorf("pipeline is starting; try again")
+
+// ready báo các thành phần lệnh admin cần đã dựng xong. p.running được đặt ngay trước log
+// "pipeline running", sau khi mọi thành phần (sched, writers, comp, snap, gov) đã khởi tạo (review R12).
+func (h *adminHandler) ready() error {
+	if !h.p.running.Load() {
+		return errNotReady
+	}
+	return nil
+}
+
 func (h *adminHandler) state() string {
 	switch {
 	case h.p.failed() != nil:
@@ -38,10 +51,15 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 	if p.retentionRisk.Load() {
 		zone = "bootstrap_retention_risk"
 	}
+	// Top vẫn trả lời lúc "starting" (script chờ trạng thái), chỉ bỏ lag khi scheduler chưa có (review R12).
+	lag := 0.0
+	if h.ready() == nil {
+		lag = p.lagSeconds()
+	}
 	return &admin.TopInfo{
 		PipelineID: p.id,
 		State:      h.state(),
-		LagSeconds: p.lagSeconds(),
+		LagSeconds: lag,
 		Throughput: p.throughput.rate(), // row/giây trong cửa sổ gần nhất (review R18)
 		Zone:       zone,
 	}, nil
@@ -75,6 +93,9 @@ func (h *adminHandler) ThrottleSet(ctx context.Context, req admin.Request) (*adm
 	// Chỉ báo thành công cho thứ thực sự được thi hành (review R17): soft limit IOPS source, áp cho mọi
 	// governor (static dùng chính giá trị này làm nhịp snapshot). IOPS target chưa được thi hành — từ
 	// chối thay vì báo đã đặt.
+	if err := h.ready(); err != nil {
+		return nil, err
+	}
 	if req.TargetIOPS > 0 {
 		return nil, fmt.Errorf("target IOPS limits are not enforced by this version; nothing changed")
 	}
@@ -110,6 +131,9 @@ func (h *adminHandler) CheckpointShow(ctx context.Context) (*admin.CheckpointRes
 // supervisor khởi động lại và stream lại từ vị trí mới (02 §10).
 func (h *adminHandler) CheckpointRewind(ctx context.Context, to string) (*admin.CheckpointResult, error) {
 	p := h.p
+	if err := h.ready(); err != nil {
+		return nil, err
+	}
 	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
 		return nil, fmt.Errorf("checkpoint rewind is supported for MySQL → MySQL pipelines only")
 	}
@@ -154,10 +178,16 @@ func (h *adminHandler) CheckpointRewind(ctx context.Context, to string) (*admin.
 
 // SnapshotAdd: `strand snapshot add --table <t>`.
 func (h *adminHandler) SnapshotAdd(ctx context.Context, table string) error {
+	if err := h.ready(); err != nil {
+		return err
+	}
 	return h.p.SnapshotAdd(h.p.runCtx, table)
 }
 
 // VerifyDelta: `strand verify --mode delta`.
 func (h *adminHandler) VerifyDelta(ctx context.Context) (string, error) {
+	if err := h.ready(); err != nil {
+		return "", err
+	}
 	return h.p.VerifyDelta(ctx)
 }
