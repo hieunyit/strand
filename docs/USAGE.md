@@ -386,7 +386,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `resources.source.iops.soft` | 600 | Tốc độ đọc snapshot (token/giây). Đổi nóng bằng `throttle set` |
 | `resources.source.iops.hard` | không | Trần cho GRACE |
 | `resources.workers.max` | 8 | Số luồng apply (relaxed). `strict` luôn 1 |
-| `governor.algorithm` | `onoff` | `onoff` \| `grace-v2` \| `static`. Source PG luôn dùng `static` |
+| `governor.algorithm` | `onoff` | `onoff` \| `grace-v2` \| `static`. Source PG dùng tín hiệu PG (docs/GOVERNOR-WIRING.md); thiếu quyền đọc view thống kê thì lùi về `static` |
 | `governor.tick` / `governor.lag_slo` | `1s` / `5s` | Nhịp điều tốc và lag mục tiêu |
 | `governor.probe` | `on` | `grace-v2`: `off` tắt dither ±1% |
 | `governor.breaker.replica_lag.max` | tắt | Replica lag vượt ngưỡng thì cắt snapshot |
@@ -736,7 +736,7 @@ Governor chỉ điều tốc **phần đọc snapshot** trên source. Stream lu�
 
 - **`onoff`:** mỗi `tick`, áp suất P được đo bằng lag so với `lag_slo` và nguy cơ mất binlog. P ≥ 1 thì dừng snapshot. P < 0,9 trong 3 tick thì chạy lại ở `iops.soft`.
 - **`grace-v2`:** điều tốc liên tục trong khoảng [soft, hard] theo độ nhạy đo được của source. Có dither ±1% (`probe`).
-- **`static`:** nhịp cố định `iops.soft`, không breaker. Source PG luôn dùng chế độ này.
+- **`static`:** nhịp cố định `iops.soft`, không breaker. Là chế độ dự phòng cho source PG khi thiếu quyền đọc view thống kê.
 - **Breaker:** replica lag hoặc độ trễ query vượt ngưỡng thì cắt snapshot. Mở lại sau 60 giây liên tục dưới ngưỡng.
 - **Tín hiệu cứng** (dừng snapshot ngay trong tick): `Innodb_buffer_pool_wait_free` hoặc `Innodb_log_waits` tăng trên source MySQL, hoặc spool local đạt 95% `spool.hard`.
 - **Trong bootstrap:** lag vượt `lag_slo` thì log `bootstrap_retention_risk` và **ưu tiên** snapshot thay vì dừng, để không tự khóa chết.
@@ -920,7 +920,7 @@ strand verify -c billing.yaml --mode full --table public.orders
 - **`validate` không kiểm PG source** (dòng 33) và không kiểm quyền.
 - **`target.batch.max_wait`** làm khóa nóng chậm lại ở `strict` (dòng 26); `relaxed` gom chuỗi Txn phụ thuộc vào cùng batch.
 - **PG identity `ALWAYS`:** PK bị `UPDATE … SET id = DEFAULT` kèm cột TOAST không đổi làm writer lỗi 428C9 (dòng 27, hiếm).
-- **Source PG:** governor luôn `static` (dòng 31).
+- **Source PG:** governor `onoff`/`grace-v2` dùng tín hiệu PG (replica lag của standby đang replay, WAL slot); thiếu quyền thì lùi về `static`.
 - **Không có:** đồng bộ hai chiều, DDL tự động (`schema.*`), verify full theo lịch, HA tự failover của chính Strand, tự co giãn worker, mask cột, đọc từ PG standby.
 - **Hiệu năng:** đo trên máy test container, khoảng 2.100 txn/s relaxed và 1.600 txn/s strict (MySQL→MySQL). Chưa có benchmark Gate 2.
 
