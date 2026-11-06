@@ -1745,6 +1745,13 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		if len(m.PK) == 0 {
 			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("table %s has no primary key", id), nil)
 		}
+		// review R10: bảng mới không được trùng tên đích với một bảng đã thuộc pipeline.
+		p.tablesMu.RLock()
+		err = checkTargetCollisions(p.filter, map[model.TableID]*tableMeta{id: m}, p.tables)
+		p.tablesMu.RUnlock()
+		if err != nil {
+			return err
+		}
 	}
 	if err := p.checkSnapshotKey(ctx, id, m); err != nil {
 		return err
