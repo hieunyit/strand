@@ -286,6 +286,10 @@ type MySQLSnapshotter struct {
 	// số byte row thật của chunk vừa đọc (chi phí đọc dùng để giãn nhịp; ≤ 0 nếu không biết).
 	Pace func(ctx context.Context, chunkBytes int64) error
 
+	// NextChunkRows (tùy chọn) chọn cỡ (số hàng) của chunk chính kế tiếp từ số liệu đọc của chunk chính
+	// vừa xong — luật 250 ms và trần chi phí R · 0,25 s của governor (02 §7). nil = cố định ChunkRows của plan.
+	NextChunkRows func(table model.TableID, st ChunkStat) int64
+
 	// FlushRows / ClearTarget (tùy chọn) thay phần ghi target khi target không phải MySQL
 	// (MySQL→PG). FlushRows phải thay nguyên range [startPK, endPK] của bảng đích bằng rows trong
 	// MỘT transaction (RS-1) và tự retry lỗi tạm thời; ClearTarget xóa mọi row của bảng đích.
@@ -623,6 +627,8 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	}
 	var chunks []*Chunk
 	var cur SnapshotPlan
+	// stat: số liệu đọc của chunk đang xử lý (cộng cả phần đuôi tách ra khi chạm max_chunk_bytes).
+	var stat ChunkStat
 	register := func() error {
 		var plan SnapshotPlan
 		resumed := false
@@ -781,6 +787,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		var read ChunkRead
 		var chunkHigh checkpoint.AppliedSet
 		var err error
+		readStart := time.Now()
 		if s.Chunks != nil {
 			read, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdxs, table)
 		} else if chunk.KeySet != nil {
@@ -792,6 +799,9 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		if err != nil {
 			return nil, err
 		}
+		stat.Elapsed += time.Since(readStart)
+		stat.Bytes += read.Bytes
+		stat.ReadRows += int64(len(read.Rows))
 		rows := read.Rows
 		var rest *Chunk
 		if read.Truncated {
@@ -843,6 +853,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	}
 	// processChunk xử lý chunk và mọi phần đuôi tách ra khi chạm max_chunk_bytes, tuần tự.
 	processChunk := func(chunk *Chunk) error {
+		stat = ChunkStat{}
 		for chunk != nil {
 			rest, err := processOne(chunk)
 			if err != nil {
@@ -854,10 +865,15 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	}
 
 	if generic {
-		return s.walkGeneric(ctx, srcDB, table, kq, cur, processChunk)
+		return s.walkGeneric(ctx, srcDB, table, kq, cur, processChunk, func(rows int64) int64 {
+			stat.Rows = rows
+			return s.nextChunkRows(table, stat)
+		})
 	}
 	// mainDone: walk chính đã xong. Theo dõi bằng cờ thay vì next > MaxPK (tràn khi MaxPK == MaxInt64).
 	mainDone := cur.Empty || cur.Finished || cur.NextPK > cur.MaxPK
+	// chunkRows: cỡ chunk chính hiện hành; bắt đầu từ plan, sau mỗi chunk chính do NextChunkRows chọn.
+	chunkRows := cur.ChunkRows
 	for next := cur.NextPK; ; {
 		select {
 		case <-ctx.Done():
@@ -879,9 +895,9 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		}
 		var end int64
 		if s.Chunks != nil {
-			end, err = s.Chunks.KeysetEnd(ctx, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+			end, err = s.Chunks.KeysetEnd(ctx, table, pkCol, next, cur.MaxPK, chunkRows)
 		} else {
-			end, err = keysetEnd(ctx, srcDB, table, pkCol, next, cur.MaxPK, cur.ChunkRows)
+			end, err = keysetEnd(ctx, srcDB, table, pkCol, next, cur.MaxPK, chunkRows)
 		}
 		if err != nil {
 			return fmt.Errorf("keyset walk %s from %d: %w", table, next, err)
@@ -898,9 +914,35 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		if err := processChunk(chunk); err != nil {
 			return err
 		}
+		stat.Rows = chunkRows
+		chunkRows = s.nextChunkRows(table, stat)
 	}
 
 	return nil
+}
+
+// ChunkStat là số liệu đọc của một chunk chính vừa xong, đầu vào của luật cỡ chunk (02 §7).
+type ChunkStat struct {
+	Rows     int64         // cỡ chunk (số hàng) đã dùng khi cắt chunk
+	ReadRows int64         // số hàng thực đọc được
+	Bytes    int64         // số byte row thực đọc được
+	Elapsed  time.Duration // thời gian đọc chunk (gồm watermark), không gồm điểm hẹn / flush / giãn nhịp
+}
+
+// nextChunkRows: cỡ chunk chính kế tiếp. Không có NextChunkRows thì giữ nguyên; kết quả không nhỏ hơn
+// min_chunk_rows.
+func (s *MySQLSnapshotter) nextChunkRows(table model.TableID, st ChunkStat) int64 {
+	if s.NextChunkRows == nil {
+		return st.Rows
+	}
+	n := s.NextChunkRows(table, st)
+	if minRows := s.opts.MinChunkRows; n < minRows {
+		n = minRows
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // keysetEnd trả về khóa cuối của chunk bắt đầu ở start: khóa thứ `rows` tính từ start

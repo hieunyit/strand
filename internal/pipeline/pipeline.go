@@ -136,8 +136,18 @@ type Pipeline struct {
 	govAlgo       string
 	govTick       time.Duration
 	curAvgRow     atomic.Int64
-	snapChunkRows int64 // bootstrap.logical.chunk_rows hiệu lực (ước lượng chi phí chunk khi không biết byte)
-	touched       *touchedKeys
+	snapChunkRows atomic.Int64 // cỡ chunk hiệu lực gần nhất (ước lượng chi phí chunk khi không biết byte)
+	// adaptiveChunks: cỡ chunk theo luật 250 ms của governor (chunk_rows = auto, governor ≠ static).
+	adaptiveChunks bool
+	// snapBucket: token bucket chung của mọi reader snapshot (bootstrap và `snapshot add` chạy song song
+	// cùng chia một R, không phải mỗi reader một R).
+	snapBucket tokenBucket
+	// snapReaders / snapGated: số reader snapshot đang chạy / đang bị giữ ở cổng của pace (cửa sổ L).
+	snapReaders atomic.Int32
+	snapGated   atomic.Int32
+	// pgSignals: bộ đọc tín hiệu governor của source PG (nil với source MySQL).
+	pgSignals *governor.PGDBSignalReader
+	touched   *touchedKeys
 
 	runCtx   context.Context
 	instance string
@@ -598,7 +608,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	defer p.comp.Stop()
 
 	// --- Governor ---
-	if err := p.setupGovernor(); err != nil {
+	if err := p.setupGovernor(ctx); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 	}
 	// Tick đầu tiên trước khi snapshot chạy: breaker phải có hiệu lực ngay từ chunk đầu.
@@ -618,10 +628,13 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 		opts.DefaultChunkRows = n
 	}
-	p.snapChunkRows = opts.DefaultChunkRows
+	p.snapChunkRows.Store(opts.DefaultChunkRows)
 	p.snap = snapshot.NewMySQLSnapshotter(opts)
 	p.snap.Barrier = p.barrier
 	p.snap.Pace = p.pace
+	if p.adaptiveChunks {
+		p.snap.NextChunkRows = p.nextChunkRows
+	}
 	p.snap.TargetName = p.filter.Target
 	p.snap.LoadPlan = func(t model.TableID) (snapshot.SnapshotPlan, bool) { return p.state.Plan(t.String()) }
 	p.snap.SavePlan = func(t model.TableID, pl snapshot.SnapshotPlan) error { return p.state.SetPlan(t.String(), pl) }
@@ -1619,43 +1632,23 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 }
 
 func (p *Pipeline) pace(ctx context.Context, chunkBytes int64) error {
-	for {
-		// Lệnh `pause --snapshot` dừng riêng snapshot, thắng cả nhánh retentionRisk.
-		if !p.snapPaused.Load() {
-			breaker := p.govAlgo != "static" && p.gov.BreakerOpen()
-			// Breaker luôn thắng: background dừng (02 §7). bootstrap_retention_risk chỉ ghi đè việc
-			// onoff dừng vì áp suất lag (P_lag theo pha), để snapshot không tự khóa chết.
-			if p.retentionRisk.Load() && !breaker {
-				return nil
-			}
-			windowOK := inWindows(p.cfg.Bootstrap.Logical.Windows, time.Now())
-			running := p.govAlgo == "static" || p.gov.BackgroundRunning()
-			if windowOK && running && !breaker {
-				break
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(p.govTick):
-		}
+	if err := p.paceGate(ctx); err != nil {
+		return err
 	}
-	// Chi phí chunk ước lượng (trang 16 KiB) chia cho tốc độ background R (token/giây).
-	var rate float64
-	if p.govAlgo != "static" && p.gov != nil {
-		_, rate = p.gov.CurrentRate()
-	}
-	if p.govAlgo == "static" || rate <= 0 {
-		rate = p.softRate() // soft limit hiện hành (cấu hình, hoặc `throttle set --soft`)
-	}
+	// Chi phí chunk ước lượng (trang 16 KiB) chia cho tốc độ background R (token/giây), qua token bucket
+	// chung: nhiều reader song song cùng chia một R.
+	rate := p.backgroundRate()
 	if rate <= 0 {
 		return nil
 	}
-	d := time.Duration(chunkReadPages(chunkBytes, p.curAvgRow.Load(), p.snapChunkRows) / rate * float64(time.Second))
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(d):
+	cost := chunkReadPages(chunkBytes, p.curAvgRow.Load(), p.snapChunkRows.Load())
+	wait := p.snapBucket.reserve(time.Now(), time.Duration(cost/rate*float64(time.Second)))
+	if wait > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
 	}
 	// Nếu `pause --snapshot` được bật trong lúc đang ngủ giãn nhịp giữa hai chunk, chờ tiếp.
 	for p.snapPaused.Load() {
@@ -1666,6 +1659,112 @@ func (p *Pipeline) pace(ctx context.Context, chunkBytes int64) error {
 		}
 	}
 	return nil
+}
+
+// paceGate chờ tới khi background được chạy: không `pause --snapshot`, breaker đóng, trong
+// bootstrap.logical.windows và governor cho background chạy. bootstrap_retention_risk bỏ qua windows và
+// việc governor dừng background (để snapshot không tự khóa chết, 02 §7), nhưng không bỏ qua breaker
+// hay pause, và KHÔNG bỏ qua giãn nhịp: trước đây nhánh này trả về ngay trước bước giãn nhịp, nên
+// snapshot chạy không giới hạn — vượt cả hard limit ("tăng ưu tiên … vẫn trong hard limit").
+func (p *Pipeline) paceGate(ctx context.Context) error {
+	gated := false
+	defer func() {
+		if gated {
+			p.snapGated.Add(-1)
+		}
+	}()
+	for {
+		// Lệnh `pause --snapshot` dừng riêng snapshot, thắng cả nhánh retentionRisk.
+		if !p.snapPaused.Load() {
+			breaker := p.govAlgo != "static" && p.gov.BreakerOpen()
+			// Breaker luôn thắng: background dừng (02 §7).
+			risk := p.retentionRisk.Load()
+			windowOK := risk || inWindows(p.cfg.Bootstrap.Logical.Windows, time.Now())
+			running := risk || p.govAlgo == "static" || p.gov.BackgroundRunning()
+			if windowOK && running && !breaker {
+				return nil
+			}
+		}
+		if !gated {
+			gated = true
+			p.snapGated.Add(1)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(p.govTick):
+		}
+	}
+}
+
+// hardRate: resources.source.iops.hard (0 = không cấu hình).
+func (p *Pipeline) hardRate() float64 {
+	if p.cfg == nil {
+		return 0
+	}
+	return float64(p.cfg.Resources.Source.IOPS.Hard)
+}
+
+// backgroundRate: R của background (token/giây) mà token bucket của snapshot dùng.
+//   - static: soft limit hiện hành.
+//   - grace-v2: phần background của arbiter (đã gồm luật P_lag theo pha).
+//   - onoff: soft limit khi chạy; bootstrap_retention_risk → hard limit (tăng ưu tiên, 02 §7).
+//
+// Governor trả 0 (chưa tick) thì lùi về soft. Mọi governor bị chặn bởi hard limit ở token bucket.
+func (p *Pipeline) backgroundRate() float64 {
+	var rate float64
+	if p.govAlgo != "static" && p.gov != nil {
+		_, rate = p.gov.CurrentRate()
+		if _, grace := p.gov.(*governor.GraceGovernor); !grace && p.retentionRisk.Load() {
+			rate = math.Max(rate, p.hardRate())
+		}
+	}
+	if p.govAlgo == "static" || rate <= 0 {
+		rate = p.softRate() // soft limit hiện hành (cấu hình, hoặc `throttle set --soft`)
+	}
+	if hard := p.hardRate(); hard > 0 && rate > hard {
+		rate = hard
+	}
+	return rate
+}
+
+// nextChunkRows: luật cỡ chunk của governor (02 §7) — rows · clamp(250 ms / thời gian chunk trước,
+// 0,5, 2), rồi chi phí ước lượng ≤ R · 0,25 s với R = backgroundRate. Chi phí một row tính theo trang
+// 16 KiB từ byte thực đọc (không có thì AVG_ROW_LENGTH).
+func (p *Pipeline) nextChunkRows(_ model.TableID, st snapshot.ChunkStat) int64 {
+	avg := p.curAvgRow.Load()
+	if st.ReadRows > 0 && st.Bytes > 0 {
+		avg = st.Bytes / st.ReadRows
+	}
+	if avg <= 0 {
+		avg = 200
+	}
+	rows := st.Rows
+	if rows <= 0 {
+		rows = p.snapChunkRows.Load()
+	}
+	n := int64(governor.NextChunkRows(int(rows), st.Elapsed, float64(avg)/16384, p.backgroundRate()))
+	p.snapChunkRows.Store(n)
+	return n
+}
+
+// tokenBucket giãn nhịp kiểu trả sau (virtual scheduling): chunk vừa đọc tốn d = chi phí / R; thời điểm
+// được đọc chunk kế tiếp (tat) lùi thêm d, tính từ max(tat, now). Một reader: chờ đúng d sau mỗi chunk
+// (như trước). Nhiều reader: các khoản d cộng dồn, nên tổng tốc độ vẫn ≤ R.
+type tokenBucket struct {
+	mu  sync.Mutex
+	tat time.Time
+}
+
+// reserve ghi nhận chi phí d tại now và trả thời gian phải chờ.
+func (b *tokenBucket) reserve(now time.Time, d time.Duration) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tat.Before(now) {
+		b.tat = now
+	}
+	b.tat = b.tat.Add(d)
+	return b.tat.Sub(now)
 }
 
 func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {
@@ -1695,6 +1794,9 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 			return err
 		}
 	}
+	// Reader snapshot bắt đầu dùng cửa sổ L (windowSaturated); chờ cổng PG ở trên không tính.
+	p.snapReaders.Add(1)
+	defer p.snapReaders.Add(-1)
 	rereads := p.snap.RereadKeysTotal.Load()
 	var err error
 	if m.PKNumeric {
@@ -1907,7 +2009,7 @@ func (p *Pipeline) monitor(ctx context.Context) {
 		// P_lag theo pha (02 §7): ở bootstrap, P_lag ≥ 1 thì báo bootstrap_retention_risk và
 		// TĂNG ưu tiên snapshot (không giãn chunk) thay vì dừng, để không tự khóa chết.
 		if phase == "bootstrap" {
-			pLag := lag / lagSLO.Seconds()
+			pLag := math.Max(lag/lagSLO.Seconds(), p.walRetainedPressure())
 			if pLag >= 1 && !p.retentionRisk.Swap(true) {
 				p.log.Warn("bootstrap_retention_risk: reader lag exceeds lag_slo during bootstrap; prioritising snapshot",
 					"code", "bootstrap_retention_risk", "lag_seconds", lag, "lag_slo", lagSLO.String())
@@ -2004,6 +2106,18 @@ func (p *Pipeline) updateMetrics() {
 }
 
 func (p *Pipeline) caughtUpWithSource(ctx context.Context) bool {
+	if p.srcEngine == model.EnginePG {
+		// PG không có tập GTID để so: walsender của slot đã gửi tới head (02 §7: lag bootstrap = khoảng
+		// cách reader → head). Trước đây luôn false → source PG rảnh vài giây là lag "tăng" mãi và
+		// bootstrap_retention_risk bật sai.
+		if p.pgSignals == nil {
+			return false
+		}
+		qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		s, err := p.pgSignals.Sample(qctx)
+		return err == nil && s.ReaderCaughtUp(governor.PGCaughtUpSlackBytes)
+	}
 	if p.srcEngine != model.EngineMySQL {
 		return false
 	}
