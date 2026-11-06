@@ -111,6 +111,7 @@ type Pipeline struct {
 	seen     checkpoint.AppliedSet // applied0 ∪ mọi Txn router đã xử lý (chỉ source MySQL)
 
 	admitted     atomic.Uint64 // seq lớn nhất đã Admit
+	routed       atomic.Uint64 // số Txn route xong (Admit hoặc bỏ vì đã apply); xem drainPrefetch (review R03)
 	appliedTxns  atomic.Int64
 	appliedRows  atomic.Int64
 	lastSourceTS atomic.Int64 // SourceTS của Txn mới nhất đã commit ở target
@@ -978,6 +979,7 @@ func (p *Pipeline) router(ctx context.Context, txns <-chan *model.Txn, asmErr <-
 				}
 				return
 			}
+			p.routed.Add(1) // review R03
 		}
 	}
 }
@@ -1201,6 +1203,9 @@ func (p *Pipeline) drainPrefetch(ctx context.Context, out chan<- *model.Txn) err
 	if err != nil {
 		return err
 	}
+	// drainPrefetch là nguồn duy nhất của router trước khi stream trực tiếp bắt đầu: mốc routed lúc
+	// này + n = mọi Txn prefetch đã qua router (review R03).
+	base := p.routed.Load()
 	n := 0
 	for {
 		t, err := it.Next(ctx)
@@ -1222,10 +1227,7 @@ func (p *Pipeline) drainPrefetch(ctx context.Context, out chan<- *model.Txn) err
 	it.Close()
 	p.log.Info("prefetch spool replayed; switching to live stream", "transactions", n)
 	go func() {
-		for p.sched.Lwd() < p.admitted.Load() && ctx.Err() == nil && p.failed() == nil {
-			time.Sleep(100 * time.Millisecond)
-		}
-		if ctx.Err() != nil || p.failed() != nil {
+		if !p.waitPrefetchApplied(ctx, base+uint64(n), p.sched.Lwd, 100*time.Millisecond) {
 			return
 		}
 		_ = p.prefetch.Close()
@@ -1234,6 +1236,27 @@ func (p *Pipeline) drainPrefetch(ctx context.Context, out chan<- *model.Txn) err
 		}
 	}()
 	return nil
+}
+
+// waitPrefetchApplied chờ đến khi xóa được spool prefetch (review R03): trước hết mọi Txn prefetch
+// phải đã qua router (routed >= target) — Txn còn trong channel hay router đã nhận nhưng chưa Admit
+// thì admitted chưa tính, Lwd == admitted vẫn có thể đúng trong khi SpillPath của chúng nằm trong
+// prefetchDir. Sau đó mới chốt admitted và chờ Lwd đạt mốc đó. Trả false khi ctx hủy / pipeline lỗi.
+func (p *Pipeline) waitPrefetchApplied(ctx context.Context, target uint64, lwd func() uint64, tick time.Duration) bool {
+	for p.routed.Load() < target {
+		if ctx.Err() != nil || p.failed() != nil {
+			return false
+		}
+		time.Sleep(tick)
+	}
+	mark := p.admitted.Load()
+	for lwd() < mark {
+		if ctx.Err() != nil || p.failed() != nil {
+			return false
+		}
+		time.Sleep(tick)
+	}
+	return ctx.Err() == nil && p.failed() == nil
 }
 
 // drain chờ mọi Txn đã Admit được commit ở target (hoặc hết timeout / lỗi).
