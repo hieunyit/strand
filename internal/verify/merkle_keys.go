@@ -17,7 +17,7 @@ import (
 // (snapshot.MySQLKeySQL / PGKeySQL) dựng bằng CÙNG giá trị biên ở hai phía, với tham số ép đúng kiểu cột
 // từng phía — đúng khi hai phía có cùng thứ tự khóa, điều kiện mà caller kiểm trước (PKCodec.SameOrder,
 // hoặc lớp thứ tự độc lập engine cho MySQL→PG). Hai chunk mở "< min" và "> max" bắt row thừa ở target.
-// Chưa có: --resume (tiến độ lưu biên BIGINT) và so bằng LiveVerifier.
+// Row lệch được kiểm lại như đường PK số nguyên (recheck.go). Chưa có: --resume (tiến độ lưu biên BIGINT).
 
 // keyChunk là một lá của Merkle theo khóa: below (< Lo), above (> Hi), all (mọi row), hoặc range [Lo, Hi].
 type keyChunk struct {
@@ -143,12 +143,13 @@ func (s keySide) rowsBounds(ctx context.Context, c keyChunk, cols []ColumnInfo, 
 	return out, bounds, rs.Err()
 }
 
-// VerifyTableFullKeys: full verify của bảng t có PK tổng quát. srcCodec/dstCodec: codec PK hai phía (cùng
-// cột, cùng thứ tự — caller đã kiểm).
-func (mv *MerkleVerifier) VerifyTableFullKeys(ctx context.Context, t model.TableID, srcCodec, dstCodec *snapshot.PKCodec) (*FullVerifyReport, error) {
-	if mv.cfg.Resume {
-		return nil, fmt.Errorf("table %s: --resume is not supported for a primary key that is not a single integer column", t)
-	}
+// keySidesOf là hai phía của verify theo khóa cùng cột (PK đứng đầu) và cột PK hai phía.
+type keySidesOf struct {
+	src, dst                       keySide
+	srcCols, dstCols, srcPK, dstPK []ColumnInfo
+}
+
+func (mv *MerkleVerifier) keySides(ctx context.Context, t model.TableID, srcCodec, dstCodec *snapshot.PKCodec) (*keySidesOf, error) {
 	srcDB := mv.srcDB()
 	src := keySide{engine: mv.cfg.SourceEngine, db: srcDB, table: t, codec: srcCodec}
 	dst := keySide{engine: mv.cfg.TargetEngine, db: mv.cfg.Target, table: mv.targetTable(t), codec: dstCodec}
@@ -183,6 +184,39 @@ func (mv *MerkleVerifier) VerifyTableFullKeys(ctx context.Context, t model.Table
 	if len(srcPK) != len(pkNames) || len(dstPK) != len(pkNames) {
 		return nil, fmt.Errorf("table %s: primary key columns not found on both sides", t)
 	}
+	return &keySidesOf{src: src, dst: dst, srcCols: srcCols, dstCols: dstCols, srcPK: srcPK, dstPK: dstPK}, nil
+}
+
+// VerifyKeyPoints so từng khóa trong keys (cận tuple PK theo srcCodec) giữa hai phía bằng chuỗi chính
+// tắc và kiểm lại row lệch — delta cho bảng PK tổng quát ở cặp engine mà LiveVerifier không so được.
+// Cùng điều kiện với VerifyTableFullKeys: hai codec cùng cột, cùng thứ tự khóa (caller đã kiểm).
+func (mv *MerkleVerifier) VerifyKeyPoints(ctx context.Context, t model.TableID, srcCodec, dstCodec *snapshot.PKCodec, keys []snapshot.Bound) (*FullVerifyReport, error) {
+	ks, err := mv.keySides(ctx, t, srcCodec, dstCodec)
+	if err != nil {
+		return nil, err
+	}
+	chunks := make([]keyChunk, len(keys))
+	for i, b := range keys {
+		chunks[i] = keyChunk{id: i, lo: b, hi: b}
+	}
+	rep := &FullVerifyReport{Table: t.String(), TotalChunks: len(chunks)}
+	if err := mv.compareKeyChunks(ctx, ks.src, ks.dst, ks.srcCols, ks.dstCols, ks.srcPK, ks.dstPK, chunks, rep); err != nil {
+		return nil, err
+	}
+	return rep, nil
+}
+
+// VerifyTableFullKeys: full verify của bảng t có PK tổng quát. srcCodec/dstCodec: codec PK hai phía (cùng
+// cột, cùng thứ tự — caller đã kiểm).
+func (mv *MerkleVerifier) VerifyTableFullKeys(ctx context.Context, t model.TableID, srcCodec, dstCodec *snapshot.PKCodec) (*FullVerifyReport, error) {
+	if mv.cfg.Resume {
+		return nil, fmt.Errorf("table %s: --resume is not supported for a primary key that is not a single integer column", t)
+	}
+	ks, err := mv.keySides(ctx, t, srcCodec, dstCodec)
+	if err != nil {
+		return nil, err
+	}
+	src, dst, srcCols, dstCols, srcPK, dstPK := ks.src, ks.dst, ks.srcCols, ks.dstCols, ks.srcPK, ks.dstPK
 
 	chunks, err := mv.keyChunks(ctx, src)
 	if err != nil {
@@ -221,35 +255,56 @@ func (mv *MerkleVerifier) VerifyTableFullKeys(ctx context.Context, t model.Table
 		}
 	}
 	rep.MismatchedChunks = len(bad)
-	for _, c := range bad {
+	if err := mv.compareKeyChunks(ctx, src, dst, srcCols, dstCols, srcPK, dstPK, bad, rep); err != nil {
+		return nil, err
+	}
+	if m := mv.cfg.Metrics; m != nil {
+		m.VerifyMismatchTotal.WithLabelValues(mv.cfg.PipelineID, t.String()).Add(float64(len(rep.Mismatches)))
+		m.VerifyUnverifiableHotTotal.WithLabelValues(mv.cfg.PipelineID, t.String()).Add(float64(len(rep.UnverifiableHot)))
+	}
+	return rep, nil
+}
+
+// compareKeyChunks so từng row các chunk theo khóa, kiểm lại row lệch (recheck.go: đọc lại cả chunk ở
+// mỗi lần thử) để tách unverifiable_hot. Cận khóa của row lệch (để repair) lấy từ lần đọc đầu.
+func (mv *MerkleVerifier) compareKeyChunks(ctx context.Context, src, dst keySide, srcCols, dstCols, srcPK, dstPK []ColumnInfo, chunks []keyChunk, rep *FullVerifyReport) error {
+	for _, c := range chunks {
 		s, sb, err := src.rowsBounds(ctx, c, srcCols, srcPK)
 		if err != nil {
-			return nil, fmt.Errorf("source: %w", err)
+			return fmt.Errorf("source: %w", err)
 		}
 		d, db, err := dst.rowsBounds(ctx, c, dstCols, dstPK)
 		if err != nil {
-			return nil, fmt.Errorf("target: %w", err)
+			return fmt.Errorf("target: %w", err)
 		}
 		rep.RangesChecked++
 		rep.RowsChecked += len(s)
-		for k, sv := range s {
-			if dv, ok := d[k]; !ok || dv != sv {
-				rep.Mismatches = append(rep.Mismatches, k)
-				if b, ok := sb[k]; ok {
-					rep.MismatchKeys = append(rep.MismatchKeys, b)
-				}
+		suspects := diffKeys(s, d)
+		if len(suspects) == 0 {
+			continue
+		}
+		c := c
+		readSrc := func(ctx context.Context, _ []string) (map[string]string, error) {
+			return src.rows(ctx, c, srcCols, srcPK)
+		}
+		readDst := func(ctx context.Context, _ []string) (map[string]string, error) {
+			return dst.rows(ctx, c, dstCols, dstPK)
+		}
+		bad, hot, err := recheckSuspects(ctx, suspects, mv.cfg.RecheckRetries, readSrc, readDst, mv.cfg.ApplyWaiter)
+		if err != nil {
+			return fmt.Errorf("row re-check of %s: %w", src.table, err)
+		}
+		for _, k := range bad {
+			rep.Mismatches = append(rep.Mismatches, k)
+			if b, ok := sb[k]; ok {
+				rep.MismatchKeys = append(rep.MismatchKeys, b)
+			} else if b, ok := db[k]; ok {
+				rep.MismatchKeys = append(rep.MismatchKeys, b)
 			}
 		}
-		for k := range d {
-			if _, ok := s[k]; !ok {
-				rep.Mismatches = append(rep.Mismatches, k)
-				if b, ok := db[k]; ok {
-					rep.MismatchKeys = append(rep.MismatchKeys, b)
-				}
-			}
-		}
+		rep.UnverifiableHot = append(rep.UnverifiableHot, hot...)
 	}
-	return rep, nil
+	return nil
 }
 
 // keyChunks: "< min", các range keyset của nguồn, "> max" (bảng rỗng: một chunk mọi row).

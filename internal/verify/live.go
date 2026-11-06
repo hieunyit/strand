@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"strand/internal/checkpoint"
 	"strand/internal/model"
 	"strand/internal/snapshot"
 )
@@ -195,19 +194,14 @@ func (v *LiveVerifier) VerifyRanges(ctx context.Context, t model.TableID, pk str
 func (v *LiveVerifier) recheck(ctx context.Context, t model.TableID, pk, list, key string) (real, hot bool, err error) {
 	srcQ := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?", list, qt(t), qi(pk))
 	dstQ := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?", list, qt(v.target(t)), qi(pk))
+	w := v.waiter()
 	for attempt := 0; attempt < v.cfg.Retries; attempt++ {
 		s1, _, err := readRows(ctx, v.cfg.Source, srcQ, key)
 		if err != nil {
 			return false, false, err
 		}
-		if !v.cfg.SkipApplyWait {
-			var g string
-			if err := v.cfg.Source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&g); err != nil {
-				return false, false, err
-			}
-			if err := v.waitApplied(ctx, g); err != nil {
-				return false, false, err
-			}
+		if err := waitMark(ctx, w); err != nil {
+			return false, false, err
 		}
 		d, _, err := readRows(ctx, v.cfg.Target, dstQ, key)
 		if err != nil {
@@ -217,50 +211,54 @@ func (v *LiveVerifier) recheck(ctx context.Context, t model.TableID, pk, list, k
 		if err != nil {
 			return false, false, err
 		}
-		if s1[key] != s2[key] {
+		switch classifyObs(obsOf(s1, d, s2, key)) {
+		case verdictUnstable:
 			continue // row đổi trong cửa sổ: thử lại
+		case verdictMismatch:
+			return true, false, nil
 		}
-		return s1[key] != d[key], false, nil
+		return false, false, nil
 	}
 	return false, true, nil
 }
 
-func (v *LiveVerifier) waitApplied(ctx context.Context, executed string) error {
-	want, err := checkpoint.ParseMySQLGTIDSet(strings.ReplaceAll(executed, "\n", ""))
+// waiter trả ApplyWaiter MySQL→MySQL của LiveVerifier (nil khi SkipApplyWait).
+func (v *LiveVerifier) waiter() ApplyWaiter {
+	if v.cfg.SkipApplyWait {
+		return nil
+	}
+	return &LogApplyWaiter{Source: v.cfg.Source, Meta: v.cfg.Meta, PipelineID: v.cfg.PipelineID,
+		SourceEngine: model.EngineMySQL, TargetEngine: model.EngineMySQL, Limit: v.cfg.CatchUpLimit}
+}
+
+// waitMark: bước 2 của kiểm lại — đọc vị trí log source rồi chờ target apply tới đó (w nil: bỏ qua).
+func waitMark(ctx context.Context, w ApplyWaiter) error {
+	if w == nil {
+		return nil
+	}
+	m, err := w.Mark(ctx)
 	if err != nil {
 		return err
 	}
-	deadline := time.Now().Add(v.cfg.CatchUpLimit)
-	for {
-		got, err := checkpoint.LoadAppliedSnapshotMySQL(ctx, v.cfg.Meta, v.cfg.PipelineID, model.EngineMySQL)
-		if err != nil {
-			return err
-		}
-		miss := want.Clone().(*checkpoint.MySQLAppliedSet)
-		miss.Subtract(got.(*checkpoint.MySQLAppliedSet))
-		if miss.String() == "" {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("verify: target did not apply %s within %s", miss.String(), v.cfg.CatchUpLimit)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+	return w.Wait(ctx, m)
 }
 
 // SampleRanges chọn ngẫu nhiên các range liên tiếp phủ khoảng rate (0..1] số row của bảng,
 // mỗi range `rows` khóa (keyset trên source), ít nhất một range.
 func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, rate float64, rows int64, rng *rand.Rand) ([][2]int64, error) {
+	return SampleRangesEngine(ctx, db, model.EngineMySQL, t, pk, rate, rows, rng)
+}
+
+// SampleRangesEngine như SampleRanges cho source thuộc engine bất kỳ (PG: ước lượng số row từ
+// pg_class.reltuples).
+func SampleRangesEngine(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID, pk string, rate float64, rows int64, rng *rand.Rand) ([][2]int64, error) {
+	qpk, qtab, ph1 := QuoteIdent(engine, pk), QuoteTable(engine, t), keyPh(engine, 1)
 	if rows <= 0 {
 		rows = 1000
 	}
 	var mn, mx sql.NullInt64
 	var est int64
-	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s", qi(pk), qi(pk), qt(t))).Scan(&mn, &mx); err != nil {
+	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s", qpk, qpk, qtab)).Scan(&mn, &mx); err != nil {
 		return nil, err
 	}
 	if !mn.Valid {
@@ -272,8 +270,8 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 		next := mn.Int64
 		for next <= mx.Int64 {
 			var end sql.NullInt64
-			q := fmt.Sprintf("SELECT MAX(%s) FROM (SELECT %s FROM %s WHERE %s >= ? ORDER BY %s LIMIT %d) x",
-				qi(pk), qi(pk), qt(t), qi(pk), qi(pk), rows)
+			q := fmt.Sprintf("SELECT MAX(%s) FROM (SELECT %s FROM %s WHERE %s >= %s ORDER BY %s LIMIT %d) x",
+				qpk, qpk, qtab, qpk, ph1, qpk, rows)
 			if err := db.QueryRowContext(ctx, q, next).Scan(&end); err != nil {
 				return nil, err
 			}
@@ -295,8 +293,12 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 		}
 		return out, nil
 	}
-	_ = db.QueryRowContext(ctx, "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		t.Schema, t.Table).Scan(&est)
+	if engine == model.EnginePG {
+		_ = db.QueryRowContext(ctx, "SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = to_regclass($1)", qtab).Scan(&est)
+	} else {
+		_ = db.QueryRowContext(ctx, "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+			t.Schema, t.Table).Scan(&est)
+	}
 	n := int(float64(est)*rate/float64(rows)) + 1
 	var out [][2]int64
 	for i := 0; i < n; i++ {
@@ -312,8 +314,8 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 			}
 		}
 		var end sql.NullInt64
-		q := fmt.Sprintf("SELECT MAX(%s) FROM (SELECT %s FROM %s WHERE %s >= ? ORDER BY %s LIMIT %d) x",
-			qi(pk), qi(pk), qt(t), qi(pk), qi(pk), rows)
+		q := fmt.Sprintf("SELECT MAX(%s) FROM (SELECT %s FROM %s WHERE %s >= %s ORDER BY %s LIMIT %d) x",
+			qpk, qpk, qtab, qpk, ph1, qpk, rows)
 		if err := db.QueryRowContext(ctx, q, start).Scan(&end); err != nil {
 			return nil, err
 		}

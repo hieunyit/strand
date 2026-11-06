@@ -609,10 +609,12 @@ Lệnh tạo slot cùng exported snapshot, rồi chạy `pg_dump --snapshot` (`-
 
 | Chế độ | Lệnh | Cặp | Ghi chú |
 | --- | --- | --- | --- |
-| sample | `verify --mode sample --table app.t [--rate 0.01]` | MySQL→MySQL | Lấy mẫu `--rate` phần row theo khoảng khóa, so trực tiếp. Chờ target apply tới thời điểm đọc. Row quá nóng được đếm `unverifiable_hot` |
-| delta | `verify --mode delta` | MySQL→MySQL | Qua socket: verify các khóa CDC vừa chạm. Lệch thì exit 5 |
+| sample | `verify --mode sample --table app.t [--rate 0.01]` | Mọi cặp (PG→PG, MySQL→PG: chỉ PK một cột số nguyên) | Lấy mẫu `--rate` phần row theo khoảng khóa, so trực tiếp (khác engine: so chuỗi chính tắc như full) |
+| delta | `verify --mode delta` | Mọi cặp | Qua socket: verify các khóa CDC vừa chạm. Lệch thì exit 5 |
 | full | `verify --mode full [--table app.t] [--rate N]` | Mọi cặp | Cây Merkle theo chunk 10.000 row, rồi so từng row ở chunk lệch. `--rate` ở đây là chunk/giây (không đặt thì 10) |
 
+- Mọi chế độ kiểm lại row lệch: đọc source, chờ target apply tới vị trí log của source lúc đọc (MySQL: `gtid_executed`; PG: WAL insert LSN, kèm một watermark `pg_logical_emit_message` để pipeline dời checkpoint qua đó cả khi source rảnh), đọc target, đọc lại source. Row đổi ở source trong mọi lần thử (mặc định 5) được đếm `unverifiable_hot` (metric `strand_verify_unverifiable_hot_total`), không báo lệch.
+- Bước chờ apply chỉ chạy khi pipeline đang chạy (khóa pipeline trên target đang bị giữ). Pipeline đã dừng thì không chờ; pipeline đang `pause` thì chờ hết hạn (2 phút) rồi lỗi. Source PG đọc qua `--replica-dsn` (standby) không ghi được watermark: source rảnh thì chờ có thể hết hạn.
 - `--table` của full: không đặt thì dùng `tables.include`, nhưng **không nhận wildcard**. Với `app.*`, phải chạy từng bảng (handoff dòng 51).
 - `--resume`: chạy tiếp lượt full bị ngắt. Chỉ dùng lại chunk đã khớp. Lượt chạy hết thì tiến độ bị xóa. Không có cho PK tổng quát.
 - `--replica-dsn`: đọc phía source từ replica.

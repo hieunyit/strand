@@ -16,7 +16,8 @@ package verify
 //  4. Dựng cây Merkle (lá = hash chunk, nút cha = sha256(trái:phải)) ở hai phía, so từ gốc, chỉ
 //     đi xuống nhánh khác hash. Lá khác hash là chunk duy nhất phải so từng row.
 //  5. So từng row trong chunk lệch: dùng LiveVerifier (MySQL→MySQL, nếu được cấu hình) hoặc so
-//     chuỗi chính tắc theo PK (mọi cặp engine).
+//     chuỗi chính tắc theo PK (mọi cặp engine). Cả hai kiểm lại row lệch theo vị trí log để row đang
+//     đổi liên tục được báo unverifiable_hot, không báo lệch (recheck.go).
 //
 // Giới hạn của chuẩn hóa (canonicalValueExpr):
 //   - Số thực (FLOAT/DOUBLE, real/double precision): so theo chữ số ngắn nhất round-trip của giá trị
@@ -96,7 +97,13 @@ type FullVerifyConfig struct {
 	// LiveVerifier, nếu có và cả hai phía là MySQL, được dùng để so từng row trong chunk lệch
 	// (có kiểm lại PK để tách unverifiable_hot). Chạy độc lập thì tạo nó với SkipApplyWait.
 	LiveVerifier *LiveVerifier
-	Metrics      *metrics.Metrics
+	// Các cặp khác (và MySQL→MySQL không có LiveVerifier): row lệch được kiểm lại bằng chuỗi chính tắc
+	// (recheck.go) tối đa RecheckRetries lần (mặc định DefaultRecheckRetries). ApplyWaiter chờ target
+	// apply tới vị trí log của source trước khi đọc target; nil = không có pipeline đang chạy, bỏ bước
+	// chờ (row đổi ở source trong cửa sổ kiểm lại vẫn được báo unverifiable_hot).
+	RecheckRetries int
+	ApplyWaiter    ApplyWaiter
+	Metrics        *metrics.Metrics
 }
 
 // FullVerifyReport là kết quả full verify một bảng.
@@ -740,29 +747,8 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 		}
 		rep.RangesChecked, rep.RowsChecked = lr.RangesChecked, lr.RowsChecked
 		rep.Mismatches, rep.UnverifiableHot = lr.Mismatches, lr.UnverifiableHot
-	} else {
-		for _, r := range ranges {
-			s, err := readCanonicalRows(ctx, src, mv.cfg.SourceEngine, t, pkCol, srcCols, r)
-			if err != nil {
-				return nil, fmt.Errorf("source: %w", err)
-			}
-			d, err := readCanonicalRows(ctx, mv.cfg.Target, mv.cfg.TargetEngine, dstTable, pkCol, dstCols, r)
-			if err != nil {
-				return nil, fmt.Errorf("target: %w", err)
-			}
-			rep.RangesChecked++
-			rep.RowsChecked += len(s)
-			for k, sv := range s {
-				if dv, ok := d[k]; !ok || dv != sv {
-					rep.Mismatches = append(rep.Mismatches, k)
-				}
-			}
-			for k := range d {
-				if _, ok := s[k]; !ok {
-					rep.Mismatches = append(rep.Mismatches, k)
-				}
-			}
-		}
+	} else if err := mv.compareIntRanges(ctx, t, pkCol, srcCols, dstCols, ranges, rep); err != nil {
+		return nil, err
 	}
 	if m := mv.cfg.Metrics; m != nil {
 		m.VerifyMismatchTotal.WithLabelValues(mv.cfg.PipelineID, tableKey).Add(float64(len(rep.Mismatches)))

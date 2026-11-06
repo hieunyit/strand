@@ -237,6 +237,57 @@ func (p *Pipeline) liveVerifier() *verify.LiveVerifier {
 	})
 }
 
+// liveMySQL: LiveVerifier (so ảnh MySQL nguyên văn) chỉ dùng được cho MySQL→MySQL; cặp khác so chuỗi
+// chính tắc (canonicalVerifier).
+func (p *Pipeline) liveMySQL() bool {
+	return p.srcEngine == model.EngineMySQL && p.dstEngine == model.EngineMySQL
+}
+
+// canonicalVerifier so từng row bằng chuỗi chính tắc (mọi cặp engine) và kiểm lại row lệch, chờ target
+// apply tới vị trí log của source (gtid_executed / WAL insert LSN + watermark) như LiveVerifier.
+func (p *Pipeline) canonicalVerifier() *verify.MerkleVerifier {
+	return verify.NewMerkleVerifier(verify.FullVerifyConfig{
+		Source: p.src, Target: p.dst, Meta: p.dst, PipelineID: p.id,
+		SourceEngine: p.srcEngine, TargetEngine: p.dstEngine, TargetName: p.filter.Target,
+		ApplyWaiter: &verify.LogApplyWaiter{Source: p.src, Meta: p.dst, PipelineID: p.id,
+			SourceEngine: p.srcEngine, TargetEngine: p.dstEngine},
+	})
+}
+
+// targetKeyCodec: codec PK của bảng đích, đã kiểm cùng thứ tự với source (như checkSnapshotKey, không
+// ghi vào meta).
+func (p *Pipeline) targetKeyCodec(ctx context.Context, id model.TableID, m *tableMeta) (*snapshot.PKCodec, error) {
+	if m.TargetPKCodec != nil {
+		return m.TargetPKCodec, nil
+	}
+	tgt := p.filter.Target(id)
+	var dc *snapshot.PKCodec
+	var err error
+	if p.dstEngine == model.EnginePG {
+		dc, err = pgPKCodec(ctx, p.dst, tgt, m.PK)
+	} else {
+		dc, err = mysqlPKCodec(ctx, p.dst, tgt, m.PK)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("verify %s: target primary key: %w", id, err)
+	}
+	if p.srcEngine == p.dstEngine {
+		err = m.PKCodec.SameOrder(dc)
+	} else {
+		err = snapshot.CrossEngineSameOrder(m.PKCodec, dc)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("verify %s: target orders the primary key differently from the source: %w", id, err)
+	}
+	return dc, nil
+}
+
+// tableVerdict là kết quả verify một bảng (chung cho LiveVerifier và canonicalVerifier).
+type tableVerdict struct {
+	ranges, rows    int
+	mismatches, hot []string
+}
+
 // verifyTables chạy sample (rate) cho mọi bảng và verify các khóa trong keys; trả lỗi
 // verify_mismatch nếu có lệch thật.
 func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[model.TableID][]int64) error {
@@ -246,6 +297,10 @@ func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[mode
 // verifyTablesKeys như verifyTables, kèm khóa đã chạm của bảng PK tổng quát (gen).
 func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[model.TableID][]int64, gen map[model.TableID][]snapshot.Bound) error {
 	lv := p.liveVerifier()
+	var cv *verify.MerkleVerifier
+	if !p.liveMySQL() {
+		cv = p.canonicalVerifier()
+	}
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	p.tablesMu.RLock()
 	ids := make([]model.TableID, 0, len(p.tables))
@@ -267,7 +322,7 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 		m := p.table(id)
 		var ranges [][2]int64
 		if rate > 0 {
-			r, err := verify.SampleRanges(ctx, p.src, id, m.PK[0], rate, 1000, rng)
+			r, err := verify.SampleRangesEngine(ctx, p.src, p.srcEngine, id, m.PK[0], rate, 1000, rng)
 			if err != nil {
 				return err
 			}
@@ -277,18 +332,28 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 		if len(ranges) == 0 {
 			continue
 		}
-		rep, err := lv.VerifyRanges(ctx, id, m.PK[0], ranges)
-		if err != nil {
-			return err
+		var rep tableVerdict
+		if cv != nil {
+			r, err := cv.VerifyRanges(ctx, id, m.PK[0], ranges)
+			if err != nil {
+				return err
+			}
+			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
+		} else {
+			r, err := lv.VerifyRanges(ctx, id, m.PK[0], ranges)
+			if err != nil {
+				return err
+			}
+			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
 		}
-		p.log.Info("verify", "table", id.String(), "ranges", rep.RangesChecked, "rows", rep.RowsChecked,
-			"mismatches", len(rep.Mismatches), "unverifiable_hot", len(rep.UnverifiableHot))
-		if n := len(rep.UnverifiableHot); n > 0 {
+		p.log.Info("verify", "table", id.String(), "ranges", rep.ranges, "rows", rep.rows,
+			"mismatches", len(rep.mismatches), "unverifiable_hot", len(rep.hot))
+		if n := len(rep.hot); n > 0 {
 			p.metrics.VerifyUnverifiableHotTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
 		}
-		if n := len(rep.Mismatches); n > 0 {
+		if n := len(rep.mismatches); n > 0 {
 			p.metrics.VerifyMismatchTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
-			pks := rep.Mismatches
+			pks := rep.mismatches
 			if len(pks) > 10 {
 				pks = pks[:10]
 			}
@@ -299,29 +364,48 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 	for _, id := range genIDs {
 		m := p.table(id)
 		var ranges []verify.KeyRange
-		if rate > 0 {
+		if rate > 0 && cv == nil {
 			r, err := verify.SampleKeyRanges(ctx, p.src, id, m.PKCodec, rate, 1000, rng)
 			if err != nil {
 				return err
 			}
 			ranges = append(ranges, r...)
 		}
-		ranges = append(ranges, verify.PointRanges(gen[id])...)
-		if len(ranges) == 0 {
-			continue
+		var rep tableVerdict
+		if cv != nil {
+			// Cặp khác MySQL→MySQL: chỉ khóa đã chạm (delta); SampleKeyRanges là SQL của MySQL nên
+			// rate > 0 (post-seed, chỉ MySQL→MySQL) không lấy mẫu ở đây.
+			if len(gen[id]) == 0 {
+				continue
+			}
+			dc, err := p.targetKeyCodec(ctx, id, m)
+			if err != nil {
+				return err
+			}
+			r, err := cv.VerifyKeyPoints(ctx, id, m.PKCodec, dc, gen[id])
+			if err != nil {
+				return err
+			}
+			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
+		} else {
+			ranges = append(ranges, verify.PointRanges(gen[id])...)
+			if len(ranges) == 0 {
+				continue
+			}
+			r, err := lv.VerifyKeyRanges(ctx, id, m.PKCodec, ranges)
+			if err != nil {
+				return err
+			}
+			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
 		}
-		rep, err := lv.VerifyKeyRanges(ctx, id, m.PKCodec, ranges)
-		if err != nil {
-			return err
-		}
-		p.log.Info("verify", "table", id.String(), "ranges", rep.RangesChecked, "rows", rep.RowsChecked,
-			"mismatches", len(rep.Mismatches), "unverifiable_hot", len(rep.UnverifiableHot))
-		if n := len(rep.UnverifiableHot); n > 0 {
+		p.log.Info("verify", "table", id.String(), "ranges", rep.ranges, "rows", rep.rows,
+			"mismatches", len(rep.mismatches), "unverifiable_hot", len(rep.hot))
+		if n := len(rep.hot); n > 0 {
 			p.metrics.VerifyUnverifiableHotTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
 		}
-		if n := len(rep.Mismatches); n > 0 {
+		if n := len(rep.mismatches); n > 0 {
 			p.metrics.VerifyMismatchTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
-			pks := rep.Mismatches
+			pks := rep.mismatches
 			if len(pks) > 10 {
 				pks = pks[:10]
 			}
@@ -399,9 +483,8 @@ func (p *Pipeline) takePostSeedKeys() (map[model.TableID][]int64, map[model.Tabl
 // (cần verify.delta: on), trả báo cáo theo bảng. Verify lỗi (không phải lệch) thì gộp lại khóa đã lấy
 // để lần sau verify lại; có bảng vượt giới hạn ghi khóa thì không báo sạch (review N12).
 func (p *Pipeline) VerifyDelta(ctx context.Context) (string, error) {
-	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
-		return "", fmt.Errorf("verify --mode delta is supported for MySQL → MySQL pipelines only; use verify --mode full")
-	}
+	// MySQL→MySQL so bằng LiveVerifier; PG→PG, MySQL→PG so chuỗi chính tắc (canonicalVerifier) — cả hai
+	// kiểm lại row lệch, row đổi liên tục báo unverifiable_hot.
 	if !p.touched.active(touchDelta) {
 		return "", fmt.Errorf("verify --mode delta needs verify.delta: on in the pipeline config (no changed keys are being tracked)")
 	}
