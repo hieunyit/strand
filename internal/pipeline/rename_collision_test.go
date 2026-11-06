@@ -45,3 +45,30 @@ func TestR10_TargetCollisionInFinalTableList(t *testing.T) {
 		t.Fatalf("unexpected collision: %v", err)
 	}
 }
+
+// review G3: target MySQL so tên đích không phân biệt hoa thường — a.t1→a.T va chạm với a.t (không rename),
+// hai rename về b.X / b.x cũng vậy; target PG (foldCase=false) giữ so chính xác.
+func TestG3_TargetCollisionCaseInsensitiveForMySQLTarget(t *testing.T) {
+	if _, err := newTargetTableFilter([]string{"a.*"}, nil, map[string]string{"a.t1": "b.X", "a.t2": "b.x"}, true); err == nil {
+		t.Fatalf("case-only duplicate rename target must be rejected for MySQL target")
+	}
+	if _, err := newTargetTableFilter([]string{"a.*"}, nil, map[string]string{"a.t1": "b.X", "a.t2": "b.x"}, false); err != nil {
+		t.Fatalf("PG target: case-distinct targets must be accepted: %v", err)
+	}
+	t1 := model.TableID{Schema: "a", Table: "t1"}
+	lower := model.TableID{Schema: "a", Table: "t"}
+	for _, fold := range []bool{true, false} {
+		f, err := newTargetTableFilter([]string{"a.*"}, nil, map[string]string{"a.t1": "A.T"}, fold)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = checkTargetCollisions(f, map[model.TableID]*tableMeta{t1: {}, lower: {}}, nil)
+		var se *exitcode.Error
+		if fold && (!errors.As(err, &se) || se.ExitCode != exitcode.InvalidSyntax) {
+			t.Fatalf("MySQL target: a.t1→A.T must collide with a.t, got %v", err)
+		}
+		if !fold && err != nil {
+			t.Fatalf("PG target: A.T and a.t are distinct: %v", err)
+		}
+	}
+}

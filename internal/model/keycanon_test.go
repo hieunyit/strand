@@ -57,3 +57,30 @@ func TestSpillRoundTripKeepsForeignKeyParentIndex(t *testing.T) {
 		}
 	}
 }
+
+// review G4: kana và ký tự ignorable/điều khiển mà utf8mb4_0900_ai_ci / collation ja coi là bằng nhau ở
+// mức primary phải cùng bộ xương.
+func TestG4_FoldStringKanaAndIgnorables(t *testing.T) {
+	eq := [][2]string{
+		{"カタカナ", "かたかな"},             // katakana ↔ hiragana
+		{"ｶﾀｶﾅ", "かたかな"},             // katakana nửa độ rộng
+		{"ガギグ", "かきく"},               // dấu kêu (secondary) bị bỏ
+		{"ﾊﾞﾊﾟ", "はは"},               // dấu kêu nửa độ rộng
+		{"ァィゥェォッャュョヮ", "あいうえおつやゆよわ"}, // kana nhỏ
+		{"ヵヶ", "かけ"}, {"ㇰㇳ", "くと"},
+		{"カー", "かあ"}, {"ｶｰ", "かあ"}, {"コーヒー", "こおひい"}, {"ラーメン", "らあめん"}, // dấu kéo dài
+		{"いすゞ", "いすす"}, {"コヽロ", "こころ"}, // dấu lặp
+		{"ab", "a\x00b"}, {"ab", "a\x07b"}, {"a\tb", "ab"}, {"ab\n", "ab"}, // Cc
+		{"ab", "aㅤb"}, {"ab", "aﾠb"}, {"ab", "a\U000E0100b"}, {"ab", "a͏b"}, // default-ignorable
+	}
+	for _, p := range eq {
+		if foldString(p[0]) != foldString(p[1]) {
+			t.Errorf("fold(%q)=%q != fold(%q)=%q", p[0], foldString(p[0]), p[1], foldString(p[1]))
+		}
+	}
+	for _, p := range [][2]string{{"かた", "かな"}, {"カー", "かい"}, {"ab", "a b"}} {
+		if foldString(p[0]) == foldString(p[1]) {
+			t.Errorf("fold(%q) == fold(%q): distinct keys must stay distinct", p[0], p[1])
+		}
+	}
+}

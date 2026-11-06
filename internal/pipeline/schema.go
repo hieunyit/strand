@@ -21,10 +21,19 @@ type tableFilter struct {
 	include []string
 	exclude []string
 	rename  map[string]model.TableID
+	// foldCase: so tên bảng đích không phân biệt hoa thường khi kiểm va chạm (review G3) — target MySQL
+	// với lower_case_table_names=1/2 (mặc định trên Windows/macOS) coi a.T và a.t là một bảng. Thận trọng:
+	// luôn bật cho target MySQL; target PG so chính xác vì strand luôn quote định danh.
+	foldCase bool
 }
 
 func newTableFilter(include, exclude []string, rename map[string]string) (*tableFilter, error) {
-	f := &tableFilter{include: include, exclude: exclude, rename: map[string]model.TableID{}}
+	return newTargetTableFilter(include, exclude, rename, false)
+}
+
+// newTargetTableFilter như newTableFilter, foldCase = target so tên không phân biệt hoa thường (review G3).
+func newTargetTableFilter(include, exclude []string, rename map[string]string, foldCase bool) (*tableFilter, error) {
+	f := &tableFilter{include: include, exclude: exclude, rename: map[string]model.TableID{}, foldCase: foldCase}
 	for _, p := range append(append([]string{}, include...), exclude...) {
 		if _, err := path.Match(p, "x.y"); err != nil {
 			return nil, fmt.Errorf("invalid table pattern %q: %w", p, err)
@@ -44,10 +53,10 @@ func newTableFilter(include, exclude []string, rename map[string]string) (*table
 			return nil, fmt.Errorf("rename target %q must be schema.table", to)
 		}
 		id := model.TableID{Schema: s, Table: t}
-		if prev, dup := byTarget[id]; dup {
+		if prev, dup := byTarget[f.targetKey(id)]; dup {
 			return nil, fmt.Errorf("tables.rename maps both %q and %q to %q: each target table must come from exactly one source table", prev, from, to)
 		}
-		byTarget[id] = from
+		byTarget[f.targetKey(id)] = from
 		f.rename[from] = id
 	}
 	return f, nil
@@ -71,14 +80,22 @@ func checkTargetCollisions(f *tableFilter, tables, existing map[model.TableID]*t
 	byTarget := make(map[model.TableID]model.TableID, len(ids))
 	for _, id := range ids {
 		t := f.Target(id)
-		if prev, dup := byTarget[t]; dup {
+		if prev, dup := byTarget[f.targetKey(t)]; dup {
 			return exitcode.New("invalid_rename", exitcode.InvalidSyntax,
 				fmt.Sprintf("source tables %s and %s both map to target table %s (check tables.rename / tables.include): "+
 					"each target table must come from exactly one source table", prev, id, t), nil)
 		}
-		byTarget[t] = id
+		byTarget[f.targetKey(t)] = id
 	}
 	return nil
+}
+
+// targetKey là khóa so trùng tên bảng đích: chữ thường khi foldCase (review G3), nguyên văn nếu không.
+func (f *tableFilter) targetKey(t model.TableID) model.TableID {
+	if f.foldCase {
+		return model.TableID{Schema: strings.ToLower(t.Schema), Table: strings.ToLower(t.Table)}
+	}
+	return t
 }
 
 func (f *tableFilter) Included(t model.TableID) bool {
@@ -129,6 +146,20 @@ type tableMeta struct {
 	// exclusion) và không REPLICA IDENTITY FULL — pgoutput không gửi giá trị cũ nên writeset không thấy
 	// xung đột; ở relaxed mọi Txn chạm bảng đi làn tuần tự (model.Txn.Lane).
 	LaneTable bool
+}
+
+// checkPrimaryKeyPrefix từ chối bảng MySQL có PRIMARY KEY chứa cột prefix, ví dụ PRIMARY KEY (code(10))
+// (review G1, cùng gốc với N01). Tính duy nhất chỉ nằm trên prefix, trong khi writeset, keyset/codec
+// snapshot, verify và upsert/delete của writer đều coi PK là định danh theo TOÀN BỘ giá trị cột: hai row
+// khác giá trị nhưng trùng prefix là cùng một row ở nguồn — không có cách ánh xạ an toàn, nên fail closed.
+// prefix: tên index → có cột SUB_PART khác NULL (như loadSourceTables đọc).
+func checkPrimaryKeyPrefix(id model.TableID, prefix map[string]bool) error {
+	if !prefix["PRIMARY"] {
+		return nil
+	}
+	return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf(
+		"table %s: primary key with prefix part is not supported (uniqueness is on the column prefix, "+
+			"strand identifies rows by the full primary key value); use a full-column primary key", id), nil)
 }
 
 // loadSourceTables đọc từ information_schema của source mọi bảng thỏa bộ lọc,
@@ -208,6 +239,9 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 			}
 		}
 		ir.Close()
+		if err := checkPrimaryKeyPrefix(id, prefix); err != nil {
+			return nil, err
+		}
 		sort.Strings(names)
 		for _, n := range names {
 			if n == "PRIMARY" {

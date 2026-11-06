@@ -140,7 +140,36 @@ tables:
 	if exitcode.GetExitCode(err) != exitcode.InvalidSyntax || err == nil || !strings.Contains(err.Error(), "b.t") {
 		t.Fatalf("want exit 2 naming the duplicate target, got %v", err)
 	}
-	if err := config.ValidateRename(map[string]string{"a.t1": "b.t1", "a.t2": "b.t2"}); err != nil {
+	if err := config.ValidateRename(map[string]string{"a.t1": "b.t1", "a.t2": "b.t2"}, true); err != nil {
 		t.Fatalf("distinct targets must be accepted: %v", err)
+	}
+}
+
+// review G3: target MySQL (lower_case_table_names=1/2) coi b.T và b.t là một bảng — rename về hai tên chỉ
+// khác hoa thường phải bị từ chối; target PG (định danh được quote) thì nhận.
+func TestG3_RenameCollisionCaseInsensitiveForMySQLTarget(t *testing.T) {
+	yml := func(target string) []byte {
+		return []byte(`
+version: 1
+name: case-rename
+source: { kind: mysql, dsn: "root:secret@tcp(127.0.0.1:3306)/a" }
+target: ` + target + `
+tables:
+  include: ["a.*"]
+  rename: { "a.t1": "b.T", "a.t2": "b.t" }
+`)
+	}
+	_, err := config.LoadYAMLStrict(yml(`{ kind: mysql, dsn: "root:secret@tcp(127.0.0.1:3307)/b" }`))
+	if exitcode.GetExitCode(err) != exitcode.InvalidSyntax || err == nil || !strings.Contains(err.Error(), "b.t") {
+		t.Fatalf("mysql target: want exit 2 for case-only duplicate rename target, got %v", err)
+	}
+	if _, err := config.LoadYAMLStrict(yml(`{ kind: postgres, dsn: "postgres://u:p@127.0.0.1:5432/b" }`)); err != nil {
+		t.Fatalf("postgres target: case-distinct quoted names must be accepted: %v", err)
+	}
+	if err := config.ValidateRename(map[string]string{"a.t1": "b.T", "a.t2": "b.t"}, false); err != nil {
+		t.Fatalf("exact compare must accept case-distinct targets: %v", err)
+	}
+	if !config.TargetFoldsTableCase("mysql") || config.TargetFoldsTableCase("postgres") || config.TargetFoldsTableCase(" PG ") {
+		t.Fatalf("TargetFoldsTableCase wrong")
 	}
 }

@@ -20,6 +20,12 @@ import (
 // giờ thiếu cạnh. Bộ xương: NFKD, bỏ dấu (Mn/Me) và ký tự định dạng (Cf), chữ thường theo SimpleFold,
 // tách chữ ghép (ß→s, æ→ae, ...), gộp các ký tự lặp liền nhau (để 'ß'='ss'='s' như UCA và general_ci),
 // bỏ khoảng trắng cuối.
+//
+// review G4: thêm ký tự điều khiển (Cc) và code point default-ignorable (Other_Default_Ignorable_Code_Point,
+// Variation_Selector) — UCA của MySQL bỏ qua nhiều ký tự loại này — và kana: katakana (cả nửa độ rộng, qua
+// NFKD) về hiragana, kana nhỏ về kana thường, dấu lặp ゝ/ヽ bỏ (gộp lặp làm "かゝ" = "かか"), dấu kéo dài
+// ー thay bằng nguyên âm của kana trước nó (như collation ja: "カー" = "かあ"). utf8mb4_0900_ai_ci và
+// collation ja coi chúng bằng nhau ở mức primary.
 
 // canonValue trả về dạng chuẩn của một giá trị khóa để hash.
 func canonValue(v Value) string {
@@ -66,8 +72,25 @@ func foldString(s string) string {
 		out = append(out, r)
 	}
 	for _, r := range d {
-		if unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
+		if unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf, unicode.Cc) {
 			continue
+		}
+		if r >= 0x80 {
+			if unicode.In(r, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) {
+				continue
+			}
+			// review G4: kana (xem chú thích đầu file).
+			switch r = foldKana(r); r {
+			case 0x309D: // ゝ (ヽ đã về ゝ; ゞ/ヾ đã tách thành ゝ + dấu kêu)
+				continue
+			case 0x30FC: // ー
+				if n := len(out); n > 0 {
+					if v, ok := kanaVowel[out[n-1]]; ok {
+						push(v)
+						continue
+					}
+				}
+			}
 		}
 		if l, ok := ligatures[r]; ok {
 			for _, x := range l {
@@ -82,6 +105,43 @@ func foldString(s string) string {
 	}
 	return string(out)
 }
+
+// foldKana đưa katakana về hiragana và kana nhỏ về kana thường (review G4). Katakana nửa độ rộng đã thành
+// toàn độ rộng qua NFKD trước khi tới đây.
+func foldKana(r rune) rune {
+	switch {
+	case r >= 0x30A1 && r <= 0x30F6, r == 0x30FD, r == 0x30FE: // ァ..ヶ, ヽ, ヾ → ぁ..ゖ, ゝ, ゞ
+		r -= 0x60
+	case r >= 0x31F0 && r <= 0x31FF: // ㇰ..ㇿ (katakana nhỏ mở rộng)
+		return smallKanaExt[r-0x31F0]
+	}
+	if l, ok := smallKana[r]; ok {
+		return l
+	}
+	return r
+}
+
+var smallKana = map[rune]rune{
+	'ぁ': 'あ', 'ぃ': 'い', 'ぅ': 'う', 'ぇ': 'え', 'ぉ': 'お', 'っ': 'つ', 'ゃ': 'や', 'ゅ': 'ゆ', 'ょ': 'よ',
+	'ゎ': 'わ', 'ゕ': 'か', 'ゖ': 'け',
+}
+
+// smallKanaExt: U+31F0..U+31FF ㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ → hiragana thường.
+var smallKanaExt = [16]rune{'く', 'し', 'す', 'と', 'ぬ', 'は', 'ひ', 'ふ', 'へ', 'ほ', 'む', 'ら', 'り', 'る', 'れ', 'ろ'}
+
+// kanaVowel: hiragana thường (không dấu kêu, đã tách qua NFKD) → nguyên âm thay cho ー đứng sau nó.
+var kanaVowel = func() map[rune]rune {
+	m := map[rune]rune{'ん': 'ん'}
+	for v, row := range map[rune]string{
+		'あ': "あかさたなはまやらわ", 'い': "いきしちにひみりゐ", 'う': "うくすつぬふむゆる",
+		'え': "えけせてねへめれゑ", 'お': "おこそとのほもよろを",
+	} {
+		for _, k := range row {
+			m[k] = v
+		}
+	}
+	return m
+}()
 
 // minFold trả về phần tử nhỏ nhất trong lớp SimpleFold của r (k, K, và ký hiệu Kelvin cùng một lớp).
 func minFold(r rune) rune {

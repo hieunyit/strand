@@ -313,7 +313,7 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 			fmt.Sprintf("invalid bootstrap.create_schema %q (want auto | off)", cfg.Bootstrap.CreateSchema), nil)
 	}
 
-	if err := ValidateRename(cfg.Tables.Rename); err != nil {
+	if err := ValidateRename(cfg.Tables.Rename, TargetFoldsTableCase(cfg.Target.Kind)); err != nil {
 		return nil, err
 	}
 
@@ -334,8 +334,9 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 // ValidateRename kiểm tables.rename là đơn ánh (review R10): hai bảng nguồn đổi tên về cùng một bảng
 // đích sẽ ghi chung một không gian PK ở target, row của bảng này đè row của bảng kia. Từ chối sớm khi
 // nạp cấu hình (exit 2). Va chạm với bảng nguồn KHÔNG rename chỉ phát hiện được khi đã có danh sách
-// bảng thật (pipeline kiểm lại sau khi đọc source).
-func ValidateRename(rename map[string]string) error {
+// bảng thật (pipeline kiểm lại sau khi đọc source). foldCase: so tên đích không phân biệt hoa thường
+// (target MySQL, review G3 — xem TargetFoldsTableCase).
+func ValidateRename(rename map[string]string, foldCase bool) error {
 	froms := make([]string, 0, len(rename))
 	for from := range rename {
 		froms = append(froms, from)
@@ -344,11 +345,27 @@ func ValidateRename(rename map[string]string) error {
 	seen := make(map[string]string, len(rename))
 	for _, from := range froms {
 		to := rename[from]
-		if prev, ok := seen[to]; ok {
+		key := to
+		if foldCase {
+			key = strings.ToLower(to)
+		}
+		if prev, ok := seen[key]; ok {
 			return exitcode.New("invalid_rename", exitcode.InvalidSyntax,
 				fmt.Sprintf("tables.rename maps both %q and %q to %q: each target table must come from exactly one source table", prev, from, to), nil)
 		}
-		seen[to] = from
+		seen[key] = from
 	}
 	return nil
+}
+
+// TargetFoldsTableCase: target kind có thể coi tên bảng khác hoa thường là cùng một bảng (review G3).
+// MySQL với lower_case_table_names=1/2 (mặc định trên Windows/macOS) thì a.T và a.t trùng nhau; không
+// biết giá trị biến lúc nạp cấu hình nên thận trọng coi mọi target không phải PG là gộp hoa thường.
+// PG: strand luôn quote định danh nên tên phân biệt hoa thường.
+func TargetFoldsTableCase(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "postgres", "postgresql", "pg":
+		return false
+	}
+	return true
 }

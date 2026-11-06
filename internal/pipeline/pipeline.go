@@ -271,7 +271,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.runCtx = ctx
 
 	var err error
-	if p.filter, err = newTableFilter(p.cfg.Tables.Include, p.cfg.Tables.Exclude, p.cfg.Tables.Rename); err != nil {
+	// review G3: target MySQL so tên bảng đích không phân biệt hoa thường (lower_case_table_names).
+	if p.filter, err = newTargetTableFilter(p.cfg.Tables.Include, p.cfg.Tables.Exclude, p.cfg.Tables.Rename, p.dstEngine != model.EnginePG); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 	}
 
