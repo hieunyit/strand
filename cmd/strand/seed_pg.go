@@ -47,7 +47,7 @@ type pgPlanFlags struct {
 func (f *pgPlanFlags) register(c *cobra.Command) {
 	c.Flags().StringVar(&f.slot, "slot", "", "PG: slot logical (đã tạo trên --source) — P = consistent_point/confirmed_flush_lsn của slot")
 	c.Flags().StringVar(&f.backupLabel, "backup-label", "", "PG: label pgBackRest / backup_name WAL-G cần dùng (mặc định: backup mới nhất kết thúc trước P)")
-	c.Flags().StringVar(&f.archiveInfo, "archive-info", "", "WAL-G: file JSON của `wal-g wal-show --detailed-json` (phạm vi archive, SD-2)")
+	c.Flags().StringVar(&f.archiveInfo, "archive-info", "", "inventory archive WAL (SD-2): WAL-G = JSON của `wal-g wal-show --detailed-json`; pgBackRest = JSON của `pgbackrest repo-ls archive/<stanza>/<archive-id> --recurse --output=json` (bắt buộc: `info` chỉ có min/max, review N08)")
 	c.Flags().StringVar(&f.toolVersion, "tool-version", "", "PG: phiên bản công cụ khi metadata không ghi (WAL-G)")
 	c.Flags().DurationVar(&f.eta, "eta", 2*time.Hour, "PG: thời gian restore dự kiến; backup không được expire trong khoảng này")
 	c.Flags().IntVar(&f.retentionFull, "retention-full", 0, "PG: repo1-retention-full (pgBackRest) / số FULL giữ lại (wal-g delete retain FULL N)")

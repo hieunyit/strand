@@ -552,7 +552,7 @@ Quy trình chung:
 | `clone` | MySQL | `gtid_executed` của target sau CLONE | Plugin clone; `BACKUP_ADMIN` trên donor |
 | `mydumper` | MySQL | `metadata`, section `[source]` | **Bắt buộc** `--dump-log <stderr của mydumper>` (từ chối `NO_LOCK`). Backup cũ không có log: `--accept-unverified-lock-mode` |
 | `mysqldump` | MySQL | `SET @@GLOBAL.GTID_PURGED` | `--single-transaction --source-data=2 --set-gtid-purged=ON`; file còn dòng `-- Dump completed`; `RESET BINARY LOGS AND GTIDS` trên target trước khi nạp. Luôn có cảnh báo |
-| `pgbackrest` | PG | slot (`--slot`) | `--retention-full`, `--backup-label`, `--eta` |
+| `pgbackrest` | PG | slot (`--slot`) | `--archive-info` (JSON của `pgbackrest repo-ls archive/<stanza>/<archive-id> --recurse --output=json`; `info` chỉ có min/max nên không đủ chứng minh WAL liên tục), `--retention-full`, `--backup-label`, `--eta` |
 | `walg` | PG | slot (`--slot`) | `--archive-info` (JSON của `wal-g wal-show --detailed-json`), `--tool-version` |
 | — (`strand export`) | PG | slot do export tạo | `export` ghi `seed.json` trực tiếp, không cần `seed plan` |
 
@@ -564,6 +564,7 @@ Cờ `seed plan`:
 - `--archive-until`: GTID set đã có trong archive binlog.
 - `--tables`, `--out` (mặc định `seed.json`), `--allow-prerelease-tool`.
 - Riêng PG: `--slot`, `--backup-label`, `--archive-info`, `--tool-version`, `--eta` (mặc định 2h), `--retention-full`, `--full-interval`.
+- PG SD-2: WAL từ đầu backup tới P phải có liên tục trên timeline của backup. Lỗ giữa các dải, chỉ có min/max, hoặc archive có timeline mới hơn bắt đầu trước P (source có thể đã failover) đều bị từ chối `log_gap` (exit 5).
 - PG `--tables` (và `tables` trong `seed.json`): rỗng hoặc `*` = mọi bảng (mặc định của seed vật lý, vì restore vật lý chứa cả cluster); còn lại là pattern kiểu `pg_dump -t`: `schema.table`, `*`/`?` là wildcard, chữ ngoài ngoặc kép bị hạ về chữ thường, `"Tên"` giữ nguyên hoa/thường; tên không có schema hiểu là `public`. `sync --start-at seed` coi bảng khớp là đã có dữ liệu, bảng còn lại được snapshot logic.
 
 Cờ `seed apply`:

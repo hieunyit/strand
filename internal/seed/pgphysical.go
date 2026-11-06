@@ -23,7 +23,9 @@ import (
 // Vì vậy:
 //   - SD-1: P lấy từ slot (src.ConsistentPointLSN do CLI đọc từ slot), backup phải kết thúc (stop LSN) ≤ P
 //     để PITR tới được P, cùng system_identifier với source; nếu đã có target thì replay LSN phải = P.
-//   - SD-2: archive WAL phải phủ liên tục từ segment bắt đầu backup tới segment chứa P; thiếu → log_gap.
+//   - SD-2: archive WAL phải phủ liên tục từ segment bắt đầu backup tới segment chứa P, TRÊN timeline của
+//     backup; thiếu / không chứng minh được → log_gap. Phạm vi archive là danh sách dải liên tục theo
+//     timeline, không phải min/max toàn cục (review N08): [1,10] và [100,110] KHÔNG phủ [5,105].
 //     Backup không được expire trong ETA (ước lượng từ retention full + chu kỳ full backup).
 //   - SD-3: schema nằm trong chính backup vật lý.
 //   - SD-4: cùng major version PostgreSQL.
@@ -41,19 +43,129 @@ type pgPhysicalBackup struct {
 	StartLSN    uint64
 	StopLSN     uint64
 	StartTime   time.Time
+	Timeline    uint32 // timeline của WAL bắt đầu backup (0 = không biết)
 	Version     string // server version của cluster được backup
 	SystemID    string
 	ToolVersion string
 }
 
-// pgArchiveCoverage là phạm vi WAL đã có trong archive (theo số segment, không tính timeline).
+// walSeg là một segment WAL: timeline + số segment tuyệt đối (LSN / wal_segment_size).
+type walSeg struct {
+	TLI uint32
+	Seg uint64
+}
+
+// walInterval là một dải segment liên tục [Start, End] (bao gồm hai đầu) đã có trong archive trên
+// timeline TLI.
+type walInterval struct {
+	TLI        uint32
+	Start, End uint64
+}
+
+// pgArchiveCoverage là phạm vi WAL đã có trong archive, dạng danh sách dải theo timeline (review N08:
+// trước đây chỉ giữ min/max toàn cục và bỏ timeline → lỗ giữa hai dải không bị phát hiện).
 type pgArchiveCoverage struct {
-	Known    bool
-	MinSeg   uint64
-	MaxSeg   uint64
-	MaxName  string
-	Missing  []uint64 // segment bị thiếu bên trong [MinSeg, MaxSeg]
-	Describe string
+	Known     bool
+	Intervals []walInterval
+	// BoundsOnly: nguồn metadata chỉ cho biên min/max (`pgbackrest info`), không liệt kê từng segment →
+	// không chứng minh được tính liên tục bên trong.
+	BoundsOnly bool
+	Missing    []walSeg // segment công cụ báo thiếu (wal-show missing_segments)
+	Describe   string
+}
+
+// segsPerLogID là số segment trong một "log id" 4 GiB (phần XXXXXXXX của tên file WAL).
+func segsPerLogID(segSize uint64) uint64 { return 0x100000000 / segSize }
+
+// walFileName dựng tên file WAL 24 ký tự từ timeline + số segment.
+func walFileName(tli uint32, seg, segSize uint64) string {
+	n := segsPerLogID(segSize)
+	return fmt.Sprintf("%08X%08X%08X", tli, seg/n, seg%n)
+}
+
+// intervalsMinus trả các dải con của [lo, hi] trên timeline tli sau khi bỏ các segment missing.
+func intervalsMinus(tli uint32, lo, hi uint64, missing []uint64) []walInterval {
+	ms := append([]uint64(nil), missing...)
+	sort.Slice(ms, func(i, j int) bool { return ms[i] < ms[j] })
+	var out []walInterval
+	cur := lo
+	for _, m := range ms {
+		if m < cur || m > hi {
+			continue
+		}
+		if m > cur {
+			out = append(out, walInterval{TLI: tli, Start: cur, End: m - 1})
+		}
+		cur = m + 1
+	}
+	if cur <= hi {
+		out = append(out, walInterval{TLI: tli, Start: cur, End: hi})
+	}
+	return out
+}
+
+// intervalsFromSegments gộp danh sách segment rời (inventory archive) thành các dải liên tục theo timeline.
+func intervalsFromSegments(segs []walSeg) []walInterval {
+	ss := append([]walSeg(nil), segs...)
+	sort.Slice(ss, func(i, j int) bool {
+		if ss[i].TLI != ss[j].TLI {
+			return ss[i].TLI < ss[j].TLI
+		}
+		return ss[i].Seg < ss[j].Seg
+	})
+	var out []walInterval
+	for _, x := range ss {
+		if n := len(out); n > 0 && out[n-1].TLI == x.TLI && x.Seg <= out[n-1].End+1 {
+			if x.Seg > out[n-1].End {
+				out[n-1].End = x.Seg
+			}
+			continue
+		}
+		out = append(out, walInterval{TLI: x.TLI, Start: x.Seg, End: x.Seg})
+	}
+	return out
+}
+
+// coveredUntil: trên timeline tli, hợp các dải phủ liên tục từ from tới segment nào (ok=false nếu
+// from không nằm trong dải nào).
+func coveredUntil(ivs []walInterval, tli uint32, from uint64) (end uint64, ok bool) {
+	var own []walInterval
+	for _, iv := range ivs {
+		if iv.TLI == tli && iv.End >= iv.Start {
+			own = append(own, iv)
+		}
+	}
+	sort.Slice(own, func(i, j int) bool { return own[i].Start < own[j].Start })
+	for _, iv := range own {
+		switch {
+		case !ok:
+			if iv.Start <= from && iv.End >= from {
+				end, ok = iv.End, true
+			}
+		case iv.Start <= end+1:
+			if iv.End > end {
+				end = iv.End
+			}
+		default:
+			return end, true
+		}
+	}
+	return end, ok
+}
+
+// describeIntervals in danh sách dải dạng tên file WAL (cho thông báo lỗi).
+func describeIntervals(ivs []walInterval, segSize uint64) string {
+	parts := make([]string, 0, len(ivs))
+	for _, iv := range ivs {
+		parts = append(parts, walFileName(iv.TLI, iv.Start, segSize)+".."+walFileName(iv.TLI, iv.End, segSize))
+	}
+	if len(parts) == 0 {
+		return "(empty)"
+	}
+	if len(parts) > 6 {
+		parts = append(parts[:6], fmt.Sprintf("… (%d ranges)", len(ivs)))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // flexString nhận giá trị JSON dạng chuỗi hoặc số và giữ nguyên văn bản (không qua float64, tránh mất
@@ -94,21 +206,29 @@ func readBackupInfo(kind, ref string) ([]byte, error) {
 // walSegmentNo trả số segment chứa LSN.
 func walSegmentNo(lsn, segSize uint64) uint64 { return lsn / segSize }
 
-// parseWALFileName đổi tên file WAL 24 ký tự (TTTTTTTTXXXXXXXXYYYYYYYY) thành số segment.
-func parseWALFileName(name string, segSize uint64) (uint64, error) {
+// parseWALFileName đổi tên file WAL 24 ký tự (TTTTTTTTXXXXXXXXYYYYYYYY) thành timeline + số segment
+// (review N08: trước đây bỏ timeline).
+func parseWALFileName(name string, segSize uint64) (walSeg, error) {
 	name = strings.TrimSpace(name)
 	if len(name) < 24 {
-		return 0, fmt.Errorf("invalid WAL file name %q", name)
+		return walSeg{}, fmt.Errorf("invalid WAL file name %q", name)
+	}
+	tli, err := strconv.ParseUint(name[0:8], 16, 32)
+	if err != nil {
+		return walSeg{}, fmt.Errorf("invalid WAL file name %q: %w", name, err)
 	}
 	logNo, err := strconv.ParseUint(name[8:16], 16, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid WAL file name %q: %w", name, err)
+		return walSeg{}, fmt.Errorf("invalid WAL file name %q: %w", name, err)
 	}
 	segNo, err := strconv.ParseUint(name[16:24], 16, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid WAL file name %q: %w", name, err)
+		return walSeg{}, fmt.Errorf("invalid WAL file name %q: %w", name, err)
 	}
-	return logNo*(0x100000000/segSize) + segNo, nil
+	if segNo >= segsPerLogID(segSize) {
+		return walSeg{}, fmt.Errorf("invalid WAL file name %q: segment %X out of range for wal_segment_size %d", name, segNo, segSize)
+	}
+	return walSeg{TLI: uint32(tli), Seg: logNo*segsPerLogID(segSize) + segNo}, nil
 }
 
 // pgMajor trích major version PostgreSQL: "16.2" → "16", "160002" → "16", "18beta1" → "18", "9.6.1" → "9.6".
@@ -359,25 +479,46 @@ func planPGPhysical(kind string, src SeedSource, backups []pgPhysicalBackup, cov
 		expiresAt = &s
 	}
 
-	// SD-2: archive phủ liên tục [segment bắt đầu backup, segment chứa P].
+	// SD-2: archive phủ liên tục [segment bắt đầu backup, segment chứa P] trên timeline của backup
+	// (review N08).
+	logGap := func(format string, a ...any) error {
+		return exitcode.New(exitcode.ErrLogGap, exitcode.DataError, fmt.Sprintf(kind+": log gap: "+format, a...), nil)
+	}
 	if !cov.Known {
-		return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError,
-			fmt.Sprintf("%s: log gap: WAL archive coverage unknown, cannot prove WAL from backup %s to P %s is archived",
-				kind, b.Label, pStr), nil)
+		return nil, logGap("WAL archive coverage unknown, cannot prove WAL from backup %s to P %s is archived", b.Label, pStr)
+	}
+	tli := b.Timeline
+	if tli == 0 {
+		return nil, logGap("SD-2 cannot be proven: backup %s metadata does not record its WAL timeline", b.Label)
 	}
 	needFrom, needTo := walSegmentNo(b.StartLSN, segSize), walSegmentNo(p, segSize)
-	if cov.MinSeg > needFrom || cov.MaxSeg < needTo {
-		return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError,
-			fmt.Sprintf("%s: log gap: archive %s does not cover WAL from backup start %s to P %s "+
-				"(the segment holding P may not be archived yet: run pg_switch_wal() on the primary, or stream it via primary_conninfo)",
-				kind, cov.Describe, checkpoint.FormatLSN(b.StartLSN), pStr), nil)
-	}
-	for _, m := range cov.Missing {
-		if m >= needFrom && m <= needTo {
-			return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError,
-				fmt.Sprintf("%s: log gap: WAL segment %d between backup start and P is missing from archive", kind, m), nil)
+	needDesc := walFileName(tli, needFrom, segSize) + ".." + walFileName(tli, needTo, segSize)
+	// Timeline mới hơn bắt đầu trước/trong khoảng cần: source có thể đã chuyển timeline (failover/PITR)
+	// giữa backup và P, restore (recovery_target_timeline = latest) sẽ theo nhánh đó — metadata archive
+	// không cho chứng minh nhánh nào là lịch sử của source → không chứng minh được SD-2.
+	for _, iv := range cov.Intervals {
+		if iv.TLI > tli && iv.Start <= needTo {
+			return nil, logGap("SD-2 cannot be proven: archive has WAL on timeline %d from %s, a timeline switch at or before P %s; "+
+				"the history from backup %s (timeline %d) to P cannot be verified from the archive metadata",
+				iv.TLI, walFileName(iv.TLI, iv.Start, segSize), pStr, b.Label, tli)
 		}
 	}
+	end, ok := coveredUntil(cov.Intervals, tli, needFrom)
+	if !ok || end < needTo {
+		return nil, logGap("archive %s does not cover WAL %s (backup %s start %s to P %s) contiguously on timeline %d "+
+			"(the segment holding P may not be archived yet: run pg_switch_wal() on the primary, or stream it via primary_conninfo)",
+			cov.Describe, needDesc, b.Label, checkpoint.FormatLSN(b.StartLSN), pStr, tli)
+	}
+	for _, m := range cov.Missing {
+		if m.TLI == tli && m.Seg >= needFrom && m.Seg <= needTo {
+			return nil, logGap("WAL segment %s between backup start and P is missing from archive", walFileName(m.TLI, m.Seg, segSize))
+		}
+	}
+	if cov.BoundsOnly {
+		return nil, logGap("SD-2 cannot be proven: archive metadata %s only gives min/max, not whether every segment of %s is archived "+
+			"(pass --archive-info with an archive inventory)", cov.Describe, needDesc)
+	}
+	archiveUntil := walFileName(tli, end, segSize)
 
 	// "tables": restore vật lý chứa cả cluster → mặc định "*" (mọi bảng). Cách hiểu dùng chung ở
 	// SeedCovers (review N06); pattern sai cú pháp bị từ chối ngay ở plan thay vì lặng lẽ không khớp.
@@ -402,7 +543,7 @@ func planPGPhysical(kind string, src SeedSource, backups []pgPhysicalBackup, cov
 		SchemaSnapshot:     ref, // SD-3: catalog nằm trong chính backup vật lý
 		Tables:             tables,
 		Integrity:          &IntegrityInfo{PrepareOK: true},
-		LogCoverage:        &LogCoverageInfo{ArchiveUntil: cov.MaxName, OK: true},
+		LogCoverage:        &LogCoverageInfo{ArchiveUntil: archiveUntil, OK: true},
 		BackupExpiresAt:    expiresAt,
 		Target:             target,
 		Warnings:           warnings,
