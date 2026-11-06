@@ -71,6 +71,8 @@ type PGWriter struct {
 	orderer        *CommitOrderer
 	copyMinRows    int
 	ordered        map[model.TableID]bool // bảng có UNIQUE ngoài PK / ràng buộc loại trừ (cache từ catalog)
+	// txBegin (seam kiểm thử, SetTxBeginner): mở transaction thay cho kết nối lấy từ db.
+	txBegin func(ctx context.Context) (pgx.Tx, error)
 	MergeCount     int64
 	TotalMergeRows int64
 }
@@ -92,6 +94,14 @@ func (w *PGWriter) SetCopyMinRows(n int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.copyMinRows = n
+}
+
+// SetTxBeginner (chỉ dùng cho kiểm thử/mô phỏng): ApplyBatch mở transaction bằng fn thay vì lấy kết nối
+// pgx từ db; phần áp dữ liệu, row delta và commit giữ nguyên. nil = đường thật.
+func (w *PGWriter) SetTxBeginner(fn func(ctx context.Context) (pgx.Tx, error)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.txBegin = fn
 }
 
 // SetPrimaryKey khai báo tên các cột khóa chính của bảng (theo thứ tự của RowChange.Key).
@@ -165,6 +175,24 @@ func (w *PGWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta Del
 		}()
 	}
 
+	w.mu.Lock()
+	begin := w.txBegin
+	w.mu.Unlock()
+	if begin != nil {
+		// Seam kiểm thử (SetTxBeginner): transaction do bên gọi cung cấp, cùng đường áp dữ liệu.
+		tx, berr := begin(ctx)
+		if berr != nil {
+			return fmt.Errorf("failed to begin transaction: %w", berr)
+		}
+		if err = w.applyTx(ctx, tx, batch, delta, &committing); err != nil {
+			return err
+		}
+		if strict {
+			orderer.CommitDone(batch[len(batch)-1].Seq())
+		}
+		return nil
+	}
+
 	// COPY cần pgx.Conn. Toàn bộ transaction (dữ liệu, COPY, MERGE, row delta, commit) chạy trên
 	// đúng một kết nối vật lý, bên trong conn.Raw — cách dùng driver conn được database/sql cho phép.
 	conn, err := w.db.Conn(ctx)
@@ -204,6 +232,11 @@ func (w *PGWriter) applyOnConn(ctx context.Context, pc *pgx.Conn, batch []*model
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	return w.applyTx(ctx, tx, batch, delta, committing)
+}
+
+// applyTx: dữ liệu của batch + row delta (hoặc row toàn cục) + commit trên transaction tx đã mở.
+func (w *PGWriter) applyTx(ctx context.Context, tx pgx.Tx, batch []*model.Txn, delta DeltaRow, committing *bool) error {
 	defer func() {
 		// Rollback bằng context không bị hủy để transaction không treo trên kết nối khi ctx đã hủy.
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -216,13 +249,23 @@ func (w *PGWriter) applyOnConn(ctx context.Context, pc *pgx.Conn, batch []*model
 	minRows := w.copyMinRows
 	w.mu.Unlock()
 	a := &pgApplier{w: w, ctx: ctx, tx: tx, tmp: make(map[model.TableID]string), copyMinRows: minRows}
+	var routed int64
 	for _, txn := range batch {
+		routed += txn.TotalRows()
 		if err := txn.ForEachRow(a.apply); err != nil {
 			return fmt.Errorf("failed to apply row changes: %w", err)
 		}
 	}
 	if err := a.flushAll(); err != nil {
 		return fmt.Errorf("failed to apply row changes: %w", err)
+	}
+	// F11: mọi row đã định tuyến phải nằm trong một câu lệnh đã chạy thành công — kiểm TRƯỚC commit,
+	// để batch thiếu row rollback (cùng row delta) thay vì được đánh dấu đã apply.
+	if err := checkRowsWritten(batch, routed, a.handed, a.written); err != nil {
+		return err
+	}
+	if delta.Stats != nil {
+		delta.Stats.Rows = a.written
 	}
 
 	pid, wid, ep := resolveDelta(delta, w.pipelineID, w.workerID, w.epoch)
@@ -281,9 +324,16 @@ type pgApplier struct {
 	// q: câu lệnh từng row của bảng "ordered" chờ gửi, đúng thứ tự nguồn, pipeline một round-trip.
 	q       *pgx.Batch
 	qTables []model.TableID
-	qBytes  int // ước lượng byte tham số của q (review N13)
+	qRows   []int64 // số row nguồn mà từng câu trong q phủ (câu DELETE khóa cũ của đổi PK: 0)
+	qBytes  int     // ước lượng byte tham số của q (review N13)
 
 	copyMinRows int
+
+	// Bộ đếm phát hiện mất row (F11): handed = số row đã nhận qua apply; written = số row nằm trong
+	// câu lệnh đã chạy thành công (khối upsert tính cả row bị ảnh sau cùng khóa thay thế). Cuối batch
+	// hai số phải bằng nhau và bằng tổng row đã định tuyến (checkRowsWritten).
+	handed  int64
+	written int64
 }
 
 func (a *pgApplier) flushUpsert() error {
@@ -291,6 +341,9 @@ func (a *pgApplier) flushUpsert() error {
 		return nil
 	}
 	err := a.up.flush(a)
+	if err == nil {
+		a.written += a.up.covered
+	}
 	a.up = nil
 	return err
 }
@@ -300,6 +353,9 @@ func (a *pgApplier) flushDelete() error {
 		return nil
 	}
 	err := a.del.flush(a.ctx, a.tx)
+	if err == nil {
+		a.written += int64(len(a.del.keys))
+	}
 	a.del = nil
 	return err
 }
@@ -317,12 +373,13 @@ func (a *pgApplier) flushAll() error {
 // pgOrderedQueueMax: số câu lệnh tối đa trong một lần gửi pipeline.
 const pgOrderedQueueMax = 1000
 
-func (a *pgApplier) enqueue(t model.TableID, q string, args []any) error {
+func (a *pgApplier) enqueue(t model.TableID, q string, args []any, rows int64) error {
 	if a.q == nil {
 		a.q = &pgx.Batch{}
 	}
 	a.q.Queue(q, args...)
 	a.qTables = append(a.qTables, t)
+	a.qRows = append(a.qRows, rows)
 	a.qBytes += len(q) + argsBytes(args)
 	if a.queueFull() {
 		return a.flushQueue()
@@ -340,8 +397,8 @@ func (a *pgApplier) flushQueue() error {
 	if a.q == nil || a.q.Len() == 0 {
 		return nil
 	}
-	b, tables := a.q, a.qTables
-	a.q, a.qTables, a.qBytes = nil, nil, 0
+	b, tables, rows := a.q, a.qTables, a.qRows
+	a.q, a.qTables, a.qRows, a.qBytes = nil, nil, nil, 0
 	br := a.tx.SendBatch(a.ctx, b)
 	for i := 0; i < b.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
@@ -349,7 +406,13 @@ func (a *pgApplier) flushQueue() error {
 			return fmt.Errorf("ordered apply on %s: %w", tables[i], err)
 		}
 	}
-	return br.Close()
+	if err := br.Close(); err != nil {
+		return err
+	}
+	for _, n := range rows {
+		a.written += n
+	}
+	return nil
 }
 
 // isOrdered cho biết bảng có UNIQUE index (kể cả partial) ngoài PK hoặc ràng buộc loại trừ.
@@ -414,7 +477,7 @@ func (a *pgApplier) applyOrdered(row *model.RowChange) error {
 			if err != nil {
 				return err
 			}
-			if err := a.enqueue(row.Table, q, args); err != nil {
+			if err := a.enqueue(row.Table, q, args, 0); err != nil { // nửa DELETE của đổi PK: row tính ở upsert
 				return err
 			}
 		}
@@ -430,7 +493,7 @@ func (a *pgApplier) applyOrdered(row *model.RowChange) error {
 			}
 		}
 		q, args := buildUpsert(row.Table, names, pkCols, [][]any{vals})
-		return a.enqueue(row.Table, q, args)
+		return a.enqueue(row.Table, q, args, 1)
 	case model.OpDelete:
 		pkCols, err := a.w.pk.get(row.Table, len(row.Key))
 		if err != nil {
@@ -440,13 +503,14 @@ func (a *pgApplier) applyOrdered(row *model.RowChange) error {
 		if err != nil {
 			return err
 		}
-		return a.enqueue(row.Table, q, args)
+		return a.enqueue(row.Table, q, args, 1)
 	default:
 		return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)
 	}
 }
 
 func (a *pgApplier) apply(row *model.RowChange) error {
+	a.handed++
 	ordered, err := a.isOrdered(row.Table)
 	if err != nil {
 		return err
@@ -545,6 +609,14 @@ func (a *pgApplier) apply(row *model.RowChange) error {
 // partialUpdate áp một UPDATE có cột Unchanged (TOAST): cột Unchanged không bao giờ nằm trong SET.
 // spec: 02 §8 (partial UPDATE; đổi PK khi cột TOAST không đổi). Row thiếu ở target → ToastRowMissingError.
 func (a *pgApplier) partialUpdate(row *model.RowChange, pkCols []string) error {
+	if err := a.partialUpdateRow(row, pkCols); err != nil {
+		return err
+	}
+	a.written++
+	return nil
+}
+
+func (a *pgApplier) partialUpdateRow(row *model.RowChange, pkCols []string) error {
 	tbl := quotePGTable(row.Table)
 	isPK := make(map[string]bool, len(pkCols))
 	for _, c := range pkCols {
@@ -666,6 +738,8 @@ type pgUpsertBlock struct {
 	rows   [][]any
 	idx    map[string]int // khóa PK -> vị trí trong rows
 	bytes  int            // tổng argsBytes của rows (review N13)
+	// covered: số row nguồn đã vào khối, kể cả row có ảnh bị ảnh sau cùng khóa thay thế (F11).
+	covered int64
 }
 
 // full cho biết row (bảng, tập cột, kích thước rowBytes) không được thêm vào khối này mà phải mở
@@ -677,6 +751,7 @@ func (b *pgUpsertBlock) full(table model.TableID, cols []string, rowBytes int) b
 }
 
 func (b *pgUpsertBlock) add(key []model.Value, vals []any) {
+	b.covered++
 	k := pkString(key)
 	if i, ok := b.idx[k]; ok {
 		b.bytes += argsBytes(vals) - argsBytes(b.rows[i])

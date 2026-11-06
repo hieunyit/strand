@@ -72,6 +72,10 @@ type Metrics struct {
 
 	// Bổ sung 02 §12: strand_spool_capacity_bytes{tier} (cho alert StrandSpoolNearFull).
 	SpoolCapacityBytes *prometheus.GaugeVec
+
+	// F11: strand_rows_not_written_total{pipeline}: batch có row đã định tuyến mà writer không ghi
+	// (bộ phát hiện trước commit); pipeline dừng mỗi lần đếm tăng.
+	RowsNotWrittenTotal *prometheus.CounterVec
 }
 
 // NewMetrics khởi tạo và đăng ký đầy đủ 20 metric theo spec/02 §11.
@@ -182,6 +186,10 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "strand_fenced_total",
 			Help: "Tổng số lần pipeline bị fenced do instance khác nhận quyền.",
 		}, []string{"pipeline"}),
+		RowsNotWrittenTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "strand_rows_not_written_total",
+			Help: "Số batch bị từ chối trước commit vì có row đã định tuyến mà writer không ghi (pipeline dừng).",
+		}, []string{"pipeline"}),
 		SpoolCapacityBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "strand_spool_capacity_bytes",
 			Help: "Dung lượng tối đa (hard limit) của spool theo tầng.",
@@ -210,6 +218,7 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.VerifyUnverifiableHotTotal,
 		m.FencedTotal,
 		m.SpoolCapacityBytes,
+		m.RowsNotWrittenTotal,
 	)
 
 	return m

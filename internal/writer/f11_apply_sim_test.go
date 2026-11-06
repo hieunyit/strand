@@ -39,6 +39,7 @@ type fDB struct {
 	ordered map[string]bool
 	unique  map[string]string // bảng → cột UNIQUE ngoài PK
 	stmts   int
+	delta   string // row delta đã commit gần nhất
 }
 
 func (d *fDB) clone() map[string]map[int64]fRow {
@@ -63,6 +64,7 @@ type fTx struct {
 	tmpOf   map[string]string // bảng tạm → bảng đích
 	tmpRows map[string][]fRow
 	done    bool
+	delta   string
 }
 
 func (d *fDB) begin() *fTx {
@@ -144,6 +146,10 @@ func (tx *fTx) upsert(tab string, rows []fRow, update bool) error {
 
 func (tx *fTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	tx.db.stmts++
+	if strings.HasPrefix(sql, "UPDATE _strand_worker_delta SET applied = $1") {
+		tx.delta = args[0].(string) // row delta của worker (ApplyBatch qua SetTxBeginner)
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	}
 	if m := reTemp.FindStringSubmatch(sql); m != nil {
 		tx.tmpOf[m[1]] = m[2]
 		return pgconn.NewCommandTag("CREATE TABLE"), nil
@@ -292,7 +298,11 @@ func (tx *fTx) SendBatch(_ context.Context, b *pgx.Batch) pgx.BatchResults {
 
 func (tx *fTx) Begin(context.Context) (pgx.Tx, error) { panic("unused") }
 func (tx *fTx) Commit(context.Context) error {
+	if tx.done {
+		return pgx.ErrTxClosed
+	}
 	tx.db.tabs, tx.done = tx.tabs, true
+	tx.db.delta = tx.delta
 	return nil
 }
 func (tx *fTx) Rollback(context.Context) error { tx.done = true; return nil }
@@ -598,6 +608,15 @@ func (s *wSim) applyBatch(batch []*model.Txn) error {
 		_ = tx.Rollback(context.Background())
 		return err
 	}
+	// Bộ phát hiện F11 (checkRowsWritten) không được báo nhầm trên mọi đường apply của writer.
+	var routed int64
+	for _, t := range batch {
+		routed += t.TotalRows()
+	}
+	if err := checkRowsWritten(batch, routed, a.handed, a.written); err != nil {
+		s.errs = append(s.errs, err.Error())
+	}
+	s.st["rows"] += int(a.written)
 	_ = tx.Commit(context.Background())
 	s.checkMonotonic()
 	return nil
@@ -765,17 +784,18 @@ func TestF11ApplySim_RelaxedPGWriter(t *testing.T) {
 	if v, err := strconv.Atoi(os.Getenv("F11_SEEDS")); err == nil && v > 0 {
 		n = v
 	}
-	reorders, contagion, stmts := 0, 0, 0
+	reorders, contagion, stmts, rows := 0, 0, 0, 0
 	for seed := int64(1); seed <= int64(n); seed++ {
 		s := newWSim(t, seed)
 		s.run()
 		reorders += s.reorder
 		contagion += s.st["contagion"]
 		stmts += s.db.stmts
+		rows += s.st["rows"]
 		bad := append(s.errs, s.diff()...)
 		if len(bad) > 0 {
 			t.Fatalf("%s (copyMin %d, lane %v): %d problems: %v", s.name, s.copyMin, s.laneOn, len(bad), bad[:min(len(bad), 8)])
 		}
 	}
-	t.Logf("unique-violation reorders %d, lane contagion %d, statements %d", reorders, contagion, stmts)
+	t.Logf("unique-violation reorders %d, lane contagion %d, statements %d, rows written %d", reorders, contagion, stmts, rows)
 }

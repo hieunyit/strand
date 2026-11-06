@@ -208,7 +208,7 @@ func TestN13_PGUpsertBlockCutsByBytes(t *testing.T) {
 func TestN13_PGOrderedQueueFullByBytes(t *testing.T) {
 	a := &pgApplier{}
 	big := bytes.Repeat([]byte{'x'}, 9<<20)
-	if err := a.enqueue(model.TableID{Table: "t"}, "UPDATE t SET d = $1 WHERE id = $2", []any{big, int64(1)}); err != nil {
+	if err := a.enqueue(model.TableID{Table: "t"}, "UPDATE t SET d = $1 WHERE id = $2", []any{big, int64(1)}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if a.queueFull() {
