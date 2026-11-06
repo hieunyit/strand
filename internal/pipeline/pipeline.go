@@ -361,6 +361,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.state, err = openLocalState(p.cfg.Resources.Spool.Path, p.id); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 	}
+	p.state.targetOf = func(name string) string {
+		sc, t, _ := strings.Cut(name, ".")
+		return p.filter.Target(model.TableID{Schema: sc, Table: t}).String()
+	}
 	if p.conv != nil {
 		for id := range p.tables {
 			if err := p.conv.load(ctx, p.src, id); err != nil {
@@ -443,6 +447,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 				return err
 			}
 		}
+	}
+	if err := p.checkTableTargets(); err != nil {
+		return err
 	}
 	var pending []model.TableID
 	for id := range p.tables {

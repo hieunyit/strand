@@ -29,6 +29,8 @@ const (
 	// ErrTargetNotTransactional: bảng đích hoặc bảng _strand_* trên target MySQL không dùng InnoDB,
 	// nên ghi dữ liệu và checkpoint không nằm chung một transaction (review R26).
 	ErrTargetNotTransactional = "target_not_transactional"
+	// ErrTableTargetChanged: tables.rename đổi bảng đích của bảng đã bootstrap xong (review N14).
+	ErrTableTargetChanged = "table_target_changed"
 
 	// Exit 4: Tranh chấp khóa pipeline / bị fence
 	ErrPipelineLocked = "pipeline_locked"
