@@ -140,6 +140,11 @@ type Pipeline struct {
 	runCtx   context.Context
 	instance string
 
+	// snapAdding: bảng đang được `snapshot add` (từ lúc nhận lệnh tới khi snapshot xong). Admin xử lý
+	// kết nối song song; IsRegistered chỉ đúng sau khi snapshot đã đăng ký range (review R14).
+	snapAddMu  sync.Mutex
+	snapAdding map[model.TableID]bool
+
 	failMu  sync.Mutex
 	failErr error
 	cancel  context.CancelFunc
@@ -1706,6 +1711,17 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	if p.pgChunks != nil && p.pgChunks.GateErr != nil {
 		return fmt.Errorf("logical snapshot from this PostgreSQL source is not possible: %w", p.pgChunks.GateErr)
 	}
+	// Giành quyền add bảng một cách nguyên tử: hai lệnh đồng thời cho cùng bảng chỉ một lệnh đi tiếp
+	// (review R14). Nhả khi trả lỗi sớm, hoặc khi goroutine snapshot kết thúc.
+	if !p.claimSnapshotAdd(id) {
+		return fmt.Errorf("table %s is already being snapshotted", id)
+	}
+	started := false
+	defer func() {
+		if !started {
+			p.releaseSnapshotAdd(id)
+		}
+	}()
 	if p.snap.Manager.IsRegistered(id) {
 		return fmt.Errorf("table %s is already being snapshotted", id)
 	}
@@ -1761,7 +1777,9 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	p.routeMu.Unlock()
 	p.log.Info("snapshot add requested", "table", id.String(), "new_table", added)
 	p.bootstrap.Store(true)
+	started = true
 	go func() {
+		defer p.releaseSnapshotAdd(id)
 		if err := p.snapshotTable(ctx, id); err != nil && ctx.Err() == nil {
 			p.fail(fmt.Errorf("snapshot add %s: %w", id, err))
 			return
@@ -1771,6 +1789,26 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		}
 	}()
 	return nil
+}
+
+// claimSnapshotAdd giành bảng id cho một lệnh snapshot add; false nếu lệnh khác đang giữ (review R14).
+func (p *Pipeline) claimSnapshotAdd(id model.TableID) bool {
+	p.snapAddMu.Lock()
+	defer p.snapAddMu.Unlock()
+	if p.snapAdding[id] {
+		return false
+	}
+	if p.snapAdding == nil {
+		p.snapAdding = map[model.TableID]bool{}
+	}
+	p.snapAdding[id] = true
+	return true
+}
+
+func (p *Pipeline) releaseSnapshotAdd(id model.TableID) {
+	p.snapAddMu.Lock()
+	delete(p.snapAdding, id)
+	p.snapAddMu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
