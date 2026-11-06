@@ -648,6 +648,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.snap.FlushRange = p.pgFlushRange
 		p.snap.FlushKeySet = p.pgFlushKeySet
 		p.snap.ClearUnreadRange = p.pgClearUnreadRange
+		p.snap.ExactKeys = p.exactKeys
+		p.snap.FlushExact = p.pgFlushExact
 	}
 	if p.srcEngine == model.EnginePG {
 		snapDB, err := openPGSnapshotSource(p.srcDSN)

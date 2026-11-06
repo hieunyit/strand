@@ -314,6 +314,12 @@ type MySQLSnapshotter struct {
 	FlushRange       func(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, lo, hi Bound) error
 	FlushKeySet      func(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, keys []Bound) error
 	ClearUnreadRange func(ctx context.Context, table model.TableID, lo, hi Bound, hasRange bool, keys []Bound) error
+	// ExactKeys / FlushExact (Gate 2, cross_order.go): ExactKeys(table nguồn) = true khi target sắp PK
+	// khác thứ tự source (CrossEngineKeySet) — chunk chính khi đó được flush bằng FlushExact: upsert rows và
+	// DELETE đúng các khóa deletes (tombstone, giá trị chính xác) trong MỘT transaction, không xóa range.
+	// ClearUnreadRange của bảng như vậy phải tự xóa theo khóa source (không theo range ở target).
+	ExactKeys  func(table model.TableID) bool
+	FlushExact func(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, deletes []Bound) error
 
 	// OnTruncatedRead (tùy chọn) được gọi mỗi lần đọc chunk dừng ở max_chunk_bytes (metric / test).
 	OnTruncatedRead func()
@@ -518,12 +524,28 @@ func (s *MySQLSnapshotter) FlushChunk(
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
+	if chunk.mergeErr != nil {
+		// Row snapshot không mã hóa được khóa (vd. WEIGHT_STRING lỗi/timeout): trước đây bị bỏ âm thầm
+		// khỏi tập merge — đường range rồi XÓA nó ở target, đường tập khóa không ghi nó (mất row, RS-1).
+		// Dừng: chunk được đọc lại khi chạy tiếp (plan chưa qua chunk này).
+		return fmt.Errorf("snapshot flush of %s: %w", table, chunk.mergeErr)
+	}
 	if !codecOrInt(chunk.codec).IsSingleInt() && s.FlushRows != nil {
 		// Khóa tổng quát, target không phải MySQL (việc C).
 		var err error
-		if chunk.KeySet != nil {
+		switch {
+		case chunk.KeySet != nil:
 			err = s.FlushKeySet(ctx, s.target(table), columnNames, mergedRows, chunk.KeySet)
-		} else {
+		case s.ExactKeys != nil && s.ExactKeys(table):
+			// Target sắp khóa khác thứ tự source: flush theo tập khóa (cross_order.go).
+			if s.FlushExact == nil {
+				return fmt.Errorf("snapshot flush of %s: the target orders the primary key differently and needs FlushExact", table)
+			}
+			var dels []Bound
+			if dels, err = exactDeletes(chunk, codecOrInt(chunk.codec)); err == nil {
+				err = s.FlushExact(ctx, s.target(table), columnNames, mergedRows, dels)
+			}
+		default:
 			err = s.FlushRange(ctx, s.target(table), columnNames, mergedRows, chunk.Lo, chunk.Hi)
 		}
 		if err != nil {

@@ -300,8 +300,14 @@ Ghi chú:
 
 - Charset chuỗi MySQL được nhận: `utf8mb4`, `utf8mb3`, `latin1`, `ascii`, `binary`. Charset khác (`gbk`, `utf16`…) bị từ chối.
 - PK nhiều cột được nhận khi mọi cột đều thuộc bảng trên. Các cột được so như tuple theo thứ tự của PK.
-- Bảng đích phải có **cùng** PK: cùng cột, cùng kiểu, cùng collation. Bảng do `schema init` tạo luôn thỏa.
-- MySQL→PG chỉ nhận khóa mà thứ tự hai engine trùng nhau: số, thời gian, `VARBINARY`↔`bytea`. Khóa chuỗi bị từ chối, vì PAD SPACE và collation MySQL khác `"C"` của PG. Bảng có khóa như vậy vẫn được nhận khi **rỗng** ở source lúc khởi động (mọi row sau đó đi qua stream).
+- Bảng đích phải có **cùng** PK: cùng cột, cùng kiểu, cùng collation. Bảng do `schema init` tạo luôn thỏa. MySQL→PG xem hai ý ngay dưới.
+- MySQL→PG, khóa mà thứ tự hai engine trùng nhau (số, thời gian, `VARBINARY`↔`bytea`): snapshot và `verify --mode full` theo range khóa như PG→PG.
+- MySQL→PG, khóa chuỗi (`_ci`, `_ai`, `general_ci`, `_bin`…) sang `text`/`varchar`/`char` `COLLATE "C"` (cột khóa chuỗi do `schema init` tạo thỏa điều kiện bên dưới): thứ tự và phép bằng hai phía khác nhau (`'a' = 'A'` ở source, khác nhau ở target), nhưng bảng **có dữ liệu sẵn** vẫn được snapshot logic. Strand không dùng range ở target cho bảng này:
+  - Flush chunk theo **tập khóa chính xác**: ghi đúng các row của chunk, xóa đúng khóa đã bị xóa trong lúc đọc chunk. Không xóa theo range.
+  - Chạy tiếp snapshot dở (sau crash, kill -9): quét **toàn bộ khóa** bảng đích, tính khóa source bằng `WEIGHT_STRING` trên source (theo lô 128 giá trị), xóa row thuộc phần chưa đọc. Lượt quét chạy khi router đang dừng, nên stream của mọi bảng đứng chờ trong lúc đó (bảng lớn: vài phút).
+  - `verify --mode full`: chunk theo thứ tự source. Target được quét toàn bảng một lượt, mỗi row gom vào chunk theo khóa source. Chunk lệch được so từng row, mỗi lượt quét target lo tối đa 16 chunk lệch. Biến thể khác byte nhưng bằng nhau ở source (`'a'` ở source, `'A'` ở target) bị báo lệch.
+  - Log khi khởi động: `target orders the primary key differently from the source: snapshot flushes by exact key set`.
+  - Điều kiện: charset `utf8mb4`/`utf8mb3`/`ascii` (latin1 bị từ chối). Target là `text`/`varchar` `COLLATE "C"`, hoặc `char(n) COLLATE "C"` khi cột source là `CHAR(n)` hay collation PAD SPACE. Cột khác trong PK ghép chỉ được là số nguyên hoặc `DECIMAL` (cột thời gian hay nhị phân cạnh cột chuỗi bị từ chối). Chưa có `verify --resume` và `verify --repair fix` cho các bảng này.
 - Bị từ chối nghĩa là `sync` hoặc `snapshot add` dừng exit 3 với thông báo `table … needs a logical snapshot but its primary key is not supported: <lý do>; seed it from a backup instead`. Cách xử lý: seed từ backup (mục 7.5), `--start-at`, hoặc đổi kiểu/collation cột khóa.
 
 Với PK tổng quát (không phải một cột số nguyên), các phần sau còn thiếu và đều bị từ chối rõ ràng:
@@ -853,7 +859,7 @@ strand sync -c p.yaml
 strand verify -c p.yaml --mode full --table app.orders   # từng bảng
 ```
 
-Bảng có PK chuỗi bị từ chối snapshot (mục 5.2). Hai cách xử lý: (1) để bảng đó rỗng lúc bắt đầu; (2) nạp dữ liệu tại một GTID đã biết rồi dùng `--start-at` cho pipeline riêng của bảng đó.
+Bảng có PK chuỗi `_ci`/`_bin` sang `COLLATE "C"` được snapshot logic theo tập khóa chính xác và verify full được (mục 5.2). Bảng có PK mà mục 5.2 từ chối: (1) để bảng đó rỗng lúc bắt đầu; hoặc (2) nạp dữ liệu tại một GTID đã biết, rồi dùng `--start-at` cho pipeline riêng của bảng đó.
 
 ### (d) PG→PG seed bằng `strand export`
 

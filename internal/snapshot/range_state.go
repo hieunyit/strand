@@ -572,10 +572,18 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 
 	mergedMap := make(map[Key]*model.RowChange)
 
-	// 1. Nạp snapshot rows
+	// 1. Nạp snapshot rows. Khóa không mã hóa được thì ghi lỗi vào chunk (FlushChunk dừng) — không bỏ
+	// row âm thầm: flush sẽ xóa/không ghi nó ở target dù nó còn ở source.
+	chunk.mergeErr = nil
 	for _, row := range chunk.SnapshotRows {
 		pk, err := codec.Encode(row.Key)
-		if err == nil && !skip(pk) {
+		if err != nil {
+			if chunk.mergeErr == nil {
+				chunk.mergeErr = fmt.Errorf("primary key of a snapshot row: %w", err)
+			}
+			continue
+		}
+		if !skip(pk) {
 			mergedMap[pk] = row
 		}
 	}

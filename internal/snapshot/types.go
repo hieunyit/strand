@@ -118,6 +118,8 @@ type Chunk struct {
 	// KeySet: tập khóa của chunk re-read (song song Keys).
 	KeySet []Bound
 	codec  *PKCodec // codec PK của bảng (nil = số nguyên)
+	// mergeErr: lỗi mã hóa khóa của row snapshot trong lần MergeLocked gần nhất (FlushChunk dừng).
+	mergeErr error
 
 	// Keys khác nil: chunk "đọc lại" (re-read) một TẬP khóa rời rạc thay vì đoạn [StartPK, EndPK]
 	// (StartPK/EndPK khi đó chỉ là min/max để ghi log). Dùng cho UPDATE đổi PK mà cột TOAST không

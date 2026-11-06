@@ -451,10 +451,20 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 	if err != nil {
 		return nil, reject(err.Error())
 	}
+	exact := false
 	if srcEngine == dstEngine {
 		err = sc.SameOrder(dc)
 	} else {
 		err = snapshot.CrossEngineSameOrder(sc, dc)
+		if err != nil && srcEngine == model.EngineMySQL && dstEngine == model.EnginePG {
+			// Gate 2 (_ci → "C"): thứ tự khác nhau — verify gom row target vào chunk theo khóa source
+			// (verify/merkle_cross.go).
+			if kerr := snapshot.CrossEngineKeySet(sc, dc); kerr == nil {
+				err, exact = nil, true
+			} else {
+				err = fmt.Errorf("%v; exact-key verify is not possible either: %v", err, kerr)
+			}
+		}
 	}
 	if err != nil {
 		return nil, reject("source and target order the primary key differently: " + err.Error())
@@ -462,6 +472,9 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
 		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
 		ChunkRows: verify.DefaultChunkRows, Rate: rate, ApplyWaiter: waiter})
+	if exact {
+		return mv.VerifyTableFullKeysExact(ctx, id, sc, dc)
+	}
 	return mv.VerifyTableFullKeys(ctx, id, sc, dc)
 }
 

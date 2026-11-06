@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,7 +30,8 @@ func MySQLPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string
 		pc.Collation, pc.Charset = coll.String, cs.String
 		c.Cols = append(c.Cols, pc)
 		if pc.Kind == PKWeight && c.Weigh == nil {
-			c.Weigh = newMySQLWeigher(db)
+			w := newMySQLWeigherState(db)
+			c.Weigh, c.WeighMany = w.weigh, w.weighMany
 		}
 	}
 	return c, nil
@@ -38,68 +40,161 @@ func MySQLPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string
 // weighQueryTimeout giới hạn một truy vấn WEIGHT_STRING (review N05).
 var weighQueryTimeout = 30 * time.Second
 
-// newMySQLWeigher: WEIGHT_STRING(CONVERT(v USING charset) COLLATE collation) tính trên db, có cache (giá
+// weighBatch: số giá trị tối đa trong một truy vấn WEIGHT_STRING của WeighMany.
+const weighBatch = 128
+
+// mysqlWeigher: WEIGHT_STRING(CONVERT(v USING charset) COLLATE collation) tính trên db, có cache (giá
 // trị lặp lại nhiều: biên chunk, khóa nóng). Weight là khóa sắp xếp của collation: so byte cho đúng thứ
 // tự ORDER BY. Collation PAD SPACE: weight thô không xét phần đệm space ('a' ≠ 'a ', 'a' < 'a\t' trong
 // khi DB coi 'a' = 'a ' và 'a' > 'a\t'), nên được chuyển qua PadSpaceWeightKey (review N04; kiểm với DB ở
 // TestN04_MySQLPadSpaceKeyEqualityAndOrderMatchDB).
+type mysqlWeigher struct {
+	db     *sql.DB
+	mu     sync.Mutex
+	cache  map[string][]byte
+	spaces map[string][]byte // charset\x00collation → weight của một space
+}
+
+// newMySQLWeigher trả hàm Weigh của codec (một giá trị mỗi truy vấn, có cache).
 func newMySQLWeigher(db *sql.DB) func(PKColumn, model.Value) ([]byte, error) {
-	var mu sync.Mutex
-	cache := map[string][]byte{}
-	spaces := map[string][]byte{} // charset\x00collation → weight của một space
-	raw := func(col PKColumn, s string) ([]byte, error) {
-		q := fmt.Sprintf("SELECT WEIGHT_STRING(CONVERT(? USING %s) COLLATE %s)", col.Charset, col.Collation)
-		// Có timeout: trước đây QueryRow không context, source treo thì luồng CDC (verify delta) treo
-		// theo vô hạn (review N05). Weigh không nhận ctx (gọi sâu trong Encode/BoundOf) nên dùng
-		// context.Background có giới hạn; không giữ ctx lúc dựng codec vì ctx đó có thể đã bị hủy.
-		qctx, cancel := context.WithTimeout(context.Background(), weighQueryTimeout)
-		defer cancel()
-		var w []byte
-		if err := db.QueryRowContext(qctx, q, s).Scan(&w); err != nil {
-			return nil, err
-		}
-		return w, nil
+	return newMySQLWeigherState(db).weigh
+}
+
+func newMySQLWeigherState(db *sql.DB) *mysqlWeigher {
+	return &mysqlWeigher{db: db, cache: map[string][]byte{}, spaces: map[string][]byte{}}
+}
+
+// raw tính weight thô của các giá trị ss trong MỘT truy vấn (một cột kết quả mỗi giá trị).
+func (w *mysqlWeigher) raw(col PKColumn, ss []string) ([][]byte, error) {
+	exprs := make([]string, len(ss))
+	args := make([]any, len(ss))
+	for i, s := range ss {
+		exprs[i] = fmt.Sprintf("WEIGHT_STRING(CONVERT(? USING %s) COLLATE %s)", col.Charset, col.Collation)
+		args[i] = s
 	}
-	return func(col PKColumn, v model.Value) ([]byte, error) {
-		s, err := toText(v)
+	// Có timeout: trước đây QueryRow không context, source treo thì luồng CDC (verify delta) treo
+	// theo vô hạn (review N05). Weigh không nhận ctx (gọi sâu trong Encode/BoundOf) nên dùng
+	// context.Background có giới hạn; không giữ ctx lúc dựng codec vì ctx đó có thể đã bị hủy.
+	qctx, cancel := context.WithTimeout(context.Background(), weighQueryTimeout)
+	defer cancel()
+	// NullString phân biệt NULL với weight rỗng (giá trị '' có weight rỗng, không phải NULL).
+	ns := make([]sql.NullString, len(ss))
+	ptrs := make([]any, len(ss))
+	for i := range ns {
+		ptrs[i] = &ns[i]
+	}
+	if err := w.db.QueryRowContext(qctx, "SELECT "+strings.Join(exprs, ", "), args...).Scan(ptrs...); err != nil {
+		return nil, err
+	}
+	out := make([][]byte, len(ss))
+	for i, n := range ns {
+		if !n.Valid {
+			// WEIGHT_STRING trả NULL khi CONVERT thất bại: không có khóa thì không được đoán.
+			return nil, fmt.Errorf("WEIGHT_STRING of %q under %s is NULL", ss[i], col.Collation)
+		}
+		out[i] = []byte(n.String)
+	}
+	return out, nil
+}
+
+// finish áp PadSpaceWeightKey cho collation PAD SPACE.
+func (w *mysqlWeigher) finish(col PKColumn, wt []byte) ([]byte, error) {
+	if !col.PadSpace {
+		return wt, nil
+	}
+	sk := col.Charset + "\x00" + col.Collation
+	w.mu.Lock()
+	sp, ok := w.spaces[sk]
+	w.mu.Unlock()
+	if !ok {
+		r, err := w.raw(col, []string{" "})
 		if err != nil {
 			return nil, err
 		}
-		ck := col.Charset + "\x00" + col.Collation + "\x00" + s
-		mu.Lock()
-		w, ok := cache[ck]
-		mu.Unlock()
-		if ok {
-			return w, nil
-		}
-		if w, err = raw(col, s); err != nil {
-			return nil, err
-		}
-		if col.PadSpace {
-			sk := col.Charset + "\x00" + col.Collation
-			mu.Lock()
-			sp, ok := spaces[sk]
-			mu.Unlock()
-			if !ok {
-				if sp, err = raw(col, " "); err != nil {
-					return nil, err
-				}
-				mu.Lock()
-				spaces[sk] = sp
-				mu.Unlock()
-			}
-			if w, err = PadSpaceWeightKey(w, sp); err != nil {
-				return nil, fmt.Errorf("collation %s: %w", col.Collation, err)
-			}
-		}
-		mu.Lock()
-		if len(cache) > 100000 {
-			cache = map[string][]byte{}
-		}
-		cache[ck] = w
-		mu.Unlock()
-		return w, nil
+		sp = r[0]
+		w.mu.Lock()
+		w.spaces[sk] = sp
+		w.mu.Unlock()
 	}
+	out, err := PadSpaceWeightKey(wt, sp)
+	if err != nil {
+		return nil, fmt.Errorf("collation %s: %w", col.Collation, err)
+	}
+	return out, nil
+}
+
+func cacheKey(col PKColumn, s string) string {
+	return col.Charset + "\x00" + col.Collation + "\x00" + s
+}
+
+func (w *mysqlWeigher) put(ck string, wt []byte) {
+	w.mu.Lock()
+	if len(w.cache) > 100000 {
+		w.cache = map[string][]byte{}
+	}
+	w.cache[ck] = wt
+	w.mu.Unlock()
+}
+
+func (w *mysqlWeigher) weigh(col PKColumn, v model.Value) ([]byte, error) {
+	s, err := toText(v)
+	if err != nil {
+		return nil, err
+	}
+	ck := cacheKey(col, s)
+	w.mu.Lock()
+	wt, ok := w.cache[ck]
+	w.mu.Unlock()
+	if ok {
+		return wt, nil
+	}
+	r, err := w.raw(col, []string{s})
+	if err != nil {
+		return nil, err
+	}
+	if wt, err = w.finish(col, r[0]); err != nil {
+		return nil, err
+	}
+	w.put(ck, wt)
+	return wt, nil
+}
+
+// weighMany tính trước (vào cache) weight của vs, weighBatch giá trị mỗi truy vấn: quét khóa target khi
+// dọn phần chưa đọc / verify full khác thứ tự (CrossEngineKeySet) cần khóa source của mọi row target —
+// một truy vấn mỗi row thì quá chậm. Chỉ là tối ưu: Encode sau đó vẫn đi qua weigh (cache bị xóa giữa
+// chừng thì weigh tự hỏi lại MySQL), nên kết quả không phụ thuộc cache.
+func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) error {
+	var todo []string
+	seen := map[string]bool{}
+	for _, v := range vs {
+		s, err := toText(v)
+		if err != nil {
+			return err
+		}
+		ck := cacheKey(col, s)
+		w.mu.Lock()
+		_, ok := w.cache[ck]
+		w.mu.Unlock()
+		if !ok && !seen[s] {
+			seen[s] = true
+			todo = append(todo, s)
+		}
+	}
+	for i := 0; i < len(todo); i += weighBatch {
+		part := todo[i:min(i+weighBatch, len(todo))]
+		r, err := w.raw(col, part)
+		if err != nil {
+			return err
+		}
+		for j, s := range part {
+			wt, err := w.finish(col, r[j])
+			if err != nil {
+				return err
+			}
+			w.put(cacheKey(col, s), wt)
+		}
+	}
+	return nil
 }
 
 // PGPKCodec dựng codec PK (PGPKColumn) từ catalog: kiểu gốc (typname, qua domain) và collation.

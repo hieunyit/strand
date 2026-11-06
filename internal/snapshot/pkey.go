@@ -100,6 +100,10 @@ type PKColumn struct {
 	// PadSpace: collation PAD SPACE (PKWeight): DB so như thể chuỗi ngắn hơn được đệm space, nên weight
 	// thô không so byte được ('a' = 'a ', 'a' > 'a\t') — weigher chuyển qua PadSpaceWeightKey (review N04).
 	PadSpace bool
+	// FixedChar: cột MySQL CHAR(n) (không phải VARCHAR). MySQL bỏ space cuối của CHAR khi đọc (và trong
+	// binlog), nên hai giá trị PK khác nhau của cột CHAR không bao giờ chỉ khác nhau ở space cuối — dùng
+	// cho CrossEngineKeySet (target bpchar).
+	FixedChar bool
 }
 
 // PKCodec mã hóa tuple PK của một bảng.
@@ -108,6 +112,39 @@ type PKCodec struct {
 	// Weigh trả WEIGHT_STRING của giá trị v theo collation của cột (PKWeight, mức 2) — tính bởi chính
 	// MySQL (MySQLPKCodec gắn sẵn, có cache). nil: codec không có cột PKWeight.
 	Weigh func(col PKColumn, v model.Value) ([]byte, error)
+	// WeighMany (tùy chọn) tính trước weight của nhiều giá trị một lúc (cache của Weigh): chỉ là tối ưu
+	// cho EncodeMany, không đổi kết quả của Encode.
+	WeighMany func(col PKColumn, vs []model.Value) error
+}
+
+// EncodeMany mã hóa nhiều tuple PK; với cột PKWeight, weight được tính trước theo lô (WeighMany) thay vì
+// một truy vấn MySQL mỗi giá trị. Kết quả giống hệt gọi Encode từng tuple.
+func (c *PKCodec) EncodeMany(tuples [][]model.Value) ([]Key, error) {
+	if c.WeighMany != nil {
+		for i, col := range c.Cols {
+			if col.Kind != PKWeight {
+				continue
+			}
+			vs := make([]model.Value, 0, len(tuples))
+			for _, t := range tuples {
+				if len(t) == len(c.Cols) && t[i] != nil {
+					vs = append(vs, t[i])
+				}
+			}
+			if err := c.WeighMany(col, vs); err != nil {
+				return nil, fmt.Errorf("primary key column %s: weight string: %w", col.Name, err)
+			}
+		}
+	}
+	out := make([]Key, len(tuples))
+	for i, t := range tuples {
+		k, err := c.Encode(t)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = k
+	}
+	return out, nil
 }
 
 // Key là tuple PK đã mã hóa memcomparable (so sánh string = so thứ tự tuple của DB).
@@ -159,12 +196,12 @@ func MySQLPKColumn(name, dataType, columnType, charset, collation, padAttribute 
 			// Mức 2: thứ tự và phép bằng của collation lấy từ WEIGHT_STRING của chính MySQL (không cài lại
 			// collation trong Go).
 			return PKColumn{Name: name, Kind: PKWeight, Collation: collation, Charset: charset,
-				PadSpace: !strings.EqualFold(strings.TrimSpace(padAttribute), "NO PAD")}, nil
+				PadSpace: !strings.EqualFold(strings.TrimSpace(padAttribute), "NO PAD"), FixedChar: dt == "char"}, nil
 		}
 		if strings.EqualFold(strings.TrimSpace(padAttribute), "NO PAD") {
-			return PKColumn{Name: name, Kind: PKBytes}, nil
+			return PKColumn{Name: name, Kind: PKBytes, FixedChar: dt == "char"}, nil
 		}
-		return PKColumn{Name: name, Kind: PKPadBytes}, nil
+		return PKColumn{Name: name, Kind: PKPadBytes, FixedChar: dt == "char"}, nil
 	}
 	return unsupported("type " + dataType + " is not supported")
 }
@@ -655,6 +692,77 @@ func CrossEngineSameOrder(src, dst *PKCodec) error {
 		if a.Name != b.Name || ca == "" || ca != class(b.Kind) {
 			return fmt.Errorf("primary key column %s (%s → %s %s) has no engine-independent order", a.Name, a.Kind, b.Kind, b.SQLType)
 		}
+	}
+	return nil
+}
+
+// CrossEngineKeySet (MySQL→PG, Gate 2 "collation _ci → C"): cặp PK mà hai engine sắp KHÁC thứ tự nhưng
+// snapshot / verify full vẫn làm đúng được nếu mọi thao tác ở target là THEO KHÓA CHÍNH XÁC (không theo
+// range): flush theo tập khóa (FlushExact), dọn phần chưa đọc bằng cách quét khóa target rồi tính khóa
+// SOURCE trong Go (ClearUnreadRange của pipeline), verify full gom row target vào chunk của source.
+// Trả nil khi nhận; khi đó CrossEngineSameOrder phải đã từ chối (gọi sau nó).
+//
+// Điều kiện đúng (mọi điều kiện đều cần):
+//
+//  1. Phép bằng ở target MỊN HƠN hoặc bằng phép bằng ở source: hai giá trị bằng nhau ở target thì bằng
+//     nhau ở source (cùng khóa range-state). Khi đó mỗi row target có ĐÚNG MỘT khóa source, nên "row target
+//     thuộc range source nào" xác định được, và hai row khác khóa source không bao giờ đụng nhau ở unique
+//     PK của target. Cột chuỗi:
+//     - text/varchar COLLATE "C" (PKBytes): bằng = bằng byte; bằng byte ⇒ bằng theo MỌI collation
+//     deterministic của MySQL ✓.
+//     - bpchar "C" (PKTrimBytes): bằng = bằng sau khi bỏ space cuối; ⇒ bằng ở source khi source PAD
+//     SPACE ('a' = 'a ' ở cả hai), hoặc khi cột source là CHAR(n) (MySQL bỏ space cuối của CHAR nên hai
+//     giá trị source khác nhau không chỉ khác ở space cuối). VARCHAR NO PAD ('a' ≠ 'a ') bị từ chối.
+//     Ngược lại (source mịn hơn target) KHÔNG cần: source _ci coi 'a' = 'A' nên PK source không bao giờ
+//     chứa cả hai; target C chỉ nhận đúng byte mà stream/snapshot gửi.
+//  2. Byte của khóa ở target = byte ở source: chỉ charset utf8mb4/utf8mb3/utf8/ascii (PG lưu UTF-8;
+//     latin1 bị chuyển mã nên khóa target đọc về không còn là giá trị source để tính WEIGHT_STRING).
+//  3. Đọc khóa target dạng text (::text) rồi mã hóa bằng codec SOURCE phải cho đúng khóa source của row
+//     đó: cột chuỗi (giá trị như nhau), số nguyên / UNSIGNED / DECIMAL (text thập phân; codec chuẩn hóa
+//     1.50 = 1.5). Các kiểu khác (thời gian, nhị phân: text của PG khác dạng MySQL) bị từ chối khi đứng
+//     chung PK với cột chuỗi — chưa có chứng minh chuyển dạng.
+//  4. Cột PK cùng tên, cùng số cột, và mỗi cặp cột không phải chuỗi thuộc cùng lớp thứ tự (như
+//     CrossEngineSameOrder) — để bound/tham số bind được ở cả hai phía.
+func CrossEngineKeySet(src, dst *PKCodec) error {
+	if len(src.Cols) != len(dst.Cols) {
+		return fmt.Errorf("primary key has %d columns on the source and %d on the target", len(src.Cols), len(dst.Cols))
+	}
+	str := false
+	for i := range src.Cols {
+		a, b := src.Cols[i], dst.Cols[i]
+		if a.Name != b.Name {
+			return fmt.Errorf("primary key column %d is %s on the source and %s on the target", i+1, a.Name, b.Name)
+		}
+		srcStr := a.Kind == PKWeight || a.Kind == PKPadBytes || (a.Kind == PKBytes && a.Collation != "")
+		if srcStr {
+			switch strings.ToLower(a.Charset) {
+			case "utf8mb4", "utf8mb3", "utf8", "ascii":
+			default:
+				return fmt.Errorf("primary key column %s: character set %s is converted on the way to PostgreSQL, so target keys cannot be mapped back to source keys", a.Name, a.Charset)
+			}
+			padSpace := a.Kind == PKPadBytes || (a.Kind == PKWeight && a.PadSpace)
+			typ := strings.ToLower(b.SQLType)
+			switch {
+			case b.Kind == PKBytes && (typ == "text" || typ == "varchar"):
+			case b.Kind == PKTrimBytes && typ == "bpchar" && (padSpace || a.FixedChar):
+			default:
+				return fmt.Errorf("primary key column %s (%s %s → %s %s): the target must be text/varchar COLLATE \"C\" (or char COLLATE \"C\" for a PAD SPACE collation) so that equal target keys are equal source keys",
+					a.Name, a.Kind, a.Collation, b.Kind, b.SQLType)
+			}
+			str = true
+			continue
+		}
+		switch a.Kind {
+		case PKInt, PKUint, PKDecimal:
+			if b.Kind != PKInt && b.Kind != PKDecimal {
+				return fmt.Errorf("primary key column %s (%s → %s %s) has no engine-independent order", a.Name, a.Kind, b.Kind, b.SQLType)
+			}
+		default:
+			return fmt.Errorf("primary key column %s (%s) cannot be mapped back from its PostgreSQL text form next to a string key column", a.Name, a.Kind)
+		}
+	}
+	if !str {
+		return fmt.Errorf("primary key has no string column")
 	}
 	return nil
 }
