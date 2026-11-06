@@ -317,7 +317,7 @@ func (w *pgWorkload) one(r *rand.Rand, span int64) error {
 		}
 	case k < 74: // upsert events
 		if _, err := tx.Exec(`INSERT INTO app.events VALUES ($1, nextval('app.ver_seq'), 'x')
-			ON CONFLICT (id) DO UPDATE SET ver = EXCLUDED.ver, body = 'y'`, hot(r, span)); err != nil {
+			ON CONFLICT (id) DO UPDATE SET ver = nextval('app.ver_seq'), body = 'y'`, hot(r, span)); err != nil {
 			return err
 		}
 	case k < 79: // đổi PK của events
