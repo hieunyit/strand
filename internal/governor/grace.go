@@ -685,6 +685,8 @@ func (g *GraceGovernor) RecordQueryLatency(d time.Duration) {
 	switch r := g.cfg.SignalReader.(type) {
 	case *MySQLDBSignalReader:
 		r.latencyTracker.Record(d)
+	case *PGDBSignalReader:
+		r.latencyTracker.Record(d)
 	case *SimulatedSignalReader:
 		r.latencyTracker.Record(d)
 	}
@@ -747,6 +749,13 @@ func (g *GraceGovernor) SetWindowSaturated(v bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.windowSaturated = v
+}
+
+// WindowSaturated: giá trị SetWindowSaturated gần nhất (mặc định true).
+func (g *GraceGovernor) WindowSaturated() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.windowSaturated
 }
 
 // SetBackgroundWeights: weight của từng tác vụ background (snapshot, verify, prefetch...).
