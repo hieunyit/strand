@@ -528,6 +528,7 @@ func comparePG(t *testing.T, src, dst *pgNode, tables ...string) {
 // cho đúng ver đó (vắng = phiên bản chưa từng được ghi ở target; có = đã ghi rồi bị đè).
 func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) string {
 	var out []string
+	xids := map[string]bool{}
 	for _, tb := range tables {
 		s, d := dumpPG(t, src.DB, tb), dumpPG(t, dst.DB, tb)
 		for id, sv := range s {
@@ -541,9 +542,31 @@ func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) stri
 			var cnt sql.NullInt64
 			_ = dst.DB.QueryRow("SELECT cnt FROM public.apply_log WHERE tbl = $1 AND ver = $2::bigint", strings.TrimPrefix(tb, "app."), ver).Scan(&cnt)
 			out = append(out, fmt.Sprintf("%s id=%s src xmin=%s ver=%s | dst ver=%q apply_log(src ver)=%v", tb, id, xmin, ver, dver, cnt))
+			if xmin != "" {
+				xids[xmin] = true
+			}
 			if len(out) > 30 {
 				return strings.Join(out, "\n")
 			}
+		}
+	}
+	// Mọi row ở source còn mang xmin của Txn bị lệch, trên mọi bảng app (F11): cả Txn bị mất, hay chỉ
+	// một phần của nó; row nào của Txn đó đã tới target.
+	for x := range xids {
+		for _, tb := range pgAppTables {
+			rows, err := src.DB.Query(fmt.Sprintf("SELECT id::text, ver::text FROM %s WHERE xmin::text = $1 ORDER BY id LIMIT 20", tb), x)
+			if err != nil {
+				continue
+			}
+			for rows.Next() {
+				var id, ver, dver string
+				_ = rows.Scan(&id, &ver)
+				_ = dst.DB.QueryRow(fmt.Sprintf("SELECT ver::text FROM %s WHERE id = $1::bigint", tb), id).Scan(&dver)
+				var cnt sql.NullInt64
+				_ = dst.DB.QueryRow("SELECT cnt FROM public.apply_log WHERE tbl = $1 AND ver = $2::bigint", strings.TrimPrefix(tb, "app."), ver).Scan(&cnt)
+				out = append(out, fmt.Sprintf("  xid %s: %s id=%s src ver=%s | dst ver=%q apply_log=%v", x, tb, id, ver, dver, cnt))
+			}
+			rows.Close()
 		}
 	}
 	return strings.Join(out, "\n")
