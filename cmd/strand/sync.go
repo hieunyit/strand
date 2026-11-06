@@ -115,6 +115,12 @@ func newSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Chạy pipeline đồng bộ CDC (spec/02 §10, spec/03 §4)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// review R08: --dry-run (cờ persistent "không tác động đích") từng bị bỏ qua, sync chạy thật.
+			// sync không có chế độ chạy thử: từ chối trước khi đọc cấu hình hay chạm DSN nào.
+			if dryRun {
+				return exitcode.New("dry_run_unsupported", exitcode.InvalidSyntax,
+					"strand sync does not support --dry-run (it would write to the target); use `strand validate` or `strand plan` to check without side effects", nil)
+			}
 			if cfgPath == "" {
 				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing config file path (use -c or --config)", nil)
 			}
