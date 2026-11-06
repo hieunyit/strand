@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -171,6 +172,7 @@ type MySQLWriter struct {
 	pk                  pkRegistry
 	pipelining          bool
 	mu                  sync.Mutex
+	maxPacket           atomic.Int64 // @@max_allowed_packet của target, 0 = chưa đọc (review N13)
 	MultiRowUpsertCount int64
 	TotalUpsertRows     int64
 }
@@ -259,7 +261,11 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 	// cùng tập cột được gom thành multi-row qua ranh giới các Txn của batch: thứ tự row trong
 	// transaction đích giữ nguyên, nhưng số round-trip giảm (quan trọng ở strict, một worker).
 	var cur *mysqlUpsertBatch
-	q := &stmtQueue{tx: tx, on: w.pipelining}
+	budget, maxPacket, err := w.queueLimits(ctx, tx)
+	if err != nil {
+		return err
+	}
+	q := &stmtQueue{tx: tx, on: w.pipelining, budget: budget, maxPacket: maxPacket}
 	for _, txn := range batch {
 		if err := w.applyTxnMySQL(ctx, q, txn, &cur); err != nil {
 			return fmt.Errorf("failed to apply row changes: %w", err)
@@ -343,25 +349,106 @@ type stmtQueue struct {
 	sb   strings.Builder
 	args []any
 	n    int
+	// bytes: ước lượng kích thước payload đang chờ = độ dài SQL + kích thước đã mã hóa của tham số
+	// (review N13). Chỉ đếm độ dài SQL (có placeholder) thì blob/text lớn trong args không được tính:
+	// SQL ngắn vẫn có thể mang payload vượt max_allowed_packet hoặc cấp phát rất lớn khi interpolate.
+	bytes int
+	// send: gửi một câu (hoặc lô nhiều câu) xuống target; nil = tx.ExecContext. Tách ra để kiểm
+	// thử logic chia lô không cần DB.
+	send func(ctx context.Context, query string, args ...any) error
+	// budget: ngân sách byte của một lần gửi (0 = stmtQueueMaxBytes); maxPacket: @@max_allowed_packet
+	// của target (0 = không biết, không kiểm). Xem MySQLWriter.queueLimits.
+	budget    int
+	maxPacket int64
 }
 
 const (
-	stmtQueueMaxBytes = 512 * 1024 // dưới max_allowed_packet mặc định (64 MiB) với biên rộng
+	// stmtQueueMaxBytes: trần ngân sách byte của một lần gửi (SQL + tham số đã mã hóa), review N13.
+	// Khi pipelining, ngân sách thực = min(trần này, max_allowed_packet/4) — chừa biên cho escape
+	// khi interpolate (tối đa ~2x) và cho target có max_allowed_packet nhỏ (MySQL 5.7: 4 MiB).
+	stmtQueueMaxBytes = 16 * 1024 * 1024
+	stmtQueueMinBytes = 64 * 1024
 	stmtQueueMaxArgs  = 20000
+	// stmtPacketSlack: phần dư cho chữ câu lệnh (tên bảng/cột, ON DUPLICATE KEY UPDATE) và header gói.
+	stmtPacketSlack = 64 * 1024
 )
+
+func (q *stmtQueue) limit() int {
+	if q.budget > 0 {
+		return q.budget
+	}
+	return stmtQueueMaxBytes
+}
+
+// budgetFor tính ngân sách byte của lô từ max_allowed_packet (0 = không biết → trần mặc định).
+func budgetFor(maxPacket int64) int {
+	if maxPacket <= 0 {
+		return stmtQueueMaxBytes
+	}
+	b := maxPacket / 4
+	if b > stmtQueueMaxBytes {
+		b = stmtQueueMaxBytes
+	}
+	if b < stmtQueueMinBytes {
+		b = stmtQueueMinBytes
+	}
+	return int(b)
+}
+
+// argBytes ước lượng kích thước một tham số khi gửi xuống target (MySQL, PG; review N13): chuỗi/byte tính
+// theo độ dài thật (+ dấu nháy/tiền tố), số và kiểu khác tính cố định. Chỉ là ước lượng để chia lô;
+// escape khi interpolate có thể làm chuỗi dài hơn, ngân sách 16 MiB chừa biên cho việc đó.
+func argBytes(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 4
+	case []byte:
+		return len(x) + 10
+	case string:
+		return len(x) + 3
+	case fmt.Stringer:
+		return len(x.String()) + 3
+	default:
+		return 16
+	}
+}
+
+func argsBytes(args []any) int {
+	n := 0
+	for _, a := range args {
+		n += argBytes(a)
+	}
+	return n
+}
+
+func (q *stmtQueue) do(ctx context.Context, query string, args ...any) error {
+	if q.send != nil {
+		return q.send(ctx, query, args...)
+	}
+	_, err := q.tx.ExecContext(ctx, query, args...)
+	return err
+}
 
 func (q *stmtQueue) exec(ctx context.Context, query string, args ...any) error {
 	if !q.on {
-		_, err := q.tx.ExecContext(ctx, query, args...)
-		return err
+		return q.do(ctx, query, args...)
+	}
+	size := len(query) + argsBytes(args)
+	// Câu mới làm lô vượt ngân sách: gửi phần đang chờ trước, để câu lớn đi một mình (review N13).
+	if q.n > 0 && q.bytes+size+2 > q.limit() {
+		if err := q.flush(ctx); err != nil {
+			return err
+		}
 	}
 	if q.n > 0 {
 		q.sb.WriteString(";\n")
+		q.bytes += 2
 	}
 	q.sb.WriteString(query)
 	q.args = append(q.args, args...)
+	q.bytes += size
 	q.n++
-	if q.sb.Len() >= stmtQueueMaxBytes || len(q.args) >= stmtQueueMaxArgs {
+	if q.bytes >= q.limit() || len(q.args) >= stmtQueueMaxArgs {
 		return q.flush(ctx)
 	}
 	return nil
@@ -371,10 +458,11 @@ func (q *stmtQueue) flush(ctx context.Context) error {
 	if q.n == 0 {
 		return nil
 	}
-	_, err := q.tx.ExecContext(ctx, q.sb.String(), q.args...)
+	err := q.do(ctx, q.sb.String(), q.args...)
 	q.sb.Reset()
 	q.args = q.args[:0]
 	q.n = 0
+	q.bytes = 0
 	if err != nil {
 		return fmt.Errorf("apply statements: %w", err)
 	}
@@ -388,6 +476,7 @@ type mysqlUpsertBatch struct {
 	cols   []string
 	pkCols []string
 	vals   [][]any
+	bytes  int // tổng argsBytes của vals (review N13)
 }
 
 func (b *mysqlUpsertBatch) flush(ctx context.Context, q *stmtQueue) error {
@@ -429,6 +518,7 @@ func (b *mysqlUpsertBatch) flush(ctx context.Context, q *stmtQueue) error {
 		return fmt.Errorf("multi-row upsert on %s: %w", b.table, err)
 	}
 	b.vals = nil
+	b.bytes = 0
 	return nil
 }
 
@@ -486,7 +576,14 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 				names[i] = c.Name
 				vals[i] = c.Value
 			}
-			if cur != nil && (cur.table != row.Table || !sameStringSlice(cur.cols, names) || len(cur.vals) >= 500) {
+			// Cắt khối theo số row VÀ theo byte payload (review N13): một row lớn hơn ngân sách vẫn đi
+			// nguyên một mình (không bao giờ tách giữa row), nhưng phải vừa max_allowed_packet.
+			rowBytes := argsBytes(vals)
+			if err := checkRowPacket(q, row, rowBytes); err != nil {
+				return err
+			}
+			if cur != nil && (cur.table != row.Table || !sameStringSlice(cur.cols, names) || len(cur.vals) >= 500 ||
+				cur.bytes+rowBytes > q.limit()) {
 				if err := flush(); err != nil {
 					return err
 				}
@@ -495,6 +592,7 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 				cur = &mysqlUpsertBatch{w: w, table: row.Table, cols: names, pkCols: pkCols}
 			}
 			cur.vals = append(cur.vals, vals)
+			cur.bytes += rowBytes
 			return nil
 		case model.OpDelete:
 			if err := flush(); err != nil {
@@ -513,6 +611,39 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 		return err
 	}
 	return nil // phần upsert còn dở được gom tiếp với Txn kế trong batch
+}
+
+// checkRowPacket (review N13): row mà riêng nó đã vượt ngân sách lô vẫn đi nguyên một mình, nhưng
+// nếu không thể vừa một gói max_allowed_packet thì từ chối rõ ràng — kèm bảng và khóa — thay vì để
+// server cắt kết nối với lỗi khó hiểu. Chỉ áp khi pipelining (interpolateParams): câu lệnh đi dưới dạng
+// văn bản nên cả row phải vừa một gói. Không pipelining, driver dùng prepared statement và tách giá trị
+// lớn thành long data (mỗi giá trị riêng chịu max_allowed_packet); lỗi server (nếu có) trả nguyên.
+func checkRowPacket(q *stmtQueue, row *model.RowChange, rowBytes int) error {
+	if !q.on || q.maxPacket <= 0 || rowBytes < q.limit() {
+		return nil
+	}
+	if int64(rowBytes)+stmtPacketSlack > q.maxPacket {
+		return fmt.Errorf("table %s key %v: row payload ~%d bytes exceeds target max_allowed_packet %d; raise max_allowed_packet on the target",
+			row.Table, row.Key, rowBytes, q.maxPacket)
+	}
+	return nil
+}
+
+// queueLimits trả ngân sách lô và max_allowed_packet cho hàng đợi câu lệnh. Khi pipelining,
+// @@max_allowed_packet được đọc MỘT lần cho mỗi writer (giá trị toàn cục, đổi cần SET GLOBAL; phiên
+// mới mới thấy) rồi lưu lại; không pipelining thì không truy vấn (review N13).
+func (w *MySQLWriter) queueLimits(ctx context.Context, tx *sql.Tx) (int, int64, error) {
+	if !w.pipelining {
+		return stmtQueueMaxBytes, 0, nil
+	}
+	mp := w.maxPacket.Load()
+	if mp == 0 {
+		if err := tx.QueryRowContext(ctx, "SELECT @@max_allowed_packet").Scan(&mp); err != nil {
+			return 0, 0, fmt.Errorf("read target max_allowed_packet: %w", err)
+		}
+		w.maxPacket.Store(mp)
+	}
+	return budgetFor(mp), mp, nil
 }
 
 func sameStringSlice(a, b []string) bool {
