@@ -49,6 +49,10 @@ func newVerifyCmd() *cobra.Command {
 					if strings.Contains(err.Error(), exitcode.ErrVerifyMismatch) {
 						return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError, err.Error(), err)
 					}
+					// Có bảng vượt giới hạn ghi khóa: kết quả incomplete, exit 5 như lệch (review N12).
+					if strings.Contains(err.Error(), exitcode.ErrVerifyIncomplete) {
+						return exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError, err.Error(), err)
+					}
 					return err
 				}
 				fmt.Println(msg)

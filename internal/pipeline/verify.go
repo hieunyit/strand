@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -15,26 +16,94 @@ import (
 	"strand/internal/verify"
 )
 
-// touchedKeys ghi lại PK (số nguyên) mà CDC đã chạm tới, theo bảng nguồn (verify delta).
-type touchedKeys struct {
-	mu    sync.Mutex
-	on    bool
-	limit int
-	keys  map[model.TableID]map[int64]struct{}
-	over  map[model.TableID]bool
+// Bên tiêu thụ khóa đã chạm (review N12): post-seed verify và `strand verify --mode delta` mỗi bên có
+// tập riêng, take của bên này không lấy mất khóa của bên kia.
+const (
+	touchPostSeed = "postseed"
+	touchDelta    = "delta"
+)
+
+// touchedSet: khóa đã chạm của một bên tiêu thụ.
+type touchedSet struct {
+	keys map[model.TableID]map[int64]struct{}
+	over map[model.TableID]bool
 	// gen: khóa đã chạm của bảng PK tổng quát (việc C), theo khóa mã hóa.
 	gen map[model.TableID]map[snapshot.Key]snapshot.Bound
 }
 
-func newTouchedKeys(limit int) *touchedKeys {
-	return &touchedKeys{limit: limit, keys: map[model.TableID]map[int64]struct{}{}, over: map[model.TableID]bool{},
+func newTouchedSet() *touchedSet {
+	return &touchedSet{keys: map[model.TableID]map[int64]struct{}{}, over: map[model.TableID]bool{},
 		gen: map[model.TableID]map[snapshot.Key]snapshot.Bound{}}
 }
 
-func (tk *touchedKeys) enable(on bool) {
+func (s *touchedSet) addInt(t model.TableID, k int64, limit int) {
+	m := s.keys[t]
+	if m == nil {
+		m = map[int64]struct{}{}
+		s.keys[t] = m
+	}
+	if _, ok := m[k]; ok {
+		return
+	}
+	if len(m) >= limit {
+		s.over[t] = true
+		return
+	}
+	m[k] = struct{}{}
+}
+
+func (s *touchedSet) addBound(t model.TableID, b snapshot.Bound, limit int) {
+	m := s.gen[t]
+	if m == nil {
+		m = map[snapshot.Key]snapshot.Bound{}
+		s.gen[t] = m
+	}
+	if _, ok := m[b.K]; ok {
+		return
+	}
+	if len(m) >= limit {
+		s.over[t] = true
+		return
+	}
+	m[b.K] = b
+}
+
+// touchedTake: kết quả take của một bên tiêu thụ. over = bảng có khóa bị bỏ do vượt giới hạn.
+type touchedTake struct {
+	keys map[model.TableID][]int64
+	over map[model.TableID]bool
+	gen  map[model.TableID][]snapshot.Bound
+}
+
+// touchedKeys ghi lại PK mà CDC đã chạm tới, theo bảng nguồn, cho từng bên tiêu thụ đang bật
+// (post-seed verify, verify delta — review N12).
+type touchedKeys struct {
+	mu    sync.Mutex
+	limit int
+	sets  map[string]*touchedSet // bên tiêu thụ đang bật → tập khóa riêng
+}
+
+func newTouchedKeys(limit int) *touchedKeys {
+	return &touchedKeys{limit: limit, sets: map[string]*touchedSet{}}
+}
+
+// enable bật/tắt ghi khóa cho một bên tiêu thụ. Tắt thì bỏ tập của bên đó; bật lại bắt đầu tập rỗng.
+func (tk *touchedKeys) enable(consumer string, on bool) {
 	tk.mu.Lock()
-	tk.on = on
-	tk.mu.Unlock()
+	defer tk.mu.Unlock()
+	if !on {
+		delete(tk.sets, consumer)
+		return
+	}
+	if tk.sets[consumer] == nil {
+		tk.sets[consumer] = newTouchedSet()
+	}
+}
+
+func (tk *touchedKeys) active(consumer string) bool {
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	return tk.sets[consumer] != nil
 }
 
 // addKey: như add; codec khác nil (bảng PK tổng quát) thì lưu khóa mã hóa.
@@ -43,89 +112,96 @@ func (tk *touchedKeys) addKey(t model.TableID, key []model.Value, codec *snapsho
 		tk.add(t, key)
 		return
 	}
-	// Kiểm tk.on TRƯỚC khi mã hóa: codec PKWeight gọi WEIGHT_STRING trên source cho mỗi khóa mới, không
-	// được chạy trên luồng CDC thường trực khi delta tracking tắt (review N05). BoundOf chạy ngoài khóa
-	// (có thể là truy vấn mạng), rồi kiểm lại tk.on dưới khóa vì enable có thể đổi giữa chừng.
+	// Kiểm có bên tiêu thụ nào bật TRƯỚC khi mã hóa: codec PKWeight gọi WEIGHT_STRING trên source cho mỗi
+	// khóa mới, không được chạy trên luồng CDC thường trực khi delta tracking tắt (review N05). BoundOf
+	// chạy ngoài khóa (có thể là truy vấn mạng), rồi kiểm lại dưới khóa vì enable có thể đổi giữa chừng.
 	tk.mu.Lock()
-	on := tk.on
+	on := len(tk.sets) > 0
 	tk.mu.Unlock()
 	if !on {
 		return
 	}
 	b, err := codec.BoundOf(key)
-	tk.mu.Lock()
-	defer tk.mu.Unlock()
-	if !tk.on || err != nil {
+	if err != nil {
 		return
 	}
-	m := tk.gen[t]
-	if m == nil {
-		m = map[snapshot.Key]snapshot.Bound{}
-		tk.gen[t] = m
-	}
-	if len(m) >= tk.limit {
-		tk.over[t] = true
-		return
-	}
-	m[b.K] = b
-}
-
-// takeGeneric lấy (và xóa) khóa đã chạm của bảng PK tổng quát.
-func (tk *touchedKeys) takeGeneric() map[model.TableID][]snapshot.Bound {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
-	out := map[model.TableID][]snapshot.Bound{}
-	for t, m := range tk.gen {
-		bs := make([]snapshot.Bound, 0, len(m))
-		for _, b := range m {
-			bs = append(bs, b)
-		}
-		sort.Slice(bs, func(i, j int) bool { return bs[i].K < bs[j].K })
-		out[t] = bs
+	for _, s := range tk.sets {
+		s.addBound(t, b, tk.limit)
 	}
-	tk.gen = map[model.TableID]map[snapshot.Key]snapshot.Bound{}
-	return out
 }
 
 func (tk *touchedKeys) add(t model.TableID, key []model.Value) {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
-	if !tk.on || len(key) != 1 {
+	if len(tk.sets) == 0 || len(key) != 1 {
 		return
 	}
 	k, ok := toInt64(key[0])
 	if !ok {
 		return
 	}
-	m := tk.keys[t]
-	if m == nil {
-		m = map[int64]struct{}{}
-		tk.keys[t] = m
+	for _, s := range tk.sets {
+		s.addInt(t, k, tk.limit)
 	}
-	if len(m) >= tk.limit {
-		tk.over[t] = true
-		return
-	}
-	m[k] = struct{}{}
 }
 
-// take trả về và xóa các khóa đã ghi; overflow = có khóa bị bỏ do vượt giới hạn.
-func (tk *touchedKeys) take() (map[model.TableID][]int64, map[model.TableID]bool) {
+// take trả về và xóa các khóa đã ghi của một bên tiêu thụ (khóa số + khóa PK tổng quát + cờ overflow,
+// lấy cùng lúc dưới một khóa). Tập của bên khác không đổi.
+func (tk *touchedKeys) take(consumer string) touchedTake {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
-	out := map[model.TableID][]int64{}
-	for t, m := range tk.keys {
+	out := touchedTake{keys: map[model.TableID][]int64{}, over: map[model.TableID]bool{}, gen: map[model.TableID][]snapshot.Bound{}}
+	s := tk.sets[consumer]
+	if s == nil {
+		return out
+	}
+	for t, m := range s.keys {
 		ks := make([]int64, 0, len(m))
 		for k := range m {
 			ks = append(ks, k)
 		}
 		sort.Slice(ks, func(i, j int) bool { return ks[i] < ks[j] })
-		out[t] = ks
+		out.keys[t] = ks
 	}
-	over := tk.over
-	tk.keys = map[model.TableID]map[int64]struct{}{}
-	tk.over = map[model.TableID]bool{}
-	return out, over
+	for t, m := range s.gen {
+		bs := make([]snapshot.Bound, 0, len(m))
+		for _, b := range m {
+			bs = append(bs, b)
+		}
+		sort.Slice(bs, func(i, j int) bool { return bs[i].K < bs[j].K })
+		out.gen[t] = bs
+	}
+	out.over = s.over
+	tk.sets[consumer] = newTouchedSet()
+	return out
+}
+
+// restore gộp lại khóa đã take khi verify lỗi (lỗi kết nối, hủy — không phải lệch) để lần sau verify
+// lại, không mất (review N12). Bên tiêu thụ đã tắt thì bỏ qua.
+func (tk *touchedKeys) restore(consumer string, tt touchedTake) {
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	s := tk.sets[consumer]
+	if s == nil {
+		return
+	}
+	for t, ks := range tt.keys {
+		for _, k := range ks {
+			s.addInt(t, k, tk.limit)
+		}
+	}
+	for t, bs := range tt.gen {
+		for _, b := range bs {
+			s.addBound(t, b, tk.limit)
+		}
+	}
+	for t, o := range tt.over {
+		if o {
+			s.over[t] = true
+		}
+	}
 }
 
 func toInt64(v model.Value) (int64, bool) {
@@ -272,7 +348,7 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 		return
 	}
 	window := durationOr(p.cfg.Verify.PostSeedWindow, 30*time.Minute)
-	p.touched.enable(true)
+	p.touched.enable(touchPostSeed, true)
 	// Verify chỉ có nghĩa khi target đã theo kịp phần log từ P (catch-up xong).
 	for !(p.caughtUpWithSource(ctx) && p.sched.Lwd() >= p.admitted.Load()) {
 		select {
@@ -311,35 +387,61 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	p.log.Info("post-seed verify passed: pipeline synced")
 }
 
-// takePostSeedKeys lấy khóa đã chạm trong cửa sổ post-seed rồi tắt ghi khóa — trừ khi verify.delta: on
-// (pipeline đã bật từ lúc khởi động cho `strand verify --mode delta`; tắt ở đây làm verify delta
-// về sau không còn thấy khóa nào, review R21).
+// takePostSeedKeys lấy khóa đã chạm trong cửa sổ post-seed rồi tắt ghi khóa của post-seed. Tập của
+// verify delta (verify.delta: on) là tập riêng, không bị lấy hay tắt ở đây (review R21, N12).
 func (p *Pipeline) takePostSeedKeys() (map[model.TableID][]int64, map[model.TableID]bool, map[model.TableID][]snapshot.Bound) {
-	keys, over := p.touched.take()
-	gen := p.touched.takeGeneric()
-	if p.cfg == nil || !strings.EqualFold(p.cfg.Verify.Delta, "on") {
-		p.touched.enable(false)
-	}
-	return keys, over, gen
+	tt := p.touched.take(touchPostSeed)
+	p.touched.enable(touchPostSeed, false)
+	return tt.keys, tt.over, tt.gen
 }
 
 // VerifyDelta (strand verify --mode delta): verify các khóa CDC đã chạm từ lần gọi trước
-// (cần verify.delta: on), trả báo cáo theo bảng.
+// (cần verify.delta: on), trả báo cáo theo bảng. Verify lỗi (không phải lệch) thì gộp lại khóa đã lấy
+// để lần sau verify lại; có bảng vượt giới hạn ghi khóa thì không báo sạch (review N12).
 func (p *Pipeline) VerifyDelta(ctx context.Context) (string, error) {
 	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
 		return "", fmt.Errorf("verify --mode delta is supported for MySQL → MySQL pipelines only; use verify --mode full")
 	}
-	keys, _ := p.touched.take()
-	gen := p.touched.takeGeneric()
-	if err := p.verifyTablesKeys(ctx, 0, keys, gen); err != nil {
+	if !p.touched.active(touchDelta) {
+		return "", fmt.Errorf("verify --mode delta needs verify.delta: on in the pipeline config (no changed keys are being tracked)")
+	}
+	tt := p.touched.take(touchDelta)
+	if err := p.verifyTablesKeys(ctx, 0, tt.keys, tt.gen); err != nil {
+		var xe *exitcode.Error
+		if !errors.As(err, &xe) || xe.Code != exitcode.ErrVerifyMismatch {
+			p.touched.restore(touchDelta, tt)
+		}
 		return "", err
 	}
+	return deltaVerifyResult(tt)
+}
+
+// deltaVerifyResult dựng kết quả verify delta sau khi các khóa đã lấy đều 0 lệch. Bảng vượt giới hạn
+// ghi khóa chỉ được verify một phần (mẫu) nên kết quả là incomplete — lỗi verify_incomplete (exit 5),
+// không phải "0 mismatches" cho toàn bộ tập thay đổi (review N12).
+func deltaVerifyResult(tt touchedTake) (string, error) {
 	n := 0
-	for _, ks := range keys {
+	tables := map[model.TableID]bool{}
+	for t, ks := range tt.keys {
 		n += len(ks)
+		tables[t] = true
 	}
-	for _, ks := range gen {
+	for t, ks := range tt.gen {
 		n += len(ks)
+		tables[t] = true
 	}
-	return fmt.Sprintf("delta verify: %d changed keys in %d tables, 0 mismatches", n, len(keys)+len(gen)), nil
+	var over []string
+	for t, o := range tt.over {
+		if o {
+			over = append(over, t.String())
+			tables[t] = true
+		}
+	}
+	if len(over) > 0 {
+		sort.Strings(over)
+		return "", exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError,
+			fmt.Sprintf("delta verify incomplete: %d tables exceeded the tracking limit (sampled): %s; %d changed keys in %d tables verified, 0 mismatches; run `strand verify --mode sample` or `--mode full` on those tables",
+				len(over), strings.Join(over, ", "), n, len(tables)), nil)
+	}
+	return fmt.Sprintf("delta verify: %d changed keys in %d tables, 0 mismatches", n, len(tables)), nil
 }

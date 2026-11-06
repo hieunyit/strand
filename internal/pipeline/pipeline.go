@@ -755,7 +755,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	go func() { defer bgWG.Done(); p.monitor(ctx) }()
 	go func() { defer bgWG.Done(); p.watchCompactor(ctx) }()
 	if strings.EqualFold(p.cfg.Verify.Delta, "on") {
-		p.touched.enable(true)
+		p.touched.enable(touchDelta, true)
 	}
 	if p.pgReader != nil {
 		bgWG.Add(2)
