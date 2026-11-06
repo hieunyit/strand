@@ -194,8 +194,10 @@ func TestG2_E2E_LongTxnRelaxedPG(t *testing.T) {
 			return err
 		}
 		if n%5 == 0 {
-			_, err := conn.ExecContext(ctx, `INSERT INTO app.items VALUES ($1, nextval('app.ver_seq'), 1, 1.00, 'long',
-				repeat(md5($1::text), 100), '{"long": true}', now())`, longTxnItemsBase+int64(n))
+			// $1 dùng hai chỗ (cột bigint và md5(text)): ép kiểu tường minh cả hai, nếu không PG suy ra hai
+			// kiểu khác nhau cho cùng tham số (SQLSTATE 42P08).
+			_, err := conn.ExecContext(ctx, `INSERT INTO app.items VALUES ($1::bigint, nextval('app.ver_seq'), 1, 1.00, 'long',
+				repeat(md5($1::bigint::text), 100), '{"long": true}', now())`, longTxnItemsBase+int64(n))
 			return err
 		}
 		return nil

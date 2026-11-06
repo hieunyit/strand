@@ -96,7 +96,7 @@ func TestG2_E2E_GraceSensitivityUnknownMetric(t *testing.T) {
 		}{
 			{"strand_sensitivity_unknown", nil, &s.unknown},
 			{"strand_governor_zone", nil, &s.zone},
-			{"strand_governor_rate_tokens", []string{`signal="source_iops"`}, &s.tokens},
+			{"strand_governor_rate_tokens", []string{`resource="source_iops"`}, &s.tokens}, // label là resource (docs/USAGE.md), không phải signal
 		} {
 			v, ok, err := scrapeMetric(cfg.MetricsAddr, m.name, append([]string{label}, m.extra...)...)
 			if err != nil || !ok {
