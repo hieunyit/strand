@@ -370,7 +370,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `target.commit_order` | **`strict`** | `strict` \| `relaxed` (mục 1.3) |
 | `target.batch.max_rows` | 2000 | Đóng batch khi đủ số row |
 | `target.batch.max_bytes` | `4MiB` | Đóng batch khi đủ dung lượng (ước lượng) |
-| `target.batch.max_wait` | 0 | Chờ tối đa để gom thêm Txn. Lưu ý handoff dòng 26: khóa nóng chỉ đạt khoảng 1/max_wait Txn/s |
+| `target.batch.max_wait` | 0 | Chờ tối đa để gom thêm Txn. Relaxed: chuỗi Txn của một khóa nóng được gom cùng batch (không còn giới hạn 1/max_wait Txn/s). Strict: khóa nóng vẫn chỉ đạt khoảng 1/max_wait Txn/s (handoff dòng 26) |
 | `tables.include` | **bắt buộc** | Glob `schema.table` (mục 2) |
 | `tables.exclude` | rỗng | Glob |
 | `tables.rename` | rỗng | `"src.t": "dst.t"` |
@@ -918,7 +918,7 @@ strand verify -c billing.yaml --mode full --table public.orders
 - **Lag:** `strand_lag_seconds` và `top` báo 0 khi scheduler hết việc, kể cả khi reader đang đứng sau source (ví dụ mạng treo). Chưa có heartbeat (handoff dòng 48). Hãy theo dõi thêm `apply_txn_total` có tăng không.
 - **Verify sau seed ngoài MySQL→MySQL:** chỉ ghi cảnh báo rồi bỏ qua, pipeline vẫn báo `synced` dù chưa verify (handoff dòng 52). Hãy tự chạy `verify --mode full`.
 - **`validate` không kiểm PG source** (dòng 33) và không kiểm quyền.
-- **`target.batch.max_wait`** làm khóa nóng chậm lại (dòng 26).
+- **`target.batch.max_wait`** làm khóa nóng chậm lại ở `strict` (dòng 26); `relaxed` gom chuỗi Txn phụ thuộc vào cùng batch.
 - **PG identity `ALWAYS`:** PK bị `UPDATE … SET id = DEFAULT` kèm cột TOAST không đổi làm writer lỗi 428C9 (dòng 27, hiếm).
 - **Source PG:** governor luôn `static` (dòng 31).
 - **Không có:** đồng bộ hai chiều, DDL tự động (`schema.*`), verify full theo lịch, HA tự failover của chính Strand, tự co giãn worker, mask cột, đọc từ PG standby.

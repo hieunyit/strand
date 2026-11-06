@@ -1364,6 +1364,10 @@ func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 	if lim.maxBytes <= 0 {
 		lim.maxBytes = 4 << 20 // 4 MiB (02 §10)
 	}
+	if !p.strict {
+		// Relaxed: batch kéo theo chuỗi Txn phụ thuộc vào nó (row nóng, G2-11) — xem TakeChained.
+		lim.chain = p.sched.TakeChained
+	}
 	var mine checkpoint.AppliedSet = checkpoint.NewMySQLAppliedSet()
 	if p.srcEngine == model.EnginePG {
 		mine = checkpoint.NewPGAppliedSet(0)
