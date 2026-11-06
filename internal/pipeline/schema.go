@@ -83,6 +83,10 @@ type tableMeta struct {
 	Keys          assemble.KeyMeta
 	// TargetGenerated: cột generated ở bảng ĐÍCH — không ghi giá trị (generated.go).
 	TargetGenerated map[string]bool
+	// LaneTable (source PG): bảng có ràng buộc duy nhất ngoài PK (UNIQUE, kể cả partial/biểu thức, hoặc
+	// exclusion) và không REPLICA IDENTITY FULL — pgoutput không gửi giá trị cũ nên writeset không thấy
+	// xung đột; ở relaxed mọi Txn chạm bảng đi làn tuần tự (model.Txn.Lane).
+	LaneTable bool
 }
 
 // loadSourceTables đọc từ information_schema của source mọi bảng thỏa bộ lọc,

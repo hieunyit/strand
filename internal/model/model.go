@@ -145,6 +145,11 @@ type Txn struct {
 	// SourceTS: thời điểm commit ở source (giây Unix, từ header binlog), dùng tính lag.
 	SourceTS int64 `json:"source_ts,omitempty"`
 
+	// Lane: Txn đi làn tuần tự của scheduler (relaxed, source PG, chạm bảng có ràng buộc duy nhất ngoài
+	// PK mà writeset không thấy giá trị cũ): apply đúng thứ tự Admit, gom nhiều Txn liên tiếp vào một
+	// commit (sched.NextLaneBatch). Chỉ trong RAM.
+	Lane bool `json:"-"`
+
 	// XID: xid top-level của Txn ở source PG (từ BEGIN của pgoutput; 0 = không có / MySQL). Snapshot
 	// logic từ source PG dùng nó để biết Txn có visible với snapshot đọc chunk hay không (02 §5).
 	XID uint64 `json:"xid,omitempty"`

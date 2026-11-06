@@ -241,6 +241,13 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 		for _, n := range names {
 			m.Keys.Unique = append(m.Keys.Unique, assemble.UniqueIndex{Name: n, Columns: idx[n]})
 		}
+		if err := db.QueryRowContext(ctx, `
+			SELECT c.relreplident <> 'f' AND (
+			       EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisunique AND NOT i.indisprimary)
+			    OR EXISTS (SELECT 1 FROM pg_constraint x WHERE x.conrelid = c.oid AND x.contype = 'x'))
+			  FROM pg_class c WHERE c.oid = $1`, r.oid).Scan(&m.LaneTable); err != nil {
+			return nil, fmt.Errorf("read unique constraints of %s: %w", r.id, err)
+		}
 		if len(m.PK) == 1 {
 			switch types[m.PK[0]] {
 			case "int2", "int4", "int8":

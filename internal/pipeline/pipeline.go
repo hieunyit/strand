@@ -87,7 +87,9 @@ type Pipeline struct {
 	comp    *checkpoint.Compactor
 	orderer *writer.CommitOrderer
 	writers []batchWriter
-	snap    *snapshot.MySQLSnapshotter
+	// laneOn: writer cuối của writers chạy làn tuần tự (laneWorker, model.Txn.Lane).
+	laneOn bool
+	snap   *snapshot.MySQLSnapshotter
 
 	// Source PG: reader (để báo lwd bền vững), bộ theo dõi LSN cho Vouch, lwd bền vững ở strict.
 	pgReader      *pgreader.Reader
@@ -531,7 +533,13 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		// gom tối đa các Txn liên tiếp vào một commit (group commit).
 		nWorkers = 1
 	}
-	for i := 1; i <= nWorkers; i++ {
+	// Làn tuần tự (relaxed, source PG): thêm một writer riêng ở cuối p.writers (laneWorker).
+	p.laneOn = p.srcEngine == model.EnginePG && !p.strict
+	total := nWorkers
+	if p.laneOn {
+		total++
+	}
+	for i := 1; i <= total; i++ {
 		var w batchWriter
 		if p.dstEngine == model.EnginePG {
 			w = writer.NewPGWriter(p.dst, p.id, i, p.epoch)
@@ -720,6 +728,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		workersWG.Add(1)
 		go func(i int, w batchWriter) {
 			defer workersWG.Done()
+			if p.laneOn && i == len(p.writers)-1 {
+				p.laneWorker(wctx, i+1, w)
+				return
+			}
 			p.worker(wctx, i+1, w)
 		}(i, w)
 	}
@@ -1013,6 +1025,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	// rereadTables: bảng vừa có khóa được đánh dấu đọc lại (UPDATE đổi PK mà cột TOAST không đổi, 02 §8);
 	// plan của chúng phải được lưu bền TRƯỚC khi Txn này được Admit (xem snapshot/toast_pk.go).
 	var rereadTables map[model.TableID]bool
+	lane := false // Txn chạm bảng LaneTable (relaxed, source PG): đi làn tuần tự
 	keep := func(rc *model.RowChange, emit func(model.RowChange) error) error {
 		if p.table(rc.Table) == nil {
 			// Partition lá của một bảng thuộc pipeline (publication không publish_via_partition_root):
@@ -1060,6 +1073,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			}
 		}
 		meta := p.table(rc.Table)
+		if p.laneOn && meta != nil && meta.LaneTable && len(parts) > 0 {
+			lane = true
+		}
 		var keyCodec *snapshot.PKCodec // PK tổng quát: khóa đã chạm lưu theo khóa mã hóa (việc C)
 		if meta != nil && !meta.PKNumeric {
 			keyCodec = meta.PKCodec
@@ -1136,6 +1152,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		}
 	}
 	out.Bytes = t.Bytes
+	out.Lane = lane
 
 	// Nghĩa vụ đọc lại phải bền trước khi Txn có thể commit ở target (checkpoint vượt Txn).
 	for tid := range rereadTables {
@@ -1294,35 +1311,64 @@ func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 			}
 			continue
 		}
-		var prev checkpoint.AppliedSet
-		if p.srcEngine == model.EnginePG {
-			prev = mine.Clone() // để apply lại theo seq nếu batch vi phạm unique (applyInSeqOrder)
+		if !p.applyRelaxed(ctx, id, w, batch, rows, &mine) {
+			return
 		}
+	}
+}
+
+// applyRelaxed apply một batch ở relaxed: thêm vào tập đã apply của worker (mine), ghi row delta cùng
+// transaction dữ liệu, thử lại khi deadlock; source PG vi phạm unique → apply lại từng Txn theo seq
+// (applyInSeqOrder). Trả false nếu worker phải dừng.
+func (p *Pipeline) applyRelaxed(ctx context.Context, id int, w batchWriter, batch []*model.Txn, rows int64, mine *checkpoint.AppliedSet) bool {
+	var prev checkpoint.AppliedSet
+	if p.srcEngine == model.EnginePG {
+		prev = (*mine).Clone() // để apply lại theo seq nếu batch vi phạm unique (applyInSeqOrder)
+	}
+	for _, t := range batch {
+		(*mine).Add(t.SourcePos)
+	}
+	delta, err := p.deltaFor(ctx, *mine)
+	if err == nil {
+		// Deadlock / lock wait timeout ở target: cả transaction (dữ liệu + row delta) đã
+		// rollback, nên apply lại là an toàn (04 §4 "Khóa phía target: retry").
+		for attempt := 1; ; attempt++ {
+			err = w.ApplyBatch(ctx, batch, writer.DeltaRow{Applied: delta})
+			if err == nil || !isRetryable(err) || attempt >= 20 || ctx.Err() != nil {
+				break
+			}
+			time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
+		}
+	}
+	if err != nil && p.srcEngine == model.EnginePG && writer.IsPGUniqueViolation(err) && ctx.Err() == nil {
+		// Batch đã rollback. Xem applyInSeqOrder: apply lại từng Txn theo seq.
+		p.reorderRetry.Add(1)
+		*mine = prev
+		return p.applyInSeqOrder(ctx, id, w, batch, *mine)
+	}
+	return p.finishBatch(ctx, id, batch, rows, err)
+}
+
+// laneWorker (relaxed, source PG): apply Txn làn tuần tự đúng thứ tự Admit, gom chuỗi Txn liên tiếp đã
+// sẵn sàng vào một transaction (group commit, như strict) — thứ tự source giữa các Txn chạm bảng có
+// ràng buộc duy nhất mà writeset không thấy giá trị cũ (model.Txn.Lane), mà không trả giá một commit
+// cho mỗi Txn. Txn làn khác vẫn ghi song song ở các worker thường.
+func (p *Pipeline) laneWorker(ctx context.Context, id int, w batchWriter) {
+	maxRows := int64(p.cfg.Target.Batch.MaxRows)
+	if maxRows <= 0 {
+		maxRows = 2000
+	}
+	var mine checkpoint.AppliedSet = checkpoint.NewPGAppliedSet(0)
+	for {
+		batch := p.sched.NextLaneBatch(ctx, 256, maxRows)
+		if batch == nil {
+			return
+		}
+		var rows int64
 		for _, t := range batch {
-			mine.Add(t.SourcePos)
+			rows += t.TotalRows()
 		}
-		delta, err := p.deltaFor(ctx, mine)
-		if err == nil {
-			// Deadlock / lock wait timeout ở target: cả transaction (dữ liệu + row delta) đã
-			// rollback, nên apply lại là an toàn (04 §4 "Khóa phía target: retry").
-			for attempt := 1; ; attempt++ {
-				err = w.ApplyBatch(ctx, batch, writer.DeltaRow{Applied: delta})
-				if err == nil || !isRetryable(err) || attempt >= 20 || ctx.Err() != nil {
-					break
-				}
-				time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
-			}
-		}
-		if err != nil && p.srcEngine == model.EnginePG && writer.IsPGUniqueViolation(err) && ctx.Err() == nil {
-			// Batch đã rollback. Xem applyInSeqOrder: apply lại từng Txn theo seq.
-			p.reorderRetry.Add(1)
-			mine = prev
-			if !p.applyInSeqOrder(ctx, id, w, batch, mine) {
-				return
-			}
-			continue
-		}
-		if !p.finishBatch(ctx, id, batch, rows, err) {
+		if !p.applyRelaxed(ctx, id, w, batch, rows, &mine) {
 			return
 		}
 	}

@@ -80,6 +80,15 @@ type Scheduler struct {
 	retainedKeys int   // tổng len(keysBySeq[*])
 	pendingBytes int64 // tổng Txn.Bytes của pendingTxns
 
+	// Làn tuần tự (model.Txn.Lane): Txn làn không phụ thuộc nhau qua writeset — thứ tự giữa chúng là
+	// thứ tự Admit, do một worker riêng apply (NextLaneBatch); phụ thuộc với Txn thường giữ nguyên ở
+	// cả hai chiều (invariant: CO-1). Không deadlock: đầu làn chỉ chờ Txn thường có seq nhỏ hơn nó, và
+	// Txn đó không phụ thuộc Txn làn nào đứng sau (phụ thuộc chỉ trỏ về seq nhỏ hơn).
+	laneQ      []uint64              // seq của Txn làn chưa được lấy, theo thứ tự Admit
+	laneReady  map[uint64]*model.Txn // Txn làn đã hết phụ thuộc, chờ tới lượt
+	laneActive map[uint64]struct{}   // seq Txn làn chưa Done
+	laneWake   chan struct{}         // đóng/tạo lại khi đầu làn có thể đã sẵn sàng
+
 	// Holes tracking (spec 02 §1, §2 CP-4, §6)
 	lwd        uint64
 	high       uint64
@@ -124,6 +133,9 @@ func NewScheduler(cfg Config) *Scheduler {
 		readyWidthHist: make(map[int]int),
 		completed:      make(map[uint64]struct{}),
 		holeWaitCh:     make(chan struct{}),
+		laneReady:      make(map[uint64]*model.Txn),
+		laneActive:     make(map[uint64]struct{}),
+		laneWake:       make(chan struct{}),
 	}
 }
 
@@ -378,11 +390,18 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	var activeDeps []uint64
 	for _, dep := range deps {
 		if _, ok := s.activeSeqs[dep]; ok {
+			if _, lane := s.laneActive[dep]; lane && t.Lane {
+				continue // thứ tự giữa hai Txn làn do làn bảo đảm (NextLaneBatch)
+			}
 			activeDeps = append(activeDeps, dep)
 		}
 	}
 
 	s.activeSeqs[seq] = struct{}{}
+	if t.Lane {
+		s.laneQ = append(s.laneQ, seq)
+		s.laneActive[seq] = struct{}{}
+	}
 
 	if len(activeDeps) == 0 {
 		// Không có phụ thuộc, sẵn sàng chạy ngay
@@ -400,6 +419,11 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 }
 
 func (s *Scheduler) emitReady(t *model.Txn) {
+	if t.Lane && !s.cfg.Serial {
+		s.laneReady[t.Seq()] = t
+		s.wakeLaneLocked()
+		return
+	}
 	// Ghi nhận histogram độ rộng DAG (số txn trong ready queue)
 	curWidth := len(s.readyCh) + len(s.overflow) + 1
 	bucket := (curWidth / 4) * 4
@@ -453,8 +477,10 @@ func (s *Scheduler) Done(seq uint64, err error) {
 			close(s.holeWaitCh)
 			s.holeWaitCh = make(chan struct{})
 		}
+		s.wakeLaneLocked()
 		return
 	}
+	delete(s.laneActive, seq)
 
 	// Dọn khóa cấp row của chính Txn này: O(số khóa của Txn).
 	for _, tk := range s.keysBySeq[seq] {
@@ -536,11 +562,71 @@ func (s *Scheduler) Done(seq uint64, err error) {
 	s.drainOverflowLocked()
 }
 
+func (s *Scheduler) wakeLaneLocked() {
+	close(s.laneWake)
+	s.laneWake = make(chan struct{})
+}
+
+// NextLaneBatch trả các Txn làn liên tiếp tính từ đầu làn đã hết phụ thuộc, đúng thứ tự Admit — tối
+// đa maxTxns Txn và (nếu maxRows > 0) tới khi đạt maxRows row — để apply trong MỘT transaction ở target
+// (group commit). Chờ tới khi đầu làn sẵn sàng; trả nil khi ctx hết, scheduler lỗi hoặc đóng. Chỉ một
+// goroutine được gọi (một worker làn): thứ tự apply giữa các Txn làn là thứ tự trả về.
+func (s *Scheduler) NextLaneBatch(ctx context.Context, maxTxns int, maxRows int64) []*model.Txn {
+	if maxTxns <= 0 {
+		maxTxns = 256
+	}
+	s.mu.Lock()
+	for {
+		if s.failed != nil || ctx.Err() != nil {
+			s.mu.Unlock()
+			return nil
+		}
+		if len(s.laneQ) > 0 {
+			if _, ok := s.laneReady[s.laneQ[0]]; ok {
+				break
+			}
+		} else if s.isClosed {
+			s.mu.Unlock()
+			return nil
+		}
+		wake := s.laneWake
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-wake:
+		}
+		s.mu.Lock()
+	}
+	var out []*model.Txn
+	var rows int64
+	for len(s.laneQ) > 0 && len(out) < maxTxns && (maxRows <= 0 || rows < maxRows) {
+		t, ok := s.laneReady[s.laneQ[0]]
+		if !ok {
+			break
+		}
+		delete(s.laneReady, s.laneQ[0])
+		s.laneQ = s.laneQ[1:]
+		out = append(out, t)
+		rows += t.TotalRows()
+	}
+	s.mu.Unlock()
+	return out
+}
+
+// LanePending: số Txn làn chưa được lấy (metric/test).
+func (s *Scheduler) LanePending() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.laneQ)
+}
+
 // Close đóng scheduler khi không còn transaction mới.
 func (s *Scheduler) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.isClosed = true
+	s.wakeLaneLocked()
 	if s.holeWaitCh != nil {
 		select {
 		case <-s.holeWaitCh:
