@@ -246,6 +246,20 @@ func isRowFormatTxnQuery(q string) bool {
 	return false
 }
 
+// isXAQuery: q (đã chữ hoa, đã trim) là câu lệnh XA ("XA START/BEGIN/END/PREPARE/COMMIT/ROLLBACK ...").
+func isXAQuery(q string) bool {
+	f := strings.Fields(q)
+	return len(f) > 1 && f[0] == "XA"
+}
+
+// currentTxnGTID trả GTID của txn đang lắp (nếu có), không thì GTID của pos.
+func (a *Assembler) currentTxnGTID(pos model.Pos) string {
+	if a.currentTxn != nil {
+		return a.currentTxn.SourcePos.GTID
+	}
+	return pos.GTID
+}
+
 // queryPrefix rút gọn câu lệnh để đưa vào thông báo lỗi (review R09).
 func queryPrefix(q string) string {
 	q = strings.TrimSpace(q)
@@ -325,6 +339,21 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 				fmt.Sprintf("QUERY %q trong transaction đã BEGIN (txn %s): DML dạng statement không replicate được, binlog_format phải là ROW (kể cả ở mức session)",
 					queryPrefix(ev.Query), a.currentTxn.SourcePos.GTID), nil)
+		case !a.sawBegin && isXAQuery(q):
+			// review G2: XA ghi binlog dạng GTID; QUERY "XA START xid"; TABLE_MAP/ROWS; QUERY "XA END xid";
+			// XA_PREPARE_LOG_EVENT (reader không phát), rồi về sau một GTID riêng + QUERY "XA COMMIT/ROLLBACK xid".
+			// Trước đây "XA START" bị coi là DDL và các ROWS sau đó được apply ngay ở "XA END" — trước khi
+			// biết txn commit hay rollback. Chưa hỗ trợ ngữ nghĩa prepare/commit (kể cả qua restart): fail closed.
+			// Ngoại lệ: "XA ROLLBACK" đứng riêng không mang row nào — txn đã prepare trước điểm đọc mà không
+			// thấy XA START thì cũng chưa có gì được apply; phát Txn rỗng để GTID được ghi nhận.
+			if f := strings.Fields(q); len(f) > 1 && f[1] == "ROLLBACK" {
+				a.ensureTxnStarted(ev.Pos)
+				return a.finishTxn()
+			}
+			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("QUERY %q (txn %s): XA transactions are not supported (strand cannot replicate prepared/two-phase "+
+					"transactions on the source, including on tables outside the pipeline); stop using XA on the source",
+					queryPrefix(ev.Query), a.currentTxnGTID(ev.Pos)), nil)
 		case !a.sawBegin:
 			// Txn DDL: GTID + QUERY, không có BEGIN/XID. Phát thành Txn riêng để GTID được ghi nhận.
 			a.ensureTxnStarted(ev.Pos)
