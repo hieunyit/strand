@@ -47,10 +47,20 @@ type SequenceInfo struct {
 	CurrentValue    int64        `json:"current_value"`
 	SuggestedValue  int64        `json:"suggested_value"`
 	FinalValue      int64        `json:"final_value"`
+	// Feeds: các cột số nguyên (của sequence độc lập) có DEFAULT gọi nextval của sequence này (pg_depend
+	// deptype 'n' từ pg_attrdef). Source MySQL không có sequence nên giá trị của sequence độc lập ở target
+	// PG được suy ra từ max (giảm dần: min) của các cột này ở target, như sequence gắn cột (02 §8).
+	Feeds []ColumnRef `json:"feeds,omitempty"`
 	// Decided: FinalValue của sequence độc lập đã được chốt (đọc từ source sau fence, hoặc người vận hành
 	// chỉ định qua override) và đã lưu vào _strand_promote. Chạy lại promote dùng tiếp giá trị này,
 	// không hỏi lại người vận hành, và không bao giờ hạ nó xuống.
 	Decided bool `json:"decided,omitempty"`
+}
+
+// ColumnRef là một cột của bảng target (tên bảng định dạng như SequenceInfo.Table).
+type ColumnRef struct {
+	Table  string `json:"table"`
+	Column string `json:"column"`
 }
 
 // Config cấu hình cho lệnh promote.
@@ -102,6 +112,14 @@ type SourceDriver interface {
 	Fence(ctx context.Context) error
 	IsReachable(ctx context.Context) bool
 	ReadSequenceLastValue(ctx context.Context, seqName string) (int64, error)
+}
+
+// SequencelessSource là interface tùy chọn cho SourceDriver: HasSequences() = false nghĩa là source
+// không có sequence (MySQL dùng AUTO_INCREMENT). Khi đó sequence độc lập ở target PG không có bản tương
+// ứng ở source: promote lấy giá trị từ các cột target mà sequence cấp giá trị (SequenceInfo.Feeds)
+// cộng margin, không đọc source và không hỏi người vận hành.
+type SequencelessSource interface {
+	HasSequences() bool
 }
 
 // TargetDriver điều khiển target DB trong promote.

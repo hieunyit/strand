@@ -12,6 +12,7 @@ import (
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
+	pgreader "strand/internal/reader/pg"
 )
 
 // quoteIdent bao bọc định danh PostgreSQL trong dấu ngoặc kép.
@@ -54,11 +55,13 @@ type PGSourceDriver struct {
 	db        *sql.DB
 	appRoles  []string
 	reachable bool
+	// exitWait: thời gian tối đa Fence chờ các session vừa bị ngắt thoát hẳn (mặc định 30s).
+	exitWait time.Duration
 }
 
 // NewPGSourceDriver khởi tạo PGSourceDriver với DB kết nối và danh sách role ứng dụng cần fence.
 func NewPGSourceDriver(db *sql.DB, appRoles ...string) *PGSourceDriver {
-	return &PGSourceDriver{db: db, appRoles: cleanList(appRoles), reachable: true}
+	return &PGSourceDriver{db: db, appRoles: cleanList(appRoles), reachable: true, exitWait: 30 * time.Second}
 }
 
 // SetReachable cho phép giả lập ngắt kết nối source khi test failover khẩn cấp.
@@ -72,6 +75,9 @@ func (d *PGSourceDriver) SetReachable(r bool) {
 //  2. Ngắt các session client đang mở để transaction read-write đang dở không commit thêm được:
 //     theo role ứng dụng nếu có cấu hình, nếu không thì mọi client backend trừ user của Strand.
 //     Walsender (backend_type khác 'client backend') không bị ngắt để pipeline apply nốt log ở bước 3.
+//  3. Chờ các session vừa bị ngắt thoát hẳn: pg_terminate_backend chỉ gửi SIGTERM rồi trả về ngay, một
+//     backend đang dở COMMIT vẫn có thể ghi commit record SAU khi Fence trả về. Bước 3 (ApplyRemaining)
+//     dựa vào việc không còn commit nào của ứng dụng sau marker, nên Fence chỉ thành công khi chúng đã thoát.
 func (d *PGSourceDriver) Fence(ctx context.Context) error {
 	if !d.reachable || d.db == nil {
 		return fmt.Errorf("source db unreachable")
@@ -82,6 +88,22 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 	if _, err := d.db.ExecContext(ctx, "SELECT pg_reload_conf()"); err != nil {
 		return fmt.Errorf("fence source: pg_reload_conf: %w", err)
 	}
+	var killed []int64
+	terminate := func(q string, args ...any) error {
+		rows, err := d.db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var pid int64
+			if err := rows.Scan(&pid); err != nil {
+				return err
+			}
+			killed = append(killed, pid)
+		}
+		return rows.Err()
+	}
 	if len(d.appRoles) > 0 {
 		// Hàng rào cứng cho role ứng dụng đã khai báo (review R06): default_transaction_read_only chỉ là
 		// mặc định — role thường tự đặt lại được (SET default_transaction_read_only = off). NOLOGIN trước
@@ -91,20 +113,51 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 			if _, err := d.db.ExecContext(ctx, "ALTER ROLE "+quoteIdent(role)+" NOLOGIN"); err != nil {
 				return fmt.Errorf("fence source: ALTER ROLE %s NOLOGIN: %w", role, err)
 			}
-			q := `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-				WHERE usename = $1 AND pid <> pg_backend_pid() AND backend_type = 'client backend'`
-			if _, err := d.db.ExecContext(ctx, q, role); err != nil {
+			q := `SELECT pid FROM pg_stat_activity
+				WHERE usename = $1 AND pid <> pg_backend_pid() AND backend_type = 'client backend'
+				  AND pg_terminate_backend(pid)`
+			if err := terminate(q, role); err != nil {
 				return fmt.Errorf("fence source: terminate sessions for role %s: %w", role, err)
 			}
 		}
+	} else {
+		q := `SELECT pid FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid() AND backend_type = 'client backend' AND usename <> current_user
+			  AND pg_terminate_backend(pid)`
+		if err := terminate(q); err != nil {
+			return fmt.Errorf("fence source: terminate client sessions: %w", err)
+		}
+	}
+	return d.waitExited(ctx, killed)
+}
+
+// waitExited chờ đến khi mọi backend trong pids đã thoát (không còn trong pg_stat_activity).
+func (d *PGSourceDriver) waitExited(ctx context.Context, pids []int64) error {
+	if len(pids) == 0 {
 		return nil
 	}
-	q := `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-		WHERE pid <> pg_backend_pid() AND backend_type = 'client backend' AND usename <> current_user`
-	if _, err := d.db.ExecContext(ctx, q); err != nil {
-		return fmt.Errorf("fence source: terminate client sessions: %w", err)
+	wait := d.exitWait
+	if wait <= 0 {
+		wait = 30 * time.Second
 	}
-	return nil
+	deadline := time.Now().Add(wait)
+	for {
+		var alive int
+		if err := d.db.QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1::int8[])", pids).Scan(&alive); err != nil {
+			return fmt.Errorf("fence source: check terminated sessions: %w", err)
+		}
+		if alive == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("fence source: %d terminated session(s) still running after %s; they may still commit — retry promote", alive, wait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // IsReachable kiểm tra kết nối tới source PostgreSQL.
@@ -328,13 +381,30 @@ func (d *PGTargetDriver) IsReadOnly(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// ApplyRemaining (bước 3) chờ đến khi tập đã apply của pipeline trên target bao phủ vị trí log
-// hiện tại của source (đã fence). Không xác minh được thì trả lỗi để promote không bao giờ mở ghi
-// khi target còn thiếu dữ liệu (PR-1). Source không truy cập được (failover khẩn cấp, 05 §5):
-// chỉ cảnh báo và đi tiếp, mất dữ liệu bằng lag — giống MySQLTargetDriver.
+// ApplyRemaining (bước 3) chờ đến khi tập đã apply của pipeline trên target bao phủ mọi commit của
+// source (đã fence). Không xác minh được thì trả lỗi để promote không bao giờ mở ghi khi target còn
+// thiếu dữ liệu (PR-1). Source không truy cập được (failover khẩn cấp, 05 §5): chỉ cảnh báo và đi
+// tiếp, mất dữ liệu bằng lag — giống MySQLTargetDriver.
 //
-// Source PG: vị trí là pg_current_wal_lsn() (hoặc pg_last_wal_replay_lsn() trên standby); target
-// theo kịp khi lwd của tập đã apply ≥ vị trí đó, tức pipeline đã xác nhận (Vouch) mọi Txn tới đó.
+// Source PG: KHÔNG so lwd với pg_current_wal_lsn(). lwd chỉ tiến tới commit LSN (đầu commit record)
+// của các Txn pipeline đã thấy, còn pg_current_wal_lsn() nằm ở/sau CUỐI commit record cuối cùng và
+// còn cộng WAL không thuộc transaction mà pgoutput không bao giờ gửi (RUNNING_XACTS, checkpoint…):
+// sau fence không còn commit nào nên điều kiện đó không bao giờ đúng. Thay vào đó (fenceMarker):
+//  1. chờ source yên: không còn backend nào trong database đang giữ xid, không còn prepared
+//     transaction — mọi Txn đã bắt đầu trước fence đều đã commit hoặc abort;
+//  2. ghi một marker qua stream replication: pg_logical_emit_message(false, 'strand_watermark', …),
+//     cùng loại message mà snapshot logic dùng; reader phát nó thành một Txn rỗng có LSN = LSN mà
+//     hàm trả về (cuối record), router ghi nhận nó như mọi Txn;
+//  3. chờ lwd bền vững trên target ≥ H, vị trí chèn WAL đọc ngay trước marker (record của marker bắt
+//     đầu ở LSN ≥ H, mọi commit record khác nằm trước H).
+//
+// Đúng vì: logical decoding giải mã WAL theo thứ tự, nên mọi Txn có commit record đứng trước marker
+// được phát (và được router xử lý) trước marker; lwd ≥ marker nghĩa là mọi Txn đó đã commit ở target.
+// Không có commit nào của ứng dụng đứng SAU marker: Fence đã đặt NOLOGIN (role ứng dụng), ngắt session
+// và chờ chúng thoát; default_transaction_read_only chặn transaction mới; bước 1 ở trên chờ hết các
+// Txn còn dở (kể cả của session không bị ngắt). Marker cần pgoutput option messages (PG14+) và
+// --fence phải trỏ vào đúng database của slot (message chỉ được giải mã trong database của nó).
+//
 // Source MySQL (MySQL→PG): so gtid_executed với tập GTID đã apply như MySQLTargetDriver.
 func (d *PGTargetDriver) ApplyRemaining(ctx context.Context) error {
 	if d.source == nil || d.pipelineID == "" || d.db == nil {
@@ -344,6 +414,7 @@ func (d *PGTargetDriver) ApplyRemaining(ctx context.Context) error {
 		d.logger.Warn("source unreachable: cannot verify remaining log was applied (failover; data loss bounded by lag)", "error", err)
 		return nil
 	}
+	deadline := time.Now().Add(d.catchUpTimeout)
 
 	var caughtUp func(applied checkpoint.AppliedSet) (string, error)
 	switch d.sourceEngine {
@@ -356,20 +427,16 @@ func (d *PGTargetDriver) ApplyRemaining(ctx context.Context) error {
 			return MissingFromApplied(executed, applied)
 		}
 	default:
-		var lsnStr string
-		q := `SELECT (CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END)::text`
-		if err := d.source.QueryRowContext(ctx, q).Scan(&lsnStr); err != nil {
-			return fmt.Errorf("apply remaining: read source current LSN: %w", err)
-		}
-		sourceLSN, err := checkpoint.ParseLSN(lsnStr)
+		marker, err := d.fenceMarker(ctx, deadline)
 		if err != nil {
-			return fmt.Errorf("apply remaining: parse source LSN %q: %w", lsnStr, err)
+			return err
 		}
 		caughtUp = func(applied checkpoint.AppliedSet) (string, error) {
-			if applied != nil && applied.Lwd().LSN >= sourceLSN {
+			if applied != nil && applied.Lwd().LSN >= marker {
 				return "", nil
 			}
-			return "WAL up to " + lsnStr, nil
+			return fmt.Sprintf("WAL up to the promote fence marker (lwd must reach %s; is the pipeline running, reading this database, on PostgreSQL 14+?)",
+				checkpoint.FormatLSN(marker)), nil
 		}
 	}
 
@@ -377,7 +444,6 @@ func (d *PGTargetDriver) ApplyRemaining(ctx context.Context) error {
 	if interval <= 0 {
 		interval = 500 * time.Millisecond
 	}
-	deadline := time.Now().Add(d.catchUpTimeout)
 	for {
 		applied, err := checkpoint.LoadAppliedSnapshotPG(ctx, d.db, d.pipelineID, d.sourceEngine)
 		if err != nil {
@@ -399,6 +465,84 @@ func (d *PGTargetDriver) ApplyRemaining(ctx context.Context) error {
 		case <-time.After(interval):
 		}
 	}
+}
+
+// pgSourceBusyQuery trả mô tả một transaction còn có thể commit trên source ("" = source đã yên):
+// backend trong database hiện tại đang giữ xid (đã ghi gì đó), hoặc prepared transaction chưa
+// COMMIT/ROLLBACK PREPARED (COMMIT PREPARED được phép cả khi default_transaction_read_only = on).
+const pgSourceBusyQuery = `SELECT COALESCE(
+	(SELECT 'transaction ' || backend_xid::text || ' of pid ' || pid::text || ' (user ' || COALESCE(usename, '?') || ')'
+	   FROM pg_stat_activity
+	  WHERE pid <> pg_backend_pid() AND datname = current_database() AND backend_xid IS NOT NULL
+	  ORDER BY pid LIMIT 1),
+	(SELECT 'prepared transaction ' || quote_literal(gid)
+	   FROM pg_prepared_xacts WHERE database = current_database() ORDER BY prepared LIMIT 1),
+	'')`
+
+// fenceMarker chờ source PG yên (xem pgSourceBusyQuery) rồi ghi marker vào WAL. Trả mốc H mà lwd
+// phải đạt: chỉ Txn có LSN ≥ H (marker hoặc sau nó) mới đưa được lwd tới H.
+func (d *PGTargetDriver) fenceMarker(ctx context.Context, deadline time.Time) (uint64, error) {
+	var standby bool
+	if err := d.source.QueryRowContext(ctx, "SELECT pg_is_in_recovery()").Scan(&standby); err != nil {
+		return 0, fmt.Errorf("apply remaining: check source recovery state: %w", err)
+	}
+	if standby {
+		return 0, fmt.Errorf("apply remaining: the source is a standby: cannot write the promote fence marker (pg_logical_emit_message); point --fence at the primary")
+	}
+	interval := d.catchUpInterval
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
+	for {
+		var busy string
+		if err := d.source.QueryRowContext(ctx, pgSourceBusyQuery).Scan(&busy); err != nil {
+			return 0, fmt.Errorf("apply remaining: check open source transactions: %w", err)
+		}
+		if busy == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("apply remaining: source still has %s after %s: it could commit after the fence; end it (or COMMIT/ROLLBACK PREPARED) and retry",
+				busy, d.catchUpTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+	// Session riêng tắt read-only ở mức session: sau fence, mặc định cấp cluster là read-only.
+	conn, err := d.source.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("apply remaining: open source session: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET default_transaction_read_only = off"); err != nil {
+		return 0, fmt.Errorf("apply remaining: prepare marker session: %w", err)
+	}
+	// H = vị trí chèn WAL đọc SAU khi source đã yên và TRƯỚC marker: mọi commit record đã nằm trước H,
+	// record của marker bắt đầu ở LSN ≥ H (như mốc high của snapshot logic). So lwd với H thay vì với LSN
+	// hàm trả về, để không phụ thuộc việc pgoutput báo đầu hay cuối record của message.
+	var hStr string
+	var version int
+	if err := conn.QueryRowContext(ctx, "SELECT pg_current_wal_insert_lsn()::text, current_setting('server_version_num')::int").Scan(&hStr, &version); err != nil {
+		return 0, fmt.Errorf("apply remaining: read source WAL insert position: %w", err)
+	}
+	h, err := checkpoint.ParseLSN(hStr)
+	if err != nil {
+		return 0, fmt.Errorf("apply remaining: parse source LSN %q: %w", hStr, err)
+	}
+	q := "SELECT pg_logical_emit_message(false, $1::text, $2::text)::text"
+	if version >= 170000 {
+		q = "SELECT pg_logical_emit_message(false, $1::text, $2::text, true)::text" // PG17+: flush ngay
+	}
+	var markerStr string
+	if err := conn.QueryRowContext(ctx, q, pgreader.WatermarkPrefix, "promote_fence:"+d.pipelineID).Scan(&markerStr); err != nil {
+		return 0, fmt.Errorf("apply remaining: write promote fence marker: %w", err)
+	}
+	d.logger.Info("promote fence marker written to the source WAL; waiting for the pipeline to apply up to it",
+		"wal_insert_lsn", hStr, "marker_lsn", markerStr)
+	return h, nil
 }
 
 // FindColumnMax tìm giá trị MAX của cột trong bảng target PostgreSQL (0 nếu bảng rỗng).
@@ -577,7 +721,8 @@ func (d *PGTargetDriver) FailoverSummary(ctx context.Context) (string, error) {
 
 // DiscoverPGSequences liệt kê mọi sequence và identity trong các schema chỉ định (rỗng = mọi schema
 // không phải hệ thống). Sequence gắn cột là sequence có pg_depend deptype 'a' (serial / OWNED BY)
-// hoặc 'i' (identity) trỏ tới một cột; còn lại là sequence độc lập (02 §8). Đọc cache và increment.
+// hoặc 'i' (identity) trỏ tới một cột; còn lại là sequence độc lập (02 §8). Đọc cache và increment, và
+// với sequence độc lập thì các cột số nguyên có DEFAULT nextval của nó (Feeds).
 // Tên trả về không kèm schema nếu schema là public.
 func DiscoverPGSequences(ctx context.Context, db *sql.DB, schemas []string) ([]SequenceInfo, error) {
 	if db == nil {
@@ -640,7 +785,46 @@ func DiscoverPGSequences(ctx context.Context, db *sql.DB, schemas []string) ([]S
 		}
 		results = append(results, info)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+
+	// Cột số nguyên có DEFAULT gọi nextval của sequence độc lập (pg_depend deptype 'n' từ pg_attrdef).
+	fq := `
+		SELECT sn.nspname, s.relname, tn.nspname, t.relname, a.attname
+		FROM pg_depend dep
+		JOIN pg_attrdef ad ON dep.classid = 'pg_attrdef'::regclass AND dep.objid = ad.oid
+		JOIN pg_class s ON dep.refclassid = 'pg_class'::regclass AND s.oid = dep.refobjid AND s.relkind = 'S'
+		JOIN pg_namespace sn ON sn.oid = s.relnamespace
+		JOIN pg_class t ON t.oid = ad.adrelid
+		JOIN pg_namespace tn ON tn.oid = t.relnamespace
+		JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+		WHERE dep.deptype = 'n'
+		  AND a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)
+		  AND (cardinality($1::text[]) = 0 OR sn.nspname = ANY($1::text[]))
+		ORDER BY 1, 2, 3, 4, 5`
+	frows, err := db.QueryContext(ctx, fq, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("discover pg sequence column defaults: %w", err)
+	}
+	defer frows.Close()
+	idx := make(map[string]int, len(results))
+	for i, r := range results {
+		idx[r.Name] = i
+	}
+	for frows.Next() {
+		var seqSchema, seqName, tblSchema, tblName, colName string
+		if err := frows.Scan(&seqSchema, &seqName, &tblSchema, &tblName, &colName); err != nil {
+			return nil, fmt.Errorf("scan sequence column default: %w", err)
+		}
+		i, ok := idx[qualify(seqSchema, seqName)]
+		if !ok || results[i].Type != SequenceTypeIndependent {
+			continue
+		}
+		results[i].Feeds = append(results[i].Feeds, ColumnRef{Table: qualify(tblSchema, tblName), Column: colName})
+	}
+	return results, frows.Err()
 }
 
 // =============================================================================

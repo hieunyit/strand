@@ -377,6 +377,9 @@ func TestDiscoverPGSequences(t *testing.T) {
 	if indep.Type != promote.SequenceTypeIndependent || indep.CacheSize != 50 || indep.IncrementBy != 5 {
 		t.Fatalf("independent sequence: %+v", indep)
 	}
+	if len(indep.Feeds) != 1 || indep.Feeds[0] != (promote.ColumnRef{Table: "test_disc_default", Column: "id"}) {
+		t.Fatalf("independent sequence feeds (DEFAULT nextval): %+v", indep.Feeds)
+	}
 	serial := findSeq(t, seqs, "test_disc_serial_id_seq")
 	if serial.Type != promote.SequenceTypeColumn || serial.Table != "test_disc_serial" || serial.Column != "id" {
 		t.Fatalf("serial sequence: %+v", serial)
@@ -397,7 +400,54 @@ func TestDiscoverPGSequences(t *testing.T) {
 	}
 }
 
-// invariant: PR-1 — bước 3 trên target PG chỉ qua khi tập đã apply bao phủ vị trí WAL của source.
+// decodingPipeline đóng vai pipeline thật hơn simulatePipeline: đọc slot test_decoding trên source và
+// chỉ dời lwd tới vị trí của những gì logical decoding thực sự phát (COMMIT, message) — không bao giờ
+// tới WAL không thuộc transaction (checkpoint, RUNNING_XACTS) mà pgoutput không gửi.
+func decodingPipeline(t *testing.T, src *sql.DB, store *checkpoint.PGStore, pipelineID string) {
+	t.Helper()
+	slot := fmt.Sprintf("promote_td_%d", pgDBSeq.Add(1))
+	mustExec(t, src, "SELECT pg_create_logical_replication_slot($1, 'test_decoding')", slot)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ctx.Err() == nil {
+			rows, err := src.QueryContext(ctx, "SELECT lsn::text, data FROM pg_logical_slot_get_changes($1, NULL, NULL)", slot)
+			if err == nil {
+				var last uint64
+				for rows.Next() {
+					var lsn, data string
+					if rows.Scan(&lsn, &data) != nil {
+						continue
+					}
+					if strings.HasPrefix(data, "COMMIT") || strings.HasPrefix(data, "message:") {
+						if l, err := checkpoint.ParseLSN(lsn); err == nil && l > last {
+							last = l
+						}
+					}
+				}
+				rows.Close()
+				if last > 0 {
+					_ = store.WriteGlobal(ctx, checkpoint.Global{PipelineID: pipelineID, Epoch: store.Epoch(),
+						Applied: checkpoint.NewPGAppliedSet(last).String()})
+				}
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		_, _ = src.ExecContext(context.Background(), "SELECT pg_drop_replication_slot($1)", slot)
+	})
+}
+
+// invariant: PR-1 — bước 3 trên target PG chỉ qua khi tập đã apply bao phủ mọi commit của source.
+// Hồi quy: lwd của pipeline chỉ tới vị trí commit/message đã giải mã, còn pg_current_wal_lsn() đã vượt
+// qua đó (ở đây do CHECKPOINT ghi WAL không thuộc transaction) — so với nó thì bước 3 không bao giờ qua.
 func TestPGApplyRemainingWaitsForCatchUp(t *testing.T) {
 	ctx := context.Background()
 	src, _ := newTestDB(t, sourcePG(t))
@@ -410,33 +460,39 @@ func TestPGApplyRemainingWaitsForCatchUp(t *testing.T) {
 	if _, err := store.AdvanceEpoch(ctx, pid, "test", "h"); err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, src, "CREATE TABLE w (id int); INSERT INTO w VALUES (1)")
-	var lsn string
-	if err := src.QueryRowContext(ctx, "SELECT pg_current_wal_lsn()::text").Scan(&lsn); err != nil {
-		t.Fatal(err)
-	}
-	l, _ := checkpoint.ParseLSN(lsn)
-	write := func(base uint64) error {
-		return store.WriteGlobal(ctx, checkpoint.Global{PipelineID: pid, Epoch: store.Epoch(), Applied: checkpoint.NewPGAppliedSet(base).String()})
-	}
-	if err := write(l - 1); err != nil {
-		t.Fatal(err)
-	}
+	mustExec(t, src, "CREATE TABLE w (id int)")
+
+	// Pipeline chưa chạy: target không theo kịp, bước 3 không được qua.
 	d := promote.NewPGTargetDriver(tgt, "app").WithCatchUpCheck(src, pid, 1*time.Second, nil)
 	if err := d.ApplyRemaining(ctx); err == nil || !strings.Contains(err.Error(), "still missing") {
 		t.Fatalf("lagging target must not pass step 3, got %v", err)
 	}
-	// Pipeline theo kịp trong lúc chờ: bước 3 phải qua.
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		var cur string
-		_ = src.QueryRow("SELECT pg_current_wal_lsn()::text").Scan(&cur)
-		c, _ := checkpoint.ParseLSN(cur)
-		_ = write(c + 1<<20)
-	}()
-	d2 := promote.NewPGTargetDriver(tgt, "app").WithCatchUpCheck(src, pid, 10*time.Second, nil)
+
+	// Transaction còn mở (đã có xid) trên source có thể commit sau marker: bước 3 phải chờ nó.
+	open, err := src.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := open.ExecContext(ctx, "INSERT INTO w VALUES (0)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ApplyRemaining(ctx); err == nil || !strings.Contains(err.Error(), "could commit after the fence") {
+		t.Fatalf("open source transaction must block step 3, got %v", err)
+	}
+	if err := open.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	decodingPipeline(t, src, store, pid)
+	mustExec(t, src, "INSERT INTO w VALUES (1)")
+	mustExec(t, src, "CHECKPOINT") // WAL sau commit cuối mà logical decoding không bao giờ phát
+	d2 := promote.NewPGTargetDriver(tgt, "app").WithCatchUpCheck(src, pid, 20*time.Second, nil)
 	if err := d2.ApplyRemaining(ctx); err != nil {
 		t.Fatalf("caught-up target must pass step 3: %v", err)
+	}
+	var n int
+	if err := src.QueryRowContext(ctx, "SELECT count(*) FROM w").Scan(&n); err != nil || n != 2 {
+		t.Fatalf("source rows = %d (%v), want 2", n, err)
 	}
 }
 
