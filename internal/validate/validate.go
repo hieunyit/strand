@@ -162,6 +162,18 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
 				fmt.Sprintf("table %s has no primary key", t), nil)
 		}
+		// review G1: PRIMARY KEY có cột prefix (SUB_PART) — pipeline từ chối khi nạp schema, validate báo sớm.
+		var pkPrefix int
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM information_schema.STATISTICS
+			  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' AND SUB_PART IS NOT NULL`,
+			schema, table).Scan(&pkPrefix); err != nil {
+			return fmt.Errorf("inspect table %s: %w", t, err)
+		}
+		if pkPrefix > 0 {
+			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
+				fmt.Sprintf("table %s: primary key with prefix part is not supported; use a full-column primary key", t), nil)
+		}
 	}
 	return nil
 }

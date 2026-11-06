@@ -131,6 +131,20 @@ type tableMeta struct {
 	LaneTable bool
 }
 
+// checkPrimaryKeyPrefix từ chối bảng MySQL có PRIMARY KEY chứa cột prefix, ví dụ PRIMARY KEY (code(10))
+// (review G1, cùng gốc với N01). Tính duy nhất chỉ nằm trên prefix, trong khi writeset, keyset/codec
+// snapshot, verify và upsert/delete của writer đều coi PK là định danh theo TOÀN BỘ giá trị cột: hai row
+// khác giá trị nhưng trùng prefix là cùng một row ở nguồn — không có cách ánh xạ an toàn, nên fail closed.
+// prefix: tên index → có cột SUB_PART khác NULL (như loadSourceTables đọc).
+func checkPrimaryKeyPrefix(id model.TableID, prefix map[string]bool) error {
+	if !prefix["PRIMARY"] {
+		return nil
+	}
+	return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf(
+		"table %s: primary key with prefix part is not supported (uniqueness is on the column prefix, "+
+			"strand identifies rows by the full primary key value); use a full-column primary key", id), nil)
+}
+
 // loadSourceTables đọc từ information_schema của source mọi bảng thỏa bộ lọc,
 // kèm cột, PK, unique index và FK.
 func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[model.TableID]*tableMeta, error) {
@@ -208,6 +222,9 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 			}
 		}
 		ir.Close()
+		if err := checkPrimaryKeyPrefix(id, prefix); err != nil {
+			return nil, err
+		}
 		sort.Strings(names)
 		for _, n := range names {
 			if n == "PRIMARY" {

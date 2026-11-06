@@ -92,6 +92,14 @@ func TestValidateChecksLiveMySQLSource(t *testing.T) {
 		t.Fatalf("table without PK must be rejected with missing_pk, got %v", err)
 	}
 
+	// review G1: PRIMARY KEY có cột prefix bị từ chối với missing_pk.
+	exec("CREATE TABLE app.pkpfx (code VARCHAR(40) NOT NULL, PRIMARY KEY (code(10)))")
+	err = validate.CheckMySQLSource(ctx, db, []string{"app.orders", "app.pkpfx"})
+	if exitcode.GetExitCode(err) != exitcode.Rejected || !asExit(err, &se) || se.Code != exitcode.ErrMissingPK ||
+		!strings.Contains(err.Error(), "prefix part") {
+		t.Fatalf("primary key with prefix part must be rejected with missing_pk, got %v", err)
+	}
+
 	err = validate.CheckMySQLSource(ctx, db, []string{"app.does_not_exist"})
 	if exitcode.GetExitCode(err) != exitcode.Rejected {
 		t.Fatalf("missing table must be rejected, got %v", err)
