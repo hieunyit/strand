@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"strand/internal/config"
@@ -121,5 +122,25 @@ func TestJSONSchema_Valid(t *testing.T) {
 	}
 	if _, ok := m["properties"]; !ok {
 		t.Errorf("expected properties field in JSONSchema")
+	}
+}
+
+// review R10: tables.rename đưa hai bảng nguồn về cùng một bảng đích phải bị từ chối khi nạp cấu hình (exit 2).
+func TestR10_DuplicateRenameTargetRejected(t *testing.T) {
+	yml := `
+version: 1
+name: dup-rename
+source: { kind: mysql, dsn: "root:secret@tcp(127.0.0.1:3306)/a" }
+target: { kind: postgres, dsn: "postgres://u:p@127.0.0.1:5432/b" }
+tables:
+  include: ["a.*"]
+  rename: { "a.t1": "b.t", "a.t2": "b.t" }
+`
+	_, err := config.LoadYAMLStrict([]byte(yml))
+	if exitcode.GetExitCode(err) != exitcode.InvalidSyntax || err == nil || !strings.Contains(err.Error(), "b.t") {
+		t.Fatalf("want exit 2 naming the duplicate target, got %v", err)
+	}
+	if err := config.ValidateRename(map[string]string{"a.t1": "b.t1", "a.t2": "b.t2"}); err != nil {
+		t.Fatalf("distinct targets must be accepted: %v", err)
 	}
 }

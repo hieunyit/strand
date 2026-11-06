@@ -131,6 +131,10 @@ func (p *Pipeline) loadTables(ctx context.Context, f *tableFilter) (map[model.Ta
 	if err != nil {
 		return nil, err
 	}
+	// review R10: hai bảng nguồn cùng tên đích (rename trùng, hoặc rename trùng bảng không rename) thì từ chối.
+	if err := checkTargetCollisions(f, out, nil); err != nil {
+		return nil, err
+	}
 	resolveForeignKeys(out, p.table)
 	return out, nil
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"strand/internal/assemble"
+	"strand/internal/exitcode"
 	"strand/internal/model"
 	mysqlreader "strand/internal/reader/mysql"
 	"strand/internal/snapshot"
@@ -29,14 +30,55 @@ func newTableFilter(include, exclude []string, rename map[string]string) (*table
 			return nil, fmt.Errorf("invalid table pattern %q: %w", p, err)
 		}
 	}
-	for from, to := range rename {
+	// review R10: rename phải là đơn ánh — hai bảng nguồn về cùng một bảng đích sẽ ghi chung không gian PK.
+	froms := make([]string, 0, len(rename))
+	for from := range rename {
+		froms = append(froms, from)
+	}
+	sort.Strings(froms)
+	byTarget := map[model.TableID]string{}
+	for _, from := range froms {
+		to := rename[from]
 		s, t, ok := strings.Cut(to, ".")
 		if !ok {
 			return nil, fmt.Errorf("rename target %q must be schema.table", to)
 		}
-		f.rename[from] = model.TableID{Schema: s, Table: t}
+		id := model.TableID{Schema: s, Table: t}
+		if prev, dup := byTarget[id]; dup {
+			return nil, fmt.Errorf("tables.rename maps both %q and %q to %q: each target table must come from exactly one source table", prev, from, to)
+		}
+		byTarget[id] = from
+		f.rename[from] = id
 	}
 	return f, nil
+}
+
+// checkTargetCollisions kiểm tên đích (sau rename) của các bảng nguồn đã chọn là duy nhất (review R10).
+// newTableFilter chỉ thấy map rename; va chạm giữa một rename và một bảng nguồn KHÔNG rename (ví dụ
+// a.t1→a.t2 trong khi a.t2 cũng được include) chỉ phát hiện được khi đã có danh sách bảng thật.
+// Bảng trong existing (đã thuộc pipeline) được tính vào; id có mặt cả hai phía chỉ tính một lần.
+func checkTargetCollisions(f *tableFilter, tables, existing map[model.TableID]*tableMeta) error {
+	ids := make([]model.TableID, 0, len(tables)+len(existing))
+	for id := range existing {
+		ids = append(ids, id)
+	}
+	for id := range tables {
+		if _, ok := existing[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	byTarget := make(map[model.TableID]model.TableID, len(ids))
+	for _, id := range ids {
+		t := f.Target(id)
+		if prev, dup := byTarget[t]; dup {
+			return exitcode.New("invalid_rename", exitcode.InvalidSyntax,
+				fmt.Sprintf("source tables %s and %s both map to target table %s (check tables.rename / tables.include): "+
+					"each target table must come from exactly one source table", prev, id, t), nil)
+		}
+		byTarget[t] = id
+	}
+	return nil
 }
 
 func (f *tableFilter) Included(t model.TableID) bool {

@@ -110,6 +110,20 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 			renamedIn = append(renamedIn, id)
 		}
 	}
+	if len(newCreated) > 0 {
+		// review R10: bảng mới không được trùng tên đích với một bảng đã thuộc pipeline (vd a.t1→a.t2 rồi
+		// CREATE TABLE a.t2) — kiểm trước khi tạo gì ở target.
+		joining := make(map[model.TableID]*tableMeta, len(newCreated))
+		for id := range newCreated {
+			joining[id] = nil
+		}
+		p.tablesMu.RLock()
+		err := checkTargetCollisions(p.filter, joining, p.tables)
+		p.tablesMu.RUnlock()
+		if err != nil {
+			return err
+		}
+	}
 	if len(affected) == 0 {
 		return nil
 	}
