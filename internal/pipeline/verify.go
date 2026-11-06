@@ -284,9 +284,7 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 		return
 	case <-time.After(window):
 	}
-	keys, over := p.touched.take()
-	gen := p.touched.takeGeneric()
-	p.touched.enable(false)
+	keys, over, gen := p.takePostSeedKeys()
 	for t := range over {
 		p.log.Warn("post-seed verify: too many changed keys, verifying a sample of them", "table", t.String())
 	}
@@ -302,6 +300,18 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	}
 	p.verifying.Store(false)
 	p.log.Info("post-seed verify passed: pipeline synced")
+}
+
+// takePostSeedKeys lấy khóa đã chạm trong cửa sổ post-seed rồi tắt ghi khóa — trừ khi verify.delta: on
+// (pipeline đã bật từ lúc khởi động cho `strand verify --mode delta`; tắt ở đây làm verify delta
+// về sau không còn thấy khóa nào, review R21).
+func (p *Pipeline) takePostSeedKeys() (map[model.TableID][]int64, map[model.TableID]bool, map[model.TableID][]snapshot.Bound) {
+	keys, over := p.touched.take()
+	gen := p.touched.takeGeneric()
+	if p.cfg == nil || !strings.EqualFold(p.cfg.Verify.Delta, "on") {
+		p.touched.enable(false)
+	}
+	return keys, over, gen
 }
 
 // VerifyDelta (strand verify --mode delta): verify các khóa CDC đã chạm từ lần gọi trước
