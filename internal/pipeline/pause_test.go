@@ -24,7 +24,7 @@ func TestPace_PauseSnapshot(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			done <- p.pace(ctx)
+			done <- p.pace(ctx, 0)
 		}()
 
 		select {
@@ -59,7 +59,7 @@ func TestPace_PauseSnapshot(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			done <- p.pace(ctx)
+			done <- p.pace(ctx, 0)
 		}()
 
 		select {

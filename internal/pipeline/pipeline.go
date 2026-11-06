@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -135,6 +136,7 @@ type Pipeline struct {
 	govAlgo       string
 	govTick       time.Duration
 	curAvgRow     atomic.Int64
+	snapChunkRows int64 // bootstrap.logical.chunk_rows hiệu lực (ước lượng chi phí chunk khi không biết byte)
 	touched       *touchedKeys
 
 	runCtx   context.Context
@@ -616,6 +618,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 		opts.DefaultChunkRows = n
 	}
+	p.snapChunkRows = opts.DefaultChunkRows
 	p.snap = snapshot.NewMySQLSnapshotter(opts)
 	p.snap.Barrier = p.barrier
 	p.snap.Pace = p.pace
@@ -1615,7 +1618,7 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 	return nil
 }
 
-func (p *Pipeline) pace(ctx context.Context) error {
+func (p *Pipeline) pace(ctx context.Context, chunkBytes int64) error {
 	for {
 		// Lệnh `pause --snapshot` dừng riêng snapshot, thắng cả nhánh retentionRisk.
 		if !p.snapPaused.Load() {
@@ -1648,12 +1651,7 @@ func (p *Pipeline) pace(ctx context.Context) error {
 	if rate <= 0 {
 		return nil
 	}
-	avg := p.curAvgRow.Load()
-	if avg <= 0 {
-		avg = 200
-	}
-	pages := float64(avg*snapshot.DefaultChunkOptions().DefaultChunkRows) / 16384
-	d := time.Duration(pages / rate * float64(time.Second))
+	d := time.Duration(chunkReadPages(chunkBytes, p.curAvgRow.Load(), p.snapChunkRows) / rate * float64(time.Second))
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -2047,4 +2045,22 @@ func isRetryable(err error) bool {
 		return me.Number == 1213 || me.Number == 1205
 	}
 	return writer.IsPGRetryable(err)
+}
+
+// chunkReadPages: chi phí đọc một chunk tính theo trang 16 KiB, để giãn nhịp snapshot theo R (token/giây).
+// Dùng số byte row thật của chunk vừa đọc. Trước đây luôn lấy AVG_ROW_LENGTH × số row MẶC ĐỊNH của chunk,
+// bỏ qua chunk_rows cấu hình và dùng thống kê có thể đã cũ (bảng mới tạo có vài row → AVG_ROW_LENGTH
+// hàng KB) — chunk 500 row bị tính như hàng nghìn trang, mỗi chunk chờ hàng phút (e2e N10). Không biết byte
+// (≤ 0) thì lùi về AVG_ROW_LENGTH × chunk_rows hiệu lực. Tối thiểu một trang.
+func chunkReadPages(chunkBytes, avgRow, chunkRows int64) float64 {
+	if chunkBytes > 0 {
+		return math.Max(1, float64(chunkBytes)/16384)
+	}
+	if avgRow <= 0 {
+		avgRow = 200
+	}
+	if chunkRows <= 0 {
+		chunkRows = snapshot.DefaultChunkOptions().DefaultChunkRows
+	}
+	return math.Max(1, float64(avgRow*chunkRows)/16384)
 }

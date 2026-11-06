@@ -91,7 +91,7 @@ func TestGPK_ResumeFromSavedPlanWithGenericKeys(t *testing.T) {
 	s1 := newSnap()
 	cctx, cancel := context.WithCancel(ctx)
 	chunks := 0
-	s1.Pace = func(context.Context) error {
+	s1.Pace = func(context.Context, int64) error {
 		if chunks++; chunks == 4 {
 			cancel()
 			return context.Canceled
