@@ -24,26 +24,74 @@ func (p *Pipeline) setSoftRate(r float64) {
 	}
 }
 
-// Governor điều tiết snapshot (background) bằng khoảng cách giữa các chunk.
+// Governor điều tiết snapshot (background) bằng khoảng cách giữa các chunk (token bucket chung, xem
+// pace), cỡ chunk (luật 250 ms, nextChunkRows) và cửa sổ L (windowSaturated). Bảng ánh xạ đầu ra →
+// actuator: docs/GOVERNOR-WIRING.md.
 
-func (p *Pipeline) setupGovernor() error {
-	algo := strings.ToLower(p.cfg.Governor.Algorithm)
+// selectGovernorAlgo chuẩn hóa governor.algorithm (rỗng = onoff). Source nào cũng chạy được ba
+// governor: MySQL và PostgreSQL đều có bộ đọc tín hiệu (02 §7).
+func selectGovernorAlgo(cfg string) (string, error) {
+	algo := strings.ToLower(strings.TrimSpace(cfg))
 	switch algo {
-	case "", "onoff", "static", "grace-v2":
-	default:
-		return fmt.Errorf("unknown governor.algorithm %q", p.cfg.Governor.Algorithm)
+	case "":
+		return "onoff", nil
+	case "onoff", "static", "grace-v2":
+		return algo, nil
 	}
-	if algo == "" {
-		algo = "onoff"
+	return "", fmt.Errorf("unknown governor.algorithm %q", cfg)
+}
+
+// signalProber là bộ đọc tín hiệu cần đọc thử khi dựng governor (source PG: quyền trên view thống kê).
+type signalProber interface {
+	governor.DBSignalReader
+	Probe(ctx context.Context) ([]string, error)
+}
+
+// probeSignals đọc thử bộ đọc tín hiệu: lỗi → cảnh báo và static (governor không được chạy mù);
+// cảnh báo (tín hiệu bị ẩn một phần) chỉ ghi log. Trả algo hiệu lực.
+func (p *Pipeline) probeSignals(ctx context.Context, algo string, r signalProber) string {
+	if algo == "static" {
+		return algo
+	}
+	warns, err := r.Probe(ctx)
+	if err != nil {
+		p.log.Warn("cannot read source governor signals; using static", "algorithm", algo, "error", err)
+		return "static"
+	}
+	for _, w := range warns {
+		p.log.Warn("governor signals degraded", "algorithm", algo, "reason", w)
+	}
+	return algo
+}
+
+func (p *Pipeline) setupGovernor(ctx context.Context) error {
+	algo, err := selectGovernorAlgo(p.cfg.Governor.Algorithm)
+	if err != nil {
+		return err
 	}
 	p.govTick = durationOr(p.cfg.Governor.Tick, time.Second)
-	if algo != "static" && p.srcEngine != model.EngineMySQL {
-		// Tín hiệu onoff đọc từ MySQL, và governor chỉ điều tiết snapshot logic — thứ source PG
-		// chưa có: dùng static.
-		p.log.Warn("governor onoff reads MySQL signals; using static for a PostgreSQL source")
-		algo = "static"
+	// Tín hiệu cứng (02 §7): MySQL — delta counter InnoDB; PG — wal_status của slot; cả hai — spool
+	// local ≥ 95% spool.hard. Trước đây source PG luôn bị ép về static (backlog #31).
+	var reader governor.DBSignalReader
+	if p.srcEngine == model.EnginePG {
+		slot, _ := p.pgSlotNames()
+		pr := governor.NewPGDBSignalReader(p.src, slot, nil)
+		pr.SpoolUsage = p.spoolUsage
+		// Giữ cả khi static: mẫu PG còn dùng cho P_lag (WAL slot) và "reader đã đuổi kịp" ở bootstrap.
+		p.pgSignals = pr
+		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		algo = p.probeSignals(qctx, algo, pr)
+		cancel()
+		reader = pr
+	} else {
+		mr := governor.NewMySQLDBSignalReader(p.src, nil)
+		mr.SpoolUsage = p.spoolUsage
+		reader = mr
 	}
 	p.govAlgo = algo
+	// Luật cỡ chunk 250 ms (02 §7) áp cho onoff và grace-v2 khi chunk_rows = auto; static và chunk_rows
+	// cố định giữ nguyên cỡ chunk (mốc so sánh của benchmark).
+	p.adaptiveChunks = algo != "static" && chunkRowsAuto(p.cfg.Bootstrap.Logical.ChunkRows)
 	soft := float64(p.cfg.Resources.Source.IOPS.Soft)
 	if soft <= 0 {
 		soft = 600
@@ -56,10 +104,6 @@ func (p *Pipeline) setupGovernor() error {
 		// Mở lại sau 60 giây liên tục dưới ngưỡng (02 §7).
 		CooldownTicks: int((60 * time.Second) / p.govTick),
 	}
-	// Tín hiệu cứng (02 §7): delta counter InnoDB trên source và spool local ≥ 95% spool.hard.
-	reader := governor.NewMySQLDBSignalReader(p.src, nil)
-	reader.SpoolUsage = p.spoolUsage
-
 	if algo == "grace-v2" {
 		// GRACE v2 (02 §7); probe: off tắt dither ±1%.
 		p.gov = governor.NewGraceGovernor(governor.GraceConfig{
@@ -138,8 +182,9 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 	}
 }
 
-// feedGrace truyền pha và P_lag theo pha cho GRACE trước mỗi tick (02 §7 bảng P_lag):
-// bootstrap = khoảng cách reader → head của source; synced = độ trễ apply ở target.
+// feedGrace truyền pha, P_lag theo pha và trạng thái cửa sổ L cho GRACE trước mỗi tick (02 §7 bảng
+// P_lag): bootstrap = khoảng cách reader → head của source; synced = độ trễ apply ở target; cả hai pha
+// cộng số hạng WAL slot (source PG).
 func (p *Pipeline) feedGrace(ctx context.Context, gg *governor.GraceGovernor) {
 	slo := durationOr(p.cfg.Governor.LagSLO, 5*time.Second).Seconds()
 	phase, lag := "synced", p.lagSeconds()
@@ -151,7 +196,34 @@ func (p *Pipeline) feedGrace(ctx context.Context, gg *governor.GraceGovernor) {
 		}
 	}
 	gg.SetPhase(phase)
-	gg.SetLagPressure(lag / slo)
+	gg.SetLagPressure(math.Max(lag/slo, p.walRetainedPressure()))
+	// Green chỉ tăng R khi cửa sổ L đang bị dùng hết (02 §7): có reader snapshot đang chạy, không bị giữ
+	// bởi pause / windows / breaker / background dừng.
+	gg.SetWindowSaturated(windowSaturated(p.snapReaders.Load(), p.snapGated.Load()))
+}
+
+// walRetainedPressure: số hạng WAL của P_lag (02 §7) = WAL slot đang giữ / max_slot_wal_keep_size, từ
+// mẫu PG gần nhất. Source MySQL hoặc chưa có mẫu: 0.
+func (p *Pipeline) walRetainedPressure() float64 {
+	if p.pgSignals == nil {
+		return 0
+	}
+	s, ok := p.pgSignals.Last()
+	if !ok {
+		return 0
+	}
+	return s.WALRetainedRatio()
+}
+
+// windowSaturated: background chỉ có một reader nối tiếp cho mỗi bảng (không có actuator đổi số reader
+// song song), nên L thực tế = số reader đang chạy. Cửa sổ "bị dùng hết" khi có ít nhất một reader không
+// bị giữ ở cổng của pace.
+func windowSaturated(readers, gated int32) bool { return readers > gated }
+
+// chunkRowsAuto: bootstrap.logical.chunk_rows rỗng hoặc "auto".
+func chunkRowsAuto(v string) bool {
+	v = strings.TrimSpace(v)
+	return v == "" || strings.EqualFold(v, "auto")
 }
 
 // graceAlerts ghi log cảnh báo của GRACE khi cờ chuyển từ tắt sang bật (02 §7, §12).

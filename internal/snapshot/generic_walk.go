@@ -83,7 +83,7 @@ func (s *MySQLSnapshotter) registerGeneric(ctx context.Context, dstDB *sql.DB, t
 
 // walkGeneric: keyset walk của khóa tổng quát — cắt chunk (lo, khóa thứ ChunkRows] ngay trước khi đọc.
 func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table model.TableID, kq keySQL,
-	cur SnapshotPlan, processChunk func(*Chunk) error) error {
+	cur SnapshotPlan, processChunk func(*Chunk) error, nextRows func(rows int64) int64) error {
 	if cur.Empty {
 		return nil
 	}
@@ -102,6 +102,7 @@ func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table
 	if !mainDone && !geLo(maxB.K, next) {
 		mainDone = true
 	}
+	chunkRows := cur.ChunkRows // cỡ chunk chính hiện hành (xem MySQLSnapshotter.NextChunkRows)
 	for {
 		select {
 		case <-ctx.Done():
@@ -117,7 +118,7 @@ func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table
 		if mainDone {
 			return nil
 		}
-		end, err := s.keysetEndKeys(ctx, srcDB, kq, next, maxB, cur.ChunkRows)
+		end, err := s.keysetEndKeys(ctx, srcDB, kq, next, maxB, chunkRows)
 		if err != nil {
 			return fmt.Errorf("keyset walk %s: %w", table, err)
 		}
@@ -125,7 +126,7 @@ func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table
 		if err != nil {
 			return err
 		}
-		chunk.EstimatedRows = cur.ChunkRows
+		chunk.EstimatedRows = chunkRows
 		if end.K >= maxB.K {
 			mainDone = true
 		} else {
@@ -133,6 +134,9 @@ func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table
 		}
 		if err := processChunk(chunk); err != nil {
 			return err
+		}
+		if nextRows != nil {
+			chunkRows = nextRows(chunkRows)
 		}
 	}
 }

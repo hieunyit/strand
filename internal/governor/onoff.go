@@ -226,6 +226,8 @@ func (g *OnoffGovernor) BreakerOpen() bool {
 func (g *OnoffGovernor) RecordQueryLatency(d time.Duration) {
 	if r, ok := g.cfg.SignalReader.(*MySQLDBSignalReader); ok {
 		r.latencyTracker.Record(d)
+	} else if r, ok := g.cfg.SignalReader.(*PGDBSignalReader); ok {
+		r.latencyTracker.Record(d)
 	} else if s, ok := g.cfg.SignalReader.(*SimulatedSignalReader); ok {
 		s.latencyTracker.Record(d)
 	}
