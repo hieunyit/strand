@@ -465,6 +465,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.loadTargetGenerated(ctx, p.tables); err != nil {
 		return err
 	}
+	// review R26: bảng đích và _strand_* trên target MySQL phải là InnoDB.
+	if err := p.checkTargetEngines(ctx); err != nil {
+		return err
+	}
 
 	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EnginePG {
 		// MySQL→PG: bảng có PK không phải một cột số nguyên chỉ được nhận khi RỖNG ở source tại thời

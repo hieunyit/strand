@@ -26,6 +26,9 @@ const (
 	ErrInsufficientPrivilege = "insufficient_privilege"
 	ErrSeedInvariantFailed   = "seed_invariant_failed"
 	ErrPrereleaseTool        = "prerelease_tool"
+	// ErrTargetNotTransactional: bảng đích hoặc bảng _strand_* trên target MySQL không dùng InnoDB,
+	// nên ghi dữ liệu và checkpoint không nằm chung một transaction (review R26).
+	ErrTargetNotTransactional = "target_not_transactional"
 
 	// Exit 4: Tranh chấp khóa pipeline / bị fence
 	ErrPipelineLocked = "pipeline_locked"
