@@ -27,17 +27,17 @@ func TestN05AddKeySkipsCodecWhenTrackingOff(t *testing.T) {
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("tracking off: codec weigher called %d times, want 0", n)
 	}
-	if g := tk.takeGeneric(); len(g[tbl]) != 0 {
+	if g := tk.take(touchDelta).gen; len(g[tbl]) != 0 {
 		t.Fatalf("tracking off: recorded %v", g)
 	}
 
 	// Đối chứng: bật tracking thì khóa được mã hóa và ghi lại.
-	tk.enable(true)
+	tk.enable(touchDelta, true)
 	tk.addKey(tbl, []model.Value{"a"}, codec)
 	if calls.Load() == 0 {
 		t.Fatalf("tracking on: codec weigher not called")
 	}
-	if g := tk.takeGeneric(); len(g[tbl]) != 1 {
+	if g := tk.take(touchDelta).gen; len(g[tbl]) != 1 {
 		t.Fatalf("tracking on: recorded %v, want 1 key", g)
 	}
 }

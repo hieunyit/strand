@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strings"
 	"testing"
 
 	"strand/internal/config"
@@ -18,7 +19,10 @@ func TestPostSeedKeepsDeltaTracking(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Verify.Delta = tc.delta
 		p := &Pipeline{cfg: cfg, touched: newTouchedKeys(100)}
-		p.touched.enable(true)
+		p.touched.enable(touchPostSeed, true)
+		if strings.EqualFold(tc.delta, "on") {
+			p.touched.enable(touchDelta, true) // như Run khi verify.delta: on
+		}
 		p.touched.add(id, []model.Value{int64(1)})
 		keys, _, _ := p.takePostSeedKeys()
 		if len(keys[id]) != 1 {
@@ -26,8 +30,8 @@ func TestPostSeedKeepsDeltaTracking(t *testing.T) {
 		}
 		// Khóa CDC chạm sau post-seed: verify delta phải thấy nếu delta on.
 		p.touched.add(id, []model.Value{int64(2)})
-		later, _ := p.touched.take()
-		if got := len(later[id]) == 1; got != tc.wantOn {
+		later := p.touched.take(touchDelta).keys
+		if got := len(later[id]) > 0 && later[id][len(later[id])-1] == 2; got != tc.wantOn {
 			t.Fatalf("delta=%q: tracking after post-seed = %v, want %v", tc.delta, got, tc.wantOn)
 		}
 	}

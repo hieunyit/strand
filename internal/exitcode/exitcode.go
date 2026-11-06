@@ -29,6 +29,8 @@ const (
 	// ErrTargetNotTransactional: bảng đích hoặc bảng _strand_* trên target MySQL không dùng InnoDB,
 	// nên ghi dữ liệu và checkpoint không nằm chung một transaction (review R26).
 	ErrTargetNotTransactional = "target_not_transactional"
+	// ErrTableTargetChanged: tables.rename đổi bảng đích của bảng đã bootstrap xong (review N14).
+	ErrTableTargetChanged = "table_target_changed"
 
 	// Exit 4: Tranh chấp khóa pipeline / bị fence
 	ErrPipelineLocked = "pipeline_locked"
@@ -38,6 +40,9 @@ const (
 	ErrLogGap            = "log_gap"
 	ErrPrefetchExhausted = "prefetch_exhausted"
 	ErrVerifyMismatch    = "verify_mismatch"
+	// ErrVerifyIncomplete: verify delta chỉ kiểm được một phần tập thay đổi vì có bảng vượt giới hạn ghi
+	// khóa — không được báo sạch (review N12).
+	ErrVerifyIncomplete = "verify_incomplete"
 
 	// Exit 10: Dừng chờ người vận hành
 	ErrPromoteNeedsDecision = "promote_needs_decision"
