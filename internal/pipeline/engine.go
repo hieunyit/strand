@@ -946,7 +946,7 @@ func (p *Pipeline) rendezvousPG(ctx context.Context, high uint64) error {
 // Áp dụng cho MỌI source (review N10). Trước đây chỉ source PG đi qua keepBeforeRegister; với source
 // MySQL, event của bảng như vậy được apply thẳng. Về dữ liệu thì vô hại (đăng ký bảng mới gọi ClearTarget,
 // plan dở gọi ClearUnread: mọi thứ apply vào phần sẽ đọc lại đều bị xóa rồi đọc lại — RS-1), nhưng target
-// có FK (schema init tạo FK; PG luôn kiểm FK, writer MySQL không tắt FOREIGN_KEY_CHECKS) thì một INSERT
+// PG có FK (schema init tạo FK; PG luôn kiểm FK — target MySQL thì phiên ghi đặt foreign_key_checks=0) thì một INSERT
 // của bảng con trỏ tới row cha chưa được snapshot (bảng cha đang chờ/đang snapshot, orderSnapshotTables
 // chỉ bảo đảm cha XONG trước khi con BẮT ĐẦU) bị target từ chối → pipeline dừng. Bỏ các event này là
 // đúng vì cùng lý do chúng vốn sẽ bị xóa: source MySQL đọc biên sau barrier (router đã drain, Txn của
