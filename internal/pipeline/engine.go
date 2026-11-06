@@ -160,6 +160,19 @@ func resolveForeignKeys(metas map[model.TableID]*tableMeta, fallback func(model.
 	}
 }
 
+// pgUniqueIndexColumnsSQL: cột khóa của các unique index (kể cả PK) của một bảng, theo thứ tự cột
+// trong index. Chỉ lấy indnkeyatts cột đầu của indkey: cột INCLUDE cũng nằm trong indkey nhưng không
+// thuộc khóa — `PRIMARY KEY (id) INCLUDE (payload)` từng cho PK=(id,payload) (review N07).
+const pgUniqueIndexColumnsSQL = `
+			SELECT ic.relname, i.indisprimary, a.attname
+			  FROM pg_index i
+			  JOIN pg_class ic ON ic.oid = i.indexrelid
+			  JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON true
+			  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+			 WHERE i.indrelid = $1 AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL
+			   AND k.ord <= i.indnkeyatts
+			 ORDER BY ic.relname, k.ord`
+
 // loadSourceTablesPG đọc từ catalog của source PG: cột (bỏ cột generated — pgoutput không gửi),
 // PK, unique index (không partial, không biểu thức) và FK.
 func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[model.TableID]*tableMeta, error) {
@@ -210,15 +223,11 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 			types[c] = typ
 		}
 		cr.Close()
+		if err := cr.Err(); err != nil {
+			return nil, fmt.Errorf("read columns of %s: %w", r.id, err)
+		}
 
-		ir, err := db.QueryContext(ctx, `
-			SELECT ic.relname, i.indisprimary, a.attname
-			  FROM pg_index i
-			  JOIN pg_class ic ON ic.oid = i.indexrelid
-			  JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON true
-			  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-			 WHERE i.indrelid = $1 AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL
-			 ORDER BY ic.relname, k.ord`, r.oid)
+		ir, err := db.QueryContext(ctx, pgUniqueIndexColumnsSQL, r.oid)
 		if err != nil {
 			return nil, err
 		}
@@ -241,6 +250,10 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 			idx[n] = append(idx[n], c)
 		}
 		ir.Close()
+		// Lỗi giữa chừng (mạng, hủy) trước đây bị nuốt: PK/unique thiếu cột mà không báo (review N07).
+		if err := ir.Err(); err != nil {
+			return nil, fmt.Errorf("read indexes of %s: %w", r.id, err)
+		}
 		sort.Strings(names)
 		for _, n := range names {
 			m.Keys.Unique = append(m.Keys.Unique, assemble.UniqueIndex{Name: n, Columns: idx[n]})
@@ -293,6 +306,9 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 			fk.RefColumns = append(fk.RefColumns, rcol)
 		}
 		fr.Close()
+		if err := fr.Err(); err != nil {
+			return nil, fmt.Errorf("read foreign keys of %s: %w", r.id, err)
+		}
 		for _, n := range fkNames {
 			m.Keys.ForeignKeys = append(m.Keys.ForeignKeys, *fks[n])
 		}
