@@ -88,6 +88,11 @@ type Scheduler struct {
 	laneReady  map[uint64]*model.Txn // Txn làn đã hết phụ thuộc, chờ tới lượt
 	laneActive map[uint64]struct{}   // seq Txn làn chưa Done
 	laneWake   chan struct{}         // đóng/tạo lại khi đầu làn có thể đã sẵn sàng
+	// laneHeld: Txn làn đã ra khỏi DAG (laneReady, hoặc đã được NextLaneBatch lấy) mà chưa Done → Bytes.
+	// Tính vào trần MaxPending/MaxPendingBytes của Admit cùng pendingTxns (review N02): không thì
+	// worker làn kẹt ở target + luồng toàn Txn làn làm laneQ/laneReady tăng vô hạn.
+	laneHeld      map[uint64]int64
+	laneHeldBytes int64
 
 	// Holes tracking (spec 02 §1, §2 CP-4, §6)
 	lwd        uint64
@@ -135,6 +140,7 @@ func NewScheduler(cfg Config) *Scheduler {
 		holeWaitCh:     make(chan struct{}),
 		laneReady:      make(map[uint64]*model.Txn),
 		laneActive:     make(map[uint64]struct{}),
+		laneHeld:       make(map[uint64]int64),
 		laneWake:       make(chan struct{}),
 	}
 }
@@ -246,10 +252,12 @@ func (s *Scheduler) checkBudgetLocked() {
 // đi qua, nó đã bị nâng cấp bảng ở Admit), nên không bao giờ tự khóa chết: Txn đang chờ chỉ phụ
 // thuộc Txn đã nhận trước đó, và mỗi Done đánh thức Admit.
 func (s *Scheduler) overBudgetLocked(t *model.Txn) bool {
-	if s.cfg.Serial || len(s.pendingTxns) == 0 {
+	// review N02: Txn làn đang giữ (chưa Done) cũng tính vào trần; vẫn luôn nhận khi không còn gì giữ.
+	queued := len(s.pendingTxns) + len(s.laneHeld)
+	if s.cfg.Serial || queued == 0 {
 		return false
 	}
-	if len(s.pendingTxns) >= s.cfg.MaxPending || s.pendingBytes+t.Bytes > s.cfg.MaxPendingBytes {
+	if queued >= s.cfg.MaxPending || s.pendingBytes+s.laneHeldBytes+t.Bytes > s.cfg.MaxPendingBytes {
 		return true
 	}
 	return s.retainedKeys+len(t.Rows) > s.cfg.WritesetBudget // ≥ 1 khóa mỗi row (Txn tràn đĩa: cấp bảng, không giữ khóa)
@@ -433,6 +441,8 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 func (s *Scheduler) emitReady(t *model.Txn) {
 	if t.Lane && !s.cfg.Serial {
 		s.laneReady[t.Seq()] = t
+		s.laneHeld[t.Seq()] = t.Bytes
+		s.laneHeldBytes += t.Bytes
 		s.wakeLaneLocked()
 		return
 	}
@@ -493,6 +503,11 @@ func (s *Scheduler) Done(seq uint64, err error) {
 		return
 	}
 	delete(s.laneActive, seq)
+	if b, ok := s.laneHeld[seq]; ok {
+		// review N02: nhả phần trần của Txn làn; Admit được đánh thức qua holeWaitCh bên dưới.
+		delete(s.laneHeld, seq)
+		s.laneHeldBytes -= b
+	}
 
 	// Dọn khóa cấp row của chính Txn này: O(số khóa của Txn).
 	for _, tk := range s.keysBySeq[seq] {
