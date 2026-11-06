@@ -14,7 +14,8 @@ import (
 // MySQLDBSignalReader:
 //
 //   - ReplicaLagSeconds: source là standby → độ trễ replay của chính nó; source là primary → replay_lag
-//     lớn nhất của các standby vật lý (walsender logical, gồm của Strand, bị loại). Breaker so với
+//     lớn nhất của các standby vật lý thật sự replay WAL (walsender logical, gồm của Strand, và client chỉ
+//     nhận WAL như pg_receivewal bị loại — xem StandbyReplayLag). Breaker so với
 //     governor.breaker.replica_lag.max như MySQL.
 //   - QueryP99: latency của chính câu poll tín hiệu (hàng "Tự đo"), như MySQL.
 //   - Tín hiệu cứng: wal_status của slot của pipeline là `unreserved` / `lost`, và spool local ≥ 95%.
@@ -27,15 +28,22 @@ import (
 const pgHeadLSN = `CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END`
 
 // pgInstanceSignalsSQL: một dòng — đang recovery, độ trễ replay của chính server (0 khi đã replay hết
-// WAL đã nhận: standby của primary rảnh không bị tính là trễ), replay_lag lớn nhất của standby vật lý,
-// max_slot_wal_keep_size (MB, -1 = không giới hạn).
+// WAL đã nhận: standby của primary rảnh không bị tính là trễ), max_slot_wal_keep_size (MB, -1 = không
+// giới hạn).
 const pgInstanceSignalsSQL = `SELECT pg_is_in_recovery(),
   CASE WHEN pg_is_in_recovery() AND pg_last_wal_receive_lsn() IS DISTINCT FROM pg_last_wal_replay_lsn()
        THEN COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp()), 0)::float8
        ELSE 0::float8 END,
-  (SELECT COALESCE(MAX(EXTRACT(EPOCH FROM r.replay_lag)), 0)::float8 FROM pg_stat_replication r
-    WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots s WHERE s.active_pid = r.pid AND s.slot_type = 'logical')),
   COALESCE((SELECT setting FROM pg_settings WHERE name = 'max_slot_wal_keep_size'), '-1')`
+
+// pgStandbysSQL: mỗi walsender vật lý (walsender logical, gồm của Strand, bị loại) một dòng — có báo vị
+// trí replay không (replay_lsn khác NULL), đã replay tới sent_lsn chưa, replay_lag (-1 = NULL). Việc
+// diễn giải nằm ở StandbyReplayLag (hàm thuần, có test) thay vì gộp MAX trong SQL.
+const pgStandbysSQL = `SELECT r.replay_lsn IS NOT NULL,
+  COALESCE(r.replay_lsn >= r.sent_lsn, false),
+  COALESCE(EXTRACT(EPOCH FROM r.replay_lag)::float8, -1::float8)
+  FROM pg_stat_replication r
+  WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots s WHERE s.active_pid = r.pid AND s.slot_type = 'logical')`
 
 // pgSlotSignalsSQL: slot của pipeline — wal_status, số byte WAL slot đang giữ (head − restart_lsn) và
 // khoảng cách head − sent_lsn của walsender đang dùng slot (NULL khi slot không active).
@@ -70,6 +78,36 @@ func (s PGSample) ReplicaLagSeconds() float64 {
 		return s.ReplayDelaySeconds
 	}
 	return s.StandbyReplayLagSeconds
+}
+
+// PGStandby là một walsender vật lý trong pg_stat_replication (nhìn từ primary).
+type PGStandby struct {
+	Replays          bool    // replay_lsn khác NULL: client có replay WAL (standby thật)
+	CaughtUp         bool    // replay_lsn >= sent_lsn: đã replay hết những gì đã nhận
+	ReplayLagSeconds float64 // replay_lag; -1 = NULL
+}
+
+// StandbyReplayLag: replay_lag lớn nhất của các standby thật sự replay WAL.
+//
+//   - replay_lsn NULL (pg_receivewal — kể cả khi là standby đồng bộ —, pg_basebackup): client không bao
+//     giờ báo vị trí replay. Walsender khi đó vẫn tính replay_lag = now − thời điểm của mẫu WAL CŨ NHẤT
+//     chưa "replay" (nhánh "chỉ có mẫu tương lai" của LagTrackerRead), nên giá trị tăng mãi hoặc đứng ở
+//     một số lớn sau khi bộ đệm lag tracker đầy. Đọc nó là replica lag làm onoff dừng background vĩnh
+//     viễn (e2e SyncRepRace: snapshot app.items treo 10 phút). Không có replica đọc nào trễ ở đây → bỏ.
+//   - Đã replay tới sent_lsn: 0 (walsender chỉ xóa replay_lag sau hai bản tin "đã replay hết" liên
+//     tiếp; trước đó giá trị cũ của đợt WAL trước vẫn hiện).
+//   - replay_lag NULL: 0.
+func StandbyReplayLag(sts []PGStandby) float64 {
+	lag := 0.0
+	for _, st := range sts {
+		if !st.Replays || st.CaughtUp || st.ReplayLagSeconds < 0 {
+			continue
+		}
+		if st.ReplayLagSeconds > lag {
+			lag = st.ReplayLagSeconds
+		}
+	}
+	return lag
 }
 
 // SlotHard: wal_status `unreserved` (slot sắp mất WAL: đã vượt max_slot_wal_keep_size) hoặc `lost` là
@@ -116,15 +154,20 @@ func ReadPGSample(ctx context.Context, db *sql.DB, slot string) (PGSample, error
 	s := PGSample{MaxSlotWALKeepBytes: -1, SlotRetainedBytes: -1, SlotSentLagBytes: -1}
 	var keep string
 	if err := db.QueryRowContext(ctx, pgInstanceSignalsSQL).Scan(&s.InRecovery, &s.ReplayDelaySeconds,
-		&s.StandbyReplayLagSeconds, &keep); err != nil {
+		&keep); err != nil {
 		return s, fmt.Errorf("read PostgreSQL governor signals: %w", err)
 	}
 	s.MaxSlotWALKeepBytes = ParseMaxSlotWALKeepSize(keep)
+	sts, err := readPGStandbys(ctx, db)
+	if err != nil {
+		return s, err
+	}
+	s.StandbyReplayLagSeconds = StandbyReplayLag(sts)
 	if slot == "" {
 		return s, nil
 	}
 	var retained, sentLag float64
-	err := db.QueryRowContext(ctx, pgSlotSignalsSQL, slot).Scan(&s.SlotWALStatus, &retained, &sentLag)
+	err = db.QueryRowContext(ctx, pgSlotSignalsSQL, slot).Scan(&s.SlotWALStatus, &retained, &sentLag)
 	switch {
 	case err == sql.ErrNoRows:
 		return s, nil
@@ -134,6 +177,27 @@ func ReadPGSample(ctx context.Context, db *sql.DB, slot string) (PGSample, error
 	s.SlotFound = true
 	s.SlotRetainedBytes, s.SlotSentLagBytes = int64(retained), int64(sentLag)
 	return s, nil
+}
+
+// readPGStandbys đọc các walsender vật lý (pgStandbysSQL).
+func readPGStandbys(ctx context.Context, db *sql.DB) ([]PGStandby, error) {
+	rows, err := db.QueryContext(ctx, pgStandbysSQL)
+	if err != nil {
+		return nil, fmt.Errorf("read PostgreSQL standby replay lag: %w", err)
+	}
+	defer rows.Close()
+	var sts []PGStandby
+	for rows.Next() {
+		var st PGStandby
+		if err := rows.Scan(&st.Replays, &st.CaughtUp, &st.ReplayLagSeconds); err != nil {
+			return nil, fmt.Errorf("read PostgreSQL standby replay lag: %w", err)
+		}
+		sts = append(sts, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read PostgreSQL standby replay lag: %w", err)
+	}
+	return sts, nil
 }
 
 // PGDBSignalReader đọc tín hiệu sức khỏe trực tiếp từ source PostgreSQL (02 §7: không phụ thuộc
