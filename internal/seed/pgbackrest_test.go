@@ -281,3 +281,37 @@ func TestPGPhysical_PrereleaseTool(t *testing.T) {
 
 var _ pgPlanner = seed.NewPgBackRestPlanner()
 var _ pgPlanner = seed.NewWalgPlanner()
+
+// review N09: backup không ghi system identifier → không chứng minh được SD-1 → từ chối (trước đây
+// planner lấy systemid của source đang chạy làm source_identity). Source không rõ systemid cũng vậy.
+func TestN09_PGPhysical_IdentityMustComeFromBackup(t *testing.T) {
+	t.Run("pgbackrest-no-system-id", func(t *testing.T) {
+		raw, err := os.ReadFile(pgbrInfo(t, "16", "00000001000000000000000A"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := pgSrc(writeJSON(t, "info-noid.json", strings.Replace(string(raw), `"system-id": `+pgSysID+`,`, "", 1)))
+		_, err = (&seed.PgBackRestPlanner{Now: func() time.Time { return pgNow }}).Plan(context.Background(), src)
+		wantCode(t, err, exitcode.ErrSeedInvariantFailed)
+		if !strings.Contains(err.Error(), "SD-1") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("walg-no-system-id", func(t *testing.T) {
+		raw, err := os.ReadFile(walgList(t, 160004))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := pgSrc(writeJSON(t, "backups-noid.json", strings.ReplaceAll(string(raw), `"system_identifier": `+pgSysID, `"system_identifier": null`)))
+		src.ArchiveInfoRef = walShow(t, "00000001000000000000000A")
+		src.ToolVersion = "v3.0.5"
+		_, err = (&seed.WalgPlanner{Now: func() time.Time { return pgNow }}).Plan(context.Background(), src)
+		wantCode(t, err, exitcode.ErrSeedInvariantFailed)
+	})
+	for kind, plan := range pgPlanners(t) {
+		t.Run(kind+"-source-unknown", func(t *testing.T) {
+			_, err := plan(func(s *seed.SeedSource) { s.SourceSystemID = "" }, "16", "00000001000000000000000A")
+			wantCode(t, err, exitcode.ErrSeedInvariantFailed)
+		})
+	}
+}

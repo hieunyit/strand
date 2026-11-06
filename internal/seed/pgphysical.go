@@ -269,13 +269,17 @@ func planPGPhysical(kind string, src SeedSource, backups []pgPhysicalBackup, cov
 	}
 
 	// SD-1: backup phải thuộc đúng cluster của source (system_identifier).
-	identity := b.SystemID
+	// Chứng cứ phải đến từ CHÍNH backup: trước đây backup không ghi system identifier thì lấy luôn
+	// systemid của source đang chạy — đó không phải bằng chứng backup thuộc cluster này (review N09).
+	// Spec (02 §2, §9) không cho ngoại lệ: không chứng minh được SD-1 → từ chối. Vì vậy source_identity
+	// trong seed.json luôn là system identifier đọc từ metadata backup, đã khớp với source.
+	identity := strings.TrimSpace(b.SystemID)
 	switch {
-	case identity == "" && src.SourceSystemID == "":
-		return nil, reject("SD-1: cannot identify source cluster: backup has no system identifier and source systemid is unknown (pass --source)")
 	case identity == "":
-		identity = src.SourceSystemID
-	case src.SourceSystemID != "" && src.SourceSystemID != identity:
+		return nil, reject("SD-1: cannot prove backup %s belongs to the source cluster: backup metadata has no system identifier", b.Label)
+	case strings.TrimSpace(src.SourceSystemID) == "":
+		return nil, reject("SD-1: cannot prove backup %s belongs to the source cluster: source system identifier is unknown (pass --source)", b.Label)
+	case strings.TrimSpace(src.SourceSystemID) != identity:
 		return nil, reject("SD-1: backup %s belongs to cluster system_identifier %s, source is %s",
 			b.Label, identity, src.SourceSystemID)
 	}

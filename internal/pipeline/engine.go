@@ -394,6 +394,16 @@ func (p *Pipeline) startFromSeedPG(ctx context.Context) (checkpoint.AppliedSet, 
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 			fmt.Sprintf("source.slot is %q but the seed was taken at the consistent_point of slot %q", p.cfg.Source.Slot, slot), nil)
 	}
+	// SD-1 (review N09): seed phải được lấy từ đúng cluster source đang nối (system_identifier),
+	// kiểm trước khi ghi bất kỳ trạng thái nào.
+	srcID, err := p.pgSourceSystemID(ctx)
+	if err != nil {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("SD-1: cannot check seed source_identity: %v", err), err)
+	}
+	if err := checkPGSeedSourceIdentity(m.SourceIdentity, srcID); err != nil {
+		return nil, err
+	}
 	if err := p.state.SetPGSlot(slot); err != nil {
 		return nil, err
 	}
