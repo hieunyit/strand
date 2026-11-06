@@ -25,21 +25,36 @@ func TestSD1MySQLSeedSourceIdentity(t *testing.T) {
 		// Sau failover sang b: b có lịch sử của a.
 		{"source after failover", a, a + ":1-100", b, a + ":1-200,\n" + b + ":1-5"},
 		{"identity is the source uuid", b, a + ":1-100", b, a + ":1-200"},
+		// source_identity lạ nhưng P chỉ gồm lịch sử của source: P chứng minh cùng topology.
+		{"identity unknown but P in source history", x, a + ":1-100", b, a + ":1-200"},
 	}
 	for _, c := range ok {
-		if err := checkMySQLSeedSourceIdentity(c.id, c.p, c.uuid, c.exec); err != nil {
+		warns, err := checkMySQLSeedSourceIdentity(c.id, c.p, c.uuid, c.exec)
+		if err != nil {
 			t.Fatalf("%s: rejected: %v", c.name, err)
 		}
+		if len(warns) != 0 {
+			t.Fatalf("%s: unexpected warnings %v", c.name, warns)
+		}
+	}
+	// Backup lấy từ replica b có Txn lạc (ghi cục bộ trên b, source a chưa từng thấy b): nhận, có cảnh báo.
+	// Trước đây (e2e seed từ replica, prefetch) bị từ chối nhầm "never executed".
+	warns, err := checkMySQLSeedSourceIdentity(a, a+":1-100,"+b+":1-6", a, a+":1-200")
+	if err != nil {
+		t.Fatalf("seed from a replica with errant GTIDs rejected: %v", err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], b) {
+		t.Fatalf("warnings = %v, want one naming %s", warns, b)
 	}
 	bad := []struct{ name, id, p, uuid, exec, want string }{
 		{"no identity", "", a + ":1-100", a, a + ":1-200", "no source_identity"},
-		{"seed from another cluster", x, x + ":1-100", a, a + ":1-200", "never executed"},
-		{"seed ahead of source", a, a + ":1-300", a, a + ":1-200", "never executed"},
-		{"identity not in source history", x, a + ":1-100", b, a + ":1-200", "neither the source server_uuid"},
+		{"seed from another cluster", x, x + ":1-100", a, a + ":1-200", "another cluster"},
+		{"seed ahead of source", a, a + ":1-300", a, a + ":1-200", "has not executed"},
+		{"seed ahead of source, errant too", a, a + ":1-300," + b + ":1-2", a, a + ":1-200", "has not executed"},
 		{"empty P", a, "", a, a + ":1-200", "not a valid non-empty GTID set"},
 	}
 	for _, c := range bad {
-		err := checkMySQLSeedSourceIdentity(c.id, c.p, c.uuid, c.exec)
+		_, err := checkMySQLSeedSourceIdentity(c.id, c.p, c.uuid, c.exec)
 		var xe *exitcode.Error
 		if err == nil || !errors.As(err, &xe) || xe.ExitCode != exitcode.Rejected || xe.Code != exitcode.ErrSeedInvariantFailed {
 			t.Fatalf("%s: err = %v, want seed_invariant_failed (exit 3)", c.name, err)
