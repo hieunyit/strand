@@ -196,13 +196,17 @@ func TestGPK_MySQLToPGSnapshotWithGenericKeys(t *testing.T) {
 	<-done
 	t.Logf("workload: %d ops", ops.Load())
 
-	// PK chuỗi có collation: từ chối rõ ràng.
-	myExec("CREATE TABLE app.strk (k VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL PRIMARY KEY, v INT)")
+	// PK chuỗi mà snapshot logic chưa chứng minh được (latin1: khóa bị chuyển mã sang PG nên không còn là
+	// giá trị source để tính WEIGHT_STRING): từ chối rõ ràng. utf8mb4 → "C" nay được hỗ trợ (flush theo
+	// tập khóa, gate2/collation). ctx có hạn: nếu bảng bị nhận nhầm, pipeline không chạy mãi.
+	myExec("CREATE TABLE app.strk (k VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_swedish_ci NOT NULL PRIMARY KEY, v INT)")
 	myExec("INSERT INTO app.strk VALUES ('a', 1)")
 	pgExec(`CREATE TABLE public.strk (k varchar(10) COLLATE "C" NOT NULL PRIMARY KEY, v int4)`)
 	rename["app.strk"] = "public.strk"
 	cfg2, _ := mkcfg("gpkmypg_str", []string{"app.strk"})
-	err := Run(ctx, Options{Config: cfg2, ShutdownTimeout: 5 * time.Second, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer rcancel()
+	err := Run(rctx, Options{Config: cfg2, ShutdownTimeout: 5 * time.Second, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	var x *exitcode.Error
 	if !errors.As(err, &x) || x.Code != exitcode.ErrTypeUnmappable || !strings.Contains(err.Error(), "seed it from a backup") {
 		t.Fatalf("string PK MySQL→PG: Run = %v, want a clear rejection", err)
