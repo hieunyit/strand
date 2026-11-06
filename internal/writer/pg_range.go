@@ -147,8 +147,29 @@ func pgReplaceRetryCols(ctx context.Context, db *sql.DB, table model.TableID, pk
 	return err
 }
 
+// PGReplaceExact (Gate 2, khóa khác thứ tự giữa source và target — snapshot.CrossEngineKeySet): chạy các
+// câu DELETE dels (theo khóa chính xác, mỗi câu một lô khóa) rồi upsert rows, trong MỘT transaction có
+// fence; lỗi tạm thời được retry. Không có điều kiện range.
+func PGReplaceExact(ctx context.Context, db *sql.DB, table model.TableID, pkCols []string, columnNames []string,
+	rows []*model.RowChange, dels []string, delArgs [][]any) error {
+	var err error
+	for attempt := 1; attempt <= 20; attempt++ {
+		err = pgReplaceOnceMulti(ctx, db, table, pkCols, columnNames, rows, dels, delArgs)
+		if err == nil || !IsPGRetryable(err) || ctx.Err() != nil {
+			return err
+		}
+		time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
+	}
+	return err
+}
+
 func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCols []string, columnNames []string,
 	rows []*model.RowChange, del string, delArgs ...any) error {
+	return pgReplaceOnceMulti(ctx, db, table, pkCols, columnNames, rows, []string{del}, [][]any{delArgs})
+}
+
+func pgReplaceOnceMulti(ctx context.Context, db *sql.DB, table model.TableID, pkCols []string, columnNames []string,
+	rows []*model.RowChange, dels []string, delArgs [][]any) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -157,8 +178,10 @@ func pgReplaceOnce(ctx context.Context, db *sql.DB, table model.TableID, pkCols 
 	if err := checkpoint.CheckFence(ctx, tx, true); err != nil { // SG-1, review R07
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, del, delArgs...); err != nil {
-		return fmt.Errorf("clear chunk range on target: %w", err)
+	for i, del := range dels {
+		if _, err := tx.ExecContext(ctx, del, delArgs[i]...); err != nil {
+			return fmt.Errorf("clear chunk range on target: %w", err)
+		}
 	}
 	if len(rows) > 0 && len(columnNames) > 0 {
 		per := pgMaxParams / len(columnNames)

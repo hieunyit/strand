@@ -136,10 +136,13 @@ type tableMeta struct {
 	// của PK chưa được hỗ trợ — PKCodecErr nói vì sao.
 	PKCodec    *snapshot.PKCodec
 	PKCodecErr error
-	// TargetPKCodec: codec PK của bảng đích (đã kiểm cùng thứ tự với source; checkSnapshotKey).
+	// TargetPKCodec: codec PK của bảng đích (đã kiểm cùng thứ tự với source, hoặc ExactKeys; checkSnapshotKey).
 	TargetPKCodec *snapshot.PKCodec
-	AvgRow        int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
-	Keys          assemble.KeyMeta
+	// ExactKeys: target sắp PK khác thứ tự source nhưng snapshot được theo khóa chính xác
+	// (snapshot.CrossEngineKeySet, Gate 2 "_ci → C"): flush theo tập khóa, dọn phần chưa đọc theo khóa source.
+	ExactKeys bool
+	AvgRow    int64 // AVG_ROW_LENGTH (ước lượng chi phí chunk cho governor)
+	Keys      assemble.KeyMeta
 	// TargetGenerated: cột generated ở bảng ĐÍCH — không ghi giá trị (generated.go).
 	TargetGenerated map[string]bool
 	// LaneTable (source PG): bảng có ràng buộc duy nhất ngoài PK (UNIQUE, kể cả partial/biểu thức, hoặc
