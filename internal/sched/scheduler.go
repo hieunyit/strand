@@ -580,6 +580,9 @@ func (s *Scheduler) Done(seq uint64, err error) {
 	// Giải phóng các transaction phụ thuộc trong DAG
 	if depList, ok := s.dependents[seq]; ok {
 		for _, depSeq := range depList {
+			if _, ok := s.inDegree[depSeq]; !ok {
+				continue // đã được TakeChained lấy cùng batch với seq (không còn chờ trong DAG)
+			}
 			s.inDegree[depSeq]--
 			if s.inDegree[depSeq] == 0 {
 				delete(s.inDegree, depSeq)
@@ -622,6 +625,64 @@ func (s *Scheduler) Done(seq uint64, err error) {
 	}
 
 	s.drainOverflowLocked()
+}
+
+// TakeChained lấy ra khỏi DAG các Txn đang chờ mà MỌI phụ thuộc còn lại đều nằm trong batch — các
+// Txn mà worker gọi đã lấy (từ Ready hoặc từ lần TakeChained trước) và sẽ apply trong CÙNG một
+// transaction ở target theo thứ tự trả về. Kết quả xếp sau mọi phụ thuộc của nó (duyệt theo thứ tự
+// batch, mỗi Txn chỉ được lấy khi phụ thuộc cuối cùng đã nằm trong batch), nên apply batch theo thứ tự
+// vẫn giữ đúng thứ tự giữa các Txn phụ thuộc nhau (CO-1); worker phải gọi Done cho mọi Txn lấy ra.
+//
+// Lý do (G2-11 hot row): một row cập nhật liên tục tạo một chuỗi Txn phụ thuộc nối tiếp. Không gom
+// chuỗi thì mỗi Txn là một commit riêng, và Txn kế tiếp chỉ sẵn sàng sau khi Txn trước Done — worker
+// còn chờ thêm target.batch.max_wait (50 ms) mà không Txn nào tới được: ~20 Txn/giây cho cả pipeline,
+// tụt hậu vô hạn sau source 1.000 Txn/giây. Làn tuần tự (PG) đã gom chuỗi kiểu này; đây là bản cho
+// worker thường.
+//
+// accept được gọi (khi đang giữ khóa scheduler) trước khi lấy từng Txn; trả false thì dừng (batch đầy).
+// Txn làn không bao giờ được lấy (làn có worker riêng). Serial: không có DAG, trả nil.
+func (s *Scheduler) TakeChained(batch []*model.Txn, accept func(*model.Txn) bool) []*model.Txn {
+	if len(batch) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.Serial || s.failed != nil || len(s.pendingTxns) == 0 {
+		return nil
+	}
+	members := make([]uint64, 0, len(batch))
+	for _, t := range batch {
+		members = append(members, t.Seq())
+	}
+	// cnt[d]: số phụ thuộc của d đã nằm trong batch. Mỗi cạnh x → d được đếm đúng một lần (khi duyệt x);
+	// cnt[d] == inDegree[d] nghĩa là mọi phụ thuộc còn lại của d là thành viên batch.
+	cnt := map[uint64]int{}
+	var out []*model.Txn
+	for i := 0; i < len(members); i++ {
+		for _, d := range s.dependents[members[i]] {
+			need, waiting := s.inDegree[d]
+			if !waiting {
+				continue
+			}
+			cnt[d]++
+			if cnt[d] != need {
+				continue
+			}
+			t, ok := s.pendingTxns[d]
+			if !ok || t.Lane {
+				continue
+			}
+			if !accept(t) {
+				return out
+			}
+			delete(s.pendingTxns, d)
+			delete(s.inDegree, d) // Done của các phụ thuộc bỏ qua d (xem Done)
+			s.pendingBytes -= heldBytes(t)
+			members = append(members, d)
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (s *Scheduler) wakeLaneLocked() {

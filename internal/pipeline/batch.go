@@ -14,6 +14,10 @@ type batchLimits struct {
 	maxBytes int64
 	maxWait  time.Duration
 	strict   bool
+	// chain (relaxed, tùy chọn): lấy thêm Txn đang chờ trong DAG mà mọi phụ thuộc đã nằm trong batch
+	// (sched.Scheduler.TakeChained) — chuỗi Txn của một row nóng được group commit thay vì mỗi Txn một
+	// commit cộng max_wait.
+	chain func(batch []*model.Txn, accept func(*model.Txn) bool) []*model.Txn
 }
 
 // txnBytes ước lượng kích thước Txn để áp max_bytes: dùng Txn.Bytes nếu có; Txn đã tràn ra đĩa
@@ -57,18 +61,38 @@ func gatherBatch(ctx context.Context, first *model.Txn, ready <-chan *model.Txn,
 	full := func() bool {
 		return rows >= lim.maxRows || len(batch) >= 256 || (lim.maxBytes > 0 && size >= lim.maxBytes)
 	}
+	// takeChain gom chuỗi phụ thuộc của batch; true nếu lấy được ít nhất một Txn.
+	takeChain := func() bool {
+		if lim.chain == nil || lim.strict || full() {
+			return false
+		}
+		got := lim.chain(batch, func(t *model.Txn) bool {
+			if full() {
+				return false
+			}
+			rows += t.TotalRows()
+			size += txnBytes(t, lim.maxBytes)
+			return true
+		})
+		batch = append(batch, got...)
+		return len(got) > 0
+	}
 	for !full() {
 		var t *model.Txn
-		if timeout == nil {
-			select {
-			case t = <-ready:
-			default:
+		// Txn đã sẵn sàng hoặc chuỗi phụ thuộc của batch: lấy ngay, không chờ.
+		select {
+		case t = <-ready:
+		default:
+			if takeChain() {
+				continue
+			}
+			if timeout == nil {
 				return
 			}
-		} else {
 			select {
 			case t = <-ready:
 			case <-timeout:
+				takeChain() // Txn tới trong lúc chờ có thể phụ thuộc batch
 				return
 			case <-ctx.Done():
 				return

@@ -92,6 +92,7 @@ var instCols = one("rec", "delay", "keep")
 func standby(replays, caughtUp bool, lag float64) []driver.Value {
 	return []driver.Value{replays, caughtUp, lag}
 }
+
 var slotCols = one("status", "retained", "sent")
 
 // --- hàm thuần ---
