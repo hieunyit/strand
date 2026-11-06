@@ -61,3 +61,36 @@ func TestCO1_ForeignKeyMetadataResolvesReferencedKey(t *testing.T) {
 		})
 	}
 }
+
+// review N01: unique index có cột prefix (SUB_PART) phải được đánh dấu Prefix để writeset dùng khóa hằng.
+// Cần container MySQL.
+func TestN01_MySQLPrefixUniqueIndexMarked(t *testing.T) {
+	db, _ := startTestDB(t, "mysql")
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE pfx (id BIGINT PRIMARY KEY, code VARCHAR(20) NOT NULL, x INT NOT NULL,
+		UNIQUE KEY uk_pfx (x, code(3)), UNIQUE KEY uk_full (code))`); err != nil {
+		t.Fatal(err)
+	}
+	f, err := newTableFilter([]string{"app.pfx"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metas, err := loadSourceTables(ctx, db, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := metas[model.TableID{Schema: "app", Table: "pfx"}]
+	if m == nil {
+		t.Fatal("thiếu meta pfx")
+	}
+	got := map[string]bool{}
+	for _, uk := range m.Keys.Unique {
+		got[uk.Name] = uk.Prefix
+	}
+	if p, ok := got["uk_pfx"]; !ok || !p {
+		t.Fatalf("uk_pfx phải Prefix=true: %+v", m.Keys.Unique)
+	}
+	if p, ok := got["uk_full"]; !ok || p {
+		t.Fatalf("uk_full phải Prefix=false: %+v", m.Keys.Unique)
+	}
+}

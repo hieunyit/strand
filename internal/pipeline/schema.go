@@ -180,19 +180,22 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		}
 		cr.Close()
 
-		// Mọi index unique (gồm PRIMARY), theo thứ tự cột trong index.
+		// Mọi index unique (gồm PRIMARY), theo thứ tự cột trong index. SUB_PART khác NULL = cột prefix
+		// (review N01): unique theo prefix nên writeset không được hash cả giá trị cột.
 		ir, err := db.QueryContext(ctx, `
-			SELECT INDEX_NAME, COLUMN_NAME FROM information_schema.STATISTICS
+			SELECT INDEX_NAME, COLUMN_NAME, SUB_PART FROM information_schema.STATISTICS
 			 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND NON_UNIQUE = 0
 			 ORDER BY INDEX_NAME, SEQ_IN_INDEX`, id.Schema, id.Table)
 		if err != nil {
 			return nil, err
 		}
 		idx := map[string][]string{}
+		prefix := map[string]bool{}
 		var names []string
 		for ir.Next() {
 			var n, c string
-			if err := ir.Scan(&n, &c); err != nil {
+			var sub sql.NullInt64
+			if err := ir.Scan(&n, &c, &sub); err != nil {
 				ir.Close()
 				return nil, err
 			}
@@ -200,6 +203,9 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 				names = append(names, n)
 			}
 			idx[n] = append(idx[n], c)
+			if sub.Valid {
+				prefix[n] = true
+			}
 		}
 		ir.Close()
 		sort.Strings(names)
@@ -208,7 +214,7 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 				m.PK = idx[n]
 				continue
 			}
-			m.Keys.Unique = append(m.Keys.Unique, assemble.UniqueIndex{Name: n, Columns: idx[n]})
+			m.Keys.Unique = append(m.Keys.Unique, assemble.UniqueIndex{Name: n, Columns: idx[n], Prefix: prefix[n]})
 		}
 		if len(m.PK) == 1 {
 			switch types[m.PK[0]] {

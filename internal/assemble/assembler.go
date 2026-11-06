@@ -33,7 +33,14 @@ func WithSpillDir(dir string) Option {
 type UniqueIndex struct {
 	Name    string
 	Columns []string
+	// Prefix: index có ít nhất một cột prefix (MySQL SUB_PART, ví dụ UNIQUE(code(3))). Tính unique
+	// theo prefix + collation không tái tạo được từ giá trị cột, nên writeset dùng một khóa hằng cho
+	// (bảng, index): mọi row chạm index này xung đột với nhau — tuần tự hóa theo bảng (review N01).
+	Prefix bool
 }
+
+// prefixIndexKey là khóa hằng cho unique index có cột prefix (review N01).
+var prefixIndexKey = []model.Value{"\x00prefix-index"}
 
 // ForeignKeyMeta mô tả một khóa ngoại: các cột ở bảng con tham chiếu tới bảng cha.
 type ForeignKeyMeta struct {
@@ -186,6 +193,14 @@ func (a *Assembler) enrichKeys(tid model.TableID, t *TableSchema, before, after 
 		}
 		if before != nil {
 			old, okOld = pickValues(t, before, uk.Columns)
+		}
+		if uk.Prefix {
+			// review N01: không hash giá trị (hai giá trị khác nhau có thể trùng prefix) — khóa hằng
+			// theo (bảng, index) cho cả before- lẫn after-image.
+			if okNew || okOld {
+				rc.AddUniqueKey(uk.Name, prefixIndexKey)
+			}
+			continue
 		}
 		switch {
 		case okNew && okOld:
