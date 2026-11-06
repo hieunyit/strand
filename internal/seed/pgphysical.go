@@ -375,9 +375,14 @@ func planPGPhysical(kind string, src SeedSource, backups []pgPhysicalBackup, cov
 		}
 	}
 
+	// "tables": restore vật lý chứa cả cluster → mặc định "*" (mọi bảng). Cách hiểu dùng chung ở
+	// SeedCovers (review N06); pattern sai cú pháp bị từ chối ngay ở plan thay vì lặng lẽ không khớp.
 	tables := src.Tables
 	if len(tables) == 0 {
 		tables = []string{"*"}
+	}
+	if err := ValidateTablePatterns(tables); err != nil {
+		return nil, reject("--tables: %v", err)
 	}
 	ref := refFor(b.Label)
 	return &SeedManifest{

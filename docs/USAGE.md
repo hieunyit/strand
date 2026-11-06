@@ -564,6 +564,7 @@ Cờ `seed plan`:
 - `--archive-until`: GTID set đã có trong archive binlog.
 - `--tables`, `--out` (mặc định `seed.json`), `--allow-prerelease-tool`.
 - Riêng PG: `--slot`, `--backup-label`, `--archive-info`, `--tool-version`, `--eta` (mặc định 2h), `--retention-full`, `--full-interval`.
+- PG `--tables` (và `tables` trong `seed.json`): rỗng hoặc `*` = mọi bảng (mặc định của seed vật lý, vì restore vật lý chứa cả cluster); còn lại là pattern kiểu `pg_dump -t`: `schema.table`, `*`/`?` là wildcard, chữ ngoài ngoặc kép bị hạ về chữ thường, `"Tên"` giữ nguyên hoa/thường; tên không có schema hiểu là `public`. `sync --start-at seed` coi bảng khớp là đã có dữ liệu, bảng còn lại được snapshot logic.
 
 Cờ `seed apply`:
 

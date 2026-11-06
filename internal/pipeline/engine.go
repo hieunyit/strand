@@ -397,13 +397,13 @@ func (p *Pipeline) startFromSeedPG(ctx context.Context) (checkpoint.AppliedSet, 
 	if err := p.state.SetPGSlot(slot); err != nil {
 		return nil, err
 	}
-	// Bảng có trong seed thì xong; bảng của pipeline không có trong seed được snapshot logic.
-	seeded := map[string]bool{}
-	for _, t := range m.Tables {
-		seeded[strings.Trim(t, `"`)] = true
-	}
+	// Bảng có trong seed thì xong; bảng của pipeline không có trong seed được snapshot logic. Cách hiểu
+	// "tables" (gồm "*" của seed vật lý) dùng chung seed.SeedCovers (review N06).
+	ids := make([]model.TableID, 0, len(p.tables))
 	for id := range p.tables {
-		done := len(m.Tables) == 0 || seeded[id.String()] || (id.Schema == "public" && seeded[id.Table])
+		ids = append(ids, id)
+	}
+	for id, done := range pgSeedTablesDone(&m, ids) {
 		if err := p.state.SetDone(id.String(), done); err != nil {
 			return nil, err
 		}

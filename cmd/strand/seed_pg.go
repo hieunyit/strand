@@ -14,6 +14,7 @@ import (
 
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
+	"strand/internal/model"
 	"strand/internal/seed"
 )
 
@@ -204,20 +205,53 @@ func applyPGSeed(ctx context.Context, m *seed.SeedManifest, targetDSN, restoreCm
 	}
 	defer func() { _ = conn.Close(context.Background()) }()
 	if m.Kind == "strand-export" || m.Kind == "strand_export" {
-		// Dump logic: dữ liệu đúng tại P theo snapshot; chỉ kiểm các bảng đã được nạp.
-		for _, t := range m.Tables {
-			var ok bool
-			if err := conn.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", t).Scan(&ok); err != nil {
-				return fmt.Errorf("check table %s on target: %w", t, err)
+		// Dump logic: dữ liệu đúng tại P theo snapshot; chỉ kiểm các bảng đã được nạp. "tables" là pattern
+		// `pg_dump -t` (có thể có `*`, `?`, "..."): đối chiếu với bảng thật ở target bằng cùng cách hiểu
+		// seed.SeedCovers thay vì to_regclass (không hiểu pattern) — review N06.
+		rows, err := conn.Query(ctx, `SELECT n.nspname, c.relname FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema')`)
+		if err != nil {
+			return fmt.Errorf("list tables on target: %w", err)
+		}
+		var have []model.TableID
+		for rows.Next() {
+			var id model.TableID
+			if err := rows.Scan(&id.Schema, &id.Table); err != nil {
+				rows.Close()
+				return fmt.Errorf("list tables on target: %w", err)
 			}
-			if !ok {
-				return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
-					fmt.Sprintf("table %s from the export is missing on target (run pg_restore first)", t), nil)
-			}
+			have = append(have, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("list tables on target: %w", err)
+		}
+		if miss := missingSeedTables(m.Tables, have); len(miss) > 0 {
+			return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+				fmt.Sprintf("table(s) %s from the export are missing on target (run pg_restore first)", strings.Join(miss, ", ")), nil)
 		}
 		return nil
 	}
 	return prepareRestoredPGTarget(ctx, conn, m)
+}
+
+// missingSeedTables trả các phần tử "tables" của seed.json không khớp bảng nào trong have (review N06).
+func missingSeedTables(patterns []string, have []model.TableID) []string {
+	var miss []string
+	for _, t := range patterns {
+		found := false
+		for _, id := range have {
+			if seed.SeedCovers([]string{t}, id) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			miss = append(miss, t)
+		}
+	}
+	return miss
 }
 
 // prepareRestoredPGTarget (idempotent): target phải đang dừng ở recovery với pg_last_wal_replay_lsn() = P

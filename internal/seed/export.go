@@ -152,7 +152,7 @@ func RunExport(ctx context.Context, cfg ExportConfig) (res *ExportResult, err er
 		BackupRef:      cfg.Out,
 		StartPosition:  StartPosition{LSN: checkpoint.FormatLSN(p), Slot: slot},
 		SchemaSnapshot: cfg.Out, // SD-3: schema nằm trong chính bản dump (cùng snapshot)
-		Tables:         cfg.Tables,
+		Tables:         exportManifestTables(cfg.Tables),
 		Integrity:      &IntegrityInfo{PrepareOK: true},
 		// Dump logic: nạp được vào mọi major version / engine đích (SD-4 không ràng buộc dòng version).
 		Target:    TargetInfo{Version: "any (logical dump from PostgreSQL " + serverVersion + ")", Compatible: true},
@@ -166,6 +166,20 @@ func RunExport(ctx context.Context, cfg ExportConfig) (res *ExportResult, err er
 		return nil, fmt.Errorf("write %s: %w", cfg.ManifestOut, err)
 	}
 	return &ExportResult{Manifest: m, ConsistentPoint: p, SnapshotName: snap, SlotName: slot}, nil
+}
+
+// exportManifestTables ghi các pattern `pg_dump -t` vào "tables" của seed.json. Riêng "*" đứng một mình:
+// với pg_dump nó chỉ khớp bảng thấy được qua search_path, còn trong seed.json "*" nghĩa là MỌI bảng
+// (SeedCovers) → ghi thành "public.*" để sync không coi bảng của schema khác là đã có (review N06).
+func exportManifestTables(patterns []string) []string {
+	out := make([]string, 0, len(patterns))
+	for _, t := range patterns {
+		if strings.TrimSpace(t) == "*" {
+			t = "public.*"
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // pgDumpVersion chạy `pg_dump --version` (vd "pg_dump (PostgreSQL) 18.1" → "18.1").
