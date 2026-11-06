@@ -1034,7 +1034,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		// Trước range-state: snapshot logic phải chờ Txn này visible (snapshot.XIDTracker).
 		p.xids.Add(t.XID)
 	}
-	if t.TotalRows() == 0 && t.DDL == "" && pos.GTID == "" {
+	if skipEmptyPGTxn(p.strict, t) {
 		p.noteRouted(pos, 0) // Txn PG rỗng: không có gì để apply
 		return nil
 	}
@@ -1203,6 +1203,19 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	p.markSeen(pos)
 	p.noteRouted(pos, out.Seq())
 	return nil
+}
+
+// skipEmptyPGTxn: Txn PG rỗng (không row, không DDL) không cần đi qua scheduler — relaxed vẫn dời
+// được lwd qua nó vì compactor xác nhận định kỳ tới lsnTracker.point (vouchGlobal). Riêng strict:
+// row toàn cục chỉ được ghi cùng commit của một batch, nên watermark (logical decoding message
+// không transactional, XID = 0 — của snapshot logic hoặc marker fence của promote) phải đi qua
+// scheduler như một Txn rỗng thì lwd bền vững mới tới được nó khi source đã ngừng ghi. Txn rỗng có
+// XID (transaction không chạm bảng nào của publication) vẫn bị bỏ qua để không ghi target vô ích.
+func skipEmptyPGTxn(strict bool, t *model.Txn) bool {
+	if t.TotalRows() != 0 || t.DDL != "" || t.SourcePos.GTID != "" {
+		return false
+	}
+	return !(strict && t.SourcePos.Engine == model.EnginePG && t.XID == 0)
 }
 
 // noteRouted báo bộ theo dõi LSN (chỉ source PG) rằng router đã xử lý xong Txn pos.
@@ -1500,7 +1513,17 @@ func (p *Pipeline) strictGlobal(b []*model.Txn) string {
 		p.strictApplied.Add(t.SourcePos)
 	}
 	if s, ok := p.strictApplied.(*checkpoint.PGAppliedSet); ok && len(b) > 0 {
-		s.Vouch(p.lsns.point(b[len(b)-1].Seq()), nil)
+		last := b[len(b)-1]
+		v := p.lsns.point(last.Seq())
+		// Strict commit đúng thứ tự seq, và seq tăng theo commit LSN: khi batch này commit thì mọi Txn
+		// có LSN ≤ LSN của Txn cuối batch đã commit (Txn bị router bỏ qua thì đã apply / rỗng). Không chờ
+		// router kịp ghi nhận Txn cuối vào lsnTracker (noteRouted chạy SAU Admit): nếu batch commit trước
+		// đó, point chưa thấy nó và mốc dừng lại — với watermark/marker cuối cùng khi source đã ngừng
+		// ghi, lwd bền vững sẽ không bao giờ tới được nó (promote bước 3).
+		if l := last.SourcePos.LSN; l > v {
+			v = l
+		}
+		s.Vouch(v, nil)
 	}
 	return p.strictApplied.(fmt.Stringer).String()
 }
