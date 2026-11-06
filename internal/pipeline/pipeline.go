@@ -1142,6 +1142,14 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		sw := model.NewSpillWriter(f)
 		tables := map[model.TableID]bool{}
 		var n int64
+		// Gom writeset (chỉ hash khóa) ngay khi chép row đã định tuyến: Txn tràn đĩa ≤ table_level_threshold
+		// khóa/bảng vẫn có phụ thuộc cấp row (02 §6) — tràn đĩa chỉ là chuyện RAM của payload. Khóa tính
+		// trên row sau định tuyến (bảng target, giá trị đã đổi) đúng như Txn trong RAM. strict (Serial)
+		// không dựng DAG nên không gom.
+		var ws *model.WritesetCollector
+		if scfg := p.sched.Config(); !scfg.Serial {
+			ws = model.NewWritesetCollector(scfg.TableLevelThreshold, scfg.WritesetBudget)
+		}
 		err = t.ForEachRow(func(rc *model.RowChange) error {
 			return keep(rc, func(c model.RowChange) error {
 				n++
@@ -1149,6 +1157,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 				for _, fk := range c.ForeignKeys {
 					tables[fk.ParentTable] = true
 				}
+				ws.Add(&c)
 				return sw.Write(&c)
 			})
 		})
@@ -1167,6 +1176,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			_ = os.Remove(f.Name())
 		} else {
 			out.SpillPath, out.RowCount = f.Name(), n
+			out.SpillWriteset = ws.Writeset()
 			for tid := range tables {
 				out.SpilledTables = append(out.SpilledTables, tid)
 			}

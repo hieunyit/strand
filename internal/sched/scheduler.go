@@ -15,9 +15,10 @@ type Config struct {
 	TableLevelThreshold int // Mặc định: 50.000 khóa/bảng/Txn
 	WritesetBudget      int // Mặc định: 2.000.000 entry
 	MaxHoles            int // Mặc định: 4.096
-	// MaxPending / MaxPendingBytes: trần số Txn và tổng Txn.Bytes đang chờ phụ thuộc trong DAG (chưa
-	// emit). Cùng với trần entry khóa giữ theo seq (≤ WritesetBudget), đây là backpressure của
-	// Admit (invariant: CO-2, review R09): một Txn kẹt ở target không làm RAM tăng vô hạn.
+	// MaxPending / MaxPendingBytes: trần số Txn và tổng phần RAM (heldBytes: Txn.Bytes, hoặc ước lượng
+	// khóa + metadata với Txn tràn đĩa) của Txn đang chờ phụ thuộc trong DAG (chưa emit). Cùng với trần
+	// entry khóa giữ theo seq (≤ WritesetBudget), đây là backpressure của Admit (invariant: CO-2,
+	// review R09): một Txn kẹt ở target không làm RAM tăng vô hạn.
 	MaxPending      int   // Mặc định: 65.536
 	MaxPendingBytes int64 // Mặc định: 512 MiB
 	// Serial: mọi Txn được phát ngay theo thứ tự seq, không dựng DAG writeset. Dùng cho
@@ -78,7 +79,7 @@ type Scheduler struct {
 	keysBySeq    map[uint64][]tableKey
 	tablesBySeq  map[uint64][]string
 	retainedKeys int   // tổng len(keysBySeq[*])
-	pendingBytes int64 // tổng Txn.Bytes của pendingTxns
+	pendingBytes int64 // tổng heldBytes của pendingTxns
 
 	// Làn tuần tự (model.Txn.Lane): Txn làn không phụ thuộc nhau qua writeset — thứ tự giữa chúng là
 	// thứ tự Admit, do một worker riêng apply (NextLaneBatch); phụ thuộc với Txn thường giữ nguyên ở
@@ -246,6 +247,37 @@ func (s *Scheduler) checkBudgetLocked() {
 	}
 }
 
+// Config trả cấu hình hiệu lực (đã điền mặc định) của scheduler.
+func (s *Scheduler) Config() Config { return s.cfg }
+
+// writesetKeys: số entry khóa mà t sẽ giữ theo seq ở Admit (cận trên): ≥ 1 khóa mỗi row trong RAM;
+// Txn tràn đĩa chỉ giữ khóa đã gom trong SpillWriteset (bảng cấp bảng không giữ khóa).
+func writesetKeys(t *model.Txn) int {
+	if t.IsSpilled() {
+		return t.SpillWritesetKeys()
+	}
+	return len(t.Rows)
+}
+
+// Ước lượng RAM của một Txn tràn đĩa khi nằm trong DAG: metadata cố định, mỗi bảng, mỗi khóa (hash trong
+// SpillWriteset + tableKey trong keysBySeq + entry map row).
+const (
+	spilledTxnBaseBytes = 512
+	spilledTableBytes   = 64
+	spilledWsEntryBytes = 64
+)
+
+// heldBytes: phần RAM của t tính vào MaxPendingBytes. Txn tràn đĩa có payload trên đĩa, chỉ khóa và
+// metadata nằm trong RAM — tính Txn.Bytes (kích thước payload) sẽ làm backpressure đếm thừa.
+// Hàm thuần theo các trường không đổi sau Admit, nên cộng/trừ luôn khớp.
+func heldBytes(t *model.Txn) int64 {
+	if !t.IsSpilled() {
+		return t.Bytes
+	}
+	return spilledTxnBaseBytes + int64(len(t.SpilledTables))*spilledTableBytes +
+		int64(t.SpillWritesetKeys())*spilledWsEntryBytes
+}
+
 // overBudgetLocked: nhận t lúc này có vượt trần RAM của DAG không (CO-2, review R09). Trần entry khóa
 // giữ theo seq là WritesetBudget — map row có thể chỉ có một khóa nóng trong khi mỗi Txn chờ vẫn giữ
 // bản sao khóa của mình. Khi DAG không còn Txn nào chờ thì luôn nhận (Txn đơn lẻ lớn hơn trần vẫn
@@ -257,10 +289,10 @@ func (s *Scheduler) overBudgetLocked(t *model.Txn) bool {
 	if s.cfg.Serial || queued == 0 {
 		return false
 	}
-	if queued >= s.cfg.MaxPending || s.pendingBytes+s.laneHeldBytes+t.Bytes > s.cfg.MaxPendingBytes {
+	if queued >= s.cfg.MaxPending || s.pendingBytes+s.laneHeldBytes+heldBytes(t) > s.cfg.MaxPendingBytes {
 		return true
 	}
-	return s.retainedKeys+len(t.Rows) > s.cfg.WritesetBudget // ≥ 1 khóa mỗi row (Txn tràn đĩa: cấp bảng, không giữ khóa)
+	return s.retainedKeys+writesetKeys(t) > s.cfg.WritesetBudget
 }
 
 // Err trả về lỗi apply đầu tiên được báo qua Done (nil nếu chưa có).
@@ -325,11 +357,13 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	writeset := t.WritesetByTable()
 	spilledTables := make(map[string]bool)
 	if t.IsSpilled() {
-		// Txn tràn đĩa không có Rows trong RAM: luôn nâng lên cấp bảng cho mọi bảng nó chạm.
+		// Txn tràn đĩa không có Rows trong RAM: bảng có khóa trong SpillWriteset giữ cấp row như Txn
+		// trong RAM (ngưỡng table_level_threshold / writeset_budget bên dưới vẫn áp dụng); bảng không có
+		// khóa (vượt trần khi gom, hoặc Txn không được gom writeset) thì nâng lên cấp bảng.
 		for _, tid := range t.SpilledTables {
 			name := tid.String()
-			spilledTables[name] = true
 			if _, ok := writeset[name]; !ok {
+				spilledTables[name] = true
 				writeset[name] = nil
 			}
 		}
@@ -428,7 +462,7 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 		s.emitReady(t)
 	} else {
 		s.pendingTxns[seq] = t
-		s.pendingBytes += t.Bytes
+		s.pendingBytes += heldBytes(t)
 		s.inDegree[seq] = len(activeDeps)
 		for _, dep := range activeDeps {
 			s.dependents[dep] = append(s.dependents[dep], seq)
@@ -441,8 +475,9 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 func (s *Scheduler) emitReady(t *model.Txn) {
 	if t.Lane && !s.cfg.Serial {
 		s.laneReady[t.Seq()] = t
-		s.laneHeld[t.Seq()] = t.Bytes
-		s.laneHeldBytes += t.Bytes
+		b := heldBytes(t)
+		s.laneHeld[t.Seq()] = b
+		s.laneHeldBytes += b
 		s.wakeLaneLocked()
 		return
 	}
@@ -550,7 +585,7 @@ func (s *Scheduler) Done(seq uint64, err error) {
 				delete(s.inDegree, depSeq)
 				if readyTxn, exists := s.pendingTxns[depSeq]; exists {
 					delete(s.pendingTxns, depSeq)
-					s.pendingBytes -= readyTxn.Bytes
+					s.pendingBytes -= heldBytes(readyTxn)
 					s.emitReady(readyTxn)
 				}
 			}
@@ -559,7 +594,7 @@ func (s *Scheduler) Done(seq uint64, err error) {
 	}
 
 	if t, ok := s.pendingTxns[seq]; ok {
-		s.pendingBytes -= t.Bytes
+		s.pendingBytes -= heldBytes(t)
 		delete(s.pendingTxns, seq)
 	}
 	delete(s.activeSeqs, seq)

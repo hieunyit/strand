@@ -131,6 +131,11 @@ type Txn struct {
 	// Txn tràn đĩa không có Rows trong RAM, nên scheduler dùng danh sách này để
 	// dựng phụ thuộc cấp bảng (CO-1).
 	SpilledTables []TableID `json:"spilled_tables,omitempty"`
+	// SpillWriteset: writeset (hash khóa theo bảng, như WritesetByTable) của Txn tràn đĩa, gom khi ghi
+	// file tràn (WritesetCollector). Bảng trong SpilledTables mà vắng mặt ở đây (vượt
+	// table_level_threshold / writeset_budget, hoặc không ai gom) thì scheduler dựng phụ thuộc cấp bảng.
+	// Chỉ trong RAM: Txn đọc lại từ spool không có nó, nên rơi về cấp bảng (bảo thủ, CO-1).
+	SpillWriteset map[string][]uint64 `json:"-"`
 
 	// DDL chứa câu lệnh DDL khi Txn là một transaction DDL (không có row).
 	// Txn DDL vẫn có GTID riêng và phải được ghi nhận vào tập đã apply (CP-1, CP-2).
@@ -191,11 +196,40 @@ func (t *Txn) SetSeq(s uint64) {
 // - (table, PK) cho mọi row T chạm tới. Với UPDATE đổi PK, lấy cả PK cũ lẫn PK mới.
 // - (table, unique_key) cho mọi unique index.
 // - (parent_table, parent_key) cho FK.
+// Txn tràn đĩa không có Rows trong RAM: trả bản sao (map) của SpillWriteset — bảng vắng mặt trong đó
+// được scheduler nâng lên cấp bảng qua SpilledTables.
 func (t *Txn) WritesetByTable() map[string][]uint64 {
 	ws := make(map[string][]uint64)
 	if t == nil {
 		return ws
 	}
+	if t.IsSpilled() {
+		for tbl, keys := range t.SpillWriteset {
+			ws[tbl] = keys
+		}
+		return ws
+	}
+	for i := range t.Rows {
+		t.Rows[i].AppendWriteset(ws)
+	}
+	return ws
+}
+
+// SpillWritesetKeys: tổng số khóa trong SpillWriteset (0 khi Txn không tràn đĩa).
+func (t *Txn) SpillWritesetKeys() int {
+	if t == nil {
+		return 0
+	}
+	n := 0
+	for _, keys := range t.SpillWriteset {
+		n += len(keys)
+	}
+	return n
+}
+
+// AppendWriteset thêm hash khóa writeset của row (spec: 02 §6) vào ws theo bảng. Dùng chung cho Txn
+// trong RAM (WritesetByTable) và Txn tràn đĩa (WritesetCollector), nên hai đường cho cùng một tập khóa.
+func (row *RowChange) AppendWriteset(ws map[string][]uint64) {
 	// Khóa được chuẩn hóa bảo thủ theo collation (keycanon.go, invariant: CO-1): hai giá trị DB coi
 	// là bằng nhau luôn cho cùng hash.
 	pkHash := func(tbl string, key []Value) uint64 { return xxh3.HashString(tbl + "|" + canonKey(key)) }
@@ -205,40 +239,109 @@ func (t *Txn) WritesetByTable() map[string][]uint64 {
 		}
 		return xxh3.HashString(tbl + "|uk|" + canonKey(key))
 	}
-	for _, row := range t.Rows {
-		tbl := row.Table.String()
-		// 1. (table, PK) và OldKey nếu đổi PK
-		if len(row.Key) > 0 {
-			ws[tbl] = append(ws[tbl], pkHash(tbl, row.Key))
-		}
-		if len(row.OldKey) > 0 {
-			ws[tbl] = append(ws[tbl], pkHash(tbl, row.OldKey))
-		}
+	tbl := row.Table.String()
+	// 1. (table, PK) và OldKey nếu đổi PK
+	if len(row.Key) > 0 {
+		ws[tbl] = append(ws[tbl], pkHash(tbl, row.Key))
+	}
+	if len(row.OldKey) > 0 {
+		ws[tbl] = append(ws[tbl], pkHash(tbl, row.OldKey))
+	}
 
-		// 2. (table, unique_key) cho mọi unique index
-		for _, uk := range row.UniqueKeys {
-			if len(uk.Key) > 0 {
-				ws[tbl] = append(ws[tbl], ukHash(tbl, uk.Name, uk.Key))
-			}
-			if len(uk.OldKey) > 0 {
-				ws[tbl] = append(ws[tbl], ukHash(tbl, uk.Name, uk.OldKey))
-			}
+	// 2. (table, unique_key) cho mọi unique index (kể cả khóa hằng của index có cột prefix)
+	for _, uk := range row.UniqueKeys {
+		if len(uk.Key) > 0 {
+			ws[tbl] = append(ws[tbl], ukHash(tbl, uk.Name, uk.Key))
 		}
+		if len(uk.OldKey) > 0 {
+			ws[tbl] = append(ws[tbl], ukHash(tbl, uk.Name, uk.OldKey))
+		}
+	}
 
-		// 3. (parent_table, parent_key) cho FK — cùng namespace với khóa được tham chiếu ở bảng cha:
-		// PK, hoặc unique index ParentIndex.
-		for _, fk := range row.ForeignKeys {
-			if len(fk.ParentKey) > 0 {
-				parentTbl := fk.ParentTable.String()
-				if fk.ParentIndex != "" {
-					ws[parentTbl] = append(ws[parentTbl], ukHash(parentTbl, fk.ParentIndex, fk.ParentKey))
-				} else {
-					ws[parentTbl] = append(ws[parentTbl], pkHash(parentTbl, fk.ParentKey))
-				}
+	// 3. (parent_table, parent_key) cho FK — cùng namespace với khóa được tham chiếu ở bảng cha:
+	// PK, hoặc unique index ParentIndex.
+	for _, fk := range row.ForeignKeys {
+		if len(fk.ParentKey) > 0 {
+			parentTbl := fk.ParentTable.String()
+			if fk.ParentIndex != "" {
+				ws[parentTbl] = append(ws[parentTbl], ukHash(parentTbl, fk.ParentIndex, fk.ParentKey))
+			} else {
+				ws[parentTbl] = append(ws[parentTbl], pkHash(parentTbl, fk.ParentKey))
 			}
 		}
 	}
-	return ws
+}
+
+// WritesetCollector gom writeset (chỉ hash khóa) của một Txn đang được ghi ra file tràn, từng row một,
+// để Txn tràn đĩa vẫn giữ phụ thuộc cấp row (spec 02 §6: chỉ nâng cấp bảng khi > table_level_threshold
+// khóa/bảng/Txn). Tràn đĩa là chuyện RAM của payload, không phải độ hạt xung đột.
+//
+// Bộ nhớ có trần: bảng nào vượt perTable khóa thì bỏ khóa của bảng đó (scheduler nâng nó lên cấp bảng
+// — đúng như Txn trong RAM có len(keys) > threshold); tổng vượt total (writeset_budget) thì bỏ hết
+// (mọi bảng của Txn lên cấp bảng, bảo thủ: chỉ thêm cạnh).
+type WritesetCollector struct {
+	perTable, total int
+	ws              map[string][]uint64
+	over            map[string]bool
+	n               int
+	dropped         bool
+	touched         []string
+}
+
+// NewWritesetCollector tạo collector với trần khóa mỗi bảng (perTable) và trần tổng (total); ≤ 0 = không trần.
+func NewWritesetCollector(perTable, total int) *WritesetCollector {
+	return &WritesetCollector{
+		perTable: perTable,
+		total:    total,
+		ws:       make(map[string][]uint64),
+		over:     make(map[string]bool),
+	}
+}
+
+// Add thêm khóa writeset của row.
+func (c *WritesetCollector) Add(row *RowChange) {
+	if c == nil || c.dropped {
+		return
+	}
+	// Các bảng row chạm (bảng của row + bảng cha qua FK), không trùng.
+	c.touched = append(c.touched[:0], row.Table.String())
+	for _, fk := range row.ForeignKeys {
+		name := fk.ParentTable.String()
+		dup := false
+		for _, x := range c.touched {
+			if x == name {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			c.touched = append(c.touched, name)
+		}
+	}
+	for _, tbl := range c.touched {
+		c.n -= len(c.ws[tbl])
+	}
+	row.AppendWriteset(c.ws)
+	for _, tbl := range c.touched {
+		if c.over[tbl] || (c.perTable > 0 && len(c.ws[tbl]) > c.perTable) {
+			c.over[tbl] = true
+			delete(c.ws, tbl)
+			continue
+		}
+		c.n += len(c.ws[tbl])
+	}
+	if c.total > 0 && c.n > c.total {
+		c.dropped = true
+		c.ws, c.over, c.n = nil, nil, 0
+	}
+}
+
+// Writeset trả writeset đã gom (bảng vượt trần vắng mặt); nil khi đã bỏ hết vì vượt trần tổng.
+func (c *WritesetCollector) Writeset() map[string][]uint64 {
+	if c == nil || c.dropped || len(c.ws) == 0 {
+		return nil
+	}
+	return c.ws
 }
 
 // Checkpoint lưu trạng thái đã commit tại target.
