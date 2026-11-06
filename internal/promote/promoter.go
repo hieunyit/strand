@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -83,6 +84,11 @@ func mergeSequences(saved, fresh []SequenceInfo) []SequenceInfo {
 	out := make([]SequenceInfo, len(fresh))
 	for i, f := range fresh {
 		if s, ok := byName[f.Name]; ok {
+			// CacheSize: lấy giá trị lớn hơn (thận trọng). Bản đã lưu do đồng bộ định kỳ ghi đọc từ SOURCE,
+			// bản vừa khám phá thường đọc từ target; margin phải theo CACHE của source (xem MergeSourceCache).
+			if s.CacheSize > f.CacheSize {
+				f.CacheSize = s.CacheSize
+			}
 			f.LastSyncedValue = further(f, f.LastSyncedValue, s.LastSyncedValue)
 			f.FinalValue = further(f, f.FinalValue, s.FinalValue)
 			f.Decided = f.Decided || s.Decided
@@ -128,6 +134,35 @@ func (p *Promoter) feedsBase(ctx context.Context, seq SequenceInfo) (base int64,
 		base = further(seq, base, v)
 	}
 	return base, found, nil
+}
+
+// MergeSourceCache đặt CacheSize của từng sequence target thành max(CACHE ở target, CACHE ở source) theo
+// tên. Margin (02 §8) bù cho các giá trị mà session ở SOURCE đã giữ trong cache nhưng chưa ghi xuống
+// cột, nên phải dùng CACHE của source; lấy max với target cho thận trọng. Sequence không có bản cùng tên
+// ở source giữ nguyên CACHE của target.
+func MergeSourceCache(target, source []SequenceInfo) []SequenceInfo {
+	cache := make(map[string]int64, len(source))
+	for _, s := range source {
+		cache[s.Name] = s.CacheSize
+	}
+	out := make([]SequenceInfo, len(target))
+	for i, t := range target {
+		if c, ok := cache[t.Name]; ok && c > t.CacheSize {
+			t.CacheSize = c
+		}
+		out[i] = t
+	}
+	return out
+}
+
+// SortedSequenceNames trả tên các sequence trong m theo thứ tự tăng dần, để in gợi ý ổn định.
+func SortedSequenceNames(m map[string]int64) []string {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // suggestion là giá trị gợi ý cho sequence độc lập khi phải hỏi người vận hành: lần đồng bộ cuối +

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -94,6 +95,7 @@ func newPromoteCmd() *cobra.Command {
 				stateStore = promote.NewPGStateStore(targetDB)
 
 				// Kết nối Source DB (nếu có): PG→PG hoặc MySQL→PG, nhận diện theo DSN của --fence.
+				var pgSourceDB *sql.DB
 				if promoteFenceSourceDSN != "" {
 					if isPGDSN(promoteFenceSourceDSN) {
 						sourceDB, err := sql.Open("pgx", promoteFenceSourceDSN)
@@ -101,6 +103,7 @@ func newPromoteCmd() *cobra.Command {
 							return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 						}
 						defer sourceDB.Close()
+						pgSourceDB = sourceDB
 						sourceDriver = promote.NewPGSourceDriver(sourceDB, promoteSourceAppRoles...)
 						if len(promoteSourceAppRoles) == 0 {
 							// review R06: không biết role ứng dụng thì fence chỉ là default_transaction_read_only
@@ -125,6 +128,20 @@ func newPromoteCmd() *cobra.Command {
 				seqs, err := promote.DiscoverPGSequences(cmd.Context(), targetDB, promoteSchemas)
 				if err != nil {
 					return fmt.Errorf("discover PG sequences: %w", err)
+				}
+				// Margin theo CACHE của source (02 §8): giá trị session ở source đã giữ trong cache là thứ có
+				// thể chưa xuất hiện ở target. Source PG đọc được thì lấy max(CACHE source, CACHE target);
+				// không đọc được thì dùng CACHE target, và promoter còn lấy max với CACHE đã lưu bởi đồng bộ
+				// định kỳ (đọc từ source).
+				if pgSourceDB != nil {
+					dctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second) // source có thể đã chết (failover)
+					srcSeqs, err := promote.DiscoverPGSequences(dctx, pgSourceDB, promoteSchemas)
+					cancel()
+					if err != nil {
+						logger.Warn("cannot read sequence CACHE from the source; margin uses the target CACHE", "error", err)
+					} else {
+						seqs = promote.MergeSourceCache(seqs, srcSeqs)
+					}
 				}
 				sequences = seqs
 			} else {
@@ -185,8 +202,8 @@ func newPromoteCmd() *cobra.Command {
 					}
 					if len(progress.SuggestedSequences) > 0 {
 						fmt.Printf("Các sequence độc lập không đọc được từ source:\n")
-						for seqName, suggested := range progress.SuggestedSequences {
-							fmt.Printf("  - %s: gợi ý %d (lần sync cuối hoặc max cột target, + margin)\n", seqName, suggested)
+						for _, seqName := range promote.SortedSequenceNames(progress.SuggestedSequences) {
+							fmt.Printf("  - %s: gợi ý %d (lần sync cuối hoặc max cột target, + margin)\n", seqName, progress.SuggestedSequences[seqName])
 						}
 						fmt.Printf("Duyệt hoặc chỉ định giá trị qua --override-sequences '<json>' khi chạy lại.\n")
 					}

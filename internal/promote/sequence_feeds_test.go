@@ -2,6 +2,7 @@ package promote_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"strand/internal/promote"
@@ -98,5 +99,42 @@ func TestIndependentSequenceSuggestionCoversTargetFeeds(t *testing.T) {
 	progress, _ = p.Run(ctx)
 	if len(progress.SuggestedSequences) != 0 {
 		t.Fatalf("MySQL source: no sequence suggestions expected, got %v", progress.SuggestedSequences)
+	}
+}
+
+// Margin theo CACHE của source (lấy max với target); tên gợi ý in theo thứ tự ổn định.
+func TestMergeSourceCacheAndSortedNames(t *testing.T) {
+	target := []promote.SequenceInfo{{Name: "a", CacheSize: 1}, {Name: "b", CacheSize: 50}, {Name: "c", CacheSize: 1}}
+	source := []promote.SequenceInfo{{Name: "a", CacheSize: 1000}, {Name: "b", CacheSize: 10}}
+	got := promote.MergeSourceCache(target, source)
+	if got[0].CacheSize != 1000 || got[1].CacheSize != 50 || got[2].CacheSize != 1 {
+		t.Fatalf("merged cache sizes: %+v", got)
+	}
+	if target[0].CacheSize != 1 {
+		t.Fatalf("input slice must not be modified")
+	}
+	names := promote.SortedSequenceNames(map[string]int64{"z": 1, "a": 2, "m": 3, "b.x": 4})
+	if want := []string{"a", "b.x", "m", "z"}; fmt.Sprint(names) != fmt.Sprint(want) {
+		t.Fatalf("sorted names = %v, want %v", names, want)
+	}
+}
+
+// Resume: CACHE đã lưu bởi đồng bộ định kỳ (đọc từ source) không bị CACHE target nhỏ hơn đè mất.
+func TestResumeKeepsLargerSavedCache(t *testing.T) {
+	ctx := context.Background()
+	store := promote.NewMemoryStateStore()
+	if err := store.SaveProgress(ctx, &promote.Progress{PipelineID: "cache", State: promote.StateValidating,
+		Sequences:          []promote.SequenceInfo{{Name: "s", Type: promote.SequenceTypeIndependent, CacheSize: 1000, IncrementBy: 1, LastSyncedValue: 10}},
+		SuggestedSequences: map[string]int64{}}); err != nil {
+		t.Fatal(err)
+	}
+	seqs := []promote.SequenceInfo{{Name: "s", Type: promote.SequenceTypeIndependent, CacheSize: 1, IncrementBy: 1}}
+	cfg := promote.Config{PipelineID: "cache", PeakRate: 10, SyncIntervalSec: 1}
+	progress, err := promote.NewPromoter(cfg, store, newMockSourceDriver(false), newMockTargetDriver(), seqs, nil).Run(ctx)
+	if err == nil {
+		t.Fatalf("unfenced source must stop for an operator decision")
+	}
+	if got, want := progress.SuggestedSequences["s"], 10+promote.CalculateMargin(1000, 1, 10, 1); got != want {
+		t.Fatalf("suggestion = %d, want %d (margin from the source CACHE 1000)", got, want)
 	}
 }
