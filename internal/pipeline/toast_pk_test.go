@@ -48,7 +48,7 @@ func TestToastPK_BeforeRegisterPG(t *testing.T) {
 		{9, 1000, "update[1000]/[9] "}, // sau MaxPK: đã ở target
 	}
 	for _, c := range cases {
-		parts, err := p.keepBeforeRegisterPG(move(c.from, c.to))
+		parts, err := p.keepBeforeRegister(move(c.from, c.to))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -61,7 +61,7 @@ func TestToastPK_BeforeRegisterPG(t *testing.T) {
 		t.Fatalf("plan reread %v, want [60 7] (persisted before the txn is admitted)", pl.Reread)
 	}
 	// Event thường trên khóa chờ đọc lại bị bỏ (sẽ được đọc lại).
-	parts, _ := p.keepBeforeRegisterPG(&model.RowChange{Table: tbl, Op: model.OpUpdate, Key: []model.Value{int64(7)},
+	parts, _ := p.keepBeforeRegister(&model.RowChange{Table: tbl, Op: model.OpUpdate, Key: []model.Value{int64(7)},
 		Cols: []model.ColValue{{Name: "id", Value: int64(7)}, {Name: "doc", Value: "x"}}})
 	if len(parts) != 0 {
 		t.Fatalf("event on a key waiting for re-read must be dropped, got %s", desc(parts))

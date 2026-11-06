@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -941,16 +942,30 @@ func (p *Pipeline) rendezvousPG(ctx context.Context, high uint64) error {
 	return nil
 }
 
-// keepBeforeRegisterPG (source PG): event của bảng đang chờ snapshot mà range chưa được đăng ký.
+// beforeRegister: bảng thuộc pipeline đang chờ snapshot (chưa Done) mà range chưa được đăng ký.
+// Áp dụng cho MỌI source (review N10). Trước đây chỉ source PG đi qua keepBeforeRegister; với source
+// MySQL, event của bảng như vậy được apply thẳng. Về dữ liệu thì vô hại (đăng ký bảng mới gọi ClearTarget,
+// plan dở gọi ClearUnread: mọi thứ apply vào phần sẽ đọc lại đều bị xóa rồi đọc lại — RS-1), nhưng target
+// PG có FK (schema init tạo FK; PG luôn kiểm FK — target MySQL thì phiên ghi đặt foreign_key_checks=0) thì một INSERT
+// của bảng con trỏ tới row cha chưa được snapshot (bảng cha đang chờ/đang snapshot, orderSnapshotTables
+// chỉ bảo đảm cha XONG trước khi con BẮT ĐẦU) bị target từ chối → pipeline dừng. Bỏ các event này là
+// đúng vì cùng lý do chúng vốn sẽ bị xóa: source MySQL đọc biên sau barrier (router đã drain, Txn của
+// event đã commit), chunk đọc sau đó với watermark GTID, nên snapshot thấy mọi event đã bỏ. Không dùng
+// session_replication_role = replica (cần superuser, writer không dựa vào nó) và không giữ Txn chờ bảng cha.
+func (p *Pipeline) beforeRegister(t model.TableID) bool {
+	return !p.snap.Manager.IsRegistered(t) && !p.state.IsDone(t.String())
+}
+
+// keepBeforeRegister: event của bảng đang chờ snapshot mà range chưa được đăng ký (beforeRegister).
 // Phần sẽ được đọc lại bởi snapshot (bảng mới: cả bảng — ClearTarget xóa sạch khi đăng ký; plan dở
-// từ lần chạy trước: [NextPK, MaxPK]) thì BỎ: Txn của nó nằm trong XIDTracker nên biên và chunk đọc
-// sau đều thấy nó (BeforeRegister). Bỏ thay vì apply rồi bị xóa, vì UPDATE của PG có thể thiếu cột TOAST
+// từ lần chạy trước: [NextPK, MaxPK]) thì BỎ: source PG — Txn của nó nằm trong XIDTracker nên biên và chunk
+// đọc sau đều thấy nó (BeforeRegister); source MySQL — xem beforeRegister. Bỏ thay vì apply rồi bị xóa, vì UPDATE của PG có thể thiếu cột TOAST
 // mà row chưa có ở target. Phần đã flush của plan dở ([MinPK, NextPK−1]) và phần đuôi (> MaxPK) thì
 // apply như range "Xong". UPDATE đổi PK được tách thành tombstone + upsert, xét từng nửa.
 // Khóa trong plan.Reread (chờ đọc lại, 02 §8) được coi như phần sẽ đọc lại. UPDATE đổi PK mà cột TOAST
 // không đổi, khóa cũ sẽ được đọc lại còn khóa mới thì không: nửa upsert thiếu giá trị TOAST nên khóa mới
 // được thêm vào plan.Reread (lưu bền ngay, trước khi Txn được Admit) và nửa upsert bị bỏ (toast_pk.go).
-func (p *Pipeline) keepBeforeRegisterPG(rc *model.RowChange) ([]*model.RowChange, error) {
+func (p *Pipeline) keepBeforeRegister(rc *model.RowChange) ([]*model.RowChange, error) {
 	plan, ok := p.state.Plan(rc.Table.String())
 	if !ok {
 		return nil, nil
@@ -1015,7 +1030,9 @@ func (p *Pipeline) keepBeforeRegisterPG(rc *model.RowChange) ([]*model.RowChange
 	return out, nil
 }
 
-// snapshotPK đọc PK số nguyên một cột (int64 từ reader PG).
+// snapshotPK đọc PK số nguyên một cột (int64/int32 từ reader PG; reader MySQL còn cho int8/int16 và
+// kiểu không dấu — review N10: khóa không đọc được bị coi là "sẽ đọc lại" và bị bỏ, nên phải nhận đủ
+// các kiểu mà range-state nhận, nếu không event ở phần đã flush của plan dở bị mất).
 func snapshotPK(key []model.Value) (int64, error) {
 	if len(key) != 1 {
 		return 0, fmt.Errorf("composite key")
@@ -1025,8 +1042,26 @@ func snapshotPK(key []model.Value) (int64, error) {
 		return v, nil
 	case int32:
 		return int64(v), nil
+	case int16:
+		return int64(v), nil
+	case int8:
+		return int64(v), nil
 	case int:
 		return int64(v), nil
+	case uint8:
+		return int64(v), nil
+	case uint16:
+		return int64(v), nil
+	case uint32:
+		return int64(v), nil
+	case uint64:
+		if v <= math.MaxInt64 {
+			return int64(v), nil
+		}
+	case uint:
+		if uint64(v) <= math.MaxInt64 {
+			return int64(v), nil
+		}
 	}
 	return 0, fmt.Errorf("unsupported key type %T", key[0])
 }
