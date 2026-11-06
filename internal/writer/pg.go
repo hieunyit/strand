@@ -30,6 +30,11 @@ const (
 	pgDeleteMaxKeys = 1024
 	// pgMaxParams: trần số tham số của một câu lệnh trong giao thức PG (uint16).
 	pgMaxParams = 65535
+	// pgBlockMaxBytes: ngân sách byte payload (ước lượng theo argBytes) của một khối COPY + MERGE
+	// hoặc một lần gửi pipeline (review N13). PG không có trần gói như max_allowed_packet, nhưng
+	// 5000 row hay 1000 câu chứa blob lớn bị giữ trọn trong bộ nhớ trước khi gửi. Một row lớn hơn
+	// ngân sách vẫn đi nguyên (một mình), không bao giờ tách giữa row.
+	pgBlockMaxBytes = 16 * 1024 * 1024
 )
 
 // ToastRowMissingError: partial UPDATE (cột TOAST Unchanged) không tìm thấy row ở target.
@@ -276,6 +281,7 @@ type pgApplier struct {
 	// q: câu lệnh từng row của bảng "ordered" chờ gửi, đúng thứ tự nguồn, pipeline một round-trip.
 	q       *pgx.Batch
 	qTables []model.TableID
+	qBytes  int // ước lượng byte tham số của q (review N13)
 
 	copyMinRows int
 }
@@ -317,10 +323,16 @@ func (a *pgApplier) enqueue(t model.TableID, q string, args []any) error {
 	}
 	a.q.Queue(q, args...)
 	a.qTables = append(a.qTables, t)
-	if a.q.Len() >= pgOrderedQueueMax {
+	a.qBytes += len(q) + argsBytes(args)
+	if a.queueFull() {
 		return a.flushQueue()
 	}
 	return nil
+}
+
+// queueFull: hàng đợi pipeline đủ số câu hoặc đủ ngân sách byte (review N13).
+func (a *pgApplier) queueFull() bool {
+	return a.q != nil && (a.q.Len() >= pgOrderedQueueMax || a.qBytes >= pgBlockMaxBytes)
 }
 
 // flushQueue gửi các câu lệnh đang chờ trong một pipeline; PG thực thi tuần tự đúng thứ tự xếp hàng.
@@ -329,7 +341,7 @@ func (a *pgApplier) flushQueue() error {
 		return nil
 	}
 	b, tables := a.q, a.qTables
-	a.q, a.qTables = nil, nil
+	a.q, a.qTables, a.qBytes = nil, nil, 0
 	br := a.tx.SendBatch(a.ctx, b)
 	for i := 0; i < b.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
@@ -490,7 +502,7 @@ func (a *pgApplier) apply(row *model.RowChange) error {
 			names[i] = c.Name
 			vals[i] = c.Value
 		}
-		if a.up != nil && (a.up.table != row.Table || !sameStringSlice(a.up.cols, names) || len(a.up.rows) >= pgCopyBlockRows) {
+		if a.up != nil && a.up.full(row.Table, names, argsBytes(vals)) {
 			if err := a.flushUpsert(); err != nil {
 				return err
 			}
@@ -653,16 +665,27 @@ type pgUpsertBlock struct {
 	pkCols []string
 	rows   [][]any
 	idx    map[string]int // khóa PK -> vị trí trong rows
+	bytes  int            // tổng argsBytes của rows (review N13)
+}
+
+// full cho biết row (bảng, tập cột, kích thước rowBytes) không được thêm vào khối này mà phải mở
+// khối mới: khác bảng/tập cột, đủ số row, hoặc vượt ngân sách byte (review N13). Khối rỗng không bao
+// giờ "đầy" theo byte, nên row lớn hơn ngân sách vẫn đi nguyên một mình.
+func (b *pgUpsertBlock) full(table model.TableID, cols []string, rowBytes int) bool {
+	return b.table != table || !sameStringSlice(b.cols, cols) || len(b.rows) >= pgCopyBlockRows ||
+		(len(b.rows) > 0 && b.bytes+rowBytes > pgBlockMaxBytes)
 }
 
 func (b *pgUpsertBlock) add(key []model.Value, vals []any) {
 	k := pkString(key)
 	if i, ok := b.idx[k]; ok {
+		b.bytes += argsBytes(vals) - argsBytes(b.rows[i])
 		b.rows[i] = vals
 		return
 	}
 	b.idx[k] = len(b.rows)
 	b.rows = append(b.rows, vals)
+	b.bytes += argsBytes(vals)
 }
 
 // flush ghi khối. Khối lớn: COPY vào bảng tạm rồi MERGE (02 §6). Khối nhỏ (< copyMinRows):
