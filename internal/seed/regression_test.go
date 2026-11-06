@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"strand/internal/exitcode"
 	"strand/internal/seed"
@@ -194,5 +195,28 @@ func TestSD4_PrereleaseTokenMustBeSeparateVersionComponent(t *testing.T) {
 		if got := seed.IsPrereleaseToolVersion(tc.ver); got != tc.want {
 			t.Errorf("IsPrereleaseToolVersion(%q) = %v, muốn %v", tc.ver, got, tc.want)
 		}
+	}
+}
+
+// invariant: SD-1 / review R33
+// P thưa với khoảng trống cực lớn (1<<40 GNO) phải bị từ chối nhanh là log gap; code cũ liệt kê
+// từng GNO thiếu chỉ để kiểm len(holes) > 0 nên treo/OOM.
+func TestR33_SparsePositionHugeGapRejectedQuickly(t *testing.T) {
+	gtid := uA + ":1-5:1099511627776"
+	for name, plan := range planners(t, gtid) {
+		t.Run(name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() {
+				done <- plan(seed.SeedSource{Engine: "mysql", TargetVersion: "8.4.6"})
+			}()
+			select {
+			case err := <-done:
+				if exitcode.GetExitCode(err) != exitcode.DataError {
+					t.Fatalf("expected log_gap (exit 5), got %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("hole check enumerated every missing GNO (no result after 5s)")
+			}
+		})
 	}
 }

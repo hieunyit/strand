@@ -30,9 +30,10 @@ func checkPositionP(kind, p string) (*checkpoint.MySQLAppliedSet, error) {
 		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
 			fmt.Sprintf("%s backup position P is empty", kind), nil)
 	}
-	if holes := pSet.Holes(); len(holes) > 0 {
+	// review R33: kiểm theo interval, không liệt kê từng GNO (khoảng trống lớn sẽ treo/OOM).
+	if pSet.HasHoles() {
 		return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError,
-			fmt.Sprintf("%s backup GTID set %q contains %d holes: corrupted or non-contiguous log", kind, p, len(holes)), nil)
+			fmt.Sprintf("%s backup GTID set %q contains %d holes: corrupted or non-contiguous log", kind, p, pSet.HoleCount()), nil)
 	}
 	return pSet, nil
 }

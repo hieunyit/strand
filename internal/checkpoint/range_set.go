@@ -137,8 +137,9 @@ func (rs *RangeSet) High() uint64 {
 	return rs.intervals[len(rs.intervals)-1].End
 }
 
-// Holes trả về danh sách các giá trị còn thiếu trong khoảng (Lwd, High].
-func (rs *RangeSet) Holes() []uint64 {
+// HoleIntervals trả về các khoảng giá trị còn thiếu trong (Lwd, High] dưới dạng đoạn [Start, End].
+// Chi phí tỉ lệ với số interval, không phải độ rộng khoảng trống (review R33).
+func (rs *RangeSet) HoleIntervals() []Interval {
 	if rs.IsEmpty() {
 		return nil
 	}
@@ -149,20 +150,50 @@ func (rs *RangeSet) Holes() []uint64 {
 		return nil
 	}
 
-	var holes []uint64
+	var holes []Interval
 	expected := lwd + 1
 
 	for _, it := range rs.intervals {
 		if it.End <= lwd {
 			continue
 		}
-		for expected < it.Start {
-			holes = append(holes, expected)
-			expected++
+		if expected < it.Start {
+			holes = append(holes, Interval{Start: expected, End: it.Start - 1})
 		}
 		expected = it.End + 1
 	}
 
+	return holes
+}
+
+// HasHoles báo tập có khoảng trống trong (Lwd, High] hay không, không liệt kê từng giá trị
+// (review R33: GTID set thưa với khoảng trống lớn không được tốn thời gian/RAM theo độ rộng).
+func (rs *RangeSet) HasHoles() bool {
+	return len(rs.HoleIntervals()) > 0
+}
+
+// HoleCount trả về số giá trị còn thiếu trong (Lwd, High], tính theo interval (review R33).
+func (rs *RangeSet) HoleCount() uint64 {
+	var n uint64
+	for _, h := range rs.HoleIntervals() {
+		n += h.End - h.Start + 1
+	}
+	return n
+}
+
+// Holes trả về danh sách các giá trị còn thiếu trong khoảng (Lwd, High].
+// Liệt kê từng giá trị nên chi phí tỉ lệ với độ rộng khoảng trống: không dùng trên đường nóng
+// hay với dữ liệu ngoài (GTID set từ metadata); dùng HasHoles/HoleCount/HoleIntervals (review R33).
+func (rs *RangeSet) Holes() []uint64 {
+	var holes []uint64
+	for _, h := range rs.HoleIntervals() {
+		for v := h.Start; ; v++ {
+			holes = append(holes, v)
+			if v == h.End {
+				break
+			}
+		}
+	}
 	return holes
 }
 
