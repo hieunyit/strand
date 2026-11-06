@@ -40,10 +40,26 @@ var weighQueryTimeout = 30 * time.Second
 
 // newMySQLWeigher: WEIGHT_STRING(CONVERT(v USING charset) COLLATE collation) tính trên db, có cache (giá
 // trị lặp lại nhiều: biên chunk, khóa nóng). Weight là khóa sắp xếp của collation: so byte cho đúng thứ
-// tự ORDER BY, và hai giá trị bằng nhau theo collation có cùng weight (kiểm ở TestGPK_MySQL…).
+// tự ORDER BY. Collation PAD SPACE: weight thô không xét phần đệm space ('a' ≠ 'a ', 'a' < 'a\t' trong
+// khi DB coi 'a' = 'a ' và 'a' > 'a\t'), nên được chuyển qua PadSpaceWeightKey (review N04; kiểm với DB ở
+// TestN04_MySQLPadSpaceKeyEqualityAndOrderMatchDB).
 func newMySQLWeigher(db *sql.DB) func(PKColumn, model.Value) ([]byte, error) {
 	var mu sync.Mutex
 	cache := map[string][]byte{}
+	spaces := map[string][]byte{} // charset\x00collation → weight của một space
+	raw := func(col PKColumn, s string) ([]byte, error) {
+		q := fmt.Sprintf("SELECT WEIGHT_STRING(CONVERT(? USING %s) COLLATE %s)", col.Charset, col.Collation)
+		// Có timeout: trước đây QueryRow không context, source treo thì luồng CDC (verify delta) treo
+		// theo vô hạn (review N05). Weigh không nhận ctx (gọi sâu trong Encode/BoundOf) nên dùng
+		// context.Background có giới hạn; không giữ ctx lúc dựng codec vì ctx đó có thể đã bị hủy.
+		qctx, cancel := context.WithTimeout(context.Background(), weighQueryTimeout)
+		defer cancel()
+		var w []byte
+		if err := db.QueryRowContext(qctx, q, s).Scan(&w); err != nil {
+			return nil, err
+		}
+		return w, nil
+	}
 	return func(col PKColumn, v model.Value) ([]byte, error) {
 		s, err := toText(v)
 		if err != nil {
@@ -56,15 +72,25 @@ func newMySQLWeigher(db *sql.DB) func(PKColumn, model.Value) ([]byte, error) {
 		if ok {
 			return w, nil
 		}
-		q := fmt.Sprintf("SELECT WEIGHT_STRING(CONVERT(? USING %s) COLLATE %s)", col.Charset, col.Collation)
-		// Có timeout: trước đây QueryRow không context, source treo thì luồng CDC (verify delta) treo
-		// theo vô hạn (review N05). Weigh không nhận ctx (gọi sâu trong Encode/BoundOf) nên dùng
-		// context.Background có giới hạn; không giữ ctx lúc dựng codec vì ctx đó có thể đã bị hủy.
-		qctx, cancel := context.WithTimeout(context.Background(), weighQueryTimeout)
-		err = db.QueryRowContext(qctx, q, s).Scan(&w)
-		cancel()
-		if err != nil {
+		if w, err = raw(col, s); err != nil {
 			return nil, err
+		}
+		if col.PadSpace {
+			sk := col.Charset + "\x00" + col.Collation
+			mu.Lock()
+			sp, ok := spaces[sk]
+			mu.Unlock()
+			if !ok {
+				if sp, err = raw(col, " "); err != nil {
+					return nil, err
+				}
+				mu.Lock()
+				spaces[sk] = sp
+				mu.Unlock()
+			}
+			if w, err = PadSpaceWeightKey(w, sp); err != nil {
+				return nil, fmt.Errorf("collation %s: %w", col.Collation, err)
+			}
 		}
 		mu.Lock()
 		if len(cache) > 100000 {

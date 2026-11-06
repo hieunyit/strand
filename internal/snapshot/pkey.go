@@ -97,6 +97,9 @@ type PKColumn struct {
 	Collation string
 	// Charset: bộ ký tự của cột chuỗi (PKWeight: để tính weight của giá trị như của cột).
 	Charset string
+	// PadSpace: collation PAD SPACE (PKWeight): DB so như thể chuỗi ngắn hơn được đệm space, nên weight
+	// thô không so byte được ('a' = 'a ', 'a' > 'a\t') — weigher chuyển qua PadSpaceWeightKey (review N04).
+	PadSpace bool
 }
 
 // PKCodec mã hóa tuple PK của một bảng.
@@ -155,7 +158,8 @@ func MySQLPKColumn(name, dataType, columnType, charset, collation, padAttribute 
 		if !strings.HasSuffix(coll, "_bin") {
 			// Mức 2: thứ tự và phép bằng của collation lấy từ WEIGHT_STRING của chính MySQL (không cài lại
 			// collation trong Go).
-			return PKColumn{Name: name, Kind: PKWeight, Collation: collation, Charset: charset}, nil
+			return PKColumn{Name: name, Kind: PKWeight, Collation: collation, Charset: charset,
+				PadSpace: !strings.EqualFold(strings.TrimSpace(padAttribute), "NO PAD")}, nil
 		}
 		if strings.EqualFold(strings.TrimSpace(padAttribute), "NO PAD") {
 			return PKColumn{Name: name, Kind: PKBytes}, nil
@@ -653,4 +657,44 @@ func CrossEngineSameOrder(src, dst *PKCodec) error {
 		}
 	}
 	return nil
+}
+
+// PadSpaceWeightKey chuyển WEIGHT_STRING w của một collation PAD SPACE thành khóa so byte đúng thứ tự và
+// phép bằng của DB (review N04). sp là weight của một space (độ dài = độ rộng một đơn vị weight).
+//
+// DB so hai mảng weight như thể mảng ngắn hơn được nối thêm vô hạn đơn vị sp. Viết weight thành các đoạn
+// (L đơn vị sp liên tiếp, rồi một đơn vị u ≠ sp); hết chuỗi = một đoạn "L = ∞". So hai đoạn đầu tiên khác
+// nhau (L1,u1) và (L2,u2):
+//   - L1 = L2: so u1 với u2;
+//   - L1 < L2: ở vị trí L1, bên 1 là u1, bên 2 là sp ⇒ kết quả = so u1 với sp (u1 ≠ sp);
+//   - một bên hết chuỗi (L = ∞): kết quả = so sp với đơn vị kế tiếp của bên kia.
+//
+// Mã hóa mỗi đoạn: u < sp → 0x01, L tăng dần (uint32 BE), u; u > sp → 0x03, L GIẢM dần (^L), u; hết chuỗi
+// → 0x02. Kiểm: L1<L2, u1<sp: 0x01·L1 < 0x01·L2 và 0x01 < 0x03 ⇒ bên 1 nhỏ hơn ✓; u1>sp: 0x03·^L1 > 0x03·^L2
+// và 0x03 > 0x01 ⇒ bên 1 lớn hơn ✓; hết chuỗi 0x02 nằm giữa ✓; L bằng nhau → cùng tiền tố, so u ✓. Space
+// cuối chuỗi biến mất (đoạn cuối chỉ còn "hết chuỗi") nên 'a' = 'a ' ✓.
+func PadSpaceWeightKey(w, sp []byte) ([]byte, error) {
+	n := len(sp)
+	if n == 0 || len(w)%n != 0 {
+		return nil, fmt.Errorf("weight string of %d bytes is not a whole number of %d-byte units", len(w), n)
+	}
+	out := make([]byte, 0, len(w)+len(w)/n*5+1)
+	var run uint32
+	for i := 0; i < len(w); i += n {
+		u := w[i : i+n]
+		c := bytes.Compare(u, sp)
+		if c == 0 {
+			run++
+			continue
+		}
+		l := run
+		cls := byte(0x01)
+		if c > 0 {
+			cls, l = 0x03, ^run
+		}
+		out = append(out, cls, byte(l>>24), byte(l>>16), byte(l>>8), byte(l))
+		out = append(out, u...)
+		run = 0
+	}
+	return append(out, 0x02), nil
 }
