@@ -38,7 +38,9 @@ type SeedSource struct {
 	SourceVersion  string `json:"source_version,omitempty"`
 	// BackupLabel chọn một backup cụ thể (label pgBackRest / backup_name WAL-G); rỗng = backup mới nhất có stop LSN ≤ P.
 	BackupLabel string `json:"backup_label,omitempty"`
-	// ArchiveInfoRef: file JSON `wal-g wal-show --detailed-json` (WAL-G không có phạm vi archive trong backup-list).
+	// ArchiveInfoRef: inventory archive WAL (SD-2): `wal-g wal-show --detailed-json` (WAL-G không có phạm vi
+	// archive trong backup-list) hoặc `pgbackrest repo-ls archive/<stanza>/<archive-id> --recurse --output=json`
+	// (`pgbackrest info` chỉ có min/max, không chứng minh được liên tục — review N08).
 	ArchiveInfoRef string `json:"archive_info_ref,omitempty"`
 	// ToolVersion: phiên bản công cụ khi metadata không ghi (WAL-G).
 	ToolVersion string `json:"tool_version,omitempty"`

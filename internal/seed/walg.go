@@ -35,6 +35,7 @@ type walgBackup struct {
 	FinishLSN        flexString `json:"finish_lsn"`
 	IsPermanent      bool       `json:"is_permanent"`
 	SystemIdentifier flexString `json:"system_identifier"`
+	WalFileName      string     `json:"wal_file_name"`
 }
 
 // walgTimeline là một phần tử của `wal-g wal-show --detailed-json`.
@@ -92,6 +93,16 @@ func (pl *WalgPlanner) Plan(_ context.Context, src SeedSource) (*SeedManifest, e
 		if pb.StartTime.IsZero() {
 			pb.StartTime = parseWalgTime(b.Time)
 		}
+		// Timeline của backup: tên WAL bắt đầu trong backup_name (base_<WAL>[_D_<WAL gốc>]), hoặc wal_file_name.
+		walName := b.WalFileName
+		if rest, ok := strings.CutPrefix(b.BackupName, "base_"); ok && len(rest) >= 24 {
+			walName = rest[:24]
+		}
+		if walName != "" {
+			if ws, err := parseWALFileName(walName, segSize); err == nil {
+				pb.Timeline = ws.TLI
+			}
+		}
 		if b.StartLSN != "" {
 			if pb.StartLSN, err = checkpoint.ParseLSN(string(b.StartLSN)); err != nil {
 				return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
@@ -118,36 +129,39 @@ func (pl *WalgPlanner) Plan(_ context.Context, src SeedSource) (*SeedManifest, e
 			return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
 				fmt.Sprintf("walg: cannot parse `wal-g wal-show --detailed-json`: %v", err), err)
 		}
-		// Gộp các timeline thành một dải segment (số segment không phụ thuộc timeline; timeline mới
-		// tiếp nối timeline cha tại switch point).
+		// Mỗi timeline: [start_segment, end_segment] trừ missing_segments → các dải liên tục THEO TIMELINE
+		// (review N08: trước đây gộp mọi timeline thành một min/max, lỗ và timeline đều bị mất).
 		for _, tl := range tls {
 			if tl.StartSegment == "" || tl.EndSegment == "" {
 				continue
 			}
 			lo, err1 := parseWALFileName(tl.StartSegment, segSize)
 			hi, err2 := parseWALFileName(tl.EndSegment, segSize)
-			if err1 != nil || err2 != nil {
+			if err1 != nil || err2 != nil || lo.TLI != hi.TLI || hi.Seg < lo.Seg {
 				return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
 					fmt.Sprintf("walg: invalid timeline %d segment range %s..%s", tl.ID, tl.StartSegment, tl.EndSegment), nil)
 			}
-			if !cov.Known || lo < cov.MinSeg {
-				cov.MinSeg = lo
+			if tl.ID != 0 && uint32(tl.ID) != lo.TLI {
+				return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+					fmt.Sprintf("walg: timeline %d has segments of timeline %d (%s)", tl.ID, lo.TLI, tl.StartSegment), nil)
 			}
-			if !cov.Known || hi > cov.MaxSeg {
-				cov.MaxSeg, cov.MaxName = hi, tl.EndSegment
-			}
-			cov.Known = true
+			var miss []uint64
 			for _, m := range tl.MissingSegments {
-				n, err := parseWALFileName(m, segSize)
+				ws, err := parseWALFileName(m, segSize)
 				if err != nil {
 					return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
 						fmt.Sprintf("walg: invalid missing segment %q", m), err)
 				}
-				cov.Missing = append(cov.Missing, n)
+				cov.Missing = append(cov.Missing, ws)
+				if ws.TLI == lo.TLI {
+					miss = append(miss, ws.Seg)
+				}
 			}
+			cov.Intervals = append(cov.Intervals, intervalsMinus(lo.TLI, lo.Seg, hi.Seg, miss)...)
+			cov.Known = true
 		}
 		if cov.Known {
-			cov.Describe = fmt.Sprintf("segments %d..%d", cov.MinSeg, cov.MaxSeg)
+			cov.Describe = describeIntervals(cov.Intervals, segSize)
 		}
 	}
 

@@ -74,6 +74,47 @@ func walgList(t *testing.T, pgVersion int) string {
 		pgVersion, 0x7000028, 0x7000100, pgSysID))
 }
 
+// walName dựng tên file WAL (segment 16 MiB) từ timeline + số segment.
+func walName(tli uint32, seg uint64) string {
+	return fmt.Sprintf("%08X%08X%08X", tli, seg/256, seg%256)
+}
+
+// walSegOf trả số segment của tên file WAL (segment 16 MiB).
+func walSegOf(name string) uint64 {
+	var hi, lo uint64
+	fmt.Sscanf(name[8:16], "%X", &hi)
+	fmt.Sscanf(name[16:24], "%X", &lo)
+	return hi*256 + lo
+}
+
+// walRange trả tên file WAL [from, to] trên timeline tli.
+func walRange(tli uint32, from, to uint64) []string {
+	var out []string
+	for s := from; s <= to; s++ {
+		out = append(out, walName(tli, s))
+	}
+	return out
+}
+
+// pgbrRepoLs dựng JSON `pgbackrest repo-ls archive/main --recurse --output=json` chứa các segment WAL
+// (kèm checksum + .gz như pgBackRest lưu) và vài file không phải segment (phải bị bỏ qua).
+func pgbrRepoLs(t *testing.T, version string, names ...string) string {
+	id := version + "-1"
+	obj := map[string]map[string]any{
+		".":                      {"type": "path"},
+		id:                       {"type": "path"},
+		id + "/00000002.history": {"type": "file", "size": 41},
+		id + "/0000000100000000": {"type": "path"},
+		"9.6-1/0000000100000000/000000010000000000000050-0123456789abcdef0123456789abcdef01234567.gz": {"type": "file", "size": 1},
+	}
+	for _, n := range names {
+		obj[id+"/"+n[:16]+"/"+n+"-0123456789abcdef0123456789abcdef01234567.gz"] = map[string]any{"type": "file", "size": 1024, "time": 1}
+	}
+	obj[id+"/0000000100000000/000000010000000000000002.00000028.backup"] = map[string]any{"type": "file", "size": 300}
+	raw, _ := json.Marshal(obj)
+	return writeJSON(t, "repo-ls.json", string(raw))
+}
+
 func walShow(t *testing.T, end string, missing ...string) string {
 	m, _ := json.Marshal(missing)
 	if missing == nil {
@@ -102,6 +143,8 @@ func pgPlanners(t *testing.T) map[string]func(mut func(*seed.SeedSource), versio
 	return map[string]func(func(*seed.SeedSource), string, string) (*seed.SeedManifest, error){
 		"pgbackrest": func(mut func(*seed.SeedSource), version, archiveMax string) (*seed.SeedManifest, error) {
 			src := pgSrc(pgbrInfo(t, version, archiveMax))
+			// SD-2 (review N08): `info` chỉ có min/max → cần inventory archive (repo-ls) để chứng minh liên tục.
+			src.ArchiveInfoRef = pgbrRepoLs(t, version, walRange(1, 1, walSegOf(archiveMax))...)
 			if mut != nil {
 				mut(&src)
 			}
@@ -281,3 +324,134 @@ func TestPGPhysical_PrereleaseTool(t *testing.T) {
 
 var _ pgPlanner = seed.NewPgBackRestPlanner()
 var _ pgPlanner = seed.NewWalgPlanner()
+
+// review N09: backup không ghi system identifier → không chứng minh được SD-1 → từ chối (trước đây
+// planner lấy systemid của source đang chạy làm source_identity). Source không rõ systemid cũng vậy.
+func TestN09_PGPhysical_IdentityMustComeFromBackup(t *testing.T) {
+	t.Run("pgbackrest-no-system-id", func(t *testing.T) {
+		raw, err := os.ReadFile(pgbrInfo(t, "16", "00000001000000000000000A"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := pgSrc(writeJSON(t, "info-noid.json", strings.Replace(string(raw), `"system-id": `+pgSysID+`,`, "", 1)))
+		_, err = (&seed.PgBackRestPlanner{Now: func() time.Time { return pgNow }}).Plan(context.Background(), src)
+		wantCode(t, err, exitcode.ErrSeedInvariantFailed)
+		if !strings.Contains(err.Error(), "SD-1") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("walg-no-system-id", func(t *testing.T) {
+		raw, err := os.ReadFile(walgList(t, 160004))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := pgSrc(writeJSON(t, "backups-noid.json", strings.ReplaceAll(string(raw), `"system_identifier": `+pgSysID, `"system_identifier": null`)))
+		src.ArchiveInfoRef = walShow(t, "00000001000000000000000A")
+		src.ToolVersion = "v3.0.5"
+		_, err = (&seed.WalgPlanner{Now: func() time.Time { return pgNow }}).Plan(context.Background(), src)
+		wantCode(t, err, exitcode.ErrSeedInvariantFailed)
+	})
+	for kind, plan := range pgPlanners(t) {
+		t.Run(kind+"-source-unknown", func(t *testing.T) {
+			_, err := plan(func(s *seed.SeedSource) { s.SourceSystemID = "" }, "16", "00000001000000000000000A")
+			wantCode(t, err, exitcode.ErrSeedInvariantFailed)
+		})
+	}
+}
+
+// review N08: phạm vi archive là các dải theo timeline; lỗ giữa hai dải, timeline khác hay chỉ có min/max
+// đều không chứng minh được SD-2.
+func TestN08_PGPhysical_ArchiveIntervals(t *testing.T) {
+	// P = 0/9000060 (segment 9); diff 11-02 bắt đầu 0/7000028 (segment 7) → cần segment 7..9 trên TL 1.
+	pgbr := func(t *testing.T, mut func(*seed.SeedSource), names ...string) error {
+		src := pgSrc(pgbrInfo(t, "16", walName(1, 0x110)))
+		src.ArchiveInfoRef = pgbrRepoLs(t, "16", names...)
+		if mut != nil {
+			mut(&src)
+		}
+		_, err := (&seed.PgBackRestPlanner{Now: func() time.Time { return pgNow }}).Plan(context.Background(), src)
+		return err
+	}
+	walg := func(t *testing.T, timelines string) error {
+		src := pgSrc(walgList(t, 160004))
+		src.ArchiveInfoRef = writeJSON(t, "walshow.json", timelines)
+		src.ToolVersion = "v3.0.5"
+		_, err := (&seed.WalgPlanner{Now: func() time.Time { return pgNow }}).Plan(context.Background(), src)
+		return err
+	}
+	tl := func(id int, start, end string, missing ...string) string {
+		m, _ := json.Marshal(append([]string{}, missing...))
+		return fmt.Sprintf(`{"id": %d, "parent_id": %d, "switch_point_lsn": 0, "start_segment": %q, "end_segment": %q,
+  "missing_segments": %s, "status": "OK"}`, id, id-1, start, end, m)
+	}
+
+	t.Run("pgbackrest-contiguous", func(t *testing.T) {
+		if err := pgbr(t, nil, walRange(1, 1, 0x110)...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("pgbackrest-gap-between-ranges", func(t *testing.T) {
+		// [1,8] và [0x100,0x110]: min/max phủ 7..9 nhưng segment 9 không có.
+		names := append(walRange(1, 1, 8), walRange(1, 0x100, 0x110)...)
+		err := pgbr(t, nil, names...)
+		wantCode(t, err, exitcode.ErrLogGap)
+		if exitcode.GetExitCode(err) != exitcode.DataError || !strings.Contains(err.Error(), "contiguously") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("pgbackrest-other-timeline-only", func(t *testing.T) {
+		// Đủ segment nhưng trên timeline 2, backup ở timeline 1.
+		err := pgbr(t, nil, walRange(2, 1, 0x110)...)
+		wantCode(t, err, exitcode.ErrLogGap)
+	})
+	t.Run("pgbackrest-timeline-switch-before-P", func(t *testing.T) {
+		// TL 1 liên tục tới 0x110 nhưng TL 2 bắt đầu ở segment 8 (≤ segment của P): không chứng minh được.
+		err := pgbr(t, nil, append(walRange(1, 1, 0x110), walRange(2, 8, 0x110)...)...)
+		wantCode(t, err, exitcode.ErrLogGap)
+		if !strings.Contains(err.Error(), "SD-2 cannot be proven") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("pgbackrest-timeline-switch-after-P", func(t *testing.T) {
+		if err := pgbr(t, nil, append(walRange(1, 1, 0x110), walRange(2, 0x20, 0x110)...)...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("pgbackrest-min-max-only", func(t *testing.T) {
+		// Không có inventory: `info` chỉ có min/max phủ 7..9 → không chứng minh được.
+		err := pgbr(t, func(s *seed.SeedSource) { s.ArchiveInfoRef = "" })
+		wantCode(t, err, exitcode.ErrLogGap)
+		if !strings.Contains(err.Error(), "SD-2 cannot be proven") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("pgbackrest-plain-name-list", func(t *testing.T) {
+		raw, _ := json.Marshal(walRange(1, 7, 9))
+		if err := pgbr(t, func(s *seed.SeedSource) { s.ArchiveInfoRef = writeJSON(t, "names.json", string(raw)) }); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("walg-contiguous", func(t *testing.T) {
+		if err := walg(t, "["+tl(1, walName(1, 1), walName(1, 0x110))+"]"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("walg-gap-between-ranges", func(t *testing.T) {
+		// Cùng TL 1, hai dải [1,8] và [0x100,0x110] (WAL-G có thể in nhiều mục).
+		err := walg(t, "["+tl(1, walName(1, 1), walName(1, 8))+","+tl(1, walName(1, 0x100), walName(1, 0x110))+"]")
+		wantCode(t, err, exitcode.ErrLogGap)
+	})
+	t.Run("walg-other-timeline", func(t *testing.T) {
+		// TL 1 dừng ở segment 8, TL 2 phủ phần còn lại: min/max gộp phủ 7..9 nhưng có switch trước P.
+		err := walg(t, "["+tl(1, walName(1, 1), walName(1, 8))+","+tl(2, walName(2, 8), walName(2, 0x110))+"]")
+		wantCode(t, err, exitcode.ErrLogGap)
+		if !strings.Contains(err.Error(), "SD-2 cannot be proven") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("walg-missing-in-range", func(t *testing.T) {
+		err := walg(t, "["+tl(1, walName(1, 1), walName(1, 0x110), walName(1, 8))+"]")
+		wantCode(t, err, exitcode.ErrLogGap)
+	})
+}

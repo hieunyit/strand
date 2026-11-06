@@ -410,16 +410,26 @@ func (p *Pipeline) startFromSeedPG(ctx context.Context) (checkpoint.AppliedSet, 
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 			fmt.Sprintf("source.slot is %q but the seed was taken at the consistent_point of slot %q", p.cfg.Source.Slot, slot), nil)
 	}
+	// SD-1 (review N09): seed phải được lấy từ đúng cluster source đang nối (system_identifier),
+	// kiểm trước khi ghi bất kỳ trạng thái nào.
+	srcID, err := p.pgSourceSystemID(ctx)
+	if err != nil {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("SD-1: cannot check seed source_identity: %v", err), err)
+	}
+	if err := checkPGSeedSourceIdentity(m.SourceIdentity, srcID); err != nil {
+		return nil, err
+	}
 	if err := p.state.SetPGSlot(slot); err != nil {
 		return nil, err
 	}
-	// Bảng có trong seed thì xong; bảng của pipeline không có trong seed được snapshot logic.
-	seeded := map[string]bool{}
-	for _, t := range m.Tables {
-		seeded[strings.Trim(t, `"`)] = true
-	}
+	// Bảng có trong seed thì xong; bảng của pipeline không có trong seed được snapshot logic. Cách hiểu
+	// "tables" (gồm "*" của seed vật lý) dùng chung seed.SeedCovers (review N06).
+	ids := make([]model.TableID, 0, len(p.tables))
 	for id := range p.tables {
-		done := len(m.Tables) == 0 || seeded[id.String()] || (id.Schema == "public" && seeded[id.Table])
+		ids = append(ids, id)
+	}
+	for id, done := range pgSeedTablesDone(&m, ids) {
 		if err := p.state.SetDone(id.String(), done); err != nil {
 			return nil, err
 		}
