@@ -186,7 +186,7 @@ func newPromoteCmd() *cobra.Command {
 					if len(progress.SuggestedSequences) > 0 {
 						fmt.Printf("Các sequence độc lập không đọc được từ source:\n")
 						for seqName, suggested := range progress.SuggestedSequences {
-							fmt.Printf("  - %s: gợi ý %d (lần sync cuối + margin)\n", seqName, suggested)
+							fmt.Printf("  - %s: gợi ý %d (lần sync cuối hoặc max cột target, + margin)\n", seqName, suggested)
 						}
 						fmt.Printf("Duyệt hoặc chỉ định giá trị qua --override-sequences '<json>' khi chạy lại.\n")
 					}

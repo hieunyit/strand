@@ -58,3 +58,45 @@ func TestMySQLSourceIndependentSequenceFromTargetFeeds(t *testing.T) {
 		t.Fatalf("state = %s, want promoted", progress.State)
 	}
 }
+
+// Gợi ý khi phải hỏi người vận hành không được thấp hơn max(cột target mà sequence cấp) + margin: lần
+// đồng bộ cuối có thể là 0 (không có đồng bộ định kỳ, ví dụ source MySQL) hoặc đã cũ.
+func TestIndependentSequenceSuggestionCoversTargetFeeds(t *testing.T) {
+	ctx := context.Background()
+	target := newMockTargetDriver()
+	target.maxColValues["orders.order_no"] = 9000
+	seqs := []promote.SequenceInfo{{Name: "order_no_seq", Type: promote.SequenceTypeIndependent, CacheSize: 1, IncrementBy: 1,
+		LastSyncedValue: 100, Feeds: []promote.ColumnRef{{Table: "orders", Column: "order_no"}}}}
+	cfg := promote.Config{PipelineID: "sugg", PeakRate: 10, SyncIntervalSec: 1}
+	margin := promote.CalculateMargin(1, 1, 10, 1)
+
+	// Không fence được (source không truy cập được): dừng exit 10 kèm gợi ý.
+	p := promote.NewPromoter(cfg, promote.NewMemoryStateStore(), newMockSourceDriver(false), target, seqs, nil)
+	progress, err := p.Run(ctx)
+	if err == nil {
+		t.Fatalf("unfenced source must stop for an operator decision")
+	}
+	if got, want := progress.SuggestedSequences["order_no_seq"], int64(9000)+margin; got != want {
+		t.Fatalf("suggestion = %d, want max(feeds) + margin = %d (last sync + margin = %d is below used values)", got, want, 100+margin)
+	}
+
+	// Fence xong rồi source mất ở bước 4: gợi ý cũng vậy.
+	src := newMockSourceDriver(true)
+	target.applyHook = func() error { src.mu.Lock(); src.reachable = false; src.mu.Unlock(); return nil }
+	p = promote.NewPromoter(cfg, promote.NewMemoryStateStore(), src, target, seqs, nil)
+	progress, err = p.Run(ctx)
+	if err == nil {
+		t.Fatalf("unreadable independent sequence must stop for an operator decision")
+	}
+	if got, want := progress.SuggestedSequences["order_no_seq"], int64(9000)+margin; got != want {
+		t.Fatalf("step-4 suggestion = %d, want %d", got, want)
+	}
+
+	// Source MySQL không fence được: không có gì để người vận hành chỉ định cho sequence (bước 4 tự suy ra).
+	my := mysqlLikeSource{newMockSourceDriver(false)}
+	p = promote.NewPromoter(cfg, promote.NewMemoryStateStore(), my, newMockTargetDriver(), seqs, nil)
+	progress, _ = p.Run(ctx)
+	if len(progress.SuggestedSequences) != 0 {
+		t.Fatalf("MySQL source: no sequence suggestions expected, got %v", progress.SuggestedSequences)
+	}
+}

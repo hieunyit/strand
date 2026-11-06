@@ -565,6 +565,8 @@ func (p *Pipeline) pgConfirmLoop(ctx context.Context) {
 
 // startSequenceSync chạy đồng bộ định kỳ last_value của sequence độc lập ở source PG vào
 // _strand_promote trên target (02 §8, Δt_sync). Trả hàm dừng (chờ goroutine thoát).
+// Source MySQL không có sequence nên không có gì để đồng bộ: sequence độc lập ở target PG được promote
+// suy ra từ max của các cột target mà nó cấp giá trị (promote.SequenceInfo.Feeds), không từ lần sync cuối.
 func (p *Pipeline) startSequenceSync(ctx context.Context) func() {
 	interval := durationOr(p.cfg.Source.SequenceSyncInterval, 5*time.Second)
 	schemaSet := map[string]bool{}

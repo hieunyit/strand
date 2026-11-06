@@ -130,9 +130,32 @@ func (p *Promoter) feedsBase(ctx context.Context, seq SequenceInfo) (base int64,
 	return base, found, nil
 }
 
-// suggestIndependentSequences ghi giá trị gợi ý (lần đồng bộ cuối + margin) cho các
-// sequence độc lập chưa có giá trị do người vận hành chỉ định, để in ra cùng lúc dừng hỏi.
-func (p *Promoter) suggestIndependentSequences(progress *Progress) {
+// suggestion là giá trị gợi ý cho sequence độc lập khi phải hỏi người vận hành: lần đồng bộ cuối +
+// margin, nhưng không bao giờ phía sau max (giảm dần: min) của các cột target mà sequence cấp giá trị
+// + margin. Đồng bộ định kỳ last_value chỉ chạy với source PG (pipeline.startSequenceSync); với source
+// MySQL LastSyncedValue luôn là 0, nên "lần đồng bộ cuối + margin" có thể thấp hơn giá trị đã dùng.
+// Đọc cột target lỗi thì chỉ cảnh báo và giữ phần lần đồng bộ cuối.
+func (p *Promoter) suggestion(ctx context.Context, seq SequenceInfo, margin int64) int64 {
+	suggested := stepAhead(seq, seq.LastSyncedValue, margin)
+	base, found, err := p.feedsBase(ctx, seq)
+	if err != nil {
+		p.logger.Warn("cannot read the target columns fed by an independent sequence; suggestion uses the last sync only",
+			"sequence", seq.Name, "error", err)
+		return suggested
+	}
+	if found {
+		suggested = further(seq, suggested, stepAhead(seq, base, margin))
+	}
+	return suggested
+}
+
+// suggestIndependentSequences ghi giá trị gợi ý (xem suggestion) cho các sequence độc lập chưa có giá
+// trị do người vận hành chỉ định, để in ra cùng lúc dừng hỏi. Source không có sequence (MySQL) thì bỏ
+// qua: bước 4 tự lấy giá trị từ các cột target, người vận hành không cần chỉ định.
+func (p *Promoter) suggestIndependentSequences(ctx context.Context, progress *Progress) {
+	if p.sourceHasNoSequences() {
+		return
+	}
 	for i, seq := range progress.Sequences {
 		if seq.Type != SequenceTypeIndependent || seq.Decided {
 			continue
@@ -141,7 +164,7 @@ func (p *Promoter) suggestIndependentSequences(progress *Progress) {
 			continue
 		}
 		margin := CalculateMargin(seq.CacheSize, seq.IncrementBy, p.cfg.PeakRate, p.cfg.SyncIntervalSec)
-		suggested := stepAhead(seq, seq.LastSyncedValue, margin)
+		suggested := p.suggestion(ctx, seq, margin)
 		progress.SuggestedSequences[seq.Name] = suggested
 		progress.Sequences[i].SuggestedValue = suggested
 	}
@@ -218,7 +241,7 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			// source" không có nghĩa "source đã chết": mở ghi lúc này có thể sinh hai nơi nhận ghi.
 			// Dừng hỏi người vận hành (quyết định P1-17, câu 2, hướng 1).
 			if !p.cfg.SourceFencedExternally {
-				p.suggestIndependentSequences(progress)
+				p.suggestIndependentSequences(ctx, progress)
 				// Đính kèm tóm tắt tập GTID đã apply ở target ngay ở lần dừng exit 10 để người vận hành
 				// biết mức mất dữ liệu trước khi xác nhận (quyết định P1-17, câu 3 = "gộp").
 				if summarizer, ok := p.targetDriver.(FailoverSummarizer); ok {
@@ -337,9 +360,9 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 				continue
 			}
 			if overrideVal, ok := findSequenceOverride(p.cfg.SequenceOverrides, seq.Name); ok {
-				suggested := stepAhead(*seq, seq.LastSyncedValue, margin)
+				suggested := p.suggestion(ctx, *seq, margin)
 				if behind(*seq, overrideVal, suggested) {
-					p.logger.Warn("operator override is behind the suggested value (last sync + margin in the sequence direction)",
+					p.logger.Warn("operator override is behind the suggested value (last sync / target column max + margin in the sequence direction)",
 						"sequence", seq.Name, "override", overrideVal, "suggested", suggested, "increment_by", seq.IncrementBy)
 				}
 				seq.FinalValue = further(*seq, seq.FinalValue, overrideVal)
@@ -366,9 +389,9 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 				continue
 			}
 			// spec: 02 §8: "Nếu sau khi fence không đọc được source, promote dừng và hỏi người vận hành,
-			// kèm giá trị gợi ý (lần đồng bộ cuối cộng margin)."
+			// kèm giá trị gợi ý (lần đồng bộ cuối cộng margin)." — không thấp hơn max(cột cấp) + margin.
 			p.logger.Warn("cannot read independent sequence from source after fence", "sequence", seq.Name, "error", readErr)
-			suggested := stepAhead(*seq, seq.LastSyncedValue, margin)
+			suggested := p.suggestion(ctx, *seq, margin)
 			progress.SuggestedSequences[seq.Name] = suggested
 			seq.SuggestedValue = suggested
 			needsDecision = true
