@@ -232,6 +232,9 @@ type strandCfg struct {
 	SourceExtra string
 	// ChunkRows: bootstrap.logical.chunk_rows (rỗng = auto).
 	ChunkRows string
+	// GovernorAlgo: governor.algorithm (rỗng = onoff); GovernorProbe: governor.probe (rỗng = mặc định on).
+	GovernorAlgo  string
+	GovernorProbe string
 }
 
 func (c *strandCfg) chunkRows() string {
@@ -283,6 +286,13 @@ func (c *strandCfg) write(t *testing.T) string {
 	if c.TargetKind == "" {
 		c.TargetKind = "mysql"
 	}
+	if c.GovernorAlgo == "" {
+		c.GovernorAlgo = "onoff"
+	}
+	probe := ""
+	if c.GovernorProbe != "" {
+		probe = ", probe: " + strconv.Quote(c.GovernorProbe)
+	}
 	q := func(xs []string) string {
 		var out []string
 		for _, x := range xs {
@@ -308,11 +318,11 @@ resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB, overflow: %q }
   source: { iops: { soft: %d, hard: %d } }
   workers: { min: 1, max: %d }
-governor: { algorithm: onoff, tick: 1s, lag_slo: %s, breaker: { strand_query_p99: { max_ratio: 1000 }, replica_lag: { max: %s } } }
+governor: { algorithm: %s%s, tick: 1s, lag_slo: %s, breaker: { strand_query_p99: { max_ratio: 1000 }, replica_lag: { max: %s } } }
 verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
-		c.Bootstrap, c.CreateSchema, c.chunkRows(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
+		c.Bootstrap, c.CreateSchema, c.chunkRows(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.GovernorAlgo, probe, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	p := filepath.Join(c.Dir, "pipeline.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
