@@ -867,8 +867,9 @@ func (p *Pipeline) initialPosition(ctx context.Context, applied *checkpoint.MySQ
 			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax,
 				"--start-at is only valid for a new pipeline; a checkpoint already exists (use strand checkpoint rewind)", nil)
 		}
-		var setStr string
-		if p.opts.StartAt == "seed" {
+		var setStr, seedIdentity string
+		fromSeed := p.opts.StartAt == "seed"
+		if fromSeed {
 			path := p.opts.SeedManifest
 			if path == "" {
 				path = "seed.json"
@@ -884,13 +885,20 @@ func (p *Pipeline) initialPosition(ctx context.Context, applied *checkpoint.MySQ
 			if m.LogCoverage != nil && !m.LogCoverage.OK {
 				return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError, "seed manifest reports log coverage not OK", nil)
 			}
-			setStr = m.StartPosition.GTIDSet
+			setStr, seedIdentity = m.StartPosition.GTIDSet, m.SourceIdentity
 		} else {
 			setStr = p.opts.StartAt
 		}
 		set, err := checkpoint.ParseMySQLGTIDSet(setStr)
 		if err != nil || set.String() == "" {
 			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid start position %q: %v", setStr, err), err)
+		}
+		// SD-1: seed phải lấy từ đúng topology của source đang nối (như review N09 phía PG), kiểm trước
+		// khi ghi bất kỳ trạng thái nào.
+		if fromSeed {
+			if err := p.checkMySQLSeedSource(ctx, seedIdentity, setStr); err != nil {
+				return nil, err
+			}
 		}
 		// Dữ liệu đã có sẵn ở target (seed hoặc --start-at): không snapshot, nhưng phải verify
 		// trước khi chuyển sang synced (02 §9; chế độ C: verify bắt buộc).
