@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // MemoryStateStore lưu trữ tiến trình promote trong bộ nhớ (dùng cho testing).
@@ -118,12 +122,39 @@ func (s *DBStateStore) EnsureTable(ctx context.Context) error {
 	return err
 }
 
-// LoadProgress nạp progress từ DB.
+// LoadProgress nạp progress từ DB (tạo bảng _strand_promote nếu chưa có).
 func (s *DBStateStore) LoadProgress(ctx context.Context, pipelineID string) (*Progress, error) {
 	if err := s.EnsureTable(ctx); err != nil {
 		return nil, fmt.Errorf("ensure _strand_promote table: %w", err)
 	}
+	return s.loadProgress(ctx, pipelineID)
+}
 
+// LoadProgressReadOnly nạp progress mà không ghi gì vào target: không CREATE TABLE, bảng
+// _strand_promote chưa tồn tại thì coi như chưa có tiến trình (review R31: --dry-run không được ghi).
+func (s *DBStateStore) LoadProgressReadOnly(ctx context.Context, pipelineID string) (*Progress, error) {
+	p, err := s.loadProgress(ctx, pipelineID)
+	if err != nil && isMissingTableErr(err) {
+		return nil, nil
+	}
+	return p, err
+}
+
+// isMissingTableErr nhận diện lỗi "bảng không tồn tại": MySQL 1146 (ER_NO_SUCH_TABLE),
+// PostgreSQL SQLSTATE 42P01 (undefined_table).
+func isMissingTableErr(err error) bool {
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1146
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "42P01"
+	}
+	return false
+}
+
+func (s *DBStateStore) loadProgress(ctx context.Context, pipelineID string) (*Progress, error) {
 	var q string
 	if s.isPostgres() {
 		q = `SELECT pipeline_id, state, current_step, completed_steps, sequences, suggested_sequences, updated_at

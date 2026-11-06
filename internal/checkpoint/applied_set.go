@@ -350,6 +350,27 @@ func (s *MySQLAppliedSet) High() model.Pos {
 	}
 }
 
+// HasHoles báo có khoảng trống trong bất kỳ UUID nào, tính theo interval (review R33).
+func (s *MySQLAppliedSet) HasHoles() bool {
+	for _, rs := range s.sets {
+		if rs.HasHoles() {
+			return true
+		}
+	}
+	return false
+}
+
+// HoleCount trả về tổng số GNO còn thiếu qua mọi UUID, tính theo interval (review R33).
+func (s *MySQLAppliedSet) HoleCount() uint64 {
+	var n uint64
+	for _, rs := range s.sets {
+		n += rs.HoleCount()
+	}
+	return n
+}
+
+// Holes liệt kê từng GNO còn thiếu (giữ cho interface AppliedSet và test). Chi phí tỉ lệ với độ
+// rộng khoảng trống: đường kiểm tra dùng HasHoles/HoleCount thay vì hàm này (review R33).
 func (s *MySQLAppliedSet) Holes() []model.Pos {
 	var res []model.Pos
 

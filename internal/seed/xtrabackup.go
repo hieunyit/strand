@@ -215,8 +215,8 @@ func (p *XtraBackupPlanner) Plan(ctx context.Context, src SeedSource) (*SeedMani
 		)
 	}
 
-	// 7. Tương thích target (SD-4): backup vật lý cần cùng dòng version
-	target, err := checkPhysicalCompat(meta.ServerVersion, src.TargetVersion)
+	// 7. Tương thích target (SD-4): backup vật lý cần cùng dòng version và cùng kiến trúc CPU (review R32)
+	target, err := checkPhysicalCompat(meta.ServerVersion, src.TargetVersion, src.SourceArch, src.TargetArch)
 	if err != nil {
 		return nil, err
 	}

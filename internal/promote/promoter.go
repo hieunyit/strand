@@ -123,8 +123,13 @@ func (p *Promoter) suggestIndependentSequences(progress *Progress) {
 // 5. Mở quyền ghi
 // 6. Chuyển DNS hoặc VIP
 func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
-	// Nạp hoặc khởi tạo tiến trình promote
-	progress, err := p.stateStore.LoadProgress(ctx, p.cfg.PipelineID)
+	// Nạp hoặc khởi tạo tiến trình promote. Dry-run không được ghi vào target, kể cả CREATE TABLE
+	// _strand_promote mà LoadProgress của DBStateStore làm (review R31): dùng bản nạp chỉ-đọc.
+	load := p.stateStore.LoadProgress
+	if ro, ok := p.stateStore.(ReadOnlyProgressLoader); ok && p.cfg.DryRun {
+		load = ro.LoadProgressReadOnly
+	}
+	progress, err := load(ctx, p.cfg.PipelineID)
 	if err != nil {
 		return nil, fmt.Errorf("load promote progress: %w", err)
 	}

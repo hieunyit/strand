@@ -133,3 +133,9 @@ type StateStore interface {
 	LoadProgress(ctx context.Context, pipelineID string) (*Progress, error)
 	SaveProgress(ctx context.Context, progress *Progress) error
 }
+
+// ReadOnlyProgressLoader: StateStore nạp được progress mà không ghi gì (không tạo bảng); promote
+// --dry-run dùng giao diện này khi store hỗ trợ (review R31).
+type ReadOnlyProgressLoader interface {
+	LoadProgressReadOnly(ctx context.Context, pipelineID string) (*Progress, error)
+}

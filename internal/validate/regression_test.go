@@ -17,6 +17,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"strand/internal/exitcode"
+	"strand/internal/model"
 	"strand/internal/validate"
 )
 
@@ -192,5 +193,43 @@ func TestValidateExpandsTablePatterns(t *testing.T) {
 	if _, err := validate.ExpandTables(ctx, db, []string{"app.*", "shop.*"}, nil); exitcode.GetExitCode(err) != exitcode.Rejected ||
 		!strings.Contains(err.Error(), "shop.*") {
 		t.Fatalf("pattern matching nothing must be rejected naming it, got %v", err)
+	}
+}
+
+// review R26 (cần container): target MySQL có bảng đích MyISAM hoặc bảng _strand_* MEMORY bị từ chối
+// target_not_transactional (exit 3); toàn InnoDB thì qua; bảng không đồng bộ không ảnh hưởng.
+func TestR26_TargetEngineLiveMySQL(t *testing.T) {
+	db := startMySQL(t)
+	defer db.Close()
+	ctx := context.Background()
+	for _, q := range []string{
+		"CREATE TABLE app.orders_v2 (id INT PRIMARY KEY) ENGINE=InnoDB",
+		"CREATE TABLE app._strand_checkpoint (pipeline_id VARCHAR(64) PRIMARY KEY) ENGINE=InnoDB",
+		"CREATE TABLE app.unrelated (id INT PRIMARY KEY) ENGINE=MyISAM",
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	targets := []model.TableID{{Schema: "app", Table: "orders_v2"}}
+	if err := validate.CheckMySQLTargetEngines(ctx, db, targets); err != nil {
+		t.Fatalf("all-InnoDB target must pass: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE app.orders_v2 ENGINE=MyISAM"); err != nil {
+		t.Fatal(err)
+	}
+	err := validate.CheckMySQLTargetEngines(ctx, db, targets)
+	if exitcode.GetExitCode(err) != exitcode.Rejected || !strings.Contains(err.Error(), "app.orders_v2 (ENGINE=MyISAM)") {
+		t.Fatalf("MyISAM target table must be rejected, got %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE app.orders_v2 ENGINE=InnoDB"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE app._strand_checkpoint ENGINE=MEMORY"); err != nil {
+		t.Fatal(err)
+	}
+	err = validate.CheckMySQLTargetEngines(ctx, db, targets)
+	if exitcode.GetExitCode(err) != exitcode.Rejected || !strings.Contains(err.Error(), "app._strand_checkpoint (ENGINE=MEMORY)") {
+		t.Fatalf("MEMORY checkpoint table must be rejected, got %v", err)
 	}
 }

@@ -21,6 +21,10 @@ type SeedSource struct {
 	ArchiveUntilGTID         string   `json:"archive_until_gtid"`
 	DumpLog                  string   `json:"dump_log,omitempty"`
 	AcceptUnverifiedLockMode bool     `json:"accept_unverified_lock_mode,omitempty"`
+	// SourceArch / TargetArch: kiến trúc CPU (@@version_compile_machine) của server tạo backup và của
+	// target, để kiểm SD-4 cho backup vật lý MySQL; rỗng = không biết, seed plan từ chối (review R32).
+	SourceArch string `json:"source_arch,omitempty"`
+	TargetArch string `json:"target_arch,omitempty"`
 
 	// --- PostgreSQL (pgbackrest | walg) ---
 	// Slot logical trên source (hoặc standby PG16+) mà CDC sẽ đọc; P = consistent_point của slot.
@@ -68,6 +72,8 @@ type PositionCrossCheck struct {
 type TargetInfo struct {
 	Version    string `json:"version"`
 	Compatible bool   `json:"compatible"`
+	// Arch: kiến trúc CPU đã đối chiếu với source (backup vật lý MySQL, review R32).
+	Arch string `json:"arch,omitempty"`
 }
 
 // IntegrityInfo kiểm tra tính toàn vẹn của backup (SD-1).

@@ -3,7 +3,9 @@ package checkpoint
 // Regression tests from the Gate 1 code review (2026-11-02).
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"strand/internal/model"
 )
@@ -91,5 +93,66 @@ func TestMySQLAppliedSetSubtractAndSubset(t *testing.T) {
 	archive2, _ := ParseMySQLGTIDSet(u + ":900-6000")
 	if !missing.IsSubsetOf(archive2) {
 		t.Fatalf("1001-5000 is covered by archive 900-6000")
+	}
+}
+
+// review R33: HasHoles/HoleCount phải tính theo interval. Khoảng trống 1<<40 GNO không thể liệt kê
+// (code cũ treo/OOM), nên test đặt thời hạn: quá hạn nghĩa là đang liệt kê từng giá trị.
+func TestR33_HasHolesHugeGapIsIntervalBased(t *testing.T) {
+	const far = uint64(1) << 40
+	type result struct {
+		has   bool
+		count uint64
+		ivs   []Interval
+	}
+	done := make(chan result, 1)
+	go func() {
+		rs := NewRangeSet(1)
+		rs.AddRange(1, 5)
+		rs.Add(far)
+		done <- result{rs.HasHoles(), rs.HoleCount(), rs.HoleIntervals()}
+	}()
+	select {
+	case r := <-done:
+		if !r.has {
+			t.Fatal("1-5,1<<40 phải có khoảng trống")
+		}
+		if want := far - 6; r.count != want {
+			t.Fatalf("HoleCount = %d, want %d", r.count, want)
+		}
+		if len(r.ivs) != 1 || r.ivs[0] != (Interval{Start: 6, End: far - 1}) {
+			t.Fatalf("HoleIntervals = %v", r.ivs)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("HasHoles/HoleCount liệt kê từng GNO: không xong sau 5s với khoảng trống 1<<40")
+	}
+
+	set, err := ParseMySQLGTIDSet(fmt.Sprintf("%s:1-5:%d", u, far))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.HasHoles() || set.HoleCount() != far-6 {
+		t.Fatalf("MySQLAppliedSet HasHoles=%v HoleCount=%d", set.HasHoles(), set.HoleCount())
+	}
+}
+
+// review R33: Holes() giữ nguyên ngữ nghĩa cũ (liệt kê (Lwd, High]) và khớp với HoleIntervals.
+func TestR33_HolesMatchesHoleIntervals(t *testing.T) {
+	rs := NewRangeSet(1)
+	rs.AddRange(3, 4)
+	rs.AddRange(7, 7)
+	rs.AddRange(10, 12)
+	got := rs.Holes()
+	want := []uint64{1, 2, 5, 6, 8, 9}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Holes = %v, want %v", got, want)
+	}
+	if !rs.HasHoles() || rs.HoleCount() != uint64(len(want)) {
+		t.Fatalf("HasHoles=%v HoleCount=%d", rs.HasHoles(), rs.HoleCount())
+	}
+	full := NewRangeSet(1)
+	full.AddRange(1, 9)
+	if full.HasHoles() || full.HoleCount() != 0 || len(full.Holes()) != 0 {
+		t.Fatal("tập liên tục không được có khoảng trống")
 	}
 }

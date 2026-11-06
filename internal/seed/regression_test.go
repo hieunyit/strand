@@ -6,7 +6,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"strand/internal/exitcode"
 	"strand/internal/seed"
@@ -47,6 +49,7 @@ func planners(t *testing.T, gtid string) map[string]planFn {
 	return map[string]planFn{
 		"xtrabackup": func(src seed.SeedSource) error {
 			src.Kind, src.BackupRef = "xtrabackup", xtraDir(t, gtid, goodInfo)
+			src.SourceArch, src.TargetArch = "x86_64", "x86_64" // SD-4 kiến trúc (review R32)
 			_, err := seed.NewXtraBackupPlanner().Plan(ctx, src)
 			return err
 		},
@@ -137,7 +140,7 @@ func TestSD4_PhysicalBackupVersionLineMismatchRejected(t *testing.T) {
 		}
 	}
 	m, err := seed.NewXtraBackupPlanner().Plan(ctx, seed.SeedSource{Engine: "mysql", Kind: "xtrabackup",
-		BackupRef: dir, TargetVersion: "8.0.40"})
+		BackupRef: dir, TargetVersion: "8.0.40", SourceArch: "x86_64", TargetArch: "x86_64"})
 	if err != nil || !m.Target.Compatible {
 		t.Fatalf("same line 8.0 must be accepted: %v", err)
 	}
@@ -147,7 +150,7 @@ func TestSD4_PhysicalBackupVersionLineMismatchRejected(t *testing.T) {
 func TestSD1_PrepareOKReflectsBackupType(t *testing.T) {
 	ctx := context.Background()
 	m, err := seed.NewXtraBackupPlanner().Plan(ctx, seed.SeedSource{Engine: "mysql", Kind: "xtrabackup",
-		BackupRef: xtraDir(t, uA+":1-100", goodInfo), TargetVersion: "8.4.6"})
+		BackupRef: xtraDir(t, uA+":1-100", goodInfo), TargetVersion: "8.4.6", SourceArch: "x86_64", TargetArch: "x86_64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,4 +198,60 @@ func TestSD4_PrereleaseTokenMustBeSeparateVersionComponent(t *testing.T) {
 			t.Errorf("IsPrereleaseToolVersion(%q) = %v, muốn %v", tc.ver, got, tc.want)
 		}
 	}
+}
+
+// invariant: SD-1 / review R33
+// P thưa với khoảng trống cực lớn (1<<40 GNO) phải bị từ chối nhanh là log gap; code cũ liệt kê
+// từng GNO thiếu chỉ để kiểm len(holes) > 0 nên treo/OOM.
+func TestR33_SparsePositionHugeGapRejectedQuickly(t *testing.T) {
+	gtid := uA + ":1-5:1099511627776"
+	for name, plan := range planners(t, gtid) {
+		t.Run(name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() {
+				done <- plan(seed.SeedSource{Engine: "mysql", TargetVersion: "8.4.6"})
+			}()
+			select {
+			case err := <-done:
+				if exitcode.GetExitCode(err) != exitcode.DataError {
+					t.Fatalf("expected log_gap (exit 5), got %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("hole check enumerated every missing GNO (no result after 5s)")
+			}
+		})
+	}
+}
+
+// invariant: SD-4 / review R32
+// Backup vật lý cần cùng kiến trúc CPU. Trước đây kiến trúc không được kiểm: backup x86_64 được
+// nhận trên target aarch64, và kiến trúc không biết vẫn được báo compatible.
+func TestR32_PhysicalBackupArchitecture(t *testing.T) {
+	ctx := context.Background()
+	dir := xtraDir(t, uA+":1-100", goodInfo)
+	plan := func(srcArch, dstArch string) (*seed.SeedManifest, error) {
+		return seed.NewXtraBackupPlanner().Plan(ctx, seed.SeedSource{Engine: "mysql", Kind: "xtrabackup",
+			BackupRef: dir, TargetVersion: "8.4.6", SourceArch: srcArch, TargetArch: dstArch})
+	}
+	t.Run("match", func(t *testing.T) {
+		// Go "amd64" và MySQL "x86_64" là cùng một kiến trúc.
+		m, err := plan("amd64", "x86_64")
+		if err != nil || !m.Target.Compatible || m.Target.Arch != "x86_64" {
+			t.Fatalf("same arch must be accepted: m=%+v err=%v", m, err)
+		}
+	})
+	t.Run("mismatch", func(t *testing.T) {
+		_, err := plan("x86_64", "aarch64")
+		if exitcode.GetExitCode(err) != exitcode.Rejected || !strings.Contains(err.Error(), "SD-4") {
+			t.Fatalf("expected SD-4 rejection for x86_64 backup on aarch64 target, got %v", err)
+		}
+	})
+	t.Run("unknown", func(t *testing.T) {
+		for _, c := range [][2]string{{"", "x86_64"}, {"x86_64", ""}, {"", ""}} {
+			_, err := plan(c[0], c[1])
+			if exitcode.GetExitCode(err) != exitcode.Rejected || !strings.Contains(err.Error(), "architecture not verified") {
+				t.Fatalf("src=%q dst=%q: expected 'architecture not verified' rejection, got %v", c[0], c[1], err)
+			}
+		}
+	})
 }

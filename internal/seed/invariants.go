@@ -30,9 +30,10 @@ func checkPositionP(kind, p string) (*checkpoint.MySQLAppliedSet, error) {
 		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
 			fmt.Sprintf("%s backup position P is empty", kind), nil)
 	}
-	if holes := pSet.Holes(); len(holes) > 0 {
+	// review R33: kiểm theo interval, không liệt kê từng GNO (khoảng trống lớn sẽ treo/OOM).
+	if pSet.HasHoles() {
 		return nil, exitcode.New(exitcode.ErrLogGap, exitcode.DataError,
-			fmt.Sprintf("%s backup GTID set %q contains %d holes: corrupted or non-contiguous log", kind, p, len(holes)), nil)
+			fmt.Sprintf("%s backup GTID set %q contains %d holes: corrupted or non-contiguous log", kind, p, pSet.HoleCount()), nil)
 	}
 	return pSet, nil
 }
@@ -98,9 +99,24 @@ func versionLine(v string) string {
 	return parts[0] + "." + parts[1]
 }
 
-// checkPhysicalCompat kiểm SD-4 cho backup vật lý: cùng dòng version (kiến trúc CPU chưa
-// có trong metadata nên chưa kiểm được; xem báo cáo review).
-func checkPhysicalCompat(sourceVersion, targetVersion string) (TargetInfo, error) {
+// normalizeArch đưa tên kiến trúc về một dạng chuẩn: MySQL báo @@version_compile_machine là
+// "x86_64"/"aarch64" (Linux) hoặc "arm64" (macOS), Go báo "amd64"/"arm64" (review R32).
+func normalizeArch(a string) string {
+	a = strings.ToLower(strings.TrimSpace(a))
+	switch a {
+	case "amd64", "x86-64", "x64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	}
+	return a
+}
+
+// checkPhysicalCompat kiểm SD-4 cho backup vật lý: cùng dòng version và cùng kiến trúc CPU.
+// Metadata XtraBackup không ghi kiến trúc nên kiến trúc source phải được cung cấp (đọc từ source
+// hoặc khai báo); không biết kiến trúc thì không chứng minh được SD-4 nên từ chối (02 §2, §9;
+// review R32).
+func checkPhysicalCompat(sourceVersion, targetVersion, sourceArch, targetArch string) (TargetInfo, error) {
 	src, dst := versionLine(sourceVersion), versionLine(targetVersion)
 	if src == "" || dst == "" {
 		return TargetInfo{}, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
@@ -112,5 +128,16 @@ func checkPhysicalCompat(sourceVersion, targetVersion string) (TargetInfo, error
 			fmt.Sprintf("SD-4: physical backup from MySQL %s line cannot be restored on %s line target",
 				sourceVersion, targetVersion), nil)
 	}
-	return TargetInfo{Version: targetVersion, Compatible: true}, nil
+	sa, ta := normalizeArch(sourceArch), normalizeArch(targetArch)
+	if sa == "" || ta == "" {
+		return TargetInfo{}, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("SD-4: CPU architecture not verified (backup source arch %q, target arch %q): "+
+				"pass --source and --target (reads @@version_compile_machine) or --source-arch",
+				sourceArch, targetArch), nil)
+	}
+	if sa != ta {
+		return TargetInfo{}, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("SD-4: physical backup from %s server cannot be restored on %s target", sourceArch, targetArch), nil)
+	}
+	return TargetInfo{Version: targetVersion, Compatible: true, Arch: ta}, nil
 }

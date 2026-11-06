@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/model"
 	"strand/internal/schemagen"
 	"strand/internal/typemap"
 	"strand/internal/validate"
@@ -117,8 +118,28 @@ func newValidateCmd() *cobra.Command {
 			if len(plan.Tables) > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "%d table(s) will be created on target\n", len(plan.Tables))
 			}
+			// review R26: target MySQL phải dùng InnoDB cho bảng đích (sau rename) và bảng _strand_*.
+			if strings.EqualFold(cfg.Target.Kind, "mysql") {
+				targets := make([]model.TableID, 0, len(tables))
+				for _, id := range tables {
+					targets = append(targets, renamedTarget(cfg.Tables.Rename, id))
+				}
+				if err := validate.CheckMySQLTargetEngines(cmd.Context(), r.Target, targets); err != nil {
+					return err
+				}
+			}
 			fmt.Fprintf(os.Stdout, "Preflight validation passed for pipeline: %s\n", cfg.Name)
 			return nil
 		},
 	}
+}
+
+// renamedTarget áp tables.rename ("schema.table" → "schema.table") lên tên bảng nguồn.
+func renamedTarget(rename map[string]string, id model.TableID) model.TableID {
+	if to, ok := rename[id.String()]; ok {
+		if s, t, ok := strings.Cut(to, "."); ok {
+			return model.TableID{Schema: s, Table: t}
+		}
+	}
+	return id
 }
