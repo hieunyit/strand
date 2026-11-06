@@ -1577,6 +1577,13 @@ func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, 
 					"code", exitcode.ErrVerifyMismatch, "table", src.String(), "key", fmt.Sprint(te.Key),
 					"hint", fmt.Sprintf("strand verify --mode full --table %s --repair fix", src))
 			}
+			var rn *writer.RowsNotWrittenError
+			if errors.As(err, &rn) {
+				// F11: batch đã rollback trước commit (cùng row delta), không Txn nào được đánh dấu đã apply.
+				p.metrics.RowsNotWrittenTotal.WithLabelValues(p.id).Inc()
+				p.log.Error("rows routed but not written", "worker", id, "routed", rn.Routed, "handed", rn.Handed,
+					"written", rn.Written, "seqs", fmt.Sprint(rn.Seqs), "positions", strings.Join(rn.Positions, ","))
+			}
 			p.fail(fmt.Errorf("worker %d: %w", id, err))
 		}
 		return false

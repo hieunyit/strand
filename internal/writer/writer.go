@@ -27,6 +27,41 @@ type DeltaRow struct {
 	// trong chính transaction commit, có điều kiện epoch. Hàm được gọi SAU khi đến lượt commit
 	// (mọi batch có seq nhỏ hơn đã commit), trả chuỗi applied mới của row toàn cục.
 	Global func() (string, error)
+
+	// Stats (tùy chọn): writer PG điền số row đã ghi của batch khi ApplyBatch thành công.
+	Stats *ApplyStats
+}
+
+// ApplyStats: số liệu một lần ApplyBatch (F11).
+type ApplyStats struct {
+	Rows int64 // số row nguồn nằm trong câu lệnh đã chạy thành công
+}
+
+// RowsNotWrittenError (F11): batch có row đã được định tuyến tới writer nhưng không nằm trong câu lệnh
+// nào đã chạy thành công. Trả TRƯỚC commit (transaction rollback cùng row delta): pipeline phải dừng
+// thay vì đánh dấu các Txn đã apply — mất row âm thầm tệ hơn dừng.
+type RowsNotWrittenError struct {
+	Routed, Handed, Written int64
+	Seqs                    []uint64
+	Positions               []string
+}
+
+func (e *RowsNotWrittenError) Error() string {
+	return fmt.Sprintf("rows routed but not written: routed %d, handed to writer %d, written %d (txn seqs %v, positions %v)",
+		e.Routed, e.Handed, e.Written, e.Seqs, e.Positions)
+}
+
+// checkRowsWritten so số row định tuyến (Σ TotalRows của batch), số row writer đã nhận và số row đã ghi.
+func checkRowsWritten(batch []*model.Txn, routed, handed, written int64) error {
+	if routed == handed && handed == written {
+		return nil
+	}
+	e := &RowsNotWrittenError{Routed: routed, Handed: handed, Written: written}
+	for _, t := range batch {
+		e.Seqs = append(e.Seqs, t.Seq())
+		e.Positions = append(e.Positions, t.SourcePos.String())
+	}
+	return e
 }
 
 // Writer là interface áp dụng các batch transaction vào target database.
