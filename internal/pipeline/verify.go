@@ -43,6 +43,15 @@ func (tk *touchedKeys) addKey(t model.TableID, key []model.Value, codec *snapsho
 		tk.add(t, key)
 		return
 	}
+	// Kiểm tk.on TRƯỚC khi mã hóa: codec PKWeight gọi WEIGHT_STRING trên source cho mỗi khóa mới, không
+	// được chạy trên luồng CDC thường trực khi delta tracking tắt (review N05). BoundOf chạy ngoài khóa
+	// (có thể là truy vấn mạng), rồi kiểm lại tk.on dưới khóa vì enable có thể đổi giữa chừng.
+	tk.mu.Lock()
+	on := tk.on
+	tk.mu.Unlock()
+	if !on {
+		return
+	}
 	b, err := codec.BoundOf(key)
 	tk.mu.Lock()
 	defer tk.mu.Unlock()

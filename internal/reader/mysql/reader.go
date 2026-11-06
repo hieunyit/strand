@@ -183,8 +183,15 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		defer close(out)
 		defer syncer.Close()
 
-		tableMap := make(map[uint64]*replication.TableMapEvent)
-		curFile := "" // file binlog hiện tại (từ ROTATE, kể cả rotate giả lúc kết nối)
+		st := &streamState{tableMap: make(map[uint64]*replication.TableMapEvent)}
+		emit := func(e reader.Event) bool {
+			select {
+			case out <- e:
+				return true
+			case <-ctxRead.Done():
+				return false
+			}
+		}
 
 		for {
 			select {
@@ -210,222 +217,208 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 				}
 			}
 
-			ts := time.Unix(int64(ev.Header.Timestamp), 0)
-			// Vị trí bắt đầu của event trong file binlog hiện tại (LogPos là vị trí KẾT THÚC).
-			var evStart uint64
-			if ev.Header.LogPos >= ev.Header.EventSize {
-				evStart = uint64(ev.Header.LogPos - ev.Header.EventSize)
-			}
-
-			switch ev.Header.EventType {
-			case replication.GTID_EVENT:
-				if gtidEv, ok := ev.Event.(*replication.GTIDEvent); ok {
-					u, err := uuid.FromBytes(gtidEv.SID)
-					if err != nil {
-						continue
-					}
-					gtid := fmt.Sprintf("%s:%d", u.String(), gtidEv.GNO)
-					r.setPos(gtid)
-					select {
-					case out <- reader.Event{
-						Type:       reader.EventGTID,
-						Pos:        r.Position(),
-						GTID:       gtid,
-						Timestamp:  ts,
-						BinlogFile: curFile,
-						BinlogPos:  evStart,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.GTID_TAGGED_LOG_EVENT:
-				if taggedEv, ok := ev.Event.(*replication.GtidTaggedLogEvent); ok {
-					u, err := uuid.FromBytes(taggedEv.SID)
-					if err != nil {
-						continue
-					}
-					gtid := fmt.Sprintf("%s:%s:%d", u.String(), taggedEv.Tag, taggedEv.GNO)
-					r.setPos(gtid)
-					select {
-					case out <- reader.Event{
-						Type:       reader.EventGTID,
-						Pos:        r.Position(),
-						GTID:       gtid,
-						Timestamp:  ts,
-						BinlogFile: curFile,
-						BinlogPos:  evStart,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.QUERY_EVENT:
-				if qEv, ok := ev.Event.(*replication.QueryEvent); ok {
-					select {
-					case out <- reader.Event{
-						Type:      reader.EventQuery,
-						Pos:       r.Position(),
-						Query:     string(qEv.Query),
-						Schema:    string(qEv.Schema),
-						Timestamp: ts,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.TABLE_MAP_EVENT:
-				if tmEv, ok := ev.Event.(*replication.TableMapEvent); ok {
-					tableMap[tmEv.TableID] = tmEv
-					var cols, pkCols []string
-					if len(tmEv.ColumnName) > 0 {
-						cols = tmEv.ColumnNameString()
-						for _, idx := range tmEv.PrimaryKey {
-							if int(idx) < len(cols) {
-								pkCols = append(pkCols, cols[idx])
-							}
-						}
-					}
-					select {
-					case out <- reader.Event{
-						Type:      reader.EventTableMap,
-						Pos:       r.Position(),
-						TableID:   tmEv.TableID,
-						Schema:    string(tmEv.Schema),
-						Table:     string(tmEv.Table),
-						Columns:   cols,
-						PKColumns: pkCols,
-						Timestamp: ts,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.WRITE_ROWS_EVENTv0, replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2:
-				if rowsEv, ok := ev.Event.(*replication.RowsEvent); ok {
-					schema, table := "", ""
-					if tm, found := tableMap[rowsEv.TableID]; found {
-						schema, table = string(tm.Schema), string(tm.Table)
-					}
-					if err := NormalizeRows(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
-						select {
-						case out <- reader.Event{Type: reader.EventError, Err: err}:
-						case <-ctxRead.Done():
-						}
-						return
-					}
-					select {
-					case out <- reader.Event{
-						Type:      reader.EventRows,
-						Pos:       r.Position(),
-						TableID:   rowsEv.TableID,
-						Schema:    schema,
-						Table:     table,
-						Op:        model.OpInsert,
-						Rows:      rowsEv.Rows,
-						Timestamp: ts,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.UPDATE_ROWS_EVENTv0, replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2:
-				if rowsEv, ok := ev.Event.(*replication.RowsEvent); ok {
-					schema, table := "", ""
-					if tm, found := tableMap[rowsEv.TableID]; found {
-						schema, table = string(tm.Schema), string(tm.Table)
-					}
-					if err := NormalizeRows(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
-						select {
-						case out <- reader.Event{Type: reader.EventError, Err: err}:
-						case <-ctxRead.Done():
-						}
-						return
-					}
-					select {
-					case out <- reader.Event{
-						Type:      reader.EventRows,
-						Pos:       r.Position(),
-						TableID:   rowsEv.TableID,
-						Schema:    schema,
-						Table:     table,
-						Op:        model.OpUpdate,
-						Rows:      rowsEv.Rows,
-						Timestamp: ts,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.DELETE_ROWS_EVENTv0, replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2:
-				if rowsEv, ok := ev.Event.(*replication.RowsEvent); ok {
-					schema, table := "", ""
-					if tm, found := tableMap[rowsEv.TableID]; found {
-						schema, table = string(tm.Schema), string(tm.Table)
-					}
-					if err := NormalizeRows(tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
-						select {
-						case out <- reader.Event{Type: reader.EventError, Err: err}:
-						case <-ctxRead.Done():
-						}
-						return
-					}
-					select {
-					case out <- reader.Event{
-						Type:      reader.EventRows,
-						Pos:       r.Position(),
-						TableID:   rowsEv.TableID,
-						Schema:    schema,
-						Table:     table,
-						Op:        model.OpDelete,
-						Rows:      rowsEv.Rows,
-						Timestamp: ts,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.XID_EVENT:
-				if xidEv, ok := ev.Event.(*replication.XIDEvent); ok {
-					select {
-					case out <- reader.Event{
-						Type:      reader.EventXID,
-						Pos:       r.Position(),
-						XID:       xidEv.XID,
-						Timestamp: ts,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
-
-			case replication.ROTATE_EVENT:
-				if rotEv, ok := ev.Event.(*replication.RotateEvent); ok {
-					curFile = string(rotEv.NextLogName)
-					select {
-					case out <- reader.Event{
-						Type:      reader.EventRotate,
-						Pos:       r.Position(),
-						Query:     string(rotEv.NextLogName),
-						XID:       rotEv.Position,
-						Timestamp: ts,
-					}:
-					case <-ctxRead.Done():
-						return
-					}
-				}
+			if !r.handleEvent(st, ev, emit) {
+				return
 			}
 		}
 	}()
 
 	return out, nil
+}
+
+// streamState là trạng thái của một luồng binlog dùng chung giữa các event (kể cả event con
+// trong TRANSACTION_PAYLOAD_EVENT).
+type streamState struct {
+	tableMap map[uint64]*replication.TableMapEvent
+	curFile  string // file binlog hiện tại (từ ROTATE, kể cả rotate giả lúc kết nối)
+}
+
+// handleEvent xử lý một event binlog và đẩy kết quả qua emit. Trả false khi luồng phải dừng
+// (emit bị huỷ do ctx, hoặc đã phát EventError). Tách khỏi vòng đọc để event con của
+// TRANSACTION_PAYLOAD_EVENT đi qua cùng logic và để test bằng event tổng hợp (review N03).
+func (r *MySQLReader) handleEvent(st *streamState, ev *replication.BinlogEvent, emit func(reader.Event) bool) bool {
+	return r.handleEventDepth(st, ev, emit, false)
+}
+
+func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEvent, emit func(reader.Event) bool, inPayload bool) bool {
+	ts := time.Unix(int64(ev.Header.Timestamp), 0)
+	// Vị trí bắt đầu của event trong file binlog hiện tại (LogPos là vị trí KẾT THÚC).
+	var evStart uint64
+	if ev.Header.LogPos >= ev.Header.EventSize {
+		evStart = uint64(ev.Header.LogPos - ev.Header.EventSize)
+	}
+
+	fail := func(err error) bool {
+		emit(reader.Event{Type: reader.EventError, Err: err})
+		return false
+	}
+
+	rows := func(op model.Op) bool {
+		rowsEv, ok := ev.Event.(*replication.RowsEvent)
+		if !ok {
+			return true
+		}
+		schema, table := "", ""
+		if tm, found := st.tableMap[rowsEv.TableID]; found {
+			schema, table = string(tm.Schema), string(tm.Table)
+		}
+		if err := NormalizeRows(st.tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+			return fail(err)
+		}
+		return emit(reader.Event{
+			Type:      reader.EventRows,
+			Pos:       r.Position(),
+			TableID:   rowsEv.TableID,
+			Schema:    schema,
+			Table:     table,
+			Op:        op,
+			Rows:      rowsEv.Rows,
+			Timestamp: ts,
+		})
+	}
+
+	switch ev.Header.EventType {
+	case replication.GTID_EVENT:
+		if gtidEv, ok := ev.Event.(*replication.GTIDEvent); ok {
+			u, err := uuid.FromBytes(gtidEv.SID)
+			if err != nil {
+				return true
+			}
+			gtid := fmt.Sprintf("%s:%d", u.String(), gtidEv.GNO)
+			r.setPos(gtid)
+			return emit(reader.Event{
+				Type:       reader.EventGTID,
+				Pos:        r.Position(),
+				GTID:       gtid,
+				Timestamp:  ts,
+				BinlogFile: st.curFile,
+				BinlogPos:  evStart,
+			})
+		}
+
+	case replication.GTID_TAGGED_LOG_EVENT:
+		if taggedEv, ok := ev.Event.(*replication.GtidTaggedLogEvent); ok {
+			u, err := uuid.FromBytes(taggedEv.SID)
+			if err != nil {
+				return true
+			}
+			gtid := fmt.Sprintf("%s:%s:%d", u.String(), taggedEv.Tag, taggedEv.GNO)
+			r.setPos(gtid)
+			return emit(reader.Event{
+				Type:       reader.EventGTID,
+				Pos:        r.Position(),
+				GTID:       gtid,
+				Timestamp:  ts,
+				BinlogFile: st.curFile,
+				BinlogPos:  evStart,
+			})
+		}
+
+	case replication.QUERY_EVENT:
+		if qEv, ok := ev.Event.(*replication.QueryEvent); ok {
+			return emit(reader.Event{
+				Type:      reader.EventQuery,
+				Pos:       r.Position(),
+				Query:     string(qEv.Query),
+				Schema:    string(qEv.Schema),
+				Timestamp: ts,
+			})
+		}
+
+	case replication.TABLE_MAP_EVENT:
+		if tmEv, ok := ev.Event.(*replication.TableMapEvent); ok {
+			st.tableMap[tmEv.TableID] = tmEv
+			var cols, pkCols []string
+			if len(tmEv.ColumnName) > 0 {
+				cols = tmEv.ColumnNameString()
+				for _, idx := range tmEv.PrimaryKey {
+					if int(idx) < len(cols) {
+						pkCols = append(pkCols, cols[idx])
+					}
+				}
+			}
+			return emit(reader.Event{
+				Type:      reader.EventTableMap,
+				Pos:       r.Position(),
+				TableID:   tmEv.TableID,
+				Schema:    string(tmEv.Schema),
+				Table:     string(tmEv.Table),
+				Columns:   cols,
+				PKColumns: pkCols,
+				Timestamp: ts,
+			})
+		}
+
+	case replication.WRITE_ROWS_EVENTv0, replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2:
+		return rows(model.OpInsert)
+
+	case replication.UPDATE_ROWS_EVENTv0, replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2:
+		return rows(model.OpUpdate)
+
+	case replication.DELETE_ROWS_EVENTv0, replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2:
+		return rows(model.OpDelete)
+
+	case replication.PARTIAL_UPDATE_ROWS_EVENT:
+		// binlog_row_value_options=PARTIAL_JSON: after-image chỉ chứa diff JSON, không áp được như
+		// UPDATE đầy đủ. Trước đây event này rơi khỏi switch, XID vẫn tới nên txn checkpoint rỗng
+		// = mất dữ liệu. Fail closed (review N03).
+		schema, table := "", ""
+		if rowsEv, ok := ev.Event.(*replication.RowsEvent); ok {
+			if tm, found := st.tableMap[rowsEv.TableID]; found {
+				schema, table = string(tm.Schema), string(tm.Table)
+			}
+		}
+		return fail(exitcode.New(
+			exitcode.ErrBinlogConfigInvalid,
+			exitcode.Rejected,
+			fmt.Sprintf("PARTIAL_UPDATE_ROWS_EVENT for table %s.%s: binlog_row_value_options=PARTIAL_JSON is not supported; set binlog_row_value_options to an empty value", schema, table),
+			nil,
+		))
+
+	case replication.TRANSACTION_PAYLOAD_EVENT:
+		// binlog_transaction_compression=ON: cả txn (BEGIN, TABLE_MAP, ROWS, XID) nằm nén trong một
+		// event; go-mysql đã giải nén thành Events. Đưa từng event con qua cùng switch, trước đây
+		// bị bỏ qua nên txn checkpoint rỗng (review N03). Pos của mọi event lấy từ GTID hiện tại
+		// (GTID_EVENT nằm ngoài payload), không dùng LogPos con nên LogPos=0 không ảnh hưởng checkpoint.
+		tpEv, ok := ev.Event.(*replication.TransactionPayloadEvent)
+		if !ok || inPayload {
+			return fail(exitcode.New(
+				exitcode.ErrBinlogConfigInvalid,
+				exitcode.Rejected,
+				"unexpected TRANSACTION_PAYLOAD_EVENT (undecoded or nested payload)",
+				nil,
+			))
+		}
+		for _, inner := range tpEv.Events {
+			if !r.handleEventDepth(st, inner, emit, true) {
+				return false
+			}
+		}
+		return true
+
+	case replication.XID_EVENT:
+		if xidEv, ok := ev.Event.(*replication.XIDEvent); ok {
+			return emit(reader.Event{
+				Type:      reader.EventXID,
+				Pos:       r.Position(),
+				XID:       xidEv.XID,
+				Timestamp: ts,
+			})
+		}
+
+	case replication.ROTATE_EVENT:
+		if rotEv, ok := ev.Event.(*replication.RotateEvent); ok {
+			st.curFile = string(rotEv.NextLogName)
+			return emit(reader.Event{
+				Type:      reader.EventRotate,
+				Pos:       r.Position(),
+				Query:     string(rotEv.NextLogName),
+				XID:       rotEv.Position,
+				Timestamp: ts,
+			})
+		}
+	}
+	return true
 }
 
 // Close dừng đồng bộ và đóng kết nối.

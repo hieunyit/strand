@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"time"
 
 	"strand/internal/model"
 )
@@ -34,6 +35,9 @@ func MySQLPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string
 	return c, nil
 }
 
+// weighQueryTimeout giới hạn một truy vấn WEIGHT_STRING (review N05).
+var weighQueryTimeout = 30 * time.Second
+
 // newMySQLWeigher: WEIGHT_STRING(CONVERT(v USING charset) COLLATE collation) tính trên db, có cache (giá
 // trị lặp lại nhiều: biên chunk, khóa nóng). Weight là khóa sắp xếp của collation: so byte cho đúng thứ
 // tự ORDER BY, và hai giá trị bằng nhau theo collation có cùng weight (kiểm ở TestGPK_MySQL…).
@@ -53,7 +57,13 @@ func newMySQLWeigher(db *sql.DB) func(PKColumn, model.Value) ([]byte, error) {
 			return w, nil
 		}
 		q := fmt.Sprintf("SELECT WEIGHT_STRING(CONVERT(? USING %s) COLLATE %s)", col.Charset, col.Collation)
-		if err := db.QueryRow(q, s).Scan(&w); err != nil {
+		// Có timeout: trước đây QueryRow không context, source treo thì luồng CDC (verify delta) treo
+		// theo vô hạn (review N05). Weigh không nhận ctx (gọi sâu trong Encode/BoundOf) nên dùng
+		// context.Background có giới hạn; không giữ ctx lúc dựng codec vì ctx đó có thể đã bị hủy.
+		qctx, cancel := context.WithTimeout(context.Background(), weighQueryTimeout)
+		err = db.QueryRowContext(qctx, q, s).Scan(&w)
+		cancel()
+		if err != nil {
 			return nil, err
 		}
 		mu.Lock()
