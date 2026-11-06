@@ -313,8 +313,9 @@ Với PK tổng quát (không phải một cột số nguyên), các phần sau 
 ### 5.3 Giới hạn khác
 
 - **UNIQUE ngoài PK:**
-  - MySQL: các Txn đụng cùng giá trị unique được xếp tuần tự. Khóa chuỗi collation `_ci` được gộp theo collation.
-  - PG: mọi thay đổi của bảng được apply tuần tự, vì pgoutput không gửi giá trị unique cũ.
+  - MySQL: các Txn đụng cùng giá trị unique được xếp tuần tự. Khóa chuỗi collation `_ci` được gộp theo collation. Unique index có cột prefix (ví dụ `UNIQUE(code(3))`) xếp tuần tự mọi Txn chạm index đó trong bảng.
+  - PG (relaxed): bảng có UNIQUE ngoài PK, unique index biểu thức/partial hoặc exclusion constraint, mà không đặt `REPLICA IDENTITY FULL`, đi **làn tuần tự**: mọi Txn chạm bảng đó được apply đúng thứ tự commit ở một luồng riêng, gom nhiều Txn liền nhau vào một transaction ở target. Txn khác vẫn chạy song song; Txn phụ thuộc một Txn làn cũng đi vào làn. Lý do: pgoutput không gửi giá trị unique cũ nên không tự phát hiện được xung đột. Các Txn đang chờ trong làn cũng tính vào trần bộ nhớ của scheduler.
+  - PG có nhiều Txn chạm bảng như vậy: làn tuần tự làm relaxed gần bằng tốc độ strict. Nếu phần lớn tải đi qua các bảng này, dùng `strict` cho đơn giản; hoặc đặt `ALTER TABLE ... REPLICA IDENTITY FULL` để bảng không phải đi làn (đổi lại WAL lớn hơn).
 - **FK:** MySQL: phiên ghi của Strand tắt kiểm FK (`foreign_key_checks=0`). PG: FK vẫn được kiểm; snapshot chép bảng cha trước bảng con. Cả hai engine: Txn chạm cùng row cha/con được xếp theo thứ tự commit, kể cả FK tham chiếu UNIQUE ngoài PK.
 - **TOAST (PG):** UPDATE mà cột TOAST không đổi chỉ gửi các cột còn lại.
   - Nếu row không có ở target, Strand dừng với `verify_mismatch` (exit 5). Sửa bằng `verify --mode full --table … --repair fix` rồi chạy lại.
