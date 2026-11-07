@@ -28,7 +28,7 @@ type DeltaRow struct {
 	// (mọi batch có seq nhỏ hơn đã commit), trả chuỗi applied mới của row toàn cục.
 	Global func() (string, error)
 
-	// Stats (tùy chọn): writer PG điền số row đã ghi của batch khi ApplyBatch thành công.
+	// Stats (tùy chọn): writer (PG, MySQL) điền số row đã ghi của batch khi ApplyBatch thành công.
 	Stats *ApplyStats
 }
 
@@ -301,7 +301,9 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 		return err
 	}
 	q := &stmtQueue{tx: tx, on: w.pipelining, budget: budget, maxPacket: maxPacket}
+	var routed int64
 	for _, txn := range batch {
+		routed += txn.TotalRows()
 		if err := w.applyTxnMySQL(ctx, q, txn, &cur); err != nil {
 			return fmt.Errorf("failed to apply row changes: %w", err)
 		}
@@ -313,6 +315,14 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 	}
 	if err := q.flush(ctx); err != nil {
 		return fmt.Errorf("failed to apply row changes: %w", err)
+	}
+	// F11 (như writer PG): mọi row đã định tuyến phải nằm trong một câu lệnh đã chạy thành công — kiểm
+	// TRƯỚC row delta và commit, để batch thiếu row rollback thay vì được đánh dấu đã apply.
+	if err := checkRowsWritten(batch, routed, q.handed, q.written); err != nil {
+		return err
+	}
+	if delta.Stats != nil {
+		delta.Stats.Rows = q.written
 	}
 
 	pid, wid, ep := resolveDelta(delta, w.pipelineID, w.workerID, w.epoch)
@@ -395,6 +405,17 @@ type stmtQueue struct {
 	// của target (0 = không biết, không kiểm). Xem MySQLWriter.queueLimits.
 	budget    int
 	maxPacket int64
+
+	// Bộ đếm phát hiện mất row (F11), như pgApplier: handed = số row nguồn applyTxnMySQL đã nhận;
+	// written = số row nguồn nằm trong câu lệnh đã chạy KHÔNG lỗi (khối upsert: mọi row của khối;
+	// DELETE: 1; DELETE khóa cũ của đổi PK: 0 — row đó được tính ở upsert khóa mới). Không dùng
+	// RowsAffected: ON DUPLICATE KEY UPDATE báo 0/1/2 theo row, DELETE row không có ở target báo 0,
+	// và lô multi-statement chỉ trả RowsAffected của câu cuối. pending = số row của các câu đang chờ
+	// trong lô (pipelining), chỉ cộng vào written khi cả lô gửi xong không lỗi (driver trả lỗi của
+	// bất kỳ câu nào trong lô; server dừng ở câu lỗi).
+	handed  int64
+	written int64
+	pending int64
 }
 
 const (
@@ -464,9 +485,20 @@ func (q *stmtQueue) do(ctx context.Context, query string, args ...any) error {
 	return err
 }
 
+// exec gửi (hoặc xếp lô) một câu lệnh không phủ row nguồn nào (rows = 0).
 func (q *stmtQueue) exec(ctx context.Context, query string, args ...any) error {
+	return q.execRows(ctx, 0, query, args...)
+}
+
+// execRows gửi (hoặc xếp lô) một câu lệnh phủ rows row nguồn; rows được cộng vào written khi câu (hoặc
+// lô chứa nó) chạy xong không lỗi.
+func (q *stmtQueue) execRows(ctx context.Context, rows int64, query string, args ...any) error {
 	if !q.on {
-		return q.do(ctx, query, args...)
+		if err := q.do(ctx, query, args...); err != nil {
+			return err
+		}
+		q.written += rows
+		return nil
 	}
 	size := len(query) + argsBytes(args)
 	// Câu mới làm lô vượt ngân sách: gửi phần đang chờ trước, để câu lớn đi một mình (review N13).
@@ -483,6 +515,7 @@ func (q *stmtQueue) exec(ctx context.Context, query string, args ...any) error {
 	q.args = append(q.args, args...)
 	q.bytes += size
 	q.n++
+	q.pending += rows
 	if q.bytes >= q.limit() || len(q.args) >= stmtQueueMaxArgs {
 		return q.flush(ctx)
 	}
@@ -494,13 +527,16 @@ func (q *stmtQueue) flush(ctx context.Context) error {
 		return nil
 	}
 	err := q.do(ctx, q.sb.String(), q.args...)
+	pending := q.pending
 	q.sb.Reset()
 	q.args = q.args[:0]
 	q.n = 0
 	q.bytes = 0
+	q.pending = 0
 	if err != nil {
 		return fmt.Errorf("apply statements: %w", err)
 	}
+	q.written += pending
 	return nil
 }
 
@@ -549,7 +585,7 @@ func (b *mysqlUpsertBatch) flush(ctx context.Context, q *stmtQueue) error {
 	}
 	stmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s",
 		quoteMySQLTable(b.table), strings.Join(quoted, ", "), strings.Join(phs, ", "), strings.Join(updates, ", "))
-	if err := q.exec(ctx, stmt, args...); err != nil {
+	if err := q.execRows(ctx, int64(len(b.vals)), stmt, args...); err != nil {
 		return fmt.Errorf("multi-row upsert on %s: %w", b.table, err)
 	}
 	b.vals = nil
@@ -557,13 +593,14 @@ func (b *mysqlUpsertBatch) flush(ctx context.Context, q *stmtQueue) error {
 	return nil
 }
 
-func (w *MySQLWriter) deleteByKey(ctx context.Context, q *stmtQueue, t model.TableID, pkCols []string, key []model.Value) error {
+// deleteByKey: rows = số row nguồn câu DELETE phủ (1 cho DELETE; 0 cho DELETE khóa cũ của đổi PK).
+func (w *MySQLWriter) deleteByKey(ctx context.Context, q *stmtQueue, t model.TableID, pkCols []string, key []model.Value, rows int64) error {
 	conds := make([]string, len(pkCols))
 	for i, c := range pkCols {
 		conds[i] = quoteMySQL(c) + " = ?"
 	}
 	stmt := fmt.Sprintf("DELETE FROM %s WHERE %s", quoteMySQLTable(t), strings.Join(conds, " AND "))
-	return q.exec(ctx, stmt, toArgs(key)...)
+	return q.execRows(ctx, rows, stmt, toArgs(key)...)
 }
 
 // applyTxnMySQL áp dụng mọi row của Txn. Với row image FULL (bắt buộc ở source MySQL,
@@ -582,6 +619,7 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 	}
 
 	err := txn.ForEachRow(func(row *model.RowChange) error {
+		q.handed++
 		switch row.Op {
 		case model.OpInsert, model.OpUpdate:
 			// Upsert MySQL dựa trên mọi unique key của bảng; tên cột PK chỉ cần để
@@ -601,7 +639,7 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 				if err != nil {
 					return err
 				}
-				if err := w.deleteByKey(ctx, q, row.Table, delCols, row.OldKey); err != nil {
+				if err := w.deleteByKey(ctx, q, row.Table, delCols, row.OldKey, 0); err != nil {
 					return err
 				}
 			}
@@ -637,7 +675,7 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 			if err != nil {
 				return err
 			}
-			return w.deleteByKey(ctx, q, row.Table, pkCols, row.Key)
+			return w.deleteByKey(ctx, q, row.Table, pkCols, row.Key, 1)
 		default:
 			return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)
 		}
