@@ -53,6 +53,10 @@ func newVerifyCmd() *cobra.Command {
 					if strings.Contains(err.Error(), exitcode.ErrVerifyIncomplete) {
 						return exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError, err.Error(), err)
 					}
+					// Pipeline đang pause: không apply nên không verify được — exit 4 (review item 9).
+					if strings.Contains(err.Error(), exitcode.ErrPipelinePaused) {
+						return exitcode.New(exitcode.ErrPipelinePaused, exitcode.Fenced, err.Error(), err)
+					}
 					return err
 				}
 				fmt.Println(msg)
@@ -123,6 +127,13 @@ func newVerifyCmd() *cobra.Command {
 			running := false
 			if !fixing {
 				if running, err = pipelineRunning(cmd.Context(), dst, dstEngine, cfg.Name); err != nil {
+					return err
+				}
+			}
+			// Pipeline đang giữ khóa nhưng bị pause: không apply, chờ chỉ hết hạn (2 phút) rồi lỗi
+			// "target did not apply" — báo ngay.
+			if running {
+				if err := failIfPaused(cmd.Context(), adminTop(getAdminSocketPath()), cfg.Name); err != nil {
 					return err
 				}
 			}
@@ -389,6 +400,39 @@ func pipelineRunning(ctx context.Context, dst *sql.DB, engine model.Engine, pipe
 		return false, fmt.Errorf("verify: check whether pipeline %s is running: %w", pipelineID, err)
 	}
 	return false, release()
+}
+
+// adminTop hỏi trạng thái pipeline qua admin socket (lệnh top), với hạn ngắn: socket không phản hồi
+// không được làm verify treo.
+func adminTop(socket string) func(context.Context) (*admin.TopInfo, error) {
+	return func(ctx context.Context) (*admin.TopInfo, error) {
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		return admin.NewClient(socket).Top(ctx)
+	}
+}
+
+// failIfPaused: pipeline đang giữ khóa (running) nhưng admin socket báo state "paused" thì nó không
+// apply — chờ target apply tới vị trí log của source chỉ hết hạn rồi lỗi "target did not apply". Trả lỗi
+// pipeline_paused ngay. Không hỏi được socket (không cấu hình, pipeline ở máy khác, ...) hoặc socket là
+// của pipeline khác thì không kết luận được: trả nil, verify chờ như trước.
+func failIfPaused(ctx context.Context, top func(context.Context) (*admin.TopInfo, error), pipelineID string) error {
+	if top == nil {
+		return nil
+	}
+	info, err := top(ctx)
+	if err != nil || info == nil {
+		return nil
+	}
+	if info.PipelineID != "" && info.PipelineID != pipelineID {
+		return nil
+	}
+	if info.State != "paused" {
+		return nil
+	}
+	return exitcode.New(exitcode.ErrPipelinePaused, exitcode.Fenced, fmt.Sprintf(
+		"pipeline %s is paused: resume it (`strand resume`) or stop it before verify "+
+			"(a paused pipeline holds the pipeline lock but applies nothing, so mismatched rows cannot be rechecked)", pipelineID), nil)
 }
 
 // applyWaiter: chờ target apply tới vị trí log của source khi kiểm lại row lệch — chỉ khi pipeline đang

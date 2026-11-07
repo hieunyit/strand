@@ -485,6 +485,12 @@ func (p *Pipeline) takePostSeedKeys() (map[model.TableID][]int64, map[model.Tabl
 func (p *Pipeline) VerifyDelta(ctx context.Context) (string, error) {
 	// MySQL→MySQL so bằng LiveVerifier; PG→PG, MySQL→PG so chuỗi chính tắc (canonicalVerifier) — cả hai
 	// kiểm lại row lệch, row đổi liên tục báo unverifiable_hot.
+	// Đang pause: router dừng nên không apply gì — kiểm lại row lệch chờ apply chỉ hết hạn rồi lỗi
+	// "target did not apply". Báo ngay, trước khi lấy tập khóa đã đổi (giữ nguyên cho lần verify sau).
+	if p.paused.Load() {
+		return "", exitcode.New(exitcode.ErrPipelinePaused, exitcode.Fenced, fmt.Sprintf(
+			"pipeline %s is paused: resume it (`strand resume`) or stop it before verify", p.id), nil)
+	}
 	if !p.touched.active(touchDelta) {
 		return "", fmt.Errorf("verify --mode delta needs verify.delta: on in the pipeline config (no changed keys are being tracked)")
 	}

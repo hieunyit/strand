@@ -35,6 +35,9 @@ const (
 	// Exit 4: Tranh chấp khóa pipeline / bị fence
 	ErrPipelineLocked = "pipeline_locked"
 	ErrFenced         = "fenced"
+	// ErrPipelinePaused: pipeline đang giữ khóa nhưng bị `strand pause` — không apply nên lệnh cần chờ
+	// target apply (verify) không thể hoàn tất.
+	ErrPipelinePaused = "pipeline_paused"
 
 	// Exit 5: Lỗi dữ liệu hoặc log
 	ErrLogGap            = "log_gap"
