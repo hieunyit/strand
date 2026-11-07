@@ -81,3 +81,5 @@ Review phát hiện runner cũ có thể khuyến nghị GRACE khi toàn bộ sc
 - Ngưỡng 0,3 kiểm mọi cửa sổ xác lập của GRACE qua maximum p2p, không chỉ median.
 
 Smoke/ngắn vẫn hữu ích kiểm runner nhưng không được dùng làm kết quả Gate 2. Review này không xác nhận runner và môi trường đã đáp ứng toàn bộ yêu cầu sysbench/pgbench/staging trong spec; cần kiểm giao thức trước lượt benchmark chính thức.
+
+Sampler chỉ nhận mẫu đủ R, pressure, zone, breaker và lag hữu hạn từ HTTP 200; pressure bằng 0 vẫn là giá trị hợp lệ. Thiếu metric hoặc mẫu không hữu hạn làm phép đo incomplete.

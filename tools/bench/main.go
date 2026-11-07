@@ -715,15 +715,19 @@ func (s *sampler) run(ctx context.Context, _ *load, _ time.Time) {
 			if resp, err := cl.Get("http://" + s.addr + "/metrics"); err == nil {
 				m := parseMetrics(resp.Body, s.pipeline)
 				resp.Body.Close()
-				sm.R, sm.OK = m[`strand_governor_rate_tokens|source_iops`]
-				sm.OK = sm.OK && resp.StatusCode == http.StatusOK && finite(sm.R) && sm.R >= 0
-				sm.Zone = m["strand_governor_zone|"]
-				sm.P = m[`strand_governor_pressure|total`]
-				if sm.P == 0 {
-					sm.P = m[`strand_governor_pressure|replica_lag`]
+				var rateOK, zoneOK, pressureOK, breakerOK, lagOK bool
+				sm.R, rateOK = m[`strand_governor_rate_tokens|source_iops`]
+				sm.Zone, zoneOK = m["strand_governor_zone|"]
+				sm.P, pressureOK = m[`strand_governor_pressure|total`]
+				// P=0 là mẫu hợp lệ; chỉ fallback khi metric thực sự vắng, không thay số 0 bằng signal khác.
+				if !pressureOK {
+					sm.P, pressureOK = m[`strand_governor_pressure|replica_lag`]
 				}
-				sm.Breaker = m["strand_breaker_open|"]
-				sm.Lag = m["strand_lag_seconds|"]
+				sm.Breaker, breakerOK = m["strand_breaker_open|"]
+				sm.Lag, lagOK = m["strand_lag_seconds|"]
+				sm.OK = resp.StatusCode == http.StatusOK && rateOK && zoneOK && pressureOK && breakerOK && lagOK &&
+					finite(sm.R) && sm.R >= 0 && finite(sm.Zone) && sm.Zone >= 0 && sm.Zone <= 2 &&
+					finite(sm.P) && sm.P >= 0 && finite(sm.Breaker) && (sm.Breaker == 0 || sm.Breaker == 1) && finite(sm.Lag) && sm.Lag >= 0
 			}
 			s.mu.Lock()
 			s.s = append(s.s, sm)
