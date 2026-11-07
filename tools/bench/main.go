@@ -155,6 +155,8 @@ type runResult struct {
 	P2PWindows       int       `json:"p2p_windows"`
 	P2PZeroWindows   int       `json:"p2p_windows_with_r_zero"`
 	Samples          int       `json:"samples"`
+	ValidSamples     int       `json:"valid_samples_during_snapshot"`
+	InvalidSamples   int       `json:"invalid_samples_during_snapshot"`
 	StrandExit       int       `json:"strand_exit_code"`
 	CompareOK        bool      `json:"compare_ok"`
 	CompareDetail    string    `json:"compare_detail"`
@@ -173,6 +175,7 @@ type govSummary struct {
 	MedianAppP99Ms        jf  `json:"median_app_p99_ms"`
 	HardLimitExceedTotal  int `json:"hard_limit_exceed_total"`
 	MaxP2PMedian          jf  `json:"max_p2p_log_r_median"`
+	MaxP2P                jf  `json:"max_p2p_log_r"`
 }
 
 // jf là float64 ghi JSON được: NaN/±Inf (chưa đo được) thành null thay vì làm hỏng cả file.
@@ -331,7 +334,15 @@ func runOnce(ctx context.Context, o options, name, gov string) (res runResult) {
 	samples := smp.snapshot()
 	res.Samples = len(samples)
 	for _, s := range samples {
-		if !s.T.After(snapEnd) && s.R > float64(o.HardIOPS)+1e-9 {
+		if s.T.Before(strandStart) || s.T.After(snapEnd) {
+			continue
+		}
+		if s.OK && finite(s.R) && s.R >= 0 {
+			res.ValidSamples++
+		} else {
+			res.InvalidSamples++
+		}
+		if s.OK && s.R > float64(o.HardIOPS)+1e-9 {
 			res.HardLimitExceed++
 		}
 	}
@@ -342,6 +353,9 @@ func runOnce(ctx context.Context, o options, name, gov string) (res runResult) {
 
 	// 7. So khớp.
 	res.CompareOK, res.CompareDetail = compare(ctx, src, o.TargetDSN)
+	if why := evidenceError(res); why != "" {
+		res.Error = strings.TrimSpace(res.Error + "; " + why)
+	}
 	res.OK = res.Error == "" && res.StrandExit == 0 && res.CompareOK && res.SnapshotSeconds > 0
 	return res
 }
@@ -702,6 +716,7 @@ func (s *sampler) run(ctx context.Context, _ *load, _ time.Time) {
 				m := parseMetrics(resp.Body, s.pipeline)
 				resp.Body.Close()
 				sm.R, sm.OK = m[`strand_governor_rate_tokens|source_iops`]
+				sm.OK = sm.OK && resp.StatusCode == http.StatusOK && finite(sm.R) && sm.R >= 0
 				sm.Zone = m["strand_governor_zone|"]
 				sm.P = m[`strand_governor_pressure|total`]
 				if sm.P == 0 {
@@ -884,6 +899,9 @@ func decide(runs []runResult) (map[string]govSummary, string) {
 		if !math.IsNaN(float64(r.P2PLogRMedian)) && r.P2PLogRMedian > g.MaxP2PMedian {
 			g.MaxP2PMedian = r.P2PLogRMedian
 		}
+		if finite(float64(r.P2PLogRMax)) && r.P2PLogRMax > g.MaxP2P {
+			g.MaxP2P = r.P2PLogRMax
+		}
 		sum[r.Governor] = g
 	}
 	for k, g := range sum {
@@ -892,6 +910,24 @@ func decide(runs []runResult) (map[string]govSummary, string) {
 		sum[k] = g
 	}
 	var why []string
+	seen := map[string]map[int]bool{}
+	for _, r := range runs {
+		if seen[r.Governor] == nil {
+			seen[r.Governor] = map[int]bool{}
+		}
+		if seen[r.Governor][r.Repeat] {
+			why = append(why, "lặp trùng repeat của "+r.Governor)
+		}
+		seen[r.Governor][r.Repeat] = true
+		if msg := evidenceError(r); msg != "" {
+			why = append(why, r.Governor+": "+msg)
+		}
+	}
+	for _, gov := range []string{"static", "onoff", "grace-v2"} {
+		if sum[gov].Runs != 3 || len(seen[gov]) != 3 {
+			why = append(why, gov+": cần đúng 3 lần đo độc lập")
+		}
+	}
 	for k, g := range sum {
 		if g.HardLimitExceedTotal > 0 {
 			why = append(why, fmt.Sprintf("%s vượt hard limit %d mẫu", k, g.HardLimitExceedTotal))
@@ -905,9 +941,9 @@ func decide(runs []runResult) (map[string]govSummary, string) {
 		return sum, "không đủ dữ liệu grace-v2/onoff để quyết định"
 	}
 	ok := len(why) == 0
-	if gr.MaxP2PMedian > 0.3 {
+	if gr.MaxP2P > 0.3 {
 		ok = false
-		why = append(why, fmt.Sprintf("grace-v2 p2p log R %.3f > 0,3", gr.MaxP2PMedian))
+		why = append(why, fmt.Sprintf("grace-v2 p2p log R %.3f > 0,3", gr.MaxP2P))
 	}
 	gain := 1 - gr.MedianSnapshotSeconds/on.MedianSnapshotSeconds
 	if !(gain >= 0.30) {
@@ -922,4 +958,27 @@ func decide(runs []runResult) (map[string]govSummary, string) {
 		return sum, fmt.Sprintf("grace-v2 đạt: làm mặc định (snapshot nhanh hơn onoff %.1f%%, p99 %.1f ≤ %.1f ms)", gain*100, gr.MedianAppP99Ms, on.MedianAppP99Ms)
 	}
 	return sum, "grace-v2 KHÔNG đạt → onoff mặc định, GRACE experimental: " + strings.Join(why, "; ")
+}
+
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// Gate 2: thiếu phép đo là incomplete, không phải bằng chứng hard limit/p2p bằng 0.
+// Giữ nguyên giao thức trước đo; không chạy benchmark thật trong regression test.
+func evidenceError(r runResult) string {
+	if r.AppErrors != 0 {
+		return "workload có lỗi"
+	}
+	if r.AppTxns <= 0 || !finite(float64(r.AppP99Ms)) || r.AppP99Ms <= 0 {
+		return "thiếu p99 phía client"
+	}
+	if !finite(float64(r.SnapshotSeconds)) || r.SnapshotSeconds <= 0 {
+		return "thiếu thời gian snapshot"
+	}
+	if r.InvalidSamples > 0 || r.ValidSamples <= 0 || float64(r.ValidSamples) < float64(r.SnapshotSeconds)-2 {
+		return "telemetry thiếu hoặc scrape lỗi trong snapshot"
+	}
+	if r.P2PWindows <= 0 || !finite(float64(r.P2PLogRMedian)) || !finite(float64(r.P2PLogRMax)) {
+		return "không có cửa sổ ổn định đo p2p hợp lệ"
+	}
+	return ""
 }

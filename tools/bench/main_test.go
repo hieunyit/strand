@@ -78,11 +78,14 @@ func TestP2PLogRPerHalfPeriodSkipsTransientSpikesAndZero(t *testing.T) {
 
 func TestDecideRules(t *testing.T) {
 	mk := func(g string, snap, p99, p2p float64, hard int) runResult {
-		return runResult{Governor: g, SnapshotSeconds: jf(snap), AppP99Ms: jf(p99), P2PLogRMedian: jf(p2p), HardLimitExceed: hard, OK: true}
+		return runResult{Governor: g, SnapshotSeconds: jf(snap), AppP99Ms: jf(p99), P2PLogRMedian: jf(p2p), P2PLogRMax: jf(p2p), P2PWindows: 1, ValidSamples: 1200, AppTxns: 1000, HardLimitExceed: hard, OK: true}
 	}
 	var runs []runResult
 	for i := 0; i < 3; i++ {
-		runs = append(runs, mk("onoff", 1000, 20, math.NaN(), 0), mk("static", 1200, 25, math.NaN(), 0), mk("grace-v2", 650, 19, 0.2, 0))
+		runs = append(runs, mk("onoff", 1000, 20, 0.1, 0), mk("static", 1200, 25, 0.1, 0), mk("grace-v2", 650, 19, 0.2, 0))
+	}
+	for i := range runs {
+		runs[i].Repeat = i/3 + 1
 	}
 	if _, d := decide(runs); !strings.HasPrefix(d, "grace-v2 đạt") {
 		t.Fatalf("expected pass, got %s", d)
@@ -98,11 +101,11 @@ func TestDecideRules(t *testing.T) {
 		t.Fatalf("hard limit exceed must fail, got %s", d)
 	}
 	runs[0].HardLimitExceed = 0
-	runs[2].P2PLogRMedian = 0.35
+	runs[2].P2PLogRMax = 0.35
 	if _, d := decide(runs); !strings.Contains(d, "p2p") {
 		t.Fatalf("p2p > 0.3 must fail, got %s", d)
 	}
-	runs[2].P2PLogRMedian = 0.2
+	runs[2].P2PLogRMax = 0.2
 	for _, i := range []int{2, 5, 8} {
 		runs[i].AppP99Ms = 21
 	}

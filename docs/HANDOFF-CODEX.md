@@ -22,6 +22,9 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 
 ## 1. Repo và nhánh
 
+**2026-11-07 — sửa review benchmark:** nhánh `agent/review-bench-fix-20261107`, worktree `/home/hellc/strand-bench-review`, nền `c2fab665`. Sửa fail-open khi thiếu telemetry/cửa sổ p2p, thiếu repeat/governor hoặc workload lỗi; giữ ngưỡng Gate 2, kiểm maximum p2p. Regression đỏ trên runner cũ, test mới qua; chưa chạy benchmark chính thức. Xem `reports/REVIEW-BENCH-FIX-20261107.md`.
+
+
 - GitHub: `hieunyit/strand` (private). Bản clone của người dùng: `/home/hellc/strand` (remote `origin` = GitHub).
 - **GitHub `main` = `9281ffa`** — chứa Gate 1 (P1) + P2 đợt 1 (P2-01 reader PG, P2-02 writer PG, P2-04 typemap, P2-08 Merkle) + seed mysqldump/mydumper.
 - **Nhánh tích hợp `review/gate1-fixes` = `f4664a7`** (chưa đẩy lên GitHub) — chứa toàn bộ việc đã xong và đã review:
@@ -340,6 +343,8 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 16 | P2-03: "chờ hai range flush rồi SQL điều kiện" (theo spec) làm mất row / row sống lại | Spec không xét range khóa cũ chưa đọc và event sau chạm khóa mới | Re-read khóa mới qua giao thức chunk (quyết định 18) | `toast_pk_*_test.go`, `pg_toast_pk_test.go` |
 | 17 | P2-03 e2e strict "not synced after 10m" (2 lần, trước khi sửa test) | Tải không giới hạn + strict một worker → lag mãi; chưa loại trừ hoàn toàn khả năng khoá chết (không có goroutine dump) | Giới hạn tải 60 s; watcher SIGQUIT chưa từng kích hoạt sau đó | Theo dõi: nếu gặp lại, lấy `kill -QUIT` goroutine dump |
 | 18 | Logical snapshot PG với sync rep trỏ vào Strand khoá chết | Strand xác nhận start-LSN, sync rep chờ end-LSN; hold 2PC | Chưa sửa — giới hạn đã biết | test dùng `pg_receivewal` thay |
+
+| 62 | Runner benchmark đề xuất GRACE khi telemetry thiếu/NaN hoặc chưa đủ lần đo | Decision bỏ NaN, thiếu kiểm completeness | Fail incomplete, yêu cầu coverage/repeat/client p99, maximum p2p | `TestReviewBenchRejectsIncompleteEvidence`, `TestReviewBenchAcceptsCompleteEvidence` |
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 

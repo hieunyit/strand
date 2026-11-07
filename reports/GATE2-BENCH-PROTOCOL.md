@@ -69,3 +69,15 @@ Sau mỗi lần chạy: so khớp `bench.big` và `bench.sbtest` giữa source v
 ## Thay đổi giao thức
 
 - (trước lần đo đầu tiên) Dừng tải và chờ target bắt kịp trước khi dừng Strand, để so khớp cuối có nghĩa.
+
+
+## Làm rõ điều kiện dữ liệu trước lượt đo chính thức — 2026-11-07
+
+Review phát hiện runner cũ có thể khuyến nghị GRACE khi toàn bộ scrape lỗi hoặc không có cửa sổ xác lập. Đây là sửa việc thi hành giao thức, không thay ngưỡng sau khi thấy kết quả. Chưa chạy benchmark chính thức trong lần sửa này.
+
+- Decision yêu cầu đủ static/onoff/grace-v2, đúng ba repeat độc lập mỗi loại.
+- Snapshot phải có telemetry hợp lệ gần đủ số giây đo (cho phép lệch hai mẫu ở biên); scrape lỗi trong khoảng snapshot làm kết quả incomplete. JSON ghi valid_samples_during_snapshot và invalid_samples_during_snapshot.
+- Thiếu client p99, workload có lỗi, không có cửa sổ p2p hợp lệ hoặc p2p NaN/Inf đều không đủ bằng chứng quyết định.
+- Ngưỡng 0,3 kiểm mọi cửa sổ xác lập của GRACE qua maximum p2p, không chỉ median.
+
+Smoke/ngắn vẫn hữu ích kiểm runner nhưng không được dùng làm kết quả Gate 2. Review này không xác nhận runner và môi trường đã đáp ứng toàn bộ yêu cầu sysbench/pgbench/staging trong spec; cần kiểm giao thức trước lượt benchmark chính thức.
