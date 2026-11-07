@@ -792,15 +792,16 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			defer stopSeq()
 		}
 	}
-	if p.state.VerifyPending() {
-		p.verifying.Store(true)
-		bgWG.Add(1)
-		go func() { defer bgWG.Done(); p.postSeedVerify(ctx) }()
-	}
 	if len(pending) > 0 {
 		p.bootstrap.Store(true)
 		bgWG.Add(1)
 		go func() { defer bgWG.Done(); p.runSnapshots(ctx, pending) }()
+	}
+	// Sau bootstrap.Store: postSeedVerify chờ snapshot logic xong (seed PG một phần) trước khi verify.
+	if p.state.VerifyPending() {
+		p.verifying.Store(true)
+		bgWG.Add(1)
+		go func() { defer bgWG.Done(); p.postSeedVerify(ctx) }()
 	}
 	p.running.Store(true)
 	p.log.Info("pipeline running", "workers", nWorkers, "strict", p.strict, "snapshot_pending", len(pending),
