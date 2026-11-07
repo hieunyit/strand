@@ -579,6 +579,7 @@ func comparePG(t *testing.T, src, dst *pgNode, tables ...string) {
 func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) string {
 	var out []string
 	xids := map[string]bool{}
+tables:
 	for _, tb := range tables {
 		s, d := dumpPG(t, src.DB, tb), dumpPG(t, dst.DB, tb)
 		for id, sv := range s {
@@ -596,7 +597,7 @@ func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) stri
 				xids[xmin] = true
 			}
 			if len(out) > 30 {
-				return strings.Join(out, "\n")
+				break tables // vẫn in phần theo xid và checkpoint bên dưới
 			}
 		}
 	}
@@ -618,6 +619,24 @@ func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) stri
 			}
 			rows.Close()
 		}
+	}
+	// Checkpoint ở target (F11): Txn bị mất được ghi là đã apply trong delta của worker nào, hay chỉ được
+	// vouch qua lwd toàn cục.
+	for _, q := range []string{
+		"SELECT 'global ' || pipeline_id || ' ' || applied::text FROM _strand_checkpoint",
+		"SELECT 'delta w' || worker_id || ' batch ' || batch_no || ' ' || left(applied::text, 400) FROM _strand_worker_delta ORDER BY worker_id",
+	} {
+		rows, err := dst.DB.Query(q)
+		if err != nil {
+			out = append(out, "  checkpoint query: "+err.Error())
+			continue
+		}
+		for rows.Next() {
+			var l string
+			_ = rows.Scan(&l)
+			out = append(out, "  "+l)
+		}
+		rows.Close()
 	}
 	return strings.Join(out, "\n")
 }

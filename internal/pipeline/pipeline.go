@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strand/internal/txntrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -834,6 +835,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.comp.Compact(fctx); err != nil {
 		return fmt.Errorf("final checkpoint flush: %w", err)
 	}
+	txntrace.Dump()
 	p.log.Info("pipeline stopped cleanly", "applied_txns", p.appliedTxns.Load(), "reapplied_in_seq_order", p.reorderRetry.Load())
 	return nil
 }
@@ -1051,10 +1053,12 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		p.xids.Add(t.XID)
 	}
 	if skipEmptyPGTxn(p.strict, t) {
+		txntrace.Put(txntrace.Skipped, pos.LSN, t.XID, 0, 1, 0)
 		p.noteRouted(pos, 0) // Txn PG rỗng: không có gì để apply
 		return nil
 	}
 	if p.applied0.Contains(pos) {
+		txntrace.Put(txntrace.Skipped, pos.LSN, t.XID, 0, 2, 0)
 		p.markSeen(pos) // CP-2: đã apply trước đó
 		p.noteRouted(pos, 0)
 		return nil
@@ -1223,6 +1227,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		return err
 	}
 	p.admitted.Store(out.Seq())
+	txntrace.Put(txntrace.Routed, pos.LSN, t.XID, out.Seq(), t.TotalRows(), out.TotalRows())
 	if t.SourceTS > 0 {
 		p.lastRoutedTS.Store(t.SourceTS)
 	}
@@ -1589,7 +1594,9 @@ func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, 
 		}
 		return false
 	}
+	bid := txntrace.NextBatch()
 	for _, t := range batch {
+		txntrace.Put(txntrace.Done, t.SourcePos.LSN, 0, t.Seq(), int64(id), bid)
 		p.sched.Done(t.Seq(), nil)
 		if t.IsSpilled() {
 			_ = os.Remove(t.SpillPath)

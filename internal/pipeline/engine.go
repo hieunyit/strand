@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strand/internal/txntrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -545,7 +546,10 @@ func (t *lsnTracker) point(lwd uint64) uint64 {
 // đã commit ở target theo scheduler.
 func (p *Pipeline) vouchGlobal(g checkpoint.AppliedSet) {
 	if s, ok := g.(*checkpoint.PGAppliedSet); ok {
-		s.Vouch(p.lsns.point(p.sched.Lwd()), nil)
+		lwd := p.sched.Lwd()
+		pt := p.lsns.point(lwd)
+		txntrace.Put(6, pt, 0, lwd, 0, 0)
+		s.Vouch(pt, nil)
 	}
 }
 
