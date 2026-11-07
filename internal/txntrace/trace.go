@@ -3,6 +3,7 @@
 package txntrace
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -18,6 +19,7 @@ const (
 )
 
 type rec struct {
+	ready    atomic.Bool
 	ts       int64
 	kind     uint8
 	lsn, xid uint64
@@ -48,27 +50,48 @@ func Put(kind uint8, lsn, xid, seq uint64, a, b int64) {
 	if int(i) >= len(recs) {
 		return
 	}
-	recs[i] = rec{ts: time.Now().UnixNano(), kind: kind, lsn: lsn, xid: xid, seq: seq, a: a, b: b}
+	r := &recs[i]
+	r.ts, r.kind, r.lsn, r.xid, r.seq, r.a, r.b = time.Now().UnixNano(), kind, lsn, xid, seq, a, b
+	// Publish sau khi ghi đủ trường; Dump không đọc slot chưa sẵn sàng (không đổi CP/RS/CO).
+	r.ready.Store(true)
 }
 
 // NextBatch trả id batch mới.
 func NextBatch() int64 { return batch.Add(1) }
 
 // Dump ghi vết ra file STRAND_TXN_TRACE.
-func Dump() {
+func Dump() (err error) {
 	if !On {
-		return
+		return nil
 	}
 	f, err := os.Create(path)
 	if err != nil {
-		return
+		return err
 	}
-	defer f.Close()
-	m := int(n.Load())
-	if m > len(recs) {
-		m = len(recs)
+	defer func() {
+		if e := f.Close(); err == nil {
+			err = e
+		}
+	}()
+	w := bufio.NewWriterSize(f, 64*1024)
+	allocated := n.Load()
+	m := min(allocated, int64(len(recs)))
+	var stored, unpublished int64
+	for i := int64(0); i < m; i++ {
+		r := &recs[i]
+		if !r.ready.Load() {
+			unpublished++
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "%d k=%d lsn=%X xid=%d seq=%d a=%d b=%d\n", r.ts, r.kind, r.lsn, r.xid, r.seq, r.a, r.b); err != nil {
+			return err
+		}
+		stored++
 	}
-	for _, r := range recs[:m] {
-		fmt.Fprintf(f, "%d k=%d lsn=%X xid=%d seq=%d a=%d b=%d\n", r.ts, r.kind, r.lsn, r.xid, r.seq, r.a, r.b)
+	// Có slot bị bỏ hoặc còn producer thì sự vắng mặt của record không chứng minh mất Txn.
+	final := n.Load()
+	if _, err := fmt.Fprintf(w, "# allocated=%d stored=%d dropped=%d unpublished=%d observed_after_dump=%d\n", allocated, stored, max(int64(0), allocated-int64(len(recs))), unpublished, final); err != nil {
+		return err
 	}
+	return w.Flush()
 }

@@ -174,6 +174,8 @@ func TestP2_E2E_PGSnapshotAddWhileStreaming(t *testing.T) {
 	seed := seedFromEnv(t)
 	slot, pub := "strand_e2e_snapadd", "strand_e2e_pub"
 	src, dst, lsn := setupPGPair(t, slot, pub)
+	dir := testDir(t)
+	witness := beginF11Witness(t, src, dir, lsn)
 	// Thêm dữ liệu cho events ở source (target có cùng preload; phần thêm chỉ có ở source) để bảng có
 	// nhiều chunk.
 	src.exec(t, "INSERT INTO app.events SELECT g, nextval('app.ver_seq'), 'pre' FROM generate_series(3001, 20000) g")
@@ -191,7 +193,7 @@ func TestP2_E2E_PGSnapshotAddWhileStreaming(t *testing.T) {
 	cfg := strandCfg{Name: "e2e-pg-snapadd", SourceKind: "postgres", TargetKind: "postgres",
 		SourceDSN: src.DSN, TargetDSN: dst.DSN,
 		SourceExtra: fmt.Sprintf(", slot: %s, publication: %s", slot, pub),
-		Include:     []string{"app.items", "app.accounts", "app.marker"}, Dir: testDir(t), Bootstrap: "start_at", SourceIOPS: 20000}
+		Include:     []string{"app.items", "app.accounts", "app.marker"}, Dir: dir, Bootstrap: "start_at", SourceIOPS: 20000}
 	p := startStrand(t, cfg.write(t), "--start-at", lsn)
 	waitSynced(t, &cfg, p, time.Minute)
 	vs := startPGVerSampler(dst, "app.items", "app.events", "app.accounts")
@@ -216,6 +218,7 @@ func TestP2_E2E_PGSnapshotAddWhileStreaming(t *testing.T) {
 	if !strings.Contains(p.output.String(), `"snapshot done"`) {
 		t.Fatalf("snapshot add did not finish\n%s", p.tail())
 	}
+	witness.capture(t, dst, &cfg)
 	vs.check(t)
 	comparePG(t, src, dst, pgAppTables...)
 	checkPGInvariants(t, dst)

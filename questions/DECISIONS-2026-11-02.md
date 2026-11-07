@@ -26,6 +26,8 @@ Trả lời: `1A, 2B, 3B, 4A, 5 ok, 6 ok, 7 gộp` (cùng với P1-17 câu 1 và
 
 | 19 | Owner chọn hướng giữ FK hoạt động khi logical bootstrap auto sang target PG: snapshot cha trước con; FK vòng/tự tham chiếu trong tập pending phải dùng seed/restore nhất quán, từ chối trước DDL. Không mở rộng hỗ trợ FK vòng trong việc B. Lý do: với a→b→a có row tham chiếu nhau, flush từng bảng/range không có thứ tự hợp lệ; tự tham chiếu xuyên chunk có phản ví dụ tương tự. | `internal/pipeline/schema_init.go` (`orderSnapshotTables`), `TestRS1_SnapshotParentsBeforeChildren`, `questions/OPEN-schema-init-fk.md` | 02 §5/§8: ghi giới hạn logical bootstrap PG; spec do owner cập nhật |
 
+| 20 | Làm rõ CP-3 cho PG: code hiện hữu (`PGAppliedSet.Vouch`, `lsnTracker.point`, seed tại P−1) đã lưu **biên WAL đã chứng minh an toàn**, không nhất thiết là đầu một commit record; danh tính Txn thật vẫn là commit LSN, không lưu `seq`. Watermark không transactional được phát ở `message.endLSN−1`, vì endLSN là exclusive. Phản ví dụ: message kết thúc ở P, commit kế tiếp bắt đầu ở P; vouch P rồi restart bỏ cả Txn chưa apply. Vouch P−1 giữ replay, đồng thời vẫn đạt high đọc trước message. Đây là sửa biên trên cơ chế đang có; owner cần làm rõ câu “chỉ … commit LSN” của CP-3, không coi câu hiện tại đã khớp hoàn toàn với các biên P−1. | `internal/reader/pg/stream.go`, `watermark_boundary_test.go`; `reports/F11-ROOT-CAUSE-20261107.md` | 02 §2 CP-3, §3/§4: phân biệt commit LSN định danh Txn với biên WAL an toàn của lwd/high; không sửa spec trong nhánh này |
+
 ## Mục 6 — cờ và khóa cấu hình mới cần thêm vào 02 §10
 
 | Lệnh / khóa | Thêm |

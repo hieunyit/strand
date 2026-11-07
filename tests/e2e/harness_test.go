@@ -361,6 +361,9 @@ func startStrand(t *testing.T, cfgPath string, extra ...string) *strandProc {
 	args := append([]string{"sync", "-c", cfgPath}, extra...)
 	cmd := exec.Command(strandBin, args...)
 	logPath := filepath.Join(filepath.Dir(cfgPath), fmt.Sprintf("strand-%04d.log", runCounter.Add(1)))
+	if os.Getenv("STRAND_E2E_F11_WITNESS") == "1" {
+		cmd.Env = append(os.Environ(), "STRAND_TXN_TRACE="+logPath+".txn")
+	}
 	f, err := os.Create(logPath)
 	if err != nil {
 		t.Fatal(err)

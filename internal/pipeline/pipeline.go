@@ -606,6 +606,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return fmt.Errorf("startup compaction: %w", err)
 	}
 	p.comp.Start(ctx)
+	// Đăng ký trước rd.Close: LIFO đóng/join reader trước khi chụp trace cuối, cả khi lỗi.
+	defer func() {
+		if err := txntrace.Dump(); err != nil {
+			p.log.Error("transaction trace dump failed", "error", err)
+		}
+	}()
 	defer p.comp.Stop()
 
 	// --- Governor ---
@@ -835,7 +841,6 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.comp.Compact(fctx); err != nil {
 		return fmt.Errorf("final checkpoint flush: %w", err)
 	}
-	txntrace.Dump()
 	p.log.Info("pipeline stopped cleanly", "applied_txns", p.appliedTxns.Load(), "reapplied_in_seq_order", p.reorderRetry.Load())
 	return nil
 }

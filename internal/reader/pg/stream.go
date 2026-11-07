@@ -340,10 +340,14 @@ func (st *streamState) handle(data []byte) error {
 		if m.Transactional || m.Prefix != WatermarkPrefix || st.cur != nil || st.prep != nil || st.inStream {
 			return nil // message của ứng dụng khác: không ảnh hưởng dữ liệu
 		}
-		// Watermark của snapshot logic (02 §5): message không transactional được giải mã đúng tại vị
-		// trí của nó trong WAL, nên mọi Txn có commit LSN nhỏ hơn đã được phát trước. Phát thành một
-		// Txn rỗng có "commit LSN" = LSN của message để pipeline biết stream đã qua điểm này.
-		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.LSN)}
+		// PG logicalmsg_decode truyền EndRecPtr (exclusive) cho message, còn commit thật dùng
+		// ReadRecPtr. Vì vậy m.LSN có thể bằng commit LSN của Txn KẾ TIẾP, chưa được phát.
+		// Chỉ xác nhận tới m.LSN-1: CP-1/2, CO-1/2 không cho checkpoint bỏ qua Txn kế tiếp
+		// khi restart. RS-1/2 vẫn đạt high đọc trước message: high <= đầu record < m.LSN.
+		if m.LSN == 0 {
+			return fmt.Errorf("watermark có end LSN bằng 0")
+		}
+		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.LSN) - 1}
 		if !st.contains(pos) {
 			if err := st.emit(reader.Event{Type: reader.EventQuery, Query: "BEGIN", Pos: pos}); err != nil {
 				return err

@@ -11,7 +11,7 @@ Tài liệu này dành cho agent tiếp quản (Codex). Đọc hết trước kh
 | 1 | `spec/02-specs.md` | Đặc tả kỹ thuật — nguồn sự thật. **Không sửa `spec/`** (thuộc owner). |
 | 2 | `spec/design.md` | Thiết kế, lý do, bất biến |
 | 3 | `TASKS.md` | Danh sách task theo phase + tiêu chí nghiệm thu (AC) |
-| 4 | `questions/DECISIONS-2026-11-02.md` | 18 quyết định đã chốt trong code mà spec chưa cập nhật. Khi bạn phải lệch spec: thêm một dòng vào đây (số tiếp theo), không sửa spec |
+| 4 | `questions/DECISIONS-2026-11-02.md` | Các quyết định và điểm cần owner làm rõ mà spec chưa cập nhật. Khi bạn phải lệch spec: thêm một dòng vào đây (số tiếp theo), không sửa spec |
 | 5 | `spec/04-testing.md` | Cách test, gate, soak |
 | 6 | `reports/` | Báo cáo từng task (`P1-xx.md`, `P2-0x.md`, `REVIEW-2026-11-02-gate1.md`) |
 | 7 | `docs/USAGE.md` | Tài liệu người dùng (đang thiếu — xem việc D) |
@@ -21,6 +21,9 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 ---
 
 ## 1. Repo và nhánh
+
+**2026-11-07 — điều tra F11 tiếp:** nhánh `agent/f11-root-cause-20261107` trong clone riêng trên. Phát hiện lỗi reader dùng end LSN của watermark làm checkpoint inclusive: trùng LSN commit kế tiếp; regression trên code cũ mất cả Txn sau restart, bản sửa dùng `endLSN-1`. Ba trace thật trước sửa có 11 va chạm; một trace có 14 lần coordinator vouch LSN trước khi Txn được Admit. Đây là cơ chế lỗi đã chứng minh, chưa gán chắc chắn toàn bộ log F11 lịch sử. Đồng thời sửa race/tràn im lặng của trace. Xem `reports/F11-ROOT-CAUSE-20261107.md`; bản sửa đã qua build/vet/gofmt, 913 non-E2E test/subtest (31 package), F11 E2E 6/6 (3 seed/mỗi chế độ), reader/trace race; chưa full E2E toàn repo, chưa merge/push.
+
 
 **2026-11-07 — sửa review local mới:** clone riêng `/home/hellc/strand-review-fixes`, nhánh `agent/review-fixes-20261107`, nền tích hợp `751e5ca` (main local vẫn `9281ffa`). Sửa R01/F11 barrier, R02 fencing, R03 bind snapshot, R04 FK catalog, R05 tracking incomplete, R07 budget holes; test đỏ trên code cũ; build/vet qua, gofmt rỗng, non-E2E 910 test/subtest qua, E2E chọn lọc 24/24 (ba seed mỗi chế độ) qua. Không sửa worktree nguồn, spec hay main. Chi tiết/bằng chứng: `reports/REVIEW-FIXES-20261107.md`. Benchmark R06 ở nhánh riêng `agent/review-bench-fix-20261107` HEAD `872db7d` (gồm `c254d59`); 20 test/subtest thường và 20 với race qua, chưa chạy benchmark chính thức. **Chưa đề nghị merge khi full E2E hai chế độ trên bản sửa chưa hoàn tất.**
 
@@ -117,6 +120,8 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 ---
 
 ## 4. Việc còn lại — theo thứ tự ưu tiên
+
+F11 tiếp tục trên `agent/f11-root-cause-20261107`: đã hoàn tất ma trận ba seed relaxed/strict (6/6), reader/trace race và 913 non-E2E test/subtest; còn full E2E toàn bộ trên đầu nhánh trước đề nghị merge. Báo cáo và log ở `reports/F11-ROOT-CAUSE-20261107.md` và `/tmp/strand-f11-investigation-20261107/`.
 
 ### Review follow-up 2026-11-07
 
@@ -458,6 +463,12 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 66 | Hai test MinIO lỗi connection refused localhost:9000 | Phụ thuộc dịch vụ compose ngoài test | Fixture MinIO riêng qua testcontainers, endpoint mapped và health wait | `TestPF4_SpoolOverflowToBucket_MinIO`, `TestMinIOBackend_Direct` |
 
 | 67 | Sample verify MySQL→PG lỗi Error 3636 khi tạo fixture | CTE đệ quy 5000 vượt mặc định 1000 | Sinh đúng 5000 row bằng tích chữ số, không sửa session | `TestSampleKeysDB_MySQLToPGCompositeInt` |
+
+| 68 | Watermark PG xác nhận cả commit kế tiếp chưa apply; restart có thể mất nguyên Txn | Logical message dùng EndRecPtr exclusive, commit dùng ReadRecPtr; hai LSN có thể bằng nhau | Reader phát watermark tại endLSN−1; giữ high trước record nên RS-1/2 vẫn đạt; không vouch Txn chưa phát (CP-1/2, CO-1/2) | `TestWatermarkDoesNotAcknowledgeNextCommit`: code cũ reader restart mất cả Txn, sửa qua; trace thực có cửa sổ vouch trước Admit |
+
+| 69 | Trace F11 race khi Dump đồng thời Put | Counter cấp slot trước khi các trường record được ghi đủ | Publish atomic ready sau khi ghi; Dump chỉ đọc slot ready | `TestTraceConcurrentPublicationAndDump`: race detector đỏ trên code cũ |
+
+| 70 | Trace F11 tràn buffer nhưng không báo, có thể kết luận nhầm mất Txn | Put bỏ record ngoài capacity, Dump không ghi completeness | Trailer allocated/stored/dropped/unpublished/observed_after_dump; trả lỗi I/O; dump sau đóng reader | `TestTraceReportsDroppedRecords`: code cũ đỏ, bản sửa báo đúng 3/5 record bị bỏ |
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 

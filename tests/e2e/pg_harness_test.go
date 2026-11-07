@@ -213,7 +213,11 @@ func applyLogDup(cdc, snap int, firstCDC, snapshotRewrites bool) bool {
 // setupPGPair dựng source/target PG→PG: lược đồ, preload giống hệt, publication, trigger đếm apply
 // ở target, rồi tạo slot (two_phase) và trả consistent_point.
 func setupPGPair(t *testing.T, slot, pub string) (*pgNode, *pgNode, string) {
-	src := startPG(t, "pgsrc")
+	var extra []string
+	if delay := os.Getenv("STRAND_E2E_F11_WAL_WRITER_DELAY"); delay != "" {
+		extra = []string{"-c", "wal_writer_delay=" + delay}
+	}
+	src := startPG(t, "pgsrc", extra...)
 	dst := startPG(t, "pgdst")
 	src.exec(t, pgSchemaSQL...)
 	dst.exec(t, pgSchemaSQL...)
@@ -488,7 +492,12 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 		t.Fatal(err)
 	}
 	var before string
-	if err := tx.QueryRow("SELECT pg_current_wal_insert_lsn()::text").Scan(&before); err != nil {
+	cutoffQuery := "SELECT pg_current_wal_insert_lsn()::text"
+	// Biến chỉ của fixture săn F11: tái hiện barrier cũ, không phải lựa chọn production.
+	if os.Getenv("STRAND_E2E_F11_UNSAFE_BARRIER") == "1" {
+		cutoffQuery = "SELECT pg_current_wal_lsn()::text"
+	}
+	if err := tx.QueryRow(cutoffQuery).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec("INSERT INTO app.marker VALUES ($1, 'caught-up')", markerID); err != nil {
@@ -510,6 +519,7 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 		_ = dst.DB.QueryRow("SELECT count(*) FROM app.marker WHERE id = $1", markerID).Scan(&n)
 		got, err := checkpoint.LoadAppliedSnapshotPG(context.Background(), dst.DB, cfg.Name, model.EnginePG)
 		if err == nil && n == 1 && got.Lwd().LSN >= l0 && pipelineSynced(cfg.Socket) {
+			recordF11Barrier(t, src, dst, cfg, before, markerID, got)
 			return
 		}
 		if time.Now().After(deadline) {
