@@ -310,10 +310,14 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 
 	s.mu.Lock()
 
-	// Chặn nhận Txn mới khi số holes vượt ngưỡng max_holes (spec 02 §2 CP-4, §6),
+	// CP-4: giữ chỗ cho cả Txn đang chạy/chờ. Nhận tối đa MaxHoles+1 Txn chưa Done;
+	// khi một Txn bất kỳ Done và nâng high, còn tối đa MaxHoles Txn chưa xong để tạo lỗ.
+	// Chỉ nhìn holes hiện tại sẽ nhận quá nhiều trước Done đầu tiên. Không đổi cạnh DAG (CO-1),
+	// không đổi định danh checkpoint (CP-1..3); strict không cần reserve vì commit đã tuần tự (CP-5).
+	// Chặn nhận khi hết ngân sách in-flight hoặc holes vượt ngưỡng,
 	// hoặc khi hàng đợi sẵn sàng đã đầy (back-pressure, không giữ mu khi chờ).
 	for s.failed == nil && !s.isClosed &&
-		(s.holesLocked() > s.cfg.MaxHoles || len(s.overflow) >= cap(s.readyCh) || s.overBudgetLocked(t)) {
+		((!s.cfg.Serial && len(s.activeSeqs) > s.cfg.MaxHoles) || s.holesLocked() > s.cfg.MaxHoles || len(s.overflow) >= cap(s.readyCh) || s.overBudgetLocked(t)) {
 		holeCh, spaceCh := s.holeWaitCh, s.spaceCh
 		s.mu.Unlock()
 

@@ -62,17 +62,17 @@ func newToastRowMissing(t model.TableID, key []model.Value) error {
 // PGWriter cài đặt Writer cho PostgreSQL target: COPY vào bảng tạm rồi MERGE (PG 15+).
 // db phải mở bằng driver pgx stdlib ("pgx") vì cần pgx.Conn để COPY.
 type PGWriter struct {
-	db             *sql.DB
-	pipelineID     string
-	workerID       int
-	epoch          int64
-	pk             pkRegistry
-	mu             sync.Mutex
-	orderer        *CommitOrderer
-	copyMinRows    int
-	ordered        map[model.TableID]bool // bảng có UNIQUE ngoài PK / ràng buộc loại trừ (cache từ catalog)
+	db          *sql.DB
+	pipelineID  string
+	workerID    int
+	epoch       int64
+	pk          pkRegistry
+	mu          sync.Mutex
+	orderer     *CommitOrderer
+	copyMinRows int
+	ordered     map[model.TableID]bool // bảng có UNIQUE ngoài PK / ràng buộc loại trừ (cache từ catalog)
 	// txBegin (seam kiểm thử, SetTxBeginner): mở transaction thay cho kết nối lấy từ db.
-	txBegin func(ctx context.Context) (pgx.Tx, error)
+	txBegin        func(ctx context.Context) (pgx.Tx, error)
 	MergeCount     int64
 	TotalMergeRows int64
 }

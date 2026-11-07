@@ -104,8 +104,12 @@ func TestSampleKeysDB_MySQLToPGCompositeInt(t *testing.T) {
 	mustExec(t, src, "CREATE TABLE verify_src.skc (a INT NOT NULL, b BIGINT NOT NULL, v VARCHAR(20), PRIMARY KEY (a, b))")
 	mustExec(t, pg, "DROP TABLE IF EXISTS public.skc")
 	mustExec(t, pg, "CREATE TABLE public.skc (a int NOT NULL, b bigint NOT NULL, v varchar(20), PRIMARY KEY (a, b))")
+	// Vẫn đủ 5000 row, không phụ thuộc cte_max_recursion_depth=1000 hay SET rò qua pool.
 	mustExec(t, src, `INSERT INTO verify_src.skc
-		WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g WHERE n < 5000) SELECT n % 40, n, CONCAT('v', n) FROM g`)
+		WITH digits(n) AS (SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
+        UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9),
+        g AS (SELECT 1+a.n+10*b.n+100*c.n+1000*d.n AS n FROM digits a CROSS JOIN digits b CROSS JOIN digits c CROSS JOIN digits d)
+        SELECT n % 40, n, CONCAT('v', n) FROM g WHERE n<=5000`)
 	mustExec(t, pg, "INSERT INTO public.skc SELECT g % 40, g, 'v' || g FROM generate_series(1, 5000) g")
 	mustExec(t, src, "ANALYZE TABLE verify_src.skc")
 	tbl, dstT := model.TableID{Schema: "verify_src", Table: "skc"}, model.TableID{Schema: "public", Table: "skc"}

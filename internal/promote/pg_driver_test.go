@@ -523,6 +523,10 @@ func TestPR1_AC1_IndependentSequenceCache1000(t *testing.T) {
 		}
 		defer conn.Close()
 	}
+	// Ba connection cache sequence đang được giữ; chỉ còn một slot cho quản trị/marker/poll.
+	// Ép lần ghi kiểm tra dùng lại đúng slot marker để regression rò SET không phụ thuộc lịch pool.
+	srcDB.SetMaxOpenConns(4)
+
 	srcLast := seqLastValue(t, srcDB, "ac1_global_seq")
 	t.Logf("source issued up to %d, source last_value = %d", maxIssued, srcLast)
 

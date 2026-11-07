@@ -148,7 +148,7 @@ func pgReplaceRetryCols(ctx context.Context, db *sql.DB, table model.TableID, pk
 }
 
 // PGReplaceExact (Gate 2, khóa khác thứ tự giữa source và target — snapshot.CrossEngineKeySet): chạy các
-// câu DELETE dels (theo khóa chính xác, mỗi câu một lô khóa) rồi upsert rows, trong MỘT transaction có
+// câu dels (DELETE theo khóa chính xác hoặc chuẩn bị staging + DELETE anti-join) rồi upsert rows, trong MỘT transaction có
 // fence; lỗi tạm thời được retry. Không có điều kiện range.
 func PGReplaceExact(ctx context.Context, db *sql.DB, table model.TableID, pkCols []string, columnNames []string,
 	rows []*model.RowChange, dels []string, delArgs [][]any) error {

@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,51 +28,51 @@ type BenchmarkReport struct {
 	HotRowRatio  float64        `json:"hot_row_ratio"`
 }
 
+// Test replay xóa/tạo bảng, nên luôn dùng container riêng; không dò localhost/compose hay DSN môi trường.
 func getMySQLDSNs(t *testing.T) (string, string) {
-	src := os.Getenv("MYSQL_SRC_DSN")
-	dst := os.Getenv("MYSQL_DST_DSN")
-	if src != "" && dst != "" {
-		return src, dst
-	}
-
-	// Kiểm tra nếu localhost sẵn sàng
-	testDB, err := sql.Open("mysql", "root:dev@tcp(127.0.0.1:3306)/app?parseTime=true")
-	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		if testDB.PingContext(ctx) == nil {
-			cancel()
-			testDB.Close()
-			return "root:dev@tcp(127.0.0.1:3306)/app?parseTime=true",
-				"root:dev@tcp(127.0.0.1:3307)/app?parseTime=true"
+	t.Helper()
+	start := func(serverID int) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: testcontainers.ContainerRequest{
+			Image: "mysql:8.4", ExposedPorts: []string{"3306/tcp"}, Env: map[string]string{"MYSQL_ROOT_PASSWORD": "test-only", "MYSQL_DATABASE": "app"},
+			Cmd:        []string{fmt.Sprintf("--server-id=%d", serverID), "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--binlog-format=ROW", "--binlog-row-image=FULL", "--innodb-use-native-aio=OFF"},
+			WaitingFor: wait.ForLog("port: 3306  MySQL Community Server").WithStartupTimeout(90 * time.Second),
+		}, Started: true})
+		if c != nil {
+			t.Cleanup(func() {
+				if err := c.Terminate(context.Background()); err != nil {
+					t.Errorf("terminate own replay container: %v", err)
+				}
+			})
 		}
-		cancel()
-		testDB.Close()
-	}
-
-	// Lấy IP trực tiếp từ container docker
-	getIP := func(service string) string {
-		out, err := exec.Command("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", service).Output()
-		if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-			t.Fatalf("Không thể lấy IP docker container %s: %v", service, err)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return strings.TrimSpace(string(out))
+		host, err := c.Host(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := c.MappedPort(ctx, "3306/tcp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("root:test-only@tcp(%s)/app?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s", net.JoinHostPort(host, port.Port()))
 	}
-
-	srcIP := getIP("strand-dev-mysql-src-1")
-	dstIP := getIP("strand-dev-mysql-dst-1")
-
-	return fmt.Sprintf("root:dev@tcp(%s:3306)/app?parseTime=true", srcIP),
-		fmt.Sprintf("root:dev@tcp(%s:3306)/app?parseTime=true", dstIP)
+	return start(101), start(102)
 }
 
 // AC3: Replay tải genload từ mysql-src sang mysql-dst: checksum từng bảng bằng nhau.
 // AC4: Chạy được với --workers 4, 8, 16 và xuất file JSON số liệu.
 func TestAC3_AC4_ReplayBenchmark(t *testing.T) {
+	// Nếu helper vô tình dùng lại DSN môi trường, socket không tồn tại này làm test đỏ trước mọi DDL.
+	t.Setenv("MYSQL_SRC_DSN", "root:test-only@unix("+filepath.Join(t.TempDir(), "not-a-db.sock")+")/app")
+	t.Setenv("MYSQL_DST_DSN", "root:test-only@unix("+filepath.Join(t.TempDir(), "not-a-db.sock")+")/app")
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	srcDSN, dstDSN := getMySQLDSNs(t)
-	t.Logf("Using srcDSN: %s, dstDSN: %s", srcDSN, dstDSN)
+	t.Log("Using owned MySQL source and target test containers")
 
 	srcDB, err := sql.Open("mysql", srcDSN)
 	if err != nil {

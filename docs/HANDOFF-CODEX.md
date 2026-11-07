@@ -22,6 +22,9 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 
 ## 1. Repo và nhánh
 
+**2026-11-07 — sửa review local mới:** clone riêng `/home/hellc/strand-review-fixes`, nhánh `agent/review-fixes-20261107`, nền tích hợp `751e5ca` (main local vẫn `9281ffa`). Sửa R01/F11 barrier, R02 fencing, R03 bind snapshot, R04 FK catalog, R05 tracking incomplete, R07 budget holes; test đỏ trên code cũ, đang chạy bộ kiểm định. Không sửa worktree nguồn, spec hay main. Chi tiết/bằng chứng: `reports/REVIEW-FIXES-20261107.md`. Benchmark R06 ở nhánh riêng `agent/review-bench-fix-20261107` commit `c254d59`; chưa chạy benchmark chính thức. **Chưa đề nghị merge khi full E2E hai chế độ trên bản sửa chưa hoàn tất.**
+
+
 **Codex đang làm việc B (2026-11-04):** clone riêng `/home/hellc/strand-codex`, nguồn local scratchpad; tiếp tục `agent/schema-init` từ `27c3e1f`; code `efb3b1b` + sửa sequence/default `cdd7f6c`. Đã triển khai sinh/apply DDL ba hướng, CLI, validate và bootstrap/CREATE barrier. Chưa merge/push. Báo cáo đang cập nhật ở `reports/SCHEMA-INIT.md`; chưa được coi là xong trước checklist §9 và full e2e hai chế độ. C–F và Gate 2 vẫn chưa bắt đầu trong phiên Codex.
 
 
@@ -114,6 +117,10 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 ---
 
 ## 4. Việc còn lại — theo thứ tự ưu tiên
+
+### Review follow-up 2026-11-07
+
+Sửa review mới trên `agent/review-fixes-20261107` (nền local `751e5ca`), benchmark trên `agent/review-bench-fix-20261107`. Kết quả cuối và giới hạn phải đọc ở `reports/REVIEW-FIXES-20261107.md`; không dùng trạng thái main cũ hoặc log E2E của worktree khác để xác nhận bản sửa. Còn full E2E relaxed/strict trên bản tích hợp sửa trước khi đề nghị merge. Trong kiểm định gặp fixture governor dò IP compose cố định: đã ngắt riêng binary test do mình sở hữu và chuyển sang container riêng (#63); không đụng strand-dev/container của người khác.
 
 ### A. Chốt full e2e trên `f4664a7` rồi đẩy lên GitHub main  ⏳ đang chạy
 
@@ -434,6 +441,23 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 53 | (việc C) Cột chuỗi charset khác UTF-8 (latin1…) có ký tự ngoài ASCII: stream MySQL→MySQL dừng với 1366 (hoặc ghi `?` khi sql_mode không strict) | Binlog đưa byte theo charset CỦA CỘT, writer gửi qua kết nối utf8mb4 | Reader chuyển giá trị chuỗi sang UTF-8 theo collation của cột trong TABLE_MAP (bảng collation đọc từ source); latin1 = cp1252 của MySQL; charset khác chỉ nhận ASCII, có byte ≥ 0x80 thì dừng rõ (`806402a`); áp cả cho `strand prefetch` | `TestCharset_Latin1ValuesSurviveSnapshotAndStream` (đỏ 1366 trước), `TestLatin1DecodeMatchesMySQL` (256 byte) |
 | 54 | (việc C) Khóa VARBINARY rỗng `''` bind thành NULL → snapshot chép 0 row mà báo xong | `[]byte(nil)` từ RawBytes | Giữ `[]byte{}` khi đọc, đổi nil → rỗng khi bind | `TestGPK_EmptyBinaryKeyIsABoundNotNull` |
 | 55 (vận hành) | Test chạy với `TESTCONTAINERS_RYUK_DISABLED=true`: tiến trình test bị kill (OOM, timeout) để lại container MySQL ~570 MB mỗi cái; 2026-11-05 có ~50 cái, RAM cạn, lượt e2e strict bị OOM-kill | Không có reaper | Không chạy test nặng song song với full e2e; dọn bằng lệnh lọc theo nhãn `org.testcontainers` trừ session đang chạy | — |
+
+| 56 | F11 E2E có thể dừng trước khi mọi commit workload được apply | Catch-up lấy WAL write position với async commit; marker có thể apply sớm ở relaxed | Chờ durable LWD bao phủ insert cutoff trước marker | `TestReviewF11CatchupWaitsForInsertedWAL`; chưa chốt nguyên nhân duy nhất của log lịch sử |
+| 57 | Fence PG trả trước reload hoặc lỗi ALTER ROLE read-only | Reload bất đồng bộ; session quản trị cũng nhận read-only | Một session writable, chờ reload, loại session khỏi pool | `TestReviewPGFenceReloadAndWritableAdmin`, test fence PG thật |
+| 58 | Snapshot PK rộng PG lỗi quá 65535 parameters | DELETE keep/scope list không giới hạn bind | TEMP key staging, anti-join, cùng transaction/fence với upsert | `TestReviewPGWideKeySnapshotParameterLimit` (range, keys, rollback/retry) |
+| 59 | Schema init FK khác schema trỏ sai bảng | Suy schema bảng cha từ schema bảng con khi pretty-print bỏ qualification | Dùng confrelid và namespace catalog | `TestReviewPGCrossSchemaFKUsesCatalogIdentity` |
+| 60 | Delta/post-seed verify báo đủ dù encode khóa thất bại | Nuốt lỗi BoundOf, thiếu key trong touchset | Mark incomplete cho mọi consumer; giữ VerifyPending khi post-seed thiếu tracking | `TestReviewTouchedEncodeFailureIsIncomplete` |
+| 61 | Holes có thể vượt MaxHoles sau nhiều admission chưa Done | Chỉ nhìn holes đã hiện hữu, không reserve in-flight | Giới hạn Txn chưa Done ở relaxed | `TestReviewCP4ReserveInflightHoles`, `TestCP4_SchedulerStopsOnMaxHoles` |
+
+| 63 | Unit governor treo khi full test do dò IP compose cố định, có thể báo PASS khi DB không sẵn sàng | PingContext không timeout vào 172.23.0.5; integration tùy cơ hội | Fixture MySQL riêng do test tạo/dọn, DSN timeout rõ, không dò container người khác | `TestGV1_DirectDBSignals_NoMetricsSourceDependency`; lượt cũ bị ngắt riêng binary test, rerun được báo riêng |
+
+| 64 | `TestPR1_AC1_IndependentSequenceCache1000`: source still writable after fence | fenceMarker đặt default_transaction_read_only=off rồi trả connection vào pool | Loại connection marker khỏi pool ở mọi đường thoát, như session Fence | Test AC1 có sẵn đỏ khi tạm revert cleanup marker, xanh khi khôi phục; chạy lại toàn package promote |
+
+| 65 | Test replay có thể DROP gen_orders trên dev/DSN môi trường | Tự dò localhost và docker inspect strand-dev-* cho test có DDL | Luôn tạo cặp MySQL riêng; fixture bẫy DSN môi trường bằng socket riêng không tồn tại. Audit/watermark cũng thêm native AIO OFF | `TestAC3_AC4_ReplayBenchmark`; không dùng fixture ngoài test |
+
+| 66 | Hai test MinIO lỗi connection refused localhost:9000 | Phụ thuộc dịch vụ compose ngoài test | Fixture MinIO riêng qua testcontainers, endpoint mapped và health wait | `TestPF4_SpoolOverflowToBucket_MinIO`, `TestMinIOBackend_Direct` |
+
+| 67 | Sample verify MySQL→PG lỗi Error 3636 khi tạo fixture | CTE đệ quy 5000 vượt mặc định 1000 | Sinh đúng 5000 row bằng tích chữ số, không sửa session | `TestSampleKeysDB_MySQLToPGCompositeInt` |
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 

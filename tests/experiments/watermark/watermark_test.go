@@ -41,6 +41,7 @@ func startTestContainerMySQL(t *testing.T, image string) (string, func()) {
 	ctx := context.Background()
 
 	cmd := []string{
+		"--innodb-use-native-aio=OFF",
 		"--server-id=101",
 		"--gtid-mode=ON",
 		"--enforce-gtid-consistency=ON",

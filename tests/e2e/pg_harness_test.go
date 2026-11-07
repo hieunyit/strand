@@ -476,7 +476,9 @@ func resolvePrepared(t *testing.T, n *pgNode) {
 // --------------------------------------------------------------------------
 
 // waitPGCaughtUp chèn một marker ở source rồi chờ target có marker và lwd đã xác nhận (row toàn cục)
-// vượt LSN trước commit của marker: mọi Txn trước đó đã apply bền vững.
+// bao phủ insert LSN trước marker: mọi Txn workload đã commit trước cutoff đã apply bền vững.
+// F11: pg_current_wal_lsn là write position, có thể đứng sau commit đã trả về khi synchronous_commit=off.
+// Marker có thể apply trước Txn độc lập ở relaxed; chỉ durable LWD >= insert cutoff mới là prefix đủ.
 func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandProc, timeout time.Duration) {
 	t.Helper()
 	resolvePrepared(t, src)
@@ -486,7 +488,7 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 		t.Fatal(err)
 	}
 	var before string
-	if err := tx.QueryRow("SELECT pg_current_wal_lsn()::text").Scan(&before); err != nil {
+	if err := tx.QueryRow("SELECT pg_current_wal_insert_lsn()::text").Scan(&before); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec("INSERT INTO app.marker VALUES ($1, 'caught-up')", markerID); err != nil {
@@ -495,7 +497,10 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	l0, _ := checkpoint.ParseLSN(before)
+	l0, err := checkpoint.ParseLSN(before)
+	if err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(timeout)
 	for {
 		if p != nil && p.exited() {
@@ -504,7 +509,7 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 		var n int
 		_ = dst.DB.QueryRow("SELECT count(*) FROM app.marker WHERE id = $1", markerID).Scan(&n)
 		got, err := checkpoint.LoadAppliedSnapshotPG(context.Background(), dst.DB, cfg.Name, model.EnginePG)
-		if err == nil && n == 1 && got.Lwd().LSN > l0 && pipelineSynced(cfg.Socket) {
+		if err == nil && n == 1 && got.Lwd().LSN >= l0 && pipelineSynced(cfg.Socket) {
 			return
 		}
 		if time.Now().After(deadline) {

@@ -108,14 +108,16 @@ func pgToPG(ctx context.Context, r Request, t model.TableID) ([]string, []string
 		}
 		defs = append(defs, d)
 	}
-	constraints, err := r.Source.QueryContext(ctx, `SELECT conname,contype::text,pg_get_constraintdef(oid,true) FROM pg_constraint WHERE conrelid=$1 AND conparentid=0 ORDER BY conname`, oid)
+	constraints, err := r.Source.QueryContext(ctx, `SELECT c.conname,c.contype::text,pg_get_constraintdef(c.oid,true),COALESCE(n.nspname,''),COALESCE(p.relname,'')
+ FROM pg_constraint c LEFT JOIN pg_class p ON p.oid=c.confrelid LEFT JOIN pg_namespace n ON n.oid=p.relnamespace
+ WHERE c.conrelid=$1 AND c.conparentid=0 ORDER BY c.conname`, oid)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	var foreign []string
 	for constraints.Next() {
-		var n, typ, def string
-		if err := constraints.Scan(&n, &typ, &def); err != nil {
+		var n, typ, def, parentSchema, parentTable string
+		if err := constraints.Scan(&n, &typ, &def, &parentSchema, &parentTable); err != nil {
 			constraints.Close()
 			return nil, nil, nil, err
 		}
@@ -127,7 +129,7 @@ func pgToPG(ctx context.Context, r Request, t model.TableID) ([]string, []string
 			return nil, nil, nil, reject("mapped constraint name %s exceeds 63 bytes", n)
 		}
 		if typ == "f" {
-			rewritten, err := pgReferences(def, t, dst, r.Rename)
+			rewritten, err := pgReferences(def, t, dst, r.Rename, model.TableID{Schema: parentSchema, Table: parentTable})
 			if err != nil {
 				constraints.Close()
 				return nil, nil, nil, err
@@ -214,7 +216,7 @@ func pgToPG(ctx context.Context, r Request, t model.TableID) ([]string, []string
 	return ddl, foreign, warnings, nil
 }
 
-func pgReferences(def string, src, dst model.TableID, rename map[string]string) (string, error) {
+func pgReferences(def string, src, dst model.TableID, rename map[string]string, referenced ...model.TableID) (string, error) {
 	ts, err := lex(def)
 	if err != nil {
 		return "", err
@@ -228,6 +230,14 @@ func pgReferences(def string, src, dst model.TableID, rename map[string]string) 
 				ref.Schema = a.value
 				ref.Table = ts[i+3].value
 				end = ts[i+3].end
+			}
+			// confrelid mới là danh tính FK; pretty-print có thể bỏ schema theo search_path.
+			// Không suy schema của cha từ schema bảng con (bootstrap phải giữ đúng ràng buộc).
+			if len(referenced) > 0 {
+				ref = referenced[0]
+				if ref.Schema == "" || ref.Table == "" {
+					return "", fmt.Errorf("foreign key has no referenced catalog relation")
+				}
 			}
 			if mapped, ok := rename[ref.String()]; ok {
 				s, t, _ := strings.Cut(mapped, ".")

@@ -2,7 +2,7 @@ package spool_test
 
 import (
 	"context"
-	"net/http"
+	"strand/internal/testutil"
 	"testing"
 	"time"
 
@@ -10,19 +10,13 @@ import (
 )
 
 func TestMinIOBackend_Direct(t *testing.T) {
-	// Kiểm tra xem MinIO có đang chạy trên localhost:9000 không
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://localhost:9000/minio/health/live")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("MinIO not running on localhost:9000: %v", err)
-	}
-	_ = resp.Body.Close()
+	endpoint := testutil.MinIOEndpoint(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	b, err := spool.NewMinIOBackend(spool.MinIOConfig{
-		Endpoint:  "http://localhost:9000",
+		Endpoint:  endpoint,
 		Bucket:    "strand-test-bucket",
 		AccessKey: "minioadmin",
 		SecretKey: "minioadmin",
