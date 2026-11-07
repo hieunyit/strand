@@ -1,0 +1,402 @@
+{
+  "base": "751e5ca869f9e3e70ef13d2c3d9e360be3ca4c4a",
+  "code_commit": "5455606",
+  "branch": "agent/review-fixes-20261107",
+  "worktree": "/home/hellc/strand-review-fixes",
+  "bench_branch": "agent/review-bench-fix-20261107",
+  "bench_commit": "872db7d",
+  "bench_worktree": "/home/hellc/strand-bench-review",
+  "checks": [
+    {
+      "check": "build-final",
+      "exit": 0,
+      "seconds": 8.277,
+      "output_bytes": 0
+    },
+    {
+      "check": "vet-final",
+      "exit": 0,
+      "seconds": 3.805,
+      "output_bytes": 0
+    },
+    {
+      "check": "gofmt-final",
+      "exit": 0,
+      "seconds": 0.322,
+      "output_bytes": 0
+    }
+  ],
+  "non_e2e": {
+    "packages": {
+      "strand/cmd/replay": {
+        "file": "core-all.json",
+        "result": "skip",
+        "elapsed": 0,
+        "tests": {}
+      },
+      "strand/cmd/strand": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 176.106,
+        "tests": {
+          "pass": 16
+        }
+      },
+      "strand/internal/admin": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.04,
+        "tests": {
+          "pass": 9
+        }
+      },
+      "strand/internal/assemble": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 56.878,
+        "tests": {
+          "pass": 18
+        }
+      },
+      "strand/internal/checkpoint": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 30.374,
+        "tests": {
+          "pass": 44
+        }
+      },
+      "strand/internal/config": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.06,
+        "tests": {
+          "pass": 47
+        }
+      },
+      "strand/internal/exitcode": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.012,
+        "tests": {
+          "pass": 8
+        }
+      },
+      "strand/internal/governor": {
+        "file": "governor-rerun.json",
+        "result": "pass",
+        "elapsed": 22.317,
+        "tests": {
+          "pass": 27
+        }
+      },
+      "strand/internal/metrics": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.198,
+        "tests": {
+          "pass": 2
+        }
+      },
+      "strand/internal/model": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.019,
+        "tests": {
+          "pass": 7
+        }
+      },
+      "strand/internal/pipeline": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 287.12,
+        "tests": {
+          "pass": 83
+        }
+      },
+      "strand/internal/promote": {
+        "file": "promote-rerun.json",
+        "result": "pass",
+        "elapsed": 47.204,
+        "tests": {
+          "pass": 34
+        }
+      },
+      "strand/internal/reader": {
+        "file": "core-all.json",
+        "result": "skip",
+        "elapsed": 0,
+        "tests": {}
+      },
+      "strand/internal/reader/archive": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 46.307,
+        "tests": {
+          "pass": 9
+        }
+      },
+      "strand/internal/reader/mysql": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 150.694,
+        "tests": {
+          "pass": 12
+        }
+      },
+      "strand/internal/reader/pg": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 130.481,
+        "tests": {
+          "pass": 30
+        }
+      },
+      "strand/internal/sched": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 18.808,
+        "tests": {
+          "pass": 52
+        }
+      },
+      "strand/internal/schemagen": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 35.178,
+        "tests": {
+          "pass": 13
+        }
+      },
+      "strand/internal/seed": {
+        "file": "seed-rerun.json",
+        "result": "pass",
+        "elapsed": 18.171,
+        "tests": {
+          "pass": 113
+        }
+      },
+      "strand/internal/snapshot": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 122.312,
+        "tests": {
+          "pass": 77
+        }
+      },
+      "strand/internal/spool": {
+        "file": "spool-rerun.json",
+        "result": "pass",
+        "elapsed": 8.219,
+        "tests": {
+          "pass": 12
+        }
+      },
+      "strand/internal/typemap": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 28.156,
+        "tests": {
+          "pass": 57
+        }
+      },
+      "strand/internal/validate": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 88.729,
+        "tests": {
+          "pass": 17
+        }
+      },
+      "strand/internal/verify": {
+        "file": "verify-rerun.json",
+        "result": "pass",
+        "elapsed": 131.34,
+        "tests": {
+          "pass": 40
+        }
+      },
+      "strand/internal/writer": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 54.591,
+        "tests": {
+          "pass": 61
+        }
+      },
+      "strand/schema": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.016,
+        "tests": {
+          "pass": 1
+        }
+      },
+      "strand/tests/audit/mysql": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 62.224,
+        "tests": {
+          "pass": 3
+        }
+      },
+      "strand/tests/audit/pg": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 45.964,
+        "tests": {
+          "pass": 7
+        }
+      },
+      "strand/tests/checker": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.015,
+        "tests": {
+          "pass": 13
+        }
+      },
+      "strand/tests/experiments/watermark": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 101.454,
+        "tests": {
+          "pass": 3
+        }
+      },
+      "strand/tests/replay": {
+        "file": "replay-rerun.json",
+        "result": "pass",
+        "elapsed": 51.652,
+        "tests": {
+          "pass": 1
+        }
+      },
+      "strand/tools/genload": {
+        "file": "core-all.json",
+        "result": "skip",
+        "elapsed": 0,
+        "tests": {}
+      },
+      "strand/tools/soak": {
+        "file": "core-all.json",
+        "result": "pass",
+        "elapsed": 0.092,
+        "tests": {
+          "pass": 94
+        }
+      },
+      "strand/internal/testutil": {
+        "file": "testutil.json",
+        "result": "skip",
+        "elapsed": 0,
+        "tests": {}
+      }
+    },
+    "package_results": {
+      "skip": 4,
+      "pass": 30
+    },
+    "test_results": {
+      "pass": 910
+    }
+  },
+  "selected_e2e": {
+    "tests": {
+      "pass": 24
+    },
+    "runs": [
+      {
+        "mode": "relaxed",
+        "iteration": 1,
+        "seed": 1793896467143368426,
+        "exit": 0,
+        "seconds": 191.2,
+        "tests": {
+          "pass": 4
+        },
+        "log": "e2e-relaxed-1.json"
+      },
+      {
+        "mode": "relaxed",
+        "iteration": 2,
+        "seed": 1793967817576330754,
+        "exit": 0,
+        "seconds": 206.87,
+        "tests": {
+          "pass": 4
+        },
+        "log": "e2e-relaxed-2.json"
+      },
+      {
+        "mode": "relaxed",
+        "iteration": 3,
+        "seed": 1793957136901575401,
+        "exit": 0,
+        "seconds": 207.0,
+        "tests": {
+          "pass": 4
+        },
+        "log": "e2e-relaxed-3.json"
+      },
+      {
+        "mode": "strict",
+        "iteration": 1,
+        "seed": 1793896467143368426,
+        "exit": 0,
+        "seconds": 443.45,
+        "tests": {
+          "pass": 4
+        },
+        "log": "e2e-strict-1.json"
+      },
+      {
+        "mode": "strict",
+        "iteration": 2,
+        "seed": 1793967817576330754,
+        "exit": 0,
+        "seconds": 600.55,
+        "tests": {
+          "pass": 4
+        },
+        "log": "e2e-strict-2.json"
+      },
+      {
+        "mode": "strict",
+        "iteration": 3,
+        "seed": 1793957136901575401,
+        "exit": 0,
+        "seconds": 541.16,
+        "tests": {
+          "pass": 4
+        },
+        "log": "e2e-strict-3.json"
+      }
+    ]
+  },
+  "race_selected": {
+    "pass": 7
+  },
+  "benchmark_tests": {
+    "pass": 20
+  },
+  "benchmark_race": {
+    "pass": 20
+  },
+  "initial_core": "core-all.json: 4 failing tests, 1 interrupted package and replay build failure; corrected packages rerun in full, original output retained",
+  "full_e2e_all_tests_run_on_fix_branch": false,
+  "benchmark_measurement_run": false,
+  "soak_run": false,
+  "historical_F11_sole_root_cause_confirmed": false,
+  "limitations": [
+    "Full E2E relaxed/strict and release/version matrix still required before merge",
+    "F11 barrier fixed and tested; historical cases lack commit-LSN/applied-set evidence to prove a sole cause",
+    "No performance/soak certification from these correctness tests"
+  ],
+  "race_promote": {
+    "pass": 1
+  },
+  "race_selected_total": {
+    "pass": 8
+  }
+}

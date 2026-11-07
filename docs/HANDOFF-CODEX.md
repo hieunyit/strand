@@ -22,7 +22,7 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 
 ## 1. Repo và nhánh
 
-**2026-11-07 — sửa review local mới:** clone riêng `/home/hellc/strand-review-fixes`, nhánh `agent/review-fixes-20261107`, nền tích hợp `751e5ca` (main local vẫn `9281ffa`). Sửa R01/F11 barrier, R02 fencing, R03 bind snapshot, R04 FK catalog, R05 tracking incomplete, R07 budget holes; test đỏ trên code cũ, đang chạy bộ kiểm định. Không sửa worktree nguồn, spec hay main. Chi tiết/bằng chứng: `reports/REVIEW-FIXES-20261107.md`. Benchmark R06 ở nhánh riêng `agent/review-bench-fix-20261107` commit `c254d59`; chưa chạy benchmark chính thức. **Chưa đề nghị merge khi full E2E hai chế độ trên bản sửa chưa hoàn tất.**
+**2026-11-07 — sửa review local mới:** clone riêng `/home/hellc/strand-review-fixes`, nhánh `agent/review-fixes-20261107`, nền tích hợp `751e5ca` (main local vẫn `9281ffa`). Sửa R01/F11 barrier, R02 fencing, R03 bind snapshot, R04 FK catalog, R05 tracking incomplete, R07 budget holes; test đỏ trên code cũ; build/vet qua, gofmt rỗng, non-E2E 910 test/subtest qua, E2E chọn lọc 24/24 (ba seed mỗi chế độ) qua. Không sửa worktree nguồn, spec hay main. Chi tiết/bằng chứng: `reports/REVIEW-FIXES-20261107.md`. Benchmark R06 ở nhánh riêng `agent/review-bench-fix-20261107` HEAD `872db7d` (gồm `c254d59`); 20 test/subtest thường và 20 với race qua, chưa chạy benchmark chính thức. **Chưa đề nghị merge khi full E2E hai chế độ trên bản sửa chưa hoàn tất.**
 
 
 **Codex đang làm việc B (2026-11-04):** clone riêng `/home/hellc/strand-codex`, nguồn local scratchpad; tiếp tục `agent/schema-init` từ `27c3e1f`; code `efb3b1b` + sửa sequence/default `cdd7f6c`. Đã triển khai sinh/apply DDL ba hướng, CLI, validate và bootstrap/CREATE barrier. Chưa merge/push. Báo cáo đang cập nhật ở `reports/SCHEMA-INIT.md`; chưa được coi là xong trước checklist §9 và full e2e hai chế độ. C–F và Gate 2 vẫn chưa bắt đầu trong phiên Codex.
@@ -80,7 +80,7 @@ Kho chứa các nhánh trên hiện là bản clone làm việc của Claude (`/
 export PATH=$PATH:/usr/local/go/bin GOFLAGS=-buildvcs=false   # go không có trong PATH mặc định
 gofmt -l internal cmd tests tools        # phải rỗng
 go build ./... && go vet ./...
-go test -count=1 $(go list ./... | grep -v tests/e2e)          # 28 package, cần Docker (testcontainers)
+go test -count=1 $(go list ./... | grep -v tests/e2e)          # 34 package ngoài E2E tại 2026-11-07 (30 có test), cần Docker (testcontainers)
 STRAND_E2E_COMMIT_ORDER=relaxed go test -count=1 -v -timeout 240m ./tests/e2e/
 STRAND_E2E_COMMIT_ORDER=strict  go test -count=1 -v -timeout 240m ./tests/e2e/
 ```
@@ -356,7 +356,7 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 - [ ] Không `t.Skip`; không sleep cố định thay cho điều kiện; điều kiện tiền đề của test (ví dụ "snapshot phải chạy dưới tải") được kiểm và báo fail rõ ràng.
 - [ ] E2E tính đúng chạy ở **cả** `relaxed` và `strict`; việc chạm snapshot/pipeline chạy ≥3 lần.
 - [ ] Có ca kill -9 / restart nếu thay đổi có trạng thái bền (plan, checkpoint, state file).
-- [ ] Unit (28 package) + full e2e cả hai chế độ trên **nhánh tích hợp sau merge**, không chỉ trên nhánh tính năng.
+- [ ] Unit toàn bộ package ngoài E2E + full e2e cả hai chế độ trên **nhánh tích hợp sau merge**, không chỉ trên nhánh tính năng.
 - [ ] Ghi số liệu thật: số test qua/lỗi, thời gian, SEED của test lỗi.
 
 **Vận hành / tài liệu**

@@ -2,9 +2,9 @@
 
 ## Phạm vi
 
-Clone riêng `/home/hellc/strand-review-fixes`, nhánh `agent/review-fixes-20261107`, nền tích hợp local `751e5ca869f9e3e70ef13d2c3d9e360be3ca4c4a` (hơn main 181 commit). Không sửa worktree người khác, không sửa spec, không merge/push main. Nhánh benchmark sửa riêng tại `/home/hellc/strand-bench-review`, commit `c254d59` trên `agent/review-bench-fix-20261107`; chưa tích hợp công cụ benchmark vào nhánh production này.
+Clone riêng `/home/hellc/strand-review-fixes`, nhánh `agent/review-fixes-20261107`, nền tích hợp local `751e5ca869f9e3e70ef13d2c3d9e360be3ca4c4a` (hơn main 181 commit). Không sửa worktree người khác, không sửa spec, không merge/push main. Nhánh benchmark sửa riêng tại `/home/hellc/strand-bench-review`, HEAD `872db7d` (gồm `c254d59`) trên `agent/review-bench-fix-20261107`; chưa tích hợp công cụ benchmark vào nhánh production này.
 
-Báo cáo review đầu vào: `/tmp/strand-review-codex/local-all-2026-11-07/REVIEW.md`. Bằng chứng chạy: `/tmp/strand-fix-evidence-20261107/`. Báo cáo này đang được cập nhật khi test hoàn tất; không coi dòng chưa kiểm là pass.
+Báo cáo review đầu vào: `/tmp/strand-review-codex/local-all-2026-11-07/REVIEW.md`. Bằng chứng chạy: `/tmp/strand-fix-evidence-20261107/`. Báo cáo chốt sau khi hoàn tất bộ kiểm định dưới đây. Các phần chưa kiểm được ghi riêng; dữ liệu máy đọc nằm trong `reports/REVIEW-FIXES-20261107-results.json`.
 
 ## Thiết kế và lập luận đúng đắn
 
@@ -38,13 +38,13 @@ Không coi mọi test được regex chọn là regression mới; `TestReview43_
 
 Test có sẵn `internal/governor/governor_test.go` dò MySQL tại IP compose cố định 172.23.0.5, không timeout, và có thể báo AC1 PASS dù DB không kết nối được. Lượt non-E2E mắc ở test đó; đã xác nhận PID/cwd rồi ngắt riêng binary `governor.test` PID 1450532 do lượt chạy này tạo, không ngắt tiến trình E2E của người khác. Lượt core đầu vì vậy có package governor FAIL do interrupt, không được ghi là một lượt full green.
 
-Sửa fixture dùng container MySQL testcontainers riêng (`owned_mysql_test.go`), timeout khởi tạo/kết nối/query rõ, fail khi DB không sẵn sàng, cleanup chỉ container vừa tạo. Không sửa governor production và không dùng t.Skip. Package governor sẽ được chạy lại đầy đủ và báo kết quả riêng. Đây là lỗi test mới tìm được khi thực thi, không phải lỗi đã chứng minh trong datapath. Log interrupt và rerun được giữ cạnh log core.
+Sửa fixture dùng container MySQL testcontainers riêng (`owned_mysql_test.go`), timeout khởi tạo/kết nối/query rõ, fail khi DB không sẵn sàng, cleanup chỉ container vừa tạo. Không sửa governor production và không dùng t.Skip. Package governor đã chạy lại đầy đủ: 27 test/subtest qua trong 22,317 giây. Đây là lỗi test mới tìm được khi thực thi, không phải lỗi đã chứng minh trong datapath. Log interrupt và rerun được giữ cạnh log core.
 
 ## Lỗi pool marker mới được test toàn package phát hiện
 
 Lượt core đầu có lỗi thật `TestPR1_AC1_IndependentSequenceCache1000`: `source still writable after fence`. Đường `PGTargetDriver.fenceMarker` đặt default_transaction_read_only=off rồi `conn.Close()` trả session writable về pool nguồn. Sửa loại connection khỏi pool trên mọi đường thoát, giữ nguyên vị trí và nội dung marker; PR-1 không còn bị phá qua phiên dùng lại. Không đổi CP/RS/CO.
 
-Đã chạy test AC1 qua sau sửa, rồi tạm revert riêng cleanup marker để xác nhận đỏ và khôi phục. Giữ `promote-marker-revert.log` và `promote-marker-green.json`. Toàn package promote sẽ chạy lại; không che lỗi lượt đầu bằng lần chạy xanh sau.
+Đã chạy test AC1 qua sau sửa, rồi tạm revert riêng cleanup marker để xác nhận đỏ và khôi phục. Giữ `promote-marker-revert.log` và `promote-marker-green.json`. Toàn package promote đã chạy lại: 34 test/subtest qua trong 47,204 giây; không che lỗi lượt đầu bằng lần chạy xanh sau.
 
 ## Cô lập fixture replay có DDL
 
@@ -60,21 +60,48 @@ Lượt core đầu có thêm hai lỗi môi trường: `TestPF4_SpoolOverflowTo
 
 ## Ghi chú lượt core đầu
 
-Lượt core đầu không xanh: ngoài các lỗi nêu trên, replay build bị lỗi import vì fixture được sửa trong khi lệnh Go đã nạp đồ thị dependency cũ. Không có replay DDL nào được chạy ở lượt lỗi build đó. Package replay phải chạy lại bằng lệnh mới trên source đã cố định. Không tính lỗi build này là lỗi datapath, cũng không giấu khỏi báo cáo.
+Lượt core đầu không xanh: ngoài các lỗi nêu trên, replay build bị lỗi import vì fixture được sửa trong khi lệnh Go đã nạp đồ thị dependency cũ. Không có replay DDL nào được chạy ở lượt lỗi build đó. Package replay đã chạy lại bằng lệnh mới trên source cố định: qua trong 51,652 giây. Không tính lỗi build này là lỗi datapath, cũng không giấu khỏi báo cáo.
 
 ## Kiểm định
 
-Đang cập nhật kết quả cuối: build/vet đã qua ở lượt đầu; regression chọn lọc, scheduler toàn package và test fence PG thật đã qua. Test chọn lọc race đã qua. Bộ non-E2E đang chạy; E2E chọn lọc chờ chạy tuần tự sau non-E2E, ba seed lịch sử × relaxed/strict. Không dùng t.Skip, không hạ kích thước fixture để biến test lỗi thành pass.
+Kết quả đã có: `go build ./...`, `go vet ./...` qua, `gofmt -l internal cmd tests tools` rỗng trên code commit `5455606`. Non-E2E cuối: **910 test/subtest pass, 0 fail, 0 test skip**; 30 package có test pass, 4 package không có test. Đây là kết quả tổng hợp lượt core đầu và các package được chạy lại đầy đủ sau sửa, không phải khẳng định lệnh core đầu đã xanh. Nguồn: `core-final-summary.json`.
 
-Full E2E của worktree khác đang chạy transaction 50 triệu row. Không dừng/xóa process hoặc container đó. Không lấy kết quả của process ấy làm bằng chứng cho nhánh sửa này. Chưa đủ checklist đề nghị merge trước khi full E2E relaxed/strict trên bản tích hợp sửa được kiểm định.
+Race chọn lọc scheduler/tracking/F11 barrier và fencing: **8 test/subtest pass**, 0 lỗi (`race-final.json`, `promote-race.json`). Benchmark trên nhánh riêng: **20 test/subtest pass, 20 với race**; build/vet toàn repo nhánh benchmark và gofmt đều qua; không đo tải governor.
+
+E2E chọn lọc: **24/24 pass**, 0 fail, 0 skip, ba seed lịch sử ở mỗi chế độ. Mỗi lượt chạy đủ bốn ca: PG snapshot add F11, PK tổng quát dưới tải, resume snapshot sau kill -9 và PK rộng 14 cột × 5.000 row bằng binary thật. Ca PK rộng kiểm audit để bảo đảm đã flush đủ 5.000 row trong một transaction; unit còn kiểm FK cascade và rollback/retry. Không dùng t.Skip, không hạ kích thước fixture để biến test lỗi thành pass.
+
+| Chế độ | Seed | Thời gian lệnh (giây) | Kết quả |
+|---|---:|---:|---|
+| relaxed | 1793896467143368426 | 191.20 | 4/4 pass |
+| relaxed | 1793967817576330754 | 206.87 | 4/4 pass |
+| relaxed | 1793957136901575401 | 207.00 | 4/4 pass |
+| strict | 1793896467143368426 | 443.45 | 4/4 pass |
+| strict | 1793967817576330754 | 600.55 | 4/4 pass |
+| strict | 1793957136901575401 | 541.16 | 4/4 pass |
+
+Thời gian trên là wall-clock của lệnh, gồm build/khởi tạo và dọn container, không phải số đo hiệu năng sản phẩm.
+
+Mô phỏng F11 30 seed cũng qua: 19.449 Txn, 384 Txn lớn spill, 6 lượt hủy, 6.858 flush; 66,86 giây (`core-all.json`).
+
+
+Khi bắt đầu kiểm định có full E2E của worktree khác chạy transaction 50 triệu row. Không dừng/xóa process hoặc container đó, và không lấy kết quả của process ấy làm bằng chứng cho nhánh sửa này. Chưa đủ checklist đề nghị merge trước khi full E2E relaxed/strict trên bản tích hợp sửa được kiểm định.
 
 ## F11 chưa được phép kết luận quá mức
 
-Đã sửa lỗi barrier có phản ví dụ xác định và regression đỏ/xanh. Các log F11 lịch sử thiếu commit LSN của transaction bị thiếu và applied set lúc helper trả về. Chưa thể chứng minh mọi F11 cũ cùng nguyên nhân, hoặc khẳng định root CDC không có lỗi khác. Các lần E2E mới sẽ là bằng chứng bổ sung, không thay cho trace gắn XID/LSN để đóng mọi giả thuyết lịch sử.
+Đã sửa lỗi barrier có phản ví dụ xác định và regression đỏ/xanh. Các log F11 lịch sử thiếu commit LSN của transaction bị thiếu và applied set lúc helper trả về. Chưa thể chứng minh mọi F11 cũ cùng nguyên nhân, hoặc khẳng định root CDC không có lỗi khác. 24 ca E2E mới là bằng chứng bổ sung, không thay cho trace gắn XID/LSN để đóng mọi giả thuyết lịch sử.
 
 ## Vận hành và việc còn lại
 
 - PG target cần TEMPORARY đã được nêu trong docs/USAGE; không thêm quyền mới ngoài cơ chế writer hiện có.
 - Post-seed tracking incomplete trả exit 5 và giữ VerifyPending; người vận hành cần xử lý nguyên nhân trước khi tiếp tục.
-- Cần full E2E hai chế độ trên bản tích hợp sau khi mọi sửa được gộp; chưa benchmark/soak hay ma trận PG16/17/MySQL9.7 trong lượt sửa này.
+- Cần full E2E hai chế độ trên bản tích hợp sau khi mọi sửa được gộp; chưa chạy benchmark/soak hay full E2E ma trận PG16/17/MySQL9.7 trong lượt sửa này; các test audit/integration có sẵn trong non-E2E không thay thế full E2E ma trận.
 - Không tự push main. Các nhánh khác chưa triển khai (SSH/Web UI) không được tính là tính năng đã xong.
+
+## Checklist và tệp bằng chứng
+
+- Gofmt rỗng; build/vet qua; non-E2E đã kiểm hết 34 package, kể cả các package lỗi ban đầu được chạy lại đầy đủ.
+- Mỗi lỗi logic review có regression đỏ trên phần code cũ và xanh sau sửa; log revert giữ nguyên trong thư mục bằng chứng.
+- Snapshot/pipeline có ba lượt E2E mỗi chế độ, gồm kill/restart; các bất biến và thay đổi vận hành được giải thích ở bảng thiết kế.
+- Chưa đủ điều kiện đề nghị merge: full E2E toàn repo relaxed/strict trên bản tích hợp sửa vẫn chưa chạy. Không thay spec, không merge/push main.
+- Các log lỗi ban đầu và output cụ thể nằm trong `core-all.json`, `revert-regressions.log`, `promote-marker-revert-bounded-pool.log`, `replay-isolation-revert.log`; log xanh theo package là `*-rerun.json`, E2E là `e2e-{relaxed,strict}-{1,2,3}.json`.
+- Bản báo cáo ngoài repo: `/tmp/strand-fix-evidence-20261107/REPORT.md`; số liệu tổng hợp: `/tmp/strand-fix-evidence-20261107/RESULTS.json`.
