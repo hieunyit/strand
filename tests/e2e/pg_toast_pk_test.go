@@ -290,7 +290,9 @@ func TestG2_E2E_PGToastPKKillDuringReread(t *testing.T) {
 	}
 	vs.check(t)
 	comparePG(t, src, dst, pgAppTables...)
-	checkPGInvariants(t, dst)
+	// kill -9 trong lúc snapshot (kể cả giữa flush chunk re-read và lưu plan): snapshot có thể ghi lại
+	// phiên bản đã có.
+	checkPGInvariantsSnapshotKilled(t, dst)
 }
 
 // Gate 2 (G2-7, 02 §6/§8, toast_pk.go "Ngân sách"): ưu tiên 30 s của chunk re-read. Khóa chờ đọc lại sớm

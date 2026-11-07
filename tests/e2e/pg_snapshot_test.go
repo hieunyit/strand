@@ -160,7 +160,12 @@ func runPGLogicalSnapshot(t *testing.T, seed int64, kill bool) {
 	}
 	vs.check(t)
 	comparePG(t, src, dst, pgAppTables...)
-	checkPGInvariants(t, dst)
+	if kill {
+		// kill -9 giữa flush chunk và lưu plan: range được đọc lại, snapshot ghi lại phiên bản đã có.
+		checkPGInvariantsSnapshotKilled(t, dst)
+	} else {
+		checkPGInvariants(t, dst)
+	}
 }
 
 // Phase 2 (02 §10): `strand snapshot add` một bảng PG khi stream đang chạy dưới tải, có đổi PK qua

@@ -151,18 +151,63 @@ func pgPreload(t *testing.T, n *pgNode, items, accounts, events int) {
 }
 
 // pgApplyLog: trên target, mỗi lần một phiên bản row (bảng, ver) được ghi thì tăng cnt. Mọi lần ghi
-// ở source đều đặt ver = nextval(...) mới, nên cnt > 1 nghĩa là một Txn bị apply hai lần (CP-2).
+// ở source đều đặt ver = nextval(...) mới, nên cnt > 1 nghĩa là một phiên bản bị ghi hai lần (CP-2).
+//
+// Lần ghi được phân loại theo transaction ghi nó (trigger DEFERRED, chạy lúc commit): transaction của
+// writer luôn cập nhật _strand_worker_delta / _strand_checkpoint trong CÙNG transaction (CP-1) — xmin
+// của row đó bằng xid hiện tại — nên cdc đếm lần apply của writer; snap đếm lần ghi khác (flush chunk
+// snapshot, hoặc ghi tay của test). first_cdc: lần ghi ĐẦU TIÊN là của writer.
+//
+// Vì sao tách: kill -9 giữa lúc flush chunk snapshot (đã commit ở target) và lúc lưu plan (file state
+// local) để lại range đó "Chưa đọc" trong plan; lần chạy sau dọn rồi đọc lại range — ghi lại đúng các
+// phiên bản đã có (dữ liệu vẫn đúng, RS-1/RS-2). Đó là ghi lại của snapshot, không phải Txn bị apply hai
+// lần; xem applyLogDup.
 var pgApplyLogSQL = []string{
-	"CREATE TABLE public.apply_log (tbl text NOT NULL, ver bigint NOT NULL, cnt int NOT NULL DEFAULT 1, PRIMARY KEY (tbl, ver))",
+	`CREATE TABLE public.apply_log (tbl text NOT NULL, ver bigint NOT NULL, cnt int NOT NULL DEFAULT 1,
+		cdc int NOT NULL DEFAULT 0, snap int NOT NULL DEFAULT 0, first_cdc boolean NOT NULL DEFAULT false,
+		PRIMARY KEY (tbl, ver))`,
 	`CREATE FUNCTION public.log_apply() RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE
+		cur text := (txid_current() % 4294967296)::text;
+		is_cdc boolean := false;
 	BEGIN
-		INSERT INTO public.apply_log (tbl, ver) VALUES (TG_TABLE_NAME, NEW.ver)
-		ON CONFLICT (tbl, ver) DO UPDATE SET cnt = public.apply_log.cnt + 1;
+		IF to_regclass('_strand_worker_delta') IS NOT NULL THEN
+			EXECUTE 'SELECT EXISTS (SELECT 1 FROM _strand_worker_delta WHERE xmin::text = $1)' INTO is_cdc USING cur;
+		END IF;
+		IF NOT is_cdc AND to_regclass('_strand_checkpoint') IS NOT NULL THEN
+			EXECUTE 'SELECT EXISTS (SELECT 1 FROM _strand_checkpoint WHERE xmin::text = $1)' INTO is_cdc USING cur;
+		END IF;
+		INSERT INTO public.apply_log AS l (tbl, ver, cdc, snap, first_cdc)
+		VALUES (TG_TABLE_NAME, NEW.ver, is_cdc::int, (NOT is_cdc)::int, is_cdc)
+		ON CONFLICT (tbl, ver) DO UPDATE SET cnt = l.cnt + 1, cdc = l.cdc + EXCLUDED.cdc, snap = l.snap + EXCLUDED.snap;
 		RETURN NEW;
 	END $$`,
-	"CREATE TRIGGER t_items AFTER INSERT OR UPDATE ON app.items FOR EACH ROW EXECUTE FUNCTION public.log_apply()",
-	"CREATE TRIGGER t_accounts AFTER INSERT OR UPDATE ON app.accounts FOR EACH ROW EXECUTE FUNCTION public.log_apply()",
-	"CREATE TRIGGER t_events AFTER INSERT OR UPDATE ON app.events FOR EACH ROW EXECUTE FUNCTION public.log_apply()",
+	"CREATE CONSTRAINT TRIGGER t_items AFTER INSERT OR UPDATE ON app.items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.log_apply()",
+	"CREATE CONSTRAINT TRIGGER t_accounts AFTER INSERT OR UPDATE ON app.accounts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.log_apply()",
+	"CREATE CONSTRAINT TRIGGER t_events AFTER INSERT OR UPDATE ON app.events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.log_apply()",
+}
+
+// applyLogDup: một phiên bản row (cdc lần apply của writer, snap lần ghi khác, firstCDC = lần ghi đầu là
+// của writer) có phải ghi trùng (CP-2) không.
+//
+// Mặc định (không kill giữa snapshot): mỗi phiên bản đúng một lần ghi, bất kể đường nào.
+//
+// snapshotRewrites (test kill -9 trong lúc snapshot): range đã flush mà plan chưa kịp lưu được đọc lại
+// sau restart, nên snapshot có thể ghi lại phiên bản đã có — kể cả phiên bản writer đã apply cho range
+// đó trong khoảng giữa flush và lưu plan (Txn sau high watermark của lần flush trước). Vẫn là lỗi:
+//   - writer apply một phiên bản hơn một lần (Txn bị apply lại);
+//   - writer apply một phiên bản mà snapshot đã ghi TRƯỚC đó: phiên bản nằm trong ảnh snapshot (Txn ≤
+//     high watermark của chunk) thì Txn đó không bao giờ được apply lại cho range (RS-1/RS-2). Lần flush
+//     đầu chỉ chứa Txn ≤ high của nó, writer chỉ apply Txn sau high, và lần đọc lại sau restart chỉ đến
+//     sau cả hai — thứ tự hợp lệ duy nhất có cả hai đường là writer trước, snapshot sau.
+func applyLogDup(cdc, snap int, firstCDC, snapshotRewrites bool) bool {
+	if !snapshotRewrites {
+		return cdc+snap > 1
+	}
+	if cdc > 1 {
+		return true
+	}
+	return cdc == 1 && !firstCDC
 }
 
 // setupPGPair dựng source/target PG→PG: lược đồ, preload giống hệt, publication, trigger đếm apply
@@ -575,26 +620,60 @@ func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) stri
 // checkPGInvariants: cột TOAST không bao giờ NULL ở target; không phiên bản row nào bị ghi hai lần.
 func checkPGInvariants(t *testing.T, dst *pgNode) {
 	t.Helper()
-	var nulls, dups, logged int
+	checkPGInvariantsMode(t, dst, false)
+}
+
+// checkPGInvariantsSnapshotKilled như checkPGInvariants cho test kill -9 trong lúc snapshot: chấp nhận
+// snapshot ghi lại phiên bản đã có khi đọc lại range đã flush mà plan chưa kịp lưu (applyLogDup).
+func checkPGInvariantsSnapshotKilled(t *testing.T, dst *pgNode) {
+	t.Helper()
+	checkPGInvariantsMode(t, dst, true)
+}
+
+func checkPGInvariantsMode(t *testing.T, dst *pgNode, snapshotRewrites bool) {
+	t.Helper()
+	var nulls, logged int
 	if err := dst.DB.QueryRow("SELECT count(*) FROM app.items WHERE doc IS NULL").Scan(&nulls); err != nil {
 		t.Fatal(err)
 	}
 	if nulls != 0 {
 		t.Fatalf("TOAST column doc is NULL on %d target rows", nulls)
 	}
-	if err := dst.DB.QueryRow("SELECT count(*) FILTER (WHERE cnt > 1), count(*) FROM public.apply_log").Scan(&dups, &logged); err != nil {
+	if err := dst.DB.QueryRow("SELECT count(*) FROM public.apply_log").Scan(&logged); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := dst.DB.Query("SELECT tbl, ver, cnt, cdc, snap, first_cdc FROM public.apply_log WHERE cnt > 1 ORDER BY tbl, ver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var dups, rewrites int
+	var ex []string
+	for rows.Next() {
+		var tb string
+		var v, c, cdc, snap int64
+		var firstCDC bool
+		if err := rows.Scan(&tb, &v, &c, &cdc, &snap, &firstCDC); err != nil {
+			t.Fatal(err)
+		}
+		if !applyLogDup(int(cdc), int(snap), firstCDC, snapshotRewrites) {
+			rewrites++
+			continue
+		}
+		dups++
+		if len(ex) < 10 {
+			ex = append(ex, fmt.Sprintf("%s ver=%d x%d (writer %d, snapshot/other %d, first by writer %v)", tb, v, c, cdc, snap, firstCDC))
+		}
+	}
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	if dups != 0 {
-		rows, _ := dst.DB.Query("SELECT tbl, ver, cnt FROM public.apply_log WHERE cnt > 1 LIMIT 10")
-		var ex []string
-		for rows != nil && rows.Next() {
-			var tb string
-			var v, c int64
-			_ = rows.Scan(&tb, &v, &c)
-			ex = append(ex, fmt.Sprintf("%s ver=%d x%d", tb, v, c))
-		}
 		t.Fatalf("duplicate apply: %d row versions written more than once on target (CP-2), e.g. %v", dups, ex)
+	}
+	if rewrites > 0 {
+		t.Logf("invariants: doc never NULL, %d row versions, none applied twice by the writer; %d re-written by the snapshot re-read after kill -9", logged, rewrites)
+		return
 	}
 	t.Logf("invariants: doc never NULL, %d row versions applied exactly once", logged)
 }

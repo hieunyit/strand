@@ -854,6 +854,10 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			err = flush()
 		}
 		if err == nil {
+			// Plan lưu ở file state local, không cùng transaction với flush ở target: crash giữa hai bước
+			// để range này "Chưa đọc" trong plan, lần chạy sau dọn rồi đọc lại nó (xem register) — ghi lại
+			// các phiên bản đã có, dữ liệu vẫn đúng (RS-1/RS-2). Chấp nhận có chủ ý; test e2e phân biệt ghi
+			// lại của snapshot với Txn bị apply hai lần (applyLogDup, tests/e2e).
 			err = savePlan(chunk)
 		}
 		if err == nil && chunk.KeySet != nil {
