@@ -4,43 +4,7 @@ import (
 	"context"
 	"sync"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
-
-var (
-	metricsInitOnce sync.Once
-	zoneMetric      prometheus.Gauge
-	pressureMetric  *prometheus.GaugeVec
-	breakerMetric   prometheus.Gauge
-	rateMetric      *prometheus.GaugeVec
-)
-
-func initGovernorMetrics() {
-	metricsInitOnce.Do(func() {
-		zoneMetric = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "strand_governor_zone",
-			Help: "Current governor zone (0 Green, 1 Yellow, 2 Red)",
-		})
-		pressureMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "strand_governor_pressure",
-			Help: "Current governor pressure by signal",
-		}, []string{"signal"})
-		breakerMetric = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "strand_breaker_open",
-			Help: "Circuit breaker open status (0 closed, 1 open)",
-		})
-		rateMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "strand_governor_rate_tokens",
-			Help: "Governor token rate per resource",
-		}, []string{"resource"})
-
-		_ = prometheus.Register(zoneMetric)
-		_ = prometheus.Register(pressureMetric)
-		_ = prometheus.Register(breakerMetric)
-		_ = prometheus.Register(rateMetric)
-	})
-}
 
 // OnoffConfig cấu hình cho Governor onoff theo spec/02 §7, §10.
 type OnoffConfig struct {
@@ -70,7 +34,6 @@ type OnoffGovernor struct {
 
 // NewOnoffGovernor khởi tạo OnoffGovernor mới.
 func NewOnoffGovernor(cfg OnoffConfig) *OnoffGovernor {
-	initGovernorMetrics()
 	if cfg.SoftRate <= 0 {
 		cfg.SoftRate = 1000.0
 	}
@@ -178,23 +141,8 @@ func (g *OnoffGovernor) Tick(ctx context.Context) error {
 		}
 	}
 
-	// 5. Cập nhật metric Prometheus
-	if zoneMetric != nil {
-		zoneMetric.Set(float64(g.currentZone))
-	}
-	if pressureMetric != nil {
-		pressureMetric.WithLabelValues("replica_lag").Set(filteredPressure)
-	}
-	if breakerMetric != nil {
-		if isBreakerOpen {
-			breakerMetric.Set(1)
-		} else {
-			breakerMetric.Set(0)
-		}
-	}
-	if rateMetric != nil {
-		rateMetric.WithLabelValues("iops").Set(g.currentRate)
-	}
+	// Metric governor (zone/pressure/rate/breaker) do pipeline xuất qua registry
+	// riêng của pipeline (internal/metrics); governor không tự đăng ký metric.
 
 	return nil
 }
