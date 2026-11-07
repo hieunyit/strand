@@ -4,6 +4,7 @@ package assemble
 import (
 	"context"
 	"fmt"
+	"strand/internal/txntrace"
 	"strings"
 	"sync"
 
@@ -462,6 +463,7 @@ func (a *Assembler) finishTxn() (*model.Txn, error) {
 		return nil, err
 	}
 	res := a.currentTxn
+	txntrace.Put(9, res.SourcePos.LSN, res.XID, 0, res.TotalRows(), int64(len(res.Rows)))
 
 	a.inTxn = false
 	a.sawBegin = false

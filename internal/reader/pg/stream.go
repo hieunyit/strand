@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"fmt"
+	"strand/internal/txntrace"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -236,6 +237,13 @@ func (st *streamState) handle(data []byte) error {
 		}
 		cur := st.cur
 		st.cur = nil
+		{
+			sk := int64(0)
+			if cur.skip {
+				sk = 1
+			}
+			txntrace.Put(8, cur.pos.LSN, uint64(cur.xid), 0, sk, 0)
+		}
 		if !cur.skip {
 			if err := st.emit(reader.Event{Type: reader.EventQuery, Query: "COMMIT", Pos: cur.pos, Timestamp: cur.ts, XID: uint64(cur.xid)}); err != nil {
 				return err
@@ -282,6 +290,21 @@ func (st *streamState) handle(data []byte) error {
 		delete(st.streams, m.Xid)
 		defer st.dropBuf(buf)
 		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.CommitLSN)}
+		{
+			var nev int64 = -1
+			var sp int64
+			if buf != nil {
+				nev = int64(buf.log.len())
+				if buf.log.spilled() {
+					sp = 1
+				}
+			}
+			c := int64(0)
+			if st.contains(pos) {
+				c = 1
+			}
+			txntrace.Put(7, pos.LSN, uint64(m.Xid), uint64(c), nev, sp)
+		}
 		if !st.contains(pos) {
 			// Txn streaming luôn được server stream lại từ đầu sau restart, nên buf rỗng chỉ khi Txn
 			// không có thay đổi nào thuộc publication.
