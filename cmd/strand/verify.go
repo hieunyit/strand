@@ -126,7 +126,16 @@ func newVerifyCmd() *cobra.Command {
 					return err
 				}
 			}
-			waiter := applyWaiter(running, src, dst, srcEngine, dstEngine, cfg.Name)
+			// --replica-dsn với source PG: replica là standby, không ghi được watermark của bước chờ — dùng
+			// source.dsn của pipeline (primary) để đọc vị trí WAL và ghi watermark (verify/recheck.go).
+			var primary *sql.DB
+			if running && srcEngine == model.EnginePG && replicaDSN != "" {
+				if primary, err = sql.Open(driverOf(srcEngine), cfg.Source.DSN); err != nil {
+					return err
+				}
+				defer primary.Close()
+			}
+			waiter := applyWaiter(running, src, primary, dst, srcEngine, dstEngine, cfg.Name)
 
 			target := func(x model.TableID) model.TableID {
 				if r, ok := cfg.Tables.Rename[x.String()]; ok {
@@ -391,12 +400,13 @@ func pipelineRunning(ctx context.Context, dst *sql.DB, engine model.Engine, pipe
 }
 
 // applyWaiter: chờ target apply tới vị trí log của source khi kiểm lại row lệch — chỉ khi pipeline đang
-// chạy (nil = bỏ bước chờ).
-func applyWaiter(running bool, src, dst *sql.DB, srcEngine, dstEngine model.Engine, pipelineID string) verify.ApplyWaiter {
+// chạy (nil = bỏ bước chờ). primary (tùy chọn, source PG): primary của cluster source khi src là
+// replica (--replica-dsn) — nơi ghi watermark.
+func applyWaiter(running bool, src, primary, dst *sql.DB, srcEngine, dstEngine model.Engine, pipelineID string) verify.ApplyWaiter {
 	if !running {
 		return nil
 	}
-	return &verify.LogApplyWaiter{Source: src, Meta: dst, PipelineID: pipelineID, SourceEngine: srcEngine, TargetEngine: dstEngine}
+	return &verify.LogApplyWaiter{Source: src, Primary: primary, Meta: dst, PipelineID: pipelineID, SourceEngine: srcEngine, TargetEngine: dstEngine}
 }
 
 // verifySampleCanonical: verify --mode sample cho cặp engine khác MySQL→MySQL (PK một cột số nguyên).

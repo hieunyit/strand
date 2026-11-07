@@ -20,8 +20,19 @@ package verify
 //     bảng ngoài publication, pgoutput bỏ Txn rỗng) thì lwd không bao giờ tới P. Vì vậy ghi một
 //     watermark (pg_logical_emit_message không transactional, prefix strand_watermark — cùng cơ chế
 //     snapshot logic): reader phát nó thành Txn rỗng có LSN ≥ P, lwd được dời qua P. Watermark được
-//     ghi lại mỗi giây trong lúc chờ (reader bỏ message rơi vào giữa một Txn đang giải mã). Source là
-//     standby (pg_is_in_recovery): P = pg_last_wal_replay_lsn(), không ghi được watermark.
+//     ghi lại mỗi giây trong lúc chờ (reader bỏ message rơi vào giữa một Txn đang giải mã).
+//     Source đọc là standby (pg_is_in_recovery; vd. `verify --replica-dsn`) — standby không ghi được
+//     watermark:
+//       * có Primary (kết nối primary của cùng cluster, vd. source.dsn của pipeline): P =
+//         pg_current_wal_insert_lsn() của PRIMARY, đọc SAU S1, và watermark ghi trên primary. Đúng vì
+//         standby chỉ replay WAL primary đã ghi: mọi Txn S1 thấy trên standby có commit LSN ≤ replay LSN
+//         ≤ insert LSN hiện tại của primary; watermark trên primary đi tới reader của pipeline (đọc slot
+//         ở primary hoặc ở standby đã replay tới đó) nên lwd được dời qua P kể cả khi source rảnh.
+//       * không có Primary: P = pg_last_wal_replay_lsn() của standby. lwd chỉ tới P nếu có Txn của
+//         publication commit ở/ sau P — source rảnh thì không bao giờ. Không suy được "đã theo kịp" từ
+//         ngoài pipeline (WAL giữa lwd và P có thể chỉ là record không transactional, hoặc là Txn đã gửi
+//         mà chưa apply: hai trường hợp không phân biệt được bằng SQL), nên chỉ chờ StandbyGrace (mặc
+//         định 10s, đủ cho source đang ghi) rồi lỗi ngay với hướng dẫn, không chờ hết Limit.
 
 import (
 	"context"
@@ -79,6 +90,9 @@ type ApplyMark struct {
 	gtid string // source MySQL: gtid_executed
 	lsn  uint64 // source PG
 	text string // dạng in được của vị trí (thông báo lỗi, nội dung watermark)
+	// standby: P là replay LSN của standby, không có watermark nào được ghi (không có Primary) — chờ
+	// tối đa StandbyGrace (xem đầu file).
+	standby bool
 }
 
 // ApplyWaiter chờ target apply tới vị trí log của source (bước 2 của kiểm lại).
@@ -99,9 +113,21 @@ type LogApplyWaiter struct {
 	TargetEngine model.Engine
 	Limit        time.Duration // tối đa chờ một mark (mặc định 2 phút)
 	Poll         time.Duration // chu kỳ đọc lại tập đã apply (mặc định 100ms)
+	// Primary (tùy chọn, source PG): primary của cluster source, dùng để đọc P và ghi watermark khi
+	// Source là standby (xem đầu file). nil: không có.
+	Primary *sql.DB
+	// StandbyGrace: tối đa chờ một mark khi Source là standby và không có Primary (mặc định 10s).
+	StandbyGrace time.Duration
 
-	pgVersion int // server_version_num của source PG (0 = chưa đọc)
+	// load (test): thay loadApplied đọc từ Meta.
+	load func(ctx context.Context) (checkpoint.AppliedSet, error)
+
+	pgVersion int  // server_version_num của nơi ghi watermark (0 = chưa đọc)
+	primaryOK bool // đã kiểm Primary là primary cùng cluster với Source
 }
+
+// DefaultStandbyGrace: StandbyGrace mặc định.
+const DefaultStandbyGrace = 10 * time.Second
 
 func (w *LogApplyWaiter) limit() time.Duration {
 	if w.Limit > 0 {
@@ -117,6 +143,18 @@ func (w *LogApplyWaiter) poll() time.Duration {
 	return 100 * time.Millisecond
 }
 
+// waitLimit: thời gian chờ tối đa cho mark m — ngắn (StandbyGrace) khi không thể ghi watermark.
+func (w *LogApplyWaiter) waitLimit(m ApplyMark) time.Duration {
+	if !m.standby {
+		return w.limit()
+	}
+	g := w.StandbyGrace
+	if g <= 0 {
+		g = DefaultStandbyGrace
+	}
+	return min(g, w.limit())
+}
+
 // Mark — xem ApplyWaiter.
 func (w *LogApplyWaiter) Mark(ctx context.Context) (ApplyMark, error) {
 	if w.SourceEngine != model.EnginePG {
@@ -127,29 +165,69 @@ func (w *LogApplyWaiter) Mark(ctx context.Context) (ApplyMark, error) {
 		g = strings.ReplaceAll(g, "\n", "")
 		return ApplyMark{gtid: g, text: g}, nil
 	}
-	var standby bool
-	var s string
-	if err := w.Source.QueryRowContext(ctx, `SELECT pg_is_in_recovery(),
-		(CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_insert_lsn() END)::text`).Scan(&standby, &s); err != nil {
+	standby, s, err := pgPosition(ctx, w.Source)
+	if err != nil {
 		return ApplyMark{}, fmt.Errorf("read source WAL position: %w", err)
+	}
+	db := w.Source
+	if standby && w.Primary != nil {
+		if err := w.checkPrimary(ctx); err != nil {
+			return ApplyMark{}, err
+		}
+		// Đọc P ở primary SAU khi đã đọc vị trí standby (và sau S1): P ≥ replay LSN của standby.
+		if _, s, err = pgPosition(ctx, w.Primary); err != nil {
+			return ApplyMark{}, fmt.Errorf("read primary WAL position: %w", err)
+		}
+		db, standby = w.Primary, false
 	}
 	l, err := checkpoint.ParseLSN(s)
 	if err != nil {
 		return ApplyMark{}, err
 	}
-	m := ApplyMark{lsn: l, text: s}
+	m := ApplyMark{lsn: l, text: s, standby: standby}
 	if !standby {
-		if err := w.emitWatermark(ctx, m); err != nil {
+		if err := w.emitWatermark(ctx, db, m); err != nil {
 			return ApplyMark{}, err
 		}
 	}
 	return m, nil
 }
 
-func (w *LogApplyWaiter) emitWatermark(ctx context.Context, m ApplyMark) error {
+// pgPosition: (là standby, vị trí WAL dạng text) — insert LSN trên primary, replay LSN trên standby.
+func pgPosition(ctx context.Context, db *sql.DB) (bool, string, error) {
+	var standby bool
+	var s string
+	err := db.QueryRowContext(ctx, `SELECT pg_is_in_recovery(),
+		(CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_insert_lsn() END)::text`).Scan(&standby, &s)
+	return standby, s, err
+}
+
+// checkPrimary: Primary không được là standby, và (nếu đọc được pg_control_system) cùng cluster với
+// Source — watermark ghi vào cluster khác không bao giờ tới reader của pipeline.
+func (w *LogApplyWaiter) checkPrimary(ctx context.Context) error {
+	if w.primaryOK {
+		return nil
+	}
+	var rec bool
+	if err := w.Primary.QueryRowContext(ctx, "SELECT pg_is_in_recovery()").Scan(&rec); err != nil {
+		return fmt.Errorf("verify: read primary state: %w", err)
+	}
+	if rec {
+		return fmt.Errorf("verify: both the read connection and the source primary connection are PostgreSQL standbys; the strand_watermark message can only be written on the primary")
+	}
+	var a, b string
+	if w.Source.QueryRowContext(ctx, "SELECT system_identifier::text FROM pg_control_system()").Scan(&a) == nil &&
+		w.Primary.QueryRowContext(ctx, "SELECT system_identifier::text FROM pg_control_system()").Scan(&b) == nil && a != b {
+		return fmt.Errorf("verify: the standby used for reads (system_identifier %s) is not a replica of the source primary (%s)", a, b)
+	}
+	w.primaryOK = true
+	return nil
+}
+
+func (w *LogApplyWaiter) emitWatermark(ctx context.Context, db *sql.DB, m ApplyMark) error {
 	if w.pgVersion == 0 {
 		var v string
-		if err := w.Source.QueryRowContext(ctx, "SHOW server_version_num").Scan(&v); err != nil {
+		if err := db.QueryRowContext(ctx, "SHOW server_version_num").Scan(&v); err != nil {
 			return fmt.Errorf("read source server_version_num: %w", err)
 		}
 		n, err := strconv.Atoi(strings.TrimSpace(v))
@@ -158,10 +236,13 @@ func (w *LogApplyWaiter) emitWatermark(ctx context.Context, m ApplyMark) error {
 		}
 		w.pgVersion = n
 	}
-	return snapshot.EmitPGWatermark(ctx, w.Source, w.pgVersion, "verify "+m.text)
+	return snapshot.EmitPGWatermark(ctx, db, w.pgVersion, "verify "+m.text)
 }
 
 func (w *LogApplyWaiter) loadApplied(ctx context.Context) (checkpoint.AppliedSet, error) {
+	if w.load != nil {
+		return w.load(ctx)
+	}
 	if w.TargetEngine == model.EnginePG {
 		return checkpoint.LoadAppliedSnapshotPG(ctx, w.Meta, w.PipelineID, w.SourceEngine)
 	}
@@ -193,7 +274,8 @@ func (m ApplyMark) missing(engine model.Engine, applied checkpoint.AppliedSet) (
 
 // Wait — xem ApplyWaiter.
 func (w *LogApplyWaiter) Wait(ctx context.Context, m ApplyMark) error {
-	deadline := time.Now().Add(w.limit())
+	limit := w.waitLimit(m)
+	deadline := time.Now().Add(limit)
 	lastMark := time.Now()
 	for {
 		applied, err := w.loadApplied(ctx)
@@ -208,9 +290,13 @@ func (w *LogApplyWaiter) Wait(ctx context.Context, m ApplyMark) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("verify: target did not apply %s within %s", miss, w.limit())
+			if m.standby {
+				return fmt.Errorf("verify: target did not apply %s within %s, and catch-up cannot be proven: the PostgreSQL source used for reads is a standby (pg_is_in_recovery), where the strand_watermark message cannot be written, so on an idle source the pipeline never advances to the standby replay LSN; give the primary for the watermark (strand verify: keep source.dsn = primary and pass the standby with --replica-dsn) or retry while the source is writing",
+					miss, limit)
+			}
+			return fmt.Errorf("verify: target did not apply %s within %s", miss, limit)
 		}
-		if w.SourceEngine == model.EnginePG && time.Since(lastMark) >= time.Second {
+		if w.SourceEngine == model.EnginePG && !m.standby && time.Since(lastMark) >= time.Second {
 			// Watermark trước có thể bị reader bỏ (rơi vào giữa một Txn): ghi lại. Lỗi (vd. source vừa
 			// thành standby) không chặn việc chờ.
 			_, _ = w.Mark(ctx)
