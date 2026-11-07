@@ -341,12 +341,17 @@ func (p *Pipeline) initialPositionPG(ctx context.Context, applied checkpoint.App
 				fmt.Sprintf("invalid start LSN %q for a PostgreSQL source (want X/Y): %v", p.opts.StartAt, err), err)
 		}
 		set := checkpoint.NewPGAppliedSet(lsn)
+		// Dữ liệu đã có sẵn ở target: verify sau seed bắt buộc trước khi chuyển sang synced (02 §9), như
+		// MySQL --start-at.
+		if err := p.state.SetVerifyPending(true); err != nil {
+			return nil, err
+		}
 		for id := range p.tables {
 			if err := p.state.SetDone(id.String(), true); err != nil {
 				return nil, err
 			}
 		}
-		p.log.Warn("start-at: target data is assumed to match the source at this LSN; automatic post-seed verify is MySQL→MySQL only, run `strand verify --mode full`",
+		p.log.Warn("start-at: target data is assumed to match the source at this LSN; post-seed verify runs after catch-up",
 			"lsn", checkpoint.FormatLSN(lsn))
 		return set, p.writeGlobal(ctx, set.String())
 	}
@@ -430,6 +435,11 @@ func (p *Pipeline) startFromSeedPG(ctx context.Context) (checkpoint.AppliedSet, 
 	for id := range p.tables {
 		ids = append(ids, id)
 	}
+	// Verify sau seed (02 §9): chỉ chuyển sang synced khi mẫu ~1% và khóa đã chạm trong cửa sổ CDC đầu
+	// tiên đều 0 lệch (postSeedVerify, sau catch-up và sau snapshot logic của bảng không có trong seed).
+	if err := p.state.SetVerifyPending(true); err != nil {
+		return nil, err
+	}
 	for id, done := range pgSeedTablesDone(&m, ids) {
 		if err := p.state.SetDone(id.String(), done); err != nil {
 			return nil, err
@@ -441,7 +451,6 @@ func (p *Pipeline) startFromSeedPG(ctx context.Context) (checkpoint.AppliedSet, 
 	set := checkpoint.NewPGAppliedSet(lsn - 1)
 	p.log.Info("start from PostgreSQL seed", "kind", m.Kind, "p", checkpoint.FormatLSN(lsn), "slot", slot,
 		"source_identity", m.SourceIdentity)
-	p.log.Warn("automatic post-seed verify is MySQL→MySQL only; run `strand verify --mode full` for this pipeline after catch-up")
 	return set, p.writeGlobal(ctx, set.String())
 }
 

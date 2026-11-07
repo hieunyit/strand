@@ -307,6 +307,7 @@ func TestP2_E2E_PGSeedExportStartAtSeed(t *testing.T) {
 	if code := p.stop(t); code != 0 {
 		t.Fatalf("first run exit %d\n%s", code, p.tail())
 	}
+	firstOut := p.output.String()
 	p = startStrand(t, cfgPath)
 	time.Sleep(5 * time.Second)
 	wl.Stop()
@@ -319,7 +320,16 @@ func TestP2_E2E_PGSeedExportStartAtSeed(t *testing.T) {
 	comparePG(t, src, dst, pgAppTables...)
 	checkPGInvariants(t, dst)
 
-	// Verify sau seed của PG chưa tự động: strand log rõ và verify --mode full báo 0 lệch.
+	// Verify sau seed tự động cho PG→PG (02 §9): pipeline chỉ synced sau khi post-seed verify báo 0 lệch
+	// (trạng thái verify pending giữ qua restart, nên lượt chạy nào cũng có thể là lượt verify).
+	all := firstOut + p.output.String()
+	if !strings.Contains(all, "post-seed verify started") || !strings.Contains(all, "post-seed verify passed: pipeline synced") {
+		t.Fatalf("post-seed verify did not run/pass for the PG seed\n%s", p.tail())
+	}
+	if strings.Contains(all, "MySQL→MySQL only") {
+		t.Fatalf("stale MySQL→MySQL-only post-seed warning\n%s", p.tail())
+	}
+	// Đối chiếu thêm: verify --mode full báo 0 lệch.
 	for _, tb := range []string{"app.items", "app.accounts", "app.events"} {
 		vout, vcode := runStrandCLI(t, 5*time.Minute, "verify", "-c", cfgPath, "--mode", "full", "--table", tb)
 		if vcode != 0 {
