@@ -15,8 +15,12 @@ import (
 // như VerifyRanges nhưng range là cận tuple PK (snapshot.MySQLKeySQL) và row được định danh bằng khóa mã
 // hóa; kiểm lại một row nghi lệch bằng điều kiện "(PK) = (giá trị)".
 
-// KeyRange là range [Lo, Hi] theo tuple PK.
-type KeyRange struct{ Lo, Hi snapshot.Bound }
+// KeyRange là range [Lo, Hi] theo tuple PK. All: mọi row của bảng (Lo/Hi bỏ qua) — mẫu của bảng source
+// rỗng, để bắt row thừa ở target.
+type KeyRange struct {
+	Lo, Hi snapshot.Bound
+	All    bool
+}
 
 type keyedRow struct {
 	img   string
@@ -75,7 +79,13 @@ func (v *LiveVerifier) VerifyKeyRanges(ctx context.Context, t model.TableID, cod
 	dq := snapshot.MySQLKeySQL{Table: v.target(t), Codec: codec}
 	for _, r := range ranges {
 		rep.RangesChecked++
-		w, a, err := sq.RangeCond(r.Lo, r.Hi)
+		cond := func(q snapshot.MySQLKeySQL) (string, []any, error) {
+			if r.All {
+				return "1 = 1", nil, nil
+			}
+			return q.RangeCond(r.Lo, r.Hi)
+		}
+		w, a, err := cond(sq)
 		if err != nil {
 			return nil, err
 		}
@@ -83,7 +93,7 @@ func (v *LiveVerifier) VerifyKeyRanges(ctx context.Context, t model.TableID, cod
 		if err != nil {
 			return nil, err
 		}
-		w, a, err = dq.RangeCond(r.Lo, r.Hi)
+		w, a, err = cond(dq)
 		if err != nil {
 			return nil, err
 		}

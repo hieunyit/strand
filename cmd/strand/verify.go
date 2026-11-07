@@ -255,11 +255,10 @@ func newVerifyCmd() *cobra.Command {
 			pk := pkCols[0]
 
 			if srcEngine != model.EngineMySQL || dstEngine != model.EngineMySQL {
-				// PG→PG, MySQL→PG: so chuỗi chính tắc (verify.MerkleVerifier.VerifyRanges), chỉ PK một cột số
-				// nguyên.
+				// PG→PG, MySQL→PG: so chuỗi chính tắc (verify.MerkleVerifier) — PK một cột số nguyên theo range
+				// số, PK tổng quát theo range tuple PK.
 				if !intPK {
-					return exitcode.New("invalid_mode", exitcode.InvalidSyntax, fmt.Sprintf(
-						"verify --mode sample from %s to %s needs a single integer primary key (%s has %s); use --mode full", srcEngine, dstEngine, id, strings.Join(pkCols, ",")), nil)
+					return verifySampleKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, cfg.Name, waiter, rate, repair == "fix" && !dryRun)
 				}
 				return verifySampleCanonical(cmd, src, dst, srcEngine, dstEngine, id, pk, target, cfg.Name, waiter, rate, repair == "fix" && !dryRun)
 			}
@@ -430,10 +429,11 @@ func verifySampleCanonical(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstE
 		fmt.Sprintf("%d mismatched rows in %s (pk %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), ",")), nil)
 }
 
-// verifyFullKeys: full verify theo tuple PK (việc C) sau khi kiểm hai phía cùng thứ tự khóa.
-func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
-	pkCols []string, rate float64, pipelineID string, waiter verify.ApplyWaiter) (*verify.FullVerifyReport, error) {
-	ctx := cmd.Context()
+// verifyKeyCodecs: codec PK hai phía của bảng PK tổng quát (việc C) đã kiểm cùng thứ tự khóa. exact: cặp
+// MySQL→PG sắp khóa khác thứ tự nhưng verify theo khóa chính xác được (Gate 2 "_ci → C",
+// verify/merkle_cross.go) — chỉ full verify làm được, không so theo range. what: tên thao tác trong lỗi.
+func verifyKeyCodecs(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
+	pkCols []string, what string) (sc, dc *snapshot.PKCodec, exact bool, err error) {
 	codecOf := func(db *sql.DB, engine model.Engine, t model.TableID) (*snapshot.PKCodec, error) {
 		if engine == model.EnginePG {
 			return snapshot.PGPKCodec(ctx, db, t, pkCols)
@@ -441,17 +441,14 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 		return snapshot.MySQLPKCodec(ctx, db, t, pkCols)
 	}
 	reject := func(why string) error {
-		return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, fmt.Sprintf("full verify of %s: %s", id, why), nil)
+		return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, fmt.Sprintf("%s of %s: %s", what, id, why), nil)
 	}
-	sc, err := codecOf(src, srcEngine, id)
-	if err != nil {
-		return nil, reject(err.Error())
+	if sc, err = codecOf(src, srcEngine, id); err != nil {
+		return nil, nil, false, reject(err.Error())
 	}
-	dc, err := codecOf(dst, dstEngine, dstID)
-	if err != nil {
-		return nil, reject(err.Error())
+	if dc, err = codecOf(dst, dstEngine, dstID); err != nil {
+		return nil, nil, false, reject(err.Error())
 	}
-	exact := false
 	if srcEngine == dstEngine {
 		err = sc.SameOrder(dc)
 	} else {
@@ -467,7 +464,18 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 		}
 	}
 	if err != nil {
-		return nil, reject("source and target order the primary key differently: " + err.Error())
+		return nil, nil, false, reject("source and target order the primary key differently: " + err.Error())
+	}
+	return sc, dc, exact, nil
+}
+
+// verifyFullKeys: full verify theo tuple PK (việc C) sau khi kiểm hai phía cùng thứ tự khóa.
+func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
+	pkCols []string, rate float64, pipelineID string, waiter verify.ApplyWaiter) (*verify.FullVerifyReport, error) {
+	ctx := cmd.Context()
+	sc, dc, exact, err := verifyKeyCodecs(ctx, src, dst, srcEngine, dstEngine, id, dstID, pkCols, "full verify")
+	if err != nil {
+		return nil, err
 	}
 	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
 		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
@@ -476,6 +484,47 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 		return mv.VerifyTableFullKeysExact(ctx, id, sc, dc)
 	}
 	return mv.VerifyTableFullKeys(ctx, id, sc, dc)
+}
+
+// verifySampleKeys: verify --mode sample cho bảng PK tổng quát ở cặp engine khác MySQL→MySQL (PG→PG,
+// MySQL→PG): range mẫu theo tuple PK của source (verify.SampleKeyRangesEngine), so chuỗi chính tắc và
+// kiểm lại row lệch (MerkleVerifier.VerifyKeyRanges). Bảng sắp khóa khác thứ tự hai phía (khóa chính
+// xác) không so theo range được: từ chối, chỉ --mode full.
+func verifySampleKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
+	pkCols []string, pipelineID string, waiter verify.ApplyWaiter, rate float64, fix bool) error {
+	ctx := cmd.Context()
+	sc, dc, exact, err := verifyKeyCodecs(ctx, src, dst, srcEngine, dstEngine, id, dstID, pkCols, "sample verify")
+	if err != nil {
+		return err
+	}
+	if exact {
+		return exitcode.New("invalid_mode", exitcode.InvalidSyntax, fmt.Sprintf(
+			"verify --mode sample of %s: the source (MySQL) and the target (PostgreSQL) order the primary key %s differently, so a key range of the source cannot be read on the target; use --mode full (exact-key verify)",
+			id, strings.Join(pkCols, ",")), nil)
+	}
+	ranges, err := verify.SampleKeyRangesEngine(ctx, src, srcEngine, id, sc, rate, 1000, rand.New(rand.NewSource(time.Now().UnixNano())))
+	if err != nil {
+		return err
+	}
+	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
+		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
+		ApplyWaiter: waiter})
+	rep, err := mv.VerifyKeyRanges(ctx, id, sc, dc, ranges)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("verify %s (sample %.2f%%, key %s): %d ranges, %d rows, %d mismatches, %d unverifiable_hot\n",
+		id, rate*100, strings.Join(pkCols, ","), rep.RangesChecked, rep.RowsChecked, len(rep.Mismatches), len(rep.UnverifiableHot))
+	if len(rep.Mismatches) == 0 {
+		return nil
+	}
+	if fix {
+		return exitcode.New("invalid_repair", exitcode.InvalidSyntax,
+			fmt.Sprintf("--repair fix of %s (primary key %s) is supported from MySQL to MySQL only; %d mismatched rows",
+				id, strings.Join(pkCols, ","), len(rep.Mismatches)), nil)
+	}
+	return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError,
+		fmt.Sprintf("%d mismatched rows in %s (key %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), "; ")), nil)
 }
 
 // repairKeysMySQL: repair của PK tổng quát (việc C), MySQL→MySQL — như repairRows: đọc ảnh source của

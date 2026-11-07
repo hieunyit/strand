@@ -98,6 +98,13 @@ func TestC_E2E_PGGenericPKSnapshotAdd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("verify --mode full app.gk: exit %d\n%s", code, out)
 	}
+	// Sample theo tuple PK ở PG→PG (trước đây bị từ chối: chỉ PK một cột số nguyên).
+	for _, rate := range []string{"0.01", "1.0"} {
+		out, code = runStrandCLI(t, 5*time.Minute, "verify", "-c", cfg.write(t), "--table", "app.gk", "--mode", "sample", "--rate", rate)
+		if code != 0 || !strings.Contains(out, "(sample") || !strings.Contains(out, " 0 mismatches") {
+			t.Fatalf("verify --mode sample --rate %s app.gk: exit %d\n%s", rate, code, out)
+		}
+	}
 	dumpAll := func(n *pgNode) string {
 		rows, err := n.DB.Query("SELECT t::text FROM app.gk t ORDER BY 1")
 		if err != nil {
