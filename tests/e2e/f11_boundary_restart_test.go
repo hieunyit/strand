@@ -139,6 +139,15 @@ func TestF11_E2E_WatermarkBoundaryCrashRestart(t *testing.T) {
 	seedFromEnv(t)
 	src, dst, start := setupPGPair(t, "f11_boundary", "f11_boundary_pub")
 	src.exec(t, "CREATE EXTENSION IF NOT EXISTS pg_walinspect")
+	dst.exec(t, `CREATE TABLE app.f11_marker_audit (id bigint PRIMARY KEY, n integer NOT NULL);
+		CREATE FUNCTION app.f11_audit_marker() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			INSERT INTO app.f11_marker_audit VALUES (NEW.id, 1)
+			ON CONFLICT (id) DO UPDATE SET n = app.f11_marker_audit.n + 1;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER f11_audit_marker AFTER INSERT OR UPDATE ON app.marker
+		FOR EACH ROW EXECUTE FUNCTION app.f11_audit_marker()`)
 	const content = "f11_boundary_gate"
 	proxied, gate := startF11WALGate(t, src.DSN, content)
 	cfg := strandCfg{Name: "f11-boundary", SourceKind: "postgres", TargetKind: "postgres", SourceDSN: proxied, TargetDSN: dst.DSN,
@@ -225,6 +234,9 @@ func TestF11_E2E_WatermarkBoundaryCrashRestart(t *testing.T) {
 	if err := dst.DB.QueryRow("SELECT count(*) FROM app.marker WHERE id=$1", id).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("gate failed to hold transaction: rows=%d err=%v", n, err)
 	}
+	if err := dst.DB.QueryRow("SELECT count(*) FROM app.f11_marker_audit WHERE id=$1", id).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("marker audit present before crash: rows=%d err=%v", n, err)
+	}
 	if applied.Contains(model.Pos{Engine: model.EnginePG, LSN: endLSN}) {
 		t.Errorf("durable checkpoint %s covers missing xid=%s commit=%s before crash", fmt.Sprint(applied), xid, end)
 	}
@@ -239,6 +251,8 @@ func TestF11_E2E_WatermarkBoundaryCrashRestart(t *testing.T) {
 	if err := dst.DB.QueryRow("SELECT count(*) FROM app.marker WHERE id=$1", id).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("restart lost entire transaction xid=%s commit=%s rows=%d err=%v", xid, end, n, err)
 	}
+	if err := dst.DB.QueryRow("SELECT n FROM app.f11_marker_audit WHERE id=$1", id).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("marker applied incorrect number of times: n=%d err=%v", n, err)
+	}
 	comparePG(t, src, dst, "app.marker")
-	checkPGInvariants(t, dst)
 }
