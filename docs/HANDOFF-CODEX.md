@@ -466,6 +466,7 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 
 | 68 | Watermark PG xác nhận cả commit kế tiếp chưa apply; restart có thể mất nguyên Txn | Logical message dùng EndRecPtr exclusive, commit dùng ReadRecPtr; hai LSN có thể bằng nhau | Reader phát watermark tại endLSN−1; giữ high trước record nên RS-1/2 vẫn đạt; không vouch Txn chưa phát (CP-1/2, CO-1/2) | `TestWatermarkDoesNotAcknowledgeNextCommit`: code cũ reader restart mất cả Txn, sửa qua; trace thực có cửa sổ vouch trước Admit |
 
+| 71 | Regression crash F11 trên WAL PG thật | Message end trùng commit start, checkpoint cũ bao phủ transaction chưa phát | Test proxy chặn tại watermark, kill -9 rồi restart; reader sửa giữ checkpoint trước commit | `TestF11_E2E_WatermarkBoundaryCrashRestart`: reader cũ mất transaction, `fd5cb48` qua; xem `reports/F11-ROOT-CAUSE-20261107.md` |
 | 69 | Trace F11 race khi Dump đồng thời Put | Counter cấp slot trước khi các trường record được ghi đủ | Publish atomic ready sau khi ghi; Dump chỉ đọc slot ready | `TestTraceConcurrentPublicationAndDump`: race detector đỏ trên code cũ |
 
 | 70 | Trace F11 tràn buffer nhưng không báo, có thể kết luận nhầm mất Txn | Put bỏ record ngoài capacity, Dump không ghi completeness | Trailer allocated/stored/dropped/unpublished/observed_after_dump; trả lỗi I/O; dump sau đóng reader | `TestTraceReportsDroppedRecords`: code cũ đỏ, bản sửa báo đúng 3/5 record bị bỏ |
