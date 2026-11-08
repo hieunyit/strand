@@ -389,6 +389,9 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 			pos:  t.SourcePos,
 			data: data,
 		})
+		// Segment đã nhận reference; giữ file kể cả khi flush báo lỗi vì kết quả
+		// commit I/O có thể không xác định và các reference khác có thể đã bền.
+		t.SpillOwned = false
 		s.segBytes += dataLen
 		s.segRawBytes += int64(uvLen) + dataLen
 		s.nextSeq = newNextSeq
@@ -438,6 +441,8 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 		return err
 	}
 
+	// Commit lỗi có thể có kết quả không xác định; giữ file để tránh mất reference đã bền.
+	t.SpillOwned = false
 	if err := batch.Commit(pebble.Sync); err != nil {
 		return err
 	}

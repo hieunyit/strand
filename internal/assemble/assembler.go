@@ -523,7 +523,7 @@ func (a *Assembler) Process(ctx context.Context, in <-chan reader.Event) (<-chan
 					select {
 					case out <- txn:
 					case <-ctx.Done():
-						if txn.SpillPath != "" {
+						if txn.SpillOwned && txn.SpillPath != "" {
 							_ = os.Remove(txn.SpillPath)
 						}
 						return

@@ -125,7 +125,9 @@ type Txn struct {
 
 	// Hỗ trợ transaction lớn tràn đĩa theo spec: design §6.4
 	SpillPath string `json:"spill_path,omitempty"`
-	RowCount  int64  `json:"row_count,omitempty"`
+	// SpillOwned chỉ đánh dấu file tạm do process này tạo; spool decode luôn coi là file bền mượn.
+	SpillOwned bool  `json:"-"`
+	RowCount   int64 `json:"row_count,omitempty"`
 
 	// SpilledTables liệt kê mọi bảng (kể cả bảng cha qua FK) mà Txn đã tràn đĩa chạm tới.
 	// Txn tràn đĩa không có Rows trong RAM, nên scheduler dùng danh sách này để

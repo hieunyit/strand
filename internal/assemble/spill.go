@@ -217,6 +217,7 @@ func (sb *SpillBuffer) Finish(txn *model.Txn) error {
 			return fmt.Errorf("failed to sync spill file: %w", err)
 		}
 		txn.SpillPath = sb.spillF.Name()
+		txn.SpillOwned = true
 		txn.SpilledTables = append([]model.TableID(nil), sb.tables...)
 		txn.Rows = nil // Đảm bảo RAM không giữ bất kỳ row nào
 		if err := sb.spillF.Close(); err != nil {
