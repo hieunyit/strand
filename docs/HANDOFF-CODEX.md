@@ -20,6 +20,10 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 
 ---
 
+## Ngoại lệ MinIO theo yêu cầu người dùng (2026-11-08)
+
+Kiểm định lần này loại đúng bốn test phụ thuộc MinIO, giữ nguyên code test và không tính chúng là PASS: non-E2E `TestMinIOBackend_Direct`, `TestPF4_SpoolOverflowToBucket_MinIO`; E2E `TestG1_E2E_PrefetchSpoolOverflowsToBucket`, `TestG1_E2E_PrefetchDuringLongRestore`. Runner dùng `-skip` theo tên đầy đủ; xem `/tmp/strand-matrix-20261108/MATRIX-PLAN.md` và `coverage-plan.json`. Lượt trước lỗi thật MinIO HTTP 503 `XMinioServerNotInitialized` được lưu tại `/tmp/strand-matrix-20261108/attempt-002-minio-fail/non-e2e.stdout`; không suy ra MinIO đã được sửa hoặc xác nhận. Bản đề xuất fixture MinIO nằm riêng, không tích hợp theo phạm vi người dùng.
+
 ## 1. Repo và nhánh
 
 **2026-11-07 — điều tra F11 tiếp:** nhánh `agent/f11-root-cause-20261107` trong clone riêng trên. Phát hiện lỗi reader dùng end LSN của watermark làm checkpoint inclusive: trùng LSN commit kế tiếp; regression trên code cũ mất cả Txn sau restart, bản sửa dùng `endLSN-1`. Ba trace thật trước sửa có 11 va chạm; một trace có 14 lần coordinator vouch LSN trước khi Txn được Admit. Đây là cơ chế lỗi đã chứng minh, chưa gán chắc chắn toàn bộ log F11 lịch sử. Đồng thời sửa race/tràn im lặng của trace. Xem `reports/F11-ROOT-CAUSE-20261107.md`; bản sửa đã qua build/vet/gofmt, 913 non-E2E test/subtest (31 package), F11 E2E 6/6 (3 seed/mỗi chế độ), reader/trace race; chưa full E2E toàn repo, chưa merge/push.
