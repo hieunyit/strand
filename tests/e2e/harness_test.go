@@ -356,12 +356,18 @@ func (l *lockedBuf) String() string {
 
 var runCounter atomic.Int64
 
+// Chỉ hai kịch bản F11 cần trace lớn; tránh bật trace cho mọi process của full E2E.
+func f11WitnessTest(name string) bool {
+	root, _, _ := strings.Cut(name, "/")
+	return root == "TestP2_E2E_PGSnapshotAddWhileStreaming" || root == "TestF11_E2E_WatermarkBoundaryCrashRestart"
+}
+
 func startStrand(t *testing.T, cfgPath string, extra ...string) *strandProc {
 	t.Helper()
 	args := append([]string{"sync", "-c", cfgPath}, extra...)
 	cmd := exec.Command(strandBin, args...)
 	logPath := filepath.Join(filepath.Dir(cfgPath), fmt.Sprintf("strand-%04d.log", runCounter.Add(1)))
-	if os.Getenv("STRAND_E2E_F11_WITNESS") == "1" {
+	if os.Getenv("STRAND_E2E_F11_WITNESS") == "1" && f11WitnessTest(t.Name()) {
 		cmd.Env = append(os.Environ(), "STRAND_TXN_TRACE="+logPath+".txn")
 	}
 	f, err := os.Create(logPath)
