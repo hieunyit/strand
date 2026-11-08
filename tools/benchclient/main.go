@@ -162,18 +162,22 @@ func parsePgbenchWindow(paths []string, start, end time.Time) (pgWindow, error) 
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("benchclient", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var backend, binary, prefix, parsePrefix, startText, endText string
-	var clients, jobs int
+	var backend, binary, prefix, parsePrefix, parseSysbenchPrefix, sysbenchStderr, startText, endText string
+	var clients, jobs, sysbenchThreads, sysbenchExitCode int
 	var duration time.Duration
 	var rate float64
 	fs.StringVar(&backend, "backend", "pgbench", "pgbench or sysbench")
 	fs.StringVar(&binary, "binary", "", "client executable path")
 	fs.StringVar(&prefix, "log-prefix", "", "owned raw-log prefix")
 	fs.StringVar(&parsePrefix, "parse-pgbench-prefix", "", "parse pgbench raw logs at prefix.*")
+	fs.StringVar(&parseSysbenchPrefix, "parse-sysbench-prefix", "", "parse instrumented sysbench raw logs at prefix.*")
+	fs.StringVar(&sysbenchStderr, "sysbench-stderr", "", "sysbench stderr containing STRAND_RAW_EVENTS marker")
 	fs.StringVar(&startText, "snapshot-start", "", "snapshot start RFC3339Nano")
 	fs.StringVar(&endText, "snapshot-end", "", "snapshot end RFC3339Nano")
 	fs.IntVar(&clients, "clients", 16, "client count")
 	fs.IntVar(&jobs, "jobs", 8, "thread count")
+	fs.IntVar(&sysbenchThreads, "sysbench-threads", 0, "expected instrumented sysbench worker file count")
+	fs.IntVar(&sysbenchExitCode, "sysbench-exit-code", -1, "actual instrumented sysbench process exit code")
 	fs.DurationVar(&duration, "duration", 10*time.Minute, "one constant-rate segment")
 	fs.Float64Var(&rate, "rate", 100, "target transactions/s")
 	if err := fs.Parse(args); err != nil {
@@ -181,12 +185,48 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
-	if parsePrefix != "" {
+	if parsePrefix != "" && parseSysbenchPrefix != "" {
+		fmt.Fprintln(stderr, "choose one parser")
+		return 2
+	}
+	if parsePrefix != "" || parseSysbenchPrefix != "" {
 		start, e1 := time.Parse(time.RFC3339Nano, startText)
 		end, e2 := time.Parse(time.RFC3339Nano, endText)
 		if e1 != nil || e2 != nil {
 			fmt.Fprintln(stderr, "snapshot-start/end must be RFC3339Nano")
 			return 2
+		}
+		if parseSysbenchPrefix != "" {
+			if sysbenchStderr == "" || sysbenchThreads < 1 || sysbenchExitCode < 0 {
+				fmt.Fprintln(stderr, "sysbench-stderr, positive sysbench-threads, and sysbench-exit-code are required")
+				return 2
+			}
+			if sysbenchExitCode != 0 {
+				fmt.Fprintln(stderr, "sysbench process failed; raw latency evidence is incomplete")
+				return 1
+			}
+			paths, err := filepath.Glob(parseSysbenchPrefix + ".[0-9]*")
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 2
+			}
+			expected, err := parseSysbenchRawMarker(sysbenchStderr)
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			res, err := parseSysbenchRawWindow(paths, start, end, expected, sysbenchThreads)
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			res.ClientExitCode = sysbenchExitCode
+			res.MarkerPath = sysbenchStderr
+			if err := enc.Encode(res); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
 		}
 		paths, err := filepath.Glob(parsePrefix + ".*")
 		if err != nil {

@@ -1,0 +1,236 @@
+diff --git a/src/sb_thread.c b/src/sb_thread.c
+index 384ddb7..8382b1b 100644
+--- a/src/sb_thread.c
++++ b/src/sb_thread.c
+@@ -130,15 +130,19 @@ int sb_thread_create_workers(void *(*worker_routine)(void*))
+ 
+ int sb_thread_join_workers(void)
+ {
++  int failed = 0;
+   for(unsigned i = 0; i < sb_globals.threads; i++)
+   {
+     int err;
+ 
+     if((err = sb_thread_join(threads[i].thread, NULL)) != 0)
++    {
+       log_errno(LOG_FATAL, "sb_thread_join() for thread #%d failed.", i);
++      failed = 1;
++    }
+ 
+     ck_pr_dec_uint(&sb_globals.threads_running);
+   }
+ 
+-  return EXIT_SUCCESS;
++  return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+ }
+diff --git a/src/sysbench.c b/src/sysbench.c
+index a8eac62..48a4bab 100644
+--- a/src/sysbench.c
++++ b/src/sysbench.c
+@@ -64,6 +64,9 @@
+ # include <limits.h>
+ #endif
+ 
++#include <inttypes.h>
++#include <time.h>
++
+ #include <luajit.h>
+ 
+ #include "sysbench.h"
+@@ -147,6 +150,128 @@ static int eventgen_thread_created;
+ /* per-thread timers for response time stats */
+ static sb_timer_t *timers;
+ 
++/* Strand Gate 2 instrumentation: optional raw timer output, one file per worker.
++   No shared FILE lock or allocation in the measured event path. */
++static FILE **strand_raw_files;
++static uint64_t *strand_raw_counts;
++static int *strand_raw_errors;
++
++static int strand_raw_open(void)
++{
++  const char *prefix = getenv("STRAND_BENCH_RAW_PREFIX");
++  if (prefix == NULL || *prefix == '\0')
++    return 0;
++
++  strand_raw_files = calloc(sb_globals.threads, sizeof(*strand_raw_files));
++  strand_raw_counts = calloc(sb_globals.threads, sizeof(*strand_raw_counts));
++  strand_raw_errors = calloc(sb_globals.threads, sizeof(*strand_raw_errors));
++  if (strand_raw_files == NULL || strand_raw_counts == NULL || strand_raw_errors == NULL)
++  {
++    log_text(LOG_FATAL, "Strand raw latency allocation failed");
++    free(strand_raw_files);
++    free(strand_raw_counts);
++    free(strand_raw_errors);
++    strand_raw_files = NULL;
++    strand_raw_counts = NULL;
++    strand_raw_errors = NULL;
++    return 1;
++  }
++
++  for (unsigned int i = 0; i < sb_globals.threads; i++)
++  {
++    size_t n = strlen(prefix) + 32;
++    char *path = malloc(n);
++    if (path == NULL)
++    {
++      log_text(LOG_FATAL, "Strand raw latency path allocation failed");
++      return 1;
++    }
++    snprintf(path, n, "%s.%u", prefix, i);
++    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
++    if (fd < 0)
++    {
++      log_errno(LOG_FATAL, "Strand raw latency open failed");
++      free(path);
++      return 1;
++    }
++    strand_raw_files[i] = fdopen(fd, "w");
++    free(path);
++    if (strand_raw_files[i] == NULL)
++    {
++      close(fd);
++      log_errno(LOG_FATAL, "Strand raw latency fdopen failed");
++      return 1;
++    }
++    if (setvbuf(strand_raw_files[i], NULL, _IOFBF, 1 << 20) != 0)
++    {
++      log_errno(LOG_FATAL, "Strand raw latency buffer allocation failed");
++      return 1;
++    }
++  }
++  return 0;
++}
++
++static void strand_raw_record(int thread_id, uint64_t duration_ns)
++{
++  if (strand_raw_files == NULL)
++    return;
++  if (thread_id < 0 || (unsigned int) thread_id >= sb_globals.threads)
++  {
++    sb_globals.error = 1;
++    return;
++  }
++  if (strand_raw_errors[thread_id])
++    return;
++  struct timespec done;
++  if (clock_gettime(CLOCK_REALTIME, &done) != 0 ||
++      fprintf(strand_raw_files[thread_id], "%d %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
++              thread_id, strand_raw_counts[thread_id] + 1,
++              (uint64_t) done.tv_sec * 1000000000ULL + (uint64_t) done.tv_nsec,
++              duration_ns) < 0)
++  {
++    strand_raw_errors[thread_id] = 1;
++    sb_globals.error = 1;
++    return;
++  }
++  strand_raw_counts[thread_id]++;
++}
++
++/* Call only after all worker threads have joined. On an earlier failure, no
++   footer or success marker is emitted, so the raw evidence is incomplete. */
++static int strand_raw_close(int run_status)
++{
++  if (strand_raw_files == NULL)
++    return run_status;
++  uint64_t count = 0;
++  int errors = 0;
++  for (unsigned int i = 0; i < sb_globals.threads; i++)
++  {
++    count += strand_raw_counts[i];
++    errors += strand_raw_errors[i];
++    if (strand_raw_files[i] != NULL)
++    {
++      if (fprintf(strand_raw_files[i],
++                  "# STRAND_RAW_THREAD thread_id=%u count=%" PRIu64 " errors=%d\n",
++                  i, strand_raw_counts[i], strand_raw_errors[i]) < 0)
++        errors++;
++      if (fclose(strand_raw_files[i]) != 0)
++        errors++;
++    }
++  }
++  int marker_written = fprintf(stderr,
++                               "STRAND_RAW_EVENTS count=%" PRIu64 " errors=%d run_status=%d\n",
++                               count, errors, run_status);
++  if (marker_written < 0 || fflush(stderr) != 0)
++    errors++;
++  free(strand_raw_files);
++  free(strand_raw_counts);
++  free(strand_raw_errors);
++  strand_raw_files = NULL;
++  strand_raw_counts = NULL;
++  strand_raw_errors = NULL;
++  return errors != 0 || run_status != 0;
++}
++
+ /* Temporary copy of timers for checkpoint reports */
+ static sb_timer_t *timers_copy;
+ 
+@@ -750,6 +875,8 @@ void sb_event_stop(int thread_id)
+ 
+   value = sb_timer_stop(timer);
+ 
++  strand_raw_record(thread_id, (uint64_t) value);
++
+   if (sb_globals.percentile > 0)
+     sb_histogram_update(&sb_latency_histogram, NS2MS(value));
+ 
+@@ -1071,6 +1198,9 @@ static int run_test(sb_test_t *test)
+   if (test->ops.prepare != NULL && test->ops.prepare() != 0)
+     return 1;
+ 
++  if (strand_raw_open() != 0)
++    return 1;
++
+   pthread_mutex_init(&sb_globals.exec_mutex, NULL);
+ 
+   sb_globals.threads_running = 0;
+@@ -1169,12 +1299,18 @@ static int run_test(sb_test_t *test)
+ 
+   /* cleanup test */
+   if (test->ops.cleanup != NULL && test->ops.cleanup() != 0)
++  {
++    strand_raw_close(1);
+     return 1;
++  }
+ 
+   if (report_thread_created)
+   {
+     if (sb_thread_cancel(report_thread) || sb_thread_join(report_thread, NULL))
++    {
+       log_errno(LOG_FATAL, "Terminating the reporting thread failed.");
++      sb_globals.error = 1;
++    }
+   }
+ 
+   if (eventgen_thread_created)
+@@ -1185,14 +1321,20 @@ static int run_test(sb_test_t *test)
+     */
+     if ((sb_thread_cancel(eventgen_thread) ||
+          sb_thread_join(eventgen_thread, NULL)) && sb_globals.max_time_ns == 0)
++    {
+       log_text(LOG_FATAL, "Terminating the event generator thread failed.");
++      sb_globals.error = 1;
++    }
+   }
+ 
+   if (checkpoints_thread_created)
+   {
+     if (sb_thread_cancel(checkpoints_thread) ||
+         sb_thread_join(checkpoints_thread, NULL))
++    {
+       log_errno(LOG_FATAL, "Terminating the checkpoint thread failed.");
++      sb_globals.error = 1;
++    }
+   }
+ 
+   /* print test-specific stats */
+@@ -1214,7 +1356,7 @@ static int run_test(sb_test_t *test)
+   if (test->ops.done != NULL)
+     (*(test->ops.done))();
+ 
+-  return sb_globals.error != 0;
++  return strand_raw_close(sb_globals.error != 0);
+ }
+ 
+ 
