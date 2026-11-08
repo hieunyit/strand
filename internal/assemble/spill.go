@@ -48,16 +48,19 @@ func (it *DiskRowIterator) Close() error                    { return it.r.Close(
 
 // SpillBuffer quản lý việc đệm RowChange cho một transaction, tự động tràn đĩa khi vượt ngưỡng RAM.
 // spec: design §6.4
+const maxInMemBytes int64 = 64 << 20
+
 type SpillBuffer struct {
 	maxInMem int
 	dir      string
 
-	inMem   []model.RowChange
-	spilled bool
-	spillF  *os.File
-	writer  *model.SpillWriter
-	count   int64
-	bytes   int64
+	inMem      []model.RowChange
+	spilled    bool
+	spillF     *os.File
+	writer     *model.SpillWriter
+	count      int64
+	bytes      int64
+	inMemBytes int64
 
 	tables   []model.TableID
 	tableSet map[model.TableID]struct{}
@@ -112,6 +115,45 @@ func estimateRowBytes(rc *model.RowChange) int64 {
 	return n
 }
 
+// Ước lượng payload giữ bởi row, kể cả khóa và metadata. Giá trị dùng chung
+// có thể bị đếm nhiều lần; đây là ước lượng payload, không phải trần RSS.
+func estimateRetainedRowBytes(rc *model.RowChange) int64 {
+	n := estimateRowBytes(rc) + 128 + int64(len(rc.Table.Schema)+len(rc.Table.Table)+len(rc.Op))
+	values := func(vs []model.Value) {
+		n += int64(len(vs)) * 16
+		for _, v := range vs {
+			switch v := v.(type) {
+			case string:
+				n += int64(len(v))
+			case []byte:
+				n += int64(len(v))
+			}
+		}
+	}
+	values(rc.Key)
+	values(rc.OldKey)
+	for _, k := range rc.UniqueKeys {
+		n += 64 + int64(len(k.Name))
+		values(k.Key)
+		values(k.OldKey)
+	}
+	for _, k := range rc.ForeignKeys {
+		n += 80 + int64(len(k.ParentTable.Schema)+len(k.ParentTable.Table)+len(k.ParentIndex))
+		values(k.ParentKey)
+	}
+	return n
+}
+
+// discard dọn file của transaction chưa được bàn giao cho consumer.
+func (sb *SpillBuffer) discard() {
+	if sb.spillF != nil {
+		name := sb.spillF.Name()
+		_ = sb.spillF.Close()
+		_ = os.Remove(name)
+		sb.spillF = nil
+	}
+}
+
 func (sb *SpillBuffer) spill() error {
 	if sb.spilled {
 		return nil
@@ -127,10 +169,12 @@ func (sb *SpillBuffer) spill() error {
 
 	for i := range sb.inMem {
 		if err := sb.writer.Write(&sb.inMem[i]); err != nil {
+			sb.discard()
 			return fmt.Errorf("failed to write spill row: %w", err)
 		}
 	}
 	sb.inMem = nil // Giải phóng RAM ngay lập tức
+	sb.inMemBytes = 0
 	return nil
 }
 
@@ -140,8 +184,11 @@ func (sb *SpillBuffer) Append(rc model.RowChange) error {
 	sb.noteTables(&rc)
 
 	if !sb.spilled {
-		if len(sb.inMem) < sb.maxInMem {
+		rowBytes := estimateRetainedRowBytes(&rc)
+		// Spill trước khi giữ row vượt budget; transaction và source position vẫn nguyên vẹn.
+		if len(sb.inMem) < sb.maxInMem && rowBytes <= maxInMemBytes-sb.inMemBytes {
 			sb.inMem = append(sb.inMem, rc)
+			sb.inMemBytes += rowBytes
 			return nil
 		}
 		if err := sb.spill(); err != nil {
@@ -150,6 +197,7 @@ func (sb *SpillBuffer) Append(rc model.RowChange) error {
 	}
 
 	if err := sb.writer.Write(&rc); err != nil {
+		sb.discard()
 		return fmt.Errorf("failed to write spill row: %w", err)
 	}
 	return nil
@@ -161,15 +209,18 @@ func (sb *SpillBuffer) Finish(txn *model.Txn) error {
 
 	if sb.spilled {
 		if err := sb.writer.Flush(); err != nil {
+			sb.discard()
 			return fmt.Errorf("failed to flush spill buffer: %w", err)
 		}
 		if err := sb.spillF.Sync(); err != nil {
+			sb.discard()
 			return fmt.Errorf("failed to sync spill file: %w", err)
 		}
 		txn.SpillPath = sb.spillF.Name()
 		txn.SpilledTables = append([]model.TableID(nil), sb.tables...)
 		txn.Rows = nil // Đảm bảo RAM không giữ bất kỳ row nào
 		if err := sb.spillF.Close(); err != nil {
+			sb.discard()
 			return fmt.Errorf("failed to close spill file: %w", err)
 		}
 	} else {
