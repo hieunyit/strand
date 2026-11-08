@@ -55,7 +55,7 @@ tables:
 func TestVerifyFullUsesPipelineTableScopePG(t *testing.T) {
 	addr := startContainer(t, testcontainers.ContainerRequest{
 		Image: "postgres:18", ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{"POSTGRES_USER": "strand", "POSTGRES_PASSWORD": "dev", "POSTGRES_DB": "strand"},
+		Env:        map[string]string{"POSTGRES_USER": "strand", "POSTGRES_PASSWORD": "dev", "POSTGRES_DB": "strand"},
 		WaitingFor: wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(120 * time.Second),
 	})
 	dsn := fmt.Sprintf("postgres://strand:dev@%s/strand?sslmode=disable", addr)
