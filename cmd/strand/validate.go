@@ -103,6 +103,13 @@ func newValidateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if strings.EqualFold(cfg.Source.Kind, "postgres") {
+				pgWarnings, err := validate.CheckPGSource(cmd.Context(), r.Source, cfg, tables)
+				if err != nil {
+					return err
+				}
+				warnings = append(warnings, pgWarnings...)
+			}
 			r.Tables = tables
 			plan, err := schemagen.Build(cmd.Context(), r)
 			if err != nil {
