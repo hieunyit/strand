@@ -497,7 +497,12 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	// SD-1/CP-1 không thay đổi; chỉ trạng thái verify được siết: thiếu khóa không chứng minh đủ
 	// cửa sổ CDC nên giữ VerifyPending, không được báo synced sau khi chỉ kiểm phần còn lại.
 	if _, err := deltaVerifyResult(touchedTake{over: over}); err != nil {
-		p.fail(err)
+		// Không dừng CDC: thiếu bằng chứng verify không phải lỗi dữ liệu. Giữ VerifyPending và cờ verifying
+		// (pipeline không bao giờ báo synced), báo rõ để người vận hành chạy verify full; replication vẫn
+		// tiếp tục áp thay đổi. Trước đây p.fail dừng pipeline với mọi seed có cửa sổ catch-up bận.
+		p.metrics.VerifyIncompleteTotal.WithLabelValues(p.id).Inc()
+		p.log.Error("post-seed verify incomplete: the seed is not verified; run `strand verify --mode full` (pipeline keeps replicating but never reports synced until a verify passes)",
+			"code", exitcode.ErrVerifyIncomplete, "error", err.Error())
 		return
 	}
 	more, err := p.verifyTablesKeys(ctx, 0, keys, gen)

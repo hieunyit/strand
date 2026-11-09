@@ -76,6 +76,8 @@ type Metrics struct {
 	// F11: strand_rows_not_written_total{pipeline}: batch có row đã định tuyến mà writer không ghi
 	// (bộ phát hiện trước commit); pipeline dừng mỗi lần đếm tăng.
 	RowsNotWrittenTotal *prometheus.CounterVec
+	// VerifyIncompleteTotal: verify sau seed không đủ bằng chứng (tràn giới hạn theo dõi khóa đổi).
+	VerifyIncompleteTotal *prometheus.CounterVec
 }
 
 // NewMetrics khởi tạo và đăng ký đầy đủ 20 metric theo spec/02 §11.
@@ -190,6 +192,10 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "strand_rows_not_written_total",
 			Help: "Số batch bị từ chối trước commit vì có row đã định tuyến mà writer không ghi (pipeline dừng).",
 		}, []string{"pipeline"}),
+		VerifyIncompleteTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "strand_verify_incomplete_total",
+			Help: "Post-seed verify runs that could not cover every changed key (tracking limit or key encoding failure)",
+		}, []string{"pipeline"}),
 		SpoolCapacityBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "strand_spool_capacity_bytes",
 			Help: "Dung lượng tối đa (hard limit) của spool theo tầng.",
@@ -219,6 +225,7 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.FencedTotal,
 		m.SpoolCapacityBytes,
 		m.RowsNotWrittenTotal,
+		m.VerifyIncompleteTotal,
 	)
 
 	return m
