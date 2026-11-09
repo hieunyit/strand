@@ -15,7 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"strand/internal/checkpoint"
 	"strand/internal/config"
+	"strand/internal/model"
+	"strand/internal/snapshot"
 )
 
 type gpkPGShape struct {
@@ -101,10 +104,40 @@ func TestGPK_PGToPGSnapshotUnderLoadWithGenericKeys(t *testing.T) {
 		}
 		include = append(include, "public."+sh.name)
 	}
+	// Bảng điều khiển riêng giữ năm bảng random đều là snapshot mới.
+	exec(src, `CREATE TABLE public.uuid_reread (u uuid PRIMARY KEY, v int, doc text)`)
+	exec(dst, `CREATE TABLE public.uuid_reread (u uuid PRIMARY KEY, v int, doc text)`)
+	exec(src, `ALTER TABLE public.uuid_reread ALTER COLUMN doc SET STORAGE EXTERNAL`)
+	include = append(include, "public.uuid_reread")
+	// Khóa dự trữ ngoài tập random: giữ TOAST ngoài dòng, old thuộc plan và new ở đuôi đã xong.
+	exec(src, fmt.Sprintf("INSERT INTO public.uuid_reread (u,v,doc) VALUES ('88888888-8888-8888-8888-888888888888',1,'%s')", doc))
 	exec(src, "CREATE PUBLICATION gpub FOR ALL TABLES")
+	// Mô phỏng bootstrap bị ngắt: checkpoint P−1 trước stream, mọi bảng vẫn chờ snapshot.
+	var slotLSN string
+	if err := src.QueryRowContext(ctx, "SELECT lsn::text FROM pg_create_logical_replication_slot('gpk_slot','pgoutput')").Scan(&slotLSN); err != nil {
+		t.Fatal(err)
+	}
+	lsn, err := checkpoint.ParseLSN(slotLSN)
+	if err != nil || lsn == 0 {
+		t.Fatalf("invalid slot LSN %q: %v", slotLSN, err)
+	}
+	store := checkpoint.NewPGStore(dst, "gpkpg", model.EnginePG)
+	if err := store.EnsureTables(ctx); err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := store.AdvanceEpoch(ctx, "gpkpg", "fixture", "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteGlobal(ctx, checkpoint.Global{PipelineID: "gpkpg", Epoch: epoch, Applied: checkpoint.NewPGAppliedSet(lsn - 1).String()}); err != nil {
+		t.Fatal(err)
+	}
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	var stopOnce sync.Once
+	stopWorkload := func() { stopOnce.Do(func() { close(stop) }); wg.Wait() }
+	defer stopWorkload()
 	var ops atomic.Int64
 	for _, sh := range shapes {
 		sh := sh
@@ -152,8 +185,27 @@ func TestGPK_PGToPGSnapshotUnderLoadWithGenericKeys(t *testing.T) {
 	}
 
 	dir := t.TempDir()
+	// Bảng thứ sáu mô phỏng plan resume chưa đọc khóa nào để ép event trước register thành nghĩa vụ re-read.
+	state, err := openLocalState(dir, "gpkpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	minKey, maxKey := "00000000-0000-0000-0000-000000000000", "88888888-8888-8888-8888-888888888888"
+	if err := state.SetPlan("public.uuid_reread", snapshot.SnapshotPlan{GenericKey: true, ChunkRows: 30,
+		MinKey: []snapshot.KeyVal{{S: &minKey}}, MaxKey: []snapshot.KeyVal{{S: &maxKey}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sh := range shapes {
+		name := "public." + sh.name
+		if state.IsDone(name) {
+			t.Fatalf("original table %s already marked done", name)
+		}
+		if _, ok := state.Plan(name); ok {
+			t.Fatalf("original table %s has a resume plan", name)
+		}
+	}
 	cfg := &config.Config{Name: "gpkpg",
-		Source: config.SourceConfig{Kind: "postgres", DSN: dsn("gsrc"), Slot: "gpk_slot", Publication: "gpub", CreateSlot: true},
+		Source: config.SourceConfig{Kind: "postgres", DSN: dsn("gsrc"), Slot: "gpk_slot", Publication: "gpub", CreateSlot: false},
 		Target: config.TargetConfig{Kind: "postgres", DSN: dsn("gdst")},
 		Tables: config.TablesConfig{Include: include}}
 	cfg.Resources.Spool.Path = dir
@@ -162,15 +214,54 @@ func TestGPK_PGToPGSnapshotUnderLoadWithGenericKeys(t *testing.T) {
 	cfg.Resources.Source.IOPS.Soft = 100000
 	cfg.Bootstrap.Logical.ChunkRows = "30"
 	var logBuf syncBuf
+	gate := &gpkSnapshotGate{base: slog.NewJSONHandler(&logBuf, nil), started: make(chan struct{}), release: make(chan struct{})}
 	rctx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
+	stopped := false
 	go func() {
-		done <- Run(rctx, Options{Config: cfg, ShutdownTimeout: 5 * time.Second, Logger: slog.New(slog.NewJSONHandler(&logBuf, nil))})
+		done <- Run(rctx, Options{Config: cfg, ShutdownTimeout: 5 * time.Second, Logger: slog.New(gate)})
 	}()
 	defer func() {
+		gate.open()
 		cancel()
-		<-done
+		if !stopped {
+			<-done
+		}
 	}()
+	select {
+	case <-gate.started:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("uuid reread snapshot did not reach test gate")
+	}
+	res, err := src.ExecContext(ctx, "UPDATE public.uuid_reread SET u='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE u='88888888-8888-8888-8888-888888888888'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("controlled TOAST move affected %d rows: %v", n, err)
+	}
+	// Router phải ghi nghĩa vụ trước khi cho snapshot đăng ký lại plan; timeout chỉ phát hiện lỗi.
+	deadlineReread := time.Now().Add(time.Minute)
+	for {
+		raw, err := os.ReadFile(filepath.Join(dir, "pipeline-state.json"))
+		var st stateFile
+		found := false
+		if err == nil && json.Unmarshal(raw, &st) == nil {
+			for _, key := range st.Plans["public.uuid_reread"].RereadKeyVals {
+				if len(key) == 1 && key[0].S != nil && *key[0].S == "ffffffff-ffff-ffff-ffff-ffffffffffff" {
+					found = true
+				}
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadlineReread) {
+			t.Fatalf("controlled move was not persisted as re-read: %s", raw)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	gate.open()
 	deadline := time.Now().Add(4 * time.Minute)
 	for {
 		raw, _ := os.ReadFile(filepath.Join(dir, "pipeline-state.json"))
@@ -185,6 +276,7 @@ func TestGPK_PGToPGSnapshotUnderLoadWithGenericKeys(t *testing.T) {
 		}
 		select {
 		case err := <-done:
+			stopped = true
 			t.Fatalf("pipeline exited during snapshot: %v", err)
 		default:
 		}
@@ -194,8 +286,7 @@ func TestGPK_PGToPGSnapshotUnderLoadWithGenericKeys(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	time.Sleep(time.Second)
-	close(stop)
-	wg.Wait()
+	stopWorkload()
 	for _, sh := range shapes {
 		var a, b string
 		var err error
@@ -216,19 +307,35 @@ func TestGPK_PGToPGSnapshotUnderLoadWithGenericKeys(t *testing.T) {
 		}
 		t.Logf("%s: %d rows identical", sh.name, strings.Count(a, "\n")+1)
 	}
-	rereads := 0
+	controlSource, err := dumpPG(ctx, src, "public.uuid_reread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlTarget, err := dumpPG(ctx, dst, "public.uuid_reread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if controlSource != controlTarget {
+		t.Fatal("uuid_reread: target differs from source")
+	}
+	t.Log("uuid_reread: controlled row identical")
+	rereads, uuidRereads := 0, 0
 	for _, line := range strings.Split(logBuf.String(), "\n") {
 		var e struct {
 			Msg     string `json:"msg"`
+			Table   string `json:"table"`
 			Rereads int    `json:"reread_keys"`
 		}
 		if json.Unmarshal([]byte(line), &e) == nil && e.Msg == "snapshot done" {
 			rereads += e.Rereads
+			if e.Table == "public.uuid_reread" {
+				uuidRereads += e.Rereads
+			}
 		}
 	}
-	t.Logf("workload: %d ops, %d keys re-read (TOAST PK moves)", ops.Load(), rereads)
-	if rereads == 0 {
-		t.Fatal("no key was re-read: the TOAST PK-move path was not exercised")
+	t.Logf("workload: %d ops, %d keys re-read (TOAST PK moves), %d control-table re-reads", ops.Load(), rereads, uuidRereads)
+	if rereads == 0 || uuidRereads == 0 {
+		t.Fatalf("TOAST PK-move re-read not exercised on uuid: total=%d uuid=%d", rereads, uuidRereads)
 	}
 }
 
@@ -240,3 +347,39 @@ type syncBuf struct {
 
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+// Test gate chỉ chặn snapshot table đã chọn; router và reader vẫn chạy thật.
+type gpkSnapshotGate struct {
+	base             slog.Handler
+	started, release chan struct{}
+	once             sync.Once
+}
+
+func (g *gpkSnapshotGate) Enabled(ctx context.Context, level slog.Level) bool {
+	return g.base.Enabled(ctx, level)
+}
+func (g *gpkSnapshotGate) Handle(ctx context.Context, rec slog.Record) error {
+	err := g.base.Handle(ctx, rec)
+	if rec.Message != "snapshot start" {
+		return err
+	}
+	var table string
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == "table" {
+			table = a.Value.String()
+		}
+		return true
+	})
+	if table == "public.uuid_reread" {
+		close(g.started)
+		<-g.release
+	}
+	return err
+}
+func (g *gpkSnapshotGate) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &gpkSnapshotGate{base: g.base.WithAttrs(attrs), started: g.started, release: g.release}
+}
+func (g *gpkSnapshotGate) WithGroup(name string) slog.Handler {
+	return &gpkSnapshotGate{base: g.base.WithGroup(name), started: g.started, release: g.release}
+}
+func (g *gpkSnapshotGate) open() { g.once.Do(func() { close(g.release) }) }

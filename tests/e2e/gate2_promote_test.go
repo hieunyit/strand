@@ -417,6 +417,7 @@ func TestG2_E2E_PromoteNoDuplicateKeyPGToPG(t *testing.T) {
 	slot, pub := "strand_g2_promote", "strand_g2_pub"
 	src, dst, lsn := setupG2PGPair(t, slot, pub, 20, 50)
 
+	t.Logf("strict diagnostic workload starting at %s", time.Now().UTC().Format(time.RFC3339Nano))
 	wl := startG2Load(seed, 6, g2PGOp(src.DB))
 	time.Sleep(2 * time.Second) // có tải trước khi Strand bắt đầu: phần đầu stream là backlog
 
@@ -424,9 +425,12 @@ func TestG2_E2E_PromoteNoDuplicateKeyPGToPG(t *testing.T) {
 		SourceDSN: src.DSN, TargetDSN: dst.DSN,
 		SourceExtra: fmt.Sprintf(", slot: %s, publication: %s, sequence_sync_interval: 1s", slot, pub),
 		Include:     []string{"app.*"}, Dir: testDir(t), Bootstrap: "start_at"}
+	enableStrictDiagnostic(t, &cfg)
 	p := startStrand(t, cfg.write(t), "--start-at", lsn)
+	cleanupStrictDiagnostic(t, p)
 	time.Sleep(time.Duration(envInt("STRAND_E2E_PG_LOAD_SECONDS", 20)) * time.Second)
 	wl.Stop()
+	t.Logf("strict diagnostic workload stopped at %s", time.Now().UTC().Format(time.RFC3339Nano))
 	t.Logf("source load: %s", wl.summary())
 	if wl.ops.Load() < 200 {
 		t.Fatalf("source load too small to be meaningful: %s", wl.summary())
@@ -727,10 +731,14 @@ func TestG2_E2E_PromoteSourceUnreachableCache1000PG(t *testing.T) {
 		SourceDSN: src.DSN, TargetDSN: dst.DSN,
 		SourceExtra: fmt.Sprintf(", slot: %s, publication: %s, sequence_sync_interval: 1s", slot, pub),
 		Include:     []string{"app.*"}, Dir: testDir(t), Bootstrap: "start_at"}
+	enableStrictDiagnostic(t, &cfg)
 	p := startStrand(t, cfg.write(t), "--start-at", lsn)
+	cleanupStrictDiagnostic(t, p)
+	t.Logf("strict diagnostic workload starting at %s", time.Now().UTC().Format(time.RFC3339Nano))
 	wl := startG2Load(seed, 6, g2PGOp(src.DB))
 	time.Sleep(time.Duration(envInt("STRAND_E2E_PG_LOAD_SECONDS", 20)) * time.Second)
 	wl.Stop()
+	t.Logf("strict diagnostic workload stopped at %s", time.Now().UTC().Format(time.RFC3339Nano))
 	t.Logf("source load: %s", wl.summary())
 	waitPGCaughtUp(t, src, dst, &cfg, p, 5*time.Minute)
 

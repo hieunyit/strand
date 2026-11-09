@@ -274,6 +274,13 @@ func (p *Pipeline) pgFlushRange(ctx context.Context, table model.TableID, column
 
 // pgFlushKeySet (FlushKeySet, chunk re-read): như pgFlushRange cho đúng tập khóa keys.
 func (p *Pipeline) pgFlushKeySet(ctx context.Context, table model.TableID, columnNames []string, rows []*model.RowChange, keys []snapshot.Bound) error {
+	if src, ok := p.sourceOf(table); ok {
+		m := p.table(src)
+		if m != nil && m.TargetPKCodec != nil && len(m.TargetPKCodec.Cols) > 0 && len(keys) > (65535/2)/len(m.TargetPKCodec.Cols) {
+			q := snapshot.PGKeySQL{Table: table, Codec: m.TargetPKCodec}
+			return p.pgFlushStaged(ctx, table, columnNames, rows, q, nil, nil, keys)
+		}
+	}
 	return p.pgFlushGeneric(ctx, table, columnNames, rows, func(q snapshot.PGKeySQL) (string, []any, int, error) {
 		return q.InList(keys, 1)
 	})
@@ -283,7 +290,7 @@ func (p *Pipeline) pgFlushGeneric(ctx context.Context, table model.TableID, colu
 	scope func(snapshot.PGKeySQL) (string, []any, int, error)) error {
 	src, ok := p.sourceOf(table)
 	m := p.table(src)
-	if !ok || m == nil || m.PKCodec == nil || m.TargetPKCodec == nil {
+	if !ok || m == nil || m.PKCodec == nil || m.TargetPKCodec == nil || len(m.PKCodec.Cols) == 0 || len(m.TargetPKCodec.Cols) == 0 {
 		return fmt.Errorf("flush %s: no primary key codec", table)
 	}
 	q := snapshot.PGKeySQL{Table: table, Codec: m.TargetPKCodec}
@@ -298,6 +305,9 @@ func (p *Pipeline) pgFlushGeneric(ctx context.Context, table model.TableID, colu
 			return fmt.Errorf("flush %s: %w", table, err)
 		}
 		keep = append(keep, b)
+	}
+	if len(keep) > (65535-len(args))/len(q.Codec.Cols) {
+		return p.pgFlushStaged(ctx, table, columnNames, rows, q, []string{cond}, [][]any{args})
 	}
 	if len(keep) > 0 {
 		in, ka, _, err := q.InList(keep, next)
@@ -352,4 +362,86 @@ func (p *Pipeline) pgClearUnreadRange(ctx context.Context, table model.TableID, 
 func pgQuoteTable(t model.TableID) string {
 	q := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 	return q(t.Schema) + "." + q(t.Table)
+}
+
+// pgFlushStaged giữ TOÀN BỘ keep-set trong bảng tạm, rồi mới DELETE các khóa vắng và upsert.
+// RS-1: không chia NOT IN thành nhiều DELETE (sẽ xóa row sống của lô khác/cascade con FK).
+// PGReplaceExact chạy mọi câu trong MỘT transaction có fence (SG-1); rollback bỏ cả staging,
+// DELETE và upsert. CP-1..5/CO-1..2/SD-1..4 không đổi vì không đổi stream hay checkpoint.
+// Chỉ dùng khi danh sách bind lớn; chunk nhỏ giữ đường SQL cũ để tránh DDL bảng tạm mỗi chunk.
+func (p *Pipeline) pgFlushStaged(ctx context.Context, table model.TableID, columns []string, rows []*model.RowChange,
+	q snapshot.PGKeySQL, conds []string, args [][]any, scopeKeys ...[]snapshot.Bound) error {
+	if q.Codec == nil || len(q.Codec.Cols) == 0 {
+		return fmt.Errorf("snapshot %s has no target key columns", table)
+	}
+	const temp = `pg_temp."_strand_snapshot_keep"`
+	names := q.Cols()
+	stmts := []string{`CREATE TEMP TABLE "_strand_snapshot_keep" ON COMMIT DROP AS SELECT ` + strings.Join(names, ",") + " FROM " + pgQuoteTable(table) + " WITH NO DATA"}
+	binds := [][]any{nil}
+	src, ok := p.sourceOf(table)
+	if !ok {
+		return fmt.Errorf("snapshot table %s has no source", table)
+	}
+	m := p.table(src)
+	if m == nil || m.PKCodec == nil {
+		return fmt.Errorf("snapshot %s has no source key codec", table)
+	}
+	keep := make([]snapshot.Bound, 0, len(rows))
+	for _, r := range rows {
+		b, err := m.PKCodec.BoundOf(r.Key)
+		if err != nil {
+			return err
+		}
+		keep = append(keep, b)
+	}
+	per := min(1000, 65535/len(names))
+	for i := 0; i < len(keep); i += per {
+		vals, a, _, err := q.Values(keep[i:min(i+per, len(keep))], 1)
+		if err != nil {
+			return err
+		}
+		stmts = append(stmts, "INSERT INTO "+temp+" ("+strings.Join(names, ",")+") VALUES "+vals)
+		binds = append(binds, a)
+	}
+	// Có index/statistics để anti-join không thành quét keep-set cho từng row đích.
+	stmts = append(stmts, "CREATE INDEX ON "+temp+" ("+strings.Join(names, ",")+")", "ANALYZE "+temp)
+	binds = append(binds, nil, nil)
+	if len(scopeKeys) > 0 {
+		const scopeTemp = `pg_temp."_strand_snapshot_scope"`
+		stmts = append(stmts, `CREATE TEMP TABLE "_strand_snapshot_scope" ON COMMIT DROP AS SELECT `+strings.Join(names, ",")+" FROM "+pgQuoteTable(table)+" WITH NO DATA")
+		binds = append(binds, nil)
+		for i := 0; i < len(scopeKeys[0]); i += per {
+			vals, a, _, err := q.Values(scopeKeys[0][i:min(i+per, len(scopeKeys[0]))], 1)
+			if err != nil {
+				return err
+			}
+			stmts = append(stmts, "INSERT INTO "+scopeTemp+" ("+strings.Join(names, ",")+") VALUES "+vals)
+			binds = append(binds, a)
+		}
+		stmts = append(stmts, "CREATE INDEX ON "+scopeTemp+" ("+strings.Join(names, ",")+")", "ANALYZE "+scopeTemp)
+		binds = append(binds, nil, nil)
+		var match []string
+		for _, n := range names {
+			match = append(match, "_strand_scope."+n+" = "+pgQuoteTable(table)+"."+n)
+		}
+		conds = []string{"EXISTS (SELECT 1 FROM " + scopeTemp + " AS _strand_scope WHERE " + strings.Join(match, " AND ") + ")"}
+		args = [][]any{nil}
+	}
+	var eq []string
+	for _, n := range names {
+		eq = append(eq, "_strand_keep."+n+" = "+pgQuoteTable(table)+"."+n)
+	}
+	for i, cond := range conds {
+		stmts = append(stmts, "DELETE FROM "+pgQuoteTable(table)+" WHERE ("+cond+") AND NOT EXISTS (SELECT 1 FROM "+temp+" AS _strand_keep WHERE "+strings.Join(eq, " AND ")+")")
+		binds = append(binds, args[i])
+	}
+	out, err := p.pgFlushImages(table, rows)
+	if err != nil {
+		return err
+	}
+	pk := make([]string, len(q.Codec.Cols))
+	for i, c := range q.Codec.Cols {
+		pk[i] = c.Name
+	}
+	return writer.PGReplaceExact(ctx, p.dst, table, pk, columns, out, stmts, binds)
 }

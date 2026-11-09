@@ -20,6 +20,7 @@ import (
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/schemagen"
 	"strand/internal/snapshot"
 	"strand/internal/verify"
 )
@@ -159,19 +160,27 @@ func newVerifyCmd() *cobra.Command {
 
 			if mode == "full" {
 				var ids []model.TableID
-				names := cfg.Tables.Include
 				if table != "" {
-					names = []string{table}
-				}
-				if len(names) == 0 {
-					return exitcode.New("missing_tables", exitcode.InvalidSyntax, "verify --mode full needs --table or tables.include", nil)
-				}
-				for _, n := range names {
-					s, t, ok := strings.Cut(n, ".")
-					if !ok || strings.ContainsAny(n, "*?") {
-						return exitcode.New("invalid_table", exitcode.InvalidSyntax, fmt.Sprintf("table %q must be schema.table (no wildcard)", n), nil)
+					// --table là lựa chọn tường minh của người dùng, kể cả bảng bị exclude khỏi pipeline.
+					s, t, ok := strings.Cut(table, ".")
+					if !ok || s == "" || t == "" || strings.ContainsAny(table, "*?") {
+						return exitcode.New("invalid_table", exitcode.InvalidSyntax, fmt.Sprintf("table %q must be schema.table (no wildcard)", table), nil)
 					}
-					ids = append(ids, model.TableID{Schema: s, Table: t})
+					ids = []model.TableID{{Schema: s, Table: t}}
+				} else {
+					// Dùng cùng discovery với sync/validate để include glob, exclude và thứ tự bảng giống nhau.
+					// Discover trả về mỗi bảng nguồn đúng một lần theo schema/table, bất kể include trùng.
+					var warnings []string
+					ids, warnings, err = schemagen.Discover(cmd.Context(), src, cfg.Source.Kind, cfg.Tables.Include, cfg.Tables.Exclude)
+					if err != nil {
+						return err
+					}
+					for _, w := range warnings {
+						fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+w)
+					}
+					if len(ids) == 0 {
+						return exitcode.New("missing_tables", exitcode.InvalidSyntax, "verify --mode full: no source tables match tables.include after tables.exclude", nil)
+					}
 				}
 				// --rate mặc định 0.01 là tỉ lệ của sample; với full, không đặt thì dùng DefaultFullRate chunk/giây.
 				fullRate := verify.DefaultFullRate

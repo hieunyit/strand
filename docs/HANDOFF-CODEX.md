@@ -11,7 +11,7 @@ Tài liệu này dành cho agent tiếp quản (Codex). Đọc hết trước kh
 | 1 | `spec/02-specs.md` | Đặc tả kỹ thuật — nguồn sự thật. **Không sửa `spec/`** (thuộc owner). |
 | 2 | `spec/design.md` | Thiết kế, lý do, bất biến |
 | 3 | `TASKS.md` | Danh sách task theo phase + tiêu chí nghiệm thu (AC) |
-| 4 | `questions/DECISIONS-2026-11-02.md` | 18 quyết định đã chốt trong code mà spec chưa cập nhật. Khi bạn phải lệch spec: thêm một dòng vào đây (số tiếp theo), không sửa spec |
+| 4 | `questions/DECISIONS-2026-11-02.md` | Các quyết định và điểm cần owner làm rõ mà spec chưa cập nhật. Khi bạn phải lệch spec: thêm một dòng vào đây (số tiếp theo), không sửa spec |
 | 5 | `spec/04-testing.md` | Cách test, gate, soak |
 | 6 | `reports/` | Báo cáo từng task (`P1-xx.md`, `P2-0x.md`, `REVIEW-2026-11-02-gate1.md`) |
 | 7 | `docs/USAGE.md` | Tài liệu người dùng (đang thiếu — xem việc D) |
@@ -20,7 +20,17 @@ Bất biến phải giữ (định nghĩa trong spec 02): **CP-1..5** (checkpoin
 
 ---
 
+## Ngoại lệ MinIO theo yêu cầu người dùng (2026-11-08)
+
+Kiểm định lần này loại đúng bốn test phụ thuộc MinIO, giữ nguyên code test và không tính chúng là PASS: non-E2E `TestMinIOBackend_Direct`, `TestPF4_SpoolOverflowToBucket_MinIO`; E2E `TestG1_E2E_PrefetchSpoolOverflowsToBucket`, `TestG1_E2E_PrefetchDuringLongRestore`. Runner dùng `-skip` theo tên đầy đủ; xem `/tmp/strand-matrix-20261108/MATRIX-PLAN.md` và `coverage-plan.json`. Lượt trước lỗi thật MinIO HTTP 503 `XMinioServerNotInitialized` được lưu tại `/tmp/strand-matrix-20261108/attempt-002-minio-fail/non-e2e.stdout`; không suy ra MinIO đã được sửa hoặc xác nhận. Bản đề xuất fixture MinIO nằm riêng, không tích hợp theo phạm vi người dùng.
+
 ## 1. Repo và nhánh
+
+**2026-11-07 — điều tra F11 tiếp:** nhánh `agent/f11-root-cause-20261107` trong clone riêng trên. Phát hiện lỗi reader dùng end LSN của watermark làm checkpoint inclusive: trùng LSN commit kế tiếp; regression trên code cũ mất cả Txn sau restart, bản sửa dùng `endLSN-1`. Ba trace thật trước sửa có 11 va chạm; một trace có 14 lần coordinator vouch LSN trước khi Txn được Admit. Đây là cơ chế lỗi đã chứng minh, chưa gán chắc chắn toàn bộ log F11 lịch sử. Đồng thời sửa race/tràn im lặng của trace. Xem `reports/F11-ROOT-CAUSE-20261107.md`; bản sửa đã qua build/vet/gofmt, 913 non-E2E test/subtest (31 package), F11 E2E 6/6 (3 seed/mỗi chế độ), reader/trace race; chưa full E2E toàn repo, chưa merge/push.
+
+
+**2026-11-07 — sửa review local mới:** clone riêng `/home/hellc/strand-review-fixes`, nhánh `agent/review-fixes-20261107`, nền tích hợp `751e5ca` (main local vẫn `9281ffa`). Sửa R01/F11 barrier, R02 fencing, R03 bind snapshot, R04 FK catalog, R05 tracking incomplete, R07 budget holes; test đỏ trên code cũ; build/vet qua, gofmt rỗng, non-E2E 910 test/subtest qua, E2E chọn lọc 24/24 (ba seed mỗi chế độ) qua. Không sửa worktree nguồn, spec hay main. Chi tiết/bằng chứng: `reports/REVIEW-FIXES-20261107.md`. Benchmark R06 ở nhánh riêng `agent/review-bench-fix-20261107` HEAD `872db7d` (gồm `c254d59`); 20 test/subtest thường và 20 với race qua, chưa chạy benchmark chính thức. **Chưa đề nghị merge khi full E2E hai chế độ trên bản sửa chưa hoàn tất.**
+
 
 **Codex đang làm việc B (2026-11-04):** clone riêng `/home/hellc/strand-codex`, nguồn local scratchpad; tiếp tục `agent/schema-init` từ `27c3e1f`; code `efb3b1b` + sửa sequence/default `cdd7f6c`. Đã triển khai sinh/apply DDL ba hướng, CLI, validate và bootstrap/CREATE barrier. Chưa merge/push. Báo cáo đang cập nhật ở `reports/SCHEMA-INIT.md`; chưa được coi là xong trước checklist §9 và full e2e hai chế độ. C–F và Gate 2 vẫn chưa bắt đầu trong phiên Codex.
 
@@ -77,7 +87,7 @@ Kho chứa các nhánh trên hiện là bản clone làm việc của Claude (`/
 export PATH=$PATH:/usr/local/go/bin GOFLAGS=-buildvcs=false   # go không có trong PATH mặc định
 gofmt -l internal cmd tests tools        # phải rỗng
 go build ./... && go vet ./...
-go test -count=1 $(go list ./... | grep -v tests/e2e)          # 28 package, cần Docker (testcontainers)
+go test -count=1 $(go list ./... | grep -v tests/e2e)          # 34 package ngoài E2E tại 2026-11-07 (30 có test), cần Docker (testcontainers)
 STRAND_E2E_COMMIT_ORDER=relaxed go test -count=1 -v -timeout 240m ./tests/e2e/
 STRAND_E2E_COMMIT_ORDER=strict  go test -count=1 -v -timeout 240m ./tests/e2e/
 ```
@@ -114,6 +124,12 @@ Còn thiếu cho Gate 1: cập nhật báo cáo gate (`reports/P1-22.md` hoặc 
 ---
 
 ## 4. Việc còn lại — theo thứ tự ưu tiên
+
+F11 tiếp tục trên `agent/f11-root-cause-20261107`: đã hoàn tất ma trận ba seed relaxed/strict (6/6), reader/trace race và 913 non-E2E test/subtest; còn full E2E toàn bộ trên đầu nhánh trước đề nghị merge. Báo cáo và log ở `reports/F11-ROOT-CAUSE-20261107.md` và `/tmp/strand-f11-investigation-20261107/`.
+
+### Review follow-up 2026-11-07
+
+Sửa review mới trên `agent/review-fixes-20261107` (nền local `751e5ca`), benchmark trên `agent/review-bench-fix-20261107`. Kết quả cuối và giới hạn phải đọc ở `reports/REVIEW-FIXES-20261107.md`; không dùng trạng thái main cũ hoặc log E2E của worktree khác để xác nhận bản sửa. Còn full E2E relaxed/strict trên bản tích hợp sửa trước khi đề nghị merge. Trong kiểm định gặp fixture governor dò IP compose cố định: đã ngắt riêng binary test do mình sở hữu và chuyển sang container riêng (#63); không đụng strand-dev/container của người khác.
 
 ### A. Chốt full e2e trên `f4664a7` rồi đẩy lên GitHub main  ⏳ đang chạy
 
@@ -349,7 +365,7 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 - [ ] Không `t.Skip`; không sleep cố định thay cho điều kiện; điều kiện tiền đề của test (ví dụ "snapshot phải chạy dưới tải") được kiểm và báo fail rõ ràng.
 - [ ] E2E tính đúng chạy ở **cả** `relaxed` và `strict`; việc chạm snapshot/pipeline chạy ≥3 lần.
 - [ ] Có ca kill -9 / restart nếu thay đổi có trạng thái bền (plan, checkpoint, state file).
-- [ ] Unit (28 package) + full e2e cả hai chế độ trên **nhánh tích hợp sau merge**, không chỉ trên nhánh tính năng.
+- [ ] Unit toàn bộ package ngoài E2E + full e2e cả hai chế độ trên **nhánh tích hợp sau merge**, không chỉ trên nhánh tính năng.
 - [ ] Ghi số liệu thật: số test qua/lỗi, thời gian, SEED của test lỗi.
 
 **Vận hành / tài liệu**
@@ -407,10 +423,10 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 27 (mở, hiếm) | PG PK identity ALWAYS bị `UPDATE … SET id = DEFAULT` cùng cột TOAST không đổi → writer `UPDATE SET pk` lỗi 428C9 | partialUpdate đặt PK tường minh | **Chưa sửa** (hiếm) | — |
 | 28 | (review Codex 2026-11-05) `TestG1_E2E_Kill9RandomCrashes` iteration 7: 1062 `accounts.uk_code` ngay sau resume snapshot | Flush chunk (target commit) và lưu plan (fsync local) là hai bước; crash ở giữa để lại row cũ trong phần plan coi là "Chưa đọc" — event của phần đó bị bỏ nên row cũ giữ giá trị unique mà source đã giải phóng | Resume: xóa ở target phần `[NextPK, MaxPK]` + khóa Reread trước khi đăng ký range (`agent/resume-clear`, `fef4762`) | `TestRS1_ResumeClearsUnreadPartBeforeRegister` (đỏ khi tắt bước xóa); e2e kill -9 lặp lại |
 | 29 (đóng — dòng 50) | Reader PG giữ toàn bộ event của Txn streaming/two-phase trong RAM (`buf.events`, `internal/reader/pg/stream.go` ~417) tới khi biết kết cục → Txn lớn / nhiều Txn mở có thể OOM | Chưa có spill ở reader PG | **Chưa sửa** — cần spill ra đĩa theo byte (như assembler MySQL) + test Txn lớn streaming | — |
-| 30 (mở) | Assembler spill theo số row (`maxInMem`), không theo byte (`internal/assemble/spill.go` ~143) | Row lớn → RAM vượt dự kiến | **Chưa sửa** — ngưỡng theo byte | — |
+| 30 | Assembler spill chỉ theo số row; row lớn vượt dự kiến RAM | Thiếu budget byte ước lượng | Spill trước row vượt 64 MiB payload ước lượng; dọn file Txn chưa bàn giao khi Process dừng; không phải trần RSS | `TestSpillByteBudget*`, `TestSpillAbandonedTransactionCleanup` đỏ cũ/xanh mới; giới hạn ở `reports/ASSEMBLER-BYTE-BUDGET-20261108.md` |
 | 31 | Source PG: mọi governor bị ép về `static` (`internal/pipeline/governor.go` ~28); comment "PG chưa có snapshot logic" đã lỗi thời từ PGBOOT → **không benchmark được GRACE cho PG** (Gate 2) | Tín hiệu onoff/GRACE chỉ đọc từ MySQL | Đã sửa (review N11): `PGDBSignalReader` (replica lag, wal_status slot, poll latency, số hạng WAL của P_lag), bỏ ép static (thiếu quyền → cảnh báo + static); nối cỡ chunk / cửa sổ L / token bucket chung, sửa retention risk bỏ qua giãn nhịp — xem `docs/GOVERNOR-WIRING.md`. Benchmark G2-12 trên PG còn phải chạy | `internal/governor/signals_pg_test.go`, `internal/pipeline/governor_wiring_test.go`, `internal/snapshot/chunk_rows_hook_test.go` |
 | 32 (đóng — dòng 46) | `resources.memory.*`, `resources.target.iops`, `target.write_mode` không có tác dụng và không có cảnh báo | Thiếu trong `internal/config/unimplemented.go` | **Chưa sửa** — thêm cảnh báo (hoặc từ chối) | — |
-| 33 (mở) | `strand validate` không kiểm điều kiện PG logical replication (`wal_level`, publication, slot, quyền REPLICATION) | Validate chỉ có kiểm MySQL | **Chưa sửa** | — |
+| 33 (mở một phần) | `strand validate` thiếu preflight PG | Validate chỉ kiểm MySQL | Kiểm WAL, role, publication/membership và slot tường minh bằng catalog chỉ đọc; cảnh báo slot implicit/seed, filter/cột publication và slot active | `TestPGValidateChecksCDCPrerequisites` đỏ cũ/xanh mới; giới hạn và các ca chưa kiểm ở `reports/PG-VALIDATE-20261108.md` |
 | 34 | Bản sửa đầu tiên của #28 làm `TestG1_E2E_Kill9RandomCrashes` lỗi 6/6 với 1452 (FK) | `clearUnread` đặt `FOREIGN_KEY_CHECKS = 1` khi trả kết nối về pool, trong khi kết nối ghi của pipeline mặc định `foreign_key_checks=0` (`pipeline.targetDSN`) — đúng bài học §7.3 | Lưu giá trị cũ của phiên và khôi phục đúng nó; khôi phục lỗi thì loại kết nối khỏi pool | Kill -9 + snapshot add: relaxed 6/6, strict 6/6 |
 | 35 | (review sâu Codex 2026-11-05, R01) UNIQUE/PK collation `_ci`/`_ai`/PAD SPACE: T1 `'a'→'b'`, T2 INSERT `'A'` chạy song song → `ON DUPLICATE KEY UPDATE` đè row khác, mất row, cả hai GTID đã checkpoint | Writeset hash chuỗi theo byte | Hash khóa qua "bộ xương" bảo thủ (`internal/model/keycanon.go`: NFKD, bỏ dấu, gập hoa/thường, chữ ghép, gộp ký tự lặp, bỏ space cuối) + length prefix; gập thừa chỉ thêm cạnh (`agent/review-deep` `2e13bdb`) | `TestCO1_CaseInsensitiveUniqueKeysConflict` (đỏ trên code cũ); probe R01 báo "T2 correctly blocked". **Còn rủi ro dư:** collation lạ (ICU tùy biến, quy tắc riêng) có thể bằng nhau mà bộ xương khác — nếu gặp, nâng bảng đó lên cấp bảng |
 | 36 | (R11) FK tham chiếu UNIQUE ngoài PK: row con hash vào namespace PK của cha → không có cạnh | Metadata FK không biết cột được tham chiếu | Đọc `REFERENCED_COLUMN_NAME`/`confkey`, phân giải theo PK/unique cha (`ForeignKey.ParentIndex`, sắp cột theo thứ tự khóa cha); spill record `'S'` mang ParentIndex (`2e13bdb`) | `TestCO1_ForeignKeyToUniqueIndexOrdersChildAfterParent`, `TestCO1_ForeignKeyMetadataResolvesReferencedKey` (MySQL+PG), round-trip spill |
@@ -428,12 +444,40 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 48 (mở, R18) | `lag` = 0 khi scheduler hết việc dù reader có thể đang đứng sau source head (mạng treo) | Lag chỉ tính từ Txn đã Admit | **Chưa sửa** — cần heartbeat từ source (MySQL `HeartbeatPeriod` của BinlogSyncer, PG keepalive `ServerWALEnd`) để đo reader→head; health "xanh + lag 0" chưa chứng minh freshness | — |
 | 49 (R10) | `max_chunk_bytes` không phải trần RAM: đọc hết chunk rồi mới kiểm byte, chia đôi rồi **ghép lại** toàn bộ | Chunk là đơn vị watermark/flush | SELECT dừng (và hủy query) ngay khi chạm trần; chunk bị cắt ở khóa cuối đã đọc, phần đuôi tách thành chunk "Đang đọc" giữ low/S0 + buffer của nó (`SplitReading`, `Chunk.Continuation`), đầu flush như chunk thường, đuôi đọc tiếp không lấy low mới — đúng vì buffer giữ ảnh cuối mọi khóa trong (low, high] (`dbe009e`) | `TestR10_ByteBudgetTruncatesInsteadOfReassembling`; mô phỏng TOAST/PK với mọi chunk bị cắt (60 seed, 4.245 lần cắt; đỏ khi đuôi lệch một khóa); `TestR10_SnapshotAdd_ByteTruncatedChunksUnderHeavyUpdates` (MySQL thật, 5/5). Mô phỏng KHÔNG phân biệt được việc chuyển buffer sang đuôi (event luôn visible ngay) — giữ vì an toàn với 2PC/visibility |
 | 50 (R08 = dòng 29) | Reader PG giữ Txn streaming/2PC trong RAM | — | `eventLog`: RAM tới tổng `MaxBufferedBytes` (64 MiB) mọi Txn treo, vượt thì Txn lớn nhất đổ ra file trong spool (`pg-reader-<pipeline>`); rollback savepoint cắt theo mốc byte; file xóa khi commit/abort/thoát, file cũ dọn khi Start (`bc5a8f8`) | `TestR08_EventLogSpillRoundTripAndSubxactTruncate`, `TestR08_StreamingAndTwoPhaseSpillToDisk` (kịch bản AC3 trên PG 18 với trần 4 KiB). Chưa đo RSS với Gate 2 "100 Txn × 49.999 khóa"; trần chưa đọc từ `resources.memory` |
-| 51 (mở, review) | `verify --mode full` không tự mở rộng wildcard `tables.include` như `sync` (đòi `--table` cụ thể) | — | **Chưa sửa** — UX dễ khiến tưởng đã verify toàn pipeline | — |
+| 51 | `verify --mode full` không mở rộng wildcard hoặc áp exclude như `sync` | Dùng include thô | Discover bảng theo include/exclude; `--table` vẫn override; hỗ trợ rename | `TestVerifyFullUsesPipelineTableScope` đỏ cũ; MySQL 8.4 + PG18 xanh (`verify-scope-final-green.log`, `/tmp/strand-matrix-20261108/`) |
 | 52 (mở, review) | Post-seed verify ngoài MySQL→MySQL chỉ cảnh báo rồi xóa VerifyPending → pipeline báo `synced` dù chưa verify (`internal/pipeline/verify.go` ~167) | — | **Chưa sửa** — tối thiểu: trạng thái/metric phân biệt synced-chưa-verify | — |
 
 | 53 | (việc C) Cột chuỗi charset khác UTF-8 (latin1…) có ký tự ngoài ASCII: stream MySQL→MySQL dừng với 1366 (hoặc ghi `?` khi sql_mode không strict) | Binlog đưa byte theo charset CỦA CỘT, writer gửi qua kết nối utf8mb4 | Reader chuyển giá trị chuỗi sang UTF-8 theo collation của cột trong TABLE_MAP (bảng collation đọc từ source); latin1 = cp1252 của MySQL; charset khác chỉ nhận ASCII, có byte ≥ 0x80 thì dừng rõ (`806402a`); áp cả cho `strand prefetch` | `TestCharset_Latin1ValuesSurviveSnapshotAndStream` (đỏ 1366 trước), `TestLatin1DecodeMatchesMySQL` (256 byte) |
 | 54 | (việc C) Khóa VARBINARY rỗng `''` bind thành NULL → snapshot chép 0 row mà báo xong | `[]byte(nil)` từ RawBytes | Giữ `[]byte{}` khi đọc, đổi nil → rỗng khi bind | `TestGPK_EmptyBinaryKeyIsABoundNotNull` |
 | 55 (vận hành) | Test chạy với `TESTCONTAINERS_RYUK_DISABLED=true`: tiến trình test bị kill (OOM, timeout) để lại container MySQL ~570 MB mỗi cái; 2026-11-05 có ~50 cái, RAM cạn, lượt e2e strict bị OOM-kill | Không có reaper | Không chạy test nặng song song với full e2e; dọn bằng lệnh lọc theo nhãn `org.testcontainers` trừ session đang chạy | — |
+
+| 56 | F11 E2E có thể dừng trước khi mọi commit workload được apply | Catch-up lấy WAL write position với async commit; marker có thể apply sớm ở relaxed | Chờ durable LWD bao phủ insert cutoff trước marker | `TestReviewF11CatchupWaitsForInsertedWAL`; chưa chốt nguyên nhân duy nhất của log lịch sử |
+| 57 | Fence PG trả trước reload hoặc lỗi ALTER ROLE read-only | Reload bất đồng bộ; session quản trị cũng nhận read-only | Một session writable, chờ reload, loại session khỏi pool | `TestReviewPGFenceReloadAndWritableAdmin`, test fence PG thật |
+| 58 | Snapshot PK rộng PG lỗi quá 65535 parameters | DELETE keep/scope list không giới hạn bind | TEMP key staging, anti-join, cùng transaction/fence với upsert | `TestReviewPGWideKeySnapshotParameterLimit` (range, keys, rollback/retry) |
+| 59 | Schema init FK khác schema trỏ sai bảng | Suy schema bảng cha từ schema bảng con khi pretty-print bỏ qualification | Dùng confrelid và namespace catalog | `TestReviewPGCrossSchemaFKUsesCatalogIdentity` |
+| 60 | Delta/post-seed verify báo đủ dù encode khóa thất bại | Nuốt lỗi BoundOf, thiếu key trong touchset | Mark incomplete cho mọi consumer; giữ VerifyPending khi post-seed thiếu tracking | `TestReviewTouchedEncodeFailureIsIncomplete` |
+| 61 | Holes có thể vượt MaxHoles sau nhiều admission chưa Done | Chỉ nhìn holes đã hiện hữu, không reserve in-flight | Giới hạn Txn chưa Done ở relaxed | `TestReviewCP4ReserveInflightHoles`, `TestCP4_SchedulerStopsOnMaxHoles` |
+
+| 63 | Unit governor treo khi full test do dò IP compose cố định, có thể báo PASS khi DB không sẵn sàng | PingContext không timeout vào 172.23.0.5; integration tùy cơ hội | Fixture MySQL riêng do test tạo/dọn, DSN timeout rõ, không dò container người khác | `TestGV1_DirectDBSignals_NoMetricsSourceDependency`; lượt cũ bị ngắt riêng binary test, rerun được báo riêng |
+
+| 64 | `TestPR1_AC1_IndependentSequenceCache1000`: source still writable after fence | fenceMarker đặt default_transaction_read_only=off rồi trả connection vào pool | Loại connection marker khỏi pool ở mọi đường thoát, như session Fence | Test AC1 có sẵn đỏ khi tạm revert cleanup marker, xanh khi khôi phục; chạy lại toàn package promote |
+
+| 65 | Test replay có thể DROP gen_orders trên dev/DSN môi trường | Tự dò localhost và docker inspect strand-dev-* cho test có DDL | Luôn tạo cặp MySQL riêng; fixture bẫy DSN môi trường bằng socket riêng không tồn tại. Audit/watermark cũng thêm native AIO OFF | `TestAC3_AC4_ReplayBenchmark`; không dùng fixture ngoài test |
+
+| 66 | Hai test MinIO lỗi connection refused localhost:9000 | Phụ thuộc dịch vụ compose ngoài test | Fixture MinIO riêng qua testcontainers, endpoint mapped và health wait | `TestPF4_SpoolOverflowToBucket_MinIO`, `TestMinIOBackend_Direct` |
+
+| 67 | Sample verify MySQL→PG lỗi Error 3636 khi tạo fixture | CTE đệ quy 5000 vượt mặc định 1000 | Sinh đúng 5000 row bằng tích chữ số, không sửa session | `TestSampleKeysDB_MySQLToPGCompositeInt` |
+
+| 68 | Watermark PG xác nhận cả commit kế tiếp chưa apply; restart có thể mất nguyên Txn | Logical message dùng EndRecPtr exclusive, commit dùng ReadRecPtr; hai LSN có thể bằng nhau | Reader phát watermark tại endLSN−1; giữ high trước record nên RS-1/2 vẫn đạt; không vouch Txn chưa phát (CP-1/2, CO-1/2) | `TestWatermarkDoesNotAcknowledgeNextCommit`: code cũ reader restart mất cả Txn, sửa qua; trace thực có cửa sổ vouch trước Admit |
+
+| 73 | Router xóa file spill bền của prefetch trước target commit | Spool STX2 chỉ giữ path, router coi mọi input là file tạm | Ownership runtime dương, decode spool là borrowed, output route ở runtime dir riêng; giữ prefetch tới applied | `TestPrefetchSpilledTxnSurvivesRouteAndRestart` code cũ ENOENT, code mới qua; chi tiết và giới hạn `reports/PREFETCH-SPILL-OWNERSHIP-20261108.md` |
+| 72 (mở) | File spill của transaction đã bàn giao vào channel có thể còn trong backlog khi consumer dừng | Cleanup #30 chỉ quản lý transaction assembler chưa bàn giao | **Chưa sửa** — cần hợp đồng sở hữu/dọn backlog toàn pipeline; chưa inject lỗi ghi/sync/cancel | Xem `reports/ASSEMBLER-BYTE-BUDGET-20261108.md` |
+| 74 | Test generic PK PG thiếu coverage reread dù dữ liệu khớp | Workload random không bảo đảm PK move chạm row/đúng trạng thái snapshot | Thêm bảng control thứ sáu với move TOAST và gate trước register; giữ năm bảng gốc snapshot mới | `TestGPK_PGToPGSnapshotUnderLoadWithGenericKeys` cũ lỗi 0 reread, fixture mới PG18 3/3; xem `reports/PG-GENERIC-REREAD-FIXTURE-20261108.md` |
+| 75 | Test giả lập barrier F11 lỗi khi global witness bật | Fake DB trả một cột cho query witness hai cột, thiếu thư mục artifact | Fake trả đúng write/insert, test ép witness và kiểm artifact/cutoff/LWD; barrier không đổi | `TestReviewF11CatchupWaitsForInsertedWAL` đỏ cũ/xanh mới; xem `reports/F11-WITNESS-HELPER-20261109.md` |
+| 71 | Regression crash F11 trên WAL PG thật | Message end trùng commit start, checkpoint cũ bao phủ transaction chưa phát | Test proxy chặn tại watermark, kill -9 rồi restart; reader sửa giữ checkpoint trước commit | `TestF11_E2E_WatermarkBoundaryCrashRestart`: reader cũ mất transaction, `fd5cb48` qua; xem `reports/F11-ROOT-CAUSE-20261107.md` |
+| 69 | Trace F11 race khi Dump đồng thời Put | Counter cấp slot trước khi các trường record được ghi đủ | Publish atomic ready sau khi ghi; Dump chỉ đọc slot ready | `TestTraceConcurrentPublicationAndDump`: race detector đỏ trên code cũ |
+
+| 70 | Trace F11 tràn buffer nhưng không báo, có thể kết luận nhầm mất Txn | Put bỏ record ngoài capacity, Dump không ghi completeness | Trailer allocated/stored/dropped/unpublished/observed_after_dump; trả lỗi I/O; dump sau đóng reader | `TestTraceReportsDroppedRecords`: code cũ đỏ, bản sửa báo đúng 3/5 record bị bỏ |
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 

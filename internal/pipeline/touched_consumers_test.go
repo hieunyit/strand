@@ -82,7 +82,7 @@ func TestN12DeltaVerifyResultIncompleteOnOverflow(t *testing.T) {
 	if err == nil || !errors.As(err, &xe) || xe.Code != exitcode.ErrVerifyIncomplete || xe.ExitCode != exitcode.DataError {
 		t.Fatalf("overflow reported clean: msg=%q err=%v", msg, err)
 	}
-	if !strings.Contains(err.Error(), "incomplete: 1 tables exceeded the tracking limit (sampled): app.b") {
+	if !strings.Contains(err.Error(), "incomplete: 1 tables have incomplete changed-key tracking (limit or encoding failure): app.b") {
 		t.Fatalf("message: %v", err)
 	}
 }

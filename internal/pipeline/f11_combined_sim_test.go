@@ -444,7 +444,7 @@ func (tx *cTx) SendBatch(_ context.Context, b *pgx.Batch) pgx.BatchResults {
 }
 
 func (tx *cTx) Begin(context.Context) (pgx.Tx, error) { panic("unused") }
-func (tx *cTx) LargeObjects() pgx.LargeObjects       { panic("unused") }
+func (tx *cTx) LargeObjects() pgx.LargeObjects        { panic("unused") }
 func (tx *cTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
 	panic("unused")
 }
@@ -464,9 +464,11 @@ func (cDrv) Open(string) (driver.Conn, error) { return nil, errors.New("use conn
 
 type cConn struct{ t *cTarget }
 
-func (c cConn) Prepare(q string) (driver.Stmt, error) { return nil, fmt.Errorf("prepare unsupported: %s", q) }
-func (c cConn) Close() error                          { return nil }
-func (c cConn) Begin() (driver.Tx, error)             { return nil, errors.New("no tx") }
+func (c cConn) Prepare(q string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("prepare unsupported: %s", q)
+}
+func (c cConn) Close() error              { return nil }
+func (c cConn) Begin() (driver.Tx, error) { return nil, errors.New("no tx") }
 
 type cRows struct {
 	cols []string

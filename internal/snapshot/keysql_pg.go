@@ -118,6 +118,15 @@ func (q PGKeySQL) InList(keys []Bound, arg int) (string, []any, int, error) {
 	if len(keys) == 0 {
 		return "FALSE", nil, arg, nil
 	}
+	values, args, next, err := q.Values(keys, arg)
+	if err != nil {
+		return "", nil, arg, err
+	}
+	return q.tuple(q.Cols()) + " IN (" + values + ")", args, next, nil
+}
+
+// Values dựng tuple có ép kiểu để nạp key staging; caller chia lô theo số tham số PG.
+func (q PGKeySQL) Values(keys []Bound, arg int) (string, []any, int, error) {
 	var parts []string
 	var args []any
 	for _, k := range keys {
@@ -130,7 +139,7 @@ func (q PGKeySQL) InList(keys []Bound, arg int) (string, []any, int, error) {
 		}
 		parts, args, arg = append(parts, p), append(args, a...), next
 	}
-	return q.tuple(q.Cols()) + " IN (" + strings.Join(parts, ", ") + ")", args, arg, nil
+	return strings.Join(parts, ", "), args, arg, nil
 }
 
 // BoundOf mã hóa giá trị khóa vals thành Bound (giá trị giữ dạng bind được).

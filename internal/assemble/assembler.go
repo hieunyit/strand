@@ -4,6 +4,8 @@ package assemble
 import (
 	"context"
 	"fmt"
+	"os"
+	"strand/internal/txntrace"
 	"strings"
 	"sync"
 
@@ -462,6 +464,7 @@ func (a *Assembler) finishTxn() (*model.Txn, error) {
 		return nil, err
 	}
 	res := a.currentTxn
+	txntrace.Put(9, res.SourcePos.LSN, res.XID, 0, res.TotalRows(), int64(len(res.Rows)))
 
 	a.inTxn = false
 	a.sawBegin = false
@@ -479,6 +482,17 @@ func (a *Assembler) Process(ctx context.Context, in <-chan reader.Event) (<-chan
 	go func() {
 		defer close(out)
 		defer close(errCh)
+		defer func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			if a.currentSpill != nil {
+				a.currentSpill.discard()
+			}
+			a.currentSpill = nil
+			a.currentTxn = nil
+			a.inTxn = false
+			a.sawBegin = false
+		}()
 
 		for {
 			select {
@@ -509,6 +523,9 @@ func (a *Assembler) Process(ctx context.Context, in <-chan reader.Event) (<-chan
 					select {
 					case out <- txn:
 					case <-ctx.Done():
+						if txn.SpillOwned && txn.SpillPath != "" {
+							_ = os.Remove(txn.SpillPath)
+						}
 						return
 					}
 				}

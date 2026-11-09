@@ -50,6 +50,11 @@ func TestPR1_PGSourceFenceBlocksDeclaredAppRoleFromWriting(t *testing.T) {
 	if err := promote.NewPGSourceDriver(db, "r06_app").Fence(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// Session quản trị dùng SET off phải bị loại khỏi pool; session mới vẫn thấy fence cluster.
+	var readOnly string
+	if err := db.QueryRowContext(ctx, "SHOW default_transaction_read_only").Scan(&readOnly); err != nil || readOnly != "on" {
+		t.Fatalf("fence did not reach a fresh pooled session: %q (%v)", readOnly, err)
+	}
 	// Ứng dụng thử lại như thật: kết nối (mới) rồi tắt read-only trong phiên và ghi.
 	for i := 0; i < 3; i++ {
 		_, _ = app.ExecContext(ctx, "SET default_transaction_read_only = off")

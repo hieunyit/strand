@@ -3,6 +3,7 @@ package sched
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -226,158 +227,54 @@ func TestAC2_TableLevelLock(t *testing.T) {
 // invariant: CP-4
 // AC3: holes > 4.096 thì scheduler ngừng nhận (TestCP4).
 func TestCP4_SchedulerStopsOnMaxHoles(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("DefaultMaxHoles_4096", func(t *testing.T) {
-		cfg := DefaultConfig()
-		if cfg.MaxHoles != 4096 {
-			t.Fatalf("kỳ vọng DefaultConfig.MaxHoles == 4096, got %d", cfg.MaxHoles)
-		}
-		sched := NewScheduler(cfg)
-		defer sched.Close()
-
-		// Background drain ready channel để scheduler không bị nghẽn kênh emit
-		stopDrain := make(chan struct{})
-		go func() {
-			for {
-				select {
-				case <-stopDrain:
-					return
-				case <-sched.Ready():
+	for _, limit := range []int{1, 5, DefaultConfig().MaxHoles} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.MaxHoles = limit
+			s := NewScheduler(cfg)
+			defer s.Close()
+			stop := make(chan struct{})
+			defer close(stop)
+			go func() {
+				for {
+					select {
+					case <-stop:
+						return
+					case <-s.Ready():
+					}
+				}
+			}()
+			for i := 0; i < limit+1; i++ {
+				if err := s.Admit(context.Background(), &model.Txn{}); err != nil {
+					t.Fatal(err)
 				}
 			}
-		}()
-		defer close(stopDrain)
-
-		tbl := model.TableID{Schema: "test", Table: "t1"}
-
-		// 1. Admit Txn 1 (giả lập transaction dài 30 phút, chưa gọi Done)
-		txn1 := &model.Txn{
-			Rows: []model.RowChange{
-				{Table: tbl, Op: model.OpInsert, Key: []model.Value{1}},
-			},
-		}
-		if err := sched.Admit(ctx, txn1); err != nil {
-			t.Fatalf("admit txn1 thất bại: %v", err)
-		}
-
-		// 2. Admit Txns 2..4098
-		for i := 2; i <= 4098; i++ {
-			tx := &model.Txn{
-				Rows: []model.RowChange{
-					{Table: tbl, Op: model.OpInsert, Key: []model.Value{i}},
-				},
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			if err := s.Admit(ctx, &model.Txn{}); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("unreserved admission: %v", err)
 			}
-			if err := sched.Admit(ctx, tx); err != nil {
-				t.Fatalf("admit txn %d thất bại: %v", i, err)
+			s.Done(uint64(limit+1), nil)
+			if s.Holes() != limit {
+				t.Fatalf("holes=%d want %d", s.Holes(), limit)
 			}
-		}
-
-		// 3. Txn 4098 hoàn thành (nhảy mốc high lên 4098)
-		sched.Done(4098, nil)
-
-		// Lúc này: lwd = 0 (vì txn1 chưa xong), high = 4098.
-		// Các sequence trong (0, 4098] chưa xong: 1..4097 -> 4097 lỗ > 4096!
-		holes := sched.Holes()
-		if holes != 4097 {
-			t.Fatalf("kỳ vọng holes == 4097, got %d (lwd=%d, high=%d)", holes, sched.Lwd(), sched.High())
-		}
-
-		// 4. Khi holes > 4.096, scheduler PHẢI NGỪNG NHẬN Txn mới (Admit bị chặn)
-		ctxTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-		defer cancel()
-
-		txn4099 := &model.Txn{
-			Rows: []model.RowChange{
-				{Table: tbl, Op: model.OpInsert, Key: []model.Value{4099}},
-			},
-		}
-		err := sched.Admit(ctxTimeout, txn4099)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("kỳ vọng Admit bị chặn và trả DeadlineExceeded khi holes > 4096, got %v", err)
-		}
-
-		// 5. Txn 1 hoàn thành -> lwd nhảy lên 1 -> holes giảm về (4098 - 1) - 1 = 4096 <= 4096
-		sched.Done(1, nil)
-		if sched.Holes() != 4096 {
-			t.Fatalf("kỳ vọng holes giảm về 4096 sau khi txn1 Done, got %d", sched.Holes())
-		}
-
-		// 6. Scheduler tiếp tục nhận Txn mới thành công
-		ctxValid, cancelValid := context.WithTimeout(ctx, 500*time.Millisecond)
-		defer cancelValid()
-
-		if err := sched.Admit(ctxValid, txn4099); err != nil {
-			t.Fatalf("admit txn4099 thất bại sau khi holes đã giảm: %v", err)
-		}
-	})
-
-	t.Run("CustomMaxHoles_SmallThreshold", func(t *testing.T) {
-		cfg := Config{
-			MaxHoles:            5,
-			TableLevelThreshold: 50000,
-			WritesetBudget:      2000000,
-		}
-		sched := NewScheduler(cfg)
-		defer sched.Close()
-
-		stopDrain := make(chan struct{})
-		go func() {
-			for {
-				select {
-				case <-stopDrain:
-					return
-				case <-sched.Ready():
-				}
+			ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+			defer cancel2()
+			if err := s.Admit(ctx2, &model.Txn{}); err != nil {
+				t.Fatal(err)
 			}
-		}()
-		defer close(stopDrain)
-
-		tbl := model.TableID{Schema: "test", Table: "t2"}
-
-		// Admit txn 1..7
-		for i := 1; i <= 7; i++ {
-			tx := &model.Txn{
-				Rows: []model.RowChange{
-					{Table: tbl, Op: model.OpInsert, Key: []model.Value{i}},
-				},
+			s.Done(uint64(limit+2), nil)
+			if s.Holes() != limit {
+				t.Fatalf("holes=%d want %d", s.Holes(), limit)
 			}
-			if err := sched.Admit(ctx, tx); err != nil {
-				t.Fatalf("admit %d: %v", i, err)
+			for i := 1; i <= limit; i++ {
+				s.Done(uint64(i), nil)
 			}
-		}
-
-		// Done 7: high=7, lwd=0, holes = 6 > 5
-		sched.Done(7, nil)
-		if sched.Holes() != 6 {
-			t.Fatalf("expected 6 holes, got %d", sched.Holes())
-		}
-
-		ctxTimeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-
-		tx8 := &model.Txn{
-			Rows: []model.RowChange{
-				{Table: tbl, Op: model.OpInsert, Key: []model.Value{8}},
-			},
-		}
-		if err := sched.Admit(ctxTimeout, tx8); !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("expected timeout blocked by 6 holes > 5, got %v", err)
-		}
-
-		// Unblock in background
-		go func() {
-			time.Sleep(20 * time.Millisecond)
-			sched.Done(1, nil) // holes drops to 5
-		}()
-
-		ctxUnblock, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
-		defer cancel2()
-
-		if err := sched.Admit(ctxUnblock, tx8); err != nil {
-			t.Fatalf("expected unblock after hole closed: %v", err)
-		}
-	})
+			if s.Holes() != 0 || s.Lwd() != uint64(limit+2) {
+				t.Fatalf("holes=%d lwd=%d", s.Holes(), s.Lwd())
+			}
+		})
+	}
 }
 
 // invariant: CO-1

@@ -68,7 +68,7 @@ func (s *touchedSet) addBound(t model.TableID, b snapshot.Bound, limit int) {
 	m[b.K] = b
 }
 
-// touchedTake: kết quả take của một bên tiêu thụ. over = bảng có khóa bị bỏ do vượt giới hạn.
+// touchedTake: kết quả take của một bên tiêu thụ. over = bảng có khóa bị bỏ do vượt giới hạn hoặc lỗi mã hóa.
 type touchedTake struct {
 	keys map[model.TableID][]int64
 	over map[model.TableID]bool
@@ -123,6 +123,13 @@ func (tk *touchedKeys) addKey(t model.TableID, key []model.Value, codec *snapsho
 	}
 	b, err := codec.BoundOf(key)
 	if err != nil {
+		// Không đổi apply/checkpoint (CP-1..5, CO-1/2), nhưng verify phải biết phạm vi bị thiếu.
+		// Không nuốt lỗi weight rồi báo sạch: dùng cùng đường incomplete như overflow cho từng consumer.
+		tk.mu.Lock()
+		for _, s := range tk.sets {
+			s.over[t] = true
+		}
+		tk.mu.Unlock()
 		return
 	}
 	tk.mu.Lock()
@@ -487,8 +494,11 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	case <-time.After(window):
 	}
 	keys, over, gen := p.takePostSeedKeys()
-	for t := range over {
-		p.log.Warn("post-seed verify: too many changed keys, verifying a sample of them", "table", t.String())
+	// SD-1/CP-1 không thay đổi; chỉ trạng thái verify được siết: thiếu khóa không chứng minh đủ
+	// cửa sổ CDC nên giữ VerifyPending, không được báo synced sau khi chỉ kiểm phần còn lại.
+	if _, err := deltaVerifyResult(touchedTake{over: over}); err != nil {
+		p.fail(err)
+		return
 	}
 	more, err := p.verifyTablesKeys(ctx, 0, keys, gen)
 	if err != nil {
@@ -589,7 +599,7 @@ func deltaVerifyResult(tt touchedTake, skipped ...model.TableID) (string, error)
 	var why []string
 	if len(over) > 0 {
 		sort.Strings(over)
-		why = append(why, fmt.Sprintf("%d tables exceeded the tracking limit (sampled): %s", len(over), strings.Join(over, ", ")))
+		why = append(why, fmt.Sprintf("%d tables have incomplete changed-key tracking (limit or encoding failure): %s", len(over), strings.Join(over, ", ")))
 	}
 	if sk := skippedNames(skipped); len(sk) > 0 {
 		why = append(why, fmt.Sprintf("%d tables cannot be verified by key (the target orders the primary key differently): %s", len(sk), strings.Join(sk, ", ")))

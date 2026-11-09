@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
+	"strand/internal/testutil"
 	"sync"
 	"testing"
 	"time"
@@ -313,13 +313,7 @@ func TestPF3_AllSpoolTiersFull_ReportsPrefetchExhausted(t *testing.T) {
 
 // AC4: spool tràn sang bucket (MinIO trong compose)
 func TestPF4_SpoolOverflowToBucket_MinIO(t *testing.T) {
-	// Kiểm tra kết nối tới MinIO trên compose (localhost:9000)
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://localhost:9000/minio/health/live")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("MinIO not running on localhost:9000: %v", err)
-	}
-	_ = resp.Body.Close()
+	endpoint := testutil.MinIOEndpoint(t)
 
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -330,7 +324,7 @@ func TestPF4_SpoolOverflowToBucket_MinIO(t *testing.T) {
 
 	// Khởi tạo MinIO backend thực tế từ container trong compose
 	minioBackend, err := spool.NewMinIOBackend(spool.MinIOConfig{
-		Endpoint:  "http://localhost:9000",
+		Endpoint:  endpoint,
 		Bucket:    "strand-staging",
 		AccessKey: "minioadmin",
 		SecretKey: "minioadmin",

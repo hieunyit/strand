@@ -23,6 +23,9 @@ type SpoolIter interface {
 
 // Spool là interface hàng đợi log trên đĩa cho transaction theo spec/02-specs.md §3.
 type Spool interface {
+	// Append có thể nhận quyền giữ SpillPath từ caller; sau khi gọi, caller phải
+	// kiểm SpillOwned trước khi dọn, kể cả khi trả lỗi sau lúc đã buffer segment.
+	// Caller không dùng đồng thời Txn này ở nơi khác trong lúc Append chạy.
 	Append(ctx context.Context, t *model.Txn) error
 	Flush(ctx context.Context) error
 	Iter(ctx context.Context, from model.Pos) (SpoolIter, error)

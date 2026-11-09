@@ -1,0 +1,9 @@
+# Giới hạn payload assembler — 2026-11-08
+
+Assembler trước đây chỉ spill khi vượt 10.000 row: một row 64 MiB hoặc hai row 33 MiB vẫn ở RAM. Nay spill trước khi giữ row làm tổng ước lượng vượt 64 MiB, đồng thời giữ ngưỡng row. Ước lượng tính payload cột, key/old key, unique key, FK và metadata; đây không phải trần RSS: reader đã giải mã row, Go overhead, chia sẻ bộ nhớ và các transaction khác không nằm trong giới hạn. `Txn.Bytes`, codec, source position và nguyên transaction không thay đổi (CP-1/2, CO-1/2); bảng và bảng cha vẫn được giữ cho scheduler. Khi Process kết thúc trước khi transaction hoàn tất, file spill chưa bàn giao được đóng/xóa; lỗi ghi/flush/sync cũng thử dọn.
+
+Regression `TestSpillByteBudget*`: code cũ FAIL trên một row 64 MiB, hai row 33 MiB, payload OldKey/unique/FK và lỗi tạo file; code sửa PASS cả bốn, kiểm iterator/giá trị/bảng phụ thuộc và đóng/xóa file hoàn tất. `TestSpillAbandonedTransactionCleanup` FAIL cũ (file còn) và PASS mới. Log `/tmp/strand-matrix-20261108/assembler-old-red.log`, `assembler-cleanup-old-red.log`, `assembler-green.log`. Reviewer đã kiểm source. Lượt đầu chưa inject lỗi ghi/sync hay cancel, và chưa kiểm dọn backlog transaction hoàn tất đã bàn giao vào channel. Lượt toàn package bị ngắt sau khoảng 26 giây để tránh chạy test 50 triệu row song song; không tính là PASS.
+
+Sau lượt bị ngắt trên, chạy lại toàn bộ package `internal/assemble` dưới heavy.lock trên `477fac5`: **PASS**, 56,994 giây, exit 0 (`assembler-package-green.log`, `.exit`).
+
+`TestSpillFlushFailureRemovesFile` đóng file trước `Finish` để tạo lỗi flush thật: code cũ FAIL vì file còn, code sửa PASS và không bàn giao path. Log `assembler-flush-old-red.log`, `assembler-flush-green.log`. Pilot đầu thiếu revert `assembler.go` nên lỗi compile; sau đó test lại với cả hai file cũ và ghi kết quả đúng vào log trên. Chưa inject lỗi sync hoặc kiểm cancel/backlog.

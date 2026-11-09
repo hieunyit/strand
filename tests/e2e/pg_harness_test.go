@@ -213,7 +213,11 @@ func applyLogDup(cdc, snap int, firstCDC, snapshotRewrites bool) bool {
 // setupPGPair dựng source/target PG→PG: lược đồ, preload giống hệt, publication, trigger đếm apply
 // ở target, rồi tạo slot (two_phase) và trả consistent_point.
 func setupPGPair(t *testing.T, slot, pub string) (*pgNode, *pgNode, string) {
-	src := startPG(t, "pgsrc")
+	var extra []string
+	if delay := os.Getenv("STRAND_E2E_F11_WAL_WRITER_DELAY"); delay != "" {
+		extra = []string{"-c", "wal_writer_delay=" + delay}
+	}
+	src := startPG(t, "pgsrc", extra...)
 	dst := startPG(t, "pgdst")
 	src.exec(t, pgSchemaSQL...)
 	dst.exec(t, pgSchemaSQL...)
@@ -476,7 +480,9 @@ func resolvePrepared(t *testing.T, n *pgNode) {
 // --------------------------------------------------------------------------
 
 // waitPGCaughtUp chèn một marker ở source rồi chờ target có marker và lwd đã xác nhận (row toàn cục)
-// vượt LSN trước commit của marker: mọi Txn trước đó đã apply bền vững.
+// bao phủ insert LSN trước marker: mọi Txn workload đã commit trước cutoff đã apply bền vững.
+// F11: pg_current_wal_lsn là write position, có thể đứng sau commit đã trả về khi synchronous_commit=off.
+// Marker có thể apply trước Txn độc lập ở relaxed; chỉ durable LWD >= insert cutoff mới là prefix đủ.
 func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandProc, timeout time.Duration) {
 	t.Helper()
 	resolvePrepared(t, src)
@@ -489,7 +495,12 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 	// pg_current_wal_insert_lsn, KHÔNG pg_current_wal_lsn: container chạy synchronous_commit=off nên vị
 	// trí đã GHI có thể còn thấp hơn commit record của các Txn vừa commit — mốc thấp thì "bắt kịp" được kết
 	// luận khi vài Txn cuối còn đang apply (F11: test dừng strand rồi thấy thiếu đúng các Txn cuối).
-	if err := tx.QueryRow("SELECT pg_current_wal_insert_lsn()::text").Scan(&before); err != nil {
+	cutoffQuery := "SELECT pg_current_wal_insert_lsn()::text"
+	// Biến chỉ của fixture săn F11: tái hiện barrier cũ, không phải lựa chọn production.
+	if os.Getenv("STRAND_E2E_F11_UNSAFE_BARRIER") == "1" {
+		cutoffQuery = "SELECT pg_current_wal_lsn()::text"
+	}
+	if err := tx.QueryRow(cutoffQuery).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec("INSERT INTO app.marker VALUES ($1, 'caught-up')", markerID); err != nil {
@@ -498,7 +509,12 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	l0, _ := checkpoint.ParseLSN(before)
+	l0, err := checkpoint.ParseLSN(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopDiagnostic := startStrictDiagnostic(src, dst, cfg, p, before, markerID)
+	defer stopDiagnostic()
 	deadline := time.Now().Add(timeout)
 	for {
 		if p != nil && p.exited() {
@@ -507,7 +523,8 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 		var n int
 		_ = dst.DB.QueryRow("SELECT count(*) FROM app.marker WHERE id = $1", markerID).Scan(&n)
 		got, err := checkpoint.LoadAppliedSnapshotPG(context.Background(), dst.DB, cfg.Name, model.EnginePG)
-		if err == nil && n == 1 && got.Lwd().LSN > l0 && pipelineSynced(cfg.Socket) {
+		if err == nil && n == 1 && got.Lwd().LSN >= l0 && pipelineSynced(cfg.Socket) {
+			recordF11Barrier(t, src, dst, cfg, before, markerID, got)
 			return
 		}
 		if time.Now().After(deadline) {
@@ -577,6 +594,7 @@ func comparePG(t *testing.T, src, dst *pgNode, tables ...string) {
 func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) string {
 	var out []string
 	xids := map[string]bool{}
+tables:
 	for _, tb := range tables {
 		s, d := dumpPG(t, src.DB, tb), dumpPG(t, dst.DB, tb)
 		for id, sv := range s {
@@ -594,7 +612,7 @@ func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) stri
 				xids[xmin] = true
 			}
 			if len(out) > 30 {
-				return strings.Join(out, "\n")
+				break tables // vẫn in phần theo xid và checkpoint bên dưới
 			}
 		}
 	}
@@ -616,6 +634,24 @@ func pgMismatchDiagnostics(t *testing.T, src, dst *pgNode, tables []string) stri
 			}
 			rows.Close()
 		}
+	}
+	// Checkpoint ở target (F11): Txn bị mất được ghi là đã apply trong delta của worker nào, hay chỉ được
+	// vouch qua lwd toàn cục.
+	for _, q := range []string{
+		"SELECT 'global ' || pipeline_id || ' ' || applied::text FROM _strand_checkpoint",
+		"SELECT 'delta w' || worker_id || ' batch ' || batch_no || ' ' || left(applied::text, 400) FROM _strand_worker_delta ORDER BY worker_id",
+	} {
+		rows, err := dst.DB.Query(q)
+		if err != nil {
+			out = append(out, "  checkpoint query: "+err.Error())
+			continue
+		}
+		for rows.Next() {
+			var l string
+			_ = rows.Scan(&l)
+			out = append(out, "  "+l)
+		}
+		rows.Close()
 	}
 	return strings.Join(out, "\n")
 }

@@ -2,7 +2,6 @@ package governor_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -34,20 +33,11 @@ func TestGV1_DirectDBSignals_NoMetricsSourceDependency(t *testing.T) {
 		t.Fatalf("expected QueryP99=15ms, got %v", sig.QueryP99)
 	}
 
-	// 2. Kiểm tra với real MySQL container trong compose (172.23.0.5 hoặc localhost nếu có)
-	// Kết nối trực tiếp vào MySQL, không qua Prometheus / metrics_source
-	db, err := sql.Open("mysql", "root:dev@tcp(172.23.0.5:3306)/app")
-	if err == nil && db.PingContext(ctx) == nil {
-		defer db.Close()
-		mysqlReader := governor.NewMySQLDBSignalReader(db, nil)
-		dbSig, dbErr := mysqlReader.ReadSignals(ctx)
-		if dbErr != nil {
-			t.Fatalf("MySQL ReadSignals failed: %v", dbErr)
-		}
-		t.Logf("Tín hiệu đọc trực tiếp từ real MySQL thành công: ReplicaLag=%.2f, QueryP99=%v",
-			dbSig.ReplicaLagSeconds, dbSig.QueryP99)
-	} else {
-		t.Logf("Real MySQL container không sẵn sàng tại 172.23.0.5, xác nhận qua Direct DB reader")
+	// DB thật thuộc riêng test, không dò IP compose của người khác hoặc báo pass khi không kết nối.
+	db := ownSignalMySQL(t)
+	mysqlReader := governor.NewMySQLDBSignalReader(db, nil)
+	if _, err := mysqlReader.ReadSignals(ctx); err != nil {
+		t.Fatalf("MySQL ReadSignals failed: %v", err)
 	}
 
 	t.Logf("AC1 PASS: Tín hiệu đọc trực tiếp từ DB thành công, không phụ thuộc metrics_source")

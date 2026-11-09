@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"fmt"
+	"strand/internal/txntrace"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -236,6 +237,13 @@ func (st *streamState) handle(data []byte) error {
 		}
 		cur := st.cur
 		st.cur = nil
+		{
+			sk := int64(0)
+			if cur.skip {
+				sk = 1
+			}
+			txntrace.Put(8, cur.pos.LSN, uint64(cur.xid), 0, sk, 0)
+		}
 		if !cur.skip {
 			if err := st.emit(reader.Event{Type: reader.EventQuery, Query: "COMMIT", Pos: cur.pos, Timestamp: cur.ts, XID: uint64(cur.xid)}); err != nil {
 				return err
@@ -282,6 +290,21 @@ func (st *streamState) handle(data []byte) error {
 		delete(st.streams, m.Xid)
 		defer st.dropBuf(buf)
 		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.CommitLSN)}
+		{
+			var nev int64 = -1
+			var sp int64
+			if buf != nil {
+				nev = int64(buf.log.len())
+				if buf.log.spilled() {
+					sp = 1
+				}
+			}
+			c := int64(0)
+			if st.contains(pos) {
+				c = 1
+			}
+			txntrace.Put(7, pos.LSN, uint64(m.Xid), uint64(c), nev, sp)
+		}
 		if !st.contains(pos) {
 			// Txn streaming luôn được server stream lại từ đầu sau restart, nên buf rỗng chỉ khi Txn
 			// không có thay đổi nào thuộc publication.
@@ -317,10 +340,14 @@ func (st *streamState) handle(data []byte) error {
 		if m.Transactional || m.Prefix != WatermarkPrefix || st.cur != nil || st.prep != nil || st.inStream {
 			return nil // message của ứng dụng khác: không ảnh hưởng dữ liệu
 		}
-		// Watermark của snapshot logic (02 §5): message không transactional được giải mã đúng tại vị
-		// trí của nó trong WAL, nên mọi Txn có commit LSN nhỏ hơn đã được phát trước. Phát thành một
-		// Txn rỗng có "commit LSN" = LSN của message để pipeline biết stream đã qua điểm này.
-		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.LSN)}
+		// PG logicalmsg_decode truyền EndRecPtr (exclusive) cho message, còn commit thật dùng
+		// ReadRecPtr. Vì vậy m.LSN có thể bằng commit LSN của Txn KẾ TIẾP, chưa được phát.
+		// Chỉ xác nhận tới m.LSN-1: CP-1/2, CO-1/2 không cho checkpoint bỏ qua Txn kế tiếp
+		// khi restart. RS-1/2 vẫn đạt high đọc trước message: high <= đầu record < m.LSN.
+		if m.LSN == 0 {
+			return fmt.Errorf("watermark có end LSN bằng 0")
+		}
+		pos := model.Pos{Engine: model.EnginePG, LSN: uint64(m.LSN) - 1}
 		if !st.contains(pos) {
 			if err := st.emit(reader.Event{Type: reader.EventQuery, Query: "BEGIN", Pos: pos}); err != nil {
 				return err

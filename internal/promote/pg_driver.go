@@ -3,6 +3,7 @@ package promote
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -82,11 +83,42 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 	if !d.reachable || d.db == nil {
 		return fmt.Errorf("source db unreachable")
 	}
-	if _, err := d.db.ExecContext(ctx, "ALTER SYSTEM SET default_transaction_read_only = on"); err != nil {
+	// PR-1: giữ một session quản trị writable xuyên reload; không để ALTER ROLE rơi vào read-only.
+	// Session đổi SET bị loại khỏi pool ở mọi đường thoát, nên không rò quyền ghi sang caller khác.
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }); _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "SET default_transaction_read_only = off"); err != nil {
+		return err
+	}
+	var before string
+	if err := conn.QueryRowContext(ctx, "SELECT pg_conf_load_time()::text").Scan(&before); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "ALTER SYSTEM SET default_transaction_read_only = on"); err != nil {
 		return fmt.Errorf("fence source: alter system set default_transaction_read_only: %w", err)
 	}
-	if _, err := d.db.ExecContext(ctx, "SELECT pg_reload_conf()"); err != nil {
+	if _, err := conn.ExecContext(ctx, "SELECT pg_reload_conf()"); err != nil {
 		return fmt.Errorf("fence source: pg_reload_conf: %w", err)
+	}
+	// pg_reload_conf chỉ gửi SIGHUP. Chờ backend đọc lại sau postmaster trước khi xác nhận fence.
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		var reloaded bool
+		if err := conn.QueryRowContext(waitCtx, "SELECT pg_conf_load_time() > $1::timestamptz", before).Scan(&reloaded); err != nil {
+			return fmt.Errorf("fence source: confirm configuration reload: %w", err)
+		}
+		if reloaded {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("fence source: configuration reload: %w", waitCtx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	var killed []int64
 	// pg_terminate_backend nằm ở danh sách SELECT, KHÔNG ở WHERE: PostgreSQL không bảo đảm thứ tự đánh giá
@@ -94,7 +126,7 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 	// session đang chạy câu lệnh (fence lỗi 57P01, rồi gỡ fence cũng lỗi). Ở danh sách SELECT, hàm chỉ chạy
 	// trên các row đã qua WHERE.
 	terminate := func(q string, args ...any) error {
-		rows, err := d.db.QueryContext(ctx, q, args...)
+		rows, err := conn.QueryContext(ctx, q, args...)
 		if err != nil {
 			return err
 		}
@@ -117,7 +149,7 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 		// khi ngắt session: role không kết nối lại được, nên không còn session nào để ghi. Gỡ fence là
 		// việc của người vận hành (ALTER ROLE … LOGIN), như với super_read_only của MySQL.
 		for _, role := range d.appRoles {
-			if _, err := d.db.ExecContext(ctx, "ALTER ROLE "+quoteIdent(role)+" NOLOGIN"); err != nil {
+			if _, err := conn.ExecContext(ctx, "ALTER ROLE "+quoteIdent(role)+" NOLOGIN"); err != nil {
 				return fmt.Errorf("fence source: ALTER ROLE %s NOLOGIN: %w", role, err)
 			}
 			q := `SELECT pid, pg_terminate_backend(pid) FROM pg_stat_activity
@@ -133,11 +165,11 @@ func (d *PGSourceDriver) Fence(ctx context.Context) error {
 			return fmt.Errorf("fence source: terminate client sessions: %w", err)
 		}
 	}
-	return d.waitExited(ctx, killed)
+	return d.waitExited(ctx, conn, killed)
 }
 
 // waitExited chờ đến khi mọi backend trong pids đã thoát (không còn trong pg_stat_activity).
-func (d *PGSourceDriver) waitExited(ctx context.Context, pids []int64) error {
+func (d *PGSourceDriver) waitExited(ctx context.Context, conn *sql.Conn, pids []int64) error {
 	if len(pids) == 0 {
 		return nil
 	}
@@ -148,7 +180,7 @@ func (d *PGSourceDriver) waitExited(ctx context.Context, pids []int64) error {
 	deadline := time.Now().Add(wait)
 	for {
 		var alive int
-		if err := d.db.QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1::int8[])", pids).Scan(&alive); err != nil {
+		if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1::int8[])", pids).Scan(&alive); err != nil {
 			return fmt.Errorf("fence source: check terminated sessions: %w", err)
 		}
 		if alive == 0 {
@@ -521,7 +553,9 @@ func (d *PGTargetDriver) fenceMarker(ctx context.Context, deadline time.Time) (u
 	if err != nil {
 		return 0, fmt.Errorf("apply remaining: open source session: %w", err)
 	}
-	defer conn.Close()
+	// PR-1: marker cần session writable riêng; trả SET off về pool sẽ làm source vẫn ghi được
+	// sau Fence. Loại connection ở cả đường thành công/lỗi, như session quản trị của Fence.
+	defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }); _ = conn.Close() }()
 	if _, err := conn.ExecContext(ctx, "SET default_transaction_read_only = off"); err != nil {
 		return 0, fmt.Errorf("apply remaining: prepare marker session: %w", err)
 	}

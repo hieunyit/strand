@@ -27,6 +27,7 @@ func startMySQL(t *testing.T, image string, extraArgs ...string) (*sql.DB, strin
 	ctx := context.Background()
 
 	cmd := []string{
+		"--innodb-use-native-aio=OFF",
 		"--server-id=1",
 		"--gtid-mode=ON",
 		"--enforce-gtid-consistency=ON",

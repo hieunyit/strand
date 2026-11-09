@@ -246,7 +246,7 @@ func (s *streamSim) step() {
 	case x < 99: // watermark không transactional (ngoài mọi khối)
 		l := s.newLSN()
 		s.emit(pgoBuf{'M'}.u8(0).u64(l).str(WatermarkPrefix).u32(3).u8('a').u8('b').u8('c'))
-		s.expect = append(s.expect, simExpect{lsn: l, wm: true})
+		s.expect = append(s.expect, simExpect{lsn: l - 1, wm: true})
 	default: // Relation gửi lại (invalidation) ngoài Txn
 		s.emit(msgRelation(0, simRels[s.r.Intn(2)]))
 	}

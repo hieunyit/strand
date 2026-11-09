@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strand/internal/txntrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,19 +125,20 @@ type Pipeline struct {
 	bootstrap    atomic.Bool
 	// running: khởi động xong (đã quyết định snapshot/verify sau seed). Trước đó admin báo "starting",
 	// không bao giờ "synced" — admin socket mở sớm hơn lúc biết có bootstrap hay không.
-	running       atomic.Bool
-	retentionRisk atomic.Bool
-	verifying     atomic.Bool // chờ verify sau seed (02 §9)
-	strictMu      sync.Mutex
-	strictApplied checkpoint.AppliedSet // row toàn cục ở chế độ strict (02 §4 quy tắc 5)
-	readyCh       <-chan *model.Txn     // nguồn Txn cho worker (strict: đã sắp theo seq)
-	prefetchDir   string
-	prefetch      *spool.PebbleSpool
-	gov           governor.Governor
-	govAlgo       string
-	govTick       time.Duration
-	curAvgRow     atomic.Int64
-	snapChunkRows atomic.Int64 // cỡ chunk hiệu lực gần nhất (ước lượng chi phí chunk khi không biết byte)
+	running         atomic.Bool
+	retentionRisk   atomic.Bool
+	verifying       atomic.Bool // chờ verify sau seed (02 §9)
+	strictMu        sync.Mutex
+	strictApplied   checkpoint.AppliedSet // row toàn cục ở chế độ strict (02 §4 quy tắc 5)
+	readyCh         <-chan *model.Txn     // nguồn Txn cho worker (strict: đã sắp theo seq)
+	prefetchDir     string
+	runtimeSpillDir string
+	prefetch        *spool.PebbleSpool
+	gov             governor.Governor
+	govAlgo         string
+	govTick         time.Duration
+	curAvgRow       atomic.Int64
+	snapChunkRows   atomic.Int64 // cỡ chunk hiệu lực gần nhất (ước lượng chi phí chunk khi không biết byte)
 	// adaptiveChunks: cỡ chunk theo luật 250 ms của governor (chunk_rows = auto, governor ≠ static).
 	adaptiveChunks bool
 	// snapBucket: token bucket chung của mọi reader snapshot (bootstrap và `snapshot add` chạy song song
@@ -605,6 +607,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return fmt.Errorf("startup compaction: %w", err)
 	}
 	p.comp.Start(ctx)
+	// Đăng ký trước rd.Close: LIFO đóng/join reader trước khi chụp trace cuối, cả khi lỗi.
+	defer func() {
+		if err := txntrace.Dump(); err != nil {
+			p.log.Error("transaction trace dump failed", "error", err)
+		}
+	}()
 	defer p.comp.Stop()
 
 	// --- Governor ---
@@ -670,6 +678,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return m.Keys, true
 	}
 	spillDir := filepath.Join(p.cfg.Resources.Spool.Path, "spill")
+	p.runtimeSpillDir = spillDir
 	if err := os.MkdirAll(spillDir, 0o750); err != nil {
 		return err
 	}
@@ -1056,10 +1065,12 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		p.xids.Add(t.XID)
 	}
 	if skipEmptyPGTxn(p.strict, t) {
+		txntrace.Put(txntrace.Skipped, pos.LSN, t.XID, 0, 1, 0)
 		p.noteRouted(pos, 0) // Txn PG rỗng: không có gì để apply
 		return nil
 	}
 	if p.applied0.Contains(pos) {
+		txntrace.Put(txntrace.Skipped, pos.LSN, t.XID, 0, 2, 0)
 		p.markSeen(pos) // CP-2: đã apply trước đó
 		p.noteRouted(pos, 0)
 		return nil
@@ -1073,6 +1084,13 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	}
 
 	out := &model.Txn{SourcePos: pos, SourceTS: t.SourceTS}
+	handedOff := false
+	defer func() {
+		// Chỉ file output do router tạo mới được xóa khi Admit/Persist thất bại.
+		if !handedOff && out.SpillOwned && out.SpillPath != "" {
+			_ = os.Remove(out.SpillPath)
+		}
+	}()
 	// rereadTables: bảng vừa có khóa được đánh dấu đọc lại (UPDATE đổi PK mà cột TOAST không đổi, 02 §8);
 	// plan của chúng phải được lưu bền TRƯỚC khi Txn này được Admit (xem snapshot/toast_pk.go).
 	var rereadTables map[model.TableID]bool
@@ -1156,7 +1174,16 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	}
 
 	if t.IsSpilled() {
-		f, err := os.CreateTemp(filepath.Dir(t.SpillPath), "strand-routed-*.spill")
+		// File spool prefetch là dữ liệu bền được mượn, không đặt output tạm cạnh nó:
+		// cleanup prefetch chỉ sau khi mọi Txn đã được apply (CP-1/2, SD-1).
+		dir := p.runtimeSpillDir
+		if dir == "" && p.cfg != nil && p.cfg.Resources.Spool.Path != "" {
+			dir = filepath.Join(p.cfg.Resources.Spool.Path, "spill")
+		}
+		if dir == "" {
+			dir = os.TempDir()
+		}
+		f, err := os.CreateTemp(dir, "strand-routed-*.spill")
 		if err != nil {
 			return err
 		}
@@ -1188,7 +1215,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
-		_ = os.Remove(t.SpillPath)
+		if t.SpillOwned {
+			_ = os.Remove(t.SpillPath)
+		}
 		if err != nil {
 			_ = os.Remove(f.Name())
 			return err
@@ -1197,6 +1226,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			_ = os.Remove(f.Name())
 		} else {
 			out.SpillPath, out.RowCount = f.Name(), n
+			out.SpillOwned = true
 			out.SpillWriteset = ws.Writeset()
 			for tid := range tables {
 				out.SpilledTables = append(out.SpilledTables, tid)
@@ -1227,7 +1257,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	if err := p.sched.Admit(ctx, out); err != nil {
 		return err
 	}
+	handedOff = true
 	p.admitted.Store(out.Seq())
+	txntrace.Put(txntrace.Routed, pos.LSN, t.XID, out.Seq(), t.TotalRows(), out.TotalRows())
 	if t.SourceTS > 0 {
 		p.lastRoutedTS.Store(t.SourceTS)
 	}
@@ -1594,9 +1626,11 @@ func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, 
 		}
 		return false
 	}
+	bid := txntrace.NextBatch()
 	for _, t := range batch {
+		txntrace.Put(txntrace.Done, t.SourcePos.LSN, 0, t.Seq(), int64(id), bid)
 		p.sched.Done(t.Seq(), nil)
-		if t.IsSpilled() {
+		if t.IsSpilled() && t.SpillOwned {
 			_ = os.Remove(t.SpillPath)
 		}
 		if t.SourceTS > 0 {
