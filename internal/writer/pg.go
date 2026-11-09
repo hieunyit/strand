@@ -336,38 +336,59 @@ type pgApplier struct {
 	written int64
 }
 
+// flushUpsert: khối nhỏ (< copyMinRows) được XẾP vào hàng đợi pipeline (một round-trip cho nhiều câu,
+// đúng thứ tự với các câu đã xếp trước — số row được tính khi hàng đợi gửi thành công); khối lớn gửi các
+// câu đang chờ trước rồi COPY + MERGE. Trước đây mỗi khối nhỏ là một round-trip riêng: workload trộn
+// insert/update/delete trên nhiều bảng cắt khối liên tục, ~1 ms mỗi khối, strict ~286 Txn/s (2026-11-09).
 func (a *pgApplier) flushUpsert() error {
 	if a.up == nil {
 		return nil
 	}
-	err := a.up.flush(a)
-	if err == nil {
-		a.written += a.up.covered
-	}
+	b := a.up
 	a.up = nil
-	return err
+	if len(b.rows) == 0 {
+		return nil
+	}
+	if len(b.rows) < a.copyMinRows {
+		q, args := buildUpsert(b.table, b.cols, b.pkCols, b.rows)
+		return a.enqueue(b.table, q, args, b.covered)
+	}
+	if err := a.flushQueue(); err != nil {
+		return err
+	}
+	if err := b.flush(a); err != nil {
+		return err
+	}
+	a.written += b.covered
+	return nil
 }
 
+// flushDelete xếp DELETE theo lô vào hàng đợi pipeline (xem flushUpsert).
 func (a *pgApplier) flushDelete() error {
 	if a.del == nil {
 		return nil
 	}
-	err := a.del.flush(a.ctx, a.tx)
-	if err == nil {
-		a.written += int64(len(a.del.keys))
-	}
+	b := a.del
 	a.del = nil
-	return err
-}
-
-func (a *pgApplier) flushAll() error {
-	if err := a.flushQueue(); err != nil {
+	if len(b.keys) == 0 {
+		return nil
+	}
+	q, args, err := buildDelete(b.table, b.pkCols, b.keys)
+	if err != nil {
 		return err
 	}
+	return a.enqueue(b.table, q, args, int64(len(b.keys)))
+}
+
+// flushAll: khối đang chờ (mới nhất) được xếp sau mọi câu đã xếp, rồi gửi cả hàng đợi — đúng thứ tự row.
+func (a *pgApplier) flushAll() error {
 	if err := a.flushUpsert(); err != nil {
 		return err
 	}
-	return a.flushDelete()
+	if err := a.flushDelete(); err != nil {
+		return err
+	}
+	return a.flushQueue()
 }
 
 // pgOrderedQueueMax: số câu lệnh tối đa trong một lần gửi pipeline.
@@ -518,10 +539,8 @@ func (a *pgApplier) apply(row *model.RowChange) error {
 	if ordered {
 		return a.applyOrdered(row)
 	}
-	// Đường nhanh (bảng chỉ có PK): các câu lệnh tuần tự còn chờ phải đi trước.
-	if err := a.flushQueue(); err != nil {
-		return err
-	}
+	// Đường nhanh (bảng chỉ có PK): khối nhỏ và DELETE dùng chung hàng đợi pipeline với các câu tuần tự,
+	// nên thứ tự giữ nguyên mà không phải gửi hàng đợi trước mỗi row.
 	switch row.Op {
 	case model.OpInsert, model.OpUpdate:
 		if len(row.Cols) == 0 {
