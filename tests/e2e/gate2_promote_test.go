@@ -435,7 +435,7 @@ func TestG2_E2E_PromoteNoDuplicateKeyPGToPG(t *testing.T) {
 	if wl.ops.Load() < 200 {
 		t.Fatalf("source load too small to be meaningful: %s", wl.summary())
 	}
-	waitPGCaughtUp(t, src, dst, &cfg, p, 5*time.Minute)
+	waitPGCaughtUp(t, src, dst, &cfg, p, g2CatchUpTimeout(&cfg))
 
 	requireSeqBehind(t, dst, "app.g_always", "app.g_always_id_seq")
 	requireSeqBehind(t, dst, "app.g_bydefault", "app.g_bydefault_id_seq")
@@ -740,7 +740,7 @@ func TestG2_E2E_PromoteSourceUnreachableCache1000PG(t *testing.T) {
 	wl.Stop()
 	t.Logf("strict diagnostic workload stopped at %s", time.Now().UTC().Format(time.RFC3339Nano))
 	t.Logf("source load: %s", wl.summary())
-	waitPGCaughtUp(t, src, dst, &cfg, p, 5*time.Minute)
+	waitPGCaughtUp(t, src, dst, &cfg, p, g2CatchUpTimeout(&cfg))
 
 	srcExt, _ := pgSeqState(t, src.DB, "app.ext_seq")
 	maxIndep := pgMaxID(t, src.DB, "app.g_indep")
@@ -914,4 +914,14 @@ func TestG2_E2E_PromoteSourceUnreachableCache1000MySQL(t *testing.T) {
 	rows := envInt("STRAND_E2E_G2_APP_ROWS", 500)
 	res := g2AppBurst(t, appDSN, myAppStmts, rows, 8)
 	checkBurst(t, dst, res, floor, before, rows)
+}
+
+// g2CatchUpTimeout: strict áp bằng MỘT worker; với workload trộn insert/update/delete trên nhiều bảng,
+// writer PG tốn khoảng một round-trip cho mỗi khối nhỏ (đo 2026-11-09: ~286 Txn/s, 256 Txn/batch ≈ 0,9 s),
+// nên dồn 100k+ thao tác trong 20 s cần ~5–8 phút để strict bắt kịp. Relaxed giữ 5 phút.
+func g2CatchUpTimeout(cfg *strandCfg) time.Duration {
+	if cfg.CommitOrder == "strict" {
+		return 15 * time.Minute
+	}
+	return 5 * time.Minute
 }
