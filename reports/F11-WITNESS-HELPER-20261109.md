@@ -1,0 +1,5 @@
+# Fixture kiểm barrier F11 khi bật witness — 2026-11-09
+
+Full E2E baseline relaxed và strict trên `215c061` đều lỗi `TestReviewF11CatchupWaitsForInsertedWAL`: witness bật toàn suite gọi query hai cột write/insert LSN, nhưng fake database của test chỉ trả một cột (`sql: expected 1 destination arguments in Scan, not 2`). Đây là lỗi test fixture; không phải bằng chứng sai barrier F11. Log gốc: `/tmp/strand-matrix-20261108/37-baseline-nonminio-relaxed.jsonl`, `38-baseline-nonminio-strict.jsonl`.
+
+Fake nay trả đúng hai cột theo thứ tự, test cấp thư mục riêng và chủ động bật witness. Vẫn bắt buộc helper chờ ít nhất hai poll với LWD 199 rồi 300 cho cutoff insert 250, và kiểm artifact có write LSN 150, insert/cutoff 250, LWD 300. Không đổi logic barrier, scope witness hay production. Regression cũ FAIL cùng lỗi Scan, mới PASS: `/tmp/strand-matrix-20261108/f11-witness-helper-old-red.log`, `f11-witness-helper-green.log`. Test dùng fake DB và admin socket, không thay thế full E2E thật sau khi tích hợp.
