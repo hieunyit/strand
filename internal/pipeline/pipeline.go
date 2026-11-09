@@ -752,7 +752,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 
 	// --- Goroutine ---
 	var workersWG, bgWG sync.WaitGroup
-	wctx, wcancel := context.WithCancel(ctx)
+	wctx, wcancel := workerContext(ctx, p.failed)
 	defer wcancel()
 	p.readyCh = p.sched.Ready()
 	if p.strict {
@@ -813,7 +813,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.log.Info("stop requested: draining")
 		rcancel()
 		<-routerDone
-		p.drain(p.opts.ShutdownTimeout)
+		if !p.drain(p.opts.ShutdownTimeout) && p.failed() == nil {
+			// Txn đã Admit mà chưa commit ở target: checkpoint không vượt qua chúng, lần chạy sau đọc lại
+			// từ slot/binlog — không mất, nhưng không phải "dừng sạch".
+			p.log.Warn("stopping before every admitted transaction was applied; they will be re-read on restart",
+				"lwd", p.sched.Lwd(), "admitted", p.admitted.Load())
+		}
 	case <-ctx.Done():
 	}
 	if err := p.failed(); err != nil {
@@ -2224,4 +2229,23 @@ func chunkReadPages(chunkBytes, avgRow, chunkRows int64) float64 {
 		chunkRows = snapshot.DefaultChunkOptions().DefaultChunkRows
 	}
 	return math.Max(1, float64(avgRow*chunkRows)/16384)
+}
+
+// workerContext: context của writer/worker. KHÔNG kế thừa việc hủy của ctx khi dừng theo yêu cầu (SIGTERM):
+// trước đây wctx là con của ctx nên SIGTERM hủy ngay các batch đang ghi dở, drain thấy lỗi của scheduler
+// và thoát tức thì — vi phạm 03 §4 (ShutdownTimeout: chờ writer xong) và log "stopped cleanly" trong khi
+// Txn đã Admit chưa được apply (e2e G2-8 / F11: test so dữ liệu ngay sau khi dừng thấy thiếu các Txn cuối).
+// Khi ctx bị hủy vì pipeline lỗi (failed() != nil) thì worker bị hủy ngay như cũ; khi dừng theo yêu cầu,
+// bên gọi hủy wctx sau khi drain xong (hoặc hết ShutdownTimeout).
+func workerContext(ctx context.Context, failed func() error) (context.Context, context.CancelFunc) {
+	wctx, wcancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() {
+		if failed() != nil {
+			wcancel()
+		}
+	})
+	return wctx, func() {
+		stop()
+		wcancel()
+	}
 }

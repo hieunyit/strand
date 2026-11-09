@@ -486,7 +486,10 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 		t.Fatal(err)
 	}
 	var before string
-	if err := tx.QueryRow("SELECT pg_current_wal_lsn()::text").Scan(&before); err != nil {
+	// pg_current_wal_insert_lsn, KHÔNG pg_current_wal_lsn: container chạy synchronous_commit=off nên vị
+	// trí đã GHI có thể còn thấp hơn commit record của các Txn vừa commit — mốc thấp thì "bắt kịp" được kết
+	// luận khi vài Txn cuối còn đang apply (F11: test dừng strand rồi thấy thiếu đúng các Txn cuối).
+	if err := tx.QueryRow("SELECT pg_current_wal_insert_lsn()::text").Scan(&before); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec("INSERT INTO app.marker VALUES ($1, 'caught-up')", markerID); err != nil {
