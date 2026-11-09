@@ -510,6 +510,8 @@ func waitPGCaughtUp(t *testing.T, src, dst *pgNode, cfg *strandCfg, p *strandPro
 	if err != nil {
 		t.Fatal(err)
 	}
+	stopDiagnostic := startStrictDiagnostic(src, dst, cfg, p, before, markerID)
+	defer stopDiagnostic()
 	deadline := time.Now().Add(timeout)
 	for {
 		if p != nil && p.exited() {
