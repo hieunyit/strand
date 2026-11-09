@@ -33,6 +33,7 @@ Kiểm định lần này loại đúng bốn test phụ thuộc MinIO, giữ ng
 
 
 **Codex đang làm việc B (2026-11-04):** clone riêng `/home/hellc/strand-codex`, nguồn local scratchpad; tiếp tục `agent/schema-init` từ `27c3e1f`; code `efb3b1b` + sửa sequence/default `cdd7f6c`. Đã triển khai sinh/apply DDL ba hướng, CLI, validate và bootstrap/CREATE barrier. Chưa merge/push. Báo cáo đang cập nhật ở `reports/SCHEMA-INIT.md`; chưa được coi là xong trước checklist §9 và full e2e hai chế độ. C–F và Gate 2 vẫn chưa bắt đầu trong phiên Codex.
+**2026-11-07 — sửa review benchmark:** nhánh `agent/review-bench-fix-20261107`, worktree `/home/hellc/strand-bench-review`, nền `c2fab665`. Sửa fail-open khi thiếu telemetry/cửa sổ p2p, thiếu repeat/governor hoặc workload lỗi; giữ ngưỡng Gate 2, kiểm maximum p2p. Regression đỏ trên runner cũ, test mới qua; chưa chạy benchmark chính thức. Xem `reports/REVIEW-BENCH-FIX-20261107.md`.
 
 
 - GitHub: `hieunyit/strand` (private). Bản clone của người dùng: `/home/hellc/strand` (remote `origin` = GitHub).
@@ -478,6 +479,8 @@ Người review (bạn) không tin báo cáo của agent/người viết; tự c
 | 69 | Trace F11 race khi Dump đồng thời Put | Counter cấp slot trước khi các trường record được ghi đủ | Publish atomic ready sau khi ghi; Dump chỉ đọc slot ready | `TestTraceConcurrentPublicationAndDump`: race detector đỏ trên code cũ |
 
 | 70 | Trace F11 tràn buffer nhưng không báo, có thể kết luận nhầm mất Txn | Put bỏ record ngoài capacity, Dump không ghi completeness | Trailer allocated/stored/dropped/unpublished/observed_after_dump; trả lỗi I/O; dump sau đóng reader | `TestTraceReportsDroppedRecords`: code cũ đỏ, bản sửa báo đúng 3/5 record bị bỏ |
+
+| 62 | Runner benchmark đề xuất GRACE khi telemetry thiếu/NaN hoặc chưa đủ lần đo | Decision bỏ NaN, thiếu kiểm completeness | Fail incomplete, yêu cầu coverage/repeat/client p99, maximum p2p | `TestReviewBenchRejectsIncompleteEvidence`, `TestReviewBenchAcceptsCompleteEvidence` |
 
 Khi gặp lỗi mới: thêm một dòng vào bảng này trong cùng commit sửa lỗi.
 
