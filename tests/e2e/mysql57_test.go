@@ -740,9 +740,9 @@ func TestM57_E2E_ToPostgres(t *testing.T) {
 	}
 }
 
-// Nguồn gtid_mode=OFF đi chế độ vị trí binlog: validate nhận (exit 0); sync của pipeline mới mà không có
-// --start-at <file>:<pos> phải dừng rõ ràng (không tự snapshot logic ở chế độ này), nêu --start-at.
-func TestM57_E2E_RejectMySQL56Style(t *testing.T) {
+// Nguồn 5.7 gtid_mode=OFF đi chế độ vị trí binlog: validate nhận (exit 0); sync của pipeline mới không có
+// --start-at chạy bootstrap logical (snapshot + stream từ đầu binlog hiện tại), báo synced và áp thay đổi mới.
+func TestM57_E2E_GTIDOffLogicalBootstrap(t *testing.T) {
 	src := startM57Source(t, "src", 1, nil, "--gtid-mode=OFF", "--enforce-gtid-consistency=OFF")
 	dst := startMySQL(t, m57TargetImage(), "dst", 2, nil)
 	var mode string
@@ -761,16 +761,27 @@ func TestM57_E2E_RejectMySQL56Style(t *testing.T) {
 	}
 
 	p := startStrand(t, cfgPath)
-	deadline := time.Now().Add(time.Minute)
-	for !p.exited() && time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
+	defer p.kill9()
+	deadline := time.Now().Add(2 * time.Minute)
+	for !pipelineSynced(cfg.Socket) {
+		if p.exited() || time.Now().After(deadline) {
+			t.Fatalf("sync không --start-at (gtid_mode=OFF) không tới synced (exited=%v)\n%s", p.exited(), p.tail())
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
-	if !p.exited() {
-		p.kill9()
-		t.Fatalf("sync không --start-at vẫn chạy với nguồn gtid_mode=OFF\n%s", p.tail())
+	if !strings.Contains(p.output.String(), "BINLOG POSITION MODE") {
+		t.Fatalf("thiếu cảnh báo chế độ vị trí binlog\n%s", p.tail())
 	}
-	if p.exitCode() == 0 || !strings.Contains(p.output.String(), "--start-at") {
-		t.Fatalf("sync: exit %d, want khác 0 và nêu --start-at\n%s", p.exitCode(), p.tail())
+	src.exec(t, "INSERT INTO app.t VALUES (2, 2)", "UPDATE app.t SET v = 10 WHERE id = 1")
+	for {
+		var n, sum int
+		err := dst.DB.QueryRow("SELECT COUNT(*), COALESCE(SUM(v),0) FROM app.t").Scan(&n, &sum)
+		if err == nil && n == 2 && sum == 12 {
+			break
+		}
+		if p.exited() || time.Now().After(deadline) {
+			t.Fatalf("đích chưa hội tụ: n=%d sum=%d err=%v\n%s", n, sum, err, p.tail())
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
-	t.Logf("sync với gtid_mode=OFF, không --start-at: exit %d", p.exitCode())
 }
