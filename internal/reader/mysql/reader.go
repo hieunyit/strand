@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
@@ -142,9 +143,24 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 	}
 	r.mu.Unlock()
 
-	gset, err := ToMysqlGTIDSet(from)
-	if err != nil {
-		return nil, err
+	// Chế độ vị trí binlog (source không GTID): đọc từ (file, offset) = Lwd của tập đã apply, tức vị trí
+	// bắt đầu của Txn chưa apply sớm nhất (CP-3). Mọi Txn ≥ đó mà đã apply nằm trong tập nên router bỏ (CP-2).
+	var posSet *checkpoint.MySQLPosAppliedSet
+	var startPos mysql.Position
+	var gset mysql.GTIDSet
+	if ps, ok := from.(*checkpoint.MySQLPosAppliedSet); ok {
+		posSet = ps
+		lw := ps.Lwd()
+		if ps.IsEmpty() || !lw.IsBinlogPos() {
+			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				"binlog position mode needs a start position (--start-at <file>:<position>)", nil)
+		}
+		startPos = mysql.Position{Name: lw.File, Pos: uint32(lw.BinlogPos)}
+	} else {
+		var err error
+		if gset, err = ToMysqlGTIDSet(from); err != nil {
+			return nil, err
+		}
 	}
 
 	syncerCfg := replication.BinlogSyncerConfig{
@@ -161,7 +177,13 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 	}
 
 	syncer := replication.NewBinlogSyncer(syncerCfg)
-	streamer, err := syncer.StartSyncGTID(gset)
+	var streamer *replication.BinlogStreamer
+	var err error
+	if posSet != nil {
+		streamer, err = syncer.StartSync(startPos)
+	} else {
+		streamer, err = syncer.StartSyncGTID(gset)
+	}
 	if err != nil {
 		syncer.Close()
 		// Lỗi kết nối/mạng là lỗi tạm thời (exit 1, systemd sẽ restart), không phải
@@ -190,6 +212,13 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 				return true
 			case <-ctxRead.Done():
 				return false
+			}
+		}
+
+		if posSet != nil {
+			if err := st.initPosMode(posSet.FileBase(), startPos.Name); err != nil {
+				emit(reader.Event{Type: reader.EventError, Err: err})
+				return
 			}
 		}
 
@@ -231,6 +260,14 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 type streamState struct {
 	tableMap map[uint64]*replication.TableMapEvent
 	curFile  string // file binlog hiện tại (từ ROTATE, kể cả rotate giả lúc kết nối)
+
+	// Chế độ vị trí binlog (xem binlogpos.go).
+	posMode  bool
+	fileBase string // tên gốc của file binlog; đổi giữa chừng là lỗi
+	curSeq   uint32 // số thứ tự của curFile; chỉ được tăng
+	// start/end của event ngoài cùng đang xử lý; event con của TRANSACTION_PAYLOAD_EVENT có LogPos = 0
+	// nên dùng vị trí của event bao ngoài.
+	outerStart, outerEnd uint64
 }
 
 // handleEvent xử lý một event binlog và đẩy kết quả qua emit. Trả false khi luồng phải dừng
@@ -246,6 +283,29 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 	var evStart uint64
 	if ev.Header.LogPos >= ev.Header.EventSize {
 		evStart = uint64(ev.Header.LogPos - ev.Header.EventSize)
+	}
+	evEnd := uint64(ev.Header.LogPos)
+	if st.posMode {
+		if inPayload {
+			evStart, evEnd = st.outerStart, st.outerEnd
+		} else {
+			st.outerStart, st.outerEnd = evStart, evEnd
+		}
+	}
+	// Vị trí của event: GTID khi có GTID, ngược lại (chế độ vị trí binlog) là (file, end_log_pos).
+	posAt := func() model.Pos {
+		if st.posMode {
+			p := model.Pos{Engine: model.EngineMySQL, File: st.curFile, BinlogPos: evEnd}
+			r.mu.Lock()
+			r.currentPos = p
+			r.mu.Unlock()
+			return p
+		}
+		return r.Position()
+	}
+	startFile, startPos := "", uint64(0)
+	if st.posMode {
+		startFile, startPos = st.curFile, evStart
 	}
 
 	fail := func(err error) bool {
@@ -266,19 +326,28 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 			return fail(err)
 		}
 		return emit(reader.Event{
-			Type:      reader.EventRows,
-			Pos:       r.Position(),
-			TableID:   rowsEv.TableID,
-			Schema:    schema,
-			Table:     table,
-			Op:        op,
-			Rows:      rowsEv.Rows,
-			Timestamp: ts,
+			Type:       reader.EventRows,
+			Pos:        posAt(),
+			BinlogFile: startFile,
+			BinlogPos:  startPos,
+			TableID:    rowsEv.TableID,
+			Schema:     schema,
+			Table:      table,
+			Op:         op,
+			Rows:       rowsEv.Rows,
+			Timestamp:  ts,
 		})
 	}
 
 	switch ev.Header.EventType {
 	case replication.GTID_EVENT:
+		if st.posMode {
+			// ANONYMOUS_GTID_EVENT là type khác (bị bỏ qua); GTID_EVENT thật nghĩa là source đã bật GTID
+			// sau khi checkpoint tạo ở chế độ vị trí: định danh Txn đổi kiểu giữa chừng, không resume được.
+			return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
+				"GTID event at %s:%d while the pipeline runs in binlog position mode: the source enabled GTID (gtid_mode) after the checkpoint was created; re-seed the pipeline",
+				st.curFile, evEnd), nil))
+		}
 		if gtidEv, ok := ev.Event.(*replication.GTIDEvent); ok {
 			u, err := uuid.FromBytes(gtidEv.SID)
 			if err != nil {
@@ -297,6 +366,11 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 		}
 
 	case replication.GTID_TAGGED_LOG_EVENT:
+		if st.posMode {
+			return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
+				"GTID event at %s:%d while the pipeline runs in binlog position mode: the source enabled GTID (gtid_mode) after the checkpoint was created; re-seed the pipeline",
+				st.curFile, evEnd), nil))
+		}
 		if taggedEv, ok := ev.Event.(*replication.GtidTaggedLogEvent); ok {
 			u, err := uuid.FromBytes(taggedEv.SID)
 			if err != nil {
@@ -317,11 +391,13 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 	case replication.QUERY_EVENT:
 		if qEv, ok := ev.Event.(*replication.QueryEvent); ok {
 			return emit(reader.Event{
-				Type:      reader.EventQuery,
-				Pos:       r.Position(),
-				Query:     string(qEv.Query),
-				Schema:    string(qEv.Schema),
-				Timestamp: ts,
+				Type:       reader.EventQuery,
+				Pos:        posAt(),
+				BinlogFile: startFile,
+				BinlogPos:  startPos,
+				Query:      string(qEv.Query),
+				Schema:     string(qEv.Schema),
+				Timestamp:  ts,
 			})
 		}
 
@@ -338,14 +414,16 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				}
 			}
 			return emit(reader.Event{
-				Type:      reader.EventTableMap,
-				Pos:       r.Position(),
-				TableID:   tmEv.TableID,
-				Schema:    string(tmEv.Schema),
-				Table:     string(tmEv.Table),
-				Columns:   cols,
-				PKColumns: pkCols,
-				Timestamp: ts,
+				Type:       reader.EventTableMap,
+				Pos:        posAt(),
+				BinlogFile: startFile,
+				BinlogPos:  startPos,
+				TableID:    tmEv.TableID,
+				Schema:     string(tmEv.Schema),
+				Table:      string(tmEv.Table),
+				Columns:    cols,
+				PKColumns:  pkCols,
+				Timestamp:  ts,
 			})
 		}
 
@@ -399,16 +477,31 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 	case replication.XID_EVENT:
 		if xidEv, ok := ev.Event.(*replication.XIDEvent); ok {
 			return emit(reader.Event{
-				Type:      reader.EventXID,
-				Pos:       r.Position(),
-				XID:       xidEv.XID,
-				Timestamp: ts,
+				Type:       reader.EventXID,
+				Pos:        posAt(),
+				BinlogFile: startFile,
+				BinlogPos:  startPos,
+				XID:        xidEv.XID,
+				Timestamp:  ts,
 			})
 		}
 
 	case replication.ROTATE_EVENT:
 		if rotEv, ok := ev.Event.(*replication.RotateEvent); ok {
-			st.curFile = string(rotEv.NextLogName)
+			next := string(rotEv.NextLogName)
+			if st.posMode {
+				if err := st.rotate(next); err != nil {
+					return fail(err)
+				}
+				return emit(reader.Event{
+					Type:      reader.EventRotate,
+					Pos:       model.Pos{Engine: model.EngineMySQL, File: next, BinlogPos: rotEv.Position},
+					Query:     next,
+					XID:       rotEv.Position,
+					Timestamp: ts,
+				})
+			}
+			st.curFile = next
 			return emit(reader.Event{
 				Type:      reader.EventRotate,
 				Pos:       r.Position(),
