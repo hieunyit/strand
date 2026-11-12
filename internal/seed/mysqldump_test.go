@@ -147,7 +147,7 @@ CREATE TABLE ` + "`orders`" + ` (` + "`id`" + ` bigint PRIMARY KEY);
 				"-- Dump completed on 2026-11-02 10:00:00\n",
 			wantErr:       true,
 			wantExitCode:  exitcode.Rejected,
-			wantErrSubstr: "mysqldump file has no GTID_PURGED (dump with --set-gtid-purged=ON on a GTID source)",
+			wantErrSubstr: "GTID_PURGED is at the end of the file and there is no CHANGE MASTER position",
 		},
 		{
 			name:     "CrossCheckMismatch_Rejected",

@@ -103,7 +103,7 @@ func newSeedCmd() *cobra.Command {
 			case "mydumper":
 				planner = seed.NewMydumperPlanner()
 			case "mysqldump":
-				planner = seed.NewMysqldumpPlanner()
+				planner = seed.NewMysqldumpPlannerWithSource(sourceDSN)
 			case "clone":
 				planner = seed.NewClonePlanner()
 			case "pgbackrest":
@@ -295,6 +295,15 @@ func prepareRestoredTarget(ctx context.Context, db *sql.DB, m *seed.SeedManifest
 	want, err := checkpoint.ParseMySQLGTIDSet(m.StartPosition.GTIDSet)
 	if err != nil {
 		return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, "invalid P in manifest", err)
+	}
+	if m.StartPosition.GTIDSet == "" {
+		// Seed không GTID (chế độ vị trí binlog): không có P dạng GTID để đối chiếu.
+		return nil
+	}
+	if m.StartPosition.GTIDFromBinlog && want.IsSubsetOf(got) {
+		// P tính từ binlog; target mang GTID_PURGED cuối dump (>= P) nên chấp nhận ⊇ P.
+		m.PositionCrossCheck = &seed.PositionCrossCheck{RestoredGTIDExecuted: executed, Match: true}
+		return nil
 	}
 	if !got.Equal(want) {
 		return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,

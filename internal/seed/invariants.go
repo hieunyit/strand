@@ -54,6 +54,25 @@ func checkCrossCheck(pSet *checkpoint.MySQLAppliedSet, p, restored string) (*Pos
 	return &PositionCrossCheck{RestoredGTIDExecuted: restored, Match: true}, nil
 }
 
+// checkCrossCheckSuperset như checkCrossCheck nhưng chấp nhận gtid_executed của target ⊇ P: dump 5.7 mang
+// GTID_PURGED ở cuối file (gtid_executed lúc kết thúc dump) nên target có thể "khai" nhiều GTID hơn P;
+// phần thừa là các Txn commit trong lúc dump, không nằm trong dữ liệu snapshot — checkpoint của Strand
+// dùng P nên vẫn đúng, các Txn đó sẽ được CDC áp lại từ P.
+func checkCrossCheckSuperset(pSet *checkpoint.MySQLAppliedSet, p, restored string) (*PositionCrossCheck, error) {
+	if strings.TrimSpace(restored) == "" {
+		return nil, nil
+	}
+	rSet, err := parseGTIDSetStrict("restored gtid_executed", restored)
+	if err != nil {
+		return nil, err
+	}
+	if !pSet.IsSubsetOf(rSet) {
+		return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			fmt.Sprintf("position cross-check mismatch: restored gtid_executed (%s) does not contain backup P (%s)", restored, p), nil)
+	}
+	return &PositionCrossCheck{RestoredGTIDExecuted: restored, Match: true}, nil
+}
+
 // checkLogCoverage kiểm SD-2: mọi GTID source đã purge mà nằm ngoài P phải có trong archive
 // (design §3.3: "P không giao với gtid_purged; nếu có giao thì archive phải phủ phần giao đó").
 func checkLogCoverage(pSet *checkpoint.MySQLAppliedSet, purged, archive string) error {

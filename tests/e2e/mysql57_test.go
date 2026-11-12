@@ -603,7 +603,7 @@ func TestM57_E2E_SeedMysqldumpToMySQL8(t *testing.T) {
 	srcID, dstID := src.c.GetContainerID(), dst.c.GetContainerID()
 	// mysqldump 5.7: --master-data (không có --source-data như 8.0.26+).
 	runDockerCmd(t, 2*time.Minute, "exec", srcID, "sh", "-c",
-		"mysqldump -uroot -pdev --single-transaction --master-data=2 --set-gtid-purged=ON --databases app m57 > /tmp/dump.sql")
+		"mysqldump -uroot -pdev --default-character-set=utf8mb4 --single-transaction --master-data=2 --set-gtid-purged=ON --databases app m57 > /tmp/dump.sql")
 	runDockerCmd(t, time.Minute, "cp", srcID+":/tmp/dump.sql", dumpFile)
 	runDockerCmd(t, time.Minute, "cp", dumpFile, dstID+":/tmp/dump.sql")
 	runDockerCmd(t, 2*time.Minute, "exec", dstID, "sh", "-c",
@@ -618,6 +618,17 @@ func TestM57_E2E_SeedMysqldumpToMySQL8(t *testing.T) {
 		"--source", src.RootDSN, "--target", dst.RootDSN, "--out", manifest)
 	if code != 0 || !strings.Contains(out, "WARNING: mysqldump") {
 		t.Fatalf("seed plan: exit %d\n%s", code, out)
+	}
+	// mysqldump 5.7 ghi GTID_PURGED ở cuối file; P phải tính từ binlog tại vị trí CHANGE MASTER, không lấy giá trị cuối file.
+	if !strings.Contains(out, "GTID_PURGED at the end of the dump") {
+		t.Fatalf("seed plan: thiếu ghi chú P tính từ binlog\n%s", out)
+	}
+	t.Logf("seed plan: %s", strings.TrimSpace(out[strings.LastIndex(out, "seed plan OK"):]))
+	if raw, rerr := os.ReadFile(dumpFile); rerr == nil {
+		if i := strings.LastIndex(string(raw), "SET @@GLOBAL.GTID_PURGED="); i >= 0 {
+			tr := string(raw[i:])
+			t.Logf("GTID_PURGED trong file dump (cuối file): %s", strings.TrimSpace(tr[:strings.Index(tr, ";")]))
+		}
 	}
 	out, code = runStrandCLI(t, 5*time.Minute, "seed", "apply", "--manifest", manifest, "--target", dst.RootDSN,
 		"--spool", filepath.Join(dir, "state", "prefetch"), "--source", src.RootDSN)
