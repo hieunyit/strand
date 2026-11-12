@@ -7,6 +7,7 @@ import (
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 
+	"strand/internal/checkpoint"
 	"strand/internal/reader"
 )
 
@@ -178,5 +179,92 @@ func TestSchemaHistorySeedMismatchStillFailsClosed(t *testing.T) {
 	ok := r.handleEvent(s, tmEv(tm57([]byte{L, L, L}, make([]uint16, 3))), func(e reader.Event) bool { got = append(got, e); return true })
 	if ok || len(got) != 1 || got[0].Err == nil {
 		t.Fatalf("ok=%v got=%+v", ok, got)
+	}
+}
+
+// --- Chế độ vị trí binlog (SH-1/SH-2) ---
+
+func pk(t *testing.T, seq uint32, off uint64) uint64 {
+	t.Helper()
+	k, err := checkpoint.BinlogKey(seq, off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+func TestSeedSchemaVersionsPos(t *testing.T) {
+	old, nw := ti("a", "b", "c"), ti("a", "b")
+	f := checkpoint.FormatBinlogKey
+	vs := []SchemaVersion{
+		{Info: old, From: f(pk(t, 1, 100)), Until: f(pk(t, 1, 500))},
+		{Info: nw, From: f(pk(t, 1, 500))},
+	}
+	cases := []struct {
+		name  string
+		start uint64
+		want  *TableInfo
+		kept  int
+	}{
+		{"DDL chưa qua: dùng version cũ", pk(t, 1, 400), old, 2},
+		{"bắt đầu đúng đầu DDL (Txn của DDL chưa apply): version cũ", pk(t, 1, 480), old, 2},
+		{"bắt đầu đúng cuối DDL: DDL đã qua, dùng mới", pk(t, 1, 500), nw, 1},
+		{"sang file sau", pk(t, 2, 4), nw, 1},
+		{"trước From của mọi version: không dùng gì", pk(t, 1, 50), nil, 2},
+	}
+	for _, c := range cases {
+		got, kept := seedSchemaVersionsPos(vs, c.start)
+		if got != c.want || len(kept) != c.kept {
+			t.Errorf("%s: got=%v kept=%d want %v kept=%d", c.name, got, len(kept), c.want, c.kept)
+		}
+	}
+	// State kiểu GTID (hoặc hỏng) không đoán: bỏ version.
+	bad := []SchemaVersion{{Info: old, From: hU + ":1-5"}}
+	if got, kept := seedSchemaVersionsPos(bad, pk(t, 1, 400)); got != nil || len(kept) != 0 {
+		t.Fatalf("GTID-marked version must be dropped in pos mode: %v %v", got, kept)
+	}
+}
+
+// Tái hiện lỗi (d): strand dừng, DDL DROP COLUMN chạy ở nguồn không GTID; row trước DDL giải mã bằng info đã lưu.
+func TestSchemaHistoryPosDecodesPreDDLRows(t *testing.T) {
+	old := &TableInfo{Columns: []ColumnInfo{col("id", "int"), col("a", "int"), col("b", "int"), col("w", "int")}, PK: []string{"id"}}
+	nw := &TableInfo{Columns: []ColumnInfo{col("id", "int"), col("a", "int"), col("b", "int")}, PK: []string{"id"}}
+	start := pk(t, 3, 200)
+	st := &memStore{m: map[string][]SchemaVersion{"app.t": {{Info: old, From: checkpoint.FormatBinlogKey(pk(t, 3, 100))}}}}
+	live := &fakeInfo{tables: map[string]*TableInfo{"app.t": nw}}
+	r, err := New(Config{Host: "127.0.0.1", User: "x", ServerID: 9, TableInfo: live, SchemaHistory: st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &streamState{tableMap: map[uint64]*replication.TableMapEvent{}}
+	if err := s.initPosMode("mysql-bin", "mysql-bin.000003"); err != nil {
+		t.Fatal(err)
+	}
+	s.hist, s.infoCache = openSchemaHistoryPos(st, start)
+	var got []reader.Event
+	emit := func(e reader.Event) bool { got = append(got, e); return true }
+	L := byte(gomysql.MYSQL_TYPE_LONG)
+	if !r.handleEvent(s, tmEv(tm57([]byte{L, L, L, L}, make([]uint16, 4))), emit) {
+		t.Fatalf("pre-DDL: %+v", got)
+	}
+	if live.loads != 0 || !reflect.DeepEqual(got[0].Columns, []string{"id", "a", "b", "w"}) {
+		t.Fatalf("loads=%d cols=%v", live.loads, got[0].Columns)
+	}
+	ddl := n03Ev(replication.QUERY_EVENT, 800, 40, &replication.QueryEvent{Query: []byte("ALTER TABLE t DROP COLUMN w")})
+	if !r.handleEvent(s, ddl, emit) {
+		t.Fatal("ddl")
+	}
+	if want := checkpoint.FormatBinlogKey(pk(t, 3, 800)); st.m["app.t"][0].Until != want {
+		t.Fatalf("Until=%q want %q", st.m["app.t"][0].Until, want)
+	}
+	if !r.handleEvent(s, tmEv(tm57([]byte{L, L, L}, make([]uint16, 3))), emit) {
+		t.Fatal("post-DDL")
+	}
+	if live.loads != 1 || len(st.m["app.t"]) != 2 || st.m["app.t"][1].From != checkpoint.FormatBinlogKey(pk(t, 3, 800)) {
+		t.Fatalf("loads=%d hist=%+v", live.loads, st.m["app.t"])
+	}
+	// Restart sau DDL (start ≥ Until): dùng version mới, không dùng version 4 cột.
+	if _, c := openSchemaHistoryPos(st, pk(t, 3, 800)); len(c["app.t"].Columns) != 3 {
+		t.Fatalf("restart after DDL: %+v", c["app.t"])
 	}
 }

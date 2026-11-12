@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -423,8 +424,18 @@ func TestBinlogPos_E2E_Rejections(t *testing.T) {
 			t.Fatalf("%s: a rejected start must not write a checkpoint", what)
 		}
 	}
-	mustReject("no start-at", "not yet supported in binlog position mode")
-	mustReject("seed", "not yet supported in binlog position mode", "--start-at", "seed")
+	// Seed: manifest không có vị trí binlog / không có manifest → từ chối rõ (không ghi checkpoint).
+	mustReject("seed without a manifest", "read seed manifest", "--start-at", "seed", "--seed-manifest", filepath.Join(dir, "none.json"))
+	noPos := filepath.Join(dir, "nopos.json")
+	if err := os.WriteFile(noPos, []byte(`{"version":1,"engine":"mysql","kind":"mysqldump","start_position":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustReject("seed manifest without a binlog position", "no binlog position", "--start-at", "seed", "--seed-manifest", noPos)
+	gone := filepath.Join(dir, "gone.json")
+	if err := os.WriteFile(gone, []byte(`{"version":1,"engine":"mysql","kind":"mysqldump","start_position":{"binlog_file":"mysql-bin.009999","binlog_pos":120}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustReject("seed position in a purged/missing file", "log gap", "--start-at", "seed", "--seed-manifest", gone)
 	mustReject("GTID start-at", "invalid start position", "--start-at", "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5")
 	mustReject("start-at in a missing file", "log gap", "--start-at", "mysql-bin.009999:4")
 	f, _ := src.masterPos(t)
@@ -569,4 +580,317 @@ func TestBinlogPos_E2E_ToPostgres(t *testing.T) {
 			t.Logf("final checkpoint: %s", applied)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Seed / snapshot logic / lịch sử schema ở chế độ vị trí binlog
+// ---------------------------------------------------------------------------
+
+func posImage(def string) string {
+	if v := os.Getenv("STRAND_E2E_POS_IMAGES"); v != "" {
+		return strings.Split(v, ",")[0]
+	}
+	return def
+}
+
+// waitPosEqual: chờ mọi bảng source == target (và strand còn sống).
+func waitPosEqual(t *testing.T, src, dst *sql.DB, p *strandProc, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		tb, ok := posEqual(src, dst)
+		if ok {
+			return
+		}
+		if p.exited() {
+			t.Fatalf("strand exited (code %d) before catching up (%s differs)\n%s", p.exitCode(), tb, p.tail())
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("target did not catch up: %s differs\n%s", tb, p.tail())
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+func posPreload(t *testing.T, n int, dbs ...*sql.DB) {
+	t.Helper()
+	for _, db := range dbs {
+		for i := 1; i <= n; i++ {
+			if _, err := db.Exec("INSERT INTO app.t1 (id, ver, v, n) VALUES (?, ?, 'init', 0)", i, 1000+i); err != nil {
+				t.Fatal(err)
+			}
+			if i%2 == 0 {
+				if _, err := db.Exec("INSERT INTO app.t2 (id, ver, v, d) VALUES (?, ?, 'init', '2020-01-02 03:04:05')", i, 1000+i); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if i%5 == 0 {
+				if _, err := db.Exec("INSERT INTO app.m (id, ver, v) VALUES (?, ?, 'init')", i, 1000+i); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+}
+
+// (a) Seed từ mysqldump --master-data=2 của MySQL 5.5 (không GTID) → 8.4: vị trí CHANGE MASTER là điểm
+// bắt đầu; nguồn ghi liên tục trong lúc dump/restore; CDC bắt kịp, hai bên bằng nhau.
+func TestBinlogPos_E2E_SeedMysqldump(t *testing.T) {
+	seed := seedFromEnv(t)
+	src := startMySQLNoGTID(t, posImage("mysql:5.5"), "src", 1)
+	dst := startMySQL(t, mysqlImage("target"), "dst", 2, nil)
+	src.exec(t, posSchema("InnoDB")...)
+	posPreload(t, 600, src.DB)
+	wl := &posWorkload{db: src.DB}
+	wl.Start(4, seed, 800)
+	defer wl.Stop()
+	time.Sleep(2 * time.Second)
+
+	dir := testDir(t)
+	dumpFile := filepath.Join(dir, "dump.sql")
+	srcID, dstID := src.c.GetContainerID(), dst.c.GetContainerID()
+	runDockerCmd(t, 2*time.Minute, "exec", srcID, "sh", "-c",
+		"mysqldump -uroot -pdev --default-character-set=utf8mb4 --single-transaction --master-data=2 --databases app > /tmp/dump.sql")
+	runDockerCmd(t, time.Minute, "cp", srcID+":/tmp/dump.sql", dumpFile)
+	runDockerCmd(t, time.Minute, "cp", dumpFile, dstID+":/tmp/dump.sql")
+	// Tải vẫn chạy trong lúc restore: Txn sau vị trí dump phải tới đích qua CDC.
+	runDockerCmd(t, 2*time.Minute, "exec", dstID, "sh", "-c", "mysql -uroot -pdev < /tmp/dump.sql")
+	dst.exec(t, "SET SESSION sql_log_bin=0; CREATE DATABASE IF NOT EXISTS strand; SET SESSION sql_log_bin=1")
+
+	manifest := filepath.Join(dir, "seed.json")
+	out, code := runStrandCLI(t, time.Minute, "seed", "plan", "--type", "mysqldump", "--backup", dumpFile,
+		"--source", src.RootDSN, "--target", dst.RootDSN, "--out", manifest)
+	if code != 0 {
+		t.Fatalf("seed plan: exit %d\n%s", code, out)
+	}
+	raw, _ := os.ReadFile(manifest)
+	if !strings.Contains(string(raw), `"binlog_file"`) || strings.Contains(string(raw), `"gtid_set"`) {
+		t.Fatalf("manifest must carry the binlog position and no GTID set:\n%s", raw)
+	}
+	out, code = runStrandCLI(t, 5*time.Minute, "seed", "apply", "--manifest", manifest, "--target", dst.RootDSN,
+		"--spool", filepath.Join(dir, "state", "prefetch"), "--source", src.RootDSN)
+	if code != 0 {
+		t.Fatalf("seed apply: exit %d\n%s", code, out)
+	}
+	cfg := posStrandCfg(t, "pos-seed", src, dst, "", dir)
+	cfg.Bootstrap = "seed"
+	p := startStrand(t, cfg.write(t), "--start-at", "seed", "--seed-manifest", manifest)
+	time.Sleep(10 * time.Second) // tải tiếp tục trong lúc catch-up
+	wl.Stop()
+	waitPosEqual(t, src.DB, dst.DB, p, 4*time.Minute)
+	waitSynced(t, &cfg, p, 3*time.Minute) // post-seed verify chạy xong
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("exit %d\n%s", code, p.tail())
+	}
+	if tb, ok := posEqual(src.DB, dst.DB); !ok {
+		t.Fatalf("final state: %s differs", tb)
+	}
+}
+
+// (b) Bootstrap logical (snapshot theo chunk + stream) từ 5.6 gtid_mode=OFF dưới tải ghi đồng thời → 8.4;
+// so sánh dữ liệu và `verify --mode full`.
+func TestBinlogPos_E2E_LogicalBootstrap(t *testing.T) {
+	seed := seedFromEnv(t)
+	src := startMySQLNoGTID(t, posImage("mysql:5.6"), "src", 1, "--max-binlog-size=65536")
+	dst := startMySQL(t, mysqlImage("target"), "dst", 2, nil)
+	src.exec(t, posSchema("InnoDB")...)
+	dst.exec(t, posSchema("InnoDB")...)
+	dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
+	posPreload(t, 3000, src.DB)
+	wl := &posWorkload{db: src.DB}
+	wl.Start(4, seed, 3500)
+	defer wl.Stop()
+
+	dir := testDir(t)
+	cfg := posStrandCfg(t, "pos-boot", src, dst, "", dir)
+	cfg.ChunkRows = "200"
+	cfgPath := cfg.write(t)
+	p := startStrand(t, cfgPath) // không --start-at: bootstrap logical từ đầu binlog hiện tại
+	time.Sleep(15 * time.Second)
+	wl.Stop()
+	waitPosEqual(t, src.DB, dst.DB, p, 4*time.Minute)
+	waitSynced(t, &cfg, p, 3*time.Minute)
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("exit %d\n%s", code, p.tail())
+	}
+	if !strings.Contains(p.output.String(), "logical bootstrap in binlog position mode") {
+		t.Fatalf("pipeline did not bootstrap logically\n%s", p.tail())
+	}
+	out, code := runStrandCLI(t, 10*time.Minute, "verify", "-c", cfgPath, "--mode", "full")
+	if code != 0 {
+		t.Fatalf("verify full: exit %d\n%s", code, out)
+	}
+	if tb, ok := posEqual(src.DB, dst.DB); !ok {
+		t.Fatalf("final state: %s differs", tb)
+	}
+}
+
+// (c) `snapshot add` một bảng mới (MyISAM ở source) khi pipeline đang stream dưới tải, chế độ vị trí.
+func TestBinlogPos_E2E_SnapshotAdd(t *testing.T) {
+	seed := seedFromEnv(t)
+	src := startMySQLNoGTID(t, posImage("mysql:5.5"), "src", 1)
+	dst := startMySQL(t, mysqlImage("target"), "dst", 2, nil)
+	src.exec(t, posSchema("MyISAM")...)
+	dst.exec(t, posSchema("InnoDB")...)
+	dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
+	posPreload(t, 1500, src.DB, dst.DB)
+	wl := &posWorkload{db: src.DB}
+	wl.Start(4, seed, 1800)
+	defer wl.Stop()
+
+	dir := testDir(t)
+	cfg := posStrandCfg(t, "pos-add", src, dst, "", dir)
+	cfg.Include = []string{"app.t1", "app.t2"} // app.m chưa thuộc pipeline
+	cfg.ChunkRows = "100"
+	// Hai bảng của pipeline phải bằng nhau tại vị trí bắt đầu: dừng tải một nhịp, sao chép t1/t2 sang target
+	// tại đúng vị trí đó, rồi chạy lại tải.
+	wl.Stop()
+	f, pos := src.masterPos(t)
+	for _, tb := range []string{"app.t1", "app.t2"} {
+		dst.exec(t, "DELETE FROM "+tb)
+		rows, err := src.DB.Query("SELECT * FROM " + tb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, _ := rows.Columns()
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",")
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptr := make([]any, len(cols))
+			for i := range ptr {
+				ptr[i] = &vals[i]
+			}
+			if err := rows.Scan(ptr...); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := dst.DB.Exec("INSERT INTO "+tb+" VALUES ("+ph+")", vals...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rows.Close()
+	}
+	dst.exec(t, "DELETE FROM app.m")
+	wl2 := &posWorkload{db: src.DB}
+	wl2.Start(4, seed+7, 1800)
+	defer wl2.Stop()
+	cfgPath := cfg.write(t)
+	p := startStrand(t, cfgPath, "--start-at", fmt.Sprintf("%s:%d", f, pos))
+	// Tải ghi liên tục nên pipeline có thể chưa báo "synced": chỉ cần đã chạy (có checkpoint) và stream đang áp.
+	for i := 0; i < 100; i++ {
+		if _, ok := hasCheckpoint(dst, "pos-add"); ok {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	time.Sleep(3 * time.Second)
+	out, code := runStrandCLI(t, time.Minute, "snapshot", "add", "--table", "app.m", "--socket", cfg.Socket)
+	if code != 0 {
+		t.Fatalf("snapshot add: exit %d\n%s", code, out)
+	}
+	deadline := time.Now().Add(3 * time.Minute)
+	for !strings.Contains(p.output.String(), "snapshot done") || !strings.Contains(p.output.String(), "app.m") {
+		if p.exited() || time.Now().After(deadline) {
+			t.Fatalf("snapshot add did not finish (exited=%v)\n%s", p.exited(), p.tail())
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	time.Sleep(5 * time.Second)
+	wl2.Stop()
+	// app.m không thuộc include của pipeline nên không được ghi lại sau snapshot add khi restart; trong phiên này
+	// bảng đã vào pipeline (Strand giữ bảng cho tới khi dừng), nên cả ba bảng phải hội tụ.
+	waitPosEqual(t, src.DB, dst.DB, p, 4*time.Minute)
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("exit %d\n%s", code, p.tail())
+	}
+}
+
+// (d) DROP COLUMN khi Strand dừng, nguồn 5.6 không GTID: binlog 5.6 không có tên cột; row ghi trước DDL phải
+// giải mã theo cấu trúc cũ (lịch sử schema theo vị trí), row sau DDL theo cấu trúc mới.
+func TestBinlogPos_E2E_SchemaHistoryDropColumn(t *testing.T) {
+	src := startMySQLNoGTID(t, posImage("mysql:5.6"), "src", 1)
+	dst := startMySQL(t, mysqlImage("target"), "dst", 2, nil)
+	src.exec(t, posSchema("InnoDB")...)
+	dst.exec(t, posSchema("InnoDB")...)
+	const altDDL = "CREATE TABLE app.alt (id BIGINT PRIMARY KEY, v VARCHAR(20) NOT NULL, u BIGINT UNSIGNED NOT NULL, w INT NULL)"
+	src.exec(t, altDDL)
+	dst.exec(t, altDDL)
+	dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
+	for i := 1; i <= 100; i++ {
+		src.exec(t, fmt.Sprintf("INSERT INTO app.alt VALUES (%d, 'v%d', %d, %d)", i, i, i, i))
+		dst.exec(t, fmt.Sprintf("INSERT INTO app.alt VALUES (%d, 'v%d', %d, %d)", i, i, i, i))
+	}
+	dir := testDir(t)
+	cfg := posStrandCfg(t, "pos-ddl", src, dst, "", dir)
+	cfgPath := cfg.write(t)
+	f, pos := src.masterPos(t)
+	p := startStrand(t, cfgPath, "--start-at", fmt.Sprintf("%s:%d", f, pos))
+	waitSynced(t, &cfg, p, 3*time.Minute)
+	src.exec(t, "INSERT INTO app.alt VALUES (500, 'live', 5, 5)")
+	waitPosEqualAlt(t, src, dst, p)
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("exit %d\n%s", code, p.tail())
+	}
+	// Strand dừng: row theo cấu trúc cũ, DROP COLUMN (đích chưa áp), row theo cấu trúc mới.
+	for i := 2001; i <= 2100; i++ {
+		src.exec(t, fmt.Sprintf("INSERT INTO app.alt VALUES (%d, 'old%d', %d, %d)", i, i, i, i%9))
+	}
+	src.exec(t, "ALTER TABLE app.alt DROP COLUMN w")
+	for i := 3001; i <= 3100; i++ {
+		src.exec(t, fmt.Sprintf("INSERT INTO app.alt VALUES (%d, 'new%d', %d)", i, i, i))
+	}
+	p2 := startStrand(t, cfgPath)
+	deadline := time.Now().Add(2 * time.Minute)
+	for !p2.exited() && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !p2.exited() || p2.exitCode() != 10 || !strings.Contains(p2.output.String(), "schema_change_pending") {
+		t.Fatalf("want exit 10 schema_change_pending, exited=%v code=%d\n%s", p2.exited(), p2.exitCode(), p2.tail())
+	}
+	var cnt int
+	if err := dst.DB.QueryRow("SELECT COUNT(*) FROM app.alt WHERE id BETWEEN 2001 AND 2100").Scan(&cnt); err != nil || cnt != 100 {
+		t.Fatalf("rows before DROP COLUMN at target: %d (%v), want 100\n%s", cnt, err, p2.tail())
+	}
+	if err := dst.DB.QueryRow("SELECT COUNT(*) FROM app.alt WHERE id BETWEEN 3001 AND 3100").Scan(&cnt); err != nil || cnt != 0 {
+		t.Fatalf("rows after DROP COLUMN reached the target (%d) before its DDL was applied", cnt)
+	}
+	dst.exec(t, "ALTER TABLE app.alt DROP COLUMN w")
+	p3 := startStrand(t, cfgPath)
+	waitPosEqualAlt(t, src, dst, p3)
+	if code := p3.stop(t); code != 0 {
+		t.Fatalf("exit %d\n%s", code, p3.tail())
+	}
+}
+
+func waitPosEqualAlt(t *testing.T, src, dst *mysqlNode, p *strandProc) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		a, e1 := posAltDump(src.DB)
+		b, e2 := posAltDump(dst.DB)
+		if e1 == nil && e2 == nil && a == b {
+			return
+		}
+		if p.exited() || time.Now().After(deadline) {
+			t.Fatalf("app.alt differs (exited=%v): %v %v\n%s", p.exited(), e1, e2, p.tail())
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+func posAltDump(db *sql.DB) (string, error) {
+	rows, err := db.Query("SELECT id, v, u FROM app.alt ORDER BY id")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var sb strings.Builder
+	for rows.Next() {
+		var id, u int64
+		var v string
+		if err := rows.Scan(&id, &v, &u); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&sb, "%d|%s|%d\n", id, v, u)
+	}
+	return sb.String(), rows.Err()
 }

@@ -13,10 +13,15 @@ type BinlogStatus struct {
 	ExecutedSet string // Executed_Gtid_Set; rỗng với MySQL 5.5 (không có GTID)
 }
 
+// StatusQuerier: *sql.DB hoặc *sql.Conn (đọc vị trí trên đúng kết nối đang giữ khóa).
+type StatusQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // ReadBinlogStatus đọc vị trí binlog hiện tại của source. MySQL 8.4 bỏ SHOW MASTER STATUS (đổi thành
 // SHOW BINARY LOG STATUS, có từ 8.2); 5.5–8.0 chỉ có SHOW MASTER STATUS. Thử cú pháp mới trước rồi lùi về cũ.
 // Số cột khác nhau theo phiên bản (5.5: 4 cột, 5.6+: 5 cột) nên đọc theo tên cột.
-func ReadBinlogStatus(ctx context.Context, db *sql.DB) (BinlogStatus, error) {
+func ReadBinlogStatus(ctx context.Context, db StatusQuerier) (BinlogStatus, error) {
 	var lastErr error
 	for _, q := range []string{"SHOW BINARY LOG STATUS", "SHOW MASTER STATUS"} {
 		st, err := queryBinlogStatus(ctx, db, q)
@@ -28,7 +33,7 @@ func ReadBinlogStatus(ctx context.Context, db *sql.DB) (BinlogStatus, error) {
 	return BinlogStatus{}, fmt.Errorf("read source binlog status: %w", lastErr)
 }
 
-func queryBinlogStatus(ctx context.Context, db *sql.DB, q string) (BinlogStatus, error) {
+func queryBinlogStatus(ctx context.Context, db StatusQuerier, q string) (BinlogStatus, error) {
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
 		return BinlogStatus{}, err

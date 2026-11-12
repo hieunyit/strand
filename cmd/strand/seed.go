@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	_ "github.com/go-sql-driver/mysql"
+	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 
 	"strand/internal/checkpoint"
@@ -67,9 +67,17 @@ func newSeedCmd() *cobra.Command {
 				}
 				defer db.Close()
 				var srcArch string
-				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_purged, @@GLOBAL.version_compile_machine, @@GLOBAL.version").
-					Scan(&src.SourcePurgedGTID, &srcArch, &src.SourceMySQLVersion); err != nil {
-					return fmt.Errorf("read source gtid_purged/version_compile_machine: %w", err)
+				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.version_compile_machine, @@GLOBAL.version").
+					Scan(&srcArch, &src.SourceMySQLVersion); err != nil {
+					return fmt.Errorf("read source version_compile_machine/version: %w", err)
+				}
+				// gtid_purged không tồn tại ở MySQL 5.5 (lỗi 1193): nguồn không GTID, không có tập purge theo GTID.
+				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_purged").Scan(&src.SourcePurgedGTID); err != nil {
+					var me *drivermysql.MySQLError
+					if !errors.As(err, &me) || me.Number != 1193 {
+						return fmt.Errorf("read source gtid_purged: %w", err)
+					}
+					src.SourcePurgedGTID = ""
 				}
 				if v, err := mysqlver.Parse(src.SourceMySQLVersion); err != nil {
 					return err
@@ -185,6 +193,12 @@ func newSeedCmd() *cobra.Command {
 				return nil
 			}
 			// Prefetch (mặc định bật): đọc log từ P vào spool trong lúc restore (02 §9).
+			if pfOn && pfSpool != "" && m.StartPosition.GTIDSet == "" {
+				// Seed không GTID (chế độ vị trí binlog): spool prefetch theo GTID không áp dụng; pipeline đọc thẳng
+				// từ file binlog của source tại vị trí manifest (file bị purge → log_gap khi khởi động).
+				fmt.Println("note: seed without GTID (binlog position mode): prefetch is skipped; the pipeline reads the source binlog from the manifest position")
+				pfOn = false
+			}
 			if pfOn && pfSpool != "" {
 				var n int
 				if restoreCmd != "" {

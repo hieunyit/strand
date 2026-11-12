@@ -15,14 +15,16 @@ package pipeline
 //   - CP-4: |holes| + |extra| bị chặn bởi cùng cơ chế backpressure của scheduler như PG.
 //   - CP-5: strict commit tuần tự theo seq = thứ tự binlog; checkpoint là một mốc ghi trong commit cuối.
 //
-// Ngoài phạm vi (từ chối rõ ràng): seed, snapshot logic (watermark theo GTID), đổi/failover server,
+// Ngoài phạm vi (từ chối rõ ràng): đổi/failover server,
 // đọc từ replica, promote/rewind/verify theo GTID — xem rejectBinlogPos.
 
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	drivermysql "github.com/go-sql-driver/mysql"
@@ -31,6 +33,7 @@ import (
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	mysqlreader "strand/internal/reader/mysql"
+	"strand/internal/seed"
 )
 
 const posModeUnsupported = "not yet supported in binlog position mode (source MySQL without GTID)"
@@ -88,7 +91,7 @@ func (p *Pipeline) detectBinlogPosMode(ctx context.Context) error {
 	}
 	p.srcIdent = ident
 	p.log.Warn("source has no GTID (gtid_mode OFF or absent): running in BINLOG POSITION MODE; transactions are identified by "+
-		"(binlog file, end position); seeds, logical snapshots, promote and replica switching are not supported in this mode",
+		"(binlog file, end position); promote and replica switching are not supported in this mode",
 		"source", ident)
 	return nil
 }
@@ -185,10 +188,15 @@ func (p *Pipeline) initialPositionPos(ctx context.Context, loaded checkpoint.App
 			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax,
 				"--start-at is only valid for a new pipeline; a checkpoint already exists (use strand checkpoint rewind)", nil)
 		}
-		if p.opts.StartAt == "seed" {
-			return nil, rejectBinlogPos("--start-at seed")
+		startAt := p.opts.StartAt
+		fromSeed := startAt == "seed"
+		if fromSeed {
+			var err error
+			if startAt, err = p.seedStartPos(); err != nil {
+				return nil, err
+			}
 		}
-		base, key, err := checkpoint.ParseBinlogStartAt(p.opts.StartAt)
+		base, key, err := checkpoint.ParseBinlogStartAt(startAt)
 		if err != nil {
 			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax,
 				fmt.Sprintf("invalid start position %q for a source without GTID: %v", p.opts.StartAt, err), err)
@@ -198,6 +206,12 @@ func (p *Pipeline) initialPositionPos(ctx context.Context, loaded checkpoint.App
 			return nil, err
 		}
 		// Mọi Txn kết thúc ≤ vị trí này coi như đã apply (dữ liệu target khớp source tại đó); đọc từ đúng vị trí.
+		// SD-1': với seed, vị trí đó là CHANGE MASTER của dump (cùng read view với dữ liệu: mysqldump
+		// --master-data dưới FTWRL + CONSISTENT SNAPSHOT, mydumper khóa toàn cục), nên dữ liệu target ≡ source
+		// sau mọi Txn kết thúc ≤ vị trí. Stream bắt đầu đúng đó và router coi Txn ≤ vị trí là đã apply (CP-2).
+		// SD-2': checkBinlogPosition ở trên từ chối file đã bị purge (log_gap) và vị trí không phải ranh giới
+		// event / vượt cuối file. Không tính được định danh server từ dump không GTID: verify sau seed
+		// (SetVerifyPending) là chốt chặn nếu manifest đến từ server khác.
 		set = checkpoint.NewMySQLPosAppliedSet(base, key)
 		set.SetSource(p.srcIdent)
 		if err := p.state.SetVerifyPending(true); err != nil {
@@ -214,8 +228,8 @@ func (p *Pipeline) initialPositionPos(ctx context.Context, loaded checkpoint.App
 		return set, p.writeGlobal(ctx, set.String())
 	}
 	if set == nil {
-		// Pipeline mới, không --start-at: chế độ A cần snapshot logic với watermark GTID.
-		return nil, rejectBinlogPos("a new pipeline needs --start-at <binlog file>:<position>; logical snapshot (bootstrap.default=logical)")
+		// Pipeline mới, không --start-at: bootstrap logical từ đầu binlog hiện tại (watermark theo vị trí).
+		return p.initialPositionPosHead(ctx)
 	}
 	// Resume từ checkpoint. Định danh server phải khớp: vị trí chỉ có nghĩa trên server đã tạo ra chúng.
 	if set.Source() != "" && set.Source() != p.srcIdent {
@@ -229,6 +243,39 @@ func (p *Pipeline) initialPositionPos(ctx context.Context, loaded checkpoint.App
 		return nil, err
 	}
 	return set, nil
+}
+
+// seedStartPos đọc manifest seed (--start-at seed) của source không GTID và trả "file:pos".
+func (p *Pipeline) seedStartPos() (string, error) {
+	path := p.opts.SeedManifest
+	if path == "" {
+		path = "seed.json"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, fmt.Sprintf("read seed manifest: %v", err), err)
+	}
+	var m seed.SeedManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "", exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, fmt.Sprintf("parse seed manifest: %v", err), err)
+	}
+	return seedManifestPos(&m)
+}
+
+// seedManifestPos (thuần): vị trí bắt đầu từ manifest cho nguồn không GTID.
+func seedManifestPos(m *seed.SeedManifest) (string, error) {
+	if m.LogCoverage != nil && !m.LogCoverage.OK {
+		return "", exitcode.New(exitcode.ErrLogGap, exitcode.DataError, "seed manifest reports log coverage not OK", nil)
+	}
+	if m.StartPosition.GTIDSet != "" {
+		return "", exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			"the seed manifest carries a GTID set but the source has no GTID (gtid_mode OFF): the seed was taken from a different (GTID) server or the source changed mode", nil)
+	}
+	if m.StartPosition.BinlogFile == "" || m.StartPosition.BinlogPos < 4 {
+		return "", exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
+			"the seed manifest has no binlog position (start_position.binlog_file/binlog_pos): a seed for a source without GTID needs the CHANGE MASTER position (mysqldump --master-data=2, mydumper metadata Log:/Pos:)", nil)
+	}
+	return fmt.Sprintf("%s:%d", m.StartPosition.BinlogFile, m.StartPosition.BinlogPos), nil
 }
 
 // checkBinlogTxn kiểm Txn mà router nhận trước khi dùng vị trí của nó (CP-2/CP-5): cùng tên gốc file

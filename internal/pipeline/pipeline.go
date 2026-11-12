@@ -516,15 +516,6 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].String() < pending[j].String() })
-	if p.posMode && len(pending) > 0 {
-		// Snapshot logic dùng watermark GTID (02 §5): chưa có ở chế độ vị trí binlog. Bảng chưa "done"
-		// (trạng thái cục bộ mất, hoặc bảng mới trong bộ lọc) không thể bootstrap an toàn.
-		names := make([]string, len(pending))
-		for i, id := range pending {
-			names[i] = id.String()
-		}
-		return rejectBinlogPos("logical snapshot of table(s) " + strings.Join(names, ", "))
-	}
 	if p.dstEngine == model.EnginePG && p.cfg.Bootstrap.CreateSchemaAuto() {
 		pending, err = orderSnapshotTables(pending, p.tables)
 		if err != nil {
@@ -691,6 +682,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.snapChunkRows.Store(opts.DefaultChunkRows)
 	p.snap = snapshot.NewMySQLSnapshotter(opts)
 	p.snap.Barrier = p.barrier
+	if p.posMode {
+		p.snap.Pos = &posWatermarks{db: p.src, base: p.binlogBase}
+	}
 	p.snap.Pace = p.pace
 	if p.adaptiveChunks {
 		p.snap.NextChunkRows = p.nextChunkRows
@@ -1346,6 +1340,10 @@ func skipEmptyPGTxn(strict bool, t *model.Txn) bool {
 func (p *Pipeline) noteRouted(pos model.Pos, seq uint64) {
 	if p.posMode && pos.IsBinlogPos() {
 		p.lsns.routedPos(p.curEnd, p.curStart, seq)
+		// Điểm hẹn của snapshot (rendezvousPos) chờ lsns.seen; markSeen broadcast TRƯỚC khi seen cập nhật.
+		p.seenMu.Lock()
+		p.seenCond.Broadcast()
+		p.seenMu.Unlock()
 		return
 	}
 	if p.lsns != nil && pos.Engine == model.EnginePG {
@@ -1772,7 +1770,7 @@ func (p *Pipeline) barrier(ctx context.Context, fn func() error) error {
 // rendezvous chờ router đã xử lý mọi GTID trong high watermark.
 func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) error {
 	if p.posMode {
-		return rejectBinlogPos("snapshot rendezvous")
+		return p.rendezvousPos(ctx, high)
 	}
 	if hs, ok := high.(*checkpoint.PGAppliedSet); ok {
 		return p.rendezvousPG(ctx, hs.Lwd().LSN)
@@ -1997,9 +1995,6 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 // Bảng chưa có trong pipeline được thêm vào ngay (metadata đọc từ source); để giữ bảng sau
 // khi restart, người vận hành phải thêm nó vào tables.include.
 func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
-	if p.posMode {
-		return rejectBinlogPos("snapshot add")
-	}
 	s, t, ok := strings.Cut(table, ".")
 	if !ok {
 		return fmt.Errorf("table must be schema.table")
