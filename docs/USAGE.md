@@ -505,6 +505,10 @@ Lệnh nói chuyện với `sync` đang chạy (`top`, `pause`, `resume`, `throt
 2. `observability.admin_socket` trong file `-c`
 3. `/run/strand/default.sock`
 
+### 7.0 `config init`
+
+`strand config init --from mysql|mariadb|postgres --to mysql|postgres [--name N] [--source-host H] [--target-host H] [--database app] [--systemd] [-o file] [--force]`. Sinh file cấu hình mẫu có chú thích; mật khẩu luôn đọc từ biến môi trường `SRC_PW`/`DST_PW`. Không có `-o` thì in ra màn hình. File đã có thì không ghi đè, trừ khi có `--force`. Cặp nguồn/đích không hỗ trợ (MariaDB → PG, PG → MySQL) bị từ chối.
+
 ### 7.1 `validate`
 
 `strand validate -c p.yaml`. Exit 0 khi đạt, exit 3 kèm lý do khi bị từ chối. Cảnh báo in ra stderr.

@@ -87,6 +87,16 @@ Không cần tạo bảng: Strand tự tạo bảng trên đích theo cấu trú
 
 ### Bước 4. File cấu hình `mdb-app.yaml`
 
+Sinh file mẫu có chú thích rồi sửa host, database:
+
+```bash
+strand config init --from mariadb --to mysql --name mdb-app \
+  --source-host 10.0.0.11 --target-host 10.0.0.21 --database app -o mdb-app.yaml
+# chạy bằng systemd thì thêm --systemd (đường dẫn /var/lib/strand/<name>, /run/strand/<name>/admin.sock)
+```
+
+Nội dung tối thiểu tương đương:
+
 ```yaml
 version: 1
 name: mdb-app

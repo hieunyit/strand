@@ -32,6 +32,7 @@ Gói `.deb` / `.rpm` + tarball: `VERSION=1.0.0 scripts/package.sh` (kết quả 
 Luồng cơ bản:
 
 ```bash
+strand config init --from mariadb --to mysql -o pipeline.yaml   # sinh file mẫu (--from mysql|mariadb|postgres, --to mysql|postgres)
 export SRC_PW=... DST_PW=...
 strand validate -c pipeline.yaml   # kiểm nguồn/đích/cấu hình
 strand plan     -c pipeline.yaml   # ước lượng thời gian snapshot

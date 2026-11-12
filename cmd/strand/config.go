@@ -22,6 +22,6 @@ func newConfigCmd() *cobra.Command {
 		},
 	}
 
-	configCmd.AddCommand(schemaCmd)
+	configCmd.AddCommand(schemaCmd, newConfigInitCmd())
 	return configCmd
 }
