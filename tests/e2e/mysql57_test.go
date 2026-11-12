@@ -740,8 +740,8 @@ func TestM57_E2E_ToPostgres(t *testing.T) {
 	}
 }
 
-// Nguồn kiểu 5.6 (gtid_mode=OFF) phải bị từ chối rõ ràng: validate exit 3 (Rejected,
-// binlog_config_invalid) nêu gtid_mode; sync không được chạy tiếp (exit khác 0, nêu gtid).
+// Nguồn gtid_mode=OFF đi chế độ vị trí binlog: validate nhận (exit 0); sync của pipeline mới mà không có
+// --start-at <file>:<pos> phải dừng rõ ràng (không tự snapshot logic ở chế độ này), nêu --start-at.
 func TestM57_E2E_RejectMySQL56Style(t *testing.T) {
 	src := startM57Source(t, "src", 1, nil, "--gtid-mode=OFF", "--enforce-gtid-consistency=OFF")
 	dst := startMySQL(t, m57TargetImage(), "dst", 2, nil)
@@ -756,11 +756,8 @@ func TestM57_E2E_RejectMySQL56Style(t *testing.T) {
 	cfgPath := cfg.write(t)
 
 	out, code := runStrandCLI(t, time.Minute, "validate", "-c", cfgPath)
-	if code != 3 {
-		t.Fatalf("validate: exit %d, want 3 (Rejected)\n%s", code, out)
-	}
-	if !strings.Contains(strings.ToLower(out), "gtid_mode") {
-		t.Fatalf("validate không nêu gtid_mode:\n%s", out)
+	if code != 0 {
+		t.Fatalf("validate: exit %d, want 0 (gtid_mode=OFF = chế độ vị trí binlog)\n%s", code, out)
 	}
 
 	p := startStrand(t, cfgPath)
@@ -770,10 +767,10 @@ func TestM57_E2E_RejectMySQL56Style(t *testing.T) {
 	}
 	if !p.exited() {
 		p.kill9()
-		t.Fatalf("sync vẫn chạy với nguồn gtid_mode=OFF\n%s", p.tail())
+		t.Fatalf("sync không --start-at vẫn chạy với nguồn gtid_mode=OFF\n%s", p.tail())
 	}
-	if p.exitCode() == 0 || !strings.Contains(strings.ToLower(p.output.String()), "gtid") {
-		t.Fatalf("sync: exit %d, want khác 0 và nêu gtid\n%s", p.exitCode(), p.tail())
+	if p.exitCode() == 0 || !strings.Contains(p.output.String(), "--start-at") {
+		t.Fatalf("sync: exit %d, want khác 0 và nêu --start-at\n%s", p.exitCode(), p.tail())
 	}
-	t.Logf("sync với gtid_mode=OFF: exit %d (validate: 3)", p.exitCode())
+	t.Logf("sync với gtid_mode=OFF, không --start-at: exit %d", p.exitCode())
 }
