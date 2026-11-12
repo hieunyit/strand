@@ -21,10 +21,43 @@ type Pos struct {
 	Engine Engine `json:"engine"`
 	GTID   string `json:"gtid,omitempty"` // MySQL: "uuid[:tag]:n"
 	LSN    uint64 `json:"lsn,omitempty"`  // PG: commit LSN
+
+	// Chế độ vị trí binlog (source MySQL KHÔNG có GTID: 5.5, hoặc 5.6/5.7 gtid_mode=OFF): Txn được
+	// định danh bằng vị trí KẾT THÚC của nó = (File, BinlogPos), với BinlogPos = end_log_pos của event
+	// XID/COMMIT (hoặc của câu DDL). GTID == "" và File != "" là dấu hiệu của chế độ này; mọi đường
+	// GTID giữ nguyên.
+	File      string `json:"file,omitempty"`       // tên file binlog, ví dụ "mysql-bin.000123"
+	BinlogPos uint64 `json:"binlog_pos,omitempty"` // offset kết thúc trong File (< 2^32)
+}
+
+// IsBinlogPos: Pos của Txn MySQL ở chế độ vị trí binlog (không GTID).
+func (p Pos) IsBinlogPos() bool {
+	return p.Engine == EngineMySQL && p.GTID == "" && p.File != ""
+}
+
+// IsZero: Pos chưa mang vị trí nào (không GTID, không LSN, không file/offset).
+func (p Pos) IsZero() bool {
+	return p.GTID == "" && p.LSN == 0 && p.File == "" && p.BinlogPos == 0
+}
+
+// Label là dạng in được của vị trí cho thông báo lỗi/log: GTID, "file:offset" hoặc LSN.
+func (p Pos) Label() string {
+	switch {
+	case p.GTID != "":
+		return p.GTID
+	case p.File != "":
+		return fmt.Sprintf("%s:%d", p.File, p.BinlogPos)
+	case p.Engine == EnginePG:
+		return fmt.Sprintf("%X/%X", uint32(p.LSN>>32), uint32(p.LSN))
+	}
+	return ""
 }
 
 func (p Pos) String() string {
 	if p.Engine == EngineMySQL {
+		if p.IsBinlogPos() {
+			return fmt.Sprintf("mysql:%s:%d", p.File, p.BinlogPos)
+		}
 		return fmt.Sprintf("mysql:%s", p.GTID)
 	}
 	return fmt.Sprintf("pg:%X/%X", uint32(p.LSN>>32), uint32(p.LSN))
@@ -146,6 +179,8 @@ type Txn struct {
 	DDLSchema string `json:"ddl_schema,omitempty"`
 	// BinlogFile/BinlogPos: vị trí event GTID của Txn trong binlog source (MySQL, chỉ khi reader biết;
 	// không đi qua spool). Rỗng thì bên dùng phải tự tìm theo GTID.
+	// Chế độ vị trí binlog (Pos.IsBinlogPos): BinlogFile/BinlogPos là vị trí BẮT ĐẦU của event đầu tiên
+	// của Txn (SourcePos là vị trí kết thúc); pipeline dùng nó làm điểm đọc lại an toàn (CP-3).
 	BinlogFile string `json:"binlog_file,omitempty"`
 	BinlogPos  uint64 `json:"binlog_pos,omitempty"`
 

@@ -54,6 +54,16 @@ type CheckpointStore interface {
 func ParseAppliedSet(engine model.Engine, appliedStr string) (AppliedSet, error) {
 	switch engine {
 	case model.EngineMySQL:
+		// Chế độ vị trí binlog (source không GTID): JSON {"mode":"binlog_pos",...}. GTID set không bao giờ
+		// bắt đầu bằng "{", nên nhận dạng theo chuỗi không mơ hồ; chuỗi rỗng vẫn là GTID set rỗng và được
+		// MergeChecked nhường chỗ cho tập vị trí.
+		if IsBinlogPosApplied(appliedStr) {
+			set, err := ParseBinlogPosApplied(appliedStr)
+			if err != nil {
+				return nil, fmt.Errorf("parse MySQL binlog position applied set: %w", err)
+			}
+			return set, nil
+		}
 		set := NewMySQLAppliedSet()
 		if err := set.AddGTIDSet(appliedStr); err != nil {
 			return nil, fmt.Errorf("parse MySQL applied set: %w", err)

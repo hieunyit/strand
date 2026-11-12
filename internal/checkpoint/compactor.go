@@ -255,7 +255,9 @@ func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse worker delta: %w", err)
 		}
-		globalSet.Merge(workerSet)
+		if globalSet, err = MergeChecked(globalSet, workerSet); err != nil {
+			return nil, fmt.Errorf("failed to merge worker delta: %w", err)
+		}
 	}
 
 	if c.vouch != nil {
@@ -519,6 +521,10 @@ func subtractApplied(set, global AppliedSet) {
 		}
 	case *PGAppliedSet:
 		if g, ok := global.(*PGAppliedSet); ok {
+			s.subtract(g)
+		}
+	case *MySQLPosAppliedSet:
+		if g, ok := global.(*MySQLPosAppliedSet); ok {
 			s.subtract(g)
 		}
 	}
