@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+
+	"strand/internal/checkpoint"
 )
 
 // Lịch sử cấu trúc bảng nguồn cho TABLE_MAP không có metadata (MySQL 5.5–5.7).
@@ -73,6 +75,65 @@ func seedSchemaVersions(vs []SchemaVersion, from gomysql.GTIDSet) (cur *TableInf
 		}
 	}
 	return cur, kept
+}
+
+// Chế độ vị trí binlog (source không GTID): From/Until là KHÓA vị trí kết thúc (checkpoint.FormatBinlogKey,
+// "SEQ:OFFSET") thay cho GTID. Lập luận (SH-1/SH-2), s = vị trí bắt đầu luồng = Lwd của tập đã apply
+// (luồng đọc lại MỌI event từ s, Txn đã apply bị router bỏ):
+//
+//   - SH-1 (version đúng cho event ≥ s): version dùng được khi From ≤ s và Until > s.
+//     From là KẾT THÚC của DDL gần nhất reader thấy trước khi đọc info (hoặc vị trí bắt đầu luồng cũ s0):
+//     mọi event từ From đến TABLE_MAP dùng cấu trúc đó. Lwd chỉ tăng giữa các lần chạy (rewind bị từ chối ở
+//     chế độ vị trí) nên s ≥ s0; From ≤ s nghĩa là DDL đó đã nằm trước điểm đọc lại. Từ TABLE_MAP tới s không
+//     có DDL nào chưa được ghi nhận: reader ghi Until ĐỒNG BỘ trước khi phát DDL (SH-2), mà checkpoint (và s)
+//     không vượt DDL chưa phát.
+//   - SH-2: Until = kết thúc event QUERY của DDL. s là ranh giới đầu Txn nên s ≤ đầu DDL < Until (DDL chưa
+//     qua: event ở s dùng version cũ) hoặc s ≥ Until (DDL đã qua: version cũ bỏ).
+//
+// Khóa không parse được (state từ chế độ GTID): version bị bỏ → rơi về information_schema + kiểm khớp
+// (fail closed), không đoán.
+
+// seedSchemaVersionsPos là seedSchemaVersions cho chế độ vị trí binlog; start = khóa Lwd lúc mở luồng.
+func seedSchemaVersionsPos(vs []SchemaVersion, start uint64) (cur *TableInfo, kept []SchemaVersion) {
+	for _, v := range vs {
+		if v.Info == nil {
+			continue
+		}
+		if v.Until != "" {
+			u, err := checkpoint.ParseBinlogKey(v.Until)
+			if err != nil || u <= start {
+				continue // DDL đã qua (hoặc state hỏng): version cũ
+			}
+		}
+		f, err := checkpoint.ParseBinlogKey(v.From)
+		if err != nil {
+			continue
+		}
+		kept = append(kept, v)
+		if f <= start {
+			cur = v.Info
+		}
+	}
+	return cur, kept
+}
+
+// openSchemaHistoryPos như openSchemaHistory cho chế độ vị trí binlog.
+func openSchemaHistoryPos(store SchemaHistoryStore, start uint64) (*schemaHistory, map[string]*TableInfo) {
+	h := &schemaHistory{store: store, hist: map[string][]SchemaVersion{}, start: checkpoint.FormatBinlogKey(start)}
+	cache := map[string]*TableInfo{}
+	if store == nil {
+		return h, cache
+	}
+	for key, vs := range store.LoadSchemaHistory() {
+		cur, kept := seedSchemaVersionsPos(vs, start)
+		if len(kept) > 0 {
+			h.hist[key] = kept
+		}
+		if cur != nil {
+			cache[key] = cur
+		}
+	}
+	return h, cache
 }
 
 // schemaHistory là bản trong bộ nhớ của lịch sử, thuộc về goroutine đọc của một luồng.

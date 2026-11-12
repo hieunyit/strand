@@ -215,10 +215,14 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		defer syncer.Close()
 
 		st := &streamState{tableMap: make(map[uint64]*replication.TableMapEvent), ctx: ctxRead}
-		// Lịch sử schema bền gắn mốc theo GTID (From/Until): chế độ vị trí binlog (posSet != nil) chưa có dạng mốc
-		// theo vị trí, nên không dùng — DDL chạy lúc strand dừng thì vẫn fail closed như trước (an toàn).
-		if r.cfg.TableInfo != nil && posSet == nil {
-			st.hist, st.infoCache = openSchemaHistory(r.cfg.SchemaHistory, gset)
+		// Lịch sử schema bền: mốc From/Until theo GTID, hoặc theo khóa vị trí binlog ở chế độ vị trí (SH-1/SH-2,
+		// schemahist.go): start = Lwd của tập đã apply = nơi luồng bắt đầu đọc lại.
+		if r.cfg.TableInfo != nil {
+			if posSet != nil {
+				st.hist, st.infoCache = openSchemaHistoryPos(r.cfg.SchemaHistory, posSet.LwdKey())
+			} else {
+				st.hist, st.infoCache = openSchemaHistory(r.cfg.SchemaHistory, gset)
+			}
 		}
 		emit := func(e reader.Event) bool {
 			select {
@@ -467,7 +471,16 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				st.infoCache = nil // DDL: cấu trúc bảng có thể đã đổi, đọc lại ở TABLE_MAP kế tiếp
 				if st.hist != nil {
 					// Ghi bền "version cũ kết thúc ở DDL này" TRƯỚC khi phát QUERY: checkpoint không vượt DDL được.
-					if err := st.hist.supersede(r.Position().GTID); err != nil {
+					mark := r.Position().GTID
+					if st.posMode {
+						// Chế độ vị trí: mốc = khóa kết thúc của event QUERY (SH-2). Lỗi khóa → dừng, không đoán.
+						k, kerr := checkpoint.BinlogKey(st.curSeq, evEnd)
+						if kerr != nil {
+							return fail(kerr)
+						}
+						mark = checkpoint.FormatBinlogKey(k)
+					}
+					if err := st.hist.supersede(mark); err != nil {
 						return fail(fmt.Errorf("persist schema history at DDL: %w", err))
 					}
 				}

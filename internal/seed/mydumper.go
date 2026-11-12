@@ -183,11 +183,13 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 		)
 	}
 
-	if meta.GTID == "" {
+	// Nguồn không GTID (5.5 / gtid_mode=OFF): điểm nhất quán là "Log:"/"Pos:" (SHOW MASTER STATUS dưới khóa
+	// toàn cục của mydumper) — chế độ vị trí binlog dùng đúng vị trí đó (SD-1').
+	if meta.GTID == "" && (meta.BinlogFile == "" || meta.BinlogPos < 4) {
 		return nil, exitcode.New(
 			exitcode.ErrSeedInvariantFailed,
 			exitcode.Rejected,
-			"missing or empty GTID in mydumper metadata",
+			"missing or empty GTID in mydumper metadata, and no binlog Log:/Pos: position either",
 			nil,
 		)
 	}
@@ -217,6 +219,10 @@ func (p *MydumperPlanner) Plan(ctx context.Context, src SeedSource) (*SeedManife
 		if err := verifyMydumperLog(src.DumpLog); err != nil {
 			return nil, err
 		}
+	}
+
+	if meta.GTID == "" {
+		return p.planGTIDLess(src, meta, warnings)
 	}
 
 	// 1. P hợp lệ, không có khoảng trống (SD-1)
@@ -278,6 +284,35 @@ func (p *MydumperPlanner) Plan(ctx context.Context, src SeedSource) (*SeedManife
 	}
 
 	return manifest, nil
+}
+
+// planGTIDLess: manifest cho nguồn không GTID — chỉ mang BinlogFile/BinlogPos. Không có tập GTID để đối
+// chiếu chéo hay kiểm độ phủ log ở bước plan: pipeline kiểm file còn trên source (log_gap nếu đã purge) và
+// vị trí là ranh giới event khi nhận --start-at seed.
+func (p *MydumperPlanner) planGTIDLess(src SeedSource, meta *MydumperMeta, warnings []string) (*SeedManifest, error) {
+	engine := src.Engine
+	if engine == "" {
+		engine = "mysql"
+	}
+	tables := src.Tables
+	if len(tables) == 0 {
+		tables = []string{"*"}
+	}
+	return &SeedManifest{
+		Version:        1,
+		Engine:         engine,
+		Kind:           "mydumper",
+		ToolVersion:    meta.ToolVersion,
+		BackupRef:      src.BackupRef,
+		StartPosition:  StartPosition{BinlogFile: meta.BinlogFile, BinlogPos: meta.BinlogPos},
+		SchemaSnapshot: filepath.Join(src.BackupRef, "metadata"),
+		Tables:         tables,
+		Integrity:      &IntegrityInfo{PrepareOK: true},
+		LogCoverage:    &LogCoverageInfo{SourceGTIDPurged: src.SourcePurgedGTID, ArchiveUntil: src.ArchiveUntilGTID, OK: true},
+		Target:         TargetInfo{Version: src.TargetVersion, Compatible: true},
+		Warnings:       append(warnings, MysqldumpGTIDLessNote),
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}, nil
 }
 
 // verifyMydumperLog quét log stderr của mydumper theo dòng để kiểm tra chế độ khóa (02 §9).

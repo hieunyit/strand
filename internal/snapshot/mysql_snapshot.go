@@ -38,6 +38,32 @@ type ChunkConn interface {
 	Close() error
 }
 
+// PosWatermarks là watermark của snapshot ở chế độ vị trí binlog (source MySQL không GTID): thay
+// gtid_executed + WAIT_FOR_EXECUTED_GTID_SET bằng vị trí binlog (file, end_log_pos). Tập trả về là
+// checkpoint.MySQLPosAppliedSet mốc base = vị trí đó, nên range-state dùng lại nguyên Contains(pos) của
+// "GTID ∈ low": event có vị trí KẾT THÚC ≤ low bị bỏ.
+//
+// Lập luận (mirror RS-1/RS-2 của đường GTID):
+//   - RS-2' (low ⊆ read view): Low(table) phải bảo đảm MỌI Txn có vị trí kết thúc ≤ low và chạm table đã
+//     commit ở engine TRƯỚC khi SELECT của chunk lấy read view. SHOW MASTER STATUS một mình không đủ
+//     (Txn đã ghi binlog nhưng chưa commit InnoDB ở giai đoạn commit nhóm; GTID path dùng
+//     WAIT_FOR_EXECUTED_GTID_SET chính vì vậy, 5.5/5.6 không có GTID để chờ). Cách dùng ở đây: giữ metadata
+//     lock READ của table (LOCK TABLES t READ) khi đọc vị trí. MDL đòi mọi Txn đang ghi table đã commit xong
+//     (kể cả giai đoạn commit, MDL chỉ nhả sau đó) và chặn Txn mới chạm table trong lúc giữ; do đó mọi Txn
+//     chạm table có kết thúc ≤ low (đã vào binlog trước lúc đọc) đã commit. SELECT sau đó (statement mới →
+//     read view mới, về sau) thấy chúng. Txn của bảng khác không liên quan tới chunk của table.
+//   - RS-1' (high ⊇ read view): High đọc SAU SELECT. Txn visible với SELECT đã ghi binlog (ghi binlog đứng
+//     trước commit engine) nên kết thúc ≤ high; rendezvous chờ router xử lý mọi Txn ≤ high ⇒ mọi Txn mà
+//     rows phản ánh đã đi qua range-state (đã bị bỏ do ≤ low, hoặc nằm trong buffer).
+//   - Event nằm trong (low, high] hoặc đến trước khi StartReading được gộp vào buffer theo PK: idempotent
+//     (ảnh cuối của PK trong buffer luôn là ảnh cuối ≤ high, đè lên row đọc được dù row đã phản ánh nó).
+type PosWatermarks interface {
+	// Low: vị trí binlog đọc dưới MDL READ của table (xem RS-2').
+	Low(ctx context.Context, table model.TableID) (checkpoint.AppliedSet, error)
+	// High: vị trí binlog hiện tại của source (gọi sau SELECT của chunk).
+	High(ctx context.Context) (checkpoint.AppliedSet, error)
+}
+
 // SourceQuerier là seam truy vấn watermark và mở kết nối đọc chunk trên source/replica.
 type SourceQuerier interface {
 	GetGlobalGTIDExecuted(ctx context.Context) (string, error)
@@ -196,6 +222,9 @@ func (s *MySQLSnapshotter) readChunkWatermarked(
 ) (ChunkRead, checkpoint.AppliedSet, error) {
 	var discarded *checkpoint.MySQLAppliedSet
 	var waitStr string
+	if s.Pos != nil {
+		return s.readChunkPos(ctx, src, chunk, kq, colsStr, columnNames, pkIdxs, table)
+	}
 	if chunk.Continuation {
 		// Phần đuôi tách ra khi chạm max_chunk_bytes (SplitReading): giữ low của chunk gốc; tập event đã
 		// bỏ đã được xác nhận visible ở lần đọc đầu, nên chỉ cần chờ low.
@@ -258,6 +287,54 @@ func (s *MySQLSnapshotter) readChunkWatermarked(
 	return read, ParseMySQLGTIDSet(chunkHighStr), nil
 }
 
+// readChunkPos là readChunkWatermarked ở chế độ vị trí binlog: BeginReading → low (dưới MDL READ) →
+// StartReading → SELECT (kết nối mới, không cần chờ gì: read view mới ⊇ lúc đọc low) → high.
+// Sub-chunk sau khi chia đôi / phần đuôi Continuation giữ low của chunk gốc: SELECT sau luôn có read
+// view không cũ hơn nên vẫn thấy mọi Txn ≤ low (RS-2').
+func (s *MySQLSnapshotter) readChunkPos(
+	ctx context.Context,
+	src SourceQuerier,
+	chunk *Chunk,
+	kq keySQL,
+	colsStr string,
+	columnNames []string,
+	pkIdxs []int,
+	table model.TableID,
+) (ChunkRead, checkpoint.AppliedSet, error) {
+	if !chunk.Continuation {
+		// Chế độ vị trí không ghi PendingDiscards (Pos.GTID rỗng): event bị bỏ lúc "Chưa đọc" đã vào binlog
+		// trước low, nên nằm trong phần RS-2' bảo đảm commit.
+		s.Manager.BeginReading(chunk)
+		low, err := s.Pos.Low(ctx, table)
+		if err != nil {
+			return ChunkRead{}, nil, fmt.Errorf("failed to read chunk low position: %w", err)
+		}
+		s.Manager.StartReading(chunk, low)
+	}
+	queryFn := func(qCtx context.Context, c *Chunk, maxBytes int64) ([]*model.RowChange, int64, error) {
+		conn, err := src.OpenChunkConn(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer conn.Close()
+		cond, args, err := kq.rangeCond(c.Lo, c.Hi)
+		if err != nil {
+			return nil, 0, err
+		}
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", colsStr, quoteTable(table), cond, kq.orderBy(false))
+		return conn.QueryChunk(qCtx, query, args, columnNames, pkIdxs, table, maxBytes)
+	}
+	read, err := s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn)
+	if err != nil {
+		return ChunkRead{}, nil, fmt.Errorf("adaptive read failed for chunk [%d, %d]: %w", chunk.StartPK, chunk.EndPK, err)
+	}
+	high, err := s.Pos.High(ctx)
+	if err != nil {
+		return ChunkRead{}, nil, fmt.Errorf("failed to read chunk high position: %w", err)
+	}
+	return read, high, nil
+}
+
 // MySQLSnapshotter điều phối quá trình snapshot chunking và range-state cho MySQL source sang MySQL target.
 type MySQLSnapshotter struct {
 	Manager *RangeStateManager
@@ -267,6 +344,10 @@ type MySQLSnapshotter struct {
 	// Source (tùy chọn) thay srcDB cho bước đọc watermark và SELECT của chunk (seam kiểm thử RS-2).
 	// Khi nil, dùng srcDB; WAIT_FOR_EXECUTED_GTID_SET luôn chạy cùng kết nối với SELECT.
 	Source SourceQuerier
+
+	// Pos (tùy chọn): watermark theo vị trí binlog thay cho GTID (source MySQL không GTID, xem PosWatermarks).
+	// Khác nil thì readChunkWatermarked không chờ GTID.
+	Pos PosWatermarks
 
 	// Barrier (tùy chọn) bao quanh bước đọc biên + đăng ký range + dọn target. Pipeline
 	// truyền vào hàm dừng router và chờ mọi Txn đã nhận được apply xong, để không Txn cũ

@@ -185,6 +185,12 @@ func newSeedCmd() *cobra.Command {
 				return nil
 			}
 			// Prefetch (mặc định bật): đọc log từ P vào spool trong lúc restore (02 §9).
+			if pfOn && pfSpool != "" && m.StartPosition.GTIDSet == "" {
+				// Seed không GTID (chế độ vị trí binlog): spool prefetch theo GTID không áp dụng; pipeline đọc thẳng
+				// từ file binlog của source tại vị trí manifest (file bị purge → log_gap khi khởi động).
+				fmt.Println("note: seed without GTID (binlog position mode): prefetch is skipped; the pipeline reads the source binlog from the manifest position")
+				pfOn = false
+			}
 			if pfOn && pfSpool != "" {
 				var n int
 				if restoreCmd != "" {
