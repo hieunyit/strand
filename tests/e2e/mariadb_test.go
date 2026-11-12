@@ -57,6 +57,7 @@ func mdbAtLeast(t *testing.T, db *sql.DB, maj, min int) bool {
 	return a > maj || a == maj && b >= min
 }
 
+// startMariaDBImage: như startMariaDB nhưng với image cố định (test kiểu cần phiên bản tối thiểu: INET4 10.10+, UUID 10.7+).
 func startMariaDBImage(t *testing.T, image, alias string, serverID int) *mysqlNode {
 	t.Helper()
 	ctx := context.Background()
@@ -471,7 +472,7 @@ func TestMDB_E2E_ValidateRejectsUnsupported(t *testing.T) {
 	src := startMariaDB(t, "src", 1)
 	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)
 	src.exec(t, "CREATE DATABASE app")
-	// kiểu/tính năng chỉ có ở bản mới: INET6 (10.5+), UUID (10.7+), INET4 (10.10+), PERIOD (10.4+).
+	// kiểu/tính năng theo phiên bản: INET6 (10.5+), UUID (10.7+), INET4 (10.10+), PERIOD (10.4+).
 	type rej struct{ table, want string }
 	var rejects []rej
 	for _, c := range []struct {
@@ -480,9 +481,9 @@ func TestMDB_E2E_ValidateRejectsUnsupported(t *testing.T) {
 		ddl      string
 		want     string
 	}{
-		{10, 5, "t_inet", "CREATE TABLE app.t_inet (id INT PRIMARY KEY, ip INET6) ENGINE=InnoDB", "MariaDB-only type"},
-		{10, 7, "t_uuid", "CREATE TABLE app.t_uuid (id INT PRIMARY KEY, u UUID) ENGINE=InnoDB", "MariaDB-only type"},
-		{10, 10, "t_inet4", "CREATE TABLE app.t_inet4 (id INT PRIMARY KEY, ip INET4) ENGINE=InnoDB", "MariaDB-only type"},
+		{10, 5, "t_inet", "CREATE TABLE app.t_inet (id INET6 PRIMARY KEY, v INT) ENGINE=InnoDB", "primary key column id has MariaDB type inet6"},
+		{10, 7, "t_uuid", "CREATE TABLE app.t_uuid (id UUID PRIMARY KEY, v INT) ENGINE=InnoDB", "primary key column id has MariaDB type uuid"},
+		{10, 10, "t_inet4", "CREATE TABLE app.t_inet4 (id INET4 PRIMARY KEY, v INT) ENGINE=InnoDB", "primary key column id has MariaDB type inet4"},
 		{10, 4, "t_period", "CREATE TABLE app.t_period (id INT PRIMARY KEY, s DATE, e DATE, PERIOD FOR p(s, e)) ENGINE=InnoDB", "PERIOD"},
 	} {
 		if mdbAtLeast(t, src.DB, c.maj, c.min) {
@@ -491,8 +492,7 @@ func TestMDB_E2E_ValidateRejectsUnsupported(t *testing.T) {
 		}
 	}
 	src.exec(t,
-		"CREATE TABLE app.t_comp (id INT PRIMARY KEY, body TEXT COMPRESSED) ENGINE=InnoDB",
-		"CREATE TABLE app.t_sv (id INT PRIMARY KEY, v INT) ENGINE=InnoDB WITH SYSTEM VERSIONING",
+		"CREATE TABLE app.t_sv (id INT PRIMARY KEY, v INT, s TIMESTAMP(6) GENERATED ALWAYS AS ROW START, e TIMESTAMP(6) GENERATED ALWAYS AS ROW END, PERIOD FOR SYSTEM_TIME(s, e)) ENGINE=InnoDB WITH SYSTEM VERSIONING",
 		"CREATE TABLE app.t_nopad (name VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_nopad_ci PRIMARY KEY) ENGINE=InnoDB",
 		"CREATE TABLE app.t_ok (id INT PRIMARY KEY, v INT) ENGINE=InnoDB",
 		"CREATE SEQUENCE app.seq1")
@@ -504,7 +504,7 @@ func TestMDB_E2E_ValidateRejectsUnsupported(t *testing.T) {
 			TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr), Include: include, Exclude: exclude, Dir: testDir(t)}
 		return runStrandCLI(t, time.Minute, "validate", "-c", cfg.write(t))
 	}
-	rejects = append(rejects, rej{"app.t_comp", "COMPRESSED"}, rej{"app.t_sv", "system-versioned"},
+	rejects = append(rejects, rej{"app.t_sv", "system-versioning period columns explicitly"},
 		rej{"app.t_nopad", "PRIMARY KEY or UNIQUE"})
 	var excl []string
 	for _, c := range rejects {

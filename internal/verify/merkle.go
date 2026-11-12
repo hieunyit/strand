@@ -260,9 +260,11 @@ func FindPKColumns(ctx context.Context, db *sql.DB, engine model.Engine, t model
 			WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $1 AND tc.table_name = $2
 			ORDER BY kcu.ordinal_position`
 	} else {
-		q = `SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'
-			ORDER BY ORDINAL_POSITION`
+		// STATISTICS thay KEY_COLUMN_USAGE: bảng system-versioned của MariaDB ghi thêm cột ẩn row_end vào PRIMARY
+		// KEY ở KEY_COLUMN_USAGE (khóa ngầm mở rộng), còn STATISTICS chỉ có cột người dùng khai báo.
+		q = `SELECT COLUMN_NAME FROM information_schema.STATISTICS
+			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY'
+			ORDER BY SEQ_IN_INDEX`
 	}
 	rows, err := db.QueryContext(ctx, q, schema, t.Table)
 	if err != nil {

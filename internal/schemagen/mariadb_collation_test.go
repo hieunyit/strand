@@ -133,14 +133,21 @@ func TestPinUTF8MB4CollationRealDefault(t *testing.T) {
 	}
 }
 
-func TestMariaDBHasPeriod(t *testing.T) {
-	if !mariaDBHasPeriod("CREATE TABLE `t` (`id` int, `s` date, `e` date, PERIOD FOR `p` (`s`,`e`)) ENGINE=InnoDB") {
+func TestMariaDBHasPeriodWithoutOverlaps(t *testing.T) {
+	has := func(ddl string) bool {
+		ok, err := mariaDBHasPeriod(ddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if !has("CREATE TABLE `t` (`id` int, `s` date, `e` date, PERIOD FOR `p` (`s`,`e`)) ENGINE=InnoDB") {
 		t.Error("PERIOD FOR không được nhận ra")
 	}
-	if !mariaDBHasPeriod("CREATE TABLE `t` (`id` int, UNIQUE KEY `u` (`id`, `p` WITHOUT OVERLAPS)) ENGINE=InnoDB") {
+	if !has("CREATE TABLE `t` (`id` int, UNIQUE KEY `u` (`id`, `p` WITHOUT OVERLAPS)) ENGINE=InnoDB") {
 		t.Error("WITHOUT OVERLAPS không được nhận ra")
 	}
-	if mariaDBHasPeriod("CREATE TABLE `t` (`period` int DEFAULT 'PERIOD FOR x', `for` int) ENGINE=InnoDB") {
+	if has("CREATE TABLE `t` (`period` int DEFAULT 'PERIOD FOR x', `for` int) ENGINE=InnoDB") {
 		t.Error("nhận nhầm tên cột/chuỗi")
 	}
 }

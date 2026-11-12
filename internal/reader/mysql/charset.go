@@ -203,6 +203,9 @@ func NormalizeRowsInfo(tm *replication.TableMapEvent, info *TableInfo, rows [][]
 	if err := applyInfo(tm, info, rows); err != nil {
 		return err
 	}
+	if err := convertMariaDBTypes(tm, info, rows); err != nil {
+		return err
+	}
 	if tm == nil || info == nil || len(tm.CollationMap()) > 0 {
 		return NormalizeRows(tm, rows, charsets)
 	}

@@ -184,6 +184,10 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		TimestampStringLocation: time.UTC,
 		TLSConfig:               r.cfg.TLS,
 	}
+	if r.cfg.Flavor == "mariadb" {
+		// Cột COMPRESSED của MariaDB dùng kiểu TABLE_MAP mà go-mysql không biết (mariadb_tablemap.go).
+		syncerCfg.RowsEventDecodeFunc = MariaDBRowsDecode
+	}
 
 	syncer := replication.NewBinlogSyncer(syncerCfg)
 	var streamer *replication.BinlogStreamer
@@ -279,10 +283,12 @@ type streamState struct {
 	tableMap map[uint64]*replication.TableMapEvent
 	curFile  string // file binlog hiện tại (từ ROTATE, kể cả rotate giả lúc kết nối)
 
-	ctx       context.Context       // ctx của luồng đọc, dùng cho truy vấn information_schema (nil = Background)
-	info      map[uint64]*TableInfo // theo TableID của TABLE_MAP hiện hành; nil = bảng không có info
-	infoCache map[string]*TableInfo // schema.table -> info đã đọc (hoặc nạp từ lịch sử bền); xóa khi gặp DDL
-	hist      *schemaHistory        // lịch sử bền (nil = không lưu)
+	ctx  context.Context       // ctx của luồng đọc, dùng cho truy vấn information_schema (nil = Background)
+	info map[uint64]*TableInfo // theo TableID của TABLE_MAP hiện hành; nil = bảng không có info
+	// MariaDB: chỉ số cột COMPRESSED theo TableID của TABLE_MAP hiện hành (mariadb_tablemap.go).
+	compressed map[uint64][]int
+	infoCache  map[string]*TableInfo // schema.table -> info đã đọc (hoặc nạp từ lịch sử bền); xóa khi gặp DDL
+	hist       *schemaHistory        // lịch sử bền (nil = không lưu)
 	// Chế độ vị trí binlog (xem binlogpos.go).
 	posMode  bool
 	fileBase string // tên gốc của file binlog; đổi giữa chừng là lỗi
@@ -411,21 +417,39 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 		if tm, found := st.tableMap[rowsEv.TableID]; found {
 			schema, table = string(tm.Schema), string(tm.Table)
 		}
-		if err := NormalizeRowsInfo(st.tableMap[rowsEv.TableID], st.info[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
-			return fail(err)
+		tm, info := st.tableMap[rowsEv.TableID], st.info[rowsEv.TableID]
+		if comp := st.compressed[rowsEv.TableID]; len(comp) > 0 {
+			if err := decompressRows(tm, rowsEv.Rows, comp); err != nil {
+				return fail(err)
+			}
 		}
-		return emit(reader.Event{
-			Type:       reader.EventRows,
-			Pos:        posAt(),
-			BinlogFile: startFile,
-			BinlogPos:  startPos,
-			TableID:    rowsEv.TableID,
-			Schema:     schema,
-			Table:      table,
-			Op:         op,
-			Rows:       rowsEv.Rows,
-			Timestamp:  ts,
-		})
+		segs := []rowSeg{{op: op, rows: rowsEv.Rows}}
+		if info != nil && info.SysVersioned {
+			var err error
+			if segs, err = splitSystemVersioned(op, rowsEv.Rows, len(info.Columns)); err != nil {
+				return fail(fmt.Errorf("%s.%s: %w", schema, table, err))
+			}
+		}
+		for _, sg := range segs {
+			if err := NormalizeRowsInfo(tm, info, sg.rows, r.cfg.CollationCharsets); err != nil {
+				return fail(err)
+			}
+			if !emit(reader.Event{
+				Type:       reader.EventRows,
+				Pos:        posAt(),
+				BinlogFile: startFile,
+				BinlogPos:  startPos,
+				TableID:    rowsEv.TableID,
+				Schema:     schema,
+				Table:      table,
+				Op:         sg.op,
+				Rows:       sg.rows,
+				Timestamp:  ts,
+			}) {
+				return false
+			}
+		}
+		return true
 	}
 
 	switch ev.Header.EventType {
@@ -550,6 +574,17 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 
 	case replication.TABLE_MAP_EVENT:
 		if tmEv, ok := ev.Event.(*replication.TableMapEvent); ok {
+			if r.cfg.Flavor == "mariadb" {
+				fixed, comp, err := fixMariaDBTableMap(tmEv)
+				if err != nil {
+					return fail(err)
+				}
+				tmEv = fixed
+				if st.compressed == nil {
+					st.compressed = map[uint64][]int{}
+				}
+				st.compressed[tmEv.TableID] = comp
+			}
 			st.tableMap[tmEv.TableID] = tmEv
 			info, err := r.resolveInfo(st, tmEv)
 			if err != nil {

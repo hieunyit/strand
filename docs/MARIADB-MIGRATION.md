@@ -242,10 +242,11 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 | Bảng InnoDB | Có |
 | Bảng MyISAM / Aria / MEMORY | Bị từ chối. Đổi sang InnoDB trên nguồn (`ALTER TABLE ... ENGINE=InnoDB`) hoặc loại ra |
 | Bảng không có PRIMARY KEY | Bị từ chối. Thêm PRIMARY KEY hoặc loại ra |
-| Kiểu `INET6`, `INET4`, `UUID` (10.5+/10.10+/10.7+) | Bị từ chối (MySQL không có kiểu này) |
-| `PERIOD FOR` / `WITHOUT OVERLAPS` (application-time, 10.4+/10.5+) | Bị từ chối |
-| Cột `COMPRESSED` | Bị từ chối |
-| Bảng `WITH SYSTEM VERSIONING` | Bị từ chối |
+| Kiểu `INET6` (10.5+), `INET4` (10.10+), `UUID` (10.7+) | Hỗ trợ khi nằm ngoài khóa chính: đích là `VARCHAR(39)` / `VARCHAR(15)` / `CHAR(36)` (ascii_bin), chữ giống hệt `SELECT` của MariaDB |
+| `INET6`/`INET4`/`UUID` nằm trong PRIMARY KEY | Bị từ chối (thứ tự khóa khác thứ tự chữ nên không chứng minh được khoảng khóa) |
+| Cột `COMPRESSED` | Hỗ trợ: đích là cột thường (không nén), giá trị gốc giữ nguyên |
+| Bảng `WITH SYSTEM VERSIONING` (kể cả `PARTITION BY SYSTEM_TIME`) | Hỗ trợ: đích là bảng thường chỉ có hàng **hiện hành**, không có `row_start`/`row_end`. **Lịch sử không được chuyển** (có cảnh báo) |
+| System-versioned khai báo cột `ROW START/ROW END` tường minh, `PERIOD FOR` / `WITHOUT OVERLAPS` (application-time, 10.4+/10.5+) | Bị từ chối |
 | `SEQUENCE` | Bỏ qua, có cảnh báo. Tự tạo lại cơ chế tương đương trên MySQL |
 | Collation riêng của MariaDB (`nopad`, `uca1400`) | Ánh xạ sang collation MySQL, xem mục 2.1. Cột khóa mà chỉ có ánh xạ gần đúng thì bị từ chối |
 | `log_bin_compress=ON` | Bị từ chối |
@@ -270,6 +271,9 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 - **DEFAULT dạng hàm** (`DEFAULT uuid()`, `rand()`, `curdate()`, `concat(...)`) và **DEFAULT trên TEXT/BLOB/JSON** (`TEXT DEFAULT 'x'`): MySQL không nhận cú pháp này của MariaDB. Khi tạo bảng đích, Strand tự đổi sang dạng biểu thức `DEFAULT (uuid())`, `DEFAULT ('x')`, ý nghĩa không đổi.
 - **Cột sinh tự động** (`AS (...) VIRTUAL`, `PERSISTENT`/`STORED`) và **cột `INVISIBLE`**: được giữ nguyên (đã kiểm).
 - **`latin1` và các charset khác:** được chuyển đúng ký tự (đã kiểm `latin1` với `VARCHAR` và `TEXT`).
+- **INET6/INET4/UUID:** MySQL không có các kiểu này. Binlog mang byte thô, Strand đổi sang đúng chữ mà `SELECT` trên MariaDB trả (vd `::ffff:1.2.3.4`, `1:0:0:2::3`, UUID chữ thường). Đích là cột chữ, nên `ORDER BY` trên đích theo chữ, không theo thứ tự byte như `INET6`/`UUID` của MariaDB.
+- **Cột `COMPRESSED`:** Strand giải nén giá trị từ binlog (cả nén thô lẫn `column_compression_zlib_wrap=ON`, giá trị ngắn không nén, rỗng, NULL). Cột đích không nén, tốn dung lượng hơn nguồn. Header nén lạ hoặc độ dài sau giải nén sai thì Strand dừng, không ghi sai.
+- **Bảng system-versioned:** đích chỉ giữ hàng hiện hành. `UPDATE` ở nguồn thành `UPDATE`, `DELETE` thành `DELETE` ở đích; hàng lịch sử, `DELETE HISTORY`, purge theo partition không ảnh hưởng đích. Truy vấn `FOR SYSTEM_TIME` sau cutover sẽ không còn lịch sử; muốn giữ, hãy xuất lịch sử riêng trước khi chuyển. Mọi `ALTER` vẫn đi qua `schema_change_pending` như bảng thường.
 - **GTID MariaDB** (`0-1-123`) không dùng được trên MySQL. Strand định danh giao dịch bằng vị trí binlog `(file, offset)`.
 - **MariaDB 10.6.3** là bản ổn định đầu tiên của dòng 10.6 (2021). Nên nâng lên bản 10.6 mới nhất trước khi chuyển. Đây chỉ là nâng bản vá, ít rủi ro, và Strand chạy được với cả hai.
 - **performance_schema** trên MariaDB tắt mặc định. Vì vậy `validate` và `sync` in vài cảnh báo `cannot verify per-session binlog settings` hoặc `cannot list stale instance connections`. Không ảnh hưởng đồng bộ. Hãy tự bảo đảm không ứng dụng nào đặt `binlog_format` khác ROW ở mức session.
@@ -296,12 +300,13 @@ Với cột khóa, so sánh khác nhau có thể gộp hai khóa khác nhau ở 
 | `binary logging is disabled on the source` | Bật `log-bin` và `server-id` trong `my.cnf`, restart |
 | `binlog_format must be ROW` | `SET GLOBAL binlog_format=ROW`, ghi vào `my.cnf`, cho ứng dụng kết nối lại |
 | `log_bin_compress is ON` | `SET GLOBAL log_bin_compress=OFF`, ghi vào `my.cnf` |
-| `... has MariaDB-only type inet6` | Đổi cột sang `VARCHAR(39)` hoặc `BINARY(16)` trên nguồn, hoặc loại bảng ra |
-| `... is a MariaDB COMPRESSED column` | Bỏ thuộc tính `COMPRESSED` trên nguồn, hoặc loại bảng ra |
-| `... system-versioned table` | `ALTER TABLE ... DROP SYSTEM VERSIONING` trên nguồn, hoặc loại bảng ra |
+| `primary key column ... has MariaDB type inet6/inet4/uuid ... key ranges cannot be proven equal` | Đổi khóa chính sang kiểu thường (vd khóa thay thế `BIGINT`), hoặc loại bảng ra |
+| `declares its system-versioning period columns explicitly` | Dùng `WITH SYSTEM VERSIONING` thường (row_start/row_end ẩn), bỏ versioning, hoặc loại bảng ra |
+| `has a PERIOD FOR definition` | Bỏ PERIOD (application-time) trên nguồn, hoặc loại bảng ra |
+| `system-versioned table ...: only current rows are migrated` (cảnh báo) | Chủ ý: lịch sử không chuyển |
+| `compressed-column header ...` / `inflated N bytes` khi đang chạy | Dữ liệu nén không đọc được; Strand dừng. Báo lỗi kèm bảng/cột trong thông báo |
 | `column(s) in a PRIMARY KEY or UNIQUE index use a MariaDB collation without an exact MySQL equivalent` | Đổi collation cột khóa trên nguồn, xem mục 2.1 |
 | `source collation(s) not available on the target and without a mapping` | Đổi cột hoặc bảng sang collation MySQL có (vd `utf8mb4_general_ci`, `utf8mb4_bin`) |
-| `uses a MariaDB application-time PERIOD` | Bỏ `PERIOD FOR` trên nguồn, hoặc loại bảng ra |
 | `uses nontransactional/unsupported engine MyISAM` (hoặc Aria) | `ALTER TABLE ... ENGINE=InnoDB` trên nguồn |
 | `has no primary key` | Thêm PRIMARY KEY |
 | `Unknown database 'strand'` | Tạo database `strand` trên đích (mục A bước 3) |
@@ -342,11 +347,11 @@ LEFT JOIN information_schema.STATISTICS s
   ON s.TABLE_SCHEMA=t.TABLE_SCHEMA AND s.TABLE_NAME=t.TABLE_NAME AND s.INDEX_NAME='PRIMARY'
 WHERE t.TABLE_SCHEMA='app' AND t.TABLE_TYPE='BASE TABLE' AND s.INDEX_NAME IS NULL;
 
--- 5. SEQUENCE (bỏ qua) và bảng system-versioned (bị từ chối)
+-- 5. SEQUENCE (bỏ qua) và bảng system-versioned (chuyển hàng hiện hành, bỏ lịch sử)
 SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES
 WHERE TABLE_SCHEMA='app' AND TABLE_TYPE IN ('SEQUENCE','SYSTEM VERSIONED');
 
--- 6. Kiểu riêng MariaDB và cột COMPRESSED: bị từ chối
+-- 6. Kiểu riêng MariaDB và cột COMPRESSED (đổi sang chữ / giải nén; kiểu này nằm trong PRIMARY KEY thì bị từ chối)
 SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA='app' AND (DATA_TYPE IN ('inet6','inet4','uuid') OR COLUMN_TYPE LIKE '%compressed%');
 
