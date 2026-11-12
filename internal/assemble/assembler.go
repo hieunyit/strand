@@ -272,6 +272,18 @@ func queryPrefix(q string) string {
 	return q
 }
 
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // New khởi tạo Assembler mới.
 func New(opts ...Option) *Assembler {
 	a := &Assembler{
@@ -368,7 +380,11 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		a.ensureTxnStarted(ev.Pos)
 		// Schema lấy từ metadata của TABLE_MAP (binlog_row_metadata=FULL) khi có.
 		if len(ev.Columns) > 0 {
-			a.registry.RegisterTable(ev.Schema, ev.Table, ev.PKColumns, ev.Columns)
+			// Bảng không có PK trong event (MySQL 5.7 hoặc bảng không PK) và cột không đổi: giữ PK đã đăng ký
+			// (pipeline chọn unique key thay PK).
+			if cur := a.registry.GetTable(ev.Schema, ev.Table); len(ev.PKColumns) > 0 || cur == nil || !sameStrings(cur.Columns, ev.Columns) {
+				a.registry.RegisterTable(ev.Schema, ev.Table, ev.PKColumns, ev.Columns)
+			}
 		} else if a.registry.GetTable(ev.Schema, ev.Table) == nil {
 			a.registry.RegisterTable(ev.Schema, ev.Table, nil, nil)
 		}
@@ -380,6 +396,18 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		if tbl == nil {
 			a.registry.RegisterTable(ev.Schema, ev.Table, nil, nil)
 			tbl = a.registry.GetTable(ev.Schema, ev.Table)
+		}
+
+		// Registry (nạp từ information_schema khi TABLE_MAP không có tên cột, vd MySQL 5.7) phải cùng số cột với
+		// row của binlog; lệch = bảng đã ALTER mà registry chưa nạp lại: fail closed thay vì gán sai tên cột.
+		if n := len(tbl.Columns); n > 0 && ev.Pos.Engine == model.EngineMySQL {
+			for _, row := range ev.Rows {
+				if len(row) != n {
+					return nil, exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+						fmt.Sprintf("table %s.%s: binlog row has %d columns but the registered schema has %d (table altered while streaming without column metadata); restart strand",
+							ev.Schema, ev.Table, len(row), n), nil)
+				}
+			}
 		}
 
 		switch ev.Op {

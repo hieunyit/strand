@@ -720,7 +720,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		if err != nil {
 			return err
 		}
-		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID, CollationCharsets: charsets})
+		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID, CollationCharsets: charsets,
+			TableInfo: mysqlreader.NewInfoSchemaProvider(p.src)})
 		if err != nil {
 			return err
 		}

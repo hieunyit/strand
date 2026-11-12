@@ -210,7 +210,14 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 				return n, err
 			}
 			// Giá trị chuỗi của cột không phải UTF-8 chuyển sang UTF-8 như reader của pipeline (charset.go).
-			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000), CollationCharsets: charsets})
+			// MySQL 5.7 không có metadata cột trong TABLE_MAP: lấy tên cột/unsigned/ENUM từ information_schema.
+			infoDB, err := sql.Open("mysql", sourceDSN)
+			if err != nil {
+				return n, err
+			}
+			defer infoDB.Close()
+			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000), CollationCharsets: charsets,
+				TableInfo: mysqlreader.NewInfoSchemaProvider(infoDB)})
 			if err != nil {
 				return n, err
 			}
