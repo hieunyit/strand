@@ -10,6 +10,7 @@ Tài liệu này chỉ ghi phần riêng của MariaDB. Phần dùng chung với
 
 - [0. Build](#0-build)
 - [A. Chạy thử từ đầu đến cuối](#a-chạy-thử-từ-đầu-đến-cuối)
+- [B. Chuyển view/trigger/procedure/event/user](#b-chuyển-viewtriggerprocedureeventuser)
 - [1. Hỗ trợ gì, không hỗ trợ gì](#1-hỗ-trợ-gì-không-hỗ-trợ-gì)
 - [2. Khác biệt MariaDB → MySQL cần biết](#2-khác-biệt-mariadb--mysql-cần-biết)
 - [3. Lỗi thường gặp](#3-lỗi-thường-gặp)
@@ -224,6 +225,58 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 
 ---
 
+## B. Chuyển view/trigger/procedure/event/user
+
+`sync` chỉ chép bảng. Phần còn lại do `strand objects` (nguồn MariaDB/MySQL → đích MySQL; cặp khác bị từ chối exit 3 `objects_unsupported`). Dùng cùng file `-c` của pipeline, tôn trọng `tables.include/exclude/rename`.
+
+**Quy tắc thời điểm (quan trọng):**
+
+| Đối tượng | Khi nào tạo trên đích | Lý do |
+| --- | --- | --- |
+| View, procedure, function | Sau khi bảng đã có (sau `sync` seed xong), `--phase pre` | Không chủ động ghi dữ liệu |
+| Event | `--phase pre` tạo ở trạng thái `DISABLE`; chỉ bật ở `--phase post` | Event chạy trên đích trước cutover sẽ ghi trùng |
+| **Trigger** | **Chỉ ở cutover** (`--phase post`) | Binlog ROW đã chứa dòng do trigger sinh ra ở nguồn. Trigger trên đích trong lúc đồng bộ sẽ áp lần hai |
+| User và quyền | Bất kỳ lúc nào, `--phase users` | Không liên quan dữ liệu |
+
+```bash
+# 1. Xem có gì (cảnh báo cú pháp MariaDB in ra stderr)
+strand objects list -c mdb-app.yaml
+
+# 2. Xuất file để duyệt/chạy bằng mysql client (01-views-routines.sql, 02-events-disabled.sql,
+#    03-triggers.sql, 04-events-enable.sql, users.sql, objects.json)
+strand objects export -c mdb-app.yaml --out ./objects
+
+# 3. Sau khi sync đã seed bảng xong: view, procedure, function, event (DISABLE). Thử trước bằng --dry-run
+strand objects apply -c mdb-app.yaml --phase pre --dry-run
+strand objects apply -c mdb-app.yaml --phase pre
+
+# 4. User và quyền (xem lưu ý mật khẩu bên dưới)
+strand objects apply -c mdb-app.yaml --phase users --from ./objects
+
+# 5. Ngày cutover: trigger và bật event chạy tự động ngay trước khi mở ghi
+strand promote -c mdb-app.yaml --pipeline mdb-app --objects-post \
+  --target "mysql://strand_admin:***@10.0.0.21:3306/strand" \
+  --fence  "mysql://strand_admin:***@10.0.0.11:3306/" --catchup-timeout 5m
+```
+
+- `apply` idempotent: đối tượng đã có và giống hệt thì `identical` (bỏ qua); có nhưng khác thì `failed` kèm lý do, không ghi đè. Mỗi đối tượng in một dòng kết quả; còn lỗi thì exit 1 sau khi đã thử hết.
+- `--objects-post` chạy `--phase post` sau bước bắt kịp và **trước** khi mở ghi, đồng thời đặt `event_scheduler=OFF` trên nguồn lúc fence. Cần DSN `--fence` có quyền SUPER/`SET GLOBAL` và đọc được định nghĩa ở nguồn; nguồn đã chết thì thêm `--objects-from ./objects` (dùng thư mục đã export).
+- **Nếu bước này lỗi:** promote dừng, đích vẫn `read_only`, chưa mở ghi. Sửa nguyên nhân (vd trigger lạ đã tồn tại với nội dung khác: `DROP TRIGGER`) rồi chạy lại đúng lệnh cũ; promote tiếp từ bước mở ghi.
+- **DEFINER:** mặc định bỏ, đối tượng thuộc tài khoản chạy `apply` (`CURRENT_USER`). `--keep-definer` giữ nguyên, user đó phải có sẵn trên đích.
+- **Đổi tên schema** (`tables.rename`): tên có qualified trong view/trigger/routine/event được viết lại theo cấu hình. View được tạo theo thứ tự phụ thuộc (view trên view).
+- **Cú pháp riêng của MariaDB** được phát hiện và in cảnh báo kèm tên đối tượng: `BEGIN NOT ATOMIC`, `PACKAGE`, `NEXTVAL`/sequence, `RETURNING`, `CREATE OR REPLACE` ngoài view, routine `sql_mode=ORACLE`. Đối tượng đó cần sửa tay; `apply` báo lỗi nếu MySQL từ chối.
+- **Trigger trên bảng bị loại** (`tables.exclude`) bị bỏ qua, có ghi chú.
+
+### User và quyền
+
+`users.sql` gồm `CREATE USER` + `GRANT` cho user có quyền trên schema được chọn. Bỏ qua `root`, `mariadb.sys`, user của Strand và user chỉ có quyền replication.
+
+- Hash `mysql_native_password` được giữ (`IDENTIFIED WITH mysql_native_password AS '<hash>'`) nên ứng dụng đăng nhập bằng mật khẩu cũ. **MySQL 8.4 tắt plugin này mặc định:** thêm `mysql_native_password=ON` vào `my.cnf` của đích rồi khởi động lại, hoặc dùng `--auth reset` (mật khẩu ngẫu nhiên mới, `caching_sha2_password`, in ra để đặt lại cho ứng dụng).
+- Quyền riêng của MariaDB được đổi sang tương đương MySQL hoặc bị chú thích (`-- ...`) kèm ghi chú: `BINLOG MONITOR`, `SLAVE MONITOR`, `READ_ONLY ADMIN`, `DELETE HISTORY`... Đọc lại `users.sql` trước khi áp.
+- Role đơn giản được chuyển; role phức tạp cần xem tay.
+
+---
+
 ## 1. Hỗ trợ gì, không hỗ trợ gì
 
 | Hạng mục | Trạng thái |
@@ -250,7 +303,7 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 | `SEQUENCE` | Bỏ qua, có cảnh báo. Tự tạo lại cơ chế tương đương trên MySQL |
 | Collation riêng của MariaDB (`nopad`, `uca1400`) | Ánh xạ sang collation MySQL, xem mục 2.1. Cột khóa mà chỉ có ánh xạ gần đúng thì bị từ chối |
 | `log_bin_compress=ON` | Bị từ chối |
-| View, trigger, procedure, function, event, user | **Không chép**. Tạo lại trên MySQL bằng tay (nhiều cú pháp khác MariaDB) |
+| View, procedure, function, trigger, event, user và quyền | `sync` **không** chép. Dùng `strand objects` (mục B): tự xuất, chuyển DEFINER/tên schema, cảnh báo cú pháp riêng của MariaDB |
 | Seed bằng mysqldump hoặc mariabackup | Chưa kiểm với MariaDB. Dùng snapshot logic (mặc định, như mục A) |
 | Đọc từ replica MariaDB, đổi máy nguồn giữa chừng | Không hỗ trợ (chế độ vị trí binlog) |
 
@@ -320,9 +373,9 @@ Loại bảng ra bằng `tables.exclude: ["app.bang_x"]` trong file cấu hình.
 1. `strand validate` đạt. Mọi bảng cần chuyển đều có trong danh sách sẽ tạo.
 2. `strand top` báo `synced` và lag xấp xỉ 0.
 3. `strand verify --mode full` cho từng bảng: 0 mismatches.
-4. Đã tạo lại trên MySQL: user và quyền của ứng dụng, view, trigger, procedure, event (Strand không chép các thứ này).
+4. Đã chuyển view, procedure, function, event (`objects apply --phase pre`), user và quyền (`--phase users`); cutover dùng `promote --objects-post` để tạo trigger và bật event (mục B).
 5. Ứng dụng đã thử với MySQL 8 trên bản sao: cú pháp SQL riêng của MariaDB, collation, chế độ `sql_mode`.
-6. Chạy `strand promote` (mục A bước 10). Trỏ ứng dụng sang MySQL. Dừng `strand sync`. Giữ MariaDB ở `read_only`.
+6. Chạy `strand promote --objects-post` (mục A bước 10, mục B). Trỏ ứng dụng sang MySQL. Dừng `strand sync`. Giữ MariaDB ở `read_only`.
 
 ## 5. Lệnh SQL kiểm tra trước trên MariaDB
 

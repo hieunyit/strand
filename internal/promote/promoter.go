@@ -20,6 +20,14 @@ type Promoter struct {
 	logger       *slog.Logger
 	sequences    []SequenceInfo
 	autoInc      []AutoIncCounter // counter AUTO_INCREMENT của source MySQL, đọc sau fence ở bước 4
+	beforeOpen   func(ctx context.Context) error
+}
+
+// WithBeforeOpenWrites đăng ký hook chạy ngay trước khi mở quyền ghi ở bước 5 (sau catch-up và setval), ví dụ
+// tạo trigger và bật event trên target. Hook lỗi thì promote dừng, target vẫn read-only, chạy lại sẽ tiếp từ bước 5.
+func (p *Promoter) WithBeforeOpenWrites(fn func(ctx context.Context) error) *Promoter {
+	p.beforeOpen = fn
+	return p
 }
 
 // NewPromoter khởi tạo Promoter.
@@ -506,6 +514,11 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			}
 		}
 
+		if p.beforeOpen != nil {
+			if err := p.beforeOpen(ctx); err != nil {
+				return progress, fmt.Errorf("pre-open hook failed, target writes NOT opened (target stays read-only): %w", err)
+			}
+		}
 		if err := p.targetDriver.OpenWrites(ctx); err != nil {
 			return progress, fmt.Errorf("open target writes failed: %w", err)
 		}

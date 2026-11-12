@@ -14,6 +14,7 @@ import (
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/mysqlver"
+	"strand/internal/objects"
 	"strand/internal/schemagen"
 	"strand/internal/typemap"
 	"strand/internal/validate"
@@ -77,6 +78,13 @@ func newValidateCmd() *cobra.Command {
 				}
 				if err != nil {
 					return err
+				}
+
+				// View/routine/trigger/event/user không được Strand chép: báo để không quên ở cutover.
+				if sum, err := objects.Summary(cmd.Context(), db, objects.Options{Include: cfg.Tables.Include, Exclude: cfg.Tables.Exclude}); err != nil {
+					fmt.Fprintln(os.Stderr, "warning: cannot count views/routines/triggers/events (source account lacks privileges?): "+err.Error())
+				} else if w := objectsSummaryWarning(sum, strings.EqualFold(cfg.Target.Kind, "mysql")); w != "" {
+					fmt.Fprintln(os.Stderr, "warning: "+w)
 				}
 
 				// spec 02 §8, TASK P2-04: Khi target là postgres, kiểm tra mapping kiểu, collation cột khóa và giá trị thực tế
@@ -177,4 +185,26 @@ func renamedTarget(rename map[string]string, id model.TableID) model.TableID {
 		}
 	}
 	return id
+}
+
+// objectsSummaryWarning: "N views, M triggers... are not migrated automatically"; rỗng nếu không có gì.
+func objectsSummaryWarning(c map[objects.Kind]int, toMySQL bool) string {
+	var parts []string
+	for _, k := range []objects.Kind{objects.KindView, objects.KindProcedure, objects.KindFunction, objects.KindTrigger, objects.KindEvent} {
+		if n := c[k]; n > 0 {
+			name := string(k)
+			if n != 1 {
+				name += "s"
+			}
+			parts = append(parts, fmt.Sprintf("%d %s", n, name))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	msg := strings.Join(parts, ", ") + " are not migrated automatically (nor are users and grants; counts cover only what the source account can see)"
+	if toMySQL {
+		return msg + "; use `strand objects list|export|apply`"
+	}
+	return msg + ": recreate them on the target by hand"
 }

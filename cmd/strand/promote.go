@@ -17,6 +17,7 @@ import (
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/objects"
 	"strand/internal/promote"
 )
 
@@ -35,6 +36,8 @@ var (
 	promoteSourceAppRoles   []string
 	promoteFenceTimeout     time.Duration
 	promoteRename           map[string]string
+	promoteObjectsPost      bool
+	promoteObjectsFrom      string
 )
 
 // isPGDSN nhận diện DSN PostgreSQL dạng URL.
@@ -73,6 +76,26 @@ func newPromoteCmd() *cobra.Command {
 				}
 			}
 
+			// --objects-post: nạp định nghĩa trigger/event TRƯỚC khi đụng tới bất kỳ DB nào (đọc source không được thì dừng sớm).
+			var objectsSet *objects.Set
+			if promoteObjectsPost {
+				if promoteEngine == "pg" || promoteEngine == "postgres" || promoteEngine == "postgresql" || isPGDSN(promoteTargetDSN) {
+					return exitcode.New(errObjectsUnsupported, exitcode.Rejected, "--objects-post supports only a MySQL target", nil)
+				}
+				ocfg, err := objectsConfig()
+				if err != nil {
+					return fmt.Errorf("--objects-post needs the pipeline config (-c): %w", err)
+				}
+				if promoteObjectsFrom == "" && promoteFenceSourceDSN != "" {
+					objSourceDSN = promoteFenceSourceDSN // --fence là DSN có quyền hơn user Strand
+				}
+				if objectsSet, err = loadObjects(cmd.Context(), ocfg, promoteObjectsFrom, false); err != nil {
+					return fmt.Errorf("--objects-post: read objects: %w", err)
+				}
+				c := objectsSet.Counts()
+				fmt.Printf("objects post phase: %d trigger, %d event to enable at cutover\n", c[objects.KindTrigger], countEnable(objectsSet))
+			}
+
 			// Xác định engine của target: PG hoặc MySQL
 			engine := strings.ToLower(strings.TrimSpace(promoteEngine))
 			isPG := false
@@ -90,6 +113,7 @@ func newPromoteCmd() *cobra.Command {
 			var sourceDriver promote.SourceDriver
 			var stateStore promote.StateStore
 			var sequences []promote.SequenceInfo
+			var objectsHook func(ctx context.Context) error
 
 			if isPG {
 				// Kết nối Target DB PostgreSQL
@@ -190,6 +214,25 @@ func newPromoteCmd() *cobra.Command {
 					myTargetDriver.WithCatchUpCheck(sourceDB, promotePipelineID, promoteCatchUpTimeout, logger)
 				}
 				sequences = nil
+				if objectsSet != nil {
+					// Chạy trước khi mở ghi: tạo trigger + bật event trên target (đang read_only; user có SUPER vẫn tạo được).
+					hookDB := targetDB
+					objectsHook = func(ctx context.Context) error {
+						if dryRun {
+							return nil
+						}
+						// Tắt event của source ở đây (sau fence + catch-up), không phải lúc promote mới bắt đầu: promote
+						// lỗi trước fence thì source vẫn phục vụ ứng dụng và không được mất event.
+						stopSourceEvents(ctx, logger)
+						var sb strings.Builder
+						err := runApply(ctx, hookDB, objectsSet, objects.PhasePost, false, &sb)
+						fmt.Print(sb.String())
+						if err != nil {
+							return fmt.Errorf("objects post phase (triggers + enable events): %v; fix the cause then re-run the same promote command (it resumes before opening writes; apply is idempotent)", err)
+						}
+						return nil
+					}
+				}
 			}
 
 			cfg := promote.Config{
@@ -204,6 +247,9 @@ func newPromoteCmd() *cobra.Command {
 			}
 
 			p := promote.NewPromoter(cfg, stateStore, sourceDriver, targetDriver, sequences, logger)
+			if objectsHook != nil {
+				p.WithBeforeOpenWrites(objectsHook)
+			}
 
 			progress, err := p.Run(cmd.Context())
 			if err != nil {
@@ -254,7 +300,36 @@ func newPromoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&promoteAppRole, "app-role", "app_rw", "Role ứng dụng trên target PostgreSQL: bị chặn ghi đến bước 5 rồi được cấp quyền ghi")
 	cmd.Flags().StringSliceVar(&promoteSourceAppRoles, "source-app-roles", nil, "Role (PG) / user (MySQL) ứng dụng trên source: MySQL kill session của user này sau khi giữ FTWRL. PG: fence đặt NOLOGIN rồi ngắt session (rỗng = chỉ ngắt mọi session client trừ user của Strand, fence mang tính hợp tác)")
 	cmd.Flags().DurationVar(&promoteFenceTimeout, "fence-timeout", promote.DefaultFenceTimeout, "Thời gian tối đa chờ FLUSH TABLES WITH READ LOCK và chờ session ứng dụng thoát khi fence source MySQL không có super_read_only (MySQL 5.5/5.6/5.7<5.7.8, MariaDB)")
+	cmd.Flags().BoolVar(&promoteObjectsPost, "objects-post", false, "MySQL target: trước khi mở ghi, tạo trigger và bật event (strand objects apply --phase post); cần -c. Tắt event_scheduler trên source khi fence. Lỗi thì dừng, target vẫn read-only")
+	cmd.Flags().StringVar(&promoteObjectsFrom, "objects-from", "", "Với --objects-post: đọc định nghĩa từ thư mục strand objects export (khi source không còn truy cập được)")
 	cmd.Flags().StringSliceVar(&promoteSchemas, "schemas", []string{"public"}, "Danh sách schema PostgreSQL chứa bảng và sequence cần promote")
 
 	return cmd
+}
+
+func countEnable(s *objects.Set) int {
+	n := 0
+	for _, o := range s.Of(objects.KindEvent) {
+		if o.EnableStmt != "" && o.Skipped == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// stopSourceEvents tắt event scheduler của source (đã fence) để event không còn ghi vào source cũ
+// (SET GLOBAL không ghi bảng, không vào binlog, chạy được cả dưới FTWRL). Lỗi chỉ cảnh báo: fence vẫn chặn ghi.
+func stopSourceEvents(ctx context.Context, logger *slog.Logger) {
+	if promoteFenceSourceDSN == "" || isPGDSN(promoteFenceSourceDSN) {
+		return
+	}
+	db, err := sql.Open("mysql", promoteFenceSourceDSN)
+	if err != nil {
+		logger.Warn("cannot disable the source event scheduler", "error", err)
+		return
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, "SET GLOBAL event_scheduler = OFF"); err != nil {
+		logger.Warn("cannot disable the source event scheduler (the fence still blocks writes)", "error", err)
+	}
 }
