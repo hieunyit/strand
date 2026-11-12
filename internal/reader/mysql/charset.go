@@ -195,6 +195,7 @@ func padBinaryCols(tm *replication.TableMapEvent, rows [][]any, cols []int) {
 // sang UTF-8 (convertCharsets). Dùng cho mọi reader đọc binlog MySQL (trực tiếp và archive).
 func NormalizeRows(tm *replication.TableMapEvent, rows [][]any, charsets map[uint64]string) error {
 	padBinary(tm, rows)
+	fixLegacyTime(tm, rows)
 	return convertCharsets(tm, rows, charsets)
 }
 

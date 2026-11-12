@@ -115,11 +115,13 @@ func (v Version) PersistAdvice(variable, value string) string {
 func CheckSupported(v Version) error {
 	if v.IsMariaDB() {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-			fmt.Sprintf("MariaDB source is not supported (server version %q): MySQL source 5.7 or later is required", v.Raw), nil)
+			fmt.Sprintf("MariaDB source is not supported (server version %q): MySQL source 5.5 or later is required", v.Raw), nil)
 	}
-	if !v.AtLeast(5, 7, 0) {
+	// 5.5/5.6 được hỗ trợ (yêu cầu chuyển đổi từ phiên bản cũ, 2026-11-12): không có GTID thì đi chế độ vị trí
+	// binlog. Dưới 5.5 (5.1, 5.0): ROWS event và catalog quá khác, chưa kiểm — từ chối rõ.
+	if !v.AtLeast(5, 5, 0) {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-			fmt.Sprintf("MySQL source 5.7 or later is required, got %q", v.Raw), nil)
+			fmt.Sprintf("MySQL source 5.5 or later is required, got %q", v.Raw), nil)
 	}
 	return nil
 }

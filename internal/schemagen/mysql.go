@@ -388,7 +388,7 @@ func mysqlToPG(ctx context.Context, r Request, t model.TableID) ([]string, []str
 		}
 	}
 	extras := map[string]mysqlExtra{}
-	rows, err := r.Source.QueryContext(ctx, `SELECT COLUMN_NAME,COLUMN_DEFAULT,EXTRA,GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION`, t.Schema, t.Table)
+	rows, err := r.Source.QueryContext(ctx, columnExtrasSelect(ctx, r)+` FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION`, t.Schema, t.Table)
 	if err != nil {
 		return nil, nil, nil, err
 	}

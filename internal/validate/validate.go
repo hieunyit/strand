@@ -121,8 +121,8 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 	if err := mysqlver.CheckSupported(ver); err != nil {
 		return err
 	}
-	var format, image, gtidMode, valueOpts string
-	err = db.QueryRowContext(ctx, mysqlver.BinlogSettingsQuery(ver)).Scan(&format, &image, &gtidMode, &valueOpts)
+	// Đọc từng biến, biến vắng (5.5/5.6/5.7) lấy mặc định của phiên bản đó (legacy_vars.go).
+	format, image, gtidMode, valueOpts, err := sourceBinlogVars(ctx, db)
 	if err != nil {
 		return fmt.Errorf("read source binlog settings: %w", err)
 	}
@@ -236,6 +236,9 @@ func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string
 		    OR (v.VARIABLE_NAME = 'binlog_row_image' AND UPPER(v.VARIABLE_VALUE) <> 'FULL')
 		 ORDER BY v.THREAD_ID`)
 	if qerr != nil {
+		if h := sessionBinlogHint(qerr); h != "" {
+			return append(warnings, h), nil
+		}
 		warnings = append(warnings, fmt.Sprintf("cannot verify per-session binlog settings (%v); grant SELECT ON performance_schema.variables_by_thread and performance_schema.threads to the strand user, or check manually", qerr))
 		return warnings, nil
 	}

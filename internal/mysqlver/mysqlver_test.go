@@ -89,14 +89,15 @@ func TestLegacy57(t *testing.T) {
 }
 
 func TestCheckSupported(t *testing.T) {
-	for _, ok := range []string{"5.7.0", "5.7.44-log", "8.0.36", "8.4.0", "9.7.0"} {
+	// 5.5/5.6 được hỗ trợ (chế độ vị trí binlog khi không có GTID); dưới 5.5 và MariaDB bị từ chối.
+	for _, ok := range []string{"5.5.62", "5.6.51-log", "5.7.0", "5.7.44-log", "8.0.36", "8.4.0", "9.7.0"} {
 		if err := CheckSupported(mustV(t, ok)); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"5.6.51-log", "5.5.62", "10.6.12-MariaDB", "5.5.5-10.3.0-MariaDB"} {
+	for _, bad := range []string{"5.1.73", "5.0.96", "10.6.12-MariaDB", "5.5.5-10.3.0-MariaDB"} {
 		err := CheckSupported(mustV(t, bad))
-		if err == nil || !strings.Contains(err.Error(), "MySQL source 5.7 or later is required") {
+		if err == nil || !strings.Contains(err.Error(), "MySQL source 5.5 or later is required") {
 			t.Errorf("%s: err=%v", bad, err)
 		}
 	}

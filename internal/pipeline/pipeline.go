@@ -252,6 +252,8 @@ func targetDSN(dsn, pipelineID, instance string) (string, error) {
 	}
 	// Giá trị thời gian đến từ binlog dưới dạng chuỗi UTC (reader đặt TimestampStringLocation=UTC).
 	c.Params["time_zone"] = "'+00:00'"
+	// Giữ nguyên zero date của nguồn cũ (xem mysqlTargetSessionSQLMode).
+	c.Params["sql_mode"] = "'" + mysqlTargetSessionSQLMode + "'"
 	// Trong bootstrap, row con có thể tới trước row cha (range của bảng cha "Chưa đọc"):
 	// target chưa nhất quán về FK cho tới khi snapshot xong. Khi stream, thứ tự cha–con do
 	// writeset (FK) bảo đảm. Vì vậy phiên ghi của Strand không kiểm FK (như applier sao chép).
