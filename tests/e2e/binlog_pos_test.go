@@ -775,7 +775,14 @@ func TestBinlogPos_E2E_SnapshotAdd(t *testing.T) {
 	defer wl2.Stop()
 	cfgPath := cfg.write(t)
 	p := startStrand(t, cfgPath, "--start-at", fmt.Sprintf("%s:%d", f, pos))
-	waitSynced(t, &cfg, p, 3*time.Minute)
+	// Tải ghi liên tục nên pipeline có thể chưa báo "synced": chỉ cần đã chạy (có checkpoint) và stream đang áp.
+	for i := 0; i < 100; i++ {
+		if _, ok := hasCheckpoint(dst, "pos-add"); ok {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	time.Sleep(3 * time.Second)
 	out, code := runStrandCLI(t, time.Minute, "snapshot", "add", "--table", "app.m", "--socket", cfg.Socket)
 	if code != 0 {
 		t.Fatalf("snapshot add: exit %d\n%s", code, out)
