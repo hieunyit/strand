@@ -271,11 +271,26 @@ func tableColumns(ctx context.Context, db *sql.DB, id model.TableID) ([]string, 
 		if err := rows.Scan(&n, &typ, &null); err != nil {
 			return nil, false, err
 		}
-		c := n + " " + typ
+		c := n + " " + normalizeColumnType(typ)
 		if null == "NO" {
 			c += " not null"
 		}
 		cols = append(cols, c)
 	}
 	return cols, len(cols) > 0, rows.Err()
+}
+
+var intDisplayWidth = regexp.MustCompile(`^(tinyint|smallint|mediumint|int|integer|bigint)\(\d+\)`)
+
+// normalizeColumnType bỏ độ rộng hiển thị của kiểu số nguyên trước khi so schema nguồn/đích: MySQL ≤ 8.0.18
+// (nguồn 5.5–5.7) báo "bigint(20)", "int(11)", còn 8.0.19+ báo "bigint", "int" — cùng một kiểu. Giữ nguyên
+// tinyint(1) (8.0 vẫn hiển thị, thường mang nghĩa BOOLEAN) và cột ZEROFILL (độ rộng có nghĩa). year(4) → year.
+func normalizeColumnType(t string) string {
+	if strings.Contains(t, "zerofill") || strings.HasPrefix(t, "tinyint(1)") {
+		return t
+	}
+	if strings.HasPrefix(t, "year(4)") {
+		return "year" + t[len("year(4)"):]
+	}
+	return intDisplayWidth.ReplaceAllString(t, "$1")
 }
