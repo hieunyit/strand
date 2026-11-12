@@ -221,6 +221,9 @@ func newPromoteCmd() *cobra.Command {
 						if dryRun {
 							return nil
 						}
+						// Tắt event của source ở đây (sau fence + catch-up), không phải lúc promote mới bắt đầu: promote
+						// lỗi trước fence thì source vẫn phục vụ ứng dụng và không được mất event.
+						stopSourceEvents(ctx, logger)
 						var sb strings.Builder
 						err := runApply(ctx, hookDB, objectsSet, objects.PhasePost, false, &sb)
 						fmt.Print(sb.String())
@@ -246,9 +249,6 @@ func newPromoteCmd() *cobra.Command {
 			p := promote.NewPromoter(cfg, stateStore, sourceDriver, targetDriver, sequences, logger)
 			if objectsHook != nil {
 				p.WithBeforeOpenWrites(objectsHook)
-				if !dryRun {
-					stopSourceEvents(cmd.Context(), logger)
-				}
 			}
 
 			progress, err := p.Run(cmd.Context())
@@ -317,7 +317,7 @@ func countEnable(s *objects.Set) int {
 	return n
 }
 
-// stopSourceEvents tắt event scheduler của source trước khi fence để event không còn ghi vào source cũ
+// stopSourceEvents tắt event scheduler của source (đã fence) để event không còn ghi vào source cũ
 // (SET GLOBAL không ghi bảng, không vào binlog, chạy được cả dưới FTWRL). Lỗi chỉ cảnh báo: fence vẫn chặn ghi.
 func stopSourceEvents(ctx context.Context, logger *slog.Logger) {
 	if promoteFenceSourceDSN == "" || isPGDSN(promoteFenceSourceDSN) {
