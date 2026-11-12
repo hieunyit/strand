@@ -83,6 +83,43 @@ func mysqlImage(role string) string {
 	return "mysql:8.4"
 }
 
+// isMySQL57Image: image thuộc dòng MySQL 5.7 (tag bắt đầu bằng 5.7, ví dụ mysql:5.7, mysql:5.7.44).
+func isMySQL57Image(image string) bool {
+	i := strings.LastIndexByte(image, ':')
+	return i >= 0 && strings.HasPrefix(image[i+1:], "5.7")
+}
+
+// mysql57Image: image nguồn MySQL 5.7 cho các test M57 (STRAND_E2E_M57_IMAGE để đổi).
+func mysql57Image() string {
+	if v := os.Getenv("STRAND_E2E_M57_IMAGE"); v != "" {
+		return v
+	}
+	return "mysql:5.7"
+}
+
+// mysqlServerFlags: cờ mysqld theo dòng phiên bản. 5.7 không có binlog_row_metadata,
+// binlog_row_value_options, log_replica_updates (tên cũ là log-slave-updates) và cần --log-bin
+// tường minh (8.x bật mặc định). Không đặt cờ xác thực: 5.7 chỉ có mysql_native_password.
+func mysqlServerFlags(image string, serverID int) []string {
+	if isMySQL57Image(image) {
+		return []string{
+			fmt.Sprintf("--server-id=%d", serverID),
+			"--gtid-mode=ON", "--enforce-gtid-consistency=ON",
+			"--log-bin=mysql-bin", "--binlog-format=ROW", "--binlog-row-image=FULL",
+			"--log-slave-updates=ON", "--max-connections=500",
+			"--innodb-use-native-aio=OFF",
+		}
+	}
+	return []string{
+		fmt.Sprintf("--server-id=%d", serverID),
+		"--gtid-mode=ON", "--enforce-gtid-consistency=ON",
+		"--binlog-format=ROW", "--binlog-row-image=FULL", "--binlog-row-metadata=FULL",
+		"--log-replica-updates=ON", "--max-connections=500",
+		// Không dùng native AIO: máy test chạy nhiều MySQL cùng lúc dễ cạn fs.aio-max-nr khiến mysqld không khởi động.
+		"--innodb-use-native-aio=OFF",
+	}
+}
+
 // --------------------------------------------------------------------------
 // MySQL containers
 // --------------------------------------------------------------------------
@@ -98,14 +135,7 @@ type mysqlNode struct {
 func startMySQL(t *testing.T, image, alias string, serverID int, nw *testcontainers.DockerNetwork, extra ...string) *mysqlNode {
 	t.Helper()
 	ctx := context.Background()
-	args := []string{
-		fmt.Sprintf("--server-id=%d", serverID),
-		"--gtid-mode=ON", "--enforce-gtid-consistency=ON",
-		"--binlog-format=ROW", "--binlog-row-image=FULL", "--binlog-row-metadata=FULL",
-		"--log-replica-updates=ON", "--max-connections=500",
-		// Không dùng native AIO: máy test chạy nhiều MySQL cùng lúc dễ cạn fs.aio-max-nr khiến mysqld không khởi động.
-		"--innodb-use-native-aio=OFF",
-	}
+	args := mysqlServerFlags(image, serverID)
 	args = append(args, extra...)
 	req := testcontainers.ContainerRequest{
 		Image:        image,

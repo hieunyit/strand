@@ -23,14 +23,7 @@ import (
 func startMySQLWithDatadir(t *testing.T, image, alias string, serverID int, nw *testcontainers.DockerNetwork, hostDatadir string) *mysqlNode {
 	t.Helper()
 	ctx := context.Background()
-	args := []string{
-		fmt.Sprintf("--server-id=%d", serverID),
-		"--gtid-mode=ON", "--enforce-gtid-consistency=ON",
-		"--binlog-format=ROW", "--binlog-row-image=FULL", "--binlog-row-metadata=FULL",
-		"--log-replica-updates=ON", "--max-connections=500",
-		// Không dùng native AIO: máy test chạy nhiều MySQL cùng lúc dễ cạn fs.aio-max-nr khiến mysqld không khởi động.
-		"--innodb-use-native-aio=OFF",
-	}
+	args := mysqlServerFlags(image, serverID)
 	req := testcontainers.ContainerRequest{
 		Image:        image,
 		ExposedPorts: []string{"3306/tcp"},
