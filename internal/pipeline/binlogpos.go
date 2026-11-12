@@ -91,7 +91,7 @@ func (p *Pipeline) detectBinlogPosMode(ctx context.Context) error {
 	}
 	p.srcIdent = ident
 	p.log.Warn("source has no GTID (gtid_mode OFF or absent): running in BINLOG POSITION MODE; transactions are identified by "+
-		"(binlog file, end position); promote and replica switching are not supported in this mode",
+		"(binlog file, end position); reading from a replica, switching source servers and checkpoint rewind are not supported in this mode",
 		"source", ident)
 	return nil
 }

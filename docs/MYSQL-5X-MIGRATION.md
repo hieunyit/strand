@@ -1,9 +1,15 @@
 # Chuyển MySQL 5.5 / 5.6 / 5.7 lên MySQL 8.x hoặc PostgreSQL bằng Strand
 
-Cập nhật: 2026-11-12. Tài liệu ứng với nhánh `fix/mysql-legacy`. Phần chung (cấu hình đầy đủ, mọi lệnh, metric, exit code) xem `docs/USAGE.md`. Tài liệu này chỉ nêu những gì **riêng cho nguồn MySQL 5.x** và một quy trình chạy từ đầu đến cutover.
+Cập nhật: 2026-11-12, ứng với nhánh `main` từ commit `57cd109` trở đi.
+
+Người mới: làm theo **mục 0** (build) rồi **mục A** (chạy thử 15 phút). Mọi lệnh trong hai mục này đã được chạy thật trên MySQL 5.6 → MySQL 8.4 và cho đúng kết quả in ở đây. Các mục 1–11 là chi tiết cho lúc chạy thật.
+
+Phần chung (cấu hình đầy đủ, mọi lệnh, metric, exit code) xem `docs/USAGE.md`.
 
 ## Mục lục
 
+0. [Build và cài đặt](#0-build-và-cài-đặt)
+A. [Chạy thử từ đầu đến cuối (15 phút)](#a-chạy-thử-từ-đầu-đến-cuối-15-phút)
 1. [Hỗ trợ gì](#1-hỗ-trợ-gì)
 2. [Chọn cách chạy](#2-chọn-cách-chạy)
 3. [Chuẩn bị nguồn 5.x](#3-chuẩn-bị-nguồn-5x)
@@ -15,6 +21,204 @@ Cập nhật: 2026-11-12. Tài liệu ứng với nhánh `fix/mysql-legacy`. Ph�
 9. [Cutover (promote)](#9-cutover-promote)
 10. [Giới hạn và xử lý sự cố](#10-giới-hạn-và-xử-lý-sự-cố)
 11. [Checklist một trang](#11-checklist-một-trang)
+12. [Chạy thường trực bằng systemd](#12-chạy-thường-trực-bằng-systemd)
+
+---
+
+## 0. Build và cài đặt
+
+Strand là **một file chạy duy nhất** (`strand`), không cần cài thêm thư viện. Chạy trên Linux (amd64 hoặc arm64). Máy chạy Strand chỉ cần kết nối mạng tới MySQL nguồn và CSDL đích; không cần cài trên server MySQL.
+
+### 0.1 Build từ mã nguồn
+
+Cần Go **1.25 trở lên** (`go version` để kiểm tra; tải ở https://go.dev/dl/).
+
+```bash
+git clone https://github.com/hieunyit/strand.git
+cd strand
+git checkout main
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X main.version=$(git describe --tags --always) -X main.commit=$(git rev-parse --short HEAD)" \
+  -o strand ./cmd/strand
+./strand version          # ví dụ: strand 57cd109 (57cd109) linux/amd64 go1.27.3
+```
+
+`CGO_ENABLED=0` cho ra binary tĩnh, chép sang máy Linux khác cùng kiến trúc là chạy được. Build cho arm64: thêm `GOARCH=arm64` trước `go build`.
+
+Cài vào PATH:
+
+```bash
+sudo install -m 0755 strand /usr/local/bin/strand
+strand --help             # danh sách lệnh
+strand sync --help        # cờ của từng lệnh
+```
+
+### 0.2 Hoặc đóng gói `.deb` / `.rpm`
+
+```bash
+VERSION=1.0.0 scripts/package.sh          # cần mạng lần đầu (tải nfpm qua go run)
+ls dist/                                  # strand_1.0.0_amd64.deb, strand-1.0.0-1.x86_64.rpm, tarball + .sha256
+sudo dpkg -i dist/strand_1.0.0_amd64.deb  # hoặc: sudo rpm -i dist/strand-1.0.0-1.x86_64.rpm
+```
+
+Gói cài `/usr/bin/strand`, unit systemd `strand@.service`, user hệ thống `strand` và thư mục `/etc/strand`. Chạy bằng systemd: mục 12.
+
+---
+
+## A. Chạy thử từ đầu đến cuối (15 phút)
+
+Ví dụ: MySQL 5.6 nguồn (không GTID) ở `10.0.0.11`, MySQL 8.4 đích ở `10.0.0.21`, database ứng dụng là `app`. Thay địa chỉ, mật khẩu cho đúng môi trường của bạn. Nên thử trên bản sao dữ liệu trước.
+
+**Bước 1 — Nguồn 5.x đã bật binlog dạng ROW.** Kiểm tra:
+
+```sql
+SELECT @@log_bin, @@binlog_format, @@server_id;   -- cần: 1, ROW, khác 0
+```
+
+Nếu chưa đúng, sửa `my.cnf` theo mục 3.1 rồi restart MySQL nguồn.
+
+**Bước 2 — Tạo user cho Strand trên nguồn** (chạy bằng root của nguồn):
+
+```sql
+CREATE USER 'strand'@'%' IDENTIFIED BY 'srcpw';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'strand'@'%';
+GRANT SELECT, LOCK TABLES ON app.* TO 'strand'@'%';
+```
+
+**Bước 3 — Chuẩn bị đích 8.x** (chạy bằng root của đích):
+
+```sql
+CREATE DATABASE strand;                       -- nơi Strand lưu checkpoint (_strand_*)
+CREATE USER 'strand'@'%' IDENTIFIED BY 'dstpw';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*    TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON strand.* TO 'strand'@'%';
+GRANT CONNECTION_ADMIN ON *.* TO 'strand'@'%';
+```
+
+Không cần tạo bảng `app.*` ở đích: Strand tự tạo từ cấu trúc của nguồn.
+
+**Bước 4 — Viết file cấu hình** `legacy-app.yaml`, đặt cạnh binary:
+
+```yaml
+version: 1
+name: legacy-app
+source:
+  kind: mysql
+  host: 10.0.0.11
+  port: 3306
+  user: strand
+  password_env: SRC_PW          # mật khẩu lấy từ biến môi trường SRC_PW
+  server_id: 47001              # số bất kỳ, không trùng server_id nào trong cụm MySQL
+target:
+  kind: mysql
+  host: 10.0.0.21
+  port: 3306
+  user: strand
+  password_env: DST_PW
+  database: strand
+  commit_order: relaxed
+tables:
+  include: ["app.*"]
+resources:
+  spool: { path: ./state }      # thư mục trạng thái cục bộ; Strand tự tạo
+observability:
+  admin_socket: ./run/admin.sock   # để dùng strand top / verify / checkpoint
+  metrics: "127.0.0.1:9464"
+```
+
+```bash
+mkdir -p state run
+export SRC_PW='srcpw' DST_PW='dstpw'
+```
+
+**Bước 5 — Kiểm tra trước:**
+
+```bash
+strand validate -c legacy-app.yaml
+```
+
+Kết quả mong đợi (hai dòng `warning` là bình thường với nguồn 5.6):
+
+```
+warning: source is MySQL 5.6: binlog_row_metadata is not available (...); column metadata is read from the source catalog
+warning: cannot verify per-session binlog settings (... variables_by_thread ...)
+2 table(s) will be created on target
+Preflight validation passed for pipeline: legacy-app
+```
+
+```bash
+strand plan -c legacy-app.yaml       # số row, dung lượng, ETA snapshot so với thời gian giữ binlog
+```
+
+**Bước 6 — Chạy đồng bộ** (để chạy trong cửa sổ terminal riêng, hoặc `tmux`):
+
+```bash
+strand sync -c legacy-app.yaml
+```
+
+Log in dạng JSON. Các dòng chính, theo thứ tự:
+
+```
+"source has no GTID (gtid_mode OFF or absent): running in BINLOG POSITION MODE; ..."
+"logical bootstrap in binlog position mode: streaming from the current head"
+"target schema initialized"
+"snapshot start" / "snapshot done"        (mỗi bảng một cặp)
+"bootstrap finished: pipeline synced"
+```
+
+Ứng dụng vẫn ghi vào nguồn bình thường trong lúc này.
+
+**Bước 7 — Theo dõi** (terminal khác, cùng thư mục, cùng biến môi trường):
+
+```bash
+strand top -c legacy-app.yaml
+```
+
+```
+Pipeline:   legacy-app
+Trạng thái: synced
+Lag:        0.000 s
+```
+
+**Bước 8 — Kiểm dữ liệu từng bảng:**
+
+```bash
+strand verify -c legacy-app.yaml --mode full --table app.customers
+strand verify -c legacy-app.yaml --mode full --table app.orders
+# verify app.orders (full): 3 chunks (...), 0 mismatched chunks, ..., 0 mismatches, 0 unverifiable_hot
+```
+
+`0 mismatches` là khớp.
+
+**Bước 9 — Khi nguồn có ALTER TABLE.** Strand **không tự áp DDL**. Khi gặp `ALTER` trên bảng đang đồng bộ, `sync` dừng với exit 10 và in đúng câu lệnh cần chạy:
+
+```
+Error [schema_change_pending]: DDL at mysql-bin.000004:2334 changes pipeline table(s) and the target schema
+does not match yet: ... Apply the change on the target, then resume.
+DDL: "ALTER TABLE app.customers ADD COLUMN email VARCHAR(100) NULL"
+```
+
+Chạy đúng câu `ALTER` đó trên đích, rồi chạy lại `strand sync -c legacy-app.yaml`. Strand đi tiếp từ checkpoint, không mất dữ liệu.
+
+**Bước 10 — Dừng / chạy lại.** `Ctrl-C` dừng an toàn (log `pipeline stopped cleanly`). Chạy lại đúng lệnh ở bước 6 thì đi tiếp từ chỗ cũ, không snapshot lại.
+
+**Bước 11 — Cutover** khi đã sẵn sàng chuyển ứng dụng sang đích. Giữ `strand sync` đang chạy, ở terminal khác:
+
+```bash
+strand promote -c legacy-app.yaml --pipeline legacy-app \
+  --target "root:***@tcp(10.0.0.21:3306)/strand" \
+  --fence  "root:***@tcp(10.0.0.11:3306)/" \
+  --source-app-roles app_user --fence-timeout 30s --catchup-timeout 5m
+```
+
+```
+Promote pipeline legacy-app thành công. Target đã mở quyền ghi.
+Lưu ý nguồn MySQL cũ (...): khóa FTWRL nhả khi lệnh này thoát, read_only=ON vẫn giữ nhưng KHÔNG chặn user SUPER. ...
+```
+
+Sau đó: nguồn ở `read_only=1`, đích mở ghi, bộ đếm `AUTO_INCREMENT` đã chép sang đích. Trỏ ứng dụng sang đích, rồi `Ctrl-C` để dừng `strand sync`. Chi tiết: mục 9.
+
+`--source-app-roles`: tên user MySQL của ứng dụng trên nguồn, Strand ngắt các session của user này. `--target`/`--fence` dùng user có quyền đổi `read_only` (root hoặc user có `SUPER`).
 
 ---
 
@@ -51,7 +255,7 @@ Những gì chạy được ở chế độ vị trí binlog:
 | Seed từ `mydumper` | Có | Lấy file/pos trong `metadata` |
 | Seed từ XtraBackup, CLONE | **Không** | XtraBackup cần GTID; CLONE cần nguồn 8.0.17+ |
 | `snapshot add` | Có | |
-| ALTER / DROP COLUMN trên nguồn khi đang chạy | Có | Strand lưu lịch sử schema theo vị trí |
+| ALTER / DROP COLUMN trên nguồn khi đang chạy | Có, **bán tự động** | `sync` dừng (exit 10) và in câu DDL; chạy câu đó trên đích rồi chạy lại `sync` (mục A, bước 9). Strand lưu lịch sử schema nên row cũ trước DDL vẫn giải mã đúng |
 | `CREATE TABLE` mới trên nguồn khi đang chạy | **Không tự động** | Phải tạo bảng ở đích bằng tay (mục 10) |
 | `verify --mode full` | Có | |
 | `promote` | Có | Fence bằng `read_only` + `FLUSH TABLES WITH READ LOCK` (mục 9) |
@@ -188,7 +392,7 @@ resources:
   workers: { max: 8 }
 verify: { post_seed_window: 30m }
 observability:
-  admin_socket: /run/strand/legacy-app.sock
+  admin_socket: /run/strand/legacy-app/admin.sock   # systemd: nằm trong RuntimeDirectory (mục 12)
   metrics: ":9464"
   log: { level: info, format: json }
 ```
@@ -204,7 +408,7 @@ target:
   dsn: "postgres://strand:${DST_PW}@pg-dst:5432/app?sslmode=require"
 tables: { include: ["app.*"] }
 resources: { spool: { path: /var/lib/strand/legacy-to-pg } }
-observability: { admin_socket: /run/strand/legacy-to-pg.sock, metrics: ":9465" }
+observability: { admin_socket: /run/strand/legacy-to-pg/admin.sock, metrics: ":9465" }
 ```
 
 Mật khẩu: đặt biến môi trường (`export SRC_PW=... DST_PW=...`) trước khi chạy, không ghi thẳng vào file.
@@ -368,3 +572,41 @@ Promote bị ngắt giữa chừng thì chạy lại cùng lệnh: nó tiếp t�
 6. Chờ `strand top` báo `synced`. Lag ổn định gần 0.
 7. `strand verify --mode full --table ...` từng bảng: 0 mismatches.
 8. Hẹn giờ cutover: `strand promote ...` (mục 9). Trỏ ứng dụng sang đích. Dừng `sync`. Tắt/khóa nguồn.
+
+---
+
+## 12. Chạy thường trực bằng systemd
+
+Cài bằng gói (mục 0.2) thì unit `strand@.service` đã có. Cài binary tay (mục 0.1) thì chép unit và tạo user:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin strand
+sudo cp deploy/systemd/strand@.service /etc/systemd/system/   # unit gọi /usr/local/bin/strand
+sudo install -d -m 0750 -o root -g strand /etc/strand
+sudo systemctl daemon-reload
+```
+
+Mỗi pipeline một instance `strand@<name>`, đọc `/etc/strand/<name>.yaml` và `/etc/strand/<name>.env`:
+
+```bash
+sudo cp legacy-app.yaml /etc/strand/legacy-app.yaml
+printf 'SRC_PW=srcpw\nDST_PW=dstpw\n' | sudo tee /etc/strand/legacy-app.env >/dev/null
+sudo chown root:strand /etc/strand/legacy-app.*
+sudo chmod 0640 /etc/strand/legacy-app.yaml; sudo chmod 0600 /etc/strand/legacy-app.env
+sudo systemctl enable --now strand@legacy-app
+journalctl -u strand@legacy-app -f        # xem log
+strand top -c /etc/strand/legacy-app.yaml
+```
+
+Trong file cấu hình khi chạy bằng systemd, **phải** dùng đúng các đường dẫn mà unit cho phép ghi:
+
+```yaml
+resources:
+  spool: { path: /var/lib/strand/legacy-app }              # StateDirectory
+observability:
+  admin_socket: /run/strand/legacy-app/admin.sock          # RuntimeDirectory
+```
+
+- Unit **không tự restart** khi exit 2, 3, 4, 5 hoặc 10 (lỗi cấu hình, bị từ chối, bị instance khác thay, mất log, cần người quyết định, ví dụ ALTER ở mục A bước 9). Xử lý xong thì `sudo systemctl start strand@legacy-app`.
+- Lỗi khác (mất mạng, DB restart): systemd tự chạy lại sau 10 giây; Strand đi tiếp từ checkpoint.
+- Dừng: `sudo systemctl stop strand@legacy-app` (gửi SIGTERM, dừng sạch).

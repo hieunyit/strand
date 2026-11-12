@@ -112,13 +112,19 @@ func (h *adminHandler) CheckpointShow(ctx context.Context) (*admin.CheckpointRes
 	p := h.p
 	var applied string
 	var updated time.Time
-	q := "SELECT applied, updated_at FROM _strand_checkpoint WHERE pipeline_id = ?"
+	// updated_at đọc dưới dạng epoch micro giây: DSN MySQL của target có thể thiếu parseTime=true, khi đó
+	// driver trả TIMESTAMP dạng []byte và Scan vào time.Time lỗi (`strand checkpoint show` hỏng).
+	q := "SELECT applied, CAST(UNIX_TIMESTAMP(updated_at) * 1000000 AS SIGNED) FROM _strand_checkpoint WHERE pipeline_id = ?"
 	if p.dstEngine == model.EnginePG {
-		q = "SELECT applied, updated_at FROM _strand_checkpoint WHERE pipeline_id = $1"
+		q = "SELECT applied, (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint FROM _strand_checkpoint WHERE pipeline_id = $1"
 	}
-	err := p.dst.QueryRowContext(ctx, q, p.id).Scan(&applied, &updated)
+	var micros sql.NullInt64
+	err := p.dst.QueryRowContext(ctx, q, p.id).Scan(&applied, &micros)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
+	}
+	if micros.Valid {
+		updated = time.UnixMicro(micros.Int64).UTC()
 	}
 	all, err := p.store.LoadApplied(ctx)
 	if err == nil {
