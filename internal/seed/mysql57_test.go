@@ -98,16 +98,16 @@ func TestMySQL57_Mydumper_OldMetadata(t *testing.T) {
 // Clone plugin cần donor 8.0.17+: nguồn 5.7 bị từ chối trước mọi kiểm tra khác.
 func TestMySQL57_Clone_Rejected(t *testing.T) {
 	src := seed.SeedSource{Engine: "mysql", Kind: "clone", TargetRestoredGTID: u57a + ":1-100", TargetVersion: "8.4.0"}
-	for _, v := range []string{"5.7.44-log", "8.0.16"} {
+	for _, v := range []string{"5.5.62", "5.6.51-log", "5.7.44-log", "8.0.16"} {
 		src.SourceMySQLVersion = v
 		_, err := seed.NewClonePlanner().Plan(context.Background(), src)
 		if err == nil || !strings.Contains(err.Error(), "8.0.17") || exitcode.GetExitCode(err) != exitcode.Rejected {
 			t.Errorf("%s: want clone rejection, got %v", v, err)
 		}
 	}
-	src.SourceMySQLVersion = "5.6.51-log"
-	if _, err := seed.NewClonePlanner().Plan(context.Background(), src); err == nil || !strings.Contains(err.Error(), "5.7 or later is required") {
-		t.Errorf("5.6: %v", err)
+	src.SourceMySQLVersion = "5.1.73"
+	if _, err := seed.NewClonePlanner().Plan(context.Background(), src); err == nil || !strings.Contains(err.Error(), "5.5 or later is required") {
+		t.Errorf("5.1: %v", err)
 	}
 	src.SourceMySQLVersion = "8.4.0"
 	if _, err := seed.NewClonePlanner().Plan(context.Background(), src); err != nil {

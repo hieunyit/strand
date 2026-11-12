@@ -132,7 +132,7 @@ func CheckClone(v Version) error {
 		return nil
 	}
 	return exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
-		fmt.Sprintf("clone seed requires a MySQL 8.0.17+ donor, source is %q: use mysqldump or mydumper for MySQL 5.7", v.Raw), nil)
+		fmt.Sprintf("clone seed requires a MySQL 8.0.17+ donor, source is %q: use mysqldump or mydumper for MySQL 5.x", v.Raw), nil)
 }
 
 // Detect đọc SELECT VERSION() từ db và phân tích.
