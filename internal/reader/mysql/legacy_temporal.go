@@ -46,6 +46,9 @@ func fixLegacyTimeString(s string) string {
 		return s
 	}
 	u := h*10000 + m*100 + sec
+	if u >= 1<<24 || m > 99 || sec > 99 {
+		return s
+	}
 	if u < 1<<23 {
 		return s // dương: go-mysql đã đúng
 	}
