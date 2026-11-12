@@ -10,6 +10,7 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/mysqlver"
 )
 
 // Result lưu kết quả preflight validate
@@ -112,10 +113,16 @@ func CheckMySQLBinlogRowValueOptions(val string) error {
 // binlog_format=ROW, binlog_row_image=FULL, gtid_mode=ON, binlog_row_value_options rỗng,
 // và mọi bảng trong tables ("schema.table", không hỗ trợ wildcard) tồn tại và có PK.
 func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
+	// Phiên bản server quyết định câu SQL: 5.7 không có binlog_row_value_options (8.0.3+) nên coi là rỗng.
+	ver, err := mysqlver.Cached(ctx, db)
+	if err != nil {
+		return err
+	}
+	if err := mysqlver.CheckSupported(ver); err != nil {
+		return err
+	}
 	var format, image, gtidMode, valueOpts string
-	err := db.QueryRowContext(ctx,
-		"SELECT @@GLOBAL.binlog_format, @@GLOBAL.binlog_row_image, @@GLOBAL.gtid_mode, @@GLOBAL.binlog_row_value_options").
-		Scan(&format, &image, &gtidMode, &valueOpts)
+	err = db.QueryRowContext(ctx, mysqlver.BinlogSettingsQuery(ver)).Scan(&format, &image, &gtidMode, &valueOpts)
 	if err != nil {
 		return fmt.Errorf("read source binlog settings: %w", err)
 	}
@@ -178,6 +185,24 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 	return nil
 }
 
+// binlogRowMetadataWarning trả cảnh báo về binlog_row_metadata ("" = không cảnh báo). MySQL 5.7 không có biến
+// này (8.0.1+): chỉ báo thông tin, không khuyên SET PERSIST.
+func binlogRowMetadataWarning(ctx context.Context, db *sql.DB, ver mysqlver.Version) string {
+	if !ver.HasBinlogRowMetadata() {
+		return binlogRowMetadataNote57(ver)
+	}
+	var meta string
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.binlog_row_metadata").Scan(&meta); err == nil && !strings.EqualFold(meta, "FULL") {
+		return fmt.Sprintf("binlog_row_metadata is %q; FULL is recommended (column names and PK in TABLE_MAP): %s", meta, ver.PersistAdvice("binlog_row_metadata", "FULL"))
+	}
+	return ""
+}
+
+// binlogRowMetadataNote57: ghi chú thông tin cho nguồn 5.7 (TABLE_MAP không có tên cột/PK).
+func binlogRowMetadataNote57(ver mysqlver.Version) string {
+	return fmt.Sprintf("source is MySQL %s: binlog_row_metadata is not available (TABLE_MAP has no column names or PK); column metadata is read from the source catalog", ver.Line())
+}
+
 // SessionBinlogIssue là một thread trên source còn ghi binlog với giá trị session khác yêu cầu.
 type SessionBinlogIssue struct {
 	ThreadID uint64
@@ -195,9 +220,12 @@ type SessionBinlogIssue struct {
 // performance_schema, hoặc performance_schema tắt) thì chỉ trả về cảnh báo. Cảnh báo cả khi
 // binlog_row_metadata khác FULL (02 §11: nên bật).
 func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string, err error) {
-	var meta string
-	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.binlog_row_metadata").Scan(&meta); err == nil && !strings.EqualFold(meta, "FULL") {
-		warnings = append(warnings, fmt.Sprintf("binlog_row_metadata is %q; FULL is recommended (column names and PK in TABLE_MAP): SET PERSIST binlog_row_metadata = FULL", meta))
+	ver, verr := mysqlver.Cached(ctx, db)
+	if verr != nil {
+		return nil, verr
+	}
+	if w := binlogRowMetadataWarning(ctx, db, ver); w != "" {
+		warnings = append(warnings, w)
 	}
 	rows, qerr := db.QueryContext(ctx, `
 		SELECT v.THREAD_ID, COALESCE(t.PROCESSLIST_USER, ''), COALESCE(t.PROCESSLIST_HOST, ''), COALESCE(t.NAME, ''),

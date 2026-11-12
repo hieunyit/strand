@@ -9,17 +9,21 @@ import (
 	"time"
 
 	"strand/internal/model"
+	"strand/internal/mysqlver"
 )
 
 // MySQLPKCodec dựng codec PK (MySQLPKColumn) từ information_schema của bảng.
 func MySQLPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (*PKCodec, error) {
 	c := &PKCodec{}
+	ver, err := mysqlver.Cached(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	query := pkColumnQuery(ver)
 	for _, col := range pk {
 		var dt, ct string
 		var cs, coll, pad sql.NullString
-		err := db.QueryRowContext(ctx, `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME, co.PAD_ATTRIBUTE
-			FROM information_schema.COLUMNS c LEFT JOIN information_schema.COLLATIONS co ON co.COLLATION_NAME = c.COLLATION_NAME
-			WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`, id.Schema, id.Table, col).Scan(&dt, &ct, &cs, &coll, &pad)
+		err := db.QueryRowContext(ctx, query, id.Schema, id.Table, col).Scan(&dt, &ct, &cs, &coll, &pad)
 		if err != nil {
 			return nil, fmt.Errorf("read primary key column %s.%s: %w", id, col, err)
 		}
@@ -35,6 +39,19 @@ func MySQLPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string
 		}
 	}
 	return c, nil
+}
+
+// pkColumnQuery: truy vấn catalog của một cột PK. COLLATIONS.PAD_ATTRIBUTE chỉ có từ MySQL 8.0; ở 5.7 mọi
+// collation là PAD SPACE, trả NULL (MySQLPKColumn coi rỗng là PAD SPACE).
+func pkColumnQuery(ver mysqlver.Version) string {
+	if !ver.HasPadAttribute() {
+		return `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME, NULL
+			FROM information_schema.COLUMNS c
+			WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`
+	}
+	return `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME, co.PAD_ATTRIBUTE
+			FROM information_schema.COLUMNS c LEFT JOIN information_schema.COLLATIONS co ON co.COLLATION_NAME = c.COLLATION_NAME
+			WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`
 }
 
 // weighQueryTimeout giới hạn một truy vấn WEIGHT_STRING (review N05).

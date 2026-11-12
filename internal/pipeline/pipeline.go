@@ -37,6 +37,7 @@ import (
 	"strand/internal/governor"
 	"strand/internal/metrics"
 	"strand/internal/model"
+	"strand/internal/mysqlver"
 	"strand/internal/reader"
 	mysqlreader "strand/internal/reader/mysql"
 	pgreader "strand/internal/reader/pg"
@@ -325,6 +326,20 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	defer p.dst.Close()
 	p.dst.SetMaxOpenConns(64)
+
+	// Nguồn MySQL: nhận diện phiên bản một lần (cache theo *sql.DB, các hàm SQL phụ thuộc phiên bản như
+	// MySQLPKCodec dùng lại) và từ chối nguồn < 5.7 / MariaDB sớm, trước khi chạm vào dữ liệu.
+	if p.srcEngine == model.EngineMySQL {
+		defer mysqlver.Forget(p.src)
+		ver, err := mysqlver.Cached(ctx, p.src)
+		if err != nil {
+			return err
+		}
+		if err := mysqlver.CheckSupported(ver); err != nil {
+			return err
+		}
+		p.log.Info("source MySQL version", "version", ver.Raw)
+	}
 
 	// --- Khóa pipeline, epoch (02 §4 quy tắc 1–2) ---
 	if p.dstEngine == model.EnginePG {
@@ -2224,10 +2239,11 @@ func (p *Pipeline) caughtUpWithSource(ctx context.Context) bool {
 
 // retentionHeadroom ước lượng số giây còn lại trước khi source xóa binlog mà reader chưa đọc.
 func (p *Pipeline) retentionHeadroom(ctx context.Context) (float64, bool) {
-	var expire int64
 	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if err := p.src.QueryRowContext(qctx, "SELECT @@GLOBAL.binlog_expire_logs_seconds").Scan(&expire); err != nil || expire <= 0 {
+	// 5.7 không có binlog_expire_logs_seconds: mysqlver đọc expire_logs_days * 86400.
+	expire, err := mysqlver.BinlogRetentionSeconds(qctx, p.src)
+	if err != nil || expire <= 0 {
 		return 0, false
 	}
 	ts := p.lastRoutedTS.Load()

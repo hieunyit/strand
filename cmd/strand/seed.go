@@ -17,6 +17,7 @@ import (
 
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
+	"strand/internal/mysqlver"
 	"strand/internal/seed"
 )
 
@@ -66,9 +67,14 @@ func newSeedCmd() *cobra.Command {
 				}
 				defer db.Close()
 				var srcArch string
-				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_purged, @@GLOBAL.version_compile_machine").
-					Scan(&src.SourcePurgedGTID, &srcArch); err != nil {
+				if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_purged, @@GLOBAL.version_compile_machine, @@GLOBAL.version").
+					Scan(&src.SourcePurgedGTID, &srcArch, &src.SourceMySQLVersion); err != nil {
 					return fmt.Errorf("read source gtid_purged/version_compile_machine: %w", err)
+				}
+				if v, err := mysqlver.Parse(src.SourceMySQLVersion); err != nil {
+					return err
+				} else if err := mysqlver.CheckSupported(v); err != nil {
+					return err
 				}
 				// SD-4 (review R32): --source-arch khai báo tường minh thắng giá trị đọc từ source
 				// (backup có thể được tạo trên một host khác source hiện tại).

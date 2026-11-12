@@ -12,6 +12,7 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/mysqlver"
 )
 
 // `strand plan -c p.yaml` (02 §10): ước lượng ETA của snapshot logic; từ chối chế độ A khi
@@ -35,6 +36,11 @@ func newPlanCmd() *cobra.Command {
 			}
 			defer db.Close()
 			ctx := cmd.Context()
+			if ver, err := mysqlver.Cached(ctx, db); err != nil {
+				return err
+			} else if err := mysqlver.CheckSupported(ver); err != nil {
+				return err
+			}
 
 			match := func(name string) bool {
 				in := false
@@ -89,8 +95,8 @@ func newPlanCmd() *cobra.Command {
 				fmt.Printf("%-40s %14d %14d %12s\n", name, n, size, mode)
 			}
 			eta := time.Duration(float64(total) / bytesPerSec * float64(time.Second))
-			var expire int64
-			_ = db.QueryRowContext(ctx, "SELECT @@GLOBAL.binlog_expire_logs_seconds").Scan(&expire)
+			// 5.7: expire_logs_days * 86400 (không có binlog_expire_logs_seconds).
+			expire, _ := mysqlver.BinlogRetentionSeconds(ctx, db)
 			retention := time.Duration(expire) * time.Second
 			fmt.Printf("\nlogical snapshot: %d bytes at source soft limit %d IOPS (~%.1f MiB/s) → ETA %s\n",
 				total, iops, bytesPerSec/1024/1024, eta.Round(time.Second))

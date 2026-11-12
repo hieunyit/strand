@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"strand/internal/model"
+	"strand/internal/mysqlver"
 	"strand/internal/typemap"
 )
 
@@ -173,6 +175,72 @@ func mysqlDDL(q string, src, dst model.TableID, rename map[string]string) (strin
 	return out.String(), nil
 }
 
+// utf8mb4Default57 là collation mặc định của utf8mb4 ở MySQL 5.7 (8.x mặc định utf8mb4_0900_ai_ci).
+const utf8mb4Default57 = "utf8mb4_general_ci"
+
+// pinUTF8MB4Collation57 thêm COLLATE tường minh vào DDL do 5.7 sinh ra: sau mỗi `CHARACTER SET utf8mb4`
+// của cột không kèm COLLATE và sau `CHARSET=utf8mb4` của bảng nếu bảng không có `COLLATE=`. Hàm thuần.
+func pinUTF8MB4Collation57(ddl string) (string, error) {
+	ts, err := lex(ddl)
+	if err != nil {
+		return "", err
+	}
+	type ins struct {
+		at   int
+		text string
+	}
+	var adds []ins
+	depth, tableClosed := 0, false
+	tableHasCollate := false
+	tableCharsetEnd := -1
+	for i := 0; i < len(ts); i++ {
+		t := ts[i]
+		if ddl[t.start] == '(' && t.value == "(" {
+			depth++
+		}
+		if ddl[t.start] == ')' && t.value == ")" {
+			depth--
+			if depth == 0 {
+				tableClosed = true
+			}
+		}
+		if t.keyword(ddl, "COLLATE") && tableClosed && depth == 0 {
+			tableHasCollate = true
+		}
+		var vi int // chỉ số token giá trị charset
+		switch {
+		case t.keyword(ddl, "CHARACTER") && i+2 < len(ts) && ts[i+1].keyword(ddl, "SET"):
+			vi = i + 2
+		case t.keyword(ddl, "CHARSET") && i+1 < len(ts):
+			vi = i + 1
+		default:
+			continue
+		}
+		if vi < len(ts) && ts[vi].value == "=" {
+			vi++
+		}
+		if vi >= len(ts) || !ts[vi].keyword(ddl, "utf8mb4") {
+			continue
+		}
+		if tableClosed && depth == 0 {
+			tableCharsetEnd = ts[vi].end
+			continue
+		}
+		if vi+1 < len(ts) && ts[vi+1].keyword(ddl, "COLLATE") {
+			continue
+		}
+		adds = append(adds, ins{ts[vi].end, " COLLATE " + utf8mb4Default57})
+	}
+	if tableCharsetEnd >= 0 && !tableHasCollate {
+		adds = append(adds, ins{tableCharsetEnd, " COLLATE=" + utf8mb4Default57})
+	}
+	sort.Slice(adds, func(a, b int) bool { return adds[a].at < adds[b].at })
+	for i := len(adds) - 1; i >= 0; i-- {
+		ddl = ddl[:adds[i].at] + adds[i].text + ddl[adds[i].at:]
+	}
+	return ddl, nil
+}
+
 func mysqlToMySQL(ctx context.Context, r Request, t model.TableID) ([]string, []string, error) {
 	// invariant: CP-1 — dữ liệu và checkpoint phải commit nguyên tử trên target.
 	// Không sao chép engine phi giao dịch rồi tuyên bố effectively-once.
@@ -194,6 +262,17 @@ func mysqlToMySQL(ctx context.Context, r Request, t model.TableID) ([]string, []
 	ddl, err := mysqlDDL(ddl, t, dst, r.Rename)
 	if err != nil {
 		return nil, nil, err
+	}
+	ver, err := mysqlver.Cached(ctx, r.Source)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ver.Legacy57() {
+		// SHOW CREATE TABLE của 5.7 bỏ COLLATE khi là mặc định của charset; target 8.x sẽ lấy mặc định
+		// khác (utf8mb4_0900_ai_ci) nên phải ghi rõ collation của nguồn.
+		if ddl, err = pinUTF8MB4Collation57(ddl); err != nil {
+			return nil, nil, err
+		}
 	}
 	warnings, err := mysqlOmitted(ctx, r.Source, t)
 	if err != nil {

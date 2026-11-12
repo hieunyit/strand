@@ -125,8 +125,8 @@ func checkPhysicalCompat(sourceVersion, targetVersion, sourceArch, targetArch st
 	}
 	if src != dst {
 		return TargetInfo{}, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected,
-			fmt.Sprintf("SD-4: physical backup from MySQL %s line cannot be restored on %s line target",
-				sourceVersion, targetVersion), nil)
+			fmt.Sprintf("SD-4: physical backup from MySQL %s line cannot be restored on %s line target%s",
+				sourceVersion, targetVersion, crossLineHint(src, dst)), nil)
 	}
 	sa, ta := normalizeArch(sourceArch), normalizeArch(targetArch)
 	if sa == "" || ta == "" {
@@ -140,4 +140,12 @@ func checkPhysicalCompat(sourceVersion, targetVersion, sourceArch, targetArch st
 			fmt.Sprintf("SD-4: physical backup from %s server cannot be restored on %s target", sourceArch, targetArch), nil)
 	}
 	return TargetInfo{Version: targetVersion, Compatible: true, Arch: ta}, nil
+}
+
+// crossLineHint: gợi ý khi backup vật lý từ nguồn 5.7 cho target 8.x (khác dòng version) — dùng backup logic.
+func crossLineHint(src, dst string) string {
+	if src == "5.7" {
+		return " (MySQL 5.7 source: use a logical seed, mysqldump or mydumper, for a MySQL " + dst + " target)"
+	}
+	return ""
 }

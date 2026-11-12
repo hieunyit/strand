@@ -497,8 +497,8 @@ func canonicalValueExpr(engine model.Engine, col ColumnInfo) string {
 		e = fmt.Sprintf("(CASE WHEN %s = 0 THEN '0' ELSE %s END)", i, stripDecimalSQL(engine, fmt.Sprintf("CAST(%s AS CHAR)", i)))
 	case "float", "double", "real":
 		// MySQL đổi double sang DECIMAL theo chữ số ngắn nhất round-trip, khớp với nhánh PG.
-		e = fmt.Sprintf("(CASE WHEN %s = 0 THEN '0' WHEN ABS(%s) < 1e35 THEN %s ELSE REPLACE(CAST(CAST(%s AS DOUBLE) AS CHAR), 'e+', 'e') END)",
-			i, i, stripDecimalSQL(engine, fmt.Sprintf("CAST(CAST(%s AS DECIMAL(65,30)) AS CHAR)", i)), i)
+		e = fmt.Sprintf("(CASE WHEN %s = 0 THEN '0' WHEN ABS(%s) < 1e35 THEN %s ELSE REPLACE(CAST(%s AS CHAR), 'e+', 'e') END)",
+			i, i, stripDecimalSQL(engine, fmt.Sprintf("CAST(CAST(%s AS DECIMAL(65,30)) AS CHAR)", i)), doubleExpr(i))
 	case "date":
 		e = fmt.Sprintf("DATE_FORMAT(%s, '%%Y-%%m-%%d')", i)
 	case "datetime":
@@ -516,6 +516,11 @@ func canonicalValueExpr(engine model.Engine, col ColumnInfo) string {
 	}
 	return fmt.Sprintf("CONVERT(%s USING utf8mb4)", e)
 }
+
+// doubleExpr ép cột float/double sang DOUBLE bằng phép cộng `+ 0e0` thay cho CAST(x AS DOUBLE): cú pháp
+// CAST ... AS DOUBLE chỉ có từ MySQL 8.0.17 (5.7 báo lỗi cú pháp cả câu), còn `x + 0e0` cho cùng giá trị
+// DOUBLE ở mọi phiên bản.
+func doubleExpr(col string) string { return "(" + col + " + 0e0)" }
 
 // rowExpression trả biểu thức text chính tắc của cả row: mỗi cột là "độ_dài:giá_trị" (NULL là "N"),
 // nối bằng '|'. Tiền tố độ dài làm chuỗi không mơ hồ kể cả khi giá trị chứa '|' hay ':'.

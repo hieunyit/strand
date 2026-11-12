@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"strand/internal/exitcode"
+	"strand/internal/mysqlver"
 )
 
 // spec: 02 §9, design §3.3
@@ -23,6 +24,19 @@ func NewClonePlanner() *ClonePlanner {
 
 // Plan kiểm tra các bất biến SD-1 đến SD-4 cho phương thức CLONE.
 func (p *ClonePlanner) Plan(ctx context.Context, src SeedSource) (*SeedManifest, error) {
+	// Clone plugin chỉ có từ 8.0.17: donor MySQL 5.7 phải dùng mysqldump/mydumper.
+	if src.SourceMySQLVersion != "" {
+		v, err := mysqlver.Parse(src.SourceMySQLVersion)
+		if err != nil {
+			return nil, exitcode.New(exitcode.ErrSeedInvariantFailed, exitcode.Rejected, err.Error(), err)
+		}
+		if err := mysqlver.CheckSupported(v); err != nil {
+			return nil, err
+		}
+		if err := mysqlver.CheckClone(v); err != nil {
+			return nil, err
+		}
+	}
 	// Vị trí P của CLONE lấy từ gtid_executed trên đích sau khi clone xong (design §3.3)
 	// hoặc từ file manifest trong BackupRef
 	// P lấy từ trạng thái clone của donor (BackupRef) và/hoặc gtid_executed sau clone.

@@ -24,7 +24,10 @@ type SeedSource struct {
 	// SourceArch / TargetArch: kiến trúc CPU (@@version_compile_machine) của server tạo backup và của
 	// target, để kiểm SD-4 cho backup vật lý MySQL; rỗng = không biết, seed plan từ chối (review R32).
 	SourceArch string `json:"source_arch,omitempty"`
-	TargetArch string `json:"target_arch,omitempty"`
+	// SourceMySQLVersion: @@version của source MySQL (rỗng = không biết). Dùng để từ chối nguồn < 5.7 và
+	// clone từ donor < 8.0.17.
+	SourceMySQLVersion string `json:"source_mysql_version,omitempty"`
+	TargetArch         string `json:"target_arch,omitempty"`
 
 	// --- PostgreSQL (pgbackrest | walg) ---
 	// Slot logical trên source (hoặc standby PG16+) mà CDC sẽ đọc; P = consistent_point của slot.

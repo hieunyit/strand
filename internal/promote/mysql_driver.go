@@ -9,6 +9,7 @@ import (
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
+	"strand/internal/mysqlver"
 )
 
 // MySQLSourceDriver thực thi các thao tác trên MySQL source.
@@ -31,6 +32,15 @@ func (d *MySQLSourceDriver) SetReachable(r bool) {
 func (d *MySQLSourceDriver) Fence(ctx context.Context) error {
 	if !d.reachable || d.db == nil {
 		return fmt.Errorf("source db unreachable")
+	}
+	// super_read_only có từ 5.7.8: bản cũ hơn không fence được hết quyền SUPER nên từ chối rõ ràng.
+	if ver, err := mysqlver.Cached(ctx, d.db); err == nil {
+		if err := mysqlver.CheckSupported(ver); err != nil {
+			return err
+		}
+		if !ver.HasSuperReadOnly() {
+			return fmt.Errorf("cannot fence source %s: super_read_only requires MySQL 5.7.8 or later", ver.Raw)
+		}
 	}
 	_, err := d.db.ExecContext(ctx, "SET GLOBAL super_read_only = ON;")
 	return err
