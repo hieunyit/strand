@@ -59,6 +59,15 @@ type SeedSource struct {
 // StartPosition biểu diễn vị trí P nhất quán của backup.
 type StartPosition struct {
 	GTIDSet string `json:"gtid_set,omitempty"`
+	// BinlogFile/BinlogPos: vị trí binlog nhất quán của dump (mysqldump --master-data). Với nguồn có GTID,
+	// GTIDSet được tính từ binlog tại đúng vị trí này (GTIDFromBinlog=true); với nguồn không GTID
+	// (5.5 / gtid_mode=OFF), đây là vị trí bắt đầu cho chế độ vị trí binlog và GTIDSet rỗng.
+	BinlogFile string `json:"binlog_file,omitempty"`
+	BinlogPos  uint64 `json:"binlog_pos,omitempty"`
+	// GTIDFromBinlog: GTIDSet được tính từ binlog của source tại BinlogFile:BinlogPos chứ không lấy từ
+	// GTID_PURGED của dump. Khi đó gtid_executed của target sau restore có thể lớn hơn P (dump 5.7 đặt
+	// GTID_PURGED ở cuối file = gtid_executed lúc kết thúc dump), nên kiểm tra chéo chỉ yêu cầu ⊇ P.
+	GTIDFromBinlog bool `json:"gtid_from_binlog,omitempty"`
 	// LSN (PG) dạng "X/Y" = consistent_point của slot. Txn có commit LSN < LSN nằm trong seed;
 	// Txn có commit LSN ≥ LSN được slot stream (commit record có thể bắt đầu đúng tại consistent_point).
 	LSN string `json:"lsn,omitempty"`
