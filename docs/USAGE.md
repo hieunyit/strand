@@ -677,6 +677,22 @@ strand promote --pipeline billing --engine pg \
 2. Cô lập source bằng cách khác: tắt máy hoặc chặn mạng.
 3. Chạy lại cùng lệnh, thêm `--source-fenced-externally`.
 
+### 7.10b `objects` (MySQL/MariaDB → MySQL)
+
+Chuyển view, procedure, function, trigger, event, user và quyền (`sync` chỉ chép bảng). Chỉ nhận nguồn họ MySQL và đích MySQL, cặp khác exit 3 `objects_unsupported`. Chi tiết và thời điểm chạy: [MARIADB-MIGRATION.md mục B](MARIADB-MIGRATION.md).
+
+```bash
+strand objects list   -c p.yaml
+strand objects export -c p.yaml --out ./objects [--keep-definer] [--auth native|reset]
+strand objects apply  -c p.yaml --phase pre|users|post [--from ./objects] [--dry-run]
+```
+
+- `pre`: view (theo thứ tự phụ thuộc), procedure, function, event ở trạng thái DISABLE. `post`: trigger và bật event. `users`: `CREATE USER` + `GRANT`.
+- Trigger chỉ tạo ở cutover (`post`), vì binlog ROW đã chứa dòng trigger sinh ra ở nguồn.
+- Idempotent: giống hệt thì bỏ qua, khác thì lỗi rõ ràng. `--source-dsn`/`--target-dsn` thay DSN trong cấu hình.
+- `strand promote --objects-post [--objects-from ./objects]` chạy `post` sau bắt kịp, trước khi mở ghi; lỗi thì target vẫn read-only, chạy lại cùng lệnh. Tắt `event_scheduler` ở nguồn khi fence.
+- `strand validate` in cảnh báo "N views, M triggers... not migrated automatically" khi nguồn có các đối tượng này.
+
 ### 7.11 `config schema`
 
 `strand config schema` in JSON Schema của file cấu hình.
