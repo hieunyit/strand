@@ -37,14 +37,18 @@ package verify
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	drivermysql "github.com/go-sql-driver/mysql"
+
 	"strand/internal/checkpoint"
 	"strand/internal/model"
+	mysqlreader "strand/internal/reader/mysql"
 	"strand/internal/snapshot"
 )
 
@@ -88,8 +92,12 @@ func obsOf(s1, d, s2 map[string]string, k string) rowObs {
 // ApplyMark là vị trí log của source đọc ngay sau một lần đọc source (S1).
 type ApplyMark struct {
 	gtid string // source MySQL: gtid_executed
-	lsn  uint64 // source PG
-	text string // dạng in được của vị trí (thông báo lỗi, nội dung watermark)
+	// Source MySQL không GTID (chế độ vị trí binlog): khóa đầu binlog (checkpoint.BinlogKey), tên gốc file,
+	// 0 = không dùng. Mọi Txn đã có trong binlog lúc đọc S1 kết thúc ≤ pos.
+	pos     uint64
+	posBase string
+	lsn     uint64 // source PG
+	text    string // dạng in được của vị trí (thông báo lỗi, nội dung watermark)
 	// standby: P là replay LSN của standby, không có watermark nào được ghi (không có Primary) — chờ
 	// tối đa StandbyGrace (xem đầu file).
 	standby bool
@@ -158,6 +166,23 @@ func (w *LogApplyWaiter) waitLimit(m ApplyMark) time.Duration {
 // Mark — xem ApplyWaiter.
 func (w *LogApplyWaiter) Mark(ctx context.Context) (ApplyMark, error) {
 	if w.SourceEngine != model.EnginePG {
+		if isPos, err := mysqlGTIDOff(ctx, w.Source); err != nil {
+			return ApplyMark{}, err
+		} else if isPos {
+			f, off, err := mysqlreader.MasterStatus(ctx, w.Source)
+			if err != nil {
+				return ApplyMark{}, fmt.Errorf("read source binlog position: %w", err)
+			}
+			base, seq, err := checkpoint.SplitBinlogName(f)
+			if err != nil {
+				return ApplyMark{}, err
+			}
+			key, err := checkpoint.BinlogKey(seq, off)
+			if err != nil {
+				return ApplyMark{}, err
+			}
+			return ApplyMark{pos: key, posBase: base, text: fmt.Sprintf("%s:%d", f, off)}, nil
+		}
 		var g string
 		if err := w.Source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&g); err != nil {
 			return ApplyMark{}, fmt.Errorf("read source gtid_executed: %w", err)
@@ -249,8 +274,38 @@ func (w *LogApplyWaiter) loadApplied(ctx context.Context) (checkpoint.AppliedSet
 	return checkpoint.LoadAppliedSnapshotMySQL(ctx, w.Meta, w.PipelineID, w.SourceEngine)
 }
 
+// mysqlGTIDOff: source MySQL chạy ở chế độ vị trí binlog (gtid_mode OFF, hoặc biến không tồn tại ở 5.5).
+func mysqlGTIDOff(ctx context.Context, db *sql.DB) (bool, error) {
+	var mode string
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode").Scan(&mode); err != nil {
+		var me *drivermysql.MySQLError
+		if errors.As(err, &me) && me.Number == 1193 {
+			return true, nil
+		}
+		return false, fmt.Errorf("read source gtid_mode: %w", err)
+	}
+	return strings.EqualFold(strings.TrimSpace(mode), "OFF"), nil
+}
+
 // missing trả phần của m mà applied chưa phủ ("" = đã phủ).
 func (m ApplyMark) missing(engine model.Engine, applied checkpoint.AppliedSet) (string, error) {
+	if m.pos != 0 {
+		ps, ok := applied.(*checkpoint.MySQLPosAppliedSet)
+		if applied == nil || (ok && ps.IsEmpty()) {
+			return "binlog up to " + m.text, nil
+		}
+		if !ok {
+			return "", fmt.Errorf("applied set of pipeline is %T, not a binlog-position set", applied)
+		}
+		if ps.FileBase() != m.posBase {
+			return "", fmt.Errorf("applied set is for binlog base %q, the source binlog base is %q", ps.FileBase(), m.posBase)
+		}
+		// Lwd là ranh giới: mọi Txn kết thúc ≤ Lwd đã apply.
+		if ps.LwdKey() >= m.pos {
+			return "", nil
+		}
+		return "binlog up to " + m.text, nil
+	}
 	if engine == model.EnginePG {
 		if applied != nil && applied.Lwd().LSN >= m.lsn {
 			return "", nil
@@ -288,6 +343,15 @@ func (w *LogApplyWaiter) Wait(ctx context.Context, m ApplyMark) error {
 		}
 		if miss == "" {
 			return nil
+		}
+		if m.pos != 0 {
+			// Đầu binlog có thể chỉ gồm event không thuộc Txn (Rotate, Format_desc...) nên mốc applied không
+			// bao giờ tới đúng vị trí đó: nếu không còn event Txn nào sau Lwd thì đã phủ.
+			if ps, ok := applied.(*checkpoint.MySQLPosAppliedSet); ok {
+				if free, ferr := mysqlreader.TxnFreeToHead(ctx, w.Source, m.posBase, ps.LwdKey()); ferr == nil && free {
+					return nil
+				}
+			}
 		}
 		if time.Now().After(deadline) {
 			if m.standby {

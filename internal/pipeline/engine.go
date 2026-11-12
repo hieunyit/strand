@@ -501,6 +501,8 @@ type lsnTracker struct {
 
 type seqLSN struct {
 	seq, lsn uint64
+	// start: chế độ vị trí binlog — khóa vị trí BẮT ĐẦU của Txn (lsn là khóa KẾT THÚC). 0 với source PG.
+	start uint64
 }
 
 // routed ghi nhận router đã xử lý xong Txn có commit LSN lsn; seq = 0 nếu Txn không đi qua scheduler.
@@ -516,6 +518,44 @@ func (t *lsnTracker) routed(lsn, seq uint64) {
 	if lsn > t.seen {
 		t.seen = lsn
 	}
+}
+
+// routedPos là routed cho chế độ vị trí binlog (source MySQL không GTID): end/start là khóa kết thúc /
+// bắt đầu của Txn (checkpoint.BinlogKey). Router xử lý tuần tự theo thứ tự binlog nên end tăng ngặt.
+func (t *lsnTracker) routedPos(end, start, seq uint64) {
+	if end == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if seq != 0 {
+		t.q = append(t.q, seqLSN{seq: seq, lsn: end, start: start})
+	}
+	if end > t.seen {
+		t.seen = end
+	}
+}
+
+// pointPos là point cho chế độ vị trí binlog: mốc lớn nhất có thể xác nhận (Vouch) khi mọi seq ≤ lwd
+// đã commit ở target (0 = chưa có gì). Mốc luôn là RANH GIỚI event, để đọc lại tại đó là hợp lệ:
+//   - còn Txn chưa xác nhận: mốc = vị trí BẮT ĐẦU của Txn sớm nhất trong số đó. Mọi Txn trước nó trong
+//     luồng đã commit (seq ≤ lwd) hoặc bị bỏ vì đã apply, và kết thúc ≤ vị trí bắt đầu của nó (Txn
+//     binlog liền nhau, không chồng lấn) nên "mọi Txn kết thúc ≤ mốc đã apply" đúng;
+//   - không còn: mốc = vị trí KẾT THÚC của Txn cuối router đã xử lý.
+//
+// Khác point (PG) dùng lsn−1, vì −1 không phải ranh giới event nên không đọc lại được.
+func (t *lsnTracker) pointPos(lwd uint64) uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	i := 0
+	for i < len(t.q) && t.q[i].seq <= lwd {
+		i++
+	}
+	t.q = t.q[i:]
+	if len(t.q) > 0 {
+		return t.q[0].start
+	}
+	return t.seen
 }
 
 // seenLSN trả LSN lớn nhất router đã xử lý xong.
@@ -545,6 +585,14 @@ func (t *lsnTracker) point(lwd uint64) uint64 {
 // vouchGlobal là hook của compactor (relaxed, source PG): dời mốc của tập toàn cục tới phần
 // đã commit ở target theo scheduler.
 func (p *Pipeline) vouchGlobal(g checkpoint.AppliedSet) {
+	if s, ok := g.(*checkpoint.MySQLPosAppliedSet); ok {
+		// Chế độ vị trí binlog: mốc là ranh giới event (pointPos), không có pending → không tạo hole.
+		// Lỗi Vouch (không thể xảy ra khi pending = nil) vẫn không được nuốt im lặng: không dời mốc.
+		if err := s.Vouch(p.lsns.pointPos(p.sched.Lwd()), nil); err != nil {
+			p.fail(fmt.Errorf("checkpoint vouch: %w", err))
+		}
+		return
+	}
 	if s, ok := g.(*checkpoint.PGAppliedSet); ok {
 		lwd := p.sched.Lwd()
 		pt := p.lsns.point(lwd)

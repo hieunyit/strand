@@ -259,6 +259,13 @@ func TestPosSetRoundTripAndParseErrors(t *testing.T) {
 	if !bs.Equal(s) || bs.Source() != s.Source() || bs.String() != str {
 		t.Fatalf("round trip differs:\n%s\n%s", str, bs)
 	}
+	// Tập của worker: chỉ extra, base 0 → "base":"" và round trip được.
+	w := NewMySQLPosAppliedSet("mysql-bin", 0)
+	w.Add(bpos(2, 700))
+	w.Add(bpos(2, 900))
+	if wb, err := ParseAppliedSet(model.EngineMySQL, w.String()); err != nil || !wb.Equal(w) {
+		t.Fatalf("worker set round trip: %v\n%s", err, w)
+	}
 	// Tập rỗng: chuỗi rỗng; parse "" của MySQL vẫn là GTID set rỗng.
 	if NewMySQLPosAppliedSet("mysql-bin", 0).String() != "" {
 		t.Fatal("empty pos set must serialize to empty string")

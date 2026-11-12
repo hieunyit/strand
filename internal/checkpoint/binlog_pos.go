@@ -103,6 +103,21 @@ func FormatBinlogKey(key uint64) string {
 	return fmt.Sprintf("%06d:%d", seq, off)
 }
 
+// fmtKeyOpt/parseKeyOpt: khóa 0 ("chưa có mốc", ví dụ tập của worker chỉ có extra) được lưu là chuỗi rỗng.
+func fmtKeyOpt(k uint64) string {
+	if k == 0 {
+		return ""
+	}
+	return FormatBinlogKey(k)
+}
+
+func parseKeyOpt(s string) (uint64, error) {
+	if strings.TrimSpace(s) == "" {
+		return 0, nil
+	}
+	return ParseBinlogKey(s)
+}
+
 // ParseBinlogKey đọc "SEQ:OFFSET" (SEQ: số thập phân, OFFSET trong [4, 2^32)).
 func ParseBinlogKey(s string) (uint64, error) {
 	a, b, ok := strings.Cut(strings.TrimSpace(s), ":")
@@ -453,7 +468,7 @@ func (s *MySQLPosAppliedSet) String() string {
 	}
 	pj := posAppliedJSON{
 		Mode: BinlogPosMode, V: BinlogPosFormatVersion, FileBase: s.fileBase, Source: s.source,
-		Base: FormatBinlogKey(s.base), Lwd: FormatBinlogKey(s.LwdKey()), High: FormatBinlogKey(s.HighKey()),
+		Base: fmtKeyOpt(s.base), Lwd: fmtKeyOpt(s.LwdKey()), High: fmtKeyOpt(s.HighKey()),
 		Holes: []posHoleJSON{},
 	}
 	ends := make([]uint64, 0, len(s.holes))
@@ -507,7 +522,7 @@ func ParseBinlogPosApplied(str string) (*MySQLPosAppliedSet, error) {
 	if pj.FileBase == "" {
 		return nil, fmt.Errorf("applied set has no file_base")
 	}
-	base, err := ParseBinlogKey(pj.Base)
+	base, err := parseKeyOpt(pj.Base)
 	if err != nil {
 		return nil, fmt.Errorf("applied set base: %w", err)
 	}
@@ -540,10 +555,10 @@ func ParseBinlogPosApplied(str string) (*MySQLPosAppliedSet, error) {
 		}
 		set.extra[k] = struct{}{}
 	}
-	if got := FormatBinlogKey(set.LwdKey()); pj.Lwd != got {
+	if got := fmtKeyOpt(set.LwdKey()); pj.Lwd != got {
 		return nil, fmt.Errorf("applied set lwd %s inconsistent with holes (expected %s)", pj.Lwd, got)
 	}
-	if got := FormatBinlogKey(set.HighKey()); pj.High != got {
+	if got := fmtKeyOpt(set.HighKey()); pj.High != got {
 		return nil, fmt.Errorf("applied set high %s inconsistent with contents (expected %s)", pj.High, got)
 	}
 	return set, nil
