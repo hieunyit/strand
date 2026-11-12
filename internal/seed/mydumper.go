@@ -71,6 +71,7 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 	// Các section khác (vd. [replication] mô tả source của replica) KHÔNG phải P.
 	// Bản cũ (0.x) ghi khối "SHOW MASTER STATUS:" với "Log:", "Pos:", "GTID:" — vẫn đọc được.
 	section := ""
+	gtidOpen := false
 	inPosSection := func() bool { return section == "" || section == "source" || section == "master" }
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -81,6 +82,14 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 			section = strings.ToLower(strings.Trim(line, "[]"))
 			continue
 		}
+		// GTID set nhiều UUID của dạng cũ (nguồn 5.7: Executed_Gtid_Set ngăn các UUID bằng ",\n") trải trên nhiều
+		// dòng: dòng trước kết thúc bằng "," thì dòng này là phần tiếp theo của tập (không bỏ sót UUID nào).
+		if gtidOpen && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "[") {
+			meta.GTID += strings.TrimSpace(line)
+			gtidOpen = strings.HasSuffix(line, ",")
+			continue
+		}
+		gtidOpen = false
 		if strings.HasPrefix(line, "#") {
 			body := strings.TrimSpace(strings.TrimLeft(line, "#"))
 			if k, v, ok := strings.Cut(body, "="); ok && inPosSection() {
@@ -141,6 +150,7 @@ func ParseMydumperMetadata(path string) (*MydumperMeta, error) {
 			}
 			if len(parts) == 2 {
 				meta.GTID = strings.TrimSpace(parts[1])
+				gtidOpen = strings.HasSuffix(meta.GTID, ",")
 			}
 		} else if strings.Contains(lower, "lock mode") || strings.Contains(lower, "lock_mode") || strings.Contains(lower, "sync-thread-lock-mode") || strings.Contains(lower, "no-locks") || strings.Contains(lower, "no_locks") || strings.Contains(lower, "no-lock") || strings.Contains(lower, "no_lock") {
 			if strings.Contains(lower, "no-locks") || strings.Contains(lower, "no_locks") || strings.Contains(lower, "no-lock") || strings.Contains(lower, "no_lock") {
