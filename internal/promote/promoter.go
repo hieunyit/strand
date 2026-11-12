@@ -19,6 +19,7 @@ type Promoter struct {
 	targetDriver TargetDriver
 	logger       *slog.Logger
 	sequences    []SequenceInfo
+	autoInc      []AutoIncCounter // counter AUTO_INCREMENT của source MySQL, đọc sau fence ở bước 4
 }
 
 // NewPromoter khởi tạo Promoter.
@@ -356,6 +357,23 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 			}
 		}
 
+		// Counter AUTO_INCREMENT của source (sau fence): target không được cấp lại id source đã giao
+		// (dòng cao nhất có thể đã bị xóa nên counter > MAX(id)+1). MySQL target: ALTER TABLE ngay;
+		// PG target: thành sàn setval của sequence gắn cột (bên dưới). Source không đọc được (failover):
+		// bỏ qua, cảnh báo.
+		if rd, ok := p.sourceDriver.(AutoIncrementReader); ok && p.sourceDriver.IsReachable(ctx) {
+			counters, err := rd.ReadAutoIncrements(ctx)
+			if err != nil {
+				return progress, fmt.Errorf("read source AUTO_INCREMENT counters: %w", err)
+			}
+			p.autoInc = counters
+			if ap, ok := p.targetDriver.(AutoIncrementApplier); ok {
+				if err := ap.ApplyAutoIncrement(ctx, counters); err != nil {
+					return progress, err
+				}
+			}
+		}
+
 		// Chốt giá trị cho từng sequence trước, lưu kế hoạch, rồi mới setval: nếu bị ngắt giữa chừng,
 		// lần chạy lại dùng đúng các giá trị đã chốt (không hỏi lại, không hạ xuống).
 		needsDecision := false
@@ -392,6 +410,9 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 				}
 				seq.CurrentValue = maxCol
 				seq.FinalValue = further(*seq, seq.FinalValue, stepAhead(*seq, maxCol, margin))
+				if floor, ok := autoIncFloor(p.autoInc, seq.Table); ok {
+					seq.FinalValue = further(*seq, seq.FinalValue, floor)
+				}
 				continue
 			}
 

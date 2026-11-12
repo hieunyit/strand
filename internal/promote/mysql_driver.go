@@ -22,6 +22,7 @@ type MySQLSourceDriver struct {
 	appUsers     []string
 	logger       *slog.Logger
 	hold         *ftwrlHold
+	rename       map[string]string
 }
 
 // NewMySQLSourceDriver khởi tạo MySQLSourceDriver.

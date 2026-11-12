@@ -14,6 +14,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/cobra"
 
+	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/promote"
@@ -33,6 +34,7 @@ var (
 	promoteSchemas          []string
 	promoteSourceAppRoles   []string
 	promoteFenceTimeout     time.Duration
+	promoteRename           map[string]string
 )
 
 // isPGDSN nhận diện DSN PostgreSQL dạng URL.
@@ -56,6 +58,14 @@ func newPromoteCmd() *cobra.Command {
 				promotePipelineID = "default"
 			}
 
+			// tables.rename từ cấu hình pipeline (nếu có -c): ánh xạ bảng nguồn → target cho counter AUTO_INCREMENT.
+			if cfgPath != "" {
+				c, err := config.LoadFile(cfgPath)
+				if err != nil {
+					return err
+				}
+				promoteRename = c.Tables.Rename
+			}
 			var seqOverrides map[string]int64
 			if promoteOverrideSeqsJSON != "" {
 				if err := json.Unmarshal([]byte(promoteOverrideSeqsJSON), &seqOverrides); err != nil {
@@ -119,7 +129,7 @@ func newPromoteCmd() *cobra.Command {
 							return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 						}
 						defer sourceDB.Close()
-						mySrc := promote.NewMySQLSourceDriver(sourceDB).WithAppUsers(promoteSourceAppRoles...).
+						mySrc := promote.NewMySQLSourceDriver(sourceDB).WithAppUsers(promoteSourceAppRoles...).WithRename(promoteRename).
 							WithFenceTimeout(promoteFenceTimeout).WithLogger(logger)
 						defer mySrc.ReleaseFence()
 						sourceDriver = mySrc
@@ -173,7 +183,7 @@ func newPromoteCmd() *cobra.Command {
 						return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 					}
 					defer sourceDB.Close()
-					mySrc := promote.NewMySQLSourceDriver(sourceDB).WithAppUsers(promoteSourceAppRoles...).
+					mySrc := promote.NewMySQLSourceDriver(sourceDB).WithAppUsers(promoteSourceAppRoles...).WithRename(promoteRename).
 						WithFenceTimeout(promoteFenceTimeout).WithLogger(logger)
 					defer mySrc.ReleaseFence()
 					sourceDriver = mySrc

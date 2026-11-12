@@ -95,6 +95,13 @@ func TestPromote5x_E2E_PositionMode(t *testing.T) {
 				src.exec(t, fmt.Sprintf("INSERT INTO app.ai (v) VALUES ('tail%d')", i),
 					fmt.Sprintf("INSERT INTO app.t1 (id, ver, v, n) VALUES (%d, 1, 'tail', 0) ON DUPLICATE KEY UPDATE v='tail2'", 1000+i))
 			}
+			// Source xóa các id cao nhất của app.ai: counter nguồn > MAX(id)+1. Target không được cấp lại id đó.
+			src.exec(t, "INSERT INTO app.ai (v) VALUES ('doomed1'), ('doomed2'), ('doomed3')",
+				"DELETE FROM app.ai WHERE v LIKE 'doomed%'")
+			var srcCounter int64
+			if err := src.DB.QueryRow("SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA='app' AND TABLE_NAME='ai'").Scan(&srcCounter); err != nil {
+				t.Fatal(err)
+			}
 			src.exec(t, "FLUSH LOGS")
 
 			// Session app mở sẵn: phải bị kill khi fence.
@@ -138,7 +145,7 @@ func TestPromote5x_E2E_PositionMode(t *testing.T) {
 			}
 			okWrites, blocked := 0, false
 			for i := 0; i < 60 && !blocked; i++ {
-				_, err := sc.ExecContext(context.Background(), fmt.Sprintf("INSERT INTO app.ai (v) VALUES ('sup%d')", i))
+				_, err := sc.ExecContext(context.Background(), fmt.Sprintf("INSERT INTO app.m (id, ver, v) VALUES (%d, 1, 'sup')", 100000+i))
 				if err == nil {
 					okWrites++
 					time.Sleep(300 * time.Millisecond)
@@ -151,12 +158,12 @@ func TestPromote5x_E2E_PositionMode(t *testing.T) {
 				t.Fatalf("SUPER user could still write during promote\n%s", buf.String())
 			}
 			for i := 0; i < 3; i++ { // vẫn bị chặn (khóa được giữ suốt bước 3)
-				if _, err := sc.ExecContext(context.Background(), "INSERT INTO app.ai (v) VALUES ('sup-late')"); err == nil {
+				if _, err := sc.ExecContext(context.Background(), "INSERT INTO app.m (id, ver, v) VALUES (999999, 1, 'sup-late')"); err == nil {
 					t.Fatalf("SUPER write succeeded while FTWRL should be held\n%s", buf.String())
 				}
 			}
 			var n int
-			if err := src.DB.QueryRow("SELECT COUNT(*) FROM app.ai WHERE v LIKE 'sup%'").Scan(&n); err != nil || n != okWrites {
+			if err := src.DB.QueryRow("SELECT COUNT(*) FROM app.m WHERE v LIKE 'sup%'").Scan(&n); err != nil || n != okWrites {
 				t.Fatalf("SUPER rows on source = %d (err %v), want %d (only writes before the lock)", n, err, okWrites)
 			}
 			// Session app đã bị kill.
@@ -224,6 +231,10 @@ func TestPromote5x_E2E_PositionMode(t *testing.T) {
 			var minNew int64
 			if err := dst.DB.QueryRow("SELECT MIN(id) FROM app.ai WHERE v LIKE 'new%'").Scan(&minNew); err != nil || minNew <= maxSrc {
 				t.Fatalf("new auto_increment ids start at %d, must be > %d (%v)", minNew, maxSrc, err)
+			}
+			// Counter nguồn (sau khi xóa các id cao nhất) phải được mang sang: id đầu tiên ≥ counter nguồn.
+			if srcCounter < maxSrc+3 || minNew < srcCounter {
+				t.Fatalf("first target id %d must be >= source counter %d (surviving max id %d)", minNew, srcCounter, maxSrc)
 			}
 		})
 	}
