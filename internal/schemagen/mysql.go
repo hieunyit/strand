@@ -181,6 +181,12 @@ const utf8mb4Default57 = "utf8mb4_general_ci"
 // pinUTF8MB4Collation57 thêm COLLATE tường minh vào DDL do 5.7 sinh ra: sau mỗi `CHARACTER SET utf8mb4`
 // của cột không kèm COLLATE và sau `CHARSET=utf8mb4` của bảng nếu bảng không có `COLLATE=`. Hàm thuần.
 func pinUTF8MB4Collation57(ddl string) (string, error) {
+	return pinUTF8MB4Collation(ddl, utf8mb4Default57)
+}
+
+// pinUTF8MB4Collation như pinUTF8MB4Collation57 nhưng với collation mặc định thật của utf8mb4 trên nguồn
+// (MariaDB 11.x mặc định utf8mb4_uca1400_ai_ci, không phải utf8mb4_general_ci).
+func pinUTF8MB4Collation(ddl, defColl string) (string, error) {
 	ts, err := lex(ddl)
 	if err != nil {
 		return "", err
@@ -229,10 +235,10 @@ func pinUTF8MB4Collation57(ddl string) (string, error) {
 		if vi+1 < len(ts) && ts[vi+1].keyword(ddl, "COLLATE") {
 			continue
 		}
-		adds = append(adds, ins{ts[vi].end, " COLLATE " + utf8mb4Default57})
+		adds = append(adds, ins{ts[vi].end, " COLLATE " + defColl})
 	}
 	if tableCharsetEnd >= 0 && !tableHasCollate {
-		adds = append(adds, ins{tableCharsetEnd, " COLLATE=" + utf8mb4Default57})
+		adds = append(adds, ins{tableCharsetEnd, " COLLATE=" + defColl})
 	}
 	sort.Slice(adds, func(a, b int) bool { return adds[a].at < adds[b].at })
 	for i := len(adds) - 1; i >= 0; i-- {
@@ -279,17 +285,45 @@ func mysqlToMySQL(ctx context.Context, r Request, t model.TableID) ([]string, []
 			return nil, nil, err
 		}
 	}
-	if ver.Legacy57() || ver.IsMariaDB() {
-		// SHOW CREATE TABLE của 5.7 (và MariaDB) bỏ COLLATE khi là mặc định của charset; target 8.x sẽ lấy mặc định
+	var collWarnings []string
+	if ver.Legacy57() {
+		// SHOW CREATE TABLE của 5.7 bỏ COLLATE khi là mặc định của charset; target 8.x sẽ lấy mặc định
 		// khác (utf8mb4_0900_ai_ci) nên phải ghi rõ collation của nguồn.
 		if ddl, err = pinUTF8MB4Collation57(ddl); err != nil {
 			return nil, nil, err
 		}
 	}
+	if ver.IsMariaDB() {
+		// MariaDB cũng bỏ COLLATE khi là mặc định của charset, mà mặc định thật của nguồn có thể không phải
+		// general_ci (11.x: uca1400_ai_ci): đọc từ nguồn rồi ghi rõ; sau đó ánh xạ collation đích không có.
+		def, err := MariaDBCharsetDefault(ctx, r.Source, "utf8mb4")
+		if err != nil {
+			return nil, nil, err
+		}
+		if ddl, err = pinUTF8MB4Collation(ddl, def); err != nil {
+			return nil, nil, err
+		}
+		has, err := TargetCollations(ctx, r.Target)
+		if err != nil {
+			return nil, nil, err
+		}
+		cp, err := PlanMariaDBCollations(ctx, r.Source, has, t.Schema, t.Table)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ddl, err = rewriteCollations(ddl, cp.Rewrite); err != nil {
+			return nil, nil, err
+		}
+		collWarnings = cp.Warnings
+		var dbw []string
+		collation, dbw = MapDatabaseCollation(t.Schema, collation, has, ver.AtLeast(10, 5, 0))
+		collWarnings = append(collWarnings, dbw...)
+	}
 	warnings, err := mysqlOmitted(ctx, r.Source, t)
 	if err != nil {
 		return nil, nil, err
 	}
+	warnings = append(warnings, collWarnings...)
 	return []string{"CREATE DATABASE IF NOT EXISTS " + quote(dst.Schema, false) + " CHARACTER SET " + quote(charset, false) + " COLLATE " + quote(collation, false), ddl}, warnings, nil
 }
 func mysqlOmitted(ctx context.Context, db *sql.DB, t model.TableID) ([]string, error) {

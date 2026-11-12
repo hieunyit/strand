@@ -238,13 +238,39 @@ func LoadCollationCharsets(ctx context.Context, db *sql.DB) (map[uint64]string, 
 	}
 	defer rows.Close()
 	out := map[uint64]string{}
+	generic := false
 	for rows.Next() {
+		var id sql.NullInt64
+		var cs sql.NullString
+		if err := rows.Scan(&id, &cs); err != nil {
+			return nil, err
+		}
+		if !id.Valid || !cs.Valid {
+			// MariaDB 11.x: COLLATIONS có thêm dòng collation "chung" (uca1400_ai_ci) không có id/charset.
+			generic = true
+			continue
+		}
+		out[uint64(id.Int64)] = cs.String
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !generic {
+		return out, nil
+	}
+	// Collation đầy đủ (utf8mb4_uca1400_ai_ci...) của MariaDB 11.x nằm ở COLLATION_CHARACTER_SET_APPLICABILITY.
+	r2, err := db.QueryContext(ctx, "SELECT ID, CHARACTER_SET_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY WHERE ID IS NOT NULL")
+	if err != nil {
+		return nil, fmt.Errorf("read source collations (applicability): %w", err)
+	}
+	defer r2.Close()
+	for r2.Next() {
 		var id uint64
 		var cs string
-		if err := rows.Scan(&id, &cs); err != nil {
+		if err := r2.Scan(&id, &cs); err != nil {
 			return nil, err
 		}
 		out[id] = cs
 	}
-	return out, rows.Err()
+	return out, r2.Err()
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -164,7 +165,11 @@ func Build(ctx context.Context, r Request) (*Plan, error) {
 		}
 		p.Statements = append(p.Statements, ddl...)
 		foreign = append(foreign, fk...)
-		p.Warnings = append(p.Warnings, w...)
+		for _, x := range w { // cùng cảnh báo (vd collation mặc định của database) chỉ in một lần
+			if !slices.Contains(p.Warnings, x) {
+				p.Warnings = append(p.Warnings, x)
+			}
+		}
 		p.Tables = append(p.Tables, dst)
 	}
 	p.Statements = append(p.Statements, foreign...)

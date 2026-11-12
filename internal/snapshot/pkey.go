@@ -258,7 +258,7 @@ func (c *PKCodec) SameOrder(o *PKCodec) error {
 		a, b := c.Cols[i], o.Cols[i]
 		// Nguồn 5.7 báo collation "utf8_general_ci", đích 8.x báo "utf8mb3_general_ci": cùng một collation.
 		if a.Name != b.Name || a.Kind != b.Kind || !strings.EqualFold(a.SQLType, b.SQLType) ||
-			!strings.EqualFold(mysqlver.NormalizeCollation(a.Collation), mysqlver.NormalizeCollation(b.Collation)) {
+			!mysqlver.SameCollation(a.Collation, b.Collation) {
 			return fmt.Errorf("primary key column %d differs: %s %s %s %s vs %s %s %s %s", i+1,
 				a.Name, a.Kind, a.SQLType, a.Collation, b.Name, b.Kind, b.SQLType, b.Collation)
 		}

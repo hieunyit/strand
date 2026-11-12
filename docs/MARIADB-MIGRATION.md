@@ -1,8 +1,8 @@
-# Chuyển MariaDB 10.6 lên MySQL 8.x bằng Strand
+# Chuyển MariaDB 10.3–11.4 lên MySQL 8.x bằng Strand
 
-Strand chép toàn bộ dữ liệu từ MariaDB 10.6 sang MySQL 8.x, sau đó đồng bộ liên tục các thay đổi (đọc binlog) cho tới khi bạn cutover (`promote`) ứng dụng sang MySQL. Ứng dụng vẫn ghi vào MariaDB trong suốt quá trình. Thời gian dừng ghi chỉ là lúc promote, thường vài giây.
+Strand chép toàn bộ dữ liệu từ MariaDB (10.3 đến 11.4, xem mục 1) sang MySQL 8.x, sau đó đồng bộ liên tục các thay đổi (đọc binlog) cho tới khi bạn cutover (`promote`) ứng dụng sang MySQL. Ứng dụng vẫn ghi vào MariaDB trong suốt quá trình. Thời gian dừng ghi chỉ là lúc promote, thường vài giây.
 
-Các lệnh trong mục A đã được chạy thật trên MariaDB 10.6.3 → MySQL 8.4.
+Các lệnh trong mục A đã được chạy thật trên MariaDB 10.6.3 → MySQL 8.4. Các bản MariaDB khác: xem bảng phiên bản ở mục 1.
 
 Tài liệu này chỉ ghi phần riêng của MariaDB. Phần dùng chung với MySQL 5.x (build, systemd, theo dõi) nằm trong [MYSQL-5X-MIGRATION.md](MYSQL-5X-MIGRATION.md).
 
@@ -58,6 +58,7 @@ binlog_format    = ROW
 binlog_row_image = FULL
 log_bin_compress = OFF
 binlog_expire_logs_seconds = 864000   # giữ binlog 10 ngày, đủ cho snapshot và các lần dừng
+# MariaDB < 10.6.1 (10.3, 10.4, 10.5) không có biến trên, dùng: expire_logs_days = 10
 ```
 
 ### Bước 2. Tạo user cho Strand trên MariaDB
@@ -68,7 +69,7 @@ GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'strand'@'%';
 GRANT SELECT, LOCK TABLES ON app.* TO 'strand'@'%';
 ```
 
-`REPLICATION CLIENT` trên MariaDB 10.6 là tên cũ của `BINLOG MONITOR`. Strand cần quyền này để đọc vị trí binlog.
+`REPLICATION CLIENT` là quyền Strand cần để đọc vị trí binlog. Từ MariaDB 10.5.2 nó là tên cũ của `BINLOG MONITOR` (cả hai cách ghi đều được); 10.3 và 10.4 chỉ có `REPLICATION CLIENT`.
 
 ### Bước 3. Chuẩn bị MySQL 8.x đích
 
@@ -227,8 +228,9 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 
 | Hạng mục | Trạng thái |
 | --- | --- |
-| Nguồn MariaDB 10.6.x | Hỗ trợ (đã chạy thật trên 10.6.3 và 10.6 mới nhất) |
-| MariaDB 10.5 trở xuống, 10.7 trở lên, 11.x | Bị từ chối: `only MariaDB 10.6 is supported` |
+| Nguồn MariaDB 10.3, 10.4, 10.5, 10.6, 10.11, 11.4 | Hỗ trợ, đã chạy e2e thật trên từng bản (bảng bên dưới) |
+| MariaDB 10.7–10.10, 11.0–11.3, 11.5 trở lên | Nhận nhưng chưa kiểm e2e |
+| MariaDB 10.2 trở xuống | Bị từ chối: `MariaDB 10.3 or later is required` |
 | Đích MySQL 8.4 | Hỗ trợ (có e2e). MySQL 8.0: code cho phép, chưa có e2e |
 | Đích PostgreSQL từ nguồn MariaDB | Bị từ chối (chưa kiểm) |
 | Snapshot ban đầu + stream thay đổi | Có |
@@ -240,19 +242,30 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 | Bảng InnoDB | Có |
 | Bảng MyISAM / Aria / MEMORY | Bị từ chối. Đổi sang InnoDB trên nguồn (`ALTER TABLE ... ENGINE=InnoDB`) hoặc loại ra |
 | Bảng không có PRIMARY KEY | Bị từ chối. Thêm PRIMARY KEY hoặc loại ra |
-| Kiểu `INET6` | Bị từ chối (MySQL không có kiểu này) |
+| Kiểu `INET6`, `INET4`, `UUID` (10.5+/10.10+/10.7+) | Bị từ chối (MySQL không có kiểu này) |
+| `PERIOD FOR` / `WITHOUT OVERLAPS` (application-time, 10.4+/10.5+) | Bị từ chối |
 | Cột `COMPRESSED` | Bị từ chối |
 | Bảng `WITH SYSTEM VERSIONING` | Bị từ chối |
 | `SEQUENCE` | Bỏ qua, có cảnh báo. Tự tạo lại cơ chế tương đương trên MySQL |
-| Collation riêng của MariaDB (vd `utf8mb4_general_nopad_ci`) | Bị từ chối, liệt kê cột và bảng |
+| Collation riêng của MariaDB (`nopad`, `uca1400`) | Ánh xạ sang collation MySQL, xem mục 2.1. Cột khóa mà chỉ có ánh xạ gần đúng thì bị từ chối |
 | `log_bin_compress=ON` | Bị từ chối |
 | View, trigger, procedure, function, event, user | **Không chép**. Tạo lại trên MySQL bằng tay (nhiều cú pháp khác MariaDB) |
 | Seed bằng mysqldump hoặc mariabackup | Chưa kiểm với MariaDB. Dùng snapshot logic (mặc định, như mục A) |
 | Đọc từ replica MariaDB, đổi máy nguồn giữa chừng | Không hỗ trợ (chế độ vị trí binlog) |
 
+### Bảng phiên bản MariaDB
+
+| Bản | e2e | Khác biệt đã xử lý |
+| --- | --- | --- |
+| 10.3, 10.4, 10.5 | Có | Retention binlog dùng `expire_logs_days` (không có `binlog_expire_logs_seconds`); charset tên `utf8` (đích là `utf8mb3`) |
+| 10.6 | Có | Chuẩn của tài liệu này |
+| 10.11 | Có | Như 10.6 |
+| 11.4 | Có | Mặc định `utf8mb4` là `utf8mb4_uca1400_ai_ci` (đọc từ nguồn, ánh xạ ở mục 2.1); image không có client `mysql` (Strand không cần) |
+
 ## 2. Khác biệt MariaDB → MySQL cần biết
 
-- **Collation mặc định:** `utf8mb4` của MariaDB 10.6 mặc định là `utf8mb4_general_ci`, còn MySQL 8 là `utf8mb4_0900_ai_ci`. Strand **giữ nguyên `utf8mb4_general_ci`** trên bảng đích để so sánh chuỗi và khóa duy nhất cho kết quả giống hệt nguồn. Muốn đổi sang `0900`, làm sau cutover và kiểm trùng khóa trước.
+- **Collation mặc định:** `utf8mb4` của MariaDB đến 10.11 mặc định là `utf8mb4_general_ci`, còn MySQL 8 là `utf8mb4_0900_ai_ci`. Strand đọc collation mặc định thật từ nguồn (11.x có thể là `uca1400_ai_ci`, hoặc đặt bằng `character_set_collations`) và ghi tường minh vào bảng đích. Với `general_ci` thì giữ nguyên để so sánh chuỗi và khóa duy nhất giống hệt nguồn. Muốn đổi sang `0900`, làm sau cutover và kiểm trùng khóa trước.
+- **Tên charset:** `utf8` ở MariaDB ≤ 10.5 là `utf8mb3` ở 10.6+ và MySQL 8; Strand xử lý cả hai.
 - **JSON:** trên MariaDB, `JSON` thực chất là `LONGTEXT` kèm `CHECK (json_valid(...))`. Bảng đích cũng là `LONGTEXT` có cùng CHECK, nội dung giữ nguyên từng byte. Muốn dùng kiểu `JSON` thật của MySQL, `ALTER` sau cutover.
 - **DEFAULT dạng hàm** (`DEFAULT uuid()`, `rand()`, `curdate()`, `concat(...)`) và **DEFAULT trên TEXT/BLOB/JSON** (`TEXT DEFAULT 'x'`): MySQL không nhận cú pháp này của MariaDB. Khi tạo bảng đích, Strand tự đổi sang dạng biểu thức `DEFAULT (uuid())`, `DEFAULT ('x')`, ý nghĩa không đổi.
 - **Cột sinh tự động** (`AS (...) VIRTUAL`, `PERSISTENT`/`STORED`) và **cột `INVISIBLE`**: được giữ nguyên (đã kiểm).
@@ -261,18 +274,34 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 - **MariaDB 10.6.3** là bản ổn định đầu tiên của dòng 10.6 (2021). Nên nâng lên bản 10.6 mới nhất trước khi chuyển. Đây chỉ là nâng bản vá, ít rủi ro, và Strand chạy được với cả hai.
 - **performance_schema** trên MariaDB tắt mặc định. Vì vậy `validate` và `sync` in vài cảnh báo `cannot verify per-session binlog settings` hoặc `cannot list stale instance connections`. Không ảnh hưởng đồng bộ. Hãy tự bảo đảm không ứng dụng nào đặt `binlog_format` khác ROW ở mức session.
 
+### 2.1. Ánh xạ collation
+
+Collation mà MySQL đích không có sẽ được ánh xạ khi tạo bảng, cột và database (đích dùng collation ở cột "MySQL"). `strand validate` in cảnh báo nêu bảng, cột và ánh xạ.
+
+| MariaDB | MySQL | Loại | Dùng cho cột khóa (PK/UNIQUE) |
+| --- | --- | --- | --- |
+| `utf8mb4_nopad_bin` | `utf8mb4_0900_bin` | Tương đương hoàn toàn (cùng NO PAD, so theo code point; đã kiểm ORDER BY và so sánh kể cả dấu cách cuối trên cả hai server) | Được từ MariaDB 10.5. Ở 10.3/10.4, `nopad_bin` coi `'a'` và `'a\0'` là bằng nhau (lỗi của MariaDB, sửa ở 10.5) nên chỉ gần đúng: khóa bị từ chối |
+| `*_nopad_ci` / `*_nopad_bin` khác (vd `utf8mb4_general_nopad_ci`) | bản PAD SPACE cùng tên (`utf8mb4_general_ci`) | Gần đúng: `'a'` và `'a '` bằng nhau trên đích, khác nhau trên nguồn | Từ chối |
+| `utf8mb4_uca1400_ai_ci`, `_as_ci`, `_as_cs` | `utf8mb4_0900_ai_ci`, `_as_ci`, `_as_cs` | Gần đúng: Unicode 14 so với 9, NO PAD so với PAD SPACE | Từ chối |
+| `utf8mb4_uca1400_ai_cs` | `utf8mb4_0900_as_cs` | Gần đúng, chặt hơn (MySQL không có ai_cs) | Từ chối |
+| `utf8mb3_uca1400_*ci` / `*cs` | `utf8mb3_unicode_ci` / `utf8mb3_bin` | Gần đúng | Từ chối |
+
+Với cột khóa, so sánh khác nhau có thể gộp hai khóa khác nhau ở nguồn thành một ở đích (mất dữ liệu), nên Strand từ chối và nêu tên cột. Cách sửa: đổi collation cột đó trên nguồn (vd `utf8mb4_general_ci`, `utf8mb4_bin`, `utf8mb4_nopad_bin`) hoặc loại bảng ra. Cột không phải khóa vẫn sắp xếp và so sánh khác nguồn một chút (hoa/thường, dấu, dấu cách cuối) trên truy vấn `WHERE`/`ORDER BY` của ứng dụng: xem cảnh báo và thử trước. Collation không có ánh xạ nào thì bị từ chối.
+
 ## 3. Lỗi thường gặp
 
 | Thông báo | Sửa |
 | --- | --- |
-| `only MariaDB 10.6 is supported` | Nâng hoặc hạ nguồn về MariaDB 10.6 trước |
+| `MariaDB 10.3 or later is required` | Nâng nguồn lên MariaDB 10.3 trở lên |
 | `binary logging is disabled on the source` | Bật `log-bin` và `server-id` trong `my.cnf`, restart |
 | `binlog_format must be ROW` | `SET GLOBAL binlog_format=ROW`, ghi vào `my.cnf`, cho ứng dụng kết nối lại |
 | `log_bin_compress is ON` | `SET GLOBAL log_bin_compress=OFF`, ghi vào `my.cnf` |
 | `... has MariaDB-only type inet6` | Đổi cột sang `VARCHAR(39)` hoặc `BINARY(16)` trên nguồn, hoặc loại bảng ra |
 | `... is a MariaDB COMPRESSED column` | Bỏ thuộc tính `COMPRESSED` trên nguồn, hoặc loại bảng ra |
 | `... system-versioned table` | `ALTER TABLE ... DROP SYSTEM VERSIONING` trên nguồn, hoặc loại bảng ra |
-| `source collation(s) not available on the target: ...` | Đổi cột hoặc bảng sang collation MySQL có (vd `utf8mb4_general_ci`, `utf8mb4_bin`) |
+| `column(s) in a PRIMARY KEY or UNIQUE index use a MariaDB collation without an exact MySQL equivalent` | Đổi collation cột khóa trên nguồn, xem mục 2.1 |
+| `source collation(s) not available on the target and without a mapping` | Đổi cột hoặc bảng sang collation MySQL có (vd `utf8mb4_general_ci`, `utf8mb4_bin`) |
+| `uses a MariaDB application-time PERIOD` | Bỏ `PERIOD FOR` trên nguồn, hoặc loại bảng ra |
 | `uses nontransactional/unsupported engine MyISAM` (hoặc Aria) | `ALTER TABLE ... ENGINE=InnoDB` trên nguồn |
 | `has no primary key` | Thêm PRIMARY KEY |
 | `Unknown database 'strand'` | Tạo database `strand` trên đích (mục A bước 3) |
@@ -295,11 +324,11 @@ Loại bảng ra bằng `tables.exclude: ["app.bang_x"]` trong file cấu hình.
 Chạy bằng `root`, thay `app` bằng database cần chuyển. `strand validate` tự kiểm các mục 1–7 và 10. Chạy trước các lệnh này để biết sẵn cần sửa gì. Mục 8 Strand không kiểm, bạn phải tự xử lý.
 
 ```sql
--- 1. Phiên bản: phải là 10.6.x
+-- 1. Phiên bản: 10.3 trở lên
 SELECT VERSION();
 
 -- 2. Binlog. Cần: 1, khác 0, ROW, FULL, 0, đủ lớn (0 = không tự xóa)
-SELECT @@log_bin, @@server_id, @@binlog_format, @@binlog_row_image, @@log_bin_compress, @@binlog_expire_logs_seconds;
+SELECT @@log_bin, @@server_id, @@binlog_format, @@binlog_row_image, @@log_bin_compress, @@binlog_expire_logs_seconds;  -- 10.3–10.5: dùng @@expire_logs_days
 SHOW MASTER STATUS;   -- phải có 1 dòng
 SHOW BINARY LOGS;
 
@@ -321,7 +350,7 @@ WHERE TABLE_SCHEMA='app' AND TABLE_TYPE IN ('SEQUENCE','SYSTEM VERSIONED');
 SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA='app' AND (DATA_TYPE IN ('inet6','inet4','uuid') OR COLUMN_TYPE LIKE '%compressed%');
 
--- 7. Collation đang dùng: đối chiếu với SHOW COLLATION trên MySQL đích (đáng ngờ: tên có "nopad")
+-- 7. Collation đang dùng: tên có "nopad" hoặc "uca1400" sẽ được ánh xạ (mục 2.1)
 SELECT DISTINCT COLLATION_NAME FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA='app' AND COLLATION_NAME IS NOT NULL;
 
@@ -336,6 +365,6 @@ SELECT User, Host FROM mysql.user;
 SELECT TABLE_NAME, TABLE_ROWS, ROUND((DATA_LENGTH+INDEX_LENGTH)/1024/1024) AS MB
 FROM information_schema.TABLES WHERE TABLE_SCHEMA='app' ORDER BY MB DESC;
 
--- 10. Quyền của user strand. Cần: REPLICATION SLAVE, BINLOG MONITOR (= REPLICATION CLIENT) ON *.*; SELECT, LOCK TABLES ON app.*
+-- 10. Quyền của user strand. Cần: REPLICATION SLAVE, REPLICATION CLIENT (= BINLOG MONITOR từ 10.5.2) ON *.*; SELECT, LOCK TABLES ON app.*
 SHOW GRANTS FOR 'strand'@'%';
 ```

@@ -1,7 +1,8 @@
 package e2e
 
-// Nhóm test nguồn MariaDB 10.6 (chế độ vị trí binlog, không GTID) → MySQL 8.4.
-// Image nguồn: STRAND_E2E_MDB_IMAGE (mặc định mariadb:10.6); đích luôn là mysql:8.4.
+// Nhóm test nguồn MariaDB 10.3+ (chế độ vị trí binlog, không GTID) → MySQL 8.4.
+// Image nguồn: STRAND_E2E_MDB_IMAGE (mặc định mariadb:10.6; đã chạy trên 10.3/10.4/10.5/10.6/10.11/11.4);
+// đích luôn là mysql:8.4. Chạy từng phiên bản: for v in 10.3 ...; do STRAND_E2E_MDB_IMAGE=mariadb:$v go test -run TestMDB .
 
 import (
 	"bytes"
@@ -32,9 +33,35 @@ func mdbImage() string {
 // startMariaDB: nguồn MariaDB (env MARIADB_ROOT_PASSWORD, không GTID); kết nối dữ liệu dùng charset utf8mb4.
 func startMariaDB(t *testing.T, alias string, serverID int) *mysqlNode {
 	t.Helper()
+	return startMariaDBImage(t, mdbImage(), alias, serverID)
+}
+
+// mdbVersion: (major, minor) của server MariaDB, vd (10, 6).
+func mdbVersion(t *testing.T, db *sql.DB) (int, int) {
+	t.Helper()
+	var ver string
+	if err := db.QueryRow("SELECT VERSION()").Scan(&ver); err != nil {
+		t.Fatal(err)
+	}
+	ver = strings.TrimPrefix(ver, "5.5.5-")
+	var maj, min int
+	if _, err := fmt.Sscanf(ver, "%d.%d", &maj, &min); err != nil {
+		t.Fatalf("parse version %q: %v", ver, err)
+	}
+	return maj, min
+}
+
+// mdbAtLeast: server MariaDB >= maj.min.
+func mdbAtLeast(t *testing.T, db *sql.DB, maj, min int) bool {
+	a, b := mdbVersion(t, db)
+	return a > maj || a == maj && b >= min
+}
+
+func startMariaDBImage(t *testing.T, image, alias string, serverID int) *mysqlNode {
+	t.Helper()
 	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
-		Image:        mdbImage(),
+		Image:        image,
 		ExposedPorts: []string{"3306/tcp"},
 		Env:          map[string]string{"MARIADB_ROOT_PASSWORD": "dev"},
 		Cmd: []string{"--log-bin=mysql-bin", fmt.Sprintf("--server-id=%d", serverID), "--binlog-format=ROW",
@@ -47,7 +74,7 @@ func startMariaDB(t *testing.T, alias string, serverID int) *mysqlNode {
 		t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	}
 	if err != nil {
-		t.Fatalf("start %s: %v", mdbImage(), err)
+		t.Fatalf("start %s: %v", image, err)
 	}
 	host, _ := c.Host(ctx)
 	port, _ := c.MappedPort(ctx, "3306")
@@ -80,7 +107,7 @@ const mdbPass = "strandpw"
 
 // mdbSourceUsers: user strand với đúng bộ quyền tối thiểu trong tài liệu (REPLICATION SLAVE, REPLICATION
 // CLIENT, SELECT, LOCK TABLES) và user app (cho promote) trên nguồn. MariaDB 10.6 bản mới ẩn
-// information_schema.TABLE_CONSTRAINTS với bộ quyền này (xem TestMDB106_E2E_ValidateMinimalGrants).
+// information_schema.TABLE_CONSTRAINTS với bộ quyền này (xem TestMDB_E2E_ValidateMinimalGrants).
 func mdbSourceUsers(t *testing.T, src *mysqlNode, _ ...bool) {
 	src.exec(t, "CREATE USER 'strand'@'%' IDENTIFIED BY '"+mdbPass+"'")
 	src.exec(t,
@@ -100,9 +127,9 @@ func mdbTargetSetup(t *testing.T, dst *mysqlNode) {
 
 var mdbSchemaSQL = []string{
 	"CREATE DATABASE IF NOT EXISTS app",
-	// code: VARCHAR utf8mb4 mặc định collation utf8mb4_general_ci; meta JSON = alias LONGTEXT của MariaDB.
+	// code: VARCHAR utf8mb4 collation general_ci tường minh (mặc định của 11.4 là uca1400, không dùng được cho khóa); meta JSON = alias LONGTEXT của MariaDB.
 	`CREATE TABLE app.acct (
-		code VARCHAR(40) CHARACTER SET utf8mb4 NOT NULL PRIMARY KEY,
+		code VARCHAR(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL PRIMARY KEY,
 		bal DECIMAL(20,4) NOT NULL,
 		created DATETIME(3) NOT NULL,
 		big BIGINT UNSIGNED NOT NULL,
@@ -283,7 +310,7 @@ func (w *mdbWriter) one(r *rand.Rand) error {
 	}
 }
 
-func TestMDB106_E2E_SnapshotStreamDDLRestartVerify(t *testing.T) {
+func TestMDB_E2E_SnapshotStreamDDLRestartVerify(t *testing.T) {
 	src := startMariaDB(t, "src", 1)
 	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)
 	src.exec(t, mdbSchemaSQL...)
@@ -300,7 +327,7 @@ func TestMDB106_E2E_SnapshotStreamDDLRestartVerify(t *testing.T) {
 		src.exec(t, q)
 	}
 
-	cfg := strandCfg{Name: "e2e-mdb106", SourceDSN: fmt.Sprintf("strand:%s@tcp(%s)/", mdbPass, src.Addr),
+	cfg := strandCfg{Name: "e2e-mdb", SourceDSN: fmt.Sprintf("strand:%s@tcp(%s)/", mdbPass, src.Addr),
 		TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr), Include: []string{"app.*"}, Dir: testDir(t)}
 	cfgPath := cfg.write(t)
 
@@ -440,14 +467,33 @@ func TestMDB106_E2E_SnapshotStreamDDLRestartVerify(t *testing.T) {
 	}
 }
 
-func TestMDB106_E2E_ValidateRejectsUnsupported(t *testing.T) {
+func TestMDB_E2E_ValidateRejectsUnsupported(t *testing.T) {
 	src := startMariaDB(t, "src", 1)
 	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)
-	src.exec(t, "CREATE DATABASE app",
-		"CREATE TABLE app.t_inet (id INT PRIMARY KEY, ip INET6) ENGINE=InnoDB",
+	src.exec(t, "CREATE DATABASE app")
+	// kiểu/tính năng chỉ có ở bản mới: INET6 (10.5+), UUID (10.7+), INET4 (10.10+), PERIOD (10.4+).
+	type rej struct{ table, want string }
+	var rejects []rej
+	for _, c := range []struct {
+		maj, min int
+		table    string
+		ddl      string
+		want     string
+	}{
+		{10, 5, "t_inet", "CREATE TABLE app.t_inet (id INT PRIMARY KEY, ip INET6) ENGINE=InnoDB", "MariaDB-only type"},
+		{10, 7, "t_uuid", "CREATE TABLE app.t_uuid (id INT PRIMARY KEY, u UUID) ENGINE=InnoDB", "MariaDB-only type"},
+		{10, 10, "t_inet4", "CREATE TABLE app.t_inet4 (id INT PRIMARY KEY, ip INET4) ENGINE=InnoDB", "MariaDB-only type"},
+		{10, 4, "t_period", "CREATE TABLE app.t_period (id INT PRIMARY KEY, s DATE, e DATE, PERIOD FOR p(s, e)) ENGINE=InnoDB", "PERIOD"},
+	} {
+		if mdbAtLeast(t, src.DB, c.maj, c.min) {
+			src.exec(t, c.ddl)
+			rejects = append(rejects, rej{"app." + c.table, c.want})
+		}
+	}
+	src.exec(t,
 		"CREATE TABLE app.t_comp (id INT PRIMARY KEY, body TEXT COMPRESSED) ENGINE=InnoDB",
 		"CREATE TABLE app.t_sv (id INT PRIMARY KEY, v INT) ENGINE=InnoDB WITH SYSTEM VERSIONING",
-		"CREATE TABLE app.t_nopad (id INT PRIMARY KEY, name VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_nopad_ci) ENGINE=InnoDB",
+		"CREATE TABLE app.t_nopad (name VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_nopad_ci PRIMARY KEY) ENGINE=InnoDB",
 		"CREATE TABLE app.t_ok (id INT PRIMARY KEY, v INT) ENGINE=InnoDB",
 		"CREATE SEQUENCE app.seq1")
 	mdbSourceUsers(t, src)
@@ -458,19 +504,18 @@ func TestMDB106_E2E_ValidateRejectsUnsupported(t *testing.T) {
 			TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr), Include: include, Exclude: exclude, Dir: testDir(t)}
 		return runStrandCLI(t, time.Minute, "validate", "-c", cfg.write(t))
 	}
-	for _, c := range []struct{ table, want string }{
-		{"app.t_inet", "MariaDB-only type"},
-		{"app.t_comp", "COMPRESSED"},
-		{"app.t_sv", "system-versioned"},
-		{"app.t_nopad", "not available on the target"},
-	} {
+	rejects = append(rejects, rej{"app.t_comp", "COMPRESSED"}, rej{"app.t_sv", "system-versioned"},
+		rej{"app.t_nopad", "PRIMARY KEY or UNIQUE"})
+	var excl []string
+	for _, c := range rejects {
+		excl = append(excl, c.table)
 		out, code := validate("mdb-rej-"+strings.TrimPrefix(c.table, "app."), []string{c.table})
 		if code == 0 || !strings.Contains(out, c.want) {
 			t.Errorf("%s: exit %d, want non-zero with %q\n%s", c.table, code, c.want, out)
 		}
 	}
-	// SEQUENCE chỉ cảnh báo, không chặn (include app.* gặp cả sequence; loại bốn bảng bị từ chối).
-	out, code := validate("mdb-seq", []string{"app.*"}, "app.t_inet", "app.t_comp", "app.t_sv", "app.t_nopad")
+	// SEQUENCE chỉ cảnh báo, không chặn (include app.* gặp cả sequence; loại các bảng bị từ chối).
+	out, code := validate("mdb-seq", []string{"app.*"}, excl...)
 	if code != 0 || !strings.Contains(out, "MariaDB sequence omitted") {
 		t.Errorf("sequence: exit %d, want 0 with warning %q\n%s", code, "MariaDB sequence omitted", out)
 	}
@@ -485,7 +530,7 @@ func TestMDB106_E2E_ValidateRejectsUnsupported(t *testing.T) {
 	}
 }
 
-func TestMDB106_E2E_Promote(t *testing.T) {
+func TestMDB_E2E_Promote(t *testing.T) {
 	src := startMariaDB(t, "src", 1)
 	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)
 	src.exec(t, mdbSchemaSQL...)
@@ -602,7 +647,7 @@ func TestMDB106_E2E_Promote(t *testing.T) {
 }
 
 // Bộ quyền tối thiểu của user strand trên nguồn MariaDB (SELECT, LOCK TABLES trên app.*) phải qua validate.
-func TestMDB106_E2E_ValidateMinimalGrants(t *testing.T) {
+func TestMDB_E2E_ValidateMinimalGrants(t *testing.T) {
 	src := startMariaDB(t, "src", 1)
 	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)
 	src.exec(t, mdbSchemaSQL...)

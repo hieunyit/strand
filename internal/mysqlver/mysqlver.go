@@ -102,8 +102,14 @@ func (v Version) HasBinlogRowMetadata() bool { return !v.IsMariaDB() && v.AtLeas
 // MariaDB không có cột này (collation NO PAD có tên chứa "nopad").
 func (v Version) HasPadAttribute() bool { return !v.IsMariaDB() && v.AtLeast(8, 0, 0) }
 
-// HasBinlogExpireLogsSeconds: @@binlog_expire_logs_seconds có từ 8.0.1; 5.7 dùng expire_logs_days.
-func (v Version) HasBinlogExpireLogsSeconds() bool { return v.AtLeast(8, 0, 1) }
+// HasBinlogExpireLogsSeconds: @@binlog_expire_logs_seconds có từ MySQL 8.0.1 và MariaDB 10.6.1; bản cũ hơn
+// (5.7, MariaDB 10.3–10.5) chỉ có expire_logs_days. Số phiên bản MariaDB (10.x) không so được với MySQL (8.x).
+func (v Version) HasBinlogExpireLogsSeconds() bool {
+	if v.IsMariaDB() {
+		return v.AtLeast(10, 6, 1)
+	}
+	return v.AtLeast(8, 0, 1)
+}
 
 // HasClone: clone plugin có từ 8.0.17.
 func (v Version) HasClone() bool { return !v.IsMariaDB() && v.AtLeast(8, 0, 17) }
@@ -112,8 +118,13 @@ func (v Version) HasClone() bool { return !v.IsMariaDB() && v.AtLeast(8, 0, 17) 
 // MariaDB 10.6 không có super_read_only.
 func (v Version) HasSuperReadOnly() bool { return !v.IsMariaDB() && v.AtLeast(5, 7, 8) }
 
-// HasCastAsDouble: CAST(x AS DOUBLE) có từ 8.0.17 (5.7 báo lỗi cú pháp).
-func (v Version) HasCastAsDouble() bool { return v.AtLeast(8, 0, 17) }
+// HasCastAsDouble: CAST(x AS DOUBLE) có từ MySQL 8.0.17 (5.7 báo lỗi cú pháp) và MariaDB 10.4.5.
+func (v Version) HasCastAsDouble() bool {
+	if v.IsMariaDB() {
+		return v.AtLeast(10, 4, 5)
+	}
+	return v.AtLeast(8, 0, 17)
+}
 
 // PersistAdvice là lời khuyên đặt biến cấu hình lâu dài: SET PERSIST từ 8.0, 5.7 dùng SET GLOBAL + my.cnf.
 func (v Version) PersistAdvice(variable, value string) string {
@@ -123,14 +134,15 @@ func (v Version) PersistAdvice(variable, value string) string {
 	return fmt.Sprintf("SET GLOBAL %s = %s and add \"%s=%s\" to my.cnf ([mysqld] section; SET GLOBAL alone is lost on restart)", variable, value, variable, value)
 }
 
-// CheckSupported từ chối nguồn không được hỗ trợ: MariaDB ngoài 10.6 và MySQL < 5.5 (exit 3).
+// CheckSupported từ chối nguồn không được hỗ trợ: MariaDB < 10.3 và MySQL < 5.5 (exit 3).
 func CheckSupported(v Version) error {
 	if v.IsMariaDB() {
-		// MariaDB 10.6 (yêu cầu chuyển MariaDB 10.6 → MySQL 8.x, 2026-11-12): chế độ vị trí binlog. Bản khác
-		// chưa kiểm (kiểu dữ liệu/collation mới từ 10.7: UUID, uca1400...): từ chối rõ.
-		if v.Major != 10 || v.Minor != 6 {
+		// MariaDB 10.3+ (chế độ vị trí binlog). Đã chạy e2e trên 10.3, 10.4, 10.5, 10.6, 10.11, 11.4; các bản
+		// 10.x/11.x/12.x khác nhận nhưng chưa kiểm. Dưới 10.3 (10.2: chưa có SEQUENCE, system-versioning,
+		// binlog khác) chưa kiểm: từ chối rõ.
+		if !v.AtLeast(10, 3, 0) {
 			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-				fmt.Sprintf("MariaDB source %q is not supported: only MariaDB 10.6 is supported", v.Raw), nil)
+				fmt.Sprintf("MariaDB source %q is not supported: MariaDB 10.3 or later is required", v.Raw), nil)
 		}
 		return nil
 	}
@@ -233,4 +245,24 @@ func NormalizeCollation(coll string) string {
 		return "utf8mb3_" + coll[5:]
 	}
 	return coll
+}
+
+// exactCollationPeers: collation MariaDB → collation MySQL 8.x tương đương hoàn toàn (cùng phép so sánh và
+// thứ tự, kể cả NO PAD; kiểm bằng DB thật ở TestMDB_E2E_CollationExactEquivalence). Dùng cho khóa chính/duy nhất.
+var exactCollationPeers = map[string]string{"utf8mb4_nopad_bin": "utf8mb4_0900_bin"}
+
+// ExactCollationPeer trả collation MySQL tương đương hoàn toàn của collation MariaDB coll.
+func ExactCollationPeer(coll string) (string, bool) {
+	p, ok := exactCollationPeers[strings.ToLower(coll)]
+	return p, ok
+}
+
+// SameCollation: hai tên collation (nguồn, đích) cho cùng phép so sánh: trùng tên (sau NormalizeCollation) hoặc
+// là cặp tương đương hoàn toàn MariaDB → MySQL.
+func SameCollation(src, dst string) bool {
+	if strings.EqualFold(NormalizeCollation(src), NormalizeCollation(dst)) {
+		return true
+	}
+	p, ok := ExactCollationPeer(src)
+	return ok && strings.EqualFold(p, dst)
 }

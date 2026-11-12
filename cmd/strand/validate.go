@@ -126,7 +126,9 @@ func newValidateCmd() *cobra.Command {
 				return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.Rejected,
 					fmt.Sprintf("%d target table(s) missing and bootstrap.create_schema=off; run strand schema init", len(plan.Tables)), nil)
 			}
+			printed := map[string]bool{}
 			for _, w := range append(warnings, plan.Warnings...) {
+				printed[w] = true
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+w)
 			}
 			if len(plan.Tables) > 0 {
@@ -149,7 +151,13 @@ func newValidateCmd() *cobra.Command {
 						for _, id := range tables {
 							names = append(names, id.Schema+"."+id.Table)
 						}
-						if err := validate.CheckSourceCollationsOnTarget(cmd.Context(), r.Source, r.Target, names); err != nil {
+						collWarnings, err := validate.CheckSourceCollationsOnTarget(cmd.Context(), r.Source, r.Target, names)
+						for _, w := range collWarnings {
+							if !printed[w] { // schemagen.Build đã in cùng cảnh báo
+								fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+w)
+							}
+						}
+						if err != nil {
 							return err
 						}
 					}

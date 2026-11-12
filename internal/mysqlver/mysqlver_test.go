@@ -102,9 +102,14 @@ func TestCheckSupported(t *testing.T) {
 			t.Errorf("%s: err=%v", bad, err)
 		}
 	}
-	for _, bad := range []string{"5.5.5-10.3.0-MariaDB", "10.5.20-MariaDB", "10.11.6-MariaDB", "11.4.2-MariaDB"} {
+	for _, ok := range []string{"5.5.5-10.3.0-MariaDB", "10.3.39-MariaDB", "10.4.34-MariaDB", "10.5.29-MariaDB", "10.11.6-MariaDB", "11.4.2-MariaDB", "12.0.1-MariaDB"} {
+		if err := CheckSupported(mustV(t, ok)); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"5.5.5-10.2.44-MariaDB", "10.1.48-MariaDB", "5.5.68-MariaDB"} {
 		err := CheckSupported(mustV(t, bad))
-		if err == nil || !strings.Contains(err.Error(), "only MariaDB 10.6 is supported") {
+		if err == nil || !strings.Contains(err.Error(), "MariaDB 10.3 or later is required") {
 			t.Errorf("%s: err=%v", bad, err)
 		}
 	}
@@ -183,5 +188,23 @@ func TestNormalize(t *testing.T) {
 	}
 	if NormalizeCharset("utf8") != "utf8mb3" || NormalizeCharset("utf8mb4") != "utf8mb4" || NormalizeCharset("UTF8") != "utf8mb3" {
 		t.Error("charset")
+	}
+}
+
+// MariaDB < 10.6.1 không có binlog_expire_logs_seconds (chỉ expire_logs_days); số 10.x không được so với 8.0.1
+// của MySQL. Hồi quy: trước đây mọi MariaDB 10.x đều dùng binlog_expire_logs_seconds nên 10.3–10.5 lỗi truy vấn.
+func TestMariaDBRetentionQueryByVersion(t *testing.T) {
+	for raw, wantSeconds := range map[string]bool{
+		"10.3.39-MariaDB": false, "10.4.34-MariaDB": false, "10.5.29-MariaDB": false, "10.6.0-MariaDB": false,
+		"10.6.1-MariaDB": true, "10.6.28-MariaDB": true, "10.11.19-MariaDB": true, "11.4.13-MariaDB": true,
+	} {
+		v := mustV(t, raw)
+		q := BinlogRetentionQuery(v)
+		if got := strings.Contains(q, "binlog_expire_logs_seconds"); got != wantSeconds {
+			t.Errorf("%s: query %q, want seconds=%v", raw, q, wantSeconds)
+		}
+	}
+	if mustV(t, "10.3.39-MariaDB").HasCastAsDouble() || !mustV(t, "10.4.5-MariaDB").HasCastAsDouble() {
+		t.Error("CAST AS DOUBLE của MariaDB từ 10.4.5")
 	}
 }

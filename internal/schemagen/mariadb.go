@@ -29,6 +29,14 @@ func CheckMariaDBTable(ctx context.Context, db *sql.DB, schema, table string) er
 	case "SYSTEM VERSIONED":
 		return reject("%s.%s is a MariaDB system-versioned table (WITH SYSTEM VERSIONING): not supported; remove versioning or exclude the table", schema, table)
 	}
+	// Application-time period (10.4+: PERIOD FOR, 10.5+: WITHOUT OVERLAPS) không có trên MySQL.
+	var tn, ddl string
+	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE "+quote(schema, false)+"."+quote(table, false)).Scan(&tn, &ddl); err != nil {
+		return fmt.Errorf("inspect MariaDB table %s.%s: %w", schema, table, err)
+	}
+	if mariaDBHasPeriod(ddl) {
+		return reject("%s.%s uses a MariaDB application-time PERIOD (PERIOD FOR / WITHOUT OVERLAPS): not supported; remove the period or exclude the table", schema, table)
+	}
 	rows, err := db.QueryContext(ctx, `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IFNULL(EXTRA, '') FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION`, schema, table)
 	if err != nil {
@@ -49,6 +57,21 @@ func CheckMariaDBTable(ctx context.Context, db *sql.DB, schema, table string) er
 		}
 	}
 	return rows.Err()
+}
+
+// mariaDBHasPeriod: DDL có `PERIOD FOR` hoặc `WITHOUT OVERLAPS` (ngoài chuỗi/tên trích dẫn). Hàm thuần.
+func mariaDBHasPeriod(ddl string) bool {
+	ts, err := lex(ddl)
+	if err != nil {
+		return false
+	}
+	for i := 0; i+1 < len(ts); i++ {
+		if ts[i].keyword(ddl, "PERIOD") && ts[i+1].keyword(ddl, "FOR") ||
+			ts[i].keyword(ddl, "WITHOUT") && ts[i+1].keyword(ddl, "OVERLAPS") {
+			return true
+		}
+	}
+	return false
 }
 
 // mariaDBBlobTypes: kiểu mà MySQL không cho DEFAULT literal (chỉ cho DEFAULT (biểu thức), 8.0.13+).

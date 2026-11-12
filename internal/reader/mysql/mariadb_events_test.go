@@ -1,7 +1,7 @@
 package mysql
 
 // Event binlog riêng của MariaDB 10.6 (flavor mariadb, chế độ vị trí binlog). Unit test thuần trên event
-// tổng hợp; luồng thật MariaDB → MySQL 8.4 kiểm ở tests/e2e/mariadb106_test.go.
+// tổng hợp; luồng thật MariaDB → MySQL 8.4 kiểm ở tests/e2e/mariadb_test.go.
 
 import (
 	"strings"
