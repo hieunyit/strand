@@ -40,6 +40,10 @@ type Config struct {
 	// không có binlog_row_metadata): tên cột, PK, unsigned, charset, nhãn ENUM/SET (tableinfo.go).
 	// nil = chỉ dùng metadata của TABLE_MAP.
 	TableInfo TableInfoProvider
+	// SchemaHistory: nơi lưu bền các info đã đọc kèm khoảng hiệu lực GTID (schemahist.go), để sau khi
+	// khởi động lại binlog trước một DDL đang chạy lúc Strand dừng vẫn giải mã theo cấu trúc lúc đó.
+	// nil = không lưu (chỉ dùng information_schema hiện tại).
+	SchemaHistory SchemaHistoryStore
 }
 
 // MySQLReader hiện thực interface reader.Reader cho MySQL binlog.
@@ -189,6 +193,9 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		defer syncer.Close()
 
 		st := &streamState{tableMap: make(map[uint64]*replication.TableMapEvent), ctx: ctxRead}
+		if r.cfg.TableInfo != nil {
+			st.hist, st.infoCache = openSchemaHistory(r.cfg.SchemaHistory, gset)
+		}
 		emit := func(e reader.Event) bool {
 			select {
 			case out <- e:
@@ -239,7 +246,8 @@ type streamState struct {
 
 	ctx       context.Context       // ctx của luồng đọc, dùng cho truy vấn information_schema (nil = Background)
 	info      map[uint64]*TableInfo // theo TableID của TABLE_MAP hiện hành; nil = bảng không có info
-	infoCache map[string]*TableInfo // schema.table -> info đã đọc; xóa khi gặp DDL
+	infoCache map[string]*TableInfo // schema.table -> info đã đọc (hoặc nạp từ lịch sử bền); xóa khi gặp DDL
+	hist      *schemaHistory        // lịch sử bền (nil = không lưu)
 }
 
 func (st *streamState) context() context.Context {
@@ -289,6 +297,11 @@ func (r *MySQLReader) resolveInfo(st *streamState, tm *replication.TableMapEvent
 		st.infoCache = map[string]*TableInfo{}
 	}
 	st.infoCache[key] = info
+	if st.hist != nil {
+		if err := st.hist.record(key, info); err != nil {
+			return nil, fmt.Errorf("persist schema of %s: %w", key, err)
+		}
+	}
 	return info, nil
 }
 
@@ -377,6 +390,12 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 		if qEv, ok := ev.Event.(*replication.QueryEvent); ok {
 			if !isTxnControlQuery(string(qEv.Query)) {
 				st.infoCache = nil // DDL: cấu trúc bảng có thể đã đổi, đọc lại ở TABLE_MAP kế tiếp
+				if st.hist != nil {
+					// Ghi bền "version cũ kết thúc ở DDL này" TRƯỚC khi phát QUERY: checkpoint không vượt DDL được.
+					if err := st.hist.supersede(r.Position().GTID); err != nil {
+						return fail(fmt.Errorf("persist schema history at DDL: %w", err))
+					}
+				}
 			}
 			return emit(reader.Event{
 				Type:      reader.EventQuery,

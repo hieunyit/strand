@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"strand/internal/exitcode"
+	mysqlreader "strand/internal/reader/mysql"
 	"strand/internal/snapshot"
 )
 
@@ -41,6 +42,33 @@ type stateFile struct {
 	// Targets: bảng nguồn → bảng đích (sau rename) lúc bảng được bootstrap / đánh dấu Done (review N14).
 	// Bảng Done mà tables.rename đổi đích thì đích mới không có lịch sử: khởi động bị từ chối.
 	Targets map[string]string `json:"table_targets,omitempty"`
+	// SourceSchemas: lịch sử cấu trúc bảng nguồn MySQL 5.x (TABLE_MAP không có tên cột) kèm khoảng hiệu lực
+	// GTID, xem internal/reader/mysql/schemahist.go. State cũ không có field này: coi như rỗng.
+	SourceSchemas map[string][]mysqlreader.SchemaVersion `json:"source_schemas,omitempty"`
+}
+
+func (s *localState) LoadSchemaHistory() map[string][]mysqlreader.SchemaVersion {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return copySchemas(s.data.SourceSchemas)
+}
+
+func (s *localState) SaveSchemaHistory(m map[string][]mysqlreader.SchemaVersion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.SourceSchemas = copySchemas(m) // sao chép: reader tiếp tục sửa map của nó
+	return s.flushLocked()
+}
+
+func copySchemas(m map[string][]mysqlreader.SchemaVersion) map[string][]mysqlreader.SchemaVersion {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string][]mysqlreader.SchemaVersion, len(m))
+	for k, vs := range m {
+		out[k] = append([]mysqlreader.SchemaVersion(nil), vs...)
+	}
+	return out
 }
 
 func (s *localState) PGSlot() string {
