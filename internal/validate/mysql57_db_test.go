@@ -50,8 +50,9 @@ func TestMySQL57_CheckMySQLSource_RejectsMisconfig(t *testing.T) {
 	if _, err := db.ExecContext(context.Background(), "SET GLOBAL binlog_format = 'ROW'"); err != nil {
 		t.Fatal(err)
 	}
+	// GTID tắt được nhận (chế độ vị trí binlog), nhưng không bật log-bin thì vẫn phải bị từ chối rõ ràng.
 	err = validate.CheckMySQLSource(context.Background(), db, nil)
-	if err == nil || !strings.Contains(err.Error(), "gtid_mode must be ON") {
-		t.Fatalf("want gtid_mode rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "binary logging is disabled") {
+		t.Fatalf("want log_bin rejection, got %v", err)
 	}
 }

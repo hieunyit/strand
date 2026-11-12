@@ -302,10 +302,23 @@ func (a *Assembler) Registry() *SchemaRegistry {
 }
 
 func (a *Assembler) ensureTxnStarted(pos model.Pos) {
+	a.ensureTxnStartedEv(reader.Event{Pos: pos})
+}
+
+// ensureTxnStartedEv bắt đầu Txn tại event ev nếu chưa có Txn đang lắp. Chế độ vị trí binlog
+// (ev.Pos.IsBinlogPos): ev.BinlogFile/BinlogPos là vị trí BẮT ĐẦU của event đầu tiên của Txn; lưu vào
+// Txn.BinlogFile/BinlogPos làm điểm đọc lại an toàn (SourcePos sẽ là vị trí kết thúc, đặt ở finishTxnAt).
+func (a *Assembler) ensureTxnStartedEv(ev reader.Event) {
 	if !a.inTxn {
 		a.inTxn = true
 		a.currentTxn = &model.Txn{
-			SourcePos: pos,
+			SourcePos: ev.Pos,
+		}
+		if ev.Pos.IsBinlogPos() {
+			a.currentTxn.BinlogFile, a.currentTxn.BinlogPos = ev.BinlogFile, ev.BinlogPos
+			if !ev.Timestamp.IsZero() {
+				a.currentTxn.SourceTS = ev.Timestamp.Unix()
+			}
 		}
 		a.currentSpill = NewSpillBuffer(a.maxInMem, a.spillDir)
 	}
@@ -333,7 +346,14 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		q := strings.ToUpper(strings.TrimSpace(ev.Query))
 		switch {
 		case q == "BEGIN":
-			a.ensureTxnStarted(ev.Pos)
+			if a.inTxn && ev.Pos.IsBinlogPos() {
+				// Chế độ vị trí binlog không có event GTID đánh dấu ranh giới Txn: BEGIN khi Txn trước chưa
+				// kết thúc nghĩa là mất event hoặc kiểu Txn lạ. Gộp hai Txn sẽ làm vị trí kết thúc nhảy qua
+				// Txn đầu: fail closed.
+				return nil, fmt.Errorf("BEGIN at %s arrived before the transaction starting at %s:%d terminated: events lost or unsupported transaction layout",
+					ev.Pos.Label(), a.currentTxn.BinlogFile, a.currentTxn.BinlogPos)
+			}
+			a.ensureTxnStartedEv(ev)
 			a.sawBegin = true
 			// Source PG không có event GTID: thời điểm commit đi kèm BEGIN (dùng để tính lag).
 			if ev.Pos.Engine == model.EnginePG && a.currentTxn.SourceTS == 0 && !ev.Timestamp.IsZero() {
@@ -344,8 +364,13 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 			}
 		case q == "COMMIT":
 			if a.inTxn {
-				return a.finishTxn()
+				return a.finishTxnAt(ev)
 			}
+		case q == "ROLLBACK" && a.sawBegin && ev.Pos.IsBinlogPos():
+			// Chế độ vị trí binlog: ROLLBACK toàn Txn (có bảng không giao dịch đã ghi row vào binlog) kết thúc
+			// Txn trong binlog. Row của bảng không giao dịch ĐÃ có hiệu lực ở source nên được apply như COMMIT
+			// (replica gốc cũng làm vậy). Không kết thúc ở đây thì Txn kế tiếp bị gộp vào.
+			return a.finishTxnAt(ev)
 		case a.sawBegin && ev.Pos.Engine != model.EnginePG && !isRowFormatTxnQuery(q):
 			// review R09: QUERY khác trong txn đã BEGIN = DML dạng statement (session đặt
 			// binlog_format=STATEMENT/MIXED). Bỏ qua sẽ để txn rỗng được checkpoint, mất dữ liệu: fail closed.
@@ -361,8 +386,8 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 			// Ngoại lệ: "XA ROLLBACK" đứng riêng không mang row nào — txn đã prepare trước điểm đọc mà không
 			// thấy XA START thì cũng chưa có gì được apply; phát Txn rỗng để GTID được ghi nhận.
 			if f := strings.Fields(q); len(f) > 1 && f[1] == "ROLLBACK" {
-				a.ensureTxnStarted(ev.Pos)
-				return a.finishTxn()
+				a.ensureTxnStartedEv(ev)
+				return a.finishTxnAt(ev)
 			}
 			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 				fmt.Sprintf("QUERY %q (txn %s): XA transactions are not supported (strand cannot replicate prepared/two-phase "+
@@ -370,14 +395,19 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 					queryPrefix(ev.Query), a.currentTxnGTID(ev.Pos)), nil)
 		case !a.sawBegin:
 			// Txn DDL: GTID + QUERY, không có BEGIN/XID. Phát thành Txn riêng để GTID được ghi nhận.
-			a.ensureTxnStarted(ev.Pos)
+			// (Chế độ vị trí binlog: không có GTID, QUERY đứng riêng là Txn; vị trí kết thúc là của QUERY.)
+			if a.inTxn && ev.Pos.IsBinlogPos() {
+				return nil, fmt.Errorf("QUERY at %s arrived before the transaction starting at %s:%d terminated: events lost",
+					ev.Pos.Label(), a.currentTxn.BinlogFile, a.currentTxn.BinlogPos)
+			}
+			a.ensureTxnStartedEv(ev)
 			a.currentTxn.DDL = ev.Query
 			a.currentTxn.DDLSchema = ev.Schema
-			return a.finishTxn()
+			return a.finishTxnAt(ev)
 		}
 
 	case reader.EventTableMap:
-		a.ensureTxnStarted(ev.Pos)
+		a.ensureTxnStartedEv(ev)
 		// Schema lấy từ metadata của TABLE_MAP (binlog_row_metadata=FULL) khi có.
 		if len(ev.Columns) > 0 {
 			// Bảng không có PK trong event (MySQL 5.7 hoặc bảng không PK) và cột không đổi: giữ PK đã đăng ký
@@ -390,7 +420,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		}
 
 	case reader.EventRows:
-		a.ensureTxnStarted(ev.Pos)
+		a.ensureTxnStartedEv(ev)
 		tableID := model.TableID{Schema: ev.Schema, Table: ev.Table}
 		tbl := a.registry.GetTable(ev.Schema, ev.Table)
 		if tbl == nil {
@@ -480,7 +510,7 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 
 	case reader.EventXID:
 		if a.inTxn {
-			return a.finishTxn()
+			return a.finishTxnAt(ev)
 		}
 	}
 
@@ -488,6 +518,22 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 }
 
 func (a *Assembler) finishTxn() (*model.Txn, error) {
+	return a.finishTxnAt(reader.Event{})
+}
+
+// finishTxnAt kết thúc Txn tại event end. Chế độ vị trí binlog: SourcePos của Txn là vị trí KẾT THÚC
+// (file, end_log_pos) của event kết thúc — định danh duy nhất của Txn trong tập đã apply (CP-1/CP-2).
+func (a *Assembler) finishTxnAt(end reader.Event) (*model.Txn, error) {
+	if end.Pos.IsBinlogPos() && a.currentTxn != nil {
+		if a.currentTxn.BinlogFile != "" && a.currentTxn.BinlogFile != end.Pos.File {
+			return nil, fmt.Errorf("transaction starts in %s:%d but ends in %s: a transaction never spans binlog files",
+				a.currentTxn.BinlogFile, a.currentTxn.BinlogPos, end.Pos.Label())
+		}
+		if end.Pos.BinlogPos <= a.currentTxn.BinlogPos {
+			return nil, fmt.Errorf("transaction ends at %s before it starts (%d)", end.Pos.Label(), a.currentTxn.BinlogPos)
+		}
+		a.currentTxn.SourcePos = end.Pos
+	}
 	if err := a.currentSpill.Finish(a.currentTxn); err != nil {
 		return nil, err
 	}

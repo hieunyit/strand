@@ -9,7 +9,7 @@ import (
 )
 
 // MySQL 5.5: không có gtid_mode / binlog_row_value_options / binlog_row_image / performance_schema.variables_by_thread.
-// Trước đây SELECT @@GLOBAL.<biến thiếu> làm cả câu lỗi; giờ phải ra từ chối rõ ràng "gtid_mode must be ON".
+// Trước đây SELECT @@GLOBAL.<biến thiếu> làm cả câu lỗi. 5.5 (không GTID) giờ được nhận: chế độ vị trí binlog.
 func TestCompatM56_Container_CheckMySQLSource55(t *testing.T) {
 	db := testutil.LegacyMySQL(t, "mysql:5.5")
 	ctx := context.Background()
@@ -20,9 +20,8 @@ func TestCompatM56_Container_CheckMySQLSource55(t *testing.T) {
 	if format != "ROW" || image != "FULL" || gtid != "OFF" || vopts != "" {
 		t.Errorf("vars: %q %q %q %q", format, image, gtid, vopts)
 	}
-	err = CheckMySQLSource(ctx, db, nil)
-	if err == nil || !strings.Contains(err.Error(), "gtid_mode must be ON") {
-		t.Errorf("want gtid_mode rejection, got %v", err)
+	if err := CheckMySQLSource(ctx, db, nil); err != nil {
+		t.Errorf("5.5 with log-bin + ROW must be accepted (binlog position mode): %v", err)
 	}
 	warns, err := CheckMySQLSessionBinlog(ctx, db)
 	if err != nil {

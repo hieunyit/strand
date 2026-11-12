@@ -58,7 +58,7 @@ func (p *Pipeline) createAtDDL(ctx context.Context, t *model.Txn, ids []model.Ta
 	}
 	if err := p.checkCreateSchemaAtPosition(checkCtx, t, ids); err != nil {
 		return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
-			fmt.Sprintf("cannot prove source schema at CREATE %s: %v; initialize target schema manually and resume", t.SourcePos.GTID, err), err)
+			fmt.Sprintf("cannot prove source schema at CREATE %s: %v; initialize target schema manually and resume", t.SourcePos.Label(), err), err)
 	}
 	// Lock đọc giữ nguyên cho tới sau Apply; ALTER không thể chen vào giữa kiểm và sinh DDL.
 	if err := p.createTargetTables(checkCtx, ids); err != nil {
@@ -96,6 +96,10 @@ func readBinlogEvents(ctx context.Context, db *sql.DB, file string, from uint64)
 	return out, rows.Err()
 }
 func (p *Pipeline) checkCreateSchemaAtPosition(ctx context.Context, t *model.Txn, ids []model.TableID) error {
+	if t.SourcePos.IsBinlogPos() {
+		// Kiểm "schema tại CREATE" tìm event GTID của CREATE trong binlog; chế độ vị trí binlog chưa có.
+		return fmt.Errorf("proving the source schema at CREATE is %s: create the target table(s) manually", posModeUnsupported)
+	}
 	rows, err := p.src.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
 		return err
@@ -197,7 +201,7 @@ func (p *Pipeline) checkCreateSchemaAtPosition(ctx context.Context, t *model.Txn
 			break
 		}
 	}
-	p.log.Warn("schema at CREATE: binlog position unknown, searching binlogs for the GTID (slow)", "gtid", t.SourcePos.GTID)
+	p.log.Warn("schema at CREATE: binlog position unknown, searching binlogs for the GTID (slow)", "position", t.SourcePos.Label())
 	found := false
 	for i := len(files) - 1; i >= 0; i-- {
 		// Tìm file chứa GTID, từ file mới nhất; log bị purge thì không đoán schema.

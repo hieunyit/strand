@@ -133,7 +133,7 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		if err := p.failed(); err != nil {
 			return err
 		}
-		return fmt.Errorf("DDL at %s: pipeline did not drain", t.SourcePos.GTID)
+		return fmt.Errorf("DDL at %s: pipeline did not drain", t.SourcePos.Label())
 	}
 	ids := make([]model.TableID, 0, len(affected))
 	for id := range affected {
@@ -165,7 +165,7 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 	if len(diffs) > 0 {
 		return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
 			fmt.Sprintf("DDL at %s changes pipeline table(s) and the target schema does not match yet: %s. "+
-				"Apply the change on the target, then resume. DDL: %q", t.SourcePos.GTID, strings.Join(diffs, "; "), t.DDL), nil)
+				"Apply the change on the target, then resume. DDL: %q", t.SourcePos.Label(), strings.Join(diffs, "; "), t.DDL), nil)
 	}
 	if len(renamedIn) > 0 {
 		names := make([]string, len(renamedIn))
@@ -174,7 +174,7 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		}
 		return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
 			fmt.Sprintf("DDL at %s renames a table that was not replicated into the pipeline filter (%s): its existing rows are not on the target. "+
-				"Restart strand to snapshot it (or exclude it in tables.exclude). DDL: %q", t.SourcePos.GTID, strings.Join(names, ", "), t.DDL), nil)
+				"Restart strand to snapshot it (or exclude it in tables.exclude). DDL: %q", t.SourcePos.Label(), strings.Join(names, ", "), t.DDL), nil)
 	}
 	// Schema khớp: nạp lại metadata (cột, PK, unique, FK) của các bảng liên quan.
 	for _, id := range ids {
@@ -217,7 +217,7 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 			if err := p.state.SetDone(id.String(), true); err != nil {
 				return err
 			}
-			p.log.Info("new table created on source joins the pipeline", "table", id.String(), "gtid", t.SourcePos.GTID)
+			p.log.Info("new table created on source joins the pipeline", "table", id.String(), "position", t.SourcePos.Label())
 		}
 	}
 	return nil

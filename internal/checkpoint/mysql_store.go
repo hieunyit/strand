@@ -215,7 +215,9 @@ func (s *MySQLStore) LoadApplied(ctx context.Context) (AppliedSet, error) {
 		if err != nil {
 			return nil, err
 		}
-		globalSet.Merge(workerSet)
+		if globalSet, err = MergeChecked(globalSet, workerSet); err != nil {
+			return nil, fmt.Errorf("merge worker delta: %w", err)
+		}
 	}
 
 	return globalSet, rows.Err()
@@ -277,7 +279,9 @@ func LoadAppliedSnapshotMySQL(ctx context.Context, db *sql.DB, pipelineID string
 		if err != nil {
 			return nil, err
 		}
-		set.Merge(ds)
+		if set, err = MergeChecked(set, ds); err != nil {
+			return nil, fmt.Errorf("merge worker delta: %w", err)
+		}
 	}
 	return set, rows.Err()
 }

@@ -95,10 +95,18 @@ type Pipeline struct {
 	snap   *snapshot.MySQLSnapshotter
 
 	// Source PG: reader (để báo lwd bền vững), bộ theo dõi LSN cho Vouch, lwd bền vững ở strict.
-	pgReader      *pgreader.Reader
-	lsns          *lsnTracker
-	strictDurable atomic.Uint64
-	reorderRetry  atomic.Int64 // số batch phải apply lại theo seq vì unique_violation (applyInSeqOrder)
+	pgReader *pgreader.Reader
+	lsns     *lsnTracker
+	// Chế độ vị trí binlog (source MySQL không GTID, xem binlogpos.go): posMode, tên gốc file binlog,
+	// định danh server nguồn, và khóa kết thúc của Txn router xử lý gần nhất (router tuần tự).
+	posMode      bool
+	binlogBase   string
+	srcIdent     string
+	lastRouteEnd uint64
+	// curStart/curEnd: khóa bắt đầu/kết thúc của Txn router đang xử lý (đặt bởi checkBinlogTxn, dùng ở noteRouted).
+	curStart, curEnd uint64
+	strictDurable    atomic.Uint64
+	reorderRetry     atomic.Int64 // số batch phải apply lại theo seq vì unique_violation (applyInSeqOrder)
 	// MySQL→PG: chuyển giá trị theo typemap (nil = giá trị đi thẳng).
 	conv *valueConverter
 	// Source PG: xid các Txn đã route chưa xác nhận visible, và phần đọc source của snapshot logic.
@@ -311,6 +319,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 	}
 	defer p.src.Close()
+	if err := p.detectBinlogPosMode(ctx); err != nil {
+		return err
+	}
 	host, _ := os.Hostname()
 	p.instance = fmt.Sprintf("%s/%d/%d", host, os.Getpid(), time.Now().UnixNano())
 	if p.dstEngine == model.EnginePG {
@@ -415,8 +426,20 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		if applied, err = p.initialPositionPG(ctx, loaded); err != nil {
 			return err
 		}
+	} else if p.posMode {
+		pa, err := p.initialPositionPos(ctx, loaded)
+		if err != nil {
+			return err
+		}
+		applied = pa
+		p.lastRouteEnd = pa.LwdKey()
 	} else {
-		ma, err := p.initialPosition(ctx, loaded.(*checkpoint.MySQLAppliedSet))
+		ga, ok := loaded.(*checkpoint.MySQLAppliedSet)
+		if !ok {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				"the checkpoint was created in binlog position mode (source without GTID) but the source now has GTID enabled: re-seed the pipeline", nil)
+		}
+		ma, err := p.initialPosition(ctx, ga)
 		if err != nil {
 			return err
 		}
@@ -429,6 +452,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	// Spool prefetch của `seed apply` (02 §9): phủ phần log từ P mà source/archive có thể đã xóa.
 	p.prefetchDir = filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")
 	streamFrom := applied.Clone()
+	if fi, err := os.Stat(p.prefetchDir); err == nil && fi.IsDir() && p.posMode {
+		return rejectBinlogPos("spool prefetch of `seed apply`")
+	}
 	if fi, err := os.Stat(p.prefetchDir); err == nil && fi.IsDir() && p.srcEngine == model.EngineMySQL {
 		var opts []spool.Option
 		bucket, prefix, berr := spool.BucketFromURI(p.cfg.Resources.Spool.Overflow)
@@ -463,7 +489,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		it.Close()
 		p.log.Info("prefetch spool found", "transactions", n)
 	}
-	if p.srcEngine == model.EngineMySQL {
+	if p.srcEngine == model.EngineMySQL && !p.posMode { // chế độ vị trí: initialPositionPos đã kiểm file còn trên source
 		// Source PG: slot quyết định log còn đọc được (reader.Start trả log_gap khi slot đã vượt lwd).
 		if err := p.checkLogAvailable(ctx, streamFrom.(*checkpoint.MySQLAppliedSet)); err != nil {
 			return err
@@ -490,6 +516,15 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].String() < pending[j].String() })
+	if p.posMode && len(pending) > 0 {
+		// Snapshot logic dùng watermark GTID (02 §5): chưa có ở chế độ vị trí binlog. Bảng chưa "done"
+		// (trạng thái cục bộ mất, hoặc bảng mới trong bộ lọc) không thể bootstrap an toàn.
+		names := make([]string, len(pending))
+		for i, id := range pending {
+			names[i] = id.String()
+		}
+		return rejectBinlogPos("logical snapshot of table(s) " + strings.Join(names, ", "))
+	}
 	if p.dstEngine == model.EnginePG && p.cfg.Bootstrap.CreateSchemaAuto() {
 		pending, err = orderSnapshotTables(pending, p.tables)
 		if err != nil {
@@ -611,8 +646,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	ccfg := checkpoint.DefaultCompactorConfig(p.id, p.epoch)
 	ccfg.Interval = durationOr(p.cfg.Checkpoint.FlushEvery, 500*time.Millisecond)
 	p.comp = checkpoint.NewCompactor(p.dst, p.store, p.id, p.srcEngine, p.dstEngine, ccfg)
-	if p.srcEngine == model.EnginePG && !p.strict {
-		// Relaxed: row delta chỉ chứa LSN tường minh; coordinator dời mốc của row toàn cục tới
+	if (p.srcEngine == model.EnginePG || p.posMode) && !p.strict {
+		// Relaxed: row delta chỉ chứa LSN (hoặc khóa vị trí binlog) tường minh; coordinator dời mốc của row toàn cục tới
 		// phần scheduler đã commit, để lwd (và slot) tiến (02 §4 quy tắc 4).
 		p.comp.SetVouch(p.vouchGlobal)
 	}
@@ -1062,8 +1097,9 @@ func (p *Pipeline) router(ctx context.Context, txns <-chan *model.Txn, asmErr <-
 
 func (p *Pipeline) markSeen(pos model.Pos) {
 	p.seenMu.Lock()
-	if p.srcEngine == model.EngineMySQL {
-		// Chỉ snapshot (source MySQL) đọc p.seen; với PG tập LSN tường minh sẽ phình mãi.
+	if p.srcEngine == model.EngineMySQL && !p.posMode {
+		// Chỉ snapshot (source MySQL) đọc p.seen; với PG tập LSN tường minh sẽ phình mãi. Chế độ vị trí
+		// binlog không có snapshot nên không cần.
 		p.seen.Add(pos)
 	}
 	p.seenCond.Broadcast()
@@ -1078,6 +1114,11 @@ func (p *Pipeline) table(id model.TableID) *tableMeta {
 
 func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	pos := t.SourcePos
+	if p.posMode {
+		if _, _, err := p.checkBinlogTxn(t); err != nil {
+			return err
+		}
+	}
 	if p.xids != nil {
 		// Trước range-state: snapshot logic phải chờ Txn này visible (snapshot.XIDTracker).
 		p.xids.Add(t.XID)
@@ -1293,7 +1334,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 // scheduler như một Txn rỗng thì lwd bền vững mới tới được nó khi source đã ngừng ghi. Txn rỗng có
 // XID (transaction không chạm bảng nào của publication) vẫn bị bỏ qua để không ghi target vô ích.
 func skipEmptyPGTxn(strict bool, t *model.Txn) bool {
-	if t.TotalRows() != 0 || t.DDL != "" || t.SourcePos.GTID != "" {
+	// Txn MySQL (GTID hoặc vị trí binlog) không bao giờ bị bỏ ở đây: Txn rỗng sau lọc vẫn phải đi qua
+	// scheduler để vị trí của nó vào tập đã apply (CP-1/CP-2).
+	if t.TotalRows() != 0 || t.DDL != "" || t.SourcePos.GTID != "" || t.SourcePos.IsBinlogPos() {
 		return false
 	}
 	return !(strict && t.SourcePos.Engine == model.EnginePG && t.XID == 0)
@@ -1301,6 +1344,10 @@ func skipEmptyPGTxn(strict bool, t *model.Txn) bool {
 
 // noteRouted báo bộ theo dõi LSN (chỉ source PG) rằng router đã xử lý xong Txn pos.
 func (p *Pipeline) noteRouted(pos model.Pos, seq uint64) {
+	if p.posMode && pos.IsBinlogPos() {
+		p.lsns.routedPos(p.curEnd, p.curStart, seq)
+		return
+	}
 	if p.lsns != nil && pos.Engine == model.EnginePG {
 		p.lsns.routed(pos.LSN, seq)
 		// Điểm hẹn của snapshot PG chờ LSN router đã xử lý (rendezvousPG).
@@ -1427,6 +1474,9 @@ func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 	var mine checkpoint.AppliedSet = checkpoint.NewMySQLAppliedSet()
 	if p.srcEngine == model.EnginePG {
 		mine = checkpoint.NewPGAppliedSet(0)
+	}
+	if p.posMode {
+		mine = checkpoint.NewMySQLPosAppliedSet(p.binlogBase, 0)
 	}
 	var stash *model.Txn // strict: Txn lấy ra nhưng không liền seq với batch, xử lý ở lượt sau
 	for {
@@ -1597,6 +1647,23 @@ func (p *Pipeline) strictGlobal(b []*model.Txn) string {
 	for _, t := range b {
 		p.strictApplied.Add(t.SourcePos)
 	}
+	if s, ok := p.strictApplied.(*checkpoint.MySQLPosAppliedSet); ok && len(b) > 0 {
+		// Chế độ vị trí binlog, như PG: strict commit đúng thứ tự seq = thứ tự binlog, nên khi batch này
+		// commit thì mọi Txn kết thúc ≤ vị trí kết thúc của Txn cuối batch đã commit hoặc đã bỏ (đã apply).
+		// Mốc = max(pointPos, kết thúc Txn cuối): cả hai là ranh giới event (pointPos: bắt đầu Txn kế
+		// tiếp; kết thúc Txn cuối: ranh giới Txn). Không chờ router ghi nhận Txn cuối vào tracker (xem
+		// chú thích ở nhánh PG): nếu batch commit trước đó, point chưa thấy nó.
+		last := b[len(b)-1]
+		v := p.lsns.pointPos(last.Seq())
+		if k, err := checkpoint.KeyOfPos(p.binlogBase, last.SourcePos); err == nil && k > v {
+			v = k
+		} else if err != nil {
+			panic(fmt.Sprintf("strictGlobal: %v", err)) // router đã kiểm tên gốc; không được ghi checkpoint sai
+		}
+		if err := s.Vouch(v, nil); err != nil {
+			panic(fmt.Sprintf("strictGlobal: %v", err))
+		}
+	}
 	if s, ok := p.strictApplied.(*checkpoint.PGAppliedSet); ok && len(b) > 0 {
 		last := b[len(b)-1]
 		v := p.lsns.point(last.Seq())
@@ -1704,6 +1771,9 @@ func (p *Pipeline) barrier(ctx context.Context, fn func() error) error {
 
 // rendezvous chờ router đã xử lý mọi GTID trong high watermark.
 func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) error {
+	if p.posMode {
+		return rejectBinlogPos("snapshot rendezvous")
+	}
 	if hs, ok := high.(*checkpoint.PGAppliedSet); ok {
 		return p.rendezvousPG(ctx, hs.Lwd().LSN)
 	}
@@ -1927,6 +1997,9 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 // Bảng chưa có trong pipeline được thêm vào ngay (metadata đọc từ source); để giữ bảng sau
 // khi restart, người vận hành phải thêm nó vào tables.include.
 func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
+	if p.posMode {
+		return rejectBinlogPos("snapshot add")
+	}
 	s, t, ok := strings.Cut(table, ".")
 	if !ok {
 		return fmt.Errorf("table must be schema.table")
@@ -2224,6 +2297,11 @@ func (p *Pipeline) caughtUpWithSource(ctx context.Context) bool {
 	}
 	if p.srcEngine != model.EngineMySQL {
 		return false
+	}
+	if p.posMode {
+		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		return p.posCaughtUp(qctx)
 	}
 	var executed string
 	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)

@@ -137,6 +137,9 @@ func (h *adminHandler) CheckpointRewind(ctx context.Context, to string) (*admin.
 	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
 		return nil, fmt.Errorf("checkpoint rewind is supported for MySQL → MySQL pipelines only")
 	}
+	if p.posMode {
+		return nil, rejectBinlogPos("checkpoint rewind")
+	}
 	set, err := checkpoint.ParseMySQLGTIDSet(to)
 	if err != nil || set.String() == "" {
 		return nil, fmt.Errorf("invalid GTID set %q: %v", to, err)

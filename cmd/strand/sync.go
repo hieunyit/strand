@@ -157,7 +157,7 @@ func newSyncCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&syncStartAt, "start-at", "", "Vị trí bắt đầu: seed | <gtid> (source MySQL) | <LSN X/Y> (source PostgreSQL)")
+	cmd.Flags().StringVar(&syncStartAt, "start-at", "", "Vị trí bắt đầu: seed | <gtid> (source MySQL) | <file binlog>:<vị trí> (source MySQL không GTID, ví dụ mysql-bin.000123:4567) | <LSN X/Y> (source PostgreSQL)")
 	cmd.Flags().StringVar(&syncSeedManifest, "seed-manifest", "seed.json", "Đường dẫn seed.json khi --start-at seed")
 	return cmd
 }

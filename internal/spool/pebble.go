@@ -184,8 +184,17 @@ func txnKey(seq uint64) []byte {
 	return []byte(fmt.Sprintf("txn/%016x", seq))
 }
 
+// hasPos: Pos mang một vị trí nào đó (GTID, LSN hoặc file+offset của chế độ vị trí binlog).
+func hasPos(p model.Pos) bool {
+	return p.GTID != "" || p.LSN != 0 || p.File != ""
+}
+
 func posKey(pos model.Pos) []byte {
 	if pos.Engine == model.EngineMySQL {
+		if pos.IsBinlogPos() {
+			// Chế độ vị trí binlog: khóa theo (file, offset kết thúc); offset đệm để thứ tự khóa = thứ tự vị trí.
+			return []byte(fmt.Sprintf("pos/mysqlbin/%s/%016x", pos.File, pos.BinlogPos))
+		}
 		return []byte(fmt.Sprintf("pos/mysql/%s", pos.GTID))
 	} else if pos.Engine == model.EnginePG {
 		return []byte(fmt.Sprintf("pos/pg/%016x", pos.LSN))
@@ -290,7 +299,7 @@ func (s *PebbleSpool) flushSegmentLocked(ctx context.Context) error {
 			s.discardSegmentLocked()
 			return err
 		}
-		if e.pos.GTID != "" || e.pos.LSN != 0 {
+		if hasPos(e.pos) {
 			var seqBuf [8]byte
 			binary.BigEndian.PutUint64(seqBuf[:], e.seq)
 			if err := batch.Set(posKey(e.pos), seqBuf[:], nil); err != nil {
@@ -426,7 +435,7 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 	}
 
 	// Lưu index vị trí SourcePos -> seq
-	if t.SourcePos.GTID != "" || t.SourcePos.LSN != 0 {
+	if hasPos(t.SourcePos) {
 		var seqBuf [8]byte
 		binary.BigEndian.PutUint64(seqBuf[:], seq)
 		if err := batch.Set(posKey(t.SourcePos), seqBuf[:], nil); err != nil {
@@ -486,7 +495,7 @@ func (s *PebbleSpool) Iter(ctx context.Context, from model.Pos) (SpoolIter, erro
 	}
 
 	startKey := []byte("txn/0000000000000000")
-	if from.GTID != "" || from.LSN != 0 {
+	if hasPos(from) {
 		pKey := posKey(from)
 		val, closer, err := s.db.Get(pKey)
 		if err != nil {
@@ -602,7 +611,7 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 				if err := batch.Delete(iter.Key(), nil); err != nil {
 					return err
 				}
-				if t.SourcePos.GTID != "" || t.SourcePos.LSN != 0 {
+				if hasPos(t.SourcePos) {
 					if err := batch.Delete(posKey(t.SourcePos), nil); err != nil {
 						return err
 					}
@@ -640,7 +649,7 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 			if err := batch.Delete(iter.Key(), nil); err != nil {
 				return err
 			}
-			if t.SourcePos.GTID != "" || t.SourcePos.LSN != 0 {
+			if hasPos(t.SourcePos) {
 				if err := batch.Delete(posKey(t.SourcePos), nil); err != nil {
 					return err
 				}

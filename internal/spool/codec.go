@@ -181,10 +181,29 @@ func decodeValue(r io.Reader) (model.Value, error) {
 // của model (giữ UniqueKeys/ForeignKeys cho writeset, mọi kiểu giá trị).
 const txnMagicV2 = "STX2"
 
+// txnMagicV3 = V2 + vị trí chế độ vị trí binlog (File, BinlogPos) và vị trí bắt đầu Txn (BinlogFile, BinlogPos của Txn).
+// Chỉ dùng khi Txn mang vị trí file+offset, nên spool của GTID/PG giữ nguyên định dạng V2 (đọc/ghi cũ không đổi).
+const txnMagicV3 = "STX3"
+
 // encodeTxn tuần tự hóa model.Txn thành byte buffer.
 func encodeTxn(t *model.Txn) ([]byte, error) {
 	var buf bytes.Buffer
-	buf.WriteString(txnMagicV2)
+	v3 := t.SourcePos.File != "" || t.SourcePos.BinlogPos != 0 || t.BinlogFile != "" || t.BinlogPos != 0
+	if v3 {
+		buf.WriteString(txnMagicV3)
+		for _, s := range []string{t.SourcePos.File, t.BinlogFile} {
+			if err := writeString(&buf, s); err != nil {
+				return nil, err
+			}
+		}
+		for _, v := range []uint64{t.SourcePos.BinlogPos, t.BinlogPos} {
+			if err := binary.Write(&buf, binary.LittleEndian, v); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		buf.WriteString(txnMagicV2)
+	}
 	ddl := t.DDL
 	if t.DDLSchema != "" && ddl != "" {
 		ddl = t.DDLSchema + "\x00" + ddl // tương thích ngược: bản ghi cũ không có NUL
@@ -222,11 +241,26 @@ func encodeTxn(t *model.Txn) ([]byte, error) {
 
 // decodeTxn giải mã byte buffer thành model.Txn.
 func decodeTxn(data []byte) (*model.Txn, error) {
-	if len(data) < len(txnMagicV2) || string(data[:len(txnMagicV2)]) != txnMagicV2 {
+	if len(data) < len(txnMagicV2) || (string(data[:len(txnMagicV2)]) != txnMagicV2 && string(data[:len(txnMagicV3)]) != txnMagicV3) {
 		return nil, fmt.Errorf("spool: unknown txn encoding")
 	}
+	v3 := string(data[:len(txnMagicV3)]) == txnMagicV3
 	r := bytes.NewReader(data[len(txnMagicV2):])
 	t := &model.Txn{}
+	if v3 {
+		for _, dst := range []*string{&t.SourcePos.File, &t.BinlogFile} {
+			s, err := readString(r)
+			if err != nil {
+				return nil, err
+			}
+			*dst = s
+		}
+		for _, dst := range []*uint64{&t.SourcePos.BinlogPos, &t.BinlogPos} {
+			if err := binary.Read(r, binary.LittleEndian, dst); err != nil {
+				return nil, err
+			}
+		}
+	}
 	strs := make([]string, 4)
 	for i := range strs {
 		s, err := readString(r)

@@ -135,8 +135,20 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 	if !strings.EqualFold(image, "FULL") {
 		return reject(fmt.Sprintf("binlog_row_image must be FULL, got %q", image))
 	}
-	if !strings.EqualFold(gtidMode, "ON") {
-		return reject(fmt.Sprintf("gtid_mode must be ON, got %q", gtidMode))
+	// gtid_mode ON: chế độ GTID. OFF hoặc không có biến (5.5): chế độ vị trí binlog (file:pos, bắt đầu bằng
+	// --start-at <file>:<pos>). *_PERMISSIVE trộn Txn có/không GTID trong cùng binlog: không chế độ nào đúng.
+	switch strings.ToUpper(gtidMode) {
+	case "ON", "OFF", "":
+	default:
+		return reject(fmt.Sprintf("gtid_mode must be ON (GTID mode) or OFF (binlog position mode), got %q", gtidMode))
+	}
+	// Không còn bắt buộc GTID nên phải kiểm binlog bật riêng (trước đây gtid_mode=ON ngầm đòi log-bin).
+	var logBin string
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.log_bin").Scan(&logBin); err != nil {
+		return fmt.Errorf("read source log_bin: %w", err)
+	}
+	if logBin != "1" && !strings.EqualFold(logBin, "ON") {
+		return reject("binary logging is disabled on the source (log_bin=OFF): start mysqld with --log-bin and --server-id")
 	}
 	if err := CheckMySQLBinlogRowValueOptions(valueOpts); err != nil {
 		return err

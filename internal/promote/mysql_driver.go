@@ -99,6 +99,9 @@ func (d *MySQLTargetDriver) WithCatchUpCheck(source *sql.DB, pipelineID string, 
 // MissingFromApplied trả về các GTID đã executed trên source nhưng chưa có trong tập đã apply
 // của target ("" nghĩa là target đã theo kịp).
 func MissingFromApplied(sourceExecuted string, applied checkpoint.AppliedSet) (string, error) {
+	if _, isPos := applied.(*checkpoint.MySQLPosAppliedSet); isPos {
+		return "", fmt.Errorf("promote is not yet supported in binlog position mode (source MySQL without GTID)")
+	}
 	src, err := checkpoint.ParseMySQLGTIDSet(sourceExecuted)
 	if err != nil {
 		return "", fmt.Errorf("parse source gtid_executed: %w", err)
