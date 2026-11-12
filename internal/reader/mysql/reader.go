@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,10 @@ type Config struct {
 	// CollationCharsets: collation id -> charset (information_schema.COLLATIONS của source). Khác nil thì
 	// giá trị chuỗi của cột không phải UTF-8 được chuyển sang UTF-8 (charset.go). nil = giữ byte nguyên.
 	CollationCharsets map[uint64]string
+	// TableInfo: cấu trúc bảng source (information_schema) cho TABLE_MAP không có metadata cột (MySQL 5.7
+	// không có binlog_row_metadata): tên cột, PK, unsigned, charset, nhãn ENUM/SET (tableinfo.go).
+	// nil = chỉ dùng metadata của TABLE_MAP.
+	TableInfo TableInfoProvider
 }
 
 // MySQLReader hiện thực interface reader.Reader cho MySQL binlog.
@@ -183,7 +188,7 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 		defer close(out)
 		defer syncer.Close()
 
-		st := &streamState{tableMap: make(map[uint64]*replication.TableMapEvent)}
+		st := &streamState{tableMap: make(map[uint64]*replication.TableMapEvent), ctx: ctxRead}
 		emit := func(e reader.Event) bool {
 			select {
 			case out <- e:
@@ -231,6 +236,60 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 type streamState struct {
 	tableMap map[uint64]*replication.TableMapEvent
 	curFile  string // file binlog hiện tại (từ ROTATE, kể cả rotate giả lúc kết nối)
+
+	ctx       context.Context       // ctx của luồng đọc, dùng cho truy vấn information_schema (nil = Background)
+	info      map[uint64]*TableInfo // theo TableID của TABLE_MAP hiện hành; nil = bảng không có info
+	infoCache map[string]*TableInfo // schema.table -> info đã đọc; xóa khi gặp DDL
+}
+
+func (st *streamState) context() context.Context {
+	if st.ctx != nil {
+		return st.ctx
+	}
+	return context.Background()
+}
+
+// isTxnControlQuery: QUERY không phải DDL (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/XA ...).
+func isTxnControlQuery(q string) bool {
+	f := strings.Fields(strings.ToUpper(q))
+	if len(f) == 0 {
+		return true
+	}
+	switch f[0] {
+	case "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "XA":
+		return true
+	}
+	return false
+}
+
+// resolveInfo trả info cho TABLE_MAP không có tên cột. Dùng cache; lệch số cột/kiểu thì đọc lại một lần từ
+// information_schema, vẫn lệch thì lỗi (fail closed, không ánh xạ cột sai). Bảng không còn tồn tại: nil.
+func (r *MySQLReader) resolveInfo(st *streamState, tm *replication.TableMapEvent) (*TableInfo, error) {
+	if r.cfg.TableInfo == nil || len(tm.ColumnName) > 0 {
+		return nil, nil
+	}
+	key := string(tm.Schema) + "." + string(tm.Table)
+	if info, ok := st.infoCache[key]; ok && info != nil && infoMismatch(tm, info) == "" {
+		return info, nil
+	}
+	info, found, err := r.cfg.TableInfo.LoadTable(st.context(), string(tm.Schema), string(tm.Table))
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		delete(st.infoCache, key)
+		return nil, nil
+	}
+	if why := infoMismatch(tm, info); why != "" {
+		return nil, exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+			fmt.Sprintf("table %s: source schema cannot be reconciled with the binlog (%s); the table was probably altered again "+
+				"after this position (MySQL 5.7 binlog has no column names). Restart strand after the source schema is stable", key, why), nil)
+	}
+	if st.infoCache == nil {
+		st.infoCache = map[string]*TableInfo{}
+	}
+	st.infoCache[key] = info
+	return info, nil
 }
 
 // handleEvent xử lý một event binlog và đẩy kết quả qua emit. Trả false khi luồng phải dừng
@@ -262,7 +321,7 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 		if tm, found := st.tableMap[rowsEv.TableID]; found {
 			schema, table = string(tm.Schema), string(tm.Table)
 		}
-		if err := NormalizeRows(st.tableMap[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
+		if err := NormalizeRowsInfo(st.tableMap[rowsEv.TableID], st.info[rowsEv.TableID], rowsEv.Rows, r.cfg.CollationCharsets); err != nil {
 			return fail(err)
 		}
 		return emit(reader.Event{
@@ -316,6 +375,9 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 
 	case replication.QUERY_EVENT:
 		if qEv, ok := ev.Event.(*replication.QueryEvent); ok {
+			if !isTxnControlQuery(string(qEv.Query)) {
+				st.infoCache = nil // DDL: cấu trúc bảng có thể đã đổi, đọc lại ở TABLE_MAP kế tiếp
+			}
 			return emit(reader.Event{
 				Type:      reader.EventQuery,
 				Pos:       r.Position(),
@@ -328,8 +390,21 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 	case replication.TABLE_MAP_EVENT:
 		if tmEv, ok := ev.Event.(*replication.TableMapEvent); ok {
 			st.tableMap[tmEv.TableID] = tmEv
+			info, err := r.resolveInfo(st, tmEv)
+			if err != nil {
+				return fail(err)
+			}
+			if st.info == nil {
+				st.info = map[uint64]*TableInfo{}
+			}
+			st.info[tmEv.TableID] = info
 			var cols, pkCols []string
-			if len(tmEv.ColumnName) > 0 {
+			if info != nil {
+				for _, c := range info.Columns {
+					cols = append(cols, c.Name)
+				}
+				pkCols = info.PK
+			} else if len(tmEv.ColumnName) > 0 {
 				cols = tmEv.ColumnNameString()
 				for _, idx := range tmEv.PrimaryKey {
 					if int(idx) < len(cols) {

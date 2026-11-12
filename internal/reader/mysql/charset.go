@@ -58,12 +58,22 @@ func convertCharsets(tm *replication.TableMapEvent, rows [][]any, charsets map[u
 	if len(cm) == 0 {
 		return nil
 	}
-	names := tm.ColumnNameString()
+	byIdx := make(map[int]string, len(cm))
 	for idx, coll := range cm {
 		cs, ok := charsets[coll]
 		if !ok {
 			return fmt.Errorf("%s.%s: unknown collation id %d for column %d", tm.Schema, tm.Table, coll, idx)
 		}
+		byIdx[idx] = cs
+	}
+	return convertCharsetsBy(tm, rows, byIdx)
+}
+
+// convertCharsetsBy: lõi của convertCharsets, charset theo chỉ số cột (từ collation của TABLE_MAP hoặc từ
+// information_schema khi nguồn MySQL 5.7 không có metadata).
+func convertCharsetsBy(tm *replication.TableMapEvent, rows [][]any, byIdx map[int]string) error {
+	names := tm.ColumnNameString()
+	for idx, cs := range byIdx {
 		switch cs {
 		case "utf8mb4", "utf8mb3", "utf8", "ascii", "binary":
 			continue
@@ -147,10 +157,18 @@ func padBinary(tm *replication.TableMapEvent, rows [][]any) {
 	if tm == nil {
 		return
 	}
+	var cols []int
 	for idx, coll := range tm.CollationMap() {
-		if coll != binaryCollationID {
-			continue
+		if coll == binaryCollationID {
+			cols = append(cols, idx)
 		}
+	}
+	padBinaryCols(tm, rows, cols)
+}
+
+// padBinaryCols đệm 0x00 cho các cột BINARY(n) có chỉ số trong cols.
+func padBinaryCols(tm *replication.TableMapEvent, rows [][]any, cols []int) {
+	for _, idx := range cols {
 		n, ok := fixedStringLen(tm, idx)
 		if !ok {
 			continue
@@ -178,6 +196,39 @@ func padBinary(tm *replication.TableMapEvent, rows [][]any) {
 func NormalizeRows(tm *replication.TableMapEvent, rows [][]any, charsets map[uint64]string) error {
 	padBinary(tm, rows)
 	return convertCharsets(tm, rows, charsets)
+}
+
+// NormalizeRowsInfo như NormalizeRows và thêm: phần TABLE_MAP không có metadata (MySQL 5.7, hoặc 8.0
+// MINIMAL) lấy từ info (information_schema): số nguyên không dấu, nhãn ENUM/SET, đệm BINARY(n), charset cột.
+// info=nil: chỉ dùng metadata của TABLE_MAP (giống NormalizeRows, cộng nhãn ENUM/SET khi có trong event).
+func NormalizeRowsInfo(tm *replication.TableMapEvent, info *TableInfo, rows [][]any, charsets map[uint64]string) error {
+	if err := applyInfo(tm, info, rows); err != nil {
+		return err
+	}
+	if tm == nil || info == nil || len(tm.CollationMap()) > 0 {
+		return NormalizeRows(tm, rows, charsets)
+	}
+	var bin []int
+	byIdx := map[int]string{}
+	for i, c := range info.Columns {
+		if i >= len(tm.ColumnType) {
+			break
+		}
+		switch c.DataType {
+		case "binary":
+			bin = append(bin, i)
+		case "enum", "set", "json":
+		default:
+			if c.Charset != "" {
+				byIdx[i] = c.Charset
+			}
+		}
+	}
+	padBinaryCols(tm, rows, bin)
+	if charsets == nil {
+		return nil
+	}
+	return convertCharsetsBy(tm, rows, byIdx)
 }
 
 // LoadCollationCharsets: collation id -> charset của source (information_schema.COLLATIONS), cho
