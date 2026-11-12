@@ -456,6 +456,23 @@ func (d *PGTargetDriver) ApplyRemaining(ctx context.Context) error {
 	var caughtUp func(applied checkpoint.AppliedSet) (string, error)
 	switch d.sourceEngine {
 	case model.EngineMySQL:
+		// Nguồn không GTID (chế độ vị trí binlog): so với vị trí binlog đọc sau fence.
+		if first, err := checkpoint.LoadAppliedSnapshotPG(ctx, d.db, d.pipelineID, d.sourceEngine); err == nil {
+			if ps, ok := first.(*checkpoint.MySQLPosAppliedSet); ok {
+				head, err := readPosHead(ctx, d.source, ps)
+				if err != nil {
+					return fmt.Errorf("apply remaining: %w", err)
+				}
+				caughtUp = func(applied checkpoint.AppliedSet) (string, error) {
+					cur, ok := applied.(*checkpoint.MySQLPosAppliedSet)
+					if !ok {
+						return "", fmt.Errorf("apply remaining: checkpoint is no longer a binlog position set")
+					}
+					return posMissing(ctx, d.source, cur, head)
+				}
+				break
+			}
+		}
 		var executed string
 		if err := d.source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&executed); err != nil {
 			return fmt.Errorf("apply remaining: read source gtid_executed: %w", err)

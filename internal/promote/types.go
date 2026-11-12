@@ -114,6 +114,14 @@ type SourceDriver interface {
 	ReadSequenceLastValue(ctx context.Context, seqName string) (int64, error)
 }
 
+// FenceHolder là interface tùy chọn cho SourceDriver mà fence cần được GIỮ trong suốt promote (MySQL
+// 5.5/5.6/5.7<5.7.8: FLUSH TABLES WITH READ LOCK trên một kết nối riêng). FenceHeld trả lỗi nếu fence
+// đang không được giữ bởi tiến trình này (khóa mất, hoặc promote chạy lại sau khi tiến trình cũ chết:
+// khóa đã nhả dù bước fence đã đánh dấu xong). Promoter fence lại khi resume và kiểm trước khi mở ghi.
+type FenceHolder interface {
+	FenceHeld(ctx context.Context) error
+}
+
 // SequencelessSource là interface tùy chọn cho SourceDriver: HasSequences() = false nghĩa là source
 // không có sequence (MySQL dùng AUTO_INCREMENT). Khi đó sequence độc lập ở target PG không có bản tương
 // ứng ở source: promote lấy giá trị từ các cột target mà sequence cấp giá trị (SequenceInfo.Feeds)

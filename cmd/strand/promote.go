@@ -32,6 +32,7 @@ var (
 	promoteAppRole          string
 	promoteSchemas          []string
 	promoteSourceAppRoles   []string
+	promoteFenceTimeout     time.Duration
 )
 
 // isPGDSN nhận diện DSN PostgreSQL dạng URL.
@@ -118,7 +119,10 @@ func newPromoteCmd() *cobra.Command {
 							return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 						}
 						defer sourceDB.Close()
-						sourceDriver = promote.NewMySQLSourceDriver(sourceDB)
+						mySrc := promote.NewMySQLSourceDriver(sourceDB).WithAppUsers(promoteSourceAppRoles...).
+							WithFenceTimeout(promoteFenceTimeout).WithLogger(logger)
+						defer mySrc.ReleaseFence()
+						sourceDriver = mySrc
 						pgTargetDriver.WithSourceEngine(model.EngineMySQL).
 							WithCatchUpCheck(sourceDB, promotePipelineID, promoteCatchUpTimeout, logger)
 					}
@@ -169,7 +173,10 @@ func newPromoteCmd() *cobra.Command {
 						return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 					}
 					defer sourceDB.Close()
-					sourceDriver = promote.NewMySQLSourceDriver(sourceDB)
+					mySrc := promote.NewMySQLSourceDriver(sourceDB).WithAppUsers(promoteSourceAppRoles...).
+						WithFenceTimeout(promoteFenceTimeout).WithLogger(logger)
+					defer mySrc.ReleaseFence()
+					sourceDriver = mySrc
 					myTargetDriver.WithCatchUpCheck(sourceDB, promotePipelineID, promoteCatchUpTimeout, logger)
 				}
 				sequences = nil
@@ -217,6 +224,10 @@ func newPromoteCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Promote pipeline %s thành công. Target đã mở quyền ghi.\n", progress.PipelineID)
+			if len(promoteFenceSourceDSN) > 0 && !isPGDSN(promoteFenceSourceDSN) {
+				fmt.Println("Lưu ý nguồn MySQL cũ (5.5/5.6/5.7<5.7.8 fence bằng read_only + FLUSH TABLES WITH READ LOCK): khóa FTWRL nhả khi lệnh này thoát, " +
+					"read_only=ON vẫn giữ nhưng KHÔNG chặn user SUPER. Giữ source tắt hoặc read_only và cắt kết nối ứng dụng cho tới khi cut-over xong.")
+			}
 			return nil
 		},
 	}
@@ -231,7 +242,8 @@ func newPromoteCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&promoteSyncIntervalSec, "sync-interval", 5, "Chu kỳ đồng bộ sequence Delta t_sync (giây)")
 	cmd.Flags().StringVar(&promoteEngine, "engine", "auto", "Loại CSDL target: mysql | pg | auto (tự động nhận diện từ DSN)")
 	cmd.Flags().StringVar(&promoteAppRole, "app-role", "app_rw", "Role ứng dụng trên target PostgreSQL: bị chặn ghi đến bước 5 rồi được cấp quyền ghi")
-	cmd.Flags().StringSliceVar(&promoteSourceAppRoles, "source-app-roles", nil, "Role ứng dụng trên source PostgreSQL: fence đặt NOLOGIN rồi ngắt session (rỗng = chỉ ngắt mọi session client trừ user của Strand, fence mang tính hợp tác)")
+	cmd.Flags().StringSliceVar(&promoteSourceAppRoles, "source-app-roles", nil, "Role (PG) / user (MySQL) ứng dụng trên source: MySQL kill session của user này sau khi giữ FTWRL. PG: fence đặt NOLOGIN rồi ngắt session (rỗng = chỉ ngắt mọi session client trừ user của Strand, fence mang tính hợp tác)")
+	cmd.Flags().DurationVar(&promoteFenceTimeout, "fence-timeout", promote.DefaultFenceTimeout, "Thời gian tối đa chờ FLUSH TABLES WITH READ LOCK và chờ session ứng dụng thoát khi fence source MySQL không có super_read_only (5.5/5.6/5.7<5.7.8)")
 	cmd.Flags().StringSliceVar(&promoteSchemas, "schemas", []string{"public"}, "Danh sách schema PostgreSQL chứa bảng và sequence cần promote")
 
 	return cmd

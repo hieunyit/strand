@@ -254,6 +254,17 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 		return progress, nil
 	}
 
+	// Fence cần giữ khóa (MySQL FTWRL): bước fence đã đánh dấu xong ở lần chạy trước nhưng khóa đã nhả khi
+	// tiến trình đó thoát → fence lại trước khi đi tiếp (Fence idempotent).
+	if holder, ok := p.sourceDriver.(FenceHolder); ok && progress.IsStepCompleted(StepFenceSource) && !p.cfg.SourceFencedExternally {
+		if herr := holder.FenceHeld(ctx); herr != nil {
+			p.logger.Warn("source fence is not held by this process; fencing again", "reason", herr)
+			if err := p.sourceDriver.Fence(ctx); err != nil {
+				return progress, fmt.Errorf("re-fence source on resume failed: %w", err)
+			}
+		}
+	}
+
 	// spec: 02 §8 Bước 1: Fence source cũ
 	if !progress.IsStepCompleted(StepFenceSource) {
 		progress.CurrentStep = StepFenceSource
@@ -339,6 +350,11 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 	if !progress.IsStepCompleted(StepSetval) {
 		progress.CurrentStep = StepSetval
 		_ = p.stateStore.SaveProgress(ctx, progress)
+		if holder, ok := p.sourceDriver.(FenceHolder); ok && !p.cfg.SourceFencedExternally {
+			if err := holder.FenceHeld(ctx); err != nil {
+				return progress, err
+			}
+		}
 
 		// Chốt giá trị cho từng sequence trước, lưu kế hoạch, rồi mới setval: nếu bị ngắt giữa chừng,
 		// lần chạy lại dùng đúng các giá trị đã chốt (không hỏi lại, không hạ xuống).
@@ -463,6 +479,11 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 	if !progress.IsStepCompleted(StepOpenWrites) {
 		progress.CurrentStep = StepOpenWrites
 		_ = p.stateStore.SaveProgress(ctx, progress)
+		if holder, ok := p.sourceDriver.(FenceHolder); ok && !p.cfg.SourceFencedExternally {
+			if err := holder.FenceHeld(ctx); err != nil {
+				return progress, err
+			}
+		}
 
 		if err := p.targetDriver.OpenWrites(ctx); err != nil {
 			return progress, fmt.Errorf("open target writes failed: %w", err)

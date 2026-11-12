@@ -16,6 +16,12 @@ import (
 type MySQLSourceDriver struct {
 	db        *sql.DB
 	reachable bool
+
+	// Fence FTWRL cho nguồn không có super_read_only (xem mysql_fence.go).
+	fenceTimeout time.Duration
+	appUsers     []string
+	logger       *slog.Logger
+	hold         *ftwrlHold
 }
 
 // NewMySQLSourceDriver khởi tạo MySQLSourceDriver.
@@ -33,13 +39,13 @@ func (d *MySQLSourceDriver) Fence(ctx context.Context) error {
 	if !d.reachable || d.db == nil {
 		return fmt.Errorf("source db unreachable")
 	}
-	// super_read_only có từ 5.7.8: bản cũ hơn không fence được hết quyền SUPER nên từ chối rõ ràng.
+	// super_read_only có từ 5.7.8; bản cũ hơn dùng read_only + FLUSH TABLES WITH READ LOCK (fenceFTWRL).
 	if ver, err := mysqlver.Cached(ctx, d.db); err == nil {
 		if err := mysqlver.CheckSupported(ver); err != nil {
 			return err
 		}
-		if !ver.HasSuperReadOnly() {
-			return fmt.Errorf("cannot fence source %s: super_read_only requires MySQL 5.7.8 or later", ver.Raw)
+		if ChooseFenceMode(ver) == FenceFTWRL {
+			return d.fenceFTWRL(ctx)
 		}
 	}
 	_, err := d.db.ExecContext(ctx, "SET GLOBAL super_read_only = ON;")
@@ -100,7 +106,7 @@ func (d *MySQLTargetDriver) WithCatchUpCheck(source *sql.DB, pipelineID string, 
 // của target ("" nghĩa là target đã theo kịp).
 func MissingFromApplied(sourceExecuted string, applied checkpoint.AppliedSet) (string, error) {
 	if _, isPos := applied.(*checkpoint.MySQLPosAppliedSet); isPos {
-		return "", fmt.Errorf("promote is not yet supported in binlog position mode (source MySQL without GTID)")
+		return "", fmt.Errorf("GTID comparison does not apply in binlog position mode (source MySQL without GTID): use the binlog position comparison")
 	}
 	src, err := checkpoint.ParseMySQLGTIDSet(sourceExecuted)
 	if err != nil {
@@ -152,6 +158,12 @@ func (d *MySQLTargetDriver) ApplyRemaining(ctx context.Context) error {
 	if err := d.source.PingContext(ctx); err != nil {
 		d.logger.Warn("source unreachable: cannot verify remaining log was applied (failover; data loss bounded by lag)", "error", err)
 		return nil
+	}
+	// Chế độ vị trí binlog (nguồn không GTID): so với vị trí binlog đọc sau fence.
+	if applied, err := checkpoint.LoadAppliedSnapshotMySQL(ctx, d.db, d.pipelineID, model.EngineMySQL); err == nil {
+		if ps, ok := applied.(*checkpoint.MySQLPosAppliedSet); ok {
+			return d.applyRemainingPos(ctx, ps)
+		}
 	}
 	var executed string
 	if err := d.source.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&executed); err != nil {
