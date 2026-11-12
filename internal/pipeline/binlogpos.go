@@ -314,11 +314,14 @@ func (p *Pipeline) posCaughtUp(ctx context.Context) bool {
 	if p.lsns == nil {
 		return false
 	}
-	seen := p.lsns.seenLSN()
-	if seen == 0 {
-		// Chưa nhận Txn nào: so từ Lwd khởi động.
-		seen = p.applied0.(*checkpoint.MySQLPosAppliedSet).LwdKey()
-	}
-	ok, err := mysqlreader.TxnFreeToHead(ctx, p.src, p.binlogBase, seen)
+	// seen đọc SAU khi lấy head (như nhánh GTID: gtid_executed lấy trước rồi mới so với seen).
+	ok, err := mysqlreader.TxnFreeToHeadFunc(ctx, p.src, p.binlogBase, func() uint64 {
+		seen := p.lsns.seenLSN()
+		if seen == 0 {
+			// Chưa nhận Txn nào: so từ Lwd khởi động.
+			seen = p.applied0.(*checkpoint.MySQLPosAppliedSet).LwdKey()
+		}
+		return seen
+	})
 	return err == nil && ok
 }

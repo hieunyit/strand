@@ -57,6 +57,14 @@ func nonTxnEvent(kind string) bool {
 // tại (nghĩa là mọi Txn đã có trong binlog đều kết thúc ≤ from). from phải là ranh giới event.
 // Dùng để biết "đã theo kịp" khi đầu binlog chỉ còn event không thuộc Txn (Rotate, Format_desc...).
 func TxnFreeToHead(ctx context.Context, db *sql.DB, fileBase string, from uint64) (bool, error) {
+	return TxnFreeToHeadFunc(ctx, db, fileBase, func() uint64 { return from })
+}
+
+// TxnFreeToHeadFunc như TxnFreeToHead nhưng đọc from SAU khi đã lấy đầu binlog: với reader đang chạy,
+// from (seen) được lấy sau mốc head nên mọi Txn commit trước mốc đó có cơ hội đã được đọc. Chỉ xét
+// event bắt đầu trước head đã lấy — Txn ghi sau mốc không làm kết quả thành false (dưới tải liên tục,
+// quét tới EOF hiện tại luôn gặp Txn mới và không bao giờ "kịp").
+func TxnFreeToHeadFunc(ctx context.Context, db *sql.DB, fileBase string, fromFn func() uint64) (bool, error) {
 	hf, hp, err := MasterStatus(ctx, db)
 	if err != nil {
 		return false, err
@@ -72,6 +80,7 @@ func TxnFreeToHead(ctx context.Context, db *sql.DB, fileBase string, from uint64
 	if err != nil {
 		return false, err
 	}
+	from := fromFn()
 	if from >= head {
 		return true, nil
 	}
@@ -101,6 +110,14 @@ func TxnFreeToHead(ctx context.Context, db *sql.DB, fileBase string, from uint64
 			if len(vals) < 6 {
 				rows.Close()
 				return false, fmt.Errorf("SHOW BINLOG EVENTS: unexpected columns")
+			}
+			if file == hf {
+				var pos uint64
+				fmt.Sscan(string(vals[1]), &pos)
+				if pos >= hp {
+					rows.Close()
+					return true, nil // event ghi sau mốc head đã lấy
+				}
 			}
 			if !nonTxnEvent(string(vals[2])) {
 				rows.Close()
