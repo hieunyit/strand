@@ -30,7 +30,7 @@ Strand đồng bộ **một chiều** dữ liệu từ một CSDL nguồn (sourc
 | PostgreSQL → PostgreSQL | Có |
 | PostgreSQL → MySQL | **Không**. `sync` từ chối: `unsupported pipeline postgres → mysql` |
 
-Phiên bản có test tự động: MySQL 8.4, PostgreSQL 16, 17 và 18. MySQL 8.0 có trong spec nhưng chưa có test tự động. Source PostgreSQL cần ít nhất PG 14, vì watermark snapshot dùng `messages` của pgoutput.
+Phiên bản có test tự động: MySQL 8.4, PostgreSQL 16, 17 và 18. Source MySQL 5.5, 5.6 và 5.7 (có hoặc không GTID) cũng có e2e: xem `docs/MYSQL-5X-MIGRATION.md`. MySQL 8.0 có trong spec nhưng chưa có test tự động. Source PostgreSQL cần ít nhất PG 14, vì watermark snapshot dùng `messages` của pgoutput.
 
 ### 1.2 Tính năng theo cặp
 
@@ -207,7 +207,7 @@ Strand **không tự áp DDL**.
 
 ### 4.1 Source MySQL
 
-Source phải bật GTID và binlog ROW đầy đủ. Mọi biến đổi được online, trừ `log_bin` và `log_replica_updates` (cần restart nếu chưa bật). `strand validate` kiểm cả giá trị global lẫn từng session đang mở.
+Source cần binlog ROW đầy đủ. Bảng dưới là cho source có GTID (8.x, 5.7 `gtid_mode=ON`). Source không GTID (5.5, 5.6/5.7 `gtid_mode=OFF`) chạy ở chế độ vị trí binlog: xem `docs/MYSQL-5X-MIGRATION.md`. Mọi biến đổi được online, trừ `log_bin` và `log_replica_updates` (cần restart nếu chưa bật). `strand validate` kiểm cả giá trị global lẫn từng session đang mở.
 
 | Biến | Giá trị | Đổi online | Ghi chú |
 | --- | --- | --- | --- |
@@ -228,7 +228,7 @@ Source phải bật GTID và binlog ROW đầy đủ. Mọi biến đổi đư�
 
 Nên đọc từ replica có `log_replica_updates=ON`: trỏ `source` vào replica. `source.read_from` chưa có tác dụng.
 
-Không có định vị bằng file + position; bắt buộc GTID. Retention binlog phải đủ dài để phủ thời gian snapshot logic (`strand plan` tính ETA) hoặc tuổi backup cộng thời gian restore (chế độ B).
+Source có GTID thì định vị bằng GTID. Source không GTID thì định vị bằng file + position (`--start-at mysql-bin.000123:4567`), với các giới hạn ở `docs/MYSQL-5X-MIGRATION.md` mục 10. Retention binlog phải đủ dài để phủ thời gian snapshot logic (`strand plan` tính ETA) hoặc tuổi backup cộng thời gian restore (chế độ B).
 
 ### 4.2 Source PostgreSQL
 
