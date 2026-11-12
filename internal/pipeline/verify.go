@@ -317,11 +317,19 @@ type tableVerdict struct {
 // verify_mismatch nếu có lệch thật. skipped: bảng không verify được theo range/khóa (genVerifyMode
 // "skip") — bảng có khóa cần verify (hoặc có mẫu) bị bỏ.
 func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[model.TableID][]int64) (skipped []model.TableID, err error) {
-	return p.verifyTablesKeys(ctx, rate, keys, nil)
+	return p.verifyTablesKeys(ctx, rate, keys, nil, nil)
 }
 
-// verifyTablesKeys như verifyTables, kèm khóa đã chạm của bảng PK tổng quát (gen).
-func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[model.TableID][]int64, gen map[model.TableID][]snapshot.Bound) (skipped []model.TableID, err error) {
+// verifyTablesKeys như verifyTables, kèm khóa đã chạm của bảng PK tổng quát (gen). full: bảng verify
+// TOÀN BỘ (keyset walk theo chunk 1000 khóa, như rate = 1) thay cho mẫu + khóa đã chạm — dùng khi tập
+// khóa đã chạm của bảng không đầy đủ (vượt giới hạn hoặc lỗi mã hóa).
+func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[model.TableID][]int64, gen map[model.TableID][]snapshot.Bound, full map[model.TableID]bool) (skipped []model.TableID, err error) {
+	rateOf := func(id model.TableID) float64 {
+		if full[id] {
+			return 1
+		}
+		return rate
+	}
 	lv := p.liveVerifier()
 	var cv *verify.MerkleVerifier
 	if !p.liveMySQL() {
@@ -347,7 +355,7 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 	for _, id := range ids {
 		m := p.table(id)
 		var ranges [][2]int64
-		if rate > 0 {
+		if rate := rateOf(id); rate > 0 {
 			r, err := verify.SampleRangesEngine(ctx, p.src, p.srcEngine, id, m.PK[0], rate, 1000, rng)
 			if err != nil {
 				return nil, err
@@ -389,6 +397,7 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 	sort.Slice(genIDs, func(i, j int) bool { return genIDs[i].String() < genIDs[j].String() })
 	for _, id := range genIDs {
 		m := p.table(id)
+		rate := rateOf(id)
 		if rate <= 0 && len(gen[id]) == 0 {
 			continue
 		}
@@ -494,18 +503,19 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	case <-time.After(window):
 	}
 	keys, over, gen := p.takePostSeedKeys()
-	// SD-1/CP-1 không thay đổi; chỉ trạng thái verify được siết: thiếu khóa không chứng minh đủ
-	// cửa sổ CDC nên giữ VerifyPending, không được báo synced sau khi chỉ kiểm phần còn lại.
-	if _, err := deltaVerifyResult(touchedTake{over: over}); err != nil {
-		// Không dừng CDC: thiếu bằng chứng verify không phải lỗi dữ liệu. Giữ VerifyPending và cờ verifying
-		// (pipeline không bao giờ báo synced), báo rõ để người vận hành chạy verify full; replication vẫn
-		// tiếp tục áp thay đổi. Trước đây p.fail dừng pipeline với mọi seed có cửa sổ catch-up bận.
-		p.metrics.VerifyIncompleteTotal.WithLabelValues(p.id).Inc()
-		p.log.Error("post-seed verify incomplete: the seed is not verified; run `strand verify --mode full` (pipeline keeps replicating but never reports synced until a verify passes)",
-			"code", exitcode.ErrVerifyIncomplete, "error", err.Error())
-		return
+	// SD-1/CP-1 không thay đổi. Bảng có tập khóa đã chạm không đầy đủ (vượt giới hạn hoặc lỗi mã hóa):
+	// mẫu + phần khóa còn lại không chứng minh đủ cửa sổ CDC, nên verify TOÀN BỘ bảng đó trước khi bỏ
+	// VerifyPending. Trước đây pipeline giữ VerifyPending mãi (không bao giờ synced) dù dữ liệu đúng,
+	// vì `strand verify --mode full` chạy ở process khác không gỡ được trạng thái này.
+	full := map[model.TableID]bool{}
+	for t, o := range over {
+		if o {
+			full[t] = true
+			p.log.Warn("post-seed verify: changed-key tracking incomplete for this table (limit or encoding failure); verifying the whole table",
+				"table", t.String())
+		}
 	}
-	more, err := p.verifyTablesKeys(ctx, 0, keys, gen)
+	more, err := p.verifyTablesKeys(ctx, 0, keys, gen, full)
 	if err != nil {
 		if ctx.Err() == nil {
 			p.fail(err)
@@ -568,7 +578,7 @@ func (p *Pipeline) VerifyDelta(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("verify --mode delta needs verify.delta: on in the pipeline config (no changed keys are being tracked)")
 	}
 	tt := p.touched.take(touchDelta)
-	skipped, err := p.verifyTablesKeys(ctx, 0, tt.keys, tt.gen)
+	skipped, err := p.verifyTablesKeys(ctx, 0, tt.keys, tt.gen, nil)
 	if err != nil {
 		var xe *exitcode.Error
 		if !errors.As(err, &xe) || xe.Code != exitcode.ErrVerifyMismatch {
