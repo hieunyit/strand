@@ -112,10 +112,7 @@ func CheckMySQLBinlogRowValueOptions(val string) error {
 // binlog_format=ROW, binlog_row_image=FULL, gtid_mode=ON, binlog_row_value_options rỗng,
 // và mọi bảng trong tables ("schema.table", không hỗ trợ wildcard) tồn tại và có PK.
 func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
-	var format, image, gtidMode, valueOpts string
-	err := db.QueryRowContext(ctx,
-		"SELECT @@GLOBAL.binlog_format, @@GLOBAL.binlog_row_image, @@GLOBAL.gtid_mode, @@GLOBAL.binlog_row_value_options").
-		Scan(&format, &image, &gtidMode, &valueOpts)
+	format, image, gtidMode, valueOpts, err := sourceBinlogVars(ctx, db)
 	if err != nil {
 		return fmt.Errorf("read source binlog settings: %w", err)
 	}
@@ -208,6 +205,9 @@ func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string
 		    OR (v.VARIABLE_NAME = 'binlog_row_image' AND UPPER(v.VARIABLE_VALUE) <> 'FULL')
 		 ORDER BY v.THREAD_ID`)
 	if qerr != nil {
+		if h := sessionBinlogHint(qerr); h != "" {
+			return append(warnings, h), nil
+		}
 		warnings = append(warnings, fmt.Sprintf("cannot verify per-session binlog settings (%v); grant SELECT ON performance_schema.variables_by_thread and performance_schema.threads to the strand user, or check manually", qerr))
 		return warnings, nil
 	}

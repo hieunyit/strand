@@ -20,6 +20,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"strand/internal/model"
+	readermysql "strand/internal/reader/mysql"
 	"strand/internal/sched"
 )
 
@@ -138,12 +139,9 @@ func RunReplay(srcDSN, dstDSN string, numWorkers, targetTxns int, startFile stri
 
 	if startFile == "" {
 		// Thử lấy vị trí hiện tại
-		var curFile string
-		var curPos uint32
-		var d1, d2, d3 sql.NullString
-		err = srcDB.QueryRowContext(ctx, "SHOW BINARY LOG STATUS").Scan(&curFile, &curPos, &d1, &d2, &d3)
-		if err == nil && curFile != "" {
-			startFile = curFile
+		st, err := readermysql.ReadBinlogStatus(ctx, srcDB)
+		if err == nil && st.File != "" {
+			startFile = st.File
 			startPos = 4
 		} else {
 			startFile = "binlog.000001"
