@@ -144,13 +144,20 @@ func (p *Pipeline) checkBinlogPosition(ctx context.Context, file string, off uin
 	if off == size {
 		return nil
 	}
-	rows, err := p.src.QueryContext(ctx, fmt.Sprintf("SHOW BINLOG EVENTS IN '%s' FROM %d LIMIT 1", strings.ReplaceAll(file, "'", "''"), off))
-	if err != nil {
+	notBoundary := func(err error) error {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 			fmt.Sprintf("position %s:%d is not an event boundary of the source binlog: %v", file, off, err), err)
 	}
-	rows.Close()
-	return rows.Err()
+	rows, err := p.src.QueryContext(ctx, fmt.Sprintf("SHOW BINLOG EVENTS IN '%s' FROM %d LIMIT 1", strings.ReplaceAll(file, "'", "''"), off))
+	if err != nil {
+		return notBoundary(err)
+	}
+	defer rows.Close()
+	rows.Next() // MySQL báo lỗi vị trí sai khi đọc dòng đầu, không phải lúc Query
+	if err := rows.Err(); err != nil {
+		return notBoundary(err)
+	}
+	return nil
 }
 
 // initialPositionPos quyết định điểm bắt đầu ở chế độ vị trí binlog (thay initialPosition). Chỉ có
