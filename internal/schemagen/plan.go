@@ -108,8 +108,11 @@ func Discover(ctx context.Context, db *sql.DB, kind string, include, exclude []s
 		switch typ {
 		case "BASE TABLE":
 		case "SYSTEM VERSIONED":
-			// MariaDB WITH SYSTEM VERSIONING: bỏ qua im lặng là mất cả bảng dữ liệu; từ chối rõ.
-			return nil, nil, CheckMariaDBTable(ctx, db, t.Schema, t.Table)
+			// MariaDB WITH SYSTEM VERSIONING: chỉ chép hàng hiện hành sang bảng thường; hình dạng không chép đúng thì từ chối.
+			if err := CheckMariaDBTable(ctx, db, t.Schema, t.Table); err != nil {
+				return nil, nil, err
+			}
+			warnings = append(warnings, "system-versioned table "+t.String()+": only current rows are migrated to a plain table; row history (FOR SYSTEM_TIME queries) is not migrated")
 		case "SEQUENCE":
 			warnings = append(warnings, "MariaDB sequence omitted (MySQL has no sequences): "+t.String())
 			continue

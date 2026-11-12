@@ -32,9 +32,15 @@ func mdbImage() string {
 // startMariaDB: nguồn MariaDB (env MARIADB_ROOT_PASSWORD, không GTID); kết nối dữ liệu dùng charset utf8mb4.
 func startMariaDB(t *testing.T, alias string, serverID int) *mysqlNode {
 	t.Helper()
+	return startMariaDBImage(t, mdbImage(), alias, serverID)
+}
+
+// startMariaDBImage: như startMariaDB nhưng với image cố định (test kiểu cần phiên bản tối thiểu: INET4 10.10+, UUID 10.7+).
+func startMariaDBImage(t *testing.T, image, alias string, serverID int) *mysqlNode {
+	t.Helper()
 	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
-		Image:        mdbImage(),
+		Image:        image,
 		ExposedPorts: []string{"3306/tcp"},
 		Env:          map[string]string{"MARIADB_ROOT_PASSWORD": "dev"},
 		Cmd: []string{"--log-bin=mysql-bin", fmt.Sprintf("--server-id=%d", serverID), "--binlog-format=ROW",
@@ -47,7 +53,7 @@ func startMariaDB(t *testing.T, alias string, serverID int) *mysqlNode {
 		t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	}
 	if err != nil {
-		t.Fatalf("start %s: %v", mdbImage(), err)
+		t.Fatalf("start %s: %v", image, err)
 	}
 	host, _ := c.Host(ctx)
 	port, _ := c.MappedPort(ctx, "3306")
@@ -444,9 +450,8 @@ func TestMDB106_E2E_ValidateRejectsUnsupported(t *testing.T) {
 	src := startMariaDB(t, "src", 1)
 	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)
 	src.exec(t, "CREATE DATABASE app",
-		"CREATE TABLE app.t_inet (id INT PRIMARY KEY, ip INET6) ENGINE=InnoDB",
-		"CREATE TABLE app.t_comp (id INT PRIMARY KEY, body TEXT COMPRESSED) ENGINE=InnoDB",
-		"CREATE TABLE app.t_sv (id INT PRIMARY KEY, v INT) ENGINE=InnoDB WITH SYSTEM VERSIONING",
+		"CREATE TABLE app.t_inet (id INET6 PRIMARY KEY, v INT) ENGINE=InnoDB",
+		"CREATE TABLE app.t_sv (id INT PRIMARY KEY, v INT, s TIMESTAMP(6) GENERATED ALWAYS AS ROW START, e TIMESTAMP(6) GENERATED ALWAYS AS ROW END, PERIOD FOR SYSTEM_TIME(s, e)) ENGINE=InnoDB WITH SYSTEM VERSIONING",
 		"CREATE TABLE app.t_nopad (id INT PRIMARY KEY, name VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_nopad_ci) ENGINE=InnoDB",
 		"CREATE TABLE app.t_ok (id INT PRIMARY KEY, v INT) ENGINE=InnoDB",
 		"CREATE SEQUENCE app.seq1")
@@ -459,9 +464,8 @@ func TestMDB106_E2E_ValidateRejectsUnsupported(t *testing.T) {
 		return runStrandCLI(t, time.Minute, "validate", "-c", cfg.write(t))
 	}
 	for _, c := range []struct{ table, want string }{
-		{"app.t_inet", "MariaDB-only type"},
-		{"app.t_comp", "COMPRESSED"},
-		{"app.t_sv", "system-versioned"},
+		{"app.t_inet", "primary key column id has MariaDB type inet6"},
+		{"app.t_sv", "system-versioning period columns explicitly"},
 		{"app.t_nopad", "not available on the target"},
 	} {
 		out, code := validate("mdb-rej-"+strings.TrimPrefix(c.table, "app."), []string{c.table})
@@ -469,8 +473,8 @@ func TestMDB106_E2E_ValidateRejectsUnsupported(t *testing.T) {
 			t.Errorf("%s: exit %d, want non-zero with %q\n%s", c.table, code, c.want, out)
 		}
 	}
-	// SEQUENCE chỉ cảnh báo, không chặn (include app.* gặp cả sequence; loại bốn bảng bị từ chối).
-	out, code := validate("mdb-seq", []string{"app.*"}, "app.t_inet", "app.t_comp", "app.t_sv", "app.t_nopad")
+	// SEQUENCE chỉ cảnh báo, không chặn (include app.* gặp cả sequence; loại các bảng bị từ chối).
+	out, code := validate("mdb-seq", []string{"app.*"}, "app.t_inet", "app.t_sv", "app.t_nopad")
 	if code != 0 || !strings.Contains(out, "MariaDB sequence omitted") {
 		t.Errorf("sequence: exit %d, want 0 with warning %q\n%s", code, "MariaDB sequence omitted", out)
 	}

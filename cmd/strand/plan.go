@@ -57,7 +57,7 @@ func newPlanCmd() *cobra.Command {
 				return in
 			}
 			rows, err := db.QueryContext(ctx, `SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(DATA_LENGTH,0), COALESCE(TABLE_ROWS,0)
-				FROM information_schema.TABLES WHERE TABLE_TYPE = 'BASE TABLE'
+				FROM information_schema.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED')
 				AND TABLE_SCHEMA NOT IN ('mysql','sys','information_schema','performance_schema') ORDER BY 1, 2`)
 			if err != nil {
 				return err

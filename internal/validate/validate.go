@@ -309,7 +309,7 @@ func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string
 func ExpandTables(ctx context.Context, db *sql.DB, include, exclude []string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) FROM information_schema.TABLES
-		 WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') -- MariaDB system-versioned: để bị từ chối rõ ở CheckMySQLSource
+		 WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') -- MariaDB system-versioned: chỉ chép hàng hiện hành
 		   AND TABLE_SCHEMA NOT IN ('mysql','sys','information_schema','performance_schema')
 		 ORDER BY 1`)
 	if err != nil {

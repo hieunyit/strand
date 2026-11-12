@@ -278,6 +278,14 @@ func mysqlToMySQL(ctx context.Context, r Request, t model.TableID) ([]string, []
 		if ddl, err = mariaDBDefaults(ddl); err != nil {
 			return nil, nil, err
 		}
+		// Kiểu INET6/INET4/UUID → chuỗi, bỏ COMPRESSED và cú pháp system-versioning (đích là bảng thường).
+		if ddl, err = mariaDBTypes(ddl); err != nil {
+			return nil, nil, err
+		}
+		if ddl, err = mariaDBVersioning(ddl); err != nil {
+			return nil, nil, err
+		}
+		ddl = strings.ReplaceAll(ddl, "/*M!100301 COMPRESSED*/", "")
 	}
 	if ver.Legacy57() || ver.IsMariaDB() {
 		// SHOW CREATE TABLE của 5.7 (và MariaDB) bỏ COLLATE khi là mặc định của charset; target 8.x sẽ lấy mặc định

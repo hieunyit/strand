@@ -170,7 +170,7 @@ func checkPrimaryKeyPrefix(id model.TableID, prefix map[string]bool) error {
 func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[model.TableID]*tableMeta, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES
-		 WHERE TABLE_TYPE = 'BASE TABLE'
+		 WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED')
 		   AND TABLE_SCHEMA NOT IN ('mysql','sys','information_schema','performance_schema')`)
 	if err != nil {
 		return nil, fmt.Errorf("list source tables: %w", err)

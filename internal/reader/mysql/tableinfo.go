@@ -30,6 +30,9 @@ type ColumnInfo struct {
 type TableInfo struct {
 	Columns []ColumnInfo
 	PK      []string
+	// SysVersioned: bảng MariaDB WITH SYSTEM VERSIONING (TABLE_TYPE = 'SYSTEM VERSIONED'). information_schema
+	// ẩn row_start/row_end nhưng TABLE_MAP/ROWS của binlog có thêm hai cột đó ở cuối (sysversion.go).
+	SysVersioned bool
 }
 
 // TableInfoProvider đọc cấu trúc bảng hiện tại của source. found=false khi bảng không còn tồn tại.
@@ -70,6 +73,12 @@ func (p infoSchemaProvider) LoadTable(ctx context.Context, schema, table string)
 	if len(info.Columns) == 0 {
 		return nil, false, nil
 	}
+	var tableType string
+	if err := p.db.QueryRowContext(ctx, "SELECT TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+		schema, table).Scan(&tableType); err != nil {
+		return nil, false, fmt.Errorf("read table type of %s.%s: %w", schema, table, err)
+	}
+	info.SysVersioned = strings.EqualFold(tableType, "SYSTEM VERSIONED")
 	pk, err := p.db.QueryContext(ctx,
 		"SELECT COLUMN_NAME FROM information_schema.STATISTICS "+
 			"WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX", schema, table)
@@ -147,14 +156,27 @@ func typeOK(tm *replication.TableMapEvent, i int, dt string) bool {
 		return in(gomysql.MYSQL_TYPE_JSON)
 	case "bit":
 		return in(gomysql.MYSQL_TYPE_BIT)
+	case "inet6", "inet4", "uuid":
+		return in(gomysql.MYSQL_TYPE_STRING) // MariaDB: STRING(16)/STRING(4) thô
 	}
 	return true
 }
 
 // infoMismatch trả lý do TABLE_MAP không khớp info ("" nếu khớp): số cột khác nhau, hoặc một cột khác kiểu.
 func infoMismatch(tm *replication.TableMapEvent, info *TableInfo) string {
-	if int(tm.ColumnCount) != len(info.Columns) || len(tm.ColumnType) != len(info.Columns) {
-		return fmt.Sprintf("binlog has %d columns, information_schema has %d", tm.ColumnCount, len(info.Columns))
+	want := len(info.Columns)
+	if info.SysVersioned {
+		want += sysVerHidden // row_start, row_end ẩn ở cuối
+	}
+	if int(tm.ColumnCount) != want || len(tm.ColumnType) != want {
+		return fmt.Sprintf("binlog has %d columns, information_schema has %d", tm.ColumnCount, want)
+	}
+	if info.SysVersioned {
+		for i := len(info.Columns); i < want; i++ {
+			if t := tm.ColumnType[i]; t != gomysql.MYSQL_TYPE_TIMESTAMP2 && t != gomysql.MYSQL_TYPE_TIMESTAMP {
+				return fmt.Sprintf("system-versioned table: hidden column %d has binlog type %d, want TIMESTAMP (explicit or transaction-precise period columns are not supported)", i+1, t)
+			}
+		}
 	}
 	for i, c := range info.Columns {
 		if !typeOK(tm, i, c.DataType) {
