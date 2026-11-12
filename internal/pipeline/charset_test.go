@@ -23,9 +23,9 @@ func TestCharset_Latin1ValuesSurviveSnapshotAndStream(t *testing.T) {
 		}
 	}
 	mustExec("CREATE DATABASE dst")
-	mustExec("CREATE TABLE app.l1 (id BIGINT PRIMARY KEY, s VARCHAR(20) CHARACTER SET latin1, u VARCHAR(20) CHARACTER SET utf8mb4)")
+	mustExec("CREATE TABLE app.l1 (id BIGINT PRIMARY KEY, s VARCHAR(20) CHARACTER SET latin1, u VARCHAR(20) CHARACTER SET utf8mb4, tx TEXT CHARACTER SET latin1)")
 	mustExec("CREATE TABLE dst.l1 LIKE app.l1")
-	mustExec("INSERT INTO app.l1 VALUES (1, 'café Ñandú ü', 'café')")
+	mustExec("INSERT INTO app.l1 VALUES (1, 'café Ñandú ü', 'café', 'naïve')")
 	cfg := &config.Config{Name: "cs",
 		Source: config.SourceConfig{Kind: "mysql", DSN: dsn, ServerID: 4545},
 		Target: config.TargetConfig{Kind: "mysql", DSN: strings.Replace(dsn, "/app?", "/dst?", 1)},
@@ -42,7 +42,7 @@ func TestCharset_Latin1ValuesSurviveSnapshotAndStream(t *testing.T) {
 		t.Helper()
 		var got string
 		for i := 0; i < 300; i++ {
-			if db.QueryRowContext(ctx, "SELECT CONCAT(s, '|', u) FROM dst.l1 WHERE id = ?", id).Scan(&got) == nil && got == want {
+			if db.QueryRowContext(ctx, "SELECT CONCAT(s, '|', u, '|', tx) FROM dst.l1 WHERE id = ?", id).Scan(&got) == nil && got == want {
 				return
 			}
 			select {
@@ -54,7 +54,7 @@ func TestCharset_Latin1ValuesSurviveSnapshotAndStream(t *testing.T) {
 		}
 		t.Fatalf("row %d on target = %q, want %q", id, got, want)
 	}
-	wait(1, "café Ñandú ü|café") // snapshot
-	mustExec("INSERT INTO app.l1 VALUES (2, 'Ångström ß', 'Ångström')")
-	wait(2, "Ångström ß|Ångström") // stream
+	wait(1, "café Ñandú ü|café|naïve") // snapshot
+	mustExec("INSERT INTO app.l1 VALUES (2, 'Ångström ß', 'Ångström', 'Ærø')")
+	wait(2, "Ångström ß|Ångström|Ærø") // stream
 }

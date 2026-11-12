@@ -231,7 +231,8 @@ Sau đó: nguồn ở `read_only=1`, đích mở ghi, bộ đếm `AUTO_INCREMEN
 | MySQL 5.6 | `gtid_mode=ON` | GTID | **Chưa có e2e**. Code cho phép nhưng nên thử kỹ trên bản sao trước |
 | MySQL 5.7 | `gtid_mode=OFF` | Vị trí binlog | Có |
 | MySQL 5.7 | `gtid_mode=ON` | GTID (như nguồn 8.x) | Có |
-| MySQL 5.4 trở xuống, MariaDB | — | Bị từ chối: `MySQL source 5.5 or later is required` | — |
+| MySQL 5.4 trở xuống | — | Bị từ chối: `MySQL source 5.5 or later is required` | — |
+| MariaDB 10.6 | (GTID MariaDB không dùng) | Vị trí binlog, xem [MARIADB-MIGRATION.md](MARIADB-MIGRATION.md) | Có |
 
 MySQL 5.4 chưa từng có bản GA, nên không hỗ trợ.
 
@@ -424,7 +425,7 @@ strand plan     -c legacy-app.yaml   # số row, dung lượng, ETA snapshot, so
 
 `validate` kiểm:
 
-- Phiên bản nguồn (≥ 5.5, không phải MariaDB).
+- Phiên bản nguồn (MySQL ≥ 5.5, hoặc MariaDB 10.6).
 - `log_bin`, `binlog_format`, `binlog_row_image`, `gtid_mode`.
 - Bảng có PRIMARY KEY và mẫu `include` có khớp bảng.
 - Ánh xạ kiểu (nếu đích là PG).
@@ -433,7 +434,7 @@ Lỗi thường gặp:
 
 | Thông báo | Sửa |
 | --- | --- |
-| `MySQL source 5.5 or later is required` | Nguồn quá cũ hoặc là MariaDB |
+| `MySQL source 5.5 or later is required` | Nguồn quá cũ |
 | `binary logging is disabled on the source` | Bật `log-bin` trong `my.cnf`, restart |
 | `gtid_mode must be ON (GTID mode) or OFF (binlog position mode)` | Đưa `gtid_mode` về `ON` hoặc `OFF` |
 | `binlog_format must be ROW` | `SET GLOBAL binlog_format=ROW`, ghi vào `my.cnf`, cho ứng dụng kết nối lại |

@@ -290,6 +290,10 @@ type streamState struct {
 	// start/end của event ngoài cùng đang xử lý; event con của TRANSACTION_PAYLOAD_EVENT có LogPos = 0
 	// nên dùng vị trí của event bao ngoài.
 	outerStart, outerEnd uint64
+	// MariaDB: vị trí đầu của event GTID standalone (nhóm DDL) chờ QUERY kế tiếp.
+	groupStart    uint64
+	groupFile     string
+	hasGroupStart bool
 }
 
 func (st *streamState) context() context.Context {
@@ -383,6 +387,14 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 	startFile, startPos := "", uint64(0)
 	if st.posMode {
 		startFile, startPos = st.curFile, evStart
+		if st.hasGroupStart && !inPayload && ev.Header.EventType != replication.MARIADB_GTID_EVENT {
+			// Event đầu tiên sau GTID standalone của MariaDB: Txn bắt đầu tại event GTID (cùng file: GTID và
+			// QUERY không bị ROTATE chen giữa).
+			if ev.Header.EventType == replication.QUERY_EVENT && st.groupFile == st.curFile {
+				startPos = st.groupStart
+			}
+			st.hasGroupStart = false
+		}
 	}
 
 	fail := func(err error) bool {
@@ -464,6 +476,46 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				BinlogPos:  evStart,
 			})
 		}
+
+	case replication.MARIADB_GTID_EVENT:
+		// MariaDB: mỗi nhóm event bắt đầu bằng GTID của MariaDB (không có QUERY "BEGIN"). Chỉ hỗ trợ chế độ vị
+		// trí binlog (GTID MariaDB domain-server-seq không so được với GTID MySQL).
+		if !st.posMode {
+			return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
+				"MariaDB GTID event at %s:%d: a MariaDB source is supported only in binlog position mode", st.curFile, evEnd), nil))
+		}
+		gEv, ok := ev.Event.(*replication.MariadbGTIDEvent)
+		if !ok {
+			return fail(fmt.Errorf("undecoded MariaDB GTID event at %s:%d", st.curFile, evEnd))
+		}
+		if gEv.IsStandalone() {
+			// Nhóm không có COMMIT/XID kết thúc (DDL): QUERY kế tiếp là cả Txn. Điểm đọc lại an toàn của Txn
+			// là đầu event GTID này (đọc lại từ QUERY cũng đúng nhưng giữ đúng ranh giới nhóm).
+			st.groupStart, st.groupFile, st.hasGroupStart = evStart, st.curFile, true
+			return true
+		}
+		// Nhóm có kết thúc (XID hoặc QUERY COMMIT/ROLLBACK): phát QUERY "BEGIN" tại đầu event GTID như binlog
+		// MySQL, để assembler mở Txn với vị trí đọc lại = đầu nhóm.
+		return emit(reader.Event{
+			Type:       reader.EventQuery,
+			Pos:        posAt(),
+			BinlogFile: startFile,
+			BinlogPos:  startPos,
+			Query:      "BEGIN",
+			Timestamp:  ts,
+		})
+
+	case replication.MARIADB_ANNOTATE_ROWS_EVENT, replication.MARIADB_BINLOG_CHECKPOINT_EVENT,
+		replication.MARIADB_GTID_LIST_EVENT, replication.MARIADB_START_ENCRYPTION_EVENT:
+		// Chú thích câu lệnh, mốc checkpoint binlog, danh sách GTID đầu file: không mang dữ liệu.
+		return true
+
+	case replication.MARIADB_QUERY_COMPRESSED_EVENT,
+		replication.MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1, replication.MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1,
+		replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
+		// log_bin_compress=ON: chưa kiểm giải nén; bỏ qua sẽ mất dữ liệu nên fail closed.
+		return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
+			"compressed MariaDB binlog event at %s:%d is not supported: set log_bin_compress=OFF on the source", st.curFile, evEnd), nil))
 
 	case replication.QUERY_EVENT:
 		if qEv, ok := ev.Event.(*replication.QueryEvent); ok {

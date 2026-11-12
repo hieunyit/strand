@@ -251,6 +251,13 @@ func mysqlToMySQL(ctx context.Context, r Request, t model.TableID) ([]string, []
 	if !strings.EqualFold(engine, "InnoDB") {
 		return nil, nil, reject("table %s uses nontransactional/unsupported engine %s; target requires InnoDB for CP-1", t, engine)
 	}
+	if ver, err := mysqlver.Cached(ctx, r.Source); err != nil {
+		return nil, nil, err
+	} else if ver.IsMariaDB() {
+		if err := CheckMariaDBTable(ctx, r.Source, t.Schema, t.Table); err != nil {
+			return nil, nil, err
+		}
+	}
 	var table, ddl, charset, collation string
 	if err := r.Source.QueryRowContext(ctx, "SHOW CREATE TABLE "+name(t, false)).Scan(&table, &ddl); err != nil {
 		return nil, nil, err
@@ -267,8 +274,13 @@ func mysqlToMySQL(ctx context.Context, r Request, t model.TableID) ([]string, []
 	if err != nil {
 		return nil, nil, err
 	}
-	if ver.Legacy57() {
-		// SHOW CREATE TABLE của 5.7 bỏ COLLATE khi là mặc định của charset; target 8.x sẽ lấy mặc định
+	if ver.IsMariaDB() {
+		if ddl, err = mariaDBDefaults(ddl); err != nil {
+			return nil, nil, err
+		}
+	}
+	if ver.Legacy57() || ver.IsMariaDB() {
+		// SHOW CREATE TABLE của 5.7 (và MariaDB) bỏ COLLATE khi là mặc định của charset; target 8.x sẽ lấy mặc định
 		// khác (utf8mb4_0900_ai_ci) nên phải ghi rõ collation của nguồn.
 		if ddl, err = pinUTF8MB4Collation57(ddl); err != nil {
 			return nil, nil, err

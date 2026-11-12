@@ -44,6 +44,13 @@ func MySQLPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string
 // pkColumnQuery: truy vấn catalog của một cột PK. COLLATIONS.PAD_ATTRIBUTE chỉ có từ MySQL 8.0; ở 5.7 mọi
 // collation là PAD SPACE, trả NULL (MySQLPKColumn coi rỗng là PAD SPACE).
 func pkColumnQuery(ver mysqlver.Version) string {
+	if ver.IsMariaDB() {
+		// MariaDB: không có PAD_ATTRIBUTE; collation NO PAD có tên chứa "nopad" (vd utf8mb4_general_nopad_ci).
+		return `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME,
+				CASE WHEN c.COLLATION_NAME LIKE '%nopad%' THEN 'NO PAD' WHEN c.COLLATION_NAME IS NULL THEN NULL ELSE 'PAD SPACE' END
+			FROM information_schema.COLUMNS c
+			WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?`
+	}
 	if !ver.HasPadAttribute() {
 		return `SELECT c.DATA_TYPE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME, c.COLLATION_NAME, NULL
 			FROM information_schema.COLUMNS c

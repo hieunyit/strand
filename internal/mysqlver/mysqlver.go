@@ -76,52 +76,79 @@ func (v Version) Line() string { return fmt.Sprintf("%d.%d", v.Major, v.Minor) }
 
 func (v Version) String() string { return v.Raw }
 
-// IsMariaDB: MariaDB không được hỗ trợ làm nguồn (GTID và binlog khác MySQL).
+// IsMariaDB: nguồn MariaDB (GTID và binlog khác MySQL): chỉ chạy chế độ vị trí binlog.
 func (v Version) IsMariaDB() bool { return v.Flavor == FlavorMariaDB }
+
+// SyncerFlavor là Flavor cho go-mysql BinlogSyncer: "mariadb" để server gửi event MariaDB gốc (GTID,
+// ANNOTATE_ROWS...) thay vì event giả thay thế; mọi bản khác là "mysql".
+func (v Version) SyncerFlavor() string {
+	if v.IsMariaDB() {
+		return "mariadb"
+	}
+	return "mysql"
+}
 
 // Legacy57 là nguồn 5.7 (hoặc cũ hơn nhưng đã bị CheckSupported từ chối): không có các tính năng 8.0.
 func (v Version) Legacy57() bool { return !v.IsMariaDB() && !v.AtLeast(8, 0, 0) }
 
 // HasBinlogRowValueOptions: @@binlog_row_value_options có từ 8.0.3.
-func (v Version) HasBinlogRowValueOptions() bool { return v.AtLeast(8, 0, 3) }
+func (v Version) HasBinlogRowValueOptions() bool { return !v.IsMariaDB() && v.AtLeast(8, 0, 3) }
 
 // HasBinlogRowMetadata: @@binlog_row_metadata (TABLE_MAP có tên cột/charset/PK) có từ 8.0.1.
-func (v Version) HasBinlogRowMetadata() bool { return v.AtLeast(8, 0, 1) }
+// MariaDB có biến này từ 10.5 nhưng Strand đọc cấu trúc bảng MariaDB qua information_schema, không cần FULL.
+func (v Version) HasBinlogRowMetadata() bool { return !v.IsMariaDB() && v.AtLeast(8, 0, 1) }
 
 // HasPadAttribute: information_schema.COLLATIONS.PAD_ATTRIBUTE có từ 8.0; 5.7 mọi collation là PAD SPACE.
-func (v Version) HasPadAttribute() bool { return v.AtLeast(8, 0, 0) }
+// MariaDB không có cột này (collation NO PAD có tên chứa "nopad").
+func (v Version) HasPadAttribute() bool { return !v.IsMariaDB() && v.AtLeast(8, 0, 0) }
 
 // HasBinlogExpireLogsSeconds: @@binlog_expire_logs_seconds có từ 8.0.1; 5.7 dùng expire_logs_days.
 func (v Version) HasBinlogExpireLogsSeconds() bool { return v.AtLeast(8, 0, 1) }
 
 // HasClone: clone plugin có từ 8.0.17.
-func (v Version) HasClone() bool { return v.AtLeast(8, 0, 17) }
+func (v Version) HasClone() bool { return !v.IsMariaDB() && v.AtLeast(8, 0, 17) }
 
 // HasSuperReadOnly: @@super_read_only có từ 5.7.8.
-func (v Version) HasSuperReadOnly() bool { return v.AtLeast(5, 7, 8) }
+// MariaDB 10.6 không có super_read_only.
+func (v Version) HasSuperReadOnly() bool { return !v.IsMariaDB() && v.AtLeast(5, 7, 8) }
 
 // HasCastAsDouble: CAST(x AS DOUBLE) có từ 8.0.17 (5.7 báo lỗi cú pháp).
 func (v Version) HasCastAsDouble() bool { return v.AtLeast(8, 0, 17) }
 
 // PersistAdvice là lời khuyên đặt biến cấu hình lâu dài: SET PERSIST từ 8.0, 5.7 dùng SET GLOBAL + my.cnf.
 func (v Version) PersistAdvice(variable, value string) string {
-	if v.AtLeast(8, 0, 0) {
+	if !v.IsMariaDB() && v.AtLeast(8, 0, 0) {
 		return fmt.Sprintf("SET PERSIST %s = %s", variable, value)
 	}
-	return fmt.Sprintf("SET GLOBAL %s = %s and add \"%s=%s\" to my.cnf ([mysqld] section; SET GLOBAL alone is lost on restart in MySQL 5.7)", variable, value, variable, value)
+	return fmt.Sprintf("SET GLOBAL %s = %s and add \"%s=%s\" to my.cnf ([mysqld] section; SET GLOBAL alone is lost on restart)", variable, value, variable, value)
 }
 
-// CheckSupported từ chối nguồn không được hỗ trợ: MariaDB và MySQL < 5.7 (exit 3).
+// CheckSupported từ chối nguồn không được hỗ trợ: MariaDB ngoài 10.6 và MySQL < 5.5 (exit 3).
 func CheckSupported(v Version) error {
 	if v.IsMariaDB() {
-		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-			fmt.Sprintf("MariaDB source is not supported (server version %q): MySQL source 5.5 or later is required", v.Raw), nil)
+		// MariaDB 10.6 (yêu cầu chuyển MariaDB 10.6 → MySQL 8.x, 2026-11-12): chế độ vị trí binlog. Bản khác
+		// chưa kiểm (kiểu dữ liệu/collation mới từ 10.7: UUID, uca1400...): từ chối rõ.
+		if v.Major != 10 || v.Minor != 6 {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("MariaDB source %q is not supported: only MariaDB 10.6 is supported", v.Raw), nil)
+		}
+		return nil
 	}
 	// 5.5/5.6 được hỗ trợ (yêu cầu chuyển đổi từ phiên bản cũ, 2026-11-12): không có GTID thì đi chế độ vị trí
 	// binlog. Dưới 5.5 (5.1, 5.0): ROWS event và catalog quá khác, chưa kiểm — từ chối rõ.
 	if !v.AtLeast(5, 5, 0) {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 			fmt.Sprintf("MySQL source 5.5 or later is required, got %q", v.Raw), nil)
+	}
+	return nil
+}
+
+// CheckTargetForSource từ chối (exit 3) cặp nguồn/đích chưa hỗ trợ: MariaDB chỉ sang MySQL 8.x (sang
+// PostgreSQL chưa kiểm). targetKind: "mysql" | "postgres".
+func CheckTargetForSource(v Version, targetKind string) error {
+	if v.IsMariaDB() && !strings.EqualFold(targetKind, "mysql") {
+		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+			fmt.Sprintf("MariaDB source %q is supported only with a MySQL 8.x target, not %s", v.Raw, targetKind), nil)
 	}
 	return nil
 }

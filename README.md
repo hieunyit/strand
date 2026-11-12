@@ -6,6 +6,7 @@ Strand đồng bộ dữ liệu **một chiều** từ CSDL nguồn sang CSDL đ
 | --- | --- |
 | MySQL 5.5 / 5.6 / 5.7 / 8.x → MySQL 8.x | Có |
 | MySQL 5.5 / 5.6 / 5.7 / 8.x → PostgreSQL 16–18 | Có |
+| MariaDB 10.6 → MySQL 8.x | Có |
 | PostgreSQL → PostgreSQL | Có |
 
 ## Build
@@ -24,6 +25,7 @@ Gói `.deb` / `.rpm` + tarball: `VERSION=1.0.0 scripts/package.sh` (kết quả 
 ## Bắt đầu
 
 - **Chuyển MySQL 5.x lên 8.x / PostgreSQL:** [docs/MYSQL-5X-MIGRATION.md](docs/MYSQL-5X-MIGRATION.md). Mục 0 (build) và mục A (chạy thử từ đầu đến cutover, các lệnh đã chạy thật).
+- **Chuyển MariaDB 10.6 lên MySQL 8.x:** [docs/MARIADB-MIGRATION.md](docs/MARIADB-MIGRATION.md).
 - **Tham chiếu đầy đủ** (mọi khóa cấu hình, mọi lệnh, metric, exit code, PG→PG): [docs/USAGE.md](docs/USAGE.md).
 - `strand --help`, `strand <lệnh> --help`.
 

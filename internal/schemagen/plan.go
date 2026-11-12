@@ -105,7 +105,15 @@ func Discover(ctx context.Context, db *sql.DB, kind string, include, exclude []s
 		if !matches(include) || matches(exclude) {
 			continue
 		}
-		if typ != "BASE TABLE" {
+		switch typ {
+		case "BASE TABLE":
+		case "SYSTEM VERSIONED":
+			// MariaDB WITH SYSTEM VERSIONING: bỏ qua im lặng là mất cả bảng dữ liệu; từ chối rõ.
+			return nil, nil, CheckMariaDBTable(ctx, db, t.Schema, t.Table)
+		case "SEQUENCE":
+			warnings = append(warnings, "MariaDB sequence omitted (MySQL has no sequences): "+t.String())
+			continue
+		default:
 			warnings = append(warnings, "view omitted: "+t.String())
 			continue
 		}

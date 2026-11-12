@@ -87,10 +87,9 @@ func convertCharsetsBy(tm *replication.TableMapEvent, rows [][]any, byIdx map[in
 				continue
 			}
 			var raw []byte
-			isStr := false
 			switch v := row[idx].(type) {
 			case string:
-				raw, isStr = []byte(v), true
+				raw = []byte(v)
 			case []byte:
 				raw = v
 			default:
@@ -114,11 +113,9 @@ func convertCharsetsBy(tm *replication.TableMapEvent, rows [][]any, byIdx map[in
 			if !utf8.ValidString(out) {
 				return fmt.Errorf("%s.%s column %s: invalid %s value", tm.Schema, tm.Table, col, cs)
 			}
-			if isStr {
-				row[idx] = out
-			} else {
-				row[idx] = []byte(out)
-			}
+			// Luôn trả string: TEXT (giá trị binlog là []byte) mà trả []byte thì writer MySQL gửi dạng _binary,
+			// server lưu nguyên byte UTF-8 vào cột latin1 (ký tự bị mã hóa hai lần).
+			row[idx] = out
 		}
 	}
 	return nil

@@ -351,6 +351,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		if err := mysqlver.CheckSupported(ver); err != nil {
 			return err
 		}
+		if p.dstEngine == model.EnginePG {
+			if err := mysqlver.CheckTargetForSource(ver, "postgres"); err != nil {
+				return err
+			}
+		}
 		p.log.Info("source MySQL version", "version", ver.Raw)
 	}
 
@@ -751,7 +756,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		if err != nil {
 			return err
 		}
-		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID, CollationCharsets: charsets,
+		srcVer, err := mysqlver.Cached(ctx, p.src)
+		if err != nil {
+			return err
+		}
+		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID, Flavor: srcVer.SyncerFlavor(), CollationCharsets: charsets,
 			TableInfo: mysqlreader.NewInfoSchemaProvider(p.src), SchemaHistory: p.state})
 		if err != nil {
 			return err

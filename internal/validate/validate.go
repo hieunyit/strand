@@ -11,6 +11,7 @@ import (
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/mysqlver"
+	"strand/internal/schemagen"
 )
 
 // Result lưu kết quả preflight validate
@@ -153,6 +154,16 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 	if err := CheckMySQLBinlogRowValueOptions(valueOpts); err != nil {
 		return err
 	}
+	if ver.IsMariaDB() {
+		// log_bin_compress=ON ghi ROWS/QUERY dạng nén: reader chưa hỗ trợ (dừng khi gặp), báo sớm ở đây.
+		var compress string
+		if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.log_bin_compress").Scan(&compress); err != nil {
+			return fmt.Errorf("read source log_bin_compress: %w", err)
+		}
+		if compress == "1" || strings.EqualFold(compress, "ON") {
+			return reject("log_bin_compress is ON on the MariaDB source: compressed binlog events are not supported; SET GLOBAL log_bin_compress=OFF (and in my.cnf)")
+		}
+	}
 
 	for _, t := range tables {
 		schema, table, ok := strings.Cut(t, ".")
@@ -166,8 +177,10 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 			schema, table).Scan(&exists)
 		if err == nil && exists > 0 {
 			err = db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-				  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_TYPE = 'PRIMARY KEY'`,
+				// STATISTICS thay TABLE_CONSTRAINTS: MariaDB 10.6 (bản mới) ẩn TABLE_CONSTRAINTS với user chỉ có
+				// SELECT, LOCK TABLES nên bảng có PK bị báo missing_pk.
+				`SELECT COUNT(*) FROM information_schema.STATISTICS
+				  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY'`,
 				schema, table).Scan(&hasPK)
 		}
 		if err != nil {
@@ -193,6 +206,11 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
 				fmt.Sprintf("table %s: primary key with prefix part is not supported; use a full-column primary key", t), nil)
 		}
+		if ver.IsMariaDB() {
+			if err := schemagen.CheckMariaDBTable(ctx, db, schema, table); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -200,6 +218,9 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 // binlogRowMetadataWarning trả cảnh báo về binlog_row_metadata ("" = không cảnh báo). MySQL 5.7 không có biến
 // này (8.0.1+): chỉ báo thông tin, không khuyên SET PERSIST.
 func binlogRowMetadataWarning(ctx context.Context, db *sql.DB, ver mysqlver.Version) string {
+	if ver.IsMariaDB() {
+		return "" // cấu trúc bảng MariaDB luôn đọc từ information_schema của nguồn
+	}
 	if !ver.HasBinlogRowMetadata() {
 		return binlogRowMetadataNote57(ver)
 	}
@@ -288,7 +309,7 @@ func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string
 func ExpandTables(ctx context.Context, db *sql.DB, include, exclude []string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) FROM information_schema.TABLES
-		 WHERE TABLE_TYPE = 'BASE TABLE'
+		 WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') -- MariaDB system-versioned: để bị từ chối rõ ở CheckMySQLSource
 		   AND TABLE_SCHEMA NOT IN ('mysql','sys','information_schema','performance_schema')
 		 ORDER BY 1`)
 	if err != nil {

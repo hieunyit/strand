@@ -47,7 +47,8 @@ func MasterStatus(ctx context.Context, db *sql.DB) (file string, pos uint64, err
 // nonTxnEventKinds: loại event của SHOW BINLOG EVENTS không thuộc Txn nào.
 func nonTxnEvent(kind string) bool {
 	switch strings.ToLower(kind) {
-	case "rotate", "format_desc", "previous_gtids", "stop", "heartbeat":
+	case "rotate", "format_desc", "previous_gtids", "stop", "heartbeat",
+		"gtid_list", "binlog_checkpoint": // MariaDB: danh sách GTID đầu file, mốc checkpoint binlog
 		return true
 	}
 	return false

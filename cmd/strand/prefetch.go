@@ -13,6 +13,7 @@ import (
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/mysqlver"
 	"strand/internal/reader"
 	archivereader "strand/internal/reader/archive"
 	mysqlreader "strand/internal/reader/mysql"
@@ -216,7 +217,11 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 				return n, err
 			}
 			defer infoDB.Close()
-			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000), CollationCharsets: charsets,
+			srcVer, err := mysqlver.Detect(ctx, infoDB)
+			if err != nil {
+				return n, err
+			}
+			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000), Flavor: srcVer.SyncerFlavor(), CollationCharsets: charsets,
 				TableInfo: mysqlreader.NewInfoSchemaProvider(infoDB)})
 			if err != nil {
 				return n, err

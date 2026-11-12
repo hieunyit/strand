@@ -89,17 +89,48 @@ func TestLegacy57(t *testing.T) {
 }
 
 func TestCheckSupported(t *testing.T) {
-	// 5.5/5.6 được hỗ trợ (chế độ vị trí binlog khi không có GTID); dưới 5.5 và MariaDB bị từ chối.
-	for _, ok := range []string{"5.5.62", "5.6.51-log", "5.7.0", "5.7.44-log", "8.0.36", "8.4.0", "9.7.0"} {
+	// 5.5/5.6 được hỗ trợ (chế độ vị trí binlog khi không có GTID); dưới 5.5 bị từ chối. MariaDB: chỉ 10.6.
+	for _, ok := range []string{"5.5.62", "5.6.51-log", "5.7.0", "5.7.44-log", "8.0.36", "8.4.0", "9.7.0",
+		"10.6.3-MariaDB-1:10.6.3+maria~focal-log", "5.5.5-10.6.12-MariaDB"} {
 		if err := CheckSupported(mustV(t, ok)); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"5.1.73", "5.0.96", "10.6.12-MariaDB", "5.5.5-10.3.0-MariaDB"} {
+	for _, bad := range []string{"5.1.73", "5.0.96"} {
 		err := CheckSupported(mustV(t, bad))
 		if err == nil || !strings.Contains(err.Error(), "MySQL source 5.5 or later is required") {
 			t.Errorf("%s: err=%v", bad, err)
 		}
+	}
+	for _, bad := range []string{"5.5.5-10.3.0-MariaDB", "10.5.20-MariaDB", "10.11.6-MariaDB", "11.4.2-MariaDB"} {
+		err := CheckSupported(mustV(t, bad))
+		if err == nil || !strings.Contains(err.Error(), "only MariaDB 10.6 is supported") {
+			t.Errorf("%s: err=%v", bad, err)
+		}
+	}
+}
+
+// MariaDB 10.6 có số phiên bản > 8.x nhưng không có các tính năng riêng của MySQL 8: các cờ phải tắt,
+// binlog đọc bằng flavor mariadb, đích chỉ MySQL.
+func TestMariaDBFeatureFlags(t *testing.T) {
+	v := mustV(t, "10.6.3-MariaDB-log")
+	if v.HasSuperReadOnly() || v.HasClone() || v.HasPadAttribute() || v.HasBinlogRowValueOptions() || v.HasBinlogRowMetadata() || v.Legacy57() {
+		t.Fatalf("MariaDB feature flags wrong: %+v", v)
+	}
+	if v.SyncerFlavor() != "mariadb" || mustV(t, "8.0.36").SyncerFlavor() != "mysql" || mustV(t, "5.6.51").SyncerFlavor() != "mysql" {
+		t.Fatal("SyncerFlavor wrong")
+	}
+	if a := v.PersistAdvice("x", "1"); strings.Contains(a, "PERSIST") {
+		t.Fatalf("MariaDB has no SET PERSIST: %s", a)
+	}
+	if err := CheckTargetForSource(v, "postgres"); err == nil {
+		t.Fatal("MariaDB -> postgres must be rejected")
+	}
+	if err := CheckTargetForSource(v, "mysql"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTargetForSource(mustV(t, "5.7.44"), "postgres"); err != nil {
+		t.Fatal(err)
 	}
 }
 

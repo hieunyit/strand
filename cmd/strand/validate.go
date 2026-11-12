@@ -13,6 +13,7 @@ import (
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/mysqlver"
 	"strand/internal/schemagen"
 	"strand/internal/typemap"
 	"strand/internal/validate"
@@ -56,6 +57,12 @@ func newValidateCmd() *cobra.Command {
 					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 				}
 				defer db.Close()
+				// MariaDB chỉ sang MySQL: từ chối trước mọi kiểm tra khác (kiểm tra của nhánh PG báo lỗi khó hiểu).
+				if ver, err := mysqlver.Cached(cmd.Context(), db); err != nil {
+					return err
+				} else if err := mysqlver.CheckTargetForSource(ver, cfg.Target.Kind); err != nil {
+					return err
+				}
 				tables, err := validate.ExpandTables(cmd.Context(), db, cfg.Tables.Include, cfg.Tables.Exclude)
 				if err != nil {
 					return err
@@ -133,6 +140,19 @@ func newValidateCmd() *cobra.Command {
 				}
 				if err := validate.CheckMySQLTargetEngines(cmd.Context(), r.Target, targets); err != nil {
 					return err
+				}
+				if strings.EqualFold(cfg.Source.Kind, "mysql") {
+					if ver, err := mysqlver.Cached(cmd.Context(), r.Source); err != nil {
+						return err
+					} else if ver.IsMariaDB() {
+						names := make([]string, 0, len(tables))
+						for _, id := range tables {
+							names = append(names, id.Schema+"."+id.Table)
+						}
+						if err := validate.CheckSourceCollationsOnTarget(cmd.Context(), r.Source, r.Target, names); err != nil {
+							return err
+						}
+					}
 				}
 			}
 			fmt.Fprintf(os.Stdout, "Preflight validation passed for pipeline: %s\n", cfg.Name)
