@@ -790,3 +790,27 @@ func TestCO2_100Txn_49999Keys_NoOOM(t *testing.T) {
 		t.Fatalf("Cảnh báo rò rỉ RAM: HeapAlloc quá cao: %.2f MB > 500 MB", heapAllocMB)
 	}
 }
+
+// Lost wakeup: readyCh và overflow đầy, sau đó consumer rút sạch readyCh (không Done). Admit kế tiếp phải
+// tự rút overflow sang readyCh rồi nhận; trước đây nó chỉ chờ spaceCh (chỉ được đóng khi Done/Admit rút
+// overflow) nên kẹt vĩnh viễn — test package treo tới timeout 60 phút khi máy tải nặng.
+func TestAdmitDrainsOverflowWhenReadyEmptiedWithoutDone(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxHoles = 1 << 20
+	s := NewScheduler(cfg)
+	defer s.Close()
+	n := 2 * cap(s.readyCh) // readyCh + overflow đầy
+	for i := 0; i < n; i++ {
+		if err := s.Admit(context.Background(), &model.Txn{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < cap(s.readyCh); i++ { // consumer rút readyCh, không Done
+		<-s.Ready()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Admit(ctx, &model.Txn{}); err != nil {
+		t.Fatalf("Admit with an emptied readyCh and a full overflow: %v", err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"strand/internal/model"
 )
@@ -303,6 +304,9 @@ func (s *Scheduler) Err() error {
 }
 
 // Admit tiếp nhận một Txn theo đúng thuật toán spec 02 §6.
+// overflowRetry: chu kỳ Admit thử rút overflow sang readyCh khi đang chờ vì overflow đầy.
+const overflowRetry = 5 * time.Millisecond
+
 func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	if t.IsSpilled() && len(t.SpilledTables) == 0 {
 		return fmt.Errorf("spilled txn %v has no table list: cannot build table-level dependencies (CO-1)", t.SourcePos)
@@ -316,16 +320,36 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 	// không đổi định danh checkpoint (CP-1..3); strict không cần reserve vì commit đã tuần tự (CP-5).
 	// Chặn nhận khi hết ngân sách in-flight hoặc holes vượt ngưỡng,
 	// hoặc khi hàng đợi sẵn sàng đã đầy (back-pressure, không giữ mu khi chờ).
-	for s.failed == nil && !s.isClosed &&
-		((!s.cfg.Serial && len(s.activeSeqs) > s.cfg.MaxHoles) || s.holesLocked() > s.cfg.MaxHoles || len(s.overflow) >= cap(s.readyCh) || s.overBudgetLocked(t)) {
+	for s.failed == nil && !s.isClosed {
+		// Rút overflow trước khi xét: consumer lấy Txn khỏi readyCh không phát tín hiệu nào, nên nếu chỉ chờ
+		// spaceCh thì Admit có thể kẹt vĩnh viễn với overflow đầy dù readyCh đã trống (lost wakeup).
+		s.drainOverflowLocked()
+		overflowFull := len(s.overflow) >= cap(s.readyCh)
+		if !((!s.cfg.Serial && len(s.activeSeqs) > s.cfg.MaxHoles) || s.holesLocked() > s.cfg.MaxHoles || overflowFull || s.overBudgetLocked(t)) {
+			break
+		}
 		holeCh, spaceCh := s.holeWaitCh, s.spaceCh
 		s.mu.Unlock()
 
+		var retry <-chan time.Time
+		var tm *time.Timer
+		if overflowFull {
+			// Không có tín hiệu "readyCh vừa có chỗ": thử rút lại sau một khoảng ngắn.
+			tm = time.NewTimer(overflowRetry)
+			retry = tm.C
+		}
 		select {
 		case <-ctx.Done():
+			if tm != nil {
+				tm.Stop()
+			}
 			return ctx.Err()
 		case <-holeCh:
 		case <-spaceCh:
+		case <-retry:
+		}
+		if tm != nil {
+			tm.Stop()
 		}
 
 		s.mu.Lock()
