@@ -38,13 +38,18 @@ func mdbObjectsSourceSetup(t *testing.T, src *mysqlNode) {
 		"SET DEFAULT ROLE app_ro FOR 'rouser'@'%'",
 		"CREATE USER 'monuser'@'%' IDENTIFIED BY 'monpw'",
 		"GRANT SELECT, DELETE HISTORY ON app.* TO 'monuser'@'%'",
-		"GRANT BINLOG MONITOR ON *.* TO 'monuser'@'%'",
 		"GRANT EXECUTE ON PROCEDURE app.bump TO 'appuser'@'%'",
 		// user chỉ có quyền ở schema khác: không được chuyển
 		"CREATE DATABASE other",
 		"CREATE USER 'otheruser'@'%' IDENTIFIED BY 'otherpw'",
 		"GRANT SELECT ON other.* TO 'otheruser'@'%'",
 	)
+	// BINLOG MONITOR (quyền riêng MariaDB) có từ 10.5.2; bản cũ hơn chỉ có REPLICATION CLIENT (cùng ánh xạ).
+	if mdbAtLeast(t, src.DB, 10, 5) {
+		src.exec(t, "GRANT BINLOG MONITOR ON *.* TO 'monuser'@'%'")
+	} else {
+		src.exec(t, "GRANT REPLICATION CLIENT ON *.* TO 'monuser'@'%'")
+	}
 }
 
 // countAction đếm dòng kết quả bắt đầu bằng action (bỏ dòng tổng kết "phase ...").
