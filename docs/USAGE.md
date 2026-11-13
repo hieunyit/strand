@@ -254,7 +254,7 @@ Kết nối PG chỉ khai báo được bằng `dsn` (`postgres://user:pass@host
 | --- | --- | --- | --- |
 | `strand` | Source MySQL | `REPLICATION SLAVE, REPLICATION CLIENT ON *.*`; `SELECT ON app.*` | Đọc binlog, snapshot, verify |
 | `strand` | Source MySQL (khuyến nghị) | `SELECT` trên `performance_schema.variables_by_thread`, `performance_schema.threads` | validate kiểm session; thiếu thì chỉ cảnh báo |
-| `strand` | Target MySQL | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*` và trên schema metadata; `CONNECTION_ADMIN ON *.*` | Apply, bảng `_strand_*`, ghi khi `read_only=ON`, ngắt instance cũ |
+| `strand` | Target MySQL | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON app.*` và trên schema metadata; `CONNECTION_ADMIN ON *.*` | Apply, bảng `_strand_*`, ghi khi `read_only=ON`, ngắt instance cũ |
 | `strand` | Target PG | `CONNECT, TEMPORARY` trên database; `USAGE, CREATE` trên schema; `SELECT, INSERT, UPDATE, DELETE` trên bảng; `UPDATE` trên sequence | Apply, `_strand_*`, setval khi promote |
 | `strand_admin` | Source và target MySQL | `SYSTEM_VARIABLES_ADMIN ON *.*` | Chỉ `promote` |
 | (PG promote) | Source và target PG | Quyền `ALTER SYSTEM`, `ALTER ROLE`, `pg_terminate_backend`, GRANT/REVOKE trên bảng của ứng dụng | Chỉ `promote` |

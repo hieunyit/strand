@@ -90,8 +90,8 @@ GRANT SELECT, LOCK TABLES ON app.* TO 'strand'@'%';
 ```sql
 CREATE DATABASE strand;                       -- nơi Strand lưu checkpoint (_strand_*)
 CREATE USER 'strand'@'%' IDENTIFIED BY 'dstpw';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*    TO 'strand'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON strand.* TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON app.*    TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON strand.* TO 'strand'@'%';
 GRANT CONNECTION_ADMIN ON *.* TO 'strand'@'%';
 ```
 

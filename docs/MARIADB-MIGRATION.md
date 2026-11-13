@@ -95,17 +95,19 @@ Strand tự tạo database và bảng trên đích, giữ nguyên tên, charset 
 ```sql
 CREATE DATABASE strand;   -- nơi Strand lưu checkpoint (_strand_*)
 CREATE USER 'strand'@'%' IDENTIFIED BY 'dstpw';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON strand.* TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON strand.* TO 'strand'@'%';
 GRANT CONNECTION_ADMIN ON *.* TO 'strand'@'%';
 
 -- Cách 1: từng database cần chuyển (cùng danh sách với bước 2)
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*  TO 'strand'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON shop.* TO 'strand'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON crm.*  TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON app.*  TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON shop.* TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON crm.*  TO 'strand'@'%';
 
 -- Cách 2: toàn bộ server (đích mới, chưa có dữ liệu khác)
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON *.* TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON *.* TO 'strand'@'%';
 ```
+
+`REFERENCES` cần cho bảng có FOREIGN KEY (thiếu thì `apply schema DDL: ... REFERENCES command denied`).
 
 Cần `strand objects` (view, trigger, procedure, event) thì cấp thêm trên các database đó: `CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, TRIGGER, EVENT` (xem mục B).
 
