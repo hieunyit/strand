@@ -283,3 +283,41 @@ func TestToastPK_AddRereadFromPlan(t *testing.T) {
 		t.Fatalf("event on restored re-read key: %s, want Discard", a)
 	}
 }
+
+// G2-7 / risk #5: lúc đăng ký bảng, router còn đứng SAU các Txn đã commit (lag). Chúng visible với
+// snapshot đọc biên (BoundSnap) nhưng vẫn đi qua router sau ClearTarget. Khóa ngoài [min, max] (ở đây
+// 1, 2 < min = 3) không thuộc chunk nào nên bị coi "Xong", trong khi row nền của chúng đã bị ClearTarget
+// xóa và snapshot không đọc lại: UPDATE thiếu cột TOAST apply xuống target → ToastRowMissingError.
+// Phải bỏ event của Txn visible với BoundSnap; Txn sau snapshot (xid ≥ 100) vẫn apply như range "Xong".
+func TestToastPK_OutsideBoundsVisibleToBoundSnap_Discarded(t *testing.T) {
+	m := snapshot.NewRangeStateManager()
+	pend := &snapshot.Chunk{Table: toastTbl, PKCol: "id", StartPK: 3, EndPK: 100, State: snapshot.StatePending}
+	m.RegisterTable(toastTbl, "id", []*snapshot.Chunk{pend}, 100)
+	m.SetBoundSnapshot(toastTbl, &snapshot.PGSnapshot{Xmin: 100, Xmax: 100}) // xid < 100 visible
+	now := time.Now()
+
+	// Đổi PK 1 → 2 (cả hai dưới min) của Txn visible với BoundSnap: không được apply UPDATE một phần.
+	rs, reread := m.HandleToastPKChangeXID(toastMove(1, 2), pgPos, 50, now)
+	if reread || actions(rs) != "Apply:delete[1] Discard:insert[2] " {
+		t.Fatalf("below min, visible: %s reread=%v", actions(rs), reread)
+	}
+	// Cùng event ở đuôi (> b_last).
+	rs, reread = m.HandleToastPKChangeXID(toastMove(300, 301), pgPos, 50, now)
+	if reread || actions(rs) != "Apply:delete[300] Discard:insert[301] " {
+		t.Fatalf("tail, visible: %s reread=%v", actions(rs), reread)
+	}
+	// Txn sau snapshot đăng ký: row nền do chính stream dựng nên SQL điều kiện của writer là đúng.
+	rs, reread = m.HandleToastPKChangeXID(toastMove(1, 2), pgPos, 150, now)
+	if reread || len(rs) != 1 || rs[0].Action != snapshot.ActionApply || rs[0].Event.OldKey == nil {
+		t.Fatalf("below min, after snapshot: %s reread=%v", actions(rs), reread)
+	}
+	// UPDATE thường thiếu cột TOAST (không đổi PK).
+	upd := &model.RowChange{Table: toastTbl, Op: model.OpUpdate, Key: []model.Value{int64(1)},
+		Cols: []model.ColValue{col("id", 1), col("q", 2), unchanged("doc")}}
+	if rs := m.HandleStreamEventWithPKSplitXID(upd, pgPos, 50); actions(rs) != "Discard:update[1] " {
+		t.Fatalf("partial update below min, visible: %s", actions(rs))
+	}
+	if rs := m.HandleStreamEventWithPKSplitXID(upd, pgPos, 150); actions(rs) != "Apply:update[1] " {
+		t.Fatalf("partial update below min, after snapshot: %s", actions(rs))
+	}
+}

@@ -750,6 +750,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 				return err
 			}
 		}
+		var boundSnap *PGSnapshot // snapshot của lần đọc biên (chỉ source PG, plan mới)
 		if !resumed {
 			// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
 			plan = SnapshotPlan{ChunkRows: s.opts.DefaultChunkRows}
@@ -781,6 +782,9 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 					plan.MinPK, plan.MaxPK, plan.NextPK = bounds.MinPK, bounds.MaxPK, bounds.MinPK
 				}
 			}
+			if bs, ok := s.Chunks.(interface{ BoundSnapshot() *PGSnapshot }); ok {
+				boundSnap = bs.BoundSnapshot() // Txn visible với snapshot này mà chưa qua router: xem TableRanges.BoundSnap
+			}
 			// Snapshot mới của bảng bắt đầu từ target rỗng: row cũ còn sót (lần chạy trước,
 			// hoặc dữ liệu có sẵn khi snapshot add) có thể giữ giá trị unique key mà row mới
 			// cần, và không bao giờ được dọn nếu range của nó bị DELETE ở source.
@@ -801,7 +805,11 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			return fmt.Errorf("saved snapshot plan of %s was made for a different primary key shape: clear the pipeline state to snapshot it again", table)
 		}
 		if generic {
-			return s.registerGeneric(ctx, dstDB, table, pkCol, kq, &plan, resumed, &cur)
+			err := s.registerGeneric(ctx, dstDB, table, pkCol, kq, &plan, resumed, &cur)
+			if err == nil {
+				s.Manager.SetBoundSnapshot(table, boundSnap)
+			}
+			return err
 		}
 		if resumed && !plan.Empty {
 			// Chạy tiếp plan dở: flush chunk và lưu plan là hai bước (target commit rồi mới fsync plan).
@@ -821,6 +829,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		cur = plan
 		if plan.Empty {
 			s.Manager.RegisterTable(table, pkCol, nil, math.MinInt64)
+			s.Manager.SetBoundSnapshot(table, boundSnap)
 			return nil
 		}
 		// 2. Keyset walk (02 §5): chỉ đăng ký phần đã xong [Min, Next-1] và phần chưa đọc
@@ -836,6 +845,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[Key]*model.RowChange{}})
 		}
 		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
+		s.Manager.SetBoundSnapshot(table, boundSnap)
 		if len(plan.Reread) > 0 {
 			// Khóa chờ đọc lại từ lần chạy trước (hoặc từ lúc bảng chờ đăng ký): nghĩa vụ vẫn còn.
 			s.Manager.AddReread(table, plan.Reread, time.Now())

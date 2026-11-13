@@ -77,7 +77,9 @@ type PGChunkSource struct {
 
 	mu     sync.Mutex
 	gateOK bool
-	types  map[model.TableID]map[string]uint32
+	// boundSnap: snapshot của lần đọc biên gần nhất (BoundSnapshot).
+	boundSnap *PGSnapshot
+	types     map[model.TableID]map[string]uint32
 }
 
 var _ ChunkSource = (*PGChunkSource)(nil)
@@ -168,10 +170,15 @@ func (c *PGChunkSource) BeforeRegister(ctx context.Context) error {
 
 // Bounds: MIN/MAX của PK (đọc đầu/cuối index).
 func (c *PGChunkSource) Bounds(ctx context.Context, table model.TableID, pkCol string) (*TableBounds, error) {
-	q := fmt.Sprintf("SELECT MIN(%s)::bigint, MAX(%s)::bigint FROM %s", quotePGIdent(pkCol), quotePGIdent(pkCol), quotePGTable(table))
+	// pg_current_snapshot() trong CÙNG câu lệnh: snapshot mà MIN/MAX nhìn thấy (BoundSnapshot).
+	q := fmt.Sprintf("SELECT MIN(%s)::bigint, MAX(%s)::bigint, pg_current_snapshot()::text FROM %s", quotePGIdent(pkCol), quotePGIdent(pkCol), quotePGTable(table))
 	var minV, maxV sql.NullInt64
-	if err := c.DB.QueryRowContext(ctx, q).Scan(&minV, &maxV); err != nil {
+	var snapTxt string
+	if err := c.DB.QueryRowContext(ctx, q).Scan(&minV, &maxV, &snapTxt); err != nil {
 		return nil, fmt.Errorf("failed to query table bounds: %w", err)
+	}
+	if err := c.setBoundSnap(snapTxt); err != nil {
+		return nil, err
 	}
 	var b TableBounds
 	if minV.Valid && maxV.Valid {
@@ -383,12 +390,14 @@ type KeyChunkSource interface {
 }
 
 // pgScanBound đọc các cột PK (SELECT col::text theo thứ tự codec) và parse như row stream.
-func (c *PGChunkSource) pgScanBound(ctx context.Context, table model.TableID, codec *PKCodec, query string, args ...any) (Bound, bool, error) {
+func (c *PGChunkSource) pgScanBound(ctx context.Context, qr interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, table model.TableID, codec *PKCodec, query string, args ...any) (Bound, bool, error) {
 	types, err := c.columnTypes(ctx, table)
 	if err != nil {
 		return Bound{}, false, err
 	}
-	rows, err := c.DB.QueryContext(ctx, query, args...)
+	rows, err := qr.QueryContext(ctx, query, args...)
 	if err != nil {
 		return Bound{}, false, err
 	}
@@ -426,11 +435,44 @@ func (c *PGChunkSource) keyCols(codec *PKCodec) string {
 	return strings.Join(cols, ", ")
 }
 
-// KeyBounds: khóa nhỏ nhất / lớn nhất (ORDER BY cột của bảng, LIMIT 1).
+// setBoundSnap lưu snapshot của lần đọc biên gần nhất (đăng ký bảng chạy tuần tự trong barrier).
+func (c *PGChunkSource) setBoundSnap(txt string) error {
+	snap, err := ParsePGSnapshot(txt)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.boundSnap = snap
+	c.mu.Unlock()
+	return nil
+}
+
+// BoundSnapshot: snapshot mà lần Bounds/KeyBounds gần nhất nhìn thấy. Ngoài [min, max] đó bảng KHÔNG có
+// row nào tại snapshot này (xem TableRanges.BoundSnap).
+func (c *PGChunkSource) BoundSnapshot() *PGSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.boundSnap
+}
+
+// KeyBounds: khóa nhỏ nhất / lớn nhất (ORDER BY cột của bảng, LIMIT 1). Hai truy vấn chạy trong MỘT
+// transaction REPEATABLE READ nên cùng một snapshot (BoundSnapshot).
 func (c *PGChunkSource) KeyBounds(ctx context.Context, table model.TableID, codec *PKCodec) (lo, hi Bound, ok bool, err error) {
+	tx, err := c.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	var snapTxt string
+	if err = tx.QueryRowContext(ctx, "SELECT pg_current_snapshot()::text").Scan(&snapTxt); err != nil {
+		return
+	}
+	if err = c.setBoundSnap(snapTxt); err != nil {
+		return
+	}
 	q := PGKeySQL{Table: table, Codec: codec, Alias: "t"}
 	one := func(desc bool) (Bound, bool, error) {
-		return c.pgScanBound(ctx, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t ORDER BY %s LIMIT 1",
+		return c.pgScanBound(ctx, tx, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t ORDER BY %s LIMIT 1",
 			c.keyCols(codec), quotePGTable(table), q.OrderBy(desc)))
 	}
 	if lo, ok, err = one(false); err != nil || !ok {
@@ -450,7 +492,7 @@ func (c *PGChunkSource) KeyKeysetEnd(ctx context.Context, table model.TableID, c
 	if err != nil {
 		return Bound{}, err
 	}
-	b, ok, err := c.pgScanBound(ctx, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s LIMIT 1 OFFSET %d",
+	b, ok, err := c.pgScanBound(ctx, c.DB, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s LIMIT 1 OFFSET %d",
 		c.keyCols(codec), quotePGTable(table), cond, q.OrderBy(false), n-1), args...)
 	if err != nil {
 		return Bound{}, err
