@@ -3,6 +3,7 @@ package validate
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 
 	"strand/internal/schemagen"
@@ -28,4 +29,23 @@ func CheckSourceCollationsOnTarget(ctx context.Context, src, dst *sql.DB, tables
 		warnings = append(warnings, p.Warnings...)
 	}
 	return warnings, nil
+}
+
+// ReplicaStatusWarning: governor đọc replica lag bằng SHOW REPLICA/SLAVE STATUS. Thiếu quyền (MariaDB
+// 10.5+ cần SLAVE MONITOR, REPLICATION CLIENT không còn đủ) thì tín hiệu replica_lag của breaker bị tắt
+// âm thầm: cảnh báo kèm câu GRANT.
+func ReplicaStatusWarning(ctx context.Context, db *sql.DB) string {
+	var firstErr error
+	for _, q := range []string{"SHOW REPLICA STATUS", "SHOW SLAVE STATUS"} {
+		rows, err := db.QueryContext(ctx, q)
+		if err == nil {
+			rows.Close()
+			return ""
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return fmt.Sprintf("the strand user cannot read replica status (%v): the breaker's replica_lag signal is disabled; "+
+		"grant it: MariaDB 10.5+ GRANT SLAVE MONITOR ON *.* TO 'strand'@'%%'; MySQL GRANT REPLICATION CLIENT ON *.* TO 'strand'@'%%'", firstErr)
 }

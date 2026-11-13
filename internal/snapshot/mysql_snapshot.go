@@ -389,6 +389,8 @@ type MySQLSnapshotter struct {
 	planMu sync.Mutex
 	// RereadKeysTotal: tổng số khóa đã được đọc lại (chunk re-read đã flush, 02 §8), để ghi log.
 	RereadKeysTotal atomic.Int64
+	// RowsFlushed: tổng số row snapshot đã ghi xuống target (strand top: tiến độ, tốc độ).
+	RowsFlushed atomic.Int64
 
 	// FlushRange / FlushKeySet / ClearUnreadRange (việc C): như FlushRows / FlushKeys / ClearUnread cho
 	// bảng có PK tổng quát, với cận khóa thay vì int64. Bắt buộc khi target không phải MySQL.
@@ -600,11 +602,16 @@ func (s *MySQLSnapshotter) FlushChunk(
 	table model.TableID,
 	pkCol string,
 	columnNames []string,
-) error {
+) (retErr error) {
 	s.Manager.mu.Lock()
 	defer s.Manager.mu.Unlock()
 
 	mergedRows := s.Manager.MergeLocked(chunk)
+	defer func() {
+		if retErr == nil {
+			s.RowsFlushed.Add(int64(len(mergedRows)))
+		}
+	}()
 	if chunk.mergeErr != nil {
 		// Row snapshot không mã hóa được khóa (vd. WEIGHT_STRING lỗi/timeout): trước đây bị bỏ âm thầm
 		// khỏi tập merge — đường range rồi XÓA nó ở target, đường tập khóa không ghi nó (mất row, RS-1).

@@ -134,8 +134,15 @@ type Pipeline struct {
 	bootstrap    atomic.Bool
 	// running: khởi động xong (đã quyết định snapshot/verify sau seed). Trước đó admin báo "starting",
 	// không bao giờ "synced" — admin socket mở sớm hơn lúc biết có bootstrap hay không.
-	running         atomic.Bool
-	retentionRisk   atomic.Bool
+	running       atomic.Bool
+	retentionRisk atomic.Bool
+	// strand top khi bootstrap: bảng đang snapshot, số bảng, ước lượng row; breaker để log/hiện lý do.
+	snapCurTable    atomic.Value // string
+	snapTablesTotal atomic.Int64
+	snapTablesDone  atomic.Int64
+	snapRowsEst     atomic.Int64
+	snapRate        rateWindow
+	breaker         *governor.Breaker
 	verifying       atomic.Bool // chờ verify sau seed (02 §9)
 	strictMu        sync.Mutex
 	strictApplied   checkpoint.AppliedSet // row toàn cục ở chế độ strict (02 §4 quy tắc 5)
@@ -843,6 +850,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}()
 	bgWG.Add(3)
 	go func() { defer bgWG.Done(); p.governorLoop(ctx) }()
+	bgWG.Add(1)
+	go func() { defer bgWG.Done(); p.progressLoop(ctx) }()
 	go func() { defer bgWG.Done(); p.monitor(ctx) }()
 	go func() { defer bgWG.Done(); p.watchCompactor(ctx) }()
 	if strings.EqualFold(p.cfg.Verify.Delta, "on") {
@@ -1949,7 +1958,10 @@ func (b *tokenBucket) reserve(now time.Time, d time.Duration) time.Duration {
 }
 
 func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {
+	p.snapTablesTotal.Store(int64(len(tables)))
+	p.snapRowsEst.Store(p.estimateRows(ctx, tables))
 	for _, id := range tables {
+		p.snapCurTable.Store(id.String())
 		if err := p.snapshotTable(ctx, id); err != nil {
 			if ctx.Err() == nil {
 				p.fail(fmt.Errorf("snapshot %s: %w", id, err))
@@ -1995,6 +2007,7 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	p.routeMu.Lock()
 	p.snap.Manager.RemoveTable(id)
 	p.routeMu.Unlock()
+	p.snapTablesDone.Add(1)
 	p.log.Info("snapshot done", "table", id.String(), "duration", time.Since(start).String(),
 		"reread_keys", rereads) // khóa được đọc lại do UPDATE đổi PK mà cột TOAST không đổi (02 §8)
 	return nil

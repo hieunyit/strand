@@ -104,6 +104,7 @@ func (p *Pipeline) setupGovernor(ctx context.Context) error {
 		// Mở lại sau 60 giây liên tục dưới ngưỡng (02 §7).
 		CooldownTicks: int((60 * time.Second) / p.govTick),
 	}
+	p.breaker = governor.NewBreaker(bcfg)
 	if algo == "grace-v2" {
 		// GRACE v2 (02 §7); probe: off tắt dither ±1%.
 		p.gov = governor.NewGraceGovernor(governor.GraceConfig{
@@ -113,7 +114,7 @@ func (p *Pipeline) setupGovernor(ctx context.Context) error {
 			Tick:         p.govTick,
 			DelayTicks:   1,
 			Probe:        !strings.EqualFold(strings.TrimSpace(p.cfg.Governor.Probe), "off"),
-			Breaker:      governor.NewBreaker(bcfg),
+			Breaker:      p.breaker,
 			SignalReader: reader,
 			PipelineID:   p.id,
 			Metrics:      p.metrics,
@@ -125,7 +126,7 @@ func (p *Pipeline) setupGovernor(ctx context.Context) error {
 		SoftRate:     soft,
 		HardRate:     hard,
 		LagSLO:       durationOr(p.cfg.Governor.LagSLO, 5*time.Second),
-		Breaker:      governor.NewBreaker(bcfg),
+		Breaker:      p.breaker,
 		SignalReader: reader,
 	})
 	return nil
@@ -144,6 +145,7 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 	defer t.Stop()
 	first := true
 	var alerts graceAlertState
+	breakerWas, reasonWas := false, ""
 	for {
 		if !first {
 			select {
@@ -165,6 +167,7 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 			p.log.Warn("governor tick failed", "error", err)
 			continue
 		}
+		breakerWas, reasonWas = p.logBreaker(breakerWas, reasonWas)
 		if isGrace {
 			// GRACE tự xuất metric §11 (zone, pressure theo signal, rate, breaker, sensitivity_unknown).
 			p.graceAlerts(gg, &alerts)
@@ -272,4 +275,23 @@ func inWindows(windows []string, now time.Time) bool {
 		}
 	}
 	return false
+}
+
+// logBreaker ghi log khi breaker mở/đóng hoặc đổi lý do (trước đây lý do bị bỏ: người vận hành chỉ thấy
+// snapshot đứng mà không biết vì sao).
+func (p *Pipeline) logBreaker(was bool, reasonWas string) (bool, string) {
+	if p.breaker == nil {
+		return was, reasonWas
+	}
+	open, reason := p.breaker.IsOpen(), p.breaker.Reason()
+	switch {
+	case open && !was:
+		p.log.Warn("source circuit breaker OPEN: snapshot paused to protect the source", "reason", reason,
+			"hint", "it closes after 60 s below the thresholds; tune governor.breaker (strand_query_p99.max_ratio, replica_lag.max) if the source is not actually overloaded")
+	case open && reason != reasonWas:
+		p.log.Warn("source circuit breaker still open", "reason", reason)
+	case !open && was:
+		p.log.Info("source circuit breaker closed: snapshot resumes")
+	}
+	return open, reason
 }

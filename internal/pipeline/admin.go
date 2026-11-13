@@ -56,13 +56,29 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 	if h.ready() == nil {
 		lag = p.lagSeconds()
 	}
-	return &admin.TopInfo{
+	info := &admin.TopInfo{
 		PipelineID: p.id,
 		State:      h.state(),
 		LagSeconds: lag,
 		Throughput: p.throughput.rate(), // row/giây trong cửa sổ gần nhất (review R18)
 		Zone:       zone,
-	}, nil
+	}
+	if p.breaker != nil && p.breaker.IsOpen() {
+		info.BreakerOpen, info.BreakerReason = true, p.breaker.Reason()
+	}
+	if total := p.snapTablesTotal.Load(); total > 0 {
+		info.TablesTotal, info.TablesDone = total, p.snapTablesDone.Load()
+		if t, ok := p.snapCurTable.Load().(string); ok && info.TablesDone < total {
+			info.SnapshotTable = t
+		}
+		if p.snap != nil {
+			info.SnapshotRows = p.snap.RowsFlushed.Load()
+		}
+		info.SnapshotRowsTotal = p.snapRowsEst.Load()
+		info.SnapshotRate = p.snapRate.rate()
+		info.Progress, info.ETASeconds = snapshotProgress(info)
+	}
+	return info, nil
 }
 
 func (h *adminHandler) Pause(ctx context.Context) (*admin.PauseResult, error) {

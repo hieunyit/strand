@@ -79,6 +79,9 @@ func newValidateCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if w := validate.ReplicaStatusWarning(cmd.Context(), db); w != "" {
+					fmt.Fprintln(os.Stderr, "warning: "+w)
+				}
 
 				// View/routine/trigger/event/user không được Strand chép: báo để không quên ở cutover.
 				if sum, err := objects.Summary(cmd.Context(), db, objects.Options{Include: cfg.Tables.Include, Exclude: cfg.Tables.Exclude}); err != nil {

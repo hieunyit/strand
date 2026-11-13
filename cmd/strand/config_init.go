@@ -15,13 +15,24 @@ import (
 
 // initOpts là tham số sinh file cấu hình mẫu (strand config init).
 type initOpts struct {
-	Name, From, To           string
-	SourceHost, TargetHost   string
-	SourcePort, TargetPort   int
-	Databases                []string // MySQL/MariaDB: các database cần chuyển ("*" = tất cả); PG: [database]
-	PGSchema                 string   // PG: schema cần chuyển
-	Database                 string   // database đầu tiên (ví dụ exclude/rename; tên database PG)
-	Includes                 []string
+	Name, From, To         string
+	SourceHost, TargetHost string
+	SourcePort, TargetPort int
+	Databases              []string // MySQL/MariaDB: các database cần chuyển ("*" = tất cả); PG: [database]
+	PGSchema               string   // PG: schema cần chuyển
+	Database               string   // database đầu tiên (ví dụ exclude/rename; tên database PG)
+	Includes               []string
+	// Tùy chọn vận hành/hiệu năng (0 / "" = dùng mặc định của Strand, ghi dạng comment).
+	SourceUser, TargetUser   string
+	ServerID                 int
+	Excludes                 []string
+	IOPSSoft, IOPSHard       int
+	Workers, ChunkRows       int
+	CommitOrder              string
+	BreakerMaxRatio          float64
+	ReplicaLagMax            string
+	Windows                  []string
+	Metrics, LogFormat       string
 	GrantOn                  string
 	Systemd                  bool
 	StateDir, Socket         string
@@ -42,12 +53,12 @@ source:
   kind: mysql                 # {{if .MariaDB}}MariaDB cũng khai báo là mysql; Strand tự nhận ra{{else}}MySQL 5.5 - 8.x{{end}}
   host: {{.SourceHost}}
   port: {{.SourcePort}}
-  user: strand                # quyền: REPLICATION SLAVE, REPLICATION CLIENT ON *.*; SELECT, LOCK TABLES ON {{.GrantOn}}
+  user: {{.SourceUser}}                # quyền: REPLICATION SLAVE, REPLICATION CLIENT ON *.*; SELECT, LOCK TABLES ON {{.GrantOn}}
   password_env: SRC_PW        # mật khẩu lấy từ biến môi trường SRC_PW
-  server_id: 47001            # số duy nhất: khác server_id của nguồn và mọi replica (SHOW SLAVE HOSTS)
+  server_id: {{.ServerID}}            # số duy nhất: khác server_id của nguồn và mọi replica (SHOW SLAVE HOSTS)
 {{- else}}
   kind: postgres
-  dsn: "postgres://strand:${SRC_PW}@{{.SourceHost}}:{{.SourcePort}}/{{.Database}}?sslmode=prefer"
+  dsn: "postgres://{{.SourceUser}}:${SRC_PW}@{{.SourceHost}}:{{.SourcePort}}/{{.Database}}?sslmode=prefer"
   create_slot: true           # tạo replication slot strand_<name> nếu chưa có
   publication: strand_{{.Name | slot}}   # DBA tạo trước: CREATE PUBLICATION ... FOR TABLE ...
 {{- end}}
@@ -57,36 +68,60 @@ target:
   kind: mysql                 # MySQL 8.x
   host: {{.TargetHost}}
   port: {{.TargetPort}}
-  user: strand
+  user: {{.TargetUser}}
   password_env: DST_PW
   database: strand            # database chứa checkpoint (_strand_*): CREATE DATABASE strand; trước
-  commit_order: relaxed       # relaxed: song song theo khóa (nhanh); strict: đúng thứ tự commit của nguồn
+  commit_order: {{.CommitOrder}}       # relaxed: song song theo khóa (nhanh); strict: đúng thứ tự commit của nguồn
 {{- else}}
   kind: postgres              # PostgreSQL 16 - 18
-  dsn: "postgres://strand:${DST_PW}@{{.TargetHost}}:{{.TargetPort}}/{{.Database}}?sslmode=prefer"
-  commit_order: relaxed
+  dsn: "postgres://{{.TargetUser}}:${DST_PW}@{{.TargetHost}}:{{.TargetPort}}/{{.Database}}?sslmode=prefer"
+  commit_order: {{.CommitOrder}}
 {{- end}}
 
 tables:
   # mẫu glob "schema.table"; nhiều database trong cùng một pipeline (một luồng binlog); "*.*" = mọi database
   # người dùng (mysql, sys, information_schema, performance_schema luôn bị bỏ qua)
   include: [{{range $i, $e := .Includes}}{{if $i}}, {{end}}"{{$e}}"{{end}}]
+{{- if .Excludes}}
+  exclude: [{{range $i, $e := .Excludes}}{{if $i}}, {{end}}"{{$e}}"{{end}}]
+{{- else}}
   # exclude: ["{{.Database}}.log_*"]
+{{- end}}
   # rename: { "{{.Database}}.orders": "{{.Database}}_new.orders" }
 
 bootstrap:
   default: logical            # snapshot dữ liệu ban đầu trực tiếp từ nguồn (không cần backup)
-  # logical: { chunk_rows: 10000, windows: ["22:00-06:00"] }   # chỉ snapshot trong khung giờ
+{{- if or .ChunkRows .Windows}}
+  logical: { {{if .ChunkRows}}chunk_rows: {{.ChunkRows}}{{if .Windows}}, {{end}}{{end}}{{if .Windows}}windows: [{{range $i, $e := .Windows}}{{if $i}}, {{end}}"{{$e}}"{{end}}]{{end}} }   # chunk_rows cố định tắt tự chỉnh cỡ chunk
+{{- else}}
+  # logical: { chunk_rows: 20000, windows: ["22:00-06:00"] }   # cỡ chunk cố định; chỉ snapshot trong khung giờ
+{{- end}}
 
 resources:
   spool: { path: {{.StateDir}} }   # thư mục làm việc (state, spill); cần vài GB trống
-  # source: { iops: { soft: 600, hard: 1200 } }               # giới hạn tải đọc lên nguồn
-  # workers: { max: 8 }
+{{- if .IOPSSoft}}
+  source: { iops: { soft: {{.IOPSSoft}}, hard: {{.IOPSHard}} } }   # giới hạn tải đọc snapshot lên nguồn
+{{- else}}
+  # source: { iops: { soft: 600, hard: 1200 } }   # mặc định 600 IOPS (~9 MiB/s): tăng nếu nguồn còn dư tải
+{{- end}}
+{{- if .Workers}}
+  workers: { max: {{.Workers}} }   # số luồng ghi song song lên đích
+{{- else}}
+  # workers: { max: 8 }   # số luồng ghi song song lên đích
+{{- end}}
+
+governor:
+  # breaker bảo vệ nguồn: mở thì snapshot tạm dừng (strand top hiện lý do)
+{{- if or .BreakerMaxRatio .ReplicaLagMax}}
+  breaker: { {{if .BreakerMaxRatio}}strand_query_p99: { max_ratio: {{.BreakerMaxRatio}} }{{if .ReplicaLagMax}}, {{end}}{{end}}{{if .ReplicaLagMax}}replica_lag: { max: {{.ReplicaLagMax}} }{{end}} }
+{{- else}}
+  # breaker: { strand_query_p99: { max_ratio: 3 }, replica_lag: { max: 10s } }   # max_ratio so với baseline tự học
+{{- end}}
 
 observability:
   admin_socket: {{.Socket}}   # cho strand top / pause / resume
-  metrics: "127.0.0.1:9464"   # Prometheus /metrics, /healthz
-  log: { level: info, format: json }
+  metrics: "{{.Metrics}}"   # Prometheus /metrics, /healthz
+  log: { level: info, format: {{.LogFormat}} }
 `
 
 var initTemplate = template.Must(template.New("cfg").Funcs(template.FuncMap{
@@ -157,6 +192,44 @@ func renderInitConfig(o initOpts) (string, error) {
 			grants = append(grants, d+".*")
 		}
 		o.GrantOn = strings.Join(grants, ", ")
+	}
+	if o.SourceUser == "" {
+		o.SourceUser = "strand"
+	}
+	if o.TargetUser == "" {
+		o.TargetUser = "strand"
+	}
+	if o.ServerID == 0 {
+		o.ServerID = 47001
+	}
+	if o.CommitOrder == "" {
+		o.CommitOrder = "relaxed"
+	}
+	if o.CommitOrder != "relaxed" && o.CommitOrder != "strict" {
+		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("--commit-order must be relaxed or strict, got %q", o.CommitOrder), nil)
+	}
+	if o.Metrics == "" {
+		o.Metrics = "127.0.0.1:9464"
+	}
+	if o.LogFormat == "" {
+		o.LogFormat = "json"
+	}
+	if o.LogFormat != "json" && o.LogFormat != "text" {
+		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("--log-format must be json or text, got %q", o.LogFormat), nil)
+	}
+	if o.IOPSSoft < 0 || o.IOPSHard < 0 || o.Workers < 0 || o.ChunkRows < 0 || o.BreakerMaxRatio < 0 {
+		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, "numeric options must not be negative", nil)
+	}
+	if o.IOPSHard > 0 && o.IOPSSoft == 0 {
+		o.IOPSSoft = o.IOPSHard / 2
+	}
+	if o.IOPSSoft > 0 && o.IOPSHard < o.IOPSSoft {
+		o.IOPSHard = 2 * o.IOPSSoft
+	}
+	for _, v := range append(append([]string{}, o.Excludes...), o.Windows...) {
+		if strings.ContainsAny(v, "\"\n") {
+			return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("invalid value %q", v), nil)
+		}
 	}
 	defPort := func(mysql bool) int {
 		if mysql {
@@ -230,6 +303,20 @@ func newConfigInitCmd() *cobra.Command {
 	f.IntVar(&o.TargetPort, "target-port", 0, "Cổng đích (mặc định 3306 / 5432)")
 	f.StringSliceVar(&o.Databases, "database", []string{"app"}, "Database cần chuyển: lặp lại hoặc phân cách bằng dấu phẩy (app,shop,crm); '*' = mọi database người dùng. Nguồn PostgreSQL: tên database")
 	f.StringVar(&o.PGSchema, "schema", "public", "Nguồn PostgreSQL: schema cần chuyển")
+	f.StringVar(&o.SourceUser, "source-user", "strand", "User Strand trên nguồn")
+	f.StringVar(&o.TargetUser, "target-user", "strand", "User Strand trên đích")
+	f.IntVar(&o.ServerID, "server-id", 47001, "Nguồn MySQL/MariaDB: server_id của Strand (khác mọi server/replica)")
+	f.StringSliceVar(&o.Excludes, "exclude", nil, "Bảng loại ra (mẫu glob schema.table, lặp lại hoặc phân cách bằng dấu phẩy)")
+	f.IntVar(&o.IOPSSoft, "iops-soft", 0, "Giới hạn mềm tải đọc snapshot lên nguồn (IOPS; mặc định Strand 600)")
+	f.IntVar(&o.IOPSHard, "iops-hard", 0, "Giới hạn cứng tải đọc (mặc định 2 × --iops-soft)")
+	f.IntVar(&o.Workers, "workers", 0, "Số luồng ghi song song lên đích (mặc định Strand 8)")
+	f.IntVar(&o.ChunkRows, "chunk-rows", 0, "Cỡ chunk snapshot cố định (mặc định: tự chỉnh)")
+	f.StringSliceVar(&o.Windows, "snapshot-window", nil, "Khung giờ được snapshot, vd 22:00-06:00 (lặp lại được)")
+	f.StringVar(&o.CommitOrder, "commit-order", "relaxed", "relaxed | strict")
+	f.Float64Var(&o.BreakerMaxRatio, "breaker-max-ratio", 0, "Breaker: p99 câu kiểm tra nguồn / baseline tự học (mặc định 3)")
+	f.StringVar(&o.ReplicaLagMax, "replica-lag-max", "", "Breaker: độ trễ replica tối đa, vd 30s (mặc định 10s)")
+	f.StringVar(&o.Metrics, "metrics", "127.0.0.1:9464", "Địa chỉ /metrics, /healthz")
+	f.StringVar(&o.LogFormat, "log-format", "json", "json | text")
 	f.BoolVar(&o.Systemd, "systemd", false, "Đường dẫn cho chạy bằng systemd (/var/lib/strand/<name>, /run/strand/<name>/admin.sock)")
 	f.StringVarP(&out, "output", "o", "", "Ghi ra file (mặc định in ra màn hình)")
 	f.BoolVar(&force, "force", false, "Ghi đè file đã có")

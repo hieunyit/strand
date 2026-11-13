@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -22,13 +23,7 @@ func newTopCmd() *cobra.Command {
 				return fmt.Errorf("strand top failed: %w", err)
 			}
 
-			fmt.Printf("Pipeline:   %s\n", top.PipelineID)
-			fmt.Printf("Trạng thái: %s\n", top.State)
-			fmt.Printf("Lag:        %.3f s\n", top.LagSeconds)
-			fmt.Printf("Tốc độ:     %.1f rows/s\n", top.Throughput)
-			fmt.Printf("Vùng (Zone):%s\n", top.Zone)
-			fmt.Printf("Tiến độ:    %.1f %%\n", top.Progress)
-			fmt.Printf("ETA:        %.1f s\n", top.ETASeconds)
+			printTop(top)
 			return nil
 		},
 	}
@@ -41,9 +36,39 @@ func getAdminSocketPath() string {
 		return adminSocketPath
 	}
 	if cfgPath != "" {
-		if cfg, err := config.LoadFile(cfgPath); err == nil && cfg.Observability.AdminSocket != "" {
+		// Chỉ cần đường dẫn socket: không đòi biến môi trường mật khẩu (trước đây phải thêm --socket).
+		if cfg, err := config.LoadFileForPaths(cfgPath); err == nil && cfg.Observability.AdminSocket != "" {
 			return cfg.Observability.AdminSocket
 		}
 	}
 	return "/run/strand/default.sock"
+}
+
+func printTop(top *admin.TopInfo) {
+	fmt.Printf("Pipeline:   %s\n", top.PipelineID)
+	fmt.Printf("Trạng thái: %s\n", top.State)
+	fmt.Printf("Lag:        %.3f s\n", top.LagSeconds)
+	fmt.Printf("Tốc độ:     %.1f rows/s (stream)\n", top.Throughput)
+	fmt.Printf("Vùng (Zone):%s\n", top.Zone)
+	if top.BreakerOpen {
+		fmt.Printf("Breaker:    MỞ (snapshot tạm dừng để bảo vệ nguồn): %s\n", top.BreakerReason)
+	}
+	if top.TablesTotal > 0 {
+		fmt.Printf("Snapshot:   %d/%d bảng", top.TablesDone, top.TablesTotal)
+		if top.SnapshotTable != "" {
+			fmt.Printf(", đang chạy %s", top.SnapshotTable)
+		}
+		fmt.Println()
+		fmt.Printf("Đã chép:    %d / ~%d rows, %.0f rows/s\n", top.SnapshotRows, top.SnapshotRowsTotal, top.SnapshotRate)
+	}
+	fmt.Printf("Tiến độ:    %.1f %%\n", top.Progress)
+	fmt.Printf("ETA:        %s\n", fmtETA(top.ETASeconds))
+}
+
+func fmtETA(s float64) string {
+	if s <= 0 {
+		return "-"
+	}
+	d := time.Duration(s * float64(time.Second)).Round(time.Second)
+	return d.String()
 }

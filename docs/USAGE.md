@@ -509,9 +509,22 @@ Lệnh nói chuyện với `sync` đang chạy (`top`, `pause`, `resume`, `throt
 
 `strand config init --from mysql|mariadb|postgres --to mysql|postgres [--name N] [--source-host H] [--target-host H] [--database app] [--systemd] [-o file] [--force]`. Sinh file cấu hình mẫu có chú thích; mật khẩu luôn đọc từ biến môi trường `SRC_PW`/`DST_PW`. Không có `-o` thì in ra màn hình. File đã có thì không ghi đè, trừ khi có `--force`. Cặp nguồn/đích không hỗ trợ (MariaDB → PG, PG → MySQL) bị từ chối.
 
+Tùy chọn thêm (không đặt thì dùng mặc định của Strand, file ghi dạng comment): `--exclude a.log_*,b.tmp`, `--source-user`, `--target-user`, `--server-id`, `--commit-order relaxed|strict`, `--iops-soft N` (`--iops-hard`, mặc định gấp đôi soft), `--workers N`, `--chunk-rows N` (cỡ chunk cố định; mặc định tự chỉnh), `--snapshot-window 22:00-06:00`, `--breaker-max-ratio X`, `--replica-lag-max 30s`, `--metrics host:port`, `--log-format json|text`.
+
+Ví dụ chuyển cả server MariaDB, đọc nhanh hơn mặc định:
+
+```bash
+strand config init --from mariadb --to mysql --name sea --database '*' --exclude 'call_logs.tmp_*' \
+  --source-host 10.5.0.21 --target-host 10.5.0.31 --iops-soft 4000 --workers 16 --chunk-rows 20000 -o sea.yaml
+```
+
 ### 7.0b `sync --background`, `stop`, `status`
 
 `strand sync -c p.yaml --background|-d [--log-file f] [--pid-file f]`: chạy nền (tách khỏi terminal), log và PID mặc định trong `resources.spool.path`; chờ 5 giây để báo lỗi khởi động sớm. Pipeline đang chạy nền thì từ chối chạy lần hai. `strand stop -c p.yaml [--timeout 150s]`: gửi SIGTERM và chờ dừng (không cần biến môi trường mật khẩu). `strand status -c p.yaml`: còn chạy hay không và 5 dòng log cuối (exit 1 nếu không chạy).
+
+### 7.0c `top`
+
+Khi đang snapshot (`Trạng thái: bootstrapping`), `strand top` hiện số bảng xong/tổng, bảng đang chạy, số row đã chép / ước lượng (thống kê của nguồn), tốc độ snapshot (~60 s gần nhất), % và ETA. Breaker đang mở thì hiện `Breaker: MỞ` kèm lý do (snapshot tạm dừng để bảo vệ nguồn); log có dòng `source circuit breaker OPEN` / `closed`. `top` chỉ cần `-c` (không cần biến môi trường mật khẩu).
 
 ### 7.1 `validate`
 

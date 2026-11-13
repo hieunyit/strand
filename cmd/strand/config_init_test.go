@@ -87,3 +87,33 @@ func TestConfigInitMultipleAndAllDatabases(t *testing.T) {
 		}
 	}
 }
+
+// Tùy chọn hiệu năng/vận hành của config init phải vào file và nạp được.
+func TestConfigInitTuningOptions(t *testing.T) {
+	t.Setenv("SRC_PW", "s")
+	t.Setenv("DST_PW", "d")
+	s, err := renderInitConfig(initOpts{Name: "tune", From: "mariadb", To: "mysql", SourceHost: "h1", TargetHost: "h2",
+		Databases: []string{"*"}, Excludes: []string{"a.log_*", "b.tmp"}, IOPSSoft: 4000, Workers: 16, ChunkRows: 50000,
+		Windows: []string{"22:00-06:00"}, CommitOrder: "strict", BreakerMaxRatio: 20, ReplicaLagMax: "30s",
+		SourceUser: "cdc", ServerID: 5555, Metrics: "0.0.0.0:9500", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadYAMLStrict([]byte(os.ExpandEnv(s)))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, s)
+	}
+	if cfg.Resources.Source.IOPS.Soft != 4000 || cfg.Resources.Source.IOPS.Hard != 8000 || cfg.Resources.Workers.Max != 16 ||
+		cfg.Target.CommitOrder != "strict" || cfg.Governor.Breaker.StrandQueryP99.MaxRatio != 20 ||
+		cfg.Governor.Breaker.ReplicaLag.Max != "30s" || cfg.Source.ServerID != 5555 ||
+		strings.Join(cfg.Tables.Exclude, ",") != "a.log_*,b.tmp" || cfg.Observability.Log.Format != "text" ||
+		cfg.Observability.Metrics != "0.0.0.0:9500" || len(cfg.Bootstrap.Logical.Windows) != 1 {
+		t.Fatalf("options not applied: %+v\n%s", cfg, s)
+	}
+	if !strings.Contains(s, "chunk_rows: 50000") || !strings.Contains(cfg.Source.DSN, "cdc") {
+		t.Fatalf("chunk_rows/user missing\n%s", s)
+	}
+	if _, err := renderInitConfig(initOpts{Name: "x", From: "mysql", To: "mysql", Databases: []string{"a"}, CommitOrder: "fast"}); err == nil {
+		t.Fatal("bad --commit-order accepted")
+	}
+}

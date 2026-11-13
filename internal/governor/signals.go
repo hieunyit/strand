@@ -174,7 +174,9 @@ type MySQLDBSignalReader struct {
 
 func NewMySQLDBSignalReader(db *sql.DB, tracker *LatencyTracker) *MySQLDBSignalReader {
 	if tracker == nil {
-		tracker = NewLatencyTracker(10 * time.Millisecond)
+		// Baseline tự học (design: "so với baseline tự học"), như nguồn PG: hằng 10 ms cũ làm breaker
+		// mở liên tục khi nguồn bận (p99 câu poll > 30 ms) dù chưa quá tải, snapshot đứng.
+		tracker = NewMeasuredLatencyTracker()
 	}
 	return &MySQLDBSignalReader{
 		db:             db,

@@ -90,6 +90,16 @@ func (b *Breaker) Evaluate(sig DBSignals) (isOpen bool, reason string) {
 	return false, ""
 }
 
+// Reason: lý do lần mở gần nhất khi đang mở ("" khi đóng).
+func (b *Breaker) Reason() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if !b.isOpen {
+		return ""
+	}
+	return b.lastReason
+}
+
 // IsOpen trả về trạng thái hiện tại của breaker.
 func (b *Breaker) IsOpen() bool {
 	b.mu.RLock()
