@@ -8,9 +8,10 @@ package verify_test
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"reflect"
-	"sync"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -18,24 +19,105 @@ import (
 	"strand/internal/verify"
 )
 
-// hammer UPDATE row id liên tục ở source (workers goroutine) cho tới khi gọi hàm trả về.
-func hammer(t *testing.T, db *sql.DB, stmt string, workers int) func() int64 {
-	t.Helper()
-	var stop atomic.Bool
-	var n atomic.Int64
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for !stop.Load() {
-				if _, err := db.Exec(stmt); err == nil {
-					n.Add(1)
-				}
-			}
-		}()
+// hotConnector bọc driver thật: TRƯỚC mỗi SELECT đọc bảng nóng (sel khớp), chạy một UPDATE row nóng
+// bằng pool khác (bump) rồi mới cho SELECT chạy. Nhờ vậy mọi cặp đọc S1/S2 của verify đều thấy row đổi,
+// bất kể máy chậm hay nhanh. (Trước đây dùng vòng UPDATE tự do: trên máy tải nặng commit MySQL chỉ
+// ~12 lần/giây, cửa sổ S1..S2 cỡ ms nên ~1/8 lượt không có commit nào lọt vào, row ổn định S1==S2
+// mà target khác thì đúng là "lệch" — verify không sai, test thiếu tải nóng thật.)
+type hotConnector struct {
+	drv  driver.Driver
+	dsn  string
+	sel  func(query string) bool
+	bump func()
+}
+
+func (c *hotConnector) Connect(context.Context) (driver.Conn, error) {
+	in, err := c.drv.Open(c.dsn)
+	if err != nil {
+		return nil, err
 	}
-	return func() int64 { stop.Store(true); wg.Wait(); return n.Load() }
+	return &hotConn{Conn: in, c: c}, nil
+}
+func (c *hotConnector) Driver() driver.Driver { return c.drv }
+
+type hotConn struct {
+	driver.Conn
+	c *hotConnector
+}
+
+func (h *hotConn) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
+	if h.c.sel(q) {
+		h.c.bump()
+	}
+	if qc, ok := h.Conn.(driver.QueryerContext); ok {
+		return qc.QueryContext(ctx, q, args)
+	}
+	return nil, driver.ErrSkip
+}
+func (h *hotConn) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
+	if ec, ok := h.Conn.(driver.ExecerContext); ok {
+		return ec.ExecContext(ctx, q, args)
+	}
+	return nil, driver.ErrSkip
+}
+func (h *hotConn) PrepareContext(ctx context.Context, q string) (driver.Stmt, error) {
+	if h.c.sel(q) { // driver không có QueryerContext thì database/sql đi đường Prepare
+		h.c.bump()
+	}
+	if pc, ok := h.Conn.(driver.ConnPrepareContext); ok {
+		return pc.PrepareContext(ctx, q)
+	}
+	return h.Conn.Prepare(q)
+}
+func (h *hotConn) BeginTx(ctx context.Context, o driver.TxOptions) (driver.Tx, error) {
+	if bt, ok := h.Conn.(driver.ConnBeginTx); ok {
+		return bt.BeginTx(ctx, o)
+	}
+	return h.Conn.Begin()
+}
+func (h *hotConn) Ping(ctx context.Context) error {
+	if p, ok := h.Conn.(driver.Pinger); ok {
+		return p.Ping(ctx)
+	}
+	return nil
+}
+func (h *hotConn) ResetSession(ctx context.Context) error {
+	if r, ok := h.Conn.(driver.SessionResetter); ok {
+		return r.ResetSession(ctx)
+	}
+	return nil
+}
+func (h *hotConn) IsValid() bool {
+	if v, ok := h.Conn.(driver.Validator); ok {
+		return v.IsValid()
+	}
+	return true
+}
+func (h *hotConn) CheckNamedValue(nv *driver.NamedValue) error {
+	if ck, ok := h.Conn.(driver.NamedValueChecker); ok {
+		return ck.CheckNamedValue(nv)
+	}
+	return driver.ErrSkip
+}
+
+// hotSource mở pool source mà mọi SELECT chứa table đều đi sau một lần UPDATE stmt (bằng plain).
+// Trả pool và số lần bump (để test khẳng định tải nóng thật sự chạy).
+func hotSource(t *testing.T, plain *sql.DB, dsn, table, stmt string) (*sql.DB, *atomic.Int64) {
+	t.Helper()
+	var n atomic.Int64
+	db := sql.OpenDB(&hotConnector{drv: plain.Driver(), dsn: dsn,
+		sel: func(q string) bool {
+			return strings.Contains(q, table) && strings.HasPrefix(strings.TrimSpace(q), "SELECT")
+		},
+		bump: func() {
+			if _, err := plain.Exec(stmt); err != nil {
+				t.Errorf("hot bump: %v", err)
+				return
+			}
+			n.Add(1)
+		}})
+	t.Cleanup(func() { _ = db.Close() })
+	return db, &n
 }
 
 // runHot chạy full verify tối đa 3 lượt: lệch đúng một row (planted), row nóng không bao giờ lệch, và
@@ -69,13 +151,12 @@ func TestRecheckDB_PGToPGHotRowIsUnverifiableNotMismatch(t *testing.T) {
 		mustExec(t, pg, fmt.Sprintf("INSERT INTO %s.hot SELECT g, g, 'r' || g FROM generate_series(1, 2000) g", s))
 	}
 	mustExec(t, pg, "UPDATE h2.hot SET note = 'PLANTED' WHERE id = 777")
-	stop := hammer(t, pg, "UPDATE h1.hot SET n = n + 1 WHERE id = 1", 4)
-	defer stop()
-	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: pg, Target: pg, PipelineID: "pipe_hot_pp",
+	hotSrc, bumps := hotSource(t, pg, pgDSN, "hot", "UPDATE h1.hot SET n = n + 1 WHERE id = 1")
+	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: hotSrc, Target: pg, PipelineID: "pipe_hot_pp",
 		SourceEngine: model.EnginePG, TargetEngine: model.EnginePG, ChunkRows: 500,
 		TargetName: func(t model.TableID) model.TableID { return model.TableID{Schema: "h2", Table: t.Table} }})
 	runHot(t, mv, model.TableID{Schema: "h1", Table: "hot"}, "777")
-	t.Logf("%d updates of the hot row", stop())
+	t.Logf("%d updates of the hot row", bumps.Load())
 }
 
 func TestRecheckDB_MySQLToPGHotRowIsUnverifiableNotMismatch(t *testing.T) {
@@ -90,11 +171,33 @@ func TestRecheckDB_MySQLToPGHotRowIsUnverifiableNotMismatch(t *testing.T) {
 	}
 	mustExec(t, pg, "INSERT INTO public.hot_mp SELECT g, g, 'r' || g FROM generate_series(1, 2000) g")
 	mustExec(t, pg, "UPDATE public.hot_mp SET note = 'PLANTED' WHERE id = 777")
-	stop := hammer(t, src, "UPDATE verify_src.hot_mp SET n = n + 1 WHERE id = 1", 4)
-	defer stop()
-	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: pg, PipelineID: "pipe_hot_mp",
+	hotSrc, bumps := hotSource(t, src, mysqlSrcDSN, "hot_mp", "UPDATE verify_src.hot_mp SET n = n + 1 WHERE id = 1")
+	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: hotSrc, Target: pg, PipelineID: "pipe_hot_mp",
 		SourceEngine: model.EngineMySQL, TargetEngine: model.EnginePG, ChunkRows: 500,
 		TargetName: func(model.TableID) model.TableID { return model.TableID{Schema: "public", Table: "hot_mp"} }})
 	runHot(t, mv, model.TableID{Schema: "verify_src", Table: "hot_mp"}, "777")
-	t.Logf("%d updates of the hot row", stop())
+	t.Logf("%d updates of the hot row", bumps.Load())
+}
+
+// Đối chứng: row đã lệch mà KHÔNG đổi trong cửa sổ S1..S2 (không tải nóng) phải là lệch thật — chứng minh
+// kết quả "hot" ở trên đến từ việc row đổi, không phải verify bỏ qua mọi row lệch.
+func TestRecheckDB_MySQLToPGStableDiffIsMismatch(t *testing.T) {
+	src, _ := getMySQL(t)
+	pg := getPostgres(t)
+	mustExec(t, src, "DROP TABLE IF EXISTS verify_src.cold_mp")
+	mustExec(t, src, "CREATE TABLE verify_src.cold_mp (id BIGINT PRIMARY KEY, n BIGINT NOT NULL)")
+	mustExec(t, pg, "DROP TABLE IF EXISTS public.cold_mp")
+	mustExec(t, pg, "CREATE TABLE public.cold_mp (id bigint PRIMARY KEY, n bigint NOT NULL)")
+	mustExec(t, src, "INSERT INTO verify_src.cold_mp VALUES (1, 1), (2, 2)")
+	mustExec(t, pg, "INSERT INTO public.cold_mp VALUES (1, 1), (2, 99)")
+	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: pg, PipelineID: "pipe_cold_mp",
+		SourceEngine: model.EngineMySQL, TargetEngine: model.EnginePG, ChunkRows: 500,
+		TargetName: func(model.TableID) model.TableID { return model.TableID{Schema: "public", Table: "cold_mp"} }})
+	rep, err := mv.VerifyTableFull(context.Background(), model.TableID{Schema: "verify_src", Table: "cold_mp"}, "id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rep.Mismatches, []string{"2"}) || len(rep.UnverifiableHot) != 0 {
+		t.Fatalf("mismatches = %v hot = %v, want [2] and none", rep.Mismatches, rep.UnverifiableHot)
+	}
 }

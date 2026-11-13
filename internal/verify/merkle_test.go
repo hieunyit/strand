@@ -29,13 +29,15 @@ import (
 )
 
 var (
-	mysqlOnce sync.Once
-	mysqlSrc  *sql.DB
-	mysqlDst  *sql.DB
-	mysqlErr  error
+	mysqlOnce   sync.Once
+	mysqlSrc    *sql.DB
+	mysqlSrcDSN string // DSN của mysqlSrc (test row nóng cần mở thêm pool bọc driver)
+	mysqlDst    *sql.DB
+	mysqlErr    error
 
 	pgOnce sync.Once
 	pgDB   *sql.DB
+	pgDSN  string
 	pgErr  error
 
 	stopMu sync.Mutex
@@ -104,7 +106,8 @@ func getMySQL(t *testing.T) (*sql.DB, *sql.DB) {
 			mysqlErr = err
 			return
 		}
-		mysqlSrc, _ = sql.Open("mysql", fmt.Sprintf("root:dev@tcp(%s)/verify_src?time_zone=%s", addr, tz))
+		mysqlSrcDSN = fmt.Sprintf("root:dev@tcp(%s)/verify_src?time_zone=%s", addr, tz)
+		mysqlSrc, _ = sql.Open("mysql", mysqlSrcDSN)
 		mysqlDst, _ = sql.Open("mysql", fmt.Sprintf("root:dev@tcp(%s)/verify_dst?time_zone=%s", addr, tz))
 	})
 	if mysqlErr != nil {
@@ -139,8 +142,9 @@ func getPostgres(t *testing.T) *sql.DB {
 			pgErr = err
 			return
 		}
-		db, err := sql.Open("pgx", fmt.Sprintf("postgres://strand:dev@%s/strand?sslmode=disable&timezone=America/New_York",
-			net.JoinHostPort(host, port.Port())))
+		pgDSN = fmt.Sprintf("postgres://strand:dev@%s/strand?sslmode=disable&timezone=America/New_York",
+			net.JoinHostPort(host, port.Port()))
+		db, err := sql.Open("pgx", pgDSN)
 		if err != nil {
 			pgErr = err
 			return
