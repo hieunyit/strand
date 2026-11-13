@@ -80,8 +80,10 @@ func fakePGSource(fail error, keepMB string, retained, sentLag float64) *sql.DB 
 			return []string{"a", "b", "c"}, []driver.Value{"reserved", retained, sentLag}, nil
 		case strings.Contains(q, "r.replay_lsn IS NOT NULL"):
 			return []string{"replays", "caught_up", "lag"}, nil, nil // không có standby vật lý
+		case strings.Contains(q, "pg_settings"):
+			return []string{"keep"}, []driver.Value{keepMB}, nil
 		case strings.Contains(q, "pg_is_in_recovery()"):
-			return []string{"a", "b", "c"}, []driver.Value{false, 0.0, keepMB}, nil
+			return []string{"a", "b"}, []driver.Value{false, 0.0}, nil
 		}
 		return nil, nil, errors.New("unexpected query")
 	}})
