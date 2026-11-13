@@ -64,36 +64,76 @@ binlog_expire_logs_seconds = 864000   # giữ binlog 10 ngày, đủ cho snapsho
 
 ### Bước 2. Tạo user cho Strand trên MariaDB
 
+Một pipeline chuyển được **một, nhiều, hoặc tất cả database** cùng lúc (đọc chung một luồng binlog). Chọn một trong hai cách cấp quyền đọc:
+
 ```sql
 CREATE USER 'strand'@'%' IDENTIFIED BY 'srcpw';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'strand'@'%';
-GRANT SELECT, LOCK TABLES ON app.* TO 'strand'@'%';
+
+-- Cách 1: chỉ các database cần chuyển (lặp lại cho từng database)
+GRANT SELECT, LOCK TABLES ON app.*  TO 'strand'@'%';
+GRANT SELECT, LOCK TABLES ON shop.* TO 'strand'@'%';
+GRANT SELECT, LOCK TABLES ON crm.*  TO 'strand'@'%';
+
+-- Cách 2: toàn bộ server
+GRANT SELECT, LOCK TABLES ON *.* TO 'strand'@'%';
 ```
 
 `REPLICATION CLIENT` là quyền Strand cần để đọc vị trí binlog. Từ MariaDB 10.5.2 nó là tên cũ của `BINLOG MONITOR` (cả hai cách ghi đều được); 10.3 và 10.4 chỉ có `REPLICATION CLIENT`.
 
+Liệt kê database đang có để chọn:
+
+```sql
+SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
+WHERE SCHEMA_NAME NOT IN ('mysql','sys','information_schema','performance_schema');
+```
+
 ### Bước 3. Chuẩn bị MySQL 8.x đích
+
+Strand tự tạo database và bảng trên đích, giữ nguyên tên, charset và collation như nguồn. Bạn chỉ cần tạo database `strand` (nơi lưu checkpoint) và user:
 
 ```sql
 CREATE DATABASE strand;   -- nơi Strand lưu checkpoint (_strand_*)
-CREATE DATABASE app;
 CREATE USER 'strand'@'%' IDENTIFIED BY 'dstpw';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*    TO 'strand'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON strand.* TO 'strand'@'%';
 GRANT CONNECTION_ADMIN ON *.* TO 'strand'@'%';
+
+-- Cách 1: từng database cần chuyển (cùng danh sách với bước 2)
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON app.*  TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON shop.* TO 'strand'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON crm.*  TO 'strand'@'%';
+
+-- Cách 2: toàn bộ server (đích mới, chưa có dữ liệu khác)
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP ON *.* TO 'strand'@'%';
 ```
 
-Không cần tạo bảng: Strand tự tạo bảng trên đích theo cấu trúc của nguồn, giữ nguyên charset và collation.
+Cần `strand objects` (view, trigger, procedure, event) thì cấp thêm trên các database đó: `CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, TRIGGER, EVENT` (xem mục B).
 
 ### Bước 4. File cấu hình `mdb-app.yaml`
 
-Sinh file mẫu có chú thích rồi sửa host, database:
+Sinh file mẫu có chú thích rồi sửa host:
 
 ```bash
+# một hoặc nhiều database (phân cách bằng dấu phẩy)
 strand config init --from mariadb --to mysql --name mdb-app \
-  --source-host 10.0.0.11 --target-host 10.0.0.21 --database app -o mdb-app.yaml
+  --source-host 10.0.0.11 --target-host 10.0.0.21 --database app,shop,crm -o mdb-app.yaml
+
+# toàn bộ database người dùng của server
+strand config init --from mariadb --to mysql --name mdb-all \
+  --source-host 10.0.0.11 --target-host 10.0.0.21 --database '*' -o mdb-all.yaml
+
 # chạy bằng systemd thì thêm --systemd (đường dẫn /var/lib/strand/<name>, /run/strand/<name>/admin.sock)
 ```
+
+Trong file, phần chọn bảng là `tables.include`:
+
+```yaml
+tables:
+  include: ["app.*", "shop.*", "crm.*"]   # hoặc ["*.*"] = mọi database người dùng
+  exclude: ["shop.log_*", "crm.tmp_import"]   # bỏ bớt bảng (tùy chọn)
+```
+
+`mysql`, `sys`, `information_schema`, `performance_schema` luôn bị bỏ qua. User và quyền của ứng dụng (nằm trong `mysql`) chuyển bằng `strand objects` (mục B).
 
 Nội dung tối thiểu tương đương:
 

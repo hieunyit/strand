@@ -18,7 +18,11 @@ type initOpts struct {
 	Name, From, To           string
 	SourceHost, TargetHost   string
 	SourcePort, TargetPort   int
-	Database                 string
+	Databases                []string // MySQL/MariaDB: các database cần chuyển ("*" = tất cả); PG: [database]
+	PGSchema                 string   // PG: schema cần chuyển
+	Database                 string   // database đầu tiên (ví dụ exclude/rename; tên database PG)
+	Includes                 []string
+	GrantOn                  string
 	Systemd                  bool
 	StateDir, Socket         string
 	SourceMySQL, TargetMySQL bool
@@ -38,7 +42,7 @@ source:
   kind: mysql                 # {{if .MariaDB}}MariaDB cũng khai báo là mysql; Strand tự nhận ra{{else}}MySQL 5.5 - 8.x{{end}}
   host: {{.SourceHost}}
   port: {{.SourcePort}}
-  user: strand                # quyền: REPLICATION SLAVE, REPLICATION CLIENT ON *.*; SELECT, LOCK TABLES ON {{.Database}}.*
+  user: strand                # quyền: REPLICATION SLAVE, REPLICATION CLIENT ON *.*; SELECT, LOCK TABLES ON {{.GrantOn}}
   password_env: SRC_PW        # mật khẩu lấy từ biến môi trường SRC_PW
   server_id: 47001            # số duy nhất: khác server_id của nguồn và mọi replica (SHOW SLAVE HOSTS)
 {{- else}}
@@ -64,7 +68,9 @@ target:
 {{- end}}
 
 tables:
-  include: ["{{.Database}}.*"]   # mẫu glob schema.table; thêm nhiều mục nếu cần
+  # mẫu glob "schema.table"; nhiều database trong cùng một pipeline (một luồng binlog); "*.*" = mọi database
+  # người dùng (mysql, sys, information_schema, performance_schema luôn bị bỏ qua)
+  include: [{{range $i, $e := .Includes}}{{if $i}}, {{end}}"{{$e}}"{{end}}]
   # exclude: ["{{.Database}}.log_*"]
   # rename: { "{{.Database}}.orders": "{{.Database}}_new.orders" }
 
@@ -115,8 +121,42 @@ func renderInitConfig(o initOpts) (string, error) {
 	if !initNameRe.MatchString(o.Name) {
 		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("--name %q: use lowercase letters, digits, '-' or '_'", o.Name), nil)
 	}
-	if o.Database == "" || strings.ContainsAny(o.Database, "\"'` *?") {
-		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("--database %q is not a plain schema name", o.Database), nil)
+	var dbs []string
+	for _, d := range o.Databases {
+		if d = strings.TrimSpace(d); d != "" {
+			dbs = append(dbs, d)
+		}
+	}
+	all := false
+	for _, d := range dbs {
+		if d == "*" || strings.EqualFold(d, "all") {
+			all = true
+		} else if strings.ContainsAny(d, "\"'` *?.") {
+			return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("--database %q is not a plain database name", d), nil)
+		}
+	}
+	switch {
+	case len(dbs) == 0:
+		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, "--database is required (one or more names, or '*' for all)", nil)
+	case !o.SourceMySQL:
+		// PG: --database là tên database PostgreSQL (một), bảng chọn theo schema.
+		if all || len(dbs) != 1 {
+			return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, "PostgreSQL source: --database takes exactly one database name; choose schemas with --schema", nil)
+		}
+		if o.PGSchema == "" || strings.ContainsAny(o.PGSchema, "\"'` *?.") {
+			return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("--schema %q is not a plain schema name", o.PGSchema), nil)
+		}
+		o.Database, o.Includes = dbs[0], []string{o.PGSchema + ".*"}
+	case all:
+		o.Database, o.Includes, o.GrantOn = "app", []string{"*.*"}, "*.*"
+	default:
+		o.Database = dbs[0]
+		var grants []string
+		for _, d := range dbs {
+			o.Includes = append(o.Includes, d+".*")
+			grants = append(grants, d+".*")
+		}
+		o.GrantOn = strings.Join(grants, ", ")
 	}
 	defPort := func(mysql bool) int {
 		if mysql {
@@ -188,7 +228,8 @@ func newConfigInitCmd() *cobra.Command {
 	f.IntVar(&o.SourcePort, "source-port", 0, "Cổng nguồn (mặc định 3306 / 5432)")
 	f.StringVar(&o.TargetHost, "target-host", "10.0.0.21", "Host đích")
 	f.IntVar(&o.TargetPort, "target-port", 0, "Cổng đích (mặc định 3306 / 5432)")
-	f.StringVar(&o.Database, "database", "app", "Database (schema) cần chuyển")
+	f.StringSliceVar(&o.Databases, "database", []string{"app"}, "Database cần chuyển: lặp lại hoặc phân cách bằng dấu phẩy (app,shop,crm); '*' = mọi database người dùng. Nguồn PostgreSQL: tên database")
+	f.StringVar(&o.PGSchema, "schema", "public", "Nguồn PostgreSQL: schema cần chuyển")
 	f.BoolVar(&o.Systemd, "systemd", false, "Đường dẫn cho chạy bằng systemd (/var/lib/strand/<name>, /run/strand/<name>/admin.sock)")
 	f.StringVarP(&out, "output", "o", "", "Ghi ra file (mặc định in ra màn hình)")
 	f.BoolVar(&force, "force", false, "Ghi đè file đã có")
