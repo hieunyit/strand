@@ -128,6 +128,10 @@ func newSyncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if syncBackground && os.Getenv(bgChildEnv) == "" {
+				return startBackground(cmd, cfg)
+			}
+			defer childPidFileCleanup()()
 			level := slog.LevelInfo
 			switch strings.ToLower(cfg.Observability.Log.Level) {
 			case "debug":
@@ -159,6 +163,9 @@ func newSyncCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&syncStartAt, "start-at", "", "Vị trí bắt đầu: seed | <gtid> (source MySQL) | <file binlog>:<vị trí> (source MySQL không GTID, ví dụ mysql-bin.000123:4567) | <LSN X/Y> (source PostgreSQL)")
 	cmd.Flags().StringVar(&syncSeedManifest, "seed-manifest", "seed.json", "Đường dẫn seed.json khi --start-at seed")
+	cmd.Flags().BoolVarP(&syncBackground, "background", "d", false, "Chạy nền: tách khỏi terminal, log ra --log-file, PID ra --pid-file; dừng bằng strand stop -c ...")
+	cmd.Flags().StringVar(&syncLogFile, "log-file", "", "Với --background: file log (mặc định <resources.spool.path>/strand.log)")
+	cmd.Flags().StringVar(&syncPidFile, "pid-file", "", "Với --background: file pid (mặc định <resources.spool.path>/strand.pid)")
 	return cmd
 }
 

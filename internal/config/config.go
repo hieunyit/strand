@@ -369,3 +369,22 @@ func TargetFoldsTableCase(kind string) bool {
 	}
 	return true
 }
+
+// LoadFileForPaths đọc file cấu hình chỉ để lấy tên pipeline và đường dẫn (spool, socket): kiểm cú pháp
+// strict nhưng không dựng DSN, nên không cần biến môi trường mật khẩu (strand stop / status).
+func LoadFileForPaths(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, exitcode.New("config_read_error", exitcode.InvalidSyntax, fmt.Sprintf("cannot read config file: %s", path), err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader([]byte(os.ExpandEnv(string(data)))))
+	dec.KnownFields(true)
+	var cfg Config
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax, fmt.Sprintf("invalid config syntax: %v", err), err)
+	}
+	if cfg.Name == "" {
+		return nil, exitcode.New("missing_name", exitcode.InvalidSyntax, "missing required field: name", nil)
+	}
+	return &cfg, nil
+}

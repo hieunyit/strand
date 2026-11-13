@@ -30,6 +30,8 @@ func init() {
 	rootCmd.AddCommand(newValidateCmd())
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newSyncCmd())
+	rootCmd.AddCommand(newStopCmd())
+	rootCmd.AddCommand(newStatusCmd())
 	rootCmd.AddCommand(newTopCmd())
 	rootCmd.AddCommand(newPauseCmd())
 	rootCmd.AddCommand(newResumeCmd())

@@ -509,6 +509,10 @@ Lệnh nói chuyện với `sync` đang chạy (`top`, `pause`, `resume`, `throt
 
 `strand config init --from mysql|mariadb|postgres --to mysql|postgres [--name N] [--source-host H] [--target-host H] [--database app] [--systemd] [-o file] [--force]`. Sinh file cấu hình mẫu có chú thích; mật khẩu luôn đọc từ biến môi trường `SRC_PW`/`DST_PW`. Không có `-o` thì in ra màn hình. File đã có thì không ghi đè, trừ khi có `--force`. Cặp nguồn/đích không hỗ trợ (MariaDB → PG, PG → MySQL) bị từ chối.
 
+### 7.0b `sync --background`, `stop`, `status`
+
+`strand sync -c p.yaml --background|-d [--log-file f] [--pid-file f]`: chạy nền (tách khỏi terminal), log và PID mặc định trong `resources.spool.path`; chờ 5 giây để báo lỗi khởi động sớm. Pipeline đang chạy nền thì từ chối chạy lần hai. `strand stop -c p.yaml [--timeout 150s]`: gửi SIGTERM và chờ dừng (không cần biến môi trường mật khẩu). `strand status -c p.yaml`: còn chạy hay không và 5 dòng log cuối (exit 1 nếu không chạy).
+
 ### 7.1 `validate`
 
 `strand validate -c p.yaml`. Exit 0 khi đạt, exit 3 kèm lý do khi bị từ chối. Cảnh báo in ra stderr.

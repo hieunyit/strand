@@ -205,6 +205,17 @@ Log cần thấy:
 
 Cảnh báo `BINLOG POSITION MODE` là bình thường với MariaDB. Strand không dùng GTID của MariaDB.
 
+Chạy nền, không giữ terminal:
+
+```bash
+strand sync -c mdb-app.yaml --background      # hoặc -d; in PID, đường dẫn log
+strand status -c mdb-app.yaml                 # còn chạy không, vài dòng log cuối
+strand top -c mdb-app.yaml                    # lag, tiến độ
+strand stop -c mdb-app.yaml                   # dừng an toàn (SIGTERM, ghi checkpoint)
+```
+
+Log mặc định `<resources.spool.path>/strand.log`, PID `<resources.spool.path>/strand.pid` (đổi bằng `--log-file`, `--pid-file`). Lỗi ngay lúc khởi động (sai mật khẩu, thiếu quyền...) thì lệnh báo luôn kèm log. Chạy nền kiểu này không tự chạy lại khi máy reboot hay lỗi tạm thời: chạy lâu dài nên dùng systemd (mục 12 của tài liệu 5.x).
+
 Từ đây mọi INSERT/UPDATE/DELETE trên MariaDB được chép sang MySQL sau khoảng dưới một giây. Lệnh chạy liên tục. `Ctrl-C` dừng an toàn, chạy lại cùng lệnh thì tiếp tục từ chỗ đã dừng. Strand bị kill đột ngột hay mất điện cũng không mất hoặc lặp dữ liệu. Muốn chạy nền lâu dài, dùng systemd (mục 12 của tài liệu 5.x).
 
 ### Bước 7. Theo dõi
