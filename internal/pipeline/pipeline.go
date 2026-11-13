@@ -218,7 +218,19 @@ func Run(ctx context.Context, opts Options) error {
 	p.seenCond = sync.NewCond(&p.seenMu)
 	p.pauseCond = sync.NewCond(&p.pauseMu)
 	p.touched = newTouchedKeys(200000)
-	return p.run(ctx)
+	return stopRequestedIsClean(ctx, p.log, p.run(ctx))
+}
+
+// stopRequestedIsClean: lỗi chỉ do ctx của người gọi bị hủy (SIGINT/SIGTERM tới khi pipeline còn đang
+// khởi động: đọc collation, khóa, snapshot...) là dừng theo yêu cầu, không phải lỗi — trả nil (exit 0).
+// Chỉ áp dụng khi parent đã bị hủy VÀ lỗi bọc context.Canceled: lỗi thật (kết nối, fence, pipeline tự
+// hủy ctx con khi fail — parent vẫn sống) không bọc Canceled hoặc xảy ra khi parent chưa bị hủy nên giữ nguyên.
+func stopRequestedIsClean(parent context.Context, log *slog.Logger, err error) error {
+	if err != nil && parent.Err() != nil && errors.Is(err, context.Canceled) {
+		log.Info("stop requested before the pipeline finished starting; exiting cleanly", "cause", err.Error())
+		return nil
+	}
+	return err
 }
 
 func (p *Pipeline) fail(err error) {
