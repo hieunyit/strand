@@ -28,13 +28,17 @@ import (
 const pgHeadLSN = `CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END`
 
 // pgInstanceSignalsSQL: một dòng — đang recovery, độ trễ replay của chính server (0 khi đã replay hết
-// WAL đã nhận: standby của primary rảnh không bị tính là trễ), max_slot_wal_keep_size (MB, -1 = không
-// giới hạn).
+// WAL đã nhận: standby của primary rảnh không bị tính là trễ).
 const pgInstanceSignalsSQL = `SELECT pg_is_in_recovery(),
   CASE WHEN pg_is_in_recovery() AND pg_last_wal_receive_lsn() IS DISTINCT FROM pg_last_wal_replay_lsn()
        THEN COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp()), 0)::float8
-       ELSE 0::float8 END,
-  COALESCE((SELECT setting FROM pg_settings WHERE name = 'max_slot_wal_keep_size'), '-1')`
+       ELSE 0::float8 END`
+
+// pgKeepSQL: max_slot_wal_keep_size. Cấu hình gần như tĩnh và quét pg_settings đắt hơn hẳn các câu khác
+// (p50 ~5 ms so với ~2 ms, đuôi dài), nên đọc cache theo pgKeepTTL và không tính vào latency probe.
+const pgKeepSQL = `SELECT COALESCE((SELECT setting FROM pg_settings WHERE name = 'max_slot_wal_keep_size'), '-1')`
+
+const pgKeepTTL = time.Minute
 
 // pgStandbysSQL: mỗi walsender vật lý (walsender logical, gồm của Strand, bị loại) một dòng — có báo vị
 // trí replay không (replay_lsn khác NULL), đã replay tới sent_lsn chưa, replay_lag (-1 = NULL). Việc
@@ -151,15 +155,47 @@ func ParseMaxSlotWALKeepSize(setting string) int64 {
 // ReadPGSample đọc tín hiệu thô của source PG. slot rỗng = bỏ phần slot. Lỗi của câu instance (quyền,
 // kết nối) được trả về; slot chưa tồn tại không phải lỗi (SlotFound = false).
 func ReadPGSample(ctx context.Context, db *sql.DB, slot string) (PGSample, error) {
+	return readPGSample(ctx, db, slot, nil, nil)
+}
+
+// pgKeepCache giữ max_slot_wal_keep_size đã đọc (byte) và thời điểm đọc.
+type pgKeepCache struct {
+	bytes int64
+	at    time.Time
+}
+
+// readPGSample: rec (tùy chọn) nhận latency của TỪNG câu truy vấn — mỗi câu một mẫu, như một câu
+// SHOW của MySQL — thay vì tổng ba round-trip (tổng có đuôi nặng hơn hẳn và làm p99 giả cao). keep
+// (tùy chọn) cache max_slot_wal_keep_size.
+func readPGSample(ctx context.Context, db *sql.DB, slot string, rec func(time.Duration), keep *pgKeepCache) (PGSample, error) {
+	timed := func(f func() error) error {
+		start := time.Now()
+		err := f()
+		if rec != nil && err == nil {
+			rec(time.Since(start))
+		}
+		return err
+	}
 	s := PGSample{MaxSlotWALKeepBytes: -1, SlotRetainedBytes: -1, SlotSentLagBytes: -1}
-	var keep string
-	if err := db.QueryRowContext(ctx, pgInstanceSignalsSQL).Scan(&s.InRecovery, &s.ReplayDelaySeconds,
-		&keep); err != nil {
+	if err := timed(func() error {
+		return db.QueryRowContext(ctx, pgInstanceSignalsSQL).Scan(&s.InRecovery, &s.ReplayDelaySeconds)
+	}); err != nil {
 		return s, fmt.Errorf("read PostgreSQL governor signals: %w", err)
 	}
-	s.MaxSlotWALKeepBytes = ParseMaxSlotWALKeepSize(keep)
-	sts, err := readPGStandbys(ctx, db)
-	if err != nil {
+	if keep != nil && !keep.at.IsZero() && time.Since(keep.at) < pgKeepTTL {
+		s.MaxSlotWALKeepBytes = keep.bytes
+	} else {
+		var setting string
+		if err := db.QueryRowContext(ctx, pgKeepSQL).Scan(&setting); err != nil {
+			return s, fmt.Errorf("read PostgreSQL governor signals: %w", err)
+		}
+		s.MaxSlotWALKeepBytes = ParseMaxSlotWALKeepSize(setting)
+		if keep != nil {
+			keep.bytes, keep.at = s.MaxSlotWALKeepBytes, time.Now()
+		}
+	}
+	var sts []PGStandby
+	if err := timed(func() (err error) { sts, err = readPGStandbys(ctx, db); return }); err != nil {
 		return s, err
 	}
 	s.StandbyReplayLagSeconds = StandbyReplayLag(sts)
@@ -167,12 +203,20 @@ func ReadPGSample(ctx context.Context, db *sql.DB, slot string) (PGSample, error
 		return s, nil
 	}
 	var retained, sentLag float64
-	err = db.QueryRowContext(ctx, pgSlotSignalsSQL, slot).Scan(&s.SlotWALStatus, &retained, &sentLag)
-	switch {
-	case err == sql.ErrNoRows:
-		return s, nil
-	case err != nil:
+	found := true
+	err := timed(func() error {
+		err := db.QueryRowContext(ctx, pgSlotSignalsSQL, slot).Scan(&s.SlotWALStatus, &retained, &sentLag)
+		if err == sql.ErrNoRows {
+			found = false
+			return nil
+		}
+		return err
+	})
+	if err != nil {
 		return s, fmt.Errorf("read PostgreSQL replication slot %q signals: %w", slot, err)
+	}
+	if !found {
+		return s, nil
 	}
 	s.SlotFound = true
 	s.SlotRetainedBytes, s.SlotSentLagBytes = int64(retained), int64(sentLag)
@@ -211,6 +255,7 @@ type PGDBSignalReader struct {
 	// SpoolUsage (tùy chọn): như MySQLDBSignalReader.SpoolUsage.
 	SpoolUsage func() (used, hard int64)
 
+	keep    pgKeepCache
 	mu      sync.Mutex
 	last    PGSample
 	hasLast bool
@@ -218,7 +263,8 @@ type PGDBSignalReader struct {
 
 func NewPGDBSignalReader(db *sql.DB, slot string, tracker *LatencyTracker) *PGDBSignalReader {
 	if tracker == nil {
-		tracker = NewLatencyTracker(10 * time.Millisecond)
+		// Baseline đo được, không phải hằng 10 ms (xem NewMeasuredLatencyTracker).
+		tracker = NewMeasuredLatencyTracker()
 	}
 	return &PGDBSignalReader{db: db, slot: slot, latencyTracker: tracker, hard: NewHardSignalDetector()}
 }
@@ -242,9 +288,13 @@ func (r *PGDBSignalReader) Probe(ctx context.Context) (warnings []string, err er
 
 // Sample đọc một mẫu mới (đo latency của câu poll) và giữ làm Last.
 func (r *PGDBSignalReader) Sample(ctx context.Context) (PGSample, error) {
-	start := time.Now()
-	s, err := ReadPGSample(ctx, r.db, r.slot)
-	r.latencyTracker.Record(time.Since(start))
+	r.mu.Lock()
+	keep := r.keep
+	r.mu.Unlock()
+	s, err := readPGSample(ctx, r.db, r.slot, r.latencyTracker.Record, &keep)
+	r.mu.Lock()
+	r.keep = keep
+	r.mu.Unlock()
 	if err != nil {
 		return s, err
 	}

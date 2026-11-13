@@ -37,7 +37,7 @@ Cùng bộ tín hiệu với MySQL (`MySQLDBSignalReader`), theo cột PostgreSQ
 | DBSignals | MySQL | PostgreSQL |
 | --- | --- | --- |
 | `ReplicaLagSeconds` | `Seconds_Behind_Source` | standby: now − `pg_last_xact_replay_timestamp()` khi còn WAL đã nhận chưa replay; primary: `max(replay_lag)` của standby vật lý trong `pg_stat_replication` (walsender logical bị loại; walsender có `replay_lsn` NULL — pg_receivewal, kể cả là standby đồng bộ, pg_basebackup — bị loại vì replay_lag của chúng do walsender ngoại suy và tăng mãi; standby đã replay tới `sent_lsn` tính 0) |
-| `QueryP99` / `QueryBaseline` | latency câu poll | latency câu poll |
+| `QueryP99` / `QueryBaseline` | latency câu poll (baseline cố định 10 ms) | latency TỪNG câu của poll (mỗi câu một mẫu; `pg_settings` đọc cache 60 s, không tính). Baseline **đo được**: p99 của 100 mẫu đầu (sàn 1 ms), p99 hiện tại trên cửa sổ trượt 100 mẫu. Hằng 10 ms cũ làm breaker mở và P_strand_p99 ≈ 6-7 ngay dưới tải pgbench (smoke Gate 2) |
 | `HardSignal` | Δ`Innodb_buffer_pool_wait_free`, Δ`Innodb_log_waits`, spool ≥ 95% | `wal_status` của slot = `unreserved` / `lost`, spool ≥ 95% |
 
 Ngoài DBSignals: số hạng WAL của P_lag (`pg_wal_lsn_diff(head, restart_lsn)` / `max_slot_wal_keep_size`)

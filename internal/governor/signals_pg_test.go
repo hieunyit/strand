@@ -79,8 +79,16 @@ func fakePG(instance fakeResult, slot *fakeResult, monitor bool, standbys ...[]d
 				return fakeResult{cols: []string{"a", "b", "c"}}
 			}
 			return *slot
+		case strings.Contains(q, "pg_settings"):
+			if instance.err != nil {
+				return instance
+			}
+			return one("keep")(instance.rows[0][2])
 		case strings.Contains(q, "pg_is_in_recovery()"):
-			return instance
+			if instance.err != nil {
+				return instance
+			}
+			return fakeResult{cols: instance.cols[:2], rows: [][]driver.Value{instance.rows[0][:2]}}
 		}
 		return fakeResult{err: errors.New("unexpected query: " + q)}
 	}})
@@ -293,8 +301,10 @@ func TestOnoff_SyncReceivewalStandbyDoesNotStopBackground(t *testing.T) {
 			return fakeResult{cols: []string{"replays", "caught_up", "lag"}, rows: [][]driver.Value{standby(false, false, lag)}}
 		case strings.Contains(q, "FROM pg_replication_slots s WHERE s.slot_name"):
 			return slotCols("reserved", float64(1<<20), float64(0))
+		case strings.Contains(q, "pg_settings"):
+			return one("keep")("-1")
 		case strings.Contains(q, "pg_is_in_recovery()"):
-			return instCols(false, 0.0, "-1")
+			return one("rec", "delay")(false, 0.0)
 		}
 		return fakeResult{err: errors.New("unexpected query: " + q)}
 	}})
@@ -315,5 +325,87 @@ func TestOnoff_SyncReceivewalStandbyDoesNotStopBackground(t *testing.T) {
 	}
 	if g.BackgroundRunning() {
 		t.Fatal("a replaying standby 4x lag_slo behind must still stop background")
+	}
+}
+
+// Hồi quy smoke Gate 2 trên PG: baseline là hằng 10 ms nên host/source bận (poll ổn định ~40 ms, không
+// có gì xấu đi) cho ratio 4 > 3 → breaker mở, P_strand_p99 kịch trần, GRACE kẹt ở sàn. Baseline phải đo
+// từ chính reader; chỉ độ trễ TĂNG so với lúc khởi đầu mới là tín hiệu.
+func TestPGReader_BaselineIsMeasuredNotConstant(t *testing.T) {
+	r := NewPGDBSignalReader(nil, "", nil)
+	br := NewBreaker(BreakerConfig{MaxRatio: 3})
+	for i := 0; i < 300; i++ {
+		r.latencyTracker.Record(40 * time.Millisecond)
+		sig, _ := r.ReadSignals(context.Background())
+		if open, why := br.Evaluate(sig); open {
+			t.Fatalf("sample %d: steady 40ms poll opened the breaker: %s (p99 %v, baseline %v)", i, why, sig.QueryP99, sig.QueryBaseline)
+		}
+	}
+	// Độ trễ tăng gấp 5 lần so với baseline đo được vẫn phải mở breaker.
+	opened := false
+	for i := 0; i < 150 && !opened; i++ {
+		r.latencyTracker.Record(200 * time.Millisecond)
+		sig, _ := r.ReadSignals(context.Background())
+		opened, _ = br.Evaluate(sig)
+	}
+	if !opened {
+		t.Fatal("a 5x latency increase over the measured baseline must open the breaker")
+	}
+}
+
+// Mỗi câu truy vấn của poll là một mẫu latency riêng (không phải tổng ba round-trip) và pg_settings
+// được cache, không tính vào probe.
+func TestPGReader_RecordsPerStatementLatencyAndCachesSettings(t *testing.T) {
+	var settingsReads int
+	slot := slotCols("reserved", float64(1<<20), float64(0))
+	db := sql.OpenDB(fakeConnector{answer: func(q string) fakeResult {
+		switch {
+		case strings.Contains(q, "pg_settings"):
+			settingsReads++
+			return one("keep")("1024")
+		case strings.Contains(q, "r.replay_lsn IS NOT NULL"):
+			return fakeResult{cols: []string{"a", "b", "c"}}
+		case strings.Contains(q, "FROM pg_replication_slots s WHERE s.slot_name"):
+			return slot
+		case strings.Contains(q, "pg_is_in_recovery()"):
+			return one("rec", "delay")(false, 0.0)
+		}
+		return fakeResult{err: errors.New("unexpected query: " + q)}
+	}})
+	r := NewPGDBSignalReader(db, "s", nil)
+	for i := 0; i < 5; i++ {
+		if _, err := r.Sample(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if settingsReads != 1 {
+		t.Fatalf("pg_settings read %d times in 5 samples, want 1 (cached)", settingsReads)
+	}
+	r.latencyTracker.mu.Lock()
+	n := len(r.latencyTracker.samples)
+	r.latencyTracker.mu.Unlock()
+	if n != 15 {
+		t.Fatalf("latency samples = %d, want 15 (3 statements x 5 samples)", n)
+	}
+	if last, _ := r.Last(); last.MaxSlotWALKeepBytes != 1024<<20 {
+		t.Fatalf("cached max_slot_wal_keep_size lost: %d", last.MaxSlotWALKeepBytes)
+	}
+}
+
+// GRACE trên PG không được kẹt Red/sàn chỉ vì poll chậm ổn định (không có tín hiệu nào khác).
+func TestGrace_SteadySlowPGPollDoesNotPinRed(t *testing.T) {
+	r := NewPGDBSignalReader(nil, "", nil)
+	g := NewGraceGovernor(GraceConfig{SoftRate: 600, HardRate: 1200, LagSLO: 5 * time.Second,
+		Breaker: NewBreaker(BreakerConfig{MaxRatio: 3}), SignalReader: r})
+	g.SetPhase("bootstrap")
+	g.SetWindowSaturated(true)
+	for i := 0; i < 200; i++ {
+		r.latencyTracker.Record(40 * time.Millisecond)
+		if err := g.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if g.Zone() == ZoneRed || g.BreakerOpen() {
+			t.Fatalf("tick %d: zone %v breaker %v with a steady slow poll (P=%.2f)", i, g.Zone(), g.BreakerOpen(), g.Pressure())
+		}
 	}
 }

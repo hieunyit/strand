@@ -71,6 +71,33 @@ type LatencyTracker struct {
 	samples  []time.Duration
 	baseline time.Duration
 	maxCap   int
+
+	// Chế độ baseline đo được (NewMeasuredLatencyTracker): baseline = p99 của warmup mẫu đầu, thay cho
+	// hằng số cấu hình. warmup = 0: baseline cố định như NewLatencyTracker.
+	warmup   int
+	seen     int
+	measured bool
+}
+
+// Mặc định của tracker đo baseline: cửa sổ p99 và số mẫu warmup (một tick PG ghi 2-3 mẫu → ~35 tick).
+const (
+	measuredWindow = 100
+	measuredWarmup = 100
+	measuredFloor  = time.Millisecond
+)
+
+// NewMeasuredLatencyTracker: baseline không phải hằng số mà là p99 đo được trong warmup mẫu đầu (sàn
+// 1 ms), p99 hiện tại tính trên cửa sổ trượt cùng cỡ. Hằng 10 ms cũ không đúng với một câu poll nhiều
+// round-trip trên host bận (p99 tĩnh đã ~18 ms → breaker mở / P_strand_p99 kịch trần mà source chưa
+// quá tải). Trong warmup Baseline() = p99 hiện tại (tỉ lệ 1, không báo động giả).
+func NewMeasuredLatencyTracker() *LatencyTracker {
+	return &LatencyTracker{
+		samples:  make([]time.Duration, 0, measuredWindow),
+		baseline: measuredFloor,
+		maxCap:   measuredWindow,
+		warmup:   measuredWarmup,
+		measured: true,
+	}
 }
 
 func NewLatencyTracker(baseline time.Duration) *LatencyTracker {
@@ -91,11 +118,21 @@ func (t *LatencyTracker) Record(d time.Duration) {
 		t.samples = t.samples[1:]
 	}
 	t.samples = append(t.samples, d)
+	if t.measured && t.seen < t.warmup {
+		t.seen++
+		if t.seen == t.warmup {
+			t.baseline = max(t.p99Locked(), measuredFloor)
+		}
+	}
 }
 
 func (t *LatencyTracker) P99() time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.p99Locked()
+}
+
+func (t *LatencyTracker) p99Locked() time.Duration {
 	if len(t.samples) == 0 {
 		return t.baseline
 	}
@@ -114,6 +151,12 @@ func (t *LatencyTracker) P99() time.Duration {
 func (t *LatencyTracker) Baseline() time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.measured && t.seen < t.warmup {
+		// Chưa đo xong baseline: coi như bằng p99 hiện tại (không có ratio để vượt ngưỡng).
+		if p := t.p99Locked(); len(t.samples) > 0 {
+			return max(p, measuredFloor)
+		}
+	}
 	return t.baseline
 }
 
