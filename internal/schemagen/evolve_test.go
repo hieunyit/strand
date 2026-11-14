@@ -1,6 +1,7 @@
 package schemagen
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -297,5 +298,16 @@ func TestEvolveColumnDefsFromCreate(t *testing.T) {
 	got := columnDefsFromCreate(ddl)
 	if got["id"] != "`id` bigint NOT NULL" || got["we`ird"] != "`we``ird` varchar(10) CHARACTER SET latin1 DEFAULT 'a,b'" || len(got) != 2 {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestEvolvePlanEvolution_UnsupportedDirection(t *testing.T) {
+	_, err := PlanEvolution(context.Background(), Request{SourceKind: "postgres", TargetKind: "mysql"}, model.TableID{Schema: "public", Table: "t"})
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("expected unsupported direction error, got %v", err)
+	}
+	_, err = PlanEvolution(context.Background(), Request{SourceKind: "oracle", TargetKind: "postgres"}, model.TableID{Schema: "public", Table: "t"})
+	if err == nil || !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("expected not implemented error, got %v", err)
 	}
 }

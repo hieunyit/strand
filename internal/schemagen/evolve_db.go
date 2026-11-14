@@ -19,12 +19,29 @@ import (
 // Giới hạn đã biết: schema source đọc tại lúc xử lý DDL; nếu source đã đi xa hơn bằng DDL sau đó thì diff
 // có thể gồm cả thay đổi sau (additive áp sớm vô hại, destructive thì dừng chờ duyệt).
 func PlanEvolution(ctx context.Context, r Request, t model.TableID) (Evolution, error) {
-	if r.SourceKind != "mysql" {
-		return Evolution{}, reject("schema evolution is not implemented for %s sources", r.SourceKind)
-	}
 	dstID := r.target(t)
 	pg := r.TargetKind == "postgres"
 	opts := DiffOptions{PG: pg, Target: dstID}
+
+	if r.SourceKind == "postgres" {
+		if !pg {
+			return Evolution{}, reject("schema evolution from %s to %s is not supported", r.SourceKind, r.TargetKind)
+		}
+		opts.LenientWiderTarget, opts.IgnoreExtraIndexes = true, true
+		src, err := pgSourceDef(ctx, r.Source, t, dstID)
+		if err != nil {
+			return Evolution{}, err
+		}
+		dst, err := pgTargetDef(ctx, r.Target, dstID)
+		if err != nil {
+			return Evolution{}, err
+		}
+		return Diff(src, dst, opts), nil
+	}
+
+	if r.SourceKind != "mysql" {
+		return Evolution{}, reject("schema evolution is not implemented for %s sources", r.SourceKind)
+	}
 	ver, err := mysqlver.Cached(ctx, r.Source)
 	if err != nil {
 		return Evolution{}, err
@@ -311,29 +328,68 @@ func sourceDefForPG(ctx context.Context, r Request, t, dst model.TableID) (Table
 	return td, nil
 }
 
-// pgTargetDef đọc schema bảng đích PostgreSQL: cột (kiểu chuẩn hoá, NULL) và index (chữ ký theo cột).
-func pgTargetDef(ctx context.Context, db *sql.DB, t model.TableID) (TableDef, error) {
-	rows, err := db.QueryContext(ctx, `SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull
+// pgSourceDef đọc schema bảng nguồn PostgreSQL: cột (kèm DEFAULT, NULL, Def) và index.
+func pgSourceDef(ctx context.Context, db *sql.DB, t, dst model.TableID) (TableDef, error) {
+	rows, err := db.QueryContext(ctx, `SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
+		COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity::text, a.attgenerated::text,
+		COALESCE(cn.nspname, ''), COALESCE(co.collname, ''), tn.nspname
 		FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+		JOIN pg_type ty ON ty.oid=a.atttypid JOIN pg_namespace tn ON tn.oid=ty.typnamespace
+		LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+		LEFT JOIN pg_collation co ON co.oid=a.attcollation AND a.attcollation<>ty.typcollation
+		LEFT JOIN pg_namespace cn ON cn.oid=co.collnamespace
 		WHERE n.nspname=$1 AND c.relname=$2 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`, t.Schema, t.Table)
 	if err != nil {
 		return TableDef{}, err
 	}
-	var td TableDef
+	defer rows.Close()
+	var cols []ColumnDef
 	for rows.Next() {
-		var c ColumnDef
-		var typ string
-		if err := rows.Scan(&c.Name, &typ, &c.Nullable); err != nil {
-			rows.Close()
+		var n, typ, def, identity, generated, collschema, coll, typeschema string
+		var nullable bool
+		if err := rows.Scan(&n, &typ, &nullable, &def, &identity, &generated, &collschema, &coll, &typeschema); err != nil {
 			return TableDef{}, err
 		}
-		c.Type = NormalizePGType(typ)
-		td.Columns = append(td.Columns, c)
+		cd := ColumnDef{
+			Name:       n,
+			Type:       NormalizePGType(typ),
+			Nullable:   nullable,
+			HasDefault: def != "" || identity != "",
+		}
+		switch {
+		case typeschema != "pg_catalog":
+			cd.Unsupported = fmt.Sprintf("user-defined type %s on %s.%s requires manual mapping", typ, t, n)
+		case identity != "" || generated != "":
+			cd.Unsupported = fmt.Sprintf("identity or generated column %s.%s requires manual mapping", t, n)
+		case strings.Contains(def, "nextval("):
+			cd.Unsupported = fmt.Sprintf("sequence default on %s.%s requires manual mapping", t, n)
+		default:
+			d := quote(n, true) + " " + typ
+			if coll != "" {
+				d += " COLLATE " + quote(collschema, true) + "." + quote(coll, true)
+			}
+			if def != "" {
+				d += " DEFAULT " + def
+			}
+			if !nullable {
+				d += " NOT NULL"
+			}
+			cd.Def = d
+		}
+		cols = append(cols, cd)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return TableDef{}, err
 	}
+	pk, idxs, err := readPGIndexes(ctx, db, t)
+	if err != nil {
+		return TableDef{}, err
+	}
+	return TableDef{Columns: cols, PK: pk, Indexes: idxs}, nil
+}
+
+// readPGIndexes đọc PK và danh sách IndexDef của bảng PostgreSQL.
+func readPGIndexes(ctx context.Context, db *sql.DB, t model.TableID) (string, []IndexDef, error) {
 	irows, err := db.QueryContext(ctx, `SELECT i.relname, x.indisunique, x.indisprimary, (x.indexprs IS NOT NULL OR x.indpred IS NOT NULL), am.amname,
 		COALESCE((SELECT string_agg(a.attname || CASE WHEN (x.indoption[(k.ord-1)::int] & 1)=1 THEN ' desc' ELSE '' END, ',' ORDER BY k.ord)
 		   FROM unnest(x.indkey::int2[]) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid=x.indrelid AND a.attnum=k.attnum), '')
@@ -341,17 +397,19 @@ func pgTargetDef(ctx context.Context, db *sql.DB, t model.TableID) (TableDef, er
 		JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_am am ON am.oid=i.relam
 		WHERE n.nspname=$1 AND c.relname=$2`, t.Schema, t.Table)
 	if err != nil {
-		return TableDef{}, err
+		return "", nil, err
 	}
 	defer irows.Close()
+	var pk string
+	var idxs []IndexDef
 	for irows.Next() {
 		var n, am, cols string
 		var unique, primary, partial bool
 		if err := irows.Scan(&n, &unique, &primary, &partial, &am, &cols); err != nil {
-			return TableDef{}, err
+			return "", nil, err
 		}
 		if primary {
-			td.PK = cols
+			pk = cols
 			continue
 		}
 		kind := "n"
@@ -365,7 +423,38 @@ func pgTargetDef(ctx context.Context, db *sql.DB, t model.TableID) (TableDef, er
 		if partial {
 			sig = kind + "|<expr>:" + n
 		}
-		td.Indexes = append(td.Indexes, IndexDef{Name: n, Unique: unique, Sig: sig})
+		idxs = append(idxs, IndexDef{Name: n, Unique: unique, Sig: sig})
 	}
-	return td, irows.Err()
+	return pk, idxs, irows.Err()
+}
+
+// pgTargetDef đọc schema bảng đích PostgreSQL: cột (kiểu chuẩn hoá, NULL) và index (chữ ký theo cột).
+func pgTargetDef(ctx context.Context, db *sql.DB, t model.TableID) (TableDef, error) {
+	rows, err := db.QueryContext(ctx, `SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull
+		FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+		WHERE n.nspname=$1 AND c.relname=$2 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`, t.Schema, t.Table)
+	if err != nil {
+		return TableDef{}, err
+	}
+	defer rows.Close()
+	var td TableDef
+	for rows.Next() {
+		var c ColumnDef
+		var typ string
+		if err := rows.Scan(&c.Name, &typ, &c.Nullable); err != nil {
+			return TableDef{}, err
+		}
+		c.Type = NormalizePGType(typ)
+		td.Columns = append(td.Columns, c)
+	}
+	if err := rows.Err(); err != nil {
+		return TableDef{}, err
+	}
+	pk, idxs, err := readPGIndexes(ctx, db, t)
+	if err != nil {
+		return TableDef{}, err
+	}
+	td.PK = pk
+	td.Indexes = idxs
+	return td, nil
 }
