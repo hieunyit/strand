@@ -52,7 +52,7 @@ func (c *Config) UnimplementedKeys() []string {
 	}
 
 	// Các khóa dưới cũng được parse mà runtime không đọc. Chỉ cảnh báo khi giá trị khác hành vi thật
-	// (ví dụ schema.additive=pause, checkpoint.store=target đúng là điều Strand làm).
+	// (ví dụ checkpoint.store=target đúng là điều Strand làm).
 	if strings.EqualFold(c.Source.ReadFrom, "replica") {
 		keys = append(keys, "source.read_from=replica (point the source connection at the replica)")
 	}
@@ -61,12 +61,6 @@ func (c *Config) UnimplementedKeys() []string {
 	}
 	if c.Bootstrap.Logical.MaxParallel > 0 {
 		keys = append(keys, "bootstrap.logical.max_parallel")
-	}
-	if strings.EqualFold(c.Schema.Additive, "auto") {
-		keys = append(keys, "schema.additive=auto (DDL is never applied; the pipeline stops with schema_change_pending)")
-	}
-	if strings.EqualFold(c.Schema.Destructive, "approve") {
-		keys = append(keys, "schema.destructive=approve (DDL is never applied; the pipeline stops with schema_change_pending)")
 	}
 	if s := c.Checkpoint.Store; s != "" && !strings.EqualFold(s, "target") {
 		keys = append(keys, "checkpoint.store="+s+" (the checkpoint is always stored in the target)")

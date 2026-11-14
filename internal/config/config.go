@@ -313,6 +313,26 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 			fmt.Sprintf("invalid bootstrap.create_schema %q (want auto | off)", cfg.Bootstrap.CreateSchema), nil)
 	}
 
+	// P3-01: schema.additive mặc định auto (spec 02 §6), schema.destructive mặc định pause.
+	switch v := strings.ToLower(strings.TrimSpace(cfg.Schema.Additive)); v {
+	case "":
+		cfg.Schema.Additive = "auto"
+	case "auto", "pause":
+		cfg.Schema.Additive = v
+	default:
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("invalid schema.additive %q (want auto | pause)", cfg.Schema.Additive), nil)
+	}
+	switch v := strings.ToLower(strings.TrimSpace(cfg.Schema.Destructive)); v {
+	case "":
+		cfg.Schema.Destructive = "pause"
+	case "pause", "approve":
+		cfg.Schema.Destructive = v
+	default:
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("invalid schema.destructive %q (want pause | approve)", cfg.Schema.Destructive), nil)
+	}
+
 	if err := ValidateRename(cfg.Tables.Rename, TargetFoldsTableCase(cfg.Target.Kind)); err != nil {
 		return nil, err
 	}
