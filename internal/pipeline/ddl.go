@@ -86,7 +86,32 @@ func ddlMentionsTable(q, table string) bool {
 //   - CREATE TABLE: bảng rỗng tại thời điểm tạo, mọi row sau đó đi qua stream → thêm vào pipeline, coi như đã snapshot.
 //   - RENAME từ bảng KHÔNG thuộc pipeline: row cũ chưa có ở target → dừng; khởi động lại thì bảng được snapshot.
 func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
+	// P3-02: online DDL của gh-ost/pt-osc (onlineddl.go).
+	var oc onlineResult
+	if p.filter != nil {
+		oc = p.filter.online.classify(t.DDL, t.DDLSchema, p.pipelineTablesIn)
+	}
+	if oc.Kind == onlineIgnore {
+		// DDL chỉ đụng bảng tạm/trigger của tool: không drain, không tạo bảng tạm ở target. Txn rỗng đi tiếp
+		// như mọi DDL không liên quan (CP-2: vị trí vẫn được ghi nhận qua noteRouted). Dữ liệu bảng gốc
+		// không bị ảnh hưởng: DDL này không đổi schema bảng nào của pipeline.
+		p.log.Info("online DDL: ignoring statement on temporary table/trigger", "base", oc.Base.String(), "position", t.SourcePos.Label(), "ddl", t.DDL)
+		return nil
+	}
 	created, renamedTo := ddlNewTables(t.DDL, t.DDLSchema)
+	if oc.Kind == onlineCutover {
+		// RENAME t TO _t_del, _t_gho TO t: ALTER trên t. Bảng cũ (_t_del/_t_old) không phải "bảng mới vào pipeline",
+		// nên không dừng vì renamedIn; bảng gốc t đã thuộc pipeline nên đi qua so schema + evolveSchema (P3-01).
+		p.log.Info("online DDL cut-over detected: treating as a single ALTER on the original table",
+			"tool", oc.Tool, "table", oc.Base.String(), "old", oc.OldName.Table, "new", oc.NewName.Table, "position", t.SourcePos.Label())
+		kept := renamedTo[:0]
+		for _, id := range renamedTo {
+			if id != oc.OldName {
+				kept = append(kept, id)
+			}
+		}
+		renamedTo = kept
+	}
 	affected := map[model.TableID]bool{}
 	newCreated := map[model.TableID]bool{}
 	q := strings.ToLower(t.DDL)
@@ -187,6 +212,9 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 				"Apply the change on the target, then resume. DDL: %q", t.SourcePos.Label(), strings.Join(diffs, "; "), t.DDL), nil)
 	}
 	p.resolveSchemaChanges(ctx, t)
+	if oc.Kind == onlineCutover {
+		p.log.Info("online DDL cut-over processed at barrier", "table", oc.Base.String(), "position", t.SourcePos.Label())
+	}
 	if len(renamedIn) > 0 {
 		names := make([]string, len(renamedIn))
 		for i, id := range renamedIn {
@@ -324,4 +352,17 @@ func normalizeColumnType(t string) string {
 		return "year" + t[len("year(4)"):]
 	}
 	return intDisplayWidth.ReplaceAllString(t, "$1")
+}
+
+// pipelineTablesIn: tên các bảng đang thuộc pipeline trong schema (cho nhận diện bảng tạm online DDL).
+func (p *Pipeline) pipelineTablesIn(schema string) []string {
+	p.tablesMu.RLock()
+	defer p.tablesMu.RUnlock()
+	var out []string
+	for id := range p.tables {
+		if id.Schema == schema {
+			out = append(out, id.Table)
+		}
+	}
+	return out
 }

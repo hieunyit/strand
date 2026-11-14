@@ -25,6 +25,8 @@ type tableFilter struct {
 	// với lower_case_table_names=1/2 (mặc định trên Windows/macOS) coi a.T và a.t là một bảng. Thận trọng:
 	// luôn bật cho target MySQL; target PG so chính xác vì strand luôn quote định danh.
 	foldCase bool
+	// online (P3-02): nhận diện bảng tạm gh-ost/pt-osc; nil = tắt. Chỉ filter chính (p.filter) có.
+	online *onlineDDL
 }
 
 func newTableFilter(include, exclude []string, rename map[string]string) (*tableFilter, error) {
@@ -176,12 +178,14 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		return nil, fmt.Errorf("list source tables: %w", err)
 	}
 	var ids []model.TableID
+	bySchema := map[string][]string{}
 	for rows.Next() {
 		var t model.TableID
 		if err := rows.Scan(&t.Schema, &t.Table); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		bySchema[t.Schema] = append(bySchema[t.Schema], t.Table)
 		if f.Included(t) {
 			ids = append(ids, t)
 		}
@@ -189,6 +193,18 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if f.online != nil {
+		// P3-02: bảng tạm của gh-ost/pt-osc còn lại trên source (online DDL đang chạy hoặc bỏ dở) không được
+		// snapshot/replicate; chỉ lọc khi bảng gốc có mặt cùng schema, nên không ảnh hưởng bảng thường.
+		kept := ids[:0]
+		for _, id := range ids {
+			if _, _, temp := f.online.tempOf(id.Table, bySchema[id.Schema]); temp {
+				continue
+			}
+			kept = append(kept, id)
+		}
+		ids = kept
 	}
 
 	out := make(map[model.TableID]*tableMeta, len(ids))

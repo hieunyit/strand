@@ -320,6 +320,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.filter, err = newTargetTableFilter(p.cfg.Tables.Include, p.cfg.Tables.Exclude, p.cfg.Tables.Rename, p.dstEngine != model.EnginePG); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
 	}
+	if p.srcEngine == model.EngineMySQL {
+		p.filter.online = newOnlineDDL(p.cfg.Schema.OnlineDDL) // P3-02
+	}
 
 	// --- Kết nối ---
 	p.srcDSN = p.cfg.Source.DSN
