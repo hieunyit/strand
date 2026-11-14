@@ -134,3 +134,11 @@ Lần thử chính thức đầu tiên trên MySQL dùng fixture 67.000.000 row 
 1. §6 đổi tiêu chí kích thước: không tính theo dung lượng (H × 16 KiB × 1500 s) nữa, mà theo thời gian snapshot. Ở tốc độ snapshot đo được trên chính máy đo, snapshot phải dài ≥ 25 phút, mục tiêu 40–60 phút. Mục đích không đổi: có cửa sổ p2p, tức nửa chu kỳ 5 phút trọn trong snapshot cộng 60 s chuyển tiếp. Lần chạy nào không có cửa sổ p2p vẫn là `incomplete` như §7.
 2. MySQL: `bench.big` = 20.000.000 row (khoảng 8,2 GB, snapshot dự kiến khoảng 50 phút ở 6.500 row/s). App table giữ 100.000 row.
 3. Fixture đổi nên calibrate và pilot overhead chạy lại trên fixture mới và commit lại trước lượt chính thức. Ngưỡng §4, sóng tải, soft/hard (400/600) và seed giữ nguyên.
+
+## Amendment 2026-11-15 — deadlock hiếm của client trong lượt đo
+
+Lần chạy chính thức đầu tiên trên fixture 20M (`grace-v2#2`, 00:53–02:18) bị `incomplete` chỉ vì sysbench báo `ignored errors: 1` ở 3 trong 172 đoạn tải. Cả ba đoạn ở mức tải cao (~327 txn/s, 50% bão hoà), không phải lúc spike. Đây là deadlock InnoDB giữa 16 thread oltp_read_write trên 1 bảng, độc lập với Strand. Theo mục 10, lần chạy nào cũng sẽ `incomplete` và bị chạy bù gấp đôi, nên lượt đo dừng sau lần chạy đó. Công khai: số của lần chạy đó đã được xem (snapshot 4256 s, p2p max 0,105, p99 1490 ms). Lần chạy đó KHÔNG được tính, và 9 lần chạy làm lại từ đầu với cùng fixture, calibration và tham số (commit 1696bbb).
+
+1. Mục 10 đổi cho lượt đo: `ignored errors` được đếm (`client_ignored_errors` trong results.json). Lần chạy là `incomplete` nếu tổng vượt 0,01% số event thô. Dưới ngưỡng, dù các lần thử bị deadlock (không có latency trong log thô) là những latency tệ nhất, p99 nearest-rank chỉ lệch tối đa 0,01 điểm phân vị. `reconnects` vẫn phải bằng 0; marker, footer và số event thô bằng tổng kết giữ nguyên.
+2. Calibrate giữ ngưỡng 1% (Amendment 2026-11-14).
+3. Ngưỡng quyết định §4 không đổi.

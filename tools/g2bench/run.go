@@ -147,7 +147,9 @@ func parseSegment(o Opts) func(SegmentRun) (SegmentRaw, error) {
 		if o.Engine == "postgres" {
 			return ParsePgbenchSegment(sg.Prefix, sg.Stdout, sg.Exit)
 		}
-		return ParseSysbenchSegment(sg.Prefix, sg.Threads, sg.Stdout, sg.Stderr, sg.Exit)
+		// Deadlock sysbench tự thử lại (ignored errors) được đếm; Analyze giới hạn tổng theo lần chạy
+		// (maxRunIgnoredFraction, Amendment 2026-11-15).
+		return parseSysbenchSegment(sg.Prefix, sg.Threads, sg.Stdout, sg.Stderr, sg.Exit, true)
 	}
 }
 

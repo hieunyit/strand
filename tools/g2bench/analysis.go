@@ -182,6 +182,7 @@ type RunResult struct {
 	AppP99Ms        jf        `json:"app_p99_ms_during_snapshot"`
 	AppTxns         int       `json:"app_txns_during_snapshot"`
 	RawEventsTotal  uint64    `json:"raw_events_total"`
+	IgnoredErrors   uint64    `json:"client_ignored_errors"` // deadlock sysbench đã tự thử lại
 	Segments        int       `json:"client_segments"`
 	LoadCoverage    jf        `json:"load_coverage_of_snapshot"`
 	HardLimitExceed int       `json:"hard_limit_exceed_samples"`
@@ -215,6 +216,11 @@ const (
 	// Vài giây đầu sau khi chạy `strand sync` endpoint metrics chưa sẵn sàng: mẫu lỗi liên tiếp ở đầu
 	// cửa sổ, trước mẫu hợp lệ đầu tiên, được chấp nhận tới ngưỡng này; mọi mẫu lỗi về sau là incomplete.
 	maxStartupInvalid = 5
+	// Amendment 2026-11-15: sysbench oltp_read_write 16 thread trên 1 bảng gặp deadlock (InnoDB) ngay ở
+	// mức tải cao (~3 lần trên ~1 triệu event mỗi lần chạy), độc lập với Strand. Lần thử bị deadlock không
+	// có latency trong log thô; với tỉ lệ <= 0,01% thì dù chúng là những latency tệ nhất, p99 nearest-rank
+	// chỉ lệch tối đa 0,01 điểm phân vị. Vượt ngưỡng = incomplete.
+	maxRunIgnoredFraction = 0.0001
 )
 
 type TimeRow struct {
@@ -255,6 +261,7 @@ func Analyze(rec RunRecord, samples []Sample, parse func(SegmentRun) (SegmentRaw
 			break
 		}
 		res.RawEventsTotal += uint64(len(raw.Events))
+		res.IgnoredErrors += raw.IgnoredErrors
 		events = append(events, raw.Events...)
 	}
 	if len(rec.Segments) == 0 && parseErr == nil {
@@ -356,6 +363,8 @@ func evidenceError(r RunResult) string {
 		return "restore not verified: " + r.RestoreDetail
 	case r.AppTxns <= 0 || !finite(float64(r.AppP99Ms)) || r.AppP99Ms <= 0:
 		return "thiếu p99 phía client"
+	case float64(r.IgnoredErrors) > maxRunIgnoredFraction*float64(r.RawEventsTotal):
+		return fmt.Sprintf("client deadlock retries %d > %.2f%% of %d events", r.IgnoredErrors, maxRunIgnoredFraction*100, r.RawEventsTotal)
 	case !finite(float64(r.SnapshotSeconds)) || r.SnapshotSeconds <= 0:
 		return "thiếu thời gian snapshot"
 	case float64(r.LoadCoverage) < minLoadCoverage:
