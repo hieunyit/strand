@@ -55,6 +55,9 @@ type Config struct {
 	TrustForwardedFor bool `yaml:"trust_forwarded_for,omitempty"`
 	// SampleInterval, tính bằng giây (mặc định 5); chủ yếu cho test.
 	SampleIntervalSec int `yaml:"sample_interval_sec,omitempty"`
+
+	// SourcePath: đường dẫn tuyệt đối của chính web.yaml (không đọc từ file); scan bỏ qua file này.
+	SourcePath string `yaml:"-"`
 }
 
 // DefaultStateDir là thư mục trạng thái mặc định của `strand web`.
@@ -79,6 +82,9 @@ func LoadConfig(path string) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse web config %s: %w", path, err)
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		c.SourcePath = abs
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8080"

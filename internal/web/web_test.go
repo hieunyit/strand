@@ -572,13 +572,14 @@ func TestDiscoveryFromWebYAMLAndScan(t *testing.T) {
 	write("beta.yaml", mini("beta"))
 	write("bad name.yaml", mini("bad")) // tên file không hợp lệ: bỏ và cảnh báo
 	write("zeta.yaml", mini("zeta"))
+	write("web.yaml", "listen: 127.0.0.1:1\n") // chính web.yaml nằm cạnh: không được coi là pipeline
 	explicit := write("custom.yaml", mini("custom"))
 	cmd := &fakeCmd{out: map[string]string{
 		"systemctl show -p LoadState --value strand@alpha.service": "loaded\n",
 		"systemctl show -p LoadState --value strand@beta.service":  "not-found\n",
 		"systemctl show -p LoadState --value strand@zeta.service":  "loaded\n",
 	}}
-	cfg := &Config{Listen: "127.0.0.1:1", Scan: []string{filepath.Join(dir, "*.yaml")}, Pipelines: []PipelineEntry{
+	cfg := &Config{Listen: "127.0.0.1:1", SourcePath: filepath.Join(dir, "web.yaml"), Scan: []string{filepath.Join(dir, "*.yaml")}, Pipelines: []PipelineEntry{
 		{Name: "custom", Config: explicit, EnvFile: "/etc/x.env", SystemdUnit: "my-custom"},
 		{Name: "zeta", Config: filepath.Join(dir, "zeta.yaml")}, // khai báo tường minh thắng scan: không systemd => nền
 	}}
@@ -713,6 +714,20 @@ func TestReadEnvFile(t *testing.T) {
 	}
 	if _, err := ReadEnvFile(p); err == nil {
 		t.Fatal("malformed line must fail")
+	}
+}
+
+// Ví dụ web.yaml trong gói phải nạp được (khóa strict) và đúng điều kiện: thiếu mật khẩu thì không khởi động.
+func TestPackagedExampleWebYAMLLoads(t *testing.T) {
+	c, err := LoadConfig("../../packaging/web.yaml.example")
+	if err != nil {
+		t.Fatalf("example web.yaml: %v", err)
+	}
+	if c.Listen != "127.0.0.1:8080" || len(c.Scan) != 1 || c.Scan[0] != "/etc/strand/*.yaml" {
+		t.Fatalf("example content: %+v", c)
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "password") {
+		t.Fatalf("example without a password must not start: %v", err)
 	}
 }
 

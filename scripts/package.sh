@@ -35,6 +35,8 @@ mkdir -p dist/pkgroot
 # Unit cho gói: binary ở /usr/bin (gói không cài vào /usr/local); nguồn duy nhất là deploy/systemd.
 sed 's#/usr/local/bin/strand#/usr/bin/strand#g' deploy/systemd/strand@.service > dist/pkgroot/strand@.service
 grep -q 'ExecStart=/usr/bin/strand ' dist/pkgroot/strand@.service
+sed 's#/usr/local/bin/strand#/usr/bin/strand#g' deploy/systemd/strand-web.service > dist/pkgroot/strand-web.service
+grep -q 'ExecStart=/usr/bin/strand web ' dist/pkgroot/strand-web.service
 
 for arch in $ARCHES; do
 	bin="dist/strand-linux-$arch/strand"

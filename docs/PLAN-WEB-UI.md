@@ -91,7 +91,28 @@ Không đụng đường dữ liệu (reader, scheduler, writer, checkpoint). Te
 
 Tổng khoảng 15 ngày làm việc. M1–M4 là phần owner yêu cầu, M5 làm được sau.
 
+## 6b. Trạng thái (cập nhật 2026-11-15)
+
+| Mốc | Trạng thái | Ghi chú |
+| --- | --- | --- |
+| M0 | **Xong** | ADR `questions/DECISIONS-WEB-UI-2026-11-15.md`, đặc tả `docs/WEB-API.md`. Chưa làm mockup: trang đã dựng thật và xem được |
+| M1 | **Xong** | `strand web`, `web passwd`, `web token`, session/CSRF/rate limit/TLS/audit/phát hiện pipeline, `strand-web.service` trong gói |
+| M2 | **Xong** | Overview, danh sách, chi tiết (Graph, Tables, Checkpoint, Errors, Config, Logs), biểu đồ SVG, `status`/`tables`/`events` ở admin socket. Xem lệch so với kế hoạch bên dưới |
+| M3 | Chưa | Điểm mở rộng đã có: `ActionRegistry` (route `POST /api/v1/pipelines/{name}/actions/{action}`), `JobRunner`, `env_file` đã đọc được |
+| M4 | Chưa | |
+| M5 | Chưa | |
+| M6 | Chưa | |
+
+Lệch so với kế hoạch (theo quyết định của owner 2026-11-15, chi tiết ở file ADR):
+
+- Frontend **không** dùng htmx hay uPlot: HTML phía server, một file JS tay viết (làm mới định kỳ bằng `fetch`), biểu đồ SVG phía server.
+- Quản lý **cả hai chế độ**: systemd và chế độ nền của CLI; pipeline đăng ký trong `web.yaml` (`scan` + `pipelines`).
+- `strand web` chạy **user `strand`, không root**, không polkit/sudo (thay phương án root ở mục 2 và mục 7.1).
+- Pipeline đã dừng: chỉ trạng thái, exit code, đuôi log; không đọc vị trí checkpoint từ target.
+
 ## 7. Điểm cần owner quyết trước khi làm
+
+Đã trả lời 2026-11-15: (1) chạy user `strand` (không root); (2) cả hai chế độ systemd và nền, một máy; (3) làm đủ M1–M5, theo từng đợt (đợt này M0–M2).
 
 1. `strand-web` chạy **root** (đơn giản; cần để đọc `.env` và `systemctl`), hay chạy user `strand` kèm quy tắc polkit/sudo và đổi quyền file `.env` (root:strand 0640)?
 2. v1 chỉ một máy (đề xuất), hay cần nhiều máy ngay (khi đó phải làm admin qua TCP + TLS trước)?

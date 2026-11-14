@@ -224,6 +224,10 @@ func (r *Registry) Refresh(ctx context.Context) {
 		sort.Strings(matches)
 		for _, m := range matches {
 			base := filepath.Base(m)
+			// web.yaml thường nằm cạnh các file pipeline (/etc/strand): không phải pipeline.
+			if abs, _ := filepath.Abs(m); (r.cfg.SourcePath != "" && abs == r.cfg.SourcePath) || base == "web.yaml" || base == "web.yml" {
+				continue
+			}
 			name := strings.TrimSuffix(strings.TrimSuffix(base, ".yaml"), ".yml")
 			if !ValidName(name) {
 				warns = append(warns, fmt.Sprintf("scan: %s skipped: file name is not a valid pipeline name", m))
