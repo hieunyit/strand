@@ -79,6 +79,8 @@ GRANT SELECT, LOCK TABLES ON crm.*  TO 'strand'@'%';
 GRANT SELECT, LOCK TABLES ON *.* TO 'strand'@'%';
 ```
 
+Tùy chọn, để log chẩn đoán khi snapshot đứng liệt kê được giao dịch đang mở lâu trên nguồn: `GRANT PROCESS ON *.* TO 'strand'@'%';`.
+
 MariaDB 10.5 trở lên: cấp thêm `GRANT SLAVE MONITOR ON *.* TO 'strand'@'%';` để Strand đọc được replica lag (thiếu thì `validate` cảnh báo và breaker không dùng được tín hiệu này).
 
 `REPLICATION CLIENT` là quyền Strand cần để đọc vị trí binlog. Từ MariaDB 10.5.2 nó là tên cũ của `BINLOG MONITOR` (cả hai cách ghi đều được); 10.3 và 10.4 chỉ có `REPLICATION CLIENT`.
@@ -434,6 +436,8 @@ Với cột khóa, so sánh khác nhau có thể gộp hai khóa khác nhau ở 
 Loại bảng ra bằng `tables.exclude: ["app.bang_x"]` trong file cấu hình.
 
 ### Snapshot đứng yên hoặc rất chậm
+
+- Log có dòng `snapshot made no progress` (mỗi 2 phút khi snapshot không ghi thêm row nào): nêu bảng, breaker và lý do, tốc độ governor, giao dịch mở lâu nhất trên nguồn (`oldest_source_txns`, cần quyền `PROCESS`) và phiên đang chờ khóa. Giao dịch ứng dụng mở hàng giờ chặn `LOCK TABLES … READ` của snapshot: commit/kill nó thì snapshot chạy tiếp.
 
 - `strand top -c ...`: dòng `Breaker: MỞ ...` nêu lý do. Breaker bảo vệ nguồn: khi mở, snapshot tạm dừng; đóng lại sau 60 giây liên tục dưới ngưỡng. Nếu nguồn không thật sự quá tải, nới `governor.breaker.strand_query_p99.max_ratio` (mặc định 3, so với độ trễ đo lúc khởi động) hoặc `replica_lag.max`.
 - Tăng tốc khi nguồn còn dư tải: `resources.source.iops` (mặc định 600 IOPS ≈ 9 MiB/s), `resources.workers.max`, `bootstrap.logical.chunk_rows` (chunk lớn hơn = ít lần `LOCK TABLES` hơn). Phía đích trong lúc chép: `innodb_flush_log_at_trx_commit=2`, `sync_binlog=0` (đặt lại `1` trước `promote`).

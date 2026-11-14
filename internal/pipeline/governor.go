@@ -286,12 +286,31 @@ func (p *Pipeline) logBreaker(was bool, reasonWas string) (bool, string) {
 	open, reason := p.breaker.IsOpen(), p.breaker.Reason()
 	switch {
 	case open && !was:
+		p.breakerLogged = time.Now()
 		p.log.Warn("source circuit breaker OPEN: snapshot paused to protect the source", "reason", reason,
 			"hint", "it closes after 60 s below the thresholds; tune governor.breaker (strand_query_p99.max_ratio, replica_lag.max) if the source is not actually overloaded")
-	case open && reason != reasonWas:
+	case open && (reasonKind(reason) != reasonKind(reasonWas) || time.Since(p.breakerLogged) >= 5*time.Minute):
+		p.breakerLogged = time.Now()
 		p.log.Warn("source circuit breaker still open", "reason", reason)
 	case !open && was:
 		p.log.Info("source circuit breaker closed: snapshot resumes")
 	}
 	return open, reason
+}
+
+// reasonKind: lý do breaker bỏ phần số đo ("… ratio (4.00) …" → "… ratio …"), để log chỉ khi loại lý do đổi.
+func reasonKind(r string) string {
+	var b strings.Builder
+	skip := 0
+	for _, c := range r {
+		switch {
+		case c == '(':
+			skip++
+		case c == ')' && skip > 0:
+			skip--
+		case skip == 0:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }

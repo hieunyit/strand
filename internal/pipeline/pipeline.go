@@ -143,6 +143,7 @@ type Pipeline struct {
 	snapRowsEst     atomic.Int64
 	snapRate        rateWindow
 	breaker         *governor.Breaker
+	breakerLogged   time.Time
 	verifying       atomic.Bool // chờ verify sau seed (02 §9)
 	strictMu        sync.Mutex
 	strictApplied   checkpoint.AppliedSet // row toàn cục ở chế độ strict (02 §4 quy tắc 5)
@@ -2258,6 +2259,10 @@ func (p *Pipeline) updateMetrics() {
 	for id := range p.tables {
 		name := id.String()
 		if _, ok := active[name]; !ok && p.state.IsDone(name) {
+			// Bảng đã xong: bỏ các dòng trạng thái cũ (trước đây còn lại với giá trị 0, trông như đang dở).
+			for _, st := range []string{"Pending", "Reading", "Rendezvous", "Flushing"} {
+				m.SnapshotRanges.DeleteLabelValues(p.id, name, st)
+			}
 			m.SnapshotRanges.WithLabelValues(p.id, name, "Done").Set(1)
 			m.SeedProgressRatio.WithLabelValues(p.id, name).Set(1)
 		}
