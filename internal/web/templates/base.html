@@ -1,0 +1,50 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{.CSRF}}">
+<title>{{.Title}} - Strand</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<aside class="nav">
+  <a class="brand" href="/">Strand</a>
+  <nav>
+    <a href="/" class="{{if eq .Active "overview"}}active{{end}}">Overview</a>
+    <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}">Pipelines</a>
+    <div class="navhead">Registered pipelines</div>
+    {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"><span class="dot {{stateClass .State}}"></span>{{.Name}}</a>
+    {{else}}<span class="muted pad">none registered</span>{{end}}
+  </nav>
+  <div class="navfoot">strand {{.Version}}</div>
+</aside>
+<div class="main">
+  <header class="top">
+    <h1>{{.Title}}</h1>
+    <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" type="submit">Log out</button></form>
+  </header>
+  <main id="content" data-refresh="{{.Refresh}}">{{template "content" .}}</main>
+</div>
+</body>
+</html>{{end}}
+
+{{define "pipeline-table"}}
+<table class="grid">
+  <thead><tr><th>Name</th><th>Engines</th><th>State</th><th>Lag</th><th>Lag (5 min)</th><th>Rows/s</th><th>Zone</th><th>Managed by</th><th>Last exit</th></tr></thead>
+  <tbody>
+  {{range .Body.Views}}<tr>
+    <td><a href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}</td>
+    <td>{{.Pair}}</td>
+    <td><span class="badge {{stateClass .State}}">{{.State}}</span></td>
+    <td>{{if .Top}}{{if gt .Top.LagSeconds 0.0}}{{secs .Top.LagSeconds}}{{else}}0 s{{end}}{{else}}-{{end}}</td>
+    <td>{{index $.Body.Sparks .Name}}</td>
+    <td>{{if .Top}}{{num .Top.Throughput}}{{else}}-{{end}}</td>
+    <td>{{if .Top}}{{.Top.Zone}}{{else}}-{{end}}</td>
+    <td>{{.Mode}} <span class="muted small">({{.Origin}})</span></td>
+    <td>{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
+  </tr>{{else}}<tr><td colspan="9" class="muted">No pipelines registered. Add them to web.yaml (<code>scan</code> or <code>pipelines</code>).</td></tr>{{end}}
+  </tbody>
+</table>
+{{end}}

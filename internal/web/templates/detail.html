@@ -1,0 +1,107 @@
+{{define "content"}}
+{{with .Body}}
+<section class="card head">
+  <div>
+    <span class="badge big {{stateClass .View.State}}">{{.View.State}}</span>
+    <span class="pair">{{.View.Pair}}</span>
+    <span class="muted small">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}}</span>
+  </div>
+  {{if .View.Top}}<div class="kv">
+    <span>Lag <b>{{if gt .View.Top.LagSeconds 0.0}}{{secs .View.Top.LagSeconds}}{{else}}0 s{{end}}</b></span>
+    <span>Rows/s <b>{{num .View.Top.Throughput}}</b></span>
+    <span>Zone <b>{{.View.Top.Zone}}</b></span>
+    {{if .View.Top.BreakerOpen}}<span class="err">Breaker open: {{.View.Top.BreakerReason}}</span>{{end}}
+  </div>{{end}}
+  {{if .View.ConfigErr}}<p class="err">Config error: {{.View.ConfigErr}}</p>{{end}}
+  {{if and .View.LastExit (not .View.Runtime.Running)}}<p class="warnbox">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}</p>{{end}}
+</section>
+<nav class="tabs">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}">{{.Label}}</a>{{end}}</nav>
+
+{{if eq .Tab "graph"}}
+  <section class="card"><h2>Data path</h2><div class="graphwrap">{{.Graph}}</div>
+  {{if .Status.Error}}<p class="muted">{{.Status.Error}}</p>{{end}}</section>
+  {{with .Status.Status}}
+  <section class="card"><h2>Run</h2>
+    <dl class="dl">
+      <dt>Epoch</dt><dd>{{.Epoch}}</dd>
+      <dt>Uptime</dt><dd>{{secs .UptimeSeconds}} (since {{ts .StartedAt}})</dd>
+      <dt>Start position</dt><dd class="mono">{{if .StartPosition}}{{.StartPosition}}{{else}}-{{end}}{{if .StartAt}} (--start-at {{.StartAt}}){{end}}</dd>
+      <dt>Commit order</dt><dd>{{.CommitOrder}}, {{.Workers}} writer(s)</dd>
+      <dt>Governor</dt><dd>{{.Governor.Algorithm}}{{if .Governor.Zone}}, zone {{.Governor.Zone}}{{end}}, rate {{num .Governor.BackgroundRate}}/s background, pressure {{printf "%.2f" .Governor.Pressure}}{{if .Governor.BreakerOpen}}, <span class="err">breaker open: {{.Governor.BreakerReason}}</span>{{end}}</dd>
+      <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
+    </dl>
+  </section>{{end}}
+  <section class="charts">{{range .Charts}}<div class="card">{{.}}</div>{{end}}</section>
+{{end}}
+
+{{if eq .Tab "tables"}}
+  <section class="card"><h2>Tables</h2>
+  {{if .Tables.Error}}<p class="muted">{{.Tables.Error}}</p>{{else}}
+  <p class="muted">{{.Tables.Done}} done, {{.Tables.Running}} running, {{.Tables.Pending}} pending. Row counts are estimates from the source statistics.</p>
+  <table class="grid">
+    <thead><tr><th>Table</th><th>State</th><th>Ranges</th><th>Progress</th><th>Rows copied / estimate</th><th>ETA</th><th>PK</th></tr></thead>
+    <tbody>{{range .Tables.Tables}}<tr>
+      <td class="mono">{{.Table}}</td>
+      <td><span class="badge st-tbl-{{.State}}">{{.State}}</span></td>
+      <td class="small">{{ranges .Ranges}}</td>
+      <td>{{bar .ProgressPct}} <span class="small">{{pct .ProgressPct}}</span></td>
+      <td>{{if eq .State "done"}}-{{else}}{{int64 .RowsCopied}} / {{int64 .RowsEstimate}}{{end}}</td>
+      <td>{{if gt .ETASeconds 0.0}}{{secs .ETASeconds}}{{else}}-{{end}}</td>
+      <td class="small">{{range $i, $c := .PK}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .GenericPK}} <span class="muted">(generic key)</span>{{end}}</td>
+    </tr>{{else}}<tr><td colspan="7" class="muted">No tables.</td></tr>{{end}}</tbody>
+  </table>{{end}}
+  </section>
+{{end}}
+
+{{if eq .Tab "checkpoint"}}
+  <section class="card"><h2>Checkpoint</h2>
+  {{if .Checkpoint.Error}}<p class="muted">{{.Checkpoint.Error}}</p>{{else}}{{with .Checkpoint.Checkpoint}}
+  <dl class="dl">
+    <dt>Applied position</dt><dd class="mono wrap">{{.Applied}}</dd>
+    <dt>Epoch</dt><dd>{{.Epoch}}</dd>
+    <dt>Updated</dt><dd>{{ts .UpdatedAt}}</dd>
+    {{if $.Body.Checkpoint.StartPosition}}<dt>Start position</dt><dd class="mono wrap">{{$.Body.Checkpoint.StartPosition}}</dd>{{end}}
+    {{if $.Body.Checkpoint.CompactionLagSecs}}<dt>Compaction lag</dt><dd>{{secs (deref $.Body.Checkpoint.CompactionLagSecs)}}</dd>{{end}}
+  </dl>{{end}}{{end}}
+  </section>
+{{end}}
+
+{{if eq .Tab "errors"}}
+  {{if .Errors.LastExit}}<section class="card"><h2>Last exit</h2>
+    <p><b>Exit code {{.Errors.LastExit.Code}}</b> ({{.Errors.ExitFrom}}){{if .Errors.ErrorCode}}, error <code>{{.Errors.ErrorCode}}</code>{{end}}</p>
+    <p>{{.Errors.LastExit.Meaning}}</p><p><b>What to do:</b> {{.Errors.LastExit.Action}}</p>
+    <p class="muted small">{{if .Errors.LastExit.AutoRestart}}systemd restarts this exit code automatically.{{else}}This exit code needs an operator: it is not restarted automatically.{{end}}</p>
+  </section>{{end}}
+  <section class="card"><h2>Recent warnings and errors (running process, last 200)</h2>
+    {{if .Errors.LiveErr}}<p class="muted">{{.Errors.LiveErr}}</p>{{end}}
+    {{template "events" .Errors.Live}}
+  </section>
+  <section class="card"><h2>From the log tail</h2>{{template "events" .Errors.FromLog}}</section>
+{{end}}
+
+{{if eq .Tab "config"}}
+  <section class="card"><h2>Configuration</h2>
+    <p class="muted small mono">{{.Config.Path}}</p>
+    {{if .Config.Error}}<p class="err">{{.Config.Error}}</p>{{end}}
+    {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
+    {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code">{{.Config.YAML}}</pre>{{end}}
+  </section>
+{{end}}
+
+{{if eq .Tab "logs"}}
+  <section class="card"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2>
+    <p class="small">{{if .Follow}}<a href="?lines=200">Stop following</a>{{else}}<a href="?lines=200&follow=1">Follow (refresh every 5 s)</a>{{end}}</p>
+    {{if .Logs.Error}}<p class="err">{{.Logs.Error}}</p>{{end}}
+    <pre class="code log">{{range .Logs.Lines}}{{.}}
+{{else}}(no log lines){{end}}</pre>
+  </section>
+{{end}}
+{{end}}
+{{end}}
+
+{{define "events"}}
+<table class="grid"><thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead><tbody>
+{{range .}}<tr><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap">{{.Message}}</td></tr>
+{{else}}<tr><td colspan="3" class="muted">None.</td></tr>{{end}}
+</tbody></table>
+{{end}}
