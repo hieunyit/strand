@@ -159,3 +159,33 @@ func (c *Client) VerifyDelta(ctx context.Context) (string, error) {
 	}
 	return resp.Message, nil
 }
+
+// Status lấy thông tin tĩnh của lần chạy (epoch, uptime, governor...). Chỉ quan sát.
+func (c *Client) Status(ctx context.Context) (*StatusInfo, error) {
+	resp, err := c.Call(ctx, Request{Command: CmdStatus})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status == nil {
+		return nil, errors.New("empty status returned")
+	}
+	return resp.Status, nil
+}
+
+// Tables lấy trạng thái snapshot từng bảng. Chỉ quan sát.
+func (c *Client) Tables(ctx context.Context) ([]TableInfo, error) {
+	resp, err := c.Call(ctx, Request{Command: CmdTables})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Tables, nil
+}
+
+// Events lấy ring buffer các bản ghi WARN/ERROR gần nhất (cũ → mới). Chỉ quan sát.
+func (c *Client) Events(ctx context.Context) ([]EventRecord, error) {
+	resp, err := c.Call(ctx, Request{Command: CmdEvents})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Events, nil
+}

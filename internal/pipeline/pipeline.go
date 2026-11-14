@@ -56,6 +56,9 @@ type Options struct {
 	Logger       *slog.Logger
 	// ShutdownTimeout: thời gian tối đa chờ writer xong khi nhận SIGTERM (03 §4).
 	ShutdownTimeout time.Duration
+	// Events: ring buffer WARN/ERROR cho lệnh admin `events` (nil = lệnh trả danh sách rỗng).
+	// Chỉ quan sát: Logger đã được bọc bởi ring.Wrap ở nơi tạo Options.
+	Events *admin.EventRing
 }
 
 // Pipeline là một lần chạy `strand sync`.
@@ -70,6 +73,9 @@ type Pipeline struct {
 	srcDSN   string
 
 	srcEngine, dstEngine model.Engine
+	startedAt            time.Time // thời điểm Run bắt đầu (lệnh admin `status`)
+	// tableRowsEst: cache ước lượng row từng bảng cho lệnh admin `tables` (nguồn: thống kê source).
+	tableRowsEst sync.Map
 
 	store   checkpoint.CheckpointStore
 	release func() error
@@ -208,6 +214,7 @@ func Run(ctx context.Context, opts Options) error {
 		strict:    !strings.EqualFold(cfg.Target.CommitOrder, "relaxed"),
 		srcEngine: srcEngine,
 		dstEngine: dstEngine,
+		startedAt: time.Now(),
 	}
 	if srcEngine == model.EnginePG {
 		p.lsns = &lsnTracker{}

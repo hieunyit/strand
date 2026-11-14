@@ -145,7 +145,9 @@ func newSyncCmd() *cobra.Command {
 			if strings.EqualFold(cfg.Observability.Log.Format, "text") {
 				handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 			}
-			logger := slog.New(handler)
+			// Ring 200 bản ghi WARN/ERROR cho lệnh admin `events` (Web UI): handler bọc chỉ chép thêm, log không đổi.
+			events := admin.NewEventRing(admin.DefaultEventCapacity)
+			logger := slog.New(events.Wrap(handler))
 			for _, k := range cfg.UnimplementedKeys() {
 				logger.Warn(config.UnimplementedWarning(k), "key", k)
 			}
@@ -158,6 +160,7 @@ func newSyncCmd() *cobra.Command {
 				StartAt:      syncStartAt,
 				SeedManifest: syncSeedManifest,
 				Logger:       logger,
+				Events:       events,
 			})
 		},
 	}
