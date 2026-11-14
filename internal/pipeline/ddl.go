@@ -152,14 +152,33 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 			return err
 		}
 	}
-	var diffs []string
-	for _, id := range ids {
-		d, err := p.schemaDiff(ctx, id)
-		if err != nil {
-			return err
+	collect := func() ([]string, error) {
+		var diffs []string
+		for _, id := range ids {
+			d, err := p.schemaDiff(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if d != "" {
+				diffs = append(diffs, d)
+			}
 		}
-		if d != "" {
-			diffs = append(diffs, d)
+		return diffs, nil
+	}
+	diffs, err := collect()
+	if err != nil {
+		return err
+	}
+	// P3-01: so cả những khác biệt schemaDiff không thấy (kiểu PG, index): cộng thêm → áp tự động lên target;
+	// phá hủy (hoặc additive=pause) → ghi _strand_schema_change rồi dừng chờ `strand schema approve`.
+	// Không phân loại được → rơi về hành vi cũ (dừng nếu cột lệch).
+	changed, err := p.evolveSchema(ctx, t, ids, len(diffs) > 0)
+	if err != nil {
+		return err
+	}
+	if changed {
+		if diffs, err = collect(); err != nil {
+			return err
 		}
 	}
 	if len(diffs) > 0 {
@@ -167,6 +186,7 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 			fmt.Sprintf("DDL at %s changes pipeline table(s) and the target schema does not match yet: %s. "+
 				"Apply the change on the target, then resume. DDL: %q", t.SourcePos.Label(), strings.Join(diffs, "; "), t.DDL), nil)
 	}
+	p.resolveSchemaChanges(ctx, t)
 	if len(renamedIn) > 0 {
 		names := make([]string, len(renamedIn))
 		for i, id := range renamedIn {
@@ -226,9 +246,15 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 // schemaDiff so cột (tên, kiểu, NULL) của bảng ở source và ở target theo thứ tự. Bảng không còn ở
 // source thì target cũng không được còn. Trả "" khi khớp.
 func (p *Pipeline) schemaDiff(ctx context.Context, id model.TableID) (string, error) {
+	msg, _, err := p.schemaDiffInfo(ctx, id)
+	return msg, err
+}
+
+// schemaDiffInfo như schemaDiff, kèm bothExist: bảng có ở cả source và target (chỉ khi đó mới so/áp được ALTER).
+func (p *Pipeline) schemaDiffInfo(ctx context.Context, id model.TableID) (msg string, bothExist bool, err error) {
 	srcCols, srcOK, err := tableColumns(ctx, p.src, id)
 	if err != nil {
-		return "", fmt.Errorf("read source schema of %s: %w", id, err)
+		return "", false, fmt.Errorf("read source schema of %s: %w", id, err)
 	}
 	tid := p.filter.Target(id)
 	readDst := tableColumns
@@ -241,20 +267,25 @@ func (p *Pipeline) schemaDiff(ctx context.Context, id model.TableID) (string, er
 	}
 	dstCols, dstOK, err := readDst(ctx, p.dst, tid)
 	if err != nil {
-		return "", fmt.Errorf("read target schema of %s: %w", tid, err)
+		return "", false, fmt.Errorf("read target schema of %s: %w", tid, err)
 	}
 	switch {
 	case !srcOK && !dstOK:
-		return "", nil
+		return "", false, nil
 	case !srcOK:
-		return fmt.Sprintf("%s no longer exists on source but %s still exists on target", id, tid), nil
+		return fmt.Sprintf("%s no longer exists on source but %s still exists on target", id, tid), false, nil
 	case !dstOK:
-		return fmt.Sprintf("%s does not exist on target", tid), nil
+		return fmt.Sprintf("%s does not exist on target", tid), false, nil
+	}
+	if p.dstEngine == model.EnginePG {
+		// PG: ADD COLUMN chỉ nối cuối nên không so thứ tự cột (writer ghi theo tên cột).
+		sort.Strings(srcCols)
+		sort.Strings(dstCols)
 	}
 	if strings.Join(srcCols, ", ") != strings.Join(dstCols, ", ") {
-		return fmt.Sprintf("%s columns differ: source (%s) vs target (%s)", id, strings.Join(srcCols, ", "), strings.Join(dstCols, ", ")), nil
+		return fmt.Sprintf("%s columns differ: source (%s) vs target (%s)", id, strings.Join(srcCols, ", "), strings.Join(dstCols, ", ")), true, nil
 	}
-	return "", nil
+	return "", true, nil
 }
 
 func tableColumns(ctx context.Context, db *sql.DB, id model.TableID) ([]string, bool, error) {

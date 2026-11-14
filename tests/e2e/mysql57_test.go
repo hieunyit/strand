@@ -507,7 +507,7 @@ func TestM57_E2E_AlterTableWhileStreaming(t *testing.T) {
 
 	dst.exec(t, "CREATE DATABASE IF NOT EXISTS strand")
 	cfg := strandCfg{Name: "e2e-m57-ddl", CreateSchema: "off", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
-		Include: []string{"app.*"}, Exclude: []string{"app.ignored"}, Dir: testDir(t)}
+		Include: []string{"app.*"}, Exclude: []string{"app.ignored"}, Dir: testDir(t), SchemaAdditive: "pause"}
 	cfgPath := cfg.write(t)
 	p := startStrand(t, cfgPath)
 	waitSynced(t, &cfg, p, 3*time.Minute)

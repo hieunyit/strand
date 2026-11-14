@@ -189,17 +189,40 @@ Mặc định cố định, chưa có khóa cấu hình để đổi chính sác
 - PG: `pg_dump --schema-only -d app | psql -h target`.
 - MySQL→PG: tạo theo bảng 3.2, rồi `strand validate` kiểm lại.
 
-### 3.4 DDL về sau
+### 3.4 DDL về sau (schema evolution)
 
-Strand **không tự áp DDL**.
+Với source MySQL, Strand so schema bảng ở source (sau DDL) với bảng ở target tại barrier DDL (sau khi drain) và phân loại từng khác biệt:
 
-- **Source MySQL:**
-  - `ALTER`, `DROP` hoặc `RENAME` trên bảng của pipeline làm Strand dừng với exit 10 `schema_change_pending`. Áp cùng DDL ở target rồi chạy lại `sync`; Strand so cột và đi tiếp.
-  - `CREATE TABLE` khớp bộ lọc thì được tạo ở target tại barrier, trước row đầu tiên. Strand giữ metadata lock đọc và kiểm binlog để không lấy schema đã bị ALTER sau đó. Không kiểm được trong 30 giây thì dừng exit 10.
-  - Bảng `RENAME` từ ngoài bộ lọc vào cũng dừng exit 10. Chạy lại thì bảng đó được snapshot.
-- **Source PG:** thay đổi cột được phát hiện qua message Relation của pgoutput. Không có DDL tự động.
+| Loại | Gồm | Hành vi |
+| --- | --- | --- |
+| **Cộng thêm** (additive) | `ADD COLUMN` nullable hoặc có `DEFAULT`; nới kiểu: `VARCHAR`/`VARBINARY` dài hơn, số nguyên sang số nguyên rộng hơn **cùng dấu**, `DECIMAL` tăng precision cùng scale, họ `TEXT`/`BLOB` lớn hơn, `NOT NULL` → `NULL`; thêm index thường (không unique) | `schema.additive: auto` (mặc định): Strand sinh DDL cho target (MySQL, hoặc PG theo typemap, có áp `tables.rename`), chạy, nạp lại metadata và đi tiếp. Ghi log `additive schema change applied to target` |
+| **Phá hủy** (destructive) | `DROP COLUMN`, đổi tên cột (= drop + add), thu hẹp hoặc đổi họ kiểu (kể cả `INT UNSIGNED` → `BIGINT`), `NULL` → `NOT NULL`, `ADD COLUMN NOT NULL` không default, đổi PK, thêm index unique, bỏ/đổi index, đổi charset/collation, cột generated hoặc `AUTO_INCREMENT`, đổi thứ tự cột | Dừng exit 10 `schema_change_pending` |
 
-`schema.additive` và `schema.destructive` chưa có tác dụng (mục 6.3).
+Không chắc thì coi là phá hủy. `schema.additive: pause` đưa cả thay đổi cộng thêm vào luồng dừng và duyệt. `schema.destructive: pause|approve` hiện cùng hành vi (luôn dừng và chờ `schema approve`).
+
+Khi dừng, Strand ghi một dòng vào bảng `_strand_schema_change` ở target (id, pipeline, vị trí DDL ở source, DDL gốc, DDL đề xuất cho target, phân loại, trạng thái `pending` / `approved` / `applied`, thời điểm tạo) rồi thoát với thông báo chỉ cách xử lý:
+
+```bash
+strand schema diff -c pipeline.yaml              # liệt kê thay đổi đang chờ cùng DDL đề xuất (--all: gồm cả đã áp)
+strand schema approve 3 -c pipeline.yaml --dry-run   # chỉ in DDL sẽ chạy
+strand schema approve 3 -c pipeline.yaml         # chạy DDL đề xuất ở target theo thứ tự, đánh dấu applied
+strand sync -c pipeline.yaml                     # chạy tiếp: schema target đã khớp
+```
+
+- `approve` idempotent: id đã `applied` thì không làm gì và báo `already applied`. Chạy lại `sync` khi chưa duyệt vẫn dừng và dùng lại cùng bản ghi (không ghi trùng).
+- PG: toàn bộ DDL của một lần `approve` và việc đánh dấu chạy trong một transaction. MySQL: DDL tự commit từng câu; nếu bị ngắt giữa chừng, trạng thái là `approved`, câu đã áp sẽ báo lỗi trùng khi chạy lại — áp nốt phần còn lại bằng tay rồi chạy `sync` (Strand so schema và đi tiếp).
+- Dòng đề xuất bắt đầu bằng `-- MANUAL:` là thay đổi Strand không tự áp (đổi PK, đổi thứ tự cột, index prefix/fulltext, cột generated...): `approve` từ chối; áp tay ở target rồi chạy lại `sync`. Source MariaDB: mọi thay đổi đều ở dạng này.
+- Vẫn có thể áp DDL tay ở target trước khi chạy lại như trước đây; khi schema khớp, bản ghi chờ tương ứng được đóng.
+- **Giới hạn đã biết:** so sánh dùng schema source tại lúc Strand xử lý DDL, không phải đúng tại vị trí DDL trong log. Nếu source đã có thêm DDL sau đó thì diff có thể gồm cả thay đổi sau: thay đổi cộng thêm áp sớm vô hại, thay đổi phá hủy thì dừng chờ duyệt. Với PG target, kiểu rộng hơn typemap (schema do DBA tự tạo) được coi là khớp; index chỉ có ở target không bị coi là `DROP INDEX`; cột mới của source luôn được nối cuối bảng PG và thứ tự cột không được so.
+- `CREATE TABLE` khớp bộ lọc thì được tạo ở target tại barrier, trước row đầu tiên. Strand giữ metadata lock đọc và kiểm binlog để không lấy schema đã bị ALTER sau đó. Không kiểm được trong 30 giây thì dừng exit 10.
+- Bảng `RENAME` từ ngoài bộ lọc vào, hoặc `DROP`/`RENAME` bảng của pipeline, dừng exit 10 như trước (áp tay ở target rồi chạy lại; bảng rename-vào được snapshot khi chạy lại).
+- **Source PG:** chưa có (TODO P3-01): thay đổi cột được phát hiện qua message Relation của pgoutput sẽ là bước sau; hiện giữ hành vi cũ, áp DDL tay ở target.
+
+Cấu hình:
+
+```yaml
+schema: { additive: auto, destructive: pause }   # additive: auto | pause ; destructive: pause | approve
+```
 
 ---
 
@@ -367,6 +390,8 @@ Mỗi phía chọn **một** trong ba cách:
 | `source.create_slot` | `false` | PG: tạo slot khi chưa có |
 | `source.failover_slot` | `false` | PG17+: tạo slot `FAILOVER` |
 | `source.sequence_sync_interval` | `5s` | PG: chu kỳ ghi `last_value` sequence độc lập vào `_strand_promote` (dùng khi promote không đọc được source). Đặt cùng giá trị cho `promote --sync-interval` |
+| `schema.additive` | `auto` | `auto`: tự áp thay đổi schema cộng thêm lên target (mục 3.4); `pause`: dừng chờ `schema approve` |
+| `schema.destructive` | `pause` | `pause` \| `approve`: thay đổi phá hủy luôn dừng exit 10 và chờ `strand schema approve <id>` |
 | `target.commit_order` | **`strict`** | `strict` \| `relaxed` (mục 1.3) |
 | `target.batch.max_rows` | 2000 | Đóng batch khi đủ số row |
 | `target.batch.max_bytes` | `4MiB` | Đóng batch khi đủ dung lượng (ước lượng) |
@@ -414,13 +439,12 @@ Biến môi trường:
 - `bootstrap.per_table.<t>.seed.{credentials, encryption_key, load, verify_after}`
 
 - `source.read_from=replica`: muốn đọc replica thì trỏ kết nối vào replica.
-- `schema.additive=auto`, `schema.destructive=approve`: DDL không bao giờ được áp tự động; pipeline dừng exit 10.
 - `checkpoint.store` khác `target`: checkpoint luôn nằm ở target.
 - `governor.metrics_source`
 - `verify.full.cron`, `verify.full.rate`: không có verify full theo lịch; chạy `strand verify --mode full` bằng cron ngoài.
 - `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive` (dùng `seed apply --archive`).
 
-Không cảnh báo khi giá trị đúng là hành vi thật: `read_from: primary`, `schema.additive: pause`, `schema.destructive: pause`, `checkpoint.store: target`.
+Không cảnh báo khi giá trị đúng là hành vi thật: `read_from: primary`, `checkpoint.store: target`.
 
 ### 6.4 Ví dụ
 
@@ -564,6 +588,10 @@ strand sync -c p.yaml --start-at 0/16B3748                                      
 ### 7.4 `schema init`
 
 Xem mục 3.1.
+
+### 7.4a `schema diff` / `schema approve <id>`
+
+Xem mục 3.4. `diff` liệt kê thay đổi schema đang chờ duyệt (`--all`: gồm cả đã áp); `approve <id>` chạy DDL đề xuất ở target (`--dry-run` chỉ in), idempotent. Cả hai đọc `target` và `name` từ file cấu hình (`-c`).
 
 ### 7.5 `seed plan` / `seed apply` (chế độ B)
 
@@ -845,7 +873,7 @@ Exit 1 là lỗi tạm, nên tự restart. Exit 2–5 và 10 cần người xem.
 | 5 | `log_gap` | Source đã xóa log chưa apply; slot PG không tồn tại | Cấp lại từ archive (`--archive`), hoặc seed lại |
 | 5 | `prefetch_exhausted` | Spool prefetch đầy | Tăng spool, thêm tầng bucket |
 | 5 | `verify_mismatch` | Verify thấy lệch; UPDATE TOAST mà row không có ở target | Quy trình repair (7.8), điều tra nguyên nhân |
-| 10 | `schema_change_pending` | DDL trên bảng của pipeline mà target chưa khớp | Áp DDL ở target rồi chạy lại |
+| 10 | `schema_change_pending` | DDL phá hủy (hoặc `additive: pause`) trên bảng của pipeline; DROP/RENAME bảng; source PG | `strand schema diff`, `strand schema approve <id>`, chạy lại `sync` (mục 3.4) |
 | 10 | `promote_needs_decision` | Promote không fence được source | Cô lập source, chạy lại với `--source-fenced-externally` |
 
 ---
@@ -943,7 +971,7 @@ strand verify -c billing.yaml --mode full --table public.orders
 | sync exit 5 `log_gap` ngay khi khởi động (PG) | Slot chưa có, `create_slot: false` | Tạo slot hoặc đặt `create_slot: true` |
 | sync exit 3 về publication partition | Thiếu `publish_via_partition_root` | Chạy lệnh `ALTER PUBLICATION` trong thông báo |
 | sync dừng vì TRUNCATE (PG) | Publication phát truncate | `ALTER PUBLICATION … SET (publish = 'insert, update, delete')` |
-| exit 10 `schema_change_pending` | DDL ở source | Áp cùng DDL ở target, chạy lại |
+| exit 10 `schema_change_pending` | DDL phá hủy ở source (hoặc `schema.additive: pause`) | `strand schema diff -c p.yaml`, `strand schema approve <id> -c p.yaml`, chạy lại `sync` (mục 3.4) |
 | `verify --repair fix` exit 4 | `sync` đang chạy | Dừng `sync` trước (7.8) |
 | repair báo `the source changed while repairing` | Source đổi UNIQUE trong lúc repair | Để pipeline bắt kịp, dừng, repair lại |
 | `verify --mode full` báo `must be schema.table (no wildcard)` | `tables.include` có wildcard | Dùng `--table` cho từng bảng |
@@ -958,7 +986,7 @@ strand verify -c billing.yaml --mode full --table public.orders
 - **`target.batch.max_wait`** làm khóa nóng chậm lại ở `strict` (dòng 26); `relaxed` gom chuỗi Txn phụ thuộc vào cùng batch.
 - **PG identity `ALWAYS`:** PK bị `UPDATE … SET id = DEFAULT` kèm cột TOAST không đổi làm writer lỗi 428C9 (dòng 27, hiếm).
 - **Source PG:** governor `onoff`/`grace-v2` dùng tín hiệu PG (replica lag của standby đang replay, WAL slot); thiếu quyền thì lùi về `static`.
-- **Không có:** đồng bộ hai chiều, DDL tự động (`schema.*`), verify full theo lịch, HA tự failover của chính Strand, tự co giãn worker, mask cột, đọc từ PG standby.
+- **Không có:** đồng bộ hai chiều, DDL tự động từ source PG, verify full theo lịch, HA tự failover của chính Strand, tự co giãn worker, mask cột, đọc từ PG standby.
 - **Hiệu năng:** đo trên máy test container, khoảng 2.100 txn/s relaxed và 1.600 txn/s strict (MySQL→MySQL). Chưa có benchmark Gate 2.
 
 ### 10.4 Quyết định đã chốt trong code, chờ cập nhật spec
