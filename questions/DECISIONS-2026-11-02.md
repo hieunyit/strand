@@ -42,3 +42,5 @@ Trả lời: `1A, 2B, 3B, 4A, 5 ok, 6 ok, 7 gộp` (cùng với P1-17 câu 1 và
 | `strand snapshot add` | `--socket <path>` |
 | Cấu hình | `verify.post_seed_window` (mặc định `30m`, 02 §9) |
 | Biến môi trường | `STRAND_S3_ENDPOINT`, `STRAND_S3_ACCESS_KEY`, `STRAND_S3_SECRET_KEY` (tầng bucket của spool) |
+
+- P3-02: cấu hình online DDL đặt ở `schema.online_ddl.{tools,extra_patterns}` (spec design §7 chỉ minh họa khối `online_ddl:` không nói cha); mặc định bật cả gh-ost và pt-osc, `tools: []` tắt. `extra_patterns` dùng `{table}` làm chỗ giữ tên bảng gốc.
