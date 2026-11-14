@@ -86,8 +86,7 @@ func (m *RangeStateManager) HandleToastPKChangeXID(event *model.RowChange, pos m
 	}
 	newPK := newB.K
 	oldC, newC := tr.FindChunkKey(oldPK), tr.FindChunkKey(newPK)
-	// Khóa ngoài mọi chunk mà Txn visible với snapshot đăng ký: không phải "Xong" thật (staleOutside).
-	if !tr.staleOutside(oldC, xid) && !tr.staleOutside(newC, xid) && isDoneChunk(oldC) && isDoneChunk(newC) {
+	if isDoneChunk(oldC) && isDoneChunk(newC) {
 		// 1. Cả hai range đã flush: SQL điều kiện của writer, trong transaction của T.
 		return []StreamActionResult{{Action: ActionApply, Chunk: newC, Event: event}}, false
 	}
@@ -104,8 +103,6 @@ func (m *RangeStateManager) HandleToastPKChangeXID(event *model.RowChange, pos m
 		a, c = m.handleLocked(tr, ups, pos, xid)
 		res = append(res, StreamActionResult{Action: a, Chunk: c, Event: ups})
 		return res, false
-	case tr.staleOutside(newC, xid):
-		// 2b. n ngoài mọi chunk, đã vắng ở snapshot đăng ký: Txn visible khác sẽ xóa/đổi khóa nó; bỏ nửa upsert.
 	case !isDoneChunk(newC) && inLow(newC, pos, xid):
 		// 3. Row snapshot của chunk đang đọc đã phản ánh T: ảnh cũ hơn của n trong buffer cũng lỗi thời.
 		delete(newC.BufferedChanges, newPK)

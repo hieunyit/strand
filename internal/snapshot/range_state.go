@@ -58,14 +58,7 @@ type TableRanges struct {
 	// re-read hiện hành của khóa: rereadPending (đang gom khóa, "Chưa đọc") hoặc chunk đang đọc.
 	// FindChunk tra map này TRƯỚC các chunk chính, nên khóa đang chờ đọc lại được xử lý như một range
 	// "Chưa đọc" (event bị bỏ) dù range chính của nó đã "Xong".
-	Reread map[Key]*Chunk
-	// BoundSnap (source PG, plan mới): snapshot mà lần đọc biên [min, max] của plan nhìn thấy. Tại snapshot
-	// đó bảng KHÔNG có row nào ngoài [min, max]. Txn visible với nó mà router chưa xử lý (nó đứng sau điểm
-	// router lúc đăng ký — lag) vẫn sẽ đi qua router SAU ClearTarget; ở khóa ngoài mọi chunk ("Xong" tức
-	// thì) mọi UPDATE thiếu cột TOAST của Txn đó nhắm vào row đã vắng ở snapshot (do Txn visible khác xóa/đổi
-	// khóa), còn row nền tạo bởi Txn đã qua router thì ClearTarget đã xóa — apply sẽ ra ToastRowMissing.
-	// Các event đó phải bị bỏ (staleOutside). nil = không áp dụng (MySQL, plan chạy tiếp).
-	BoundSnap     *PGSnapshot
+	Reread        map[Key]*Chunk
 	rereadPending *Chunk
 	rereadSince   []time.Time // thời điểm đánh dấu từng khóa, song song rereadPending.Keys
 }
@@ -117,21 +110,6 @@ func (m *RangeStateManager) RegisterTableKeys(table model.TableID, pkCol string,
 	}
 	sort.Slice(tr.Chunks, func(i, j int) bool { return tr.Chunks[i].Lo.K < tr.Chunks[j].Lo.K })
 	m.tables[table.String()] = tr
-}
-
-// SetBoundSnapshot đặt TableRanges.BoundSnap cho bảng vừa đăng ký (gọi trong barrier, router dừng).
-func (m *RangeStateManager) SetBoundSnapshot(table model.TableID, snap *PGSnapshot) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if tr, ok := m.tables[table.String()]; ok {
-		tr.BoundSnap = snap
-	}
-}
-
-// staleOutside: khóa k nằm ngoài mọi chunk (kể cả chunk re-read) và Txn xid visible với BoundSnap — row
-// ở k đã vắng ở snapshot đăng ký, ClearTarget đã xóa row nền (xem BoundSnap).
-func (tr *TableRanges) staleOutside(c *Chunk, xid uint64) bool {
-	return c == nil && tr.BoundSnap != nil && tr.BoundSnap.Visible(xid)
 }
 
 // encodeKey mã hóa PK của bảng.
@@ -348,11 +326,7 @@ func (m *RangeStateManager) handleLocked(tr *TableRanges, event *model.RowChange
 
 	chunk := tr.FindChunkKey(pk)
 	if chunk == nil {
-		// Không thuộc bất kỳ chunk snapshot nào (ví dụ nằm sau b_last hoặc đã xong) -> Apply bình thường,
-		// trừ UPDATE thiếu cột TOAST của Txn đã nằm trong snapshot đăng ký (staleOutside): row nền không còn.
-		if tr.staleOutside(chunk, xid) && hasUnchanged(event) {
-			return ActionDiscard, nil
-		}
+		// Không thuộc bất kỳ chunk snapshot nào (ví dụ nằm sau b_last hoặc đã xong) -> Apply bình thường
 		return ActionApply, nil
 	}
 
