@@ -126,3 +126,11 @@ Trên máy dev (16 core, MySQL 8.4, 16 thread, 1 bảng sysbench 100k row), `g2b
 1. Riêng `calibrate`, `ignored errors` được chấp nhận nếu ≤ 1% số event, và được ghi vào `calibration.json` (`ignored_errors`). Vượt 1%, hoặc `reconnects` khác 0, vẫn là lỗi. Mọi kiểm tra khác giữ nguyên: marker, footer, số thứ tự, số event thô bằng tổng kết.
 2. Lượt đo (`run`) vẫn đòi `ignored errors = 0` như mục 10.
 3. `calibrate` xoá thư mục `calibrate-raw` cũ trước khi chạy. Sysbench bản patch mở file thô với O_EXCL, nên chạy lại trên thư mục cũ sẽ chết với EEXIST.
+
+## Amendment 2026-11-14 (2) — kích thước fixture theo thời gian snapshot đo được, trước mọi số đo chính thức
+
+Lần thử chính thức đầu tiên trên MySQL dùng fixture 67.000.000 row theo §6. Bảng thật là 27,5 GB, khoảng 410 B/row chứ không phải 220 B như giả định. Snapshot chạy khoảng 6.500 row/s (governor ở soft 400 token/s, khoảng 2,7 MB/s), nên mỗi snapshot mất khoảng 2 giờ 50 phút, sát `snapshot-timeout` 3 giờ, và 9 lần chạy mất khoảng 32 giờ. Lần thử này dừng giữa lần chạy đầu, trước khi có bất kỳ kết quả nào; không số nào của nó được dùng. Log lưu riêng (`aborted-67M`).
+
+1. §6 đổi tiêu chí kích thước: không tính theo dung lượng (H × 16 KiB × 1500 s) nữa, mà theo thời gian snapshot. Ở tốc độ snapshot đo được trên chính máy đo, snapshot phải dài ≥ 25 phút, mục tiêu 40–60 phút. Mục đích không đổi: có cửa sổ p2p, tức nửa chu kỳ 5 phút trọn trong snapshot cộng 60 s chuyển tiếp. Lần chạy nào không có cửa sổ p2p vẫn là `incomplete` như §7.
+2. MySQL: `bench.big` = 20.000.000 row (khoảng 8,2 GB, snapshot dự kiến khoảng 50 phút ở 6.500 row/s). App table giữ 100.000 row.
+3. Fixture đổi nên calibrate và pilot overhead chạy lại trên fixture mới và commit lại trước lượt chính thức. Ngưỡng §4, sóng tải, soft/hard (400/600) và seed giữ nguyên.
