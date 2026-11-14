@@ -270,6 +270,17 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		}
 		return Response{OK: true, Events: ev}
 
+	case CmdSourceTables:
+		sp, ok := s.handler.(SourceTablesProvider)
+		if !ok {
+			return Response{OK: false, Error: "source_tables is not supported by this pipeline"}
+		}
+		ts, err := sp.SourceTables(ctx)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, SourceTables: ts}
+
 	default:
 		return Response{OK: false, Error: fmt.Sprintf("unknown command: %s", req.Command)}
 	}

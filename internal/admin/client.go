@@ -189,3 +189,12 @@ func (c *Client) Events(ctx context.Context) ([]EventRecord, error) {
 	}
 	return resp.Events, nil
 }
+
+// SourceTables liệt kê bảng của source (kèm cờ đã thuộc pipeline). Chỉ đọc.
+func (c *Client) SourceTables(ctx context.Context) ([]SourceTable, error) {
+	resp, err := c.Call(ctx, Request{Command: CmdSourceTables})
+	if err != nil {
+		return nil, err
+	}
+	return resp.SourceTables, nil
+}

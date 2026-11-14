@@ -9,6 +9,7 @@ import (
 
 	"strand/internal/admin"
 	"strand/internal/model"
+	"strand/internal/schemagen"
 	"strand/internal/snapshot"
 )
 
@@ -160,4 +161,30 @@ func clampPct(v float64) float64 {
 // Events trả tối đa 200 bản ghi WARN/ERROR gần nhất (cũ → mới).
 func (h *adminHandler) Events(ctx context.Context) ([]admin.EventRecord, error) {
 	return h.p.opts.Events.Snapshot(), nil
+}
+
+// SourceTables liệt kê bảng người dùng của source (không đổi trạng thái pipeline), đánh dấu bảng đã thuộc
+// pipeline; Web UI dùng để chọn bảng cho `snapshot add`. Chỉ đọc information_schema / pg_catalog.
+func (h *adminHandler) SourceTables(ctx context.Context) ([]admin.SourceTable, error) {
+	if err := h.ready(); err != nil {
+		return nil, err
+	}
+	p := h.p
+	if p.src == nil {
+		return nil, fmt.Errorf("source connection is not ready")
+	}
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	ids, _, err := schemagen.Discover(cctx, p.src, p.cfg.Source.Kind, []string{"*"}, nil)
+	if err != nil {
+		return nil, err
+	}
+	p.tablesMu.RLock()
+	defer p.tablesMu.RUnlock()
+	out := make([]admin.SourceTable, 0, len(ids))
+	for _, id := range ids {
+		_, in := p.tables[id]
+		out = append(out, admin.SourceTable{Table: id.String(), InPipeline: in})
+	}
+	return out, nil
 }

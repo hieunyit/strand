@@ -20,6 +20,8 @@ const (
 	CmdStatus = "status"
 	CmdTables = "tables"
 	CmdEvents = "events"
+	// Chỉ đọc: liệt kê bảng của source để chọn khi `snapshot add` (Web UI, M3).
+	CmdSourceTables = "source_tables"
 )
 
 // StatusProvider là interface tùy chọn cho lệnh `status`.
@@ -35,6 +37,17 @@ type TablesProvider interface {
 // EventsProvider là interface tùy chọn cho lệnh `events`.
 type EventsProvider interface {
 	Events(ctx context.Context) ([]EventRecord, error)
+}
+
+// SourceTablesProvider là interface tùy chọn cho lệnh `source_tables`.
+type SourceTablesProvider interface {
+	SourceTables(ctx context.Context) ([]SourceTable, error)
+}
+
+// SourceTable là một bảng của source; InPipeline = đã nằm trong danh sách bảng đang chạy của pipeline.
+type SourceTable struct {
+	Table      string `json:"table"`
+	InPipeline bool   `json:"in_pipeline"`
 }
 
 // DeltaVerifier là interface tùy chọn cho `strand verify --mode delta`.
@@ -76,6 +89,7 @@ type Response struct {
 	Status           *StatusInfo       `json:"status,omitempty"`
 	Tables           []TableInfo       `json:"tables,omitempty"`
 	Events           []EventRecord     `json:"events,omitempty"`
+	SourceTables     []SourceTable     `json:"source_tables,omitempty"`
 }
 
 // GovernorInfo mô tả bộ điều tốc (spec/02 §6) tại thời điểm hỏi.

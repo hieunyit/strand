@@ -59,6 +59,21 @@ func TestWeb_StatusTablesEventsOverSocket(t *testing.T) {
 	}
 }
 
+func (h *observeHandler) SourceTables(ctx context.Context) ([]admin.SourceTable, error) {
+	return []admin.SourceTable{{Table: "app.a", InPipeline: true}, {Table: "app.z"}}, nil
+}
+
+func TestWeb_SourceTablesOverSocket(t *testing.T) {
+	_, client, cleanup := setupTestServer(t, &observeHandler{mockHandler: newMockHandler(), ring: admin.NewEventRing(1)})
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ts, err := client.SourceTables(ctx)
+	if err != nil || len(ts) != 2 || !ts[0].InPipeline || ts[1].Table != "app.z" || ts[1].InPipeline {
+		t.Fatalf("unexpected source tables %+v err=%v", ts, err)
+	}
+}
+
 // Handler cũ (không cài interface mới) phải trả lỗi rõ ràng, giao thức cũ vẫn chạy.
 func TestWeb_NewCommandsBackwardCompatible(t *testing.T) {
 	_, client, cleanup := setupTestServer(t, newMockHandler())
@@ -66,9 +81,10 @@ func TestWeb_NewCommandsBackwardCompatible(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	for name, call := range map[string]func() error{
-		"status": func() error { _, err := client.Status(ctx); return err },
-		"tables": func() error { _, err := client.Tables(ctx); return err },
-		"events": func() error { _, err := client.Events(ctx); return err },
+		"status":        func() error { _, err := client.Status(ctx); return err },
+		"tables":        func() error { _, err := client.Tables(ctx); return err },
+		"events":        func() error { _, err := client.Events(ctx); return err },
+		"source_tables": func() error { _, err := client.SourceTables(ctx); return err },
 	} {
 		err := call()
 		if err == nil || !strings.Contains(err.Error(), "not supported") {
