@@ -32,6 +32,17 @@ type Config struct {
 	MaxBufferedBytes int64
 
 	ownSpillDir bool // SpillDir do bên gọi chỉ định (riêng của reader này): được dọn file cũ khi Start
+
+	// TableSchema trả về metadata cột của bảng pipeline đang có để so với RelationMessage (P3-01b).
+	TableSchema func(schema, table string) ([]ColumnMeta, bool)
+}
+
+// ColumnMeta mô tả một cột trong metadata bảng nguồn PG (tên, OID kiểu, typmod, cờ replica identity).
+type ColumnMeta struct {
+	Name         string
+	DataType     uint32
+	TypeModifier int32
+	Flags        uint8
 }
 
 // slotNameRe theo quy tắc tên slot của PostgreSQL (ReplicationSlotValidateName).

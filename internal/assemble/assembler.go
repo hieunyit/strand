@@ -408,11 +408,23 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 
 	case reader.EventTableMap:
 		a.ensureTxnStartedEv(ev)
+		cur := a.registry.GetTable(ev.Schema, ev.Table)
+		// P3-01b: Relation message của PG phát hiện thay đổi schema (hoặc cột lệch bảng đã đăng ký)
+		// tạo barrier DDL trên Txn này để pipeline drain và evolveSchema trước khi apply row mới.
+		if ev.SchemaChanged || (cur != nil && len(ev.Columns) > 0 && !sameStrings(cur.Columns, ev.Columns)) {
+			ddl := fmt.Sprintf("ALTER TABLE %s.%s", ev.Schema, ev.Table)
+			if a.currentTxn.DDL == "" {
+				a.currentTxn.DDL = ddl
+				a.currentTxn.DDLSchema = ev.Schema
+			} else if !strings.Contains(a.currentTxn.DDL, ev.Table) {
+				a.currentTxn.DDL += "; " + ddl
+			}
+		}
 		// Schema lấy từ metadata của TABLE_MAP (binlog_row_metadata=FULL) khi có.
 		if len(ev.Columns) > 0 {
 			// Bảng không có PK trong event (MySQL 5.7 hoặc bảng không PK) và cột không đổi: giữ PK đã đăng ký
 			// (pipeline chọn unique key thay PK).
-			if cur := a.registry.GetTable(ev.Schema, ev.Table); len(ev.PKColumns) > 0 || cur == nil || !sameStrings(cur.Columns, ev.Columns) {
+			if len(ev.PKColumns) > 0 || cur == nil || !sameStrings(cur.Columns, ev.Columns) {
 				a.registry.RegisterTable(ev.Schema, ev.Table, ev.PKColumns, ev.Columns)
 			}
 		} else if a.registry.GetTable(ev.Schema, ev.Table) == nil {

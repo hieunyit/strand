@@ -488,7 +488,13 @@ func (st *streamState) row(xid uint32, relID uint32, op model.Op, oldT, newT *pg
 			buf.log.mark(xid)
 		}
 		if buf.relVer[relID] != rs.ver {
-			added, err := buf.log.append(tableMapEvent(rs.msg))
+			tm := tableMapEvent(rs.msg)
+			if st.r != nil && st.r.cfg.TableSchema != nil {
+				if curr, ok := st.r.cfg.TableSchema(rs.msg.Namespace, rs.msg.RelationName); ok {
+					tm.SchemaChanged = relationDiffers(curr, rs.msg)
+				}
+			}
+			added, err := buf.log.append(tm)
 			if err != nil {
 				return err
 			}
@@ -506,6 +512,11 @@ func (st *streamState) row(xid uint32, relID uint32, op model.Op, oldT, newT *pg
 	ev.Pos, ev.Timestamp = st.cur.pos, st.cur.ts
 	if st.announced[relID] != rs.ver {
 		tm := tableMapEvent(rs.msg)
+		if st.r != nil && st.r.cfg.TableSchema != nil {
+			if curr, ok := st.r.cfg.TableSchema(rs.msg.Namespace, rs.msg.RelationName); ok {
+				tm.SchemaChanged = relationDiffers(curr, rs.msg)
+			}
+		}
 		tm.Pos, tm.Timestamp = st.cur.pos, st.cur.ts
 		if err := st.emit(tm); err != nil {
 			return err
@@ -541,6 +552,29 @@ func (st *streamState) emit(ev reader.Event) error {
 	case <-st.ctx.Done():
 		return errStop
 	}
+}
+
+// relationDiffers so metadata cột hiện có với RelationMessage của pgoutput (P3-01b).
+// Trả true khi số cột, tên cột, kiểu OID, typmod hoặc cờ khóa khác nhau.
+func relationDiffers(curr []ColumnMeta, rel *pglogrepl.RelationMessage) bool {
+	if len(curr) != len(rel.Columns) {
+		return true
+	}
+	for i, c := range rel.Columns {
+		if curr[i].Name != c.Name {
+			return true
+		}
+		if curr[i].DataType != c.DataType {
+			return true
+		}
+		if curr[i].TypeModifier != c.TypeModifier {
+			return true
+		}
+		if curr[i].Flags != c.Flags {
+			return true
+		}
+	}
+	return false
 }
 
 // tableMapEvent tạo EventTableMap từ Relation. PKColumns là các cột replica identity (cờ 1): với
