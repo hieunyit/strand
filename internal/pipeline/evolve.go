@@ -16,12 +16,12 @@ import (
 // Giới hạn đã biết: schema source được đọc lúc xử lý DDL này, không phải đúng tại vị trí DDL trong log.
 // Nếu source đã có thêm DDL sau đó thì diff có thể gồm cả thay đổi sau: thay đổi cộng thêm áp sớm vô hại,
 // thay đổi phá hủy làm pipeline dừng chờ duyệt (đúng hướng an toàn).
-// TODO(P3-01): nguồn PostgreSQL — phát hiện qua message Relation của pgoutput; hiện giữ hành vi dừng cũ.
+// Nguồn PostgreSQL: phát hiện qua message Relation của pgoutput và barrier DDL tại row đầu tiên (P3-01b).
 
 // evolveSchema so schema các bảng ids ở source/target. Trả changed=true khi đã áp DDL lên target (caller so lại
 // schema); lỗi exit 10 khi cần người duyệt; (false, nil) khi không có gì phải làm hoặc không phân loại được.
 func (p *Pipeline) evolveSchema(ctx context.Context, t *model.Txn, ids []model.TableID, hasColumnDiff bool) (bool, error) {
-	if p.srcEngine != model.EngineMySQL {
+	if p.srcEngine != model.EngineMySQL && p.srcEngine != model.EnginePG {
 		return false, nil
 	}
 	req := schemagen.Request{Source: p.src, Target: p.dst, SourceKind: p.cfg.Source.Kind, TargetKind: p.cfg.Target.Kind, Rename: p.cfg.Tables.Rename}

@@ -191,7 +191,7 @@ Mặc định cố định, chưa có khóa cấu hình để đổi chính sác
 
 ### 3.4 DDL về sau (schema evolution)
 
-Với source MySQL, Strand so schema bảng ở source (sau DDL) với bảng ở target tại barrier DDL (sau khi drain) và phân loại từng khác biệt:
+Với source MySQL hoặc PostgreSQL, Strand so schema bảng ở source (sau DDL với MySQL hoặc sau message Relation mới với PG) với bảng ở target tại barrier DDL (sau khi drain) và phân loại từng khác biệt:
 
 | Loại | Gồm | Hành vi |
 | --- | --- | --- |
@@ -216,7 +216,7 @@ strand sync -c pipeline.yaml                     # chạy tiếp: schema target 
 - **Giới hạn đã biết:** so sánh dùng schema source tại lúc Strand xử lý DDL, không phải đúng tại vị trí DDL trong log. Nếu source đã có thêm DDL sau đó thì diff có thể gồm cả thay đổi sau: thay đổi cộng thêm áp sớm vô hại, thay đổi phá hủy thì dừng chờ duyệt. Với PG target, kiểu rộng hơn typemap (schema do DBA tự tạo) được coi là khớp; index chỉ có ở target không bị coi là `DROP INDEX`; cột mới của source luôn được nối cuối bảng PG và thứ tự cột không được so.
 - `CREATE TABLE` khớp bộ lọc thì được tạo ở target tại barrier, trước row đầu tiên. Strand giữ metadata lock đọc và kiểm binlog để không lấy schema đã bị ALTER sau đó. Không kiểm được trong 30 giây thì dừng exit 10.
 - Bảng `RENAME` từ ngoài bộ lọc vào, hoặc `DROP`/`RENAME` bảng của pipeline, dừng exit 10 như trước (áp tay ở target rồi chạy lại; bảng rename-vào được snapshot khi chạy lại).
-- **Source PG:** chưa có (TODO P3-01): thay đổi cột được phát hiện qua message Relation của pgoutput sẽ là bước sau; hiện giữ hành vi cũ, áp DDL tay ở target.
+- **Source PG:** DDL không đi qua logical replication; Strand phát hiện thay đổi schema khi nhận message `Relation` mới từ pgoutput khác với metadata hiện có. Strand tạo barrier tại đúng vị trí trong luồng ngay trước row đầu tiên dùng schema mới, drain các transaction trước đó, rồi phân loại qua schemagen (cộng thêm thì tự áp lên target PG, phá hủy thì ghi `_strand_schema_change` và dừng exit 10 chờ `strand schema approve`). Lưu ý: Relation chỉ được server PG gửi trước row đầu tiên sau DDL; nếu ADD COLUMN chưa có row nào sau đó thì chưa phát hiện, chấp nhận.
 
 Cấu hình:
 

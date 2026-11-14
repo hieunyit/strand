@@ -252,17 +252,23 @@ func (p *Pipeline) schemaDiff(ctx context.Context, id model.TableID) (string, er
 
 // schemaDiffInfo như schemaDiff, kèm bothExist: bảng có ở cả source và target (chỉ khi đó mới so/áp được ALTER).
 func (p *Pipeline) schemaDiffInfo(ctx context.Context, id model.TableID) (msg string, bothExist bool, err error) {
-	srcCols, srcOK, err := tableColumns(ctx, p.src, id)
+	readSrc := tableColumns
+	if p.srcEngine == model.EnginePG {
+		readSrc = pgColumns
+	}
+	srcCols, srcOK, err := readSrc(ctx, p.src, id)
 	if err != nil {
 		return "", false, fmt.Errorf("read source schema of %s: %w", id, err)
 	}
 	tid := p.filter.Target(id)
 	readDst := tableColumns
 	if p.dstEngine == model.EnginePG {
-		// MySQL→PG: kiểu cột khác nhau theo typemap, chỉ so tên cột theo thứ tự.
 		readDst = pgColumns
-		for i, c := range srcCols {
-			srcCols[i], _, _ = strings.Cut(c, " ")
+		if p.srcEngine == model.EngineMySQL {
+			// MySQL→PG: kiểu cột khác nhau theo typemap, chỉ so tên cột theo thứ tự.
+			for i, c := range srcCols {
+				srcCols[i], _, _ = strings.Cut(c, " ")
+			}
 		}
 	}
 	dstCols, dstOK, err := readDst(ctx, p.dst, tid)

@@ -12,6 +12,7 @@ import (
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	mysqlreader "strand/internal/reader/mysql"
+	pgreader "strand/internal/reader/pg"
 	"strand/internal/snapshot"
 )
 
@@ -149,6 +150,8 @@ type tableMeta struct {
 	// exclusion) và không REPLICA IDENTITY FULL — pgoutput không gửi giá trị cũ nên writeset không thấy
 	// xung đột; ở relaxed mọi Txn chạm bảng đi làn tuần tự (model.Txn.Lane).
 	LaneTable bool
+	// PGColumns: metadata cột source PG (tên, OID kiểu, typmod, flags) dùng để so RelationMessage (P3-01b).
+	PGColumns []pgreader.ColumnMeta
 }
 
 // checkPrimaryKeyPrefix từ chối bảng MySQL có PRIMARY KEY chứa cột prefix, ví dụ PRIMARY KEY (code(10))

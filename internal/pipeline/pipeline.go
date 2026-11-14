@@ -760,7 +760,17 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			// Phần thân Txn streaming / two-phase vượt trần RAM tràn vào spool của pipeline (review R08).
 			SpillDir:   filepath.Join(p.cfg.Resources.Spool.Path, "pg-reader-"+p.id),
 			CreateSlot: p.cfg.Source.CreateSlot, Failover: p.cfg.Source.FailoverSlot,
-			ExportOnCreate: len(pending) > 0 && p.cfg.Source.CreateSlot})
+			ExportOnCreate: len(pending) > 0 && p.cfg.Source.CreateSlot,
+			// P3-01b: cung cấp metadata cột hiện tại để pgreader so sánh với RelationMessage của pgoutput.
+			TableSchema: func(schema, table string) ([]pgreader.ColumnMeta, bool) {
+				p.tablesMu.RLock()
+				defer p.tablesMu.RUnlock()
+				m := p.tables[model.TableID{Schema: schema, Table: table}]
+				if m == nil {
+					return nil, false
+				}
+				return m.PGColumns, true
+			}})
 		if err != nil {
 			return err
 		}

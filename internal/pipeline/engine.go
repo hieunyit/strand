@@ -208,21 +208,31 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 	for _, r := range rels {
 		m := &tableMeta{ID: r.id}
 		cr, err := db.QueryContext(ctx, `
-			SELECT a.attname, t.typname FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+			SELECT a.attname, t.typname, a.atttypid, a.atttypmod FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
 			 WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
 			 ORDER BY a.attnum`, r.oid)
 		if err != nil {
 			return nil, err
 		}
+		type rawCol struct {
+			name   string
+			typ    string
+			typid  uint32
+			typmod int32
+		}
+		var rawCols []rawCol
 		types := map[string]string{}
 		for cr.Next() {
 			var c, typ string
-			if err := cr.Scan(&c, &typ); err != nil {
+			var typid uint32
+			var typmod int32
+			if err := cr.Scan(&c, &typ, &typid, &typmod); err != nil {
 				cr.Close()
 				return nil, err
 			}
 			m.Columns = append(m.Columns, c)
 			types[c] = typ
+			rawCols = append(rawCols, rawCol{name: c, typ: typ, typid: typid, typmod: typmod})
 		}
 		cr.Close()
 		if err := cr.Err(); err != nil {
@@ -255,6 +265,22 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 		// Lỗi giữa chừng (mạng, hủy) trước đây bị nuốt: PK/unique thiếu cột mà không báo (review N07).
 		if err := ir.Err(); err != nil {
 			return nil, fmt.Errorf("read indexes of %s: %w", r.id, err)
+		}
+		pkSet := make(map[string]bool, len(m.PK))
+		for _, k := range m.PK {
+			pkSet[k] = true
+		}
+		for _, rc := range rawCols {
+			var flags uint8
+			if pkSet[rc.name] {
+				flags = 1
+			}
+			m.PGColumns = append(m.PGColumns, pgreader.ColumnMeta{
+				Name:         rc.name,
+				DataType:     rc.typid,
+				TypeModifier: rc.typmod,
+				Flags:        flags,
+			})
 		}
 		sort.Strings(names)
 		for _, n := range names {
