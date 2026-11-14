@@ -38,6 +38,15 @@ Tiêu chí: spec/01-plan.md (Gate 2 — test bắt buộc; nhánh GRACE → bậ
 - Công cụ: `tools/g2bench` (sysbench/pgbench phía client, p99 từ log thô, khôi phục fixture giống hệt có hash, `--official` chặn khi thiếu điều kiện). Hướng dẫn: `reports/GATE2-BENCH-RUNBOOK.md`.
 - Smoke trên máy dev (KHÔNG chính thức): MySQL 8.4 và PG 18 với `onoff` chạy trọn vòng, nguồn/đích khớp.
 - **Kết quả chính thức: CHƯA CÓ.** Cần: máy staging chuyên dụng (≥ 8 core, 32 GB RAM, 100 GB đĩa nhanh; ~10–11 giờ mỗi engine); hiệu chỉnh mức bão hòa và pilot overhead công cụ, commit trước khi đo.
+- **Lượt thử rút gọn 1 giờ trên máy dev, MySQL 8.4 (2026-11-14, KHÔNG chính thức):** 16 core / 31 GB. Fixture `bench.big` 1M row + sysbench 1 bảng 100k row. Mức bão hòa đo tay 722 txn/s (lệnh `calibrate` thất bại 4/4 lần vì sysbench gặp 1–2 deadlock ở mức bão hòa, xem mục 5). Chọn low/high = 90/361 txn/s (12,5% / 50%). Sóng tải đúng giao thức (chu kỳ 10 phút, spike 2× mỗi 3 phút). soft/hard = 400/600 IOPS. Mỗi governor chạy 1 lần.
+
+  | governor | snapshot | p99 app trong snapshot | txn trong snapshot | lag max | vượt hard | khớp nguồn/đích |
+  |---|---|---|---|---|---|---|
+  | grace-v2 | 91,1 s | 618 ms | 13.901 | 0,70 s | 0 | có |
+  | onoff | 91,1 s | 975 ms | 13.661 | 1,21 s | 0 | có |
+  | static | 93,6 s | 1615 ms | 13.438 | 0,78 s | 0 | có |
+
+  Verdict của công cụ là `incomplete`. Snapshot chỉ kéo dài khoảng 90 s, ngắn hơn một nửa chu kỳ tải (5 phút), nên không có cửa sổ tải ổn định nào để đo p2p. Fixture 1M row là quá nhỏ: lượt chính thức cần ≥ 67M row, như runbook đã ghi. Về chiều hướng, grace-v2 cho p99 ứng dụng thấp nhất, static cao nhất. Cả 3 lần chạy đều không vượt hard limit, dữ liệu khớp, strand thoát 0. Đây chỉ là tín hiệu, không phải bằng chứng Gate 2 (chỉ 1 lần mỗi governor, working tree chưa commit).
 - **Phát hiện trên PG (chưa điều tra):** `grace-v2` kẹt ở R = 1 token/s, snapshot không xong trong 10 phút; breaker mở làm snapshot dừng khi chạy smoke (phải nới bằng tùy chọn chỉ dùng cho dev). Phải sửa hoặc giải thích trước khi đo chính thức trên PG; nếu không, quy tắc spec cho ra `onoff` mặc định.
 
 ## 4. Sửa trong đợt Gate 2
@@ -47,5 +56,7 @@ Tiêu chí: spec/01-plan.md (Gate 2 — test bắt buộc; nhánh GRACE → bậ
 
 ## 5. Vấn đề mở
 
-- G2-12 chính thức (mục 3) và GRACE/breaker trên PG.
+- G2-12 chính thức (mục 3) và GRACE/breaker trên PG. Mốc độ trễ học từ dữ liệu cho breaker (b27a8eb, 4d65843) đã vào main; cần đo lại trên PG.
+- `g2bench calibrate` coi mọi `ignored errors` khác 0 là lỗi. Ở mức bão hòa với 16 thread trên 1 bảng, sysbench oltp_read_write luôn gặp vài deadlock, nên lệnh này không chạy được. Cần chọn: nới quy tắc cho riêng calibrate, hoặc dùng nhiều bảng app.
+- G2-7 (race TOAST PK trên PG): tạm hoãn. Bản sửa 2abd8a9 làm snapshot `app.items` đứng nên đã revert khỏi main.
 - Strict PG→PG ~280–300 Txn/s, chưa rõ nút thắt (không thuộc tiêu chí Gate 2 nhưng ảnh hưởng benchmark PG strict).
