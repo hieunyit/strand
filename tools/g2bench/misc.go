@@ -26,6 +26,10 @@ func absPath(p string) (string, error) { return filepath.Abs(p) }
 const (
 	highFraction = 0.50
 	lowFraction  = 0.125
+	// maxCalibIgnoredFraction: ở mức bão hoà, sysbench oltp gặp vài deadlock và tự thử lại ("ignored
+	// errors"). Calibrate chấp nhận tới 1% số event (Amendment 2026-11-14); nhiều hơn = client/fixture
+	// có vấn đề, không dùng để chốt biên độ. Lượt đo chính thức vẫn đòi 0.
+	maxCalibIgnoredFraction = 0.01
 )
 
 type Calibration struct {
@@ -36,6 +40,7 @@ type Calibration struct {
 	SaturationEPS float64 `json:"saturation_events_per_s"`
 	Low           float64 `json:"low"`
 	High          float64 `json:"high"`
+	IgnoredErrors uint64  `json:"ignored_errors"`
 	Note          string  `json:"note"`
 }
 
@@ -110,20 +115,49 @@ func calibrateCmd(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	db.Close()
 	outAbs, _ := filepath.Abs(out)
 	dir := filepath.Join(filepath.Dir(outAbs), "calibrate-raw")
-	if err := os.MkdirAll(filepath.Join(dir, "raw"), 0o755); err != nil {
+	if err := freshCalibrateDir(dir); err != nil {
 		return err
 	}
 	l := &loadDriver{o: o, ci: ci, dir: dir}
 	sr := l.runSegment(0, Segment{Dur: dur, Rate: 0})
-	raw, err := parseSegment(o)(sr)
+	c, err := calibrationFromSegment(o, sr)
 	if err != nil {
 		return fmt.Errorf("calibration run: %w", err)
 	}
+	return writeJSON(out, c)
+}
+
+// freshCalibrateDir: log thô của lần calibrate trước phải xoá; sysbench bản patch mở file thô với
+// O_EXCL nên chạy lại trên thư mục cũ sẽ chết với EEXIST.
+func freshCalibrateDir(dir string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove old calibration raw logs %s: %w", dir, err)
+	}
+	return os.MkdirAll(filepath.Join(dir, "raw"), 0o755)
+}
+
+// calibrationFromSegment: parse đoạn chạy không giới hạn tốc độ, chấp nhận ignored errors tới
+// maxCalibIgnoredFraction (deadlock ở bão hoà), rồi tính biên độ.
+func calibrationFromSegment(o Opts, sr SegmentRun) (Calibration, error) {
+	var raw SegmentRaw
+	var err error
+	if o.Engine == "postgres" {
+		raw, err = ParsePgbenchSegment(sr.Prefix, sr.Stdout, sr.Exit)
+	} else {
+		raw, err = parseSysbenchSegment(sr.Prefix, sr.Threads, sr.Stdout, sr.Stderr, sr.Exit, true)
+	}
+	if err != nil {
+		return Calibration{}, err
+	}
+	if raw.IgnoredErrors > 0 && float64(raw.IgnoredErrors) > maxCalibIgnoredFraction*float64(raw.Reported) {
+		return Calibration{}, fmt.Errorf("sysbench ignored errors %d > %.0f%% of %d events", raw.IgnoredErrors, maxCalibIgnoredFraction*100, raw.Reported)
+	}
 	c, err := CalibrateFromEvents(raw.Events, 5*time.Second, o.Clients, o.Engine)
 	if err != nil {
-		return err
+		return c, err
 	}
-	return writeJSON(out, c)
+	c.IgnoredErrors = raw.IgnoredErrors
+	return c, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -118,3 +118,11 @@ Thêm runner chính thức `tools/g2bench` (sysbench/pgbench ngoài, p99 phía c
 10. **Đối chiếu bộ đếm sysbench.** Không dùng warmup-time, nên `total number of events` trong báo cáo sysbench phải bằng marker thô; `ignored errors` và `reconnects` phải bằng 0.
 
 Smoke trên máy dev (một governor, một lần, pha ngắn) chỉ chứng minh pipeline chạy; không phải bằng chứng Gate 2.
+
+## Amendment 2026-11-14 — calibrate chấp nhận deadlock ở bão hoà, trước mọi lần đo chính thức
+
+Trên máy dev (16 core, MySQL 8.4, 16 thread, 1 bảng sysbench 100k row), `g2bench calibrate` thất bại 4/4 lần: chạy không giới hạn tốc độ, sysbench oltp_read_write luôn gặp 1–2 deadlock và tự thử lại (`ignored errors: 1–2` trên ~130.000 event). Mục 10 đòi `ignored errors = 0` cho mọi lần chạy, nên calibrate không bao giờ chốt được biên độ. **Không đổi ngưỡng quyết định (§4), không đổi quy tắc cho lượt đo.**
+
+1. Riêng `calibrate`, `ignored errors` được chấp nhận nếu ≤ 1% số event, và được ghi vào `calibration.json` (`ignored_errors`). Vượt 1%, hoặc `reconnects` khác 0, vẫn là lỗi. Mọi kiểm tra khác giữ nguyên: marker, footer, số thứ tự, số event thô bằng tổng kết.
+2. Lượt đo (`run`) vẫn đòi `ignored errors = 0` như mục 10.
+3. `calibrate` xoá thư mục `calibrate-raw` cũ trước khi chạy. Sysbench bản patch mở file thô với O_EXCL, nên chạy lại trên thư mục cũ sẽ chết với EEXIST.

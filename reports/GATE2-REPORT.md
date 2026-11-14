@@ -57,6 +57,6 @@ Tiêu chí: spec/01-plan.md (Gate 2 — test bắt buộc; nhánh GRACE → bậ
 ## 5. Vấn đề mở
 
 - G2-12 chính thức (mục 3) và GRACE/breaker trên PG. Mốc độ trễ học từ dữ liệu cho breaker (b27a8eb, 4d65843) đã vào main; cần đo lại trên PG.
-- `g2bench calibrate` coi mọi `ignored errors` khác 0 là lỗi. Ở mức bão hòa với 16 thread trên 1 bảng, sysbench oltp_read_write luôn gặp vài deadlock, nên lệnh này không chạy được. Cần chọn: nới quy tắc cho riêng calibrate, hoặc dùng nhiều bảng app.
+- ~~`g2bench calibrate` không chạy được vì sysbench gặp deadlock ở mức bão hòa~~ → đã sửa (Amendment 2026-11-14 trong GATE2-BENCH-PROTOCOL): calibrate chấp nhận `ignored errors` ≤ 1% số event và ghi lại; lượt đo vẫn đòi 0. Chạy lại không còn vướng log thô cũ.
 - G2-7 (race TOAST PK trên PG): tạm hoãn. Bản sửa 2abd8a9 làm snapshot `app.items` đứng nên đã revert khỏi main.
 - Strict PG→PG ~280–300 Txn/s, chưa rõ nút thắt (không thuộc tiêu chí Gate 2 nhưng ảnh hưởng benchmark PG strict).

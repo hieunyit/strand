@@ -29,6 +29,9 @@ type SegmentRaw struct {
 	Reported   uint64 // số event client tự báo (so khớp với log thô)
 	RawFiles   []string
 	FailedRecs int
+	// IgnoredErrors: số lỗi sysbench bỏ qua và thử lại (deadlock...). Chỉ khác 0 khi parse với
+	// allowIgnored (calibrate); lượt đo luôn đòi 0.
+	IgnoredErrors uint64
 }
 
 // P99NearestRank: p99 nearest-rank của latency ns. Rỗng là lỗi (không có bằng chứng).
@@ -74,6 +77,12 @@ var (
 // exit != 0, thiếu/ trùng marker, footer sai, số thứ tự không liền, timestamp lùi,
 // số event thô lệch marker hoặc lệch bảng tổng kết của sysbench, ignored errors / reconnects != 0.
 func ParseSysbenchSegment(prefix string, threads int, stdoutPath, stderrPath string, exitCode int) (SegmentRaw, error) {
+	return parseSysbenchSegment(prefix, threads, stdoutPath, stderrPath, exitCode, false)
+}
+
+// parseSysbenchSegment: allowIgnored=true nhận ignored errors khác 0 (ghi vào IgnoredErrors) thay vì
+// lỗi; reconnects vẫn phải bằng 0 và mọi kiểm tra khác giữ nguyên. Chỉ calibrate dùng (Amendment 2026-11-14).
+func parseSysbenchSegment(prefix string, threads int, stdoutPath, stderrPath string, exitCode int, allowIgnored bool) (SegmentRaw, error) {
 	var res SegmentRaw
 	if exitCode != 0 {
 		return res, fmt.Errorf("sysbench exit code %d", exitCode)
@@ -103,9 +112,14 @@ func ParseSysbenchSegment(prefix string, threads int, stdoutPath, stderrPath str
 		if mm == nil {
 			return res, errors.New("sysbench stdout lacks ignored errors / reconnects counters")
 		}
-		if string(mm[1]) != "0" {
-			return res, fmt.Errorf("sysbench reported %s", strings.TrimSpace(string(mm[0])))
+		if string(mm[1]) == "0" {
+			continue
 		}
+		if re == reSbIgnored && allowIgnored {
+			res.IgnoredErrors, _ = strconv.ParseUint(string(mm[1]), 10, 64)
+			continue
+		}
+		return res, fmt.Errorf("sysbench reported %s", strings.TrimSpace(string(mm[0])))
 	}
 	paths, err := filepath.Glob(prefix + ".[0-9]*")
 	if err != nil {
