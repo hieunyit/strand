@@ -101,7 +101,7 @@ func openSchemaStore() (*config.Config, *sql.DB, *schemachange.Store, error) {
 
 func printSchemaChange(cmd *cobra.Command, c schemachange.Change) {
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "#%d  [%s]  %s  at %s  (%s)\n", c.ID, c.Status, c.Classification, c.SourcePos, c.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(out, "#%d  [%s]  %s  at %s  (%s)\n", c.ID, c.Status, c.Classification, c.SourcePos, c.CreatedAt)
 	fmt.Fprintf(out, "  source DDL: %s\n", strings.TrimSpace(c.SourceDDL))
 	fmt.Fprintf(out, "  changes:    %s\n", c.Reason)
 	fmt.Fprintln(out, "  proposed target DDL:")

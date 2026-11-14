@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"strand/internal/exitcode"
 	"strand/internal/schemagen"
@@ -36,7 +35,7 @@ type Change struct {
 	Classification string   // additive | destructive
 	Reason         string   // mô tả các thay đổi
 	Status         string
-	CreatedAt      time.Time
+	CreatedAt      string // văn bản (DSN MySQL không nhất thiết bật parseTime)
 }
 
 // Store truy cập bảng trạng thái. pg: target là PostgreSQL.
@@ -165,14 +164,20 @@ func scan(rows interface{ Scan(...any) error }) (Change, error) {
 	return c, nil
 }
 
-const cols = `id, pipeline_id, source_pos, source_ddl, proposed_ddl, classification, reason, status, created_at`
+func (s *Store) cols() string {
+	ts := "CAST(created_at AS CHAR)"
+	if s.pg {
+		ts = "created_at::text"
+	}
+	return `id, pipeline_id, source_pos, source_ddl, proposed_ddl, classification, reason, status, ` + ts
+}
 
 // List trả các thay đổi của pipeline (mặc định chỉ pending/approved; all=true gồm cả applied), theo id tăng.
 func (s *Store) List(ctx context.Context, pipeline string, all bool) ([]Change, error) {
 	if !s.exists(ctx) {
 		return nil, nil
 	}
-	q := `SELECT ` + cols + ` FROM ` + table + ` WHERE pipeline_id=?`
+	q := `SELECT ` + s.cols() + ` FROM ` + table + ` WHERE pipeline_id=?`
 	if !all {
 		q += ` AND status IN ('pending','approved')`
 	}
@@ -197,7 +202,7 @@ func (s *Store) Get(ctx context.Context, id int64) (Change, error) {
 	if !s.exists(ctx) {
 		return Change{}, ErrNotFound
 	}
-	c, err := scan(s.db.QueryRowContext(ctx, s.q(`SELECT `+cols+` FROM `+table+` WHERE id=?`), id))
+	c, err := scan(s.db.QueryRowContext(ctx, s.q(`SELECT `+s.cols()+` FROM `+table+` WHERE id=?`), id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Change{}, ErrNotFound
 	}
