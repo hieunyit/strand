@@ -150,10 +150,7 @@ func ReadEnvFile(path string) ([]string, error) {
 			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE", path, n)
 		}
 		v = strings.TrimSpace(v)
-		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
-			v = v[1 : len(v)-1]
-		}
-		out = append(out, k+"="+v)
+		out = append(out, k+"="+parseEnvValue(v))
 	}
 	return out, sc.Err()
 }
@@ -175,6 +172,8 @@ type Registry struct {
 	byName map[string]*Pipeline
 	order  []string
 	warns  []string
+
+	createdMu sync.Mutex
 
 	unitMu    sync.Mutex
 	unitCache map[string]unitCacheEntry
@@ -226,6 +225,25 @@ func (r *Registry) Refresh(ctx context.Context) {
 		}
 		byName[e.Name] = &Pipeline{Name: e.Name, ConfigPath: e.Config, EnvFile: e.EnvFile, SystemdUnit: unit,
 			LogFile: e.LogFile, PidFile: e.PidFile, Origin: "web.yaml"}
+	}
+	// Pipeline tạo từ web: <state_dir>/pipelines.json. Entry tường minh trong web.yaml thắng cùng tên.
+	created, cerr := r.loadCreated()
+	if cerr != nil {
+		warns = append(warns, cerr.Error())
+	}
+	for _, e := range created {
+		if !ValidName(e.Name) || e.Config == "" {
+			warns = append(warns, fmt.Sprintf("%s: entry %q skipped: invalid name or empty config", CreatedFile, e.Name))
+			continue
+		}
+		if prev, dup := byName[e.Name]; dup {
+			if prev.Origin == "web.yaml" {
+				warns = append(warns, fmt.Sprintf("pipeline %q is in both web.yaml and %s: using the web.yaml entry", e.Name, r.createdPath()))
+			}
+			continue
+		}
+		byName[e.Name] = &Pipeline{Name: e.Name, ConfigPath: e.Config, EnvFile: e.EnvFile, SystemdUnit: e.SystemdUnit,
+			LogFile: e.LogFile, PidFile: e.PidFile, Origin: "created"}
 	}
 	for _, pat := range r.cfg.Scan {
 		matches, err := filepath.Glob(pat)

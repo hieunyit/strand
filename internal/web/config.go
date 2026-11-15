@@ -20,16 +20,16 @@ import (
 
 // PipelineEntry khai báo một pipeline trong web.yaml (mục `pipelines`).
 type PipelineEntry struct {
-	Name string `yaml:"name"`
+	Name string `yaml:"name" json:"name"`
 	// Config: đường dẫn file cấu hình pipeline (YAML của `strand sync -c`).
-	Config string `yaml:"config"`
+	Config string `yaml:"config" json:"config"`
 	// EnvFile: file KEY=VALUE nạp vào môi trường tiến trình con (chế độ nền); tùy chọn.
-	EnvFile string `yaml:"env_file,omitempty"`
+	EnvFile string `yaml:"env_file,omitempty" json:"env_file,omitempty"`
 	// SystemdUnit: có thì dùng systemctl/journalctl; không có thì dùng `strand sync --background`.
-	SystemdUnit string `yaml:"systemd_unit,omitempty"`
+	SystemdUnit string `yaml:"systemd_unit,omitempty" json:"systemd_unit,omitempty"`
 	// LogFile, PidFile: ghi đè đường dẫn mặc định của chế độ nền (<resources.spool.path>/strand.log|pid).
-	LogFile string `yaml:"log_file,omitempty"`
-	PidFile string `yaml:"pid_file,omitempty"`
+	LogFile string `yaml:"log_file,omitempty" json:"log_file,omitempty"`
+	PidFile string `yaml:"pid_file,omitempty" json:"pid_file,omitempty"`
 }
 
 // Config là web.yaml.

@@ -690,8 +690,13 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	}
 	var envBuf bytes.Buffer
 	envBuf.WriteString(fmt.Sprintf("# Environment variables for pipeline %s\n", opts.Name))
-	envBuf.WriteString(fmt.Sprintf("export %s=%q\n", srcEnv, opts.SourcePassword))
-	envBuf.WriteString(fmt.Sprintf("export %s=%q\n", dstEnv, opts.TargetPassword))
+	for _, kv := range [][2]string{{srcEnv, opts.SourcePassword}, {dstEnv, opts.TargetPassword}} {
+		line, err := formatEnvLine(kv[0], kv[1])
+		if err != nil {
+			return nil, err
+		}
+		envBuf.WriteString(line)
+	}
 
 	tmpEnv, err := os.CreateTemp(configDir, ".env-init-*")
 	if err != nil {
@@ -745,7 +750,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	}
 
 	// Đăng ký pipeline vào registry:
-	// Nếu configDir không khớp bất kỳ mẫu scan nào, thêm vào s.cfg.Pipelines và web.yaml
+	// Nếu configDir không khớp bất kỳ mẫu scan nào, ghi vào <state_dir>/pipelines.json
 	coveredByScan := false
 	for _, pat := range s.cfg.Scan {
 		if matched, _ := filepath.Match(pat, yamlPath); matched {
@@ -759,9 +764,9 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		EnvFile: envPath,
 	}
 	if !coveredByScan {
-		s.cfg.Pipelines = append(s.cfg.Pipelines, entry)
-		if s.cfg.SourcePath != "" && isWritableDir(filepath.Dir(s.cfg.SourcePath)) {
-			_ = AddPipelineToWebConfig(s.cfg.SourcePath, entry)
+		// Nguồn sự thật duy nhất: <state_dir>/pipelines.json (luôn ghi được, kể cả khi /etc/strand read-only).
+		if err := s.reg.AddCreated(entry); err != nil {
+			return nil, fmt.Errorf("pipeline files written but registering in %s failed: %w", s.reg.createdPath(), err)
 		}
 	}
 	s.reg.Refresh(ctx)
