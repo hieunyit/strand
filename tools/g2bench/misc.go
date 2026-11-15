@@ -136,6 +136,21 @@ func freshCalibrateDir(dir string) error {
 	return os.MkdirAll(filepath.Join(dir, "raw"), 0o755)
 }
 
+// overheadRawDir: log thô của pilot overhead nằm trong <thư mục của --out>/overhead-raw/raw, xoá sạch
+// mỗi lần chạy. Trước đây file thô nằm thẳng cạnh --out: chạy lại lần hai thì sysbench bản patch (mở
+// file thô với O_EXCL) chết với EEXIST, như lỗi của calibrate.
+func overheadRawDir(out string) (string, error) {
+	outAbs, err := filepath.Abs(out)
+	if err != nil {
+		return "", err
+	}
+	d := filepath.Join(filepath.Dir(outAbs), "overhead-raw")
+	if err := freshCalibrateDir(d); err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "raw"), nil
+}
+
 // calibrationFromSegment: parse đoạn chạy không giới hạn tốc độ, chấp nhận ignored errors tới
 // maxCalibIgnoredFraction (deadlock ở bão hoà), rồi tính biên độ.
 func calibrationFromSegment(o Opts, sr SegmentRun) (Calibration, error) {
@@ -249,8 +264,10 @@ func overheadCmd(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	if err != nil {
 		return err
 	}
-	outAbs, _ := filepath.Abs(out)
-	dir := filepath.Dir(outAbs)
+	dir, err := overheadRawDir(out)
+	if err != nil {
+		return err
+	}
 	var rs []OverheadRound
 	for i := 0; i < rounds; i++ {
 		order := []string{"pristine", "patched"}

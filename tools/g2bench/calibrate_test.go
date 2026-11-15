@@ -84,3 +84,25 @@ func TestFreshCalibrateDirRemovesOldRawLogs(t *testing.T) {
 		t.Fatalf("raw dir missing: %v", err)
 	}
 }
+
+// Pilot overhead chạy lần hai trên cùng --out: log thô cũ phải bị xoá (EEXIST với O_EXCL), và log thô
+// không còn nằm lẫn cạnh file kết quả.
+func TestOverheadRawDirFreshEachRun(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "overhead.json")
+	d, err := overheadRawDir(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d == filepath.Dir(out) {
+		t.Fatal("raw logs must not share the --out directory")
+	}
+	stale := filepath.Join(d, "overhead-0-patched.0")
+	writeFile(t, stale, "stale")
+	d2, err := overheadRawDir(out)
+	if err != nil || d2 != d {
+		t.Fatalf("second run dir %q err %v", d2, err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale raw log survived: %v", err)
+	}
+}
