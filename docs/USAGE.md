@@ -792,7 +792,7 @@ Lưu binlog liên tục từ một MySQL (nên là replica) vào thư mục, tha
 | `/usr/lib/systemd/system/strand@.service` | Unit template, một instance mỗi pipeline |
 | `/usr/lib/systemd/system/strand-web.service` | Unit của Web UI (7.15), chạy `User=strand`; chưa bật sẵn |
 | `/etc/strand/` | root:strand 0750; đặt `<name>.yaml` (0640) và `<name>.env` (0600) |
-| `/usr/share/doc/strand/` | `USAGE.md`, ví dụ `pipeline.yaml`, `pipeline.env`, `web.yaml` |
+| `/usr/share/doc/strand/` | `INSTALL.md`, `USAGE.md`, ví dụ `pipeline.yaml`, `pipeline.env`, `web.yaml` |
 | `/var/lib/strand/<name>`, `/run/strand/<name>` | systemd tạo (StateDirectory / RuntimeDirectory) |
 
 ```bash
@@ -809,6 +809,8 @@ sudo systemctl enable --now strand@orders-sync
 - Chưa có: chữ ký gói (03 §4 yêu cầu ký); ký file `.sha256` bằng khóa phát hành của tổ chức.
 
 ### 7.15 `web` (Web UI)
+
+Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, sự cố thường gặp): [INSTALL.md](INSTALL.md).
 
 `strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng, chế độ sửa YAML và .env), **Logs**. Từ M3 có **thao tác**; M5 có **sửa cấu hình** và **tạo pipeline mới**; từ M4 có **wizard Repair và Promote** (đoạn dưới). REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 

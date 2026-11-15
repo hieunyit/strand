@@ -1,5 +1,6 @@
 # /etc/strand/web.yaml — cấu hình Web UI (strand web --config /etc/strand/web.yaml).
-# Quyền file: 0600 hoặc root:strand 0660 nếu `strand web passwd` chạy bằng user strand. `passwd` ghi lại file ở 0600.
+# Quyền file: `passwd`/`token` ghi lại file ở 0600 thuộc người chạy (thường root vì /etc/strand là của root);
+# sau mỗi lần chạy: chown root:strand + chmod 0640 để user strand (chạy strand-web) đọc được. Xem docs/INSTALL.md mục 5.2.
 #
 # Bước đầu: strand web passwd --config /etc/strand/web.yaml     (ghi password_hash)
 # Token cho script (tùy chọn): strand web token --config /etc/strand/web.yaml

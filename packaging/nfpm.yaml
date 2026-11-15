@@ -39,6 +39,9 @@ contents:
   - src: packaging/pipeline.env.example
     dst: /usr/share/doc/strand/examples/pipeline.env
     file_info: { mode: 0644, owner: root, group: root }
+  - src: docs/INSTALL.md
+    dst: /usr/share/doc/strand/INSTALL.md
+    file_info: { mode: 0644, owner: root, group: root }
   - src: docs/USAGE.md
     dst: /usr/share/doc/strand/USAGE.md
     file_info: { mode: 0644, owner: root, group: root }
