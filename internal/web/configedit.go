@@ -422,7 +422,11 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 	b.WriteString(fmt.Sprintf("# Environment variables for pipeline %s\n", p.Name))
 	for _, k := range keys {
 		v := merged[k]
-		b.WriteString(fmt.Sprintf("export %s=%q\n", k, v))
+		line, err := formatEnvLine(k, v)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(line)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".env-save-*")
@@ -556,7 +560,12 @@ func (s *Server) apiEnvSave(w http.ResponseWriter, r *http.Request, sess *Sessio
 	}
 	bak, err := s.saveEnvContent(r.Context(), p, req.Entries, s.clientIP(r))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		var ae *ActionError
+		if errors.As(err, &ae) {
+			status = ae.Status
+		}
+		writeErr(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
