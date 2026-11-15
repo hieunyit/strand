@@ -44,6 +44,8 @@ type Config struct {
 	APITokenHash string `yaml:"api_token_hash,omitempty"`
 	// StateDir: thư mục ghi audit log (và trạng thái web về sau).
 	StateDir string `yaml:"state_dir,omitempty"`
+	// ConfigDir: thư mục lưu cấu hình pipeline mới (M5). Mặc định /etc/strand nếu ghi được, nếu không thì state_dir/pipelines.
+	ConfigDir string `yaml:"config_dir,omitempty"`
 	// Scan: glob các file cấu hình pipeline, ví dụ /etc/strand/*.yaml.
 	Scan      []string        `yaml:"scan,omitempty"`
 	Pipelines []PipelineEntry `yaml:"pipelines,omitempty"`

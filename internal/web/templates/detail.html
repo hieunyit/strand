@@ -122,7 +122,58 @@
     <p class="muted small mono">{{.Config.Path}}</p>
     {{if .Config.Error}}<p class="err">{{.Config.Error}}</p>{{end}}
     {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
-    {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code">{{.Config.YAML}}</pre>{{end}}
+    
+    <div style="margin-bottom:12px;">
+      <button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>
+    </div>
+
+    <div id="cfg-view-mode">
+      {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code">{{.Config.YAML}}</pre>{{end}}
+    </div>
+
+    <div id="cfg-edit-mode" hidden>
+      <form id="cfg-edit-form" data-pipeline="{{.View.Name}}">
+        <p class="muted small">Edit YAML configuration below. Saving validates syntax via <code>strand validate</code>, shows diff, keeps a timestamped backup, and writes atomically.</p>
+        <textarea name="yaml" id="cfg-yaml-textarea" class="code wide" rows="22" style="width:100%; min-height:350px; font-family:monospace;">{{.Config.YAML}}</textarea>
+        <div style="margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <button class="btn" type="button" id="cfg-btn-diff">Validate &amp; Preview Diff</button>
+          <label style="margin-left:8px;"><input type="checkbox" name="restart" id="cfg-restart-check" value="true"> Restart pipeline after saving</label>
+          <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
+          <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
+        </div>
+      </form>
+      <div id="cfg-diff-box" style="margin-top:14px;" hidden>
+        <h3>Validation &amp; Diff</h3>
+        <div id="cfg-val-status" style="margin-bottom:8px;"></div>
+        <pre class="code" id="cfg-diff-output"></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="card"><h2>Credentials &amp; Environment (.env)</h2>
+    <p class="muted small mono">{{.Env.Path}}</p>
+    {{if .Env.Error}}<p class="err">{{.Env.Error}}</p>{{end}}
+    <p class="muted small">Environment variables used by the pipeline process. Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.</p>
+    <form id="env-edit-form" data-pipeline="{{.View.Name}}">
+      <table class="grid" style="max-width:600px; margin-bottom:12px;">
+        <thead><tr><th>Variable</th><th>Value</th></tr></thead>
+        <tbody id="env-entries-body">
+          {{range $k, $v := .Env.Entries}}
+          <tr>
+            <td class="mono"><b>{{$k}}</b></td>
+            <td><input type="password" name="env_{{$k}}" data-key="{{$k}}" value="********" placeholder="Leave unchanged (********)" class="mono wide" autocomplete="new-password"></td>
+          </tr>
+          {{else}}
+          <tr><td colspan="2" class="muted">No variables in .env yet.</td></tr>
+          {{end}}
+          <tr id="env-new-row">
+            <td><input type="text" id="env-new-key" placeholder="NEW_VAR" class="mono" style="width:140px;"></td>
+            <td><input type="password" id="env-new-val" placeholder="Value" class="mono wide" autocomplete="new-password"></td>
+          </tr>
+        </tbody>
+      </table>
+      <button class="btn primary" type="button" id="env-btn-save">Save .env</button>
+    </form>
   </section>
 {{end}}
 

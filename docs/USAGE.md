@@ -806,7 +806,7 @@ sudo systemctl enable --now strand@orders-sync
 
 ### 7.15 `web` (Web UI)
 
-`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng), **Logs**. Từ M3 có **thao tác** (đoạn dưới), từ M4 có **wizard Repair và Promote**; sửa cấu hình làm ở mốc sau. REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
+`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng, chế độ sửa YAML và .env), **Logs**. Từ M3 có **thao tác**; M5 có **sửa cấu hình** và **tạo pipeline mới**; từ M4 có **wizard Repair và Promote** (đoạn dưới). REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
@@ -819,6 +819,7 @@ listen: 127.0.0.1:8080          # không phải loopback thì bắt buộc TLS
 # tls_cert: /etc/strand/web.crt
 # tls_key:  /etc/strand/web.key
 state_dir: /var/lib/strand-web  # audit.log (JSON lines, 0600)
+# config_dir: /etc/strand       # tùy chọn: thư mục lưu pipeline mới tạo (mặc định /etc/strand nếu ghi được, không thì state_dir/pipelines)
 scan:                           # mỗi file là một pipeline; tên pipeline = tên file bỏ .yaml
   - /etc/strand/*.yaml          # (web.yaml bị bỏ qua); <name>.env cùng thư mục được nhận làm env_file
 pipelines:                      # khai báo tường minh, thắng scan cùng tên
@@ -899,6 +900,16 @@ Trạng thái lưu ở `<state_dir>/wizards/repair-<pipeline>.json` (0600): tả
 4. Sau khi xong: chuyển ứng dụng sang target rồi bấm Stop pipeline (promote giữ `sync` chạy).
 
 DSN target (`--target`) và DSN source để fence (`--fence`, tùy chọn khi failover vì source đã chết) do người dùng nhập mỗi lần chạy, **không bao giờ lưu**; chúng thành đối số của tiến trình con `strand` (user `strand` xem được trong danh sách tiến trình lúc nó chạy) nhưng bị che trong audit log và lịch sử job (`--target=<hidden>`). Dùng tài khoản promote (ví dụ `strand_admin`, mục 7.10), không dùng tài khoản replication. Trạng thái wizard lưu ở `<state_dir>/wizards/promote-<pipeline>.json` (không có DSN). Mọi bước đi qua `POST .../actions/<action>` (docs/WEB-API.md §4.4), có audit và dùng chung quy tắc một job mỗi pipeline.
+
+**Sửa cấu hình (M5).** Tab **Config** của từng pipeline có chế độ sửa trực tiếp (textarea YAML) và trình quản lý file `.env`:
+- Lưu cấu hình YAML: (a) ghi ra file tạm cùng thư mục, (b) chạy `strand validate -c <tmp>` với biến môi trường của pipeline, (c) hiển thị kết quả kiểm tra và diff so với file hiện tại, (d) lưu bản sao lưu `<file>.bak.<timestamp>` và ghi đè nguyên tử `os.Rename`, (e) tùy chọn Restart pipeline sau khi lưu. Nếu cú pháp lỗi, validate thất bại thì không ghi đè.
+- Quản lý `.env`: mật khẩu và giá trị bí mật không bao giờ lộ ra ngoài giao diện/API (hiển thị `********`). Khi sửa, giá trị bí mật là write-only (để nguyên `********` thì giữ giá trị cũ, nhập mới thì cập nhật). File `.env` luôn được lưu với quyền bảo mật **0600**.
+
+**Tạo pipeline mới (M5).** Trang `/pipelines/new` cung cấp form trực quan để tạo pipeline mới tương tự `strand config init`:
+- Tên pipeline được kiểm tra theo whitelist chặt chẽ (từ chối tên trùng lặp và chặn path traversal).
+- Hỗ trợ các engine nguồn (MySQL, MariaDB, PostgreSQL) và đích (PostgreSQL, MySQL).
+- Mật khẩu nguồn/đích được ghi trực tiếp vào file `.env` (mode 0600) trong `config_dir` (khai báo ở `web.yaml`, mặc định `/etc/strand` nếu ghi được, ngược lại `<state_dir>/pipelines`). File cấu hình YAML chỉ tham chiếu biến môi trường qua `${SRC_PW}` hoặc `password_env`.
+- Sau khi tạo, server tự động thực hiện `strand validate` và `strand plan`, hiển thị kết quả trực tiếp và cung cấp nút **Start** để khởi động pipeline ngay ở chế độ nền (background). Pipeline mới được tự động thêm vào registry (và `web.yaml`) và có hiệu lực ngay lập tức.
 
 ---
 
