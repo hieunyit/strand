@@ -364,6 +364,21 @@ func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (Ac
 	}
 }
 
+// systemctlDeniedHint: gợi ý theo động từ khi systemctl thất bại. Gói cài quy tắc polkit
+// (packaging/polkit/50-strand.rules) chỉ cho user strand start/stop/restart strand@*.service;
+// enable/disable (manage-unit-files) không giới hạn được theo unit nên cố ý không cấp.
+func systemctlDeniedHint(verb, unit, msg string) string {
+	denied := strings.Contains(msg, "Interactive authentication required") || strings.Contains(msg, "Access denied")
+	switch {
+	case denied && (verb == "enable" || verb == "disable"):
+		return fmt.Sprintf("enable/disable at boot is not delegated to the web user; run on the server: sudo systemctl %s %s", verb, unit)
+	case denied:
+		return "the web user is not allowed to manage this unit: install the polkit rule 50-strand.rules (shipped in the package; manual install: copy packaging/polkit/50-strand.rules to /etc/polkit-1/rules.d/), see docs/INSTALL.md 5.3"
+	default:
+		return "see the unit's journal: journalctl -u " + unit
+	}
+}
+
 // systemctl start|stop|restart|enable|disable <unit>. Cần quyền của user đang chạy web (không dùng sudo/polkit).
 func (s *Server) systemctl(ctx context.Context, verb string, p *Pipeline) (ActionResult, error) {
 	out, err := s.reg.cmd.Run(withCmdTimeout(ctx, actionTimeout), "systemctl", verb, p.SystemdUnit)
@@ -373,7 +388,7 @@ func (s *Server) systemctl(ctx context.Context, verb string, p *Pipeline) (Actio
 		if msg == "" {
 			msg = err.Error()
 		}
-		return res, &ActionError{Status: 502, Msg: fmt.Sprintf("systemctl %s %s failed: %s (the web user needs permission to manage the unit; see docs/USAGE.md 7.15)", verb, p.SystemdUnit, msg)}
+		return res, &ActionError{Status: 502, Msg: fmt.Sprintf("systemctl %s %s failed: %s (%s)", verb, p.SystemdUnit, msg, systemctlDeniedHint(verb, p.SystemdUnit, msg))}
 	}
 	res.Message = fmt.Sprintf("systemctl %s %s: ok", verb, p.SystemdUnit)
 	s.reg.invalidateUnit(p.SystemdUnit)

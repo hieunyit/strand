@@ -806,7 +806,7 @@ sudo systemctl enable --now strand@orders-sync
 
 - Cài gói tạo user/group hệ thống `strand`, không tự bật pipeline nào.
 - Nâng cấp: pipeline đang chạy giữ binary cũ tới khi `systemctl restart strand@<name>` (an toàn nhờ checkpoint).
-- Gỡ gói: dừng và disable mọi `strand@*`, và `strand stop` các pipeline chế độ nền (từng `/etc/strand/*.yaml` trừ `web.yaml`, chạy bằng user `strand`). Không xóa `/etc/strand`, `/var/lib/strand` hay user, kể cả khi purge.
+- Gỡ gói: dừng và disable mọi `strand@*`, và `strand stop` các pipeline chế độ nền (từng `/etc/strand/*.yaml` trừ `web.yaml` và `/var/lib/strand-web/pipelines/*.yaml`, chạy bằng user `strand`). Không xóa `/etc/strand`, `/var/lib/strand` hay user, kể cả khi purge.
 - Chưa có: chữ ký gói (03 §4 yêu cầu ký); ký file `.sha256` bằng khóa phát hành của tổ chức.
 
 ### 7.15 `web` (Web UI)

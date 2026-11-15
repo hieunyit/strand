@@ -357,3 +357,22 @@ func TestOpsPagesRenderControls(t *testing.T) {
 }
 
 func toJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+// Bị polkit từ chối: enable/disable chỉ dẫn chạy sudo systemctl trên máy chủ; start/stop/restart chỉ dẫn cài quy tắc polkit.
+func TestOpsSystemdDeniedHints(t *testing.T) {
+	e := opsEnv(t, true, nil)
+	e.cmd.out["systemctl "] = ""
+	c, csrf := e.loginOK()
+	e.cmd.fail = map[string]int{"systemctl enable": 1, "systemctl disable": 1, "systemctl start": 1}
+	for verb, want := range map[string]string{
+		"enable":  "sudo systemctl enable strand@orders.service",
+		"disable": "sudo systemctl disable strand@orders.service",
+		"start":   "50-strand.rules",
+	} {
+		code, body := e.act(c, csrf, "orders", verb, nil)
+		msg, _ := body["error"].(string)
+		if code != 502 || !strings.Contains(msg, want) {
+			t.Errorf("%s: %d %q, want 502 containing %q", verb, code, msg, want)
+		}
+	}
+}

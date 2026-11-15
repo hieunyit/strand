@@ -19,7 +19,7 @@ Mục lục: 1 Yêu cầu và thành phần, 2 Cài đặt, 3 DB nguồn/đích,
 | Cấu hình | `/etc/strand/` | `<name>.yaml`, `<name>.env`, `web.yaml` |
 | State pipeline | `/var/lib/strand/<name>/` | systemd tạo (`StateDirectory`); spool, log chế độ nền |
 | Socket quản trị | `/run/strand/<name>/admin.sock` | systemd tạo (`RuntimeDirectory`) |
-| State Web UI | `/var/lib/strand-web/` | `audit.log`, `jobs/`, `wizards/`, `pipelines/` (pipeline tạo từ web nếu không ghi được `/etc/strand`) |
+| State Web UI | `/var/lib/strand-web/` | `audit.log`, `jobs/`, `wizards/`, `pipelines.json` (danh sách pipeline tạo từ web), `pipelines/` (file của chúng nếu không ghi được `/etc/strand`) |
 
 Checkpoint của pipeline nằm ở **target** (bảng `_strand_*`), nên mất `/var/lib/strand/<name>` không mất vị trí đồng bộ nhưng buộc snapshot lại phần local (xem mục 8).
 
@@ -40,6 +40,7 @@ Gói làm các việc sau (đối chiếu `packaging/scripts/*.sh`, `packaging/n
 - Tạo group và user hệ thống `strand` (home `/var/lib/strand`, shell `/usr/sbin/nologin`), không đổi user đã có.
 - Tạo `/etc/strand` (root:strand, 0750).
 - Cài `/usr/bin/strand`, `strand@.service`, `strand-web.service` vào `/usr/lib/systemd/system/` rồi `systemctl daemon-reload`.
+- Cài quy tắc polkit `/usr/share/polkit-1/rules.d/50-strand.rules`: user `strand` (Web UI) được start/stop/restart đúng các unit `strand@<name>.service`, không gì khác (mục 5.3).
 - Chép tài liệu và ví dụ vào `/usr/share/doc/strand/`: `INSTALL.md`, `USAGE.md`, `examples/pipeline.yaml`, `examples/pipeline.env`, `examples/web.yaml`.
 - **Không** bật pipeline hay Web UI nào.
 
@@ -56,6 +57,7 @@ sudo useradd --system --gid strand --home-dir /var/lib/strand --no-create-home \
 sudo install -d -m 0750 -o root -g strand /etc/strand
 
 sudo cp deploy/systemd/strand@.service deploy/systemd/strand-web.service /etc/systemd/system/
+sudo cp packaging/polkit/50-strand.rules /etc/polkit-1/rules.d/     # cho Web UI start/stop strand@* (polkit >= 0.106)
 sudo systemctl daemon-reload
 ```
 
@@ -157,12 +159,11 @@ Cách quản lý một pipeline: có `systemd_unit` (hoặc, với `scan`, unit 
 ```bash
 sudo strand web passwd --config /etc/strand/web.yaml        # hỏi hai lần; 8 đến 72 ký tự
 sudo strand web token  --config /etc/strand/web.yaml        # tùy chọn: in token MỘT lần, lưu sha256
-sudo chown root:strand /etc/strand/web.yaml; sudo chmod 0640 /etc/strand/web.yaml
 ```
 
 - Không có TTY: `echo 'mật-khẩu' | sudo strand web passwd --config /etc/strand/web.yaml`.
 - Một tài khoản admin duy nhất, không có mật khẩu mặc định. Chưa đặt mật khẩu thì `strand web` thoát exit 2.
-- Cả hai lệnh ghi lại `web.yaml` bằng cách tạo file tạm cùng thư mục rồi đổi tên nguyên tử, giữ chú thích và khóa khác, và đặt mode **0600** thuộc người chạy lệnh. `/etc/strand` là thư mục của root nên phải chạy bằng `sudo`; kết quả là file root:root 0600 mà user `strand` **không đọc được**, vì thế bước `chown root:strand` + `chmod 0640` ở trên bắt buộc, và phải làm lại sau mỗi lần chạy `passwd`/`token`.
+- Cả hai lệnh ghi lại `web.yaml` nguyên tử (file tạm cùng thư mục rồi đổi tên), giữ chú thích và khóa khác, và **giữ nguyên chủ sở hữu và mode** của file cũ: root:strand 0640 vẫn là root:strand 0640, nên user `strand` vẫn đọc được. Vì file chứa hash, bit "other" và quyền ghi của group luôn bị bỏ (0644 thành 0640, có in một dòng ghi chú). File chưa có thì tạo 0600. `/etc/strand` là thư mục của root nên chạy bằng `sudo`; chạy không đủ quyền để giữ chủ sở hữu thì lệnh báo lỗi và không sửa file.
 - Token chỉ hiện một lần (chạy lại `token` thì token cũ mất hiệu lực). Giữ như mật khẩu.
 
 ### 5.3 Quyền để web quản lý được pipeline
@@ -175,15 +176,16 @@ sudo chown root:strand /etc/strand/web.yaml; sudo chmod 0640 /etc/strand/web.yam
 | Đọc `.env` (xem/sửa trên tab Config, nạp env cho `validate`, `verify`, chế độ nền) | Đổi `.env` thành root:strand `0640` |
 | Gọi admin socket | Pipeline phải chạy bằng user `strand` (unit mẫu đã vậy); socket 0700 của user khác thì web báo `unreachable`/`stopped` |
 | Xem log systemd | `sudo usermod -aG systemd-journal strand`, rồi restart `strand-web` |
-| Start/Stop/Restart pipeline systemd từ web | `systemctl start strand@x` chạy bằng user `strand` nên **mặc định bị từ chối** (lỗi 502 kèm thông báo systemctl). Cần quy tắc polkit do bạn viết (ví dụ cho user `strand` quyền `org.freedesktop.systemd1.manage-units` với unit `strand@*.service`), hoặc quản lý start/stop bằng CLI/chế độ nền |
+| Start/Stop/Restart pipeline systemd từ web | Quy tắc polkit `50-strand.rules` (gói cài sẵn; cài tay: mục 2b) cho user `strand` đúng ba động từ start/stop/restart trên `strand@<name>.service`. Unit khác, `daemon-reload` vẫn bị từ chối |
+| Enable/Disable at boot từ web | **Không cấp**: quyền này (`manage-unit-files`) không giới hạn được theo unit. Web trả 502 kèm lệnh cần chạy: `sudo systemctl enable strand@<name>` |
 
-Unit web đặt `ProtectSystem=strict`: web **chỉ ghi được** `/var/lib/strand-web` (và `/dev`, `/tmp`...), không ghi được `/etc`. Hệ quả:
+Unit web đặt `ProtectSystem=strict`: web (và tiến trình con của nó) **chỉ ghi được** `/var/lib/strand-web` (và `/dev`, `/tmp`...), không ghi được `/etc`. Hệ quả:
 
-- Tạo pipeline từ web: `config_dir` mặc định rơi về `/var/lib/strand-web/pipelines` (ghi được); YAML và `.env` nằm ở đó, spool ở `/var/lib/strand-web/pipelines/<name>/spool`.
-- Pipeline tạo từ web được thêm vào registry trong RAM và ghi vào `web.yaml` **chỉ khi thư mục chứa `web.yaml` ghi được**. Với cài đặt chuẩn (`/etc/strand` read-only với web) bước ghi này bị bỏ qua, nên sau khi `strand-web` restart pipeline đó **không còn trong danh sách** (file vẫn còn). Cách xử lý: thêm tay vào `web.yaml` mục `pipelines:` (`name`, `config`, `env_file`), hoặc đặt `config_dir: /var/lib/strand-web/pipelines` và `scan` thêm `/var/lib/strand-web/pipelines/*.yaml` (lưu ý scan sẽ nhận chế độ systemd nếu `strand@<name>` tồn tại, mà unit đó đọc `/etc/strand/<name>.env`; pipeline kiểu này nên khai tường minh trong `pipelines:` không có `systemd_unit`).
-- Sửa cấu hình trên tab Config (ghi `.bak.<timestamp>` và đổi tên file tạm trong cùng thư mục) với file ở `/etc/strand` sẽ thất bại. Muốn cho phép: tạo drop-in `sudo systemctl edit strand-web` với `[Service]` / `ReadWritePaths=/etc/strand`, và cho nhóm strand quyền ghi thư mục (`sudo chmod 0770 /etc/strand`). Đây là lựa chọn bảo mật của bạn: user `strand` khi đó sửa được mọi cấu hình pipeline.
+- Tạo pipeline từ web: `config_dir` mặc định rơi về `/var/lib/strand-web/pipelines`; YAML và `.env` nằm ở đó, spool ở `/var/lib/strand-web/pipelines/<name>/spool`. Danh sách pipeline tạo từ web lưu ở `/var/lib/strand-web/pipelines.json` (0600), nên còn nguyên sau khi `strand-web` restart; không cần ghi được `web.yaml`. Khai báo cùng tên trong `web.yaml` (`pipelines:`) thắng, kèm cảnh báo.
+- Pipeline chế độ nền do web khởi động cũng chỉ ghi được dưới `/var/lib/strand-web`: spool/state của nó phải nằm ở đó (pipeline tạo từ web đã vậy). Pipeline khai tay mà spool ở chỗ khác (ví dụ `/var/lib/strand/<name>`) thì thêm drop-in `ReadWritePaths=` (dưới đây) hoặc chạy bằng `strand@<name>`.
+- Sửa cấu hình trên tab Config (ghi `.bak.<timestamp>` và đổi tên file tạm trong cùng thư mục) với file ở `/etc/strand` sẽ thất bại. Muốn cho phép: tạo drop-in `sudo systemctl edit strand-web` với `[Service]` / `ReadWritePaths=/etc/strand`, và cho nhóm strand quyền ghi thư mục (`sudo chmod 0770 /etc/strand`). Đây là lựa chọn bảo mật của bạn: user `strand` khi đó sửa được mọi cấu hình pipeline. Khi lưu, file giữ mode và (nếu được) chủ sở hữu cũ; bản `.bak` không bao giờ thoáng quyền hơn bản gốc.
 
-Pipeline chạy chế độ nền do web khởi động là tiến trình con trong cgroup của `strand-web.service`: **restart/stop `strand-web` sẽ dừng luôn chúng** (theo mặc định `KillMode` của systemd). Pipeline production nên chạy bằng `strand@<name>`.
+`strand-web.service` có `KillMode=process`: `systemctl restart|stop strand-web` chỉ dừng tiến trình web. Pipeline chế độ nền và job verify/repair/promote do web khởi động **vẫn chạy**, web mới nhận lại chúng qua pid file. Muốn dừng chúng: nút Stop trên web hoặc `strand stop -c <cfg>`. Gỡ gói thì tự `strand stop` các pipeline này (mục 8). Pipeline production vẫn nên chạy bằng `strand@<name>` (tự restart khi lỗi tạm).
 
 ### 5.4 Bật và truy cập
 
@@ -246,9 +248,9 @@ Mở URL, đăng nhập bằng mật khẩu admin. Phiên hết hạn sau 30 ph�
 1. Kiểm tên (`[A-Za-z0-9][A-Za-z0-9_.-]{0,62}`, không trùng) và cổng `/metrics` (tự chọn cổng trống đầu tiên từ `127.0.0.1:9464`; cổng bạn đặt mà trùng pipeline khác bị từ chối 409).
 2. Ghi `<config_dir>/<name>.yaml` (0640) và `<config_dir>/<name>.env` (0600, chứa mật khẩu; YAML chỉ tham chiếu `password_env`). Spool ở `<state_dir>/pipelines/<name>/spool`. File đã tồn tại thì từ chối.
 3. Chạy `strand validate` và `strand plan`, hiện kết quả. Validate lỗi thì pipeline vẫn được tạo (để sửa ở tab Config) nhưng kết quả là `ok: false` và không có nút Start.
-4. Nút **Start** khởi động ở chế độ nền (`strand sync --background`). Muốn chạy bằng systemd: chuyển file về `/etc/strand/<name>.{yaml,env}` (`.env` dạng `KEY=VALUE`, bỏ chữ `export` ở đầu dòng mà web đã ghi), rồi `systemctl enable --now strand@<name>`.
+4. Nút **Start** khởi động ở chế độ nền (`strand sync --background`). Muốn chạy bằng systemd: chép file về `/etc/strand/<name>.{yaml,env}` (`.env` web ghi đã ở dạng `KEY=VALUE` mà systemd `EnvironmentFile` đọc được; mật khẩu có ký tự đặc biệt được đặt trong nháy kép), sửa `resources.spool.path`/`observability.admin_socket` về `/var/lib/strand/<name>` và `/run/strand/<name>/admin.sock`, rồi `systemctl enable --now strand@<name>`. Mật khẩu chứa ký tự xuống dòng bị từ chối (400).
 
-Target MySQL: database metadata `strand` (hoặc `target_database`) phải tồn tại trước (validate sẽ gợi ý `CREATE DATABASE`). Đọc kỹ mục 5.3 về việc pipeline tạo từ web có thể biến mất khỏi danh sách sau khi restart web.
+Target MySQL: database metadata `strand` (hoặc `target_database`) phải tồn tại trước (validate sẽ gợi ý `CREATE DATABASE`). Nơi lưu file và quyền ghi: mục 5.3.
 
 ### 6.3 Xem và sửa cấu hình
 
@@ -259,7 +261,7 @@ Tab **Config**: hiện đúng văn bản file (giữ chú thích), mật khẩu/
 | Thao tác | Nơi | Ghi chú |
 | --- | --- | --- |
 | Start, Stop, Restart | đầu trang | Stop/Restart có hộp xác nhận. Chế độ systemd: `systemctl`; chế độ nền: `strand sync --background` / `strand stop` |
-| Enable/Disable at boot | đầu trang | Chỉ chế độ systemd |
+| Enable/Disable at boot | đầu trang | Chỉ chế độ systemd; không được polkit cấp cho web (mục 5.3), web chỉ ra lệnh `sudo systemctl ...` cần chạy |
 | Pause, Resume | đầu trang | Qua admin socket |
 | Pause snapshot, Resume (snapshot only), Snapshot add | tab Tables | Snapshot add: chọn bảng từ source (bảng cần PK) |
 | Throttle (soft IOPS) | tab Graph | Chỉ tiến trình đang chạy, không ghi vào file cấu hình |
@@ -320,9 +322,9 @@ sudo systemctl restart strand@orders-sync     # từng pipeline, khi thuận ti�
 sudo systemctl restart strand-web
 ```
 
-Pipeline đang chạy giữ binary cũ tới khi restart (an toàn nhờ checkpoint; gói in danh sách unit cần restart). `restart strand-web` sẽ dừng các pipeline chế độ nền do web khởi động (mục 5.3). Cài tay: thay `/usr/local/bin/strand` rồi restart.
+Pipeline đang chạy giữ binary cũ tới khi restart (an toàn nhờ checkpoint; gói in danh sách unit cần restart). `restart strand-web` không dừng các pipeline chế độ nền (mục 5.3); chúng dùng binary mới sau lần Restart kế tiếp. Cài tay: thay `/usr/local/bin/strand` rồi restart.
 
-**Gỡ**: `sudo apt remove strand` / `sudo rpm -e strand`. Gói dừng và disable mọi `strand@*` và `strand-web`. Gói **không** xóa `/etc/strand`, `/var/lib/strand`, `/var/lib/strand-web` hay user `strand`, kể cả khi purge. Xóa hẳn là việc của bạn:
+**Gỡ**: `sudo apt remove strand` / `sudo rpm -e strand`. Gói dừng và disable mọi `strand@*` và `strand-web`, và `strand stop` các pipeline chế độ nền (cấu hình trong `/etc/strand/*.yaml` và `/var/lib/strand-web/pipelines/*.yaml`). Gói **không** xóa `/etc/strand`, `/var/lib/strand`, `/var/lib/strand-web` hay user `strand`, kể cả khi purge. Xóa hẳn là việc của bạn:
 
 ```bash
 sudo rm -rf /etc/strand /var/lib/strand /var/lib/strand-web
@@ -343,15 +345,17 @@ Trước đó nên dừng pipeline êm (`systemctl stop strand@x`, tự ghi chec
 
 | Triệu chứng | Nguyên nhân và cách xử lý |
 | --- | --- |
-| `strand-web` thoát ngay, log `no admin password set` (exit 2) | Chưa đặt mật khẩu: `sudo strand web passwd --config /etc/strand/web.yaml`, rồi `chown root:strand` + `chmod 0640` file |
-| Log `read web config ... permission denied` | `passwd`/`token` chạy bằng root để lại file root:root 0600: `sudo chown root:strand /etc/strand/web.yaml; sudo chmod 0640 /etc/strand/web.yaml` |
+| `strand-web` thoát ngay, log `no admin password set` (exit 2) | Chưa đặt mật khẩu: `sudo strand web passwd --config /etc/strand/web.yaml` |
+| Log `read web config ... permission denied` | User `strand` không đọc được `web.yaml`: `sudo chown root:strand /etc/strand/web.yaml; sudo chmod 0640 /etc/strand/web.yaml` (làm một lần; `passwd`/`token` giữ nguyên quyền này) |
+| `passwd`/`token` báo `preserve owner ...` | Chạy không đủ quyền để giữ chủ sở hữu file: chạy lại bằng `sudo` |
 | `listen "0.0.0.0:..." is not a loopback address: TLS (tls_cert, tls_key) is required` | Bind khác loopback cần TLS. Đặt cả `tls_cert` và `tls_key`, hoặc dùng `127.0.0.1` + reverse proxy/SSH tunnel |
 | `tls_cert and tls_key must be set together` | Thiếu một trong hai khóa |
 | Pipeline hiện `unreachable` hoặc `stopped` dù đang chạy | Web (user `strand`) không đọc được YAML/`.env` hoặc không vào được admin socket vì pipeline chạy bằng user khác (ví dụ root). Chạy pipeline bằng user `strand`, kiểm quyền file; xem mục 5.3 |
 | Trang chi tiết báo lỗi cấu hình (`config error`) | Web không đọc/parse được YAML pipeline; kiểm quyền và `strand validate -c` |
 | Tab Logs báo lỗi `journalctl` | `sudo usermod -aG systemd-journal strand` rồi restart `strand-web` |
-| Start/Stop trả 502 kèm lỗi systemctl | User `strand` không có quyền điều khiển unit: thêm quy tắc polkit hoặc dùng CLI (mục 5.3) |
-| Lưu cấu hình/tạo pipeline lỗi `read-only file system` hoặc pipeline mất khỏi danh sách sau restart web | `ProtectSystem=strict` của unit web: xem mục 5.3 (drop-in `ReadWritePaths`, hoặc khai báo trong `pipelines:`) |
+| Start/Stop trả 502 `Interactive authentication required` | Thiếu quy tắc polkit `50-strand.rules` (cài tay: mục 2b), hoặc polkit < 0.106 không đọc rules JS |
+| Enable/Disable trả 502 | Đúng thiết kế (mục 5.3): chạy `sudo systemctl enable|disable strand@<name>` trên máy chủ |
+| Lưu cấu hình lỗi `read-only file system`, hoặc pipeline nền do web khởi động lỗi ghi spool | `ProtectSystem=strict` của unit web: xem mục 5.3 (drop-in `ReadWritePaths`, hoặc đặt spool dưới `/var/lib/strand-web`) |
 | `observability.admin_socket is too long: N bytes (Unix socket path limit is 107)` | Đường dẫn socket tối đa 107 byte. Đặt đường dẫn ngắn, ví dụ `/run/strand/<name>/admin.sock`. Pipeline tạo từ web tự chọn `<state_dir>/sock/<tên>.sock`, rồi `/run/strand/<tên>.sock`, rồi `<tmp>/strand-<tên>.sock` |
 | Pipeline thứ hai thoát ngay với `start metrics server: listen on ...: address already in use` | Trùng cổng `observability.metrics` (lỗi này làm `sync` dừng hẳn). Mỗi pipeline một cổng; trên web, cổng trùng bị từ chối 409 |
 | Đăng nhập sai nhiều lần ra `429` | Quá 5 lần sai/phút từ một IP thì khóa 1 phút, tái phạm gấp đôi, tối đa 15 phút. Đợi hết `retry_after_s` (xem `audit.log`). Sau reverse proxy mà ai cũng bị khóa chung một IP: bật `trust_forwarded_for` (và để proxy đặt đúng `X-Forwarded-For`) |
@@ -359,6 +363,6 @@ Trước đó nên dừng pipeline êm (`systemctl stop strand@x`, tự ghi chec
 | Quên mật khẩu | Chạy lại `sudo strand web passwd --config /etc/strand/web.yaml`, sửa quyền file, restart `strand-web` (session cũ mất). Không có cách khôi phục mật khẩu cũ (chỉ lưu bcrypt hash) |
 | Quên/lộ token | Chạy lại `strand web token`: token mới thay token cũ |
 | Pipeline `failed` ở chế độ nền và không tự chạy lại | Đúng thiết kế: chế độ nền không có supervisor (`auto_restart=false`). Đọc `last_exit`/tab Errors, sửa nguyên nhân, bấm Start. Muốn tự restart khi lỗi tạm: dùng `strand@<name>` (`Restart=on-failure`) |
-| Restart `strand-web` làm pipeline chế độ nền dừng | Tiến trình con nằm trong cgroup của unit web. Chuyển pipeline sang `strand@<name>` |
+| `systemctl stop strand-web` nhưng pipeline nền vẫn chạy | Đúng thiết kế (`KillMode=process`): dừng bằng nút Stop hoặc `strand stop -c <cfg>` |
 
 Sự cố của chính pipeline (lag, `log_gap`, `missing_pk`, exit code): [USAGE.md](USAGE.md) 8.3 và 10.2.
