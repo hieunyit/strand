@@ -146,17 +146,34 @@ func TestEvolveDiffClassifyMySQL(t *testing.T) {
 		{name: "add prefix index manual", src: idx(base, IndexDef{Name: "pv", Sig: "n|v(5)", Cols: "`v`(5)", Manual: "prefix"}), additive: false},
 		{name: "charset change", src: with(pk("id"), col("id", "bigint", false), func() ColumnDef {
 			c := col("v", "varchar(20)", false)
-			c.Charset, c.Collation = "latin1", "latin1_swedish_ci"
+			c.Charset, c.Collation = "utf8mb4", "utf8mb4_general_ci"
 			return c
 		}()), additive: false},
+		// Target utf8mb4 chứa được source latin1: không đổi target (nguồn 5.7 latin1 → đích 8.0, M57).
+		{name: "source charset narrower than utf8mb4 target", src: with(pk("id"), col("id", "bigint", false), func() ColumnDef {
+			c := col("v", "varchar(20)", false)
+			c.Charset, c.Collation = "latin1", "latin1_swedish_ci"
+			return c
+		}()), empty: true},
+		// Chỉ khác collation (5.6 utf8mb4_general_ci → 8.0 utf8mb4_0900_ai_ci): không phải thay đổi schema.
+		{name: "collation only", src: with(pk("id"), col("id", "bigint", false), func() ColumnDef {
+			c := col("v", "varchar(20)", false)
+			c.Charset, c.Collation = "utf8mb4", "utf8mb4_general_ci"
+			return c
+		}()), empty: true},
 		{name: "column order change", src: with(pk("id"), col("v", "varchar(20)", false), col("id", "bigint", false)), additive: false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dst := base
-			if c.name == "charset change" {
+			switch c.name {
+			case "charset change": // source chuyển sang utf8mb4, target latin1: target không chứa nổi
 				d := col("v", "varchar(20)", false)
-				d.Charset, d.Collation = "utf8mb4", "utf8mb4_general_ci"
+				d.Charset, d.Collation = "latin1", "latin1_swedish_ci"
+				dst = with(pk("id"), col("id", "bigint", false), d)
+			case "source charset narrower than utf8mb4 target", "collation only":
+				d := col("v", "varchar(20)", false)
+				d.Charset, d.Collation = "utf8mb4", "utf8mb4_0900_ai_ci"
 				dst = with(pk("id"), col("id", "bigint", false), d)
 			}
 			ev := Diff(c.src, dst, DiffOptions{Target: tgt})

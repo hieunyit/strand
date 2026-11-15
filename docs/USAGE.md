@@ -196,7 +196,7 @@ Với source MySQL hoặc PostgreSQL, Strand so schema bảng ở source (sau DD
 | Loại | Gồm | Hành vi |
 | --- | --- | --- |
 | **Cộng thêm** (additive) | `ADD COLUMN` nullable hoặc có `DEFAULT`; nới kiểu: `VARCHAR`/`VARBINARY` dài hơn, số nguyên sang số nguyên rộng hơn **cùng dấu**, `DECIMAL` tăng precision cùng scale, họ `TEXT`/`BLOB` lớn hơn, `NOT NULL` → `NULL`; thêm index thường (không unique) | `schema.additive: auto` (mặc định): Strand sinh DDL cho target (MySQL, hoặc PG theo typemap, có áp `tables.rename`), chạy, nạp lại metadata và đi tiếp. Ghi log `additive schema change applied to target` |
-| **Phá hủy** (destructive) | `DROP COLUMN`, đổi tên cột (= drop + add), thu hẹp hoặc đổi họ kiểu (kể cả `INT UNSIGNED` → `BIGINT`), `NULL` → `NOT NULL`, `ADD COLUMN NOT NULL` không default, đổi PK, thêm index unique, bỏ/đổi index, đổi charset/collation, cột generated hoặc `AUTO_INCREMENT`, đổi thứ tự cột | Dừng exit 10 `schema_change_pending` |
+| **Phá hủy** (destructive) | `DROP COLUMN`, đổi tên cột (= drop + add), thu hẹp hoặc đổi họ kiểu (kể cả `INT UNSIGNED` → `BIGINT`), `NULL` → `NOT NULL`, `ADD COLUMN NOT NULL` không default, đổi PK, thêm index unique, bỏ/đổi index, đổi sang charset mà cột đích không chứa nổi (đích `utf8mb4` chứa mọi charset nên không tính; chỉ khác collation cũng không tính, như trước P3), cột generated hoặc `AUTO_INCREMENT`, đổi thứ tự cột | Dừng exit 10 `schema_change_pending` |
 
 Không chắc thì coi là phá hủy. `schema.additive: pause` đưa cả thay đổi cộng thêm vào luồng dừng và duyệt. `schema.destructive: pause|approve` hiện cùng hành vi (luôn dừng và chờ `schema approve`).
 

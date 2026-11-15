@@ -349,8 +349,7 @@ func diffColumn(s, d ColumnDef, o DiffOptions, tbl string, q func(string) string
 	if o.PG && o.LenientWiderTarget && r == relNarrow {
 		r = relSame
 	}
-	charsetDiffers := !o.PG && s.Charset != "" && d.Charset != "" &&
-		(normCharset(s.Charset) != normCharset(d.Charset) || normCharset(s.Collation) != normCharset(d.Collation))
+	charsetDiffers := !o.PG && targetCharsetTooNarrow(s.Charset, d.Charset)
 	nullAdd := s.Nullable && !d.Nullable  // NOT NULL → NULL: nới
 	nullDrop := !s.Nullable && d.Nullable // NULL → NOT NULL: siết
 	if r == relSame && !charsetDiffers && !nullAdd && !nullDrop {
@@ -402,6 +401,19 @@ func diffColumn(s, d ColumnDef, o DiffOptions, tbl string, q func(string) string
 	}
 	ch.Stmts = []string{"ALTER TABLE " + tbl + " MODIFY COLUMN " + s.Def}
 	return ch, true
+}
+
+// targetCharsetTooNarrow: cột target không chứa được mọi giá trị của cột source vì khác charset. Target
+// utf8mb4 chứa được mọi charset nên không cần đổi; chỉ khác collation cũng không tính. Lý do: không biết
+// khác biệt có sẵn từ trước DDL hay không (nguồn 5.6/5.7 mặc định latin1/utf8mb4_general_ci, đích 8.0
+// mặc định utf8mb4_0900_ai_ci), và trước P3-01 barrier DDL cũng không so collation. Đổi target về charset
+// hẹp hơn để "khớp" source mới là sai hướng (mất dữ liệu).
+func targetCharsetTooNarrow(src, dst string) bool {
+	if src == "" || dst == "" {
+		return false
+	}
+	s, d := normCharset(src), normCharset(dst)
+	return s != d && d != "utf8mb4"
 }
 
 func normCharset(s string) string {
