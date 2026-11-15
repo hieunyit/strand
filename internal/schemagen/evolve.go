@@ -107,6 +107,51 @@ func (e Evolution) Statements() []string {
 		}
 		out = append(out, c.Stmts...)
 	}
+	return mergeAlters(out)
+}
+
+var (
+	reAlterStmt   = regexp.MustCompile(`(?s)^ALTER TABLE (\S+) (.+)$`)
+	reMyDropIndex = regexp.MustCompile("(?s)^DROP INDEX (`[^`]+`) ON (\\S+)$")
+	reMyCreateIdx = regexp.MustCompile("(?s)^CREATE (UNIQUE |FULLTEXT |SPATIAL )?INDEX (`[^`]+`) ON (\\S+) (\\(.+\\))$")
+)
+
+// mergeAlters gộp các câu liên tiếp trên cùng một bảng thành MỘT câu ALTER TABLE nhiều mệnh đề, để target
+// nhận đúng một ALTER cho một thay đổi schema (Gate 3, online DDL: "đích nhận đúng 1 ALTER tại barrier"),
+// và để MySQL không copy bảng nhiều lần. MySQL: DROP INDEX … ON t / CREATE INDEX … ON t đổi thành mệnh đề
+// của ALTER TABLE t. PG: CREATE/DROP INDEX là lệnh riêng, giữ nguyên; các ALTER TABLE liên tiếp vẫn gộp.
+// Câu MANUAL và câu không nhận ra giữ nguyên và ngắt việc gộp, nên thứ tự áp không đổi.
+func mergeAlters(stmts []string) []string {
+	var out []string
+	curTbl := ""
+	var clauses []string
+	flush := func() {
+		if curTbl != "" {
+			out = append(out, "ALTER TABLE "+curTbl+" "+strings.Join(clauses, ", "))
+		}
+		curTbl, clauses = "", nil
+	}
+	for _, st := range stmts {
+		tbl, clause := "", ""
+		if m := reAlterStmt.FindStringSubmatch(st); m != nil {
+			tbl, clause = m[1], m[2]
+		} else if m := reMyDropIndex.FindStringSubmatch(st); m != nil {
+			tbl, clause = m[2], "DROP INDEX "+m[1]
+		} else if m := reMyCreateIdx.FindStringSubmatch(st); m != nil {
+			tbl, clause = m[3], "ADD "+m[1]+"INDEX "+m[2]+" "+m[4]
+		}
+		if tbl == "" {
+			flush()
+			out = append(out, st)
+			continue
+		}
+		if tbl != curTbl {
+			flush()
+			curTbl = tbl
+		}
+		clauses = append(clauses, clause)
+	}
+	flush()
 	return out
 }
 

@@ -141,8 +141,8 @@ func TestEvolveDiffClassifyMySQL(t *testing.T) {
 		{name: "change type family", src: with(pk("id"), col("id", "bigint", false), col("v", "int", false)), additive: false},
 		{name: "pk type widen is still additive column change but pk same", src: with(pk("id"), col("id", "decimal(30,0)", false), col("v", "varchar(20)", false)), additive: false},
 		{name: "change pk", src: with(pk("id,v"), col("id", "bigint", false), col("v", "varchar(20)", false)), additive: false},
-		{name: "add non-unique index", src: idx(base, IndexDef{Name: "iv", Sig: "n|v", Cols: "`v`"}), additive: true, stmt: "CREATE INDEX `iv` ON `app`.`t` (`v`)"},
-		{name: "add unique index", src: idx(base, IndexDef{Name: "uv", Unique: true, Sig: "u|v", Cols: "`v`"}), additive: false, stmt: "CREATE UNIQUE INDEX"},
+		{name: "add non-unique index", src: idx(base, IndexDef{Name: "iv", Sig: "n|v", Cols: "`v`"}), additive: true, stmt: "ALTER TABLE `app`.`t` ADD INDEX `iv` (`v`)"},
+		{name: "add unique index", src: idx(base, IndexDef{Name: "uv", Unique: true, Sig: "u|v", Cols: "`v`"}), additive: false, stmt: "ADD UNIQUE INDEX"},
 		{name: "add prefix index manual", src: idx(base, IndexDef{Name: "pv", Sig: "n|v(5)", Cols: "`v`(5)", Manual: "prefix"}), additive: false},
 		{name: "charset change", src: with(pk("id"), col("id", "bigint", false), func() ColumnDef {
 			c := col("v", "varchar(20)", false)
@@ -182,14 +182,14 @@ func TestEvolveDiffDropIndexAndChangeIndexMySQL(t *testing.T) {
 	src := TableDef{PK: "id", Columns: cols}
 	dst := TableDef{PK: "id", Columns: cols, Indexes: []IndexDef{{Name: "iv", Sig: "n|v", Cols: "`v`"}}}
 	ev := Diff(src, dst, DiffOptions{Target: tgt})
-	if ev.Additive() || len(ev.Statements()) != 1 || ev.Statements()[0] != "DROP INDEX `iv` ON `app`.`t`" {
+	if ev.Additive() || len(ev.Statements()) != 1 || ev.Statements()[0] != "ALTER TABLE `app`.`t` DROP INDEX `iv`" {
 		t.Fatalf("drop index: %v %s", ev.Statements(), ev.Describe())
 	}
 	// Cùng tên, khác cột: DROP rồi CREATE, phá hủy.
 	src.Indexes = []IndexDef{{Name: "iv", Sig: "n|id,v", Cols: "`id`, `v`"}}
 	ev = Diff(src, dst, DiffOptions{Target: tgt})
 	st := ev.Statements()
-	if ev.Additive() || len(st) != 2 || !strings.HasPrefix(st[0], "DROP INDEX") || !strings.HasPrefix(st[1], "CREATE INDEX") {
+	if ev.Additive() || len(st) != 1 || st[0] != "ALTER TABLE `app`.`t` DROP INDEX `iv`, ADD INDEX `iv` (`id`, `v`)" {
 		t.Fatalf("change index: %v", st)
 	}
 	// Có tuỳ chọn bỏ qua index thừa ở target (PG): không còn khác biệt.
@@ -207,14 +207,10 @@ func TestEvolveDiffOrderOfStatements(t *testing.T) {
 	src := TableDef{PK: "id", Columns: []ColumnDef{col("id", "bigint", false), n},
 		Indexes: []IndexDef{{Name: "inew", Sig: "n|new", Cols: "`new`"}}}
 	st := Diff(src, dst, DiffOptions{Target: tgt}).Statements()
-	want := []string{"DROP INDEX", "DROP COLUMN", "ADD COLUMN", "CREATE INDEX"}
-	if len(st) != len(want) {
-		t.Fatalf("statements: %v", st)
-	}
-	for i, w := range want {
-		if !strings.Contains(st[i], w) {
-			t.Fatalf("statement %d = %q, want %q (all: %v)", i, st[i], w, st)
-		}
+	// Một thay đổi schema = MỘT câu ALTER TABLE ở target (Gate 3), mệnh đề theo đúng thứ tự áp.
+	want := "ALTER TABLE `app`.`t` DROP INDEX `io`, DROP COLUMN `old`, ADD COLUMN `new` int AFTER `id`, ADD INDEX `inew` (`new`)"
+	if len(st) != 1 || st[0] != want {
+		t.Fatalf("statements: %q\nwant %q", st, want)
 	}
 }
 
@@ -309,5 +305,36 @@ func TestEvolvePlanEvolution_UnsupportedDirection(t *testing.T) {
 	_, err = PlanEvolution(context.Background(), Request{SourceKind: "oracle", TargetKind: "postgres"}, model.TableID{Schema: "public", Table: "t"})
 	if err == nil || !strings.Contains(err.Error(), "not implemented") {
 		t.Fatalf("expected not implemented error, got %v", err)
+	}
+}
+
+// Gate 3: target phải nhận đúng một ALTER cho một DDL nhiều thay đổi. Trước đây mỗi thay đổi là một câu.
+func TestMergeAltersOneStatementPerTable(t *testing.T) {
+	in := []string{
+		"ALTER TABLE `a`.`t` ADD COLUMN `x` int",
+		"ALTER TABLE `a`.`t` MODIFY COLUMN `v` varchar(40)",
+		"CREATE UNIQUE INDEX `ux` ON `a`.`t` (`x`)",
+		"ALTER TABLE `a`.`u` ADD COLUMN `y` int",
+		ManualPrefix + "change PK: manual",
+		"ALTER TABLE `a`.`u` DROP COLUMN `z`",
+	}
+	got := mergeAlters(in)
+	want := []string{
+		"ALTER TABLE `a`.`t` ADD COLUMN `x` int, MODIFY COLUMN `v` varchar(40), ADD UNIQUE INDEX `ux` (`x`)",
+		"ALTER TABLE `a`.`u` ADD COLUMN `y` int",
+		ManualPrefix + "change PK: manual",
+		"ALTER TABLE `a`.`u` DROP COLUMN `z`",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// PG: ALTER TABLE liên tiếp gộp; CREATE/DROP INDEX (quote ") giữ là lệnh riêng.
+	pg := mergeAlters([]string{
+		`ALTER TABLE "s"."t" ADD COLUMN "x" integer`,
+		`ALTER TABLE "s"."t" ALTER COLUMN "v" TYPE varchar(40) USING "v"::varchar(40)`,
+		`CREATE INDEX "t_ix" ON "s"."t" ("x")`,
+	})
+	if len(pg) != 2 || pg[0] != `ALTER TABLE "s"."t" ADD COLUMN "x" integer, ALTER COLUMN "v" TYPE varchar(40) USING "v"::varchar(40)` {
+		t.Fatalf("pg: %q", pg)
 	}
 }
