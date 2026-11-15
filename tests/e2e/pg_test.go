@@ -102,6 +102,10 @@ func TestP2_E2E_PGKill9(t *testing.T) {
 		var p *strandProc
 		if i == 1 {
 			p = startStrand(t, cfgPath, "--start-at", lsn)
+			// --start-at chỉ bền sau khi pipeline ghi vị trí bắt đầu; kill trước đó thì lần sau
+			// đúng là "pipeline mới" và (đúng thiết kế) đòi --start-at lại. Chờ "pipeline running"
+			// để mọi lần kill sau đều rơi vào pipeline đã khởi tạo.
+			waitStrandLog(t, p, `"msg":"pipeline running"`, time.Minute)
 		} else {
 			p = startStrand(t, cfgPath)
 		}

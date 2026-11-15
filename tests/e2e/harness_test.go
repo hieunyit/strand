@@ -477,6 +477,21 @@ func (p *strandProc) stop(t *testing.T) int {
 	return p.cmd.ProcessState.ExitCode()
 }
 
+// waitStrandLog chờ tới khi stderr của process chứa needle; fail nếu process thoát hoặc quá hạn.
+func waitStrandLog(t *testing.T, p *strandProc, needle string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !strings.Contains(p.output.String(), needle) {
+		if p.exited() {
+			t.Fatalf("strand exited with code %d before logging %s\n%s", p.exitCode(), needle, p.tail())
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("strand did not log %s within %s\n%s", needle, timeout, p.tail())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func (p *strandProc) tail() string {
 	s := p.output.String()
 	if len(s) > 4000 {
