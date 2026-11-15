@@ -26,7 +26,27 @@ const testPassword = "correct horse battery"
 type fakeCmd struct {
 	mu    sync.Mutex
 	out   map[string]string
+	fail  map[string]int // tiền tố lệnh -> exit code (trả lỗi có ExitCode())
 	calls []string
+}
+
+// fakeExit giả *exec.ExitError: có ExitCode().
+type fakeExit struct{ code int }
+
+func (e fakeExit) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+func (e fakeExit) ExitCode() int { return e.code }
+
+// callsWith trả các lệnh đã chạy bắt đầu bằng prefix.
+func (f *fakeCmd) callsWith(prefix string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (f *fakeCmd) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -34,6 +54,11 @@ func (f *fakeCmd) Run(ctx context.Context, name string, args ...string) ([]byte,
 	f.mu.Lock()
 	f.calls = append(f.calls, line)
 	f.mu.Unlock()
+	for prefix, code := range f.fail {
+		if strings.HasPrefix(line, prefix) {
+			return []byte("Failed: Access denied"), fakeExit{code}
+		}
+	}
 	for prefix, out := range f.out {
 		if strings.HasPrefix(line, prefix) {
 			return []byte(out), nil
@@ -88,6 +113,8 @@ type testEnv struct {
 	clock *fakeClock
 	dir   string
 	sock  string
+	mock  *recPipeline
+	bin   string // strand giả (script sh); xem newFakeStrand
 }
 
 type fakeClock struct {
@@ -136,10 +163,11 @@ func newEnv(t *testing.T, mutate func(e *testEnv, c *Config)) *testEnv {
 	}
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 	e.sock = filepath.Join(sockDir, "a.sock")
-	asrv := admin.NewServer(e.sock, &mockPipeline{events: []admin.EventRecord{
+	e.mock = &recPipeline{mockPipeline: &mockPipeline{events: []admin.EventRecord{
 		{Time: time.Now(), Level: "WARN", Message: "snapshot slow", Attrs: map[string]string{"table": "app.orders"}},
 		{Time: time.Now(), Level: "ERROR", Message: "dial mysql://u:LeakyPass@h/db failed"},
-	}}, nil)
+	}}}
+	asrv := admin.NewServer(e.sock, e.mock, nil)
 	if err := asrv.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +186,10 @@ func newEnv(t *testing.T, mutate func(e *testEnv, c *Config)) *testEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.bin = newFakeStrand(t, e.dir)
 	cfg := &Config{
-		Listen: "127.0.0.1:0", PasswordHash: string(hash), StateDir: filepath.Join(e.dir, "state"),
+		StrandBinary: e.bin,
+		Listen:       "127.0.0.1:0", PasswordHash: string(hash), StateDir: filepath.Join(e.dir, "state"),
 		Pipelines: []PipelineEntry{{Name: "orders", Config: cfgPath}},
 	}
 	if mutate != nil {

@@ -12,6 +12,17 @@
     <span>Zone <b>{{.View.Top.Zone}}</b></span>
     {{if .View.Top.BreakerOpen}}<span class="err">Breaker open: {{.View.Top.BreakerReason}}</span>{{end}}
   </div>{{end}}
+  <div class="actions">
+    {{if not .Ctl.Running}}<form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit"{{if not .Ctl.CfgOK}} disabled{{end}}>Start</button></form>{{end}}
+    {{if .Ctl.Running}}<form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start."><button class="btn" type="submit">Stop</button></form>
+    <form class="act inline" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}}? It is stopped (checkpoint written) and started again."><button class="btn" type="submit">Restart</button></form>{{end}}
+    {{if .Ctl.Reachable}}{{if .Ctl.Paused}}<form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit">Resume</button></form>
+    {{else}}<form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Pause</button></form>{{end}}{{end}}
+    {{if .Ctl.Systemd}}<span class="sep"></span>
+    <form class="act inline" data-action="enable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Enable at boot</button></form>
+    <form class="act inline" data-action="disable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Disable at boot</button></form>{{end}}
+    {{if .Ctl.JobActive}}<span class="sep"></span><a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
+  </div>
   {{if .View.ConfigErr}}<p class="err">Config error: {{.View.ConfigErr}}</p>{{end}}
   {{if and .View.LastExit (not .View.Runtime.Running)}}<p class="warnbox">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}</p>{{end}}
 </section>
@@ -31,6 +42,12 @@
       <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
     </dl>
   </section>{{end}}
+  {{if .Ctl.Reachable}}<section class="card"><h2>Throttle</h2>
+    <form class="act" data-action="throttle" data-pipeline="{{.View.Name}}">
+      <label>Soft source IOPS <input type="number" name="source_iops" min="1" max="10000000" required class="num"></label>
+      <button class="btn" type="submit">Apply</button>
+      <span class="muted small">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file.</span>
+    </form></section>{{end}}
   <section class="charts">{{range .Charts}}<div class="card">{{.}}</div>{{end}}</section>
 {{end}}
 
@@ -51,6 +68,20 @@
     </tr>{{else}}<tr><td colspan="7" class="muted">No tables.</td></tr>{{end}}</tbody>
   </table>{{end}}
   </section>
+  {{if .Ctl.Reachable}}<section class="card"><h2>Snapshot</h2>
+    <div class="actions">
+      <form class="act inline" data-action="pause-snapshot" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Pause snapshot</button></form>
+      <form class="act inline" data-action="resume-snapshot-only" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (snapshot only, defer stream)</button></form>
+      <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (normal)</button></form>
+    </div>
+    <h3>Add tables</h3>
+    {{if .Src.Error}}<p class="muted">{{.Src.Error}}</p>{{else}}
+    <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
+      <div class="picklist">{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}</div>
+      <p class="muted small">Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.</p>
+      <button class="btn primary" type="submit">Snapshot selected tables</button>
+    </form>{{end}}
+  </section>{{end}}
 {{end}}
 
 {{if eq .Tab "checkpoint"}}
@@ -64,6 +95,13 @@
     {{if $.Body.Checkpoint.CompactionLagSecs}}<dt>Compaction lag</dt><dd>{{secs (deref $.Body.Checkpoint.CompactionLagSecs)}}</dd>{{end}}
   </dl>{{end}}{{end}}
   </section>
+  {{if .Ctl.CanRewind}}<section class="card"><h2>Rewind checkpoint</h2>
+    <p class="muted">MySQL to MySQL only. The pipeline checks the position against gtid_purged before it moves; rows after the new position are applied again.</p>
+    <form class="act" data-action="checkpoint-rewind" data-pipeline="{{.View.Name}}" data-confirm="Rewind the checkpoint of {{.View.Name}}? Events after the new position are re-applied." data-retype="{{.View.Name}}">
+      <label>Rewind to (GTID set) <input type="text" name="to" required class="wide mono" placeholder="uuid:1-12345"></label>
+      <button class="btn danger" type="submit">Rewind...</button>
+    </form></section>
+  {{else}}<p class="muted small">Rewind is available for running MySQL to MySQL pipelines only.</p>{{end}}
 {{end}}
 
 {{if eq .Tab "errors"}}
@@ -86,6 +124,22 @@
     {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
     {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code">{{.Config.YAML}}</pre>{{end}}
   </section>
+{{end}}
+
+{{if eq .Tab "jobs"}}
+  <section class="card"><h2>Verify</h2>
+    {{if .Ctl.JobActive}}<p class="warnbox">A job is running ({{.Ctl.JobActive.Kind}}); one job at a time per pipeline. <a href="/jobs/{{.Ctl.JobActive.ID}}">Open it</a>.</p>{{end}}
+    <form class="act" data-action="verify" data-pipeline="{{.View.Name}}">
+      <label>Mode <select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select></label>
+      <label>Table <input type="text" name="table" list="verify-tables" class="wide mono" placeholder="schema.table" autocomplete="off"></label>
+      <datalist id="verify-tables">{{range .Src.Tables}}<option value="{{.Table}}">{{end}}</datalist>
+      <label>Rate <input type="text" name="rate" class="num" placeholder="default"></label>
+      <label><input type="checkbox" name="resume" value="true"> resume an interrupted full run</label>
+      <button class="btn primary" type="submit">Start verify</button>
+      <p class="muted small">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
+    </form>
+  </section>
+  <section class="card"><h2>Job history</h2>{{template "jobs-table" (jobsCtx .Jobs false)}}</section>
 {{end}}
 
 {{if eq .Tab "logs"}}

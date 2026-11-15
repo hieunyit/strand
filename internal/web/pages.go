@@ -16,7 +16,7 @@ import (
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail"}
+var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job"}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -38,6 +38,20 @@ func templateFuncs() template.FuncMap {
 		"ptrInt":   func(p *int) int { return *p },
 		"deref":    func(p *float64) float64 { return *p },
 		"stateKey": func(s string) string { return s },
+		"join":     strings.Join,
+		"jobState": jobState,
+		"jobClass": jobClass,
+		"jobDur":   jobDur,
+		"deref2":   func(t *time.Time) time.Time { return *t },
+		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
+			Jobs         []JobStatus
+			ShowPipeline bool
+		} {
+			return struct {
+				Jobs         []JobStatus
+				ShowPipeline bool
+			}{j, showPipeline}
+		},
 	}
 }
 
@@ -56,6 +70,44 @@ func parsePages() (map[string]*template.Template, error) {
 	}
 	out["login"] = t
 	return out, nil
+}
+
+func jobState(j JobStatus) string {
+	switch {
+	case j.Running && j.Cancelled:
+		return "cancelling"
+	case j.Running:
+		return "running"
+	case j.Cancelled:
+		return "cancelled"
+	case j.Interrupted:
+		return "interrupted"
+	case j.ExitCode == nil:
+		return "unknown exit"
+	case *j.ExitCode == 0:
+		return "ok"
+	}
+	return "exit " + strconv.Itoa(*j.ExitCode)
+}
+
+func jobClass(j JobStatus) string {
+	switch {
+	case j.Running:
+		return "st-bootstrapping"
+	case j.ExitCode != nil && *j.ExitCode == 0 && !j.Cancelled:
+		return "st-synced"
+	case j.ExitCode == nil && !j.Cancelled:
+		return "st-paused"
+	}
+	return "st-failed"
+}
+
+func jobDur(j JobStatus) string {
+	end := time.Now()
+	if j.Ended != nil {
+		end = *j.Ended
+	}
+	return fmtSecs(end.Sub(j.Started).Seconds())
 }
 
 func fmtSecs(v float64) string {
@@ -169,6 +221,36 @@ type detailBody struct {
 	Config     ConfigView
 	Logs       LogsView
 	Follow     bool
+	Jobs       []JobStatus
+	Src        SourceTablesView
+	Ctl        Controls
+}
+
+// Controls quyết định nút nào hiện ở trang chi tiết (chỉ là gợi ý UI: API vẫn kiểm lại).
+type Controls struct {
+	Running   bool // tiến trình đang chạy
+	Systemd   bool
+	Reachable bool // admin socket trả lời
+	Paused    bool
+	CanRewind bool // MySQL → MySQL và socket trả lời (CLI chỉ cho phép loại này)
+	CfgOK     bool
+	JobActive *JobStatus // job đang chạy của pipeline này (nếu có)
+}
+
+func (s *Server) controls(p *Pipeline, v PipelineView) Controls {
+	c := Controls{Running: v.Runtime.Running || v.Reachable, Systemd: p.Mode() == ModeSystemd, Reachable: v.Reachable,
+		Paused: v.State == StatePaused, CfgOK: p.CfgErr == ""}
+	c.CanRewind = v.Reachable && p.Cfg != nil && p.Cfg.Source.Kind == "mysql" && p.Cfg.Target.Kind == "mysql"
+	if s.jobs != nil {
+		for _, j := range s.jobs.List(p.Name) {
+			if j.Running {
+				jj := j
+				c.JobActive = &jj
+				break
+			}
+		}
+	}
+	return c
 }
 
 type tabLink struct{ Key, Label, Href string }
@@ -184,7 +266,8 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	}
 	base := "/pipelines/" + p.Name
 	b := detailBody{Tab: tab, View: s.view(p)}
-	for _, t := range [][2]string{{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"}, {"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}} {
+	b.Ctl = s.controls(p, b.View)
+	for _, t := range [][2]string{{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"}, {"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"}} {
 		href := base
 		if t[0] != "graph" {
 			href += "/" + t[0]
@@ -203,6 +286,14 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		b.Charts = s.charts(p.Name)
 	case "tables":
 		b.Tables = s.tablesView(ctx, p)
+		if b.Ctl.Reachable {
+			b.Src = s.sourceTablesView(ctx, p)
+		}
+	case "jobs":
+		b.Jobs = s.listJobs(p.Name)
+		if b.Ctl.Reachable {
+			b.Src = s.sourceTablesView(ctx, p)
+		}
 	case "checkpoint":
 		b.Checkpoint = s.checkpointView(ctx, p)
 		b.Status = s.statusView(ctx, p)

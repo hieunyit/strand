@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ type Server struct {
 	limiter  *LoginLimiter
 	audit    *AuditLog
 	actions  *ActionRegistry
-	jobs     JobRunner // nil ở M2; M3 gắn bộ chạy tiến trình con
+	jobs     JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
 	log      *slog.Logger
 	now      func() time.Time
 	secure   bool // đặt cờ Secure cho cookie (TLS hoặc secure_cookies)
@@ -90,6 +91,13 @@ func New(o Options) (*Server, error) {
 		secure: o.Config.TLSCert != "" || o.Config.SecureCookies,
 	}
 	s.samp.Now = o.Now
+	jr, err := NewFileJobRunner(filepath.Join(o.Config.StateDir, "jobs"), s.strandBinary(), o.Now)
+	if err != nil {
+		return nil, err
+	}
+	jr.OnEnd = s.auditJobEnd
+	s.jobs = jr
+	s.registerOps()
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
 	}
@@ -179,7 +187,9 @@ func (s *Server) routes() http.Handler {
 	// Trang.
 	mux.Handle("GET /{$}", s.auth(false, s.pageOverview))
 	mux.Handle("GET /pipelines", s.auth(false, s.pagePipelines))
-	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs"} {
+	mux.Handle("GET /jobs", s.auth(false, s.pageJobs))
+	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
+	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs"} {
 		tab := tab
 		p := "GET /pipelines/{name}"
 		if tab != "" {
@@ -201,6 +211,11 @@ func (s *Server) routes() http.Handler {
 			s.apiPipelineTab(w, r, tab)
 		}))
 	}
+	mux.Handle("GET /api/v1/pipelines/{name}/source-tables", s.auth(true, s.apiSourceTables))
+	mux.Handle("GET /api/v1/pipelines/{name}/jobs", s.auth(true, s.apiPipelineJobs))
+	mux.Handle("GET /api/v1/jobs", s.auth(true, s.apiJobs))
+	mux.Handle("GET /api/v1/jobs/{id}", s.auth(true, s.apiJob))
+	mux.Handle("GET /api/v1/jobs/{id}/output", s.auth(true, s.apiJobOutput))
 	mux.Handle("POST /api/v1/pipelines/{name}/actions/{action}", s.auth(true, s.apiAction))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		// Mọi đường dẫn /api/ không khớp: vẫn đòi đăng nhập trước khi tiết lộ gì (404 sau 401).
@@ -464,3 +479,19 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 }
 
 func (s *Server) String() string { return fmt.Sprintf("strand web on %s", s.cfg.Listen) }
+
+// auditJobEnd ghi dòng audit khi job kết thúc: result ok khi exit 0, error khi khác 0 hoặc không quan sát được.
+func (s *Server) auditJobEnd(j JobStatus) {
+	res := "error"
+	if j.ExitCode != nil && *j.ExitCode == 0 {
+		res = "ok"
+	}
+	detail := map[string]any{"job_id": j.ID, "kind": j.Kind}
+	if j.Cancelled {
+		detail["cancelled"] = true
+	}
+	if j.Error != "" {
+		detail["error"] = j.Error
+	}
+	_ = s.audit.Log(AuditEntry{Action: "job.end", Pipeline: j.Pipeline, Args: append([]string{j.Kind}, j.Args...), Result: res, ExitCode: j.ExitCode, Detail: detail})
+}

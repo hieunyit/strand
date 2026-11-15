@@ -139,3 +139,22 @@ svg.graph { width: 100%; min-width: 860px; height: auto; }
 .graph .arrowhead { fill: #9aa7b6; }
 
 @media (max-width: 800px) { .nav { display: none; } .charts { grid-template-columns: 1fr; } }
+
+/* actions (M3) */
+.actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.actions .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+form.inline { display: inline; margin: 0; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+form.act label { display: inline-block; margin: 0 14px 8px 0; }
+form.act input[type=text], form.act input[type=number], form.act select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; }
+input.num { width: 110px; } input.wide { width: 320px; }
+.picklist { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+.pick { display: block; margin: 2px 0; }
+dialog.dlg { border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; max-width: 520px; }
+dialog.dlg::backdrop { background: rgba(20, 30, 45, .45); }
+dialog.dlg h3 { margin: 0 0 8px; }
+.dlgbtns { text-align: right; margin-top: 14px; }
+.toast { position: fixed; right: 20px; bottom: 20px; max-width: 520px; padding: 10px 16px; border-radius: 8px; color: #fff; z-index: 10; box-shadow: 0 4px 14px rgba(0, 0, 0, .25); }
+.toast.ok { background: var(--ok); } .toast.bad { background: var(--bad); }
+pre.log { max-height: 560px; overflow: auto; }

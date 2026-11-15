@@ -27,8 +27,19 @@ type Commander interface {
 
 type execCommander struct{}
 
+type cmdTimeoutKey struct{}
+
+// withCmdTimeout nới giới hạn mặc định (10 s) của execCommander cho lệnh chạy lâu (systemctl stop chờ ghi checkpoint).
+func withCmdTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, cmdTimeoutKey{}, d)
+}
+
 func (execCommander) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	d := 10 * time.Second
+	if v, ok := ctx.Value(cmdTimeoutKey{}).(time.Duration); ok {
+		d = v
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "SYSTEMD_COLORS=0", "SYSTEMD_PAGER=")

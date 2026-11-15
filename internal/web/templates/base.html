@@ -14,6 +14,7 @@
   <nav>
     <a href="/" class="{{if eq .Active "overview"}}active{{end}}">Overview</a>
     <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}">Pipelines</a>
+    <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}">Jobs</a>
     <div class="navhead">Registered pipelines</div>
     {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"><span class="dot {{stateClass .State}}"></span>{{.Name}}</a>
     {{else}}<span class="muted pad">none registered</span>{{end}}
@@ -27,6 +28,15 @@
   </header>
   <main id="content" data-refresh="{{.Refresh}}">{{template "content" .}}</main>
 </div>
+<dialog id="confirm" class="dlg">
+  <form method="dialog" id="confirm-form">
+    <h3 id="confirm-title">Confirm</h3>
+    <p id="confirm-msg"></p>
+    <p id="confirm-retype" hidden>Type the pipeline name <b id="confirm-name"></b> to confirm:<br><input id="confirm-input" type="text" autocomplete="off" spellcheck="false"></p>
+    <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">Cancel</button> <button class="btn primary" id="confirm-ok" type="submit" value="ok">Confirm</button></div>
+  </form>
+</dialog>
+<div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>{{end}}
 
@@ -46,5 +56,19 @@
     <td>{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
   </tr>{{else}}<tr><td colspan="9" class="muted">No pipelines registered. Add them to web.yaml (<code>scan</code> or <code>pipelines</code>).</td></tr>{{end}}
   </tbody>
+</table>
+{{end}}
+
+{{define "jobs-table"}}
+<table class="grid">
+  <thead><tr><th>Started</th>{{if .ShowPipeline}}<th>Pipeline</th>{{end}}<th>Job</th><th>State</th><th>Duration</th><th>Command</th></tr></thead>
+  <tbody>{{range .Jobs}}<tr>
+    <td class="small nowrap"><a href="/jobs/{{.ID}}">{{ts .Started}}</a></td>
+    {{if $.ShowPipeline}}<td><a href="/pipelines/{{.Pipeline}}/jobs">{{.Pipeline}}</a></td>{{end}}
+    <td>{{.Kind}}</td>
+    <td><span class="badge {{jobClass .}}">{{jobState .}}</span></td>
+    <td class="small">{{jobDur .}}</td>
+    <td class="mono small wrap">strand {{join .Args " "}}</td>
+  </tr>{{else}}<tr><td colspan="6" class="muted">No jobs yet.</td></tr>{{end}}</tbody>
 </table>
 {{end}}

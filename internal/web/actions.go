@@ -3,15 +3,17 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"sync"
 	"time"
 )
 
-// Điểm mở rộng cho M3-M5 (docs/PLAN-WEB-UI.md §3, §6).
+// Điểm mở rộng (docs/PLAN-WEB-UI.md §3, §6). M3 đăng ký các action ở actions_ops.go.
 //
-// M2 chỉ đọc nên registry rỗng. Mỗi thao tác ghi (start/stop/restart, pause/resume, throttle,
+// Mỗi thao tác ghi (start/stop/restart, pause/resume, throttle,
 // snapshot add, rewind, verify, repair, promote, sửa cấu hình...) là một Action đăng ký ở đây. Đường
 // POST /api/v1/pipelines/{name}/actions/{action} đã đi qua: xác thực, CSRF, whitelist tên pipeline,
 // kiểm tên đăng ký, và dòng audit — action không phải tự làm lại các bước đó.
@@ -78,7 +80,7 @@ func (r *ActionRegistry) Names() []string {
 	return out
 }
 
-// JobSpec mô tả một tiến trình con dài hạn (verify full, repair, promote, validate...).
+// JobSpec mô tả một tiến trình con dài hạn (verify, repair, promote, validate...).
 type JobSpec struct {
 	Pipeline string
 	Kind     string   // tên thao tác, ví dụ "verify"
@@ -86,7 +88,7 @@ type JobSpec struct {
 	Env      []string // KEY=VALUE bổ sung (từ env_file)
 }
 
-// JobStatus là trạng thái một job.
+// JobStatus là trạng thái một job (cũng là nội dung file <state_dir>/jobs/<id>.json).
 type JobStatus struct {
 	ID       string     `json:"id"`
 	Pipeline string     `json:"pipeline"`
@@ -95,17 +97,53 @@ type JobStatus struct {
 	Started  time.Time  `json:"started"`
 	Ended    *time.Time `json:"ended,omitempty"`
 	Running  bool       `json:"running"`
-	ExitCode *int       `json:"exit_code,omitempty"`
-	Output   []string   `json:"output,omitempty"` // dòng output đã có (stream theo offset ở M3)
+	ExitCode *int       `json:"exit_code,omitempty"` // nil: chưa xong, hoặc web khởi động lại giữa chừng nên không quan sát được
+	PID      int        `json:"pid,omitempty"`
+	// Cancelled: người dùng bấm hủy. Interrupted: web server khởi động lại khi job đang chạy và tiến trình
+	// con đã biến mất, mã thoát không quan sát được.
+	Cancelled   bool   `json:"cancelled,omitempty"`
+	Interrupted bool   `json:"interrupted,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
-// JobRunner chạy `strand <lệnh>` thành tiến trình con và giữ lịch sử. M3 cài đặt; M2 chỉ định nghĩa giao diện.
+// JobOutput là một đoạn output của job tính từ offset (byte) đã cho.
+type JobOutput struct {
+	Data     string `json:"data"`
+	Offset   int64  `json:"offset"` // offset kế tiếp để hỏi
+	Running  bool   `json:"running"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+}
+
+// JobRunner chạy `strand <lệnh>` thành tiến trình con và giữ lịch sử (bản cài đặt: FileJobRunner).
 type JobRunner interface {
+	// Start chạy job; từ chối (ErrJobRunning) nếu pipeline đã có job đang chạy. ctx chỉ dùng để kiểm lúc
+	// khởi động: tiến trình con KHÔNG gắn với ctx của request.
 	Start(ctx context.Context, spec JobSpec) (id string, err error)
 	Get(id string) (JobStatus, bool)
+	// List: mới nhất trước; pipeline rỗng = mọi pipeline.
 	List(pipeline string) []JobStatus
 	Cancel(id string) error
+	Output(id string, offset int64) (JobOutput, bool)
 }
+
+// ActionError cho action chọn mã HTTP: 400 tham số sai, 409 xung đột trạng thái...
+type ActionError struct {
+	Status int
+	Msg    string
+}
+
+func (e *ActionError) Error() string { return e.Msg }
+
+// BadRequest, Conflict: tiện ích tạo ActionError.
+func BadRequest(format string, a ...any) error {
+	return &ActionError{Status: http.StatusBadRequest, Msg: fmt.Sprintf(format, a...)}
+}
+func Conflict(format string, a ...any) error {
+	return &ActionError{Status: http.StatusConflict, Msg: fmt.Sprintf(format, a...)}
+}
+
+// actionTimeout: giới hạn tổng cho một action (systemctl stop / strand stop có thể chờ ghi checkpoint tới 150 s).
+const actionTimeout = 170 * time.Second
 
 // apiAction: POST /api/v1/pipelines/{name}/actions/{action}. Xác thực và CSRF đã xong ở middleware.
 func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -142,7 +180,12 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing to run")
 		return
 	}
-	res, err := a.Run(r.Context(), s, ActionRequest{Pipeline: p, Args: args, IP: ip})
+	// Thao tác chạy tách khỏi ctx của request: client ngắt kết nối giữa chừng không được làm hỏng
+	// systemctl stop / strand stop đang dở; vẫn có hạn chót, và máy chủ nới deadline ghi cho request này.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(actionTimeout + 10*time.Second))
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), actionTimeout)
+	defer cancel()
+	res, err := a.Run(rctx, s, ActionRequest{Pipeline: p, Args: args, IP: ip})
 	entry := AuditEntry{IP: ip, Action: act, Pipeline: name, Args: argv, Result: "ok", ExitCode: res.ExitCode}
 	if err != nil {
 		entry.Result = "error"
@@ -150,7 +193,12 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 	}
 	_ = s.audit.Log(entry)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+		status := http.StatusBadGateway
+		var ae *ActionError
+		if errors.As(err, &ae) {
+			status = ae.Status
+		}
+		writeErr(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
