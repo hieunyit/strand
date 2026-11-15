@@ -218,6 +218,18 @@ strand sync -c pipeline.yaml                     # chạy tiếp: schema target 
 - Bảng `RENAME` từ ngoài bộ lọc vào, hoặc `DROP`/`RENAME` bảng của pipeline, dừng exit 10 như trước (áp tay ở target rồi chạy lại; bảng rename-vào được snapshot khi chạy lại).
 - **Source PG:** DDL không đi qua logical replication; Strand phát hiện thay đổi schema khi nhận message `Relation` mới từ pgoutput khác với metadata hiện có. Strand tạo barrier tại đúng vị trí trong luồng ngay trước row đầu tiên dùng schema mới, drain các transaction trước đó, rồi phân loại qua schemagen (cộng thêm thì tự áp lên target PG, phá hủy thì ghi `_strand_schema_change` và dừng exit 10 chờ `strand schema approve`). Lưu ý: Relation chỉ được server PG gửi trước row đầu tiên sau DDL; nếu ADD COLUMN chưa có row nào sau đó thì chưa phát hiện, chấp nhận.
 
+**Online DDL (gh-ost, pt-osc; P3-02).** Strand nhận diện theo dấu hiệu của tool (bảng gốc `t` phải tồn tại cùng schema):
+
+- Bảng tạm `_t_gho`, `_t_ghc`, `_t_del` (gh-ost; kể cả `_t_<14 số>_del` của `--timestamp-old-table`), `_t_new`, `_t_old` (pt-osc), tên bị cắt khi quá dài, và trigger `pt_osc_*`: mọi DDL chỉ đụng chúng bị bỏ qua (không drain, không tạo ở target, không dừng); event row của chúng không được ghi và không được snapshot; phần row của `t` trong cùng transaction (trigger pt-osc) vẫn được ghi.
+- Cut-over `RENAME TABLE t TO _t_del, _t_gho TO t` (hoặc `_t_old` / `_t_new`) được coi là MỘT `ALTER` trên `t`: đi qua đường ở trên (cộng thêm thì áp một lần lên target tại barrier, phá hủy thì dừng chờ `approve`). Log: `online DDL cut-over detected` rồi `online DDL cut-over processed at barrier`.
+- Chuỗi không khớp mẫu (bảng `_gho` bỏ dở, gh-ost bị hủy, RENAME lạ) không bao giờ làm mất row của `t`: bảng tạm vẫn bị bỏ qua, phần còn lại theo hành vi cũ.
+- Giới hạn: `pt-osc --drop-swap` (DROP `t` rồi RENAME) và tên bảng tạm tùy biến (`--new-table-name`, `--force-table-names`) không nhận diện được trừ khi khai báo `extra_patterns`; ALTER nhiều cột sinh nhiều câu `ALTER` ở target (một câu mỗi thay đổi); bảng thường tên `_x_new`/`_x_old` khi `x` cũng thuộc pipeline bị coi là bảng tạm (tắt bằng `tools: []`).
+
+```yaml
+schema:
+  online_ddl: { tools: [gh-ost, pt-osc], extra_patterns: ["_{table}_tmp"] }   # mặc định cả hai tool; tools: [] tắt nhận diện
+```
+
 Cấu hình:
 
 ```yaml

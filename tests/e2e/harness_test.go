@@ -267,6 +267,8 @@ type strandCfg struct {
 	GovernorProbe string
 	// SchemaAdditive: schema.additive (rỗng = mặc định auto, tự áp thay đổi cộng thêm); "pause" = dừng như trước P3-01.
 	SchemaAdditive string
+	// SchemaOnlineDDL: nội dung schema.online_ddl dạng YAML flow (vd "tools: []" để tắt nhận diện gh-ost/pt-osc); rỗng = mặc định.
+	SchemaOnlineDDL string
 }
 
 func (c *strandCfg) chunkRows() string {
@@ -355,7 +357,13 @@ verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
 		c.Bootstrap, c.CreateSchema, c.chunkRows(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.GovernorAlgo, probe, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
-	if c.SchemaAdditive != "" {
+	if c.SchemaOnlineDDL != "" {
+		add := c.SchemaAdditive
+		if add == "" {
+			add = "auto"
+		}
+		yaml += "schema: { additive: " + add + ", online_ddl: { " + c.SchemaOnlineDDL + " } }\n"
+	} else if c.SchemaAdditive != "" {
 		yaml += "schema: { additive: " + c.SchemaAdditive + " }\n"
 	}
 	p := filepath.Join(c.Dir, "pipeline.yaml")

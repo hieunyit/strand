@@ -144,6 +144,15 @@ type LogicalBootstrapConfig struct {
 type SchemaConfig struct {
 	Additive    string `yaml:"additive" json:"additive"`       // auto | pause
 	Destructive string `yaml:"destructive" json:"destructive"` // pause | approve
+	// OnlineDDL (P3-02): nhận diện gh-ost / pt-osc. Tools nil (không khai báo) = mặc định [gh-ost, pt-osc];
+	// `tools: []` tắt nhận diện, giữ hành vi dừng/approve cũ.
+	OnlineDDL OnlineDDLConfig `yaml:"online_ddl" json:"online_ddl"`
+}
+
+// OnlineDDLConfig: spec design §7 (online_ddl).
+type OnlineDDLConfig struct {
+	Tools         []string `yaml:"tools" json:"tools"`                   // gh-ost | pt-osc
+	ExtraPatterns []string `yaml:"extra_patterns" json:"extra_patterns"` // tên bảng tạm tự đặt, {table} = bảng gốc, vd "_{table}_tmp"
 }
 
 type CheckpointConfig struct {
@@ -322,6 +331,23 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 	default:
 		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
 			fmt.Sprintf("invalid schema.additive %q (want auto | pause)", cfg.Schema.Additive), nil)
+	}
+	if cfg.Schema.OnlineDDL.Tools == nil {
+		cfg.Schema.OnlineDDL.Tools = []string{"gh-ost", "pt-osc"}
+	}
+	for i, tool := range cfg.Schema.OnlineDDL.Tools {
+		tool = strings.ToLower(strings.TrimSpace(tool))
+		if tool != "gh-ost" && tool != "pt-osc" {
+			return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+				fmt.Sprintf("invalid schema.online_ddl.tools entry %q (want gh-ost | pt-osc)", tool), nil)
+		}
+		cfg.Schema.OnlineDDL.Tools[i] = tool
+	}
+	for _, pat := range cfg.Schema.OnlineDDL.ExtraPatterns {
+		if !strings.Contains(pat, "{table}") || strings.Count(pat, "{table}") != 1 {
+			return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+				fmt.Sprintf("invalid schema.online_ddl.extra_patterns entry %q (must contain {table} exactly once)", pat), nil)
+		}
 	}
 	switch v := strings.ToLower(strings.TrimSpace(cfg.Schema.Destructive)); v {
 	case "":
