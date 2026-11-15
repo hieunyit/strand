@@ -796,8 +796,7 @@ func TestBinlogPos_E2E_SnapshotAdd(t *testing.T) {
 	}
 	time.Sleep(5 * time.Second)
 	wl2.Stop()
-	// app.m không thuộc include của pipeline nên không được ghi lại sau snapshot add khi restart; trong phiên này
-	// bảng đã vào pipeline (Strand giữ bảng cho tới khi dừng), nên cả ba bảng phải hội tụ.
+	// app.m không thuộc include nhưng snapshot add đã đưa nó vào pipeline (và được giữ qua restart); cả ba bảng phải hội tụ.
 	waitPosEqual(t, src.DB, dst.DB, p, 4*time.Minute)
 	if code := p.stop(t); code != 0 {
 		t.Fatalf("exit %d\n%s", code, p.tail())

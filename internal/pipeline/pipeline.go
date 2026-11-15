@@ -416,8 +416,29 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	p.runCtx = ctx
 
 	// --- Metadata source ---
+	// State cục bộ mở trước khi đọc metadata: các bảng thêm qua `snapshot add` phải vào bộ lọc trước loadTables.
+	if p.state, err = openLocalState(p.cfg.Resources.Spool.Path, p.id); err != nil {
+		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
+	}
+	p.state.targetOf = func(name string) string {
+		sc, t, _ := strings.Cut(name, ".")
+		return p.filter.Target(model.TableID{Schema: sc, Table: t}).String()
+	}
+	addedTables := p.state.AddedTables()
+	for _, name := range mergeAddedTables(p.filter, addedTables) {
+		p.log.Warn("table added by `snapshot add` is excluded by tables.exclude (or its name is invalid): exclude wins, dropping it from the pipeline", "table", name)
+		if err := p.state.DropAddedTable(name); err != nil {
+			return err
+		}
+	}
 	if p.tables, err = p.loadTables(ctx, p.filter); err != nil {
 		return fmt.Errorf("load source schema: %w", err)
+	}
+	for _, name := range addedTables {
+		sc, t, _ := strings.Cut(name, ".")
+		if _, ok := p.tables[model.TableID{Schema: sc, Table: t}]; !ok && p.filter.Included(model.TableID{Schema: sc, Table: t}) {
+			p.log.Warn("table added by `snapshot add` no longer exists on source: skipping it", "table", name)
+		}
 	}
 	if len(p.tables) == 0 {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "no source table matches tables.include", nil)
@@ -435,13 +456,6 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		if err := p.checkPGPartitionPublication(ctx, ids); err != nil {
 			return err
 		}
-	}
-	if p.state, err = openLocalState(p.cfg.Resources.Spool.Path, p.id); err != nil {
-		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
-	}
-	p.state.targetOf = func(name string) string {
-		sc, t, _ := strings.Cut(name, ".")
-		return p.filter.Target(model.TableID{Schema: sc, Table: t}).String()
 	}
 	if p.conv != nil {
 		for id := range p.tables {
@@ -2047,8 +2061,8 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 }
 
 // SnapshotAdd thêm một bảng khi pipeline đang chạy (strand snapshot add, 02 §10).
-// Bảng chưa có trong pipeline được thêm vào ngay (metadata đọc từ source); để giữ bảng sau
-// khi restart, người vận hành phải thêm nó vào tables.include.
+// Bảng chưa có trong pipeline được thêm vào ngay (metadata đọc từ source) và được ghi vào state cục bộ
+// (added_tables) để giữ trong pipeline qua restart; muốn bỏ thì thêm vào tables.exclude.
 func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	s, t, ok := strings.Cut(table, ".")
 	if !ok {
@@ -2118,6 +2132,13 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	}
 	if err := p.state.SetDone(id.String(), false); err != nil {
 		return err
+	}
+	// Ghi nhớ bảng mới TRƯỚC khi nó vào p.tables: crash giữa chừng thì lần khởi động sau snapshot tiếp
+	// (Done=false), không để bảng rời pipeline âm thầm.
+	if p.table(id) == nil {
+		if err := p.state.AddTable(id.String()); err != nil {
+			return err
+		}
 	}
 	// Đăng ký PK cho writer trước khi router bắt đầu đưa event của bảng vào pipeline.
 	for _, w := range p.writers {

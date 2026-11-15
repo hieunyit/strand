@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"strand/internal/exitcode"
+	"strand/internal/model"
 	mysqlreader "strand/internal/reader/mysql"
 	"strand/internal/snapshot"
 )
@@ -45,6 +46,63 @@ type stateFile struct {
 	// SourceSchemas: lịch sử cấu trúc bảng nguồn MySQL 5.x (TABLE_MAP không có tên cột) kèm khoảng hiệu lực
 	// GTID, xem internal/reader/mysql/schemahist.go. State cũ không có field này: coi như rỗng.
 	SourceSchemas map[string][]mysqlreader.SchemaVersion `json:"source_schemas,omitempty"`
+	// AddedTables: bảng thêm bằng `snapshot add` khi pipeline đang chạy mà không nằm trong tables.include.
+	// Khởi động sau hợp chúng vào bộ lọc (tables.exclude vẫn thắng), nếu không bảng sẽ âm thầm rời pipeline.
+	AddedTables []string `json:"added_tables,omitempty"`
+}
+
+// AddedTables trả các bảng đã thêm qua snapshot add (đã sắp xếp).
+func (s *localState) AddedTables() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.data.AddedTables...)
+}
+
+// AddTable ghi nhớ bảng thêm qua snapshot add (idempotent).
+func (s *localState) AddTable(table string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.data.AddedTables {
+		if t == table {
+			return nil
+		}
+	}
+	s.data.AddedTables = append(s.data.AddedTables, table)
+	sort.Strings(s.data.AddedTables)
+	return s.flushLocked()
+}
+
+// DropAddedTable quên một bảng đã thêm qua snapshot add.
+func (s *localState) DropAddedTable(table string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.data.AddedTables[:0]
+	for _, t := range s.data.AddedTables {
+		if t != table {
+			out = append(out, t)
+		}
+	}
+	s.data.AddedTables = out
+	return s.flushLocked()
+}
+
+// mergeAddedTables (review: snapshot add mất sau restart) hợp các bảng đã thêm vào bộ lọc. Bảng bị
+// tables.exclude loại thì exclude thắng: trả trong dropped để người gọi cảnh báo và quên chúng.
+func mergeAddedTables(f *tableFilter, added []string) (dropped []string) {
+	for _, name := range added {
+		s, t, ok := strings.Cut(name, ".")
+		if !ok {
+			dropped = append(dropped, name)
+			continue
+		}
+		id := model.TableID{Schema: s, Table: t}
+		if f.excluded(id) {
+			dropped = append(dropped, name)
+			continue
+		}
+		f.addIncluded(id)
+	}
+	return dropped
 }
 
 func (s *localState) LoadSchemaHistory() map[string][]mysqlreader.SchemaVersion {
