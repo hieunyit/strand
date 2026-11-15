@@ -140,9 +140,14 @@ func TestVerifyJobStreamingHistoryAndAudit(t *testing.T) {
 	}
 	// After the job ended a new one is accepted.
 	e.setExit(0)
-	if code, _ := e.act(c, csrf, "orders", ActVerify, map[string]string{"mode": "full"}); code != 200 {
-		t.Errorf("job after completion: %d", code)
+	code2, body2 := e.act(c, csrf, "orders", ActVerify, map[string]string{"mode": "full"})
+	if code2 != 200 {
+		t.Fatalf("job after completion: %d", code2)
 	}
+	// Chờ job thứ hai kết thúc: runner ghi <id>.json khi job xong; nếu test trả về trước đó thì lần ghi
+	// rơi vào lúc t.TempDir đang xóa thư mục ("directory not empty", chập chờn ~6%).
+	id2 := body2["job_id"].(string)
+	defer waitFor(t, "second job end", func() bool { return !e.job(c, id2).Running })
 	// Listing endpoints and pages.
 	resp, b := e.do(c, "GET", "/api/v1/pipelines/orders/jobs", "", nil)
 	var lst struct{ Jobs []JobStatus }
@@ -288,7 +293,13 @@ func TestRunnerOnePerPipelineAndExitCode(t *testing.T) {
 	_ = id2
 	// Started again right after the end.
 	if _, err := r.Start(nil, JobSpec{Pipeline: "a", Kind: "verify", Args: []string{"x"}}); err != nil {
-		t.Errorf("after end: %v", err)
+		t.Fatalf("after end: %v", err)
+	}
+	// Chờ job cuối xong (runner ghi <id>.json khi kết thúc) để không ghi vào lúc t.TempDir đang xóa.
+	select {
+	case <-ended:
+	case <-time.After(8 * time.Second):
+		t.Fatal("last job did not end")
 	}
 }
 
