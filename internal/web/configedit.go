@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Sửa cấu hình (M5): xem/sửa file YAML và .env qua Web UI/API.
@@ -155,81 +153,18 @@ func unifiedDiff(oldName, newName, oldText, newText string) string {
 	return buf.String()
 }
 
-// unmaskConfigYAML khôi phục giá trị bí mật từ file gốc nếu người dùng gửi lại chuỗi '********'.
-func unmaskConfigYAML(newYAML []byte, origPath string) []byte {
+// unmaskConfigYAML khôi phục giá trị bí mật từ file gốc nếu người dùng gửi lại chuỗi '********'
+// (theo dòng, giữ nguyên định dạng). Lỗi nếu không khôi phục được: không bao giờ ghi '********' như mật khẩu thật.
+func unmaskConfigYAML(newYAML []byte, origPath string) ([]byte, error) {
 	origBytes, err := os.ReadFile(origPath)
 	if err != nil {
-		return newYAML
+		origBytes = nil
 	}
-	var origDoc yaml.Node
-	if err := yaml.Unmarshal(origBytes, &origDoc); err != nil {
-		return newYAML
+	out, err := UnmaskConfigText(string(newYAML), origBytes)
+	if err != nil {
+		return nil, BadRequest("%s", err.Error())
 	}
-	var newDoc yaml.Node
-	if err := yaml.Unmarshal(newYAML, &newDoc); err != nil {
-		return newYAML
-	}
-
-	origSecrets := map[string]string{}
-	collectOrigSecrets(&origDoc, "", origSecrets)
-	restoreSecrets(&newDoc, "", origSecrets)
-
-	var out bytes.Buffer
-	enc := yaml.NewEncoder(&out)
-	enc.SetIndent(2)
-	if err := enc.Encode(&newDoc); err != nil {
-		return newYAML
-	}
-	_ = enc.Close()
-	return out.Bytes()
-}
-
-func collectOrigSecrets(n *yaml.Node, prefix string, out map[string]string) {
-	if n.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			k := n.Content[i].Value
-			path := k
-			if prefix != "" {
-				path = prefix + "." + k
-			}
-			valNode := n.Content[i+1]
-			if valNode.Kind == yaml.ScalarNode {
-				out[path] = valNode.Value
-			} else {
-				collectOrigSecrets(valNode, path, out)
-			}
-		}
-	} else if n.Kind == yaml.DocumentNode {
-		for _, c := range n.Content {
-			collectOrigSecrets(c, prefix, out)
-		}
-	}
-}
-
-func restoreSecrets(n *yaml.Node, prefix string, orig map[string]string) {
-	if n.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			k := n.Content[i].Value
-			path := k
-			if prefix != "" {
-				path = prefix + "." + k
-			}
-			valNode := n.Content[i+1]
-			if valNode.Kind == yaml.ScalarNode {
-				if valNode.Value == maskStr {
-					if old, ok := orig[path]; ok {
-						valNode.Value = old
-					}
-				}
-			} else {
-				restoreSecrets(valNode, path, orig)
-			}
-		}
-	} else if n.Kind == yaml.DocumentNode {
-		for _, c := range n.Content {
-			restoreSecrets(c, prefix, orig)
-		}
-	}
+	return []byte(out), nil
 }
 
 // ConfigValidateResult trả kết quả kiểm tra cú pháp và diff.
@@ -261,7 +196,11 @@ func (s *Server) validateConfigContent(ctx context.Context, p *Pipeline, yamlCon
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	unmasked := unmaskConfigYAML([]byte(yamlContent), p.ConfigPath)
+	unmasked, err := unmaskConfigYAML([]byte(yamlContent), p.ConfigPath)
+	if err != nil {
+		tmp.Close()
+		return nil, err
+	}
 	if _, err := tmp.Write(unmasked); err != nil {
 		tmp.Close()
 		return nil, fmt.Errorf("write temp config file: %w", err)
@@ -316,7 +255,11 @@ func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent
 		return nil, err
 	}
 
-	unmasked := unmaskConfigYAML([]byte(yamlContent), p.ConfigPath)
+	unmasked, err := unmaskConfigYAML([]byte(yamlContent), p.ConfigPath)
+	if err != nil {
+		tmp.Close()
+		return nil, err
+	}
 	if _, err := tmp.Write(unmasked); err != nil {
 		tmp.Close()
 		return nil, fmt.Errorf("write temp config file: %w", err)
