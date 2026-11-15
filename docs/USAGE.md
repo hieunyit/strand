@@ -791,6 +791,7 @@ Lưu binlog liên tục từ một MySQL (nên là replica) vào thư mục, tha
 | `/usr/bin/strand` | Binary (gói dùng `/usr/bin`; tarball theo 03 §4 dùng `/usr/local/bin`) |
 | `/usr/lib/systemd/system/strand@.service` | Unit template, một instance mỗi pipeline |
 | `/usr/lib/systemd/system/strand-web.service` | Unit của Web UI (7.15), chạy `User=strand`; chưa bật sẵn |
+| `/usr/share/polkit-1/rules.d/50-strand.rules` | Quy tắc polkit: user `strand` (Web UI) được start/stop/restart `strand@*.service` (7.15) |
 | `/etc/strand/` | root:strand 0750; đặt `<name>.yaml` (0640) và `<name>.env` (0600) |
 | `/usr/share/doc/strand/` | `INSTALL.md`, `USAGE.md`, ví dụ `pipeline.yaml`, `pipeline.env`, `web.yaml` |
 | `/var/lib/strand/<name>`, `/run/strand/<name>` | systemd tạo (StateDirectory / RuntimeDirectory) |
@@ -805,7 +806,7 @@ sudo systemctl enable --now strand@orders-sync
 
 - Cài gói tạo user/group hệ thống `strand`, không tự bật pipeline nào.
 - Nâng cấp: pipeline đang chạy giữ binary cũ tới khi `systemctl restart strand@<name>` (an toàn nhờ checkpoint).
-- Gỡ gói: dừng và disable mọi `strand@*`. Không xóa `/etc/strand`, `/var/lib/strand` hay user, kể cả khi purge.
+- Gỡ gói: dừng và disable mọi `strand@*`, và `strand stop` các pipeline chế độ nền (từng `/etc/strand/*.yaml` trừ `web.yaml`, chạy bằng user `strand`). Không xóa `/etc/strand`, `/var/lib/strand` hay user, kể cả khi purge.
 - Chưa có: chữ ký gói (03 §4 yêu cầu ký); ký file `.sha256` bằng khóa phát hành của tổ chức.
 
 ### 7.15 `web` (Web UI)
@@ -864,14 +865,16 @@ Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2).
 
 **Bảo mật.** Session ngẫu nhiên 256 bit trong RAM (khởi động lại web là đăng nhập lại), cookie `HttpOnly` và `SameSite=Strict`, hết hạn sau 30 phút không thao tác hoặc 12 giờ. Mọi POST cần token CSRF. Đăng nhập sai quá 5 lần/phút từ một IP bị khóa (1 phút, tái phạm thì gấp đôi, tối đa 15 phút). Header `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. Audit log `<state_dir>/audit.log` ghi đăng nhập, đăng xuất, lần xem cấu hình và mọi thao tác ghi (dòng `started` trước khi chạy, dòng kết quả kèm exit code; không ghi được audit thì không chạy thao tác).
 
-**Chạy bằng user `strand`, không phải root.** `strand web` chạy cùng user với `strand sync` (unit mẫu có `User=strand`); không cần polkit hay sudo. Hệ quả: chỉ quản lý được pipeline mà user này có quyền:
+**Chạy bằng user `strand`, không phải root.** `strand web` chạy cùng user với `strand sync` (unit mẫu có `User=strand`); không cần sudo. Hệ quả: chỉ quản lý được pipeline mà user này có quyền:
 
 - đọc được file cấu hình pipeline (`/etc/strand/<name>.yaml`, root:strand 0640 là đủ) và file `.env` nếu dùng `env_file` (gói đặt `.env` ở root:strand 0600: đổi thành 0640 nếu web cần đọc);
 - kết nối được admin socket (0700, thuộc user chạy pipeline: cùng user `strand` thì được);
 - đọc được log: `journalctl -u strand@<name>` cần user `strand` thuộc nhóm `systemd-journal` (`sudo usermod -aG systemd-journal strand`), hoặc dùng chế độ nền với file log mà user đọc được;
 - pipeline do user khác chạy (ví dụ root) thì web không thấy socket và báo `unreachable`/`stopped`.
 
-`systemctl start|stop|restart|enable|disable strand@<name>` chạy bằng chính user này, không sudo: chỉ thành công khi hệ thống cho phép (ví dụ quy tắc polkit do quản trị viên tự viết, hoặc chế độ nền). Không được phép thì nút trả lỗi 502 kèm thông báo của systemctl.
+`systemctl start|stop|restart|enable|disable strand@<name>` chạy bằng chính user này, không sudo. Gói cài `/usr/share/polkit-1/rules.d/50-strand.rules` (cài tay: chép `packaging/polkit/50-strand.rules` vào `/etc/polkit-1/rules.d/`, cần polkit >= 0.106): chỉ cho user `strand` thao tác `start`, `stop`, `restart` trên đúng `strand@<name>.service`; unit khác vẫn bị từ chối. `enable`/`disable` (và `daemon-reload`) cố ý KHÔNG được cấp: polkit action `manage-unit-files` không mang tên unit nên không giới hạn được theo `strand@*`; nút Enable/Disable trả 502 (`Interactive authentication required`), dùng `sudo systemctl enable|disable strand@<name>`. Không được phép thì nút trả lỗi 502 kèm thông báo của systemctl.
+
+**Khởi động lại web không giết tiến trình con.** `strand-web.service` có `KillMode=process`: `systemctl restart|stop strand-web` chỉ gửi tín hiệu cho tiến trình web. Pipeline chế độ nền (`strand sync --background`) và job verify/repair/promote do web sinh ra (process group riêng) vẫn chạy, web mới nhận nuôi chúng qua pid file / job file. Hệ quả: `systemctl stop strand-web` không dừng pipeline chế độ nền (dừng bằng nút Stop hoặc `strand stop -c <cfg>`). Dưới `ProtectSystem=strict` tiến trình con chỉ ghi được vào `/var/lib/strand-web`: đặt `resources.spool.path` của pipeline chế độ nền trong `/var/lib/strand-web/<tên>`, hoặc thêm `ReadWritePaths=` bằng drop-in.
 
 **Thao tác (M3).** Nút nằm ở đầu trang chi tiết và các tab; mọi thao tác đi qua `POST /api/v1/pipelines/<tên>/actions/<action>` (docs/WEB-API.md §4) nên script dùng được bằng token. Hộp thoại xác nhận là phần tử `<dialog>` điều khiển bởi `app.js`, không có script inline (CSP `default-src 'self'`).
 
