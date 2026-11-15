@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -486,5 +487,20 @@ func TestAD8_StaleSocketReplacedOnStart(t *testing.T) {
 	}
 	if top.PipelineID != "orders-sync" {
 		t.Errorf("pipelineID mong muốn 'orders-sync', nhận được %q", top.PipelineID)
+	}
+}
+
+// Đường dẫn socket vượt giới hạn sun_path phải báo lỗi rõ (nêu độ dài + khóa cấu hình),
+// không phải "bind: invalid argument" khó hiểu.
+func TestServerStartSocketPathTooLong(t *testing.T) {
+	long := filepath.Join(t.TempDir(), strings.Repeat("d", 120), "admin.sock")
+	srv := admin.NewServer(long, newMockHandler(), nil)
+	err := srv.Start()
+	if err == nil {
+		_ = srv.Close()
+		t.Fatal("socket path quá dài phải lỗi")
+	}
+	if !strings.Contains(err.Error(), "too long") || !strings.Contains(err.Error(), "observability.admin_socket") {
+		t.Fatalf("thông báo lỗi chưa rõ: %v", err)
 	}
 }

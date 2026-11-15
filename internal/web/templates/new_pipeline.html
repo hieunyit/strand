@@ -77,6 +77,10 @@
           <br><input type="text" name="database" value="app" class="mono">
           <br><small class="muted">PG: DB name; MySQL: comma-separated or * for all</small>
         </label>
+        <label>Target metadata database (MySQL target only)
+          <br><input type="text" name="target_database" value="strand" class="mono">
+          <br><small class="muted">Holds Strand's own _strand_* tables; must exist: CREATE DATABASE strand;</small>
+        </label>
         <label>PG Schema (Postgres source only)
           <br><input type="text" name="schema" value="public" class="mono">
         </label>

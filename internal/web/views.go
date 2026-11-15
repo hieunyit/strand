@@ -257,7 +257,7 @@ func (s *Server) configView(p *Pipeline) ConfigView {
 		v.Error = "cannot read config file: " + err.Error()
 		return v
 	}
-	masked, err := MaskConfigYAML(raw)
+	masked, err := MaskConfigText(raw)
 	if err != nil {
 		v.Error = "config is not valid YAML: " + err.Error()
 		return v

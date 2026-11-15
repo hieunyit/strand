@@ -910,6 +910,11 @@ DSN target (`--target`) và DSN source để fence (`--fence`, tùy chọn khi f
 - Hỗ trợ các engine nguồn (MySQL, MariaDB, PostgreSQL) và đích (PostgreSQL, MySQL).
 - Mật khẩu nguồn/đích được ghi trực tiếp vào file `.env` (mode 0600) trong `config_dir` (khai báo ở `web.yaml`, mặc định `/etc/strand` nếu ghi được, ngược lại `<state_dir>/pipelines`). File cấu hình YAML chỉ tham chiếu biến môi trường qua `${SRC_PW}` hoặc `password_env`.
 - Sau khi tạo, server tự động thực hiện `strand validate` và `strand plan`, hiển thị kết quả trực tiếp và cung cấp nút **Start** để khởi động pipeline ngay ở chế độ nền (background). Pipeline mới được tự động thêm vào registry (và `web.yaml`) và có hiệu lực ngay lập tức.
+- Database: ô `database` (một hoặc nhiều tên cách nhau dấu phẩy) hoặc `databases` chọn database dữ liệu, sinh `tables.include: ["<db>.*", ...]` (nguồn MySQL/MariaDB). Target MySQL: `target.database` là database chứa bảng `_strand_*` của Strand, mặc định `strand` (đổi bằng ô `target_database`), KHÔNG phải database dữ liệu. Database này phải tồn tại trước khi `sync`: `CREATE DATABASE strand;` (validate báo lỗi `Unknown database` kèm gợi ý nếu thiếu).
+- Nếu `strand validate` thoát khác 0, pipeline vẫn được tạo (file cấu hình và `.env` được giữ lại để sửa ở tab **Config**) nhưng kết quả là `ok: false`, trang hiện rõ "Validation failed" và không có nút Start; sửa cho đến khi validate qua rồi mới Start.
+- Admin socket mặc định là `<spool>/admin.sock`; giới hạn đường dẫn Unix socket là 107 byte (Linux). Nếu quá dài, web chọn `<state_dir>/sock/<tên>.sock`, rồi `/run/strand/<tên>.sock` (nếu ghi được), cuối cùng `<tmp>/strand-<tên>.sock`. `strand validate`/`sync` từ chối `observability.admin_socket` dài quá giới hạn với lỗi nêu khóa và độ dài.
+- Cổng `/metrics` mỗi pipeline một cổng riêng: mặc định chọn cổng trống đầu tiên từ `127.0.0.1:9464` trở lên (bỏ cổng đã dùng trong cấu hình pipeline khác và cổng đang bị chiếm); trường `metrics` được tôn trọng, trùng cổng pipeline khác bị từ chối (409).
+- Tab Config hiện đúng văn bản file (giữ chú thích, dòng trống, định dạng), chỉ che giá trị bí mật bằng `********`. Lưu lại văn bản đã che sẽ khôi phục bí mật gốc theo từng dòng và giữ nguyên định dạng; nếu một dòng `********` không khôi phục được thì lưu bị từ chối (400), không bao giờ ghi `********` làm mật khẩu.
 
 ---
 

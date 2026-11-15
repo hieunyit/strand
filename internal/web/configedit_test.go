@@ -289,3 +289,106 @@ func TestConfigPathTraversalBlocked(t *testing.T) {
 		}
 	}
 }
+
+const fmtYAML = `# giữ nguyên chú thích
+version: 1
+name: orders
+
+source: { kind: mysql, dsn: "mysql://strand:SuperSecretSrc@10.0.0.1:3306/app" }   # flow-style
+
+
+target:
+  kind: postgres
+  host: 10.0.0.2
+  password: tgtSecretPw   # bí mật
+  password_env: DST_PW
+  database: app
+tables:
+  include: ["app.*"]
+observability: { metrics: "127.0.0.1:9464" }
+`
+
+func writeFmtYAML(t *testing.T, e *testEnv) string {
+	t.Helper()
+	cfgPath := filepath.Join(e.dir, "orders.yaml")
+	if err := os.WriteFile(cfgPath, []byte(fmtYAML), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}
+
+func getCfgYAML(t *testing.T, e *testEnv, c *http.Client) string {
+	t.Helper()
+	resp, out := e.do(c, "GET", "/api/v1/pipelines/orders/config", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("get config: %d %s", resp.StatusCode, out)
+	}
+	var v struct {
+		YAML string `json:"yaml"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatal(err)
+	}
+	return v.YAML
+}
+
+func saveCfg(e *testEnv, c *http.Client, csrf, yamlText string) (int, string) {
+	body, _ := json.Marshal(map[string]any{"yaml": yamlText})
+	resp, out := e.do(c, "POST", "/api/v1/pipelines/orders/config", string(body),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	return resp.StatusCode, out
+}
+
+// GET config trả đúng văn bản thô (dòng trống, flow-style, chú thích), chỉ che giá trị bí mật.
+func TestConfigViewKeepsRawFormatting(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, _ := e.loginOK()
+	writeFmtYAML(t, e)
+	got := getCfgYAML(t, e, c)
+	for _, leak := range []string{"SuperSecretSrc", "tgtSecretPw"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("leak %q:\n%s", leak, got)
+		}
+	}
+	want := strings.NewReplacer("SuperSecretSrc", "********", "tgtSecretPw", `"********"`).Replace(fmtYAML)
+	if got != want {
+		t.Errorf("văn bản không được định dạng lại.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// Lưu lại văn bản đã che (kèm sửa nhỏ) phải giữ bí mật gốc và định dạng gốc; diff chỉ chứa dòng đã sửa.
+func TestConfigSaveMaskedTextKeepsSecretsAndFormat(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, csrf := e.loginOK()
+	cfgPath := writeFmtYAML(t, e)
+	e.setExit(0)
+	edited := strings.Replace(getCfgYAML(t, e, c), "host: 10.0.0.2", "host: 10.0.0.9", 1)
+	if code, out := saveCfg(e, c, csrf, edited); code != 200 {
+		t.Fatalf("save: %d %s", code, out)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	want := strings.Replace(fmtYAML, "host: 10.0.0.2", "host: 10.0.0.9", 1)
+	if string(after) != want {
+		t.Errorf("file sau khi lưu khác kỳ vọng.\n--- got ---\n%s\n--- want ---\n%s", after, want)
+	}
+	if strings.Contains(string(after), "********") {
+		t.Errorf("'********' bị ghi vào file")
+	}
+}
+
+// Không khôi phục được '********' (dòng bí mật không có trong file gốc) => từ chối, file không đổi.
+func TestConfigSaveRejectsUnrestorableMask(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, csrf := e.loginOK()
+	cfgPath := writeFmtYAML(t, e)
+	e.setExit(0)
+	edited := strings.Replace(getCfgYAML(t, e, c), "  database: app\n", "  database: app\n  token: ********\n", 1)
+	code, out := saveCfg(e, c, csrf, edited)
+	if code != 400 || !strings.Contains(out, "********") {
+		t.Errorf("want 400, got %d %s", code, out)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	if string(after) != fmtYAML {
+		t.Errorf("file bị đổi dù bị từ chối")
+	}
+}

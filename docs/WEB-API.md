@@ -42,10 +42,10 @@ Trạng thái (`state`) của pipeline: `synced`, `bootstrapping`, `paused`, `st
 ### `POST /api/v1/pipelines` (Tạo pipeline mới)
 
 Body JSON (hoặc Form URL-encoded):
-`{"name": "...", "from": "mysql|mariadb|postgres", "to": "mysql|postgres", "source_host", "source_port", "target_host", "target_port", "source_user", "target_user", "source_password", "target_password", "source_password_env", "target_password_env", "database", "schema", "include", "exclude", "commit_order", "spool_dir", "workers", ...}`.
+`{"name": "...", "from": "mysql|mariadb|postgres", "to": "mysql|postgres", "source_host", "source_port", "target_host", "target_port", "source_user", "target_user", "source_password", "target_password", "source_password_env", "target_password_env", "database", "databases", "target_database", "schema", "include", "exclude", "commit_order", "spool_dir", "workers", "server_id", "iops_soft", "iops_hard", "metrics", ...}`. `include`/`exclude`/`databases` là mảng chuỗi (JSON) hoặc chuỗi phân cách dấu phẩy (form). Số nguyên sai ở form: **400** nêu tên trường. `databases` (hoặc `database`, nhiều tên cách dấu phẩy) sinh `tables.include` `<db>.*` cho nguồn MySQL/MariaDB. `target_database` (target MySQL) là database chứa `_strand_*`, mặc định `strand` (khác database dữ liệu; phải `CREATE DATABASE` trước khi sync). `metrics` mặc định là cổng trống đầu tiên từ `127.0.0.1:9464`; trùng cổng pipeline khác: **409**. Admin socket mặc định `<spool>/admin.sock`, tự chuyển sang đường dẫn ngắn hơn khi vượt giới hạn 107 byte.
 
 Tạo cấu hình YAML và file `.env` (mode `0600`) trong `config_dir` (khai báo trong `web.yaml`, mặc định `/etc/strand` nếu ghi được, nếu không thì `<state_dir>/pipelines`). Mật khẩu chỉ ghi vào `.env`, không bao giờ vào YAML. Chạy `strand validate` và `strand plan`, thêm pipeline vào registry (và `web.yaml` nếu không khớp `scan`), gọi `Registry.Refresh`.
-Trả về **200**:
+Trả về **200** (cả khi validate lỗi; xem `ok`):
 ```json
 {
   "ok": true,
@@ -57,6 +57,7 @@ Trả về **200**:
   "message": "Pipeline created successfully"
 }
 ```
+`ok` = `strand validate` thoát 0. Nếu validate lỗi: vẫn **200**, `ok: false`, `message` bắt đầu "Pipeline files were created but validation failed (exit N)...", file YAML/`.env` được giữ lại và pipeline đã đăng ký để sửa ở tab Config; phải sửa cho validate qua rồi mới Start. `plan` chỉ để tham khảo.
 Lỗi: **400** tên sai whitelist hoặc tham số sai, **409** tên pipeline hoặc file đã tồn tại. Audit: `pipeline.create`.
 
 `PipelineView`:
@@ -94,9 +95,11 @@ Lỗi: **400** tên sai whitelist hoặc tham số sai, **409** tên pipeline ho
 
 ### `GET /api/v1/pipelines/{name}/config`
 
-`{"path", "yaml", "unimplemented_keys": [...], "error"}`. `yaml` là file cấu hình đọc thô (chưa thay `${VAR}`), mọi giá trị bí mật bị thay bằng `********` (khóa có `password`, `secret`, `token`, `credential`, `private`, `encryption_key`, `access_key`, mật khẩu nhúng trong DSN/URL). Mỗi lần xem được ghi audit `config.view`.
+`{"path", "yaml", "unimplemented_keys": [...], "error"}`. `yaml` là văn bản file cấu hình đọc thô (chưa thay `${VAR}`), giữ nguyên định dạng/chú thích/dòng trống (không tuần tự hóa lại), mọi giá trị bí mật bị thay bằng `********` (thay theo dòng; khóa có `password`, `secret`, `token`, `credential`, `private`, `encryption_key`, `access_key`, mật khẩu nhúng trong DSN/URL). Mỗi lần xem được ghi audit `config.view`.
 
 ### `POST /api/v1/pipelines/{name}/config/validate`
+
+Ghi chú: các route nhận `yaml` (validate/lưu) khôi phục bí mật theo dòng từ văn bản đã che (`********`) của `GET .../config`; dòng `********` không khôi phục được bị từ chối **400**.
 
 Body JSON: `{"yaml": "..."}`.
 Ghi cấu hình ra file tạm cùng thư mục, chạy `strand validate -c <tmp>` với môi trường của pipeline, so sánh và tạo unified diff so với file cấu hình hiện tại, rồi xóa file tạm.

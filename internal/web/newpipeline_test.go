@@ -3,10 +3,13 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"strand/internal/config"
 )
 
 func TestNewPipelineAuthAndCSRF(t *testing.T) {
@@ -201,5 +204,210 @@ func TestNewPipelineConfigDirFallback(t *testing.T) {
 	// Since /etc/strand is typically not writable in unprivileged test, it falls back to state_dir/pipelines
 	if cDir != "/etc/strand" && !strings.Contains(cDir, "pipelines") {
 		t.Errorf("unexpected ConfigDir: %s", cDir)
+	}
+}
+
+// createNP gửi POST /api/v1/pipelines (JSON) và trả mã HTTP, kết quả giải mã, nội dung YAML đã sinh.
+func createNP(t *testing.T, e *testEnv, c *http.Client, csrf string, opts NewPipelineOpts) (int, CreatePipelineResult, string, string) {
+	t.Helper()
+	body, _ := json.Marshal(opts)
+	resp, out := e.do(c, "POST", "/api/v1/pipelines", string(body),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	return decodeNP(t, e, resp.StatusCode, out)
+}
+
+func createNPForm(t *testing.T, e *testEnv, c *http.Client, csrf string, v url.Values) (int, CreatePipelineResult, string, string) {
+	t.Helper()
+	resp, out := e.do(c, "POST", "/api/v1/pipelines", v.Encode(),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/x-www-form-urlencoded"})
+	return decodeNP(t, e, resp.StatusCode, out)
+}
+
+func decodeNP(t *testing.T, e *testEnv, code int, out string) (int, CreatePipelineResult, string, string) {
+	t.Helper()
+	var res CreatePipelineResult
+	yamlText := ""
+	if code == 200 {
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("unmarshal: %v (%s)", err, out)
+		}
+		b, err := os.ReadFile(res.ConfigPath)
+		if err != nil {
+			t.Fatalf("read generated yaml: %v", err)
+		}
+		yamlText = string(b)
+	}
+	return code, res, yamlText, out
+}
+
+func npEnv(t *testing.T) (*testEnv, *http.Client, string) {
+	t.Helper()
+	dir := t.TempDir()
+	e := opsEnv(t, false, func(c *Config) { c.ConfigDir = dir })
+	c, csrf := e.loginOK()
+	e.setExit(0)
+	return e, c, csrf
+}
+
+// Form của trình duyệt phải đọc đủ mọi trường (trước đây source_port/target_port/workers/exclude bị bỏ qua).
+func TestNewPipelineFormParsesAllFields(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	code, _, y, out := createNPForm(t, e, c, csrf, url.Values{
+		"name": {"f1"}, "from": {"mysql"}, "to": {"mysql"},
+		"source_host": {"10.0.0.1"}, "source_port": {"33061"},
+		"target_host": {"10.0.0.2"}, "target_port": {"33062"},
+		"databases": {"shop, crm"}, "exclude": {"shop.log_*, crm.tmp"}, "workers": {"4"},
+		"server_id": {"51000"}, "iops_soft": {"100"}, "metrics": {"127.0.0.1:19464"},
+	})
+	if code != 200 {
+		t.Fatalf("create: %d %s", code, out)
+	}
+	for _, want := range []string{"port: 33061", "port: 33062", "max: 4", `exclude: ["shop.log_*", "crm.tmp"]`,
+		`include: ["shop.*", "crm.*"]`, "server_id: 51000", "soft: 100", `metrics: "127.0.0.1:19464"`} {
+		if !strings.Contains(y, want) {
+			t.Errorf("yaml thiếu %q:\n%s", want, y)
+		}
+	}
+	if strings.Contains(y, "port: 3306\n") {
+		t.Errorf("yaml không được chứa port mặc định 3306:\n%s", y)
+	}
+}
+
+func TestNewPipelineFormInvalidIntegerRejected(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	for _, f := range []string{"source_port", "target_port", "workers"} {
+		code, _, _, out := createNPForm(t, e, c, csrf, url.Values{
+			"name": {"bad-" + strings.ReplaceAll(f, "_", "-")}, "from": {"mysql"}, "to": {"mysql"}, f: {"abc"}})
+		if code != 400 || !strings.Contains(out, f) {
+			t.Errorf("%s=abc: want 400 nêu tên trường, got %d %s", f, code, out)
+		}
+	}
+}
+
+// JSON `databases` phải được dùng để sinh include (trước đây bị bỏ qua → app.*).
+func TestNewPipelineJSONDatabases(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	code, _, y, out := createNP(t, e, c, csrf, NewPipelineOpts{Name: "j1", From: "mysql", To: "mysql", Databases: []string{"shop", "crm"}})
+	if code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	if !strings.Contains(y, `include: ["shop.*", "crm.*"]`) || strings.Contains(y, "app.*") {
+		t.Errorf("include sai:\n%s", y)
+	}
+	// `database` (số ít) vẫn hoạt động.
+	code, _, y, out = createNP(t, e, c, csrf, NewPipelineOpts{Name: "j2", From: "mysql", To: "mysql", Database: "shop"})
+	if code != 200 || !strings.Contains(y, `include: ["shop.*"]`) {
+		t.Errorf("database số ít: %d %s\n%s", code, out, y)
+	}
+}
+
+// target.database (nơi chứa _strand_*) phải tách khỏi database dữ liệu; mặc định "strand".
+func TestNewPipelineTargetMetaDatabase(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	_, _, y, _ := createNP(t, e, c, csrf, NewPipelineOpts{Name: "m1", From: "mysql", To: "mysql", Database: "shop"})
+	if !strings.Contains(y, "  database: strand") || strings.Contains(y, "database: shop") {
+		t.Errorf("target.database phải là strand:\n%s", y)
+	}
+	_, _, y, _ = createNP(t, e, c, csrf, NewPipelineOpts{Name: "m2", From: "mysql", To: "mysql", Database: "shop", TargetDatabase: "meta_db"})
+	if !strings.Contains(y, "  database: meta_db") {
+		t.Errorf("target_database không được áp dụng:\n%s", y)
+	}
+	code, _, _, out := createNP(t, e, c, csrf, NewPipelineOpts{Name: "m3", From: "mysql", To: "mysql", TargetDatabase: "a; DROP"})
+	if code != 400 {
+		t.Errorf("target_database lạ phải 400, got %d %s", code, out)
+	}
+}
+
+// validate lỗi: giữ file nhưng ok=false và thông báo rõ.
+func TestNewPipelineValidateFailureNotOK(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	e.setExit(2)
+	code, res, _, out := createNP(t, e, c, csrf, NewPipelineOpts{Name: "v1", From: "mysql", To: "mysql"})
+	if code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	if res.OK {
+		t.Errorf("validate exit 2 nhưng ok=true: %+v", res)
+	}
+	if !strings.Contains(res.Message, "validation failed") || strings.Contains(res.Message, "created successfully") {
+		t.Errorf("message chưa rõ: %q", res.Message)
+	}
+	if res.Validate.ExitCode != 2 {
+		t.Errorf("validate.exit_code=%d", res.Validate.ExitCode)
+	}
+	if _, err := os.Stat(res.ConfigPath); err != nil {
+		t.Errorf("file cấu hình phải được giữ lại: %v", err)
+	}
+	if e.srv.Registry().Get("v1") == nil {
+		t.Errorf("pipeline vẫn phải được đăng ký")
+	}
+}
+
+func TestDefaultAdminSocketFitsLimit(t *testing.T) {
+	short := defaultAdminSocket("/var/lib/strand/p/spool", "p", "/var/lib/strand")
+	if short != "/var/lib/strand/p/spool/admin.sock" {
+		t.Errorf("spool ngắn phải giữ <spool>/admin.sock, got %s", short)
+	}
+	long := "/var/lib/strand/" + strings.Repeat("x", 120) + "/spool"
+	got := defaultAdminSocket(long, "p", "/var/lib/strand")
+	if len(got) > config.MaxUnixSocketPath() {
+		t.Errorf("socket %q dài %d > giới hạn", got, len(got))
+	}
+	// Ngay cả khi state_dir cũng dài thì vẫn phải nằm trong giới hạn.
+	got = defaultAdminSocket(long, "p", long)
+	if len(got) > config.MaxUnixSocketPath() {
+		t.Errorf("socket %q dài %d > giới hạn", got, len(got))
+	}
+}
+
+func TestNewPipelineLongSpoolSocketFits(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	long := filepath.Join(t.TempDir(), strings.Repeat("s", 110))
+	code, res, y, out := createNP(t, e, c, csrf, NewPipelineOpts{Name: "s1", From: "mysql", To: "mysql", SpoolDir: long})
+	if code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	for _, l := range strings.Split(y, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "admin_socket: "); ok && len(v) > config.MaxUnixSocketPath() {
+			t.Errorf("admin_socket quá dài (%d): %s", len(v), v)
+		}
+	}
+	_ = res
+}
+
+// Mỗi pipeline một cổng metrics riêng; cổng do người dùng đặt được tôn trọng và không được trùng.
+func TestNewPipelineMetricsUniquePort(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	_, _, y1, _ := createNP(t, e, c, csrf, NewPipelineOpts{Name: "p1", From: "mysql", To: "mysql"})
+	_, _, y2, _ := createNP(t, e, c, csrf, NewPipelineOpts{Name: "p2", From: "mysql", To: "mysql"})
+	m := func(y string) string {
+		for _, l := range strings.Split(y, "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(l), "metrics: "); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	if m(y1) == "" || m(y1) == m(y2) {
+		t.Errorf("cổng metrics trùng: %q vs %q", m(y1), m(y2))
+	}
+	// Trường metrics được tôn trọng.
+	_, _, y3, _ := createNP(t, e, c, csrf, NewPipelineOpts{Name: "p3", From: "mysql", To: "mysql", Metrics: "127.0.0.1:19999"})
+	if m(y3) != `"127.0.0.1:19999"` {
+		t.Errorf("metrics không được tôn trọng: %q", m(y3))
+	}
+	// Trùng cổng với pipeline khác → 409.
+	code, _, _, out := createNP(t, e, c, csrf, NewPipelineOpts{Name: "p4", From: "mysql", To: "mysql", Metrics: "127.0.0.1:19999"})
+	if code != 409 {
+		t.Errorf("metrics trùng phải 409, got %d %s", code, out)
+	}
+}
+
+// Trang tạo pipeline phải có ô nhập database metadata của target.
+func TestNewPipelinePageHasTargetDatabaseInput(t *testing.T) {
+	e, c, _ := npEnv(t)
+	resp, out := e.do(c, "GET", "/pipelines/new", "", nil)
+	if resp.StatusCode != 200 || !strings.Contains(out, `name="target_database"`) {
+		t.Errorf("thiếu input target_database (%d)", resp.StatusCode)
 	}
 }
