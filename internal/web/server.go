@@ -98,6 +98,7 @@ func New(o Options) (*Server, error) {
 	jr.OnEnd = s.auditJobEnd
 	s.jobs = jr
 	s.registerOps()
+	s.registerWizards()
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
 	}
@@ -217,6 +218,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/jobs/{id}", s.auth(true, s.apiJob))
 	mux.Handle("GET /api/v1/jobs/{id}/output", s.auth(true, s.apiJobOutput))
 	mux.Handle("POST /api/v1/pipelines/{name}/actions/{action}", s.auth(true, s.apiAction))
+	s.wizardRoutes(mux)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		// Mọi đường dẫn /api/ không khớp: vẫn đòi đăng nhập trước khi tiết lộ gì (404 sau 401).
 		s.auth(true, func(w http.ResponseWriter, r *http.Request, _ *Session) {

@@ -161,7 +161,11 @@ func (r *FileJobRunner) Start(_ context.Context, spec JobSpec) (string, error) {
 		_ = os.Remove(r.logPath(id))
 		return "", fmt.Errorf("start %s: %w", r.bin, err)
 	}
-	js := &JobStatus{ID: id, Pipeline: spec.Pipeline, Kind: spec.Kind, Args: append([]string(nil), spec.Args...),
+	shown := spec.Args
+	if spec.DisplayArgs != nil {
+		shown = spec.DisplayArgs
+	}
+	js := &JobStatus{ID: id, Pipeline: spec.Pipeline, Kind: spec.Kind, Args: append([]string(nil), shown...),
 		Started: now, Running: true, PID: cmd.Process.Pid}
 	r.jobs[id] = js
 	r.persistLocked(js)

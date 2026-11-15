@@ -16,7 +16,7 @@ import (
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job"}
+var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "wizard"}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -267,7 +267,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	base := "/pipelines/" + p.Name
 	b := detailBody{Tab: tab, View: s.view(p)}
 	b.Ctl = s.controls(p, b.View)
-	for _, t := range [][2]string{{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"}, {"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"}} {
+	for _, t := range [][2]string{{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"}, {"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"}, {"repair", "Repair"}, {"promote", "Promote"}} {
 		href := base
 		if t[0] != "graph" {
 			href += "/" + t[0]

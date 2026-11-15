@@ -38,6 +38,8 @@ type Action struct {
 	Name string
 	// ConfirmName: UI bắt gõ lại tên pipeline (Rewind, Repair, Promote).
 	ConfirmName bool
+	// SecretArgs: tên tham số body mang bí mật (DSN); giá trị bị che trong dòng audit.
+	SecretArgs []string
 	// Run thực hiện thao tác. Lỗi trả về được audit với result=error. Đối số tiến trình con phải là mảng.
 	Run func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error)
 }
@@ -86,6 +88,8 @@ type JobSpec struct {
 	Kind     string   // tên thao tác, ví dụ "verify"
 	Args     []string // argv của `strand`, không qua shell
 	Env      []string // KEY=VALUE bổ sung (từ env_file)
+	// DisplayArgs: nếu có, thay Args trong JobStatus (file job, trang job) khi Args chứa bí mật như DSN.
+	DisplayArgs []string
 }
 
 // JobStatus là trạng thái một job (cũng là nội dung file <state_dir>/jobs/<id>.json).
@@ -172,7 +176,13 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 	}
 	argv := make([]string, 0, len(args))
 	for _, k := range sortedKeys(args) {
-		argv = append(argv, k+"="+args[k])
+		v := args[k]
+		for _, sk := range a.SecretArgs {
+			if sk == k {
+				v = "<hidden>"
+			}
+		}
+		argv = append(argv, k+"="+v)
 	}
 	ip := s.clientIP(r)
 	// Ghi audit TRƯỚC khi chạy: nếu không ghi được thì không chạy thao tác.

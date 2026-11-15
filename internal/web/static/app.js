@@ -111,8 +111,8 @@
     return body;
   }
 
-  function runAction(form, body) {
-    var action = form.getAttribute('data-action');
+  function runAction(form, body, action) {
+    action = action || form.getAttribute('data-action');
     var url = '/api/v1/pipelines/' + encodeURIComponent(form.getAttribute('data-pipeline')) + '/actions/' + encodeURIComponent(action);
     var buttons = form.querySelectorAll('button');
     Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
@@ -123,7 +123,7 @@
       if (res.status === 401) { location.href = '/login'; return; }
       if (res.status >= 200 && res.status < 300) {
         form.removeAttribute('data-dirty');
-        if (res.j.job_id) { location.href = '/jobs/' + res.j.job_id; return; }
+        if (res.j.job_id && !form.hasAttribute('data-stay')) { location.href = '/jobs/' + res.j.job_id; return; }
         toast(action + ': ' + (res.j.message || 'ok'), true);
         setTimeout(function () { refresh(true); }, 1500);
       } else {
@@ -141,13 +141,23 @@
     if (!form || !form.classList || !form.classList.contains('act')) { return; }
     ev.preventDefault();
     var body = collect(form);
-    var message = form.getAttribute('data-confirm');
-    if (!message) { runAction(form, body); return; }
-    var retype = form.getAttribute('data-retype') || '';
+    // A form may have several submit buttons, each its own action (data-do) with its own dialogs.
+    var src = ev.submitter && ev.submitter.hasAttribute('data-do') ? ev.submitter : form;
+    var act = src === form ? null : src.getAttribute('data-do');
+    var message = src.getAttribute('data-confirm');
+    if (!message) { runAction(form, body, act); return; }
+    var retype = src.getAttribute('data-retype') || '';
     confirmDialog(message, retype).then(function (res) {
       if (!res) { return; }
       if (retype) { body.confirm_name = retype; }
-      runAction(form, body);
+      // Failover: a second, separate dialog that must be retyped again.
+      var msg2 = src.getAttribute('data-confirm2');
+      if (!msg2) { runAction(form, body, act); return; }
+      confirmDialog(msg2, retype).then(function (res2) {
+        if (!res2) { return; }
+        body.confirm_name2 = retype;
+        runAction(form, body, act);
+      });
     });
   });
 
