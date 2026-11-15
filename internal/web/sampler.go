@@ -101,7 +101,7 @@ const (
 )
 
 // AllStates theo thứ tự hiển thị ở Overview.
-var AllStates = []string{StateSynced, StateBootstrapping, StatePaused, StateStarting, StateFailed, StateStopped, StateUnreachable}
+var AllStates = []string{StateSynced, StateBootstrapping, StatePaused, StateStarting, StateFailed, StateStopped, StateUnreachable, StateUnknown}
 
 // DeriveState gộp trả lời admin socket (nếu có) với trạng thái tiến trình.
 func DeriveState(top *admin.TopInfo, rt Runtime) string {

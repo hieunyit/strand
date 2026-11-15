@@ -309,10 +309,10 @@ func TestParseLogEventsJSONAndText(t *testing.T) {
 		`garbage`, `{broken`,
 	}
 	ev := ParseLogEvents(lines, 10)
-	if len(ev) != 2 || ev[0].Message != "b" || ev[1].Message != "c d" || ev[1].Time != "t3" || ev[1].Level != "ERROR" {
+	if len(ev) != 2 || ev[0].Message != "b" || ev[1].Message != "c d  x=1" || ev[1].Time != "t3" || ev[1].Level != "ERROR" {
 		t.Fatalf("%+v", ev)
 	}
-	if got := ParseLogEvents(lines, 1); len(got) != 1 || got[0].Message != "c d" {
+	if got := ParseLogEvents(lines, 1); len(got) != 1 || got[0].Message != "c d  x=1" {
 		t.Fatalf("limit: %+v", got)
 	}
 	if ErrorCodeFromLine("Error: [log_gap] x") != "log_gap" || ErrorCodeFromLine("no code") != "" {

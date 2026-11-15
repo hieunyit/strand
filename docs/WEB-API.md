@@ -31,7 +31,7 @@ Trạng thái (`state`) của pipeline: `synced`, `bootstrapping`, `paused`, `st
 ### `GET /api/v1/overview`
 
 ```json
-{"counts": {"synced": 1, "failed": 0, "stopped": 0, "...": 0},
+{"counts": {"synced": 1, "bootstrapping": 0, "paused": 0, "starting": 0, "failed": 0, "stopped": 0, "unreachable": 0, "unknown": 0},
  "total": 1, "max_lag_seconds": 0.25, "max_lag_pipeline": "orders", "rows_per_sec": 1234,
  "warnings": ["scan: ... skipped ..."],
  "pipelines": [ <PipelineView> ]}
@@ -65,14 +65,14 @@ Lỗi: **400** tên sai whitelist hoặc tham số sai, **409** tên pipeline ho
 {"name": "orders", "pair": "mysql → postgres", "mode": "systemd|background", "origin": "scan|web.yaml",
  "config_path": "/etc/strand/orders.yaml", "state": "synced", "admin_reachable": true,
  "runtime": {"mode": "systemd", "running": true, "active_state": "active", "sub_state": "running",
-             "exit_code": 5, "pid": 1234, "since": "...", "error": "..."},
+             "exit_code": 5, "pid": 1234, "since": "...", "error": "...", "last_error": "..."},
  "top": {"pipeline_id": "orders", "state": "synced", "lag_seconds": 0.25, "throughput": 1234, "zone": "green",
          "progress": 0, "eta_seconds": 0, "tables_done": 0, "tables_total": 0, "breaker_open": false},
  "last_exit": {"code": 5, "meaning": "...", "action": "...", "auto_restart": false},
  "config_error": "", "sampled_at": "2026-11-15T10:00:00Z"}
 ```
 
-`runtime.exit_code` và `last_exit` chỉ có khi pipeline đang dừng và systemd biết exit code.
+`runtime.exit_code` và `last_exit` chỉ có khi pipeline đang dừng và biết exit code: từ systemd, hoặc (chế độ nền) suy ra từ đuôi log. Chế độ nền: lần chạy cuối kết thúc bằng lỗi (dòng `Error...:` của CLI hoặc ERROR `pipeline failed` sau mốc khởi động gần nhất) thì `state = "failed"`, `runtime.last_error` là lý do (đã che bí mật), `last_exit.code` theo mã `[code]` hoặc 1 nếu lỗi không gắn mã; dừng êm vẫn là `stopped`.
 
 ### `GET /api/v1/pipelines/{name}` → `{"pipeline": PipelineView, "status": StatusView}`
 
@@ -90,7 +90,7 @@ Lỗi: **400** tên sai whitelist hoặc tham số sai, **409** tên pipeline ho
 
 ### `GET /api/v1/pipelines/{name}/errors`
 
-`{"live_events": [LogEvent], "log_events": [LogEvent], "live_error", "last_exit": {code, meaning, action, auto_restart}, "exit_from": "systemd|log", "error_code"}`. `live_events` là ring 200 bản ghi WARN/ERROR của tiến trình đang chạy; `log_events` rút từ đuôi log (cho cả pipeline đã dừng). `last_exit` có khi pipeline dừng: từ systemd, hoặc suy ra từ mã lỗi `[code]` trong log (`exit_from = "log"`). `LogEvent`: `{"time", "level", "message"}`; mật khẩu trong message bị che.
+`{"live_events": [LogEvent], "log_events": [LogEvent], "live_error", "last_exit": {code, meaning, action, auto_restart}, "exit_from": "systemd|log", "error_code"}`. `live_events` là ring 200 bản ghi WARN/ERROR của tiến trình đang chạy; `log_events` rút từ đuôi log (cho cả pipeline đã dừng). `last_exit` có khi pipeline dừng: từ systemd, hoặc suy ra từ mã lỗi `[code]` trong log (`exit_from = "log"`). `LogEvent`: `{"time", "level", "message"}`; mật khẩu trong message bị che. Với `log_events`, `message` gồm cả thuộc tính của bản ghi (`error`, `reason`, `hint`, `table`, ... trừ `time/level/msg/pipeline/epoch`) theo khuôn `msg  k=v  k2=v2` như `live_events`, và dòng `Error: ...` cuối của CLI (chế độ nền) nếu lý do chưa có trong sự kiện nào. `exit_from = "log"` cũng áp dụng khi chế độ nền suy ra exit code từ log.
 
 ### `GET /api/v1/pipelines/{name}/config`
 

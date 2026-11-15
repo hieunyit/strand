@@ -229,6 +229,9 @@ func (s *Server) errorsView(ctx context.Context, p *Pipeline) ErrorsView {
 		case rt.ExitCode != nil:
 			e := ExplainExit(*rt.ExitCode)
 			v.LastExit, v.ExitFrom = &e, "systemd"
+			if rt.Mode == ModeBackground {
+				v.ExitFrom = "log"
+			}
 		case v.ErrorCode != "":
 			if c, ok := exitForErrorCode(v.ErrorCode); ok {
 				e := ExplainExit(c)

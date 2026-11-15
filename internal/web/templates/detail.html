@@ -24,7 +24,7 @@
     {{if .Ctl.JobActive}}<span class="sep"></span><a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
   </div>
   {{if .View.ConfigErr}}<p class="err">Config error: {{.View.ConfigErr}}</p>{{end}}
-  {{if and .View.LastExit (not .View.Runtime.Running)}}<p class="warnbox">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}</p>{{end}}
+  {{if and .View.LastExit (not .View.Runtime.Running)}}<p class="warnbox">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code>{{.View.Runtime.LastError}}</code>{{end}}</p>{{end}}
 </section>
 <nav class="tabs">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}">{{.Label}}</a>{{end}}</nav>
 

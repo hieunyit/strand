@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"strand/internal/config"
+	"strand/internal/exitcode"
 )
 
 // Commander chạy lệnh ngoài (systemctl, journalctl). Tách ra interface để test không cần systemd.
@@ -312,6 +313,8 @@ type Runtime struct {
 	PID         int    `json:"pid,omitempty"`
 	Since       string `json:"since,omitempty"`
 	Error       string `json:"error,omitempty"`
+	// LastError: chế độ nền, lý do lần chạy gần nhất thất bại (suy ra từ đuôi log; đã che bí mật).
+	LastError string `json:"last_error,omitempty"`
 }
 
 // Runtime hỏi systemctl show (chế độ systemd) hoặc kiểm file pid (chế độ nền).
@@ -367,8 +370,29 @@ func bgRuntime(p *Pipeline) Runtime {
 		rt.Running, rt.PID, rt.ActiveState = true, pid, "active"
 	} else {
 		rt.ActiveState = "inactive"
+		bgInferExit(p, &rt)
 	}
 	return rt
+}
+
+// bgInferExit: tiến trình nền đã dừng — đọc đuôi log; nếu lần chạy cuối kết thúc bằng lỗi (dòng `Error...:` của CLI
+// hoặc ERROR "pipeline failed" sau mốc khởi động gần nhất) thì coi là failed, exit code suy từ mã [code]
+// (không có mã: exit 1 như cmd/strand/main.go). Dừng êm (SIGTERM, `strand stop`) vẫn là stopped.
+func bgInferExit(p *Pipeline, rt *Runtime) {
+	logPath, _ := p.BgPaths()
+	lines, err := TailFile(logPath, 2000)
+	if err != nil {
+		return
+	}
+	o := ParseLogOutcome(lines)
+	if !o.Failed {
+		return
+	}
+	code, ok := exitForErrorCode(o.Code)
+	if !ok {
+		code = exitcode.Unclassified
+	}
+	rt.ActiveState, rt.ExitCode, rt.LastError = "failed", &code, MaskSecrets(o.Err)
 }
 
 func readPid(path string) (int, bool, error) {
