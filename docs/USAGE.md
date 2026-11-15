@@ -766,7 +766,7 @@ sudo systemctl enable --now strand@orders-sync
 
 ### 7.15 `web` (Web UI)
 
-`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng), **Logs**. Từ M3 có **thao tác** (đoạn dưới); repair, promote, sửa cấu hình làm ở các mốc sau. REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
+`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng), **Logs**. Từ M3 có **thao tác** (đoạn dưới), từ M4 có **wizard Repair và Promote**; sửa cấu hình làm ở mốc sau. REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
@@ -841,6 +841,24 @@ Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2).
 `*` có hộp thoại xác nhận. `**` phải gõ lại đúng tên pipeline (API: trường `confirm_name`).
 
 **Job verify.** Chạy nền dưới web, output hiện trực tiếp ở `/jobs/<id>` (cập nhật mỗi giây, mật khẩu/DSN bị che). Mỗi pipeline tối đa **một** job đang chạy: bấm thêm thì bị từ chối (409). Lịch sử (JSON + file output mỗi job, 100 job gần nhất mỗi pipeline) nằm ở `<state_dir>/jobs/`, xem ở tab Jobs của pipeline và trang Jobs chung; có nút Cancel (SIGTERM). Verify nhận một bảng (`schema.table`) hoặc, với `full`, tất cả bảng. Điều kiện an toàn và exit code là của CLI (lệch dữ liệu: exit 5, hiện ở trạng thái job `exit 5`). Khi web khởi động lại giữa lúc job chạy, tiến trình verify vẫn chạy tiếp (process group riêng, output ghi thẳng vào file) và được web mới nhận nuôi; mã thoát của job loại này không đọc được nên để trống.
+
+**Wizard Repair (M4).** Tab **Repair** của pipeline. Bốn bước, mỗi bước là một thao tác người dùng bấm; server ép đúng thứ tự (gọi bước 3 trước bước 2 thì 409):
+
+1. Chờ lag về gần 0: trang hiện lag đọc trực tiếp từ admin socket và ngưỡng (mặc định 5 s, đặt lúc bắt đầu). Bắt đầu wizard phải gõ lại tên pipeline.
+2. **Stop the pipeline**: chỉ chạy được khi lag đọc được và không vượt ngưỡng (server kiểm lại lúc bấm); dùng đúng cách dừng của nút Stop (systemd hoặc `strand stop`). Pipeline đã dừng sẵn thì bỏ qua việc dừng.
+3. **Run repair**: gõ lại tên pipeline, rồi chạy job `strand verify -c <cfg> --mode full --repair fix [--table=<t>]` với output trực tiếp. CLI vẫn tự từ chối khi pipeline còn chạy và chỉ hỗ trợ MySQL → MySQL; wizard không thay thế các kiểm tra đó. Job thoát khác 0 thì wizard ở lại bước 3 (mã thoát hiện trên trang), chạy lại được.
+4. **Start the pipeline**: chỉ khi job repair thoát 0. Pipeline chạy tiếp từ checkpoint và phát lại những gì source đổi trong lúc repair.
+
+Trạng thái lưu ở `<state_dir>/wizards/repair-<pipeline>.json` (0600): tải lại trang hoặc khởi động lại `strand web` vẫn tiếp tục đúng bước. "Close the wizard" đóng wizard nhưng không tự start lại pipeline đã dừng.
+
+**Wizard Promote (M4).** Tab **Promote**, theo các bước của `strand promote` (7.10); wizard không cài lại logic promote, chỉ gọi CLI:
+
+1. **Check state**: `strand promote -c <cfg> --pipeline=<tên> --engine=<mysql|pg> --target=... --fence=... --dry-run`. CLI nạp `_strand_promote` ở chế độ chỉ đọc, in kế hoạch và log "resuming promote from interrupted step" (bước đang dở và bước đã xong) nếu một lần promote trước bị ngắt; trang tóm tắt dòng đó và hiện output.
+2. **Promote**: chỉ sau khi bước 1 thoát 0; gõ lại tên pipeline một lần. Chạy cùng lệnh không có `--dry-run`. Tùy chọn: `--catchup-timeout`, `--fence-timeout`, `--peak-rate`, `--sync-interval`, `--app-role`, `--source-app-roles`, `--schemas`, `--objects-post`, `--override-sequences`.
+3. **Cần quyết định (exit 10 `promote_needs_decision`)**: trang hiện nguyên văn khối "PROMOTE NEEDS OPERATOR DECISION" của CLI (kèm phần dữ liệu sẽ mất và sequence gợi ý) và các lựa chọn: cô lập source bằng cách khác rồi bấm **Failover**; chỉ cần giá trị sequence thì chạy Promote lại với `override_sequences`; hoặc đóng wizard (tiến độ vẫn nằm trong `_strand_promote`, lần chạy sau tiếp tục). **Failover** (`--source-fenced-externally`) có hộp thoại riêng giải thích rủi ro và phải gõ lại tên pipeline **hai lần** (hai hộp thoại liên tiếp); không dùng được nếu CLI chưa dừng bằng exit 10.
+4. Sau khi xong: chuyển ứng dụng sang target rồi bấm Stop pipeline (promote giữ `sync` chạy).
+
+DSN target (`--target`) và DSN source để fence (`--fence`, tùy chọn khi failover vì source đã chết) do người dùng nhập mỗi lần chạy, **không bao giờ lưu**; chúng thành đối số của tiến trình con `strand` (user `strand` xem được trong danh sách tiến trình lúc nó chạy) nhưng bị che trong audit log và lịch sử job (`--target=<hidden>`). Dùng tài khoản promote (ví dụ `strand_admin`, mục 7.10), không dùng tài khoản replication. Trạng thái wizard lưu ở `<state_dir>/wizards/promote-<pipeline>.json` (không có DSN). Mọi bước đi qua `POST .../actions/<action>` (docs/WEB-API.md §4.4), có audit và dùng chung quy tắc một job mỗi pipeline.
 
 ---
 

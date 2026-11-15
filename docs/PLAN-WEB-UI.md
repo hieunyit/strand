@@ -99,7 +99,7 @@ Tổng khoảng 15 ngày làm việc. M1–M4 là phần owner yêu cầu, M5 l�
 | M1 | **Xong** | `strand web`, `web passwd`, `web token`, session/CSRF/rate limit/TLS/audit/phát hiện pipeline, `strand-web.service` trong gói |
 | M2 | **Xong** | Overview, danh sách, chi tiết (Graph, Tables, Checkpoint, Errors, Config, Logs), biểu đồ SVG, `status`/`tables`/`events` ở admin socket. Xem lệch so với kế hoạch bên dưới |
 | M3 | **Xong** | start/stop/restart/enable/disable, pause/resume (+ snapshot), throttle, snapshot add (lệnh socket chỉ đọc `source_tables`), checkpoint show/rewind, verify sample/delta/full thành job (`FileJobRunner`: JSON + output mỗi job ở `<state_dir>/jobs`, một job/pipeline, output trực tiếp, nhận nuôi job sau khi web khởi động lại), tab Jobs và trang `/jobs`. Test HTTP cho từng action, test job runner. Điểm mở rộng cho M4/M5: `ActionRegistry`, `JobRunner`, `ActionError`, `confirm_name` |
-| M4 | Chưa | |
+| M4 | **Xong** | Wizard Repair (chờ lag → Stop → `verify --mode full --repair fix` thành job → Start) và Promote (dry-run đọc trạng thái → promote → exit 10 hiện quyết định → failover gõ lại tên hai lần). Trạng thái lưu `<state_dir>/wizards`, server ép thứ tự bước, DSN không lưu và bị che trong audit/job. Test HTTP: auth/CSRF, confirm-name đơn và kép, thứ tự bước, resume sau khi khởi động lại, argv chính xác, mã thoát, exit 10. Chưa kiểm sống với MySQL thật (máy bận benchmark) |
 | M5 | Chưa | |
 | M6 | Chưa | |
 
