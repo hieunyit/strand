@@ -45,6 +45,7 @@ func init() {
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newArchiveCmd())
 	rootCmd.AddCommand(newObjectsCmd())
+	rootCmd.AddCommand(newWebCmd())
 	rootCmd.Version = versionString()
 	rootCmd.SetVersionTemplate("strand {{.Version}}\n")
 }

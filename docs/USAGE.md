@@ -786,8 +786,9 @@ Lưu binlog liên tục từ một MySQL (nên là replica) vào thư mục, tha
 | --- | --- |
 | `/usr/bin/strand` | Binary (gói dùng `/usr/bin`; tarball theo 03 §4 dùng `/usr/local/bin`) |
 | `/usr/lib/systemd/system/strand@.service` | Unit template, một instance mỗi pipeline |
+| `/usr/lib/systemd/system/strand-web.service` | Unit của Web UI (7.15), chạy `User=strand`; chưa bật sẵn |
 | `/etc/strand/` | root:strand 0750; đặt `<name>.yaml` (0640) và `<name>.env` (0600) |
-| `/usr/share/doc/strand/` | `USAGE.md`, ví dụ `pipeline.yaml`, `pipeline.env` |
+| `/usr/share/doc/strand/` | `USAGE.md`, ví dụ `pipeline.yaml`, `pipeline.env`, `web.yaml` |
 | `/var/lib/strand/<name>`, `/run/strand/<name>` | systemd tạo (StateDirectory / RuntimeDirectory) |
 
 ```bash
@@ -802,6 +803,102 @@ sudo systemctl enable --now strand@orders-sync
 - Nâng cấp: pipeline đang chạy giữ binary cũ tới khi `systemctl restart strand@<name>` (an toàn nhờ checkpoint).
 - Gỡ gói: dừng và disable mọi `strand@*`. Không xóa `/etc/strand`, `/var/lib/strand` hay user, kể cả khi purge.
 - Chưa có: chữ ký gói (03 §4 yêu cầu ký); ký file `.sha256` bằng khóa phát hành của tổ chức.
+
+### 7.15 `web` (Web UI)
+
+`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng), **Logs**. Từ M3 có **thao tác** (đoạn dưới), từ M4 có **wizard Repair và Promote**; sửa cấu hình làm ở mốc sau. REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
+
+Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
+
+**Cài đặt.** Gói `.deb`/`.rpm` cài sẵn `strand-web.service` và ví dụ `/usr/share/doc/strand/examples/web.yaml`. Cài tay: chép binary, `deploy/systemd/strand-web.service` vào `/etc/systemd/system/`, `packaging/web.yaml.example` thành `/etc/strand/web.yaml`.
+
+**`web.yaml`:**
+
+```yaml
+listen: 127.0.0.1:8080          # không phải loopback thì bắt buộc TLS
+# tls_cert: /etc/strand/web.crt
+# tls_key:  /etc/strand/web.key
+state_dir: /var/lib/strand-web  # audit.log (JSON lines, 0600)
+scan:                           # mỗi file là một pipeline; tên pipeline = tên file bỏ .yaml
+  - /etc/strand/*.yaml          # (web.yaml bị bỏ qua); <name>.env cùng thư mục được nhận làm env_file
+pipelines:                      # khai báo tường minh, thắng scan cùng tên
+  - name: orders-sync
+    config: /etc/strand/orders-sync.yaml
+    env_file: /etc/strand/orders-sync.env     # tùy chọn: KEY=VALUE nạp vào tiến trình con
+    systemd_unit: strand@orders-sync          # tùy chọn: có thì dùng systemctl/journalctl
+  - name: legacy
+    config: /home/strand/legacy.yaml          # không có systemd_unit: chế độ nền
+    # log_file, pid_file: tùy chọn (mặc định <resources.spool.path>/strand.log|pid)
+```
+
+Tên pipeline chỉ gồm chữ, số, `_`, `.`, `-` (tối đa 63 ký tự, bắt đầu bằng chữ hoặc số); tên khác bị bỏ qua và báo ở đầu trang Overview.
+
+**Hai chế độ quản lý pipeline:**
+
+| Chế độ | Khi nào | Trạng thái khi dừng | Log |
+| --- | --- | --- | --- |
+| systemd | có `systemd_unit`, hoặc cấu hình đến từ `scan` và unit `strand@<name>` tồn tại | `systemctl show` (ActiveState, ExecMainStatus = exit code) | `journalctl -u <unit>` |
+| nền | các trường hợp còn lại: pipeline chạy bằng `strand sync -c <cfg> --background` (7.0b) | file pid còn tiến trình `strand ... sync` hay không | file log (`--log-file` hoặc `<resources.spool.path>/strand.log`) |
+
+Đang chạy thì cả hai chế độ lấy số liệu như nhau: admin socket (`top`, và ba lệnh mới `status`, `tables`, `events`) và `/metrics`, mỗi 5 giây vào ring buffer 1 giờ trong RAM. Pipeline đã dừng: chỉ hiện trạng thái, exit code (systemd; chế độ nền suy ra từ mã lỗi `[log_gap]`... trong log) và đuôi log, không đọc vị trí checkpoint từ target.
+
+**Mật khẩu và token:**
+
+```bash
+strand web passwd --config /etc/strand/web.yaml     # hỏi hai lần, ghi bcrypt hash vào web.yaml (0600)
+strand web token  --config /etc/strand/web.yaml     # tùy chọn: token cho script, in một lần, lưu sha256
+sudo systemctl enable --now strand-web
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8080/api/v1/overview
+```
+
+Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2). Một tài khoản admin duy nhất, không có mật khẩu mặc định. Mật khẩu 8–72 ký tự. Script không có TTY: `echo 'mật-khẩu' | strand web passwd --config web.yaml`.
+
+**TLS.** Bind khác loopback (`0.0.0.0`, IP máy) bắt buộc `tls_cert` và `tls_key`, nếu không từ chối khởi động. Cách thường dùng: để `listen: 127.0.0.1:8080` rồi đặt reverse proxy (nginx, Caddy) làm TLS phía trước, kèm `secure_cookies: true` (cookie có cờ `Secure`) và `trust_forwarded_for: true` (lấy IP client từ `X-Forwarded-For`, chỉ bật khi proxy tin cậy).
+
+**Bảo mật.** Session ngẫu nhiên 256 bit trong RAM (khởi động lại web là đăng nhập lại), cookie `HttpOnly` và `SameSite=Strict`, hết hạn sau 30 phút không thao tác hoặc 12 giờ. Mọi POST cần token CSRF. Đăng nhập sai quá 5 lần/phút từ một IP bị khóa (1 phút, tái phạm thì gấp đôi, tối đa 15 phút). Header `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. Audit log `<state_dir>/audit.log` ghi đăng nhập, đăng xuất, lần xem cấu hình và mọi thao tác ghi (dòng `started` trước khi chạy, dòng kết quả kèm exit code; không ghi được audit thì không chạy thao tác).
+
+**Chạy bằng user `strand`, không phải root.** `strand web` chạy cùng user với `strand sync` (unit mẫu có `User=strand`); không cần polkit hay sudo. Hệ quả: chỉ quản lý được pipeline mà user này có quyền:
+
+- đọc được file cấu hình pipeline (`/etc/strand/<name>.yaml`, root:strand 0640 là đủ) và file `.env` nếu dùng `env_file` (gói đặt `.env` ở root:strand 0600: đổi thành 0640 nếu web cần đọc);
+- kết nối được admin socket (0700, thuộc user chạy pipeline: cùng user `strand` thì được);
+- đọc được log: `journalctl -u strand@<name>` cần user `strand` thuộc nhóm `systemd-journal` (`sudo usermod -aG systemd-journal strand`), hoặc dùng chế độ nền với file log mà user đọc được;
+- pipeline do user khác chạy (ví dụ root) thì web không thấy socket và báo `unreachable`/`stopped`.
+
+`systemctl start|stop|restart|enable|disable strand@<name>` chạy bằng chính user này, không sudo: chỉ thành công khi hệ thống cho phép (ví dụ quy tắc polkit do quản trị viên tự viết, hoặc chế độ nền). Không được phép thì nút trả lỗi 502 kèm thông báo của systemctl.
+
+**Thao tác (M3).** Nút nằm ở đầu trang chi tiết và các tab; mọi thao tác đi qua `POST /api/v1/pipelines/<tên>/actions/<action>` (docs/WEB-API.md §4) nên script dùng được bằng token. Hộp thoại xác nhận là phần tử `<dialog>` điều khiển bởi `app.js`, không có script inline (CSP `default-src 'self'`).
+
+| Thao tác | Ở đâu | Cách chạy |
+| --- | --- | --- |
+| Start, Stop*, Restart* | đầu trang | systemd: `systemctl <verb> <unit>`. Nền: `strand sync -c <cfg> --background` / `strand stop -c <cfg>` (restart = stop rồi start), nạp `env_file` vào môi trường |
+| Enable / Disable at boot | đầu trang (chỉ chế độ systemd) | `systemctl enable|disable <unit>` |
+| Pause, Resume | đầu trang | admin socket `pause`, `resume` |
+| Pause snapshot, Resume (snapshot only), Snapshot add* | tab Tables | admin socket; Snapshot add chọn bảng từ danh sách của source (lệnh socket chỉ đọc `source_tables`, bảng đã thuộc pipeline không hiện) |
+| Throttle (soft IOPS) | tab Graph | admin socket `throttle_set --soft`; chỉ tiến trình đang chạy, không ghi vào file cấu hình |
+| Checkpoint Rewind** | tab Checkpoint (chỉ MySQL → MySQL, pipeline đang chạy) | admin socket `checkpoint_rewind`; pipeline tự kiểm `gtid_purged` |
+| Verify sample / full / delta | tab Jobs | tiến trình con `strand verify -c <cfg> --mode ... [--table= --rate= --resume]` (luôn `--repair report`) |
+
+`*` có hộp thoại xác nhận. `**` phải gõ lại đúng tên pipeline (API: trường `confirm_name`).
+
+**Job verify.** Chạy nền dưới web, output hiện trực tiếp ở `/jobs/<id>` (cập nhật mỗi giây, mật khẩu/DSN bị che). Mỗi pipeline tối đa **một** job đang chạy: bấm thêm thì bị từ chối (409). Lịch sử (JSON + file output mỗi job, 100 job gần nhất mỗi pipeline) nằm ở `<state_dir>/jobs/`, xem ở tab Jobs của pipeline và trang Jobs chung; có nút Cancel (SIGTERM). Verify nhận một bảng (`schema.table`) hoặc, với `full`, tất cả bảng. Điều kiện an toàn và exit code là của CLI (lệch dữ liệu: exit 5, hiện ở trạng thái job `exit 5`). Khi web khởi động lại giữa lúc job chạy, tiến trình verify vẫn chạy tiếp (process group riêng, output ghi thẳng vào file) và được web mới nhận nuôi; mã thoát của job loại này không đọc được nên để trống.
+
+**Wizard Repair (M4).** Tab **Repair** của pipeline. Bốn bước, mỗi bước là một thao tác người dùng bấm; server ép đúng thứ tự (gọi bước 3 trước bước 2 thì 409):
+
+1. Chờ lag về gần 0: trang hiện lag đọc trực tiếp từ admin socket và ngưỡng (mặc định 5 s, đặt lúc bắt đầu). Bắt đầu wizard phải gõ lại tên pipeline.
+2. **Stop the pipeline**: chỉ chạy được khi lag đọc được và không vượt ngưỡng (server kiểm lại lúc bấm); dùng đúng cách dừng của nút Stop (systemd hoặc `strand stop`). Pipeline đã dừng sẵn thì bỏ qua việc dừng.
+3. **Run repair**: gõ lại tên pipeline, rồi chạy job `strand verify -c <cfg> --mode full --repair fix [--table=<t>]` với output trực tiếp. CLI vẫn tự từ chối khi pipeline còn chạy và chỉ hỗ trợ MySQL → MySQL; wizard không thay thế các kiểm tra đó. Job thoát khác 0 thì wizard ở lại bước 3 (mã thoát hiện trên trang), chạy lại được.
+4. **Start the pipeline**: chỉ khi job repair thoát 0. Pipeline chạy tiếp từ checkpoint và phát lại những gì source đổi trong lúc repair.
+
+Trạng thái lưu ở `<state_dir>/wizards/repair-<pipeline>.json` (0600): tải lại trang hoặc khởi động lại `strand web` vẫn tiếp tục đúng bước. "Close the wizard" đóng wizard nhưng không tự start lại pipeline đã dừng.
+
+**Wizard Promote (M4).** Tab **Promote**, theo các bước của `strand promote` (7.10); wizard không cài lại logic promote, chỉ gọi CLI:
+
+1. **Check state**: `strand promote -c <cfg> --pipeline=<tên> --engine=<mysql|pg> --target=... --fence=... --dry-run`. CLI nạp `_strand_promote` ở chế độ chỉ đọc, in kế hoạch và log "resuming promote from interrupted step" (bước đang dở và bước đã xong) nếu một lần promote trước bị ngắt; trang tóm tắt dòng đó và hiện output.
+2. **Promote**: chỉ sau khi bước 1 thoát 0; gõ lại tên pipeline một lần. Chạy cùng lệnh không có `--dry-run`. Tùy chọn: `--catchup-timeout`, `--fence-timeout`, `--peak-rate`, `--sync-interval`, `--app-role`, `--source-app-roles`, `--schemas`, `--objects-post`, `--override-sequences`.
+3. **Cần quyết định (exit 10 `promote_needs_decision`)**: trang hiện nguyên văn khối "PROMOTE NEEDS OPERATOR DECISION" của CLI (kèm phần dữ liệu sẽ mất và sequence gợi ý) và các lựa chọn: cô lập source bằng cách khác rồi bấm **Failover**; chỉ cần giá trị sequence thì chạy Promote lại với `override_sequences`; hoặc đóng wizard (tiến độ vẫn nằm trong `_strand_promote`, lần chạy sau tiếp tục). **Failover** (`--source-fenced-externally`) có hộp thoại riêng giải thích rủi ro và phải gõ lại tên pipeline **hai lần** (hai hộp thoại liên tiếp); không dùng được nếu CLI chưa dừng bằng exit 10.
+4. Sau khi xong: chuyển ứng dụng sang target rồi bấm Stop pipeline (promote giữ `sync` chạy).
+
+DSN target (`--target`) và DSN source để fence (`--fence`, tùy chọn khi failover vì source đã chết) do người dùng nhập mỗi lần chạy, **không bao giờ lưu**; chúng thành đối số của tiến trình con `strand` (user `strand` xem được trong danh sách tiến trình lúc nó chạy) nhưng bị che trong audit log và lịch sử job (`--target=<hidden>`). Dùng tài khoản promote (ví dụ `strand_admin`, mục 7.10), không dùng tài khoản replication. Trạng thái wizard lưu ở `<state_dir>/wizards/promote-<pipeline>.json` (không có DSN). Mọi bước đi qua `POST .../actions/<action>` (docs/WEB-API.md §4.4), có audit và dùng chung quy tắc một job mỗi pipeline.
 
 ---
 

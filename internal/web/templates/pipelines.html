@@ -1,0 +1,4 @@
+{{define "content"}}
+{{range .Body.Warnings}}<p class="warnbox">{{.}}</p>{{end}}
+<section class="card">{{template "pipeline-table" .}}</section>
+{{end}}

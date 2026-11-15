@@ -17,5 +17,7 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
 	for u in $(printf '%s\n' $units | sort -u); do
 		systemctl disable --now "$u" || true
 	done
+	# Web UI (nếu đã bật).
+	systemctl disable --now strand-web.service >/dev/null 2>&1 || true
 fi
 exit 0

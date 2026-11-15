@@ -13,6 +13,8 @@ require (
 	pgregory.net/rapid v1.1.0
 )
 
+require golang.org/x/term v0.19.0 // indirect
+
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect

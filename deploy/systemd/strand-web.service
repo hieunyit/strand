@@ -1,0 +1,31 @@
+# /etc/systemd/system/strand-web.service
+# Web UI của Strand (docs/PLAN-WEB-UI.md, questions/DECISIONS-WEB-UI-2026-11-15.md).
+# Chạy cùng user với strand@<name> (KHÔNG root): chỉ quản lý được pipeline mà user này có quyền
+# (đọc /etc/strand/<name>.yaml, kết nối admin socket 0700 của chính user, đọc log).
+# Trước khi bật: strand web passwd --config /etc/strand/web.yaml
+[Unit]
+Description=Strand CDC web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=strand
+Group=strand
+ExecStart=/usr/local/bin/strand web --config /etc/strand/web.yaml
+Restart=on-failure
+RestartSec=5
+# Audit log và trạng thái: /var/lib/strand-web (systemd tạo, thuộc user strand)
+StateDirectory=strand-web
+StateDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=no
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

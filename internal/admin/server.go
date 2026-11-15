@@ -237,6 +237,50 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		}
 		return Response{OK: true}
 
+	case CmdStatus:
+		sp, ok := s.handler.(StatusProvider)
+		if !ok {
+			return Response{OK: false, Error: "status is not supported by this pipeline"}
+		}
+		st, err := sp.Status(ctx)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Status: st}
+
+	case CmdTables:
+		tp, ok := s.handler.(TablesProvider)
+		if !ok {
+			return Response{OK: false, Error: "tables is not supported by this pipeline"}
+		}
+		ts, err := tp.Tables(ctx)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Tables: ts}
+
+	case CmdEvents:
+		ep, ok := s.handler.(EventsProvider)
+		if !ok {
+			return Response{OK: false, Error: "events is not supported by this pipeline"}
+		}
+		ev, err := ep.Events(ctx)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Events: ev}
+
+	case CmdSourceTables:
+		sp, ok := s.handler.(SourceTablesProvider)
+		if !ok {
+			return Response{OK: false, Error: "source_tables is not supported by this pipeline"}
+		}
+		ts, err := sp.SourceTables(ctx)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, SourceTables: ts}
+
 	default:
 		return Response{OK: false, Error: fmt.Sprintf("unknown command: %s", req.Command)}
 	}

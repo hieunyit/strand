@@ -1,0 +1,40 @@
+# /etc/strand/web.yaml — cấu hình Web UI (strand web --config /etc/strand/web.yaml).
+# Quyền file: 0600 hoặc root:strand 0660 nếu `strand web passwd` chạy bằng user strand. `passwd` ghi lại file ở 0600.
+#
+# Bước đầu: strand web passwd --config /etc/strand/web.yaml     (ghi password_hash)
+# Token cho script (tùy chọn): strand web token --config /etc/strand/web.yaml
+
+# Địa chỉ bind. Không phải loopback (127.0.0.1, ::1, localhost) thì BẮT BUỘC đặt tls_cert và tls_key.
+listen: 127.0.0.1:8080
+# tls_cert: /etc/strand/web.crt
+# tls_key: /etc/strand/web.key
+
+# Sau reverse proxy TLS (listen loopback, không TLS): đặt true để cookie có cờ Secure,
+# và trust_forwarded_for để lấy IP client từ X-Forwarded-For (chỉ khi proxy là tin cậy).
+# secure_cookies: true
+# trust_forwarded_for: true
+
+# Do `strand web passwd` ghi. Chưa có thì strand web không khởi động.
+# password_hash: "$2a$10$..."
+# Do `strand web token` ghi (sha256 của token).
+# api_token_hash: ""
+
+# Thư mục ghi audit.log (JSON lines). Mặc định /var/lib/strand-web.
+state_dir: /var/lib/strand-web
+
+# Pipeline: quét các file cấu hình theo glob (tên pipeline = tên file bỏ .yaml; <name>.env cùng thư mục
+# được nhận làm env_file; unit strand@<name> tồn tại thì dùng systemd)...
+scan:
+  - /etc/strand/*.yaml
+
+# ...và/hoặc khai báo tường minh (thắng scan cùng tên). Có systemd_unit thì dùng systemctl/journalctl;
+# không có thì chế độ nền: strand sync -c <config> --background, log/pid mặc định trong resources.spool.path.
+# pipelines:
+#   - name: orders-sync
+#     config: /etc/strand/orders-sync.yaml
+#     env_file: /etc/strand/orders-sync.env      # KEY=VALUE, nạp vào môi trường tiến trình con
+#     systemd_unit: strand@orders-sync           # bỏ dòng này nếu chạy bằng --background
+#   - name: legacy
+#     config: /home/strand/legacy.yaml
+#     log_file: /var/log/strand/legacy.log        # tùy chọn; mặc định <spool>/strand.log
+#     pid_file: /var/lib/strand/legacy/strand.pid

@@ -49,7 +49,7 @@ trình duyệt ──HTTPS──> strand web ──unix socket──> strand@a (
 | Throttle (soft IOPS) | admin socket | — |
 | Snapshot add (chọn bảng từ danh sách của source) | admin socket | hộp thoại |
 | Checkpoint show / **Rewind** (MySQL→MySQL) | admin socket | **gõ lại tên pipeline** |
-| Verify sample / delta / full (chọn bảng, rate) | exec `strand verify` | — |
+| Verify sample / delta / full (chọn bảng, rate) | exec `strand verify` (job, output trực tiếp). M3 chọn **một** bảng hoặc (full) tất cả, vì CLI nhận một `--table` | — |
 | **Repair** (`--repair fix`) | Wizard: (1) chờ lag ≈ 0, (2) Stop pipeline, (3) exec verify full fix, (4) Start | gõ lại tên pipeline |
 | **Promote** | Wizard theo 5 bước, hiện trạng thái từ `_strand_promote`. Failover `--source-fenced-externally` có hộp thoại riêng, hiện phần dữ liệu sẽ mất | gõ lại tên pipeline (hai lần với failover) |
 | Validate / Plan / Schema init `--dry-run` | exec, hiện kết quả | — |
@@ -91,7 +91,28 @@ Không đụng đường dữ liệu (reader, scheduler, writer, checkpoint). Te
 
 Tổng khoảng 15 ngày làm việc. M1–M4 là phần owner yêu cầu, M5 làm được sau.
 
+## 6b. Trạng thái (cập nhật 2026-11-15)
+
+| Mốc | Trạng thái | Ghi chú |
+| --- | --- | --- |
+| M0 | **Xong** | ADR `questions/DECISIONS-WEB-UI-2026-11-15.md`, đặc tả `docs/WEB-API.md`. Chưa làm mockup: trang đã dựng thật và xem được |
+| M1 | **Xong** | `strand web`, `web passwd`, `web token`, session/CSRF/rate limit/TLS/audit/phát hiện pipeline, `strand-web.service` trong gói |
+| M2 | **Xong** | Overview, danh sách, chi tiết (Graph, Tables, Checkpoint, Errors, Config, Logs), biểu đồ SVG, `status`/`tables`/`events` ở admin socket. Xem lệch so với kế hoạch bên dưới |
+| M3 | **Xong** | start/stop/restart/enable/disable, pause/resume (+ snapshot), throttle, snapshot add (lệnh socket chỉ đọc `source_tables`), checkpoint show/rewind, verify sample/delta/full thành job (`FileJobRunner`: JSON + output mỗi job ở `<state_dir>/jobs`, một job/pipeline, output trực tiếp, nhận nuôi job sau khi web khởi động lại), tab Jobs và trang `/jobs`. Test HTTP cho từng action, test job runner. Điểm mở rộng cho M4/M5: `ActionRegistry`, `JobRunner`, `ActionError`, `confirm_name` |
+| M4 | **Xong** | Wizard Repair (chờ lag → Stop → `verify --mode full --repair fix` thành job → Start) và Promote (dry-run đọc trạng thái → promote → exit 10 hiện quyết định → failover gõ lại tên hai lần). Trạng thái lưu `<state_dir>/wizards`, server ép thứ tự bước, DSN không lưu và bị che trong audit/job. Test HTTP: auth/CSRF, confirm-name đơn và kép, thứ tự bước, resume sau khi khởi động lại, argv chính xác, mã thoát, exit 10. Chưa kiểm sống với MySQL thật (máy bận benchmark) |
+| M5 | Chưa | |
+| M6 | Chưa | |
+
+Lệch so với kế hoạch (theo quyết định của owner 2026-11-15, chi tiết ở file ADR):
+
+- Frontend **không** dùng htmx hay uPlot: HTML phía server, một file JS tay viết (làm mới định kỳ bằng `fetch`), biểu đồ SVG phía server.
+- Quản lý **cả hai chế độ**: systemd và chế độ nền của CLI; pipeline đăng ký trong `web.yaml` (`scan` + `pipelines`).
+- `strand web` chạy **user `strand`, không root**, không polkit/sudo (thay phương án root ở mục 2 và mục 7.1).
+- Pipeline đã dừng: chỉ trạng thái, exit code, đuôi log; không đọc vị trí checkpoint từ target.
+
 ## 7. Điểm cần owner quyết trước khi làm
+
+Đã trả lời 2026-11-15: (1) chạy user `strand` (không root); (2) cả hai chế độ systemd và nền, một máy; (3) làm đủ M1–M5, theo từng đợt (đợt này M0–M2).
 
 1. `strand-web` chạy **root** (đơn giản; cần để đọc `.env` và `systemctl`), hay chạy user `strand` kèm quy tắc polkit/sudo và đổi quyền file `.env` (root:strand 0640)?
 2. v1 chỉ một máy (đề xuất), hay cần nhiều máy ngay (khi đó phải làm admin qua TCP + TLS trước)?

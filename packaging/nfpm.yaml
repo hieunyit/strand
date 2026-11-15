@@ -25,6 +25,14 @@ contents:
     dst: /usr/lib/systemd/system/strand@.service
     file_info: { mode: 0644, owner: root, group: root }
 
+  # Web UI: chạy cùng user strand (không root); cấu hình /etc/strand/web.yaml do người vận hành tạo từ ví dụ.
+  - src: dist/pkgroot/strand-web.service
+    dst: /usr/lib/systemd/system/strand-web.service
+    file_info: { mode: 0644, owner: root, group: root }
+  - src: packaging/web.yaml.example
+    dst: /usr/share/doc/strand/examples/web.yaml
+    file_info: { mode: 0644, owner: root, group: root }
+
   - src: packaging/pipeline.yaml.example
     dst: /usr/share/doc/strand/examples/pipeline.yaml
     file_info: { mode: 0644, owner: root, group: root }

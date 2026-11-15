@@ -1,0 +1,17 @@
+{{define "content"}}
+{{with .Body}}
+<section class="card head">
+  <div><span class="badge big {{jobClass .Job}}">{{jobState .Job}}</span>
+  <span class="pair">{{.Job.Kind}}</span>
+  <a href="/pipelines/{{.Job.Pipeline}}">{{.Job.Pipeline}}</a> <span class="muted small">(<a href="/pipelines/{{.Job.Pipeline}}/jobs">all jobs</a>)</span></div>
+  <div class="kv"><span>Started <b>{{ts .Job.Started}}</b></span>{{if .Job.Ended}}<span>Ended <b>{{ts (deref2 .Job.Ended)}}</b></span>{{end}}
+    <span>Exit code <b id="job-exit">{{if .Job.ExitCode}}{{ptrInt .Job.ExitCode}}{{else}}-{{end}}</b></span>{{if .Job.PID}}<span>pid <b>{{.Job.PID}}</b></span>{{end}}</div>
+  <p class="mono small wrap">strand {{join .Job.Args " "}}</p>
+  {{if .Job.Error}}<p class="warnbox">{{.Job.Error}}</p>{{end}}
+  {{if .Job.Running}}<form class="act inline" data-action="job-cancel" data-pipeline="{{.Job.Pipeline}}" data-confirm="Cancel this job? The child process receives SIGTERM."><input type="hidden" name="job_id" value="{{.Job.ID}}"><button class="btn" type="submit">Cancel job</button></form>{{end}}
+</section>
+<section class="card"><h2>Output</h2>
+<pre class="code log" id="joboutput" data-job="{{.Job.ID}}" data-offset="{{.Chunk.Offset}}" data-running="{{.Job.Running}}">{{.Chunk.Data}}</pre>
+</section>
+{{end}}
+{{end}}
