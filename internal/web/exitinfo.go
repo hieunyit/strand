@@ -45,6 +45,19 @@ func ExplainExit(code int) ExitInfo {
 	return ExitInfo{code, "Unknown exit code", "Read the log", false}
 }
 
+// explainExitFor như ExplainExit nhưng theo chế độ quản lý: chế độ nền không có systemd khởi động lại, nên
+// không hứa auto_restart và chỉ cách Start lại.
+func explainExitFor(code int, mode string) ExitInfo {
+	e := ExplainExit(code)
+	if mode == ModeBackground && e.AutoRestart {
+		e.AutoRestart = false
+		if code == exitcode.Unclassified {
+			e.Action = "Background mode does not restart automatically: fix the cause shown in the reason / log, then press Start (it resumes from the last checkpoint)"
+		}
+	}
+	return e
+}
+
 // ErrorCodeFromLine tìm mã lỗi dạng [code] (exitcode.Error.Error()) trong một dòng log.
 var errCodeRE = regexp.MustCompile(`\[([a-z][a-z0-9_]+)\]`)
 

@@ -50,7 +50,7 @@ func (s *Server) view(p *Pipeline) PipelineView {
 		v.State, v.Reachable, v.Runtime, v.Top, v.SampledAt = sn.State, sn.Reachable, sn.Runtime, sn.Top, sn.At
 	}
 	if !v.Runtime.Running && v.Runtime.ExitCode != nil {
-		e := ExplainExit(*v.Runtime.ExitCode)
+		e := explainExitFor(*v.Runtime.ExitCode, v.Mode)
 		v.LastExit = &e
 	}
 	return v
@@ -227,14 +227,14 @@ func (s *Server) errorsView(ctx context.Context, p *Pipeline) ErrorsView {
 	if !rt.Running {
 		switch {
 		case rt.ExitCode != nil:
-			e := ExplainExit(*rt.ExitCode)
+			e := explainExitFor(*rt.ExitCode, rt.Mode)
 			v.LastExit, v.ExitFrom = &e, "systemd"
 			if rt.Mode == ModeBackground {
 				v.ExitFrom = "log"
 			}
 		case v.ErrorCode != "":
 			if c, ok := exitForErrorCode(v.ErrorCode); ok {
-				e := ExplainExit(c)
+				e := explainExitFor(c, p.Mode())
 				v.LastExit, v.ExitFrom = &e, "log"
 			}
 		}

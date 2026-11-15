@@ -167,3 +167,26 @@ func TestFailedBackgroundPipelinePagesShowStateAndReason(t *testing.T) {
 		}
 	}
 }
+
+// Chế độ nền không có systemd khởi động lại: last_exit không được hứa "Systemd restarts it automatically"
+// (auto_restart=false) ở header, tab Errors và API — trước đây exit 1 luôn ghi như vậy.
+func TestBackgroundFailureDoesNotPromiseSystemdRestart(t *testing.T) {
+	e := bgEnv(t, logStart, logRun, logFailed, logClosed, logErrCLI)
+	c := e.client()
+	e.login(c, testPassword)
+	for _, path := range []string{"/pipelines/bg", "/pipelines/bg/errors"} {
+		_, body := e.do(c, "GET", path, "", nil)
+		if strings.Contains(body, "Systemd restarts") {
+			t.Errorf("%s promises a systemd restart in background mode", path)
+		}
+		if !strings.Contains(body, "press Start") {
+			t.Errorf("%s lacks the background-mode action", path)
+		}
+	}
+	for _, path := range []string{"/api/v1/pipelines/bg", "/api/v1/pipelines/bg/errors"} {
+		_, body := e.do(c, "GET", path, "", nil)
+		if strings.Contains(body, `"auto_restart":true`) || strings.Contains(body, `"auto_restart": true`) {
+			t.Errorf("%s: auto_restart true in background mode: %s", path, body)
+		}
+	}
+}
