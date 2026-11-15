@@ -37,6 +37,15 @@ func lookTool(envName string, names ...string) string {
 	return ""
 }
 
+// ptoscHost: pt-osc (Perl DBD::mysql) hiểu h=localhost là Unix socket và bỏ qua P=<cổng>, nên với container
+// docker (cổng map ra host) phải dùng địa chỉ TCP. gh-ost (Go) không có quy ước này.
+func ptoscHost(h string) string {
+	if h == "localhost" {
+		return "127.0.0.1"
+	}
+	return h
+}
+
 func mustExecDB(t *testing.T, db *sql.DB, qs ...string) {
 	t.Helper()
 	for _, q := range qs {
@@ -69,7 +78,7 @@ func runOnlineDDLTool(t *testing.T, src *mysqlNode, tool, schema, table string, 
 	}
 	if bin := lookTool("STRAND_E2E_PTOSC_BIN", "pt-online-schema-change"); bin != "" {
 		t.Logf("online DDL mode=real binary=%s", bin)
-		out, err := exec.Command(bin, "--alter", onlineAlter, fmt.Sprintf("h=%s,P=%s,u=root,p=dev,D=%s,t=%s", host, port, schema, table),
+		out, err := exec.Command(bin, "--alter", onlineAlter, fmt.Sprintf("h=%s,P=%s,u=root,p=dev,D=%s,t=%s", ptoscHost(host), port, schema, table),
 			"--execute", "--no-check-replication-filters", "--chunk-size=200", "--sleep=0.01", "--set-vars", "innodb_lock_wait_timeout=10").CombinedOutput()
 		if err != nil {
 			t.Fatalf("pt-online-schema-change: %v\n%s", err, out)
