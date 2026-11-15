@@ -1,0 +1,38 @@
+{
+  "rounds": [
+    {
+      "variant": "pristine",
+      "events_per_s": 329.69834725892946,
+      "p99_ms_reported": 38.94
+    },
+    {
+      "variant": "patched",
+      "events_per_s": 327.87445240392384,
+      "p99_ms_reported": 37.56
+    },
+    {
+      "variant": "patched",
+      "events_per_s": 326.2700778702252,
+      "p99_ms_reported": 39.65
+    },
+    {
+      "variant": "pristine",
+      "events_per_s": 328.3572639005297,
+      "p99_ms_reported": 38.25
+    },
+    {
+      "variant": "pristine",
+      "events_per_s": 328.47335621688273,
+      "p99_ms_reported": 39.65
+    },
+    {
+      "variant": "patched",
+      "events_per_s": 329.810785611741,
+      "p99_ms_reported": 38.94
+    }
+  ],
+  "median_throughput_ratio_patched_over_pristine": 0.9981767050458624,
+  "median_p99_ratio_patched_over_pristine": 1,
+  "pass": true,
+  "criteria": "throughput ratio \u003e= 0.98 and p99 ratio \u003c= 1.05"
+}

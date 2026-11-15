@@ -1,0 +1,11 @@
+{
+  "engine": "mysql",
+  "clients": 16,
+  "measured_seconds": 169.985382548,
+  "events_in_window": 111691,
+  "saturation_events_per_s": 657.0623798694045,
+  "low": 82,
+  "high": 328,
+  "ignored_errors": 1,
+  "note": "high=50%, low=12.5% of saturation; commit this file before the official run"
+}
