@@ -21,6 +21,12 @@ import (
 	"strand/internal/promote"
 )
 
+// Biến môi trường thay cho --target / --fence (không lộ DSN trong ps).
+const (
+	envPromoteTargetDSN = "STRAND_PROMOTE_TARGET_DSN"
+	envPromoteFenceDSN  = "STRAND_PROMOTE_FENCE_DSN"
+)
+
 var (
 	promoteTargetDSN        string
 	promoteFenceSourceDSN   string
@@ -51,6 +57,14 @@ func newPromoteCmd() *cobra.Command {
 		Use:   "promote",
 		Short: "Mở quyền ghi cho target sau khi fence source và setval (spec/02 §8, §10)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// DSN có thể kèm mật khẩu: cho phép truyền qua biến môi trường để không lộ trong danh sách
+			// tiến trình (Web UI dùng cách này). Cờ dòng lệnh vẫn ưu tiên.
+			if promoteTargetDSN == "" {
+				promoteTargetDSN = os.Getenv(envPromoteTargetDSN)
+			}
+			if promoteFenceSourceDSN == "" {
+				promoteFenceSourceDSN = os.Getenv(envPromoteFenceDSN)
+			}
 			if err := normalizeDSNFlags(&promoteTargetDSN, &promoteFenceSourceDSN); err != nil {
 				return err
 			}
@@ -288,8 +302,8 @@ func newPromoteCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&promoteTargetDSN, "target", "", "DSN của cơ sở dữ liệu target")
-	cmd.Flags().StringVar(&promoteFenceSourceDSN, "fence", "", "DSN của cơ sở dữ liệu source cần fence")
+	cmd.Flags().StringVar(&promoteTargetDSN, "target", "", "DSN của cơ sở dữ liệu target (hoặc biến môi trường "+envPromoteTargetDSN+")")
+	cmd.Flags().StringVar(&promoteFenceSourceDSN, "fence", "", "DSN của cơ sở dữ liệu source cần fence (hoặc biến môi trường "+envPromoteFenceDSN+")")
 	cmd.Flags().StringVar(&promotePipelineID, "pipeline", "default", "ID định danh của pipeline")
 	cmd.Flags().StringVar(&promoteOverrideSeqsJSON, "override-sequences", "", "JSON chỉ định giá trị cho các sequence độc lập khi source hỏng")
 	cmd.Flags().Float64Var(&promotePeakRate, "peak-rate", 1000, "Tốc độ cấp phát đỉnh r_peak (keys/giây)")

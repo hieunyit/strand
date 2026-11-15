@@ -187,11 +187,12 @@ var (
 	identsRE = regexp.MustCompile(`^[A-Za-z0-9_.,$-]{1,200}$`)
 )
 
-func (s *Server) startWizardJob(ctx context.Context, p *Pipeline, kind string, args, display []string) (string, error) {
+func (s *Server) startWizardJob(ctx context.Context, p *Pipeline, kind string, args, display []string, extraEnv ...string) (string, error) {
 	env, err := p.Env()
 	if err != nil {
 		return "", &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
 	}
+	env = append(env, extraEnv...)
 	id, err := s.jobs.Start(ctx, JobSpec{Pipeline: p.Name, Kind: kind, Args: args, DisplayArgs: display, Env: env})
 	if err != nil {
 		var run *ErrJobRunning
@@ -427,22 +428,22 @@ func wizRepairStart(ctx context.Context, srv *Server, req ActionRequest) (Action
 // ---- Promote ----
 
 // promoteArgs dựng argv cho `strand promote`. display thay các DSN bằng <hidden>. opts là tùy chọn không bí mật.
-func promoteArgs(p *Pipeline, a map[string]string, failover, dry bool) (argv, display []string, opts map[string]string, err error) {
+func promoteArgs(p *Pipeline, a map[string]string, failover, dry bool) (argv, display, secretEnv []string, opts map[string]string, err error) {
 	if p.Cfg == nil {
-		return nil, nil, nil, BadRequest("pipeline config is not readable: %s", p.CfgErr)
+		return nil, nil, nil, nil, BadRequest("pipeline config is not readable: %s", p.CfgErr)
 	}
 	target := strings.TrimSpace(a["target_dsn"])
 	fence := strings.TrimSpace(a["fence_dsn"])
 	for _, d := range []struct{ n, v string }{{"target_dsn", target}, {"fence_dsn", fence}} {
 		if len(d.v) > 4096 || strings.IndexFunc(d.v, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
-			return nil, nil, nil, BadRequest("%s has invalid characters", d.n)
+			return nil, nil, nil, nil, BadRequest("%s has invalid characters", d.n)
 		}
 	}
 	if target == "" {
-		return nil, nil, nil, BadRequest("target_dsn is required (the promote DSN of the target, e.g. the strand_admin user)")
+		return nil, nil, nil, nil, BadRequest("target_dsn is required (the promote DSN of the target, e.g. the strand_admin user)")
 	}
 	if fence == "" && !failover {
-		return nil, nil, nil, BadRequest("fence_dsn is required: promote fences the old source through it. If the source is dead, run the promote and use the failover dialog when the CLI asks for a decision")
+		return nil, nil, nil, nil, BadRequest("fence_dsn is required: promote fences the old source through it. If the source is dead, run the promote and use the failover dialog when the CLI asks for a decision")
 	}
 	id := p.Cfg.Name
 	if id == "" {
@@ -455,11 +456,13 @@ func promoteArgs(p *Pipeline, a map[string]string, failover, dry bool) (argv, di
 	}
 	argv = []string{"promote", "-c", p.ConfigPath, "--pipeline=" + id, "--engine=" + engine}
 	display = append([]string(nil), argv...)
-	argv = append(argv, "--target="+target)
-	display = append(display, "--target=<hidden>")
+	// DSN (có thể kèm mật khẩu) đi qua biến môi trường của tiến trình con, không qua argv: argv đọc được
+	// bằng ps bởi mọi user trên máy. Không ghi vào job record/audit.
+	secretEnv = append(secretEnv, "STRAND_PROMOTE_TARGET_DSN="+target)
+	display = append(display, "--target=<env>")
 	if fence != "" {
-		argv = append(argv, "--fence="+fence)
-		display = append(display, "--fence=<hidden>")
+		secretEnv = append(secretEnv, "STRAND_PROMOTE_FENCE_DSN="+fence)
+		display = append(display, "--fence=<env>")
 	}
 	opts = map[string]string{}
 	add := func(flag string, val string) {
@@ -480,7 +483,7 @@ func promoteArgs(p *Pipeline, a map[string]string, failover, dry bool) (argv, di
 			continue
 		}
 		if !o.re.MatchString(v) {
-			return nil, nil, nil, BadRequest("invalid %s", o.key)
+			return nil, nil, nil, nil, BadRequest("invalid %s", o.key)
 		}
 		if engine != "pg" && (o.key == "app_role" || o.key == "schemas") {
 			continue // chỉ có nghĩa với PostgreSQL
@@ -491,17 +494,17 @@ func promoteArgs(p *Pipeline, a map[string]string, failover, dry bool) (argv, di
 	case "", "false", "0", "no":
 	case "true", "1", "yes", "on":
 		if engine != "mysql" {
-			return nil, nil, nil, BadRequest("objects_post applies to a MySQL target only")
+			return nil, nil, nil, nil, BadRequest("objects_post applies to a MySQL target only")
 		}
 		argv, display = append(argv, "--objects-post"), append(display, "--objects-post")
 		opts["objects_post"] = "true"
 	default:
-		return nil, nil, nil, BadRequest("objects_post must be true or false")
+		return nil, nil, nil, nil, BadRequest("objects_post must be true or false")
 	}
 	if v := strings.TrimSpace(a["override_sequences"]); v != "" {
 		var m map[string]int64
 		if json.Unmarshal([]byte(v), &m) != nil || len(m) == 0 || len(v) > 8192 {
-			return nil, nil, nil, BadRequest(`override_sequences must be a JSON object of sequence name to integer, e.g. {"public.orders_id_seq": 123456}`)
+			return nil, nil, nil, nil, BadRequest(`override_sequences must be a JSON object of sequence name to integer, e.g. {"public.orders_id_seq": 123456}`)
 		}
 		b, _ := json.Marshal(m)
 		argv, display = append(argv, "--override-sequences="+string(b)), append(display, "--override-sequences="+string(b))
@@ -512,7 +515,7 @@ func promoteArgs(p *Pipeline, a map[string]string, failover, dry bool) (argv, di
 	if dry {
 		argv, display = append(argv, "--dry-run"), append(display, "--dry-run")
 	}
-	return argv, display, opts, nil
+	return argv, display, secretEnv, opts, nil
 }
 
 // wizPromotePlan: đọc trạng thái promote hiện tại bằng `strand promote --dry-run` (CLI nạp _strand_promote ở chế độ
@@ -533,11 +536,11 @@ func wizPromotePlan(ctx context.Context, srv *Server, req ActionRequest) (Action
 		return ActionResult{}, Conflict("a promote job is running; wait for it to finish")
 	}
 	// Failover chỉ bàn tới sau exit 10: dry-run luôn là bản thường (không --source-fenced-externally).
-	argv, display, opts, err := promoteArgs(p, req.Args, false, true)
+	argv, display, secretEnv, opts, err := promoteArgs(p, req.Args, false, true)
 	if err != nil {
 		return ActionResult{}, err
 	}
-	id, err := srv.startWizardJob(ctx, p, "promote-plan", argv, display)
+	id, err := srv.startWizardJob(ctx, p, "promote-plan", argv, display, secretEnv...)
 	if err != nil {
 		return ActionResult{}, err
 	}
@@ -569,7 +572,7 @@ func (s *Server) wizPromoteRun(ctx context.Context, req ActionRequest, failover 
 		}
 		return ActionResult{}, Conflict("promote needs a successful dry-run plan first (step 1): wizard step is %q", stepOf(st))
 	}
-	argv, display, opts, err := promoteArgs(p, req.Args, failover, false)
+	argv, display, secretEnv, opts, err := promoteArgs(p, req.Args, failover, false)
 	if err != nil {
 		return ActionResult{}, err
 	}
@@ -577,7 +580,7 @@ func (s *Server) wizPromoteRun(ctx context.Context, req ActionRequest, failover 
 	if failover {
 		kind = "promote-failover"
 	}
-	id, err := s.startWizardJob(ctx, p, kind, argv, display)
+	id, err := s.startWizardJob(ctx, p, kind, argv, display, secretEnv...)
 	if err != nil {
 		return ActionResult{}, err
 	}

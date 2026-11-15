@@ -35,7 +35,7 @@ func wizFake(t *testing.T, e *testEnv) {
 	t.Helper()
 	script := `#!/bin/sh
 d=$(dirname "$0")
-{ echo CALL; for a in "$@"; do echo "$a"; done; echo "ENV=$STRAND_TEST_VAR"; } >> "$d/calls.log"
+{ echo CALL; for a in "$@"; do echo "$a"; done; echo "ENV=$STRAND_TEST_VAR"; echo "SECRETENV=$STRAND_PROMOTE_TARGET_DSN|$STRAND_PROMOTE_FENCE_DSN"; } >> "$d/calls.log"
 [ -f "$d/out.txt" ] && cat "$d/out.txt"
 while [ -e "$d/hold" ]; do sleep 0.05; done
 c=0
@@ -443,12 +443,16 @@ func TestPromoteWizardNormalFlow(t *testing.T) {
 		t.Fatalf("plan: %d %v", code, b)
 	}
 	j := e.lastJobDone("promote")
-	wantPlan := append(append([]string{}, base...), "--target="+leakTarget, "--fence="+leakFence, "--catchup-timeout=10m", "--app-role=app_rw", "--schemas=public,sales", "--dry-run")
+	wantPlan := append(append([]string{}, base...), "--catchup-timeout=10m", "--app-role=app_rw", "--schemas=public,sales", "--dry-run")
 	if got := e.fakeCalls()[0]; !reflect.DeepEqual(got.Args, wantPlan) || got.Env != "from-env-file" {
 		t.Fatalf("plan argv:\n%v\nwant\n%v", got.Args, wantPlan)
 	}
+	// DSN đi qua môi trường của tiến trình con, không qua argv (ps đọc được argv).
+	if got := e.fakeCalls()[0]; got.SecretEnv != leakTarget+"|"+leakFence {
+		t.Fatalf("plan DSN env = %q", got.SecretEnv)
+	}
 	// The job record never holds the DSNs.
-	if strings.Contains(strings.Join(j.Args, " "), "Leaky") || !strings.Contains(strings.Join(j.Args, " "), "--target=<hidden>") {
+	if strings.Contains(strings.Join(j.Args, " "), "Leaky") || !strings.Contains(strings.Join(j.Args, " "), "--target=<env>") {
 		t.Errorf("job args leak: %v", j.Args)
 	}
 	v := e.wizState(c, "promote")
@@ -473,7 +477,7 @@ func TestPromoteWizardNormalFlow(t *testing.T) {
 		t.Fatalf("promote: %d %v", code, b)
 	}
 	e.lastJobDone("promote")
-	wantRun := append(append([]string{}, base...), "--target="+leakTarget, "--fence="+leakFence, "--peak-rate=500", "--source-app-roles=app_rw")
+	wantRun := append(append([]string{}, base...), "--peak-rate=500", "--source-app-roles=app_rw")
 	waitFor(t, "calls", func() bool { return len(e.fakeCalls()) >= 2 })
 	calls := e.fakeCalls()
 	if got := calls[len(calls)-1].Args; !reflect.DeepEqual(got, wantRun) {
@@ -564,10 +568,13 @@ func TestPromoteWizardNeedsDecisionAndFailover(t *testing.T) {
 	e.lastJobDone("promote")
 	waitFor(t, "calls", func() bool { return len(e.fakeCalls()) >= 3 })
 	calls := e.fakeCalls()
-	want := []string{"promote", "-c", cfg, "--pipeline=orders", "--engine=pg", "--target=" + leakTarget,
+	want := []string{"promote", "-c", cfg, "--pipeline=orders", "--engine=pg",
 		`--override-sequences={"public.orders_id_seq":5000}`, "--source-fenced-externally"}
 	if got := calls[len(calls)-1].Args; !reflect.DeepEqual(got, want) {
 		t.Fatalf("failover argv:\n%v\nwant\n%v", got, want)
+	}
+	if got := calls[len(calls)-1].SecretEnv; got != leakTarget+"|" {
+		t.Fatalf("failover DSN env = %q", got)
 	}
 	if !stepIs(e.wizState(c, "promote"), "done") {
 		t.Errorf("final: %v", e.wizState(c, "promote"))
@@ -637,7 +644,7 @@ func TestPromoteWizardMySQLTarget(t *testing.T) {
 	cfg := filepath.Join(e.dir, cfgOrders)
 	e.act(c, csrf, "orders", ActPromotePlan, promoteBody(map[string]string{"app_role": "x", "schemas": "y", "objects_post": "true"}))
 	e.lastJobDone("promote")
-	want := []string{"promote", "-c", cfg, "--pipeline=orders", "--engine=mysql", "--target=" + leakTarget, "--fence=" + leakFence, "--objects-post", "--dry-run"}
+	want := []string{"promote", "-c", cfg, "--pipeline=orders", "--engine=mysql", "--objects-post", "--dry-run"}
 	if got := e.fakeCalls()[0].Args; !reflect.DeepEqual(got, want) {
 		t.Errorf("argv %v want %v", got, want)
 	}

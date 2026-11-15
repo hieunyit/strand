@@ -42,6 +42,8 @@ exit $c
 type fakeCall struct {
 	Args []string
 	Env  string
+	// SecretEnv: "<STRAND_PROMOTE_TARGET_DSN>|<STRAND_PROMOTE_FENCE_DSN>" (chỉ script của wizard ghi).
+	SecretEnv string
 }
 
 func (e *testEnv) fakeCalls() []fakeCall {
@@ -57,6 +59,8 @@ func (e *testEnv) fakeCalls() []fakeCall {
 		for _, l := range lines {
 			if strings.HasPrefix(l, "ENV=") {
 				c.Env = strings.TrimPrefix(l, "ENV=")
+			} else if strings.HasPrefix(l, "SECRETENV=") {
+				c.SecretEnv = strings.TrimPrefix(l, "SECRETENV=")
 			} else {
 				c.Args = append(c.Args, l)
 			}
