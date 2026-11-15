@@ -100,7 +100,7 @@ Tổng khoảng 15 ngày làm việc. M1–M4 là phần owner yêu cầu, M5 l�
 | M2 | **Xong** | Overview, danh sách, chi tiết (Graph, Tables, Checkpoint, Errors, Config, Logs), biểu đồ SVG, `status`/`tables`/`events` ở admin socket. Xem lệch so với kế hoạch bên dưới |
 | M3 | **Xong** | start/stop/restart/enable/disable, pause/resume (+ snapshot), throttle, snapshot add (lệnh socket chỉ đọc `source_tables`), checkpoint show/rewind, verify sample/delta/full thành job (`FileJobRunner`: JSON + output mỗi job ở `<state_dir>/jobs`, một job/pipeline, output trực tiếp, nhận nuôi job sau khi web khởi động lại), tab Jobs và trang `/jobs`. Test HTTP cho từng action, test job runner. Điểm mở rộng cho M4/M5: `ActionRegistry`, `JobRunner`, `ActionError`, `confirm_name` |
 | M4 | Chưa | |
-| M5 | Chưa | |
+| M5 | **Xong** | Sửa cấu hình (textarea YAML, kiểm tra strand validate trên file tạm, diff, ghi đè nguyên tử, sao lưu `<file>.bak.<timestamp>`, sửa `.env` riêng biệt write-only mode 0600, tùy chọn restart). Tạo pipeline mới (`/pipelines/new` và `POST /api/v1/pipelines`, form sinh YAML + `.env` mode 0600 trong `config_dir`, tự động chạy validate và plan, đăng ký vào registry và `web.yaml`, nút Start chế độ nền). Audit đầy đủ mọi thao tác |
 | M6 | Chưa | |
 
 Lệch so với kế hoạch (theo quyết định của owner 2026-11-15, chi tiết ở file ADR):

@@ -1,6 +1,6 @@
 # Strand Web API `/api/v1`
 
-Đặc tả REST của `strand web` (kế hoạch: `docs/PLAN-WEB-UI.md`, quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`). Giao diện web và script dùng chung các route này. Phiên bản M3: các route đọc, đăng nhập/đăng xuất, **thao tác** (§4) và **job** (§4.3).
+Đặc tả REST của `strand web` (kế hoạch: `docs/PLAN-WEB-UI.md`, quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`). Giao diện web và script dùng chung các route này. Phiên bản M5: các route đọc, đăng nhập/đăng xuất, **thao tác** (§4), **job** (§4.3), **sửa cấu hình** (§3.1) và **tạo pipeline mới** (§3.2).
 
 ## 1. Quy ước
 
@@ -39,6 +39,26 @@ Trạng thái (`state`) của pipeline: `synced`, `bootstrapping`, `paused`, `st
 
 ### `GET /api/v1/pipelines` → `{"pipelines": [PipelineView], "warnings": []}`
 
+### `POST /api/v1/pipelines` (Tạo pipeline mới)
+
+Body JSON (hoặc Form URL-encoded):
+`{"name": "...", "from": "mysql|mariadb|postgres", "to": "mysql|postgres", "source_host", "source_port", "target_host", "target_port", "source_user", "target_user", "source_password", "target_password", "source_password_env", "target_password_env", "database", "schema", "include", "exclude", "commit_order", "spool_dir", "workers", ...}`.
+
+Tạo cấu hình YAML và file `.env` (mode `0600`) trong `config_dir` (khai báo trong `web.yaml`, mặc định `/etc/strand` nếu ghi được, nếu không thì `<state_dir>/pipelines`). Mật khẩu chỉ ghi vào `.env`, không bao giờ vào YAML. Chạy `strand validate` và `strand plan`, thêm pipeline vào registry (và `web.yaml` nếu không khớp `scan`), gọi `Registry.Refresh`.
+Trả về **200**:
+```json
+{
+  "ok": true,
+  "pipeline": "orders-sync",
+  "config_path": "/etc/strand/orders-sync.yaml",
+  "env_path": "/etc/strand/orders-sync.env",
+  "validate": {"exit_code": 0, "output": "..."},
+  "plan": {"exit_code": 0, "output": "..."},
+  "message": "Pipeline created successfully"
+}
+```
+Lỗi: **400** tên sai whitelist hoặc tham số sai, **409** tên pipeline hoặc file đã tồn tại. Audit: `pipeline.create`.
+
 `PipelineView`:
 
 ```json
@@ -76,6 +96,34 @@ Trạng thái (`state`) của pipeline: `synced`, `bootstrapping`, `paused`, `st
 
 `{"path", "yaml", "unimplemented_keys": [...], "error"}`. `yaml` là file cấu hình đọc thô (chưa thay `${VAR}`), mọi giá trị bí mật bị thay bằng `********` (khóa có `password`, `secret`, `token`, `credential`, `private`, `encryption_key`, `access_key`, mật khẩu nhúng trong DSN/URL). Mỗi lần xem được ghi audit `config.view`.
 
+### `POST /api/v1/pipelines/{name}/config/validate`
+
+Body JSON: `{"yaml": "..."}`.
+Ghi cấu hình ra file tạm cùng thư mục, chạy `strand validate -c <tmp>` với môi trường của pipeline, so sánh và tạo unified diff so với file cấu hình hiện tại, rồi xóa file tạm.
+Trả về **200**:
+`{"valid": true|false, "exit_code": 0, "output": "...", "diff": "--- ...\n+++ ..."}`.
+
+### `POST /api/v1/pipelines/{name}/config`
+
+Body JSON: `{"yaml": "...", "restart": true|false}`.
+Lưu cấu hình:
+1. Ghi ra file tạm cùng thư mục.
+2. Chạy `strand validate -c <tmp>`. Nếu thất bại: trả **502** (hoặc **400**) kèm output của validate, xóa file tạm, **không ghi đè**.
+3. Nếu validate thành công: tạo bản sao lưu `<file>.bak.<timestamp>`.
+4. Ghi đè nguyên tử bằng `os.Rename`.
+5. Nạp lại cấu hình và gọi `Registry.Refresh`.
+6. Nếu `restart=true`: khởi động lại pipeline (systemctl restart hoặc stop rồi sync background).
+Trả về **200**: `{"ok": true, "backup": "<path>", "restarted": bool, "message": "..."}`. Audit: `config.edit`.
+
+### `GET /api/v1/pipelines/{name}/env`
+
+Trả về các biến môi trường từ file `.env` của pipeline: `{"path": "...", "exists": bool, "entries": {"KEY": "val", "SRC_PW": "********"}}`. Giá trị bí mật luôn được che bằng `********`.
+
+### `POST /api/v1/pipelines/{name}/env`
+
+Body JSON: `{"entries": {"KEY": "val", "SRC_PW": "newpassword"}}`.
+Cập nhật file `.env`: nếu giá trị gửi lên là `********` thì giữ nguyên giá trị cũ; nếu là giá trị mới thì cập nhật. Tạo file sao lưu `<env>.bak.<timestamp>`, ghi đè nguyên tử, quyền file luôn là **0600**. Audit: `env.edit`.
+
 ### `GET /api/v1/pipelines/{name}/logs?lines=N`
 
 `{"source": "journalctl -u strand@x.service | file /path", "lines": [...], "error"}`; mặc định 200 dòng, tối đa 2000; mật khẩu bị che.
@@ -106,6 +154,9 @@ Phản hồi **200**: `{"message", "job_id", "exit_code", "data"}`. Lỗi: **400
 | `snapshot-add` | `table` hoặc `tables` (`schema.table`, nhiều bảng cách nhau bằng dấu phẩy, tối đa 200) | admin socket `snapshot_add` lần lượt từng bảng; dừng ở bảng lỗi (lỗi nêu các bảng đã bắt đầu) | UI hỏi xác nhận |
 | `checkpoint-show` | - | admin socket `checkpoint_show`; `data.checkpoint` | chỉ đọc |
 | `checkpoint-rewind` | `to` (GTID set hoặc LSN), **`confirm_name`** | admin socket `checkpoint_rewind` | MySQL → MySQL; pipeline tự kiểm `gtid_purged`. Cần pipeline đang chạy |
+| `config-validate` | `yaml` | `<strand_binary> validate -c <tmp>` với env của pipeline; tính diff | kiểm tra cú pháp và sinh diff |
+| `config-save` | `yaml`, `restart` (tùy chọn) | validate tmp -> sao lưu `.bak.<ts>` -> ghi đè nguyên tử -> refresh -> restart | không ghi đè nếu validate lỗi |
+| `env-save` | `entries` (hoặc các cặp key/val) | cập nhật file `.env` (mode 0600) -> sao lưu `.bak.<ts>` -> refresh | giá trị `********` giữ nguyên giá trị cũ |
 | `job-cancel` | `job_id` | SIGTERM tới process group của job (SIGKILL sau 10 s) | job phải thuộc pipeline này; đã xong: **409** |
 
 `systemctl start/stop` chạy bằng user của `strand web` (không sudo/polkit): hệ thống phải cho phép user đó (quyết định W4). Thiếu quyền thì **502** kèm thông báo của systemctl.
@@ -132,8 +183,8 @@ Khi web chết hoặc khởi động lại: tiến trình con có process group 
 
 ## 5. Audit log
 
-`<state_dir>/audit.log`, mỗi dòng một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
+`<state_dir>/audit.log`, mỗi dòng một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, `config.edit`, `env.edit`, `pipeline.create`, và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
 
 ## 6. Trang HTML
 
-`/` (Overview), `/pipelines`, `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang tự làm mới 5 giây bằng `fetch` cùng URL (trừ Config và Logs; Logs có `?follow=1`).
+`/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang tự làm mới 5 giây bằng `fetch` cùng URL (trừ Config và Logs; Logs có `?follow=1`).
