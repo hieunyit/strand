@@ -197,14 +197,11 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 	// P3-01: so cả những khác biệt schemaDiff không thấy (kiểu PG, index): cộng thêm → áp tự động lên target;
 	// phá hủy (hoặc additive=pause) → ghi _strand_schema_change rồi dừng chờ `strand schema approve`.
 	// Không phân loại được → rơi về hành vi cũ (dừng nếu cột lệch).
-	changed, err := p.evolveSchema(ctx, t, ids, len(diffs) > 0)
+	diffs, err = evolveUntilSettled(diffs, collect, func(hasDiff bool) (bool, error) {
+		return p.evolveSchema(ctx, t, ids, hasDiff)
+	})
 	if err != nil {
 		return err
-	}
-	if changed {
-		if diffs, err = collect(); err != nil {
-			return err
-		}
 	}
 	if len(diffs) > 0 {
 		return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
@@ -269,6 +266,33 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		}
 	}
 	return nil
+}
+
+// maxEvolveRounds: số lần tối đa so/áp schema tại một barrier DDL.
+const maxEvolveRounds = 5
+
+// evolveUntilSettled chạy evolve rồi so lại schema cho tới khi không còn gì để áp. Schema source được đọc
+// lúc xử lý (không phải tại vị trí DDL), nên source có thể đã nhận DDL tiếp theo giữa lúc lập kế hoạch và
+// lúc so lại: một vòng không đủ (ví dụ hai ALTER liên tiếp → báo lệch giả, exit 10). Mỗi vòng chỉ áp thay
+// đổi cộng thêm (phá hủy thì evolve trả lỗi chờ duyệt), nên lặp lại vẫn an toàn; giới hạn số vòng để
+// không quay mãi khi source đổi liên tục.
+func evolveUntilSettled(diffs []string, collect func() ([]string, error), evolve func(hasDiff bool) (bool, error)) ([]string, error) {
+	for round := 0; round < maxEvolveRounds; round++ {
+		changed, err := evolve(len(diffs) > 0)
+		if err != nil {
+			return nil, err
+		}
+		if !changed {
+			return diffs, nil
+		}
+		if diffs, err = collect(); err != nil {
+			return nil, err
+		}
+		if len(diffs) == 0 {
+			return nil, nil
+		}
+	}
+	return diffs, nil
 }
 
 // schemaDiff so cột (tên, kiểu, NULL) của bảng ở source và ở target theo thứ tự. Bảng không còn ở
