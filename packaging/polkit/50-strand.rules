@@ -1,0 +1,15 @@
+// /usr/share/polkit-1/rules.d/50-strand.rules (cài thủ công: /etc/polkit-1/rules.d/50-strand.rules)
+// Cho Web UI (chạy bằng user "strand") start/stop/restart đúng các instance strand@<name>.service.
+// Không cấp gì khác: unit khác, enable/disable (manage-unit-files, không giới hạn được theo unit),
+// daemon-reload đều vẫn bị từ chối. Cần polkit >= 0.106 (rules JS).
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "strand") {
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+        if (unit && /^strand@[A-Za-z0-9_.-]+\.service$/.test(unit) &&
+            (verb == "start" || verb == "stop" || verb == "restart")) {
+            return polkit.Result.YES;
+        }
+    }
+});

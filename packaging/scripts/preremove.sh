@@ -20,4 +20,14 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
 	# Web UI (nếu đã bật).
 	systemctl disable --now strand-web.service >/dev/null 2>&1 || true
 fi
+# Pipeline chế độ nền do web khởi động (strand sync --background) không thuộc unit nào và (KillMode=process
+# của strand-web.service) không chết theo web: dừng êm bằng strand stop cho từng /etc/strand/*.yaml.
+# strand stop ở pipeline không chạy nền chỉ báo "not running"; lỗi bỏ qua.
+if [ -x /usr/bin/strand ] && command -v runuser >/dev/null 2>&1; then
+	for c in /etc/strand/*.yaml; do
+		[ -f "$c" ] || continue
+		case "$(basename "$c")" in web.yaml) continue ;; esac
+		runuser -u strand -- /usr/bin/strand stop -c "$c" >/dev/null 2>&1 || true
+	done
+fi
 exit 0

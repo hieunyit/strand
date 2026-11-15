@@ -29,6 +29,10 @@ contents:
   - src: dist/pkgroot/strand-web.service
     dst: /usr/lib/systemd/system/strand-web.service
     file_info: { mode: 0644, owner: root, group: root }
+  # Quy tắc polkit: chỉ cho user strand start/stop/restart strand@*.service (Web UI).
+  - src: packaging/polkit/50-strand.rules
+    dst: /usr/share/polkit-1/rules.d/50-strand.rules
+    file_info: { mode: 0644, owner: root, group: root }
   - src: packaging/web.yaml.example
     dst: /usr/share/doc/strand/examples/web.yaml
     file_info: { mode: 0644, owner: root, group: root }

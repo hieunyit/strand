@@ -15,6 +15,11 @@ Group=strand
 ExecStart=/usr/local/bin/strand web --config /etc/strand/web.yaml
 Restart=on-failure
 RestartSec=5
+# Chỉ tiến trình web nhận tín hiệu khi stop/restart. Pipeline chế độ nền (strand sync --background) và
+# job verify/repair/promote do web sinh ra nằm trong cgroup này nhưng phải sống tiếp qua lần restart:
+# web mới nhận nuôi chúng qua pid file. (Mặc định control-group sẽ giết hết.) Hệ quả: dừng hẳn web
+# KHÔNG dừng chúng; dừng bằng nút Stop / strand stop. Gỡ gói: preremove tự strand stop.
+KillMode=process
 # Audit log và trạng thái: /var/lib/strand-web (systemd tạo, thuộc user strand)
 StateDirectory=strand-web
 StateDirectoryMode=0750
