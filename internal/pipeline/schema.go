@@ -28,6 +28,28 @@ type tableFilter struct {
 	foldCase bool
 	// online (P3-02): nhận diện bảng tạm gh-ost/pt-osc; nil = tắt. Chỉ filter chính (p.filter) có.
 	online *onlineDDL
+	// added: bảng thêm qua `snapshot add` lúc chạy, được giữ qua restart (so tên chính xác, không glob).
+	// Chỉ mở rộng include; tables.exclude vẫn thắng.
+	added map[string]bool
+}
+
+// addIncluded thêm bảng (tên chính xác) vào tập include. Chỉ gọi lúc khởi động, trước khi filter được chia sẻ.
+func (f *tableFilter) addIncluded(t model.TableID) {
+	if f.added == nil {
+		f.added = map[string]bool{}
+	}
+	f.added[t.String()] = true
+}
+
+// excluded: tables.exclude có loại bảng này không.
+func (f *tableFilter) excluded(t model.TableID) bool {
+	name := t.String()
+	for _, p := range f.exclude {
+		if ok, _ := path.Match(p, name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func newTableFilter(include, exclude []string, rename map[string]string) (*tableFilter, error) {
@@ -103,22 +125,14 @@ func (f *tableFilter) targetKey(t model.TableID) model.TableID {
 
 func (f *tableFilter) Included(t model.TableID) bool {
 	name := t.String()
-	in := false
+	in := f.added[name]
 	for _, p := range f.include {
 		if ok, _ := path.Match(p, name); ok {
 			in = true
 			break
 		}
 	}
-	if !in {
-		return false
-	}
-	for _, p := range f.exclude {
-		if ok, _ := path.Match(p, name); ok {
-			return false
-		}
-	}
-	return true
+	return in && !f.excluded(t)
 }
 
 // Target trả về tên bảng ở đích (sau rename).

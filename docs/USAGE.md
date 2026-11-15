@@ -672,6 +672,10 @@ Lệnh tạo slot cùng exported snapshot, rồi chạy `pg_dump --snapshot` (`-
 
 `strand snapshot add --table app.t -c p.yaml` thêm bảng vào pipeline đang chạy. Bảng được snapshot logic có điều tốc, không dừng stream. PK theo mục 5.2. PG source: bảng phải có trong publication.
 
+Bảng thêm bằng lệnh này mà không nằm trong `tables.include` được ghi vào state cục bộ (`pipeline-state.json` trong `resources.spool.path`, trường `added_tables`) và **vẫn thuộc pipeline sau khi restart**: khởi động hợp chúng vào bộ lọc, nạp metadata/schema như bảng thường và không snapshot lại bảng đã xong. Bảng đã bị xóa ở source thì chỉ log WARN và bỏ qua.
+
+Để bỏ một bảng đã thêm: thêm nó vào `tables.exclude` rồi restart. `tables.exclude` luôn thắng; Strand log WARN và quên bảng khỏi danh sách đã thêm (thêm lại sau này phải snapshot lại). Mất file state thì danh sách này mất theo: thêm bảng vào `tables.include` nếu muốn giữ lâu dài.
+
 ### 7.8 `verify`
 
 | Chế độ | Lệnh | Cặp | Ghi chú |
