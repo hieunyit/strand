@@ -75,6 +75,12 @@ type PGWriter struct {
 	txBegin        func(ctx context.Context) (pgx.Tx, error)
 	MergeCount     int64
 	TotalMergeRows int64
+	// schemaGen tăng mỗi lần pipeline nạp lại metadata bảng (SetPrimaryKey, kể cả sau DDL). connGen: thế hệ
+	// mà cache câu lệnh/mô tả cột pgx của từng kết nối đã thấy. Kết nối cũ hơn → DeallocateAll trước khi
+	// dùng: CopyFrom lấy kiểu cột từ cache mô tả theo text "select cols from pg_temp._strand_tmp_N", nên
+	// sau ALTER (P3-01 evolve) sẽ mã hóa theo kiểu cũ.
+	schemaGen uint64
+	connGen   map[*pgx.Conn]uint64
 }
 
 // NewPGWriter khởi tạo PGWriter mới cho PostgreSQL target.
@@ -105,7 +111,36 @@ func (w *PGWriter) SetTxBeginner(fn func(ctx context.Context) (pgx.Tx, error)) {
 }
 
 // SetPrimaryKey khai báo tên các cột khóa chính của bảng (theo thứ tự của RowChange.Key).
-func (w *PGWriter) SetPrimaryKey(t model.TableID, cols []string) { w.pk.set(t, cols) }
+func (w *PGWriter) SetPrimaryKey(t model.TableID, cols []string) {
+	w.pk.set(t, cols)
+	w.mu.Lock()
+	w.schemaGen++
+	w.mu.Unlock()
+}
+
+// maxTrackedConns: số kết nối nhớ thế hệ schema; vượt quá thì quên hết (kết nối bị quên được dọn cache
+// thêm một lần khi dùng lại, vô hại).
+const maxTrackedConns = 1024
+
+// refreshConnCache dọn cache câu lệnh/mô tả của pc nếu schema đã đổi từ lần cuối pc được dùng.
+func (w *PGWriter) refreshConnCache(ctx context.Context, pc *pgx.Conn) error {
+	w.mu.Lock()
+	gen := w.schemaGen
+	if w.connGen == nil || len(w.connGen) > maxTrackedConns {
+		w.connGen = make(map[*pgx.Conn]uint64)
+	}
+	seen, known := w.connGen[pc]
+	w.connGen[pc] = gen
+	w.mu.Unlock()
+	// Kết nối lạ (pool dùng chung giữa các worker, có thể đã COPY theo schema cũ): dọn một lần.
+	if known && seen == gen {
+		return nil
+	}
+	if err := pc.DeallocateAll(ctx); err != nil {
+		return fmt.Errorf("reset statement cache after schema change: %w", err)
+	}
+	return nil
+}
 
 // SetCommitOrderer gán CommitOrderer để kiểm soát thứ tự commit (CP-5).
 func (w *PGWriter) SetCommitOrderer(orderer *CommitOrderer) {
@@ -207,6 +242,9 @@ func (w *PGWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta Del
 			return fmt.Errorf("pg writer requires the pgx stdlib driver, got %T", driverConn)
 		}
 		pc := sc.Conn()
+		if err := w.refreshConnCache(ctx, pc); err != nil {
+			return err
+		}
 		rerr := w.applyOnConn(ctx, pc, batch, delta, &committing)
 		if pc.PgConn().TxStatus() != 'I' {
 			// Transaction còn mở (rollback không gửi được): đóng kết nối để pool loại bỏ nó,
