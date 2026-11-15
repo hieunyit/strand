@@ -852,7 +852,7 @@ Tên pipeline chỉ gồm chữ, số, `_`, `.`, `-` (tối đa 63 ký tự, b�
 **Mật khẩu và token:**
 
 ```bash
-strand web passwd --config /etc/strand/web.yaml     # hỏi hai lần, ghi bcrypt hash vào web.yaml (0600)
+strand web passwd --config /etc/strand/web.yaml     # hỏi hai lần, ghi bcrypt hash vào web.yaml, giữ nguyên chủ sở hữu/mode (root:strand 0640 vẫn đọc được; bỏ bit other và group-write; file mới 0600)
 strand web token  --config /etc/strand/web.yaml     # tùy chọn: token cho script, in một lần, lưu sha256
 sudo systemctl enable --now strand-web
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:8080/api/v1/overview
@@ -909,7 +909,7 @@ DSN target (`--target`) và DSN source để fence (`--fence`, tùy chọn khi f
 
 **Sửa cấu hình (M5).** Tab **Config** của từng pipeline có chế độ sửa trực tiếp (textarea YAML) và trình quản lý file `.env`:
 - Lưu cấu hình YAML: (a) ghi ra file tạm cùng thư mục, (b) chạy `strand validate -c <tmp>` với biến môi trường của pipeline, (c) hiển thị kết quả kiểm tra và diff so với file hiện tại, (d) lưu bản sao lưu `<file>.bak.<timestamp>` và ghi đè nguyên tử `os.Rename`, (e) tùy chọn Restart pipeline sau khi lưu. Nếu cú pháp lỗi, validate thất bại thì không ghi đè.
-- Quản lý `.env`: mật khẩu và giá trị bí mật không bao giờ lộ ra ngoài giao diện/API (hiển thị `********`). Khi sửa, giá trị bí mật là write-only (để nguyên `********` thì giữ giá trị cũ, nhập mới thì cập nhật). File `.env` luôn được lưu với quyền bảo mật **0600**.
+- Quản lý `.env`: mật khẩu và giá trị bí mật không bao giờ lộ ra ngoài giao diện/API (hiển thị `********`). Khi sửa, giá trị bí mật là write-only (để nguyên `********` thì giữ giá trị cũ, nhập mới thì cập nhật). File `.env` giữ nguyên mode/chủ sở hữu của file cũ (không bao giờ cho phép bit other; file mới 0600), bản sao lưu `.bak.<ts>` có cùng mode.
 
 **Tạo pipeline mới (M5).** Trang `/pipelines/new` cung cấp form trực quan để tạo pipeline mới tương tự `strand config init`:
 - Tên pipeline được kiểm tra theo whitelist chặt chẽ (từ chối tên trùng lặp và chặn path traversal).

@@ -785,8 +785,8 @@ func TestSetConfigKeyKeepsFileAndMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(p)
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v, want 0600", st.Mode().Perm())
+	if st.Mode().Perm() != 0o640 { // 0644 is tightened: other bit dropped
+		t.Fatalf("mode %v, want 0640", st.Mode().Perm())
 	}
 	b, _ := os.ReadFile(p)
 	if !strings.Contains(string(b), "# my web config") || !strings.Contains(string(b), "/etc/strand/*.yaml") {

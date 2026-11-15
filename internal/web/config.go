@@ -200,21 +200,5 @@ func SetConfigKey(path, key, value string) error {
 		return err
 	}
 	_ = enc.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".web-yaml-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(out.Bytes()); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return writeFilePreserving(path, out.Bytes(), true, true)
 }
