@@ -277,6 +277,9 @@
   });
 
   // ---- New pipeline form handler (M5) ----
+  function escHtml(x) {
+    return String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
   var newPipeForm = document.getElementById('new-pipeline-form');
   if (newPipeForm) {
     newPipeForm.addEventListener('submit', function (ev) {
@@ -291,6 +294,9 @@
         if (str !== '') {
           if (k === 'source_port' || k === 'target_port' || k === 'workers') {
             payload[k] = parseInt(str, 10);
+          } else if (k === 'include' || k === 'exclude' || k === 'databases') {
+            // API nhận mảng chuỗi: tách theo dấu phẩy
+            payload[k] = str.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
           } else {
             payload[k] = str;
           }
@@ -306,19 +312,27 @@
             if (res.ok) {
               var vPass = res.j.validate && res.j.validate.exit_code === 0;
               var pPass = res.j.plan && res.j.plan.exit_code === 0;
-              var html = '<p><span class="badge ' + (vPass ? 'st-synced' : 'st-failed') + '">Validate: ' + (vPass ? 'PASS' : 'FAIL') + '</span> ';
+              var html = '';
+              if (!res.j.ok) {
+                // Tạo file xong nhưng validate lỗi: báo rõ, không cho Start ngay.
+                html += '<p class="err"><b>Validation failed.</b> ' + escHtml(res.j.message || '') + '</p>';
+              }
+              html += '<p><span class="badge ' + (vPass ? 'st-synced' : 'st-failed') + '">Validate: ' + (vPass ? 'PASS' : 'FAIL') + '</span> ';
               html += '<span class="badge ' + (pPass ? 'st-synced' : 'st-warn') + '">Plan: ' + (pPass ? 'PASS' : 'WARN') + '</span></p>';
-              html += '<h4>Validate Output</h4><pre class="code">' + (res.j.validate ? res.j.validate.output : '') + '</pre>';
-              html += '<h4>Plan Output</h4><pre class="code">' + (res.j.plan ? res.j.plan.output : '') + '</pre>';
+              html += '<h4>Validate Output</h4><pre class="code">' + escHtml(res.j.validate ? res.j.validate.output : '') + '</pre>';
+              html += '<h4>Plan Output</h4><pre class="code">' + escHtml(res.j.plan ? res.j.plan.output : '') + '</pre>';
               html += '<div style="margin-top:16px;">';
-              html += '<form class="act inline" data-action="start" data-pipeline="' + res.j.pipeline + '">';
-              html += '<button class="btn primary" type="submit">Start ' + res.j.pipeline + ' now</button></form> ';
-              html += '<a href="/pipelines/' + encodeURIComponent(res.j.pipeline) + '" class="btn">Go to pipeline</a>';
+              if (res.j.ok) {
+                html += '<form class="act inline" data-action="start" data-pipeline="' + escHtml(res.j.pipeline) + '">';
+                html += '<button class="btn primary" type="submit">Start ' + escHtml(res.j.pipeline) + ' now</button></form> ';
+              }
+              html += '<a href="/pipelines/' + encodeURIComponent(res.j.pipeline) + '" class="btn">' + (res.j.ok ? 'Go to pipeline' : 'Fix in Config tab') + '</a>';
               html += '</div>';
               resBody.innerHTML = html;
-              toast('Pipeline created successfully!', true);
+              if (res.j.ok) { toast('Pipeline created successfully!', true); }
+              else { toast('Pipeline created but validation FAILED: fix it before Start', false); }
             } else {
-              resBody.innerHTML = '<p class="err">Error: ' + (res.j.error || 'Failed to create pipeline') + '</p>';
+              resBody.innerHTML = '<p class="err">Error: ' + escHtml(res.j.error || 'Failed to create pipeline') + '</p>';
               toast('Creation failed: ' + (res.j.error || 'error'), false);
             }
           }

@@ -6,11 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	texttmpl "text/template"
+
+	"strand/internal/config"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,7 +52,10 @@ type NewPipelineOpts struct {
 
 	Databases []string `json:"databases,omitempty"`
 	Database  string   `json:"database,omitempty"`
-	PGSchema  string   `json:"schema,omitempty"`
+	// TargetDatabase: database chứa bảng _strand_* của Strand (chỉ target MySQL); mặc định "strand".
+	// Khác với Database/Databases (database DỮ LIỆU cần chuyển).
+	TargetDatabase string `json:"target_database,omitempty"`
+	PGSchema       string `json:"schema,omitempty"`
 
 	Includes []string `json:"include,omitempty"`
 	Excludes []string `json:"exclude,omitempty"`
@@ -141,7 +149,7 @@ target:
   port: {{.TargetPort}}
   user: {{.TargetUser}}
   password_env: {{.TargetPasswordEnv}}
-  database: {{.Database}}
+  database: {{.TargetDatabase}}   # database chứa bảng _strand_* (checkpoint); cần CREATE DATABASE {{.TargetDatabase}}; trước khi sync
   commit_order: {{.CommitOrder}}
 {{- else}}
   kind: postgres
@@ -195,6 +203,7 @@ type tmplData struct {
 	SourceDSN         string
 	TargetDSN         string
 	Database          string
+	TargetDatabase    string
 	Includes          []string
 	Excludes          []string
 	ServerID          int
@@ -236,6 +245,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		SourcePasswordEnv: opts.SourcePasswordEnv,
 		TargetPasswordEnv: opts.TargetPasswordEnv,
 		Database:          opts.Database,
+		TargetDatabase:    strings.TrimSpace(opts.TargetDatabase),
 		Includes:          opts.Includes,
 		Excludes:          opts.Excludes,
 		ServerID:          opts.ServerID,
@@ -311,12 +321,24 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 	if td.TargetPasswordEnv == "" {
 		td.TargetPasswordEnv = "DST_PW"
 	}
-	if td.Database == "" {
-		td.Database = "app"
+	dbs := dataDatabases(opts)
+	if len(dbs) == 0 {
+		dbs = []string{"app"}
+	}
+	td.Database = dbs[0] // PG: tên database; MySQL: database đầu tiên
+	// Database chứa _strand_* tách khỏi database dữ liệu (giống `strand config init`).
+	if td.TargetDatabase == "" {
+		td.TargetDatabase = "strand"
 	}
 	if len(td.Includes) == 0 {
 		if td.SourceMySQL {
-			td.Includes = []string{td.Database + ".*"}
+			for _, d := range dbs {
+				if d == "*" {
+					td.Includes = append(td.Includes, "*.*")
+				} else {
+					td.Includes = append(td.Includes, d+".*")
+				}
+			}
 		} else {
 			schema := opts.PGSchema
 			if schema == "" {
@@ -325,6 +347,9 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 			td.Includes = []string{schema + ".*"}
 		}
 	}
+	if td.IOPSSoft > 0 && td.IOPSHard == 0 {
+		td.IOPSHard = td.IOPSSoft * 3 / 2 // chỉ đặt soft: hard mặc định = 1.5 lần soft
+	}
 	if td.ServerID == 0 {
 		td.ServerID = 47001
 	}
@@ -332,7 +357,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		td.CommitOrder = "relaxed"
 	}
 	if td.Metrics == "" {
-		td.Metrics = "127.0.0.1:9464"
+		td.Metrics = defaultMetricsAddr
 	}
 	if td.LogFormat == "" {
 		td.LogFormat = "json"
@@ -361,6 +386,141 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// defaultMetricsAddr chỉ là giá trị dự phòng của hàm sinh YAML; createPipeline luôn chọn cổng riêng cho từng pipeline.
+const defaultMetricsAddr = "127.0.0.1:9464"
+
+// dataDatabases gộp `databases` (danh sách) và `database` (một tên hoặc nhiều tên cách nhau dấu phẩy).
+func dataDatabases(opts NewPipelineOpts) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		if d = strings.TrimSpace(d); d != "" && !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	for _, d := range opts.Databases {
+		for _, x := range strings.Split(d, ",") {
+			add(x)
+		}
+	}
+	for _, x := range strings.Split(opts.Database, ",") {
+		add(x)
+	}
+	return out
+}
+
+// splitList tách chuỗi phân cách bằng dấu phẩy, bỏ phần tử rỗng.
+func splitList(s string) []string {
+	var out []string
+	for _, x := range strings.Split(s, ",") {
+		if x = strings.TrimSpace(x); x != "" {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+var plainDBNameRE = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
+
+// checkOpts từ chối giá trị làm hỏng YAML sinh ra (dấu nháy, xuống dòng, ...) và tên database metadata lạ.
+func checkOpts(opts NewPipelineOpts) error {
+	bad := func(field, v string) error {
+		if strings.ContainsAny(v, "\"\\\r\n") {
+			return fmt.Errorf("%s: value %q contains a quote, backslash or newline", field, v)
+		}
+		return nil
+	}
+	for field, vals := range map[string][]string{
+		"databases": opts.Databases, "include": opts.Includes, "exclude": opts.Excludes, "windows": opts.Windows,
+		"database": {opts.Database}, "schema": {opts.PGSchema}, "source_host": {opts.SourceHost},
+		"target_host": {opts.TargetHost}, "source_user": {opts.SourceUser}, "target_user": {opts.TargetUser},
+	} {
+		for _, v := range vals {
+			if err := bad(field, v); err != nil {
+				return err
+			}
+		}
+	}
+	if td := strings.TrimSpace(opts.TargetDatabase); td != "" && !plainDBNameRE.MatchString(td) {
+		return fmt.Errorf("target_database %q is not a plain database name (letters, digits, _ and $ only)", td)
+	}
+	return nil
+}
+
+// socketPathLimit: giới hạn thực dùng cho socket mặc định (chừa một chút dư).
+func socketFits(path string) bool { return len(path) <= config.MaxUnixSocketPath() }
+
+// defaultAdminSocket chọn đường dẫn admin socket mặc định cho pipeline: <spool>/admin.sock nếu đủ ngắn
+// (giới hạn sun_path ~107 byte), nếu không thì lần lượt <state_dir>/sock/<name>.sock, /run/strand/<name>.sock
+// (khi thư mục đó tạo được/ghi được), cuối cùng <os.TempDir()>/strand-<name>.sock.
+func defaultAdminSocket(spoolDir, name, stateDir string) string {
+	c := filepath.Join(spoolDir, "admin.sock")
+	if socketFits(c) {
+		return c
+	}
+	c = filepath.Join(stateDir, "sock", name+".sock")
+	if socketFits(c) {
+		return c
+	}
+	c = filepath.Join("/run/strand", name+".sock")
+	if socketFits(c) && (isWritableDir("/run/strand") || (isWritableDir("/run") && os.MkdirAll("/run/strand", 0o750) == nil)) {
+		return c
+	}
+	return filepath.Join(os.TempDir(), "strand-"+name+".sock")
+}
+
+// metricsPort lấy số cổng từ địa chỉ metrics ("127.0.0.1:9464", ":9464"); 0 nếu không đọc được.
+func metricsPort(addr string) int {
+	_, ps, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(ps)
+	return n
+}
+
+// usedMetricsPorts đọc observability.metrics của mọi pipeline đã đăng ký (đọc YAML lỏng, không cần cấu hình hợp lệ).
+func (s *Server) usedMetricsPorts() map[int]string {
+	used := map[int]string{}
+	for _, p := range s.reg.List() {
+		b, err := os.ReadFile(p.ConfigPath)
+		if err != nil {
+			continue
+		}
+		var c struct {
+			Observability struct {
+				Metrics string `yaml:"metrics"`
+			} `yaml:"observability"`
+		}
+		if yaml.Unmarshal(b, &c) == nil {
+			if port := metricsPort(c.Observability.Metrics); port > 0 {
+				used[port] = p.Name
+			}
+		}
+	}
+	return used
+}
+
+// pickMetricsAddr chọn cổng /metrics riêng: tìm từ 9464 trở lên, bỏ cổng đã dùng trong cấu hình của pipeline khác
+// và cổng đang có tiến trình lắng nghe.
+func (s *Server) pickMetricsAddr() (string, error) {
+	used := s.usedMetricsPorts()
+	for port := 9464; port < 9464+1000; port++ {
+		if _, taken := used[port]; taken {
+			continue
+		}
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return addr, nil
+	}
+	return "", errors.New("no free metrics port in 9464-10463")
 }
 
 // AddPipelineToWebConfig thêm một PipelineEntry vào file web.yaml, giữ nguyên cấu trúc và chú thích.
@@ -490,7 +650,29 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	if spoolDir == "" {
 		spoolDir = filepath.Join(s.cfg.StateDir, "pipelines", opts.Name, "spool")
 	}
-	socketPath := filepath.Join(spoolDir, "admin.sock")
+	// Socket mặc định nằm trong spool; nếu đường dẫn quá dài (giới hạn sun_path) thì chuyển sang chỗ ngắn hơn.
+	socketPath := defaultAdminSocket(spoolDir, opts.Name, s.cfg.StateDir)
+
+	if err := checkOpts(opts); err != nil {
+		return nil, BadRequest("%s", err.Error())
+	}
+	// Mỗi pipeline một cổng /metrics riêng; cổng do người dùng đặt không được trùng pipeline khác.
+	opts.Metrics = strings.TrimSpace(opts.Metrics)
+	if opts.Metrics == "" {
+		addr, err := s.pickMetricsAddr()
+		if err != nil {
+			return nil, err
+		}
+		opts.Metrics = addr
+	} else {
+		port := metricsPort(opts.Metrics)
+		if port <= 0 || port > 65535 {
+			return nil, BadRequest("invalid metrics address %q (want host:port)", opts.Metrics)
+		}
+		if other, taken := s.usedMetricsPorts()[port]; taken {
+			return nil, Conflict("metrics port %d is already used by pipeline %q", port, other)
+		}
+	}
 
 	yamlContent, err := buildNewPipelineYAML(opts, spoolDir, socketPath)
 	if err != nil {
@@ -596,11 +778,14 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	}
 
 	// Chạy validate
-	vOut, vCode, _ := s.runStrand(ctx, p, "validate", "-c", yamlPath)
+	vOut, vCode, vErr := s.runStrand(ctx, p, "validate", "-c", yamlPath)
 	valExit := 0
 	if vCode != nil {
 		valExit = *vCode
+	} else if vErr != nil {
+		valExit = -1
 	}
+	valOK := vErr == nil && valExit == 0
 
 	// Chạy plan
 	pOut, pCode, _ := s.runStrand(ctx, p, "plan", "-c", yamlPath)
@@ -613,7 +798,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		IP:       ip,
 		Action:   "pipeline.create",
 		Pipeline: opts.Name,
-		Result:   "ok",
+		Result:   map[bool]string{true: "ok", false: "validate_failed"}[valOK],
 		ExitCode: vCode,
 		Detail: map[string]any{
 			"config":   yamlPath,
@@ -623,11 +808,21 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	})
 
 	res := &CreatePipelineResult{
-		OK:         true,
+		OK:         valOK,
 		Pipeline:   opts.Name,
 		ConfigPath: yamlPath,
 		EnvPath:    envPath,
 		Message:    "Pipeline created successfully",
+	}
+	if !valOK {
+		// File vẫn được giữ lại để sửa ở tab Config; ok=false để UI/API không báo thành công giả.
+		res.Message = fmt.Sprintf("Pipeline files were created but validation failed (exit %d): fix the pipeline in the Config tab and re-validate before Start", valExit)
+		if strings.Contains(vOut, "Unknown database") || strings.Contains(vOut, "1049") {
+			res.Message += fmt.Sprintf(". Hint: the target metadata database must exist (CREATE DATABASE %s;)", metaDBOf(opts))
+		}
+		if vErr != nil && vOut == "" {
+			vOut = vErr.Error()
+		}
 	}
 	res.Validate.ExitCode = valExit
 	res.Validate.Output = vOut
@@ -635,6 +830,80 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	res.Plan.Output = pOut
 
 	return res, nil
+}
+
+// metaDBOf trả tên database metadata của target MySQL (mặc định strand).
+func metaDBOf(opts NewPipelineOpts) string {
+	if d := strings.TrimSpace(opts.TargetDatabase); d != "" {
+		return d
+	}
+	return "strand"
+}
+
+// atoiField đọc một trường số nguyên không âm của form; rỗng = 0.
+func atoiField(r *http.Request, name string) (int, error) {
+	v := strings.TrimSpace(r.PostForm.Get(name))
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid %s %q: want a non-negative integer", name, v)
+	}
+	return n, nil
+}
+
+// parseFormOpts đọc mọi trường mà form HTML gửi (application/x-www-form-urlencoded).
+func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
+	var opts NewPipelineOpts
+	if err := r.ParseForm(); err != nil {
+		return opts, fmt.Errorf("invalid form: %v", err)
+	}
+	f := r.PostForm
+	opts.Name = f.Get("name")
+	opts.From = f.Get("from")
+	opts.To = f.Get("to")
+	opts.SourceHost = f.Get("source_host")
+	opts.TargetHost = f.Get("target_host")
+	opts.SourceUser = f.Get("source_user")
+	opts.TargetUser = f.Get("target_user")
+	opts.SourcePassword = f.Get("source_password")
+	opts.TargetPassword = f.Get("target_password")
+	opts.SourcePasswordEnv = f.Get("source_password_env")
+	opts.TargetPasswordEnv = f.Get("target_password_env")
+	opts.SourceDSN = f.Get("source_dsn")
+	opts.TargetDSN = f.Get("target_dsn")
+	opts.Database = f.Get("database")
+	opts.TargetDatabase = f.Get("target_database")
+	opts.PGSchema = f.Get("schema")
+	opts.CommitOrder = f.Get("commit_order")
+	opts.SpoolDir = f.Get("spool_dir")
+	opts.ReplicaLagMax = f.Get("replica_lag_max")
+	opts.Metrics = f.Get("metrics")
+	opts.LogFormat = f.Get("log_format")
+	opts.Databases = splitList(f.Get("databases"))
+	opts.Includes = splitList(f.Get("include"))
+	opts.Excludes = splitList(f.Get("exclude"))
+	opts.Windows = splitList(f.Get("windows"))
+	for field, dst := range map[string]*int{
+		"source_port": &opts.SourcePort, "target_port": &opts.TargetPort, "workers": &opts.Workers,
+		"server_id": &opts.ServerID, "iops_soft": &opts.IOPSSoft, "iops_hard": &opts.IOPSHard,
+		"chunk_rows": &opts.ChunkRows,
+	} {
+		n, err := atoiField(r, field)
+		if err != nil {
+			return opts, err
+		}
+		*dst = n
+	}
+	if v := strings.TrimSpace(f.Get("breaker_max_ratio")); v != "" {
+		x, err := strconv.ParseFloat(v, 64)
+		if err != nil || x < 0 {
+			return opts, fmt.Errorf("invalid breaker_max_ratio %q: want a non-negative number", v)
+		}
+		opts.BreakerMaxRatio = x
+	}
+	return opts, nil
 }
 
 // ---- HTTP Handlers ----
@@ -661,35 +930,10 @@ func (s *Server) apiPipelineCreate(w http.ResponseWriter, r *http.Request, sess 
 			return
 		}
 	} else {
-		_ = r.ParseForm()
-		opts.Name = r.PostForm.Get("name")
-		opts.From = r.PostForm.Get("from")
-		opts.To = r.PostForm.Get("to")
-		opts.SourceHost = r.PostForm.Get("source_host")
-		opts.TargetHost = r.PostForm.Get("target_host")
-		opts.SourceUser = r.PostForm.Get("source_user")
-		opts.TargetUser = r.PostForm.Get("target_user")
-		opts.SourcePassword = r.PostForm.Get("source_password")
-		opts.TargetPassword = r.PostForm.Get("target_password")
-		opts.SourcePasswordEnv = r.PostForm.Get("source_password_env")
-		opts.TargetPasswordEnv = r.PostForm.Get("target_password_env")
-		opts.Database = r.PostForm.Get("database")
-		opts.PGSchema = r.PostForm.Get("schema")
-		opts.CommitOrder = r.PostForm.Get("commit_order")
-		opts.SpoolDir = r.PostForm.Get("spool_dir")
-		if dbs := r.PostForm.Get("databases"); dbs != "" {
-			for _, d := range strings.Split(dbs, ",") {
-				if d = strings.TrimSpace(d); d != "" {
-					opts.Databases = append(opts.Databases, d)
-				}
-			}
-		}
-		if inc := r.PostForm.Get("include"); inc != "" {
-			for _, item := range strings.Split(inc, ",") {
-				if item = strings.TrimSpace(item); item != "" {
-					opts.Includes = append(opts.Includes, item)
-				}
-			}
+		var err error
+		if opts, err = parseFormOpts(r); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 
