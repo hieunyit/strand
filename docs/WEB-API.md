@@ -1,6 +1,6 @@
 # Strand Web API `/api/v1`
 
-Đặc tả REST của `strand web` (kế hoạch: `docs/PLAN-WEB-UI.md`, quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`). Giao diện web và script dùng chung các route này. Phiên bản M2: **chỉ đọc**, cộng đăng nhập/đăng xuất và điểm vào cho thao tác (M3+).
+Đặc tả REST của `strand web` (kế hoạch: `docs/PLAN-WEB-UI.md`, quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`). Giao diện web và script dùng chung các route này. Phiên bản M3: các route đọc, đăng nhập/đăng xuất, **thao tác** (§4) và **job** (§4.3).
 
 ## 1. Quy ước
 
@@ -84,16 +84,56 @@ Trạng thái (`state`) của pipeline: `synced`, `bootstrapping`, `paused`, `st
 
 `{"interval_seconds": 5, "samples": [{"t", "state", "lag_seconds", "throughput", "apply_rows_per_s", "holes", "writeset_entries", "spool_bytes"}]}` — tối đa 720 mẫu (1 giờ) từ ring buffer trong RAM.
 
-## 4. Thao tác (điểm mở rộng cho M3–M5)
+## 4. Thao tác
 
-`POST /api/v1/pipelines/{name}/actions/{action}` — body JSON `{"khóa": "giá trị chuỗi"}`. M2 chưa đăng ký action nào nên luôn trả **404** `unknown action` (sau khi qua xác thực và CSRF). Với action đã đăng ký, server: kiểm session + CSRF, kiểm tên pipeline, kiểm `confirm_name` khi action yêu cầu (400 nếu sai), ghi dòng audit `started`, chạy, rồi ghi dòng audit kết quả (`ok`/`error`, `exit_code`). Phản hồi **200**: `{"message", "job_id", "exit_code", "data"}`; lỗi **502**.
+`POST /api/v1/pipelines/{name}/actions/{action}` — body JSON `{"khóa": "giá trị chuỗi"}` (có thể rỗng). Với mọi action server: kiểm session + CSRF (hoặc Bearer), kiểm tên pipeline (404), kiểm tên action (404 `unknown action`), kiểm `confirm_name` khi action yêu cầu (400 nếu không bằng đúng tên pipeline), ghi audit `started` (không ghi được thì **không chạy**), chạy, rồi ghi audit kết quả (`ok`/`error`, `exit_code`). Thao tác chạy tách khỏi kết nối của client (client ngắt giữa `stop` không làm hỏng việc đang dở), giới hạn 170 giây.
 
-Thao tác dài chạy qua `JobRunner` (M3): tiến trình con `strand <lệnh>` với đối số dạng mảng, không qua shell.
+Phản hồi **200**: `{"message", "job_id", "exit_code", "data"}`. Lỗi: **400** tham số sai (whitelist), **404** không có pipeline/action/job, **409** xung đột (đã có job đang chạy), **502** lệnh/ socket báo lỗi (`error` có nội dung đã che mật khẩu), **500** lỗi nội bộ (không ghi được audit, env_file hỏng).
+
+### 4.1 Vòng đời và điều khiển
+
+| Action | Tham số | Cách chạy | Ghi chú |
+| --- | --- | --- | --- |
+| `start` | - | systemd: `systemctl start <unit>`. Nền: `<strand_binary> sync -c <cfg> --background [--log-file= --pid-file=]` | môi trường tiến trình con = môi trường của web + `env_file` |
+| `stop` | - | systemd: `systemctl stop <unit>`. Nền: `<strand_binary> stop -c <cfg> [--pid-file=]` | UI hỏi xác nhận; chờ ghi checkpoint (tối đa 150 s) |
+| `restart` | - | systemd: `systemctl restart <unit>`. Nền: `stop` rồi `sync --background` (dừng nếu `stop` lỗi) | UI hỏi xác nhận |
+| `enable`, `disable` | - | `systemctl enable|disable <unit>` | chỉ chế độ systemd; chế độ nền: **400** |
+| `pause` | - | admin socket `pause` | |
+| `pause-snapshot` | - | admin socket `pause_snapshot` | chỉ dừng snapshot, stream vẫn chạy |
+| `resume` | - | admin socket `resume` | |
+| `resume-snapshot-only` | - | admin socket `resume` với `snapshot_only` | chỉ snapshot, hoãn stream |
+| `throttle` | `source_iops` (1..10000000) | admin socket `throttle_set` với `soft=true` | chỉ soft limit, chỉ tiến trình đang chạy; không ghi vào file cấu hình |
+| `snapshot-add` | `table` hoặc `tables` (`schema.table`, nhiều bảng cách nhau bằng dấu phẩy, tối đa 200) | admin socket `snapshot_add` lần lượt từng bảng; dừng ở bảng lỗi (lỗi nêu các bảng đã bắt đầu) | UI hỏi xác nhận |
+| `checkpoint-show` | - | admin socket `checkpoint_show`; `data.checkpoint` | chỉ đọc |
+| `checkpoint-rewind` | `to` (GTID set hoặc LSN), **`confirm_name`** | admin socket `checkpoint_rewind` | MySQL → MySQL; pipeline tự kiểm `gtid_purged`. Cần pipeline đang chạy |
+| `job-cancel` | `job_id` | SIGTERM tới process group của job (SIGKILL sau 10 s) | job phải thuộc pipeline này; đã xong: **409** |
+
+`systemctl start/stop` chạy bằng user của `strand web` (không sudo/polkit): hệ thống phải cho phép user đó (quyết định W4). Thiếu quyền thì **502** kèm thông báo của systemctl.
+
+### 4.2 `verify` (job)
+
+`POST .../actions/verify` với `mode` (`sample`|`full`|`delta`) và tùy chọn `table` (`schema.table`, bắt buộc với `sample`, không dùng với `delta`), `rate` (số; sample: (0,1], full: (0,100000]; không dùng với delta), `resume` (`true`, chỉ `full`). Chạy tiến trình con `<strand_binary> verify -c <cfg> --mode <mode> [--table=<t>] [--rate=<r>] [--resume] [--socket=<sock> khi delta]` (luôn `--repair report`; sửa dữ liệu là việc của wizard Repair ở M4). Trả **200** `{"message", "job_id"}` ngay; **409** nếu pipeline đã có job đang chạy. Mọi điều kiện an toàn và mã thoát là của CLI (`verify` thoát 5 khi lệch).
+
+### 4.3 Job
+
+Job lưu ở `<state_dir>/jobs/<id>.json` (trạng thái) và `<id>.log` (stdout+stderr, ghi thẳng vào file). `id` dạng `20261115T100000Z-1a2b3c4d`. Mỗi pipeline giữ 100 job đã xong gần nhất.
+
+| Route | Mô tả |
+| --- | --- |
+| `GET /api/v1/jobs?pipeline=` | `{"jobs": [Job]}` mới nhất trước |
+| `GET /api/v1/pipelines/{name}/jobs` | như trên cho một pipeline |
+| `GET /api/v1/jobs/{id}` | `{"job": Job}` |
+| `GET /api/v1/jobs/{id}/output?offset=N` | `{"data", "offset", "running", "exit_code"}`: output từ byte `N`; gọi lại với `offset` trả về cho tới khi `running=false`. Khi còn chạy chỉ trả đến dòng đầy đủ cuối cùng; mật khẩu/DSN bị che; tối đa 256 KiB mỗi lần |
+| `GET /api/v1/pipelines/{name}/source-tables` | `{"tables": [{"table", "in_pipeline"}], "error"}` từ admin socket `source_tables` (chỉ đọc); dùng để chọn bảng cho `snapshot-add`/`verify` |
+
+`Job`: `{"id", "pipeline", "kind", "args" (argv của strand, không gồm tên binary), "started", "ended", "running", "exit_code", "pid", "cancelled", "interrupted", "error"}`.
+
+Khi web chết hoặc khởi động lại: tiến trình con có process group riêng và ghi output thẳng vào file nên **tiếp tục chạy**; không có zombie (con mồ côi do init thu dọn). Web mới nạp lại các job còn `running`: pid còn đúng là tiến trình đó thì nhận nuôi (vẫn chặn job thứ hai của pipeline), khi nó thoát thì đóng job nhưng `exit_code` vắng và `error` ghi rõ vì web không còn là cha để đọc mã thoát; pid đã mất thì đánh dấu `interrupted`.
 
 ## 5. Audit log
 
-`<state_dir>/audit.log`, mỗi dòng một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động M2: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`.
+`<state_dir>/audit.log`, mỗi dòng một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
 
 ## 6. Trang HTML
 
-`/` (Overview), `/pipelines`, `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs}`, `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang tự làm mới 5 giây bằng `fetch` cùng URL (trừ Config và Logs; Logs có `?follow=1`).
+`/` (Overview), `/pipelines`, `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang tự làm mới 5 giây bằng `fetch` cùng URL (trừ Config và Logs; Logs có `?follow=1`).

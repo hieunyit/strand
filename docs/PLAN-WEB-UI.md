@@ -49,7 +49,7 @@ trình duyệt ──HTTPS──> strand web ──unix socket──> strand@a (
 | Throttle (soft IOPS) | admin socket | — |
 | Snapshot add (chọn bảng từ danh sách của source) | admin socket | hộp thoại |
 | Checkpoint show / **Rewind** (MySQL→MySQL) | admin socket | **gõ lại tên pipeline** |
-| Verify sample / delta / full (chọn bảng, rate) | exec `strand verify` | — |
+| Verify sample / delta / full (chọn bảng, rate) | exec `strand verify` (job, output trực tiếp). M3 chọn **một** bảng hoặc (full) tất cả, vì CLI nhận một `--table` | — |
 | **Repair** (`--repair fix`) | Wizard: (1) chờ lag ≈ 0, (2) Stop pipeline, (3) exec verify full fix, (4) Start | gõ lại tên pipeline |
 | **Promote** | Wizard theo 5 bước, hiện trạng thái từ `_strand_promote`. Failover `--source-fenced-externally` có hộp thoại riêng, hiện phần dữ liệu sẽ mất | gõ lại tên pipeline (hai lần với failover) |
 | Validate / Plan / Schema init `--dry-run` | exec, hiện kết quả | — |
@@ -98,7 +98,7 @@ Tổng khoảng 15 ngày làm việc. M1–M4 là phần owner yêu cầu, M5 l�
 | M0 | **Xong** | ADR `questions/DECISIONS-WEB-UI-2026-11-15.md`, đặc tả `docs/WEB-API.md`. Chưa làm mockup: trang đã dựng thật và xem được |
 | M1 | **Xong** | `strand web`, `web passwd`, `web token`, session/CSRF/rate limit/TLS/audit/phát hiện pipeline, `strand-web.service` trong gói |
 | M2 | **Xong** | Overview, danh sách, chi tiết (Graph, Tables, Checkpoint, Errors, Config, Logs), biểu đồ SVG, `status`/`tables`/`events` ở admin socket. Xem lệch so với kế hoạch bên dưới |
-| M3 | Chưa | Điểm mở rộng đã có: `ActionRegistry` (route `POST /api/v1/pipelines/{name}/actions/{action}`), `JobRunner`, `env_file` đã đọc được |
+| M3 | **Xong** | start/stop/restart/enable/disable, pause/resume (+ snapshot), throttle, snapshot add (lệnh socket chỉ đọc `source_tables`), checkpoint show/rewind, verify sample/delta/full thành job (`FileJobRunner`: JSON + output mỗi job ở `<state_dir>/jobs`, một job/pipeline, output trực tiếp, nhận nuôi job sau khi web khởi động lại), tab Jobs và trang `/jobs`. Test HTTP cho từng action, test job runner. Điểm mở rộng cho M4/M5: `ActionRegistry`, `JobRunner`, `ActionError`, `confirm_name` |
 | M4 | Chưa | |
 | M5 | Chưa | |
 | M6 | Chưa | |

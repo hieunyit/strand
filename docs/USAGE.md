@@ -766,7 +766,7 @@ sudo systemctl enable --now strand@orders-sync
 
 ### 7.15 `web` (Web UI)
 
-`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng), **Logs**. Bản này **chỉ đọc**; thao tác (start/stop, pause, verify, repair, promote, sửa cấu hình) làm ở các mốc sau. REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
+`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng), **Logs**. Từ M3 có **thao tác** (đoạn dưới); repair, promote, sửa cấu hình làm ở các mốc sau. REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
@@ -815,7 +815,7 @@ Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2).
 
 **TLS.** Bind khác loopback (`0.0.0.0`, IP máy) bắt buộc `tls_cert` và `tls_key`, nếu không từ chối khởi động. Cách thường dùng: để `listen: 127.0.0.1:8080` rồi đặt reverse proxy (nginx, Caddy) làm TLS phía trước, kèm `secure_cookies: true` (cookie có cờ `Secure`) và `trust_forwarded_for: true` (lấy IP client từ `X-Forwarded-For`, chỉ bật khi proxy tin cậy).
 
-**Bảo mật.** Session ngẫu nhiên 256 bit trong RAM (khởi động lại web là đăng nhập lại), cookie `HttpOnly` và `SameSite=Strict`, hết hạn sau 30 phút không thao tác hoặc 12 giờ. Mọi POST cần token CSRF. Đăng nhập sai quá 5 lần/phút từ một IP bị khóa (1 phút, tái phạm thì gấp đôi, tối đa 15 phút). Header `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. Audit log `<state_dir>/audit.log` ghi đăng nhập, đăng xuất, lần xem cấu hình (và mọi thao tác ghi của các mốc sau).
+**Bảo mật.** Session ngẫu nhiên 256 bit trong RAM (khởi động lại web là đăng nhập lại), cookie `HttpOnly` và `SameSite=Strict`, hết hạn sau 30 phút không thao tác hoặc 12 giờ. Mọi POST cần token CSRF. Đăng nhập sai quá 5 lần/phút từ một IP bị khóa (1 phút, tái phạm thì gấp đôi, tối đa 15 phút). Header `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. Audit log `<state_dir>/audit.log` ghi đăng nhập, đăng xuất, lần xem cấu hình và mọi thao tác ghi (dòng `started` trước khi chạy, dòng kết quả kèm exit code; không ghi được audit thì không chạy thao tác).
 
 **Chạy bằng user `strand`, không phải root.** `strand web` chạy cùng user với `strand sync` (unit mẫu có `User=strand`); không cần polkit hay sudo. Hệ quả: chỉ quản lý được pipeline mà user này có quyền:
 
@@ -824,7 +824,23 @@ Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2).
 - đọc được log: `journalctl -u strand@<name>` cần user `strand` thuộc nhóm `systemd-journal` (`sudo usermod -aG systemd-journal strand`), hoặc dùng chế độ nền với file log mà user đọc được;
 - pipeline do user khác chạy (ví dụ root) thì web không thấy socket và báo `unreachable`/`stopped`.
 
-Các thao tác đổi trạng thái (start/stop...) ở mốc sau cũng chỉ chạy khi hệ thống cho phép user này làm việc đó.
+`systemctl start|stop|restart|enable|disable strand@<name>` chạy bằng chính user này, không sudo: chỉ thành công khi hệ thống cho phép (ví dụ quy tắc polkit do quản trị viên tự viết, hoặc chế độ nền). Không được phép thì nút trả lỗi 502 kèm thông báo của systemctl.
+
+**Thao tác (M3).** Nút nằm ở đầu trang chi tiết và các tab; mọi thao tác đi qua `POST /api/v1/pipelines/<tên>/actions/<action>` (docs/WEB-API.md §4) nên script dùng được bằng token. Hộp thoại xác nhận là phần tử `<dialog>` điều khiển bởi `app.js`, không có script inline (CSP `default-src 'self'`).
+
+| Thao tác | Ở đâu | Cách chạy |
+| --- | --- | --- |
+| Start, Stop*, Restart* | đầu trang | systemd: `systemctl <verb> <unit>`. Nền: `strand sync -c <cfg> --background` / `strand stop -c <cfg>` (restart = stop rồi start), nạp `env_file` vào môi trường |
+| Enable / Disable at boot | đầu trang (chỉ chế độ systemd) | `systemctl enable|disable <unit>` |
+| Pause, Resume | đầu trang | admin socket `pause`, `resume` |
+| Pause snapshot, Resume (snapshot only), Snapshot add* | tab Tables | admin socket; Snapshot add chọn bảng từ danh sách của source (lệnh socket chỉ đọc `source_tables`, bảng đã thuộc pipeline không hiện) |
+| Throttle (soft IOPS) | tab Graph | admin socket `throttle_set --soft`; chỉ tiến trình đang chạy, không ghi vào file cấu hình |
+| Checkpoint Rewind** | tab Checkpoint (chỉ MySQL → MySQL, pipeline đang chạy) | admin socket `checkpoint_rewind`; pipeline tự kiểm `gtid_purged` |
+| Verify sample / full / delta | tab Jobs | tiến trình con `strand verify -c <cfg> --mode ... [--table= --rate= --resume]` (luôn `--repair report`) |
+
+`*` có hộp thoại xác nhận. `**` phải gõ lại đúng tên pipeline (API: trường `confirm_name`).
+
+**Job verify.** Chạy nền dưới web, output hiện trực tiếp ở `/jobs/<id>` (cập nhật mỗi giây, mật khẩu/DSN bị che). Mỗi pipeline tối đa **một** job đang chạy: bấm thêm thì bị từ chối (409). Lịch sử (JSON + file output mỗi job, 100 job gần nhất mỗi pipeline) nằm ở `<state_dir>/jobs/`, xem ở tab Jobs của pipeline và trang Jobs chung; có nút Cancel (SIGTERM). Verify nhận một bảng (`schema.table`) hoặc, với `full`, tất cả bảng. Điều kiện an toàn và exit code là của CLI (lệch dữ liệu: exit 5, hiện ở trạng thái job `exit 5`). Khi web khởi động lại giữa lúc job chạy, tiến trình verify vẫn chạy tiếp (process group riêng, output ghi thẳng vào file) và được web mới nhận nuôi; mã thoát của job loại này không đọc được nên để trống.
 
 ---
 
