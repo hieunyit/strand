@@ -266,9 +266,13 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 		if err := ir.Err(); err != nil {
 			return nil, fmt.Errorf("read indexes of %s: %w", r.id, err)
 		}
-		pkSet := make(map[string]bool, len(m.PK))
-		for _, k := range m.PK {
-			pkSet[k] = true
+		// Cờ "thuộc replica identity" phải tính như pgoutput (logicalrep_write_attrs): REPLICA IDENTITY
+		// FULL → mọi cột; USING INDEX → cột của index đó; DEFAULT → cột PK; NOTHING → không cột nào.
+		// Tính theo PK cho mọi bảng làm bảng FULL/USING INDEX bị coi là "Relation khác" ở mỗi session
+		// mới → barrier DDL giả và drain thừa (P3-01b).
+		pkSet, err := replicaIdentityColumns(ctx, db, r.oid)
+		if err != nil {
+			return nil, fmt.Errorf("read replica identity of %s: %w", r.id, err)
 		}
 		for _, rc := range rawCols {
 			var flags uint8
@@ -1158,4 +1162,27 @@ func snapshotPK(key []model.Value) (int64, error) {
 // pgPKCodec: xem snapshot.PGPKCodec.
 func pgPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string) (*snapshot.PKCodec, error) {
 	return snapshot.PGPKCodec(ctx, db, id, pk)
+}
+
+// replicaIdentityColumns trả các cột thuộc replica identity của bảng oid, đúng như pgoutput đánh cờ key.
+func replicaIdentityColumns(ctx context.Context, db *sql.DB, oid int64) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT a.attname FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid
+		 WHERE c.oid = $1 AND a.attnum > 0 AND NOT a.attisdropped AND (
+		       c.relreplident = 'f'
+		    OR (c.relreplident = 'd' AND a.attnum = ANY ((SELECT i.indkey FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary)::int2[]))
+		    OR (c.relreplident = 'i' AND a.attnum = ANY ((SELECT i.indkey FROM pg_index i WHERE i.indrelid = c.oid AND i.indisreplident)::int2[])))`, oid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out[n] = true
+	}
+	return out, rows.Err()
 }
