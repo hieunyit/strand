@@ -294,12 +294,13 @@ func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent
 	ts := s.now().UTC().Format("20060102T150405Z")
 	bakPath := p.ConfigPath + ".bak." + ts
 	if len(origBytes) > 0 {
-		if err := os.WriteFile(bakPath, origBytes, perm); err != nil {
+		if err := writeBackup(bakPath, origBytes, p.ConfigPath, perm); err != nil {
 			return nil, fmt.Errorf("write backup %s: %w", bakPath, err)
 		}
 	}
 
 	// (d) Ghi đè nguyên tử (rename)
+	copyOwner(tmpName, p.ConfigPath)
 	if err := os.Rename(tmpName, p.ConfigPath); err != nil {
 		return nil, fmt.Errorf("atomic rename %s -> %s: %w", tmpName, p.ConfigPath, err)
 	}
@@ -432,7 +433,13 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	if err := tmp.Chmod(0o600); err != nil {
+	// Preserve the original .env mode (e.g. 0640 root:strand) but never leave
+	// it accessible to others; new files are 0600.
+	envPerm := os.FileMode(0o600)
+	if fi, err := os.Stat(envPath); err == nil {
+		envPerm = fi.Mode().Perm() & secretPermMask
+	}
+	if err := tmp.Chmod(envPerm); err != nil {
 		tmp.Close()
 		return "", err
 	}
@@ -449,13 +456,13 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 	if origBytes, err := os.ReadFile(envPath); err == nil && len(origBytes) > 0 {
 		ts := s.now().UTC().Format("20060102T150405Z")
 		bakPath = envPath + ".bak." + ts
-		_ = os.WriteFile(bakPath, origBytes, 0o600)
+		_ = writeBackup(bakPath, origBytes, envPath, envPerm)
 	}
 
+	copyOwner(tmpName, envPath)
 	if err := os.Rename(tmpName, envPath); err != nil {
 		return "", fmt.Errorf("rename to %s: %w", envPath, err)
 	}
-	_ = os.Chmod(envPath, 0o600)
 
 	if p.EnvFile == "" {
 		p.EnvFile = envPath

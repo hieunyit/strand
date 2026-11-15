@@ -69,7 +69,7 @@ func newWebPasswdCmd() *cobra.Command {
 			if err := web.SetConfigKey(cfgPath, "password_hash", h); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "password hash written to %s (mode 0600)\n", cfgPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "password hash written to %s\n", cfgPath)
 			return nil
 		},
 	}
