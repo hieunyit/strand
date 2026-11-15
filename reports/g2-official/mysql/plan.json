@@ -1,0 +1,97 @@
+{
+  "label": "",
+  "official": false,
+  "engine": "mysql",
+  "seed": 20261113,
+  "order": [
+    "grace-v2#2",
+    "grace-v2#3",
+    "onoff#1",
+    "onoff#2",
+    "grace-v2#1",
+    "static#1",
+    "static#2",
+    "onoff#3",
+    "static#3"
+  ],
+  "git_commit": "90bef852ba8a5d9b901bea80b707074c7466ef95",
+  "git_clean": true,
+  "client_version": "sysbench 1.0.20 sha256=8c49cf79448cbfb3d24846096edf5e6a30fdd38be169b85f4a1ef4667cd5a6f2",
+  "fixture": {
+    "created": "2026-11-14T17:33:32.59161854Z",
+    "engine": "mysql",
+    "params": "{\"Big\":20000000,\"App\":100000,\"Tables\":1,\"Scale\":1,\"Seed\":20261113}",
+    "manifest": {
+      "engine": "mysql",
+      "tables": [
+        {
+          "name": "bench.big",
+          "rows": 20000000,
+          "checksum": "3564113645"
+        },
+        {
+          "name": "bench.sbtest1",
+          "rows": 100000,
+          "checksum": "2664116738"
+        }
+      ]
+    },
+    "manifest_sha256": "9623ae018b2e07ed81c2a586ae9659dc2322879b19a20c02272503b83df63f85",
+    "source_tar_sha256": "12c91db8c64ac4c2a4d5efaa38c21c1f256d30a27bc1b3083980146fea4aa263",
+    "source_tree_sha256": "33b94dd353b02934dc59ad898b4cda29ce3f6e0859b2b739865fec865466cd2b",
+    "target_tar_sha256": "ef165004693f66a9a5c4b834b903c7ab543c12a91b9e3be75459954fba1d7eec",
+    "target_tree_sha256": "23446cd4161d8797a4bb586dd85d4b18e921936bf03a9dcdfb88d8048cbff41a"
+  },
+  "options": {
+    "Engine": "mysql",
+    "Strand": "<scratch>/g2off/strand",
+    "SourceDSN": "root:***@tcp(127.0.0.1:33801)/",
+    "TargetDSN": "root:***@tcp(127.0.0.1:33802)/",
+    "SourceContainer": "g2-my-src",
+    "TargetContainer": "g2-my-dst",
+    "HelperImage": "strand-sysbench-toolchain:20261108",
+    "FixtureDir": "<scratch>/g2off/fixture",
+    "Out": "<scratch>/g2off/mysql",
+    "Governors": "static,onoff,grace-v2",
+    "Repeats": 3,
+    "Seed": 20261113,
+    "BigRows": 2000000,
+    "AppRows": 100000,
+    "AppTables": 1,
+    "PGScale": 1,
+    "Clients": 16,
+    "Jobs": 8,
+    "Wave": {
+      "Low": 82,
+      "High": 328,
+      "Period": 600000000000,
+      "SpikeEvery": 180000000000,
+      "SpikeDur": 10000000000,
+      "SpikeMult": 2
+    },
+    "Warmup": 120000000000,
+    "StreamAfter": 120000000000,
+    "CatchupTimeout": 600000000000,
+    "SnapshotTimeout": 10800000000000,
+    "MaxChunk": 30000000000,
+    "SoftIOPS": 400,
+    "HardIOPS": 600,
+    "LagSLO": "5s",
+    "MetricsAddr": "127.0.0.1:19190",
+    "ClientContainer": "g2-client",
+    "ClientBinary": "<scratch>/sbbuild/sysbench-patched",
+    "ClientSHA": "8c49cf79448cbfb3d24846096edf5e6a30fdd38be169b85f4a1ef4667cd5a6f2",
+    "Official": true,
+    "Attest": true,
+    "RerunFailed": true,
+    "Only": "",
+    "RelaxBreaker": false
+  },
+  "started": "2026-11-14T19:22:04.204913513Z",
+  "finished": "0001-01-01T00:00:00Z",
+  "runs": null,
+  "verdict": {
+    "status": "",
+    "reasons": null
+  }
+}

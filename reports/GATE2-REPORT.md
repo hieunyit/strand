@@ -1,6 +1,6 @@
-# Báo cáo Gate 2 — 2026-11-13
+# Báo cáo Gate 2 — 2026-11-13 (cập nhật 2026-11-15)
 
-**Kết luận: CHƯA ĐẠT.** 10/10 test chức năng bắt buộc PASS trên PG 16/17/18, MySQL→PG, strict và relaxed. Benchmark ba governor (G2-12) chưa có số chính thức (cần máy staging; xem mục 3).
+**Kết luận: test chức năng ĐẠT; benchmark G2-12 MySQL chính thức xong → verdict `onoff-default`** (GRACE không thành mặc định). 10/10 test chức năng bắt buộc PASS trên PG 16/17/18, MySQL→PG, strict và relaxed. Còn mở: G2-12 trên PG, G2-7 (mục 5).
 
 Mã: `main` @ `fa94613` (lượt chạy 2026-11-13 12:01–14:57: strict 105/105, PG 16 29/29, PG 17 29/29, LongTxn 30 phút 2/2; relaxed PG 18 trên mdb-all 83/84 + chạy lại pass). Sau đó gộp `fix/g2-flakes` (sửa sched, dừng lúc khởi động, test hot-row) và `feat/g2-bench` (công cụ benchmark); các test liên quan chạy lại PASS trên bản gộp.
 Tiêu chí: spec/01-plan.md (Gate 2 — test bắt buộc; nhánh GRACE → bật/tắt), spec/04-testing.md §5.
@@ -37,7 +37,16 @@ Tiêu chí: spec/01-plan.md (Gate 2 — test bắt buộc; nhánh GRACE → bậ
 - Giao thức: `reports/GATE2-BENCH-PROTOCOL.md` (cố định trước khi đo; amendment 2026-11-13 viết trước mọi lần đo, không đổi ngưỡng).
 - Công cụ: `tools/g2bench` (sysbench/pgbench phía client, p99 từ log thô, khôi phục fixture giống hệt có hash, `--official` chặn khi thiếu điều kiện). Hướng dẫn: `reports/GATE2-BENCH-RUNBOOK.md`.
 - Smoke trên máy dev (KHÔNG chính thức): MySQL 8.4 và PG 18 với `onoff` chạy trọn vòng, nguồn/đích khớp.
-- **Kết quả chính thức: CHƯA CÓ.** Cần: máy staging chuyên dụng (≥ 8 core, 32 GB RAM, 100 GB đĩa nhanh; ~10–11 giờ mỗi engine); hiệu chỉnh mức bão hòa và pilot overhead công cụ, commit trước khi đo.
+- **Kết quả chính thức MySQL 8.4 (2026-11-15 02:22–15:37, commit `90bef85`, tree sạch):** máy dev 16 core / 31 GB (không phải staging chuyên dụng; công khai). Fixture `bench.big` 20M row + sysbench 1 bảng 100k row (Amendment 2026-11-14 (2)); low/high 82/328 txn/s, soft/hard 400/600 IOPS (commit `1696bbb`); thứ tự ngẫu nhiên seed 20261113; 9/9 lần chạy `ok` ở lần thử đầu, nguồn/đích khớp, strand exit 0, 0 mẫu vượt hard limit. Deadlock client 2–6 / ~1M event mỗi lần (≤ 0,01%, Amendment 2026-11-15). Số liệu: `reports/g2-official/mysql/` (results.json, plan.json, chart + timeseries từng lần chạy; log thô sysbench giữ trên máy đo).
+
+  | governor | snapshot (median, 3 lần) | p99 app trong snapshot (median) | p2p log R max | breaker mở | lag max |
+  |---|---|---|---|---|---|
+  | static | 4407 s (4293 / 4407 / 4482) | 1583 ms | 0 | 0 | 2,6 s |
+  | onoff | 4230 s (4208 / 4230 / 4245) | 1626 ms | 0 | 0 | 7,0 s |
+  | grace-v2 | 4450 s (4415 / 4450 / 4793) | 1474 ms | 3,29 / 3,46 / 4,61 | 159–477 s (3,6–10 % thời gian snapshot) | 5,3 s |
+
+  **Verdict công cụ: `onoff-default`.** Lý do: (1) p2p log R của grace-v2 vượt 0,3 ở cả 3 lần chạy, tối đa 4,605; (2) snapshot grace-v2 chậm hơn onoff 5,2% (yêu cầu nhanh hơn ≥ 30%). Quan sát: cả ba governor đều chạm trần soft 400 IOPS phần lớn thời gian, nên với fixture này snapshot bị giới hạn bởi IOPS, không phải bởi governor. GRACE cho p99 ứng dụng thấp nhất (−9% so với onoff), nhưng breaker mở định kỳ (tỉ lệ p99 truy vấn strand ~3,4×) và kéo R xuống 0–13 token/s, gây dao động mà giao thức cấm. Theo spec/01-plan.md, mặc định là `onoff`; GRACE vẫn là tùy chọn (`governor.algorithm: grace-v2`). Code đã đúng: `governor.algorithm` rỗng → `onoff` (`internal/pipeline/governor.go` `selectGovernorAlgo`), không cần sửa.
+- **G2-12 trên PG: chưa chạy chính thức** (xem phát hiện PG bên dưới).
 - **Lượt thử rút gọn 1 giờ trên máy dev, MySQL 8.4 (2026-11-14, KHÔNG chính thức):** 16 core / 31 GB. Fixture `bench.big` 1M row + sysbench 1 bảng 100k row. Mức bão hòa đo tay 722 txn/s (lệnh `calibrate` thất bại 4/4 lần vì sysbench gặp 1–2 deadlock ở mức bão hòa, xem mục 5). Chọn low/high = 90/361 txn/s (12,5% / 50%). Sóng tải đúng giao thức (chu kỳ 10 phút, spike 2× mỗi 3 phút). soft/hard = 400/600 IOPS. Mỗi governor chạy 1 lần.
 
   | governor | snapshot | p99 app trong snapshot | txn trong snapshot | lag max | vượt hard | khớp nguồn/đích |
@@ -56,7 +65,7 @@ Tiêu chí: spec/01-plan.md (Gate 2 — test bắt buộc; nhánh GRACE → bậ
 
 ## 5. Vấn đề mở
 
-- G2-12 chính thức (mục 3) và GRACE/breaker trên PG. Mốc độ trễ học từ dữ liệu cho breaker (b27a8eb, 4d65843) đã vào main; cần đo lại trên PG.
+- G2-12 MySQL chính thức: xong, `onoff-default` (mục 3). Còn G2-12 trên PG và GRACE/breaker trên PG. Mốc độ trễ học từ dữ liệu cho breaker (b27a8eb, 4d65843) đã vào main; cần đo lại trên PG.
 - ~~`g2bench calibrate` không chạy được vì sysbench gặp deadlock ở mức bão hòa~~ → đã sửa (Amendment 2026-11-14 trong GATE2-BENCH-PROTOCOL): calibrate chấp nhận `ignored errors` ≤ 1% số event và ghi lại; lượt đo vẫn đòi 0. Chạy lại không còn vướng log thô cũ.
 - G2-7 (race TOAST PK trên PG): tạm hoãn. Bản sửa 2abd8a9 làm snapshot `app.items` đứng nên đã revert khỏi main.
 - Strict PG→PG ~280–300 Txn/s, chưa rõ nút thắt (không thuộc tiêu chí Gate 2 nhưng ảnh hưởng benchmark PG strict).
