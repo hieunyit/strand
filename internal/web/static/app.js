@@ -179,4 +179,142 @@
     };
     if (wasRunning) { setTimeout(poll, 800); }
   }
+
+  // ---- Config editing and .env (M5) ----
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t) return;
+    if (t.id === 'cfg-btn-toggle') {
+      var vm = document.getElementById('cfg-view-mode');
+      var em = document.getElementById('cfg-edit-mode');
+      if (vm && em) { vm.hidden = true; em.hidden = false; }
+    } else if (t.id === 'cfg-btn-cancel') {
+      var vm = document.getElementById('cfg-view-mode');
+      var em = document.getElementById('cfg-edit-mode');
+      if (vm && em) { vm.hidden = false; em.hidden = true; }
+    } else if (t.id === 'cfg-btn-diff') {
+      var form = document.getElementById('cfg-edit-form');
+      var ta = document.getElementById('cfg-yaml-textarea');
+      var p = form ? form.getAttribute('data-pipeline') : '';
+      if (!p || !ta) return;
+      toast('Validating configuration...', true);
+      api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/config/validate', { yaml: ta.value })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          var box = document.getElementById('cfg-diff-box');
+          var st = document.getElementById('cfg-val-status');
+          var out = document.getElementById('cfg-diff-output');
+          if (box && st && out) {
+            box.hidden = false;
+            st.innerHTML = res.valid
+              ? '<span class="badge st-synced">Validation PASS</span>'
+              : '<span class="badge st-failed">Validation FAIL (exit ' + res.exit_code + ')</span> ' + (res.output || '');
+            out.textContent = res.diff || '(no changes detected)';
+          }
+          toast(res.valid ? 'Validation passed' : 'Validation failed', res.valid);
+        })
+        .catch(function (err) { toast('Validate error: ' + err, false); });
+    } else if (t.id === 'cfg-btn-save') {
+      var form = document.getElementById('cfg-edit-form');
+      var ta = document.getElementById('cfg-yaml-textarea');
+      var restart = document.getElementById('cfg-restart-check');
+      var p = form ? form.getAttribute('data-pipeline') : '';
+      if (!p || !ta) return;
+      var rst = restart && restart.checked;
+      toast('Saving configuration...', true);
+      api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/config', { yaml: ta.value, restart: rst })
+        .then(function (r) {
+          return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+        })
+        .then(function (res) {
+          if (res.ok) {
+            toast('Configuration saved!' + (res.j.restarted ? ' Pipeline restarted.' : ''), true);
+            setTimeout(function () { location.reload(); }, 1200);
+          } else {
+            toast('Save failed: ' + (res.j.error || 'error'), false);
+          }
+        })
+        .catch(function (err) { toast('Save error: ' + err, false); });
+    } else if (t.id === 'env-btn-save') {
+      var form = document.getElementById('env-edit-form');
+      var p = form ? form.getAttribute('data-pipeline') : '';
+      if (!p) return;
+      var entries = {};
+      var inputs = form.querySelectorAll('input[data-key]');
+      Array.prototype.forEach.call(inputs, function (inp) {
+        var k = inp.getAttribute('data-key');
+        var v = inp.value;
+        entries[k] = v;
+      });
+      var newK = document.getElementById('env-new-key');
+      var newV = document.getElementById('env-new-val');
+      if (newK && newV && newK.value.trim()) {
+        entries[newK.value.trim()] = newV.value;
+      }
+      toast('Saving .env...', true);
+      api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/env', { entries: entries })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          if (res.ok) {
+            toast('.env saved successfully!', true);
+            setTimeout(function () { location.reload(); }, 1200);
+          } else {
+            toast('.env save failed: ' + (res.j.error || 'error'), false);
+          }
+        })
+        .catch(function (err) { toast('.env error: ' + err, false); });
+    }
+  });
+
+  // ---- New pipeline form handler (M5) ----
+  var newPipeForm = document.getElementById('new-pipeline-form');
+  if (newPipeForm) {
+    newPipeForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var btn = document.getElementById('btn-create-pipeline');
+      if (btn) btn.disabled = true;
+      toast('Creating and validating pipeline...', true);
+      var payload = {};
+      var fd = new FormData(newPipeForm);
+      fd.forEach(function (v, k) {
+        var str = (v || '').trim();
+        if (str !== '') {
+          if (k === 'source_port' || k === 'target_port' || k === 'workers') {
+            payload[k] = parseInt(str, 10);
+          } else {
+            payload[k] = str;
+          }
+        }
+      });
+      api('POST', '/api/v1/pipelines', payload)
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          var resBox = document.getElementById('new-pipeline-result');
+          var resBody = document.getElementById('result-body');
+          if (resBox && resBody) {
+            resBox.hidden = false;
+            if (res.ok) {
+              var vPass = res.j.validate && res.j.validate.exit_code === 0;
+              var pPass = res.j.plan && res.j.plan.exit_code === 0;
+              var html = '<p><span class="badge ' + (vPass ? 'st-synced' : 'st-failed') + '">Validate: ' + (vPass ? 'PASS' : 'FAIL') + '</span> ';
+              html += '<span class="badge ' + (pPass ? 'st-synced' : 'st-warn') + '">Plan: ' + (pPass ? 'PASS' : 'WARN') + '</span></p>';
+              html += '<h4>Validate Output</h4><pre class="code">' + (res.j.validate ? res.j.validate.output : '') + '</pre>';
+              html += '<h4>Plan Output</h4><pre class="code">' + (res.j.plan ? res.j.plan.output : '') + '</pre>';
+              html += '<div style="margin-top:16px;">';
+              html += '<form class="act inline" data-action="start" data-pipeline="' + res.j.pipeline + '">';
+              html += '<button class="btn primary" type="submit">Start ' + res.j.pipeline + ' now</button></form> ';
+              html += '<a href="/pipelines/' + encodeURIComponent(res.j.pipeline) + '" class="btn">Go to pipeline</a>';
+              html += '</div>';
+              resBody.innerHTML = html;
+              toast('Pipeline created successfully!', true);
+            } else {
+              resBody.innerHTML = '<p class="err">Error: ' + (res.j.error || 'Failed to create pipeline') + '</p>';
+              toast('Creation failed: ' + (res.j.error || 'error'), false);
+            }
+          }
+        })
+        .catch(function (err) { toast('Error: ' + err, false); })
+        .then(function () { if (btn) btn.disabled = false; });
+    });
+  }
 })();

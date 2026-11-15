@@ -16,7 +16,7 @@ import (
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job"}
+var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "new_pipeline"}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -219,6 +219,7 @@ type detailBody struct {
 	Checkpoint CheckpointView
 	Errors     ErrorsView
 	Config     ConfigView
+	Env        EnvView
 	Logs       LogsView
 	Follow     bool
 	Jobs       []JobStatus
@@ -302,6 +303,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	case "config":
 		_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "config.view", Pipeline: p.Name})
 		b.Config = s.configView(p)
+		b.Env = s.getEnvView(p)
 		refresh = 0
 	case "logs":
 		n, _ := strconv.Atoi(r.URL.Query().Get("lines"))

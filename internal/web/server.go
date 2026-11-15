@@ -98,6 +98,7 @@ func New(o Options) (*Server, error) {
 	jr.OnEnd = s.auditJobEnd
 	s.jobs = jr
 	s.registerOps()
+	s.registerConfigEditOps()
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
 	}
@@ -187,6 +188,8 @@ func (s *Server) routes() http.Handler {
 	// Trang.
 	mux.Handle("GET /{$}", s.auth(false, s.pageOverview))
 	mux.Handle("GET /pipelines", s.auth(false, s.pagePipelines))
+	mux.Handle("GET /pipelines/new", s.auth(false, s.pageNewPipeline))
+	mux.Handle("POST /pipelines/new", s.auth(false, s.apiPipelineCreate))
 	mux.Handle("GET /jobs", s.auth(false, s.pageJobs))
 	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
 	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs"} {
@@ -204,7 +207,12 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/session", s.auth(true, s.apiSession))
 	mux.Handle("GET /api/v1/overview", s.auth(true, s.apiOverview))
 	mux.Handle("GET /api/v1/pipelines", s.auth(true, s.apiPipelines))
+	mux.Handle("POST /api/v1/pipelines", s.auth(true, s.apiPipelineCreate))
 	mux.Handle("GET /api/v1/pipelines/{name}", s.auth(true, s.apiPipeline))
+	mux.Handle("POST /api/v1/pipelines/{name}/config/validate", s.auth(true, s.apiConfigValidate))
+	mux.Handle("POST /api/v1/pipelines/{name}/config", s.auth(true, s.apiConfigSave))
+	mux.Handle("GET /api/v1/pipelines/{name}/env", s.auth(true, s.apiEnvGet))
+	mux.Handle("POST /api/v1/pipelines/{name}/env", s.auth(true, s.apiEnvSave))
 	for _, tab := range []string{"status", "tables", "checkpoint", "errors", "config", "logs", "series"} {
 		tab := tab
 		mux.Handle("GET /api/v1/pipelines/{name}/"+tab, s.auth(true, func(w http.ResponseWriter, r *http.Request, sess *Session) {
