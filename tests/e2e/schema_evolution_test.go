@@ -34,6 +34,17 @@ type evoWriter struct {
 	stop  atomic.Bool
 	ops   atomic.Int64
 	wg    sync.WaitGroup
+	// gate: mỗi thao tác giữ RLock; pause(true) lấy Lock (chờ thao tác đang chạy xong, chặn thao tác mới).
+	gate sync.RWMutex
+}
+
+// pause tạm dừng (true) / cho chạy lại (false) tải ghi.
+func (w *evoWriter) pause(on bool) {
+	if on {
+		w.gate.Lock()
+	} else {
+		w.gate.Unlock()
+	}
 }
 
 func newEvoWriter(db *sql.DB, table string, seed, firstID int64) *evoWriter {
@@ -49,7 +60,9 @@ func (w *evoWriter) Start(clients int, span int64) {
 		go func() {
 			defer w.wg.Done()
 			for !w.stop.Load() {
+				w.gate.RLock()
 				w.one(r, span)
+				w.gate.RUnlock()
 				w.ops.Add(1)
 				time.Sleep(time.Millisecond)
 			}

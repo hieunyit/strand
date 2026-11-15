@@ -47,7 +47,8 @@ func mustExecDB(t *testing.T, db *sql.DB, qs ...string) {
 }
 
 // runOnlineDDLTool chạy gh-ost (tool="gh-ost") hoặc pt-osc (tool="pt-osc") trên schema.table của src.
-func runOnlineDDLTool(t *testing.T, src *mysqlNode, tool, schema, table string) {
+// pause tạm dừng/cho chạy lại tải ghi của test vào bảng (chỉ mô phỏng gh-ost dùng, quanh cut-over).
+func runOnlineDDLTool(t *testing.T, src *mysqlNode, tool, schema, table string, pause func(bool)) {
 	t.Helper()
 	host, port, _ := strings.Cut(src.Addr, ":")
 	if tool == "gh-ost" {
@@ -63,7 +64,7 @@ func runOnlineDDLTool(t *testing.T, src *mysqlNode, tool, schema, table string) 
 			return
 		}
 		t.Log("online DDL mode=simulated (gh-ost binary not available)")
-		simulateGhost(t, src.DB, schema, table)
+		simulateGhost(t, src.DB, schema, table, pause)
 		return
 	}
 	if bin := lookTool("STRAND_E2E_PTOSC_BIN", "pt-online-schema-change"); bin != "" {
@@ -80,7 +81,7 @@ func runOnlineDDLTool(t *testing.T, src *mysqlNode, tool, schema, table string) 
 }
 
 // simulateGhost phát chuỗi SQL của gh-ost 1.1 (atomic cut-over).
-func simulateGhost(t *testing.T, db *sql.DB, schema, table string) {
+func simulateGhost(t *testing.T, db *sql.DB, schema, table string, pause func(bool)) {
 	q := func(n string) string { return fmt.Sprintf("`%s`.`%s`", schema, n) }
 	orig, gho, ghc, del := q(table), q("_"+table+"_gho"), q("_"+table+"_ghc"), q("_"+table+"_del")
 	mustExecDB(t, db,
@@ -120,6 +121,18 @@ func simulateGhost(t *testing.T, db *sql.DB, schema, table string) {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}
+	// Tải ghi của test tạm dừng trong cut-over (khoảng 1 s). gh-ost thật dựa vào việc RENAME đang chờ được ưu tiên
+	// hơn DML đang chờ khi UNLOCK; đo trên MySQL 8.4 dưới tải nặng, DML vẫn có lúc chen trước RENAME vào bảng gốc
+	// sắp thành _del (giữ _del lại thấy đúng các row đó) → source mất ghi, đích có row source không có. Đó là lỗi
+	// của bản mô phỏng, không phải của Strand; dừng tải trong cửa sổ này giữ cho source đúng. Tải vẫn chạy suốt
+	// giai đoạn copy và ngay sau cut-over.
+	pause(true)
+	paused := true
+	defer func() {
+		if paused {
+			pause(false)
+		}
+	}()
 	ex(c1, "create /* gh-ost */ table "+del+" (id int primary key) engine=InnoDB comment='magic-cut-over'")
 	ex(c1, fmt.Sprintf("lock tables %s write, %s write, %s write", orig, gho, del))
 	ex(c1, fmt.Sprintf("replace into %s (%s) select %s from %s", gho, cols, cols, orig))
@@ -129,12 +142,30 @@ func simulateGhost(t *testing.T, db *sql.DB, schema, table string) {
 		_, err := c2.ExecContext(ctx, fmt.Sprintf("rename /* gh-ost */ table %s to %s, %s to %s", orig, del, gho, orig))
 		done <- err
 	}()
-	time.Sleep(500 * time.Millisecond)
+	// Như gh-ost: chỉ mở khóa khi RENAME đã đứng chờ metadata lock (processlist). Mở khóa sớm hơn thì DML
+	// đang chờ có thể chen trước RENAME và ghi vào bảng gốc sắp thành _del — mất ghi ở source, đích "đi trước"
+	// (test chập chờn khi máy tải nặng với sleep cố định 500 ms).
+	waitDeadline := time.Now().Add(30 * time.Second)
+	for {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE 'rename /* gh-ost */%' AND STATE LIKE '%metadata lock%'").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			t.Fatal("gh-ost simulation: RENAME never queued behind the lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	ex(c1, "drop /* gh-ost */ table "+del)
 	ex(c1, "unlock tables")
 	if err := <-done; err != nil {
 		t.Fatalf("cut-over rename: %v", err)
 	}
+	pause(false)
+	paused = false
 	mustExecDB(t, db, "drop /* gh-ost */ table if exists "+ghc, "drop /* gh-ost */ table if exists "+q("_"+table+"_del"))
 }
 
@@ -214,7 +245,7 @@ func assertNoTempTables(t *testing.T, db *sql.DB, schema, table string) {
 func onlineDDLMySQL(t *testing.T, tool string) {
 	e := evoStartMySQL(t, "e2e-oddl-"+strings.ReplaceAll(tool, "-", ""), "")
 	startOnlineDDLTarget(t, e)
-	runOnlineDDLTool(t, e.src, tool, "app", "evo")
+	runOnlineDDLTool(t, e.src, tool, "app", "evo", e.ew.pause)
 	deadline := time.Now().Add(2 * time.Minute)
 	for mysqlColType(t, e.dst.DB, "app", "evo", "extra") == "" {
 		mustStayRunning(t, e.p, tool)
@@ -293,7 +324,7 @@ func onlineDDLPG(t *testing.T, tool string) {
 		`CREATE FUNCTION public.ddl_audit_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$ DECLARE r record; BEGIN FOR r IN SELECT * FROM pg_event_trigger_ddl_commands() LOOP INSERT INTO public.ddl_audit VALUES (r.command_tag, r.object_identity); END LOOP; END $$`,
 		"CREATE EVENT TRIGGER ddl_audit_trg ON ddl_command_end EXECUTE FUNCTION public.ddl_audit_fn()",
 	)
-	runOnlineDDLTool(t, e.src, tool, "evo", "t")
+	runOnlineDDLTool(t, e.src, tool, "evo", "t", e.ew.pause)
 	deadline := time.Now().Add(2 * time.Minute)
 	for pgColType(t, e.dst.DB, "evo", "t", "extra") == "" {
 		mustStayRunning(t, e.p, tool)
