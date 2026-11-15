@@ -311,8 +311,14 @@ func (p *Pipeline) checkBinlogTxn(t *model.Txn) (start, end uint64, err error) {
 // Txn — Rotate/Format_desc/Previous_gtids/Stop (sau FLUSH LOGS hoặc restart) không phải Txn, nếu không
 // thì source rảnh sẽ không bao giờ "kịp".
 func (p *Pipeline) posCaughtUp(ctx context.Context) bool {
+	caught, known := p.posCaughtUpState(ctx)
+	return known && caught
+}
+
+// posCaughtUpState: như posCaughtUp nhưng tách lỗi truy vấn (known = false) khỏi "chưa kịp".
+func (p *Pipeline) posCaughtUpState(ctx context.Context) (caught, known bool) {
 	if p.lsns == nil {
-		return false
+		return false, false
 	}
 	// seen đọc SAU khi lấy head (như nhánh GTID: gtid_executed lấy trước rồi mới so với seen).
 	ok, err := mysqlreader.TxnFreeToHeadFunc(ctx, p.src, p.binlogBase, func() uint64 {
@@ -323,5 +329,8 @@ func (p *Pipeline) posCaughtUp(ctx context.Context) bool {
 		}
 		return seen
 	})
-	return err == nil && ok
+	if err != nil {
+		return false, false
+	}
+	return ok, true
 }

@@ -948,7 +948,7 @@ Bộ nhớ: không có trần RSS (`resources.memory` chưa thi hành). Các ph�
 
 | Metric | Nhãn | Ý nghĩa |
 | --- | --- | --- |
-| `strand_lag_seconds` | pipeline, phase (`bootstrap`\|`synced`) | Độ trễ. Xem 10.3: có thể báo 0 khi reader đứng sau source |
+| `strand_lag_seconds` | pipeline, phase (`bootstrap`\|`synced`) | Độ trễ so với source (gồm cả phần reader chưa đọc). Xem 10.3 |
 | `strand_apply_txn_total`, `strand_apply_rows_total` | pipeline | Số Txn và row đã apply |
 | `strand_holes` | pipeline | Số lỗ chưa lấp (relaxed) |
 | `strand_checkpoint_compaction_lag_seconds` | pipeline | Tuổi lần gộp checkpoint gần nhất (strict: 0) |
@@ -1100,7 +1100,7 @@ strand verify -c billing.yaml --mode full --table public.orders
 
 ### 10.3 Giới hạn đã biết
 
-- **Lag:** `strand_lag_seconds` và `top` báo 0 khi scheduler hết việc, kể cả khi reader đang đứng sau source (ví dụ mạng treo). Chưa có heartbeat (handoff dòng 48). Hãy theo dõi thêm `apply_txn_total` có tăng không.
+- **Lag:** hàng đợi nội bộ còn việc thì lag = now − thời điểm commit ở source của Txn mới nhất. Hàng đợi rỗng nhưng đầu source đang đi trước vị trí reader đã đọc (`pause`, reader bị chặn bởi backpressure/governor/breaker, mạng treo) thì lag vẫn > 0: monitor thăm dò đầu source mỗi giây (MySQL: `gtid_executed` hoặc vị trí binlog; PG: walsender của slot so với head WAL), dùng cùng mốc thời gian nên đó là **cận dưới** (Txn chưa đọc chắc chắn mới hơn mốc). Thăm dò lỗi hoặc không xác định được thì lùi về cách tính cũ (0 khi hàng đợi rỗng). Source PG: walsender có thể đã gửi hết vào bộ đệm TCP trong khi reader đang pause, nên pause ngắn với tải rất nhẹ có thể chưa hiện lag. Governor bỏ qua lag trong lúc operator `pause` (lag tăng vì ta dừng đọc, không phải quá tải).
 - **Verify sau seed ngoài MySQL→MySQL:** chỉ ghi cảnh báo rồi bỏ qua, pipeline vẫn báo `synced` dù chưa verify (handoff dòng 52). Hãy tự chạy `verify --mode full`.
 - **`validate` không kiểm PG source** (dòng 33) và không kiểm quyền.
 - **`target.batch.max_wait`** làm khóa nóng chậm lại ở `strict` (dòng 26); `relaxed` gom chuỗi Txn phụ thuộc vào cùng batch.

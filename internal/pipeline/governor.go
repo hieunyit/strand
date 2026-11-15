@@ -191,6 +191,11 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 func (p *Pipeline) feedGrace(ctx context.Context, gg *governor.GraceGovernor) {
 	slo := durationOr(p.cfg.Governor.LagSLO, 5*time.Second).Seconds()
 	phase, lag := "synced", p.lagSeconds()
+	if p.paused.Load() {
+		// Operator pause: lag tăng vì chính ta dừng đọc (lagSeconds tính cả phần source chưa đọc), không
+		// phải tín hiệu quá tải; hạ rate background lúc này không làm lag giảm. Metric/top vẫn báo lag thật.
+		lag = 0
+	}
 	if p.bootstrap.Load() || p.verifying.Load() {
 		phase = "bootstrap"
 		lag = 0
