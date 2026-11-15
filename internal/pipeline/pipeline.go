@@ -133,11 +133,14 @@ type Pipeline struct {
 	appliedRows  atomic.Int64
 	lastSourceTS atomic.Int64 // SourceTS của Txn mới nhất đã commit ở target
 	lastRoutedTS atomic.Int64
-	paused       atomic.Bool
-	pauseMu      sync.Mutex
-	pauseCond    *sync.Cond
-	snapPaused   atomic.Bool // tạm dừng riêng phần snapshot logic (strand pause --snapshot)
-	bootstrap    atomic.Bool
+	// srcAhead: lần thăm dò đầu source gần nhất (monitor, ≤ 1 lần/giây) thấy source có thay đổi mà reader
+	// chưa đọc tới. Lỗi/không biết → false (lagSeconds lùi về cách tính theo hàng đợi nội bộ).
+	srcAhead   atomic.Bool
+	paused     atomic.Bool
+	pauseMu    sync.Mutex
+	pauseCond  *sync.Cond
+	snapPaused atomic.Bool // tạm dừng riêng phần snapshot logic (strand pause --snapshot)
+	bootstrap  atomic.Bool
 	// running: khởi động xong (đã quyết định snapshot/verify sau seed). Trước đó admin báo "starting",
 	// không bao giờ "synced" — admin socket mở sớm hơn lúc biết có bootstrap hay không.
 	running       atomic.Bool
@@ -2206,8 +2209,13 @@ func (p *Pipeline) watchCompactor(ctx context.Context) {
 	}
 }
 
+// lagSeconds: độ trễ so với source. Hàng đợi nội bộ còn việc (Lwd < admitted) thì lag = now − SourceTS của
+// Txn mới nhất. Hàng đợi rỗng nhưng đầu source đang đi trước vị trí reader đã đọc (srcAhead: pause, reader
+// bị backpressure/governor/breaker chặn, hoặc đơn giản chậm hơn source) thì vẫn có lag: dùng cùng mốc
+// thời gian — là CẬN DƯỚI (Txn chưa đọc chắc chắn mới hơn mốc này). Source không có gì mới (hoặc thăm dò
+// lỗi) thì rỗng = 0 như trước.
 func (p *Pipeline) lagSeconds() float64 {
-	if p.sched.Lwd() >= p.admitted.Load() {
+	if p.sched.Lwd() >= p.admitted.Load() && !p.srcAhead.Load() {
 		return 0
 	}
 	ts := p.lastSourceTS.Load()
@@ -2218,6 +2226,12 @@ func (p *Pipeline) lagSeconds() float64 {
 		return 0
 	}
 	return time.Since(time.Unix(ts, 0)).Seconds()
+}
+
+// pollSourceAhead cập nhật srcAhead từ đầu source (cùng phép so với caughtUpWithSource). Chỉ gọi từ monitor.
+func (p *Pipeline) pollSourceAhead(ctx context.Context) {
+	caught, known := p.sourceHeadState(ctx)
+	p.srcAhead.Store(known && !caught)
 }
 
 func (p *Pipeline) monitor(ctx context.Context) {
@@ -2234,6 +2248,11 @@ func (p *Pipeline) monitor(ctx context.Context) {
 		phase := "synced"
 		if p.bootstrap.Load() {
 			phase = "bootstrap"
+		}
+		if phase != "bootstrap" {
+			p.pollSourceAhead(ctx)
+		} else {
+			p.srcAhead.Store(false) // bootstrap có cách tính lag riêng bên dưới
 		}
 		lag := p.lagSeconds()
 		// Bootstrap: lag = khoảng cách reader → head (router so với commit mới nhất ở source).
@@ -2358,39 +2377,49 @@ func (p *Pipeline) updateMetrics() {
 }
 
 func (p *Pipeline) caughtUpWithSource(ctx context.Context) bool {
+	caught, known := p.sourceHeadState(ctx)
+	return known && caught
+}
+
+// sourceHeadState: caught = reader đã đọc tới đầu source; known = false khi không xác định được (không có
+// engine hỗ trợ, thiếu pgSignals, lỗi truy vấn) — khi đó caught luôn false.
+func (p *Pipeline) sourceHeadState(ctx context.Context) (caught, known bool) {
 	if p.srcEngine == model.EnginePG {
 		// PG không có tập GTID để so: walsender của slot đã gửi tới head (02 §7: lag bootstrap = khoảng
 		// cách reader → head). Trước đây luôn false → source PG rảnh vài giây là lag "tăng" mãi và
 		// bootstrap_retention_risk bật sai.
 		if p.pgSignals == nil {
-			return false
+			return false, false
 		}
 		qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		s, err := p.pgSignals.Sample(qctx)
-		return err == nil && s.ReaderCaughtUp(governor.PGCaughtUpSlackBytes)
+		if err != nil {
+			return false, false
+		}
+		return s.ReaderCaughtUp(governor.PGCaughtUpSlackBytes), true
 	}
 	if p.srcEngine != model.EngineMySQL {
-		return false
+		return false, false
 	}
 	if p.posMode {
 		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		return p.posCaughtUp(qctx)
+		return p.posCaughtUpState(qctx)
 	}
 	var executed string
 	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if err := p.src.QueryRowContext(qctx, "SELECT @@GLOBAL.gtid_executed").Scan(&executed); err != nil {
-		return false
+		return false, false
 	}
 	set, err := checkpoint.ParseMySQLGTIDSet(executed)
 	if err != nil {
-		return false
+		return false, false
 	}
 	p.seenMu.Lock()
 	defer p.seenMu.Unlock()
-	return set.IsSubsetOf(p.seen.(*checkpoint.MySQLAppliedSet))
+	return set.IsSubsetOf(p.seen.(*checkpoint.MySQLAppliedSet)), true
 }
 
 // retentionHeadroom ước lượng số giây còn lại trước khi source xóa binlog mà reader chưa đọc.
