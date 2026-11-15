@@ -409,9 +409,11 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 	case reader.EventTableMap:
 		a.ensureTxnStartedEv(ev)
 		cur := a.registry.GetTable(ev.Schema, ev.Table)
-		// P3-01b: Relation message của PG phát hiện thay đổi schema (hoặc cột lệch bảng đã đăng ký)
-		// tạo barrier DDL trên Txn này để pipeline drain và evolveSchema trước khi apply row mới.
-		if ev.SchemaChanged || (cur != nil && len(ev.Columns) > 0 && !sameStrings(cur.Columns, ev.Columns)) {
+		// P3-01b: Relation message của PG phát hiện thay đổi schema tạo barrier DDL trên Txn này để pipeline
+		// drain và evolveSchema trước khi apply row mới. Chỉ theo cờ của reader: với MySQL, TABLE_MAP có cột
+		// khác registry là chuyện bình thường (row cũ nằm trước QUERY DDL thật, schema history) và barrier
+		// đúng là chính QUERY DDL; đặt barrier ở đây chặn các row trước DDL.
+		if ev.SchemaChanged {
 			ddl := fmt.Sprintf("ALTER TABLE %s.%s", ev.Schema, ev.Table)
 			if a.currentTxn.DDL == "" {
 				a.currentTxn.DDL = ddl
