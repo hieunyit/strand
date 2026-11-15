@@ -1,0 +1,121 @@
+{{define "content"}}
+<div class="card">
+  <h2>Create new pipeline</h2>
+  <p class="muted small">Generate pipeline configuration and .env credentials file, run validate and plan, and register into Strand.</p>
+  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="act" data-action="new-pipeline">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    
+    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
+      <legend><b>1. Engine & Identity</b></legend>
+      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
+        <label>Pipeline Name <span class="err">*</span>
+          <br><input type="text" name="name" required class="wide mono" placeholder="e.g. app-migration" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+          <br><small class="muted">Letters, numbers, -, _, . (max 63 chars)</small>
+        </label>
+        <label>Source Engine
+          <br><select name="from" id="from-select">
+            <option value="mysql" selected>MySQL 5.5 - 8.x</option>
+            <option value="mariadb">MariaDB 10.6+</option>
+            <option value="postgres">PostgreSQL 14 - 18</option>
+          </select>
+        </label>
+        <label>Target Engine
+          <br><select name="to" id="to-select">
+            <option value="postgres" selected>PostgreSQL 16 - 18</option>
+            <option value="mysql">MySQL 8.x</option>
+          </select>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
+      <legend><b>2. Source Connection</b></legend>
+      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
+        <label>Source Host
+          <br><input type="text" name="source_host" value="127.0.0.1" class="wide mono">
+        </label>
+        <label>Source Port
+          <br><input type="number" name="source_port" value="3306" class="num mono">
+        </label>
+        <label>Source User
+          <br><input type="text" name="source_user" value="strand" class="mono">
+        </label>
+        <label>Source Password <small class="muted">(saved to .env, mode 0600)</small>
+          <br><input type="password" name="source_password" class="mono" autocomplete="new-password">
+        </label>
+        <label>Password Env Variable
+          <br><input type="text" name="source_password_env" value="SRC_PW" class="mono">
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
+      <legend><b>3. Target Connection</b></legend>
+      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
+        <label>Target Host
+          <br><input type="text" name="target_host" value="127.0.0.1" class="wide mono">
+        </label>
+        <label>Target Port
+          <br><input type="number" name="target_port" value="5432" class="num mono">
+        </label>
+        <label>Target User
+          <br><input type="text" name="target_user" value="strand" class="mono">
+        </label>
+        <label>Target Password <small class="muted">(saved to .env, mode 0600)</small>
+          <br><input type="password" name="target_password" class="mono" autocomplete="new-password">
+        </label>
+        <label>Password Env Variable
+          <br><input type="text" name="target_password_env" value="DST_PW" class="mono">
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
+      <legend><b>4. Database & Tables</b></legend>
+      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
+        <label>Database / Database Name
+          <br><input type="text" name="database" value="app" class="mono">
+          <br><small class="muted">PG: DB name; MySQL: comma-separated or * for all</small>
+        </label>
+        <label>PG Schema (Postgres source only)
+          <br><input type="text" name="schema" value="public" class="mono">
+        </label>
+        <label>Include Tables
+          <br><input type="text" name="include" class="wide mono" placeholder="e.g. app.* or *.*">
+        </label>
+        <label>Exclude Tables
+          <br><input type="text" name="exclude" class="wide mono" placeholder="e.g. app.log_*">
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
+      <legend><b>5. Operational Settings</b></legend>
+      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
+        <label>Commit Order
+          <br><select name="commit_order">
+            <option value="relaxed" selected>relaxed (parallel by key, fast)</option>
+            <option value="strict">strict (source commit order)</option>
+          </select>
+        </label>
+        <label>Spool Directory
+          <br><input type="text" name="spool_dir" class="wide mono" placeholder="default: &lt;state_dir&gt;/pipelines/&lt;name&gt;/spool">
+        </label>
+        <label>Target Workers
+          <br><input type="number" name="workers" value="8" class="num mono">
+        </label>
+      </div>
+    </fieldset>
+
+    <div style="margin-top:20px;">
+      <button class="btn primary" type="submit" id="btn-create-pipeline">Create and Validate Pipeline</button>
+      <a href="/pipelines" class="btn" style="margin-left:8px;">Cancel</a>
+    </div>
+  </form>
+
+  <div id="new-pipeline-result" class="card" style="margin-top:20px;" hidden>
+    <h3 id="result-title">Result</h3>
+    <div id="result-body"></div>
+  </div>
+</div>
+{{end}}

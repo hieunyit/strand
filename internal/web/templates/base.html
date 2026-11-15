@@ -14,6 +14,7 @@
   <nav>
     <a href="/" class="{{if eq .Active "overview"}}active{{end}}">Overview</a>
     <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}">Pipelines</a>
+    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}">+ New pipeline</a>
     <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}">Jobs</a>
     <div class="navhead">Registered pipelines</div>
     {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"><span class="dot {{stateClass .State}}"></span>{{.Name}}</a>
