@@ -48,6 +48,23 @@ verify: { delta: on, full: { cron: "0 2 * * 0", rate: 10MiB } }
 observability: { metrics: ":9464", admin_socket: /run/strand/orders-sync.sock, log: { level: info, format: json } }
 `
 
+// Socket quá dài (vượt giới hạn sun_path) phải bị từ chối rõ ràng lúc nạp cấu hình,
+// thay vì để `sync` lỗi "bind: invalid argument".
+func TestLoadYAMLStrict_AdminSocketTooLong(t *testing.T) {
+	long := "/var/lib/strand/" + strings.Repeat("x", config.MaxUnixSocketPath()) + "/admin.sock"
+	y := strings.Replace(sampleSpecYAML, "/run/strand/orders-sync.sock", long, 1)
+	_, err := config.LoadYAMLStrict([]byte(y))
+	if err == nil {
+		t.Fatal("admin_socket quá dài phải bị từ chối")
+	}
+	if !strings.Contains(err.Error(), "observability.admin_socket") || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("lỗi phải nêu khóa và độ dài: %v", err)
+	}
+	if err := config.CheckAdminSocketPath("/run/strand/a.sock"); err != nil {
+		t.Fatalf("đường dẫn ngắn phải hợp lệ: %v", err)
+	}
+}
+
 func TestLoadYAMLStrict_Valid(t *testing.T) {
 	cfg, err := config.LoadYAMLStrict([]byte(sampleSpecYAML))
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -268,6 +269,27 @@ type LogConfig struct {
 	Format string `yaml:"format" json:"format"` // json | text
 }
 
+// MaxUnixSocketPath là độ dài tối đa (byte) của đường dẫn Unix socket: sun_path dài 108 byte trên Linux
+// (104 trên macOS/BSD), gồm cả byte NUL kết thúc.
+func MaxUnixSocketPath() int {
+	switch runtime.GOOS {
+	case "linux":
+		return 107
+	default:
+		return 103
+	}
+}
+
+// CheckAdminSocketPath từ chối observability.admin_socket quá dài: nếu không, `sync` chỉ báo lỗi khó hiểu
+// "listen unix ...: bind: invalid argument" lúc khởi động.
+func CheckAdminSocketPath(path string) error {
+	if max := MaxUnixSocketPath(); len(path) > max {
+		return exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("observability.admin_socket is too long: %d bytes (Unix socket path limit is %d); use a shorter path, e.g. /run/strand/<name>.sock", len(path), max), nil)
+	}
+	return nil
+}
+
 // LoadFile đọc và giải mã file YAML strict theo quy định (từ chối key lạ với exit 2)
 func LoadFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -304,6 +326,9 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 	// Kiểm tra các trường bắt buộc cơ bản
 	if cfg.Name == "" {
 		return nil, exitcode.New("missing_name", exitcode.InvalidSyntax, "missing required field: name", nil)
+	}
+	if err := CheckAdminSocketPath(cfg.Observability.AdminSocket); err != nil {
+		return nil, err
 	}
 	if cfg.Source.Kind == "" || cfg.Source.DSN == "" {
 		return nil, exitcode.New("missing_source", exitcode.InvalidSyntax, "missing required source configuration", nil)

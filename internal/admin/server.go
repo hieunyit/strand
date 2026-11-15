@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strand/internal/config"
 	"sync"
 	"time"
 )
@@ -73,6 +74,9 @@ func (s *Server) Start() error {
 		}
 	}
 
+	if max := config.MaxUnixSocketPath(); len(s.socketPath) > max {
+		return fmt.Errorf("admin socket path is too long (%d bytes, limit %d): %s; set observability.admin_socket to a shorter path", len(s.socketPath), max, s.socketPath)
+	}
 	ln, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listen unix socket %s: %w", s.socketPath, err)
