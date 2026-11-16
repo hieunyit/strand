@@ -142,3 +142,12 @@ Lần chạy chính thức đầu tiên trên fixture 20M (`grace-v2#2`, 00:53�
 1. Mục 10 đổi cho lượt đo: `ignored errors` được đếm (`client_ignored_errors` trong results.json). Lần chạy là `incomplete` nếu tổng vượt 0,01% số event thô. Dưới ngưỡng, dù các lần thử bị deadlock (không có latency trong log thô) là những latency tệ nhất, p99 nearest-rank chỉ lệch tối đa 0,01 điểm phân vị. `reconnects` vẫn phải bằng 0; marker, footer và số event thô bằng tổng kết giữ nguyên.
 2. Calibrate giữ ngưỡng 1% (Amendment 2026-11-14).
 3. Ngưỡng quyết định §4 không đổi.
+
+## Amendment 2026-11-16 — PostgreSQL: kích thước fixture và client, trước mọi số đo chính thức trên PG
+
+Lượt đo chính thức PG chưa có số nào. Pilot NON-OFFICIAL trên chính máy đo (PG 18.6 trong Docker, `bench.big` 2.000.000 row, pgbench scale 1, low/high 59/237 từ một lần calibrate 2 phút trên fixture pilot, soft/hard 400/600, `--only`): snapshot `onoff` 129,8 s, `grace-v2` 126,3 s, tức khoảng 15.800 row/s. Cả hai lần đều không có cửa sổ p2p (snapshot ngắn hơn nửa chu kỳ), đúng như dự kiến của pilot. Ghi chú: phát hiện cũ "grace-v2 trên PG kẹt ở R = 1 token/s" (GATE2-REPORT) không tái hiện. Số pilot không dùng làm bằng chứng.
+
+1. PG: `bench.big` = 40.000.000 row (tiêu chí thời gian của Amendment 2026-11-14 (2): ở 15.800 row/s snapshot khoảng 42 phút; nếu bảng lớn không còn nằm gọn trong bộ nhớ và chậm hơn, snapshot dài hơn nhưng vẫn dưới `snapshot-timeout` 3 h nếu tốc độ ≥ 3.700 row/s). App: pgbench scale 1 trong schema `bench` (§5 Amendment 2026-11-13).
+2. Client: `pgbench` upstream trong image `postgres:18` (18.6), không vá; latency lấy từ log giao dịch `-l` không gộp (Amendment 2026-11-08). Pilot overhead (§9 Amendment 2026-11-13) chỉ áp dụng cho bản vá sysbench nên không chạy cho PG. `--client-sha256` ghim sha256 của binary pgbench.
+3. Calibrate chạy lại trên fixture 40M và commit (`reports/g2-official/pg/`) trước lượt chính thức; ngưỡng §4, sóng, soft/hard 400/600, seed 20261113 giữ nguyên như MySQL.
+4. Nếu lần chạy chính thức đầu tiên cho thấy snapshot < 25 phút hoặc chạm `snapshot-timeout`, lượt đo dừng và kích thước được sửa bằng amendment mới (như MySQL), công khai số đã thấy.
