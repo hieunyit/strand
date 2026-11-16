@@ -123,6 +123,14 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if _, ok, _ := s.MetaGet(ctx, "k"); ok {
 			t.Fatal("phantom meta")
 		}
+		must(t, s.AppendAuditBatch(ctx, []store.AuditRow{{Time: time.Now(), Action: "b1", Data: []byte(`{}`)}, {Time: time.Now(), Action: "b2", Data: []byte(`{}`)}},
+			&store.MetaKV{Key: "prog", Value: "2"}))
+		if rows, _ := s.ListAudit(ctx, 1); len(rows) != 1 || rows[0].Action != "b2" {
+			t.Fatalf("batch audit = %+v", rows)
+		}
+		if v, ok, _ := s.MetaGet(ctx, "prog"); !ok || v != "2" {
+			t.Fatalf("batch progress = %q %v", v, ok)
+		}
 		must(t, s.MetaSet(ctx, "k", "v1"))
 		must(t, s.MetaSet(ctx, "k", "v2"))
 		if v, ok, _ := s.MetaGet(ctx, "k"); !ok || v != "v2" {

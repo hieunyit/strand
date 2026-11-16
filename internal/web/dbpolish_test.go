@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"strand/internal/web/store"
 )
@@ -17,6 +20,8 @@ import (
 type flakyStore struct {
 	store.Store
 	failUpsertPipeline atomic.Bool
+	failAuditBatchFrom atomic.Int32 // >0: the n-th AppendAuditBatch call (1-based) and later fail
+	auditBatchCalls    atomic.Int32
 }
 
 var errFlaky = errors.New("flaky: database write failed")
@@ -103,5 +108,58 @@ func TestEnvEditWithoutKeyDropsStaleSealedCopy(t *testing.T) {
 	}
 	if row, _, _ := st.GetPipeline(context.Background(), "rekey"); len(row.EnvEnc) != 0 {
 		t.Fatal("stale sealed .env kept in the database after an edit without the key")
+	}
+}
+
+func (f *flakyStore) AppendAuditBatch(ctx context.Context, rows []store.AuditRow, prog *store.MetaKV) error {
+	n := f.auditBatchCalls.Add(1)
+	if from := f.failAuditBatchFrom.Load(); from > 0 && n >= from {
+		return errFlaky
+	}
+	return f.Store.AppendAuditBatch(ctx, rows, prog)
+}
+
+// First start with a database imports audit.log in batches. If it is interrupted after some batches were
+// committed, the next start must resume, not re-insert the committed rows (audit_log is append-only).
+func TestAuditImportResumesWithoutDuplicates(t *testing.T) {
+	mem := store.NewMem()
+	fs := &flakyStore{Store: mem}
+	var sb strings.Builder
+	const lines = 2500
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&sb, `{"time":"2026-01-01T00:00:00Z","ip":"1.2.3.4","action":"old.%d","result":"ok"}`+"\n", i)
+	}
+	h, _ := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+	must0(t, mem.SetPasswordHash(context.Background(), string(h)))
+	fs.failAuditBatchFrom.Store(2) // first batch (1000 rows) commits, second fails
+	var stateDir string
+	e := newEnvWith(t, func(e *testEnv, c *Config) {
+		stateDir = c.StateDir
+		must0(t, os.MkdirAll(stateDir, 0o750))
+		must0(t, os.WriteFile(filepath.Join(stateDir, "audit.log"), []byte(sb.String()), 0o600))
+	}, func(o *Options) { o.Store = store.NewMem() }) // throwaway env, only to get a valid Config
+	c2 := *e.srv.cfg
+	c2.StateDir = stateDir
+	if _, err := New(Options{Config: &c2, Store: fs, Version: "test", Commander: e.cmd}); err == nil {
+		t.Fatal("start succeeded although the audit import failed")
+	}
+	fs.failAuditBatchFrom.Store(0)
+	if _, err := New(Options{Config: &c2, Store: fs, Version: "test", Commander: e.cmd}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := mem.ListAudit(context.Background(), 100000)
+	seen := map[string]int{}
+	for _, r := range rows {
+		if strings.HasPrefix(r.Action, "old.") {
+			seen[r.Action]++
+		}
+	}
+	if len(seen) != lines {
+		t.Fatalf("imported %d distinct lines, want %d", len(seen), lines)
+	}
+	for a, n := range seen {
+		if n != 1 {
+			t.Fatalf("%s imported %d times", a, n)
+		}
 	}
 }

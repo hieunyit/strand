@@ -64,6 +64,9 @@ type AuditRow struct {
 	Data     []byte
 }
 
+// MetaKV is one web_meta key/value.
+type MetaKV struct{ Key, Value string }
+
 // Desired states.
 const (
 	DesiredRunning = "running"
@@ -102,8 +105,10 @@ type Store interface {
 	PutWizard(ctx context.Context, kind, pipeline string, data []byte) error
 
 	AppendAudit(ctx context.Context, r AuditRow) error
-	// AppendAuditBatch inserts many rows in one transaction (import of audit.log).
-	AppendAuditBatch(ctx context.Context, rows []AuditRow) error
+	// AppendAuditBatch inserts many rows in one transaction (import of audit.log). A non-nil progress is
+	// upserted into web_meta in the same transaction, so an interrupted import can resume exactly where it
+	// stopped (audit_log is append-only: duplicates could never be removed).
+	AppendAuditBatch(ctx context.Context, rows []AuditRow, progress *MetaKV) error
 	// ListAudit returns the newest n rows, newest first.
 	ListAudit(ctx context.Context, n int) ([]AuditRow, error)
 

@@ -251,11 +251,17 @@ func (m *Mem) AppendAudit(_ context.Context, r AuditRow) error {
 	m.audit = append(m.audit, r)
 	return nil
 }
-func (m *Mem) AppendAuditBatch(ctx context.Context, rows []AuditRow) error {
+func (m *Mem) AppendAuditBatch(_ context.Context, rows []AuditRow, progress *MetaKV) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
 	for _, r := range rows {
-		if err := m.AppendAudit(ctx, r); err != nil {
-			return err
-		}
+		r.ID = int64(len(m.audit) + 1)
+		m.audit = append(m.audit, r)
+	}
+	if progress != nil {
+		m.meta[progress.Key] = progress.Value
 	}
 	return nil
 }

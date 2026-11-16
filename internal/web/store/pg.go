@@ -304,7 +304,7 @@ func (p *PG) AppendAudit(ctx context.Context, r AuditRow) error {
 	return p.wrap(err)
 }
 
-func (p *PG) AppendAuditBatch(ctx context.Context, rows []AuditRow) error {
+func (p *PG) AppendAuditBatch(ctx context.Context, rows []AuditRow, progress *MetaKV) error {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return p.wrap(err)
@@ -317,6 +317,12 @@ func (p *PG) AppendAuditBatch(ctx context.Context, rows []AuditRow) error {
 	defer st.Close()
 	for _, r := range rows {
 		if _, err := st.ExecContext(ctx, r.Time, r.IP, r.Action, r.Pipeline, r.Result, string(r.Data)); err != nil {
+			return p.wrap(err)
+		}
+	}
+	if progress != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO web_meta (key, value) VALUES ($1,$2)
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, progress.Key, progress.Value); err != nil {
 			return p.wrap(err)
 		}
 	}

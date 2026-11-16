@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -460,6 +461,8 @@ func (s *Server) importFiles(ctx context.Context) (*ImportSummary, error) {
 	return sum, err
 }
 
+const auditImportProgressKey = "audit_import_lines"
+
 func (s *Server) importAuditFile(ctx context.Context, path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -468,13 +471,21 @@ func (s *Server) importAuditFile(ctx context.Context, path string) (int, error) 
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	// Tiến độ (số dòng hợp lệ đã nhập) ghi cùng transaction với mỗi lô: lần nhập bị ngắt giữa chừng (mất DB,
+	// container bị dừng) tiếp tục đúng chỗ, không nhân đôi dòng (audit_log chỉ-thêm, không xóa được).
+	skip := 0
+	if v, ok, err := s.db.st.MetaGet(ctx, auditImportProgressKey); err != nil {
+		return 0, err
+	} else if ok {
+		skip, _ = strconv.Atoi(v)
+	}
 	var batch []store.AuditRow
-	total := 0
+	total, seen := 0, 0
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := s.db.st.AppendAuditBatch(ctx, batch); err != nil {
+		if err := s.db.st.AppendAuditBatch(ctx, batch, &store.MetaKV{Key: auditImportProgressKey, Value: strconv.Itoa(seen)}); err != nil {
 			return err
 		}
 		total += len(batch)
@@ -488,6 +499,10 @@ func (s *Server) importAuditFile(ctx context.Context, path string) (int, error) 
 		}
 		var e AuditEntry
 		if json.Unmarshal(line, &e) != nil || e.Action == "" {
+			continue
+		}
+		seen++
+		if seen <= skip {
 			continue
 		}
 		batch = append(batch, store.AuditRow{Time: e.Time, IP: e.IP, Action: e.Action, Pipeline: e.Pipeline, Result: e.Result, Data: append([]byte(nil), line...)})
