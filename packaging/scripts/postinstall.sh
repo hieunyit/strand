@@ -15,4 +15,5 @@ if [ -n "$running" ]; then
 	echo "strand: các pipeline sau vẫn chạy binary cũ; restart khi thuận tiện:"
 	for u in $running; do echo "  systemctl restart $u"; done
 fi
+echo "strand: Web UI: sudo strand web init --enable"
 exit 0

@@ -46,7 +46,7 @@ Chưa đặt mật khẩu (strand web passwd) thì không khởi động.`,
 			return srv.ListenAndServe(ctx)
 		},
 	}
-	cmd.AddCommand(newWebPasswdCmd(), newWebTokenCmd())
+	cmd.AddCommand(newWebPasswdCmd(), newWebTokenCmd(), newWebInitCmd())
 	return cmd
 }
 
@@ -120,4 +120,94 @@ func readNewPassword(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("read password from stdin: %w", err)
 	}
 	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// newWebInitCmd: `strand web init`: tạo web.yaml, đặt mật khẩu (và token), tuỳ chọn bật dịch vụ, trong một lệnh.
+func newWebInitCmd() *cobra.Command {
+	var (
+		o        web.InitOptions
+		stdinPw  bool
+		genPw    bool
+		tlsCert  string
+		tlsKey   string
+		scan     []string
+		wantEnbl bool
+	)
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Cài nhanh Web UI: tạo web.yaml, đặt mật khẩu/token, tuỳ chọn bật dịch vụ (một lệnh)",
+		Long: `Tạo /etc/strand/web.yaml (nếu chưa có), đặt mật khẩu admin, tuỳ chọn tạo token API và bật strand-web.
+
+Mật khẩu: hỏi hai lần khi stdin là terminal; --password-stdin đọc một dòng; --generate-password sinh mật khẩu
+ngẫu nhiên và in MỘT lần ra stdout. Chạy lại an toàn: web.yaml có sẵn giữ nguyên listen/state_dir/scan
+(thêm --force để ghi đè), chỉ mật khẩu/token được đặt lại; không đưa mật khẩu thì giữ hash cũ.
+Chạy bằng root và có group strand thì file là root:strand 0640 và state_dir thuộc strand:strand 0750.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			o.ConfigPath = cfgPath
+			if o.ConfigPath == "" {
+				o.ConfigPath = "/etc/strand/web.yaml"
+			}
+			o.Scan = scan
+			if len(o.Scan) == 0 {
+				o.Scan = web.DefaultInitScan
+			}
+			o.TLSCert, o.TLSKey = tlsCert, tlsKey
+			o.Enable = wantEnbl
+			o.Stdout, o.Stderr = cmd.OutOrStdout(), cmd.ErrOrStderr()
+			fail := func(err error) error {
+				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, err.Error(), err)
+			}
+			if stdinPw && genPw {
+				return fail(fmt.Errorf("--password-stdin and --generate-password are mutually exclusive"))
+			}
+			// Validate trước khi hỏi mật khẩu hay ghi gì (file có sẵn và không --force: validate trong RunInit).
+			if _, err := os.Stat(o.ConfigPath); err != nil || o.Force {
+				if err := web.ValidateInit(o); err != nil {
+					return fail(err)
+				}
+			}
+			switch {
+			case genPw:
+				pw, err := web.GeneratePassword()
+				if err != nil {
+					return fail(err)
+				}
+				o.Password, o.PrintPassword = pw, true
+			case stdinPw:
+				line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if err != nil && line == "" {
+					return fail(fmt.Errorf("read password from stdin: %w", err))
+				}
+				o.Password = strings.TrimRight(line, "\r\n")
+			case term.IsTerminal(int(os.Stdin.Fd())):
+				// Đã có mật khẩu thì không hỏi lại (chạy lại phải idempotent); đổi bằng `strand web passwd`.
+				if c, err := web.LoadConfig(o.ConfigPath); err != nil || c.PasswordHash == "" {
+					pw, err := readNewPassword(cmd)
+					if err != nil {
+						return fail(err)
+					}
+					o.Password = pw
+				}
+			}
+			if _, err := web.RunInit(o); err != nil {
+				return fail(err)
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&o.Listen, "listen", "127.0.0.1:8080", "địa chỉ bind của Web UI (không phải loopback thì bắt buộc --tls-cert/--tls-key)")
+	f.StringVar(&o.StateDir, "state-dir", web.DefaultStateDir, "thư mục audit log và trạng thái web")
+	f.StringArrayVar(&scan, "scan", nil, "glob file pipeline cần quét (lặp lại được; mặc định /etc/strand/*.yaml)")
+	f.StringVar(&tlsCert, "tls-cert", "", "file chứng chỉ TLS")
+	f.StringVar(&tlsKey, "tls-key", "", "file khóa TLS")
+	f.BoolVar(&o.SecureCookies, "secure-cookies", false, "ép cờ Secure cho cookie (sau reverse proxy TLS)")
+	f.BoolVar(&o.TrustForwardedFor, "trust-forwarded-for", false, "lấy IP client từ X-Forwarded-For (chỉ khi proxy tin cậy)")
+	f.BoolVar(&stdinPw, "password-stdin", false, "đọc mật khẩu admin (một dòng) từ stdin")
+	f.BoolVar(&genPw, "generate-password", false, "sinh mật khẩu ngẫu nhiên mạnh và in MỘT lần ra stdout")
+	f.BoolVar(&o.NewToken, "token", false, "tạo thêm token API (in một lần, lưu sha256)")
+	f.BoolVar(&wantEnbl, "enable", false, "chạy `systemctl enable --now strand-web` rồi chờ /login trả 200 (tối đa 30 giây)")
+	f.BoolVar(&o.Force, "force", false, "ghi đè listen/state_dir/scan của web.yaml có sẵn")
+	return cmd
 }

@@ -2,7 +2,28 @@
 
 Hướng dẫn từng bước cho người vận hành cài Strand lên một máy Linux mới, tạo pipeline đầu tiên và bật Web UI. Đây là bản "làm theo", không lặp lại tham chiếu: mọi khóa cấu hình, lệnh, metric, exit code nằm ở [USAGE.md](USAGE.md); REST API ở [WEB-API.md](WEB-API.md).
 
-Mục lục: 1 Yêu cầu và thành phần, 2 Cài đặt, 3 DB nguồn/đích, 4 Pipeline đầu tiên bằng CLI, 5 Cài Web UI, 6 Dùng Web UI, 7 Giám sát, 8 Nâng cấp, gỡ, sao lưu, 9 Sự cố thường gặp.
+Mục lục: Cài nhanh, 1 Yêu cầu và thành phần, 2 Cài đặt, 3 DB nguồn/đích, 4 Pipeline đầu tiên bằng CLI, 5 Cài Web UI, 6 Dùng Web UI, 7 Giám sát, 8 Nâng cấp, gỡ, sao lưu, 9 Sự cố thường gặp.
+
+## Cài nhanh
+
+Hai lệnh là có Web UI (mặc định nghe `127.0.0.1:8080`, chưa mở ra mạng):
+
+```bash
+# Gói .deb / .rpm
+sudo dpkg -i strand_<ver>_amd64.deb          # hoặc: sudo rpm -i strand-<ver>.x86_64.rpm
+sudo strand web init --enable                # hỏi mật khẩu hai lần, bật strand-web, chờ /login trả 200
+
+# Cài tay (không có gói): cần binary và repo/tarball phát hành
+sudo scripts/install.sh --binary ./strand --with-web --generate-password
+```
+
+- `strand web init` tạo `/etc/strand/web.yaml` (root:strand 0640) và `/var/lib/strand-web` (strand:strand 0750), đặt mật khẩu admin, rồi với `--enable` chạy `systemctl enable --now strand-web`. Mật khẩu: hỏi trên terminal, `--password-stdin` (một dòng), hoặc `--generate-password` (in MỘT lần ra stdout, ghi lại ngay). `--token` tạo thêm token API (cũng in một lần).
+- Chạy lại an toàn: `web.yaml` có sẵn giữ nguyên `listen`/`state_dir`/`scan` (lệnh nói rõ điều này; thêm `--force` để ghi đè), chỉ mật khẩu/token được đặt lại; không đưa mật khẩu thì giữ hash cũ. Đổi mật khẩu sau này: `strand web passwd`.
+- Các cờ khác: `--listen`, `--state-dir`, `--scan` (lặp lại được; mặc định `/etc/strand/*.yaml`), `--tls-cert`/`--tls-key`, `--secure-cookies`, `--trust-forwarded-for`. `--listen` không phải loopback mà thiếu TLS thì lệnh báo lỗi và không ghi gì.
+- `scripts/install.sh` (chạy bằng root, idempotent) cài binary vào `--prefix` (mặc định `/usr/local/bin`), tạo user/group `strand`, `/etc/strand`, unit systemd (ExecStart trỏ đúng binary), quy tắc polkit và ví dụ; `--with-web` gọi tiếp `strand web init --enable` và chuyển nguyên `--listen`, `--generate-password`, `--token`, `--tls-cert`... Thêm `--no-start` để không bật dịch vụ.
+- Truy cập từ máy khác: `ssh -L 8080:127.0.0.1:8080 user@strand-host`, mở `http://127.0.0.1:8080` (hoặc reverse proxy/TLS: mục 5.4).
+
+Phần dưới là cài từng bước (khi cần kiểm soát từng việc).
 
 ## 1. Yêu cầu và thành phần
 
@@ -132,7 +153,9 @@ strand stop   -c orders-sync.yaml                 # SIGTERM, chờ tối đa 150
 
 Log và file pid mặc định ở `<resources.spool.path>/strand.log` và `strand.pid` (đổi bằng `--log-file`, `--pid-file`). Chế độ nền **không tự restart** khi pipeline lỗi hoặc máy khởi động lại.
 
-## 5. Cài Web UI
+## 5. Cài Web UI (từng bước)
+
+> Chỉ cần một lệnh: `sudo strand web init --enable` (xem "Cài nhanh"). Các mục 5.1 đến 5.4 là cách làm tay tương đương.
 
 ### 5.1 Tạo `web.yaml`
 

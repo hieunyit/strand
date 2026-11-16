@@ -817,6 +817,16 @@ Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, s�
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
+**Cài nhanh: `strand web init`.** Một lệnh thay cho chép `web.yaml`, chown/chmod, `web passwd`, `web token` và enable unit:
+
+```bash
+sudo strand web init --enable                          # hỏi mật khẩu hai lần, bật strand-web, chờ /login 200
+sudo strand web init --generate-password --token --enable   # mật khẩu và token ngẫu nhiên, in MỘT lần
+echo 'mật-khẩu' | sudo strand web init --password-stdin
+```
+
+Cờ: `-c/--config` (mặc định `/etc/strand/web.yaml`), `--listen` (127.0.0.1:8080), `--state-dir` (/var/lib/strand-web), `--scan` (lặp lại; mặc định `/etc/strand/*.yaml`), `--tls-cert`, `--tls-key`, `--secure-cookies`, `--trust-forwarded-for`, `--password-stdin`, `--generate-password`, `--token`, `--enable`, `--force`. Kiểm tra như lúc `strand web` khởi động (listen ngoài loopback bắt buộc TLS) trước khi ghi gì. Chạy bằng root và có group `strand` thì `web.yaml` là root:strand 0640 và `state_dir` strand:strand 0750; không thì 0600 thuộc người chạy. Chạy lại an toàn: file có sẵn giữ `listen`/`state_dir`/`scan` trừ khi có `--force`; chỉ đặt lại mật khẩu/token. Không bao giờ in hash. Với máy không có gói: `sudo scripts/install.sh --binary ./strand --with-web`.
+
 **Cài đặt.** Gói `.deb`/`.rpm` cài sẵn `strand-web.service` và ví dụ `/usr/share/doc/strand/examples/web.yaml`. Cài tay: chép binary, `deploy/systemd/strand-web.service` vào `/etc/systemd/system/`, `packaging/web.yaml.example` thành `/etc/strand/web.yaml`.
 
 **`web.yaml`:**
@@ -850,7 +860,7 @@ Tên pipeline chỉ gồm chữ, số, `_`, `.`, `-` (tối đa 63 ký tự, b�
 
 Đang chạy thì cả hai chế độ lấy số liệu như nhau: admin socket (`top`, và ba lệnh mới `status`, `tables`, `events`) và `/metrics`, mỗi 5 giây vào ring buffer 1 giờ trong RAM. Pipeline đã dừng: chỉ hiện trạng thái, exit code (systemd; chế độ nền suy ra từ đuôi log) và đuôi log, không đọc vị trí checkpoint từ target. Chế độ nền: nếu tiến trình đã dừng và lần chạy cuối kết thúc bằng lỗi (dòng `Error [code]: ...` hoặc `Error: ...` cuối của CLI, hoặc bản ghi ERROR `pipeline failed`, tính từ mốc khởi động gần nhất) thì trạng thái là `failed` và `last_exit` được điền: lỗi có `[code]` đổi sang exit code theo bảng 8.3 (ví dụ `[log_gap]` là 5); lỗi không gắn mã (ví dụ mất kết nối tới target) là exit 1, như CLI. Lỗi cũ đã được một lần chạy sau đó (chạy rồi dừng êm) thay thế thì không tính. Dừng êm (SIGTERM, `strand stop`) vẫn là `stopped`. Tab Errors giữ các thuộc tính của bản ghi log (`error`, `reason`, `hint`, `table`, ...) cùng khuôn với sự kiện live, và thêm dòng `Error: ...` cuối của CLI.
 
-**Mật khẩu và token:**
+**Mật khẩu và token** (làm tay; `strand web init` ở trên gộp tất cả):
 
 ```bash
 strand web passwd --config /etc/strand/web.yaml     # hỏi hai lần, ghi bcrypt hash vào web.yaml, giữ nguyên chủ sở hữu/mode (root:strand 0640 vẫn đọc được; bỏ bit other và group-write; file mới 0600)

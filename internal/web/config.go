@@ -106,11 +106,8 @@ func (c *Config) Validate() error {
 	if _, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil {
 		return fmt.Errorf("password_hash is not a valid bcrypt hash: %w", err)
 	}
-	if (c.TLSCert == "") != (c.TLSKey == "") {
-		return errors.New("tls_cert and tls_key must be set together")
-	}
-	if c.TLSCert == "" && !IsLoopbackAddr(c.Listen) {
-		return fmt.Errorf("listen %q is not a loopback address: TLS (tls_cert, tls_key) is required", c.Listen)
+	if err := c.ValidateListen(); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for _, p := range c.Pipelines {
@@ -127,6 +124,18 @@ func (c *Config) Validate() error {
 		if p.SystemdUnit != "" && !validUnit(p.SystemdUnit) {
 			return fmt.Errorf("pipelines[%s]: invalid systemd_unit %q", p.Name, p.SystemdUnit)
 		}
+	}
+	return nil
+}
+
+// ValidateListen kiểm phần mạng của cấu hình (TLS đi theo cặp, bind ngoài loopback phải có TLS);
+// Validate và `strand web init` dùng chung để báo lỗi trước khi ghi gì ra đĩa.
+func (c *Config) ValidateListen() error {
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return errors.New("tls_cert and tls_key must be set together")
+	}
+	if c.TLSCert == "" && !IsLoopbackAddr(c.Listen) {
+		return fmt.Errorf("listen %q is not a loopback address: TLS (tls_cert, tls_key) is required", c.Listen)
 	}
 	return nil
 }
@@ -160,9 +169,18 @@ func HashPassword(pw string) (string, error) {
 	return string(h), err
 }
 
-// SetConfigKey ghi (hoặc đổi) một khóa cấp cao của web.yaml mà giữ nguyên chú thích và các khóa khác,
+// SetConfigKey ghi (hoặc đổi) một khóa chuỗi cấp cao của web.yaml mà giữ nguyên chú thích và các khóa khác,
 // rồi thay file nguyên tử với quyền 0600. File chưa có thì tạo.
 func SetConfigKey(path, key, value string) error {
+	return setConfigNodes(path, []configKV{{key, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Style: yaml.DoubleQuotedStyle}}})
+}
+
+type configKV struct {
+	key string
+	val *yaml.Node
+}
+
+func setConfigNodes(path string, kvs []configKV) error {
 	var doc yaml.Node
 	b, err := os.ReadFile(path)
 	switch {
@@ -181,17 +199,17 @@ func SetConfigKey(path, key, value string) error {
 	if root.Kind != yaml.MappingNode {
 		return fmt.Errorf("%s: top level must be a mapping", path)
 	}
-	found := false
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value == key {
-			root.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Style: yaml.DoubleQuotedStyle}
-			found = true
+	for _, kv := range kvs {
+		found := false
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			if root.Content[i].Value == kv.key {
+				root.Content[i+1] = kv.val
+				found = true
+			}
 		}
-	}
-	if !found {
-		root.Content = append(root.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Style: yaml.DoubleQuotedStyle})
+		if !found {
+			root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: kv.key}, kv.val)
+		}
 	}
 	var out bytes.Buffer
 	enc := yaml.NewEncoder(&out)
