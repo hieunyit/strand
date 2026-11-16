@@ -1,0 +1,9 @@
+package validate
+
+import "testing"
+
+func TestAuditSubset(t *testing.T) {
+ name, ok := uniqueIndexCovers(map[string][]string{"target_unique_a": {"a"}}, []string{"a", "b"}, false)
+ t.Logf("source unique (a,b); target unique (a): accepted=%v index=%s", ok, name)
+ if !ok { t.Fatal("behavior changed") }
+}

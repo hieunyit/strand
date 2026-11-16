@@ -1,0 +1,5 @@
+--- FAIL: TestAudit2MySQLMissingSignals (0.00s)
+    audit2_root_test.go:11: all database signal reads failed but ReadSignals returned nil error; governor never enters blind mode
+FAIL
+FAIL	strand/internal/governor	0.299s
+FAIL

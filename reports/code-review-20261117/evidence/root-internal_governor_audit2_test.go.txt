@@ -1,0 +1,11 @@
+package governor
+import("context";"database/sql";"database/sql/driver";"errors";"testing")
+type audit2OfflineDriver struct{}
+type audit2OfflineConn struct{}
+func(audit2OfflineDriver)Open(string)(driver.Conn,error){return audit2OfflineConn{},nil}
+func(audit2OfflineConn)Prepare(string)(driver.Stmt,error){return nil,errors.New("offline")}
+func(audit2OfflineConn)Close()error{return nil}
+func(audit2OfflineConn)Begin()(driver.Tx,error){return nil,errors.New("offline")}
+func(audit2OfflineConn)QueryContext(context.Context,string,[]driver.NamedValue)(driver.Rows,error){return nil,errors.New("offline")}
+func TestAudit2MySQLMissingSignals(t *testing.T){sql.Register("audit2-offline",audit2OfflineDriver{});db,err:=sql.Open("audit2-offline","");if err!=nil{t.Fatal(err)};defer db.Close()
+ _,err=NewMySQLDBSignalReader(db,nil).ReadSignals(context.Background());if err==nil{t.Error("all database signal reads failed but ReadSignals returned nil error; governor never enters blind mode")}}

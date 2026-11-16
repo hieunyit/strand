@@ -1,0 +1,22 @@
+package promote_test
+import (
+ "context"
+ "errors"
+ "testing"
+ "strand/internal/promote"
+)
+type auditHeldSource struct{*mockSourceDriver;held bool}
+func(s *auditHeldSource) FenceHeld(context.Context)error{if !s.held{return errors.New("connection gone")};return nil}
+func(s *auditHeldSource) Fence(c context.Context)error{s.held=true;return s.mockSourceDriver.Fence(c)}
+func TestAuditResumeRefenceRechecksCatchup(t *testing.T){
+ ctx:=context.Background();store:=promote.NewMemoryStateStore()
+ progress:=&promote.Progress{PipelineID:"audit",State:promote.StatePromoting,CurrentStep:promote.StepOpenWrites}
+ for _,step:=range []promote.PromoteStep{promote.StepFenceSource,promote.StepHoldReadOnly,promote.StepApplyRemaining,promote.StepSetval}{progress.MarkStepCompleted(step)}
+ if err:=store.SaveProgress(ctx,progress);err!=nil{t.Fatal(err)}
+ src:=&auditHeldSource{mockSourceDriver:newMockSourceDriver(true)}
+ dst:=newMockTargetDriver()
+ _,err:=promote.NewPromoter(promote.Config{PipelineID:"audit"},store,src,dst,nil,nil).Run(ctx)
+ if err!=nil{t.Fatal(err)}
+ t.Logf("refence calls=%d, catchup calls=%d, open writes calls=%d",src.fenceCalls,dst.applyCalls,dst.openCalls)
+ if src.fenceCalls>0&&dst.applyCalls==0&&dst.openCalls>0{t.Fatal("opened writes after a new fence without rechecking catchup")}
+}

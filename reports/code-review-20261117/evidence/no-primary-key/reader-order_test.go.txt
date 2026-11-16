@@ -1,0 +1,16 @@
+package pg
+
+import (
+ "testing"
+ "github.com/jackc/pglogrepl"
+ "strand/internal/assemble"
+)
+func TestAuditIndexOrder(t *testing.T) {
+ rel := &pglogrepl.RelationMessage{Namespace:"s", RelationName:"t", Columns: []*pglogrepl.RelationMessageColumn{{Name:"a", Flags:1}, {Name:"b", Flags:1}}}
+ ev := tableMapEvent(rel)
+ reg := assemble.NewSchemaRegistry()
+ reg.RegisterTable("s", "t", []string{"b", "a"}, ev.Columns)
+ t.Logf("configured key order: %v; pre-event extracted key: %v", []string{"b","a"}, reg.ExtractPK("s","t", []any{1,2}))
+ reg.RegisterTable("s", "t", ev.PKColumns, ev.Columns)
+ t.Logf("relation flag order: %v; post-event extracted key: %v", ev.PKColumns, reg.ExtractPK("s","t", []any{1,2}))
+}

@@ -1,0 +1,13 @@
+{
+  "files_in_inventory": 274,
+  "status_counts": {
+    "body fully read": 31,
+    "inventory / static-check coverage only": 152,
+    "selected functions / partial body": 2,
+    "selected functions / boundary tracing": 18,
+    "selected functions/diff only": 14,
+    "selected functions / data-path tracing; see storage manifest": 33,
+    "not examined beyond file enumeration/search": 24
+  },
+  "note": "This is review inspection coverage, not executed test coverage; assignment or build does not imply a complete code review."
+}

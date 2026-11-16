@@ -1,0 +1,8 @@
+package pg
+import("testing";"strand/internal/reader")
+func TestAuditSchemaFlagSpill(t *testing.T){
+ l:=newEventLog(t.TempDir()); defer l.close()
+ _,err:=l.append(reader.Event{Type:reader.EventTableMap,Schema:"public",Table:"t",Columns:[]string{"id","v"},SchemaChanged:true}); if err!=nil{t.Fatal(err)}
+ if _,err=l.spill();err!=nil{t.Fatal(err)}
+ if err=l.replay(func(e reader.Event)error{if !e.SchemaChanged{t.Error("SchemaChanged lost after spill")};return nil});err!=nil{t.Fatal(err)}
+}

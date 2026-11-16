@@ -1,0 +1,9 @@
+{
+  "internal/snapshot/audit_completion_test.go": "evidence/core-empty_test.go.txt",
+  "internal/spool/audit_storage_test.go": "evidence/storage-spool_audit_test.go.txt",
+  "internal/promote/audit_storage_test.go": "evidence/storage-promote_audit_test.go.txt",
+  "internal/writer/audit_storage_test.go": "evidence/storage-writer_audit_test.go.txt",
+  "internal/web/audit2_root_test.go": "evidence/root-internal_web_audit2_test.go.txt",
+  "internal/config/audit2_root_test.go": "evidence/root-internal_config_audit2_test.go.txt",
+  "internal/governor/audit2_root_test.go": "evidence/root-internal_governor_audit2_test.go.txt"
+}

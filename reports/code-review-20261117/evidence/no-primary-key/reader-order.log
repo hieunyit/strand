@@ -1,0 +1,6 @@
+=== RUN   TestAuditIndexOrder
+    nokey_audit_test.go:13: configured key order: [b a]; pre-event extracted key: [2 1]
+    nokey_audit_test.go:15: relation flag order: [a b]; post-event extracted key: [1 2]
+--- PASS: TestAuditIndexOrder (0.00s)
+PASS
+ok  	strand/internal/reader/pg	0.337s

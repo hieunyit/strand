@@ -1,0 +1,275 @@
+path,reviewer,inspection_this_pass
+Dockerfile,Luna,body fully read
+Makefile,Luna,body fully read
+cmd/replay/main.go,Luna,body fully read
+cmd/strand/archive.go,Luna,body fully read
+cmd/strand/background.go,Luna,body fully read
+cmd/strand/checkpoint.go,Luna,inventory / static-check coverage only
+cmd/strand/config.go,Luna,inventory / static-check coverage only
+cmd/strand/config_init.go,Luna,inventory / static-check coverage only
+cmd/strand/export.go,Luna,inventory / static-check coverage only
+cmd/strand/main.go,Luna,inventory / static-check coverage only
+cmd/strand/objects.go,Luna,selected functions / partial body
+cmd/strand/pause_resume.go,Luna,inventory / static-check coverage only
+cmd/strand/plan.go,Luna,inventory / static-check coverage only
+cmd/strand/prefetch.go,Coordinator,selected functions / boundary tracing
+cmd/strand/promote.go,Luna,body fully read
+cmd/strand/root.go,Luna,body fully read
+cmd/strand/schema.go,Luna,inventory / static-check coverage only
+cmd/strand/seed.go,Luna,selected functions / partial body
+cmd/strand/seed_pg.go,Luna,inventory / static-check coverage only
+cmd/strand/sync.go,Luna,inventory / static-check coverage only
+cmd/strand/throttle.go,Luna,inventory / static-check coverage only
+cmd/strand/top.go,Luna,inventory / static-check coverage only
+cmd/strand/validate.go,Luna,inventory / static-check coverage only
+cmd/strand/verify.go,Luna,body fully read
+cmd/strand/version.go,Luna,inventory / static-check coverage only
+cmd/strand/web.go,Luna,body fully read
+deploy/compose/entrypoint.sh,Luna,body fully read
+deploy/compose/healthcheck.sh,Luna,body fully read
+deploy/fke/statefulset.yaml,Luna,body fully read
+internal/admin/client.go,Coordinator,inventory / static-check coverage only
+internal/admin/events.go,Coordinator,inventory / static-check coverage only
+internal/admin/server.go,Coordinator,inventory / static-check coverage only
+internal/admin/types.go,Coordinator,inventory / static-check coverage only
+internal/assemble/assembler.go,Terra,selected functions/diff only
+internal/assemble/schema.go,Terra,body fully read
+internal/assemble/spill.go,Terra,body fully read
+internal/checkpoint/applied_set.go,Sol,inventory / static-check coverage only
+internal/checkpoint/binlog_pos.go,Sol,inventory / static-check coverage only
+internal/checkpoint/compactor.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/checkpoint/fence.go,Coordinator,selected functions / boundary tracing
+internal/checkpoint/mysql_store.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/checkpoint/pg_applied_set.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/checkpoint/pg_store.go,Sol,inventory / static-check coverage only
+internal/checkpoint/range_set.go,Sol,inventory / static-check coverage only
+internal/checkpoint/store.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/config/config.go,Coordinator,selected functions / boundary tracing
+internal/config/conn.go,Coordinator,inventory / static-check coverage only
+internal/config/env.go,Coordinator,selected functions / boundary tracing
+internal/config/schema.go,Coordinator,inventory / static-check coverage only
+internal/config/unimplemented.go,Coordinator,selected functions / boundary tracing
+internal/exitcode/exitcode.go,Coordinator,inventory / static-check coverage only
+internal/governor/breaker.go,Coordinator,inventory / static-check coverage only
+internal/governor/grace.go,Coordinator,selected functions / boundary tracing
+internal/governor/onoff.go,Coordinator,inventory / static-check coverage only
+internal/governor/signals.go,Coordinator,selected functions / boundary tracing
+internal/governor/signals_pg.go,Coordinator,inventory / static-check coverage only
+internal/governor/types.go,Coordinator,inventory / static-check coverage only
+internal/metrics/healthz.go,Coordinator,inventory / static-check coverage only
+internal/metrics/registry.go,Coordinator,inventory / static-check coverage only
+internal/metrics/server.go,Coordinator,inventory / static-check coverage only
+internal/model/keycanon.go,Terra,body fully read
+internal/model/model.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/model/spill.go,Terra,selected functions/diff only
+internal/mysqlver/mysql57test/mysql57test.go,Coordinator,inventory / static-check coverage only
+internal/mysqlver/mysqlver.go,Coordinator,inventory / static-check coverage only
+internal/objects/apply.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/objects/convert.go,Sol,inventory / static-check coverage only
+internal/objects/discover.go,Sol,inventory / static-check coverage only
+internal/objects/export.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/objects/lex.go,Sol,inventory / static-check coverage only
+internal/objects/types.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/objects/users.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/pipeline/admin.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/admin_observe.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/batch.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/binlogpos.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/pipeline/binlogpos_snapshot.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/ddl.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/engine.go,Coordinator,selected functions / boundary tracing
+internal/pipeline/evolve.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/generated.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/governor.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/keyerr.go,Coordinator,selected functions / boundary tracing
+internal/pipeline/legacy_source.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/onlineddl.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/pg_partition.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/pipeline.go,Coordinator,selected functions / boundary tracing
+internal/pipeline/progress.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/ratemeter.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/schema.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/schema_init.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/seed_mysql.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/seed_pg.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/state.go,Coordinator,selected functions / boundary tracing
+internal/pipeline/strict.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/target_engine.go,Coordinator,inventory / static-check coverage only
+internal/pipeline/verify.go,Coordinator,inventory / static-check coverage only
+internal/promote/autoinc.go,Sol,inventory / static-check coverage only
+internal/promote/margin.go,Sol,inventory / static-check coverage only
+internal/promote/mysql_driver.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/promote/mysql_fence.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/promote/pg_driver.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/promote/promoter.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/promote/state.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/promote/types.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/reader/archive/archiver.go,Terra,body fully read
+internal/reader/archive/reader.go,Terra,body fully read
+internal/reader/mysql/binlogpos.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/charset.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/gtid.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/headpos.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/legacy_status.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/legacy_temporal.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/mariadb_compress.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/mariadb_tablemap.go,Terra,selected functions/diff only
+internal/reader/mysql/mariadb_types.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/reader.go,Terra,body fully read
+internal/reader/mysql/schemahist.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/sysversion.go,Terra,not examined beyond file enumeration/search
+internal/reader/mysql/tableinfo.go,Terra,selected functions/diff only
+internal/reader/pg/config.go,Terra,not examined beyond file enumeration/search
+internal/reader/pg/eventlog.go,Terra,selected functions/diff only
+internal/reader/pg/mapping.go,Terra,not examined beyond file enumeration/search
+internal/reader/pg/messages.go,Terra,not examined beyond file enumeration/search
+internal/reader/pg/reader.go,Terra,not examined beyond file enumeration/search
+internal/reader/pg/stream.go,Terra,selected functions/diff only
+internal/reader/reader.go,Terra,not examined beyond file enumeration/search
+internal/rowkey/keyless.go,Terra,body fully read
+internal/rowkey/mysql.go,Terra,body fully read
+internal/rowkey/pg.go,Terra,body fully read
+internal/rowkey/rowkey.go,Terra,body fully read
+internal/rowkey/suggest.go,Terra,body fully read
+internal/sched/scheduler.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/schemachange/schemachange.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/evolve.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/evolve_db.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/legacy_source.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/mariadb.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/mariadb_collation.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/mysql.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/pg.go,Coordinator,inventory / static-check coverage only
+internal/schemagen/plan.go,Coordinator,inventory / static-check coverage only
+internal/seed/binlogpos.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/seed/clone.go,Sol,inventory / static-check coverage only
+internal/seed/export.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/seed/invariants.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/seed/mydumper.go,Sol,inventory / static-check coverage only
+internal/seed/mysqldump.go,Sol,inventory / static-check coverage only
+internal/seed/pgbackrest.go,Sol,inventory / static-check coverage only
+internal/seed/pgphysical.go,Sol,inventory / static-check coverage only
+internal/seed/prefetch.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/seed/tables.go,Sol,inventory / static-check coverage only
+internal/seed/types.go,Sol,inventory / static-check coverage only
+internal/seed/walg.go,Sol,inventory / static-check coverage only
+internal/seed/xtrabackup.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/snapshot/chunker.go,Terra,not examined beyond file enumeration/search
+internal/snapshot/cross_order.go,Terra,not examined beyond file enumeration/search
+internal/snapshot/generic_walk.go,Terra,selected functions/diff only
+internal/snapshot/key_sample.go,Terra,not examined beyond file enumeration/search
+internal/snapshot/keyspace.go,Terra,not examined beyond file enumeration/search
+internal/snapshot/keysql.go,Terra,not examined beyond file enumeration/search
+internal/snapshot/keysql_pg.go,Terra,not examined beyond file enumeration/search
+internal/snapshot/mysql_snapshot.go,Terra,selected functions/diff only
+internal/snapshot/pg_snapshot.go,Terra,selected functions/diff only
+internal/snapshot/pg_watermark.go,Terra,body fully read
+internal/snapshot/pkey.go,Terra,selected functions/diff only
+internal/snapshot/pkey_catalog.go,Terra,selected functions/diff only
+internal/snapshot/range_state.go,Terra,selected functions/diff only
+internal/snapshot/toast_pk.go,Terra,body fully read
+internal/snapshot/types.go,Terra,selected functions/diff only
+internal/spool/bucket.go,Sol,inventory / static-check coverage only
+internal/spool/codec.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/spool/pebble.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/spool/spool.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/testutil/legacy_mysql.go,Coordinator,inventory / static-check coverage only
+internal/testutil/minio.go,Coordinator,inventory / static-check coverage only
+internal/testutil/pg.go,Coordinator,inventory / static-check coverage only
+internal/txntrace/trace.go,Coordinator,inventory / static-check coverage only
+internal/typemap/collation.go,Terra,not examined beyond file enumeration/search
+internal/typemap/inspect.go,Terra,not examined beyond file enumeration/search
+internal/typemap/typemap.go,Terra,selected functions/diff only
+internal/typemap/validate.go,Terra,not examined beyond file enumeration/search
+internal/validate/legacy_vars.go,Coordinator,inventory / static-check coverage only
+internal/validate/mariadb.go,Coordinator,inventory / static-check coverage only
+internal/validate/mysql_to_pg.go,Coordinator,inventory / static-check coverage only
+internal/validate/postgres.go,Coordinator,inventory / static-check coverage only
+internal/validate/rowkey.go,Coordinator,inventory / static-check coverage only
+internal/validate/target_engine.go,Coordinator,inventory / static-check coverage only
+internal/validate/validate.go,Coordinator,inventory / static-check coverage only
+internal/verify/keyless.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/verify/live.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/verify/live_keys.go,Sol,inventory / static-check coverage only
+internal/verify/merkle.go,Sol,inventory / static-check coverage only
+internal/verify/merkle_cross.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/verify/merkle_keys.go,Sol,inventory / static-check coverage only
+internal/verify/recheck.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/verify/sample_keys.go,Sol,inventory / static-check coverage only
+internal/web/actions.go,Coordinator,inventory / static-check coverage only
+internal/web/actions_ops.go,Coordinator,inventory / static-check coverage only
+internal/web/api.go,Coordinator,inventory / static-check coverage only
+internal/web/audit.go,Coordinator,inventory / static-check coverage only
+internal/web/auth.go,Coordinator,inventory / static-check coverage only
+internal/web/chart.go,Coordinator,inventory / static-check coverage only
+internal/web/config.go,Coordinator,inventory / static-check coverage only
+internal/web/configedit.go,Coordinator,selected functions / boundary tracing
+internal/web/created.go,Coordinator,selected functions / boundary tracing
+internal/web/envfile.go,Coordinator,inventory / static-check coverage only
+internal/web/exitinfo.go,Coordinator,inventory / static-check coverage only
+internal/web/fileperm.go,Coordinator,inventory / static-check coverage only
+internal/web/init.go,Coordinator,inventory / static-check coverage only
+internal/web/jobs.go,Coordinator,inventory / static-check coverage only
+internal/web/jobs_http.go,Coordinator,inventory / static-check coverage only
+internal/web/mask.go,Coordinator,selected functions / boundary tracing
+internal/web/masktext.go,Coordinator,selected functions / boundary tracing
+internal/web/meta.go,Coordinator,selected functions / boundary tracing
+internal/web/newpipeline.go,Coordinator,inventory / static-check coverage only
+internal/web/pages.go,Coordinator,inventory / static-check coverage only
+internal/web/pipelines.go,Coordinator,inventory / static-check coverage only
+internal/web/sampler.go,Coordinator,inventory / static-check coverage only
+internal/web/server.go,Coordinator,inventory / static-check coverage only
+internal/web/static/app.css,Coordinator,inventory / static-check coverage only
+internal/web/static/app.js,Coordinator,inventory / static-check coverage only
+internal/web/static/theme.js,Coordinator,inventory / static-check coverage only
+internal/web/store/mem.go,Coordinator,inventory / static-check coverage only
+internal/web/store/migrate.go,Coordinator,inventory / static-check coverage only
+internal/web/store/migrations/001_init.sql,Coordinator,inventory / static-check coverage only
+internal/web/store/migrations/002_audit_append_only.sql,Coordinator,inventory / static-check coverage only
+internal/web/store/pg.go,Coordinator,inventory / static-check coverage only
+internal/web/store/secretbox.go,Coordinator,inventory / static-check coverage only
+internal/web/store/store.go,Coordinator,inventory / static-check coverage only
+internal/web/store/storetest/contract.go,Coordinator,inventory / static-check coverage only
+internal/web/templates/base.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/detail.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/job.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/jobs.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/login.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/new_pipeline.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/overview.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/pipelines.html,Coordinator,inventory / static-check coverage only
+internal/web/templates/wizard.html,Coordinator,inventory / static-check coverage only
+internal/web/tuning.go,Coordinator,selected functions / boundary tracing
+internal/web/views.go,Coordinator,selected functions / boundary tracing
+internal/web/wizards.go,Coordinator,inventory / static-check coverage only
+internal/writer/keyless.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/writer/orderer.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/writer/pg.go,Sol,selected functions / data-path tracing; see storage manifest
+internal/writer/pg_range.go,Sol,inventory / static-check coverage only
+internal/writer/writer.go,Sol,selected functions / data-path tracing; see storage manifest
+schema/seed.schema.json,Luna,body fully read
+schema/validator.go,Luna,body fully read
+scripts/check.sh,Luna,body fully read
+scripts/gate1-e2e.sh,Luna,body fully read
+scripts/install.sh,Luna,body fully read
+scripts/package.sh,Luna,body fully read
+tools/bench/main.go,Coordinator,inventory / static-check coverage only
+tools/benchclient/main.go,Coordinator,inventory / static-check coverage only
+tools/benchclient/sysbench_raw.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/analysis.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/bench.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/decide.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/engine.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/fixture.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/fixturecreate.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/main.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/misc.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/plan.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/plot.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/rawlog.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/run.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/sampler.go,Coordinator,inventory / static-check coverage only
+tools/g2bench/toolchain/build-sysbench.sh,Coordinator,inventory / static-check coverage only
+tools/genload/main.go,Coordinator,inventory / static-check coverage only
+tools/soak/compare.go,Coordinator,inventory / static-check coverage only
+tools/soak/main.go,Coordinator,inventory / static-check coverage only

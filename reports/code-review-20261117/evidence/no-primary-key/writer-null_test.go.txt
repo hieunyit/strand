@@ -1,0 +1,84 @@
+package writer
+
+import (
+ "context"
+ "fmt"
+ "strings"
+ "testing"
+
+ "github.com/jackc/pgx/v5"
+ "github.com/jackc/pgx/v5/pgconn"
+ "strand/internal/assemble"
+ "strand/internal/model"
+ "strand/internal/reader"
+)
+
+func auditAssemble(t *testing.T, before, after any) *model.Txn {
+ t.Helper()
+ a := assemble.New(assemble.WithKeylessFunc(func(id model.TableID) bool {return id == klT}))
+ p:=model.Pos{Engine:model.EngineMySQL, GTID:"3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}
+ evs:=[]reader.Event{
+  {Type:reader.EventGTID, Pos:p},
+  {Type:reader.EventQuery, Query:"BEGIN", Pos:p},
+  {Type:reader.EventTableMap, Schema:"d", Table:"k", Columns:[]string{"a","b"}, Pos:p},
+  {Type:reader.EventRows, Schema:"d", Table:"k", Op:model.OpUpdate, Rows:[][]any{{int64(1),before},{int64(1),after}}, Pos:p},
+  {Type:reader.EventXID, XID:1, Pos:p},
+ }
+ var txn *model.Txn
+ for _,ev:=range evs { var err error; got,err:=a.Push(ev); if err!=nil {t.Fatal(err)}; if got!=nil {txn=got} }
+ if txn==nil || len(txn.Rows)!=1 || len(txn.Rows[0].OldKey)!=2 { t.Fatalf("assembler failed to retain changed before-image: %+v",txn) }
+ t.Logf("assembler: before=%#v after=%#v OldKey=%#v Key=%#v",before,after,txn.Rows[0].OldKey,txn.Rows[0].Key)
+ return txn
+}
+
+func TestAuditKeylessNullLiteralMySQL(t *testing.T) {
+ for _,reverse:=range []bool{false,true} { t.Run(fmt.Sprint(reverse),func(t *testing.T){
+  var before,after any=nil,"<nil>";if reverse {before,after=after,before}
+  txn:=auditAssemble(t,before,after)
+  w,st:=klWriter(t,true);var stats ApplyStats
+  if err:=w.ApplyBatch(context.Background(),[]*model.Txn{txn},DeltaRow{Applied:"gtid:1",Stats:&stats});err!=nil{t.Fatal(err)}
+  t.Logf("committed=%v delta_updated=%v rows_written=%d SQL=%q",st.committed,st.deltaUpdated(),stats.Rows,st.execs)
+  if !strings.Contains(strings.Join(st.execs,"\n"),"UPDATE `d`.`k`") {t.Fatal("changed keyless row was silently skipped while checkpoint committed")}
+ })}
+}
+
+type auditPGTx struct {pgx.Tx;sql []string;delta string;committed bool}
+func (x *auditPGTx) Exec(_ context.Context,q string,args ...any)(pgconn.CommandTag,error){x.sql=append(x.sql,q);if strings.Contains(q,"_strand_worker_delta"){x.delta=args[0].(string)};return pgconn.NewCommandTag("UPDATE 1"),nil}
+func(x *auditPGTx) Commit(context.Context)error{x.committed=true;return nil}
+func(x *auditPGTx) Rollback(context.Context)error{return nil}
+func TestAuditKeylessNullLiteralPG(t *testing.T){
+ txn:=auditAssemble(t,nil,"<nil>")
+ w:=NewPGWriter(nil,"p",1,1);w.SetPrimaryKey(klT,[]string{"a","b"});w.SetKeyless(klT,true)
+ tx:=&auditPGTx{};w.SetTxBeginner(func(context.Context)(pgx.Tx,error){return tx,nil});var stats ApplyStats
+ if err:=w.ApplyBatch(context.Background(),[]*model.Txn{txn},DeltaRow{Applied:"gtid:1",Stats:&stats});err!=nil{t.Fatal(err)}
+ t.Logf("committed=%v delta=%q rows_written=%d SQL=%q",tx.committed,tx.delta,stats.Rows,tx.sql)
+ if !strings.Contains(strings.Join(tx.sql,"\n"),`UPDATE "d"."k"`){t.Fatal("changed keyless row was silently skipped while checkpoint committed")}
+}
+
+func TestAuditKeylessChangedControl(t *testing.T){
+ txn:=auditAssemble(t,nil,"ordinary")
+ w,st:=klWriter(t,true)
+ if err:=w.ApplyBatch(context.Background(),[]*model.Txn{txn},DeltaRow{Applied:"gtid:1"});err!=nil{t.Fatal(err)}
+ if !strings.Contains(strings.Join(st.execs,"\n"),"UPDATE `d`.`k`"){t.Fatal("control did not execute actual DML")}
+}
+
+func TestAuditKeylessNullLiteralStrict(t *testing.T){
+ for _,engine:=range []string{"mysql","pg"}{t.Run(engine,func(t *testing.T){
+  txn:=auditAssemble(t,nil,"<nil>");txn.SetSeq(1)
+  var queries []string;var committed bool;var stats ApplyStats
+  delta:=DeltaRow{Stats:&stats,Global:func()(string,error){return "strict-gtid:1",nil}}
+  co:=NewCommitOrderer("strict",1)
+  if engine=="mysql"{
+   w,st:=klWriter(t,true);w.SetCommitOrderer(co)
+   if err:=w.ApplyBatch(context.Background(),[]*model.Txn{txn},delta);err!=nil{t.Fatal(err)}
+   queries,committed=st.execs,st.committed
+  }else{
+   w:=NewPGWriter(nil,"p",1,1);w.SetPrimaryKey(klT,[]string{"a","b"});w.SetKeyless(klT,true);w.SetCommitOrderer(co)
+   tx:=&auditPGTx{};w.SetTxBeginner(func(context.Context)(pgx.Tx,error){return tx,nil})
+   if err:=w.ApplyBatch(context.Background(),[]*model.Txn{txn},delta);err!=nil{t.Fatal(err)}
+   queries,committed=tx.sql,tx.committed
+  }
+  t.Logf("committed=%v rows_written=%d next_commit=%d SQL=%q",committed,stats.Rows,co.NextCommit(),queries)
+  if len(queries)==1&&strings.Contains(queries[0],"_strand_checkpoint"){t.Fatal("strict checkpoint committed and orderer advanced with no changed-row DML")}
+ })}
+}

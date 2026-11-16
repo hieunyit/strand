@@ -1,0 +1,70 @@
+package writer
+import(
+ "context"
+ "database/sql"
+ "database/sql/driver"
+ "fmt"
+ "io"
+ "strings"
+ "testing"
+ "strand/internal/checkpoint"
+ "strand/internal/model"
+)
+type auditDB struct {pipelineEpoch,workerEpoch int64;workerExists,committed bool;dataWrites int}
+type auditConn struct{*auditDB}
+type auditConnector struct{*auditDB}
+func(c auditConnector)Connect(context.Context)(driver.Conn,error){return &auditConn{c.auditDB},nil}
+func(c auditConnector)Driver()driver.Driver{return auditDriver{}}
+type auditDriver struct{}
+func(auditDriver)Open(string)(driver.Conn,error){return nil,fmt.Errorf("use connector")}
+func(c *auditConn)Prepare(string)(driver.Stmt,error){return nil,fmt.Errorf("prepare unsupported")}
+func(c *auditConn)Close()error{return nil}
+func(c *auditConn)Begin()(driver.Tx,error){return c,nil}
+func(c *auditConn)Commit()error{c.committed=true;return nil}
+func(c *auditConn)Rollback()error{return nil}
+func(c *auditConn)ExecContext(_ context.Context,q string,args []driver.NamedValue)(driver.Result,error){
+ switch{
+ case strings.Contains(q,"INSERT INTO _strand_worker_delta"):
+  ep:=args[2].Value.(int64);if !c.workerExists||ep>c.workerEpoch{c.workerEpoch=ep};c.workerExists=true;return driver.RowsAffected(1),nil
+ case strings.HasPrefix(q,"UPDATE _strand_worker_delta SET applied"):
+  if c.workerEpoch==args[3].Value.(int64){return driver.RowsAffected(1),nil};return driver.RowsAffected(0),nil
+ case strings.HasPrefix(q,"INSERT INTO `app`.`t`"):
+  c.dataWrites++;return driver.RowsAffected(1),nil
+ default:return nil,fmt.Errorf("unexpected exec %s",q)
+ }
+}
+type auditRows struct{cols []string;data [][]driver.Value}
+func(r *auditRows)Columns()[]string{return r.cols}
+func(r *auditRows)Close()error{return nil}
+func(r *auditRows)Next(v []driver.Value)error{if len(r.data)==0{return io.EOF};copy(v,r.data[0]);r.data=r.data[1:];return nil}
+func(c *auditConn)QueryContext(_ context.Context,q string,_ []driver.NamedValue)(driver.Rows,error){
+ switch{
+ case strings.HasPrefix(q,"SELECT epoch FROM _strand_worker_delta"):
+ return &auditRows{[]string{"epoch"},[][]driver.Value{{c.workerEpoch}}},nil
+ case strings.HasPrefix(q,"SELECT epoch FROM _strand_pipeline"):
+ return &auditRows{[]string{"epoch"},[][]driver.Value{{c.pipelineEpoch}}},nil
+ case strings.HasPrefix(q,"SELECT worker_id, epoch, batch_no, applied"):
+ return &auditRows{[]string{"worker_id","epoch","batch_no","applied"},[][]driver.Value{{int64(2),c.workerEpoch,int64(1),""}}},nil
+ default:return nil,fmt.Errorf("unexpected query %s",q)
+ }
+}
+func TestAuditOldWorkerInsertedAfterTakeover(t *testing.T){
+ // Takeover already committed epoch 2; old startup has not yet inserted worker ID 2.
+ state:=&auditDB{pipelineEpoch:2}
+ db:=sql.OpenDB(auditConnector{state});defer db.Close()
+ ctx:=checkpoint.WithFence(context.Background(),checkpoint.Fence{PipelineID:"audit",Epoch:1})
+ w:=NewMySQLWriter(db,"audit",2,1)
+ if err:=w.EnsureWorkerRow(ctx);err!=nil {t.Logf("correctly fenced: %v",err);return}
+ c:=checkpoint.NewCompactor(db,nil,"audit",model.EngineMySQL,model.EngineMySQL,checkpoint.DefaultCompactorConfig("audit",1))
+ if err:=c.Compact(ctx);err!=nil{t.Logf("startup compaction fenced: %v",err);return}
+ table:=model.TableID{Schema:"app",Table:"t"};w.SetPrimaryKey(table,[]string{"id"})
+ tx:=&model.Txn{Rows:[]model.RowChange{{Table:table,Op:model.OpInsert,Key:[]model.Value{int64(1)},Cols:[]model.ColValue{{Name:"id",Value:int64(1)}}}}}
+ err:=w.ApplyBatch(ctx,[]*model.Txn{tx},DeltaRow{Applied:"3e11fa47-71ca-11e1-9e33-c80aa9429562:1"})
+ t.Logf("pipeline epoch=%d, stale worker epoch=%d, apply error=%v, data writes=%d, committed=%v",state.pipelineEpoch,state.workerEpoch,err,state.dataWrites,state.committed)
+ if err==nil&&state.dataWrites>0&&state.committed{t.Fatal("stale relaxed writer committed data after takeover")}
+}
+func TestAuditPartitionedKeylessNeedsTableOID(t *testing.T){
+ q:=buildKeylessDeletePG(model.TableID{Schema:"app",Table:"parent"},[]string{"partition_key","value"})
+ t.Log(q)
+ if !strings.Contains(q,"tableoid"){t.Fatal("ctid is only unique inside one physical relation; partitioned/inherited target needs tableoid too")}
+}

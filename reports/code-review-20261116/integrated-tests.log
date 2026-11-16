@@ -1,0 +1,5 @@
+ok  	strand/internal/reader/pg	0.317s
+ok  	strand/internal/snapshot	1.546s
+ok  	strand/internal/typemap	0.441s
+ok  	strand/internal/web	0.605s
+ok  	strand/internal/pipeline	0.500s

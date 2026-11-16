@@ -1,0 +1,32 @@
+--- FAIL: TestAudit2PasswordOverrideWhitespace (0.00s)
+    audit2_root_test.go:6: password modified: got "canary"
+FAIL
+FAIL	strand/internal/config	0.015s
+--- FAIL: TestAudit2MySQLMissingSignals (0.00s)
+    audit2_root_test.go:11: all database signal reads failed but ReadSignals returned nil error; governor never enters blind mode
+FAIL
+FAIL	strand/internal/governor	0.296s
+ok  	strand/internal/promote	0.333s [no tests to run]
+ok  	strand/internal/snapshot	0.303s
+--- FAIL: TestAuditSpillExceedsTotalHardLimit (0.02s)
+    audit_storage_test.go:22: spill bytes=262182, configured hard limit=65536, reported usage={LocalBytes:200 BucketBytes:0}, append err=<nil>
+    audit_storage_test.go:23: spool accepted spill larger than total hard limit
+FAIL
+FAIL	strand/internal/spool	0.341s
+--- FAIL: TestAudit2CompactYAMLSecret (0.00s)
+    audit2_root_test.go:6: valid compact JSON/YAML password remains visible
+--- FAIL: TestAudit2QuotedPGDSNSecret (0.00s)
+    audit2_root_test.go:10: quoted keyword DSN password remains visible
+--- FAIL: TestAudit2UnrestoredCompactPlaceholder (0.00s)
+    audit2_root_test.go:14: unrestored secret placeholder can be saved as actual password
+FAIL
+FAIL	strand/internal/web	0.345s
+--- FAIL: TestAuditOldWorkerInsertedAfterTakeover (0.00s)
+    audit_storage_test.go:63: pipeline epoch=2, stale worker epoch=1, apply error=<nil>, data writes=1, committed=true
+    audit_storage_test.go:64: stale relaxed writer committed data after takeover
+--- FAIL: TestAuditPartitionedKeylessNeedsTableOID (0.00s)
+    audit_storage_test.go:68: DELETE FROM "app"."parent" WHERE ctid = (SELECT ctid FROM "app"."parent" WHERE "partition_key" IS NOT DISTINCT FROM $1 AND "value" IS NOT DISTINCT FROM $2 LIMIT 1)
+    audit_storage_test.go:69: ctid is only unique inside one physical relation; partitioned/inherited target needs tableoid too
+FAIL
+FAIL	strand/internal/writer	0.316s
+FAIL

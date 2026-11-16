@@ -1,0 +1,9 @@
+goos: linux
+goarch: amd64
+pkg: strand/internal/snapshot
+cpu: Intel(R) Xeon(R) CPU E5-2696 v4 @ 2.20GHz
+BenchmarkAuditRereadBounds/500-16         	    1009	    129283 ns/op
+BenchmarkAuditRereadBounds/5000-16        	      74	   1944230 ns/op
+BenchmarkAuditRereadBounds/10000-16       	      32	   4926005 ns/op
+PASS
+ok  	strand/internal/snapshot	4.128s

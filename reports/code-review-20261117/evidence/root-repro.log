@@ -1,0 +1,13 @@
+--- FAIL: TestAudit2CompactYAMLSecret (0.00s)
+    audit2_root_test.go:6: valid compact JSON/YAML password remains visible
+--- FAIL: TestAudit2QuotedPGDSNSecret (0.00s)
+    audit2_root_test.go:10: quoted keyword DSN password remains visible
+--- FAIL: TestAudit2UnrestoredCompactPlaceholder (0.00s)
+    audit2_root_test.go:14: unrestored secret placeholder can be saved as actual password
+FAIL
+FAIL	strand/internal/web	0.345s
+--- FAIL: TestAudit2PasswordOverrideWhitespace (0.00s)
+    audit2_root_test.go:6: password modified: got "canary"
+FAIL
+FAIL	strand/internal/config	0.017s
+FAIL

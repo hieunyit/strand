@@ -1,0 +1,6 @@
+=== RUN   TestAuditKeylessCitextGate
+    nokey_pipeline_audit_test.go:30: citext source accepted as keyless with PK=[v]; deterministic target collation accepted, despite case-folding equality
+--- FAIL: TestAuditKeylessCitextGate (0.00s)
+FAIL
+FAIL	strand/internal/pipeline	0.389s
+FAIL
