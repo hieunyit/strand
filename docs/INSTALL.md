@@ -6,7 +6,7 @@ Mục lục: Cài nhanh, 1 Yêu cầu và thành phần, 2 Cài đặt, 3 DB ngu
 
 ## Cài nhanh
 
-Hai lệnh là có Web UI (mặc định nghe `127.0.0.1:8080`, chưa mở ra mạng):
+Hai lệnh là có Web UI. `strand web init` mặc định nghe `127.0.0.1:8080` (chỉ máy chủ); `scripts/install.sh --with-web` mặc định mở `0.0.0.0:8080` bằng HTTP thường cho cả mạng (xem dưới):
 
 ```bash
 # Gói .deb / .rpm
@@ -21,7 +21,8 @@ sudo scripts/install.sh --binary ./strand --with-web --generate-password
 - Chạy lại an toàn: `web.yaml` có sẵn giữ nguyên `listen`/`state_dir`/`scan` (lệnh nói rõ điều này; thêm `--force` để ghi đè), chỉ mật khẩu/token được đặt lại; không đưa mật khẩu thì giữ hash cũ. Đổi mật khẩu sau này: `strand web passwd`.
 - Các cờ khác: `--listen`, `--state-dir`, `--scan` (lặp lại được; mặc định `/etc/strand/*.yaml`), `--tls-cert`/`--tls-key`, `--secure-cookies`, `--trust-forwarded-for`. `--listen` không phải loopback mà thiếu TLS thì lệnh báo lỗi và không ghi gì.
 - `scripts/install.sh` (chạy bằng root, idempotent) cài binary vào `--prefix` (mặc định `/usr/local/bin`), tạo user/group `strand`, `/etc/strand`, unit systemd (ExecStart trỏ đúng binary), quy tắc polkit và ví dụ; `--with-web` gọi tiếp `strand web init --enable` và chuyển nguyên `--listen`, `--generate-password`, `--token`, `--tls-cert`... Thêm `--no-start` để không bật dịch vụ.
-- Truy cập từ máy khác: `ssh -L 8080:127.0.0.1:8080 user@strand-host`, mở `http://127.0.0.1:8080` (hoặc reverse proxy/TLS: mục 5.4).
+- `scripts/install.sh --with-web` mặc định: `--listen 0.0.0.0:8080 --allow-plain-http` (có `--tls-cert`/`--tls-key` thì HTTPS, không `--allow-plain-http`). Máy đã có `web.yaml` nghe loopback thì script tự chuyển sang `0.0.0.0:8080` (in dòng `listen ... -> 0.0.0.0:8080`). Chỉ cho máy chủ: `--listen 127.0.0.1:8080 --force`. Nhớ mở cổng 8080 trên tường lửa.
+- Truy cập từ máy khác (khi nghe loopback): `ssh -L 8080:127.0.0.1:8080 user@strand-host`, mở `http://127.0.0.1:8080` (hoặc reverse proxy/TLS: mục 5.4).
 - Mở thẳng cho mọi máy trong mạng nội bộ, không TLS: `sudo strand web init --listen 0.0.0.0:8080 --allow-plain-http --enable` (web.yaml có sẵn thì thêm `--force`; cài tay: `scripts/install.sh ... --with-web --listen 0.0.0.0:8080 --allow-plain-http`), rồi mở `http://<IP-máy-chủ>:8080` và mở cổng 8080 trên tường lửa. Mật khẩu, cookie phiên và token đi dạng rõ trên mạng: chỉ dùng trong mạng tin cậy; web in cảnh báo mỗi lần khởi động. Có TLS thì dùng `--tls-cert`/`--tls-key` thay cho `--allow-plain-http`.
 
 Phần dưới là cài từng bước (khi cần kiểm soát từng việc).
@@ -387,6 +388,7 @@ Trước đó nên dừng pipeline êm (`systemctl stop strand@x`, tự ghi chec
 | Pipeline thứ hai thoát ngay với `start metrics server: listen on ...: address already in use` | Trùng cổng `observability.metrics` (lỗi này làm `sync` dừng hẳn). Mỗi pipeline một cổng; trên web, cổng trùng bị từ chối 409 |
 | Đăng nhập sai nhiều lần ra `429` | Quá 5 lần sai/phút từ một IP thì khóa 1 phút, tái phạm gấp đôi, tối đa 15 phút. Đợi hết `retry_after_s` (xem `audit.log`). Sau reverse proxy mà ai cũng bị khóa chung một IP: bật `trust_forwarded_for` (và để proxy đặt đúng `X-Forwarded-For`) |
 | `403` khi đăng nhập/POST bằng curl | Thiếu token CSRF (mục 6.7); script nên dùng Bearer token |
+| Trình duyệt báo `missing or invalid CSRF token` khi đăng nhập | Bản mới chấp nhận form đăng nhập khi trình duyệt xác nhận cùng origin (`Origin`/`Sec-Fetch-Site`), kể cả cookie `strand_login` thiếu hoặc cũ; vẫn gặp thì: tải lại trang, kiểm tra proxy giữ nguyên header `Host` (`proxy_set_header Host $host`), xem lý do trong `audit.log` (`login_csrf_rejected`, `reason`) |
 | Quên mật khẩu | Chạy lại `sudo strand web passwd --config /etc/strand/web.yaml`, sửa quyền file, restart `strand-web` (session cũ mất). Không có cách khôi phục mật khẩu cũ (chỉ lưu bcrypt hash) |
 | Quên/lộ token | Chạy lại `strand web token`: token mới thay token cũ |
 | Pipeline `failed` ở chế độ nền và không tự chạy lại | Đúng thiết kế: chế độ nền không có supervisor (`auto_restart=false`). Đọc `last_exit`/tab Errors, sửa nguyên nhân, bấm Start. Muốn tự restart khi lỗi tạm: dùng `strand@<name>` (`Restart=on-failure`) |

@@ -6,7 +6,10 @@
 # Việc làm: cài binary 0755; tạo group/user strand; /etc/strand (root:strand 0750); chép strand@.service và
 # strand-web.service vào /etc/systemd/system (ExecStart trỏ binary đã cài); chép quy tắc polkit nếu có
 # /etc/polkit-1/rules.d; systemctl daemon-reload; chép ví dụ vào /usr/local/share/doc/strand.
-# --with-web: chạy `strand web init --enable` (thêm --no-start thì không bật dịch vụ); các tùy chọn sau đây
+# --with-web: chạy `strand web init --enable` (thêm --no-start thì không bật dịch vụ). Mặc định web nghe
+# 0.0.0.0:8080 bằng HTTP thường (--allow-plain-http; mật khẩu không mã hoá, chỉ dùng trong mạng tin cậy);
+# --tls-cert/--tls-key thì dùng HTTPS; chỉ cho máy chủ truy cập: --listen 127.0.0.1:8080. web.yaml có sẵn đang
+# nghe loopback mà không đưa --listen thì được chuyển sang 0.0.0.0:8080. Các tùy chọn sau đây
 # được chuyển nguyên cho nó: --listen X, --state-dir X, --scan X, --tls-cert X, --tls-key X, --secure-cookies,
 # --trust-forwarded-for, --allow-plain-http, --generate-password, --password-stdin, --token, --force.
 set -eu
@@ -21,6 +24,8 @@ prefix=/usr/local/bin
 with_web=0
 no_start=0
 webargs=""
+listen_set=0
+tls_set=0
 
 # Thêm một tham số vào danh sách chuyển cho `strand web init` (đã quote an toàn bằng '...').
 add_webarg() {
@@ -50,6 +55,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--listen | --state-dir | --scan | --tls-cert | --tls-key)
 		[ $# -ge 2 ] || usage
+		case "$1" in
+		--listen) listen_set=1 ;;
+		--tls-cert | --tls-key) tls_set=1 ;;
+		esac
 		add_webarg "$1"
 		add_webarg "$2"
 		shift 2
@@ -163,6 +172,22 @@ done
 
 if [ "$with_web" -eq 1 ]; then
 	echo "==> strand web init"
+	if [ "$listen_set" -eq 0 ]; then
+		# Mặc định mở cho mạng: 0.0.0.0:8080 (HTTPS nếu có --tls-cert, không thì HTTP thường).
+		add_webarg --listen
+		add_webarg 0.0.0.0:8080
+		[ "$tls_set" -eq 1 ] || add_webarg --allow-plain-http
+		wy=/etc/strand/web.yaml
+		if [ -f "$wy" ] && cur=$(sed -n 's/^listen:[[:space:]]*["'\'']\{0,1\}\([^"'\''[:space:]#]*\).*/\1/p' "$wy" | head -n 1) &&
+			case "$cur" in 127.*:* | localhost:* | \[::1\]:*) true ;; *) false ;; esac; then
+			# web.yaml có sẵn nghe loopback: chuyển sang 0.0.0.0:8080 (web init không --force sẽ giữ listen cũ).
+			echo "    $wy: listen $cur -> 0.0.0.0:8080"
+			sed -i 's/^listen:.*/listen: 0.0.0.0:8080/' "$wy"
+			if [ "$tls_set" -eq 0 ] && ! grep -q '^allow_plain_http:' "$wy"; then
+				printf 'allow_plain_http: true\n' >>"$wy"
+			fi
+		fi
+	fi
 	enable="--enable"
 	[ "$no_start" -eq 1 ] && enable=""
 	# webargs đã được quote từng phần, nên eval an toàn.

@@ -826,3 +826,58 @@ func TestSetConfigKeyKeepsFileAndMode(t *testing.T) {
 		t.Fatal("unknown keys must be rejected")
 	}
 }
+
+// Đăng nhập bằng form khi cookie strand_login không về tới server hoặc là cookie cũ (tab khác, trang để lâu,
+// cookie Secure cùng tên từ HTTPS...): trình duyệt vẫn xác nhận cùng origin qua Sec-Fetch-Site/Origin nên
+// phải đăng nhập được; request cross-site thì vẫn bị chặn.
+func TestFormLoginSameOriginWithoutLoginCookie(t *testing.T) {
+	e := newEnv(t, nil)
+	form := "password=" + testPassword + "&csrf=stale-token-from-another-tab"
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	with := func(extra map[string]string) map[string]string {
+		h := map[string]string{}
+		for k, v := range ct {
+			h[k] = v
+		}
+		for k, v := range extra {
+			h[k] = v
+		}
+		return h
+	}
+	// Không có cookie strand_login, token lệch: trình duyệt cùng origin.
+	for name, h := range map[string]map[string]string{
+		"sec-fetch-site": {"Sec-Fetch-Site": "same-origin", "Origin": e.ts.URL},
+		"origin-only":    {"Origin": e.ts.URL},
+	} {
+		c := e.client()
+		resp, _ := e.do(c, "POST", "/login", form, with(h))
+		if resp.StatusCode != http.StatusSeeOther {
+			t.Errorf("%s: same-origin form login without login cookie: %d, want 303", name, resp.StatusCode)
+		}
+	}
+	// Cookie cũ (khác token trong form) nhưng cùng origin: vẫn được.
+	c := e.client()
+	e.do(c, "GET", "/login", "", nil)
+	resp, _ := e.do(c, "POST", "/login", form, with(map[string]string{"Origin": e.ts.URL}))
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("stale login cookie, same origin: %d, want 303", resp.StatusCode)
+	}
+	// Cross-site và thiếu mọi bằng chứng: bị chặn, audit ghi lý do.
+	for name, h := range map[string]map[string]string{
+		"cross-site":      {"Sec-Fetch-Site": "cross-site", "Origin": "http://evil.example"},
+		"origin-mismatch": {"Origin": "http://evil.example"},
+		"no-evidence":     {},
+	} {
+		c := e.client()
+		resp, body := e.do(c, "POST", "/login", form, with(h))
+		if resp.StatusCode != http.StatusForbidden || !strings.Contains(body, "CSRF") {
+			t.Errorf("%s: %d, want 403", name, resp.StatusCode)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(e.dir, "state", "audit.log"))
+	for _, want := range []string{`"reason":"cross_site_cross-site"`, `"reason":"origin_mismatch"`, `"reason":"no_login_cookie"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("audit missing %s", want)
+		}
+	}
+}

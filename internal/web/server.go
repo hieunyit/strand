@@ -362,7 +362,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	tok := randToken(24)
-	s.setCookie(w, loginCookie, tok, 600)
+	s.setCookie(w, loginCookie, tok, loginCookieMaxAge)
 	next := r.URL.Query().Get("next")
 	if r.Method == http.MethodPost {
 		next = r.FormValue("next")
@@ -375,17 +375,60 @@ func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int,
 	_ = s.pages["login"].ExecuteTemplate(w, "login", map[string]any{"CSRF": tok, "Error": msg, "Next": next, "Version": s.version})
 }
 
-// checkLogin kiểm CSRF của form đăng nhập (cookie ↔ trường/ header), giới hạn tốc độ rồi mật khẩu.
-// Trả (status, thông báo); status 0 = thành công.
-func (s *Server) checkLogin(r *http.Request, password string) (int, string) {
-	ip := s.clientIP(r)
-	c, err := r.Cookie(loginCookie)
+// loginCookieMaxAge: thời hạn cookie CSRF của trang đăng nhập (giây). Để trang đăng nhập mở lâu vẫn dùng được.
+const loginCookieMaxAge = 3600
+
+// loginCSRFReason trả "" nếu request đăng nhập qua kiểm CSRF, ngược lại lý do (ghi audit).
+// Hai cách được chấp nhận:
+//  1. double-submit: token trong form/header khớp cookie strand_login (cách cũ; client không phải trình duyệt
+//     như curl dùng cách này);
+//  2. trình duyệt xác nhận cùng origin: Sec-Fetch-Site: same-origin, hoặc Origin trùng host của request.
+//     Trình duyệt luôn gửi các header này với POST và trang khác không giả được, nên đây là kiểm CSRF chuẩn
+//     (OWASP "verifying origin with standard headers"). Cách này cứu trường hợp cookie strand_login không về
+//     tới server hoặc là cookie cũ: mở trang đăng nhập ở tab khác, trang để quá lâu, trình duyệt giữ cookie
+//     Secure cùng tên từ lần vào qua HTTPS (HTTP không ghi đè được), chặn cookie theo IP...
+//
+// Request cross-site (Sec-Fetch-Site: cross-site / same-site, hoặc Origin khác host) luôn bị từ chối nếu
+// không có double-submit hợp lệ.
+func loginCSRFReason(r *http.Request) string {
 	got := r.Header.Get(csrfHeader)
 	if got == "" {
 		got = r.PostForm.Get(csrfField)
 	}
-	if err != nil || got == "" || !constEq(got, c.Value) {
-		s.auditDenied(r, "login_csrf_rejected")
+	c, cerr := r.Cookie(loginCookie)
+	if cerr == nil && got != "" && constEq(got, c.Value) {
+		return ""
+	}
+	sfs := r.Header.Get("Sec-Fetch-Site")
+	origin := r.Header.Get("Origin")
+	switch {
+	case sfs == "same-origin":
+		return ""
+	case sfs != "" && sfs != "none":
+		return "cross_site_" + sfs
+	case origin != "" && origin != "null":
+		if u, err := url.Parse(origin); err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) {
+			return ""
+		}
+		return "origin_mismatch"
+	}
+	switch {
+	case cerr != nil:
+		return "no_login_cookie"
+	case got == "":
+		return "no_token"
+	default:
+		return "token_mismatch"
+	}
+}
+
+// checkLogin kiểm CSRF của form đăng nhập (cookie ↔ trường/ header), giới hạn tốc độ rồi mật khẩu.
+// Trả (status, thông báo); status 0 = thành công.
+func (s *Server) checkLogin(r *http.Request, password string) (int, string) {
+	ip := s.clientIP(r)
+	if reason := loginCSRFReason(r); reason != "" {
+		_ = s.audit.Log(AuditEntry{IP: ip, Action: "login_csrf_rejected", Result: "denied",
+			Args: []string{r.Method, r.URL.Path}, Detail: map[string]any{"reason": reason}})
 		return http.StatusForbidden, "missing or invalid CSRF token; reload the page and try again"
 	}
 	if ok, wait := s.limiter.Allow(ip); !ok {
