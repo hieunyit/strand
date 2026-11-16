@@ -27,20 +27,88 @@
     return !!content.querySelector('form[data-dirty]');
   }
 
+  // Trạng thái giao diện phải giữ qua mỗi lần tự làm mới (thay #content): vị trí cuộn của trang và của các
+  // khung cuộn (log, danh sách bảng...), <details> đang mở, ô tích / giá trị người dùng đã đổi. Không có bước
+  // này, mỗi 5 giây bảng và log "nhảy" về đầu, mục mở bị đóng, lựa chọn bị mất.
+  function keyOf(el, i) { return el.id ? '#' + el.id : el.tagName + ':' + i; }
+  function scrollables() {
+    var out = [];
+    content.querySelectorAll('*').forEach(function (el) {
+      if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) {
+        var cs = getComputedStyle(el);
+        if (/(auto|scroll)/.test(cs.overflow + cs.overflowY + cs.overflowX)) { out.push(el); }
+      }
+    });
+    return out;
+  }
+  function saveState() {
+    var st = { y: window.scrollY, x: window.scrollX, scroll: {}, open: {}, checks: {}, values: {} };
+    scrollables().forEach(function (el, i) {
+      st.scroll[keyOf(el, i)] = { top: el.scrollTop, left: el.scrollLeft, bottom: el.scrollTop + el.clientHeight >= el.scrollHeight - 4 };
+    });
+    content.querySelectorAll('details').forEach(function (el, i) { st.open[keyOf(el, i)] = el.open; });
+    content.querySelectorAll('input[name], select[name], textarea[name]').forEach(function (el) {
+      var k = (el.form && el.form.getAttribute('data-action') || '') + '|' + el.name;
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        if (el.checked !== el.defaultChecked) { st.checks[k + '|' + el.value] = el.checked; }
+      } else if (el.type !== 'hidden' && el.type !== 'password' && el.value !== el.defaultValue) {
+        st.values[k] = el.value;
+      }
+    });
+    return st;
+  }
+  function restoreState(st) {
+    content.querySelectorAll('details').forEach(function (el, i) {
+      var k = keyOf(el, i);
+      if (k in st.open) { el.open = st.open[k]; }
+    });
+    content.querySelectorAll('input[name], select[name], textarea[name]').forEach(function (el) {
+      var k = (el.form && el.form.getAttribute('data-action') || '') + '|' + el.name;
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        if ((k + '|' + el.value) in st.checks) { el.checked = st.checks[k + '|' + el.value]; }
+      } else if (k in st.values) {
+        el.value = st.values[k];
+      }
+    });
+    scrollables().forEach(function (el, i) {
+      var s = st.scroll[keyOf(el, i)];
+      if (!s) { return; }
+      // Đang ở cuối (log đang chạy) thì bám cuối; không thì giữ đúng vị trí cũ.
+      el.scrollTop = s.bottom && el.classList.contains('log') ? el.scrollHeight : s.top;
+      el.scrollLeft = s.left;
+    });
+    window.scrollTo(st.x, st.y);
+  }
+  // Người dùng đang bôi đen chữ trong nội dung: không thay DOM (mất vùng chọn).
+  function selecting() {
+    var sel = window.getSelection && window.getSelection();
+    return !!(sel && !sel.isCollapsed && sel.anchorNode && content.contains(sel.anchorNode));
+  }
+
+  var seq = 0, lastFresh = null;
   function refresh(force) {
-    if (busy || document.hidden || (force !== true && editing())) { return; }
+    if (busy || document.hidden || (force !== true && (editing() || selecting()))) { return; }
     busy = true;
+    var mine = ++seq, where = location.pathname + location.search;
     fetch(location.href, { credentials: 'same-origin', headers: { 'X-Requested-With': 'fetch' } })
       .then(function (r) {
         if (r.redirected && /\/login/.test(r.url)) { location.href = '/login'; return null; }
         if (r.status === 401) { location.href = '/login'; return null; }
+        // Server chuyển hướng sang trang khác: không đổ nội dung trang khác vào tab hiện tại.
+        if (r.redirected && new URL(r.url).pathname !== location.pathname) { return null; }
         return r.ok ? r.text() : null;
       })
       .then(function (html) {
-        if (!html) { return; }
+        // Bỏ kết quả cũ: đã có lần làm mới mới hơn, hoặc người dùng đã sang tab/trang khác.
+        if (!html || mine !== seq || where !== location.pathname + location.search) { return; }
         var doc = new DOMParser().parseFromString(html, 'text/html');
         var fresh = doc.getElementById('content');
-        if (fresh) { content.innerHTML = fresh.innerHTML; }
+        if (!fresh || fresh.innerHTML === lastFresh) { return; }
+        if (force !== true && (editing() || selecting())) { return; }
+        var st = saveState();
+        content.innerHTML = fresh.innerHTML;
+        lastFresh = fresh.innerHTML;
+        restoreState(st);
       })
       .catch(function () { /* transient error: keep the old content */ })
       .then(function () { busy = false; });
