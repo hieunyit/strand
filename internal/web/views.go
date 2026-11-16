@@ -3,7 +3,11 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
+	"html/template"
+	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,13 +110,47 @@ func notRunningMsg(err error) string {
 	return msg
 }
 
-// TablesView: trạng thái snapshot từng bảng.
+// TablesView: trạng thái snapshot từng bảng. Tables is ordered for operators: running first, then pending,
+// then done (name order inside each group); the aggregates feed the progress summary on the Tables tab.
 type TablesView struct {
 	Tables  []admin.TableInfo `json:"tables"`
 	Done    int               `json:"done"`
 	Running int               `json:"running"`
 	Pending int               `json:"pending"`
-	Error   string            `json:"error,omitempty"`
+	Total   int               `json:"total"`
+	// TablesPct is done/total (percent); RowsPct is copied/estimated rows over all tables (estimates from the source statistics).
+	TablesPct    float64 `json:"tables_pct"`
+	RowsCopied   int64   `json:"rows_copied"`
+	RowsEstimate int64   `json:"rows_estimate"`
+	RowsPct      float64 `json:"rows_pct"`
+	Error        string  `json:"error,omitempty"`
+}
+
+// tableRank orders the groups: running (0), pending (1), done (2).
+func tableRank(state string) int {
+	switch state {
+	case "running":
+		return 0
+	case "done":
+		return 2
+	}
+	return 1
+}
+
+// tblCopied is the number of rows already copied; a finished table counts as fully copied.
+func tblCopied(t admin.TableInfo) int64 {
+	if t.State == "done" && t.RowsEstimate > t.RowsCopied {
+		return t.RowsEstimate
+	}
+	return t.RowsCopied
+}
+
+// tblEst is the row estimate of a table (never below what was copied).
+func tblEst(t admin.TableInfo) int64 {
+	if t.RowsCopied > t.RowsEstimate {
+		return t.RowsCopied
+	}
+	return t.RowsEstimate
 }
 
 func (s *Server) tablesView(ctx context.Context, p *Pipeline) TablesView {
@@ -125,6 +163,19 @@ func (s *Server) tablesView(ctx context.Context, p *Pipeline) TablesView {
 		v.Error = notRunningMsg(err)
 		return v
 	}
+	v.finish()
+	return v
+}
+
+// finish sorts the tables and computes the counts and aggregates.
+func (v *TablesView) finish() {
+	sort.SliceStable(v.Tables, func(i, j int) bool {
+		a, b := v.Tables[i], v.Tables[j]
+		if ra, rb := tableRank(a.State), tableRank(b.State); ra != rb {
+			return ra < rb
+		}
+		return a.Table < b.Table
+	})
 	for _, t := range v.Tables {
 		switch t.State {
 		case "done":
@@ -134,8 +185,135 @@ func (s *Server) tablesView(ctx context.Context, p *Pipeline) TablesView {
 		default:
 			v.Pending++
 		}
+		v.RowsCopied += tblCopied(t)
+		v.RowsEstimate += tblEst(t)
 	}
-	return v
+	v.Total = len(v.Tables)
+	if v.Total > 0 {
+		v.TablesPct = float64(v.Done) * 100 / float64(v.Total)
+	}
+	if v.RowsEstimate > 0 {
+		v.RowsPct = math.Min(100, float64(v.RowsCopied)*100/float64(v.RowsEstimate))
+	}
+}
+
+// KeyKind describes how a table's rows are identified: PK, UNIQUE or KEYLESS (full-row match).
+type KeyKind struct {
+	Kind   string // pk | unique | keyless | unknown
+	Label  string // PK | UNIQUE | KEYLESS | ?
+	Detail string // columns, e.g. "id" or "a, b"
+	Title  string // explanation for the tooltip
+}
+
+func keyKind(t admin.TableInfo) KeyKind {
+	k := strings.ToLower(t.Key)
+	cols := strings.Join(t.PK, ", ")
+	switch {
+	case strings.Contains(k, "keyless") || strings.Contains(k, "full row"):
+		return KeyKind{"keyless", "KEYLESS", "full row", "No primary or unique key: rows are matched by their whole content (byte-exact), which is slower. A key makes the copy and the apply faster."}
+	case strings.HasPrefix(k, "unique"):
+		return KeyKind{"unique", "UNIQUE", cols, "Rows are identified by a NOT NULL unique key (" + t.Key + ")."}
+	case strings.HasPrefix(k, "primary") || len(t.PK) > 0:
+		d := cols
+		if t.GenericPK {
+			d += " (generic key)"
+		}
+		return KeyKind{"pk", "PK", d, "Rows are identified by the primary key."}
+	}
+	return KeyKind{"unknown", "?", "", "The key of this table is not known."}
+}
+
+// TablesProg: tables done / total and the percentage for a pipeline in the snapshot phase (from `top`).
+type TablesProg struct {
+	Done, Total int64
+	Pct         float64
+}
+
+func tablesOf(v PipelineView) TablesProg {
+	if v.Top == nil || v.Top.TablesTotal <= 0 {
+		return TablesProg{}
+	}
+	done, total := v.Top.TablesDone, v.Top.TablesTotal
+	return TablesProg{done, total, math.Min(100, float64(done)*100/float64(total))}
+}
+
+// icon renders an icon of the /static/icons.svg sprite.
+func icon(name string) template.HTML {
+	return template.HTML(`<svg class="ic" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-` + template.HTMLEscapeString(name) + `"/></svg>`)
+}
+
+// Engine is a database engine label with a CSS class for its colour.
+type Engine struct{ Label, Class string }
+
+func engineOf(kind string) Engine {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "mysql":
+		return Engine{"MySQL", "mysql"}
+	case "mariadb":
+		return Engine{"MariaDB", "mariadb"}
+	case "postgres", "postgresql":
+		return Engine{"PostgreSQL", "postgres"}
+	}
+	return Engine{kind, "other"}
+}
+
+// engines splits "mysql → postgres" into source and target engines.
+func engines(pair string) [2]Engine {
+	if parts := strings.SplitN(pair, " → ", 2); len(parts) == 2 {
+		return [2]Engine{engineOf(parts[0]), engineOf(parts[1])}
+	}
+	return [2]Engine{engineOf(pair), {}}
+}
+
+// fmtRel: "12 s ago", "5 min ago", "3 h ago".
+func fmtRel(t, now time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	d := now.Sub(t)
+	switch {
+	case d < 0:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%d s ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d min ago", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d h ago", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d d ago", int(d.Hours()/24))
+}
+
+func hostName() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "localhost"
+	}
+	return h
+}
+
+// HeadInfo: extra facts for the pipeline header (only while the admin socket answers).
+type HeadInfo struct {
+	Uptime  float64
+	CkptAt  time.Time
+	HasInfo bool
+}
+
+func (s *Server) headInfo(ctx context.Context, p *Pipeline) HeadInfo {
+	var h HeadInfo
+	if sv := s.statusView(ctx, p); sv.Status != nil {
+		h.Uptime, h.HasInfo = sv.Status.UptimeSeconds, true
+	} else {
+		return h
+	}
+	_ = s.withAdmin(ctx, p, func(ctx context.Context, c *admin.Client) error {
+		r, err := c.CheckpointShow(ctx)
+		if err == nil && r != nil {
+			h.CkptAt = r.UpdatedAt
+		}
+		return err
+	})
+	return h
 }
 
 // CheckpointView: vị trí đã apply, epoch, thời điểm cập nhật.

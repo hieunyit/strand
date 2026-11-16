@@ -1,14 +1,27 @@
 {{define "content"}}
 {{range .Body.Warnings}}<p class="warnbox" role="alert">{{.}}</p>{{end}}
-<section class="cards" aria-label="Summary">
-  <a class="card stat link" href="/pipelines"><div class="label">Pipelines</div><div class="value">{{.Body.Overview.Total}}</div></a>
-  {{range $s := .Body.States}}{{$n := index $.Body.Overview.Counts $s}}{{if or $n (eq $s "synced") (eq $s "failed") (eq $s "stopped")}}
-  <a class="card stat link" href="/pipelines?state={{$s}}" title="Show {{$s}} pipelines"><div class="label"><span class="dot {{stateClass $s}}"></span>{{$s}}</div><div class="value">{{$n}}</div></a>{{end}}{{end}}
-  <a class="card stat link" href="/pipelines?sort=lag"><div class="label">Max lag</div><div class="value">{{if .Body.Overview.MaxLagPipeline}}{{secs .Body.Overview.MaxLagSeconds}}{{else}}0 s{{end}}</div>{{if .Body.Overview.MaxLagPipeline}}<div class="muted small mono">{{.Body.Overview.MaxLagPipeline}}</div>{{end}}</a>
-  <div class="card stat"><div class="label">Total rows/s</div><div class="value">{{num .Body.Overview.RowsPerSec}}</div></div>
+<section class="kpis" aria-label="Summary">
+  <a class="kpi" href="/pipelines"><div class="kpi-label">{{icon "pipelines"}}Pipelines</div><div class="kpi-value">{{.Body.Overview.Total}}</div><div class="kpi-sub">{{.Body.Healthy}} healthy{{if .Body.Attn}}, {{len .Body.Attn}} need attention{{end}}</div></a>
+  <a class="kpi {{if .Body.Attn}}bad{{else}}ok{{end}}" href="/pipelines?sort=sev"><div class="kpi-label">{{icon "alert"}}Needs attention</div><div class="kpi-value">{{len .Body.Attn}}</div><div class="kpi-sub">failed, paused, unreachable or breaker open</div></a>
+  <a class="kpi" href="/pipelines?sort=lag"><div class="kpi-label">{{icon "clock"}}Max lag</div><div class="kpi-value">{{if .Body.Overview.MaxLagPipeline}}{{secs .Body.Overview.MaxLagSeconds}}{{else}}0 s{{end}}</div><div class="kpi-sub mono">{{if .Body.Overview.MaxLagPipeline}}{{.Body.Overview.MaxLagPipeline}}{{else}}no lag{{end}}</div></a>
+  <div class="kpi"><div class="kpi-label">{{icon "bolt"}}Total rows/s</div><div class="kpi-value">{{num .Body.Overview.RowsPerSec}}</div><div class="kpi-sub">across all pipelines</div></div>
+  <div class="kpi"><div class="kpi-label">{{icon "table"}}Tables done</div>{{if gt .Body.TblTotal 0}}<div class="kpi-value">{{.Body.TblDone}} <small>/ {{.Body.TblTotal}}</small></div>{{bar .Body.TblPct}}{{else}}<div class="kpi-value">-</div><div class="kpi-sub">no snapshot running</div>{{end}}</div>
+</section>
+<div class="statechips" aria-label="Pipelines by state">
+  {{range $s := .Body.States}}{{$n := index $.Body.Overview.Counts $s}}{{if or $n (eq $s "synced") (eq $s "failed") (eq $s "stopped")}}<a class="statechip" href="/pipelines?state={{$s}}" title="Show {{$s}} pipelines"><span class="dot {{stateClass $s}}"></span>{{$s}} <b>{{$n}}</b></a>{{end}}{{end}}
+</div>
+<section class="card" aria-label="Attention">
+  <div class="cardhead"><h2>Needs attention</h2></div>
+  {{if .Body.Attn}}<ul class="attn">{{range .Body.Attn}}<li>
+    <span class="badge {{stateClass .State}}">{{.State}}</span>
+    <div class="attn-main"><a class="attn-name mono" href="/pipelines/{{.Name}}">{{.Name}}</a> <span class="muted small">{{.Pair}}</span>
+      <div class="attn-why">{{with stateReason .}}{{.}}{{else}}needs a look{{end}}</div></div>
+    <span class="attn-lag">{{if .Top}}lag {{if gt .Top.LagSeconds 0.0}}{{secs .Top.LagSeconds}}{{else}}0 s{{end}}{{end}}</span>
+  </li>{{end}}</ul>
+  {{else}}<div class="empty-state ok">{{icon "check"}}<b>Everything is running normally</b><span>No pipeline is failed, paused, unreachable or has an open breaker.</span></div>{{end}}
 </section>
 <section class="card">
-  <h2>Pipelines <span class="muted small">needing attention first</span></h2>
+  <div class="cardhead"><h2>Pipelines <span class="muted small">needing attention first</span></h2><a class="btn ghost" href="/pipelines">All pipelines {{icon "arrow"}}</a></div>
   {{template "pipeline-table" .}}
 </section>
 {{end}}

@@ -5,13 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in - Strand</title>
 <link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
 </head>
 <body class="loginpage">
 <main>
 <form class="login card" method="post" action="/login">
-  <h1>Strand</h1>
-  <p class="muted">Sign in to the admin console</p>
-  {{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+  <div class="logobig"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><div><h1>Strand</h1><p class="tag">Change data capture console</p></div></div>
+  <p class="muted">Sign in to manage your replication pipelines.</p>
+  {{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <input type="hidden" name="next" value="{{.Next}}">
   <label for="login-password">Password <input id="login-password" type="password" name="password" autocomplete="current-password" autofocus required></label>

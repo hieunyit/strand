@@ -361,7 +361,7 @@ func TestLineChartSVG(t *testing.T) {
 		t.Errorf("unsafe or invalid output:\n%s", svg)
 	}
 	// Điểm đầu ở trái, điểm cuối ở phải: x tăng dần, y của giá trị lớn nhỏ hơn (cao hơn).
-	if !strings.Contains(svg, "points=\"46.0,") {
+	if !strings.Contains(svg, "points=\"52.0,") {
 		t.Errorf("first point must sit at the left padding: %s", svg)
 	}
 	empty := string(LineChart("t", "u", nil, 520, 150))

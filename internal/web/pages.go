@@ -42,18 +42,27 @@ func templateFuncs() template.FuncMap {
 			}
 			return t.Local().Format("2006-01-02 15:04:05 MST")
 		},
-		"pct":      func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
-		"bar":      ProgressBar,
-		"ranges":   fmtRanges,
-		"lower":    strings.ToLower,
-		"ptrInt":   func(p *int) int { return *p },
-		"deref":    func(p *float64) float64 { return *p },
-		"stateKey": func(s string) string { return s },
-		"join":     strings.Join,
-		"jobState": jobState,
-		"jobClass": jobClass,
-		"jobDur":   jobDur,
-		"deref2":   func(t *time.Time) time.Time { return *t },
+		"pct":       func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
+		"bar":       ProgressBar,
+		"bigbar":    BigProgressBar,
+		"ranges":    fmtRanges,
+		"lower":     strings.ToLower,
+		"ptrInt":    func(p *int) int { return *p },
+		"deref":     func(p *float64) float64 { return *p },
+		"stateKey":  func(s string) string { return s },
+		"icon":      icon,
+		"tabIcon":   tabIcon,
+		"engines":   engines,
+		"keyKind":   keyKind,
+		"tblCopied": tblCopied,
+		"tblEst":    tblEst,
+		"tablesOf":  tablesOf,
+		"rel":       func(t time.Time) string { return fmtRel(t, time.Now()) },
+		"join":      strings.Join,
+		"jobState":  jobState,
+		"jobClass":  jobClass,
+		"jobDur":    jobDur,
+		"deref2":    func(t *time.Time) time.Time { return *t },
 		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
 			Jobs         []JobStatus
 			ShowPipeline bool
@@ -278,12 +287,14 @@ type pageData struct {
 	CSRF     string
 	Nav      []NavItem
 	Version  string
-	Refresh  int // giây; 0 = không tự làm mới
+	Host     string // host name shown in the top bar
+	Refresh  int    // giây; 0 = không tự làm mới
 	Body     any
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pageData) {
 	d.CSRF, d.Nav, d.Version = sess.CSRF, s.navItems(), s.version
+	d.Host = hostName()
 	if d.AsOf.IsZero() {
 		d.AsOf = s.now()
 	}
@@ -299,6 +310,11 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 
 type overviewBody struct {
 	Overview Overview
+	Healthy  int            // pipelines in the synced state
+	Attn     []PipelineView // failed, unreachable, paused, unknown or breaker open (worst first)
+	TblDone  int64          // tables done and total across all pipelines (snapshot)
+	TblTotal int64
+	TblPct   float64
 	States   []string
 	Views    []PipelineView
 	Sparks   map[string]template.HTML
@@ -331,6 +347,29 @@ func sortViews(vs []PipelineView) {
 	})
 }
 
+// summarize fills the aggregates of the overview from the (already sorted) views.
+func (b *overviewBody) summarize() {
+	for _, v := range b.Views {
+		if needsAttention(v) {
+			b.Attn = append(b.Attn, v)
+		} else if v.State == StateSynced {
+			b.Healthy++
+		}
+		if tp := tablesOf(v); tp.Total > 0 {
+			b.TblDone += tp.Done
+			b.TblTotal += tp.Total
+		}
+	}
+	if b.TblTotal > 0 {
+		b.TblPct = float64(b.TblDone) * 100 / float64(b.TblTotal)
+	}
+}
+
+// needsAttention: failed, unreachable, unknown, paused, breaker open or a config error.
+func needsAttention(v PipelineView) bool {
+	return stateSev(v.State) <= 3 || (v.Top != nil && v.Top.BreakerOpen) || v.ConfigErr != ""
+}
+
 func (s *Server) pageOverview(w http.ResponseWriter, r *http.Request, sess *Session) {
 	b := overviewBody{Overview: s.samp.BuildOverview(), States: AllStates, Sparks: map[string]template.HTML{}, Warnings: s.reg.Warnings()}
 	for _, p := range s.reg.List() {
@@ -338,6 +377,7 @@ func (s *Server) pageOverview(w http.ResponseWriter, r *http.Request, sess *Sess
 		b.Sparks[p.Name] = s.sparkFor(p.Name)
 	}
 	sortViews(b.Views)
+	b.summarize()
 	s.render(w, "overview", sess, pageData{Title: "Overview", Active: "overview", Refresh: 5, Body: b})
 }
 
@@ -371,6 +411,7 @@ type detailBody struct {
 	Jobs       []JobStatus
 	Src        SourceTablesView
 	Ctl        Controls
+	Head       HeadInfo
 }
 
 // Controls quyết định nút nào hiện ở trang chi tiết (chỉ là gợi ý UI: API vẫn kiểm lại).
@@ -402,6 +443,13 @@ func (s *Server) controls(p *Pipeline, v PipelineView) Controls {
 
 var tabLabels = map[string]string{"graph": "Graph", "tables": "Tables", "checkpoint": "Checkpoint", "errors": "Errors", "config": "Config", "logs": "Logs", "jobs": "Jobs", "repair": "Repair", "promote": "Promote"}
 
+func tabIcon(key string) string {
+	if i, ok := map[string]string{"graph": "graph", "tables": "table", "checkpoint": "flag", "errors": "alert", "config": "config", "logs": "logs", "jobs": "jobs", "repair": "repair", "promote": "promote"}[key]; ok {
+		return i
+	}
+	return "pipelines"
+}
+
 type tabLink struct{ Key, Label, Href string }
 
 func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Session, tab string) {
@@ -425,6 +473,10 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	}
 	ctx := r.Context()
 	refresh := 5
+	if b.Ctl.Reachable && tab != "config" && tab != "logs" && tab != "repair" && tab != "promote" {
+		// two cheap admin calls, only for a running pipeline: the header shows uptime and the last checkpoint
+		b.Head = s.headInfo(ctx, p)
+	}
 	switch tab {
 	case "graph":
 		b.Status = s.statusView(ctx, p)
@@ -476,16 +528,16 @@ func (s *Server) charts(name string) []template.HTML {
 		return pts
 	}
 	return []template.HTML{
-		LineChart("Lag", "seconds", []ChartSeries{{Name: "lag", Class: "s1", Points: pick(func(x Sample) float64 { return x.Lag })}}, 520, 150),
+		LineChart("Replication lag", "seconds", []ChartSeries{{Name: "lag", Class: "s1", Points: pick(func(x Sample) float64 { return x.Lag })}}, 560, 190),
 		LineChart("Throughput", "rows/s", []ChartSeries{
 			{Name: "stream (top)", Class: "s1", Points: pick(func(x Sample) float64 { return x.Throughput })},
 			{Name: "applied (metrics)", Class: "s2", Points: pick(func(x Sample) float64 { return x.ApplyRate })},
-		}, 520, 150),
+		}, 560, 190),
 		LineChart("Holes and writeset", "count", []ChartSeries{
 			{Name: "holes", Class: "s3", Points: pick(func(x Sample) float64 { return x.Holes })},
 			{Name: "writeset entries", Class: "s2", Points: pick(func(x Sample) float64 { return x.Writeset })},
-		}, 520, 150),
-		LineChart("Spool", "bytes", []ChartSeries{{Name: "spool bytes", Class: "s4", Points: pick(func(x Sample) float64 { return x.SpoolBytes })}}, 520, 150),
+		}, 560, 190),
+		LineChart("Spool", "bytes", []ChartSeries{{Name: "spool bytes", Class: "s4", Points: pick(func(x Sample) float64 { return x.SpoolBytes })}}, 560, 190),
 	}
 }
 

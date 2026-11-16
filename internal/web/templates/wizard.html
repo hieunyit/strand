@@ -1,7 +1,7 @@
 {{define "content"}}
 {{with .Body}}
 {{template "pipeline-head" .}}
-<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Kind .Key}}active{{end}}"{{if eq $.Body.Kind .Key}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}</nav>
+<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Kind .Key}}active{{end}}"{{if eq $.Body.Kind .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}{{.Label}}</a>{{end}}</nav>
 
 <section class="card"><h2>{{if eq .Kind "repair"}}Repair wizard{{else}}Promote wizard{{end}}</h2>
   <ol class="steps">{{range .Steps}}<li class="step-{{.Status}}"><b>{{.Title}}</b> <span class="badge {{if eq .Status "done"}}st-synced{{else if eq .Status "failed"}}st-failed{{else if eq .Status "current"}}st-bootstrapping{{else}}st-paused{{end}}">{{.Status}}</span>{{if .Note}}<br><span class="small err">{{.Note}}</span>{{end}}</li>{{end}}</ol>

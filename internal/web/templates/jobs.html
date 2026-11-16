@@ -1,5 +1,5 @@
 {{define "content"}}
-<section class="card"><h2>Jobs</h2>
+<section class="card"><div class="cardhead"><h2>Jobs</h2></div>
 <p class="muted small">Long-running commands started from the web (verify). History is kept under the state directory; one job at a time per pipeline.</p>
 {{template "jobs-table" (jobsCtx .Body.Jobs true)}}
 </section>

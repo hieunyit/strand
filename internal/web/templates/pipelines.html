@@ -2,10 +2,10 @@
 {{range .Body.Warnings}}<p class="warnbox" role="alert">{{.}}</p>{{end}}
 <section class="card">
   <div class="toolbar" role="search">
-    <label for="pl-filter">Filter <input type="search" id="pl-filter" placeholder="name or engine" autocomplete="off"></label>
+    <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Filter by name or engine" aria-label="Filter pipelines by name or engine" autocomplete="off"></span>
     <label for="pl-state">State <select id="pl-state"><option value="">all</option>{{range .Body.States}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
     <span class="muted small" id="pl-count" aria-live="polite"></span>
-    <a class="btn primary push" href="/pipelines/new">+ New pipeline</a>
+    <a class="btn primary push" href="/pipelines/new">{{icon "plus"}}New pipeline</a>
   </div>
   {{template "pipeline-table" .}}
 </section>

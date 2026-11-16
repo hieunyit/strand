@@ -68,9 +68,9 @@ func niceMax(v float64) float64 {
 
 // LineChart vẽ biểu đồ đường nhiều series theo thời gian. Không có dữ liệu thì trả khung "no data".
 func LineChart(title, unit string, series []ChartSeries, w, h int) template.HTML {
-	const padL, padR, padT, padB = 46, 10, 8, 20
+	const padL, padR, padT, padB = 52, 12, 10, 24
 	var sb strings.Builder
-	fmt.Fprintf(&sb, `<figure class="chart"><figcaption>%s <span class="unit">%s</span></figcaption>`, html.EscapeString(title), html.EscapeString(unit))
+	fmt.Fprintf(&sb, `<figure class="chart"><figcaption><span class="ctitle">%s</span> <span class="unit">%s</span>%s</figcaption>`, html.EscapeString(title), html.EscapeString(unit), lastReadout(series))
 	var tmin, tmax time.Time
 	vmax := 0.0
 	n := 0
@@ -106,14 +106,19 @@ func LineChart(title, unit string, series []ChartSeries, w, h int) template.HTML
 		return float64(padL) + pw*t.Sub(tmin).Seconds()/span
 	}
 	yOf := func(v float64) float64 { return float64(padT) + ph*(1-v/ymax) }
-	// Lưới ngang tại 0, 50 %, 100 %.
-	for _, f := range []float64{0, 0.5, 1} {
+	// Horizontal grid at 0, 25, 50, 75, 100 % of the (rounded) maximum.
+	for _, f := range []float64{0, 0.25, 0.5, 0.75, 1} {
 		y := yOf(ymax * f)
 		fmt.Fprintf(&sb, `<line class="grid" x1="%d" x2="%d" y1="%.1f" y2="%.1f"/>`, padL, w-padR, y, y)
 		fmt.Fprintf(&sb, `<text class="axis" x="%d" y="%.1f" text-anchor="end">%s</text>`, padL-4, y+3, FormatValue(ymax*f))
 	}
-	fmt.Fprintf(&sb, `<text class="axis" x="%d" y="%d" text-anchor="start">%s</text>`, padL, h-5, tmin.Format("15:04:05"))
-	fmt.Fprintf(&sb, `<text class="axis" x="%d" y="%d" text-anchor="end">%s</text>`, w-padR, h-5, tmax.Format("15:04:05"))
+	// Time axis: start, middle and end, with tick marks.
+	for i, f := range []float64{0, 0.5, 1} {
+		x := float64(padL) + pw*f
+		anchor := []string{"start", "middle", "end"}[i]
+		fmt.Fprintf(&sb, `<line class="tick" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, x, x, h-padB, h-padB+3)
+		fmt.Fprintf(&sb, `<text class="axis" x="%.1f" y="%d" text-anchor="%s">%s</text>`, x, h-6, anchor, tmin.Add(time.Duration(float64(tmax.Sub(tmin))*f)).Format("15:04:05"))
+	}
 	for _, s := range series {
 		var pts []string
 		for _, p := range s.Points {
@@ -134,10 +139,13 @@ func LineChart(title, unit string, series []ChartSeries, w, h int) template.HTML
 			fmt.Fprintf(&sb, `<circle class="pt %s" cx="%s" cy="%s" r="2.5"><title>%s</title></circle>`, cls, xy[0], xy[1], html.EscapeString(s.Name))
 			continue
 		}
+		xy0, xyN := strings.Split(pts[0], ","), strings.Split(pts[len(pts)-1], ",")
+		fmt.Fprintf(&sb, `<path class="area %s" d="M%s,%d L%s L%s,%d Z"/>`, cls, xy0[0], h-padB, strings.Join(pts, " L"), xyN[0], h-padB)
 		fmt.Fprintf(&sb, `<polyline class="line %s" points="%s"><title>%s</title></polyline>`, cls, strings.Join(pts, " "), html.EscapeString(s.Name))
+		fmt.Fprintf(&sb, `<circle class="pt %s" cx="%s" cy="%s" r="2.5"/>`, cls, xyN[0], xyN[1])
 	}
 	sb.WriteString(`</svg>`)
-	if len(series) > 1 {
+	if len(series) > 0 {
 		sb.WriteString(`<div class="legend">`)
 		for _, s := range series {
 			cls := s.Class
@@ -150,6 +158,18 @@ func LineChart(title, unit string, series []ChartSeries, w, h int) template.HTML
 	}
 	sb.WriteString(`</figure>`)
 	return template.HTML(sb.String())
+}
+
+// lastReadout shows the latest value of the first series next to the chart title.
+func lastReadout(series []ChartSeries) string {
+	if len(series) == 0 || len(series[0].Points) == 0 {
+		return ""
+	}
+	v := series[0].Points[len(series[0].Points)-1].V
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return ""
+	}
+	return fmt.Sprintf(` <span class="now">now <b>%s</b></span>`, FormatValue(v))
 }
 
 // Sparkline vẽ đường nhỏ không trục cho bảng/danh sách.
@@ -175,7 +195,9 @@ func Sparkline(vals []float64, w, h int) template.HTML {
 		y := float64(h-2)*(1-v/vmax) + 1
 		pts = append(pts, fmt.Sprintf("%.1f,%.1f", x, y))
 	}
-	return template.HTML(fmt.Sprintf(`<svg class="spark" viewBox="0 0 %d %d" aria-hidden="true"><polyline class="line s1" points="%s"/></svg>`, w, h, strings.Join(pts, " ")))
+	last := strings.Split(pts[len(pts)-1], ",")
+	lastX, lastY := last[0], last[1]
+	return template.HTML(fmt.Sprintf(`<svg class="spark" viewBox="0 0 %d %d" aria-hidden="true"><polyline class="line s1" points="%s"/><circle class="pt s1" cx="%s" cy="%s" r="1.8"/></svg>`, w, h, strings.Join(pts, " "), lastX, lastY))
 }
 
 // ProgressBar vẽ thanh tiến độ bằng SVG (CSP cấm style nội tuyến nên không dùng width: x%).
@@ -186,7 +208,11 @@ func ProgressBar(pct float64) template.HTML {
 	if pct > 100 {
 		pct = 100
 	}
-	return template.HTML(fmt.Sprintf(`<svg class="pbar" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="%.1f%%"><rect class="bg" x="0" y="0" width="100" height="8"/><rect class="fg" x="0" y="0" width="%.2f" height="8"/></svg>`, pct, pct))
+	cls := "pbar"
+	if pct >= 100 {
+		cls = "pbar done"
+	}
+	return template.HTML(fmt.Sprintf(`<svg class="%s" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="%.1f%%"><rect class="bg" x="0" y="0" width="100" height="8"/><rect class="fg" x="0" y="0" width="%.2f" height="8"/></svg>`, cls, pct, pct))
 }
 
 // GraphNode là một ô của sơ đồ pipeline.
@@ -223,4 +249,19 @@ func PipelineGraph(nodes []GraphNode) template.HTML {
 	}
 	sb.WriteString(`</svg>`)
 	return template.HTML(sb.String())
+}
+
+// BigProgressBar is the wide bar of the snapshot summary; label names what it measures (for screen readers).
+func BigProgressBar(pct float64, label string) template.HTML {
+	if pct < 0 || math.IsNaN(pct) {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	cls := "pbar big"
+	if pct >= 100 {
+		cls += " done"
+	}
+	return template.HTML(fmt.Sprintf(`<svg class="%s" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="%s: %.1f%%"><rect class="bg" x="0" y="0" width="100" height="8"/><rect class="fg" x="0" y="0" width="%.2f" height="8"/></svg>`, cls, html.EscapeString(label), pct, pct))
 }

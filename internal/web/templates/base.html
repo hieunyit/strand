@@ -6,27 +6,38 @@
 <meta name="csrf-token" content="{{.CSRF}}">
 <title>{{if .DocTitle}}{{.DocTitle}}{{else}}{{.Title}}{{end}} · Strand</title>
 <link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#content">Skip to content</a>
 <aside class="nav" aria-label="Sidebar">
-  <a class="brand" href="/">Strand</a>
+  <a class="brand" href="/" aria-label="Strand home"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand<small>CDC console</small></span></a>
   <nav aria-label="Main">
-    <a href="/" class="{{if eq .Active "overview"}}active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>Overview</a>
-    <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>Pipelines</a>
-    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>+ New pipeline</a>
-    <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>Jobs</a>
+    <a href="/" class="{{if eq .Active "overview"}}active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>{{icon "overview"}}Overview</a>
+    <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>{{icon "pipelines"}}Pipelines</a>
+    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>
+    <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
     <div class="navhead">Registered pipelines</div>
     {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"{{if eq $.Active .Name}} aria-current="page"{{end}} title="{{.Name}}: {{.State}}"><span class="dot {{stateClass .State}}" role="img" aria-label="{{.State}}"></span>{{.Name}}</a>
-    {{else}}<span class="muted pad">none registered</span>{{end}}
+    {{else}}<span class="muted pad small">none registered</span>{{end}}
   </nav>
   <div class="navfoot">strand {{.Version}}</div>
 </aside>
 <div class="main">
   <header class="top" role="banner">
     <h1>{{.Title}}</h1>
-    <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" type="submit">Log out</button></form>
+    <div class="topright">
+      <span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>
+      <button type="button" class="iconbtn" id="theme-toggle" aria-label="Colour theme: follows the system. Click to change." title="Colour theme">{{icon "auto"}}<span class="tlabel">Auto</span></button>
+      <details class="usermenu" id="usermenu">
+        <summary aria-label="User menu">{{icon "user"}}admin</summary>
+        <div class="menu">
+          <div class="who">Signed in as admin</div>
+          <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn ghost" type="submit">{{icon "logout"}}Log out</button></form>
+        </div>
+      </details>
+    </div>
   </header>
   <main id="content" data-refresh="{{.Refresh}}"><p class="asof" id="asof">Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}</p>{{template "content" .}}</main>
 </div>
@@ -48,29 +59,33 @@
   <caption class="sr-only">Pipelines</caption>
   <thead><tr>
     <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="name">Name</button></th>
-    <th scope="col">Engines</th>
+    <th scope="col" class="hide-md">Engines</th>
     <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="sev">State</button></th>
     <th scope="col" class="r" aria-sort="none"><button type="button" class="sortbtn" data-sort="lag">Lag</button></th>
-    <th scope="col">Lag (5 min)</th>
+    <th scope="col" class="hide-md">Lag (5 min)</th>
     <th scope="col" class="r" aria-sort="none"><button type="button" class="sortbtn" data-sort="rate">Rows/s</button></th>
-    <th scope="col">Zone</th><th scope="col">Managed by</th><th scope="col">Last exit</th></tr></thead>
+    <th scope="col">Tables</th>
+    <th scope="col" class="hide-md">Zone</th><th scope="col" class="hide-md">Managed by</th><th scope="col" class="hide-md">Last exit</th></tr></thead>
   <tbody>
   {{range .Body.Views}}<tr data-name="{{.Name}}" data-state="{{.State}}" data-sev="{{stateSev .State}}" data-lag="{{lagSort .}}" data-rate="{{if .Top}}{{.Top.Throughput}}{{else}}-1{{end}}">
     <td><a class="mono" href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}</td>
-    <td>{{.Pair}}</td>
+    <td class="hide-md">{{.Pair}}</td>
     <td><span class="badge {{stateClass .State}}">{{.State}}</span>{{with stateReason .}}<div class="reason small muted" title="{{.}}">{{.}}</div>{{end}}</td>
     <td class="r nowrap {{lagClass .}}">{{if .Top}}{{if gt .Top.LagSeconds 0.0}}{{secs .Top.LagSeconds}}{{else}}0 s{{end}}{{else}}-{{end}}</td>
-    <td>{{index $.Body.Sparks .Name}}</td>
+    <td class="hide-md">{{index $.Body.Sparks .Name}}</td>
     <td class="r nowrap">{{if .Top}}{{num .Top.Throughput}}{{else}}-{{end}}</td>
-    <td>{{if .Top}}{{.Top.Zone}}{{else}}-{{end}}</td>
-    <td>{{.Mode}} <span class="muted small">({{.Origin}})</span></td>
-    <td>{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
-  </tr>{{else}}<tr class="empty"><td colspan="9" class="muted">No pipelines registered yet. <a class="btn primary" href="/pipelines/new">Create pipeline</a> or add existing ones to web.yaml (<code>scan</code> or <code>pipelines</code>).</td></tr>{{end}}
-  <tr class="nomatch" hidden><td colspan="9" class="muted">No pipeline matches the filter. <a href="/pipelines">Clear filter</a></td></tr>
+    <td class="nowrap">{{template "tables-mini" .}}</td>
+    <td class="hide-md">{{if .Top}}{{.Top.Zone}}{{else}}-{{end}}</td>
+    <td class="hide-md">{{.Mode}} <span class="muted small">({{.Origin}})</span></td>
+    <td class="hide-md">{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
+  </tr>{{else}}<tr class="empty"><td colspan="10"><div class="empty-state">{{icon "empty"}}<b>No pipelines registered yet</b><span>Create one, or add existing configs to web.yaml (<code>scan</code> or <code>pipelines</code>).</span><a class="btn primary" href="/pipelines/new">{{icon "plus"}}Create pipeline</a></div></td></tr>{{end}}
+  <tr class="nomatch" hidden><td colspan="10" class="muted">No pipeline matches the filter. <a href="/pipelines">Clear filter</a></td></tr>
   </tbody>
 </table>
 </div>
 {{end}}
+
+{{define "tables-mini"}}{{with tablesOf .}}{{if gt .Total 0}}<span class="pcell">{{bar .Pct}}<span class="small">{{.Done}}/{{.Total}}</span></span>{{else}}<span class="muted" title="Snapshot progress is reported while the pipeline copies tables">-</span>{{end}}{{end}}{{end}}
 
 {{define "jobs-table"}}
 <div class="tablewrap tall">
@@ -83,24 +98,26 @@
     <td><span class="badge {{jobClass .}}">{{jobState .}}</span></td>
     <td class="small r nowrap">{{jobDur .}}</td>
     <td class="mono small wrap">strand {{join .Args " "}}</td>
-  </tr>{{else}}<tr><td colspan="6" class="muted">No jobs yet. Verify runs started from a pipeline's Jobs tab appear here.</td></tr>{{end}}</tbody>
+  </tr>{{else}}<tr class="empty"><td colspan="6"><div class="empty-state">{{icon "jobs"}}<b>No jobs yet</b><span>Verify runs started from a pipeline's Jobs tab appear here.</span></div></td></tr>{{end}}</tbody>
 </table>
 </div>
 {{end}}
 
 {{define "pipeline-head"}}
+{{$eng := engines .View.Pair}}
 <section class="card head" aria-label="Pipeline status">
   <div class="headrow">
+    <span class="engines pair" title="{{.View.Pair}}"><span class="eng {{(index $eng 0).Class}}">{{icon "db"}}{{(index $eng 0).Label}}</span>{{if (index $eng 1).Label}}{{icon "arrow"}}<span class="eng {{(index $eng 1).Class}}">{{icon "db"}}{{(index $eng 1).Label}}</span>{{end}}</span>
     <span class="badge big {{stateClass .View.State}}">{{.View.State}}</span>
-    <span class="pair">{{.View.Pair}}</span>
-    <span class="muted small">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}}</span>
+    <span class="muted small meta">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}} &middot; Sampled <b>{{clock .View.SampledAt}}</b></span>
   </div>
   {{with stateReason .View}}<p class="reason-line {{stateClass $.View.State}}"><b>Why:</b> <span class="wrap">{{.}}</span></p>{{end}}
-  <div class="kv">
-    <span>Lag <b class="{{lagClass .View}}">{{if .View.Top}}{{if gt .View.Top.LagSeconds 0.0}}{{secs .View.Top.LagSeconds}}{{else}}0 s{{end}}{{else}}-{{end}}</b></span>
-    {{if .View.Top}}<span>Rows/s <b>{{num .View.Top.Throughput}}</b></span>
-    <span>Zone <b>{{if .View.Top.Zone}}{{.View.Top.Zone}}{{else}}-{{end}}</b></span>{{end}}
-    <span>Sampled <b>{{clock .View.SampledAt}}</b></span>
+  <div class="metrics">
+    <div class="metric"><div class="m-label">Lag</div><div class="m-value {{lagClass .View}}">{{if .View.Top}}{{if gt .View.Top.LagSeconds 0.0}}{{secs .View.Top.LagSeconds}}{{else}}0 s{{end}}{{else}}-{{end}}</div></div>
+    <div class="metric"><div class="m-label">Rows/s</div><div class="m-value">{{if .View.Top}}{{num .View.Top.Throughput}}{{else}}-{{end}}</div>{{if .View.Top}}{{if .View.Top.Zone}}<div class="m-sub">zone {{.View.Top.Zone}}</div>{{end}}{{end}}</div>
+    {{with tablesOf .View}}<div class="metric"><div class="m-label">Tables done</div><div class="m-value">{{if gt .Total 0}}{{.Done}} / {{.Total}}{{else}}-{{end}}</div>{{if gt .Total 0}}{{bar .Pct}}{{else}}<div class="m-sub">no snapshot running</div>{{end}}</div>{{end}}
+    <div class="metric"><div class="m-label">Uptime</div><div class="m-value">{{if .Head.HasInfo}}{{secs .Head.Uptime}}{{else}}-{{end}}</div>{{if .View.Runtime.Since}}<div class="m-sub">since {{.View.Runtime.Since}}</div>{{end}}</div>
+    <div class="metric"><div class="m-label">Last checkpoint</div><div class="m-value">{{if not .Head.CkptAt.IsZero}}{{rel .Head.CkptAt}}{{else}}-{{end}}</div>{{if not .Head.CkptAt.IsZero}}<div class="m-sub">{{ts .Head.CkptAt}}</div>{{end}}</div>
   </div>
   <div class="actions" role="group" aria-label="Pipeline actions">
     <span class="grp">

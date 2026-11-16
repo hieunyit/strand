@@ -624,6 +624,7 @@ type wizardView struct {
 	Name     string            `json:"-"`
 	View     PipelineView      `json:"-"`
 	Ctl      Controls          `json:"-"`
+	Head     HeadInfo          `json:"-"`
 	Can      map[string]bool   `json:"can"` // action nào hợp lệ ở bước hiện tại (UI)
 }
 
@@ -687,6 +688,9 @@ func (s *Server) wizardView(ctx context.Context, p *Pipeline, kind string) (wiza
 	v.Step = stepOf(st)
 	v.View = s.view(p)
 	v.Ctl = s.controls(p, v.View)
+	if v.Ctl.Reachable {
+		v.Head = s.headInfo(ctx, p)
+	}
 	v.Running = v.Ctl.Running
 	if st != nil {
 		for k, x := range st.Opts {

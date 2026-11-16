@@ -1,7 +1,7 @@
 {{define "content"}}
 {{with .Body}}
 {{template "pipeline-head" .}}
-<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}</nav>
+<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}{{.Label}}</a>{{end}}</nav>
 
 {{if eq .Tab "graph"}}
   <section class="card"><h2>Data path</h2><div class="graphwrap">{{.Graph}}</div>
@@ -27,23 +27,49 @@
 {{end}}
 
 {{if eq .Tab "tables"}}
-  <section class="card"><h2>Tables</h2>
-  {{if .Tables.Error}}<p class="muted">{{.Tables.Error}}</p>{{else}}
-  <p class="muted">{{.Tables.Done}} done, {{.Tables.Running}} running, {{.Tables.Pending}} pending. Row counts are estimates from the source statistics.</p>
-  <div class="tablewrap tall"><table class="grid">
-    <thead><tr><th scope="col">Table</th><th scope="col">State</th><th scope="col">Ranges</th><th scope="col">Progress</th><th scope="col" class="r">Rows copied / estimate</th><th scope="col" class="r">ETA</th><th scope="col">PK</th></tr></thead>
-    <tbody>{{range .Tables.Tables}}<tr>
-      <td class="mono">{{.Table}}</td>
-      <td><span class="badge st-tbl-{{.State}}">{{.State}}</span></td>
-      <td class="small">{{ranges .Ranges}}</td>
-      <td>{{bar .ProgressPct}} <span class="small">{{pct .ProgressPct}}</span></td>
-      <td class="r nowrap">{{if eq .State "done"}}-{{else}}{{int64 .RowsCopied}} / {{int64 .RowsEstimate}}{{end}}</td>
-      <td class="r nowrap">{{if gt .ETASeconds 0.0}}{{secs .ETASeconds}}{{else}}-{{end}}</td>
-      <td class="small mono">{{range $i, $c := .PK}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .GenericPK}} <span class="muted">(generic key)</span>{{end}}{{if .Key}}<br><span class="muted">key: {{.Key}}</span>{{end}}</td>
-    </tr>{{else}}<tr><td colspan="7" class="muted">No tables.</td></tr>{{end}}</tbody>
-  </table></div>{{end}}
+  {{if .Tables.Error}}<section class="card"><h2>Tables</h2><p class="muted">{{.Tables.Error}}</p></section>{{else}}
+  <section class="card snap" id="snapshot-summary" aria-label="Snapshot progress">
+    <div class="snap-top">
+      <h2>Snapshot progress {{if and (gt .Tables.Total 0) (eq .Tables.Done .Tables.Total)}}<span class="badge st-synced">complete</span>{{else if gt .Tables.Running 0}}<span class="badge st-bootstrapping">copying</span>{{else if gt .Tables.Total 0}}<span class="badge st-tbl-pending">waiting</span>{{end}}</h2>
+      <div class="snap-figs">
+        <div class="snap-fig"><div class="f-label">Tables</div><div class="f-value" id="snap-tables">{{.Tables.Done}} <small>of {{.Tables.Total}} done ({{pct .Tables.TablesPct}})</small></div></div>
+        <div class="snap-fig"><div class="f-label">Rows (estimate)</div><div class="f-value" id="snap-rows">{{int64 .Tables.RowsCopied}} <small>of ~{{int64 .Tables.RowsEstimate}}{{if gt .Tables.RowsEstimate 0}} ({{pct .Tables.RowsPct}}){{end}}</small></div></div>
+        {{if .View.Top}}{{if gt .View.Top.ETASeconds 0.0}}<div class="snap-fig"><div class="f-label">ETA</div><div class="f-value">{{secs .View.Top.ETASeconds}}</div></div>{{end}}{{end}}
+      </div>
+    </div>
+    <div class="bars">{{bigbar .Tables.TablesPct "Tables done"}}</div>
+    {{if gt .Tables.RowsEstimate 0}}<div class="bars">{{bigbar .Tables.RowsPct "Rows copied (estimate)"}}</div>{{end}}
+    <p class="muted small">{{.Tables.Done}} done, {{.Tables.Running}} running, {{.Tables.Pending}} pending. Row counts are estimates from the source statistics and can be off. Completion times per table are not reported by the pipeline, so none are shown.</p>
+    <div class="chips" role="group" aria-label="Filter tables by status">
+      <button type="button" class="chip c-all" data-tfilter="all" aria-pressed="true">All <b>{{.Tables.Total}}</b></button>
+      <button type="button" class="chip c-running" data-tfilter="running" aria-pressed="false"><span class="dot"></span>Running <b>{{.Tables.Running}}</b></button>
+      <button type="button" class="chip c-pending" data-tfilter="pending" aria-pressed="false"><span class="dot"></span>Pending <b>{{.Tables.Pending}}</b></button>
+      <button type="button" class="chip c-done" data-tfilter="done" aria-pressed="false"><span class="dot"></span>Done <b>{{.Tables.Done}}</b></button>
+    </div>
   </section>
-  {{if .Ctl.Reachable}}<section class="card"><h2>Snapshot</h2>
+  <section class="card"><h2>Tables</h2>
+    <div class="toolbar" role="search">
+      <span class="searchbox">{{icon "search"}}<input type="search" id="tb-filter" placeholder="Search tables" aria-label="Search tables" autocomplete="off"></span>
+      <label for="tb-sort">Sort <select id="tb-sort"><option value="ord">Status (running first)</option><option value="name">Name</option><option value="pct">Progress</option><option value="rows">Rows</option><option value="eta">ETA</option></select></label>
+      <span class="muted small" id="tb-count" aria-live="polite">{{.Tables.Total}} tables</span>
+    </div>
+    <div class="tablewrap tall"><table class="grid" id="tables-table">
+      <caption class="sr-only">Snapshot status per table</caption>
+      <thead><tr><th scope="col">Table</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col" class="r">Rows copied / estimate</th><th scope="col" class="r">ETA</th><th scope="col">Row key</th><th scope="col" class="hide-md">Ranges</th></tr></thead>
+      <tbody>{{range $i, $t := .Tables.Tables}}{{$k := keyKind $t}}<tr class="trow{{if eq $t.State "running"}} is-running{{end}}" data-table="{{$t.Table}}" data-state="{{$t.State}}" data-ord="{{$i}}" data-pct="{{printf "%.2f" $t.ProgressPct}}" data-rows="{{tblEst $t}}" data-eta="{{if gt $t.ETASeconds 0.0}}{{printf "%.0f" $t.ETASeconds}}{{else}}-1{{end}}" data-key="{{$k.Kind}}">
+        <td class="mono wrap">{{$t.Table}}</td>
+        <td><span class="badge st-tbl-{{$t.State}}">{{$t.State}}</span></td>
+        <td><span class="pcell">{{bar $t.ProgressPct}}<span class="small">{{pct $t.ProgressPct}}</span></span></td>
+        <td class="r nowrap">{{if eq $t.State "done"}}{{int64 (tblCopied $t)}}{{if gt $t.RowsEstimate 0}} <span class="muted small" title="Estimate from the source statistics">(~{{int64 $t.RowsEstimate}})</span>{{end}}{{else}}{{int64 $t.RowsCopied}} / {{int64 $t.RowsEstimate}}{{end}}</td>
+        <td class="r nowrap">{{if gt $t.ETASeconds 0.0}}{{secs $t.ETASeconds}}{{else}}-{{end}}</td>
+        <td><span class="keytag {{$k.Kind}}" title="{{$k.Title}}">{{$k.Label}}</span>{{if $k.Detail}} <span class="small mono muted">{{$k.Detail}}</span>{{end}}</td>
+        <td class="small hide-md">{{ranges $t.Ranges}}</td>
+      </tr>{{else}}<tr class="empty"><td colspan="7"><div class="empty-state">{{icon "table"}}<b>No tables</b><span>The pipeline reports no tables yet.</span></div></td></tr>{{end}}
+      <tr class="nomatch" hidden><td colspan="7" class="muted">No table matches the filter. <button type="button" class="btn ghost" id="tb-clear">Clear filter</button></td></tr>
+      </tbody>
+    </table></div>
+  </section>{{end}}
+  {{if .Ctl.Reachable}}<section class="card"><h2>Snapshot control</h2>
     <div class="actions">
       <form class="act inline" data-action="pause-snapshot" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Pause snapshot</button></form>
       <form class="act inline" data-action="resume-snapshot-only" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (snapshot only, defer stream)</button></form>

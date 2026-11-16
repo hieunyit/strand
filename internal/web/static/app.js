@@ -110,6 +110,7 @@
         lastFresh = fresh.innerHTML;
         restoreState(st);
         applyList();
+        applyTables();
       })
       .catch(function () {
         // Transient error: keep the old content but say that it is stale.
@@ -180,6 +181,98 @@
     if (ev.target && ev.target.id === 'pl-state') { listState.state = ev.target.value; applyList(); }
   });
   applyList();
+
+  // ---- Tables tab: status chips, search and sort; survive the periodic refresh (the state lives here, not in the DOM) ----
+  var tblState = { f: 'all', q: '', sort: 'ord' };
+  function applyTables() {
+    var table = document.getElementById('tables-table');
+    if (!table) { return; }
+    var body = table.tBodies[0];
+    var rows = Array.prototype.slice.call(body.querySelectorAll('tr[data-table]'));
+    var qEl = document.getElementById('tb-filter'), sEl = document.getElementById('tb-sort');
+    if (qEl && qEl.value !== tblState.q) { qEl.value = tblState.q; }
+    if (sEl && sEl.value !== tblState.sort) { sEl.value = tblState.sort; }
+    var key = tblState.sort, desc = key === 'pct' || key === 'rows';
+    rows.sort(function (a, b) {
+      var x, y;
+      if (key === 'name') { return a.getAttribute('data-table').localeCompare(b.getAttribute('data-table')); }
+      x = parseFloat(a.getAttribute('data-' + key)); y = parseFloat(b.getAttribute('data-' + key));
+      if (key === 'eta') { x = x < 0 ? Infinity : x; y = y < 0 ? Infinity : y; }
+      if (x !== y) { return desc ? y - x : (x < y ? -1 : 1); }
+      return parseFloat(a.getAttribute('data-ord')) - parseFloat(b.getAttribute('data-ord'));
+    });
+    var anchor = body.querySelector('tr.nomatch');
+    rows.forEach(function (r) { body.insertBefore(r, anchor); });
+    var q = tblState.q.trim().toLowerCase(), shown = 0;
+    rows.forEach(function (r) {
+      var ok = (tblState.f === 'all' || r.getAttribute('data-state') === tblState.f) &&
+        (!q || r.getAttribute('data-table').toLowerCase().indexOf(q) >= 0);
+      r.hidden = !ok;
+      if (ok) { shown++; }
+    });
+    var nm = body.querySelector('tr.nomatch');
+    if (nm) { nm.hidden = !(rows.length > 0 && shown === 0); }
+    var cnt = document.getElementById('tb-count');
+    if (cnt) { cnt.textContent = (tblState.f !== 'all' || q) ? shown + ' of ' + rows.length + ' shown' : rows.length + ' tables'; }
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tfilter]'), function (c) {
+      c.setAttribute('aria-pressed', c.getAttribute('data-tfilter') === tblState.f ? 'true' : 'false');
+    });
+  }
+  document.addEventListener('click', function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target : null;
+    if (!t) { return; }
+    var chip = t.closest('[data-tfilter]');
+    if (chip) {
+      var f = chip.getAttribute('data-tfilter');
+      tblState.f = (tblState.f === f && f !== 'all') ? 'all' : f; // a second click on the active chip clears it
+      applyTables();
+    } else if (t.closest('#tb-clear')) {
+      tblState.f = 'all'; tblState.q = ''; applyTables();
+    }
+  });
+  document.addEventListener('input', function (ev) {
+    if (ev.target && ev.target.id === 'tb-filter') { tblState.q = ev.target.value; applyTables(); }
+  });
+  document.addEventListener('change', function (ev) {
+    if (ev.target && ev.target.id === 'tb-sort') { tblState.sort = ev.target.value; applyTables(); }
+  });
+  applyTables();
+
+  // ---- colour theme: auto (system) -> light -> dark; stored in localStorage; theme.js applies it before first paint ----
+  var themeBtn = document.getElementById('theme-toggle');
+  function currentTheme() {
+    var t = null;
+    try { t = localStorage.getItem('strand-theme'); } catch (e) { t = null; }
+    return t === 'light' || t === 'dark' ? t : 'auto';
+  }
+  function paintTheme() {
+    var t = currentTheme();
+    if (t === 'auto') { document.documentElement.removeAttribute('data-theme'); } else { document.documentElement.setAttribute('data-theme', t); }
+    if (!themeBtn) { return; }
+    var label = { auto: 'Auto', light: 'Light', dark: 'Dark' }[t];
+    var use = themeBtn.querySelector('use'), txt = themeBtn.querySelector('.tlabel');
+    if (use) { use.setAttribute('href', '/static/icons.svg#i-' + { auto: 'auto', light: 'sun', dark: 'moon' }[t]); }
+    if (txt) { txt.textContent = label; }
+    themeBtn.setAttribute('aria-label', 'Colour theme: ' + label.toLowerCase() + (t === 'auto' ? ' (follows the system)' : '') + '. Click to change.');
+  }
+  if (themeBtn) {
+    themeBtn.addEventListener('click', function () {
+      var next = { auto: 'light', light: 'dark', dark: 'auto' }[currentTheme()];
+      try { if (next === 'auto') { localStorage.removeItem('strand-theme'); } else { localStorage.setItem('strand-theme', next); } } catch (e) { /* storage blocked */ }
+      paintTheme();
+    });
+  }
+  paintTheme();
+
+  // User menu: close on outside click or Escape.
+  document.addEventListener('click', function (ev) {
+    var um = document.getElementById('usermenu');
+    if (um && um.open && !um.contains(ev.target)) { um.open = false; }
+  });
+  document.addEventListener('keydown', function (ev) {
+    var um = document.getElementById('usermenu');
+    if (ev.key === 'Escape' && um && um.open) { um.open = false; var s = um.querySelector('summary'); if (s) { s.focus(); } }
+  });
 
   // Arrow keys / Home / End move between the page sections (tabs).
   document.addEventListener('keydown', function (ev) {
