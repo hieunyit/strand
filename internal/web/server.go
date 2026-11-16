@@ -13,12 +13,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"strand/internal/web/store"
 )
 
 //go:embed templates/*.html
@@ -49,6 +52,7 @@ type Server struct {
 	secure   bool // đặt cờ Secure cho cookie (TLS hoặc secure_cookies)
 	tls      bool
 	version  string
+	db       *metaDB // nil = chế độ file
 
 	pages   map[string]*template.Template
 	handler http.Handler
@@ -63,11 +67,15 @@ type Options struct {
 	Commander Commander
 	// Now thay đồng hồ (test).
 	Now func() time.Time
+	// Store thay kho PostgreSQL (test dùng store.Mem). nil + Config.Database.DSN rỗng: chế độ file.
+	Store store.Store
+	// SecretKey thay STRAND_WEB_SECRET_KEY (test).
+	SecretKey string
 }
 
 // New dựng Server (chưa lắng nghe, chưa chạy sampler). Trả lỗi nếu cấu hình không đủ điều kiện khởi động.
 func New(o Options) (*Server, error) {
-	if err := o.Config.Validate(); err != nil {
+	if err := o.Config.validate(o.Store != nil || o.Config.DBEnabled()); err != nil {
 		return nil, err
 	}
 	if o.Logger == nil {
@@ -76,12 +84,34 @@ func New(o Options) (*Server, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	var db *metaDB
+	if o.Store == nil && o.Config.DBEnabled() {
+		st, err := OpenStore(context.Background(), o.Config, o.Logger)
+		if err != nil {
+			return nil, fmt.Errorf("metadata database: %w", err)
+		}
+		o.Store = st
+	}
+	if o.Store != nil {
+		secret := o.SecretKey
+		if secret == "" {
+			secret = strings.TrimSpace(os.Getenv(EnvSecretKey))
+		}
+		var err error
+		if db, err = newMetaDB(o.Store, secret, o.Logger); err != nil {
+			return nil, err
+		}
+	}
 	audit, err := OpenAuditLog(o.Config.StateDir, o.Now)
 	if err != nil {
 		return nil, err
 	}
+	if db != nil {
+		audit.useDB(db, o.Config.Database.Audit)
+	}
 	reg := NewRegistry(o.Config, o.Commander)
 	reg.now = o.Now
+	reg.db = db
 	iv := time.Duration(o.Config.SampleIntervalSec) * time.Second
 	s := &Server{
 		cfg: o.Config, reg: reg, samp: NewSampler(reg, iv),
@@ -91,7 +121,18 @@ func New(o Options) (*Server, error) {
 		secure: o.Config.TLSCert != "" || o.Config.SecureCookies,
 	}
 	s.samp.Now = o.Now
-	jr, err := NewFileJobRunner(filepath.Join(o.Config.StateDir, "jobs"), s.strandBinary(), o.Now)
+	s.db = db
+	s.sessions.db = db
+	if db != nil {
+		if err := s.initDB(); err != nil {
+			return nil, err
+		}
+	}
+	var jst store.Store
+	if db != nil {
+		jst = db.st
+	}
+	jr, err := NewJobRunner(filepath.Join(o.Config.StateDir, "jobs"), s.strandBinary(), o.Now, jst)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +147,29 @@ func New(o Options) (*Server, error) {
 	reg.Refresh(context.Background())
 	s.handler = s.routes()
 	return s, nil
+}
+
+// initDB: kiểm tài khoản admin trong DB, nhập trạng thái file một lần, khôi phục file pipeline từ DB.
+func (s *Server) initDB() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	sum, err := s.importFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("import file state into database: %w", err)
+	}
+	if sum != nil {
+		s.log.Info("imported existing file state into the database (first start with a database)",
+			"admin_password", sum.Admin, "api_token", sum.Token, "pipelines", sum.Pipelines, "jobs", sum.Jobs,
+			"wizards", sum.Wizards, "audit_lines", sum.Audit)
+		_ = s.audit.Log(AuditEntry{Action: "state.import", Result: "ok", Detail: map[string]any{
+			"pipelines": sum.Pipelines, "jobs": sum.Jobs, "wizards": sum.Wizards, "audit_lines": sum.Audit}})
+	}
+	pw, _ := s.db.adminHashes()
+	if pw == "" {
+		return errors.New("no admin password in the database: run `strand web passwd --config <web.yaml>` (or `strand web init`) first")
+	}
+	s.materializeAll()
+	return nil
 }
 
 // Handler trả http.Handler đầy đủ (middleware + route), dùng cho httptest.
@@ -140,6 +204,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go s.samp.Run(ctx)
+	go s.ResumeDesired(ctx)
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -164,7 +229,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
 		_ = srv.Shutdown(sctx)
+		if s.db != nil && s.cfg.ShutdownStopPipelines {
+			s.stopForShutdown()
+		}
 		_ = s.audit.Close()
+		if s.db != nil {
+			_ = s.db.st.Close()
+		}
 		return nil
 	case err := <-errc:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -180,6 +251,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(sub)))
 
 	// Đăng nhập / đăng xuất (không cần session).
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginForm)
 	mux.HandleFunc("POST /api/v1/login", s.handleLoginAPI)
@@ -268,7 +340,7 @@ type authedHandler func(w http.ResponseWriter, r *http.Request, sess *Session)
 func (s *Server) auth(api bool, next authedHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if tok := bearer(r); tok != "" {
-			if s.cfg.APITokenHash != "" && constEq(hashKey(tok), s.cfg.APITokenHash) {
+			if s.apiTokenHash() != "" && constEq(hashKey(tok), s.apiTokenHash()) {
 				// Token tĩnh không dùng cookie nên không cần CSRF.
 				next(w, r, &Session{CSRF: "", IP: s.clientIP(r)})
 				return
@@ -437,7 +509,7 @@ func (s *Server) checkLogin(r *http.Request, password string) (int, string) {
 		_ = s.audit.Log(AuditEntry{IP: ip, Action: "login", Result: "denied", Detail: map[string]any{"reason": "rate_limited", "retry_after_s": int(wait.Seconds()) + 1}})
 		return http.StatusTooManyRequests, "too many failed attempts; try again in " + strconv.Itoa(int(wait.Seconds())+1) + " s"
 	}
-	if bcrypt.CompareHashAndPassword([]byte(s.cfg.PasswordHash), []byte(password)) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(s.passwordHash()), []byte(password)) != nil {
 		s.limiter.Fail(ip)
 		_ = s.audit.Log(AuditEntry{IP: ip, Action: "login", Result: "denied", Detail: map[string]any{"reason": "bad_password"}})
 		return http.StatusUnauthorized, "wrong password"
@@ -448,6 +520,9 @@ func (s *Server) checkLogin(r *http.Request, password string) (int, string) {
 
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request) *Session {
 	tok, sess := s.sessions.Create(s.clientIP(r))
+	if sess == nil {
+		return nil
+	}
 	s.setCookie(w, sessionCookie, tok, int(SessionMaxAge.Seconds()))
 	s.setCookie(w, loginCookie, "", -1)
 	_ = s.audit.Log(AuditEntry{IP: sess.IP, Action: "login", Result: "ok"})
@@ -468,7 +543,10 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 		s.renderLogin(w, r, status, msg)
 		return
 	}
-	s.startSession(w, r)
+	if s.startSession(w, r) == nil {
+		s.renderLogin(w, r, http.StatusServiceUnavailable, "session store unavailable; try again shortly")
+		return
+	}
 	next := r.PostForm.Get("next")
 	if !safeNext(next) {
 		next = "/"
@@ -494,6 +572,10 @@ func (s *Server) handleLoginAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := s.startSession(w, r)
+	if sess == nil {
+		writeErr(w, http.StatusServiceUnavailable, "session store unavailable; try again shortly")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"csrf": sess.CSRF, "idle_timeout_s": int(SessionIdleTimeout.Seconds()), "max_age_s": int(SessionMaxAge.Seconds())})
 }
 

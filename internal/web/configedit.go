@@ -305,6 +305,11 @@ func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent
 		return nil, fmt.Errorf("atomic rename %s -> %s: %w", tmpName, p.ConfigPath, err)
 	}
 
+	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo).
+	if err := s.persistPipelineFiles(p); err != nil {
+		s.log.Warn("config saved to file but storing it in the database failed", "pipeline", p.Name, "err", err)
+	}
+
 	// Làm mới cấu hình trong registry
 	s.reg.Refresh(ctx)
 
@@ -470,6 +475,9 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 
 	if p.EnvFile == "" {
 		p.EnvFile = envPath
+	}
+	if err := s.persistPipelineFiles(p); err != nil {
+		s.log.Warn(".env saved to file but storing it in the database failed", "pipeline", p.Name, "err", err)
 	}
 	s.reg.Refresh(ctx)
 

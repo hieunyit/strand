@@ -28,6 +28,9 @@ type AuditLog struct {
 	path string
 	f    *os.File
 	now  func() time.Time
+	// db: sink PostgreSQL (nil = chỉ file). mode: db | file | both.
+	db   *metaDB
+	mode string
 }
 
 // OpenAuditLog mở (tạo nếu chưa có) <dir>/audit.log.
@@ -46,6 +49,14 @@ func OpenAuditLog(dir string, now func() time.Time) (*AuditLog, error) {
 	return &AuditLog{path: p, f: f, now: now}, nil
 }
 
+// useDB gắn sink PostgreSQL. mode "" = both.
+func (a *AuditLog) useDB(m *metaDB, mode string) {
+	if mode == "" {
+		mode = AuditBoth
+	}
+	a.db, a.mode = m, mode
+}
+
 // Path trả đường dẫn file audit.
 func (a *AuditLog) Path() string { return a.path }
 
@@ -61,12 +72,20 @@ func (a *AuditLog) Log(e AuditEntry) error {
 	if err != nil {
 		return err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, err := a.f.Write(append(b, '\n')); err != nil {
-		return err
+	// DB là nguồn chính khi có; lỗi DB trả về (thao tác ghi từ chối chạy khi audit hỏng), file vẫn được thử.
+	var dbErr error
+	if a.db != nil && a.mode != AuditFile {
+		dbErr = a.db.appendAudit(e)
 	}
-	return nil
+	if a.db == nil || a.mode != AuditDB {
+		a.mu.Lock()
+		_, ferr := a.f.Write(append(b, '\n'))
+		a.mu.Unlock()
+		if ferr != nil && dbErr == nil {
+			return ferr
+		}
+	}
+	return dbErr
 }
 
 // Close đóng file.

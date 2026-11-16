@@ -740,7 +740,15 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		Config:  yamlPath,
 		EnvFile: envPath,
 	}
-	if !coveredByScan {
+	if s.db != nil {
+		// Chế độ DB: DB là nguồn sự thật (dòng pipeline + YAML + .env mã hóa nếu có khóa); file chỉ là bản vật chất hóa.
+		if err := s.reg.AddCreated(entry); err != nil {
+			return nil, fmt.Errorf("pipeline files written but registering in the database failed: %w", err)
+		}
+		if err := s.persistPipelineFiles(&Pipeline{Name: opts.Name}); err != nil {
+			return nil, fmt.Errorf("pipeline files written but storing them in the database failed: %w", err)
+		}
+	} else if !coveredByScan {
 		// Nguồn sự thật duy nhất: <state_dir>/pipelines.json (luôn ghi được, kể cả khi /etc/strand read-only).
 		if err := s.reg.AddCreated(entry); err != nil {
 			return nil, fmt.Errorf("pipeline files written but registering in %s failed: %w", s.reg.createdPath(), err)
