@@ -70,6 +70,7 @@ func (f *fakeCmd) Run(ctx context.Context, name string, args ...string) ([]byte,
 // mockPipeline cài admin socket giả với đủ lệnh cũ và mới.
 type mockPipeline struct {
 	events []admin.EventRecord
+	tables []admin.TableInfo // nil: the three default tables
 }
 
 func (m *mockPipeline) Top(ctx context.Context) (*admin.TopInfo, error) {
@@ -94,6 +95,9 @@ func (m *mockPipeline) Status(ctx context.Context) (*admin.StatusInfo, error) {
 		AppliedTxns: 777, AppliedRows: 5555, Governor: admin.GovernorInfo{Algorithm: "grace-v2", Zone: "Green", BackgroundRate: 321}}, nil
 }
 func (m *mockPipeline) Tables(ctx context.Context) ([]admin.TableInfo, error) {
+	if m.tables != nil {
+		return m.tables, nil
+	}
 	return []admin.TableInfo{
 		{Table: "app.users", State: "done", ProgressPct: 100, PK: []string{"id"}},
 		{Table: "app.orders", State: "running", Ranges: map[string]int{"Done": 2, "Pending": 6}, RowsEstimate: 1000000, RowsCopied: 250000, ProgressPct: 25, ETASeconds: 90, PK: []string{"id"}},
