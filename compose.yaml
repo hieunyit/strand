@@ -1,0 +1,91 @@
+# Strand CDC Web UI bằng docker compose: PostgreSQL (metadata) + strand web (pipeline chạy chế độ nền trong container web).
+#   cp .env.example .env   # đặt POSTGRES_PASSWORD, STRAND_WEB_SECRET_KEY, STRAND_WEB_ADMIN_PASSWORD
+#   docker compose up -d --build
+#   mở http://<host>:8080  (không đặt STRAND_WEB_ADMIN_PASSWORD thì mật khẩu sinh ra nằm ở: docker compose logs web)
+# Hướng dẫn đầy đủ: docs/INSTALL.md mục "Chạy bằng docker compose".
+
+name: strand
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: strand
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (copy .env.example)}
+      POSTGRES_DB: strand
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U strand -d strand"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    # Không publish cổng 5432: chỉ web truy cập qua mạng compose. Muốn truy cập từ host: thêm
+    #   ports: ["127.0.0.1:5432:5432"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${DB_CPUS:-1}"
+          memory: ${DB_MEMORY:-1g}
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  web:
+    build:
+      context: .
+      args:
+        VERSION: ${STRAND_VERSION:-dev}
+    image: strand:${STRAND_VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Mặc định mọi interface, HTTP thường: chỉ dùng trong mạng tin cậy. Đặt STRAND_WEB_BIND=127.0.0.1 khi có
+      # reverse proxy TLS trên cùng host, hoặc đặt STRAND_WEB_TLS_CERT/KEY (xem .env.example).
+      - "${STRAND_WEB_BIND:-0.0.0.0}:${STRAND_WEB_PORT:-8080}:8080"
+    environment:
+      STRAND_WEB_DATABASE_DSN: postgres://strand:${POSTGRES_PASSWORD}@db:5432/strand?sslmode=disable
+      STRAND_WEB_SECRET_KEY: ${STRAND_WEB_SECRET_KEY:-}
+      STRAND_WEB_ADMIN_PASSWORD: ${STRAND_WEB_ADMIN_PASSWORD:-}
+      # Docker secrets thay cho biến trên: bỏ comment khối `secrets` cuối file, đặt
+      #   STRAND_WEB_ADMIN_PASSWORD_FILE: /run/secrets/strand_admin_password
+      STRAND_WEB_LISTEN: 0.0.0.0:8080
+      STRAND_WEB_ALLOW_PLAIN_HTTP: ${STRAND_WEB_ALLOW_PLAIN_HTTP:-true}
+      STRAND_WEB_SECURE_COOKIES: ${STRAND_WEB_SECURE_COOKIES:-false}
+      STRAND_WEB_TRUST_FORWARDED_FOR: ${STRAND_WEB_TRUST_FORWARDED_FOR:-false}
+      STRAND_WEB_TLS_CERT: ${STRAND_WEB_TLS_CERT:-}
+      STRAND_WEB_TLS_KEY: ${STRAND_WEB_TLS_KEY:-}
+    volumes:
+      - strand_config:/etc/strand          # file cấu hình pipeline (vật chất hóa từ DB), .env
+      - strand_state:/var/lib/strand-web   # spool, checkpoint, output job, audit.log (bản sao)
+      # TLS tại web: mount cert/key rồi đặt STRAND_WEB_TLS_CERT=/certs/tls.crt, STRAND_WEB_TLS_KEY=/certs/tls.key
+      #   - ./certs:/certs:ro
+    # Container dừng thì web dừng êm pipeline nền (tối đa ~100 s chờ ghi checkpoint) rồi thoát.
+    stop_grace_period: 120s
+    # Nguồn/đích ở máy khác: dùng IP/DNS của chúng trong cấu hình pipeline. Nguồn/đích là dịch vụ trên chính host
+    # docker: bỏ comment dòng dưới rồi dùng host `host.docker.internal`. (network_mode: host cũng được nhưng
+    # khi đó bỏ `ports`, và web nghe trực tiếp trên host.)
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "${WEB_CPUS:-2}"
+          memory: ${WEB_MEMORY:-2g}
+    logging: *logging
+
+volumes:
+  pg_data:
+  strand_config:
+  strand_state:
+
+# secrets:
+#   strand_admin_password:
+#     file: ./secrets/admin_password.txt
+# (và trong service web: `secrets: [strand_admin_password]`)

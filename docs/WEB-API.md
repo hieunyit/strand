@@ -22,6 +22,7 @@ Giới hạn đăng nhập: 5 lần sai/phút/IP, lần thứ 6 trả **429** k�
 | --- | --- |
 | `POST /api/v1/login` | như trên. 401 sai mật khẩu, 403 thiếu CSRF, 429 bị chặn |
 | `POST /api/v1/logout` | hủy session. Cần CSRF. **200** `{"ok": true}` |
+| `GET /healthz` | **Không cần xác thực.** `200 {"status":"ok","version","database":{"mode":"file"` hoặc `"postgres","ok":true}}`; chế độ PostgreSQL mà DB không ping được: **503** `{"status":"degraded","database":{"ok":false,"error":"<đã che mật khẩu>"}}`. Dùng cho HEALTHCHECK/orchestrator |
 | `GET /api/v1/session` | `{"authenticated": true, "version", "csrf", "idle_timeout_s", "max_age_s"}` (`csrf` vắng khi dùng Bearer) |
 
 ## 3. Tài nguyên
@@ -219,7 +220,7 @@ Khi web chết hoặc khởi động lại: tiến trình con có process group 
 
 ## 5. Audit log
 
-`<state_dir>/audit.log`, mỗi dòng một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, `config.edit`, `env.edit`, `pipeline.create`, và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
+Chế độ file: `<state_dir>/audit.log`. Chế độ PostgreSQL (`database.dsn`): bảng `audit_log` chỉ-thêm (cột `ts, ip, action, pipeline, result, data`); `database.audit: both` (mặc định) vẫn ghi file làm bản sao (USAGE.md 7.15). Mỗi dòng/bản ghi là một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, `config.edit`, `env.edit`, `pipeline.create`, `autostart` (web tự chạy lại pipeline có trạng thái mong muốn `running` khi khởi động), `state.import` (lần nhập file vào DB đầu tiên), và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
 
 ## 6. Trang HTML
 

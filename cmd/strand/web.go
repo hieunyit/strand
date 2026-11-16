@@ -58,8 +58,8 @@ func newWebPasswdCmd() *cobra.Command {
 		Use:   "passwd",
 		Short: "Đặt mật khẩu admin của Web UI (bcrypt hash vào web.yaml, quyền 0600)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cfgPath == "" {
-				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml)", nil)
+			if cfgPath == "" && os.Getenv(web.EnvDatabaseDSN) == "" {
+				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml, or set "+web.EnvDatabaseDSN+")", nil)
 			}
 			pw, err := readNewPassword(cmd)
 			if err != nil {
@@ -95,8 +95,8 @@ func newWebTokenCmd() *cobra.Command {
 		Use:   "token",
 		Short: "Sinh token API tĩnh cho script (in ra một lần, ghi sha256 vào web.yaml)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cfgPath == "" {
-				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml)", nil)
+			if cfgPath == "" && os.Getenv(web.EnvDatabaseDSN) == "" {
+				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml, or set "+web.EnvDatabaseDSN+")", nil)
 			}
 			tok := web.NewAPIToken()
 			st, err := web.CLIStore(cmd.Context(), cfgPath, nil)

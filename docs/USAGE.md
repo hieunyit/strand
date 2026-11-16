@@ -872,6 +872,32 @@ Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, s�
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
+**Kho metadata PostgreSQL (`database`, dùng cho docker compose).** Mặc định web giữ trạng thái trong file như mô tả bên dưới. Đặt `database.dsn` trong `web.yaml` hoặc biến `STRAND_WEB_DATABASE_DSN` (biến thắng file) thì web lưu trong PostgreSQL:
+
+```yaml
+database:
+  dsn: "postgres://strand:***@db:5432/strand?sslmode=disable"   # hoặc env STRAND_WEB_DATABASE_DSN
+  audit: both        # db | file | both (mặc định both)
+shutdown_stop_pipelines: true   # web thoát (SIGTERM) thì dừng êm pipeline nền; lần sau tự chạy lại. Dùng cho container
+```
+
+| Dữ liệu | Chế độ file | Chế độ DB |
+| --- | --- | --- |
+| Hash mật khẩu admin, hash token | `web.yaml` (`password_hash`, `api_token_hash`) | bảng `admin`; `strand web passwd/token/init` ghi vào DB khi có DSN, có hiệu lực ngay (không cần restart) |
+| Phiên đăng nhập | RAM (restart là đăng xuất) | bảng `sessions` (chỉ sha256 của id cookie); luật idle 30 phút / tối đa 12 giờ giữ nguyên; restart không đăng xuất |
+| Pipeline tạo từ web | `<state_dir>/pipelines.json` + `<config_dir>/<name>.yaml|.env` | bảng `pipelines` (YAML là nguồn sự thật; `.env` mã hóa AES-GCM, chỉ khi có `STRAND_WEB_SECRET_KEY`); file được dựng lại từ DB trước validate/start (0640/0600) vì CLI `strand` chỉ đọc file |
+| Trạng thái mong muốn running/stopped | không có | bảng `pipeline_desired`; Start/Restart đặt `running`, Stop đặt `stopped` (chế độ nền); web khởi động thì chạy lại pipeline `running` đang không chạy |
+| Lịch sử job | `<state_dir>/jobs/<id>.json` | bảng `jobs` (output vẫn là file `<id>.log`) |
+| Wizard Repair/Promote | `<state_dir>/wizards/*.json` | bảng `wizards` |
+| Audit log | `<state_dir>/audit.log` | bảng `audit_log` chỉ-thêm (trigger chặn UPDATE/DELETE/TRUNCATE). `audit: both` (mặc định) vẫn ghi cả file làm bản sao khi mất DB; `db` chỉ DB; `file` chỉ file |
+| Đồ thị/số liệu 1 giờ | RAM | RAM |
+
+`web.yaml` khai báo `pipelines:` và `scan:` vẫn hoạt động như cũ ở cả hai chế độ (khai báo tường minh thắng; pipeline quét theo glob không nằm trong DB nhưng vẫn có trạng thái mong muốn). `.env` không có khóa mã hóa thì chỉ nằm trên đĩa.
+
+Lược đồ do migration nhúng sẵn (`internal/web/store/migrations/NNN_*.sql`) tạo lúc khởi động: mỗi file một transaction, bảng `schema_migrations`, `pg_advisory_lock` nên nhiều instance khởi động cùng lúc không đạp nhau; chạy lại là no-op. Web thử kết nối lại với backoff (0,5 s tới 5 s, tối đa 60 s) rồi mới lỗi; lỗi và log luôn che mật khẩu DSN. `GET /healthz` (không cần đăng nhập) trả `200 {"status":"ok","database":{"mode":"postgres","ok":true}}` hoặc `503` khi DB hỏng; chế độ file trả `"database":{"mode":"file"}`.
+
+Lần khởi động đầu có DSN, web **nhập đúng một lần** trạng thái file hiện có: hash mật khẩu/token trong `web.yaml` (chỉ khi DB chưa có admin), `pipelines.json` (kèm đọc YAML và `.env` hiện tại), `jobs/*.json`, `wizards/*.json`, `audit.log` (giữ thời gian gốc), rồi log `imported existing file state into the database ...` kèm số lượng và ghi dòng audit `state.import`. Cờ `files_imported` trong `web_meta` làm các lần sau (và instance song song, qua advisory lock) không nhập lại; file gốc được giữ nguyên. Cài bằng docker compose: INSTALL.md mục 10. `strand web init --if-no-admin --quiet` dành cho bootstrap: chỉ đặt mật khẩu khi DB chưa có admin.
+
 **Cài nhanh: `strand web init`.** Một lệnh thay cho chép `web.yaml`, chown/chmod, `web passwd`, `web token` và enable unit:
 
 ```bash
