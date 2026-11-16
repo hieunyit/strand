@@ -305,9 +305,14 @@ func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent
 		return nil, fmt.Errorf("atomic rename %s -> %s: %w", tmpName, p.ConfigPath, err)
 	}
 
-	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo).
+	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo). Không lưu được thì
+	// trả file về bản cũ và báo lỗi: chỉ giữ bản trên đĩa thì lần start/khởi động sau DB sẽ ghi đè lặng lẽ.
 	if err := s.persistPipelineFiles(p); err != nil {
-		s.log.Warn("config saved to file but storing it in the database failed", "pipeline", p.Name, "err", err)
+		s.rollbackFile(p.ConfigPath, origBytes)
+		_ = s.audit.Log(AuditEntry{IP: ip, Action: "config.edit", Pipeline: p.Name, Result: "error",
+			Detail: map[string]any{"error": "metadata database: " + err.Error()}})
+		return nil, &ActionError{Status: http.StatusServiceUnavailable,
+			Msg: "config NOT saved: storing it in the metadata database failed (" + err.Error() + "); the file was left unchanged, try again"}
 	}
 
 	// Làm mới cấu hình trong registry
@@ -339,6 +344,13 @@ func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent
 		Restarted: restarted,
 		Message:   "Configuration updated successfully",
 	}, nil
+}
+
+// rollbackFile đặt lại nội dung cũ của path (giữ quyền/chủ) sau khi lưu vào DB thất bại.
+func (s *Server) rollbackFile(path string, orig []byte) {
+	if err := writeFilePreserving(path, orig, false, false); err != nil {
+		s.log.Error("rollback of file after database failure failed", "path", path, "err", err)
+	}
 }
 
 // EnvView thể hiện các biến môi trường của pipeline (.env), các khóa bí mật được che bằng '********'.
@@ -462,7 +474,8 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 
 	// Sao lưu .env cũ nếu có
 	bakPath := ""
-	if origBytes, err := os.ReadFile(envPath); err == nil && len(origBytes) > 0 {
+	origBytes, origErr := os.ReadFile(envPath)
+	if origErr == nil && len(origBytes) > 0 {
 		ts := s.now().UTC().Format("20060102T150405Z")
 		bakPath = envPath + ".bak." + ts
 		_ = writeBackup(bakPath, origBytes, envPath, envPerm)
@@ -473,11 +486,21 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 		return "", fmt.Errorf("rename to %s: %w", envPath, err)
 	}
 
+	prevEnvFile := p.EnvFile
 	if p.EnvFile == "" {
 		p.EnvFile = envPath
 	}
 	if err := s.persistPipelineFiles(p); err != nil {
-		s.log.Warn(".env saved to file but storing it in the database failed", "pipeline", p.Name, "err", err)
+		p.EnvFile = prevEnvFile
+		if origErr == nil {
+			s.rollbackFile(envPath, origBytes)
+		} else {
+			_ = os.Remove(envPath)
+		}
+		_ = s.audit.Log(AuditEntry{IP: ip, Action: "env.edit", Pipeline: p.Name, Result: "error",
+			Detail: map[string]any{"error": "metadata database: " + err.Error()}})
+		return "", &ActionError{Status: http.StatusServiceUnavailable,
+			Msg: ".env NOT saved: storing it in the metadata database failed (" + err.Error() + "); the file was left unchanged, try again"}
 	}
 	s.reg.Refresh(ctx)
 

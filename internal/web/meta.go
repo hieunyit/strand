@@ -230,6 +230,9 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 		return err
 	}
 	row.ConfigYAML, row.HasConfig = string(cfgB), true
+	if row.EnvPath == "" && p.EnvFile != "" {
+		row.EnvPath = p.EnvFile // .env tạo sau (tab Config) cho pipeline chưa có
+	}
 	if row.EnvPath != "" {
 		if envB, err := os.ReadFile(row.EnvPath); err == nil {
 			if s.db.box != nil {
@@ -237,6 +240,9 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 					return err
 				}
 			} else {
+				// Không có khóa: bản mã hóa cũ (nếu có, từ lúc còn khóa) đã lỗi thời; giữ lại thì khi đặt khóa
+				// trở lại nó sẽ ghi đè .env mới hơn trên đĩa.
+				row.EnvEnc = nil
 				s.db.warnedNoKey(s.log)
 			}
 		}
