@@ -43,3 +43,12 @@ func TestMySQLReaderBaselineIsLearned(t *testing.T) {
 		t.Fatal("5x latency increase over the learned baseline did not open the breaker")
 	}
 }
+
+// Tín hiệu cứng: lý do breaker nêu đúng tín hiệu (không chỉ câu chung chung) để web/log/top chỉ ra cách xử lý.
+func TestBreakerHardSignalReasonNamesTheSignal(t *testing.T) {
+	b := NewBreaker(BreakerConfig{})
+	open, reason := b.Evaluate(DBSignals{HardSignal: true, HardReason: "ΔInnodb_log_waits = 3"})
+	if !open || !strings.Contains(reason, "Innodb_log_waits") || !strings.Contains(b.Reason(), "Innodb_log_waits") {
+		t.Fatalf("open=%v reason=%q Reason()=%q", open, reason, b.Reason())
+	}
+}

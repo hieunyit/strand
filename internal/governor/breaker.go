@@ -65,6 +65,11 @@ func (b *Breaker) Evaluate(sig DBSignals) (isOpen bool, reason string) {
 	if sig.HardSignal {
 		triggered = true
 		triggerReason = "hard critical DB signal triggered"
+		if sig.HardReason != "" {
+			// Nêu tín hiệu cụ thể (ΔInnodb_log_waits, ΔInnodb_buffer_pool_wait_free, spool gần đầy,
+			// slot wal_status...) để người vận hành biết phải xử lý gì.
+			triggerReason += ": " + sig.HardReason
+		}
 	}
 
 	if triggered {
