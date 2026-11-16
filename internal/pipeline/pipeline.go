@@ -452,6 +452,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			return p.missingKeyError(ctx, id, m)
 		}
 		if m.Keyless {
+			if err := p.checkKeylessTargetCollations(ctx, id, m); err != nil {
+				return err
+			}
 			p.log.Warn("table has no key: running in keyless mode (rows matched on ALL columns, one at a time; each UPDATE/DELETE scans the target table unless an index helps; verify is count+checksum only)", "table", id.String())
 		} else if m.KeyName != rowkey.PrimaryName {
 			p.log.Info("table has no primary key: using a NOT NULL unique index as the row key", "table", id.String(), "key", keyLabel(m))

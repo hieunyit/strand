@@ -62,9 +62,25 @@ func (w *klWorkload) Start(clients int, seed int64) {
 					c = r.Intn(7)
 				}
 				var err error
-				switch r.Intn(6) {
+				var sv any // twins that differ only by case / trailing space / accent: byte-exact matching is required
+				if r.Intn(4) > 0 {
+					sv = []string{"abc", "ABC", "abc ", "Abc", "ábc"}[r.Intn(5)]
+				}
+				switch r.Intn(8) {
+				case 6: // update exactly one twin chosen by its exact bytes
+					if w.pg {
+						err = w.exec("UPDATE "+w.table+" SET c = ? WHERE ctid = (SELECT ctid FROM "+w.table+" WHERE s = ? LIMIT 1)", c, sv)
+					} else {
+						err = w.exec("UPDATE "+w.table+" SET c = ? WHERE BINARY s = BINARY ? LIMIT 1", c, sv)
+					}
+				case 7: // delete exactly one twin
+					if w.pg {
+						err = w.exec("DELETE FROM "+w.table+" WHERE ctid = (SELECT ctid FROM "+w.table+" WHERE s = ? LIMIT 1)", sv)
+					} else {
+						err = w.exec("DELETE FROM "+w.table+" WHERE BINARY s = BINARY ? LIMIT 1", sv)
+					}
 				case 0, 1:
-					err = w.exec("INSERT INTO "+w.table+" (a, b, c) VALUES (?, ?, ?)", a, b, c)
+					err = w.exec("INSERT INTO "+w.table+" (a, b, c, s) VALUES (?, ?, ?, ?)", a, b, c, sv)
 				case 2:
 					if w.pg {
 						err = w.exec("UPDATE "+w.table+" SET c = ? WHERE "+w.one(""), c, a, b)
@@ -84,8 +100,8 @@ func (w *klWorkload) Start(clients int, seed int64) {
 					if e != nil {
 						continue
 					}
-					_, e1 := tx.Exec(ukBind(w.pg, "INSERT INTO "+w.table+" (a, b, c) VALUES (?, ?, ?)"), a, b, c)
-					_, e2 := tx.Exec(ukBind(w.pg, "INSERT INTO "+w.table+" (a, b, c) VALUES (?, ?, ?)"), a, b, c) // identical twin
+					_, e1 := tx.Exec(ukBind(w.pg, "INSERT INTO "+w.table+" (a, b, c, s) VALUES (?, ?, ?, ?)"), a, b, c, sv)
+					_, e2 := tx.Exec(ukBind(w.pg, "INSERT INTO "+w.table+" (a, b, c, s) VALUES (?, ?, ?, ?)"), a, b, c, sv) // identical twin
 					if e1 != nil || e2 != nil {
 						_ = tx.Rollback()
 						continue
@@ -111,7 +127,11 @@ func klPreload(t *testing.T, db *sql.DB, pg bool, table string) {
 		if i%4 != 0 {
 			c = i % 7
 		}
-		if _, err := db.Exec(ukBind(pg, "INSERT INTO "+table+" (a, b, c) VALUES (?, ?, ?)"), i%40, fmt.Sprintf("s%d", i%5), c); err != nil {
+		var sv any
+		if i%6 != 0 {
+			sv = []string{"abc", "ABC", "abc ", "Abc", "ábc"}[i%5]
+		}
+		if _, err := db.Exec(ukBind(pg, "INSERT INTO "+table+" (a, b, c, s) VALUES (?, ?, ?, ?)"), i%40, fmt.Sprintf("s%d", i%5), c, sv); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -201,7 +221,7 @@ func klRun(t *testing.T, env klEnv) {
 	time.Sleep(8 * time.Second)
 	wl.Stop()
 	t.Logf("workload: %d ops", wl.ops.Load())
-	q := "SELECT a, b, c FROM app.kl"
+	q := "SELECT a, b, c, s FROM app.kl"
 	ukWaitEqual(t, p, 3*time.Minute, func() string { return klDiff(env.srcDB, env.dstDB, q) })
 	if !strings.Contains(p.output.String(), "running in keyless mode") {
 		t.Fatalf("log does not mention keyless mode\n%s", p.tail())
@@ -225,13 +245,13 @@ func klRun(t *testing.T, env klEnv) {
 		t.Fatalf("verify must report the divergence: exit %d\n%s", code, out)
 	}
 	out, code = runStrandCLI(t, 5*time.Minute, "verify", "-c", path, "--table", "app.kl", "--mode", "full", "--repair", "fix")
-	if code == 0 || !strings.Contains(out, "not supported for keyless") {
+	if code == 0 || !(strings.Contains(out, "not supported for keyless") || strings.Contains(out, "same engine")) {
 		t.Fatalf("repair of a keyless table must be refused with a clear message: exit %d\n%s", code, out)
 	}
 }
 
-const klMySQLDDL = "CREATE TABLE app.kl (a INT NOT NULL, b VARCHAR(20) NOT NULL, c INT NULL) ENGINE=InnoDB"
-const klPGDDL = "CREATE TABLE app.kl (a int NOT NULL, b varchar(20) NOT NULL, c int)"
+const klMySQLDDL = "CREATE TABLE app.kl (a INT NOT NULL, b VARCHAR(20) NOT NULL, c INT NULL, s VARCHAR(20) NULL) ENGINE=InnoDB"
+const klPGDDL = "CREATE TABLE app.kl (a int NOT NULL, b varchar(20) NOT NULL, c int, s varchar(20))"
 
 func TestKL_E2E_MySQLToMySQL_Keyless(t *testing.T) {
 	src, dst := newPair(t)
@@ -325,8 +345,8 @@ func TestKL_E2E_DivergenceFailsClosed(t *testing.T) {
 	src, dst := newPair(t)
 	src.exec(t, klMySQLDDL)
 	dst.exec(t, klMySQLDDL)
-	src.exec(t, "INSERT INTO app.kl VALUES (1,'x',1),(2,'y',2)")
-	dst.exec(t, "INSERT INTO app.kl VALUES (1,'x',1)") // thiếu (2,'y',2)
+	src.exec(t, "INSERT INTO app.kl (a,b,c) VALUES (1,'x',1),(2,'y',2)")
+	dst.exec(t, "INSERT INTO app.kl (a,b,c) VALUES (1,'x',1)") // thiếu (2,'y',2)
 	start := strings.ReplaceAll(src.gtidExecuted(t), "\n", "")
 	cfg := strandCfg{Name: "e2e-kl-div", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand", Include: []string{"app.kl"},
 		Dir: testDir(t), Bootstrap: "start_at", TablesExtra: klKeylessCfg}

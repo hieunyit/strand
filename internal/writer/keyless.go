@@ -45,12 +45,32 @@ func keylessBefore(row *model.RowChange) []model.Value {
 
 // --- MySQL ---
 
-func mysqlMatchCond(cols []string) string {
-	conds := make([]string, len(cols))
-	for i, c := range cols {
-		conds[i] = quoteMySQL(c) + " <=> ?"
+// mysqlMatchCond: điều kiện khớp ảnh trước. Cột chuỗi (str) khớp theo collation của cột (để dùng được index) VÀ
+// theo byte: collation _ci/_ai và PAD SPACE coi 'abc' = 'ABC' = 'abc ', nên chỉ `<=>` có thể trúng nhầm hàng.
+// CONVERT(... USING utf8mb4) làm hai phía cùng bộ ký tự (cột latin1 vs tham số utf8mb4) trước khi so BINARY.
+func mysqlMatchCond(cols []string, str map[string]bool) string {
+	conds := make([]string, 0, len(cols))
+	for _, c := range cols {
+		q := quoteMySQL(c)
+		if str[c] {
+			conds = append(conds, q+" <=> ? AND BINARY CONVERT("+q+" USING utf8mb4) <=> BINARY ?")
+			continue
+		}
+		conds = append(conds, q+" <=> ?")
 	}
 	return strings.Join(conds, " AND ")
+}
+
+// keylessMatchArgs: tham số của mysqlMatchCond (cột chuỗi dùng giá trị hai lần).
+func keylessMatchArgs(cols []string, str map[string]bool, img []model.Value) []any {
+	out := make([]any, 0, len(img)+len(str))
+	for i, v := range img {
+		out = append(out, v)
+		if i < len(cols) && str[cols[i]] {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // buildKeylessInsertMySQL: INSERT thường một hàng.
@@ -64,17 +84,17 @@ func buildKeylessInsertMySQL(t model.TableID, cols []string) string {
 }
 
 // buildKeylessUpdateMySQL: UPDATE đúng một hàng khớp ảnh trước (NULL-safe `<=>`, LIMIT 1).
-func buildKeylessUpdateMySQL(t model.TableID, setCols, matchCols []string) string {
+func buildKeylessUpdateMySQL(t model.TableID, setCols, matchCols []string, str map[string]bool) string {
 	sets := make([]string, len(setCols))
 	for i, c := range setCols {
 		sets[i] = quoteMySQL(c) + " = ?"
 	}
-	return fmt.Sprintf("UPDATE %s SET %s WHERE %s LIMIT 1", quoteMySQLTable(t), strings.Join(sets, ", "), mysqlMatchCond(matchCols))
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s LIMIT 1", quoteMySQLTable(t), strings.Join(sets, ", "), mysqlMatchCond(matchCols, str))
 }
 
 // buildKeylessDeleteMySQL: DELETE đúng một hàng khớp ảnh trước.
-func buildKeylessDeleteMySQL(t model.TableID, matchCols []string) string {
-	return fmt.Sprintf("DELETE FROM %s WHERE %s LIMIT 1", quoteMySQLTable(t), mysqlMatchCond(matchCols))
+func buildKeylessDeleteMySQL(t model.TableID, matchCols []string, str map[string]bool) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s LIMIT 1", quoteMySQLTable(t), mysqlMatchCond(matchCols, str))
 }
 
 // execAffected chạy một câu ngay (sau khi gửi hết câu đang xếp lô, để giữ thứ tự) và trả số hàng bị ảnh hưởng;
@@ -119,7 +139,8 @@ func (w *MySQLWriter) applyKeylessMySQL(ctx context.Context, q *stmtQueue, row *
 			return err
 		}
 		names, vals := colNamesVals(row.Cols, false)
-		n, err := q.execAffected(ctx, buildKeylessUpdateMySQL(row.Table, names, match), append(vals, toArgs(before)...)...)
+		str := w.pk.stringCols(row.Table)
+		n, err := q.execAffected(ctx, buildKeylessUpdateMySQL(row.Table, names, match, str), append(vals, keylessMatchArgs(match, str, before)...)...)
 		if err != nil {
 			return fmt.Errorf("keyless update on %s: %w", row.Table, err)
 		}
@@ -133,7 +154,8 @@ func (w *MySQLWriter) applyKeylessMySQL(ctx context.Context, q *stmtQueue, row *
 		if err != nil {
 			return err
 		}
-		n, err := q.execAffected(ctx, buildKeylessDeleteMySQL(row.Table, match), toArgs(row.Key)...)
+		str := w.pk.stringCols(row.Table)
+		n, err := q.execAffected(ctx, buildKeylessDeleteMySQL(row.Table, match, str), keylessMatchArgs(match, str, row.Key)...)
 		if err != nil {
 			return fmt.Errorf("keyless delete on %s: %w", row.Table, err)
 		}

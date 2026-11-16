@@ -19,12 +19,29 @@ func TestKeylessMySQLSQL(t *testing.T) {
 	if strings.Contains(buildKeylessInsertMySQL(klT, []string{"a"}), "ON DUPLICATE") {
 		t.Fatal("keyless insert must be a plain INSERT (identical rows are distinct rows)")
 	}
-	if got, want := buildKeylessUpdateMySQL(klT, []string{"a", "b"}, []string{"a", "b"}),
+	if got, want := buildKeylessUpdateMySQL(klT, []string{"a", "b"}, []string{"a", "b"}, nil),
 		"UPDATE `d`.`k` SET `a` = ?, `b` = ? WHERE `a` <=> ? AND `b` <=> ? LIMIT 1"; got != want {
 		t.Fatalf("update: %s", got)
 	}
-	if got, want := buildKeylessDeleteMySQL(klT, []string{"a", "b"}), "DELETE FROM `d`.`k` WHERE `a` <=> ? AND `b` <=> ? LIMIT 1"; got != want {
+	if got, want := buildKeylessDeleteMySQL(klT, []string{"a", "b"}, nil), "DELETE FROM `d`.`k` WHERE `a` <=> ? AND `b` <=> ? LIMIT 1"; got != want {
 		t.Fatalf("delete: %s", got)
+	}
+}
+
+// Cột chuỗi khớp thêm theo byte (collation _ci / PAD SPACE coi 'abc', 'ABC', 'abc ' là bằng nhau).
+func TestKeylessMySQLStringColumnsMatchByBytes(t *testing.T) {
+	str := map[string]bool{"b": true}
+	got := buildKeylessDeleteMySQL(klT, []string{"a", "b"}, str)
+	want := "DELETE FROM `d`.`k` WHERE `a` <=> ? AND `b` <=> ? AND BINARY CONVERT(`b` USING utf8mb4) <=> BINARY ? LIMIT 1"
+	if got != want {
+		t.Fatalf("delete: %s", got)
+	}
+	args := keylessMatchArgs([]string{"a", "b"}, str, []model.Value{int64(1), "ABC"})
+	if len(args) != 3 || args[1] != "ABC" || args[2] != "ABC" {
+		t.Fatalf("string column value must be passed twice: %v", args)
+	}
+	if n := len(keylessMatchArgs([]string{"a", "b"}, nil, []model.Value{int64(1), "x"})); n != 2 {
+		t.Fatalf("non-string columns pass one arg each, got %d", n)
 	}
 }
 

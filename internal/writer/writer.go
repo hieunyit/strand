@@ -82,6 +82,7 @@ type pkRegistry struct {
 	mu      sync.RWMutex
 	pks     map[model.TableID][]string
 	keyless map[model.TableID]bool
+	strCols map[model.TableID]map[string]bool
 }
 
 // setKeyless đánh dấu bảng keyless: cột "khóa" là mọi cột; UPDATE/DELETE khớp row theo ảnh đầy đủ (keyless.go).
@@ -92,6 +93,25 @@ func (r *pkRegistry) setKeyless(t model.TableID, on bool) {
 		r.keyless = make(map[model.TableID]bool)
 	}
 	r.keyless[t] = on
+}
+
+func (r *pkRegistry) setStringCols(t model.TableID, cols []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.strCols == nil {
+		r.strCols = make(map[model.TableID]map[string]bool)
+	}
+	m := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		m[c] = true
+	}
+	r.strCols[t] = m
+}
+
+func (r *pkRegistry) stringCols(t model.TableID) map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.strCols[t]
 }
 
 func (r *pkRegistry) isKeyless(t model.TableID) bool {
@@ -247,6 +267,11 @@ func (w *MySQLWriter) SetStatementPipelining(on bool) { w.pipelining = on }
 func (w *MySQLWriter) SetPrimaryKey(t model.TableID, cols []string) { w.pk.set(t, cols) }
 
 // SetKeyless bật/tắt chế độ keyless của bảng (tables.keyless=full_row).
+// SetKeylessStringCols khai báo các cột chuỗi (CHAR/VARCHAR/TEXT/ENUM/SET) của bảng keyless: khớp thêm theo byte.
+func (w *MySQLWriter) SetKeylessStringCols(t model.TableID, cols []string) {
+	w.pk.setStringCols(t, cols)
+}
+
 func (w *MySQLWriter) SetKeyless(t model.TableID, on bool) { w.pk.setKeyless(t, on) }
 
 // SetCommitOrderer gán CommitOrderer để kiểm soát thứ tự commit (CP-5).

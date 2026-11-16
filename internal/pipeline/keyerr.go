@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -84,4 +85,51 @@ func (p *Pipeline) keylessPendingError(ctx context.Context, id model.TableID, m 
 func setWriterKey(w batchWriter, target model.TableID, m *tableMeta) {
 	w.SetPrimaryKey(target, m.PK)
 	w.SetKeyless(target, m.Keyless)
+	if sw, ok := w.(interface {
+		SetKeylessStringCols(model.TableID, []string)
+	}); ok && m.Keyless {
+		var cols []string
+		for _, c := range m.Columns {
+			switch m.ColTypes[c] {
+			case "char", "varchar", "tinytext", "text", "mediumtext", "longtext", "enum", "set":
+				cols = append(cols, c)
+			}
+		}
+		sw.SetKeylessStringCols(target, cols)
+	}
+}
+
+// checkKeylessTargetCollations: UPDATE/DELETE keyless ở target PG khớp bằng IS NOT DISTINCT FROM theo collation của cột;
+// collation không tất định (ICU, không phân biệt hoa/thường/dấu) coi giá trị khác nhau là bằng nhau và có thể trúng
+// nhầm hàng — từ chối. Bảng đích chưa tồn tại thì bỏ qua (schema init tạo cột với collation mặc định, tất định).
+func (p *Pipeline) checkKeylessTargetCollations(ctx context.Context, id model.TableID, m *tableMeta) error {
+	if p.dstEngine != model.EnginePG || !m.Keyless {
+		return nil
+	}
+	tgt := p.filter.Target(id)
+	rows, err := p.dst.QueryContext(ctx, `SELECT a.attname, co.collname FROM pg_attribute a
+		JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_collation co ON co.oid = a.attcollation
+		WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND NOT co.collisdeterministic`, tgt.Schema, tgt.Table)
+	if err != nil {
+		return fmt.Errorf("check collations of target table %s: %w", tgt, err)
+	}
+	defer rows.Close()
+	var bad []string
+	for rows.Next() {
+		var col, coll string
+		if err := rows.Scan(&col, &coll); err != nil {
+			return err
+		}
+		bad = append(bad, col+" ("+coll+")")
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(bad) > 0 {
+		return exitcode.New(exitcode.ErrCollationLooser, exitcode.Rejected, fmt.Sprintf(
+			"keyless table %s: target column(s) %s use a non-deterministic collation; rows are matched on all columns, so values that differ only by case/accent would be treated as equal and the wrong row could be updated or deleted; use a deterministic collation",
+			tgt, strings.Join(bad, ", ")), nil)
+	}
+	return nil
 }
