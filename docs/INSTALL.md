@@ -444,7 +444,7 @@ Mọi biến nằm trong `.env.example` (kèm giải thích). Các biến chính
 | --- | --- | --- |
 | `pg_data` | PostgreSQL metadata: tài khoản admin (hash), phiên đăng nhập (chỉ sha256 id), danh sách pipeline do web tạo + YAML cấu hình (+ `.env` mã hóa nếu có khóa) + **trạng thái mong muốn** (running/stopped), lịch sử job, trạng thái wizard, audit log (bảng chỉ-thêm) | nguồn sự thật |
 | `strand_config` (`/etc/strand`) | File cấu hình pipeline `<name>.yaml` (0640) và `<name>.env` (0600), được **dựng lại từ DB** trước khi validate/start nếu thiếu hoặc khác | thả thêm file YAML vào đây thì web tự quét (`scan`), nhưng pipeline kiểu này không nằm trong DB |
-| `strand_state` (`/var/lib/strand-web`) | Spool, state, checkpoint cục bộ của pipeline, output job (`jobs/<id>.log`), bản sao `audit.log` | mất thì pipeline phải dựng lại phần local (checkpoint chính ở target) |
+| `strand_state` (`/var/lib/strand-web`) | Spool, state, checkpoint cục bộ của pipeline, spool output job đang chạy (`jobs/<id>.log`, chuyển vào bảng `job_output` của DB rồi xóa khi job xong), bản sao `audit.log` | mất thì pipeline phải dựng lại phần local (checkpoint chính ở target) |
 
 Pipeline chạy **trong container web** ở chế độ nền (không có systemd). Container dừng (`docker compose stop/restart`, `down`): web dừng êm các pipeline đang chạy (chờ ghi checkpoint, tối đa ~100 giây; `stop_grace_period: 120s`) mà **không đổi trạng thái mong muốn**; khi container chạy lại, web tự chạy lại mọi pipeline chế độ nền có trạng thái mong muốn `running` mà chưa chạy (audit `autostart`). Bấm Stop trên web đặt trạng thái `stopped` nên sẽ không tự chạy lại. Phiên đăng nhập nằm trong DB nên khởi động lại web không đăng xuất ai (hạn idle 30 phút / tối đa 12 giờ như cũ).
 

@@ -16,6 +16,7 @@ type Mem struct {
 	pipes    map[string]Pipeline
 	desired  map[string]string
 	jobs     map[string]Job
+	jobOut   map[string]map[int64][]byte
 	wizards  map[string][]byte
 	audit    []AuditRow
 	meta     map[string]string
@@ -222,7 +223,81 @@ func (m *Mem) DeleteJob(_ context.Context, id string) error {
 	}
 	defer m.mu.Unlock()
 	delete(m.jobs, id)
+	delete(m.jobOut, id)
 	return nil
+}
+
+func (m *Mem) AppendJobOutput(_ context.Context, id string, off int64, data []byte) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	if _, ok := m.jobs[id]; !ok {
+		return errors.New("store: job_output for unknown job " + id)
+	}
+	if m.jobOut == nil {
+		m.jobOut = map[string]map[int64][]byte{}
+	}
+	if m.jobOut[id] == nil {
+		m.jobOut[id] = map[int64][]byte{}
+	}
+	if _, ok := m.jobOut[id][off]; !ok {
+		m.jobOut[id][off] = append([]byte(nil), data...)
+	}
+	return nil
+}
+
+func (m *Mem) ReadJobOutput(_ context.Context, id string, off int64, max int) ([]byte, error) {
+	if err := m.enter(); err != nil {
+		return nil, err
+	}
+	defer m.mu.Unlock()
+	return readChunks(m.jobOut[id], off, max), nil
+}
+
+func (m *Mem) JobOutputSize(_ context.Context, id string) (int64, error) {
+	if err := m.enter(); err != nil {
+		return 0, err
+	}
+	defer m.mu.Unlock()
+	return contiguous(m.jobOut[id]), nil
+}
+
+// contiguous: số byte liên tục từ offset 0.
+func contiguous(ch map[int64][]byte) int64 {
+	var n int64
+	for {
+		d, ok := ch[n]
+		if !ok || len(d) == 0 {
+			return n
+		}
+		n += int64(len(d))
+	}
+}
+
+func readChunks(ch map[int64][]byte, off int64, max int) []byte {
+	offs := make([]int64, 0, len(ch))
+	for o := range ch {
+		offs = append(offs, o)
+	}
+	sort.Slice(offs, func(i, k int) bool { return offs[i] < offs[k] })
+	var out []byte
+	for _, o := range offs {
+		d := ch[o]
+		end := o + int64(len(d))
+		if end <= off {
+			continue
+		}
+		start := off + int64(len(out))
+		if o > start {
+			break // lỗ: dừng ở phần liên tục
+		}
+		out = append(out, d[start-o:]...)
+		if len(out) >= max {
+			return out[:max]
+		}
+	}
+	return out
 }
 
 func (m *Mem) GetWizard(_ context.Context, kind, pipeline string) ([]byte, bool, error) {

@@ -100,6 +100,13 @@ type Store interface {
 	UpsertJob(ctx context.Context, j Job) error
 	ListJobs(ctx context.Context) ([]Job, error)
 	DeleteJob(ctx context.Context, id string) error
+	// AppendJobOutput stores data at byte offset off of the job's output. Idempotent: a chunk already stored
+	// at off is kept (re-shipping after a restart is harmless). The job row must exist.
+	AppendJobOutput(ctx context.Context, id string, off int64, data []byte) error
+	// ReadJobOutput returns up to max bytes of the job output starting at off (shorter at the end).
+	ReadJobOutput(ctx context.Context, id string, off int64, max int) ([]byte, error)
+	// JobOutputSize is the number of contiguous bytes stored from offset 0.
+	JobOutputSize(ctx context.Context, id string) (int64, error)
 
 	GetWizard(ctx context.Context, kind, pipeline string) ([]byte, bool, error)
 	PutWizard(ctx context.Context, kind, pipeline string, data []byte) error

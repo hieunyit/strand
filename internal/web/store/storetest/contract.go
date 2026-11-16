@@ -97,7 +97,29 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if len(jobs) != 2 || jobs[0].ID != "j2" || jobs[1].Running || !strings.Contains(string(jobs[1].Data), "done") {
 			t.Fatalf("jobs = %+v", jobs)
 		}
+		// Output: chunk theo offset, idempotent, đọc từ giữa chunk, xóa theo job.
+		must(t, s.AppendJobOutput(ctx, "j2", 0, []byte("hello ")))
+		must(t, s.AppendJobOutput(ctx, "j2", 6, []byte("world\n")))
+		must(t, s.AppendJobOutput(ctx, "j2", 6, []byte("XXXXX\n"))) // re-ship: giữ bản đầu
+		if n, _ := s.JobOutputSize(ctx, "j2"); n != 12 {
+			t.Fatalf("output size = %d", n)
+		}
+		if b, _ := s.ReadJobOutput(ctx, "j2", 3, 100); string(b) != "lo world\n" {
+			t.Fatalf("output from 3 = %q", b)
+		}
+		if b, _ := s.ReadJobOutput(ctx, "j2", 0, 8); string(b) != "hello wo" {
+			t.Fatalf("output max 8 = %q", b)
+		}
+		if b, _ := s.ReadJobOutput(ctx, "j2", 12, 8); len(b) != 0 {
+			t.Fatalf("output past end = %q", b)
+		}
+		if err := s.AppendJobOutput(ctx, "nojob", 0, []byte("x")); err == nil {
+			t.Fatal("output for an unknown job accepted")
+		}
 		must(t, s.DeleteJob(ctx, "j2"))
+		if b, _ := s.ReadJobOutput(ctx, "j2", 0, 100); len(b) != 0 {
+			t.Fatalf("output survived job delete: %q", b)
+		}
 		if jobs, _ = s.ListJobs(ctx); len(jobs) != 1 {
 			t.Fatalf("jobs after delete = %d", len(jobs))
 		}

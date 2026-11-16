@@ -289,6 +289,45 @@ func (p *PG) DeleteJob(ctx context.Context, id string) error {
 	return p.wrap(err)
 }
 
+func (p *PG) AppendJobOutput(ctx context.Context, id string, off int64, data []byte) error {
+	_, err := p.db.ExecContext(ctx, `INSERT INTO job_output (job_id, off, data) VALUES ($1,$2,$3) ON CONFLICT (job_id, off) DO NOTHING`, id, off, data)
+	return p.wrap(err)
+}
+
+func (p *PG) ReadJobOutput(ctx context.Context, id string, off int64, max int) ([]byte, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT off, data FROM job_output WHERE job_id = $1 AND off + length(data) > $2 AND off < $3 ORDER BY off`,
+		id, off, off+int64(max))
+	if err != nil {
+		return nil, p.wrap(err)
+	}
+	defer rows.Close()
+	var out []byte
+	for rows.Next() {
+		var o int64
+		var d []byte
+		if err := rows.Scan(&o, &d); err != nil {
+			return nil, p.wrap(err)
+		}
+		start := off + int64(len(out))
+		if o > start {
+			break
+		}
+		out = append(out, d[start-o:]...)
+		if len(out) >= max {
+			out = out[:max]
+			break
+		}
+	}
+	return out, p.wrap(rows.Err())
+}
+
+func (p *PG) JobOutputSize(ctx context.Context, id string) (int64, error) {
+	// Các chunk được ghi nối tiếp nhau nên offset cuối + độ dài là kích thước (giả định không có lỗ).
+	var n sql.NullInt64
+	err := p.db.QueryRowContext(ctx, `SELECT max(off + length(data)) FROM job_output WHERE job_id = $1`, id).Scan(&n)
+	return n.Int64, p.wrap(err)
+}
+
 func (p *PG) GetWizard(ctx context.Context, kind, pipeline string) ([]byte, bool, error) {
 	var d string
 	err := p.db.QueryRowContext(ctx, `SELECT data::text FROM wizards WHERE kind = $1 AND pipeline = $2`, kind, pipeline).Scan(&d)

@@ -64,7 +64,8 @@ func NewFileJobRunner(dir, bin string, now func() time.Time) (*FileJobRunner, er
 	return NewJobRunner(dir, bin, now, nil)
 }
 
-// NewJobRunner như NewFileJobRunner; st != nil thì lịch sử job nằm trong PostgreSQL (output vẫn là file <id>.log).
+// NewJobRunner như NewFileJobRunner; st != nil thì lịch sử job và output nằm trong PostgreSQL (<id>.log chỉ là
+// spool khi job chạy: được chuyển dần vào bảng job_output rồi xóa khi job xong).
 func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJobRunner, error) {
 	if now == nil {
 		now = time.Now
@@ -94,6 +95,26 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 	}
 	for _, id := range adopt {
 		go r.adopt(id)
+	}
+	if st != nil {
+		// Spool còn sót (job đang được nhận nuôi, job bị ngắt khi web dừng, hoặc output của bản web cũ chỉ ghi
+		// file): chuyển nốt vào DB, tuần tự, nền.
+		var pending []string
+		for id, js := range r.jobs {
+			switch {
+			case !fileExists(r.logPath(id)):
+			case js.Running:
+				go r.shipLoop(id) // nhận nuôi: chạy tới khi job xong
+			default:
+				pending = append(pending, id)
+			}
+		}
+		sort.Strings(pending)
+		go func() {
+			for _, id := range pending {
+				r.shipLoop(id)
+			}
+		}()
 	}
 	return r, nil
 }
@@ -213,6 +234,9 @@ func (r *FileJobRunner) Start(_ context.Context, spec JobSpec) (string, error) {
 	r.persistLocked(js)
 	r.pruneLocked(spec.Pipeline)
 	go r.wait(id, cmd)
+	if r.st != nil {
+		go r.shipLoop(id)
+	}
 	return id, nil
 }
 
@@ -359,32 +383,50 @@ func (r *FileJobRunner) Output(id string, offset int64) (JobOutput, bool) {
 		return JobOutput{}, false
 	}
 	out := JobOutput{Offset: offset, Running: js.Running, ExitCode: js.ExitCode}
+	var buf []byte
 	f, err := os.Open(r.logPath(id))
-	if err != nil {
+	switch {
+	case err == nil:
+		// File spool còn (chế độ file, hoặc chế độ DB khi job đang chạy / chưa chuyển hết vào DB).
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return out, true
+		}
+		if offset < 0 || offset > st.Size() {
+			offset = st.Size()
+			out.Offset = offset
+		}
+		n := st.Size() - offset
+		if n > maxOutputChunk {
+			n = maxOutputChunk
+		}
+		if n <= 0 {
+			return out, true
+		}
+		buf = make([]byte, n)
+		m, err := f.ReadAt(buf, offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return out, true
+		}
+		buf = buf[:m]
+	case r.st != nil:
+		ctx, cancel := dbCtx()
+		defer cancel()
+		size, err := r.st.JobOutputSize(ctx, id)
+		if err != nil {
+			return out, true
+		}
+		if offset < 0 || offset > size {
+			offset = size
+			out.Offset = offset
+		}
+		if buf, err = r.st.ReadJobOutput(ctx, id, offset, maxOutputChunk); err != nil || len(buf) == 0 {
+			return out, true
+		}
+	default:
 		return out, true
 	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return out, true
-	}
-	if offset < 0 || offset > st.Size() {
-		offset = st.Size()
-		out.Offset = offset
-	}
-	n := st.Size() - offset
-	if n > maxOutputChunk {
-		n = maxOutputChunk
-	}
-	if n <= 0 {
-		return out, true
-	}
-	buf := make([]byte, n)
-	m, err := f.ReadAt(buf, offset)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return out, true
-	}
-	buf = buf[:m]
 	// Trạng thái "đang chạy" lấy TRƯỚC khi đọc file: nếu job kết thúc giữa chừng, lần hỏi kế tiếp mới báo xong
 	// và trả nốt phần đuôi, nên client không bao giờ dừng sớm mà bỏ sót output.
 	if js.Running {
@@ -400,6 +442,102 @@ func (r *FileJobRunner) Output(id string, offset int64) (JobOutput, bool) {
 	out.Offset = offset + int64(len(buf))
 	out.Data = MaskSecrets(strings.ToValidUTF8(string(buf), "�"))
 	return out, true
+}
+
+// ---- chế độ DB: chuyển output từ file spool vào bảng job_output ----
+
+// MaxJobOutputDB: phần đầu output của một job được giữ trong DB; phần sau bị bỏ, kèm một dòng ghi chú.
+const MaxJobOutputDB = 10 << 20
+
+// shipEvery: chu kỳ chuyển output (biến để test rút ngắn).
+var shipEvery = time.Second
+
+// shipLoop chuyển <id>.log vào DB theo chu kỳ khi job chạy, lần cuối khi job xong, rồi xóa file spool. DB lỗi
+// thì thử lại (file vẫn giữ nên Output đọc file, không mất gì); bỏ cuộc sau 10 phút kể từ khi job xong và để
+// lại file.
+func (r *FileJobRunner) shipLoop(id string) {
+	var shipped int64 = -1
+	var endedAt time.Time
+	for {
+		js, ok := r.Get(id)
+		if !ok {
+			return // job đã bị dọn (prune)
+		}
+		running := js.Running
+		n, complete, err := r.shipOnce(id, shipped, !running)
+		if err == nil {
+			shipped = n
+		}
+		if !running {
+			if err == nil && complete {
+				_ = os.Remove(r.logPath(id))
+				return
+			}
+			if endedAt.IsZero() {
+				endedAt = time.Now()
+			} else if time.Since(endedAt) > 10*time.Minute {
+				return
+			}
+		}
+		time.Sleep(shipEvery)
+	}
+}
+
+// shipOnce gửi phần file chưa có trong DB (tối đa MaxJobOutputDB). final: job đã xong, thêm ghi chú nếu bị cắt.
+// Trả số byte đã có trong DB và complete = toàn bộ (hoặc phần giữ lại + ghi chú) đã nằm trong DB.
+func (r *FileJobRunner) shipOnce(id string, shipped int64, final bool) (int64, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if shipped < 0 {
+		n, err := r.st.JobOutputSize(ctx, id)
+		if err != nil {
+			return shipped, false, err
+		}
+		shipped = n
+	}
+	f, err := os.Open(r.logPath(id))
+	if err != nil {
+		return shipped, errors.Is(err, os.ErrNotExist), nil
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return shipped, false, err
+	}
+	size := fi.Size()
+	limit := size
+	if limit > MaxJobOutputDB {
+		limit = MaxJobOutputDB
+	}
+	buf := make([]byte, maxOutputChunk)
+	for shipped < limit {
+		want := limit - shipped
+		if want > int64(len(buf)) {
+			want = int64(len(buf))
+		}
+		m, err := f.ReadAt(buf[:want], shipped)
+		if m == 0 {
+			if err != nil && !errors.Is(err, io.EOF) {
+				return shipped, false, err
+			}
+			break
+		}
+		if err := r.st.AppendJobOutput(ctx, id, shipped, buf[:m]); err != nil {
+			return shipped, false, err
+		}
+		shipped += int64(m)
+	}
+	if !final {
+		return shipped, false, nil
+	}
+	if size > MaxJobOutputDB && shipped == MaxJobOutputDB {
+		note := fmt.Sprintf("\n[strand web: output truncated, %d bytes in total; only the first %d MB are kept in the database]\n", size, MaxJobOutputDB>>20)
+		if err := r.st.AppendJobOutput(ctx, id, shipped, []byte(note)); err != nil {
+			return shipped, false, err
+		}
+		shipped += int64(len(note))
+	}
+	return shipped, shipped >= limit, nil
 }
 
 // procIsBinary: pid còn sống và đúng là tiến trình chạy bin (argv[0], hoặc argv[1] khi bin là script #!).
