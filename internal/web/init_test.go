@@ -317,3 +317,44 @@ func TestProbeHost(t *testing.T) {
 		}
 	}
 }
+
+// allow_plain_http: bind 0.0.0.0:8080 không TLS được phép khi bật rõ ràng; web.yaml ghi khóa, Validate qua, có cảnh báo.
+func TestInitAllowPlainHTTPOnAllInterfaces(t *testing.T) {
+	o, _, errb := initOpts(t)
+	o.Listen = "0.0.0.0:8080"
+	o.AllowPlainHTTP = true
+	if _, err := RunInit(o); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(o.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.AllowPlainHTTP || c.Listen != "0.0.0.0:8080" || c.TLSCert != "" {
+		t.Fatalf("config %+v", c)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !c.PlainHTTPExposed() || !strings.Contains(errb.String(), "plain HTTP") {
+		t.Fatalf("missing warning: %q", errb.String())
+	}
+	// Không bật thì vẫn từ chối, và lỗi chỉ ra cách bật.
+	c.AllowPlainHTTP = false
+	if err := c.ValidateListen(); err == nil || !strings.Contains(err.Error(), "allow_plain_http") {
+		t.Fatalf("err=%v", err)
+	}
+	// --force bật trên file có sẵn (đang loopback).
+	o2, _, _ := initOpts(t)
+	if _, err := RunInit(o2); err != nil {
+		t.Fatal(err)
+	}
+	o2.Listen, o2.AllowPlainHTTP, o2.Force = "0.0.0.0:8080", true, true
+	if _, err := RunInit(o2); err != nil {
+		t.Fatal(err)
+	}
+	c2, _ := LoadConfig(o2.ConfigPath)
+	if !c2.AllowPlainHTTP || c2.Listen != "0.0.0.0:8080" || c2.Validate() != nil {
+		t.Fatalf("force: %+v", c2)
+	}
+}

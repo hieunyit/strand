@@ -825,14 +825,15 @@ sudo strand web init --generate-password --token --enable   # mật khẩu và t
 echo 'mật-khẩu' | sudo strand web init --password-stdin
 ```
 
-Cờ: `-c/--config` (mặc định `/etc/strand/web.yaml`), `--listen` (127.0.0.1:8080), `--state-dir` (/var/lib/strand-web), `--scan` (lặp lại; mặc định `/etc/strand/*.yaml`), `--tls-cert`, `--tls-key`, `--secure-cookies`, `--trust-forwarded-for`, `--password-stdin`, `--generate-password`, `--token`, `--enable`, `--force`. Kiểm tra như lúc `strand web` khởi động (listen ngoài loopback bắt buộc TLS) trước khi ghi gì. Chạy bằng root và có group `strand` thì `web.yaml` là root:strand 0640 và `state_dir` strand:strand 0750; không thì 0600 thuộc người chạy. Chạy lại an toàn: file có sẵn giữ `listen`/`state_dir`/`scan` trừ khi có `--force`; chỉ đặt lại mật khẩu/token. Không bao giờ in hash. Với máy không có gói: `sudo scripts/install.sh --binary ./strand --with-web`.
+Cờ: `-c/--config` (mặc định `/etc/strand/web.yaml`), `--listen` (127.0.0.1:8080), `--state-dir` (/var/lib/strand-web), `--scan` (lặp lại; mặc định `/etc/strand/*.yaml`), `--tls-cert`, `--tls-key`, `--secure-cookies`, `--trust-forwarded-for`, `--allow-plain-http`, `--password-stdin`, `--generate-password`, `--token`, `--enable`, `--force`. Kiểm tra như lúc `strand web` khởi động (listen ngoài loopback cần TLS hoặc `--allow-plain-http`) trước khi ghi gì. Chạy bằng root và có group `strand` thì `web.yaml` là root:strand 0640 và `state_dir` strand:strand 0750; không thì 0600 thuộc người chạy. Chạy lại an toàn: file có sẵn giữ `listen`/`state_dir`/`scan` trừ khi có `--force`; chỉ đặt lại mật khẩu/token. Không bao giờ in hash. Với máy không có gói: `sudo scripts/install.sh --binary ./strand --with-web`.
 
 **Cài đặt.** Gói `.deb`/`.rpm` cài sẵn `strand-web.service` và ví dụ `/usr/share/doc/strand/examples/web.yaml`. Cài tay: chép binary, `deploy/systemd/strand-web.service` vào `/etc/systemd/system/`, `packaging/web.yaml.example` thành `/etc/strand/web.yaml`.
 
 **`web.yaml`:**
 
 ```yaml
-listen: 127.0.0.1:8080          # không phải loopback thì bắt buộc TLS
+listen: 127.0.0.1:8080          # không phải loopback thì cần TLS, hoặc allow_plain_http: true
+# allow_plain_http: true        # HTTP thường trên 0.0.0.0 (không mã hoá; chỉ mạng tin cậy)
 # tls_cert: /etc/strand/web.crt
 # tls_key:  /etc/strand/web.key
 state_dir: /var/lib/strand-web  # audit.log (JSON lines, 0600)
@@ -871,7 +872,7 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8080/api/v1/overview
 
 Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2). Một tài khoản admin duy nhất, không có mật khẩu mặc định. Mật khẩu 8–72 ký tự. Script không có TTY: `echo 'mật-khẩu' | strand web passwd --config web.yaml`.
 
-**TLS.** Bind khác loopback (`0.0.0.0`, IP máy) bắt buộc `tls_cert` và `tls_key`, nếu không từ chối khởi động. Cách thường dùng: để `listen: 127.0.0.1:8080` rồi đặt reverse proxy (nginx, Caddy) làm TLS phía trước, kèm `secure_cookies: true` (cookie có cờ `Secure`) và `trust_forwarded_for: true` (lấy IP client từ `X-Forwarded-For`, chỉ bật khi proxy tin cậy).
+**TLS.** Bind khác loopback (`0.0.0.0`, IP máy) cần `tls_cert` và `tls_key`, nếu không từ chối khởi động; ngoại lệ: `allow_plain_http: true` cho phép HTTP thường (mật khẩu, cookie phiên, token đi dạng rõ, web in cảnh báo khi khởi động; chỉ dùng trong mạng tin cậy). Cách thường dùng: để `listen: 127.0.0.1:8080` rồi đặt reverse proxy (nginx, Caddy) làm TLS phía trước, kèm `secure_cookies: true` (cookie có cờ `Secure`) và `trust_forwarded_for: true` (lấy IP client từ `X-Forwarded-For`, chỉ bật khi proxy tin cậy).
 
 **Bảo mật.** Session ngẫu nhiên 256 bit trong RAM (khởi động lại web là đăng nhập lại), cookie `HttpOnly` và `SameSite=Strict`, hết hạn sau 30 phút không thao tác hoặc 12 giờ. Mọi POST cần token CSRF. Đăng nhập sai quá 5 lần/phút từ một IP bị khóa (1 phút, tái phạm thì gấp đôi, tối đa 15 phút). Header `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. Audit log `<state_dir>/audit.log` ghi đăng nhập, đăng xuất, lần xem cấu hình và mọi thao tác ghi (dòng `started` trước khi chạy, dòng kết quả kèm exit code; không ghi được audit thì không chạy thao tác).
 

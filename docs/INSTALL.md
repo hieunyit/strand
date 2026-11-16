@@ -22,6 +22,7 @@ sudo scripts/install.sh --binary ./strand --with-web --generate-password
 - Các cờ khác: `--listen`, `--state-dir`, `--scan` (lặp lại được; mặc định `/etc/strand/*.yaml`), `--tls-cert`/`--tls-key`, `--secure-cookies`, `--trust-forwarded-for`. `--listen` không phải loopback mà thiếu TLS thì lệnh báo lỗi và không ghi gì.
 - `scripts/install.sh` (chạy bằng root, idempotent) cài binary vào `--prefix` (mặc định `/usr/local/bin`), tạo user/group `strand`, `/etc/strand`, unit systemd (ExecStart trỏ đúng binary), quy tắc polkit và ví dụ; `--with-web` gọi tiếp `strand web init --enable` và chuyển nguyên `--listen`, `--generate-password`, `--token`, `--tls-cert`... Thêm `--no-start` để không bật dịch vụ.
 - Truy cập từ máy khác: `ssh -L 8080:127.0.0.1:8080 user@strand-host`, mở `http://127.0.0.1:8080` (hoặc reverse proxy/TLS: mục 5.4).
+- Mở thẳng cho mọi máy trong mạng nội bộ, không TLS: `sudo strand web init --listen 0.0.0.0:8080 --allow-plain-http --enable` (web.yaml có sẵn thì thêm `--force`; cài tay: `scripts/install.sh ... --with-web --listen 0.0.0.0:8080 --allow-plain-http`), rồi mở `http://<IP-máy-chủ>:8080` và mở cổng 8080 trên tường lửa. Mật khẩu, cookie phiên và token đi dạng rõ trên mạng: chỉ dùng trong mạng tin cậy; web in cảnh báo mỗi lần khởi động. Có TLS thì dùng `--tls-cert`/`--tls-key` thay cho `--allow-plain-http`.
 
 Phần dưới là cài từng bước (khi cần kiểm soát từng việc).
 
@@ -168,7 +169,8 @@ Các khóa hay dùng (đầy đủ: [USAGE.md](USAGE.md) 7.15; file nhận khóa
 
 | Khóa | Mặc định | Ý nghĩa |
 | --- | --- | --- |
-| `listen` | `127.0.0.1:8080` | Không phải loopback thì bắt buộc `tls_cert` + `tls_key` |
+| `listen` | `127.0.0.1:8080` | Không phải loopback (ví dụ `0.0.0.0:8080`) thì cần `tls_cert` + `tls_key`, hoặc `allow_plain_http: true` |
+| `allow_plain_http` | `false` | Cho phép bind ngoài loopback bằng HTTP thường (không mã hoá; chỉ mạng tin cậy) |
 | `state_dir` | `/var/lib/strand-web` | `audit.log`, `jobs/`, `wizards/` |
 | `scan` | (không) | Glob các file pipeline, ví dụ `/etc/strand/*.yaml`; tên pipeline = tên file bỏ `.yaml`; `<name>.env` cùng thư mục được nhận làm `env_file`; bản thân `web.yaml` bị bỏ qua |
 | `pipelines` | (không) | Khai báo tường minh `name`, `config`, `env_file`, `systemd_unit`, `log_file`, `pid_file`; thắng `scan` cùng tên |
@@ -251,7 +253,9 @@ server {
 
 `trust_forwarded_for` chỉ đúng khi nginx **ghi đè** `X-Forwarded-For` như trên (không nối thêm giá trị client gửi). Nếu không, kẻ tấn công giả IP để né khóa đăng nhập.
 
-**c) TLS trực tiếp:** đặt `listen: 0.0.0.0:8443`, `tls_cert`, `tls_key` (cả hai, đọc được bởi user `strand`). Bind khác loopback mà thiếu TLS thì web từ chối khởi động (exit 2).
+**c) TLS trực tiếp:** đặt `listen: 0.0.0.0:8443`, `tls_cert`, `tls_key` (cả hai, đọc được bởi user `strand`). Bind khác loopback mà thiếu TLS thì web từ chối khởi động (exit 2), trừ khi bật `allow_plain_http`.
+
+**d) HTTP thường trên mọi interface (mạng nội bộ tin cậy):** `listen: 0.0.0.0:8080` và `allow_plain_http: true` (hoặc `strand web init --listen 0.0.0.0:8080 --allow-plain-http --force`). Mở `http://<IP-máy-chủ>:8080`. Không có mã hoá: mật khẩu admin, cookie phiên và token đi dạng rõ; web in cảnh báo khi khởi động. Giới hạn bằng tường lửa chỉ cho các máy cần vào.
 
 ## 6. Dùng Web UI
 
@@ -371,7 +375,7 @@ Trước đó nên dừng pipeline êm (`systemctl stop strand@x`, tự ghi chec
 | `strand-web` thoát ngay, log `no admin password set` (exit 2) | Chưa đặt mật khẩu: `sudo strand web passwd --config /etc/strand/web.yaml` |
 | Log `read web config ... permission denied` | User `strand` không đọc được `web.yaml`: `sudo chown root:strand /etc/strand/web.yaml; sudo chmod 0640 /etc/strand/web.yaml` (làm một lần; `passwd`/`token` giữ nguyên quyền này) |
 | `passwd`/`token` báo `preserve owner ...` | Chạy không đủ quyền để giữ chủ sở hữu file: chạy lại bằng `sudo` |
-| `listen "0.0.0.0:..." is not a loopback address: TLS (tls_cert, tls_key) is required` | Bind khác loopback cần TLS. Đặt cả `tls_cert` và `tls_key`, hoặc dùng `127.0.0.1` + reverse proxy/SSH tunnel |
+| `listen "0.0.0.0:..." is not a loopback address: TLS (tls_cert, tls_key) is required` | Bind khác loopback cần TLS: đặt cả `tls_cert` và `tls_key`; hoặc trong mạng tin cậy thêm `allow_plain_http: true` (`strand web init --listen 0.0.0.0:8080 --allow-plain-http --force`); hoặc dùng `127.0.0.1` + reverse proxy/SSH tunnel |
 | `tls_cert and tls_key must be set together` | Thiếu một trong hai khóa |
 | Pipeline hiện `unreachable` hoặc `stopped` dù đang chạy | Web (user `strand`) không đọc được YAML/`.env` hoặc không vào được admin socket vì pipeline chạy bằng user khác (ví dụ root). Chạy pipeline bằng user `strand`, kiểm quyền file; xem mục 5.3 |
 | Trang chi tiết báo lỗi cấu hình (`config error`) | Web không đọc/parse được YAML pipeline; kiểm quyền và `strand validate -c` |

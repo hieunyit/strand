@@ -59,7 +59,9 @@ type InitOptions struct {
 	// SecureCookies, TrustForwardedFor: chỉ ghi khi true.
 	SecureCookies     bool
 	TrustForwardedFor bool
-	Force             bool
+	// AllowPlainHTTP: ghi allow_plain_http: true (bind ngoài loopback không TLS).
+	AllowPlainHTTP bool
+	Force          bool
 
 	// Password: mật khẩu đã chọn (rỗng = giữ hash hiện có; không có hash thì lỗi).
 	Password string
@@ -106,9 +108,11 @@ const initTemplate = `# web.yaml: cấu hình Web UI (strand web --config %[1]s)
 # Quyền file: root:strand 0640 khi tạo bằng root (user strand của strand-web.service phải đọc được), không thì 0600.
 # Mật khẩu: strand web passwd --config %[1]s   Token script: strand web token --config %[1]s
 
-# Địa chỉ bind. Không phải loopback (127.0.0.1, ::1, localhost) thì BẮT BUỘC đặt tls_cert và tls_key.
+# Địa chỉ bind. Không phải loopback (127.0.0.1, ::1, localhost) thì phải đặt tls_cert và tls_key,
+# hoặc allow_plain_http: true (HTTP thường: mật khẩu/cookie không mã hoá, chỉ dùng trong mạng tin cậy).
 listen: %[2]s
 %[3]s
+%[7]s
 # Sau reverse proxy TLS (listen loopback, không TLS): secure_cookies cho cookie cờ Secure;
 # trust_forwarded_for lấy IP client từ X-Forwarded-For (chỉ khi proxy tin cậy).
 %[4]s
@@ -137,7 +141,11 @@ func renderInitTemplate(o InitOptions) string {
 	for _, s := range o.Scan {
 		scan = append(scan, "  - "+yamlQuote(s))
 	}
-	return fmt.Sprintf(initTemplate, o.ConfigPath, yamlQuote(o.Listen), tlsBlock, strings.Join(flags, "\n"), yamlQuote(o.StateDir), strings.Join(scan, "\n"))
+	plain := "# allow_plain_http: true"
+	if o.AllowPlainHTTP {
+		plain = "allow_plain_http: true"
+	}
+	return fmt.Sprintf(initTemplate, o.ConfigPath, yamlQuote(o.Listen), tlsBlock, strings.Join(flags, "\n"), yamlQuote(o.StateDir), strings.Join(scan, "\n"), plain)
 }
 
 func yamlQuote(s string) string {
@@ -147,7 +155,7 @@ func yamlQuote(s string) string {
 
 // ValidateInit kiểm đầu vào y như `strand web` sẽ kiểm khi khởi động (trừ mật khẩu). Không ghi gì.
 func ValidateInit(o InitOptions) error {
-	c := &Config{Listen: o.Listen, TLSCert: o.TLSCert, TLSKey: o.TLSKey}
+	c := &Config{Listen: o.Listen, TLSCert: o.TLSCert, TLSKey: o.TLSKey, AllowPlainHTTP: o.AllowPlainHTTP}
 	return c.ValidateListen()
 }
 
@@ -244,6 +252,9 @@ func RunInit(o InitOptions) (*InitResult, error) {
 		if o.TrustForwardedFor {
 			kvs = append(kvs, configKV{"trust_forwarded_for", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"}})
 		}
+		if o.AllowPlainHTTP {
+			kvs = append(kvs, configKV{"allow_plain_http", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"}})
+		}
 		if err := setConfigNodes(o.ConfigPath, dropNil(kvs)); err != nil {
 			return nil, err
 		}
@@ -313,6 +324,11 @@ func RunInit(o InitOptions) (*InitResult, error) {
 	}
 	if IsLoopbackAddr(eff.Listen) {
 		fmt.Fprintf(o.Stdout, "    - remote access: ssh -L %s:%s user@this-host, then open %s\n", portOf(eff.Listen), eff.Listen, res.URL)
+	} else if probeHost(eff.Listen) != eff.Listen {
+		fmt.Fprintf(o.Stdout, "    - open from another machine: %s://<this-server-ip>:%s (allow the port in the firewall)\n", scheme, portOf(eff.Listen))
+	}
+	if (&Config{Listen: eff.Listen, TLSCert: eff.TLSCert}).PlainHTTPExposed() {
+		fmt.Fprintln(o.Stderr, PlainHTTPWarning)
 	}
 	fmt.Fprintf(o.Stdout, "    - change password later: strand web passwd --config %s\n", o.ConfigPath)
 	return res, nil

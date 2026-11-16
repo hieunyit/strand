@@ -5,8 +5,10 @@
 # Bước đầu: strand web passwd --config /etc/strand/web.yaml     (ghi password_hash)
 # Token cho script (tùy chọn): strand web token --config /etc/strand/web.yaml
 
-# Địa chỉ bind. Không phải loopback (127.0.0.1, ::1, localhost) thì BẮT BUỘC đặt tls_cert và tls_key.
+# Địa chỉ bind. Không phải loopback (127.0.0.1, ::1, localhost) thì phải đặt tls_cert và tls_key,
+# hoặc allow_plain_http: true (HTTP thường, không mã hoá: chỉ dùng trong mạng tin cậy), ví dụ listen: 0.0.0.0:8080.
 listen: 127.0.0.1:8080
+# allow_plain_http: true
 # tls_cert: /etc/strand/web.crt
 # tls_key: /etc/strand/web.key
 

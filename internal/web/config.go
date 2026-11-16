@@ -55,6 +55,9 @@ type Config struct {
 	SecureCookies bool `yaml:"secure_cookies,omitempty"`
 	// TrustForwardedFor: lấy IP client từ X-Forwarded-For (chỉ bật khi sau reverse proxy tin cậy).
 	TrustForwardedFor bool `yaml:"trust_forwarded_for,omitempty"`
+	// AllowPlainHTTP: cho phép bind ngoài loopback (ví dụ 0.0.0.0:8080) KHÔNG có TLS. Mật khẩu và cookie
+	// phiên đi dạng rõ trên mạng: chỉ dùng trong mạng nội bộ tin cậy. Mặc định false.
+	AllowPlainHTTP bool `yaml:"allow_plain_http,omitempty"`
 	// SampleInterval, tính bằng giây (mặc định 5); chủ yếu cho test.
 	SampleIntervalSec int `yaml:"sample_interval_sec,omitempty"`
 
@@ -134,11 +137,19 @@ func (c *Config) ValidateListen() error {
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return errors.New("tls_cert and tls_key must be set together")
 	}
-	if c.TLSCert == "" && !IsLoopbackAddr(c.Listen) {
-		return fmt.Errorf("listen %q is not a loopback address: TLS (tls_cert, tls_key) is required", c.Listen)
+	if c.TLSCert == "" && !IsLoopbackAddr(c.Listen) && !c.AllowPlainHTTP {
+		return fmt.Errorf("listen %q is not a loopback address: TLS (tls_cert, tls_key) is required, or set allow_plain_http: true (strand web init --allow-plain-http) to serve plain HTTP on a trusted network", c.Listen)
 	}
 	return nil
 }
+
+// PlainHTTPExposed: web nghe ngoài loopback mà không có TLS (allow_plain_http).
+func (c *Config) PlainHTTPExposed() bool {
+	return c.TLSCert == "" && !IsLoopbackAddr(c.Listen)
+}
+
+// PlainHTTPWarning là cảnh báo in khi khởi động/khởi tạo với allow_plain_http.
+const PlainHTTPWarning = "WARNING: Web UI is served over plain HTTP on a non-loopback address (allow_plain_http): the admin password, session cookie and API token travel unencrypted. Use only on a trusted network, or set tls_cert/tls_key."
 
 var unitRE = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]{1,128}(\.service)?$`)
 

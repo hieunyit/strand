@@ -42,6 +42,9 @@ Chưa đặt mật khẩu (strand web passwd) thì không khởi động.`,
 			if wc.TLSCert != "" {
 				scheme = "https"
 			}
+			if wc.PlainHTTPExposed() {
+				fmt.Fprintln(cmd.ErrOrStderr(), web.PlainHTTPWarning)
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "strand web listening on %s://%s (audit log: %s)\n", scheme, wc.Listen, srv.Audit().Path())
 			return srv.ListenAndServe(ctx)
 		},
@@ -197,13 +200,14 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&o.Listen, "listen", "127.0.0.1:8080", "địa chỉ bind của Web UI (không phải loopback thì bắt buộc --tls-cert/--tls-key)")
+	f.StringVar(&o.Listen, "listen", "127.0.0.1:8080", "địa chỉ bind của Web UI, ví dụ 0.0.0.0:8080 (không phải loopback thì cần --tls-cert/--tls-key hoặc --allow-plain-http)")
 	f.StringVar(&o.StateDir, "state-dir", web.DefaultStateDir, "thư mục audit log và trạng thái web")
 	f.StringArrayVar(&scan, "scan", nil, "glob file pipeline cần quét (lặp lại được; mặc định /etc/strand/*.yaml)")
 	f.StringVar(&tlsCert, "tls-cert", "", "file chứng chỉ TLS")
 	f.StringVar(&tlsKey, "tls-key", "", "file khóa TLS")
 	f.BoolVar(&o.SecureCookies, "secure-cookies", false, "ép cờ Secure cho cookie (sau reverse proxy TLS)")
 	f.BoolVar(&o.TrustForwardedFor, "trust-forwarded-for", false, "lấy IP client từ X-Forwarded-For (chỉ khi proxy tin cậy)")
+	f.BoolVar(&o.AllowPlainHTTP, "allow-plain-http", false, "cho phép nghe ngoài loopback (0.0.0.0) bằng HTTP thường, không TLS: mật khẩu/cookie không mã hoá, chỉ dùng trong mạng tin cậy")
 	f.BoolVar(&stdinPw, "password-stdin", false, "đọc mật khẩu admin (một dòng) từ stdin")
 	f.BoolVar(&genPw, "generate-password", false, "sinh mật khẩu ngẫu nhiên mạnh và in MỘT lần ra stdout")
 	f.BoolVar(&o.NewToken, "token", false, "tạo thêm token API (in một lần, lưu sha256)")

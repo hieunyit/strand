@@ -8,7 +8,7 @@
 # /etc/polkit-1/rules.d; systemctl daemon-reload; chép ví dụ vào /usr/local/share/doc/strand.
 # --with-web: chạy `strand web init --enable` (thêm --no-start thì không bật dịch vụ); các tùy chọn sau đây
 # được chuyển nguyên cho nó: --listen X, --state-dir X, --scan X, --tls-cert X, --tls-key X, --secure-cookies,
-# --trust-forwarded-for, --generate-password, --password-stdin, --token, --force.
+# --trust-forwarded-for, --allow-plain-http, --generate-password, --password-stdin, --token, --force.
 set -eu
 
 usage() {
@@ -54,7 +54,7 @@ while [ $# -gt 0 ]; do
 		add_webarg "$2"
 		shift 2
 		;;
-	--secure-cookies | --trust-forwarded-for | --generate-password | --password-stdin | --token | --force)
+	--secure-cookies | --trust-forwarded-for | --allow-plain-http | --generate-password | --password-stdin | --token | --force)
 		add_webarg "$1"
 		shift
 		;;
