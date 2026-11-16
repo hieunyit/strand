@@ -118,8 +118,8 @@ func isWritableDir(dir string) bool {
 // 2. /etc/strand nếu ghi được
 // 3. <state_dir>/pipelines
 func (s *Server) ConfigDir() string {
-	if s.cfg.ConfigDir != "" {
-		return s.cfg.ConfigDir
+	if d := s.settingStr("config_dir"); d != "" {
+		return d
 	}
 	if isWritableDir("/etc/strand") {
 		return "/etc/strand"
@@ -729,7 +729,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	// Đăng ký pipeline vào registry:
 	// Nếu configDir không khớp bất kỳ mẫu scan nào, ghi vào <state_dir>/pipelines.json
 	coveredByScan := false
-	for _, pat := range s.cfg.Scan {
+	for _, pat := range s.settingList("scan") {
 		if matched, _ := filepath.Match(pat, yamlPath); matched {
 			coveredByScan = true
 			break

@@ -20,6 +20,7 @@ type Mem struct {
 	// metrics, metrics1m: pipeline -> UnixNano(ts) -> mẫu.
 	metrics   map[string]map[int64]MetricSample
 	metrics1m map[string]map[int64]MetricSample
+	settings  map[string]string
 	wizards   map[string][]byte
 	audit     []AuditRow
 	meta      map[string]string

@@ -177,6 +177,9 @@ type Registry struct {
 	db        *metaDB // chế độ DB: pipeline do web tạo nằm trong PostgreSQL
 	lastDB    []PipelineEntry
 
+	// scanFn: glob scan hiệu lực (cài đặt có thể đổi khi đang chạy); nil = cfg.Scan.
+	scanFn func() []string
+
 	unitMu    sync.Mutex
 	unitCache map[string]unitCacheEntry
 	now       func() time.Time
@@ -247,7 +250,11 @@ func (r *Registry) Refresh(ctx context.Context) {
 		byName[e.Name] = &Pipeline{Name: e.Name, ConfigPath: e.Config, EnvFile: e.EnvFile, SystemdUnit: e.SystemdUnit,
 			LogFile: e.LogFile, PidFile: e.PidFile, Origin: "created"}
 	}
-	for _, pat := range r.cfg.Scan {
+	scan := r.cfg.Scan
+	if r.scanFn != nil {
+		scan = r.scanFn()
+	}
+	for _, pat := range scan {
 		matches, err := filepath.Glob(pat)
 		if err != nil {
 			warns = append(warns, fmt.Sprintf("scan %q: %v", pat, err))

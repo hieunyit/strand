@@ -159,6 +159,21 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 			t.Fatalf("meta = %q", v)
 		}
 	})
+	t.Run("settings", func(t *testing.T) {
+		s := mk(t)
+		must(t, s.PutSetting(ctx, "scan", `["/a/*.yaml"]`))
+		must(t, s.PutSetting(ctx, "scan", `["/b/*.yaml"]`))
+		must(t, s.PutSetting(ctx, "secure_cookies", `true`))
+		m, err := s.Settings(ctx)
+		must(t, err)
+		if len(m) != 2 || !strings.Contains(m["scan"], "/b/") || m["secure_cookies"] != "true" {
+			t.Fatalf("settings = %v", m)
+		}
+		must(t, s.DeleteSetting(ctx, "scan"))
+		if m, _ = s.Settings(ctx); len(m) != 1 {
+			t.Fatalf("settings after delete = %v", m)
+		}
+	})
 	t.Run("metrics_history", func(t *testing.T) {
 		s := mk(t)
 		base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)

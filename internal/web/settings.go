@@ -1,0 +1,477 @@
+package web
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// Cài đặt web chỉnh được trên trang Settings (chế độ DB). Thứ tự ưu tiên (giá trị hiệu lực):
+//
+//	biến môi trường (nếu có cho khóa đó và khác rỗng) > database (đã sửa trên trang Settings) > web.yaml > mặc định
+//
+// Lý do: env là cấu hình của người triển khai (compose/systemd) nên thắng và khóa ô sửa; thay đổi trên UI là ý
+// định mới nhất nên thắng web.yaml; "Reset" xóa dòng DB để trở về web.yaml. Cài đặt khởi động (listen, TLS,
+// database, state_dir, allow_plain_http, strand_binary, mật khẩu/token) chỉ nằm ở web.yaml/env.
+
+// Nguồn của giá trị hiệu lực.
+const (
+	SrcEnv      = "env"
+	SrcDatabase = "database"
+	SrcFile     = "web.yaml"
+	SrcDefault  = "default"
+)
+
+type settingDef struct {
+	Key     string
+	Label   string
+	Help    string
+	Kind    string // bool | int | string | list
+	Restart bool   // chỉ có hiệu lực sau khi khởi động lại web
+	Env     string // biến môi trường ghi đè (rỗng: không có)
+	file    func(c *Config) any
+	def     any
+}
+
+var settingDefs = []settingDef{
+	{Key: "scan", Label: "Scan globs", Kind: "list",
+		Help: "Pipeline config files discovered automatically, one absolute glob per line (for example /etc/strand/*.yaml). Applies at the next refresh (5 s).",
+		file: func(c *Config) any { return append([]string{}, c.Scan...) }, def: []string{}},
+	{Key: "config_dir", Label: "Directory for new pipelines", Kind: "string",
+		Help: "Where the New pipeline form writes <name>.yaml and <name>.env. Empty: /etc/strand if writable, else <state_dir>/pipelines.",
+		file: func(c *Config) any { return c.ConfigDir }, def: ""},
+	{Key: "secure_cookies", Label: "Secure cookies", Kind: "bool", Env: "STRAND_WEB_SECURE_COOKIES",
+		Help: "Mark cookies Secure (behind a TLS reverse proxy). Always on when the web serves TLS itself. Applies to new cookies.",
+		file: func(c *Config) any { return c.SecureCookies }, def: false},
+	{Key: "trust_forwarded_for", Label: "Trust X-Forwarded-For", Kind: "bool", Env: "STRAND_WEB_TRUST_FORWARDED_FOR",
+		Help: "Take the client IP (audit log, login rate limit) from X-Forwarded-For. Only behind a trusted proxy.",
+		file: func(c *Config) any { return c.TrustForwardedFor }, def: false},
+	{Key: "shutdown_stop_pipelines", Label: "Stop pipelines on web shutdown", Kind: "bool",
+		Help: "When the web exits (container stop), gracefully stop the background pipelines it runs; they are restarted from their desired state on the next start.",
+		file: func(c *Config) any { return c.ShutdownStopPipelines }, def: false},
+	{Key: "sample_interval_sec", Label: "Sample interval (seconds)", Kind: "int", Restart: true,
+		Help: "How often pipelines are sampled for the dashboard and metrics history (1 to 300). Needs a web restart.",
+		file: func(c *Config) any { return c.SampleIntervalSec }, def: 5},
+}
+
+func settingDefOf(key string) *settingDef {
+	for i := range settingDefs {
+		if settingDefs[i].Key == key {
+			return &settingDefs[i]
+		}
+	}
+	return nil
+}
+
+// liveSettings là giá trị hiệu lực đang dùng (đổi được khi đang chạy).
+type liveSettings struct {
+	mu    sync.RWMutex
+	vals  map[string]any
+	srcs  map[string]string
+	start map[string]any // giá trị lúc khởi động (khóa cần khởi động lại dùng giá trị này tới lần sau)
+}
+
+func (l *liveSettings) get(key string) any {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.vals[key]
+}
+
+func (s *Server) settingBool(key string) bool  { b, _ := s.live.get(key).(bool); return b }
+func (s *Server) settingStr(key string) string { v, _ := s.live.get(key).(string); return v }
+func (s *Server) settingList(key string) []string {
+	v, _ := s.live.get(key).([]string)
+	return append([]string(nil), v...)
+}
+
+// parseSetting đổi giá trị (JSON đã giải mã, hoặc chuỗi từ form) thành kiểu của khóa và kiểm hợp lệ.
+func parseSetting(d *settingDef, raw any) (any, error) {
+	switch d.Kind {
+	case "bool":
+		switch v := raw.(type) {
+		case bool:
+			return v, nil
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "1", "true", "yes", "on":
+				return true, nil
+			case "0", "false", "no", "off", "":
+				return false, nil
+			}
+		}
+		return nil, fmt.Errorf("%s: expected true or false", d.Key)
+	case "int":
+		var n int
+		switch v := raw.(type) {
+		case float64:
+			n = int(v)
+			if float64(n) != v {
+				return nil, fmt.Errorf("%s: expected a whole number", d.Key)
+			}
+		case int:
+			n = v
+		case string:
+			x, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				return nil, fmt.Errorf("%s: expected a whole number", d.Key)
+			}
+			n = x
+		default:
+			return nil, fmt.Errorf("%s: expected a whole number", d.Key)
+		}
+		if n < 1 || n > 300 {
+			return nil, fmt.Errorf("%s: must be between 1 and 300", d.Key)
+		}
+		return n, nil
+	case "string":
+		v, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s: expected a string", d.Key)
+		}
+		v = strings.TrimSpace(v)
+		if v != "" && (!filepath.IsAbs(v) || filepath.Clean(v) != v) {
+			return nil, fmt.Errorf("%s: must be an absolute, clean path (got %q)", d.Key, v)
+		}
+		return v, nil
+	case "list":
+		var items []string
+		switch v := raw.(type) {
+		case string:
+			items = strings.Split(v, "\n")
+		case []any:
+			for _, x := range v {
+				sx, ok := x.(string)
+				if !ok {
+					return nil, fmt.Errorf("%s: expected a list of strings", d.Key)
+				}
+				items = append(items, sx)
+			}
+		case []string:
+			items = v
+		default:
+			return nil, fmt.Errorf("%s: expected a list of strings", d.Key)
+		}
+		out := []string{}
+		for _, it := range items {
+			it = strings.TrimSpace(it)
+			if it == "" {
+				continue
+			}
+			if !filepath.IsAbs(it) {
+				return nil, fmt.Errorf("%s: %q is not an absolute path", d.Key, it)
+			}
+			if _, err := filepath.Match(it, ""); err != nil {
+				return nil, fmt.Errorf("%s: %q is not a valid glob: %v", d.Key, it, err)
+			}
+			out = append(out, it)
+		}
+		if len(out) > 32 {
+			return nil, fmt.Errorf("%s: at most 32 globs", d.Key)
+		}
+		return out, nil
+	}
+	return nil, errors.New("unknown setting kind")
+}
+
+// fileSetSetting: web.yaml có đặt khóa này không (Config nạp từ file biết chính xác; Config dựng trong code
+// thì coi giá trị khác zero là "đặt").
+func fileSetSetting(c *Config, d *settingDef) bool {
+	if c.FileKeys != nil {
+		return c.FileKeys[d.Key]
+	}
+	v := reflect.ValueOf(d.file(c))
+	if v.Kind() == reflect.Slice {
+		return v.Len() > 0
+	}
+	return !v.IsZero()
+}
+
+// resolveSettings tính giá trị hiệu lực và nguồn của mọi khóa.
+func resolveSettings(c *Config, db map[string]string) (map[string]any, map[string]string) {
+	vals, srcs := map[string]any{}, map[string]string{}
+	for i := range settingDefs {
+		d := &settingDefs[i]
+		v, src := d.def, SrcDefault
+		if fileSetSetting(c, d) {
+			v, src = d.file(c), SrcFile
+		}
+		if raw, ok := db[d.Key]; ok {
+			var x any
+			if json.Unmarshal([]byte(raw), &x) == nil {
+				if pv, err := parseSetting(d, x); err == nil {
+					v, src = pv, SrcDatabase
+				}
+			}
+		}
+		if d.Env != "" {
+			if ev := strings.TrimSpace(os.Getenv(d.Env)); ev != "" {
+				if pv, err := parseSetting(d, ev); err == nil {
+					v, src = pv, SrcEnv
+				}
+			}
+		}
+		if d.Key == "sample_interval_sec" && v.(int) <= 0 {
+			v = 5
+		}
+		vals[d.Key], srcs[d.Key] = v, src
+	}
+	return vals, srcs
+}
+
+// loadSettings đọc cài đặt từ DB (chế độ DB) rồi đặt giá trị hiệu lực. initial: lúc khởi động (mọi khóa,
+// kể cả khóa cần khởi động lại, đều được áp dụng).
+func (s *Server) loadSettings(initial bool) error {
+	db := map[string]string{}
+	if s.db != nil {
+		ctx, cancel := dbCtx()
+		m, err := s.db.st.Settings(ctx)
+		cancel()
+		if err != nil {
+			return err
+		}
+		db = m
+	}
+	vals, srcs := resolveSettings(s.cfg, db)
+	s.live.mu.Lock()
+	defer s.live.mu.Unlock()
+	if initial || s.live.start == nil {
+		s.live.start = vals
+	}
+	s.live.vals, s.live.srcs = vals, srcs
+	return nil
+}
+
+// SettingView là một dòng của trang/API Settings.
+type SettingView struct {
+	Key            string `json:"key"`
+	Label          string `json:"label"`
+	Help           string `json:"help"`
+	Kind           string `json:"kind"`
+	Value          any    `json:"value"`
+	Source         string `json:"source"`
+	FileValue      any    `json:"file_value"`
+	Env            string `json:"env,omitempty"`
+	Editable       bool   `json:"editable"`
+	RestartNeeded  bool   `json:"restart_required"`
+	PendingRestart bool   `json:"pending_restart,omitempty"`
+	Text           string `json:"-"` // giá trị dạng text cho form
+}
+
+type settingsBody struct {
+	Items    []SettingView
+	DBMode   bool
+	Message  string
+	Error    string
+	Bootstap []SettingView
+}
+
+func (s *Server) settingsView() []SettingView {
+	s.live.mu.RLock()
+	defer s.live.mu.RUnlock()
+	var out []SettingView
+	for i := range settingDefs {
+		d := &settingDefs[i]
+		pending := d.Restart && !reflect.DeepEqual(s.live.vals[d.Key], s.live.start[d.Key])
+		v := SettingView{Key: d.Key, Label: d.Label, Help: d.Help, Kind: d.Kind, Value: s.live.vals[d.Key], Source: s.live.srcs[d.Key],
+			FileValue: d.file(s.cfg), Env: d.Env, RestartNeeded: d.Restart, PendingRestart: pending}
+		v.Editable = s.db != nil && v.Source != SrcEnv
+		v.Text = settingText(v.Value)
+		out = append(out, v)
+	}
+	return out
+}
+
+func settingText(v any) string {
+	switch x := v.(type) {
+	case []string:
+		return strings.Join(x, "\n")
+	case bool:
+		return strconv.FormatBool(x)
+	case int:
+		return strconv.Itoa(x)
+	case string:
+		return x
+	}
+	return fmt.Sprint(v)
+}
+
+// applySettings lưu các thay đổi (giá trị nil = reset về web.yaml/mặc định). Trả các khóa đã đổi.
+func (s *Server) applySettings(changes map[string]any, ip string) ([]string, error) {
+	if s.db == nil {
+		return nil, &ActionError{Status: http.StatusConflict, Msg: "settings are edited in web.yaml in file mode (restart the web after editing); the Settings page edits them with the PostgreSQL metadata store"}
+	}
+	keys := make([]string, 0, len(changes))
+	for k := range changes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	type op struct {
+		key, js string
+		reset   bool
+		val     any
+	}
+	var ops []op
+	cur := map[string]SettingView{}
+	for _, v := range s.settingsView() {
+		cur[v.Key] = v
+	}
+	for _, k := range keys {
+		d := settingDefOf(k)
+		if d == nil {
+			return nil, BadRequest("unknown setting %q (editable: scan, config_dir, secure_cookies, trust_forwarded_for, shutdown_stop_pipelines, sample_interval_sec)", k)
+		}
+		if cur[k].Source == SrcEnv {
+			return nil, &ActionError{Status: http.StatusConflict, Msg: fmt.Sprintf("%s is set by the environment variable %s, which wins over the database; change it there", k, d.Env)}
+		}
+		if changes[k] == nil {
+			ops = append(ops, op{key: k, reset: true})
+			continue
+		}
+		pv, err := parseSetting(d, changes[k])
+		if err != nil {
+			return nil, BadRequest("%s", err.Error())
+		}
+		b, _ := json.Marshal(pv)
+		ops = append(ops, op{key: k, js: string(b), val: pv})
+	}
+	ctx, cancel := dbCtx()
+	defer cancel()
+	var changed []string
+	for _, o := range ops {
+		old := cur[o.key]
+		if o.reset && old.Source != SrcDatabase {
+			continue
+		}
+		if !o.reset && old.Source == SrcDatabase && reflect.DeepEqual(old.Value, o.val) {
+			continue
+		}
+		e := AuditEntry{IP: ip, Action: "settings.edit", Detail: map[string]any{"key": o.key, "old": old.Value, "old_source": old.Source}}
+		if o.reset {
+			e.Detail["reset"] = true
+		} else {
+			e.Detail["new"] = o.val
+		}
+		// Audit trước: không ghi được audit thì không đổi.
+		e.Result = "started"
+		if err := s.audit.Log(e); err != nil {
+			return changed, &ActionError{Status: http.StatusInternalServerError, Msg: "audit log unavailable; refusing to change settings"}
+		}
+		var err error
+		if o.reset {
+			err = s.db.st.DeleteSetting(ctx, o.key)
+		} else {
+			err = s.db.st.PutSetting(ctx, o.key, o.js)
+		}
+		e.Result = "ok"
+		if err != nil {
+			e.Result, e.Detail["error"] = "error", err.Error()
+			_ = s.audit.Log(e)
+			return changed, &ActionError{Status: http.StatusServiceUnavailable, Msg: "metadata database: " + err.Error()}
+		}
+		_ = s.audit.Log(e)
+		changed = append(changed, o.key)
+	}
+	if len(changed) > 0 {
+		if err := s.loadSettings(false); err != nil {
+			return changed, err
+		}
+		s.reg.Refresh(ctx) // scan đổi: áp dụng ngay
+	}
+	return changed, nil
+}
+
+// ---- HTTP ----
+
+func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Session) {
+	b := settingsBody{Items: s.settingsView(), DBMode: s.db != nil, Bootstap: s.bootstrapSettings()}
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		_ = r.ParseForm()
+		changes := map[string]any{}
+		for _, it := range b.Items {
+			if !it.Editable {
+				continue
+			}
+			if r.PostForm.Get("reset_"+it.Key) == "1" {
+				changes[it.Key] = nil
+				continue
+			}
+			var nv any
+			switch it.Kind {
+			case "bool":
+				nv = r.PostForm.Get(it.Key) == "true"
+			default:
+				nv = r.PostForm.Get(it.Key)
+			}
+			d := settingDefOf(it.Key)
+			pv, err := parseSetting(d, nv)
+			if err != nil || !reflect.DeepEqual(pv, it.Value) {
+				changes[it.Key] = nv
+			}
+		}
+		changed, err := s.applySettings(changes, s.clientIP(r))
+		if err != nil {
+			b.Error = err.Error()
+		} else if len(changed) == 0 {
+			b.Message = "No changes."
+		} else {
+			b.Message = "Saved: " + strings.Join(changed, ", ") + "."
+		}
+		b.Items = s.settingsView()
+	}
+	s.render(w, "settings", sess, pageData{Title: "Settings", Active: "settings", Body: b})
+}
+
+// bootstrapSettings: các giá trị chỉ đọc (web.yaml/env), hiện để tham khảo.
+func (s *Server) bootstrapSettings() []SettingView {
+	dbv := "file mode (no database)"
+	if s.db != nil {
+		dbv = "PostgreSQL (" + EnvDatabaseDSN + " or database.dsn)"
+	}
+	tlsv := "off"
+	if s.cfg.TLSCert != "" {
+		tlsv = s.cfg.TLSCert
+	}
+	return []SettingView{
+		{Key: "listen", Label: "Listen", Text: s.cfg.Listen},
+		{Key: "tls", Label: "TLS certificate", Text: tlsv},
+		{Key: "allow_plain_http", Label: "Allow plain HTTP", Text: strconv.FormatBool(s.cfg.AllowPlainHTTP)},
+		{Key: "state_dir", Label: "State directory", Text: s.cfg.StateDir},
+		{Key: "database", Label: "Metadata store", Text: dbv},
+	}
+}
+
+func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request, _ *Session) {
+	writeJSON(w, http.StatusOK, map[string]any{"database_mode": s.db != nil, "settings": s.settingsView()})
+}
+
+func (s *Server) apiSettingsSave(w http.ResponseWriter, r *http.Request, _ *Session) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, `expected a JSON object {"key": value, ...} (null resets a key)`)
+		return
+	}
+	changed, err := s.applySettings(req, s.clientIP(r))
+	if err != nil {
+		status := http.StatusInternalServerError
+		var ae *ActionError
+		if errors.As(err, &ae) {
+			status = ae.Status
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
+	if changed == nil {
+		changed = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": changed, "settings": s.settingsView()})
+}

@@ -154,6 +154,16 @@ Tham số `?range=1h|6h|24h|7d` (mặc định `1h`). `{"range", "interval_secon
 
 Ghi: mẫu được gom và ghi theo lô mỗi 30 giây (một INSERT cho mọi pipeline), bảo trì mỗi giờ (gộp 1 phút, xóa dữ liệu hết hạn). Khối lượng: N pipeline x 12 dòng/phút ở `metric_samples` (khoảng 17 nghìn dòng/ngày/pipeline, xóa sau 24 giờ) + 1 dòng/phút/pipeline ở `metric_samples_1m`.
 
+### `GET /api/v1/settings`, `POST /api/v1/settings` (trang `/settings`)
+
+`GET` → `{"database_mode": bool, "settings": [{"key", "label", "help", "kind": "bool|int|string|list", "value", "source": "env|database|web.yaml|default", "file_value", "env", "editable", "restart_required", "pending_restart"}]}`.
+
+Khóa: `scan` (danh sách glob tuyệt đối, áp dụng ở lần quét kế tiếp), `config_dir` (đường dẫn tuyệt đối hoặc rỗng), `secure_cookies` (env `STRAND_WEB_SECURE_COOKIES`), `trust_forwarded_for` (env `STRAND_WEB_TRUST_FORWARDED_FOR`), `shutdown_stop_pipelines`, `sample_interval_sec` (1 đến 300, **cần khởi động lại web**). Cài đặt khởi động (`listen`, TLS, `allow_plain_http`, `state_dir`, `database`, `strand_binary`, mật khẩu/token) chỉ ở `web.yaml`/env và không sửa được ở đây.
+
+Thứ tự ưu tiên của giá trị hiệu lực: **biến môi trường** (khác rỗng) > **database** (bảng `web_settings`, đã lưu trên trang Settings) > **web.yaml** > mặc định. Khóa do env đặt thì không sửa được (409).
+
+`POST` body `{"khóa": giá_trị, ...}`; `null` = reset (xóa dòng DB, trở về web.yaml/mặc định). Kiểm hợp lệ trước khi ghi (400 kèm lý do), mỗi khóa đổi ghi audit `settings.edit` (`started` trước, rồi `ok`/`error`, `detail.key/old/new/old_source`; không ghi được audit thì không đổi). → `{"ok": true, "changed": [...], "settings": [...]}`. Chế độ file: **409** (sửa `web.yaml` rồi khởi động lại).
+
 ## 4. Thao tác
 
 `POST /api/v1/pipelines/{name}/actions/{action}` — body JSON `{"khóa": "giá trị chuỗi"}` (có thể rỗng). Với mọi action server: kiểm session + CSRF (hoặc Bearer), kiểm tên pipeline (404), kiểm tên action (404 `unknown action`), kiểm `confirm_name` khi action yêu cầu (400 nếu không bằng đúng tên pipeline), ghi audit `started` (không ghi được thì **không chạy**), chạy, rồi ghi audit kết quả (`ok`/`error`, `exit_code`). Thao tác chạy tách khỏi kết nối của client (client ngắt giữa `stop` không làm hỏng việc đang dở), giới hạn 170 giây.
@@ -225,8 +235,8 @@ Khi web chết hoặc khởi động lại: tiến trình con có process group 
 
 ## 5. Audit log
 
-Chế độ file: `<state_dir>/audit.log`. Chế độ PostgreSQL (`database.dsn`): bảng `audit_log` chỉ-thêm (cột `ts, ip, action, pipeline, result, data`); `database.audit: both` (mặc định) vẫn ghi file làm bản sao (USAGE.md 7.15). Mỗi dòng/bản ghi là một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, `config.edit`, `env.edit`, `pipeline.create`, `autostart` (web tự chạy lại pipeline có trạng thái mong muốn `running` khi khởi động), `state.import` (lần nhập file vào DB đầu tiên), và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
+Chế độ file: `<state_dir>/audit.log`. Chế độ PostgreSQL (`database.dsn`): bảng `audit_log` chỉ-thêm (cột `ts, ip, action, pipeline, result, data`); `database.audit: both` (mặc định) vẫn ghi file làm bản sao (USAGE.md 7.15). Mỗi dòng/bản ghi là một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, `config.edit`, `env.edit`, `pipeline.create`, `autostart` (web tự chạy lại pipeline có trạng thái mong muốn `running` khi khởi động), `state.import` (lần nhập file vào DB đầu tiên), `settings.edit`, và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
 
 ## 6. Trang HTML
 
-`/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs|repair|promote}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang tự làm mới 5 giây bằng `fetch` cùng URL (trừ Config và Logs; Logs có `?follow=1`).
+`/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs|repair|promote}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/settings` (GET; POST form có `csrf`), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang tự làm mới 5 giây bằng `fetch` cùng URL (trừ Config và Logs; Logs có `?follow=1`).

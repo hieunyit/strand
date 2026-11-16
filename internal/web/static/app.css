@@ -226,6 +226,14 @@ a.kpi:hover { text-decoration: none; border-color: var(--accent); }
 
 .warnbox { background: var(--warn-soft); border: 1px solid var(--warn); color: var(--ink); border-radius: var(--r-md); padding: 10px 14px; margin: 0 0 var(--sp-3); }
 .warnbox ul { margin: 6px 0 0; padding-left: 20px; }
+.okbox { background: var(--ok-soft); border: 1px solid var(--ok); color: var(--ink); border-radius: var(--r-md); padding: 10px 14px; margin: 0 0 var(--sp-3); }
+.settings .setrow { padding: var(--sp-3) 0; border-top: 1px solid var(--line); }
+.settings .setrow:first-of-type { border-top: 0; }
+.settings .sethead { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.settings .setinput { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.settings textarea { min-width: min(520px, 100%); }
+.badge.src-database { background: var(--accent); color: var(--accent-ink); }
+.badge.src-env { background: var(--warn-soft); color: var(--ink); }
 .infobox { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--r-md); padding: 10px 14px; margin: 0 0 var(--sp-3); }
 
 /* ---------- buttons ---------- */

@@ -1,0 +1,44 @@
+{{define "content"}}
+{{with .Body}}
+{{if .Message}}<p class="okbox" role="status">{{.Message}}</p>{{end}}
+{{if .Error}}<p class="warnbox" role="alert">{{.Error}}</p>{{end}}
+<section class="card"><div class="cardhead"><h2>Settings</h2></div>
+  <p class="muted small">Effective value of each setting and where it comes from. Precedence: <b>environment variable</b> &gt; <b>database</b> (saved here) &gt; <b>web.yaml</b> &gt; default. <b>Reset</b> removes the saved value so the web.yaml value (or the default) applies again. Every change is written to the audit log.</p>
+  {{if not .DBMode}}<p class="warnbox">File mode: settings are read from web.yaml and are read-only here. Edit web.yaml and restart the web, or use the PostgreSQL metadata store to edit them on this page.</p>{{end}}
+  <form method="post" action="/settings" class="settings">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    {{range .Items}}
+    <div class="setrow">
+      <div class="sethead">
+        <label for="set-{{.Key}}"><b>{{.Label}}</b> <code class="muted">{{.Key}}</code></label>
+        <span class="badge src-{{.Source}}" title="source of the effective value">{{.Source}}</span>
+        {{if .RestartNeeded}}<span class="badge st-tbl-pending">restart required</span>{{end}}
+        {{if .PendingRestart}}<span class="badge st-bootstrapping">saved, applies after a web restart</span>{{end}}
+      </div>
+      <p class="muted small">{{.Help}}{{if eq .Source "env"}} Set by <code>{{.Env}}</code>; change it in the environment.{{else if .Env}} Environment override: <code>{{.Env}}</code>.{{end}}</p>
+      <div class="setinput">
+      {{if eq .Kind "bool"}}
+        <select id="set-{{.Key}}" name="{{.Key}}"{{if not .Editable}} disabled{{end}}>
+          <option value="true"{{if eq .Text "true"}} selected{{end}}>on</option>
+          <option value="false"{{if eq .Text "false"}} selected{{end}}>off</option>
+        </select>
+      {{else if eq .Kind "list"}}
+        <textarea id="set-{{.Key}}" name="{{.Key}}" rows="3" class="wide mono"{{if not .Editable}} disabled{{end}}>{{.Text}}</textarea>
+      {{else if eq .Kind "int"}}
+        <input id="set-{{.Key}}" type="number" min="1" max="300" name="{{.Key}}" value="{{.Text}}" class="num mono"{{if not .Editable}} disabled{{end}}>
+      {{else}}
+        <input id="set-{{.Key}}" type="text" name="{{.Key}}" value="{{.Text}}" class="wide mono"{{if not .Editable}} disabled{{end}}>
+      {{end}}
+      {{if eq .Source "database"}}<label class="small"><input type="checkbox" name="reset_{{.Key}}" value="1"> Reset to web.yaml / default</label>{{end}}
+      </div>
+    </div>
+    {{end}}
+    {{if .DBMode}}<p><button class="btn primary" type="submit">Save settings</button></p>{{end}}
+  </form>
+</section>
+<section class="card"><div class="cardhead"><h2>Startup settings</h2></div>
+  <p class="muted small">Read from web.yaml and the environment at start; change them there and restart the web.</p>
+  <dl class="dl">{{range .Bootstap}}<dt>{{.Label}}</dt><dd class="mono">{{.Text}}</dd>{{end}}</dl>
+</section>
+{{end}}
+{{end}}
