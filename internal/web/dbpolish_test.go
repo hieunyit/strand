@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -161,5 +162,35 @@ func TestAuditImportResumesWithoutDuplicates(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("%s imported %d times", a, n)
 		}
+	}
+}
+
+// Changing the admin password in DB mode must sign out every session: sessions survive web restarts in the
+// database, so (unlike file mode, where a restart drops them) a stolen cookie would otherwise stay valid.
+func TestPasswordChangeRevokesDatabaseSessions(t *testing.T) {
+	st := store.NewMem()
+	e := dbEnv(t, st, nil, nil)
+	c, _ := e.loginOK()
+	if resp, _ := e.do(c, "GET", "/api/v1/session", "", nil); resp.StatusCode != 200 {
+		t.Fatalf("session: %d", resp.StatusCode)
+	}
+	h, _ := bcrypt.GenerateFromPassword([]byte("another-password"), bcrypt.MinCost)
+	must0(t, SetStorePassword(context.Background(), st, string(h)))
+	if resp, _ := e.do(c, "GET", "/api/v1/session", "", nil); resp.StatusCode != 401 {
+		t.Fatalf("old session still valid after password change: %d", resp.StatusCode)
+	}
+	// init in DB mode (password reset) goes through the same path.
+	var buf strings.Builder
+	cfgPath := filepath.Join(t.TempDir(), "web.yaml")
+	if _, err := RunInit(InitOptions{ConfigPath: cfgPath, Listen: "127.0.0.1:8080", StateDir: t.TempDir(), Password: "third-password-x",
+		Store: st, Stdout: &buf, Stderr: &buf, Quiet: true}); err != nil {
+		t.Fatal(err)
+	}
+	must0(t, st.PutSession(context.Background(), store.Session{IDHash: "x", CSRF: "c", Created: time.Now(), LastSeen: time.Now()}))
+	if _, err := RunInit(InitOptions{ConfigPath: cfgPath, Password: "fourth-password-x", Store: st, Stdout: &buf, Stderr: &buf, Quiet: true}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := st.CountSessions(context.Background()); n != 0 {
+		t.Fatalf("%d sessions left after password reset via init", n)
 	}
 }

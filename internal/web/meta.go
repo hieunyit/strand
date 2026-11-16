@@ -120,6 +120,17 @@ func (s *Server) apiTokenHash() string {
 	return s.cfg.APITokenHash
 }
 
+// SetStorePassword đặt mật khẩu admin trong DB và hủy MỌI session đang có. Chế độ file đổi mật khẩu cần khởi
+// động lại web (session nằm trong RAM nên tự mất); chế độ DB session sống qua khởi động lại, nên phải xóa
+// tường minh: người giữ cookie cũ (có thể là lý do đổi mật khẩu) không được dùng tiếp tới 12 giờ.
+func SetStorePassword(ctx context.Context, st store.Store, hash string) error {
+	if err := st.SetPasswordHash(ctx, hash); err != nil {
+		return err
+	}
+	all := time.Now().Add(100 * 365 * 24 * time.Hour)
+	return st.PurgeSessions(ctx, all, all)
+}
+
 // ---- audit sink ----
 
 func (m *metaDB) appendAudit(e AuditEntry) error {

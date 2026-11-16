@@ -287,7 +287,7 @@ func RunInit(o InitOptions) (*InitResult, error) {
 
 	if hash != "" {
 		if o.Store != nil {
-			if err := o.Store.SetPasswordHash(context.Background(), hash); err != nil {
+			if err := SetStorePassword(context.Background(), o.Store, hash); err != nil {
 				return nil, err
 			}
 		} else if err := SetConfigKey(o.ConfigPath, "password_hash", hash); err != nil {

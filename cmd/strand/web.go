@@ -75,10 +75,10 @@ func newWebPasswdCmd() *cobra.Command {
 			}
 			if st != nil {
 				defer st.Close()
-				if err := st.SetPasswordHash(cmd.Context(), h); err != nil {
+				if err := web.SetStorePassword(cmd.Context(), st, h); err != nil {
 					return err
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), "password hash written to the metadata database (takes effect immediately)")
+				fmt.Fprintln(cmd.OutOrStdout(), "password hash written to the metadata database (takes effect immediately; all sessions were signed out)")
 				return nil
 			}
 			if err := web.SetConfigKey(cfgPath, "password_hash", h); err != nil {
