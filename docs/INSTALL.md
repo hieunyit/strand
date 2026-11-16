@@ -284,12 +284,15 @@ Form chỉ hiện ô hợp với cặp engine đã chọn (PG chỉ sang PG, Mar
 - Bước 3: đích PG có **Target database** (database PostgreSQL để chép vào; trống = cùng tên database nguồn; bắt buộc khi nguồn MySQL là `*`), phải tạo trước bằng `CREATE DATABASE`. Đích MySQL có **Strand metadata database** (`strand`, chỉ chứa checkpoint `_strand_*`, không phải dữ liệu), cũng phải tạo trước.
 - Bước 4 (nguồn MySQL/MariaDB): **Databases** cần chép, cách nhau dấu phẩy, `*` = tất cả (bỏ database hệ thống). Mục "Only some tables?" (tùy chọn): **Include only** / **Skip** theo mẫu `db.bảng` (PG: `schema.bảng`), ví dụ `shop.orders` hay `shop.log_*`; để trống là lấy hết.
 - Bước 5 (Advanced, tùy chọn): commit order, số worker, thư mục spool, tên biến mật khẩu.
+- Bước 6 (**Snapshot speed & safety**, tùy chọn, gập sẵn): giới hạn đọc source soft/hard (mặc định soft 600), chunk rows (mặc định tự chỉnh, 5000), khung giờ snapshot (`22:00-06:00`), governor algorithm (`static|onoff|grace-v2`), lag SLO, ngưỡng breaker (tỉ lệ độ trễ query, replica lag max). Để trống là dùng mặc định. Snapshot chậm hoặc breaker mở trên source MariaDB/MySQL thì chỉnh ở đây (hoặc sau này ở tab Config).
 
 Validate sẽ gợi ý `CREATE DATABASE` nếu database đích hoặc metadata chưa có. Nơi lưu file và quyền ghi: mục 5.3.
 
 ### 6.3 Xem và sửa cấu hình
 
 Tab **Config**: hiện đúng văn bản file (giữ chú thích), mật khẩu/bí mật che bằng `********`, kèm cảnh báo khóa chưa có tác dụng. Chế độ sửa: ghi file tạm, chạy `strand validate` với env của pipeline, hiện kết quả và **diff**, rồi mới ghi đè nguyên tử và giữ bản sao lưu `<file>.bak.<timestamp>`; có tùy chọn Restart sau khi lưu. Validate lỗi thì không ghi đè. Giá trị `.env` là write-only: để nguyên `********` thì giữ giá trị cũ. Mọi lần xem/sửa đều vào audit log. Đa số khóa chỉ có hiệu lực sau restart ([USAGE.md](USAGE.md) 8.1).
+
+Thẻ **Tuning** (tab Config) cho chỉnh các khóa tốc độ/an toàn snapshot bằng form thay vì sửa YAML: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.strand_query_p99.max_ratio`, `governor.breaker.replica_lag.max`, `resources.workers.max`. Form hiện giá trị hiện có trong file (khóa vắng ghi "default: ..."); ô để trống thì khóa bị xóa (về mặc định). Lưu đi qua đúng đường ở trên (validate, diff, sao lưu `.bak`, ghi nguyên tử, Restart tùy chọn) và vẫn giữ chú thích cùng các khóa khác; bấm **Validate & Preview Diff** để xem trước. API: `GET/POST /api/v1/pipelines/{name}/tuning` ([WEB-API.md](WEB-API.md)). Giá trị mới có hiệu lực sau restart; muốn đổi tốc độ đọc ngay thì dùng **Throttle** ở tab Graph (không ghi vào file).
 
 ### 6.4 Thao tác
 
@@ -299,7 +302,7 @@ Tab **Config**: hiện đúng văn bản file (giữ chú thích), mật khẩu/
 | Enable/Disable at boot | đầu trang | Chỉ chế độ systemd; không được polkit cấp cho web (mục 5.3), web chỉ ra lệnh `sudo systemctl ...` cần chạy |
 | Pause, Resume | đầu trang | Qua admin socket |
 | Pause snapshot, Resume (snapshot only), Snapshot add | tab Tables | Snapshot add: chọn bảng từ source (bảng cần PK) |
-| Throttle (soft IOPS) | tab Graph | Chỉ tiến trình đang chạy, không ghi vào file cấu hình |
+| Throttle (soft IOPS) | tab Graph | Chỉ tiến trình đang chạy, đổi ngay, không ghi vào file cấu hình. Muốn lưu lâu dài: thẻ Tuning ở tab Config (6.3) |
 | Checkpoint Rewind | tab Checkpoint | Chỉ MySQL → MySQL, đang chạy; gõ lại tên pipeline |
 | Verify sample/full/delta | tab Jobs | Tiến trình con `strand verify ... --repair report`; mỗi pipeline tối đa **một** job (409 nếu bấm thêm); output trực tiếp ở `/jobs/<id>`, có Cancel |
 

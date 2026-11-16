@@ -245,6 +245,34 @@
           }
         })
         .catch(function (err) { toast('Save error: ' + err, false); });
+    } else if (t.id === 'tuning-btn-diff' || t.id === 'tuning-btn-save') {
+      var tform = document.getElementById('tuning-form');
+      var tp = tform ? tform.getAttribute('data-pipeline') : '';
+      if (!tp) return;
+      var dry = t.id === 'tuning-btn-diff';
+      var body = { dry_run: dry, restart: !dry && !!(document.getElementById('tuning-restart') || {}).checked };
+      Array.prototype.forEach.call(tform.querySelectorAll('[data-tuning]'), function (el) {
+        body[el.getAttribute('data-tuning')] = el.value.trim(); // rỗng = bỏ khóa (về mặc định)
+      });
+      var dbox = document.getElementById('tuning-diff-output');
+      toast(dry ? 'Validating...' : 'Saving tuning...', true);
+      api('POST', '/api/v1/pipelines/' + encodeURIComponent(tp) + '/tuning', body)
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          if (!res.ok) {
+            toast((res.j.error || 'error'), false);
+            if (dbox) { dbox.hidden = true; }
+            return;
+          }
+          if (dbox) { dbox.hidden = false; dbox.textContent = res.j.diff || '(no changes)'; }
+          if (dry) {
+            toast(res.j.valid === false ? 'Validation failed: ' + (res.j.output || '') : 'Validation passed', res.j.valid !== false);
+          } else {
+            toast(res.j.message || 'Saved', true);
+            if (res.j.changed && res.j.changed.length) setTimeout(function () { location.reload(); }, 1500);
+          }
+        })
+        .catch(function (err) { toast('Tuning error: ' + err, false); });
     } else if (t.id === 'env-btn-save') {
       var form = document.getElementById('env-edit-form');
       var p = form ? form.getAttribute('data-pipeline') : '';
@@ -368,9 +396,12 @@
       fd.forEach(function (v, k) {
         var str = (v || '').trim();
         if (str !== '') {
-          if (k === 'source_port' || k === 'target_port' || k === 'workers') {
+          if (k === 'source_port' || k === 'target_port' || k === 'workers' || k === 'server_id' ||
+              k === 'iops_soft' || k === 'iops_hard' || k === 'chunk_rows') {
             payload[k] = parseInt(str, 10);
-          } else if (k === 'include' || k === 'exclude' || k === 'databases') {
+          } else if (k === 'breaker_max_ratio') {
+            payload[k] = parseFloat(str);
+          } else if (k === 'include' || k === 'exclude' || k === 'databases' || k === 'windows') {
             // API nhận mảng chuỗi: tách theo dấu phẩy
             payload[k] = str.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
           } else {

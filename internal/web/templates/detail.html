@@ -42,11 +42,11 @@
       <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
     </dl>
   </section>{{end}}
-  {{if .Ctl.Reachable}}<section class="card"><h2>Throttle</h2>
+  {{if .Ctl.Reachable}}<section class="card" id="throttle"><h2>Throttle</h2>
     <form class="act" data-action="throttle" data-pipeline="{{.View.Name}}">
       <label>Soft source IOPS <input type="number" name="source_iops" min="1" max="10000000" required class="num"></label>
       <button class="btn" type="submit">Apply</button>
-      <span class="muted small">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file.</span>
+      <span class="muted small">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</span>
     </form></section>{{end}}
   <section class="charts">{{range .Charts}}<div class="card">{{.}}</div>{{end}}</section>
 {{end}}
@@ -148,6 +148,32 @@
         <pre class="code" id="cfg-diff-output"></pre>
       </div>
     </div>
+  </section>
+
+  <section class="card" id="tuning-card"><h2>Tuning: snapshot speed &amp; safety</h2>
+    {{if .Tuning.Error}}<p class="err">{{.Tuning.Error}}</p>{{else}}
+    <p class="muted small">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Graph tab)</a>; it is not saved to the file.</p>
+    <form id="tuning-form" class="np" data-pipeline="{{.View.Name}}">
+      <div class="np-row">
+        {{range .Tuning.Fields}}
+        <label>{{.Label}} <span class="muted small mono">({{.YAMLKey}})</span>
+          {{if .Options}}<select name="{{.Key}}" data-tuning="{{.Key}}">
+            <option value=""{{if not .Set}} selected{{end}}>default: {{.Default}}</option>
+            {{$cur := .Value}}{{range .Options}}<option value="{{.}}"{{if eq . $cur}} selected{{end}}>{{.}}</option>{{end}}
+          </select>
+          {{else}}<input type="text" name="{{.Key}}" data-tuning="{{.Key}}" value="{{.Value}}" placeholder="default: {{.Default}}" class="mono">{{end}}
+          <small class="muted">{{if .Set}}Current: <b>{{.Value}}</b>{{else}}Current: default ({{.Default}}){{end}}. {{.Help}}</small>
+        </label>
+        {{end}}
+      </div>
+      <div class="np-actions">
+        <button class="btn" type="button" id="tuning-btn-diff">Validate &amp; Preview Diff</button>
+        <label><input type="checkbox" id="tuning-restart"> Restart pipeline after saving</label>
+        <button class="btn primary" type="button" id="tuning-btn-save">Save tuning</button>
+      </div>
+    </form>
+    <pre class="code" id="tuning-diff-output" hidden></pre>
+    {{end}}
   </section>
 
   <section class="card"><h2>Credentials &amp; Environment (.env)</h2>

@@ -212,6 +212,8 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/pipelines/{name}", s.auth(true, s.apiPipeline))
 	mux.Handle("POST /api/v1/pipelines/{name}/config/validate", s.auth(true, s.apiConfigValidate))
 	mux.Handle("POST /api/v1/pipelines/{name}/config", s.auth(true, s.apiConfigSave))
+	mux.Handle("GET /api/v1/pipelines/{name}/tuning", s.auth(true, s.apiTuningGet))
+	mux.Handle("POST /api/v1/pipelines/{name}/tuning", s.auth(true, s.apiTuningSave))
 	mux.Handle("GET /api/v1/pipelines/{name}/env", s.auth(true, s.apiEnvGet))
 	mux.Handle("POST /api/v1/pipelines/{name}/env", s.auth(true, s.apiEnvSave))
 	for _, tab := range []string{"status", "tables", "checkpoint", "errors", "config", "logs", "series"} {
