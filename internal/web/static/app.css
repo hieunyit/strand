@@ -162,3 +162,15 @@ pre.log { max-height: 560px; overflow: auto; }
 ol.steps { padding-left: 1.4em; }
 ol.steps li { margin: .5em 0; }
 ol.steps li.step-failed b { color: var(--bad, #b42318); }
+
+/* new pipeline form */
+form.np .np-step { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px 4px; margin: 0 0 14px; }
+form.np legend { font-weight: 600; padding: 0 6px; }
+form.np .np-row { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 6px; }
+form.np .np-row label { display: flex; flex-direction: column; gap: 3px; max-width: 360px; margin: 0 0 8px; }
+form.np .np-row small { line-height: 1.35; }
+form.np details.np-adv { margin: 4px 0 12px; }
+form.np details.np-adv > summary { cursor: pointer; color: var(--muted); margin-bottom: 6px; }
+form.np .np-preview { background: var(--bg2, rgba(127,127,127,.08)); border-radius: 6px; padding: 6px 10px; margin: 6px 0 10px; }
+form.np .np-actions { margin-top: 16px; display: flex; gap: 8px; }
+form.np [hidden] { display: none !important; }

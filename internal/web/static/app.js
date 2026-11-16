@@ -280,8 +280,84 @@
   function escHtml(x) {
     return String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
+  // Form tạo pipeline: chỉ hiện ô hợp với cặp engine; ô bị ẩn thì disabled nên không được gửi.
+  function npSetup(form) {
+    var from = document.getElementById('np-from'), to = document.getElementById('np-to');
+    if (!from || !to) return;
+    function engineOf(v) { return v === 'postgres' ? 'postgres' : 'mysql'; }
+    function matches(cond, src, dst) {
+      var kv = cond.split(':'), vals = kv[1].split(',');
+      return vals.indexOf(kv[0] === 'src' ? src : dst) >= 0;
+    }
+    function setPort(el, eng) {
+      if (el && !el.dataset.touched) el.value = el.dataset[eng];
+    }
+    ['np-src-port', 'np-dst-port'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener('input', function () { el.dataset.touched = '1'; });
+    });
+    function val(name) {
+      var el = form.querySelector('[name="' + name + '"]:not([disabled])');
+      return el ? el.value.trim() : '';
+    }
+    function preview() {
+      var src = from.value, out = document.getElementById('np-preview');
+      if (!out) return;
+      var inc = val('include'), exc = val('exclude'), what;
+      if (inc) {
+        what = inc;
+      } else if (src === 'postgres') {
+        what = (val('schema') || 'public') + '.* (every table in schema ' + (val('schema') || 'public') + ' of database ' + (val('database') || '?') + ')';
+      } else {
+        var dbs = val('database').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+        what = dbs.length ? dbs.map(function (d) { return d === '*' ? '*.* (all databases)' : d + '.*'; }).join(', ') : '(enter a database)';
+      }
+      if (exc) what += '  except ' + exc;
+      var dst = to.value;
+      if (dst === 'postgres') {
+        var tdb = val('target_pg_database') || (src === 'postgres' ? val('database') : (val('database').split(',')[0] || '').trim());
+        what += (tdb && tdb !== '*') ? '  ->  PostgreSQL database ' + tdb : '  ->  PostgreSQL: enter the Target database in step 3';
+      } else {
+        what += '  ->  MySQL (same database names; checkpoint in ' + (val('target_database') || 'strand') + ')';
+      }
+      out.textContent = what;
+    }
+    function apply() {
+      var src = from.value;
+      // Cặp được hỗ trợ: PG chỉ sang PG, MariaDB chỉ sang MySQL.
+      var firstOK = null;
+      Array.prototype.forEach.call(to.options, function (o) {
+        var ok = (o.dataset.from || '').split(' ').indexOf(src) >= 0;
+        o.disabled = !ok; o.hidden = !ok;
+        if (ok && !firstOK) firstOK = o;
+      });
+      if (to.selectedOptions[0] && to.selectedOptions[0].disabled && firstOK) to.value = firstOK.value;
+      var note = document.getElementById('np-pair-note');
+      if (note) note.textContent = src === 'postgres' ? 'PostgreSQL can only be copied to PostgreSQL.' : (src === 'mariadb' ? 'MariaDB can only be copied to MySQL.' : '');
+      var dst = to.value;
+      form.querySelectorAll('[data-when]').forEach(function (el) {
+        var on = matches(el.dataset.when, src, dst);
+        el.hidden = !on;
+        el.querySelectorAll('input, select, textarea').forEach(function (i) { i.disabled = !on; });
+      });
+      setPort(document.getElementById('np-src-port'), engineOf(src));
+      setPort(document.getElementById('np-dst-port'), engineOf(dst));
+      var ns = src === 'postgres' ? 'schema' : 'db';
+      form.querySelectorAll('.np-ns').forEach(function (e) { e.textContent = ns; });
+      var exInc = document.getElementById('np-include-ex'), exExc = document.getElementById('np-exclude-ex');
+      var pre = src === 'postgres' ? (val('schema') || 'public') : ((val('database').split(',')[0] || 'shop').trim().replace('*', 'shop'));
+      if (exInc) exInc.textContent = pre + '.orders, ' + pre + '.customers';
+      if (exExc) exExc.textContent = pre + '.log_*, ' + pre + '.tmp_*';
+      preview();
+    }
+    from.addEventListener('change', apply);
+    to.addEventListener('change', apply);
+    form.addEventListener('input', function (ev) { if (ev.target !== from && ev.target !== to) apply(); });
+    apply();
+  }
   var newPipeForm = document.getElementById('new-pipeline-form');
   if (newPipeForm) {
+    npSetup(newPipeForm);
     newPipeForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var btn = document.getElementById('btn-create-pipeline');

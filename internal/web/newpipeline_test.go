@@ -411,3 +411,42 @@ func TestNewPipelinePageHasTargetDatabaseInput(t *testing.T) {
 		t.Errorf("thiếu input target_database (%d)", resp.StatusCode)
 	}
 }
+
+// Target PG: database đích chọn riêng (target_pg_database), mặc định cùng tên database nguồn; cặp engine
+// không hỗ trợ bị từ chối 400 ngay khi tạo.
+func TestNewPipelineTargetPGDatabaseAndPairs(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	_, _, y, _ := createNP(t, e, c, csrf, NewPipelineOpts{Name: "p1", From: "mysql", To: "postgres", Database: "shop"})
+	if !strings.Contains(y, "/shop?sslmode=prefer") {
+		t.Errorf("mặc định database PG đích = database nguồn:\n%s", y)
+	}
+	_, _, y, _ = createNP(t, e, c, csrf, NewPipelineOpts{Name: "p2", From: "mysql", To: "postgres", Database: "shop", TargetPGDatabase: "warehouse"})
+	if !strings.Contains(y, ":5432/warehouse?sslmode=prefer") && !strings.Contains(y, "/warehouse?sslmode=prefer") {
+		t.Errorf("target_pg_database không được áp dụng:\n%s", y)
+	}
+	_, _, y, _ = createNP(t, e, c, csrf, NewPipelineOpts{Name: "p3", From: "postgres", To: "postgres", Database: "src_db", TargetPGDatabase: "dst_db"})
+	if !strings.Contains(y, "/dst_db?sslmode=prefer") || !strings.Contains(y, "/src_db?sslmode=prefer") {
+		t.Errorf("PG→PG: nguồn src_db, đích dst_db:\n%s", y)
+	}
+	for _, o := range []NewPipelineOpts{
+		{Name: "bad1", From: "postgres", To: "mysql", Database: "x"},
+		{Name: "bad2", From: "mariadb", To: "postgres", Database: "x"},
+		{Name: "bad3", From: "mysql", To: "postgres", Database: "x", TargetPGDatabase: "a b"},
+		{Name: "bad4", From: "mysql", To: "postgres", Database: "*"},
+	} {
+		if code, _, _, out := createNP(t, e, c, csrf, o); code != 400 {
+			t.Errorf("%s: want 400, got %d %s", o.Name, code, out)
+		}
+	}
+}
+
+// Trang form: ô PG/MySQL được đánh dấu theo cặp engine (JS ẩn/disable ô không liên quan), có ô database PG đích.
+func TestNewPipelinePageConditionalFields(t *testing.T) {
+	e, c, _ := npEnv(t)
+	_, body := e.do(c, "GET", "/pipelines/new", "", nil)
+	for _, want := range []string{`name="target_pg_database"`, `data-when="dst:postgres"`, `data-when="dst:mysql"`, `data-when="src:postgres"`, `data-when="src:mysql,mariadb"`, `id="np-preview"`, `data-from="mysql postgres"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("form missing %s", want)
+		}
+	}
+}

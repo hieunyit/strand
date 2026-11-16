@@ -55,7 +55,9 @@ type NewPipelineOpts struct {
 	// TargetDatabase: database chứa bảng _strand_* của Strand (chỉ target MySQL); mặc định "strand".
 	// Khác với Database/Databases (database DỮ LIỆU cần chuyển).
 	TargetDatabase string `json:"target_database,omitempty"`
-	PGSchema       string `json:"schema,omitempty"`
+	// TargetPGDatabase: database PostgreSQL ĐÍCH (chỉ target PG) để chép vào; rỗng = cùng tên database nguồn.
+	TargetPGDatabase string `json:"target_pg_database,omitempty"`
+	PGSchema         string `json:"schema,omitempty"`
 
 	Includes []string `json:"include,omitempty"`
 	Excludes []string `json:"exclude,omitempty"`
@@ -376,8 +378,12 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		if opts.TargetDSN != "" {
 			td.TargetDSN = opts.TargetDSN
 		} else {
+			tdb := strings.TrimSpace(opts.TargetPGDatabase)
+			if tdb == "" {
+				tdb = td.Database
+			}
 			td.TargetDSN = fmt.Sprintf("postgres://%s:${%s}@%s:%d/%s?sslmode=prefer",
-				td.TargetUser, td.TargetPasswordEnv, td.TargetHost, td.TargetPort, td.Database)
+				td.TargetUser, td.TargetPasswordEnv, td.TargetHost, td.TargetPort, tdb)
 		}
 	}
 
@@ -446,6 +452,20 @@ func checkOpts(opts NewPipelineOpts) error {
 	}
 	if td := strings.TrimSpace(opts.TargetDatabase); td != "" && !plainDBNameRE.MatchString(td) {
 		return fmt.Errorf("target_database %q is not a plain database name (letters, digits, _ and $ only)", td)
+	}
+	if td := strings.TrimSpace(opts.TargetPGDatabase); td != "" && !plainDBNameRE.MatchString(td) {
+		return fmt.Errorf("target_pg_database %q is not a plain database name (letters, digits, _ and $ only)", td)
+	}
+	if opts.To == "postgres" && opts.From != "postgres" && strings.TrimSpace(opts.TargetPGDatabase) == "" && strings.TrimSpace(opts.TargetDSN) == "" {
+		if dbs := dataDatabases(opts); len(dbs) > 0 && dbs[0] == "*" {
+			return fmt.Errorf("copying all MySQL databases (*) to PostgreSQL: set target_pg_database (the PostgreSQL database to copy into)")
+		}
+	}
+	if opts.From == "postgres" && opts.To == "mysql" {
+		return fmt.Errorf("PostgreSQL can only be copied to PostgreSQL (postgres -> mysql is not supported)")
+	}
+	if opts.From == "mariadb" && opts.To == "postgres" {
+		return fmt.Errorf("MariaDB can only be copied to MySQL (mariadb -> postgres is not supported)")
 	}
 	return nil
 }
@@ -793,6 +813,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.TargetDSN = f.Get("target_dsn")
 	opts.Database = f.Get("database")
 	opts.TargetDatabase = f.Get("target_database")
+	opts.TargetPGDatabase = f.Get("target_pg_database")
 	opts.PGSchema = f.Get("schema")
 	opts.CommitOrder = f.Get("commit_order")
 	opts.SpoolDir = f.Get("spool_dir")

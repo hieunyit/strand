@@ -1,119 +1,126 @@
 {{define "content"}}
 <div class="card">
   <h2>Create new pipeline</h2>
-  <p class="muted small">Generate pipeline configuration and .env credentials file, run validate and plan, and register into Strand.</p>
-  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="act" data-action="new-pipeline">
+  <p class="muted small">Fill in the source and target, choose what to copy, then <b>Create and validate</b>: Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</p>
+  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="act np" data-action="new-pipeline">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    
-    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
-      <legend><b>1. Engine & Identity</b></legend>
-      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
-        <label>Pipeline Name <span class="err">*</span>
-          <br><input type="text" name="name" required class="wide mono" placeholder="e.g. app-migration" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
-          <br><small class="muted">Letters, numbers, -, _, . (max 63 chars)</small>
+
+    <fieldset class="np-step">
+      <legend>1. Pipeline</legend>
+      <div class="np-row">
+        <label>Name <span class="err">*</span>
+          <input type="text" name="name" required class="wide mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+          <small class="muted">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
         </label>
-        <label>Source Engine
-          <br><select name="from" id="from-select">
-            <option value="mysql" selected>MySQL 5.5 - 8.x</option>
+        <label>Copy from (source)
+          <select name="from" id="np-from">
+            <option value="mysql" selected>MySQL 5.5 – 8.x</option>
             <option value="mariadb">MariaDB 10.6+</option>
-            <option value="postgres">PostgreSQL 14 - 18</option>
+            <option value="postgres">PostgreSQL 14 – 18</option>
           </select>
         </label>
-        <label>Target Engine
-          <br><select name="to" id="to-select">
-            <option value="postgres" selected>PostgreSQL 16 - 18</option>
-            <option value="mysql">MySQL 8.x</option>
+        <label>Copy to (target)
+          <select name="to" id="np-to">
+            <option value="postgres" data-from="mysql postgres" selected>PostgreSQL 16 – 18</option>
+            <option value="mysql" data-from="mysql mariadb">MySQL 8.x</option>
+          </select>
+          <small class="muted" id="np-pair-note"></small>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="np-step">
+      <legend>2. Source connection</legend>
+      <div class="np-row">
+        <label>Host <input type="text" name="source_host" value="127.0.0.1" class="wide mono"></label>
+        <label>Port <input type="number" name="source_port" value="3306" class="num mono" id="np-src-port" data-mysql="3306" data-postgres="5432"></label>
+        <label>User <input type="text" name="source_user" value="strand" class="mono">
+          <small class="muted" data-when="src:mysql,mariadb">Needs <code>REPLICATION SLAVE, REPLICATION CLIENT, SELECT</code>.</small>
+          <small class="muted" data-when="src:postgres">Needs <code>REPLICATION</code> and <code>SELECT</code> on the tables.</small>
+        </label>
+        <label>Password <input type="password" name="source_password" class="mono" autocomplete="new-password"></label>
+      </div>
+      <div class="np-row" data-when="src:postgres">
+        <label>Database <span class="err">*</span>
+          <input type="text" name="database" value="app" class="mono" data-when-input="src:postgres">
+          <small class="muted">The PostgreSQL database that holds your tables.</small>
+        </label>
+        <label>Schema
+          <input type="text" name="schema" value="public" class="mono">
+          <small class="muted">Usually <code>public</code>. All tables in it are copied unless you narrow it in step 4.</small>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="np-step">
+      <legend>3. Target connection</legend>
+      <div class="np-row">
+        <label>Host <input type="text" name="target_host" value="127.0.0.1" class="wide mono"></label>
+        <label>Port <input type="number" name="target_port" value="5432" class="num mono" id="np-dst-port" data-mysql="3306" data-postgres="5432"></label>
+        <label>User <input type="text" name="target_user" value="strand" class="mono">
+          <small class="muted">Must be able to create tables and write data.</small>
+        </label>
+        <label>Password <input type="password" name="target_password" class="mono" autocomplete="new-password"></label>
+      </div>
+      <div class="np-row" data-when="dst:postgres">
+        <label>Target database
+          <input type="text" name="target_pg_database" class="mono" placeholder="same name as the source database">
+          <small class="muted">PostgreSQL database to copy into; it must already exist (<code>CREATE DATABASE …;</code>). Empty = same name as the source database (required when copying <code>*</code> from MySQL).</small>
+        </label>
+      </div>
+      <div class="np-row" data-when="dst:mysql">
+        <label>Strand metadata database
+          <input type="text" name="target_database" value="strand" class="mono">
+          <small class="muted">Small database where Strand keeps its checkpoint (<code>_strand_*</code> tables), not your data. Create it once on the target: <code>CREATE DATABASE strand;</code></small>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="np-step">
+      <legend>4. What to copy</legend>
+      <div class="np-row" data-when="src:mysql,mariadb">
+        <label>Databases <span class="err">*</span>
+          <input type="text" name="database" value="app" class="wide mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
+          <small class="muted">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>
+        </label>
+      </div>
+      <details class="np-adv" id="np-tables">
+        <summary>Only some tables? (optional)</summary>
+        <div class="np-row">
+          <label>Include only
+            <input type="text" name="include" class="wide mono" id="np-include">
+            <small class="muted">Empty = every table above. Patterns <code><span class="np-ns">db</span>.table</code>, comma-separated; <code>*</code> matches anything. Example: <code id="np-include-ex">shop.orders, shop.customers</code></small>
+          </label>
+          <label>Skip
+            <input type="text" name="exclude" class="wide mono" id="np-exclude">
+            <small class="muted">Tables never copied (wins over Include). Example: <code id="np-exclude-ex">shop.log_*, shop.tmp_*</code></small>
+          </label>
+        </div>
+      </details>
+      <p class="np-preview small">Will copy: <code id="np-preview">…</code></p>
+    </fieldset>
+
+    <details class="np-adv">
+      <summary>5. Advanced (optional)</summary>
+      <div class="np-row">
+        <label>Commit order
+          <select name="commit_order">
+            <option value="relaxed" selected>relaxed: parallel by row key (faster)</option>
+            <option value="strict">strict: exact source commit order</option>
           </select>
         </label>
+        <label>Target workers <input type="number" name="workers" value="8" class="num mono" min="1"></label>
+        <label>Spool directory
+          <input type="text" name="spool_dir" class="wide mono" placeholder="default: &lt;state_dir&gt;/pipelines/&lt;name&gt;/spool">
+        </label>
+        <label>Source password variable <input type="text" name="source_password_env" value="SRC_PW" class="mono"></label>
+        <label>Target password variable <input type="text" name="target_password_env" value="DST_PW" class="mono"></label>
       </div>
-    </fieldset>
+    </details>
 
-    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
-      <legend><b>2. Source Connection</b></legend>
-      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
-        <label>Source Host
-          <br><input type="text" name="source_host" value="127.0.0.1" class="wide mono">
-        </label>
-        <label>Source Port
-          <br><input type="number" name="source_port" value="3306" class="num mono">
-        </label>
-        <label>Source User
-          <br><input type="text" name="source_user" value="strand" class="mono">
-        </label>
-        <label>Source Password <small class="muted">(saved to .env, mode 0600)</small>
-          <br><input type="password" name="source_password" class="mono" autocomplete="new-password">
-        </label>
-        <label>Password Env Variable
-          <br><input type="text" name="source_password_env" value="SRC_PW" class="mono">
-        </label>
-      </div>
-    </fieldset>
-
-    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
-      <legend><b>3. Target Connection</b></legend>
-      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
-        <label>Target Host
-          <br><input type="text" name="target_host" value="127.0.0.1" class="wide mono">
-        </label>
-        <label>Target Port
-          <br><input type="number" name="target_port" value="5432" class="num mono">
-        </label>
-        <label>Target User
-          <br><input type="text" name="target_user" value="strand" class="mono">
-        </label>
-        <label>Target Password <small class="muted">(saved to .env, mode 0600)</small>
-          <br><input type="password" name="target_password" class="mono" autocomplete="new-password">
-        </label>
-        <label>Password Env Variable
-          <br><input type="text" name="target_password_env" value="DST_PW" class="mono">
-        </label>
-      </div>
-    </fieldset>
-
-    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
-      <legend><b>4. Database & Tables</b></legend>
-      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
-        <label>Database / Database Name
-          <br><input type="text" name="database" value="app" class="mono">
-          <br><small class="muted">PG: DB name; MySQL: comma-separated or * for all</small>
-        </label>
-        <label>Target metadata database (MySQL target only)
-          <br><input type="text" name="target_database" value="strand" class="mono">
-          <br><small class="muted">Holds Strand's own _strand_* tables; must exist: CREATE DATABASE strand;</small>
-        </label>
-        <label>PG Schema (Postgres source only)
-          <br><input type="text" name="schema" value="public" class="mono">
-        </label>
-        <label>Include Tables
-          <br><input type="text" name="include" class="wide mono" placeholder="e.g. app.* or *.*">
-        </label>
-        <label>Exclude Tables
-          <br><input type="text" name="exclude" class="wide mono" placeholder="e.g. app.log_*">
-        </label>
-      </div>
-    </fieldset>
-
-    <fieldset class="card" style="border:none; padding:0; margin-bottom:16px;">
-      <legend><b>5. Operational Settings</b></legend>
-      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-top:8px;">
-        <label>Commit Order
-          <br><select name="commit_order">
-            <option value="relaxed" selected>relaxed (parallel by key, fast)</option>
-            <option value="strict">strict (source commit order)</option>
-          </select>
-        </label>
-        <label>Spool Directory
-          <br><input type="text" name="spool_dir" class="wide mono" placeholder="default: &lt;state_dir&gt;/pipelines/&lt;name&gt;/spool">
-        </label>
-        <label>Target Workers
-          <br><input type="number" name="workers" value="8" class="num mono">
-        </label>
-      </div>
-    </fieldset>
-
-    <div style="margin-top:20px;">
-      <button class="btn primary" type="submit" id="btn-create-pipeline">Create and Validate Pipeline</button>
-      <a href="/pipelines" class="btn" style="margin-left:8px;">Cancel</a>
+    <div class="np-actions">
+      <button class="btn primary" type="submit" id="btn-create-pipeline">Create and validate</button>
+      <a href="/pipelines" class="btn">Cancel</a>
     </div>
   </form>
 

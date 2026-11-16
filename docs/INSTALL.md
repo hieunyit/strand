@@ -278,7 +278,14 @@ Mở URL, đăng nhập bằng mật khẩu admin. Phiên hết hạn sau 30 ph�
 3. Chạy `strand validate` và `strand plan`, hiện kết quả. Validate lỗi thì pipeline vẫn được tạo (để sửa ở tab Config) nhưng kết quả là `ok: false` và không có nút Start.
 4. Nút **Start** khởi động ở chế độ nền (`strand sync --background`). Muốn chạy bằng systemd: chép file về `/etc/strand/<name>.{yaml,env}` (`.env` web ghi đã ở dạng `KEY=VALUE` mà systemd `EnvironmentFile` đọc được; mật khẩu có ký tự đặc biệt được đặt trong nháy kép), sửa `resources.spool.path`/`observability.admin_socket` về `/var/lib/strand/<name>` và `/run/strand/<name>/admin.sock`, rồi `systemctl enable --now strand@<name>`. Mật khẩu chứa ký tự xuống dòng bị từ chối (400).
 
-Target MySQL: database metadata `strand` (hoặc `target_database`) phải tồn tại trước (validate sẽ gợi ý `CREATE DATABASE`). Nơi lưu file và quyền ghi: mục 5.3.
+Form chỉ hiện ô hợp với cặp engine đã chọn (PG chỉ sang PG, MariaDB chỉ sang MySQL; cổng tự đổi 3306/5432) và có dòng **Will copy** xem trước phạm vi:
+
+- Bước 2 (nguồn PG): **Database** và **Schema** (thường `public`).
+- Bước 3: đích PG có **Target database** (database PostgreSQL để chép vào; trống = cùng tên database nguồn; bắt buộc khi nguồn MySQL là `*`), phải tạo trước bằng `CREATE DATABASE`. Đích MySQL có **Strand metadata database** (`strand`, chỉ chứa checkpoint `_strand_*`, không phải dữ liệu), cũng phải tạo trước.
+- Bước 4 (nguồn MySQL/MariaDB): **Databases** cần chép, cách nhau dấu phẩy, `*` = tất cả (bỏ database hệ thống). Mục "Only some tables?" (tùy chọn): **Include only** / **Skip** theo mẫu `db.bảng` (PG: `schema.bảng`), ví dụ `shop.orders` hay `shop.log_*`; để trống là lấy hết.
+- Bước 5 (Advanced, tùy chọn): commit order, số worker, thư mục spool, tên biến mật khẩu.
+
+Validate sẽ gợi ý `CREATE DATABASE` nếu database đích hoặc metadata chưa có. Nơi lưu file và quyền ghi: mục 5.3.
 
 ### 6.3 Xem và sửa cấu hình
 
