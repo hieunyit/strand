@@ -477,12 +477,24 @@ func (s *Server) logsView(ctx context.Context, p *Pipeline, n int) LogsView {
 	return v
 }
 
-// SeriesView: các mẫu 1 giờ gần nhất.
+// SeriesView: các mẫu của khoảng range (mặc định 1 giờ gần nhất, từ RAM).
 type SeriesView struct {
+	Range           string   `json:"range"`
 	IntervalSeconds int      `json:"interval_seconds"`
 	Samples         []Sample `json:"samples"`
+	Error           string   `json:"error,omitempty"`
 }
 
-func (s *Server) seriesView(p *Pipeline) SeriesView {
-	return SeriesView{IntervalSeconds: int(s.samp.interval.Seconds()), Samples: append([]Sample{}, s.samp.Series(p.Name)...)}
+func (s *Server) seriesView(p *Pipeline, rangeKey string) SeriesView {
+	rng := chartRangeOf(rangeKey)
+	v := SeriesView{Range: rng.Key, IntervalSeconds: int(s.samp.interval.Seconds())}
+	smp, ok := s.seriesFor(p.Name, rng)
+	if !ok {
+		v.Range, v.Error = "1h", "ranges longer than 1h need the PostgreSQL metadata store"
+		smp = s.samp.Series(p.Name)
+	} else if rng.Step > 0 {
+		v.IntervalSeconds = int(rng.Step.Seconds())
+	}
+	v.Samples = append([]Sample{}, smp...)
+	return v
 }

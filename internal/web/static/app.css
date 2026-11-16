@@ -350,7 +350,9 @@ form.inline { display: inline; margin: 0; }
 .chip { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: var(--fs-sm); padding: 5px 13px; border: 1px solid var(--line-strong); border-radius: var(--r-pill); background: var(--surface); color: var(--ink); cursor: pointer; }
 .chip b { font-variant-numeric: tabular-nums; }
 .chip:hover { border-color: var(--accent); }
-.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.rangebar { align-items: center; margin-bottom: var(--sp-3); }
+a.chip:hover { text-decoration: none; }
+.chip[aria-current="true"], .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .chip .badge { padding: 0 6px; background: transparent; color: inherit; }
 .chip.c-done .dot { background: var(--ok); } .chip.c-running .dot { background: var(--accent); } .chip.c-pending .dot { background: var(--warn); }
 .chip[aria-pressed="true"] .dot { box-shadow: 0 0 0 2px var(--accent-ink); }

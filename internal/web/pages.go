@@ -399,6 +399,9 @@ type detailBody struct {
 	Status     StatusView
 	Graph      template.HTML
 	Charts     []template.HTML
+	Range      ChartRange   // khoảng đang xem của biểu đồ (tab Graph)
+	Ranges     []ChartRange // bộ chọn khoảng
+	HasHistory bool         // chế độ DB: có lịch sử quá 1 giờ
 	Metrics    map[string]float64
 	Tables     TablesView
 	Checkpoint CheckpointView
@@ -484,7 +487,10 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 			b.Metrics = sn.Metrics
 		}
 		b.Graph = PipelineGraph(s.graphNodes(b.View, b.Status.Status, b.Metrics))
-		b.Charts = s.charts(p.Name)
+		b.Range = chartRangeOf(r.URL.Query().Get("range"))
+		b.Ranges = chartRanges
+		b.HasHistory = s.db != nil
+		b.Charts = s.charts(p.Name, b.Range)
 	case "tables":
 		b.Tables = s.tablesView(ctx, p)
 		if b.Ctl.Reachable {
@@ -518,8 +524,11 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Active: p.Name, Refresh: refresh, Body: b})
 }
 
-func (s *Server) charts(name string) []template.HTML {
-	smp := s.samp.Series(name)
+func (s *Server) charts(name string, rng ChartRange) []template.HTML {
+	smp, ok := s.seriesFor(name, rng)
+	if !ok {
+		smp = s.samp.Series(name)
+	}
 	pick := func(f func(Sample) float64) []Point {
 		pts := make([]Point, len(smp))
 		for i, x := range smp {

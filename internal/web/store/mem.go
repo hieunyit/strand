@@ -17,10 +17,13 @@ type Mem struct {
 	desired  map[string]string
 	jobs     map[string]Job
 	jobOut   map[string]map[int64][]byte
-	wizards  map[string][]byte
-	audit    []AuditRow
-	meta     map[string]string
-	locks    map[string]*sync.Mutex
+	// metrics, metrics1m: pipeline -> UnixNano(ts) -> mẫu.
+	metrics   map[string]map[int64]MetricSample
+	metrics1m map[string]map[int64]MetricSample
+	wizards   map[string][]byte
+	audit     []AuditRow
+	meta      map[string]string
+	locks     map[string]*sync.Mutex
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }

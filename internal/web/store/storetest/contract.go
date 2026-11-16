@@ -159,6 +159,40 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 			t.Fatalf("meta = %q", v)
 		}
 	})
+	t.Run("metrics_history", func(t *testing.T) {
+		s := mk(t)
+		base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+		var rows []store.MetricSample
+		for i := 0; i < 36; i++ { // 3 phút, mỗi 5 s
+			rows = append(rows, store.MetricSample{Pipeline: "p", T: base.Add(time.Duration(i) * 5 * time.Second), State: "synced", Lag: float64(i), Throughput: 10})
+		}
+		must(t, s.AppendMetrics(ctx, rows))
+		must(t, s.AppendMetrics(ctx, rows[:3])) // trùng: bỏ qua
+		got, err := s.QueryMetrics(ctx, "p", base, base.Add(time.Hour), time.Minute, false)
+		must(t, err)
+		if len(got) != 3 || got[0].Lag != 5.5 || got[0].LagMax != 11 || got[2].Throughput != 10 || got[0].State != "synced" {
+			t.Fatalf("raw minute buckets = %+v", got)
+		}
+		// Rollup các phút trước base+2m, xóa raw trước base+1m.
+		must(t, s.MaintainMetrics(ctx, base.Add(2*time.Minute), base.Add(time.Minute), base.Add(-time.Hour)))
+		raw, _ := s.QueryMetrics(ctx, "p", base, base.Add(time.Hour), 5*time.Second, false)
+		if len(raw) != 24 {
+			t.Fatalf("raw after maintain = %d, want 24", len(raw))
+		}
+		ru, _ := s.QueryMetrics(ctx, "p", base, base.Add(time.Hour), time.Minute, true)
+		if len(ru) != 2 || ru[0].Lag != 5.5 || ru[0].LagMax != 11 || ru[1].LagMax != 23 {
+			t.Fatalf("rollup = %+v", ru)
+		}
+		// Chạy lại: idempotent; rồi hết hạn rollup.
+		must(t, s.MaintainMetrics(ctx, base.Add(2*time.Minute), base.Add(time.Minute), base.Add(-time.Hour)))
+		if ru2, _ := s.QueryMetrics(ctx, "p", base, base.Add(time.Hour), time.Minute, true); len(ru2) != 2 || ru2[1].Lag != ru[1].Lag {
+			t.Fatalf("rollup not idempotent: %+v", ru2)
+		}
+		must(t, s.MaintainMetrics(ctx, base.Add(2*time.Minute), base.Add(time.Minute), base.Add(90*time.Second)))
+		if ru3, _ := s.QueryMetrics(ctx, "p", base, base.Add(time.Hour), time.Minute, true); len(ru3) != 0 {
+			t.Fatalf("rollup retention: %+v", ru3)
+		}
+	})
 	t.Run("locked_is_exclusive", func(t *testing.T) {
 		s := mk(t)
 		var inside, maxInside int32

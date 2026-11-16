@@ -151,6 +151,10 @@ func New(o Options) (*Server, error) {
 		return nil, err
 	}
 	reg.Refresh(context.Background())
+	if db != nil {
+		s.preloadSeries()
+		s.samp.OnSample = db.metrics.add
+	}
 	s.handler = s.routes()
 	return s, nil
 }
@@ -214,6 +218,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	defer cancel()
 	go s.samp.Run(ctx)
 	go s.ResumeDesired(ctx)
+	go s.runMetricsHistory(ctx)
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -243,6 +248,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 		_ = s.audit.Close()
 		if s.db != nil {
+			s.flushMetrics()
 			_ = s.db.st.Close()
 		}
 		return nil

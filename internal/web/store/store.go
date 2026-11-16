@@ -122,6 +122,8 @@ type Store interface {
 	MetaGet(ctx context.Context, key string) (string, bool, error)
 	MetaSet(ctx context.Context, key, value string) error
 
+	MetricsStore
+
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error
 }

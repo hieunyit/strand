@@ -23,6 +23,8 @@
       <button class="btn" type="submit">Apply</button>
       <span class="muted small hint">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</span>
     </form></section>{{end}}
+  <nav class="chips rangebar" aria-label="Chart range">{{$cur := .Range.Key}}{{$hist := .HasHistory}}{{range .Ranges}}{{if or $hist (eq .Key "1h")}}<a class="chip" href="?range={{.Key}}"{{if eq .Key $cur}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}{{end}}
+    {{if not .HasHistory}}<span class="muted small">Last hour, kept in memory. Longer ranges (6 h to 7 d) are available with the PostgreSQL metadata store.</span>{{else if ne .Range.Key "1h"}}<span class="muted small">Averages per bucket; lag shows the maximum.</span>{{end}}</nav>
   <section class="charts">{{range .Charts}}<div class="card">{{.}}</div>{{end}}</section>
 {{end}}
 

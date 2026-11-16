@@ -59,6 +59,8 @@ type metaDB struct {
 	adminAt time.Time
 
 	warnedKey sync.Once
+
+	metrics metricsBuf // mẫu số liệu chờ ghi theo lô
 }
 
 const adminCacheTTL = 3 * time.Second

@@ -143,6 +143,25 @@ type Sampler struct {
 	// FetchTop thay được trong test; mặc định gọi admin socket.
 	FetchTop func(ctx context.Context, socket string) (*admin.TopInfo, error)
 	Now      func() time.Time
+	// OnSample (tùy chọn) nhận mỗi mẫu mới: chế độ DB ghi lịch sử số liệu.
+	OnSample func(name string, smp Sample)
+}
+
+// preload đặt sẵn các mẫu (cũ đến mới) vào ring của pipeline (lịch sử từ DB lúc khởi động).
+func (s *Sampler) preload(name string, pts []Sample) {
+	if len(pts) == 0 {
+		return
+	}
+	s.mu.Lock()
+	r := s.rings[name]
+	if r == nil {
+		r = NewRing[Sample](RingSize)
+		s.rings[name] = r
+	}
+	s.mu.Unlock()
+	for _, p := range pts {
+		r.Add(p)
+	}
 }
 
 type promPrev struct {
@@ -256,6 +275,9 @@ func (s *Sampler) sampleOne(ctx context.Context, p *Pipeline) {
 	s.latest[p.Name] = snap
 	s.mu.Unlock()
 	r.Add(smp)
+	if s.OnSample != nil {
+		s.OnSample(p.Name, smp)
+	}
 }
 
 func (s *Sampler) fetchMetrics(ctx context.Context, url string) (map[string]float64, error) {

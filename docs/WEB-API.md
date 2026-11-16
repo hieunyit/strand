@@ -147,7 +147,12 @@ Cập nhật file `.env`: nếu giá trị gửi lên là `********` thì giữ 
 
 ### `GET /api/v1/pipelines/{name}/series`
 
-`{"interval_seconds": 5, "samples": [{"t", "state", "lag_seconds", "throughput", "apply_rows_per_s", "holes", "writeset_entries", "spool_bytes"}]}` — tối đa 720 mẫu (1 giờ) từ ring buffer trong RAM.
+Tham số `?range=1h|6h|24h|7d` (mặc định `1h`). `{"range", "interval_seconds", "samples": [{"t", "state", "lag_seconds", "throughput", "apply_rows_per_s", "holes", "writeset_entries", "spool_bytes"}], "error"}`.
+
+- `1h`: tối đa 720 mẫu từ ring buffer trong RAM (cả hai chế độ; chế độ PostgreSQL nạp lại ring từ DB khi web khởi động lại).
+- `6h`, `24h`, `7d`: chỉ chế độ PostgreSQL, đọc từ bảng `metric_samples` (raw, giữ 24 giờ) và `metric_samples_1m` (trung bình 1 phút, giữ 7 ngày), gộp theo bucket 30 s / 2 phút / 15 phút (`interval_seconds` = độ rộng bucket, khoảng 700 điểm). Mỗi bucket là trung bình, riêng `lag_seconds` là **giá trị lớn nhất** của bucket. Chế độ file: trả dữ liệu 1 giờ, `"range": "1h"` và `error` giải thích.
+
+Ghi: mẫu được gom và ghi theo lô mỗi 30 giây (một INSERT cho mọi pipeline), bảo trì mỗi giờ (gộp 1 phút, xóa dữ liệu hết hạn). Khối lượng: N pipeline x 12 dòng/phút ở `metric_samples` (khoảng 17 nghìn dòng/ngày/pipeline, xóa sau 24 giờ) + 1 dòng/phút/pipeline ở `metric_samples_1m`.
 
 ## 4. Thao tác
 
