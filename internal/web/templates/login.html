@@ -7,15 +7,17 @@
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body class="loginpage">
+<main>
 <form class="login card" method="post" action="/login">
   <h1>Strand</h1>
   <p class="muted">Sign in to the admin console</p>
   {{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <input type="hidden" name="next" value="{{.Next}}">
-  <label>Password <input type="password" name="password" autocomplete="current-password" autofocus required></label>
+  <label for="login-password">Password <input id="login-password" type="password" name="password" autocomplete="current-password" autofocus required></label>
   <button class="btn primary" type="submit">Sign in</button>
   <p class="muted small">strand {{.Version}}</p>
 </form>
+</main>
 </body>
 </html>{{end}}

@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,14 +23,24 @@ func templateFuncs() template.FuncMap {
 	return template.FuncMap{
 		"stateClass": func(s string) string { return "st-" + s },
 		"secs":       fmtSecs,
-		"num":        func(v float64) string { return FormatValue(v) },
-		"int64":      func(v int64) string { return FormatValue(float64(v)) },
-		"bytes":      fmtBytes,
+		"num":        fmtNum,
+		"int64":      func(v int64) string { return fmtInt(v) },
+		"clock": func(t time.Time) string {
+			if t.IsZero() {
+				return "-"
+			}
+			return t.Local().Format("15:04:05 MST")
+		},
+		"stateReason": stateReason,
+		"lagSort":     lagSort,
+		"stateSev":    stateSev,
+		"lagClass":    lagClass,
+		"bytes":       fmtBytes,
 		"ts": func(t time.Time) string {
 			if t.IsZero() {
 				return "-"
 			}
-			return t.Local().Format("2006-01-02 15:04:05")
+			return t.Local().Format("2006-01-02 15:04:05 MST")
 		},
 		"pct":      func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
 		"bar":      ProgressBar,
@@ -119,7 +130,120 @@ func fmtSecs(v float64) string {
 	case v < 60:
 		return fmt.Sprintf("%.1f s", v)
 	}
-	return time.Duration(v * float64(time.Second)).Round(time.Second).String()
+	d := time.Duration(v * float64(time.Second)).Round(time.Second)
+	days, h, m, s := int(d/(24*time.Hour)), int(d/time.Hour)%24, int(d/time.Minute)%60, int(d/time.Second)%60
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd %dh %02dm", days, h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh %02dm %02ds", h, m, s)
+	}
+	return fmt.Sprintf("%dm %02ds", m, s)
+}
+
+// groupDigits inserts thousands separators into a plain integer string.
+func groupDigits(s string) string {
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
+func fmtInt(v int64) string { return groupDigits(strconv.FormatInt(v, 10)) }
+
+// fmtNum formats a rate or count for tables: thousands separators, one decimal below 100.
+func fmtNum(v float64) string {
+	switch {
+	case math.IsNaN(v) || math.IsInf(v, 0):
+		return "-"
+	case math.Abs(v) >= 100 || v == 0:
+		return groupDigits(strconv.FormatFloat(math.Round(v), 'f', 0, 64))
+	}
+	return strconv.FormatFloat(math.Round(v*10)/10, 'f', 1, 64)
+}
+
+// stateSev orders states for operators: the ones that need attention come first.
+func stateSev(s string) int {
+	switch s {
+	case StateFailed:
+		return 0
+	case StateUnreachable:
+		return 1
+	case StateUnknown:
+		return 2
+	case StatePaused:
+		return 3
+	case StateStarting:
+		return 4
+	case StateBootstrapping:
+		return 5
+	case StateStopped:
+		return 6
+	}
+	return 7 // synced
+}
+
+// lagSort is the numeric sort key of the lag column (-1 when there is no reading).
+func lagSort(v PipelineView) float64 {
+	if v.Top == nil {
+		return -1
+	}
+	return math.Max(v.Top.LagSeconds, 0)
+}
+
+func lagClass(v PipelineView) string {
+	switch {
+	case v.Top == nil:
+		return ""
+	case v.Top.LagSeconds >= 300:
+		return "lag-bad"
+	case v.Top.LagSeconds >= 30:
+		return "lag-warn"
+	}
+	return ""
+}
+
+// stateReason says why a pipeline is not healthy (empty when there is nothing to add).
+func stateReason(v PipelineView) string {
+	switch v.State {
+	case StateFailed:
+		switch {
+		case v.ConfigErr != "":
+			return "config error: " + v.ConfigErr
+		case v.Top != nil && v.Top.BreakerOpen && v.Top.BreakerReason != "":
+			return "breaker open: " + v.Top.BreakerReason
+		case v.Runtime.LastError != "":
+			return v.Runtime.LastError
+		case v.LastExit != nil:
+			return fmt.Sprintf("exit %d: %s", v.LastExit.Code, v.LastExit.Meaning)
+		}
+		return "the pipeline reported a failure"
+	case StateUnreachable:
+		return "process is running but the admin socket does not answer"
+	case StatePaused:
+		if v.Top != nil && v.Top.BreakerOpen && v.Top.BreakerReason != "" {
+			return "breaker open: " + v.Top.BreakerReason
+		}
+		return "replication is paused (use Resume)"
+	case StateUnknown:
+		if v.ConfigErr != "" {
+			return "config error: " + v.ConfigErr
+		}
+		return "no sample yet"
+	}
+	if v.Top != nil && v.Top.BreakerOpen {
+		return "breaker open: " + v.Top.BreakerReason
+	}
+	return ""
 }
 
 func fmtBytes(v float64) string {
@@ -147,17 +271,22 @@ func fmtRanges(m map[string]int) string {
 }
 
 type pageData struct {
-	Title   string
-	Active  string // overview | pipelines | tên pipeline
-	CSRF    string
-	Nav     []NavItem
-	Version string
-	Refresh int // giây; 0 = không tự làm mới
-	Body    any
+	Title    string
+	DocTitle string    // <title> text; defaults to Title
+	AsOf     time.Time // when the page was rendered (shown as "data as of")
+	Active   string    // overview | pipelines | tên pipeline
+	CSRF     string
+	Nav      []NavItem
+	Version  string
+	Refresh  int // giây; 0 = không tự làm mới
+	Body     any
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pageData) {
 	d.CSRF, d.Nav, d.Version = sess.CSRF, s.navItems(), s.version
+	if d.AsOf.IsZero() {
+		d.AsOf = s.now()
+	}
 	var buf bytes.Buffer
 	if err := s.pages[name].ExecuteTemplate(&buf, "base", d); err != nil {
 		s.log.Error("render page", "page", name, "error", err)
@@ -188,12 +317,27 @@ func (s *Server) sparkFor(name string) template.HTML {
 	return Sparkline(vals, 90, 22)
 }
 
+// sortViews puts the pipelines that need attention first (failed, unreachable, ...), then by lag, then by name.
+func sortViews(vs []PipelineView) {
+	sort.SliceStable(vs, func(i, j int) bool {
+		a, b := vs[i], vs[j]
+		if sa, sb := stateSev(a.State), stateSev(b.State); sa != sb {
+			return sa < sb
+		}
+		if la, lb := lagSort(a), lagSort(b); la != lb {
+			return la > lb
+		}
+		return a.Name < b.Name
+	})
+}
+
 func (s *Server) pageOverview(w http.ResponseWriter, r *http.Request, sess *Session) {
 	b := overviewBody{Overview: s.samp.BuildOverview(), States: AllStates, Sparks: map[string]template.HTML{}, Warnings: s.reg.Warnings()}
 	for _, p := range s.reg.List() {
 		b.Views = append(b.Views, s.view(p))
 		b.Sparks[p.Name] = s.sparkFor(p.Name)
 	}
+	sortViews(b.Views)
 	s.render(w, "overview", sess, pageData{Title: "Overview", Active: "overview", Refresh: 5, Body: b})
 }
 
@@ -203,6 +347,7 @@ func (s *Server) pagePipelines(w http.ResponseWriter, r *http.Request, sess *Ses
 		b.Views = append(b.Views, s.view(p))
 		b.Sparks[p.Name] = s.sparkFor(p.Name)
 	}
+	sortViews(b.Views)
 	s.render(w, "pipelines", sess, pageData{Title: "Pipelines", Active: "pipelines", Refresh: 5, Body: b})
 }
 
@@ -254,6 +399,8 @@ func (s *Server) controls(p *Pipeline, v PipelineView) Controls {
 	}
 	return c
 }
+
+var tabLabels = map[string]string{"graph": "Graph", "tables": "Tables", "checkpoint": "Checkpoint", "errors": "Errors", "config": "Config", "logs": "Logs", "jobs": "Jobs", "repair": "Repair", "promote": "Promote"}
 
 type tabLink struct{ Key, Label, Href string }
 
@@ -316,7 +463,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 			refresh = 5
 		}
 	}
-	s.render(w, "detail", sess, pageData{Title: p.Name, Active: p.Name, Refresh: refresh, Body: b})
+	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Active: p.Name, Refresh: refresh, Body: b})
 }
 
 func (s *Server) charts(name string) []template.HTML {

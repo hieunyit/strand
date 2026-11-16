@@ -4,72 +4,121 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="csrf-token" content="{{.CSRF}}">
-<title>{{.Title}} - Strand</title>
+<title>{{if .DocTitle}}{{.DocTitle}}{{else}}{{.Title}}{{end}} · Strand</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body>
-<aside class="nav">
+<a class="skip" href="#content">Skip to content</a>
+<aside class="nav" aria-label="Sidebar">
   <a class="brand" href="/">Strand</a>
-  <nav>
-    <a href="/" class="{{if eq .Active "overview"}}active{{end}}">Overview</a>
-    <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}">Pipelines</a>
-    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}">+ New pipeline</a>
-    <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}">Jobs</a>
+  <nav aria-label="Main">
+    <a href="/" class="{{if eq .Active "overview"}}active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>Overview</a>
+    <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>Pipelines</a>
+    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>+ New pipeline</a>
+    <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>Jobs</a>
     <div class="navhead">Registered pipelines</div>
-    {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"><span class="dot {{stateClass .State}}"></span>{{.Name}}</a>
+    {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"{{if eq $.Active .Name}} aria-current="page"{{end}} title="{{.Name}}: {{.State}}"><span class="dot {{stateClass .State}}" role="img" aria-label="{{.State}}"></span>{{.Name}}</a>
     {{else}}<span class="muted pad">none registered</span>{{end}}
   </nav>
   <div class="navfoot">strand {{.Version}}</div>
 </aside>
 <div class="main">
-  <header class="top">
+  <header class="top" role="banner">
     <h1>{{.Title}}</h1>
     <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" type="submit">Log out</button></form>
   </header>
-  <main id="content" data-refresh="{{.Refresh}}">{{template "content" .}}</main>
+  <main id="content" data-refresh="{{.Refresh}}"><p class="asof" id="asof">Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}</p>{{template "content" .}}</main>
 </div>
-<dialog id="confirm" class="dlg">
+<dialog id="confirm" class="dlg" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
   <form method="dialog" id="confirm-form">
     <h3 id="confirm-title">Confirm</h3>
     <p id="confirm-msg"></p>
-    <p id="confirm-retype" hidden>Type the pipeline name <b id="confirm-name"></b> to confirm:<br><input id="confirm-input" type="text" autocomplete="off" spellcheck="false"></p>
+    <p id="confirm-retype" hidden>Type the pipeline name <b id="confirm-name"></b> to confirm:<br><input id="confirm-input" type="text" aria-label="Pipeline name" autocomplete="off" spellcheck="false"></p>
     <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">Cancel</button> <button class="btn primary" id="confirm-ok" type="submit" value="ok">Confirm</button></div>
   </form>
 </dialog>
-<div id="toast" class="toast" role="status" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>{{end}}
 
 {{define "pipeline-table"}}
-<table class="grid">
-  <thead><tr><th>Name</th><th>Engines</th><th>State</th><th>Lag</th><th>Lag (5 min)</th><th>Rows/s</th><th>Zone</th><th>Managed by</th><th>Last exit</th></tr></thead>
+<div class="tablewrap">
+<table class="grid" id="pipeline-table" data-sortable>
+  <caption class="sr-only">Pipelines</caption>
+  <thead><tr>
+    <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="name">Name</button></th>
+    <th scope="col">Engines</th>
+    <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="sev">State</button></th>
+    <th scope="col" class="r" aria-sort="none"><button type="button" class="sortbtn" data-sort="lag">Lag</button></th>
+    <th scope="col">Lag (5 min)</th>
+    <th scope="col" class="r" aria-sort="none"><button type="button" class="sortbtn" data-sort="rate">Rows/s</button></th>
+    <th scope="col">Zone</th><th scope="col">Managed by</th><th scope="col">Last exit</th></tr></thead>
   <tbody>
-  {{range .Body.Views}}<tr>
-    <td><a href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}</td>
+  {{range .Body.Views}}<tr data-name="{{.Name}}" data-state="{{.State}}" data-sev="{{stateSev .State}}" data-lag="{{lagSort .}}" data-rate="{{if .Top}}{{.Top.Throughput}}{{else}}-1{{end}}">
+    <td><a class="mono" href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}</td>
     <td>{{.Pair}}</td>
-    <td><span class="badge {{stateClass .State}}">{{.State}}</span></td>
-    <td>{{if .Top}}{{if gt .Top.LagSeconds 0.0}}{{secs .Top.LagSeconds}}{{else}}0 s{{end}}{{else}}-{{end}}</td>
+    <td><span class="badge {{stateClass .State}}">{{.State}}</span>{{with stateReason .}}<div class="reason small muted" title="{{.}}">{{.}}</div>{{end}}</td>
+    <td class="r nowrap {{lagClass .}}">{{if .Top}}{{if gt .Top.LagSeconds 0.0}}{{secs .Top.LagSeconds}}{{else}}0 s{{end}}{{else}}-{{end}}</td>
     <td>{{index $.Body.Sparks .Name}}</td>
-    <td>{{if .Top}}{{num .Top.Throughput}}{{else}}-{{end}}</td>
+    <td class="r nowrap">{{if .Top}}{{num .Top.Throughput}}{{else}}-{{end}}</td>
     <td>{{if .Top}}{{.Top.Zone}}{{else}}-{{end}}</td>
     <td>{{.Mode}} <span class="muted small">({{.Origin}})</span></td>
     <td>{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
-  </tr>{{else}}<tr><td colspan="9" class="muted">No pipelines registered. Add them to web.yaml (<code>scan</code> or <code>pipelines</code>).</td></tr>{{end}}
+  </tr>{{else}}<tr class="empty"><td colspan="9" class="muted">No pipelines registered yet. <a class="btn primary" href="/pipelines/new">Create pipeline</a> or add existing ones to web.yaml (<code>scan</code> or <code>pipelines</code>).</td></tr>{{end}}
+  <tr class="nomatch" hidden><td colspan="9" class="muted">No pipeline matches the filter. <a href="/pipelines">Clear filter</a></td></tr>
   </tbody>
 </table>
+</div>
 {{end}}
 
 {{define "jobs-table"}}
+<div class="tablewrap tall">
 <table class="grid">
-  <thead><tr><th>Started</th>{{if .ShowPipeline}}<th>Pipeline</th>{{end}}<th>Job</th><th>State</th><th>Duration</th><th>Command</th></tr></thead>
+  <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Pipeline</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Command</th></tr></thead>
   <tbody>{{range .Jobs}}<tr>
     <td class="small nowrap"><a href="/jobs/{{.ID}}">{{ts .Started}}</a></td>
     {{if $.ShowPipeline}}<td><a href="/pipelines/{{.Pipeline}}/jobs">{{.Pipeline}}</a></td>{{end}}
-    <td>{{.Kind}}</td>
+    <td class="mono">{{.Kind}}</td>
     <td><span class="badge {{jobClass .}}">{{jobState .}}</span></td>
-    <td class="small">{{jobDur .}}</td>
+    <td class="small r nowrap">{{jobDur .}}</td>
     <td class="mono small wrap">strand {{join .Args " "}}</td>
-  </tr>{{else}}<tr><td colspan="6" class="muted">No jobs yet.</td></tr>{{end}}</tbody>
+  </tr>{{else}}<tr><td colspan="6" class="muted">No jobs yet. Verify runs started from a pipeline's Jobs tab appear here.</td></tr>{{end}}</tbody>
 </table>
+</div>
+{{end}}
+
+{{define "pipeline-head"}}
+<section class="card head" aria-label="Pipeline status">
+  <div class="headrow">
+    <span class="badge big {{stateClass .View.State}}">{{.View.State}}</span>
+    <span class="pair">{{.View.Pair}}</span>
+    <span class="muted small">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}}</span>
+  </div>
+  {{with stateReason .View}}<p class="reason-line {{stateClass $.View.State}}"><b>Why:</b> <span class="wrap">{{.}}</span></p>{{end}}
+  <div class="kv">
+    <span>Lag <b class="{{lagClass .View}}">{{if .View.Top}}{{if gt .View.Top.LagSeconds 0.0}}{{secs .View.Top.LagSeconds}}{{else}}0 s{{end}}{{else}}-{{end}}</b></span>
+    {{if .View.Top}}<span>Rows/s <b>{{num .View.Top.Throughput}}</b></span>
+    <span>Zone <b>{{if .View.Top.Zone}}{{.View.Top.Zone}}{{else}}-{{end}}</b></span>{{end}}
+    <span>Sampled <b>{{clock .View.SampledAt}}</b></span>
+  </div>
+  <div class="actions" role="group" aria-label="Pipeline actions">
+    <span class="grp">
+    <form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}><button class="btn primary" type="submit"{{if or .Ctl.Running (not .Ctl.CfgOK)}} disabled{{end}}{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}>Start</button></form>
+    <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"{{if not .Ctl.Paused}} title="Not paused"{{end}}><button class="btn primary" type="submit"{{if not .Ctl.Paused}} disabled title="Not paused"{{end}}>Resume</button></form>
+    </span>
+    <span class="grp">
+    <form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}><button class="btn" type="submit"{{if or .Ctl.Paused (not .Ctl.Reachable)}} disabled{{end}}{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}>Pause</button></form>
+    <form class="act inline" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}}? It is stopped (checkpoint written) and started again."{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>Restart</button></form>
+    {{if .Ctl.Systemd}}<form class="act inline" data-action="enable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Enable at boot</button></form>
+    <form class="act inline" data-action="disable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Disable at boot</button></form>{{end}}
+    </span>
+    <span class="grp">
+    <form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start."{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn danger" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>Stop</button></form>
+    </span>
+    {{if .Ctl.JobActive}}<a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
+  </div>
+  {{if .View.ConfigErr}}<p class="err wrap">Config error: {{.View.ConfigErr}}</p>{{end}}
+  {{if and .View.LastExit (not .View.Runtime.Running)}}<p class="warnbox">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code class="wrap">{{.View.Runtime.LastError}}</code>{{end}}</p>{{end}}
+</section>
 {{end}}

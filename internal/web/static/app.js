@@ -109,10 +109,90 @@
         content.innerHTML = fresh.innerHTML;
         lastFresh = fresh.innerHTML;
         restoreState(st);
+        applyList();
       })
-      .catch(function () { /* transient error: keep the old content */ })
+      .catch(function () {
+        // Transient error: keep the old content but say that it is stale.
+        var a = document.getElementById('asof');
+        if (a && !a.classList.contains('stale')) { a.classList.add('stale'); a.appendChild(document.createTextNode(' \u00b7 refresh failed, showing older data')); }
+      })
       .then(function () { busy = false; });
   }
+
+  // ---- pipelines table: client-side sort and filter; survives the periodic refresh ----
+  var listState = { sort: '', dir: 1, q: '', state: '' };
+  (function () {
+    var qs = new URLSearchParams(location.search);
+    if (qs.get('state')) { listState.state = qs.get('state'); }
+    if (qs.get('q')) { listState.q = qs.get('q'); }
+    var s = qs.get('sort');
+    if (s === 'lag' || s === 'rate') { listState.sort = s; listState.dir = -1; }
+    else if (s === 'name' || s === 'sev') { listState.sort = s; listState.dir = 1; }
+  })();
+  function applyList() {
+    var table = document.getElementById('pipeline-table');
+    if (!table) { return; }
+    var body = table.tBodies[0];
+    var rows = Array.prototype.slice.call(body.querySelectorAll('tr[data-name]'));
+    var qEl = document.getElementById('pl-filter'), sEl = document.getElementById('pl-state');
+    if (qEl && qEl.value !== listState.q) { qEl.value = listState.q; }
+    if (sEl && sEl.value !== listState.state) { sEl.value = listState.state; }
+    if (listState.sort) {
+      var key = listState.sort, dir = listState.dir;
+      rows.sort(function (a, b) {
+        var x, y;
+        if (key === 'name') { x = a.getAttribute('data-name'); y = b.getAttribute('data-name'); return dir * x.localeCompare(y); }
+        x = parseFloat(a.getAttribute('data-' + key)); y = parseFloat(b.getAttribute('data-' + key));
+        if (x !== y) { return dir * (x - y); }
+        return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
+      });
+      var anchor = body.querySelector('tr.nomatch');
+      rows.forEach(function (r) { body.insertBefore(r, anchor); });
+    }
+    var q = listState.q.trim().toLowerCase(), shown = 0;
+    rows.forEach(function (r) {
+      var ok = (!listState.state || r.getAttribute('data-state') === listState.state) &&
+        (!q || r.textContent.toLowerCase().indexOf(q) >= 0);
+      r.hidden = !ok;
+      if (ok) { shown++; }
+    });
+    var nm = body.querySelector('tr.nomatch');
+    if (nm) { nm.hidden = !(rows.length > 0 && shown === 0); }
+    var cnt = document.getElementById('pl-count');
+    if (cnt) { cnt.textContent = (listState.q || listState.state) ? shown + ' of ' + rows.length + ' shown' : rows.length + ' pipelines'; }
+    Array.prototype.forEach.call(table.querySelectorAll('th[aria-sort]'), function (th) {
+      var b = th.querySelector('.sortbtn');
+      th.setAttribute('aria-sort', b && b.getAttribute('data-sort') === listState.sort ? (listState.dir > 0 ? 'ascending' : 'descending') : 'none');
+    });
+  }
+  document.addEventListener('click', function (ev) {
+    var b = ev.target && ev.target.closest && ev.target.closest('.sortbtn');
+    if (!b) { return; }
+    var k = b.getAttribute('data-sort');
+    if (listState.sort === k) { listState.dir = -listState.dir; }
+    else { listState.sort = k; listState.dir = (k === 'lag' || k === 'rate') ? -1 : 1; }
+    applyList();
+  });
+  document.addEventListener('input', function (ev) {
+    if (ev.target && ev.target.id === 'pl-filter') { listState.q = ev.target.value; applyList(); }
+  });
+  document.addEventListener('change', function (ev) {
+    if (ev.target && ev.target.id === 'pl-state') { listState.state = ev.target.value; applyList(); }
+  });
+  applyList();
+
+  // Arrow keys / Home / End move between the page sections (tabs).
+  document.addEventListener('keydown', function (ev) {
+    var a = ev.target;
+    if (!a || !a.closest || !a.closest('nav.tabs') || a.tagName !== 'A') { return; }
+    var links = Array.prototype.slice.call(a.closest('nav.tabs').querySelectorAll('a'));
+    var i = links.indexOf(a), n = -1;
+    if (ev.key === 'ArrowRight') { n = (i + 1) % links.length; }
+    else if (ev.key === 'ArrowLeft') { n = (i - 1 + links.length) % links.length; }
+    else if (ev.key === 'Home') { n = 0; }
+    else if (ev.key === 'End') { n = links.length - 1; }
+    if (n >= 0) { ev.preventDefault(); links[n].focus(); }
+  });
 
   if (seconds > 0) { setInterval(refresh, seconds * 1000); }
 
@@ -123,11 +203,14 @@
     if (!toastEl) { return; }
     toastEl.textContent = msg;
     toastEl.className = 'toast ' + (ok ? 'ok' : 'bad');
+    toastEl.setAttribute('role', ok ? 'status' : 'alert');
+    toastEl.title = 'Click to dismiss';
     toastEl.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { toastEl.hidden = true; }, ok ? 8000 : 20000);
   }
 
+  if (toastEl) { toastEl.addEventListener('click', function () { toastEl.hidden = true; }); }
   var dlg = document.getElementById('confirm');
   function confirmDialog(message, retype) {
     return new Promise(function (resolve) {
@@ -182,8 +265,9 @@
   function runAction(form, body, action) {
     action = action || form.getAttribute('data-action');
     var url = '/api/v1/pipelines/' + encodeURIComponent(form.getAttribute('data-pipeline')) + '/actions/' + encodeURIComponent(action);
-    var buttons = form.querySelectorAll('button');
+    var buttons = Array.prototype.filter.call(form.querySelectorAll('button'), function (b) { return !b.disabled; });
     Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+    form.setAttribute('aria-busy', 'true');
     toast('Running ' + action + '...', true);
     api('POST', url, body).then(function (r) {
       return r.json().then(function (j) { return { status: r.status, j: j }; }, function () { return { status: r.status, j: {} }; });
@@ -200,6 +284,7 @@
     }).catch(function (e) {
       toast(action + ' failed: ' + e, false);
     }).then(function () {
+      form.removeAttribute('aria-busy');
       Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
     });
   }
@@ -496,7 +581,7 @@
               html += '<span class="badge ' + (pPass ? 'st-synced' : 'st-warn') + '">Plan: ' + (pPass ? 'PASS' : 'WARN') + '</span></p>';
               html += '<h4>Validate Output</h4><pre class="code">' + escHtml(res.j.validate ? res.j.validate.output : '') + '</pre>';
               html += '<h4>Plan Output</h4><pre class="code">' + escHtml(res.j.plan ? res.j.plan.output : '') + '</pre>';
-              html += '<div style="margin-top:16px;">';
+              html += '<div class="mt14">';
               if (res.j.ok) {
                 html += '<form class="act inline" data-action="start" data-pipeline="' + escHtml(res.j.pipeline) + '">';
                 html += '<button class="btn primary" type="submit">Start ' + escHtml(res.j.pipeline) + ' now</button></form> ';

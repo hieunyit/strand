@@ -834,7 +834,7 @@ func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Sessio
 	if v.Job != nil && v.Job.Running {
 		refresh = 2
 	}
-	s.render(w, "wizard", sess, pageData{Title: p.Name, Active: p.Name, Refresh: refresh, Body: pg})
+	s.render(w, "wizard", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[pg.Kind], Active: p.Name, Refresh: refresh, Body: pg})
 }
 
 func (s *Server) wizardRoutes(mux *http.ServeMux) {

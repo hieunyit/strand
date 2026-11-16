@@ -1,14 +1,14 @@
 {{define "content"}}
-{{range .Body.Warnings}}<p class="warnbox">{{.}}</p>{{end}}
-<section class="cards">
-  <div class="card stat"><div class="label">Pipelines</div><div class="value">{{.Body.Overview.Total}}</div></div>
+{{range .Body.Warnings}}<p class="warnbox" role="alert">{{.}}</p>{{end}}
+<section class="cards" aria-label="Summary">
+  <a class="card stat link" href="/pipelines"><div class="label">Pipelines</div><div class="value">{{.Body.Overview.Total}}</div></a>
   {{range $s := .Body.States}}{{$n := index $.Body.Overview.Counts $s}}{{if or $n (eq $s "synced") (eq $s "failed") (eq $s "stopped")}}
-  <div class="card stat"><div class="label"><span class="dot {{stateClass $s}}"></span>{{$s}}</div><div class="value">{{$n}}</div></div>{{end}}{{end}}
-  <div class="card stat"><div class="label">Max lag</div><div class="value">{{if .Body.Overview.MaxLagPipeline}}{{secs .Body.Overview.MaxLagSeconds}}{{else}}0 s{{end}}</div>{{if .Body.Overview.MaxLagPipeline}}<div class="muted small">{{.Body.Overview.MaxLagPipeline}}</div>{{end}}</div>
+  <a class="card stat link" href="/pipelines?state={{$s}}" title="Show {{$s}} pipelines"><div class="label"><span class="dot {{stateClass $s}}"></span>{{$s}}</div><div class="value">{{$n}}</div></a>{{end}}{{end}}
+  <a class="card stat link" href="/pipelines?sort=lag"><div class="label">Max lag</div><div class="value">{{if .Body.Overview.MaxLagPipeline}}{{secs .Body.Overview.MaxLagSeconds}}{{else}}0 s{{end}}</div>{{if .Body.Overview.MaxLagPipeline}}<div class="muted small mono">{{.Body.Overview.MaxLagPipeline}}</div>{{end}}</a>
   <div class="card stat"><div class="label">Total rows/s</div><div class="value">{{num .Body.Overview.RowsPerSec}}</div></div>
 </section>
 <section class="card">
-  <h2>Pipelines</h2>
+  <h2>Pipelines <span class="muted small">needing attention first</span></h2>
   {{template "pipeline-table" .}}
 </section>
 {{end}}

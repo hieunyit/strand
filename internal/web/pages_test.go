@@ -131,7 +131,7 @@ func TestPagesRenderLiveData(t *testing.T) {
 		}
 	}
 	tb := get("/pipelines/orders/tables")
-	for _, want := range []string{"app.users", "app.orders", "app.codes", "Done 2, Pending 6", "250.0k / 1.0M", "25.0%", "generic key", "1 done, 1 running, 1 pending"} {
+	for _, want := range []string{"app.users", "app.orders", "app.codes", "Done 2, Pending 6", "250,000 / 1,000,000", "25.0%", "generic key", "1 done, 1 running, 1 pending"} {
 		if !strings.Contains(tb, want) {
 			t.Errorf("tables tab lacks %q:\n%s", want, tb)
 		}

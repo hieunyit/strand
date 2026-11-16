@@ -1,14 +1,7 @@
 {{define "content"}}
 {{with .Body}}
-<section class="card head">
-  <div>
-    <span class="badge big {{stateClass .View.State}}">{{.View.State}}</span>
-    <span class="pair">{{.View.Pair}}</span>
-    <span class="muted small">managed by {{.View.Mode}}</span>
-  </div>
-  {{if .View.Top}}<div class="kv"><span>Lag <b>{{if gt .View.Top.LagSeconds 0.0}}{{secs .View.Top.LagSeconds}}{{else}}0 s{{end}}</b></span></div>{{end}}
-</section>
-<nav class="tabs">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Kind .Key}}active{{end}}">{{.Label}}</a>{{end}}</nav>
+{{template "pipeline-head" .}}
+<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Kind .Key}}active{{end}}"{{if eq $.Body.Kind .Key}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}</nav>
 
 <section class="card"><h2>{{if eq .Kind "repair"}}Repair wizard{{else}}Promote wizard{{end}}</h2>
   <ol class="steps">{{range .Steps}}<li class="step-{{.Status}}"><b>{{.Title}}</b> <span class="badge {{if eq .Status "done"}}st-synced{{else if eq .Status "failed"}}st-failed{{else if eq .Status "current"}}st-bootstrapping{{else}}st-paused{{end}}">{{.Status}}</span>{{if .Note}}<br><span class="small err">{{.Note}}</span>{{end}}</li>{{end}}</ol>
@@ -32,7 +25,7 @@
     <p>Lag now: <b>{{if .Lag}}{{secs (deref .Lag)}}{{else}}{{if .Running}}unknown{{else}}pipeline not running{{end}}{{end}}</b> (threshold {{num .Thr}} s).
       {{if .LagNote}}<span class="err small">{{.LagNote}}</span>{{end}}
       {{if and .Running (index .Can "repair-stop")}}<span class="badge st-synced">ready</span>{{else if .Running}}<span class="badge st-paused">waiting</span>{{end}}</p>
-    <form class="act inline" data-action="repair-stop" data-pipeline="{{.Name}}" data-stay data-confirm="Stop pipeline {{.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s)."><button class="btn primary" type="submit"{{if not (index .Can "repair-stop")}} disabled{{end}}>Stop the pipeline</button></form>
+    <form class="act inline" data-action="repair-stop" data-pipeline="{{.Name}}" data-stay data-confirm="Stop pipeline {{.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s)."><button class="btn danger" type="submit"{{if not (index .Can "repair-stop")}} disabled title="Not available yet: wait for the lag to drop below the threshold"{{end}}>Stop the pipeline</button></form>
   </section>{{end}}
   {{if eq .Step "verify"}}<section class="card"><h2>Step 3: repair</h2>
     <p>Runs <code>strand verify --mode full --repair fix</code>{{with index .Opts "table"}} on <code>{{.}}</code>{{end}}. The CLI refuses to repair while the pipeline is running and holds the pipeline lock while it fixes rows.</p>
@@ -47,11 +40,11 @@
 {{else}}
   {{if .PlanInfo}}<section class="card"><h2>Promote state</h2><p>{{.PlanInfo}}</p></section>{{end}}
   {{if .Decision}}<section class="card"><h2>The CLI needs a decision (exit 10)</h2>
-    <pre class="code">{{.Decision}}</pre>
+    <pre class="code wrapcode">{{.Decision}}</pre>
     <p>Options: (a) isolate the old source another way (power it off, block the network), then use <b>Failover</b> below; the data the CLI lists above may be lost. (b) If only sequence values are needed, run Promote again with <code>override_sequences</code> filled in. (c) Close the wizard; the promote progress stays saved and a later run resumes it.</p>
   </section>{{end}}
   {{if eq .Step "done"}}<section class="card"><h2>Promoted</h2><p>The target accepts writes. Switch the application to it, then stop the pipeline (it keeps running otherwise).</p>
-    {{if .Ctl.Running}}<form class="act inline" data-action="stop" data-pipeline="{{.Name}}" data-stay data-confirm="Stop pipeline {{.Name}}? Do this only after the application uses the new primary."><button class="btn" type="submit">Stop the pipeline</button></form>{{end}}
+    {{if .Ctl.Running}}<form class="act inline" data-action="stop" data-pipeline="{{.Name}}" data-stay data-confirm="Stop pipeline {{.Name}}? Do this only after the application uses the new primary."><button class="btn danger" type="submit">Stop the pipeline</button></form>{{end}}
   </section>{{end}}
   {{if ne .Step "done"}}
   <section class="card"><h2>Connection and options</h2>
@@ -79,9 +72,9 @@
   {{if .Active}}<section class="card"><form class="act inline" data-action="promote-abort" data-pipeline="{{.Name}}" data-stay data-confirm="Close the promote wizard? Promote progress stays saved in _strand_promote; a later run resumes it."><button class="btn" type="submit">Close the wizard</button></form></section>{{end}}
 {{end}}
 
-{{if .Output}}<section class="card"><h2>Job output (tail)</h2><pre class="code log">{{.Output}}</pre></section>{{end}}
-{{if .State}}<section class="card"><h2>History</h2><table class="grid"><thead><tr><th>Time</th><th>Step</th><th>Result</th><th>Exit</th></tr></thead><tbody>
+{{if .Output}}<section class="card"><h2>Job output (tail)</h2><pre class="code log wrapcode" tabindex="0" aria-label="Job output">{{.Output}}</pre></section>{{end}}
+{{if .State}}<section class="card"><h2>History</h2><div class="tablewrap tall"><table class="grid"><thead><tr><th scope="col">Time</th><th scope="col">Step</th><th scope="col">Result</th><th scope="col">Exit</th></tr></thead><tbody>
 {{range .State.History}}<tr><td class="small nowrap">{{ts .Time}}</td><td>{{.Step}}</td><td class="wrap">{{.Result}}{{if .JobID}} <a href="/jobs/{{.JobID}}">job</a>{{end}}</td><td>{{if .Exit}}{{ptrInt .Exit}}{{else}}-{{end}}</td></tr>{{end}}
-</tbody></table></section>{{end}}
+</tbody></table></div></section>{{end}}
 {{end}}
 {{end}}

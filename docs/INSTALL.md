@@ -267,6 +267,7 @@ Mở URL, đăng nhập bằng mật khẩu admin. Phiên hết hạn sau 30 ph�
 - **Overview**: số pipeline theo trạng thái (`synced`, `bootstrapping`, `paused`, `starting`, `stopped`, `failed`, `unreachable`, `unknown`), lag lớn nhất, tổng rows/s; cảnh báo (tên pipeline không hợp lệ...) ở đầu trang.
 - **Pipelines**: danh sách; **+ New pipeline**; **Jobs**: mọi job verify/repair/promote.
 - Trang chi tiết một pipeline có các tab: **Graph** (Source, Assembler, Scheduler, Writer, Target kèm số liệu và biểu đồ 1 giờ; nút Start/Stop/Restart/Pause/Resume, Throttle), **Tables** (snapshot từng bảng; Snapshot add), **Checkpoint**, **Errors**, **Config**, **Logs** (`?follow=1` để bám đuôi), **Jobs**, **Repair**, **Promote**.
+- Các thẻ trạng thái ở Overview bấm được (mở `/pipelines?state=failed`...). Danh sách Pipelines xếp pipeline cần chú ý lên đầu (failed, unreachable, paused...), có ô lọc theo tên/trạng thái và bấm tiêu đề cột (Name, State, Lag, Rows/s) để sắp xếp. Đầu mỗi trang có dòng `Data as of HH:MM:SS <múi giờ>` và chu kỳ làm mới; đầu trang pipeline có huy hiệu trạng thái, lý do (failed/paused/breaker), lag, và các nút xếp theo nhóm (Start/Resume, Pause/Restart, Stop màu đỏ); nút không áp dụng được ở trạng thái hiện tại bị mờ và có chú thích lý do. Tên tab trình duyệt: `<pipeline> · <Tab> · Strand`. Phím mũi tên chuyển giữa các tab; màn hình hẹp thì thanh điều hướng chuyển lên đầu trang.
 - Trang tự làm mới 5 giây; số liệu lấy từ admin socket và `/metrics` mỗi 5 giây vào bộ đệm 1 giờ trong RAM (mất khi restart web).
 
 ### 6.2 Tạo pipeline mới từ web

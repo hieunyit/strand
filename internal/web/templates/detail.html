@@ -1,32 +1,7 @@
 {{define "content"}}
 {{with .Body}}
-<section class="card head">
-  <div>
-    <span class="badge big {{stateClass .View.State}}">{{.View.State}}</span>
-    <span class="pair">{{.View.Pair}}</span>
-    <span class="muted small">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}}</span>
-  </div>
-  {{if .View.Top}}<div class="kv">
-    <span>Lag <b>{{if gt .View.Top.LagSeconds 0.0}}{{secs .View.Top.LagSeconds}}{{else}}0 s{{end}}</b></span>
-    <span>Rows/s <b>{{num .View.Top.Throughput}}</b></span>
-    <span>Zone <b>{{.View.Top.Zone}}</b></span>
-    {{if .View.Top.BreakerOpen}}<span class="err">Breaker open: {{.View.Top.BreakerReason}}</span>{{end}}
-  </div>{{end}}
-  <div class="actions">
-    {{if not .Ctl.Running}}<form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit"{{if not .Ctl.CfgOK}} disabled{{end}}>Start</button></form>{{end}}
-    {{if .Ctl.Running}}<form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start."><button class="btn" type="submit">Stop</button></form>
-    <form class="act inline" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}}? It is stopped (checkpoint written) and started again."><button class="btn" type="submit">Restart</button></form>{{end}}
-    {{if .Ctl.Reachable}}{{if .Ctl.Paused}}<form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit">Resume</button></form>
-    {{else}}<form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Pause</button></form>{{end}}{{end}}
-    {{if .Ctl.Systemd}}<span class="sep"></span>
-    <form class="act inline" data-action="enable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Enable at boot</button></form>
-    <form class="act inline" data-action="disable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Disable at boot</button></form>{{end}}
-    {{if .Ctl.JobActive}}<span class="sep"></span><a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
-  </div>
-  {{if .View.ConfigErr}}<p class="err">Config error: {{.View.ConfigErr}}</p>{{end}}
-  {{if and .View.LastExit (not .View.Runtime.Running)}}<p class="warnbox">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code>{{.View.Runtime.LastError}}</code>{{end}}</p>{{end}}
-</section>
-<nav class="tabs">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}">{{.Label}}</a>{{end}}</nav>
+{{template "pipeline-head" .}}
+<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}</nav>
 
 {{if eq .Tab "graph"}}
   <section class="card"><h2>Data path</h2><div class="graphwrap">{{.Graph}}</div>
@@ -44,9 +19,9 @@
   </section>{{end}}
   {{if .Ctl.Reachable}}<section class="card" id="throttle"><h2>Throttle</h2>
     <form class="act" data-action="throttle" data-pipeline="{{.View.Name}}">
-      <label>Soft source IOPS <input type="number" name="source_iops" min="1" max="10000000" required class="num"></label>
+      <label>Soft source IOPS (tokens/s) <input type="number" name="source_iops" min="1" max="10000000" required class="num"></label>
       <button class="btn" type="submit">Apply</button>
-      <span class="muted small">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</span>
+      <span class="muted small hint">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</span>
     </form></section>{{end}}
   <section class="charts">{{range .Charts}}<div class="card">{{.}}</div>{{end}}</section>
 {{end}}
@@ -55,18 +30,18 @@
   <section class="card"><h2>Tables</h2>
   {{if .Tables.Error}}<p class="muted">{{.Tables.Error}}</p>{{else}}
   <p class="muted">{{.Tables.Done}} done, {{.Tables.Running}} running, {{.Tables.Pending}} pending. Row counts are estimates from the source statistics.</p>
-  <table class="grid">
-    <thead><tr><th>Table</th><th>State</th><th>Ranges</th><th>Progress</th><th>Rows copied / estimate</th><th>ETA</th><th>PK</th></tr></thead>
+  <div class="tablewrap tall"><table class="grid">
+    <thead><tr><th scope="col">Table</th><th scope="col">State</th><th scope="col">Ranges</th><th scope="col">Progress</th><th scope="col" class="r">Rows copied / estimate</th><th scope="col" class="r">ETA</th><th scope="col">PK</th></tr></thead>
     <tbody>{{range .Tables.Tables}}<tr>
       <td class="mono">{{.Table}}</td>
       <td><span class="badge st-tbl-{{.State}}">{{.State}}</span></td>
       <td class="small">{{ranges .Ranges}}</td>
       <td>{{bar .ProgressPct}} <span class="small">{{pct .ProgressPct}}</span></td>
-      <td>{{if eq .State "done"}}-{{else}}{{int64 .RowsCopied}} / {{int64 .RowsEstimate}}{{end}}</td>
-      <td>{{if gt .ETASeconds 0.0}}{{secs .ETASeconds}}{{else}}-{{end}}</td>
-      <td class="small">{{range $i, $c := .PK}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .GenericPK}} <span class="muted">(generic key)</span>{{end}}</td>
+      <td class="r nowrap">{{if eq .State "done"}}-{{else}}{{int64 .RowsCopied}} / {{int64 .RowsEstimate}}{{end}}</td>
+      <td class="r nowrap">{{if gt .ETASeconds 0.0}}{{secs .ETASeconds}}{{else}}-{{end}}</td>
+      <td class="small mono">{{range $i, $c := .PK}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .GenericPK}} <span class="muted">(generic key)</span>{{end}}</td>
     </tr>{{else}}<tr><td colspan="7" class="muted">No tables.</td></tr>{{end}}</tbody>
-  </table>{{end}}
+  </table></div>{{end}}
   </section>
   {{if .Ctl.Reachable}}<section class="card"><h2>Snapshot</h2>
     <div class="actions">
@@ -77,7 +52,7 @@
     <h3>Add tables</h3>
     {{if .Src.Error}}<p class="muted">{{.Src.Error}}</p>{{else}}
     <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
-      <div class="picklist">{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}</div>
+      <div class="picklist">{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}" aria-label="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}</div>
       <p class="muted small">Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.</p>
       <button class="btn primary" type="submit">Snapshot selected tables</button>
     </form>{{end}}
@@ -123,29 +98,29 @@
     {{if .Config.Error}}<p class="err">{{.Config.Error}}</p>{{end}}
     {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
     
-    <div style="margin-bottom:12px;">
+    <div class="mb">
       <button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>
     </div>
 
     <div id="cfg-view-mode">
-      {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code">{{.Config.YAML}}</pre>{{end}}
+      {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code wrapcode">{{.Config.YAML}}</pre>{{end}}
     </div>
 
     <div id="cfg-edit-mode" hidden>
       <form id="cfg-edit-form" data-pipeline="{{.View.Name}}">
         <p class="muted small">Edit YAML configuration below. Saving validates syntax via <code>strand validate</code>, shows diff, keeps a timestamped backup, and writes atomically.</p>
-        <textarea name="yaml" id="cfg-yaml-textarea" class="code wide" rows="22" style="width:100%; min-height:350px; font-family:monospace;">{{.Config.YAML}}</textarea>
-        <div style="margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <textarea name="yaml" id="cfg-yaml-textarea" class="code cfg-textarea" rows="22" aria-label="Pipeline configuration YAML" spellcheck="false">{{.Config.YAML}}</textarea>
+        <div class="rowgap mt10">
           <button class="btn" type="button" id="cfg-btn-diff">Validate &amp; Preview Diff</button>
-          <label style="margin-left:8px;"><input type="checkbox" name="restart" id="cfg-restart-check" value="true"> Restart pipeline after saving</label>
+          <label><input type="checkbox" name="restart" id="cfg-restart-check" value="true"> Restart pipeline after saving</label>
           <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
           <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
         </div>
       </form>
-      <div id="cfg-diff-box" style="margin-top:14px;" hidden>
+      <div id="cfg-diff-box" class="mt14" hidden>
         <h3>Validation &amp; Diff</h3>
-        <div id="cfg-val-status" style="margin-bottom:8px;"></div>
-        <pre class="code" id="cfg-diff-output"></pre>
+        <div id="cfg-val-status" class="mb8"></div>
+        <pre class="code wrapcode" id="cfg-diff-output" aria-label="Diff"></pre>
       </div>
     </div>
   </section>
@@ -181,23 +156,23 @@
     {{if .Env.Error}}<p class="err">{{.Env.Error}}</p>{{end}}
     <p class="muted small">Environment variables used by the pipeline process. Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.</p>
     <form id="env-edit-form" data-pipeline="{{.View.Name}}">
-      <table class="grid" style="max-width:600px; margin-bottom:12px;">
-        <thead><tr><th>Variable</th><th>Value</th></tr></thead>
+      <div class="tablewrap env-wrap"><table class="grid">
+        <thead><tr><th scope="col">Variable</th><th scope="col">Value</th></tr></thead>
         <tbody id="env-entries-body">
           {{range $k, $v := .Env.Entries}}
           <tr>
             <td class="mono"><b>{{$k}}</b></td>
-            <td><input type="password" name="env_{{$k}}" data-key="{{$k}}" value="********" placeholder="Leave unchanged (********)" class="mono wide" autocomplete="new-password"></td>
+            <td><input type="password" aria-label="{{$k}}" name="env_{{$k}}" data-key="{{$k}}" value="********" placeholder="Leave unchanged (********)" class="mono wide" autocomplete="new-password"></td>
           </tr>
           {{else}}
           <tr><td colspan="2" class="muted">No variables in .env yet.</td></tr>
           {{end}}
           <tr id="env-new-row">
-            <td><input type="text" id="env-new-key" placeholder="NEW_VAR" class="mono" style="width:140px;"></td>
-            <td><input type="password" id="env-new-val" placeholder="Value" class="mono wide" autocomplete="new-password"></td>
+            <td><input type="text" id="env-new-key" placeholder="NEW_VAR" class="mono envkey" aria-label="New variable name"></td>
+            <td><input type="password" id="env-new-val" aria-label="New variable value" placeholder="Value" class="mono wide" autocomplete="new-password"></td>
           </tr>
         </tbody>
-      </table>
+      </table></div>
       <button class="btn primary" type="button" id="env-btn-save">Save .env</button>
     </form>
   </section>
@@ -208,9 +183,9 @@
     {{if .Ctl.JobActive}}<p class="warnbox">A job is running ({{.Ctl.JobActive.Kind}}); one job at a time per pipeline. <a href="/jobs/{{.Ctl.JobActive.ID}}">Open it</a>.</p>{{end}}
     <form class="act" data-action="verify" data-pipeline="{{.View.Name}}">
       <label>Mode <select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select></label>
-      <label>Table <input type="text" name="table" list="verify-tables" class="wide mono" placeholder="schema.table" autocomplete="off"></label>
+      <label>Table (schema.table) <input type="text" name="table" list="verify-tables" class="wide mono" placeholder="schema.table" autocomplete="off"></label>
       <datalist id="verify-tables">{{range .Src.Tables}}<option value="{{.Table}}">{{end}}</datalist>
-      <label>Rate <input type="text" name="rate" class="num" placeholder="default"></label>
+      <label>Rate (sample fraction or chunks/s) <input type="text" name="rate" class="num" placeholder="default"></label>
       <label><input type="checkbox" name="resume" value="true"> resume an interrupted full run</label>
       <button class="btn primary" type="submit">Start verify</button>
       <p class="muted small">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
@@ -223,7 +198,7 @@
   <section class="card"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2>
     <p class="small">{{if .Follow}}<a href="?lines=200">Stop following</a>{{else}}<a href="?lines=200&follow=1">Follow (refresh every 5 s)</a>{{end}}</p>
     {{if .Logs.Error}}<p class="err">{{.Logs.Error}}</p>{{end}}
-    <pre class="code log">{{range .Logs.Lines}}{{.}}
+    <pre class="code log wrapcode" tabindex="0" aria-label="Log tail">{{range .Logs.Lines}}{{.}}
 {{else}}(no log lines){{end}}</pre>
   </section>
 {{end}}
@@ -231,8 +206,8 @@
 {{end}}
 
 {{define "events"}}
-<table class="grid"><thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead><tbody>
-{{range .}}<tr><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap">{{.Message}}</td></tr>
+<div class="tablewrap tall"><table class="grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody>
+{{range .}}<tr><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>
 {{else}}<tr><td colspan="3" class="muted">None.</td></tr>{{end}}
-</tbody></table>
+</tbody></table></div>
 {{end}}

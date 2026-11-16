@@ -8,10 +8,10 @@
     <span>Exit code <b id="job-exit">{{if .Job.ExitCode}}{{ptrInt .Job.ExitCode}}{{else}}-{{end}}</b></span>{{if .Job.PID}}<span>pid <b>{{.Job.PID}}</b></span>{{end}}</div>
   <p class="mono small wrap">strand {{join .Job.Args " "}}</p>
   {{if .Job.Error}}<p class="warnbox">{{.Job.Error}}</p>{{end}}
-  {{if .Job.Running}}<form class="act inline" data-action="job-cancel" data-pipeline="{{.Job.Pipeline}}" data-confirm="Cancel this job? The child process receives SIGTERM."><input type="hidden" name="job_id" value="{{.Job.ID}}"><button class="btn" type="submit">Cancel job</button></form>{{end}}
+  {{if .Job.Running}}<form class="act inline" data-action="job-cancel" data-pipeline="{{.Job.Pipeline}}" data-confirm="Cancel this job? The child process receives SIGTERM."><input type="hidden" name="job_id" value="{{.Job.ID}}"><button class="btn danger" type="submit">Cancel job</button></form>{{end}}
 </section>
 <section class="card"><h2>Output</h2>
-<pre class="code log" id="joboutput" data-job="{{.Job.ID}}" data-offset="{{.Chunk.Offset}}" data-running="{{.Job.Running}}">{{.Chunk.Data}}</pre>
+<pre class="code log" id="joboutput" tabindex="0" aria-label="Job output" data-job="{{.Job.ID}}" data-offset="{{.Chunk.Offset}}" data-running="{{.Job.Running}}">{{.Chunk.Data}}</pre>
 </section>
 {{end}}
 {{end}}
