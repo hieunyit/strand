@@ -153,15 +153,36 @@ func pgRequireNoSlots(ctx context.Context, src *sql.DB) error {
 func prepareTargetEmpty(ctx context.Context, o Opts, dst *sql.DB) error {
 	qs := []string{"DROP DATABASE IF EXISTS bench", "DROP DATABASE IF EXISTS strand", "CREATE DATABASE bench", "CREATE DATABASE strand", "RESET BINARY LOGS AND GTIDS"}
 	if o.Engine == "postgres" {
-		qs = []string{"DROP SCHEMA IF EXISTS bench CASCADE", "CREATE SCHEMA bench", "CHECKPOINT"}
+		// Metadata Strand (_strand_checkpoint, _strand_pipeline...) của các lần chạy trước trên cùng volume phải
+		// bị xoá: nếu nằm trong tar fixture, mỗi lần đo Strand thấy checkpoint cũ (lwd cũ) trong khi slot mới
+		// đã vượt nó và dừng với log_gap (đúng thiết kế fail-closed).
+		qs = []string{"DROP SCHEMA IF EXISTS bench CASCADE", "CREATE SCHEMA bench", pgDropStrandMetadata, "CHECKPOINT"}
 	}
 	for _, q := range qs {
 		if _, err := dst.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("target %q: %w", q, err)
 		}
 	}
+	if o.Engine == "postgres" {
+		var left string
+		if err := dst.QueryRowContext(ctx, pgListStrandMetadata).Scan(&left); err != nil {
+			return fmt.Errorf("list target strand metadata: %w", err)
+		}
+		if left != "" {
+			return fmt.Errorf("target still has Strand metadata tables (%s): the fixture target must be empty", left)
+		}
+	}
 	return nil
 }
+
+// pgListStrandMetadata / pgDropStrandMetadata: bảng metadata của Strand ở target PG (mọi schema trừ hệ thống).
+const pgListStrandMetadata = `SELECT COALESCE(string_agg(format('%I.%I', schemaname, tablename), ','), '') FROM pg_tables
+  WHERE tablename LIKE '\_strand\_%' AND schemaname NOT IN ('pg_catalog', 'information_schema')`
+
+const pgDropStrandMetadata = `DO $$ DECLARE r record; BEGIN
+  FOR r IN SELECT schemaname, tablename FROM pg_tables WHERE tablename LIKE '\_strand\_%' AND schemaname NOT IN ('pg_catalog', 'information_schema') LOOP
+    EXECUTE format('DROP TABLE %I.%I CASCADE', r.schemaname, r.tablename);
+  END LOOP; END $$`
 
 // FixtureCreate dựng nguồn + đích rỗng, ghi manifest, chụp datadir hai container (tar + hash cây).
 func FixtureCreate(ctx context.Context, o Opts) error {
