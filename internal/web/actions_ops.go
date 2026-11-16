@@ -327,6 +327,7 @@ func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResul
 			argv = append(argv, "--socket="+sock)
 		}
 	}
+	srv.materialize(p.Name) // job đọc file cấu hình/.env: dựng lại từ DB trước (chế độ DB)
 	env, err := p.Env()
 	if err != nil {
 		return ActionResult{}, &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
@@ -346,6 +347,9 @@ func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResul
 
 func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (ActionResult, error) {
 	if p.Mode() == ModeSystemd {
+		if verb != ActStop {
+			s.materialize(p.Name) // unit đọc file: dựng lại từ DB nếu thiếu/khác (chế độ DB)
+		}
 		return s.systemctl(ctx, verb, p)
 	}
 	if p.CfgErr != "" {

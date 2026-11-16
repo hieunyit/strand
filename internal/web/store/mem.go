@@ -154,7 +154,61 @@ func (m *Mem) UpsertPipeline(_ context.Context, p Pipeline) error {
 	}
 	p.Updated = now
 	p.EnvEnc = append([]byte(nil), p.EnvEnc...)
+	p.normalize()
 	m.pipes[p.Name] = p
+	return nil
+}
+
+func (m *Mem) CreatePipeline(ctx context.Context, p Pipeline) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	_, exists := m.pipes[p.Name]
+	m.mu.Unlock()
+	if exists {
+		return false, nil
+	}
+	return true, m.UpsertPipeline(ctx, p)
+}
+
+func (m *Mem) UpdatePipelineMeta(_ context.Context, r Pipeline) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	cur, ok := m.pipes[r.Name]
+	if !ok {
+		return nil
+	}
+	r.normalize()
+	cur.ConfigPath, cur.EnvPath, cur.SystemdUnit, cur.LogFile, cur.PidFile = r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile
+	cur.Origin, cur.MissingSince, cur.Updated = r.Origin, r.MissingSince, time.Now()
+	m.pipes[r.Name] = cur
+	return nil
+}
+
+func (m *Mem) SetPipelineConflicts(_ context.Context, name, conflicts string) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	if conflicts == "" {
+		conflicts = "[]"
+	}
+	if cur, ok := m.pipes[name]; ok {
+		cur.Conflicts = conflicts
+		m.pipes[name] = cur
+	}
+	return nil
+}
+
+func (m *Mem) DeletePipeline(_ context.Context, name string) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	delete(m.pipes, name)
+	delete(m.desired, name)
 	return nil
 }
 func (m *Mem) GetPipeline(_ context.Context, name string) (Pipeline, bool, error) {

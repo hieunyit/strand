@@ -239,7 +239,10 @@ func (m *metaDB) appendAudit(e AuditEntry) error {
 
 // materialize ghi lại file cấu hình (0640) và .env (0600, chỉ khi có khóa giải mã) của pipeline do web tạo từ
 // DB ra config_path/env_path nếu thiếu hoặc khác. Gọi trước validate/start vì CLI strand chỉ đọc file.
-func (s *Server) materialize(name string) {
+func (s *Server) materialize(name string) { s.materializeOpt(name, false) }
+
+// materializeOpt: force = dựng lại cả pipeline đang bị đánh dấu missing (thao tác Restore file).
+func (s *Server) materializeOpt(name string, force bool) {
 	if s.db == nil {
 		return
 	}
@@ -253,9 +256,29 @@ func (s *Server) materialize(name string) {
 	if !ok || !row.HasConfig || row.ConfigPath == "" {
 		return
 	}
-	if err := s.db.writeIfDiffers(row.ConfigPath, []byte(row.ConfigYAML), 0o640, false); err != nil {
-		s.log.Warn("materialize config failed", "pipeline", name, "path", row.ConfigPath, "err", err)
+	if !row.MissingSince.IsZero() && !force {
+		return // file/entry đã bị gỡ: không tự dựng lại, chờ người dùng chọn Restore hoặc Remove
 	}
+	var conflicts []DiskConflict
+	if aside, err := s.db.writeIfDiffers(row.ConfigPath, []byte(row.ConfigYAML), 0o640, false, s.now()); err != nil {
+		s.log.Warn("materialize config failed", "pipeline", name, "path", row.ConfigPath, "err", err)
+	} else if aside != "" {
+		conflicts = append(conflicts, DiskConflict{File: "config", Path: aside, At: s.now().UTC().Format(time.RFC3339)})
+	}
+	defer func() {
+		if len(conflicts) == 0 {
+			return
+		}
+		all := append(parseConflicts(row.Conflicts), conflicts...)
+		b, _ := json.Marshal(all)
+		if err := s.db.st.SetPipelineConflicts(ctx, name, string(b)); err != nil {
+			s.log.Warn("record disk conflict failed", "pipeline", name, "err", err)
+		}
+		for _, c := range conflicts {
+			_ = s.audit.Log(AuditEntry{Action: "config.conflict", Pipeline: name, Result: "ok",
+				Detail: map[string]any{"file": c.File, "aside": c.Path, "note": "file on disk differed from the database copy; the database copy was written, the disk version set aside"}})
+		}
+	}()
 	if len(row.EnvEnc) > 0 && row.EnvPath != "" {
 		if s.db.box == nil {
 			s.db.warnedKey.Do(func() {
@@ -268,33 +291,46 @@ func (s *Server) materialize(name string) {
 			s.log.Warn("materialize env failed", "pipeline", name, "err", err)
 			return
 		}
-		if err := s.db.writeIfDiffers(row.EnvPath, pt, 0o600, true); err != nil {
+		if aside, err := s.db.writeIfDiffers(row.EnvPath, pt, 0o600, true, s.now()); err != nil {
 			s.log.Warn("materialize env failed", "pipeline", name, "path", row.EnvPath, "err", err)
+		} else if aside != "" {
+			conflicts = append(conflicts, DiskConflict{File: "env", Path: aside, At: s.now().UTC().Format(time.RFC3339)})
 		}
 	}
 }
 
-func (m *metaDB) writeIfDiffers(path string, data []byte, newPerm os.FileMode, secret bool) error {
+// writeIfDiffers ghi data vào path nếu thiếu hoặc khác. Khác: bản trên đĩa được cất sang
+// <path>.conflict-<thời gian> (cùng quyền, không bao giờ rộng hơn) trước khi ghi, trả đường dẫn bản cất.
+func (m *metaDB) writeIfDiffers(path string, data []byte, newPerm os.FileMode, secret bool, now time.Time) (string, error) {
 	cur, err := os.ReadFile(path)
+	aside := ""
 	if err == nil {
 		if bytes.Equal(cur, data) {
-			return nil
+			return "", nil
 		}
-		m.log.Warn("file differs from the database copy; the database is the source of truth and wins", "path", path)
+		perm := os.FileMode(0o600)
+		if fi, serr := os.Stat(path); serr == nil {
+			perm = fi.Mode().Perm() & secretPermMask
+		}
+		aside = path + ".conflict-" + now.UTC().Format("20060102T150405Z")
+		if werr := writeBackup(aside, cur, path, perm); werr != nil {
+			return "", fmt.Errorf("set aside the on-disk version before restoring the database copy: %w", werr)
+		}
+		m.log.Warn("file differs from the database copy; the database is the source of truth: the disk version was set aside", "path", path, "aside", aside)
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
+		return "", err
 	}
 	existed := err == nil
 	if werr := writeFilePreserving(path, data, secret, false); werr != nil {
-		return werr
+		return "", werr
 	}
 	if !existed {
-		return os.Chmod(path, newPerm)
+		return aside, os.Chmod(path, newPerm)
 	}
-	return nil
+	return aside, nil
 }
 
 // materializeAll chạy lúc khởi động: khôi phục file của mọi pipeline do web tạo (ví dụ volume cấu hình mới).

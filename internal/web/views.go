@@ -46,10 +46,14 @@ type PipelineView struct {
 	LastExit   *ExitInfo      `json:"last_exit,omitempty"`
 	ConfigErr  string         `json:"config_error,omitempty"`
 	SampledAt  time.Time      `json:"sampled_at"`
+	// Chế độ DB: entry web.yaml/file scan đã mất; bản sửa trên đĩa đã bị đặt sang bên.
+	Missing   string         `json:"missing,omitempty"`
+	Conflicts []DiskConflict `json:"disk_conflicts,omitempty"`
 }
 
 func (s *Server) view(p *Pipeline) PipelineView {
-	v := PipelineView{Name: p.Name, Pair: p.Pair(), Mode: p.Mode(), Origin: p.Origin, ConfigPath: p.ConfigPath, ConfigErr: p.CfgErr, State: StateUnknown}
+	v := PipelineView{Name: p.Name, Pair: p.Pair(), Mode: p.Mode(), Origin: p.Origin, ConfigPath: p.ConfigPath, ConfigErr: p.CfgErr, State: StateUnknown,
+		Missing: p.Missing, Conflicts: p.Conflicts}
 	if sn := s.samp.Latest(p.Name); sn != nil {
 		v.State, v.Reachable, v.Runtime, v.Top, v.SampledAt = sn.State, sn.Reachable, sn.Runtime, sn.Top, sn.At
 	}

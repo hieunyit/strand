@@ -39,9 +39,31 @@ type Pipeline struct {
 	ConfigYAML string
 	HasConfig  bool
 	// EnvEnc is the AES-GCM sealed .env (nil when no secret key was configured).
-	EnvEnc  []byte
-	Created time.Time
-	Updated time.Time
+	EnvEnc []byte
+	// Origin: created (web) | web.yaml (declared) | scan (discovered by a scan glob). "" = created.
+	Origin string
+	// MissingSince: non-zero when a declared/scanned pipeline's web.yaml entry or file has gone.
+	MissingSince time.Time
+	// Conflicts: JSON list of on-disk edits set aside because the database copy won ("" = none).
+	Conflicts string
+	Created   time.Time
+	Updated   time.Time
+}
+
+// Pipeline origins.
+const (
+	OriginCreated = "created"
+	OriginFile    = "web.yaml"
+	OriginScan    = "scan"
+)
+
+func (p *Pipeline) normalize() {
+	if p.Origin == "" {
+		p.Origin = OriginCreated
+	}
+	if p.Conflicts == "" {
+		p.Conflicts = "[]"
+	}
 }
 
 // Job is one job-history row; Data is the JSON of web.JobStatus.
@@ -93,6 +115,16 @@ type Store interface {
 	UpsertPipeline(ctx context.Context, p Pipeline) error
 	GetPipeline(ctx context.Context, name string) (Pipeline, bool, error)
 	ListPipelines(ctx context.Context) ([]Pipeline, error)
+	// CreatePipeline inserts p only if no row has that name (discovery: never overwrites). Reports whether
+	// it inserted.
+	CreatePipeline(ctx context.Context, p Pipeline) (bool, error)
+	// UpdatePipelineMeta updates only the registry metadata of an existing row (paths, unit, origin,
+	// missing_since), never config_yaml/env_enc/conflicts: safe against a concurrent config edit.
+	UpdatePipelineMeta(ctx context.Context, p Pipeline) error
+	// SetPipelineConflicts replaces the conflicts JSON of a row.
+	SetPipelineConflicts(ctx context.Context, name, conflicts string) error
+	// DeletePipeline removes the registry row and its desired state (files are left alone).
+	DeletePipeline(ctx context.Context, name string) error
 
 	SetDesired(ctx context.Context, name, desired string) error
 	Desired(ctx context.Context) (map[string]string, error)

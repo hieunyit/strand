@@ -1,6 +1,20 @@
 {{define "content"}}
 {{with .Body}}
 {{template "pipeline-head" .}}
+{{if .View.Missing}}<section class="warnbox" role="alert" aria-label="Pipeline file missing">
+  <b>This pipeline {{.View.Missing}}.</b> It is kept in the metadata database (with its config, desired state and history) and is not restored automatically.
+  <div class="actions-row">
+    <form class="act inline" data-action="registry-restore" data-pipeline="{{.View.Name}}" data-confirm="Write {{.View.ConfigPath}} (and its .env, when stored) from the database copy?"><button class="btn" type="submit">Restore file</button></form>
+    <form class="act inline" data-action="registry-forget" data-pipeline="{{.View.Name}}" data-confirm="Remove {{.View.Name}} from the registry? Its database row, desired state and settings go; files on disk and job history stay." data-retype="{{.View.Name}}"><button class="btn danger" type="submit">Remove from registry</button></form>
+  </div>
+</section>{{end}}
+{{range .View.Conflicts}}<section class="warnbox" role="alert" aria-label="Disk edit set aside">
+  <b>The {{if eq .File "env"}}.env file{{else}}config file{{end}} on disk differed from the database copy</b> (the source of truth) and was replaced by it on {{.At}}. The disk version was saved as <code>{{.Path}}</code>.
+  <div class="actions-row">
+    <form class="act inline" data-action="conflict-adopt" data-pipeline="{{$.Body.View.Name}}" data-confirm="Use the disk version from {{.Path}}?{{if ne .File "env"}} It is validated first; nothing changes if validation fails.{{end}}"><input type="hidden" name="path" value="{{.Path}}"><button class="btn" type="submit">Adopt disk version</button></form>
+    <form class="act inline" data-action="conflict-dismiss" data-pipeline="{{$.Body.View.Name}}"><input type="hidden" name="path" value="{{.Path}}"><button class="btn" type="submit">Keep database version</button></form>
+  </div>
+</section>{{end}}
 <nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}{{.Label}}</a>{{end}}</nav>
 
 {{if eq .Tab "graph"}}

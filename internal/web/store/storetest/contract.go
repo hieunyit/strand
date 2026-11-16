@@ -76,6 +76,39 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if len(l) != 2 || l[0].Name != "bare" || l[1].ConfigYAML != "version: 2\n" {
 			t.Fatalf("list = %+v", l)
 		}
+		if got.Origin != store.OriginCreated || got.Conflicts != "[]" || !got.MissingSince.IsZero() {
+			t.Fatalf("defaults: origin %q conflicts %q missing %v", got.Origin, got.Conflicts, got.MissingSince)
+		}
+		// Discovery: CreatePipeline never overwrites.
+		ok2, err := s.CreatePipeline(ctx, store.Pipeline{Name: "orders", ConfigPath: "/other.yaml", Origin: store.OriginScan})
+		must(t, err)
+		if ok2 {
+			t.Fatal("CreatePipeline overwrote an existing row")
+		}
+		miss := time.Now().UTC().Truncate(time.Second)
+		ok2, err = s.CreatePipeline(ctx, store.Pipeline{Name: "scanned", ConfigPath: "/s.yaml", Origin: store.OriginScan, MissingSince: miss,
+			Conflicts: `[{"file": "config", "path": "/s.yaml.conflict-1", "at": "2026-01-01T00:00:00Z"}]`})
+		must(t, err)
+		sc, _, _ := s.GetPipeline(ctx, "scanned")
+		if !ok2 || sc.Origin != store.OriginScan || !sc.MissingSince.Equal(miss) || !strings.Contains(sc.Conflicts, "conflict-1") {
+			t.Fatalf("scanned = %+v", sc)
+		}
+		// Cập nhật metadata không đụng config/env/conflicts.
+		sc.ConfigPath, sc.MissingSince, sc.ConfigYAML = "/moved.yaml", time.Time{}, "IGNORED"
+		must(t, s.UpdatePipelineMeta(ctx, sc))
+		must(t, s.SetPipelineConflicts(ctx, "scanned", `[]`))
+		sc2, _, _ := s.GetPipeline(ctx, "scanned")
+		if sc2.ConfigPath != "/moved.yaml" || !sc2.MissingSince.IsZero() || sc2.ConfigYAML == "IGNORED" || sc2.Conflicts != "[]" {
+			t.Fatalf("meta update = %+v", sc2)
+		}
+		must(t, s.SetDesired(ctx, "scanned", store.DesiredRunning))
+		must(t, s.DeletePipeline(ctx, "scanned"))
+		if _, ok, _ := s.GetPipeline(ctx, "scanned"); ok {
+			t.Fatal("pipeline not deleted")
+		}
+		if d, _ := s.Desired(ctx); d["scanned"] != "" {
+			t.Fatal("desired state of a deleted pipeline kept")
+		}
 		if err := s.SetDesired(ctx, "orders", "bogus"); err == nil {
 			t.Fatal("bogus desired state accepted")
 		}

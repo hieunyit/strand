@@ -152,6 +152,7 @@ func New(o Options) (*Server, error) {
 	s.registerOps()
 	s.registerWizards()
 	s.registerConfigEditOps()
+	s.registerRegistryOps()
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
 	}

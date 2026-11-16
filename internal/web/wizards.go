@@ -210,6 +210,7 @@ var (
 )
 
 func (s *Server) startWizardJob(ctx context.Context, p *Pipeline, kind string, args, display []string, extraEnv ...string) (string, error) {
+	s.materialize(p.Name) // job đọc file cấu hình/.env: dựng lại từ DB trước (chế độ DB)
 	env, err := p.Env()
 	if err != nil {
 		return "", &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
