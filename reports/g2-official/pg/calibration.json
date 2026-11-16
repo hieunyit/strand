@@ -1,11 +1,11 @@
 {
   "engine": "postgres",
   "clients": 16,
-  "measured_seconds": 169.989843,
-  "events_in_window": 69928,
-  "saturation_events_per_s": 411.3657543645122,
-  "low": 51,
-  "high": 205,
+  "measured_seconds": 169.914868,
+  "events_in_window": 76999,
+  "saturation_events_per_s": 453.1622270983372,
+  "low": 56,
+  "high": 226,
   "ignored_errors": 0,
   "note": "high=50%, low=12.5% of saturation; commit this file before the official run"
 }
