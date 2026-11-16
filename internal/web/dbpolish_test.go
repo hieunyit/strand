@@ -230,3 +230,25 @@ func TestSecretKeyMismatchAndRotation(t *testing.T) {
 		t.Fatal("old key accepted after rotation")
 	}
 }
+
+type pingErrStore struct{ store.Store }
+
+func (pingErrStore) Ping(context.Context) error {
+	return errors.New(`failed to connect to host=db-internal.corp.example user=strand database=strand: dial tcp 10.1.2.3:5432: connection refused`)
+}
+
+// /healthz is unauthenticated: it must not reveal the database host, address, user or name.
+func TestHealthzDoesNotLeakDatabaseDetails(t *testing.T) {
+	mem := store.NewMem()
+	e := dbEnv(t, mem, nil, nil)
+	e.srv.db.st = pingErrStore{mem}
+	resp, body := e.do(e.client(), "GET", "/healthz", "", nil)
+	if resp.StatusCode != 503 {
+		t.Fatalf("healthz: %d", resp.StatusCode)
+	}
+	for _, leak := range []string{"db-internal", "10.1.2.3", "user=", "database="} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("healthz leaks %q: %s", leak, body)
+		}
+	}
+}

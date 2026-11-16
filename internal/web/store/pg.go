@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -111,7 +112,12 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 	defer func() {
 		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_, _ = conn.ExecContext(uctx, `SELECT pg_advisory_unlock($1)`, k)
+		var released bool
+		if err := conn.QueryRowContext(uctx, `SELECT pg_advisory_unlock($1)`, k).Scan(&released); err != nil || !released {
+			// Không chắc đã nhả khóa (lỗi mạng, timeout): hủy kết nối thay vì trả về pool, nếu không khóa phiên
+			// này bị giữ mãi trên một kết nối rảnh và mọi instance khác chờ vô hạn ở lần migrate/import sau.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 	}()
 	return fn(ctx)
 }

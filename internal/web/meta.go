@@ -652,8 +652,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if err := s.db.st.Ping(ctx); err != nil {
+			// /healthz không cần đăng nhập: chi tiết lỗi (host, cổng, user, tên DB) chỉ vào log của web.
+			s.log.Warn("healthz: metadata database unreachable", "err", store.Redact(err.Error()))
 			out["status"] = "degraded"
-			out["database"] = map[string]any{"mode": "postgres", "ok": false, "error": store.Redact(err.Error())}
+			out["database"] = map[string]any{"mode": "postgres", "ok": false, "error": "metadata database unreachable (details in the web log)"}
 			code = http.StatusServiceUnavailable
 		} else {
 			out["database"] = map[string]any{"mode": "postgres", "ok": true}

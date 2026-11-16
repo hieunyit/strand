@@ -22,7 +22,7 @@ Giới hạn đăng nhập: 5 lần sai/phút/IP, lần thứ 6 trả **429** k�
 | --- | --- |
 | `POST /api/v1/login` | như trên. 401 sai mật khẩu, 403 thiếu CSRF, 429 bị chặn |
 | `POST /api/v1/logout` | hủy session. Cần CSRF. **200** `{"ok": true}` |
-| `GET /healthz` | **Không cần xác thực.** `200 {"status":"ok","version","database":{"mode":"file"` hoặc `"postgres","ok":true}}`; chế độ PostgreSQL mà DB không ping được: **503** `{"status":"degraded","database":{"ok":false,"error":"<đã che mật khẩu>"}}`. Dùng cho HEALTHCHECK/orchestrator |
+| `GET /healthz` | **Không cần xác thực.** `200 {"status":"ok","version","database":{"mode":"file"` hoặc `"postgres","ok":true}}`; chế độ PostgreSQL mà DB không ping được: **503** `{"status":"degraded","database":{"ok":false,"error":"metadata database unreachable (details in the web log)"}}` (chi tiết lỗi chỉ ghi vào log của web, không lộ host/user cho người chưa đăng nhập). Dùng cho HEALTHCHECK/orchestrator |
 | `GET /api/v1/session` | `{"authenticated": true, "version", "csrf", "idle_timeout_s", "max_age_s"}` (`csrf` vắng khi dùng Bearer) |
 
 ## 3. Tài nguyên
