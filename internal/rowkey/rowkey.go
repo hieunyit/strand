@@ -60,7 +60,10 @@ func Choose(candidates []Candidate, typeOK func(cols []string) error) (key *Key,
 	sortCandidates(cs)
 	for _, c := range cs {
 		if !c.Eligible() {
-			rejected = append(rejected, c)
+			rejected = append(rejected, c) // luôn báo index không đủ điều kiện, kể cả khi đã chọn được khóa
+			continue
+		}
+		if key != nil {
 			continue
 		}
 		if typeOK != nil {
@@ -70,9 +73,9 @@ func Choose(candidates []Candidate, typeOK func(cols []string) error) (key *Key,
 				continue
 			}
 		}
-		return &Key{Name: c.Name, Columns: append([]string(nil), c.Columns...)}, rejected
+		key = &Key{Name: c.Name, Columns: append([]string(nil), c.Columns...)}
 	}
-	return nil, rejected
+	return key, rejected
 }
 
 // Explain mô tả vì sao các index bị loại (cho thông báo lỗi); "" nếu không có index nào.

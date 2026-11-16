@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"strand/internal/exitcode"
+	"strand/internal/rowkey"
 )
 
 // spec: 02 §8, §11, §12; TASK P2-04
@@ -98,12 +99,24 @@ func checkMySQLToPGTables(ctx context.Context, src, dst *sql.DB, tables []string
 			return warnings, err
 		}
 		if len(pks) == 0 {
-			return warnings, exitcode.New(
-				exitcode.ErrMissingPK,
-				exitcode.Rejected,
-				fmt.Sprintf("table %s.%s has no primary key (spec: 02 §8)", schema, table),
-				nil,
-			)
+			// Không có PK: khóa hàng là unique index NOT NULL (rowkey). Bảng keyless (tables.keyless=full_row,
+			// opts.AllowKeyless) không có khóa: bỏ qua kiểm collation khóa.
+			res, kerr := rowkey.ResolveMySQL(ctx, src, schema, table)
+			if kerr != nil {
+				return warnings, kerr
+			}
+			switch {
+			case res.Key != nil:
+				pks = res.Key.Columns
+			case opts.AllowKeyless:
+			default:
+				return warnings, exitcode.New(
+					exitcode.ErrMissingPK,
+					exitcode.Rejected,
+					fmt.Sprintf("table %s.%s has no primary key or NOT NULL unique key (spec: 02 §8)", schema, table),
+					nil,
+				)
+			}
 		}
 		pkMap := make(map[string]bool, len(pks))
 		for _, pk := range pks {

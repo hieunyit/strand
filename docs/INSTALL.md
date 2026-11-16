@@ -129,7 +129,7 @@ sudo bash -c 'set -a; . /etc/strand/orders-sync.env; set +a
   strand validate -c /etc/strand/orders-sync.yaml && strand plan -c /etc/strand/orders-sync.yaml'
 ```
 
-`validate` kiểm kết nối, quyền, binlog/GTID hoặc `wal_level`, PK của bảng; `plan` ước lượng thời gian snapshot. Ý nghĩa kiểm tra và exit code: [USAGE.md](USAGE.md) 7.1, 7.2, 8.3.
+`validate` kiểm kết nối, quyền, binlog/GTID hoặc `wal_level`, khóa hàng của bảng (PK, hoặc unique index NOT NULL; bảng thiếu khóa được in kèm lệnh `ALTER TABLE` gợi ý, xem [USAGE.md](USAGE.md) 5.1); `plan` ước lượng thời gian snapshot. Ý nghĩa kiểm tra và exit code: [USAGE.md](USAGE.md) 7.1, 7.2, 8.3.
 
 ### 4.3 Chạy
 
@@ -142,7 +142,7 @@ journalctl -u strand@orders-sync -f
 sudo -u strand strand top -c /etc/strand/orders-sync.yaml      # trạng thái, lag
 ```
 
-Unit tự restart khi exit 1 (lỗi tạm) và **không** restart với exit 2, 3, 4, 5, 10 (cần người xử lý: sửa cấu hình, thiếu PK, đang bị khóa/fenced, `log_gap`, chờ quyết định promote); xem [USAGE.md](USAGE.md) 8.3.
+Unit tự restart khi exit 1 (lỗi tạm) và **không** restart với exit 2, 3, 4, 5, 10 (cần người xử lý: sửa cấu hình, thiếu khóa hàng (`missing_pk`), đang bị khóa/fenced, `log_gap`, chờ quyết định promote); xem [USAGE.md](USAGE.md) 8.3.
 
 **Cách B, chế độ nền (không cần unit, tiện cho thử nghiệm):**
 

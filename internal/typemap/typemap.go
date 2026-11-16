@@ -40,6 +40,9 @@ type ColumnMapping struct {
 
 // Options chứa cấu hình chính sách ánh xạ kiểu dữ liệu.
 type Options struct {
+	// AllowKeyless: bảng không có khóa hàng được chấp nhận (tables.keyless=full_row); bỏ kiểm collation khóa cho bảng đó.
+	AllowKeyless bool
+
 	// ZeroDatePolicy: "reject" (mặc định, trả lỗi exit 3), "null" (gán NULL), "epoch" (1970-01-01)
 	ZeroDatePolicy string
 

@@ -101,7 +101,7 @@ Chỉ bảng thường (MySQL `BASE TABLE`; PG bảng thường và bảng parti
 ### Checklist đồng bộ cả instance
 
 1. `tables.include: ["*.*"]`. Loại bảng không cần bằng `exclude`.
-2. Mọi bảng phải có PRIMARY KEY (mục 5.1). Bảng không có PK làm `sync`/`validate` dừng với `missing_pk`.
+2. Mọi bảng phải có khóa hàng: PRIMARY KEY, hoặc UNIQUE index NOT NULL (mục 5.1). Bảng không có khóa làm `sync`/`validate` dừng với `missing_pk`, kèm lệnh `ALTER TABLE` gợi ý cho từng bảng (mục 5.1.2).
 3. Kiểm từng bảng có PK snapshot logic được (mục 5.2). Bảng không hỗ trợ: seed từ backup hoặc đổi kiểu PK.
 4. User, quyền, view, routine, trigger và event **không** được sao chép. Tạo tay ở target. Seed bằng XtraBackup/CLONE thì backup mang theo chúng.
 5. PG source: publication phải chứa mọi bảng (`FOR ALL TABLES` hoặc liệt kê). Bảng partitioned cần `publish_via_partition_root = true`.
@@ -307,11 +307,61 @@ Metadata `_strand_pipeline`, `_strand_checkpoint`, `_strand_worker_delta` và `_
 
 ## 5. Yêu cầu và giới hạn của bảng
 
-### 5.1 Bắt buộc có PRIMARY KEY
+### 5.1 Khóa hàng: PRIMARY KEY, unique key NOT NULL, hoặc chế độ keyless
 
-Mọi bảng của pipeline phải có PK. Thiếu thì exit 3 `missing_pk`.
+Apply dùng upsert và delete theo khóa, và việc gán thay đổi vào chunk snapshot cũng theo khóa, nên mỗi bảng cần một **khóa hàng**. Strand chọn theo thứ tự:
 
-Lý do: apply dùng upsert và delete theo khóa, và việc gán thay đổi vào chunk snapshot cũng theo khóa.
+1. **PRIMARY KEY**, nếu có.
+2. Nếu không có PK: một **UNIQUE index mà mọi cột đều NOT NULL** (MySQL gọi là "primary key equivalent"). Chọn xác định: ít cột nhất; nếu kiểu cột của index không được snapshot hỗ trợ (mục 5.2) thì thử index kế tiếp; hòa thì theo tên index. Không đủ điều kiện: index có cột prefix (`code(10)`), index biểu thức (functional), index chứa cột NULL được, index chứa cột sinh (generated).
+3. Không có gì dùng được: exit 3 `missing_pk`, kèm **gợi ý cho từng bảng** (mục 5.1.2). Ngoại lệ là chế độ keyless (mục 5.1.3).
+
+Khóa đang dùng được in ở `validate` (`table app.t: no primary key, row key is UNIQUE uk_email (email)`), ở `plan`, ở log lúc khởi động và ở cột `key:` của tab Tables (Web UI) / `admin` `TableInfo.key`. Thay đổi khóa bằng DDL được xử lý như thay đổi PK: nếu DDL làm bảng mất khóa dùng được thì `sync` dừng (exit 10 `missing_pk`, kèm gợi ý).
+
+**Theo nguồn:**
+
+| Nguồn | Điều kiện |
+| --- | --- |
+| MySQL 5.5–8.x, MariaDB | `binlog_row_image=FULL` (đã bắt buộc) nên ảnh trước/sau chứa đủ cột khóa. Cột `INVISIBLE` (MySQL 8.0.23+, MariaDB 10.3.3+) được đọc như cột thường |
+| PostgreSQL | UPDATE/DELETE chỉ mang các cột của **REPLICA IDENTITY**, nên khóa phải là index của `REPLICA IDENTITY USING INDEX` (index unique, không partial, không deferrable, mọi cột NOT NULL; PG tự kiểm lúc `ALTER`). Bảng không PK mà replica identity là DEFAULT/NOTHING: `validate` exit 3 và in đúng lệnh `ALTER TABLE "s"."t" REPLICA IDENTITY USING INDEX "idx";` khi có index đủ điều kiện. `REPLICA IDENTITY FULL` không PK **không** được coi là khóa (xem keyless) |
+
+**Ở target:** `strand schema init` / tự tạo bảng sao chép luôn unique index (MySQL→MySQL qua `SHOW CREATE TABLE`; MySQL→PG và PG→PG tạo `CREATE UNIQUE INDEX`/constraint) nên PG `ON CONFLICT (cột khóa)` và MySQL `ON DUPLICATE KEY UPDATE` hoạt động. Nếu bảng đích **đã tồn tại** mà không có unique index khớp khóa của nguồn, `validate` exit 3 (`no matching unique index/constraint`) kèm lệnh tạo index, vì upsert sẽ nhân đôi hàng. UPDATE đổi giá trị khóa chạy như UPDATE đổi PK (xóa khóa cũ, upsert khóa mới).
+
+#### 5.1.2 Bảng chưa có khóa: thêm khóa
+
+`validate`, `plan` và thông báo `missing_pk` in cho **từng** bảng thiếu khóa một lệnh sẵn sàng chạy, theo flavor/phiên bản của nguồn:
+
+| Nguồn | Lệnh gợi ý |
+| --- | --- |
+| MariaDB ≥ 10.3.3 | ``ALTER TABLE `db`.`t` ADD COLUMN `_strand_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT INVISIBLE, ADD PRIMARY KEY (`_strand_id`);`` |
+| MySQL ≥ 8.0.23 | cùng ý, cột `my_row_id` (tên như GIPK). Từ 8.0.30, `SET sql_generate_invisible_primary_key=ON` làm bảng **mới** tự có khóa ẩn `my_row_id`; không đổi bảng đã có |
+| MySQL/MariaDB cũ hơn | cột **hiển thị** `_strand_id`. Cảnh báo: `SELECT *` và `INSERT` không liệt kê cột sẽ thấy thêm một cột |
+| PostgreSQL | nếu có unique index đủ điều kiện: `ALTER TABLE ... REPLICA IDENTITY USING INDEX ...;`. Nếu không: ``ALTER TABLE ... ADD COLUMN _strand_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY;`` (thêm cột nên `SELECT *` đổi; viết lại bảng dưới khóa ACCESS EXCLUSIVE) |
+
+Cột `INVISIBLE` không đổi `SELECT *` hay `INSERT` của ứng dụng. Strand đọc cột theo tên tường minh (binlog khớp theo vị trí cột của `information_schema`, vốn gồm cả cột ẩn); target MySQL→MySQL giữ `INVISIBLE` (qua `SHOW CREATE TABLE`), target PG tạo cột thường. Khi tự kiểm tra bằng `SELECT`, hãy nêu tên cột ẩn (`SELECT _strand_id, ...`).
+
+**Khóa và bảng lớn (> 1 triệu hàng):** thêm cột AUTO_INCREMENT **chặn ghi** trong lúc xây lại bảng (`ALGORITHM=COPY` hoặc INPLACE với `LOCK=SHARED`; đọc vẫn chạy), thời gian tỉ lệ kích thước bảng. `pt-online-schema-change` và `gh-ost` **không** thêm được khóa thay thế cho bảng không có PRIMARY KEY/UNIQUE nào: cả hai cần một khóa chung giữa bảng cũ và bảng mới để sao chép và theo dõi hàng. Lựa chọn: (1) chạy ALTER trong cửa sổ bảo trì; (2) chạy ALTER trên replica trước rồi chuyển vai; (3) nếu có tập cột NOT NULL vốn duy nhất, thêm UNIQUE index online (`CREATE UNIQUE INDEX ... ALGORITHM=INPLACE, LOCK=NONE`) — Strand dùng nó làm khóa hàng ngay, không cần cột mới. PG: thêm cột bigint NULL, điền theo lô, `CREATE UNIQUE INDEX CONCURRENTLY`, `SET NOT NULL`, rồi `REPLICA IDENTITY USING INDEX` (hoặc `ADD PRIMARY KEY USING INDEX`).
+
+#### 5.1.3 Chế độ keyless (`tables.keyless: full_row`), chỉ khi dữ liệu đầu đến từ seed
+
+Dành cho bảng **không thể** thêm khóa. Mặc định tắt (khi đó thiếu khóa là `missing_pk`). Bật bằng:
+
+```yaml
+tables:
+  include: ["app.*"]
+  keyless: full_row           # keyless_allow_float: true  nếu chấp nhận cột FLOAT/DOUBLE
+bootstrap: { default: seed }  # hoặc start_at, hoặc per_table[bảng].mode: seed
+```
+
+Điều kiện và hành vi:
+
+- **Chỉ với seed.** Dữ liệu đầu của bảng phải đến từ backup (`strand seed plan/apply` + `sync --start-at seed`) hoặc `--start-at` (bạn cam kết target đã khớp source). Snapshot logic của bảng keyless bị từ chối (exit 3 `missing_pk`) vì không có khóa để chia range và đối soát.
+- **Nguồn MySQL/MariaDB:** `binlog_row_image=FULL` (`validate` đã bắt buộc). **Nguồn PG:** bảng phải có `REPLICA IDENTITY FULL`; nếu không `validate` exit 3 và in `ALTER TABLE ... REPLICA IDENTITY FULL;`.
+- **Apply:** INSERT là INSERT thường (hai hàng giống hệt là hai hàng). UPDATE/DELETE khớp **ảnh trước** theo mọi cột, NULL-safe (MySQL `<=>`, PG `IS NOT DISTINCT FROM`), đúng **một** hàng (MySQL `LIMIT 1`, PG `ctid = (SELECT ctid ... LIMIT 1)`). Không khớp hàng nào nghĩa là target lệch: dừng với exit 5 `keyless_row_missing`, không bỏ qua im lặng. Checkpoint commit cùng dữ liệu trong một transaction target nên không có replay đôi.
+- **Lập lịch:** mọi thay đổi của một bảng keyless được áp tuần tự theo thứ tự commit (một khóa xung đột chung cho bảng) ở cả `strict` và `relaxed`; bảng khác vẫn song song.
+- **Hiệu năng:** mỗi UPDATE/DELETE quét bảng đích trừ khi có index hỗ trợ; hãy tạo index không-unique trên cột chọn lọc ở target. Bảng lớn dưới tải ghi cao sẽ chậm.
+- **Kiểu cột bị từ chối:** `FLOAT/DOUBLE/REAL` (so bằng có thể lệch sau chuyển đổi; mở bằng `keyless_allow_float: true` nếu bạn chấp nhận), `JSON`, kiểu hình học (MySQL `geometry`, `point`...; PG `point/line/box/polygon/circle`), `json`/`xml` của PG. Cột TEXT theo collation PAD SPACE coi `'a'` và `'a '` là bằng nhau: rủi ro lệch hiếm nhưng có.
+- **Verify:** chỉ so **số hàng + checksum không phụ thuộc thứ tự** (`strand verify --mode full`); không chỉ ra hàng lệch và `--repair fix` bị từ chối (nạp lại bảng từ seed). Verify theo mẫu/delta trong lúc chạy bỏ qua bảng keyless.
+- Web UI / `top`: cột key của bảng hiện `full row (keyless)`.
 
 ### 5.2 Snapshot logic với từng kiểu PK
 
@@ -429,6 +479,8 @@ Mỗi phía chọn **một** trong ba cách:
 | `governor.breaker.replica_lag.max` | tắt | Replica lag vượt ngưỡng thì cắt snapshot |
 | `governor.breaker.strand_query_p99.max_ratio` | tắt | Độ trễ query của Strand vượt n lần nền thì cắt snapshot |
 | `verify.delta` | `off` | `on`: verify các khóa CDC vừa chạm (MySQL→MySQL) |
+| `tables.keyless` | tắt | `full_row`: cho bảng không có khóa chạy keyless, chỉ khi dữ liệu đầu từ seed/`--start-at` (mục 5.1.3) |
+| `tables.keyless_allow_float` | `false` | Cho phép cột FLOAT/DOUBLE trong bảng keyless |
 | `verify.post_seed_window` | `30m` | Cửa sổ verify sau seed / `--start-at` (MySQL→MySQL) |
 | `observability.metrics` | tắt | Địa chỉ HTTP cho `/metrics` và `/healthz`, ví dụ `":9464"` |
 | `observability.admin_socket` | tắt | Unix socket cho `top`, `pause`, `resume`, `throttle`, `snapshot add`, `checkpoint`, `verify --mode delta`. Lệnh client mặc định dùng `/run/strand/default.sock` |
@@ -571,7 +623,8 @@ Nó kiểm:
 - **Cấu hình:** kind, `include` không rỗng, `commit_order`, `write_mode`, khóa chưa có tác dụng.
 - **Source MySQL:**
   - Biến binlog/GTID global và từng session.
-  - Bảng tồn tại và có PK.
+  - Bảng tồn tại và có khóa hàng (PK hoặc unique NOT NULL); bảng thiếu khóa được gom vào một lỗi `missing_pk` kèm gợi ý cho từng bảng. Bảng đích đã tồn tại phải có unique index khớp khóa khi nguồn không có PK.
+  - Với `tables.keyless: full_row`: điều kiện seed, kiểu cột, `REPLICA IDENTITY FULL` (PG) và cảnh báo hiệu năng cho từng bảng keyless.
   - Mẫu include khớp ít nhất một bảng.
   - Partial JSON.
 - **MySQL→PG:** ánh xạ kiểu, collation khóa, giá trị không chuyển được.
@@ -1011,7 +1064,8 @@ Exit 1 là lỗi tạm, nên tự restart. Exit 2–5 và 10 cần người xem.
 | 1 | (không phân loại) | Mất kết nối, lỗi tạm | Tự restart; xem log nếu lặp lại |
 | 2 | `invalid_syntax`, `invalid_connection`, … | Cấu hình hoặc cờ sai, khóa lạ | Sửa cấu hình |
 | 3 | `binlog_config_invalid` | Biến binlog/GTID sai; PG `wal_level`, publication partition | Sửa theo thông báo (mục 4) |
-| 3 | `missing_pk` | Bảng không có PK | Thêm PK hoặc loại bảng |
+| 3 | `missing_pk` | Bảng không có PK/unique NOT NULL (hoặc PG chưa có REPLICA IDENTITY phù hợp; hoặc bảng đích thiếu unique index khớp; hoặc bảng keyless bị snapshot logic) | Chạy lệnh `ALTER TABLE` được in trong thông báo (mục 5.1.2), loại bảng, hoặc keyless + seed (mục 5.1.3) |
+| 5 | `keyless_row_missing` | UPDATE/DELETE của bảng keyless không khớp hàng nào ở target (target lệch) | Nạp lại bảng từ seed; `strand verify --mode full` để xem số hàng/checksum |
 | 3 | `type_unmappable` | Kiểu không ánh xạ được; PK không snapshot logic được | Mục 3.2, 5.2 |
 | 3 | `collation_looser` | Collation khóa ở target lỏng hơn source | Dùng collation chặt hơn (PG: `"C"`) |
 | 3 | `seed_invariant_failed`, `prerelease_tool` | `seed plan`/`apply` từ chối | Sửa đúng điều kiện SD nêu ra |
@@ -1101,6 +1155,8 @@ strand verify -c billing.yaml --mode full --table public.orders
 ### 10.1 FAQ
 
 **Có phải liệt kê từng bảng không?** Không. `app.*` là cả database, `*.*` là cả instance (mục 2).
+
+**Bảng của tôi không có PRIMARY KEY, làm sao?** Nếu có UNIQUE index mà mọi cột NOT NULL, Strand dùng nó (mục 5.1). Nếu không, `strand validate` in lệnh `ALTER TABLE` thêm cột khóa ẩn cho từng bảng (mục 5.1.2), hoặc với PG lệnh `REPLICA IDENTITY USING INDEX`. Bảng không thể thêm khóa và có dữ liệu đầu từ seed: chế độ keyless (mục 5.1.3).
 
 **Tại sao bảng của tôi bị từ chối snapshot logic?** PK của nó có kiểu hoặc collation mà Strand không chứng minh được thứ tự (mục 5.2). Thông báo lỗi nêu cột và lý do. Cách xử lý: seed từ backup, hoặc đổi collation (PG: `COLLATE "C"`).
 

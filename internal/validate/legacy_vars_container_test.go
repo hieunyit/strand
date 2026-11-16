@@ -41,7 +41,7 @@ func TestCompatM56_Container_CheckMySQLSource56(t *testing.T) {
 	if err := CheckMySQLSource(ctx, db, []string{"v56.a"}); err != nil {
 		t.Errorf("5.6 with GTID+ROW must pass: %v", err)
 	}
-	if err := CheckMySQLSource(ctx, db, []string{"v56.n"}); err == nil || !strings.Contains(err.Error(), "no primary key") {
+	if err := CheckMySQLSource(ctx, db, []string{"v56.n"}); err == nil || !strings.Contains(err.Error(), "no usable row key") {
 		t.Errorf("want missing PK, got %v", err)
 	}
 	if _, err := CheckMySQLSessionBinlog(ctx, db); err != nil {

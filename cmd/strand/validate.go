@@ -105,7 +105,9 @@ func newValidateCmd() *cobra.Command {
 						}
 						defer dstDB.Close()
 					}
-					mpWarns, mpErr := typemap.CheckMySQLToPGTablesMapped(cmd.Context(), db, dstDB, tables, typemap.DefaultOptions(), cfg.Tables.Rename)
+					tmOpts := typemap.DefaultOptions()
+					tmOpts.AllowKeyless = cfg.Tables.KeylessOn()
+					mpWarns, mpErr := typemap.CheckMySQLToPGTablesMapped(cmd.Context(), db, dstDB, tables, tmOpts, cfg.Tables.Rename)
 					for _, w := range mpWarns {
 						fmt.Fprintln(os.Stderr, "warning: "+w)
 					}
