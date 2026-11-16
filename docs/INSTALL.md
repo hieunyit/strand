@@ -431,7 +431,8 @@ Mọi biến nằm trong `.env.example` (kèm giải thích). Các biến chính
 | --- | --- |
 | `POSTGRES_PASSWORD` | Bắt buộc. Mật khẩu của `db`; nằm trong DSN dạng URL nên dùng chữ-số (`openssl rand -hex 24`). |
 | `STRAND_WEB_DATABASE_DSN` | DSN metadata (compose tự dựng từ `POSTGRES_PASSWORD`). Thắng khóa `database.dsn` của `web.yaml`. Không bao giờ được ghi vào log; lỗi kết nối đã che mật khẩu. |
-| `STRAND_WEB_SECRET_KEY` | Khóa AES-256-GCM (64 ký tự hex, hoặc base64 32 byte, hoặc passphrase từ 16 ký tự) để lưu `.env` của pipeline (mật khẩu nguồn/đích) **mã hóa** trong DB. Không đặt: `.env` chỉ nằm trên volume `/etc/strand`, DB không giữ bí mật nào của pipeline (web ghi một dòng log nói rõ). Mất khóa thì `.env` trong DB không giải mã được: giữ khóa ngoài bản sao lưu DB. |
+| `STRAND_WEB_SECRET_KEY` | Khóa AES-256-GCM (64 ký tự hex, hoặc base64 32 byte, hoặc passphrase từ 16 ký tự) để lưu `.env` của pipeline (mật khẩu nguồn/đích) **mã hóa** trong DB. Không đặt: `.env` chỉ nằm trên volume `/etc/strand`, DB không giữ bí mật nào của pipeline (web ghi một dòng log nói rõ). Mất khóa thì `.env` trong DB không giải mã được: giữ khóa ngoài bản sao lưu DB. Khởi động với khóa **khác** khóa đã mã hóa các `.env` trong DB: web từ chối khởi động với lỗi nói rõ (không chạy tiếp với bản sao không giải mã được). |
+| `STRAND_WEB_SECRET_KEY_PREVIOUS` | Chỉ khi **đổi khóa**: đặt khóa mới vào `STRAND_WEB_SECRET_KEY`, khóa cũ vào biến này, khởi động lại; web mã hóa lại mọi `.env` trong DB bằng khóa mới (log `re-encrypted ...`), sau đó xóa biến này. |
 | `STRAND_WEB_ADMIN_PASSWORD` hoặc `STRAND_WEB_ADMIN_PASSWORD_FILE` | Mật khẩu admin, chỉ dùng khi database chưa có admin (tối thiểu 8 ký tự). `_FILE` dành cho docker secrets (`/run/secrets/...`), tránh để mật khẩu lộ qua `docker inspect`. Đổi sau này: `docker compose exec web strand web passwd`; token script: `docker compose exec web strand web token`. |
 | `STRAND_WEB_BIND`, `STRAND_WEB_PORT` | Địa chỉ/cổng publish trên host (mặc định `0.0.0.0:8080`). |
 | `STRAND_WEB_ALLOW_PLAIN_HTTP`, `STRAND_WEB_TLS_CERT`, `STRAND_WEB_TLS_KEY`, `STRAND_WEB_SECURE_COOKIES`, `STRAND_WEB_TRUST_FORWARDED_FOR` | Mạng và TLS, xem 10.5. |
@@ -479,5 +480,6 @@ Nếu cần `web.yaml` riêng (ví dụ `pipelines:` khai báo tường minh), m
 | --- | --- |
 | `web` khởi động lại liên tục, log `connect to metadata database` | `db` chưa sẵn sàng hoặc sai `POSTGRES_PASSWORD` (đổi mật khẩu sau khi `pg_data` đã tạo thì không có hiệu lực: `ALTER USER strand PASSWORD '...'`, hoặc `docker compose down -v` nếu chưa có dữ liệu). Web tự thử lại tối đa 60 giây với backoff. |
 | `/healthz` trả 503 | Mất kết nối DB; web vẫn chạy nhưng đăng nhập/thao tác ghi sẽ lỗi (audit từ chối thao tác ghi khi không ghi được). Pipeline đang chạy không bị ảnh hưởng. |
+| `web` không khởi động, log `STRAND_WEB_SECRET_KEY does not match the key ...` | Khóa đã đổi so với lúc mã hóa `.env` trong DB. Dùng lại khóa cũ, hoặc đổi khóa đúng cách với `STRAND_WEB_SECRET_KEY_PREVIOUS` (10.2). |
 | `.env` của pipeline không còn sau khi tạo lại container | Chưa đặt `STRAND_WEB_SECRET_KEY` nên DB không giữ `.env`; đặt khóa rồi mở tab Config > Env và lưu lại để đưa vào DB. |
 | Sửa tay `/etc/strand/<name>.yaml` của pipeline do web tạo, bị ghi đè | DB là nguồn sự thật: sửa qua web (Config) hoặc API. Web ghi log `file differs from the database copy`. |

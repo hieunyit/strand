@@ -71,6 +71,8 @@ type Options struct {
 	Store store.Store
 	// SecretKey thay STRAND_WEB_SECRET_KEY (test).
 	SecretKey string
+	// PreviousSecretKey thay STRAND_WEB_SECRET_KEY_PREVIOUS (test).
+	PreviousSecretKey string
 }
 
 // New dựng Server (chưa lắng nghe, chưa chạy sampler). Trả lỗi nếu cấu hình không đủ điều kiện khởi động.
@@ -100,6 +102,10 @@ func New(o Options) (*Server, error) {
 		var err error
 		if db, err = newMetaDB(o.Store, secret, o.Logger); err != nil {
 			return nil, err
+		}
+		db.previous = o.PreviousSecretKey
+		if db.previous == "" {
+			db.previous = strings.TrimSpace(os.Getenv(EnvSecretKeyPrevious))
 		}
 	}
 	audit, err := OpenAuditLog(o.Config.StateDir, o.Now)
@@ -153,6 +159,9 @@ func New(o Options) (*Server, error) {
 func (s *Server) initDB() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	if err := s.db.checkSecretKey(ctx, s.db.previous); err != nil {
+		return err
+	}
 	sum, err := s.importFiles(ctx)
 	if err != nil {
 		return fmt.Errorf("import file state into database: %w", err)

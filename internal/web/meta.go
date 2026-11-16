@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -47,10 +48,11 @@ func (c *Config) DBEnabled() bool { return c.Database.DSN != "" }
 
 // metaDB là kho metadata PostgreSQL (hoặc Mem trong test) gắn với một Server.
 type metaDB struct {
-	st     store.Store
-	box    *store.Box // nil: không có STRAND_WEB_SECRET_KEY, .env chỉ nằm trên đĩa
-	log    *slog.Logger
-	secret string
+	st       store.Store
+	box      *store.Box // nil: không có STRAND_WEB_SECRET_KEY, .env chỉ nằm trên đĩa
+	log      *slog.Logger
+	secret   string
+	previous string // STRAND_WEB_SECRET_KEY_PREVIOUS (xoay khóa)
 
 	mu      sync.Mutex
 	admin   store.Admin
@@ -129,6 +131,94 @@ func SetStorePassword(ctx context.Context, st store.Store, hash string) error {
 	}
 	all := time.Now().Add(100 * 365 * 24 * time.Hour)
 	return st.PurgeSessions(ctx, all, all)
+}
+
+// ---- khóa bí mật: kiểm tra và xoay khóa ----
+
+const (
+	keyCheckMetaKey = "secret_key_check"
+	keyCheckPlain   = "strand-web secret key check"
+	keyCheckAAD     = "\x00key-check"
+	// EnvSecretKeyPrevious: khóa cũ khi xoay khóa (một lần khởi động: giải mã bằng khóa cũ, mã hóa lại bằng khóa mới).
+	EnvSecretKeyPrevious = "STRAND_WEB_SECRET_KEY_PREVIOUS"
+)
+
+// checkSecretKey đảm bảo STRAND_WEB_SECRET_KEY là đúng khóa đã mã hóa các .env trong DB. Khóa sai thì lỗi rõ
+// ràng khi khởi động (trước đây: mỗi lần start chỉ có cảnh báo "decrypt failed" và .env trong DB lặng lẽ bị
+// mã hóa lại bằng khóa khác khi sửa). Có STRAND_WEB_SECRET_KEY_PREVIOUS: mã hóa lại mọi .env sang khóa mới.
+func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
+	if m.box == nil {
+		return nil
+	}
+	return m.st.Locked(ctx, "secret-key", func(ctx context.Context) error {
+		var old *store.Box
+		if previous != "" {
+			b, err := store.NewBox(previous)
+			if err != nil {
+				return fmt.Errorf("%s: %w", EnvSecretKeyPrevious, err)
+			}
+			old = b
+		}
+		opens := func(b *store.Box, sealed []byte, aad string) bool {
+			_, err := b.Open(sealed, aad)
+			return err == nil
+		}
+		v, have, err := m.st.MetaGet(ctx, keyCheckMetaKey)
+		if err != nil {
+			return err
+		}
+		rows, err := m.st.ListPipelines(ctx)
+		if err != nil {
+			return err
+		}
+		currentOK := true
+		if have {
+			currentOK = opens(m.box, []byte(v), keyCheckAAD)
+		} else {
+			// DB của bản cũ chưa có dấu kiểm: thử với các .env đã lưu.
+			for _, r := range rows {
+				if len(r.EnvEnc) > 0 && !opens(m.box, r.EnvEnc, r.Name) {
+					currentOK = false
+					break
+				}
+			}
+		}
+		if !currentOK && old == nil {
+			return fmt.Errorf("%s does not match the key the pipeline .env copies in the database were encrypted with: "+
+				"start with the previous key, or to rotate set %s=<previous key> together with the new %s (all copies are re-encrypted on start)",
+				EnvSecretKey, EnvSecretKeyPrevious, EnvSecretKey)
+		}
+		if old != nil {
+			n := 0
+			for _, r := range rows {
+				if len(r.EnvEnc) == 0 || opens(m.box, r.EnvEnc, r.Name) {
+					continue
+				}
+				pt, err := old.Open(r.EnvEnc, r.Name)
+				if err != nil {
+					return fmt.Errorf("pipeline %s: .env copy opens with neither %s nor %s", r.Name, EnvSecretKey, EnvSecretKeyPrevious)
+				}
+				if r.EnvEnc, err = m.box.Seal(pt, r.Name); err != nil {
+					return err
+				}
+				if err := m.st.UpsertPipeline(ctx, r); err != nil {
+					return err
+				}
+				n++
+			}
+			if n > 0 {
+				m.log.Info("re-encrypted pipeline .env copies with the new secret key; remove "+EnvSecretKeyPrevious+" now", "pipelines", n)
+			}
+		}
+		if have && currentOK {
+			return nil
+		}
+		sealed, err := m.box.Seal([]byte(keyCheckPlain), keyCheckAAD)
+		if err != nil {
+			return err
+		}
+		return m.st.MetaSet(ctx, keyCheckMetaKey, string(sealed))
+	})
 }
 
 // ---- audit sink ----

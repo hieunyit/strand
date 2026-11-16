@@ -52,6 +52,7 @@ services:
     environment:
       STRAND_WEB_DATABASE_DSN: postgres://strand:${POSTGRES_PASSWORD}@db:5432/strand?sslmode=disable
       STRAND_WEB_SECRET_KEY: ${STRAND_WEB_SECRET_KEY:-}
+      STRAND_WEB_SECRET_KEY_PREVIOUS: ${STRAND_WEB_SECRET_KEY_PREVIOUS:-}
       STRAND_WEB_ADMIN_PASSWORD: ${STRAND_WEB_ADMIN_PASSWORD:-}
       # Docker secrets thay cho biến trên: bỏ comment khối `secrets` cuối file, đặt
       #   STRAND_WEB_ADMIN_PASSWORD_FILE: /run/secrets/strand_admin_password

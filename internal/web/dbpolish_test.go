@@ -194,3 +194,39 @@ func TestPasswordChangeRevokesDatabaseSessions(t *testing.T) {
 		t.Fatalf("%d sessions left after password reset via init", n)
 	}
 }
+
+// A changed STRAND_WEB_SECRET_KEY used to start fine and only log "decrypt failed" on every start/validate,
+// while the next .env edit re-sealed that pipeline with the other key (mixed keys). Now: a clear startup
+// error, and STRAND_WEB_SECRET_KEY_PREVIOUS rotates every sealed copy to the new key.
+func TestSecretKeyMismatchAndRotation(t *testing.T) {
+	st := store.NewMem()
+	cfgDir := t.TempDir()
+	e := dbEnv(t, st, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir; c.Scan = nil },
+		func(o *Options) { o.SecretKey = dbKey })
+	c, csrf := e.loginOK()
+	e.setExit(0)
+	if code, _, _, out := createNP(t, e, c, csrf, newOpts("kp", "SrcSecretPw", "DstSecretPw")); code != 200 {
+		t.Fatalf("create: %d %s", code, out)
+	}
+	cfg := *e.srv.cfg
+	const newKey = "fedcba9876543210fedcba9876543210"
+	_, err := New(Options{Config: &cfg, Version: "test", Commander: e.cmd, Store: st, SecretKey: newKey})
+	if err == nil || !strings.Contains(err.Error(), EnvSecretKeyPrevious) {
+		t.Fatalf("start with a different key: err = %v, want a clear mismatch error", err)
+	}
+	if _, err := New(Options{Config: &cfg, Version: "test", Commander: e.cmd, Store: st, SecretKey: newKey, PreviousSecretKey: dbKey}); err != nil {
+		t.Fatalf("rotation start: %v", err)
+	}
+	row, _, _ := st.GetPipeline(context.Background(), "kp")
+	nb, _ := store.NewBox(newKey)
+	if pt, err := nb.Open(row.EnvEnc, "kp"); err != nil || !strings.Contains(string(pt), "SrcSecretPw") {
+		t.Fatalf(".env not re-encrypted with the new key: %v", err)
+	}
+	// After rotation the new key alone starts; the old one is now rejected.
+	if _, err := New(Options{Config: &cfg, Version: "test", Commander: e.cmd, Store: st, SecretKey: newKey}); err != nil {
+		t.Fatalf("start with the new key after rotation: %v", err)
+	}
+	if _, err := New(Options{Config: &cfg, Version: "test", Commander: e.cmd, Store: st, SecretKey: dbKey}); err == nil {
+		t.Fatal("old key accepted after rotation")
+	}
+}
