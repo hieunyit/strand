@@ -815,6 +815,8 @@ Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, s�
 
 `strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng, chế độ sửa YAML và .env), **Logs**. Từ M3 có **thao tác**; M5 có **sửa cấu hình** và **tạo pipeline mới**; từ M4 có **wizard Repair và Promote** (đoạn dưới). REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 
+**Chỉnh tốc độ snapshot trên web.** Form tạo pipeline có mục "Snapshot speed & safety" (tùy chọn), và tab Config có thẻ **Tuning** cho pipeline đang có: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.*` (`strand_query_p99.max_ratio`, `replica_lag.max`), `resources.workers.max` (mục 6.2, 8.1). Chỉ gồm khóa đã có tác dụng, không gồm khóa ở 6.3. Lưu qua đường sửa cấu hình thường (validate, diff, `.bak`), có hiệu lực sau restart; đổi nóng tốc độ đọc dùng Throttle (tab Graph). `GET/POST /api/v1/pipelines/{name}/tuning` trong `docs/WEB-API.md`.
+
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
 **Cài nhanh: `strand web init`.** Một lệnh thay cho chép `web.yaml`, chown/chmod, `web passwd`, `web token` và enable unit:

@@ -219,6 +219,7 @@ type detailBody struct {
 	Checkpoint CheckpointView
 	Errors     ErrorsView
 	Config     ConfigView
+	Tuning     TuningView
 	Env        EnvView
 	Logs       LogsView
 	Follow     bool
@@ -303,6 +304,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	case "config":
 		_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "config.view", Pipeline: p.Name})
 		b.Config = s.configView(p)
+		b.Tuning = s.tuningView(p)
 		b.Env = s.getEnvView(p)
 		refresh = 0
 	case "logs":

@@ -74,6 +74,8 @@ type NewPipelineOpts struct {
 	Windows         []string `json:"windows,omitempty"`
 	BreakerMaxRatio float64  `json:"breaker_max_ratio,omitempty"`
 	ReplicaLagMax   string   `json:"replica_lag_max,omitempty"`
+	GovAlgorithm    string   `json:"governor_algorithm,omitempty"`
+	LagSLO          string   `json:"lag_slo,omitempty"`
 
 	Metrics   string `json:"metrics,omitempty"`
 	LogFormat string `json:"log_format,omitempty"`
@@ -173,14 +175,20 @@ bootstrap:
 
 resources:
   spool: { path: {{.SpoolDir}} }
-{{- if .IOPSSoft}}
-  source: { iops: { soft: {{.IOPSSoft}}, hard: {{.IOPSHard}} } }
+{{- if or .IOPSSoft .IOPSHard}}
+  source: { iops: { {{if .IOPSSoft}}soft: {{.IOPSSoft}}{{end}}{{if and .IOPSSoft .IOPSHard}}, {{end}}{{if .IOPSHard}}hard: {{.IOPSHard}}{{end}} } }
 {{- end}}
 {{- if .Workers}}
   workers: { max: {{.Workers}} }
 {{- end}}
 
 governor:
+{{- if .GovAlgorithm}}
+  algorithm: {{.GovAlgorithm}}
+{{- end}}
+{{- if .LagSLO}}
+  lag_slo: {{.LagSLO}}
+{{- end}}
 {{- if or .BreakerMaxRatio .ReplicaLagMax}}
   breaker: { {{if .BreakerMaxRatio}}strand_query_p99: { max_ratio: {{.BreakerMaxRatio}} }{{if .ReplicaLagMax}}, {{end}}{{end}}{{if .ReplicaLagMax}}replica_lag: { max: {{.ReplicaLagMax}} }{{end}} }
 {{- end}}
@@ -219,6 +227,8 @@ type tmplData struct {
 	Windows           []string
 	BreakerMaxRatio   float64
 	ReplicaLagMax     string
+	GovAlgorithm      string
+	LagSLO            string
 	Metrics           string
 	LogFormat         string
 	SourceMySQL       bool
@@ -261,6 +271,8 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		Windows:           opts.Windows,
 		BreakerMaxRatio:   opts.BreakerMaxRatio,
 		ReplicaLagMax:     opts.ReplicaLagMax,
+		GovAlgorithm:      opts.GovAlgorithm,
+		LagSLO:            opts.LagSLO,
 		Metrics:           opts.Metrics,
 		LogFormat:         opts.LogFormat,
 	}
@@ -449,6 +461,38 @@ func checkOpts(opts NewPipelineOpts) error {
 				return err
 			}
 		}
+	}
+	// Tuning snapshot: khoảng giá trị khớp với tab Config; rỗng/0 = mặc định.
+	if err := validateWindowList(opts.Windows); err != nil {
+		return fmt.Errorf("windows: %v", err)
+	}
+	if opts.GovAlgorithm != "" {
+		if err := validateAlgorithm(opts.GovAlgorithm); err != nil {
+			return fmt.Errorf("governor_algorithm: %v", err)
+		}
+	}
+	for field, v := range map[string]string{"lag_slo": opts.LagSLO, "replica_lag_max": opts.ReplicaLagMax} {
+		if v != "" {
+			if err := validateDuration(v); err != nil {
+				return fmt.Errorf("%s: %v", field, err)
+			}
+		}
+	}
+	if opts.BreakerMaxRatio != 0 {
+		if err := validateRatio(opts.BreakerMaxRatio); err != nil {
+			return fmt.Errorf("breaker_max_ratio: %v", err)
+		}
+	}
+	for field, n := range map[string]int{"iops_soft": opts.IOPSSoft, "iops_hard": opts.IOPSHard} {
+		if n < 0 || n > 10000000 {
+			return fmt.Errorf("%s: %d is not an integer between 1 and 10000000", field, n)
+		}
+	}
+	if err := validateIOPSPair(opts.IOPSSoft, opts.IOPSHard); err != nil {
+		return err
+	}
+	if opts.ChunkRows < 0 || opts.ChunkRows > 10000000 {
+		return fmt.Errorf("chunk_rows: %d is not an integer between 1 and 10000000", opts.ChunkRows)
 	}
 	if td := strings.TrimSpace(opts.TargetDatabase); td != "" && !plainDBNameRE.MatchString(td) {
 		return fmt.Errorf("target_database %q is not a plain database name (letters, digits, _ and $ only)", td)
@@ -818,6 +862,8 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.CommitOrder = f.Get("commit_order")
 	opts.SpoolDir = f.Get("spool_dir")
 	opts.ReplicaLagMax = f.Get("replica_lag_max")
+	opts.GovAlgorithm = f.Get("governor_algorithm")
+	opts.LagSLO = f.Get("lag_slo")
 	opts.Metrics = f.Get("metrics")
 	opts.LogFormat = f.Get("log_format")
 	opts.Databases = splitList(f.Get("databases"))

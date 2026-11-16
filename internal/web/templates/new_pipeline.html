@@ -118,6 +118,49 @@
       </div>
     </details>
 
+    <details class="np-adv" id="np-tuning">
+      <summary>6. Snapshot speed &amp; safety (optional)</summary>
+      <p class="muted small">Leave a field empty to use Strand's default. These can be changed later in the Config tab of the pipeline (Tuning card).</p>
+      <div class="np-row">
+        <label>Source read limit, soft (tokens/s)
+          <input type="number" name="iops_soft" class="num mono" min="1" placeholder="default: 600">
+          <small class="muted">How fast the snapshot reads the source. Lower = gentler on the source, slower snapshot.</small>
+        </label>
+        <label>Source read limit, hard (tokens/s)
+          <input type="number" name="iops_hard" class="num mono" min="1" placeholder="default: none">
+          <small class="muted">Ceiling for the adaptive governor; at least the soft limit.</small>
+        </label>
+        <label>Chunk rows
+          <input type="number" name="chunk_rows" class="num mono" min="1" placeholder="default: auto (5000)">
+          <small class="muted">Rows per snapshot chunk. Empty = auto-tuned.</small>
+        </label>
+        <label>Snapshot windows
+          <input type="text" name="windows" class="mono" placeholder="default: any time, e.g. 22:00-06:00">
+          <small class="muted">Hours the snapshot may run (local time of the process), comma-separated; may cross midnight.</small>
+        </label>
+        <label>Governor algorithm
+          <select name="governor_algorithm">
+            <option value="" selected>default: onoff</option>
+            <option value="static">static: fixed rate, no breaker</option>
+            <option value="onoff">onoff: pause/resume by lag</option>
+            <option value="grace-v2">grace-v2: adaptive rate with breaker</option>
+          </select>
+        </label>
+        <label>Lag target (SLO)
+          <input type="text" name="lag_slo" class="num mono" placeholder="default: 5s">
+          <small class="muted">The snapshot slows or pauses when replication lag exceeds this.</small>
+        </label>
+        <label>Breaker: query latency ratio
+          <input type="number" name="breaker_max_ratio" class="num mono" min="1.1" step="any" placeholder="default: off, e.g. 3">
+          <small class="muted">Pause the snapshot when Strand's query latency is this many times its baseline. Must be greater than 1.</small>
+        </label>
+        <label>Breaker: replica lag max
+          <input type="text" name="replica_lag_max" class="num mono" placeholder="default: off, e.g. 30s">
+          <small class="muted">Pause the snapshot when a source replica lags more than this.</small>
+        </label>
+      </div>
+    </details>
+
     <div class="np-actions">
       <button class="btn primary" type="submit" id="btn-create-pipeline">Create and validate</button>
       <a href="/pipelines" class="btn">Cancel</a>
