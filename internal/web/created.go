@@ -18,10 +18,39 @@ type createdFileDoc struct {
 	Pipelines []PipelineEntry `json:"pipelines"`
 }
 
-func (r *Registry) createdPath() string { return filepath.Join(r.cfg.StateDir, CreatedFile) }
+func (r *Registry) createdPath() string {
+	if r.db != nil {
+		return "the metadata database"
+	}
+	return filepath.Join(r.cfg.StateDir, CreatedFile)
+}
 
-// loadCreated đọc registry state_dir; file chưa có = rỗng. Lỗi parse trả error (Refresh ghi vào Warnings).
+// loadCreated trả pipeline do web tạo: từ PostgreSQL (chế độ DB; lỗi DB thì giữ danh sách lần trước) hoặc
+// từ <state_dir>/pipelines.json.
 func (r *Registry) loadCreated() ([]PipelineEntry, error) {
+	if r.db == nil {
+		return r.loadCreatedFile()
+	}
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := r.db.st.ListPipelines(ctx)
+	if err != nil {
+		r.createdMu.Lock()
+		defer r.createdMu.Unlock()
+		return r.lastDB, fmt.Errorf("read pipelines from database (showing the last known list): %w", err)
+	}
+	out := make([]PipelineEntry, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, PipelineEntry{Name: p.Name, Config: p.ConfigPath, EnvFile: p.EnvPath, SystemdUnit: p.SystemdUnit, LogFile: p.LogFile, PidFile: p.PidFile})
+	}
+	r.createdMu.Lock()
+	r.lastDB = out
+	r.createdMu.Unlock()
+	return out, nil
+}
+
+// loadCreatedFile đọc registry state_dir; file chưa có = rỗng. Lỗi parse trả error (Refresh ghi vào Warnings).
+func (r *Registry) loadCreatedFile() ([]PipelineEntry, error) {
 	b, err := os.ReadFile(r.createdPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -38,6 +67,16 @@ func (r *Registry) loadCreated() ([]PipelineEntry, error) {
 
 // AddCreated lưu entry vào <state_dir>/pipelines.json (thay entry cùng tên nếu có).
 func (r *Registry) AddCreated(e PipelineEntry) error {
+	if r.db != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		row, _, err := r.db.st.GetPipeline(ctx, e.Name)
+		if err != nil {
+			return err
+		}
+		row.Name, row.ConfigPath, row.EnvPath, row.SystemdUnit, row.LogFile, row.PidFile = e.Name, e.Config, e.EnvFile, e.SystemdUnit, e.LogFile, e.PidFile
+		return r.db.st.UpsertPipeline(ctx, row)
+	}
 	r.createdMu.Lock()
 	defer r.createdMu.Unlock()
 	cur, err := r.loadCreated()

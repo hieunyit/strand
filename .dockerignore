@@ -1,0 +1,15 @@
+.git
+.claude
+.env
+.env.*
+!.env.example
+reports
+spec
+tla
+questions
+docs
+tests
+dev
+packaging
+*.md
+**/*_test.go

@@ -58,6 +58,11 @@ type Config struct {
 	// AllowPlainHTTP: cho phép bind ngoài loopback (ví dụ 0.0.0.0:8080) KHÔNG có TLS. Mật khẩu và cookie
 	// phiên đi dạng rõ trên mạng: chỉ dùng trong mạng nội bộ tin cậy. Mặc định false.
 	AllowPlainHTTP bool `yaml:"allow_plain_http,omitempty"`
+	// Database: kho metadata PostgreSQL (mục `database:` hoặc STRAND_WEB_DATABASE_DSN). Rỗng = chế độ file.
+	Database DatabaseConfig `yaml:"database,omitempty"`
+	// ShutdownStopPipelines: khi web thoát (SIGTERM) thì dừng êm các pipeline nền đang chạy; lần khởi động sau
+	// tự chạy lại theo trạng thái mong muốn (chế độ DB). Dùng cho container.
+	ShutdownStopPipelines bool `yaml:"shutdown_stop_pipelines,omitempty"`
 	// SampleInterval, tính bằng giây (mặc định 5); chủ yếu cho test.
 	SampleIntervalSec int `yaml:"sample_interval_sec,omitempty"`
 
@@ -97,17 +102,32 @@ func LoadConfig(path string) (*Config, error) {
 	if c.StateDir == "" {
 		c.StateDir = DefaultStateDir
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvDatabaseDSN)); v != "" {
+		c.Database.DSN = v // biến môi trường thắng web.yaml
+	}
+	switch c.Database.Audit {
+	case "":
+		c.Database.Audit = AuditBoth
+	case AuditDB, AuditFile, AuditBoth:
+	default:
+		return nil, fmt.Errorf("database.audit must be db, file or both (got %q)", c.Database.Audit)
+	}
 	return &c, nil
 }
 
 // Validate kiểm các điều kiện bắt buộc để khởi động: có mật khẩu, TLS khi không loopback,
 // tên pipeline hợp lệ và không trùng.
-func (c *Config) Validate() error {
-	if c.PasswordHash == "" {
-		return errors.New("no admin password set: run `strand web passwd --config <web.yaml>` first")
-	}
-	if _, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil {
-		return fmt.Errorf("password_hash is not a valid bcrypt hash: %w", err)
+func (c *Config) Validate() error { return c.validate(c.DBEnabled()) }
+
+// validate: dbMode = mật khẩu nằm trong DB, kiểm lúc mở kho (Server.New) thay vì ở đây.
+func (c *Config) validate(dbMode bool) error {
+	if !dbMode {
+		if c.PasswordHash == "" {
+			return errors.New("no admin password set: run `strand web passwd --config <web.yaml>` first")
+		}
+		if _, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil {
+			return fmt.Errorf("password_hash is not a valid bcrypt hash: %w", err)
+		}
 	}
 	if err := c.ValidateListen(); err != nil {
 		return err

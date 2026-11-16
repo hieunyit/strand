@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"strand/internal/web/store"
 )
 
 // Seams cho test: `strand web init` không được gọi systemctl/mạng/chown thật trong unit test.
@@ -69,6 +72,12 @@ type InitOptions struct {
 	PrintPassword bool
 	// NewToken: tạo (hoặc đổi) token API và in ra một lần.
 	NewToken bool
+	// Store: có thì mật khẩu/token ghi vào PostgreSQL thay vì web.yaml (chế độ DB).
+	Store store.Store
+	// IfNoAdmin: chỉ đặt mật khẩu/token khi kho chưa có admin (bootstrap lần đầu, chạy lại an toàn).
+	IfNoAdmin bool
+	// Quiet: bỏ phần tóm tắt "next steps" (dành cho container).
+	Quiet bool
 
 	Enable bool
 	// Runner mặc định chạy lệnh thật; Poll mặc định GET url tới khi 200.
@@ -205,7 +214,20 @@ func RunInit(o InitOptions) (*InitResult, error) {
 	if err := ValidateInit(eff); err != nil {
 		return nil, err
 	}
-	if o.Password == "" && (existing == nil || existing.PasswordHash == "") {
+	haveAdmin := existing != nil && existing.PasswordHash != ""
+	if o.Store != nil {
+		adm, ok, err := o.Store.Admin(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		haveAdmin = ok && adm.PasswordHash != ""
+		if o.IfNoAdmin && haveAdmin {
+			// Admin đã có: không đổi mật khẩu/token, không in mật khẩu sinh ra.
+			o.Password, o.PrintPassword, o.NewToken = "", false, false
+			fmt.Fprintln(o.Stderr, "admin account already exists in the database: keeping it")
+		}
+	}
+	if o.Password == "" && !haveAdmin {
 		return nil, errors.New("no password: use --password-stdin or --generate-password (or run interactively on a terminal)")
 	}
 	var hash string
@@ -264,13 +286,21 @@ func RunInit(o InitOptions) (*InitResult, error) {
 	}
 
 	if hash != "" {
-		if err := SetConfigKey(o.ConfigPath, "password_hash", hash); err != nil {
+		if o.Store != nil {
+			if err := o.Store.SetPasswordHash(context.Background(), hash); err != nil {
+				return nil, err
+			}
+		} else if err := SetConfigKey(o.ConfigPath, "password_hash", hash); err != nil {
 			return nil, err
 		}
 	}
 	if o.NewToken {
 		res.Token = NewAPIToken()
-		if err := SetConfigKey(o.ConfigPath, "api_token_hash", HashAPIToken(res.Token)); err != nil {
+		if o.Store != nil {
+			if err := o.Store.SetAPITokenHash(context.Background(), HashAPIToken(res.Token)); err != nil {
+				return nil, err
+			}
+		} else if err := SetConfigKey(o.ConfigPath, "api_token_hash", HashAPIToken(res.Token)); err != nil {
 			return nil, err
 		}
 	}
@@ -318,6 +348,9 @@ func RunInit(o InitOptions) (*InitResult, error) {
 		fmt.Fprintf(o.Stdout, "strand-web is up: %s/login\n", res.URL)
 	}
 
+	if o.Quiet {
+		return res, nil
+	}
 	fmt.Fprintf(o.Stdout, "\nSummary\n  config: %s\n  URL:    %s\n  login:  with the admin password set above\n  next:\n", o.ConfigPath, res.URL)
 	if !o.Enable {
 		fmt.Fprintf(o.Stdout, "    - start the service: sudo systemctl enable --now strand-web   (or re-run with --enable)\n")

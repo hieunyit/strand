@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"sync"
 	"time"
+
+	"strand/internal/web/store"
 )
 
 const (
@@ -53,6 +55,8 @@ type SessionStore struct {
 	mu  sync.Mutex
 	m   map[string]*Session
 	now func() time.Time
+	// db: session lưu trong PostgreSQL (chỉ sha256 của id); phiên sống qua lần khởi động lại web.
+	db *metaDB
 }
 
 // NewSessionStore: now = nil dùng time.Now.
@@ -68,6 +72,16 @@ func (s *SessionStore) Create(ip string) (string, *Session) {
 	tok := randToken(32)
 	t := s.now()
 	sess := &Session{CSRF: randToken(32), Created: t, LastSeen: t, IP: ip}
+	if s.db != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_ = s.db.st.PurgeSessions(ctx, t.Add(-SessionIdleTimeout), t.Add(-SessionMaxAge))
+		if err := s.db.st.PutSession(ctx, store.Session{IDHash: hashKey(tok), CSRF: sess.CSRF, IP: ip, Created: t, LastSeen: t}); err != nil {
+			s.db.log.Error("store session failed", "err", err)
+			return "", nil
+		}
+		return tok, sess
+	}
 	s.mu.Lock()
 	s.gcLocked(t)
 	s.m[hashKey(tok)] = sess
@@ -82,6 +96,9 @@ func (s *SessionStore) Get(tok string) *Session {
 	}
 	k := hashKey(tok)
 	t := s.now()
+	if s.db != nil {
+		return s.getDB(k, t)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess := s.m[k]
@@ -97,8 +114,35 @@ func (s *SessionStore) Get(tok string) *Session {
 	return &c
 }
 
+func (s *SessionStore) getDB(k string, t time.Time) *Session {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row, ok, err := s.db.st.GetSession(ctx, k)
+	if err != nil {
+		s.db.log.Warn("read session failed", "err", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	if t.Sub(row.LastSeen) > SessionIdleTimeout || t.Sub(row.Created) > SessionMaxAge {
+		_ = s.db.st.DeleteSession(ctx, k)
+		return nil
+	}
+	if t.Sub(row.LastSeen) >= time.Second { // gia hạn idle; bỏ qua ghi dày đặc
+		_ = s.db.st.TouchSession(ctx, k, t)
+	}
+	return &Session{CSRF: row.CSRF, Created: row.Created, LastSeen: t, IP: row.IP}
+}
+
 // Delete hủy session (đăng xuất).
 func (s *SessionStore) Delete(tok string) {
+	if s.db != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_ = s.db.st.DeleteSession(ctx, hashKey(tok))
+		return
+	}
 	s.mu.Lock()
 	delete(s.m, hashKey(tok))
 	s.mu.Unlock()
@@ -106,6 +150,12 @@ func (s *SessionStore) Delete(tok string) {
 
 // Len: số session đang giữ (test).
 func (s *SessionStore) Len() int {
+	if s.db != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		n, _ := s.db.st.CountSessions(ctx)
+		return n
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.m)

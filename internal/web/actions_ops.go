@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"strand/internal/admin"
+	"strand/internal/web/store"
 )
 
 // Thao tác của M3 (docs/PLAN-WEB-UI.md §3). Mọi action đi qua apiAction: xác thực, CSRF, whitelist tên
@@ -352,15 +353,27 @@ func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (Ac
 	}
 	switch verb {
 	case ActStart:
-		return s.bgStart(ctx, p)
+		res, err := s.bgStart(ctx, p)
+		if err == nil {
+			s.setDesired(p, store.DesiredRunning)
+		}
+		return res, err
 	case ActStop:
-		return s.bgStop(ctx, p)
+		res, err := s.bgStop(ctx, p)
+		if err == nil {
+			s.setDesired(p, store.DesiredStopped)
+		}
+		return res, err
 	default: // restart
 		res, err := s.bgStop(ctx, p)
 		if err != nil {
 			return res, err
 		}
-		return s.bgStart(ctx, p)
+		res, err = s.bgStart(ctx, p)
+		if err == nil {
+			s.setDesired(p, store.DesiredRunning)
+		}
+		return res, err
 	}
 }
 
@@ -403,6 +416,7 @@ func (r *Registry) invalidateUnit(unit string) {
 
 // runStrand chạy `<strand_binary> <args...>` với môi trường của env_file của pipeline, argv mảng, không shell.
 func (s *Server) runStrand(ctx context.Context, p *Pipeline, args ...string) (string, *int, error) {
+	s.materialize(p.Name) // chế độ DB: file cấu hình/.env được dựng lại từ DB nếu thiếu hoặc khác
 	env, err := p.Env()
 	if err != nil {
 		return "", nil, &ActionError{Status: 500, Msg: "env_file: " + err.Error()}

@@ -92,6 +92,19 @@ func (s *Server) wizPath(kind, pipeline string) string {
 
 // wizLoad đọc state từ đĩa (nil nếu chưa có).
 func (s *Server) wizLoad(kind, pipeline string) (*wizardState, error) {
+	if s.db != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		b, ok, err := s.db.st.GetWizard(ctx, kind, pipeline)
+		if err != nil || !ok {
+			return nil, err
+		}
+		var st wizardState
+		if err := json.Unmarshal(b, &st); err != nil {
+			return nil, fmt.Errorf("wizard state %s-%s: %w", kind, pipeline, err)
+		}
+		return &st, nil
+	}
 	b, err := os.ReadFile(s.wizPath(kind, pipeline))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -107,6 +120,15 @@ func (s *Server) wizLoad(kind, pipeline string) (*wizardState, error) {
 }
 
 func (s *Server) wizSave(st *wizardState) error {
+	if s.db != nil {
+		b, err := json.MarshalIndent(st, "", "  ")
+		if err != nil {
+			return err
+		}
+		ctx, cancel := dbCtx()
+		defer cancel()
+		return s.db.st.PutWizard(ctx, st.Kind, st.Pipeline, b)
+	}
 	p := s.wizPath(st.Kind, st.Pipeline)
 	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
 		return err

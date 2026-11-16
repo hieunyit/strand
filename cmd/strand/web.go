@@ -58,8 +58,8 @@ func newWebPasswdCmd() *cobra.Command {
 		Use:   "passwd",
 		Short: "Đặt mật khẩu admin của Web UI (bcrypt hash vào web.yaml, quyền 0600)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cfgPath == "" {
-				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml)", nil)
+			if cfgPath == "" && os.Getenv(web.EnvDatabaseDSN) == "" {
+				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml, or set "+web.EnvDatabaseDSN+")", nil)
 			}
 			pw, err := readNewPassword(cmd)
 			if err != nil {
@@ -68,6 +68,18 @@ func newWebPasswdCmd() *cobra.Command {
 			h, err := web.HashPassword(pw)
 			if err != nil {
 				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, err.Error(), err)
+			}
+			st, err := web.CLIStore(cmd.Context(), cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			if st != nil {
+				defer st.Close()
+				if err := st.SetPasswordHash(cmd.Context(), h); err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "password hash written to the metadata database (takes effect immediately)")
+				return nil
 			}
 			if err := web.SetConfigKey(cfgPath, "password_hash", h); err != nil {
 				return err
@@ -83,10 +95,23 @@ func newWebTokenCmd() *cobra.Command {
 		Use:   "token",
 		Short: "Sinh token API tĩnh cho script (in ra một lần, ghi sha256 vào web.yaml)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cfgPath == "" {
-				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml)", nil)
+			if cfgPath == "" && os.Getenv(web.EnvDatabaseDSN) == "" {
+				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml, or set "+web.EnvDatabaseDSN+")", nil)
 			}
 			tok := web.NewAPIToken()
+			st, err := web.CLIStore(cmd.Context(), cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			if st != nil {
+				defer st.Close()
+				if err := st.SetAPITokenHash(cmd.Context(), web.HashAPIToken(tok)); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\n", tok)
+				fmt.Fprintln(cmd.ErrOrStderr(), "token printed once; only its sha256 is stored in the metadata database. Use: Authorization: Bearer <token>")
+				return nil
+			}
 			if err := web.SetConfigKey(cfgPath, "api_token_hash", web.HashAPIToken(tok)); err != nil {
 				return err
 			}
@@ -185,13 +210,19 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 				o.Password = strings.TrimRight(line, "\r\n")
 			case term.IsTerminal(int(os.Stdin.Fd())):
 				// Đã có mật khẩu thì không hỏi lại (chạy lại phải idempotent); đổi bằng `strand web passwd`.
-				if c, err := web.LoadConfig(o.ConfigPath); err != nil || c.PasswordHash == "" {
+				if c, err := web.LoadConfig(o.ConfigPath); err != nil || (c.PasswordHash == "" && !c.DBEnabled()) {
 					pw, err := readNewPassword(cmd)
 					if err != nil {
 						return fail(err)
 					}
 					o.Password = pw
 				}
+			}
+			if st, err := web.CLIStore(cmd.Context(), o.ConfigPath, nil); err != nil {
+				return fail(err)
+			} else if st != nil {
+				defer st.Close()
+				o.Store = st
 			}
 			if _, err := web.RunInit(o); err != nil {
 				return fail(err)
@@ -212,6 +243,8 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 	f.BoolVar(&genPw, "generate-password", false, "sinh mật khẩu ngẫu nhiên mạnh và in MỘT lần ra stdout")
 	f.BoolVar(&o.NewToken, "token", false, "tạo thêm token API (in một lần, lưu sha256)")
 	f.BoolVar(&wantEnbl, "enable", false, "chạy `systemctl enable --now strand-web` rồi chờ /login trả 200 (tối đa 30 giây)")
+	f.BoolVar(&o.IfNoAdmin, "if-no-admin", false, "chế độ DB (STRAND_WEB_DATABASE_DSN): chỉ đặt mật khẩu/token khi database chưa có admin (bootstrap container, chạy lại an toàn)")
+	f.BoolVar(&o.Quiet, "quiet", false, "không in phần tóm tắt các bước tiếp theo")
 	f.BoolVar(&o.Force, "force", false, "ghi đè listen/state_dir/scan của web.yaml có sẵn")
 	return cmd
 }

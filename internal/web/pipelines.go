@@ -174,6 +174,8 @@ type Registry struct {
 	warns  []string
 
 	createdMu sync.Mutex
+	db        *metaDB // chế độ DB: pipeline do web tạo nằm trong PostgreSQL
+	lastDB    []PipelineEntry
 
 	unitMu    sync.Mutex
 	unitCache map[string]unitCacheEntry

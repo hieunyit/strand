@@ -2,7 +2,7 @@
 
 Hướng dẫn từng bước cho người vận hành cài Strand lên một máy Linux mới, tạo pipeline đầu tiên và bật Web UI. Đây là bản "làm theo", không lặp lại tham chiếu: mọi khóa cấu hình, lệnh, metric, exit code nằm ở [USAGE.md](USAGE.md); REST API ở [WEB-API.md](WEB-API.md).
 
-Mục lục: Cài nhanh, 1 Yêu cầu và thành phần, 2 Cài đặt, 3 DB nguồn/đích, 4 Pipeline đầu tiên bằng CLI, 5 Cài Web UI, 6 Dùng Web UI, 7 Giám sát, 8 Nâng cấp, gỡ, sao lưu, 9 Sự cố thường gặp.
+Mục lục: Cài nhanh, 1 Yêu cầu và thành phần, 2 Cài đặt, 3 DB nguồn/đích, 4 Pipeline đầu tiên bằng CLI, 5 Cài Web UI, 6 Dùng Web UI, 7 Giám sát, 8 Nâng cấp, gỡ, sao lưu, 9 Sự cố thường gặp, 10 Chạy bằng docker compose (Web UI + PostgreSQL metadata).
 
 ## Cài nhanh
 
@@ -24,6 +24,8 @@ sudo scripts/install.sh --binary ./strand --with-web --generate-password
 - `scripts/install.sh --with-web` mặc định: `--listen 0.0.0.0:8080 --allow-plain-http` (có `--tls-cert`/`--tls-key` thì HTTPS, không `--allow-plain-http`). Máy đã có `web.yaml` nghe loopback thì script tự chuyển sang `0.0.0.0:8080` (in dòng `listen ... -> 0.0.0.0:8080`). Chỉ cho máy chủ: `--listen 127.0.0.1:8080 --force`. Nhớ mở cổng 8080 trên tường lửa.
 - Truy cập từ máy khác (khi nghe loopback): `ssh -L 8080:127.0.0.1:8080 user@strand-host`, mở `http://127.0.0.1:8080` (hoặc reverse proxy/TLS: mục 5.4).
 - Mở thẳng cho mọi máy trong mạng nội bộ, không TLS: `sudo strand web init --listen 0.0.0.0:8080 --allow-plain-http --enable` (web.yaml có sẵn thì thêm `--force`; cài tay: `scripts/install.sh ... --with-web --listen 0.0.0.0:8080 --allow-plain-http`), rồi mở `http://<IP-máy-chủ>:8080` và mở cổng 8080 trên tường lửa. Mật khẩu, cookie phiên và token đi dạng rõ trên mạng: chỉ dùng trong mạng tin cậy; web in cảnh báo mỗi lần khởi động. Có TLS thì dùng `--tls-cert`/`--tls-key` thay cho `--allow-plain-http`.
+
+Triển khai bằng container (Web UI lưu trạng thái trong PostgreSQL, tự chạy lại pipeline khi container khởi động lại): mục 10, `cp .env.example .env && docker compose up -d --build`.
 
 Phần dưới là cài từng bước (khi cần kiểm soát từng việc).
 
@@ -406,3 +408,76 @@ Trước đó nên dừng pipeline êm (`systemctl stop strand@x`, tự ghi chec
 | `systemctl stop strand-web` nhưng pipeline nền vẫn chạy | Đúng thiết kế (`KillMode=process`): dừng bằng nút Stop hoặc `strand stop -c <cfg>` |
 
 Sự cố của chính pipeline (lag, `log_gap`, `missing_pk`, exit code): [USAGE.md](USAGE.md) 8.3 và 10.2.
+
+## 10. Chạy bằng docker compose
+
+Triển khai thật bằng container: `compose.yaml` ở gốc repo chạy hai dịch vụ, `db` (PostgreSQL 17, lưu **metadata của Web UI**) và `web` (`strand web` + các pipeline chế độ nền chạy trong chính container này). Cần Docker Engine với Compose v2. Đây là kho metadata của web, **không** phải DB nguồn hay đích của pipeline.
+
+### 10.1 Chạy nhanh (3 lệnh)
+
+```bash
+cp .env.example .env                       # đặt POSTGRES_PASSWORD (openssl rand -hex 24) và, nên có, STRAND_WEB_SECRET_KEY (openssl rand -hex 32)
+docker compose up -d --build               # build image, db khỏe rồi mới chạy web
+docker compose logs web | grep -A1 "GENERATED ADMIN PASSWORD"   # chỉ cần khi KHÔNG đặt STRAND_WEB_ADMIN_PASSWORD
+```
+
+Mở `http://<host>:8080` và đăng nhập bằng mật khẩu admin. Nếu `STRAND_WEB_ADMIN_PASSWORD` trống, entrypoint sinh mật khẩu ngẫu nhiên và in **một lần** ở lần khởi động đầu (khi database chưa có admin); các lần sau không in và không đổi gì. Kiểm tra: `docker compose ps` (cả hai `healthy`), `curl -s http://localhost:8080/healthz`.
+
+### 10.2 Biến môi trường
+
+Mọi biến nằm trong `.env.example` (kèm giải thích). Các biến chính:
+
+| Biến | Ý nghĩa |
+| --- | --- |
+| `POSTGRES_PASSWORD` | Bắt buộc. Mật khẩu của `db`; nằm trong DSN dạng URL nên dùng chữ-số (`openssl rand -hex 24`). |
+| `STRAND_WEB_DATABASE_DSN` | DSN metadata (compose tự dựng từ `POSTGRES_PASSWORD`). Thắng khóa `database.dsn` của `web.yaml`. Không bao giờ được ghi vào log; lỗi kết nối đã che mật khẩu. |
+| `STRAND_WEB_SECRET_KEY` | Khóa AES-256-GCM (64 ký tự hex, hoặc base64 32 byte, hoặc passphrase từ 16 ký tự) để lưu `.env` của pipeline (mật khẩu nguồn/đích) **mã hóa** trong DB. Không đặt: `.env` chỉ nằm trên volume `/etc/strand`, DB không giữ bí mật nào của pipeline (web ghi một dòng log nói rõ). Mất khóa thì `.env` trong DB không giải mã được: giữ khóa ngoài bản sao lưu DB. |
+| `STRAND_WEB_ADMIN_PASSWORD` hoặc `STRAND_WEB_ADMIN_PASSWORD_FILE` | Mật khẩu admin, chỉ dùng khi database chưa có admin (tối thiểu 8 ký tự). `_FILE` dành cho docker secrets (`/run/secrets/...`), tránh để mật khẩu lộ qua `docker inspect`. Đổi sau này: `docker compose exec web strand web passwd`; token script: `docker compose exec web strand web token`. |
+| `STRAND_WEB_BIND`, `STRAND_WEB_PORT` | Địa chỉ/cổng publish trên host (mặc định `0.0.0.0:8080`). |
+| `STRAND_WEB_ALLOW_PLAIN_HTTP`, `STRAND_WEB_TLS_CERT`, `STRAND_WEB_TLS_KEY`, `STRAND_WEB_SECURE_COOKIES`, `STRAND_WEB_TRUST_FORWARDED_FOR` | Mạng và TLS, xem 10.5. |
+| `WEB_CPUS`, `WEB_MEMORY`, `DB_CPUS`, `DB_MEMORY` | Giới hạn tài nguyên (mặc định web 2 CPU/2 GB, db 1 CPU/1 GB). Log container giới hạn 10 MB x 5 file. |
+
+### 10.3 Dữ liệu nằm ở đâu (volume)
+
+| Volume | Chứa | Ghi chú |
+| --- | --- | --- |
+| `pg_data` | PostgreSQL metadata: tài khoản admin (hash), phiên đăng nhập (chỉ sha256 id), danh sách pipeline do web tạo + YAML cấu hình (+ `.env` mã hóa nếu có khóa) + **trạng thái mong muốn** (running/stopped), lịch sử job, trạng thái wizard, audit log (bảng chỉ-thêm) | nguồn sự thật |
+| `strand_config` (`/etc/strand`) | File cấu hình pipeline `<name>.yaml` (0640) và `<name>.env` (0600), được **dựng lại từ DB** trước khi validate/start nếu thiếu hoặc khác | thả thêm file YAML vào đây thì web tự quét (`scan`), nhưng pipeline kiểu này không nằm trong DB |
+| `strand_state` (`/var/lib/strand-web`) | Spool, state, checkpoint cục bộ của pipeline, output job (`jobs/<id>.log`), bản sao `audit.log` | mất thì pipeline phải dựng lại phần local (checkpoint chính ở target) |
+
+Pipeline chạy **trong container web** ở chế độ nền (không có systemd). Container dừng (`docker compose stop/restart`, `down`): web dừng êm các pipeline đang chạy (chờ ghi checkpoint, tối đa ~100 giây; `stop_grace_period: 120s`) mà **không đổi trạng thái mong muốn**; khi container chạy lại, web tự chạy lại mọi pipeline chế độ nền có trạng thái mong muốn `running` mà chưa chạy (audit `autostart`). Bấm Stop trên web đặt trạng thái `stopped` nên sẽ không tự chạy lại. Phiên đăng nhập nằm trong DB nên khởi động lại web không đăng xuất ai (hạn idle 30 phút / tối đa 12 giờ như cũ).
+
+Nguồn/đích ở máy khác: dùng IP/DNS của chúng trong cấu hình pipeline (container đi ra ngoài bình thường; MySQL nguồn phải cho phép kết nối từ host docker). Nguồn/đích là dịch vụ trên chính host docker: bỏ comment `extra_hosts: ["host.docker.internal:host-gateway"]` trong `compose.yaml` và dùng host `host.docker.internal`; hoặc `network_mode: host` cho `web` (khi đó bỏ `ports`, web nghe trực tiếp trên host, và `db` phải publish cổng 5432 cho web, DSN trỏ `127.0.0.1`). Nguồn/đích là container cùng máy: gắn `web` vào network của chúng (`networks:` ngoài) và dùng tên service.
+
+### 10.4 Sao lưu, nâng cấp
+
+**Sao lưu** = `pg_dump` của metadata + volume pipeline + khóa `STRAND_WEB_SECRET_KEY`:
+
+```bash
+docker compose exec -T db pg_dump -U strand -Fc strand > strand-web-$(date +%F).dump
+docker run --rm -v strand_strand_config:/c -v strand_strand_state:/s -v "$PWD":/b debian:bookworm-slim \
+  tar czf /b/strand-volumes-$(date +%F).tgz /c /s          # tên volume: <tên project>_<volume>, xem docker volume ls
+# khôi phục metadata: docker compose exec -T db pg_restore -U strand -d strand --clean --if-exists < strand-web-XXXX.dump
+```
+
+**Nâng cấp**: `git pull && docker compose up -d --build`. Web mới áp dụng migration schema còn thiếu lúc khởi động (đánh số `NNN_tên.sql`, mỗi file một transaction, bảng `schema_migrations`, advisory lock nên hai instance khởi động cùng lúc vẫn an toàn). Pipeline được dừng êm khi container cũ dừng và tự chạy lại bằng binary mới. Nâng cấp major của PostgreSQL (17 lên 18) cần dump/restore, không đổi tag tại chỗ.
+
+**Chuyển từ cài bằng gói (file) sang compose**: khởi động `web` lần đầu với DSN, web nhập đúng một lần trạng thái file có sẵn (hash trong `web.yaml`, `pipelines.json`, `jobs/`, `wizards/`, `audit.log` trong `state_dir`) vào DB và ghi log đã nhập gì (USAGE.md 7.15). Mount thư mục cũ của `state_dir` và `/etc/strand` vào đúng đường dẫn trong container để import tìm thấy.
+
+### 10.5 TLS và cổng
+
+Mặc định web nghe `0.0.0.0:8080` bằng HTTP thường (`allow_plain_http`): mật khẩu và cookie đi dạng rõ. Chỉ dùng trong mạng tin cậy. Hai cách có TLS:
+
+- **Reverse proxy (khuyến nghị)**: đặt `STRAND_WEB_BIND=127.0.0.1`, `STRAND_WEB_SECURE_COOKIES=true`, `STRAND_WEB_TRUST_FORWARDED_FOR=true`, rồi proxy (nginx, Caddy, Traefik) kết thúc TLS và chuyển tới `127.0.0.1:8080` (mục 5.4).
+- **TLS tại web**: mount chứng chỉ (`./certs:/certs:ro` trong `compose.yaml`) và đặt `STRAND_WEB_TLS_CERT=/certs/tls.crt`, `STRAND_WEB_TLS_KEY=/certs/tls.key`, `STRAND_WEB_ALLOW_PLAIN_HTTP=false`. Healthcheck tự chuyển sang HTTPS.
+
+Nếu cần `web.yaml` riêng (ví dụ `pipelines:` khai báo tường minh), mount file vào container và đặt `STRAND_WEB_CONFIG=/etc/strand/web.yaml`: entrypoint khi đó không sinh file mà dùng file của bạn (vẫn đọc DSN và khóa từ biến môi trường).
+
+### 10.6 Sự cố thường gặp
+
+| Triệu chứng | Nguyên nhân / cách xử lý |
+| --- | --- |
+| `web` khởi động lại liên tục, log `connect to metadata database` | `db` chưa sẵn sàng hoặc sai `POSTGRES_PASSWORD` (đổi mật khẩu sau khi `pg_data` đã tạo thì không có hiệu lực: `ALTER USER strand PASSWORD '...'`, hoặc `docker compose down -v` nếu chưa có dữ liệu). Web tự thử lại tối đa 60 giây với backoff. |
+| `/healthz` trả 503 | Mất kết nối DB; web vẫn chạy nhưng đăng nhập/thao tác ghi sẽ lỗi (audit từ chối thao tác ghi khi không ghi được). Pipeline đang chạy không bị ảnh hưởng. |
+| `.env` của pipeline không còn sau khi tạo lại container | Chưa đặt `STRAND_WEB_SECRET_KEY` nên DB không giữ `.env`; đặt khóa rồi mở tab Config > Env và lưu lại để đưa vào DB. |
+| Sửa tay `/etc/strand/<name>.yaml` của pipeline do web tạo, bị ghi đè | DB là nguồn sự thật: sửa qua web (Config) hoặc API. Web ghi log `file differs from the database copy`. |

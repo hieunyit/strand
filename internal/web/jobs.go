@@ -17,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"strand/internal/web/store"
 )
 
 // FileJobRunner chạy `strand <lệnh>` thành tiến trình con và lưu lịch sử dưới <dir>:
@@ -38,6 +40,7 @@ type FileJobRunner struct {
 	// OnEnd được gọi (không giữ khóa) khi job kết thúc: Server ghi audit "job.end".
 	OnEnd func(JobStatus)
 	// MaxHistory: số job đã xong giữ lại cho mỗi pipeline (mặc định 100).
+	st         store.Store // nil: lịch sử trong <dir>/*.json
 	MaxHistory int
 	// KillGrace: chờ SIGTERM trước khi SIGKILL khi hủy (mặc định 10 s).
 	KillGrace time.Duration
@@ -58,30 +61,24 @@ var JobIDRE = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
 
 // NewFileJobRunner mở thư mục lịch sử (tạo nếu chưa có) và nạp lại job cũ.
 func NewFileJobRunner(dir, bin string, now func() time.Time) (*FileJobRunner, error) {
+	return NewJobRunner(dir, bin, now, nil)
+}
+
+// NewJobRunner như NewFileJobRunner; st != nil thì lịch sử job nằm trong PostgreSQL (output vẫn là file <id>.log).
+func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJobRunner, error) {
 	if now == nil {
 		now = time.Now
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create jobs dir: %w", err)
 	}
-	r := &FileJobRunner{dir: dir, bin: bin, now: now, MaxHistory: 100, KillGrace: 10 * time.Second, jobs: map[string]*JobStatus{}}
-	ents, err := os.ReadDir(dir)
+	r := &FileJobRunner{dir: dir, bin: bin, now: now, MaxHistory: 100, KillGrace: 10 * time.Second, jobs: map[string]*JobStatus{}, st: st}
+	loaded, err := r.loadHistory()
 	if err != nil {
 		return nil, err
 	}
 	var adopt []string
-	for _, e := range ents {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var js JobStatus
-		if json.Unmarshal(b, &js) != nil || !JobIDRE.MatchString(js.ID) || e.Name() != js.ID+".json" {
-			continue
-		}
+	for _, js := range loaded {
 		if js.Running {
 			if js.PID > 0 && procIsBinary(js.PID, bin) {
 				adopt = append(adopt, js.ID)
@@ -101,6 +98,45 @@ func NewFileJobRunner(dir, bin string, now func() time.Time) (*FileJobRunner, er
 	return r, nil
 }
 
+// loadHistory đọc lịch sử job từ DB (nếu có) hoặc thư mục <dir>/*.json.
+func (r *FileJobRunner) loadHistory() ([]JobStatus, error) {
+	var out []JobStatus
+	if r.st != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		rows, err := r.st.ListJobs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load job history from database: %w", err)
+		}
+		for _, row := range rows {
+			var js JobStatus
+			if json.Unmarshal(row.Data, &js) == nil && JobIDRE.MatchString(js.ID) {
+				out = append(out, js)
+			}
+		}
+		return out, nil
+	}
+	ents, err := os.ReadDir(r.dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range ents {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(r.dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var js JobStatus
+		if json.Unmarshal(b, &js) != nil || !JobIDRE.MatchString(js.ID) || e.Name() != js.ID+".json" {
+			continue
+		}
+		out = append(out, js)
+	}
+	return out, nil
+}
+
 func (r *FileJobRunner) jsonPath(id string) string { return filepath.Join(r.dir, id+".json") }
 func (r *FileJobRunner) logPath(id string) string  { return filepath.Join(r.dir, id+".log") }
 
@@ -108,6 +144,12 @@ func (r *FileJobRunner) logPath(id string) string  { return filepath.Join(r.dir,
 func (r *FileJobRunner) persistLocked(js *JobStatus) {
 	b, err := json.MarshalIndent(js, "", "  ")
 	if err != nil {
+		return
+	}
+	if r.st != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_ = r.st.UpsertJob(ctx, store.Job{ID: js.ID, Pipeline: js.Pipeline, Started: js.Started, Running: js.Running, Data: b})
 		return
 	}
 	tmp := r.jsonPath(js.ID) + ".tmp"
@@ -237,6 +279,11 @@ func (r *FileJobRunner) pruneLocked(pipeline string) {
 	}
 	sort.Slice(done, func(i, k int) bool { return done[i].Started.After(done[k].Started) })
 	for _, j := range done[r.MaxHistory:] {
+		if r.st != nil {
+			ctx, cancel := dbCtx()
+			_ = r.st.DeleteJob(ctx, j.ID)
+			cancel()
+		}
 		_ = os.Remove(r.jsonPath(j.ID))
 		_ = os.Remove(r.logPath(j.ID))
 		delete(r.jobs, j.ID)

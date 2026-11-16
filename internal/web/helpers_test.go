@@ -155,6 +155,12 @@ observability:
 // newEnv dựng server: pipeline "orders" (admin socket giả đang chạy, chế độ nền) và tùy chọn thêm.
 func newEnv(t *testing.T, mutate func(e *testEnv, c *Config)) *testEnv {
 	t.Helper()
+	return newEnvWith(t, mutate, nil)
+}
+
+// newEnvWith như newEnv; opt chỉnh Options của web.New (ví dụ gắn Store).
+func newEnvWith(t *testing.T, mutate func(e *testEnv, c *Config), opt func(o *Options)) *testEnv {
+	t.Helper()
 	e := &testEnv{t: t, cmd: &fakeCmd{out: map[string]string{}}, clock: &fakeClock{t: time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)}}
 	e.dir = t.TempDir()
 	sockDir, err := os.MkdirTemp("", "sw")
@@ -195,7 +201,11 @@ func newEnv(t *testing.T, mutate func(e *testEnv, c *Config)) *testEnv {
 	if mutate != nil {
 		mutate(e, cfg)
 	}
-	srv, err := New(Options{Config: cfg, Version: "test", Commander: e.cmd, Now: e.clock.Now})
+	o := Options{Config: cfg, Version: "test", Commander: e.cmd, Now: e.clock.Now}
+	if opt != nil {
+		opt(&o)
+	}
+	srv, err := New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
