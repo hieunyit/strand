@@ -98,7 +98,21 @@ func populateMySQL(ctx context.Context, o Opts, src *sql.DB, ci connInfo, dir st
 	return err
 }
 
+// pgDropLeftoverSlot xoá slot g2bench_slot còn sót (ví dụ của một lần chạy trên cùng volume trước khi
+// dựng fixture). Slot sót nằm trong tar fixture sẽ giữ toàn bộ WAL của lần nạp bench.big (hàng chục GB):
+// mỗi lần đo, Strand dùng lại slot đó và walsender phải giải mã hết WAL ấy trước khi snapshot chạy được.
+const pgDropLeftoverSlot = `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'g2bench_slot' AND NOT active`
+
+// pgCheckNoSlots: fixture PG không được chứa replication slot nào (mỗi lần đo Strand tự tạo slot mới).
+const pgCheckNoSlots = `SELECT COALESCE(string_agg(slot_name, ','), '') FROM pg_replication_slots`
+
 func populatePG(ctx context.Context, o Opts, src *sql.DB, ci connInfo, dir string) error {
+	if _, err := src.ExecContext(ctx, pgDropLeftoverSlot); err != nil {
+		return fmt.Errorf("drop leftover slot: %w", err)
+	}
+	if err := pgRequireNoSlots(ctx, src); err != nil {
+		return err
+	}
 	for _, q := range []string{"DROP SCHEMA IF EXISTS bench CASCADE", "CREATE SCHEMA bench", bigDDLPG,
 		fmt.Sprintf(`INSERT INTO bench.big (id,a,b,c,d) SELECT n, (('x'||substr(md5(n::text||'a%[1]d'),1,8))::bit(32)::bigint %% 100000)::int,
 		  ('x'||substr(md5(n::text||'b%[1]d'),1,8))::bit(32)::bigint*7, md5(n::text||'c%[1]d')||md5(n::text||'x'), md5(n::text||'d%[1]d')
@@ -121,6 +135,17 @@ func populatePG(ctx context.Context, o Opts, src *sql.DB, ci connInfo, dir strin
 		if _, err := src.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("%.60s: %w", q, err)
 		}
+	}
+	return pgRequireNoSlots(ctx, src)
+}
+
+func pgRequireNoSlots(ctx context.Context, src *sql.DB) error {
+	var slots string
+	if err := src.QueryRowContext(ctx, pgCheckNoSlots).Scan(&slots); err != nil {
+		return fmt.Errorf("list replication slots: %w", err)
+	}
+	if slots != "" {
+		return fmt.Errorf("source has replication slots (%s): they would be captured in the fixture and retain WAL; drop them first", slots)
 	}
 	return nil
 }
