@@ -118,6 +118,14 @@ func (w *PGWriter) SetPrimaryKey(t model.TableID, cols []string) {
 	w.mu.Unlock()
 }
 
+// SetKeyless bật/tắt chế độ keyless của bảng (tables.keyless=full_row).
+func (w *PGWriter) SetKeyless(t model.TableID, on bool) {
+	w.pk.setKeyless(t, on)
+	w.mu.Lock()
+	w.schemaGen++
+	w.mu.Unlock()
+}
+
 // maxTrackedConns: số kết nối nhớ thế hệ schema; vượt quá thì quên hết (kết nối bị quên được dọn cache
 // thêm một lần khi dùng lại, vô hại).
 const maxTrackedConns = 1024
@@ -570,6 +578,9 @@ func (a *pgApplier) applyOrdered(row *model.RowChange) error {
 
 func (a *pgApplier) apply(row *model.RowChange) error {
 	a.handed++
+	if a.w.pk.isKeyless(row.Table) {
+		return a.applyKeyless(row)
+	}
 	ordered, err := a.isOrdered(row.Table)
 	if err != nil {
 		return err

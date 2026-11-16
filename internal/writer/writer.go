@@ -79,8 +79,25 @@ type Writer interface {
 // bảng chưa đăng ký chỉ được chấp nhận khi khóa có đúng 1 cột (mặc định tên "id",
 // giữ tương thích cũ); khóa nhiều cột mà chưa đăng ký thì từ chối.
 type pkRegistry struct {
-	mu  sync.RWMutex
-	pks map[model.TableID][]string
+	mu      sync.RWMutex
+	pks     map[model.TableID][]string
+	keyless map[model.TableID]bool
+}
+
+// setKeyless đánh dấu bảng keyless: cột "khóa" là mọi cột; UPDATE/DELETE khớp row theo ảnh đầy đủ (keyless.go).
+func (r *pkRegistry) setKeyless(t model.TableID, on bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.keyless == nil {
+		r.keyless = make(map[model.TableID]bool)
+	}
+	r.keyless[t] = on
+}
+
+func (r *pkRegistry) isKeyless(t model.TableID) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.keyless[t]
 }
 
 func (r *pkRegistry) set(t model.TableID, cols []string) {
@@ -228,6 +245,9 @@ func (w *MySQLWriter) SetStatementPipelining(on bool) { w.pipelining = on }
 
 // SetPrimaryKey khai báo tên các cột khóa chính của bảng (theo thứ tự của RowChange.Key).
 func (w *MySQLWriter) SetPrimaryKey(t model.TableID, cols []string) { w.pk.set(t, cols) }
+
+// SetKeyless bật/tắt chế độ keyless của bảng (tables.keyless=full_row).
+func (w *MySQLWriter) SetKeyless(t model.TableID, on bool) { w.pk.setKeyless(t, on) }
 
 // SetCommitOrderer gán CommitOrderer để kiểm soát thứ tự commit (CP-5).
 func (w *MySQLWriter) SetCommitOrderer(orderer *CommitOrderer) {
@@ -620,6 +640,12 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 
 	err := txn.ForEachRow(func(row *model.RowChange) error {
 		q.handed++
+		if w.pk.isKeyless(row.Table) {
+			if err := flush(); err != nil {
+				return err
+			}
+			return w.applyKeylessMySQL(ctx, q, row)
+		}
 		switch row.Op {
 		case model.OpInsert, model.OpUpdate:
 			// Upsert MySQL dựa trên mọi unique key của bảng; tên cột PK chỉ cần để

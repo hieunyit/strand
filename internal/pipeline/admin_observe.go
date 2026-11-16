@@ -83,7 +83,7 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 	out := make([]admin.TableInfo, 0, len(metas))
 	for _, m := range metas {
 		name := m.ID.String()
-		ti := admin.TableInfo{Table: name, PK: m.PK, GenericPK: !m.PKNumeric}
+		ti := admin.TableInfo{Table: name, PK: m.PK, GenericPK: !m.PKNumeric, Key: keyLabel(m)}
 		rc, active := counts[name]
 		switch {
 		case p.state.IsDone(name):

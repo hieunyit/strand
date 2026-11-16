@@ -31,6 +31,7 @@ import (
 	"strand/internal/model"
 	"strand/internal/promote"
 	pgreader "strand/internal/reader/pg"
+	"strand/internal/rowkey"
 	"strand/internal/seed"
 	"strand/internal/snapshot"
 	"strand/internal/typemap"
@@ -41,6 +42,7 @@ import (
 type batchWriter interface {
 	ApplyBatch(ctx context.Context, batch []*model.Txn, delta writer.DeltaRow) error
 	SetPrimaryKey(t model.TableID, cols []string)
+	SetKeyless(t model.TableID, keyless bool)
 	SetCommitOrderer(o *writer.CommitOrderer)
 	EnsureWorkerRow(ctx context.Context) error
 }
@@ -133,6 +135,7 @@ func (p *Pipeline) loadTables(ctx context.Context, f *tableFilter) (map[model.Ta
 	if err != nil {
 		return nil, err
 	}
+	p.markKeyless(out)
 	// review R10: hai bảng nguồn cùng tên đích (rename trùng, hoặc rename trùng bảng không rename) thì từ chối.
 	if err := checkTargetCollisions(f, out, nil); err != nil {
 		return nil, err
@@ -238,6 +241,7 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 		if err := cr.Err(); err != nil {
 			return nil, fmt.Errorf("read columns of %s: %w", r.id, err)
 		}
+		m.ColTypes = types
 
 		ir, err := db.QueryContext(ctx, pgUniqueIndexColumnsSQL, r.oid)
 		if err != nil {
@@ -254,6 +258,7 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 			}
 			if primary {
 				m.PK = append(m.PK, c)
+				m.KeyName = rowkey.PrimaryName
 				continue
 			}
 			if _, ok := idx[n]; !ok {
@@ -290,11 +295,26 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 		for _, n := range names {
 			m.Keys.Unique = append(m.Keys.Unique, assemble.UniqueIndex{Name: n, Columns: idx[n]})
 		}
+		// Không có PK: khóa hàng là index của REPLICA IDENTITY USING INDEX (rowkey) — nó thay vai PK nên không
+		// tính là "unique khác" làm bảng phải đi làn tuần tự.
+		keyIdx := ""
+		if len(m.PK) == 0 {
+			res, err := rowkey.ResolvePG(ctx, db, r.id, r.oid)
+			if err != nil {
+				return nil, fmt.Errorf("read row key of %s: %w", r.id, err)
+			}
+			if res.Key != nil {
+				m.PK, m.KeyName, keyIdx = res.Key.Columns, res.Key.Name, res.Key.Name
+			} else {
+				m.KeySuggestIdx, m.KeyNotes = res.Suggested, rowkey.Explain(res.Rejected)
+				m.ReplIdent = res.Info.RelReplIdent
+			}
+		}
 		if err := db.QueryRowContext(ctx, `
 			SELECT c.relreplident <> 'f' AND (
-			       EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisunique AND NOT i.indisprimary)
+			       EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisunique AND NOT i.indisprimary AND NOT (i.indisreplident AND $2::bool))
 			    OR EXISTS (SELECT 1 FROM pg_constraint x WHERE x.conrelid = c.oid AND x.contype = 'x'))
-			  FROM pg_class c WHERE c.oid = $1`, r.oid).Scan(&m.LaneTable); err != nil {
+			  FROM pg_class c WHERE c.oid = $1`, r.oid, keyIdx != "").Scan(&m.LaneTable); err != nil {
 			return nil, fmt.Errorf("read unique constraints of %s: %w", r.id, err)
 		}
 		if len(m.PK) == 1 {

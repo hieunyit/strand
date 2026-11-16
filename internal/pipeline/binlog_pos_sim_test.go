@@ -249,6 +249,7 @@ type pWriter struct {
 }
 
 func (w *pWriter) SetPrimaryKey(model.TableID, []string)  {}
+func (w *pWriter) SetKeyless(model.TableID, bool)         {}
 func (w *pWriter) SetCommitOrderer(*writer.CommitOrderer) {}
 func (w *pWriter) EnsureWorkerRow(context.Context) error  { return nil }
 

@@ -43,6 +43,9 @@ const (
 	ErrLogGap            = "log_gap"
 	ErrPrefetchExhausted = "prefetch_exhausted"
 	ErrVerifyMismatch    = "verify_mismatch"
+	// ErrKeylessRowMissing: bảng keyless (tables.keyless=full_row) — UPDATE/DELETE không khớp row nào ở target
+	// (target lệch source); dừng thay vì bỏ qua im lặng.
+	ErrKeylessRowMissing = "keyless_row_missing"
 	// ErrVerifyIncomplete: verify delta chỉ kiểm được một phần tập thay đổi vì có bảng vượt giới hạn ghi
 	// khóa — không được báo sạch (review N12).
 	ErrVerifyIncomplete = "verify_incomplete"

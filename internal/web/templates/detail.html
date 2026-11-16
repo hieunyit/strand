@@ -39,7 +39,7 @@
       <td>{{bar .ProgressPct}} <span class="small">{{pct .ProgressPct}}</span></td>
       <td class="r nowrap">{{if eq .State "done"}}-{{else}}{{int64 .RowsCopied}} / {{int64 .RowsEstimate}}{{end}}</td>
       <td class="r nowrap">{{if gt .ETASeconds 0.0}}{{secs .ETASeconds}}{{else}}-{{end}}</td>
-      <td class="small mono">{{range $i, $c := .PK}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .GenericPK}} <span class="muted">(generic key)</span>{{end}}</td>
+      <td class="small mono">{{range $i, $c := .PK}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .GenericPK}} <span class="muted">(generic key)</span>{{end}}{{if .Key}}<br><span class="muted">key: {{.Key}}</span>{{end}}</td>
     </tr>{{else}}<tr><td colspan="7" class="muted">No tables.</td></tr>{{end}}</tbody>
   </table></div>{{end}}
   </section>

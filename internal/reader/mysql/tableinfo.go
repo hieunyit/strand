@@ -9,6 +9,7 @@ import (
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 
+	"strand/internal/rowkey"
 	"strand/internal/typemap"
 )
 
@@ -79,21 +80,15 @@ func (p infoSchemaProvider) LoadTable(ctx context.Context, schema, table string)
 		return nil, false, fmt.Errorf("read table type of %s.%s: %w", schema, table, err)
 	}
 	info.SysVersioned = strings.EqualFold(tableType, "SYSTEM VERSIONED")
-	pk, err := p.db.QueryContext(ctx,
-		"SELECT COLUMN_NAME FROM information_schema.STATISTICS "+
-			"WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX", schema, table)
+	// Khóa hàng: PRIMARY KEY, hoặc unique index NOT NULL khi bảng không có PK (cùng quy tắc với pipeline).
+	res, err := rowkey.ResolveMySQL(ctx, p.db, schema, table)
 	if err != nil {
-		return nil, false, fmt.Errorf("read primary key of %s.%s: %w", schema, table, err)
+		return nil, false, fmt.Errorf("read row key of %s.%s: %w", schema, table, err)
 	}
-	defer pk.Close()
-	for pk.Next() {
-		var n string
-		if err := pk.Scan(&n); err != nil {
-			return nil, false, err
-		}
-		info.PK = append(info.PK, n)
+	if res.Key != nil {
+		info.PK = res.Key.Columns
 	}
-	return info, true, pk.Err()
+	return info, true, nil
 }
 
 // safeKind: cột i là MYSQL_TYPE_STRING mang kiểu thật want (ENUM/SET) theo byte cao của meta; không panic khi

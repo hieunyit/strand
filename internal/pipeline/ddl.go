@@ -11,6 +11,7 @@ import (
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/rowkey"
 )
 
 // spec: 02 §12 — "P1–P2: gặp DDL trên bảng thuộc pipeline thì dừng với mã schema_change_pending.
@@ -245,6 +246,15 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 				return err
 			}
 		}
+		if m != nil && len(m.PK) == 0 {
+			// DDL vừa bỏ PK / unique index đang làm khóa (hoặc đổi cột sang nullable): coi như bỏ PK.
+			return exitcode.New(exitcode.ErrMissingPK, exitcode.NeedsDecision,
+				fmt.Sprintf("DDL at %s left table %s without a usable row key; replication of it cannot continue.\n%s",
+					t.SourcePos.Label(), id, rowkey.Suggest(p.suggestInput(ctx, id, m))), nil)
+		}
+		if prev := p.table(id); prev != nil && m != nil && prev.KeyName != "" && (prev.KeyName != m.KeyName || strings.Join(prev.PK, ",") != strings.Join(m.PK, ",")) {
+			p.log.Warn("row key of table changed by DDL", "table", id.String(), "from", keyLabel(prev), "to", keyLabel(m))
+		}
 		p.tablesMu.Lock()
 		if m == nil {
 			delete(p.tables, id) // bảng đã bị DROP/RENAME đi ở source
@@ -256,7 +266,7 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 			continue
 		}
 		for _, w := range p.writers {
-			w.SetPrimaryKey(p.filter.Target(id), m.PK)
+			setWriterKey(w, p.filter.Target(id), m)
 		}
 		if newCreated[id] {
 			if err := p.state.SetDone(id.String(), true); err != nil {

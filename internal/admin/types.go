@@ -135,7 +135,8 @@ type TableInfo struct {
 	ProgressPct  float64        `json:"progress_pct"`
 	ETASeconds   float64        `json:"eta_seconds,omitempty"`
 	PK           []string       `json:"pk,omitempty"`
-	GenericPK    bool           `json:"generic_pk"` // PK không phải một cột số nguyên (khóa tổng quát)
+	Key          string         `json:"key,omitempty"` // khóa hàng: "PRIMARY (id)", "UNIQUE uk (a)" hoặc "full row (keyless)"
+	GenericPK    bool           `json:"generic_pk"`    // PK không phải một cột số nguyên (khóa tổng quát)
 }
 
 // TopInfo chứa thông tin hiển thị của lệnh `strand top` theo spec/02 §10.

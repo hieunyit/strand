@@ -190,6 +190,26 @@ func newVerifyCmd() *cobra.Command {
 				var bad []string
 				for _, id := range ids {
 					pkCols, err := verify.FindPKColumns(cmd.Context(), src, srcEngine, id)
+					if err != nil && cfg.Tables.KeylessOn() {
+						// Bảng keyless (tables.keyless=full_row): chỉ so số hàng + checksum, không sửa được.
+						mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{
+							Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
+							SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target, ApplyWaiter: waiter,
+						})
+						krep, kerr := mv.VerifyTableKeyless(cmd.Context(), id)
+						if kerr != nil {
+							return kerr
+						}
+						fmt.Printf("verify %s (keyless, count+checksum only): source %s target %s match=%v\n", id, krep.SourceRows, krep.TargetRows, krep.Match)
+						if !krep.Match {
+							if repair == "fix" {
+								return exitcode.New("invalid_repair", exitcode.InvalidSyntax,
+									fmt.Sprintf("--repair fix is not supported for keyless table %s (no key to repair by); re-seed the table", id), nil)
+							}
+							bad = append(bad, fmt.Sprintf("keyless table %s differs (source %s, target %s); re-seed it", id, krep.SourceRows, krep.TargetRows))
+						}
+						continue
+					}
 					if err != nil {
 						return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a primary key: "+err.Error(), err)
 					}

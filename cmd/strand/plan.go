@@ -12,7 +12,9 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/model"
 	"strand/internal/mysqlver"
+	"strand/internal/rowkey"
 )
 
 // `strand plan -c p.yaml` (02 §10): ước lượng ETA của snapshot logic; từ chối chế độ A khi
@@ -71,7 +73,13 @@ func newPlanCmd() *cobra.Command {
 			// 1 token ≈ 1 page IO (16 KiB) theo 02 §7; snapshot đọc tuần tự clustered index.
 			bytesPerSec := float64(iops) * 16 * 1024
 			var total int64
-			fmt.Printf("%-40s %14s %14s %12s\n", "table", "rows(est)", "bytes", "mode")
+			var noKey []string
+			ver, _ := mysqlver.Cached(ctx, db)
+			flavor := "mysql"
+			if ver.IsMariaDB() {
+				flavor = "mariadb"
+			}
+			fmt.Printf("%-40s %14s %14s %12s  %s\n", "table", "rows(est)", "bytes", "mode", "key")
 			for rows.Next() {
 				var s, t string
 				var size, n int64
@@ -92,7 +100,20 @@ func newPlanCmd() *cobra.Command {
 				if mode == "logical" {
 					total += size
 				}
-				fmt.Printf("%-40s %14d %14d %12s\n", name, n, size, mode)
+				keyDesc := "-"
+				if res, kerr := rowkey.ResolveMySQL(ctx, db, s, t); kerr == nil {
+					if res.Key != nil {
+						keyDesc = res.Key.Label()
+					} else {
+						keyDesc = "NONE (missing_pk)"
+						noKey = append(noKey, rowkey.Suggest(rowkey.SuggestInput{Flavor: flavor, Major: ver.Major, Minor: ver.Minor, Patch: ver.Patch,
+							Table: model.TableID{Schema: s, Table: t}, EstRows: n, Notes: rowkey.Explain(res.Rejected)}))
+					}
+				}
+				fmt.Printf("%-40s %14d %14d %12s  %s\n", name, n, size, mode, keyDesc)
+			}
+			for _, sug := range noKey {
+				fmt.Printf("\n%s\n", sug)
 			}
 			eta := time.Duration(float64(total) / bytesPerSec * float64(time.Second))
 			// 5.7: expire_logs_days * 86400 (không có binlog_expire_logs_seconds).

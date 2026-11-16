@@ -68,7 +68,11 @@ func newValidateCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := validate.CheckMySQLSource(cmd.Context(), db, tables); err != nil {
+				kw, err := validate.CheckMySQLSourceOpts(cmd.Context(), db, tables, keylessOpts(cfg))
+				for _, w := range kw {
+					fmt.Fprintln(os.Stderr, "warning: "+w)
+				}
+				if err != nil {
 					return err
 				}
 				// Giá trị session của binlog_format/binlog_row_image trên các kết nối đang mở.
@@ -136,6 +140,13 @@ func newValidateCmd() *cobra.Command {
 			if len(plan.Tables) > 0 && !cfg.Bootstrap.CreateSchemaAuto() {
 				return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.Rejected,
 					fmt.Sprintf("%d target table(s) missing and bootstrap.create_schema=off; run strand schema init", len(plan.Tables)), nil)
+			}
+			keyLines, err := validate.CheckKeys(cmd.Context(), r.Source, r.SourceKind, r.Target, r.TargetKind, tables, cfg.Tables.Rename, keylessOpts(cfg))
+			for _, l := range keyLines {
+				fmt.Fprintln(cmd.OutOrStdout(), l)
+			}
+			if err != nil {
+				return err
 			}
 			printed := map[string]bool{}
 			for _, w := range append(warnings, plan.Warnings...) {
@@ -210,4 +221,23 @@ func objectsSummaryWarning(c map[objects.Kind]int, toMySQL bool) string {
 		return msg + "; use `strand objects list|export|apply`"
 	}
 	return msg + ": recreate them on the target by hand"
+}
+
+// keylessOpts: cấu hình keyless cho validate; một bảng "có seed" khi per_table[bảng].mode = seed, hoặc (không có
+// cấu hình riêng) bootstrap.default là seed/start_at.
+func keylessOpts(cfg *config.Config) validate.KeylessOpts {
+	return validate.KeylessOpts{
+		On:         cfg.Tables.KeylessOn(),
+		AllowFloat: cfg.Tables.KeylessAllowFloat,
+		Seeded: func(table string) bool {
+			if pt, ok := cfg.Bootstrap.PerTable[table]; ok && pt.Mode != "" {
+				return strings.EqualFold(pt.Mode, "seed")
+			}
+			switch strings.ToLower(strings.TrimSpace(cfg.Bootstrap.Default)) {
+			case "seed", "start_at":
+				return true
+			}
+			return false
+		},
+	}
 }

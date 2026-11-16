@@ -269,6 +269,8 @@ type strandCfg struct {
 	SchemaAdditive string
 	// SchemaOnlineDDL: nội dung schema.online_ddl dạng YAML flow (vd "tools: []" để tắt nhận diện gh-ost/pt-osc); rỗng = mặc định.
 	SchemaOnlineDDL string
+	// TablesExtra: các dòng thêm trong khối tables (YAML, mỗi dòng thụt 2 khoảng trắng, kết thúc bằng xuống dòng), ví dụ "  keyless: full_row\n".
+	TablesExtra string
 }
 
 func (c *strandCfg) chunkRows() string {
@@ -346,7 +348,7 @@ target:
 tables:
   include: %s
   exclude: %s
-bootstrap: { default: %s, create_schema: %s, logical: { chunk_rows: %s } }
+%sbootstrap: { default: %s, create_schema: %s, logical: { chunk_rows: %s } }
 checkpoint: { store: target, flush_every: 200ms }
 resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB, overflow: %q }
@@ -355,7 +357,7 @@ resources:
 governor: { algorithm: %s%s, tick: 1s, lag_slo: %s, breaker: { strand_query_p99: { max_ratio: 1000 }, replica_lag: { max: %s } } }
 verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
-`, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude),
+`, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude), c.TablesExtra,
 		c.Bootstrap, c.CreateSchema, c.chunkRows(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.GovernorAlgo, probe, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	if c.SchemaOnlineDDL != "" {
 		add := c.SchemaAdditive

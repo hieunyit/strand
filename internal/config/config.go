@@ -86,6 +86,17 @@ type TablesConfig struct {
 	// Mask: cột -> hàm mask, ví dụ "app.users.phone": sha256 (design §4). Chỉ áp được cho snapshot
 	// logic và seed logic (03 §8). Chưa triển khai: nhận key và cảnh báo ở validate.
 	Mask map[string]string `yaml:"mask,omitempty" json:"mask,omitempty"`
+	// Keyless: "full_row" cho phép bảng KHÔNG có PRIMARY KEY / unique key NOT NULL chạy ở chế độ keyless
+	// (C-lite): dữ liệu đầu phải đến từ seed/start_at (không snapshot logic), UPDATE/DELETE khớp ảnh trước theo
+	// MỌI cột (NULL-safe) với LIMIT 1. Mặc định tắt: bảng thiếu khóa là missing_pk (exit 3).
+	Keyless string `yaml:"keyless,omitempty" json:"keyless,omitempty"`
+	// KeylessAllowFloat: cho phép bảng keyless có cột FLOAT/DOUBLE (so bằng có thể không khớp); mặc định từ chối.
+	KeylessAllowFloat bool `yaml:"keyless_allow_float,omitempty" json:"keyless_allow_float,omitempty"`
+}
+
+// KeylessOn: tables.keyless = full_row.
+func (t TablesConfig) KeylessOn() bool {
+	return strings.EqualFold(strings.TrimSpace(t.Keyless), "full_row")
 }
 
 type BootstrapConfig struct {
@@ -337,6 +348,12 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 		return nil, exitcode.New("missing_target", exitcode.InvalidSyntax, "missing required target configuration", nil)
 	}
 
+	switch strings.ToLower(strings.TrimSpace(cfg.Tables.Keyless)) {
+	case "", "off", "full_row":
+	default:
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("invalid tables.keyless %q (want off | full_row)", cfg.Tables.Keyless), nil)
+	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Bootstrap.CreateSchema)) {
 	case "":
 		cfg.Bootstrap.CreateSchema = "auto"

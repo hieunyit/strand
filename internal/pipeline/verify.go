@@ -345,6 +345,9 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 			ids = append(ids, id)
 		case m.PKCodec != nil:
 			genIDs = append(genIDs, id) // việc C: verify theo tuple PK
+		case m.Keyless:
+			// Không có khóa để chia range: verify trong lúc chạy bỏ qua; `strand verify --mode full` so số hàng + checksum.
+			p.log.Info("verify skipped: keyless table (run `strand verify --mode full` for a row count + checksum comparison)", "table", id.String())
 		default:
 			p.log.Warn("verify skipped: primary key type is not supported", "table", id.String(), "reason", fmt.Sprint(m.PKCodecErr))
 		}

@@ -41,6 +41,7 @@ import (
 	"strand/internal/reader"
 	mysqlreader "strand/internal/reader/mysql"
 	pgreader "strand/internal/reader/pg"
+	"strand/internal/rowkey"
 	"strand/internal/sched"
 	"strand/internal/seed"
 	"strand/internal/snapshot"
@@ -448,7 +449,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	for id, m := range p.tables {
 		if len(m.PK) == 0 {
-			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("table %s has no primary key", id), nil)
+			return p.missingKeyError(ctx, id, m)
+		}
+		if m.Keyless {
+			p.log.Warn("table has no key: running in keyless mode (rows matched on ALL columns, one at a time; each UPDATE/DELETE scans the target table unless an index helps; verify is count+checksum only)", "table", id.String())
+		} else if m.KeyName != rowkey.PrimaryName {
+			p.log.Info("table has no primary key: using a NOT NULL unique index as the row key", "table", id.String(), "key", keyLabel(m))
 		}
 	}
 	{
@@ -568,6 +574,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].String() < pending[j].String() })
+	for _, id := range pending {
+		if m := p.tables[id]; m != nil && m.Keyless {
+			return p.keylessPendingError(ctx, id, m)
+		}
+	}
 	if p.dstEngine == model.EnginePG && p.cfg.Bootstrap.CreateSchemaAuto() {
 		pending, err = orderSnapshotTables(pending, p.tables)
 		if err != nil {
@@ -676,7 +687,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			w = mw
 		}
 		for id, m := range p.tables {
-			w.SetPrimaryKey(p.filter.Target(id), m.PK)
+			setWriterKey(w, p.filter.Target(id), m)
 		}
 		if p.orderer != nil {
 			w.SetCommitOrderer(p.orderer)
@@ -773,6 +784,13 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		if m == nil {
 			return assemble.KeyMeta{}, false
 		}
+		if m.Keyless {
+			// Bảng keyless: một khóa hằng cho mọi row (như index prefix) → mọi Txn chạm bảng xung đột nhau và được
+			// áp tuần tự theo thứ tự commit, ở cả strict lẫn relaxed; bảng khác vẫn song song.
+			km := m.Keys
+			km.Unique = append(append([]assemble.UniqueIndex(nil), km.Unique...), assemble.UniqueIndex{Name: assemble.KeylessIndexName, Columns: m.Columns, Prefix: true})
+			return km, true
+		}
 		return m.Keys, true
 	}
 	spillDir := filepath.Join(p.cfg.Resources.Spool.Path, "spill")
@@ -827,7 +845,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	rctx, rcancel := context.WithCancel(ctx)
 	defer rcancel()
 	defer rd.Close()
-	asm := assemble.New(assemble.WithKeyMetadataFunc(keyMeta), assemble.WithSpillDir(spillDir))
+	asm := assemble.New(assemble.WithKeyMetadataFunc(keyMeta), assemble.WithSpillDir(spillDir),
+		assemble.WithKeylessFunc(func(id model.TableID) bool { m := p.table(id); return m != nil && m.Keyless }))
 	for id, m := range p.tables {
 		asm.Registry().RegisterTable(id.Schema, id.Table, m.PK, m.Columns)
 	}
@@ -1271,9 +1290,11 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			keyCodec = meta.PKCodec
 		}
 		for _, part := range parts {
-			p.touched.addKey(rc.Table, part.Key, keyCodec)
-			if len(part.OldKey) > 0 {
-				p.touched.addKey(rc.Table, part.OldKey, keyCodec)
+			if meta == nil || !meta.Keyless { // bảng keyless không verify theo khóa
+				p.touched.addKey(rc.Table, part.Key, keyCodec)
+				if len(part.OldKey) > 0 {
+					p.touched.addKey(rc.Table, part.OldKey, keyCodec)
+				}
 			}
 			c := *part
 			if p.conv != nil {
@@ -2103,7 +2124,10 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 			return fmt.Errorf("table %s does not exist on source", id)
 		}
 		if len(m.PK) == 0 {
-			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("table %s has no primary key", id), nil)
+			return p.missingKeyError(ctx, id, m)
+		}
+		if m.Keyless {
+			return p.keylessPendingError(ctx, id, m)
 		}
 		// review R10: bảng mới không được trùng tên đích với một bảng đã thuộc pipeline.
 		p.tablesMu.RLock()
@@ -2145,7 +2169,7 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	}
 	// Đăng ký PK cho writer trước khi router bắt đầu đưa event của bảng vào pipeline.
 	for _, w := range p.writers {
-		w.SetPrimaryKey(p.filter.Target(id), m.PK)
+		setWriterKey(w, p.filter.Target(id), m)
 	}
 	p.routeMu.Lock()
 	p.tablesMu.Lock()

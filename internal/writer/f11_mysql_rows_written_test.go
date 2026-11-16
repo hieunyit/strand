@@ -27,6 +27,7 @@ type fakeMyState struct {
 	committed bool
 	rolled    bool
 	failOn    string
+	zeroOn    string // câu chứa chuỗi này trả RowsAffected 0
 }
 
 type fakeMyDriver struct{ st *fakeMyState }
@@ -47,6 +48,9 @@ func (c *fakeMyConn) ExecContext(_ context.Context, q string, _ []driver.NamedVa
 		return nil, fmt.Errorf("Error 1062: injected failure")
 	}
 	c.st.execs = append(c.st.execs, q)
+	if c.st.zeroOn != "" && strings.Contains(q, c.st.zeroOn) {
+		return driver.RowsAffected(0), nil
+	}
 	return driver.RowsAffected(1), nil
 }
 func (c *fakeMyConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {

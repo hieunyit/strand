@@ -41,6 +41,9 @@ type UniqueIndex struct {
 	Prefix bool
 }
 
+// KeylessIndexName là tên unique index giả mà pipeline thêm vào KeyMeta của bảng keyless (writeset: một khóa hằng).
+const KeylessIndexName = "\x00keyless"
+
 // prefixIndexKey là khóa hằng cho unique index có cột prefix (review N01).
 var prefixIndexKey = []model.Value{"\x00prefix-index"}
 
@@ -111,6 +114,11 @@ func WithKeyMetadata(meta map[model.TableID]KeyMeta) Option {
 	}
 }
 
+// WithKeylessFunc báo bảng nào chạy keyless (khóa = mọi cột): TABLE_MAP của bảng đó đăng ký mọi cột làm khóa.
+func WithKeylessFunc(fn func(model.TableID) bool) Option {
+	return func(a *Assembler) { a.keyless = fn }
+}
+
 // WithKeyMetadataFunc như WithKeyMetadata nhưng tra cứu qua hàm (metadata có thể thay đổi
 // khi pipeline đang chạy, ví dụ snapshot add một bảng mới).
 func WithKeyMetadataFunc(fn func(model.TableID) (KeyMeta, bool)) Option {
@@ -139,6 +147,8 @@ type Assembler struct {
 	inTxn        bool
 	sawBegin     bool // đã thấy QUERY "BEGIN" (Txn DML); chưa thấy mà gặp QUERY khác => DDL
 	keyMeta      func(model.TableID) (KeyMeta, bool)
+	// keyless: bảng chạy chế độ keyless — khóa hàng = mọi cột (ảnh đầy đủ), kể cả khi TABLE_MAP không có PK.
+	keyless func(model.TableID) bool
 }
 
 // colIndex trả về vị trí cột theo tên trong schema, -1 nếu không có.
@@ -188,6 +198,11 @@ func (a *Assembler) enrichKeys(tid model.TableID, t *TableSchema, before, after 
 		return
 	}
 	for _, uk := range meta.Unique {
+		if uk.Name == KeylessIndexName {
+			// Bảng keyless: khóa hằng cho MỌI row (kể cả có cột NULL) → mọi Txn chạm bảng xung đột nhau.
+			rc.AddUniqueKey(uk.Name, prefixIndexKey)
+			continue
+		}
 		var key, old []model.Value
 		var okNew, okOld bool
 		if after != nil {
@@ -426,8 +441,12 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 		if len(ev.Columns) > 0 {
 			// Bảng không có PK trong event (MySQL 5.7 hoặc bảng không PK) và cột không đổi: giữ PK đã đăng ký
 			// (pipeline chọn unique key thay PK).
-			if len(ev.PKColumns) > 0 || cur == nil || !sameStrings(cur.Columns, ev.Columns) {
-				a.registry.RegisterTable(ev.Schema, ev.Table, ev.PKColumns, ev.Columns)
+			pk := ev.PKColumns
+			if len(pk) == 0 && a.keyless != nil && a.keyless(model.TableID{Schema: ev.Schema, Table: ev.Table}) {
+				pk = ev.Columns
+			}
+			if len(pk) > 0 || cur == nil || !sameStrings(cur.Columns, ev.Columns) {
+				a.registry.RegisterTable(ev.Schema, ev.Table, pk, ev.Columns)
 			}
 		} else if a.registry.GetTable(ev.Schema, ev.Table) == nil {
 			a.registry.RegisterTable(ev.Schema, ev.Table, nil, nil)

@@ -44,6 +44,7 @@ import (
 
 	"strand/internal/metrics"
 	"strand/internal/model"
+	"strand/internal/rowkey"
 	"strand/internal/snapshot"
 )
 
@@ -283,7 +284,19 @@ func FindPKColumns(ctx context.Context, db *sql.DB, engine model.Engine, t model
 		return nil, err
 	}
 	if len(cols) == 0 {
-		return nil, fmt.Errorf("table %s has no primary key", t)
+		// Không có PK: khóa hàng là unique index NOT NULL (rowkey), cùng quy tắc với pipeline.
+		if engine == model.EnginePG {
+			var oid int64
+			if err := db.QueryRowContext(ctx, `SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = $1 AND c.relname = $2`, schema, t.Table).Scan(&oid); err == nil {
+				if res, err := rowkey.ResolvePG(ctx, db, model.TableID{Schema: schema, Table: t.Table}, oid); err == nil && res.Key != nil {
+					return res.Key.Columns, nil
+				}
+			}
+		} else if res, err := rowkey.ResolveMySQL(ctx, db, schema, t.Table); err == nil && res.Key != nil {
+			return res.Key.Columns, nil
+		}
+		return nil, fmt.Errorf("table %s has no primary key or NOT NULL unique key", t)
 	}
 	return cols, nil
 }

@@ -10,7 +10,9 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/model"
 	"strand/internal/mysqlver"
+	"strand/internal/rowkey"
 	"strand/internal/schemagen"
 )
 
@@ -114,105 +116,129 @@ func CheckMySQLBinlogRowValueOptions(val string) error {
 // binlog_format=ROW, binlog_row_image=FULL, gtid_mode=ON, binlog_row_value_options rỗng,
 // và mọi bảng trong tables ("schema.table", không hỗ trợ wildcard) tồn tại và có PK.
 func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
+	_, err := CheckMySQLSourceOpts(ctx, db, tables, KeylessOpts{})
+	return err
+}
+
+// CheckMySQLSourceOpts như CheckMySQLSource, kèm chế độ keyless (tables.keyless=full_row): bảng không khóa vẫn
+// qua khi dữ liệu đến từ seed và kiểu cột so bằng được; warnings liệt kê các bảng chạy keyless.
+func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko KeylessOpts) (warnings []string, err error) {
 	// Phiên bản server quyết định câu SQL: 5.7 không có binlog_row_value_options (8.0.3+) nên coi là rỗng.
 	ver, err := mysqlver.Cached(ctx, db)
 	if err != nil {
-		return err
+		return warnings, err
 	}
 	if err := mysqlver.CheckSupported(ver); err != nil {
-		return err
+		return warnings, err
 	}
 	// Đọc từng biến, biến vắng (5.5/5.6/5.7) lấy mặc định của phiên bản đó (legacy_vars.go).
 	format, image, gtidMode, valueOpts, err := sourceBinlogVars(ctx, db)
 	if err != nil {
-		return fmt.Errorf("read source binlog settings: %w", err)
+		return warnings, fmt.Errorf("read source binlog settings: %w", err)
 	}
 	reject := func(msg string) error {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, msg, nil)
 	}
 	if !strings.EqualFold(format, "ROW") {
-		return reject(fmt.Sprintf("binlog_format must be ROW, got %q", format))
+		return warnings, reject(fmt.Sprintf("binlog_format must be ROW, got %q", format))
 	}
 	if !strings.EqualFold(image, "FULL") {
-		return reject(fmt.Sprintf("binlog_row_image must be FULL, got %q", image))
+		return warnings, reject(fmt.Sprintf("binlog_row_image must be FULL, got %q", image))
 	}
 	// gtid_mode ON: chế độ GTID. OFF hoặc không có biến (5.5): chế độ vị trí binlog (file:pos, bắt đầu bằng
 	// --start-at <file>:<pos>). *_PERMISSIVE trộn Txn có/không GTID trong cùng binlog: không chế độ nào đúng.
 	switch strings.ToUpper(gtidMode) {
 	case "ON", "OFF", "":
 	default:
-		return reject(fmt.Sprintf("gtid_mode must be ON (GTID mode) or OFF (binlog position mode), got %q", gtidMode))
+		return warnings, reject(fmt.Sprintf("gtid_mode must be ON (GTID mode) or OFF (binlog position mode), got %q", gtidMode))
 	}
 	// Không còn bắt buộc GTID nên phải kiểm binlog bật riêng (trước đây gtid_mode=ON ngầm đòi log-bin).
 	var logBin string
 	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.log_bin").Scan(&logBin); err != nil {
-		return fmt.Errorf("read source log_bin: %w", err)
+		return warnings, fmt.Errorf("read source log_bin: %w", err)
 	}
 	if logBin != "1" && !strings.EqualFold(logBin, "ON") {
-		return reject("binary logging is disabled on the source (log_bin=OFF): start mysqld with --log-bin and --server-id")
+		return warnings, reject("binary logging is disabled on the source (log_bin=OFF): start mysqld with --log-bin and --server-id")
 	}
 	if err := CheckMySQLBinlogRowValueOptions(valueOpts); err != nil {
-		return err
+		return warnings, err
 	}
 	if ver.IsMariaDB() {
 		// log_bin_compress=ON ghi ROWS/QUERY dạng nén: reader chưa hỗ trợ (dừng khi gặp), báo sớm ở đây.
 		var compress string
 		if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.log_bin_compress").Scan(&compress); err != nil {
-			return fmt.Errorf("read source log_bin_compress: %w", err)
+			return warnings, fmt.Errorf("read source log_bin_compress: %w", err)
 		}
 		if compress == "1" || strings.EqualFold(compress, "ON") {
-			return reject("log_bin_compress is ON on the MariaDB source: compressed binlog events are not supported; SET GLOBAL log_bin_compress=OFF (and in my.cnf)")
+			return warnings, reject("log_bin_compress is ON on the MariaDB source: compressed binlog events are not supported; SET GLOBAL log_bin_compress=OFF (and in my.cnf)")
 		}
 	}
 
+	keylessWhy := map[string]string{}
+	var missing []string // bảng không có khóa dùng được: gom hết để in gợi ý cho từng bảng
 	for _, t := range tables {
 		schema, table, ok := strings.Cut(t, ".")
 		if !ok || strings.ContainsAny(t, "*?") {
-			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+			return warnings, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 				fmt.Sprintf("table %q: expected schema.table (wildcards are not supported by validate yet)", t), nil)
 		}
-		var exists, hasPK int
+		var exists int
+		var estRows int64
 		err := db.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 			schema, table).Scan(&exists)
 		if err == nil && exists > 0 {
-			err = db.QueryRowContext(ctx,
-				// STATISTICS thay TABLE_CONSTRAINTS: MariaDB 10.6 (bản mới) ẩn TABLE_CONSTRAINTS với user chỉ có
-				// SELECT, LOCK TABLES nên bảng có PK bị báo missing_pk.
-				`SELECT COUNT(*) FROM information_schema.STATISTICS
-				  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY'`,
-				schema, table).Scan(&hasPK)
+			_ = db.QueryRowContext(ctx, "SELECT COALESCE(TABLE_ROWS, 0) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+				schema, table).Scan(&estRows)
 		}
 		if err != nil {
-			return fmt.Errorf("inspect table %s: %w", t, err)
+			return warnings, fmt.Errorf("inspect table %s: %w", t, err)
 		}
 		if exists == 0 {
-			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+			return warnings, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
 				fmt.Sprintf("table %s does not exist on source", t), nil)
 		}
-		if hasPK == 0 {
-			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
-				fmt.Sprintf("table %s has no primary key", t), nil)
+		// Khóa hàng: PRIMARY KEY, hoặc unique index NOT NULL (STATISTICS thay TABLE_CONSTRAINTS: MariaDB 10.6 ẩn
+		// TABLE_CONSTRAINTS với user chỉ có SELECT, LOCK TABLES nên bảng có PK bị báo missing_pk).
+		res, err := rowkey.ResolveMySQL(ctx, db, schema, table)
+		if err != nil {
+			return warnings, fmt.Errorf("inspect table %s: %w", t, err)
+		}
+		if res.Key == nil && ko.On {
+			cols, types, terr := mysqlColTypes(ctx, db, schema, table)
+			if terr != nil {
+				return warnings, fmt.Errorf("inspect table %s: %w", t, terr)
+			}
+			why := ko.Decide(t, cols, types, false, "")
+			if why == "" {
+				warnings = append(warnings, KeylessWarnings(t)...)
+				continue
+			}
+			keylessWhy[t] = why
+		}
+		if res.Key == nil {
+			flavor := "mysql"
+			if ver.IsMariaDB() {
+				flavor = "mariadb"
+			}
+			missing = append(missing, rowkey.Suggest(rowkey.SuggestInput{
+				Flavor: flavor, Major: ver.Major, Minor: ver.Minor, Patch: ver.Patch,
+				Table: model.TableID{Schema: schema, Table: table}, EstRows: estRows, Notes: rowkey.Explain(res.Rejected), KeylessWhy: keylessWhy[t],
+			}))
+			continue
 		}
 		// review G1: PRIMARY KEY có cột prefix (SUB_PART) — pipeline từ chối khi nạp schema, validate báo sớm.
-		var pkPrefix int
-		if err := db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM information_schema.STATISTICS
-			  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' AND SUB_PART IS NOT NULL`,
-			schema, table).Scan(&pkPrefix); err != nil {
-			return fmt.Errorf("inspect table %s: %w", t, err)
-		}
-		if pkPrefix > 0 {
-			return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
+		if res.Info.PKPrefix {
+			return warnings, exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
 				fmt.Sprintf("table %s: primary key with prefix part is not supported; use a full-column primary key", t), nil)
 		}
 		if ver.IsMariaDB() {
 			if err := schemagen.CheckMariaDBTable(ctx, db, schema, table); err != nil {
-				return err
+				return warnings, err
 			}
 		}
 	}
-	return nil
+	return warnings, missingKeysError(missing)
 }
 
 // binlogRowMetadataWarning trả cảnh báo về binlog_row_metadata ("" = không cảnh báo). MySQL 5.7 không có biến

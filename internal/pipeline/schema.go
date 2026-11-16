@@ -13,6 +13,7 @@ import (
 	"strand/internal/model"
 	mysqlreader "strand/internal/reader/mysql"
 	pgreader "strand/internal/reader/pg"
+	"strand/internal/rowkey"
 	"strand/internal/snapshot"
 )
 
@@ -147,8 +148,21 @@ func (f *tableFilter) Target(t model.TableID) model.TableID {
 type tableMeta struct {
 	ID        model.TableID
 	Columns   []string
-	PK        []string
-	PKNumeric bool // PK một cột kiểu số nguyên (đường snapshot int64)
+	PK        []string // cột khóa hàng: PRIMARY KEY, hoặc unique index NOT NULL khi bảng không có PK (KeyName)
+	PKNumeric bool     // PK một cột kiểu số nguyên (đường snapshot int64)
+	// KeyName: "PRIMARY" hoặc tên unique index dùng làm khóa (rowkey); rỗng khi bảng không có khóa dùng được.
+	KeyName string
+	// EstRows: ước lượng số hàng (information_schema.TABLES.TABLE_ROWS); KeyNotes/KeySuggestIdx: lý do các unique
+	// index bị loại và index PG nên đặt REPLICA IDENTITY — chỉ để dựng gợi ý khi bảng không có khóa.
+	EstRows int64
+	// ColTypes: kiểu cột nguồn (DATA_TYPE MySQL / typname PG), cho kiểm tra keyless.
+	ColTypes map[string]string
+	// ReplIdent (PG): relreplident khi bảng không có PK; KeylessWhy: vì sao bảng không chạy được keyless.
+	ReplIdent, KeylessWhy string
+	// Keyless: bảng chạy ở chế độ keyless (tables.keyless=full_row): PK = mọi cột, UPDATE/DELETE khớp theo cả hàng.
+	Keyless       bool
+	KeyNotes      string
+	KeySuggestIdx string
 	// PKCodec: mã hóa PK giữ thứ tự cho snapshot logic với PK tổng quát (việc C); nil nếu kiểu/collation
 	// của PK chưa được hỗ trợ — PKCodecErr nói vì sao.
 	PKCodec    *snapshot.PKCodec
@@ -246,6 +260,7 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 			types[c] = strings.ToLower(dt)
 		}
 		cr.Close()
+		m.ColTypes = types
 
 		// Mọi index unique (gồm PRIMARY), theo thứ tự cột trong index. SUB_PART khác NULL = cột prefix
 		// (review N01): unique theo prefix nên writeset không được hash cả giá trị cột.
@@ -282,9 +297,24 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		for _, n := range names {
 			if n == "PRIMARY" {
 				m.PK = idx[n]
+				m.KeyName = rowkey.PrimaryName
 				continue
 			}
 			m.Keys.Unique = append(m.Keys.Unique, assemble.UniqueIndex{Name: n, Columns: idx[n], Prefix: prefix[n]})
+		}
+		_ = db.QueryRowContext(ctx, "SELECT COALESCE(TABLE_ROWS, 0) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+			id.Schema, id.Table).Scan(&m.EstRows)
+		if len(m.PK) == 0 {
+			// Không có PK: dùng unique index NOT NULL tốt nhất làm khóa hàng (rowkey).
+			res, err := rowkey.ResolveMySQL(ctx, db, id.Schema, id.Table)
+			if err != nil {
+				return nil, err
+			}
+			if res.Key != nil {
+				m.PK, m.KeyName = res.Key.Columns, res.Key.Name
+			} else {
+				m.KeyNotes = rowkey.Explain(res.Rejected)
+			}
 		}
 		if len(m.PK) == 1 {
 			switch types[m.PK[0]] {
