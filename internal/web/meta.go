@@ -46,9 +46,9 @@ func (c *Config) DBEnabled() bool { return c.Database.DSN != "" }
 
 // metaDB là kho metadata PostgreSQL (hoặc Mem trong test) gắn với một Server.
 type metaDB struct {
-	st  store.Store
-	box *store.Box // nil: không có STRAND_WEB_SECRET_KEY, .env chỉ nằm trên đĩa
-	log *slog.Logger
+	st     store.Store
+	box    *store.Box // nil: không có STRAND_WEB_SECRET_KEY, .env chỉ nằm trên đĩa
+	log    *slog.Logger
 	secret string
 
 	mu      sync.Mutex
@@ -540,4 +540,3 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, code, out)
 }
-
