@@ -45,6 +45,19 @@ type seedManifestLite struct {
 	ArchiveSchema  string
 }
 
+func prefetchIdentity(ev reader.Event, schema *assemble.TableSchema, fromArchive bool, sidecar *archivereader.SchemaSidecar) model.ArchiveIdentity {
+	id := model.TableID{Schema: ev.Schema, Table: ev.Table}
+	identity := model.ArchiveIdentity{Table: id, Mode: "pk", Columns: append([]string(nil), schema.Columns...), KeyColumns: append([]string(nil), schema.PKColumns...)}
+	if !fromArchive {
+		identity.Mode = ev.KeyMode
+	} else if sidecar != nil {
+		if declared, ok := sidecar.GetTable(ev.Schema, ev.Table); ok {
+			identity.Mode = string(declared.IdentityMode)
+		}
+	}
+	return identity
+}
+
 // prefetch (02 §9, P1-14): đọc log từ P vào spool, archive trước rồi source, song song với
 // restore. Nhờ vậy archive hoặc binlog trên source bị xóa sau đó vẫn không gây log_gap.
 // Nếu until == nil: dừng khi đã phủ tới gtid_executed của source tại lúc bắt đầu đọc source.
@@ -259,12 +272,7 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 					if schema == nil {
 						return fmt.Errorf("archive TABLE_MAP has no assembled schema for %s", id)
 					}
-					identity := model.ArchiveIdentity{Table: id, Mode: "pk", Columns: append([]string(nil), schema.Columns...), KeyColumns: append([]string(nil), schema.PKColumns...)}
-					if fromArchive && sidecar != nil {
-						if declared, ok := sidecar.GetTable(ev.Schema, ev.Table); ok {
-							identity.Mode = string(declared.IdentityMode)
-						}
-					}
+					identity := prefetchIdentity(ev, schema, fromArchive, sidecar)
 					if err := identity.Validate(); err != nil {
 						return err
 					}

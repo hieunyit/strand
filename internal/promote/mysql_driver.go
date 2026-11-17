@@ -196,22 +196,16 @@ func (d *MySQLTargetDriver) ApplyRemaining(ctx context.Context) error {
 }
 
 // quoteMySQLIdent bao bọc định danh MySQL (cột, bảng, schema) trong dấu backtick.
-// Ký tự backtick bên trong được nhân đôi ("“") để tránh SQL injection hoặc syntax error.
+// Catalog names are raw identifiers: whitespace and boundary backticks are data.
 func quoteMySQLIdent(s string) string {
-	s = strings.Trim(strings.TrimSpace(s), "`")
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 }
 
-// quoteMySQLQualified bao bọc tên có thể có dạng schema.table thành `schema`.`table`.
+// quoteMySQLQualified quotes raw catalog names in the schema.table representation
+// used by SequenceInfo. Components are identifiers, not preformatted SQL.
 func quoteMySQLQualified(name string) string {
-	name = strings.TrimSpace(name)
-	if strings.Contains(name, ".") {
-		parts := strings.Split(name, ".")
-		quoted := make([]string, len(parts))
-		for i, p := range parts {
-			quoted[i] = quoteMySQLIdent(p)
-		}
-		return strings.Join(quoted, ".")
+	if schema, table, ok := strings.Cut(name, "."); ok {
+		return quoteMySQLIdent(schema) + "." + quoteMySQLIdent(table)
 	}
 	return quoteMySQLIdent(name)
 }

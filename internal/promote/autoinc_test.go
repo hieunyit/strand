@@ -44,9 +44,12 @@ func TestQuoteMySQL(t *testing.T) {
 		wantIdent string
 	}{
 		{"users", "`users`"},
-		{"`users`", "`users`"},
+		{"`users`", "```users```"},
 		{"user`table", "`user``table`"},
 		{"col name", "`col name`"},
+		{" id", "` id`"},
+		{"`id", "```id`"},
+		{"id`", "`id```"},
 	}
 	for _, tc := range cases {
 		if got := quoteMySQLIdent(tc.input); got != tc.wantIdent {
@@ -59,10 +62,13 @@ func TestQuoteMySQL(t *testing.T) {
 		wantQual string
 	}{
 		{"users", "`users`"},
-		{"`users`", "`users`"},
+		{"`users`", "```users```"},
 		{"app.users", "`app`.`users`"},
-		{"`app`.`users`", "`app`.`users`"},
-		{"app.`my`table`", "`app`.`my``table`"},
+		{"app.`users`", "`app`.```users```"},
+		{"app.my`table", "`app`.`my``table`"},
+		{"app.my``table", "`app`.`my````table`"},
+		{"app. users", "`app`.` users`"},
+		{"app.order.details", "`app`.`order.details`"},
 	}
 	for _, tc := range qualCases {
 		if got := quoteMySQLQualified(tc.input); got != tc.wantQual {

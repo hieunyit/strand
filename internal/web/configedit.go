@@ -248,6 +248,11 @@ func (s *Server) validateConfigContent(ctx context.Context, p *Pipeline, yamlCon
 func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent string, restart bool, ip string) (*ConfigSaveResult, error) {
 	s.configEditMu.Lock()
 	defer s.configEditMu.Unlock()
+	return s.saveConfigContentLocked(ctx, p, yamlContent, restart, ip)
+}
+
+// Caller holds configEditMu through any read-modify-write of the config file.
+func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlContent string, restart bool, ip string) (*ConfigSaveResult, error) {
 	if p == nil || p.ConfigPath == "" {
 		return nil, errors.New("pipeline has no config path")
 	}

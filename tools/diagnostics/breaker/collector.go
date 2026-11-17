@@ -328,6 +328,24 @@ func SaveProtectedSnapshot(snap *DiagnosticSnapshot, destPath string) error {
 	if err != nil {
 		return err
 	}
-	// Write file with 0600 permissions so only owner can read
-	return os.WriteFile(destPath, data, 0600)
+	return SaveProtectedArtifact(data, destPath)
+}
+
+// SaveProtectedArtifact replaces the destination atomically with a private file.
+// Writing directly would preserve an existing permissive mode, expose partial
+// contents, and follow a destination symlink or modify other hard links.
+func SaveProtectedArtifact(data []byte, destPath string) error {
+	f, err := os.CreateTemp(filepath.Dir(destPath), ".breaker-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), destPath)
 }

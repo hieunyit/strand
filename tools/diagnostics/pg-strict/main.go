@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -764,6 +765,19 @@ func sortWaitStats(store map[string]*WaitEventStat) []WaitEventStat {
 	return list
 }
 
+// Prometheus text counters can use scientific notation (for example 1e+06).
+// Check bounds before converting floating-point values to signed integer counts.
+func parseMetricCounter(value string) (int64, error) {
+	if n, err := strconv.ParseInt(value, 10, 64); err == nil && n >= 0 {
+		return n, nil
+	}
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f >= 0x1p63 || math.Trunc(f) != f {
+		return 0, fmt.Errorf("invalid metric counter %q", value)
+	}
+	return int64(f), nil
+}
+
 func scrapeMetrics(url string) (appliedTxns int64, appliedRows int64, lagSeconds float64) {
 	client := http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Get(url)
@@ -781,14 +795,16 @@ func scrapeMetrics(url string) (appliedTxns int64, appliedRows int64, lagSeconds
 		if strings.HasPrefix(line, "strand_apply_txn_total") {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
-				val, _ := strconv.ParseInt(parts[len(parts)-1], 10, 64)
-				appliedTxns = val
+				if val, err := parseMetricCounter(parts[len(parts)-1]); err == nil {
+					appliedTxns = val
+				}
 			}
 		} else if strings.HasPrefix(line, "strand_apply_rows_total") {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
-				val, _ := strconv.ParseInt(parts[len(parts)-1], 10, 64)
-				appliedRows = val
+				if val, err := parseMetricCounter(parts[len(parts)-1]); err == nil {
+					appliedRows = val
+				}
 			}
 		} else if strings.HasPrefix(line, "strand_lag_seconds") {
 			parts := strings.Fields(line)

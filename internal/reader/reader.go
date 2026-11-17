@@ -36,6 +36,7 @@ type Event struct {
 	// Columns/PKColumns lấy từ TABLE_MAP khi binlog_row_metadata=FULL.
 	Columns   []string `json:"columns,omitempty"`
 	PKColumns []string `json:"pk_columns,omitempty"`
+	KeyMode   string   `json:"key_mode,omitempty"` // verified MySQL row identity: pk or unique
 	// SchemaChanged báo TABLE_MAP mang schema khác với metadata hiện hành (Relation của PG, P3-01b).
 	SchemaChanged bool     `json:"schema_changed,omitempty"`
 	Op            model.Op `json:"op,omitempty"`

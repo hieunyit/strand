@@ -43,7 +43,7 @@ func main() {
 		fmt.Println(string(outJSON))
 
 		if *outFlag != "" {
-			if err := os.WriteFile(*outFlag, outJSON, 0600); err != nil {
+			if err := breaker.SaveProtectedArtifact(outJSON, *outFlag); err != nil {
 				fmt.Fprintf(os.Stderr, "[ERROR] Failed to write output: %v\n", err)
 				os.Exit(1)
 			}

@@ -330,7 +330,7 @@ func isTxnControlQuery(q string) bool {
 // resolveInfo trả info cho TABLE_MAP không có tên cột. Dùng cache; lệch số cột/kiểu thì đọc lại một lần từ
 // information_schema, vẫn lệch thì lỗi (fail closed, không ánh xạ cột sai). Bảng không còn tồn tại: nil.
 func (r *MySQLReader) resolveInfo(st *streamState, tm *replication.TableMapEvent) (*TableInfo, error) {
-	if r.cfg.TableInfo == nil || len(tm.ColumnName) > 0 {
+	if r.cfg.TableInfo == nil || (len(tm.ColumnName) > 0 && !(r.cfg.RequireFullRowImage && len(tm.PrimaryKey) == 0)) {
 		return nil, nil
 	}
 	key := string(tm.Schema) + "." + string(tm.Table)
@@ -613,17 +613,25 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 			}
 			st.info[tmEv.TableID] = info
 			var cols, pkCols []string
+			var keyMode string
 			if info != nil {
 				for _, c := range info.Columns {
 					cols = append(cols, c.Name)
 				}
 				pkCols = info.PK
+				keyMode = info.KeyMode
+				if len(tmEv.ColumnName) > 0 && keyMode == "pk" && len(tmEv.PrimaryKey) == 0 {
+					return fail(fmt.Errorf("table %s.%s: catalog primary key is absent from full TABLE_MAP", tmEv.Schema, tmEv.Table))
+				}
 			} else if len(tmEv.ColumnName) > 0 {
 				cols = tmEv.ColumnNameString()
 				for _, idx := range tmEv.PrimaryKey {
 					if int(idx) < len(cols) {
 						pkCols = append(pkCols, cols[idx])
 					}
+				}
+				if len(pkCols) > 0 {
+					keyMode = "pk"
 				}
 			}
 			return emit(reader.Event{
@@ -636,6 +644,7 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				Table:      string(tmEv.Table),
 				Columns:    cols,
 				PKColumns:  pkCols,
+				KeyMode:    keyMode,
 				Timestamp:  ts,
 			})
 		}

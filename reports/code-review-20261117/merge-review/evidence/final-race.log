@@ -1,0 +1,8 @@
+ok  	strand/cmd/strand	1.982s
+ok  	strand/internal/reader/mysql	1.508s
+ok  	strand/internal/pipeline	2.010s
+ok  	strand/internal/promote	1.806s
+ok  	strand/internal/verify	1.852s
+ok  	strand/internal/web	3.130s
+ok  	strand/tools/diagnostics/breaker	1.799s
+ok  	strand/tools/diagnostics/pg-strict	1.103s

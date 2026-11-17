@@ -505,6 +505,7 @@ func (c cConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) 
 		}
 		return r, nil
 	case strings.HasPrefix(q, "SELECT applied FROM _strand_checkpoint"):
+		t.sim.count("checkpoint reads", 1)
 		return &cRows{cols: []string{"applied"}, data: [][]driver.Value{{t.global}}}, nil
 	}
 	return nil, fmt.Errorf("fake db: unsupported query %q", q)
@@ -1004,6 +1005,20 @@ func (c cChunks) ReadChunk(ctx context.Context, sn *snapshot.MySQLSnapshotter, c
 	return read, checkpoint.NewPGAppliedSet(high), nil
 }
 
+// CompletionWatermark models the separate final marker, including empty and
+// already-completed plans. The router must see it before the checkpoint can
+// cover snapshot completion.
+func (c cChunks) CompletionWatermark(ctx context.Context) (checkpoint.AppliedSet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.s.srcMu.Lock()
+	high := c.s.watermark()
+	c.s.srcMu.Unlock()
+	c.s.count("completion watermarks", 1)
+	return checkpoint.NewPGAppliedSet(high), nil
+}
+
 // --- phần target của snapshot ---
 
 func (s *cSim) flushRows(_ context.Context, table model.TableID, _ string, _ []string, rows []*model.RowChange, startPK, endPK int64) error {
@@ -1150,7 +1165,10 @@ func (s *cSim) build(ctx context.Context, cancel context.CancelFunc) {
 	}
 	ccfg := checkpoint.DefaultCompactorConfig(p.id, 1)
 	ccfg.Interval = time.Duration(1+s.intn(15)) * time.Millisecond
-	p.comp = checkpoint.NewCompactor(sql.OpenDB(cConnector{s.tgt}), nil, p.id, model.EnginePG, model.EnginePG, ccfg)
+	p.dst = sql.OpenDB(cConnector{s.tgt})
+	t.Cleanup(func() { _ = p.dst.Close() })
+	p.epoch = 1
+	p.comp = checkpoint.NewCompactor(p.dst, nil, p.id, model.EnginePG, model.EnginePG, ccfg)
 	p.comp.SetVouch(p.vouchGlobal)
 	p.comp.SetLastGlobal(start)
 	p.snap = snapshot.NewMySQLSnapshotter(s.opts)
@@ -1335,6 +1353,13 @@ func (s *cSim) run(nTxns, cancelAt int) {
 	}
 	if snapErr != nil && cancelAt == 0 {
 		s.errf("snapshot: %v", snapErr)
+	}
+	if snapFinished && snapErr == nil && added && cancelAt == 0 {
+		for _, name := range []string{"completion watermarks", "checkpoint reads"} {
+			if _, ok := s.st.Load(name); !ok {
+				s.errf("successful snapshot did not perform %s", name)
+			}
+		}
 	}
 	cancel()
 	wg.Wait()

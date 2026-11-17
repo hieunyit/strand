@@ -1,0 +1,64 @@
+=== RUN   TestKL_E2E_PGToPG_KeylessReplicaIdentityFull
+2026/11/17 22:06:30 github.com/testcontainers/testcontainers-go - Connected to docker:
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 3fc5a51bdf1804fb6fd038aff182f4765364de3afbc9b25b4d2a943a3dac2e70
+  Test ProcessID: 58abd330-bda5-4843-ae29-54ca9b98ed48
+2026/11/17 22:06:30 🐳 Creating container for image postgres:18
+2026/11/17 22:06:31 ✅ Container created: 55d858f67c1c
+2026/11/17 22:06:31 🐳 Starting container: 55d858f67c1c
+2026/11/17 22:06:31 ✅ Container started: 55d858f67c1c
+2026/11/17 22:06:31 ⏳ Waiting for container id 55d858f67c1c image: postgres:18. Waiting for: &{timeout:<nil> deadline:0xd3aacd505e8 Strategies:[0xd3aac94e360 0xd3aac94e390]}
+2026/11/17 22:06:35 🔔 Container is ready: 55d858f67c1c
+2026/11/17 22:06:35 🐳 Creating container for image postgres:18
+2026/11/17 22:06:36 ✅ Container created: ac7d857ebb9f
+2026/11/17 22:06:36 🐳 Starting container: ac7d857ebb9f
+2026/11/17 22:06:37 ✅ Container started: ac7d857ebb9f
+2026/11/17 22:06:37 ⏳ Waiting for container id ac7d857ebb9f image: postgres:18. Waiting for: &{timeout:<nil> deadline:0xd3aac886220 Strategies:[0xd3aacd90390 0xd3aacd903c0]}
+2026/11/17 22:06:41 🔔 Container is ready: ac7d857ebb9f
+    keyless_test.go:315: workload: 3652 ops
+2026/11/17 22:07:08 🐳 Stopping container: ac7d857ebb9f
+2026/11/17 22:07:09 ✅ Container stopped: ac7d857ebb9f
+2026/11/17 22:07:09 🐳 Terminating container: ac7d857ebb9f
+2026/11/17 22:07:09 🚫 Container terminated: ac7d857ebb9f
+2026/11/17 22:07:09 🐳 Stopping container: 55d858f67c1c
+2026/11/17 22:07:10 ✅ Container stopped: 55d858f67c1c
+2026/11/17 22:07:10 🐳 Terminating container: 55d858f67c1c
+2026/11/17 22:07:10 🚫 Container terminated: 55d858f67c1c
+--- PASS: TestKL_E2E_PGToPG_KeylessReplicaIdentityFull (40.26s)
+=== RUN   TestUK_E2E_MySQLToMySQL_UniqueKey
+2026/11/17 22:07:11 🐳 Creating container for image mysql:8.4
+2026/11/17 22:07:11 ✅ Container created: 20e9e406b648
+2026/11/17 22:07:11 🐳 Starting container: 20e9e406b648
+2026/11/17 22:07:11 ✅ Container started: 20e9e406b648
+2026/11/17 22:07:11 ⏳ Waiting for container id 20e9e406b648 image: mysql:8.4. Waiting for: &{timeout:0xd3aac886378 Log:port: 3306  MySQL Community Server IsRegexp:false Occurrence:1 PollInterval:100ms}
+2026/11/17 22:07:31 🔔 Container is ready: 20e9e406b648
+2026/11/17 22:07:31 🐳 Creating container for image mysql:8.4
+2026/11/17 22:07:31 ✅ Container created: 79a9f37306ff
+2026/11/17 22:07:31 🐳 Starting container: 79a9f37306ff
+2026/11/17 22:07:32 ✅ Container started: 79a9f37306ff
+2026/11/17 22:07:32 ⏳ Waiting for container id 79a9f37306ff image: mysql:8.4. Waiting for: &{timeout:0xd3aacb72030 Log:port: 3306  MySQL Community Server IsRegexp:false Occurrence:1 PollInterval:100ms}
+2026/11/17 22:07:52 🔔 Container is ready: 79a9f37306ff
+    unique_key_test.go:324: workload: 5573 ops, 778 key moves
+2026/11/17 22:08:10 🐳 Stopping container: 79a9f37306ff
+2026/11/17 22:08:11 ✅ Container stopped: 79a9f37306ff
+2026/11/17 22:08:11 🐳 Terminating container: 79a9f37306ff
+2026/11/17 22:08:11 🚫 Container terminated: 79a9f37306ff
+2026/11/17 22:08:11 🐳 Stopping container: 20e9e406b648
+2026/11/17 22:08:13 ✅ Container stopped: 20e9e406b648
+2026/11/17 22:08:13 🐳 Terminating container: 20e9e406b648
+2026/11/17 22:08:13 🚫 Container terminated: 20e9e406b648
+--- PASS: TestUK_E2E_MySQLToMySQL_UniqueKey (62.23s)
+PASS
+2026/11/17 22:08:13 🐳 Stopping container: ac7d857ebb9f
+2026/11/17 22:08:13 🐳 Terminating container: ac7d857ebb9f
+2026/11/17 22:08:13 🚫 Container terminated: ac7d857ebb9f
+2026/11/17 22:08:13 🐳 Stopping container: 55d858f67c1c
+2026/11/17 22:08:13 🐳 Terminating container: 55d858f67c1c
+2026/11/17 22:08:13 🚫 Container terminated: 55d858f67c1c
+ok  	strand/tests/e2e	111.638s

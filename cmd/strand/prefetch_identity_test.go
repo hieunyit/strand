@@ -10,7 +10,11 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 
+	"strand/internal/assemble"
 	"strand/internal/exitcode"
+	"strand/internal/model"
+	"strand/internal/reader"
+	"strand/internal/spool"
 )
 
 var prefetchTestSID = []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
@@ -223,5 +227,39 @@ func TestPrefetchSourceOnlyIgnoresSQLSnapshot(t *testing.T) {
 	}
 	if _, err := prefetch(context.Background(), &seedManifestLite{SchemaSnapshot: p}, t.TempDir(), 0, 0, "", "", "", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSourceUniquePrefetchIdentitySpoolRoundTrip(t *testing.T) {
+	id := model.TableID{Schema: "app", Table: "items"}
+	ev := reader.Event{Schema: id.Schema, Table: id.Table, KeyMode: "unique"}
+	identity := prefetchIdentity(ev, &assemble.TableSchema{Columns: []string{"a", "b"}, PKColumns: []string{"b"}}, false, nil)
+	if err := identity.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if identity.Mode != "unique" {
+		t.Fatalf("mode: %q", identity.Mode)
+	}
+	ctx := context.Background()
+	sp, err := spool.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.Close()
+	txn := &model.Txn{SourcePos: model.Pos{Engine: model.EngineMySQL, GTID: "00000000-0000-0000-0000-000000000001:1"}, PrefetchOrigin: "source", ArchiveIdentities: []model.ArchiveIdentity{identity}, Rows: []model.RowChange{{Table: id, Op: model.OpDelete, Key: []model.Value{int64(1)}}}}
+	if err := sp.Append(ctx, txn); err != nil {
+		t.Fatal(err)
+	}
+	it, err := sp.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	got, err := it.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ArchiveIdentities) != 1 || got.ArchiveIdentities[0].Mode != "unique" || got.ArchiveIdentities[0].KeyColumns[0] != "b" {
+		t.Fatalf("identity lost: %+v", got.ArchiveIdentities)
 	}
 }

@@ -1,0 +1,33 @@
+{
+  "base_main": "5273009ad7812aee12f38caa1b1b50b77ae0ca78",
+  "profiling_branch": "ab5160d24a89d6fbdaa5980da7118186a36f9a2c",
+  "hardening_before_repairs": "e3d19bbdbf4eae8fba2b55f7eb6c2350c4039a41",
+  "decision": "accept_with_included_repairs",
+  "new_findings_fixed": 9,
+  "test_fixture_groups_fixed": 2,
+  "production_and_test_changed_file_sha256": {
+    "cmd/strand/prefetch.go": "04ea7cdd560a98513ba9665345f2efe22e35868b96a33154ec47c4a2cd747519",
+    "cmd/strand/prefetch_identity_test.go": "43cd8af9afaf9a7e801db28a34b12921b307d7d46bde0a0baf92819eccb33d85",
+    "docs/USAGE.md": "1e299e2bb49a560193b8911d40aecffaa3757d19834fac53fc46e1ade1561768",
+    "internal/pipeline/f11_combined_sim_test.go": "97a60d220b6e9535b1ad21f1fb706c6689cb0dcfb708a02544e21aec0bb05f36",
+    "internal/promote/autoinc_identifier_regression_test.go": "6bb67bd334b79985b658a569239660a66f98ddea6447d684ad5bf939f54b3010",
+    "internal/promote/autoinc_test.go": "e3d603c79040b3b6b7806edc321a38df90d0050237f1347898328b5079aed312",
+    "internal/promote/mysql_driver.go": "6cd3c531ebaee70d6d364f307b38c1c384d9c435df27b8dc7c7399531201d9c5",
+    "internal/reader/mysql/prefetch_keymode_test.go": "6252c622ed0a7a45ac88350c325c6cee599449bf7f7685da351786fff603ca45",
+    "internal/reader/mysql/reader.go": "fec864c35614337b1b6600dacdc42e48c9c3d94e7d67f11831bb634c43c004ab",
+    "internal/reader/mysql/tableinfo.go": "9cbf045b08c4ca0d456a393e6f01e74f5bc4f38633bb5c7c6cc64d29fdd169de",
+    "internal/reader/reader.go": "eaf0a45709ba51a6786ff331ad3c502f3fc06ef6e1b4ea045311f8b8a02a3e39",
+    "internal/verify/merkle.go": "8275ed2b322c22ba5a466fdfade11aed4f76bc0486da181b8aff908853486af4",
+    "internal/verify/merkle_resume_regression_test.go": "5f5241045e3bc1b2bb42fa63e57d8884b37aeb3c7d0ccc0f29bc60b1b15acee5",
+    "internal/web/configedit.go": "9ec5dc84378039e67b65ddf31df70d3e24559def45b5987c6ec55966816a7a20",
+    "internal/web/tuning.go": "289d858a791031bfbd56a6d2011ce1af2fc88be33deb0d9d5dd0b29d5a7b905e",
+    "internal/web/tuning_test.go": "467bbf2a4611ce87487bfe1d300ee3c15a5e9d5c22d8bb886e7b5f00cfabab90",
+    "internal/writer/writer_test.go": "a9b3684d8f178e2d3afe2d2f488eaa9aca10dac0d3c80cd8528124fd94652ded",
+    "tools/diagnostics/breaker/cmd/main.go": "512b168b7305ebcba99d9671312aea3898f608dfcea3a31a87b970d7eaeafcca",
+    "tools/diagnostics/breaker/collector.go": "9e51f6a4f52a063f74dea9a8dd03151cf83e08e87e33e712a0725a9880adfceb",
+    "tools/diagnostics/breaker/safety_regression_test.go": "4df47aefe4f999571162c94bf5c0c8095c6afde1afdd699f82b1a865c51d43b5",
+    "tools/diagnostics/breaker/sanitizer.go": "d5671b6208a7e147d0c39ce2de34719729dd471d56b909502d0c5d0320a470df",
+    "tools/diagnostics/pg-strict/main.go": "91e72d81edb2a32b343955baac2715dafac490c034ceb7ff6bfc07b183acf0b3",
+    "tools/diagnostics/pg-strict/main_test.go": "95fcced95529efdfff6a0e22045333ed569d28389475c1a91218725358eb5c96"
+  }
+}

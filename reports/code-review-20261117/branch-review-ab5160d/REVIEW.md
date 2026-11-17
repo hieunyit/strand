@@ -1,3 +1,5 @@
+> Kết quả sửa sau review: [branch-repair-ab5160d/STATUS.md](../branch-repair-ab5160d/STATUS.md). Nội dung dưới đây giữ nguyên làm bằng chứng lịch sử của ab5160d.
+
 # Review nhánh fix/03-pg-profiling-review
 
 **Kết luận: chưa nên merge.** Các bản sửa mới còn đường ghi/xóa sai identity, kiểm constraint sai, lộ secret, quota chưa đầy đủ và công cụ chẩn đoán có thao tác phá dữ liệu ngoài tài nguyên do nó tạo. Build, vet và test hiện hữu đạt không khép kín các counterexample dưới đây.

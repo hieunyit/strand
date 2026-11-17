@@ -508,6 +508,7 @@ func (s *Server) apiTuningSave(w http.ResponseWriter, r *http.Request, sess *Ses
 		writeErr(w, http.StatusNotFound, "unknown pipeline")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.UseNumber()
 	var req map[string]any
@@ -538,7 +539,9 @@ func (s *Server) apiTuningSave(w http.ResponseWriter, r *http.Request, sess *Ses
 }
 
 func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any, restart, dry bool, ip string) (*tuningResult, error) {
-	if p.ConfigPath == "" {
+	s.configEditMu.Lock()
+	defer s.configEditMu.Unlock()
+	if p == nil || p.ConfigPath == "" {
 		return nil, errors.New("pipeline has no config path")
 	}
 	orig, err := os.ReadFile(p.ConfigPath)
@@ -576,7 +579,7 @@ func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any
 		res.Message = "Preview only, nothing was written"
 		return res, nil
 	}
-	sr, err := s.saveConfigContent(ctx, p, string(out), restart, ip)
+	sr, err := s.saveConfigContentLocked(ctx, p, string(out), restart, ip)
 	if err != nil {
 		return nil, err
 	}

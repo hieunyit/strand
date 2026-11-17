@@ -714,7 +714,9 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 		// Khi chạy tiếp (--resume) trong lúc pipeline đang hoạt động, chờ target apply tới vị trí
 		// hiện tại của source trước khi dùng lại cache tiến độ, tránh false-negative do replication lag.
 		if w := mv.waiter(); w != nil {
-			_ = waitMark(ctx, w)
+			if err := waitMark(ctx, w); err != nil {
+				return nil, fmt.Errorf("wait for target before resuming verify of %s: %w", t, err)
+			}
 		}
 	} else if err := mv.clearProgress(ctx, tableKey); err != nil {
 		return nil, fmt.Errorf("clear _strand_verify progress: %w", err)

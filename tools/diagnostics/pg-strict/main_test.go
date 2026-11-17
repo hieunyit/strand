@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,6 +33,36 @@ strand_lag_seconds{pipeline="pg-strict-diag"} 0.042
 	}
 	if lag < 0.041 || lag > 0.043 {
 		t.Errorf("expected ~0.042 lag, got %f", lag)
+	}
+}
+
+func TestScrapeMetricsScientificCounters(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, `strand_apply_txn_total{pipeline="pg-strict-diag"} 1.234567e+06`)
+		fmt.Fprintln(w, `strand_apply_rows_total{pipeline="pg-strict-diag"} 2.469134e+06`)
+	}))
+	defer ts.Close()
+	txns, rows, _ := scrapeMetrics(ts.URL)
+	if txns != 1234567 || rows != 2469134 {
+		t.Fatalf("scientific counters: transactions=%d rows=%d", txns, rows)
+	}
+}
+
+func TestParseMetricCounterBounds(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int64
+		valid bool
+	}{
+		{"1450", 1450, true}, {"1450.0", 1450, true}, {"1e+06", 1000000, true},
+		{"9223372036854775807", math.MaxInt64, true},
+		{"9.223372036854776e18", 0, false}, {"9223372036854775808", 0, false},
+		{"-1", 0, false}, {"NaN", 0, false}, {"+Inf", 0, false}, {"1.5", 0, false},
+	} {
+		got, err := parseMetricCounter(tc.value)
+		if got != tc.want || (err == nil) != tc.valid {
+			t.Errorf("parseMetricCounter(%q)=%d, %v; want %d, valid=%v", tc.value, got, err, tc.want, tc.valid)
+		}
 	}
 }
 
