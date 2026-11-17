@@ -1,0 +1,56 @@
+{
+  "01-web-scalar": {
+    "model": "gemini-3.8-flash-high",
+    "prompt": "tasks/01-web-scalar.md",
+    "result": "results/01-web-scalar.md",
+    "status": "queued"
+  },
+  "02-target-constraints": {
+    "model": "gemini-3.8-flash-high",
+    "prompt": "tasks/02-target-constraints.md",
+    "result": "results/02-target-constraints.md",
+    "status": "queued"
+  },
+  "03-pg-profile": {
+    "model": "gemini-3.8-flash-high",
+    "prompt": "tasks/03-pg-profile.md",
+    "result": "results/03-pg-profile.md",
+    "status": "queued"
+  },
+  "04-archive-identity": {
+    "model": "gemini-3.8-flash-high",
+    "prompt": "tasks/04-archive-identity.md",
+    "result": "results/04-archive-identity.md",
+    "status": "queued"
+  },
+  "05-spool-inventory": {
+    "model": "gemini-3.8-flash-high",
+    "prompt": "tasks/05-spool-inventory.md",
+    "result": "results/05-spool-inventory.md",
+    "status": "queued"
+  },
+  "06-runtime-repros": {
+    "model": "gemini-3.8-flash-medium",
+    "prompt": "tasks/06-runtime-repros.md",
+    "result": "results/06-runtime-repros.md",
+    "status": "queued"
+  },
+  "07-browser-repros": {
+    "model": "gemini-3.8-flash-high",
+    "prompt": "tasks/07-browser-repros.md",
+    "result": "results/07-browser-repros.md",
+    "status": "queued"
+  },
+  "08-breaker-spike": {
+    "model": "gemini-3.8-flash-medium",
+    "prompt": "tasks/08-breaker-spike.md",
+    "result": "results/08-breaker-spike.md",
+    "status": "queued"
+  },
+  "09-toast-crash-gate": {
+    "model": "gemini-3.8-flash-medium",
+    "prompt": "tasks/09-toast-crash-gate.md",
+    "result": "results/09-toast-crash-gate.md",
+    "status": "queued"
+  }
+}

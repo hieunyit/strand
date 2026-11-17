@@ -557,7 +557,15 @@ func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any
 		res.Message = "No changes: the values already match the config file"
 		return res, nil
 	}
-	res.Diff = unifiedDiff(p.ConfigPath, p.ConfigPath+" (new)", string(orig), string(out))
+	oldMasked, err := MaskConfigText(orig)
+	if err != nil {
+		return nil, err
+	}
+	newMasked, err := MaskConfigText(out)
+	if err != nil {
+		return nil, err
+	}
+	res.Diff = unifiedDiff(p.ConfigPath, p.ConfigPath+" (new)", oldMasked, newMasked)
 	if dry {
 		vr, err := s.validateConfigContent(ctx, p, string(out))
 		if err != nil {

@@ -148,6 +148,10 @@ func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, args []any,
 		return nil, 0, err
 	}
 	defer rows.Close()
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, 0, err
+	}
 
 	var result []*model.RowChange
 	var totalBytes int64
@@ -179,7 +183,7 @@ func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, args []any,
 				rawBytes = b
 				rc.Cols = append(rc.Cols, model.ColValue{
 					Name:  colName,
-					Value: string(b),
+					Value: snapshotColumnValue(b, columnTypes[i].DatabaseTypeName()),
 				})
 			} else {
 				rc.Cols = append(rc.Cols, model.ColValue{
@@ -438,11 +442,13 @@ func NewMySQLSnapshotter(opts ChunkOptions) *MySQLSnapshotter {
 
 // SnapshotPlan là tiến độ snapshot của một bảng.
 type SnapshotPlan struct {
-	Empty     bool  `json:"empty"`
-	MinPK     int64 `json:"min_pk"`
-	MaxPK     int64 `json:"max_pk"`
-	ChunkRows int64 `json:"chunk_rows"`
-	NextPK    int64 `json:"next_pk"` // mọi chunk có EndPK < NextPK đã flush
+	// Original bounds visibility must survive restart while delayed stream events remain.
+	BoundSnapshot *PGSnapshot `json:"bound_snapshot,omitempty"`
+	Empty         bool        `json:"empty"`
+	MinPK         int64       `json:"min_pk"`
+	MaxPK         int64       `json:"max_pk"`
+	ChunkRows     int64       `json:"chunk_rows"`
+	NextPK        int64       `json:"next_pk"` // mọi chunk có EndPK < NextPK đã flush
 	// Finished: đã flush tới MaxPK. Cần cờ riêng vì khi MaxPK == MaxInt64 thì NextPK = MaxPK+1
 	// không biểu diễn được (tràn thành MinInt64 → resume đọc lại cả bảng).
 	Finished bool `json:"finished,omitempty"`
@@ -750,6 +756,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 				return err
 			}
 		}
+		boundSnap := plan.BoundSnapshot // original bounds visibility on resume
 		if !resumed {
 			// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
 			plan = SnapshotPlan{ChunkRows: s.opts.DefaultChunkRows}
@@ -781,6 +788,10 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 					plan.MinPK, plan.MaxPK, plan.NextPK = bounds.MinPK, bounds.MaxPK, bounds.MinPK
 				}
 			}
+			if bs, ok := s.Chunks.(interface{ BoundSnapshot() *PGSnapshot }); ok {
+				boundSnap = bs.BoundSnapshot() // Txn visible với snapshot này mà chưa qua router: xem TableRanges.BoundSnap
+				plan.BoundSnapshot = boundSnap
+			}
 			// Snapshot mới của bảng bắt đầu từ target rỗng: row cũ còn sót (lần chạy trước,
 			// hoặc dữ liệu có sẵn khi snapshot add) có thể giữ giá trị unique key mà row mới
 			// cần, và không bao giờ được dọn nếu range của nó bị DELETE ở source.
@@ -801,9 +812,13 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			return fmt.Errorf("saved snapshot plan of %s was made for a different primary key shape: clear the pipeline state to snapshot it again", table)
 		}
 		if generic {
-			return s.registerGeneric(ctx, dstDB, table, pkCol, kq, &plan, resumed, &cur)
+			err := s.registerGeneric(ctx, dstDB, table, pkCol, kq, &plan, resumed, &cur)
+			if err == nil {
+				s.Manager.SetBoundSnapshot(table, boundSnap)
+			}
+			return err
 		}
-		if resumed && !plan.Empty {
+		if resumed && (!plan.Empty || len(plan.Reread) > 0) {
 			// Chạy tiếp plan dở: flush chunk và lưu plan là hai bước (target commit rồi mới fsync plan).
 			// Crash ở giữa để lại ở target row của phần plan còn coi là "Chưa đọc" — ảnh tại high watermark
 			// CŨ. Event của phần đó bị bỏ (chờ chunk đọc lại) nên các row cũ không bao giờ được cập nhật
@@ -811,7 +826,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			// (source đã giải phóng nó) → 1062 (kill -9 e2e, 2026-11-04). Xóa phần chưa đọc trước khi
 			// đăng ký: chunk walk sẽ đọc lại toàn bộ phần này, nên không mất gì (RS-1/2, CP-5).
 			lo, hi := plan.NextPK, plan.MaxPK
-			hasRange := !plan.Finished && lo <= hi
+			hasRange := !plan.Empty && !plan.Finished && lo <= hi
 			if hasRange || len(plan.Reread) > 0 {
 				if err := s.clearUnread(ctx, dstDB, table, pkCol, lo, hi, hasRange, plan.Reread); err != nil {
 					return fmt.Errorf("clear unread part of resumed snapshot of %s: %w", table, err)
@@ -821,6 +836,10 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		cur = plan
 		if plan.Empty {
 			s.Manager.RegisterTable(table, pkCol, nil, math.MinInt64)
+			s.Manager.SetBoundSnapshot(table, boundSnap)
+			if len(plan.Reread) > 0 {
+				s.Manager.AddReread(table, plan.Reread, time.Now())
+			}
 			return nil
 		}
 		// 2. Keyset walk (02 §5): chỉ đăng ký phần đã xong [Min, Next-1] và phần chưa đọc
@@ -836,6 +855,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[Key]*model.RowChange{}})
 		}
 		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
+		s.Manager.SetBoundSnapshot(table, boundSnap)
 		if len(plan.Reread) > 0 {
 			// Khóa chờ đọc lại từ lần chạy trước (hoặc từ lúc bảng chờ đăng ký): nghĩa vụ vẫn còn.
 			s.Manager.AddReread(table, plan.Reread, time.Now())
@@ -879,6 +899,21 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	}
 	if err != nil {
 		return fmt.Errorf("snapshot add %s: register ranges: %w", table, err)
+	}
+	finish := func() error {
+		if source, ok := s.Chunks.(interface {
+			CompletionWatermark(context.Context) (checkpoint.AppliedSet, error)
+		}); ok {
+			high, err := source.CompletionWatermark(ctx)
+			if err != nil {
+				return fmt.Errorf("snapshot %s completion watermark: %w", table, err)
+			}
+			// Never wait under Barrier: the router must run to reach high.
+			if err := rendezvousWaitFn(ctx, high); err != nil {
+				return fmt.Errorf("snapshot %s completion rendezvous: %w", table, err)
+			}
+		}
+		return nil
 	}
 
 	// 3. Xử lý lần lượt từng chunk
@@ -979,10 +1014,13 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	}
 
 	if generic {
-		return s.walkGeneric(ctx, srcDB, table, kq, cur, processChunk, func(rows int64) int64 {
+		if err := s.walkGeneric(ctx, srcDB, table, kq, cur, processChunk, func(rows int64) int64 {
 			stat.Rows = rows
 			return s.nextChunkRows(table, stat)
-		})
+		}); err != nil {
+			return err
+		}
+		return finish()
 	}
 	// mainDone: walk chính đã xong. Theo dõi bằng cờ thay vì next > MaxPK (tràn khi MaxPK == MaxInt64).
 	mainDone := cur.Empty || cur.Finished || cur.NextPK > cur.MaxPK
@@ -1032,7 +1070,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		chunkRows = s.nextChunkRows(table, stat)
 	}
 
-	return nil
+	return finish()
 }
 
 // ChunkStat là số liệu đọc của một chunk chính vừa xong, đầu vào của luật cỡ chunk (02 §7).
@@ -1294,4 +1332,12 @@ func (s *MySQLSnapshotter) clearUnread(ctx context.Context, dstDB *sql.DB, table
 		return err
 	}
 	return restore()
+}
+
+// MySQL BIT values are packed bytes; textual columns keep the established string representation.
+func snapshotColumnValue(b []byte, databaseType string) model.Value {
+	if databaseType == "BIT" {
+		return append([]byte(nil), b...)
+	}
+	return string(b)
 }

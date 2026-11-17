@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 	"strand/internal/model"
 )
@@ -291,14 +292,25 @@ func (w *MySQLWriter) GetStats() (multiRowUpserts, totalUpsertRows int64) {
 // EnsureWorkerRow đảm bảo row cho worker_id đã tồn tại trong _strand_worker_delta.
 // Không bao giờ hạ epoch: instance có epoch cũ hơn row hiện tại nhận lỗi fenced (SG-1).
 func (w *MySQLWriter) EnsureWorkerRow(ctx context.Context) error {
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin worker row transaction: %w", err)
+	}
+	defer tx.Rollback()
+	// Match AdvanceEpoch's pipeline-before-worker lock order. The shared lock
+	// remains held until insertion commits, so takeover must then advance this row.
+	fenceCtx := checkpoint.WithFence(ctx, checkpoint.Fence{PipelineID: w.pipelineID, Epoch: w.epoch})
+	if err := checkpoint.CheckFence(fenceCtx, tx, false); err != nil {
+		return err
+	}
 	query := `INSERT INTO _strand_worker_delta (pipeline_id, worker_id, epoch, batch_no, applied)
 	VALUES (?, ?, ?, 1, '')
 	ON DUPLICATE KEY UPDATE epoch = GREATEST(epoch, VALUES(epoch))`
-	if _, err := w.db.ExecContext(ctx, query, w.pipelineID, w.workerID, w.epoch); err != nil {
+	if _, err := tx.ExecContext(ctx, query, w.pipelineID, w.workerID, w.epoch); err != nil {
 		return fmt.Errorf("failed to ensure mysql worker row: %w", err)
 	}
 	var cur int64
-	if err := w.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		"SELECT epoch FROM _strand_worker_delta WHERE pipeline_id = ? AND worker_id = ?",
 		w.pipelineID, w.workerID).Scan(&cur); err != nil {
 		return fmt.Errorf("failed to read mysql worker row epoch: %w", err)
@@ -307,7 +319,7 @@ func (w *MySQLWriter) EnsureWorkerRow(ctx context.Context) error {
 		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced,
 			fmt.Sprintf("worker %d fenced: row epoch %d, instance epoch %d", w.workerID, cur, w.epoch), nil)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ApplyBatch ghi dữ liệu của batch và cập nhật row delta trong cùng transaction.

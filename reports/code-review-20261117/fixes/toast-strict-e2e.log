@@ -1,0 +1,132 @@
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove
+    harness_test.go:58: SEED=20261117
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove/run1
+2026/11/17 10:18:45 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 56ce9e51190c9fb0ac2944c87a29042a76d12aa968c5daffb54b4ecca7e2bab3
+  Test ProcessID: 1feb05a3-9b15-4e32-8612-514c617e5feb
+2026/11/17 10:18:46 🐳 Creating container for image postgres:18
+2026/11/17 10:18:46 ✅ Container created: 0117bc76a949
+2026/11/17 10:18:46 🐳 Starting container: 0117bc76a949
+2026/11/17 10:18:46 ✅ Container started: 0117bc76a949
+2026/11/17 10:18:46 ⏳ Waiting for container id 0117bc76a949 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x326ef462e4a0 Strategies:[0x326ef4884f00 0x326ef4885080]}
+2026/11/17 10:18:50 🔔 Container is ready: 0117bc76a949
+2026/11/17 10:18:50 🐳 Creating container for image postgres:18
+2026/11/17 10:18:50 ✅ Container created: e785c5f7e1b3
+2026/11/17 10:18:50 🐳 Starting container: e785c5f7e1b3
+2026/11/17 10:18:51 ✅ Container started: e785c5f7e1b3
+2026/11/17 10:18:51 ⏳ Waiting for container id e785c5f7e1b3 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x326ef4937458 Strategies:[0x326ef4b00510 0x326ef4b00540]}
+2026/11/17 10:18:55 🔔 Container is ready: e785c5f7e1b3
+    harness_test.go:866: keeping test dir /tmp/strand-fix-e2e/strand-e2e-TestP2_E2E_PGLogicalSnapshotToastPKMove_run1-1237047057
+    pg_toast_pk_test.go:119: workload: 26260 ops, 0 client-side errors, 48272 items PK moves with unchanged TOAST, 1021 events PK moves
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:19:00.579770962+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.accounts","duration":"2.423055484s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:19:12.472587959+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.events","duration":"11.89274354s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:21:54.840821631+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.items","duration":"2m42.368166247s","reread_keys":5727}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:21:54.91145029+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.marker","duration":"70.556849ms","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:21:54.911544637+07:00","level":"INFO","msg":"bootstrap finished: pipeline synced","pipeline":"e2e-pg-toastpk","epoch":1}
+    pg_toast_pk_test.go:140: app.items: 5727 keys re-read during the snapshot
+    pg_harness_test.go:772: ver monotonic over 342 samples
+    pg_toast_pk_test.go:142: final state: 111146 rows in 4 tables identical
+    pg_toast_pk_test.go:143: invariants: doc never NULL, 136241 row versions applied exactly once
+2026/11/17 10:22:01 🐳 Stopping container: e785c5f7e1b3
+2026/11/17 10:22:02 ✅ Container stopped: e785c5f7e1b3
+2026/11/17 10:22:02 🐳 Terminating container: e785c5f7e1b3
+2026/11/17 10:22:02 🚫 Container terminated: e785c5f7e1b3
+2026/11/17 10:22:02 🐳 Stopping container: 0117bc76a949
+2026/11/17 10:22:03 ✅ Container stopped: 0117bc76a949
+2026/11/17 10:22:03 🐳 Terminating container: 0117bc76a949
+2026/11/17 10:22:03 🚫 Container terminated: 0117bc76a949
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove/run2
+2026/11/17 10:22:04 🐳 Creating container for image postgres:18
+2026/11/17 10:22:04 ✅ Container created: d5d49c959595
+2026/11/17 10:22:04 🐳 Starting container: d5d49c959595
+2026/11/17 10:22:04 ✅ Container started: d5d49c959595
+2026/11/17 10:22:04 ⏳ Waiting for container id d5d49c959595 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x326ef68740f0 Strategies:[0x326ef4c88810 0x326ef4c88840]}
+2026/11/17 10:22:09 🔔 Container is ready: d5d49c959595
+2026/11/17 10:22:09 🐳 Creating container for image postgres:18
+2026/11/17 10:22:09 ✅ Container created: e67f0e639259
+2026/11/17 10:22:09 🐳 Starting container: e67f0e639259
+2026/11/17 10:22:10 ✅ Container started: e67f0e639259
+2026/11/17 10:22:10 ⏳ Waiting for container id e67f0e639259 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x326ef5e11508 Strategies:[0x326ef75c2390 0x326ef75c23c0]}
+2026/11/17 10:22:14 🔔 Container is ready: e67f0e639259
+    harness_test.go:866: keeping test dir /tmp/strand-fix-e2e/strand-e2e-TestP2_E2E_PGLogicalSnapshotToastPKMove_run2-3666065402
+    pg_toast_pk_test.go:119: workload: 24995 ops, 0 client-side errors, 45199 items PK moves with unchanged TOAST, 965 events PK moves
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:22:19.940252801+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.accounts","duration":"2.365665281s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:22:37.365596129+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.events","duration":"17.425272232s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:25:14.079208639+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.items","duration":"2m36.713549259s","reread_keys":5203}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:25:14.152588163+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.marker","duration":"73.309685ms","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:25:14.152646864+07:00","level":"INFO","msg":"bootstrap finished: pipeline synced","pipeline":"e2e-pg-toastpk","epoch":1}
+    pg_toast_pk_test.go:140: app.items: 5203 keys re-read during the snapshot
+    pg_harness_test.go:772: ver monotonic over 341 samples
+    pg_toast_pk_test.go:142: final state: 110535 rows in 4 tables identical
+    pg_toast_pk_test.go:143: invariants: doc never NULL, 134692 row versions applied exactly once
+2026/11/17 10:25:20 🐳 Stopping container: e67f0e639259
+2026/11/17 10:25:21 ✅ Container stopped: e67f0e639259
+2026/11/17 10:25:21 🐳 Terminating container: e67f0e639259
+2026/11/17 10:25:22 🚫 Container terminated: e67f0e639259
+2026/11/17 10:25:22 🐳 Stopping container: d5d49c959595
+2026/11/17 10:25:23 ✅ Container stopped: d5d49c959595
+2026/11/17 10:25:23 🐳 Terminating container: d5d49c959595
+2026/11/17 10:25:23 🚫 Container terminated: d5d49c959595
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove/run3
+2026/11/17 10:25:23 🐳 Creating container for image postgres:18
+2026/11/17 10:25:23 ✅ Container created: 67996cb31aca
+2026/11/17 10:25:23 🐳 Starting container: 67996cb31aca
+2026/11/17 10:25:24 ✅ Container started: 67996cb31aca
+2026/11/17 10:25:24 ⏳ Waiting for container id 67996cb31aca image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x326efc6562b0 Strategies:[0x326ef5592360 0x326ef5592390]}
+2026/11/17 10:25:28 🔔 Container is ready: 67996cb31aca
+2026/11/17 10:25:28 🐳 Creating container for image postgres:18
+2026/11/17 10:25:28 ✅ Container created: e78f461c2808
+2026/11/17 10:25:28 🐳 Starting container: e78f461c2808
+2026/11/17 10:25:29 ✅ Container started: e78f461c2808
+2026/11/17 10:25:29 ⏳ Waiting for container id e78f461c2808 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x326efe4a61e0 Strategies:[0x326efe485650 0x326efe485680]}
+2026/11/17 10:25:33 🔔 Container is ready: e78f461c2808
+    harness_test.go:866: keeping test dir /tmp/strand-fix-e2e/strand-e2e-TestP2_E2E_PGLogicalSnapshotToastPKMove_run3-1042754543
+    pg_toast_pk_test.go:119: workload: 25361 ops, 0 client-side errors, 45609 items PK moves with unchanged TOAST, 1033 events PK moves
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:25:38.93562918+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.accounts","duration":"2.395209283s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:25:45.892298889+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.events","duration":"6.95658564s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:28:28.930207123+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.items","duration":"2m43.037818855s","reread_keys":5369}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:28:28.999625727+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.marker","duration":"69.356683ms","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T10:28:28.999691135+07:00","level":"INFO","msg":"bootstrap finished: pipeline synced","pipeline":"e2e-pg-toastpk","epoch":1}
+    pg_toast_pk_test.go:140: app.items: 5369 keys re-read during the snapshot
+    pg_harness_test.go:772: ver monotonic over 358 samples
+    pg_toast_pk_test.go:142: final state: 92609 rows in 4 tables identical
+    pg_toast_pk_test.go:143: invariants: doc never NULL, 117675 row versions applied exactly once
+2026/11/17 10:28:35 🐳 Stopping container: e78f461c2808
+2026/11/17 10:28:36 ✅ Container stopped: e78f461c2808
+2026/11/17 10:28:36 🐳 Terminating container: e78f461c2808
+2026/11/17 10:28:37 🚫 Container terminated: e78f461c2808
+2026/11/17 10:28:37 🐳 Stopping container: 67996cb31aca
+2026/11/17 10:28:38 ✅ Container stopped: 67996cb31aca
+2026/11/17 10:28:38 🐳 Terminating container: 67996cb31aca
+2026/11/17 10:28:38 🚫 Container terminated: 67996cb31aca
+--- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove (592.95s)
+    --- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove/run1 (198.16s)
+    --- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove/run2 (199.65s)
+    --- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove/run3 (195.14s)
+PASS
+2026/11/17 10:28:38 🐳 Stopping container: e78f461c2808
+2026/11/17 10:28:38 🐳 Terminating container: e78f461c2808
+2026/11/17 10:28:38 🚫 Container terminated: e78f461c2808
+2026/11/17 10:28:38 🐳 Stopping container: 67996cb31aca
+2026/11/17 10:28:38 🐳 Terminating container: 67996cb31aca
+2026/11/17 10:28:38 🚫 Container terminated: 67996cb31aca
+2026/11/17 10:28:38 🐳 Stopping container: e67f0e639259
+2026/11/17 10:28:38 🐳 Terminating container: e67f0e639259
+2026/11/17 10:28:38 🚫 Container terminated: e67f0e639259
+2026/11/17 10:28:38 🐳 Stopping container: d5d49c959595
+2026/11/17 10:28:38 🐳 Terminating container: d5d49c959595
+2026/11/17 10:28:38 🚫 Container terminated: d5d49c959595
+2026/11/17 10:28:38 🐳 Stopping container: e785c5f7e1b3
+2026/11/17 10:28:38 🐳 Terminating container: e785c5f7e1b3
+2026/11/17 10:28:38 🚫 Container terminated: e785c5f7e1b3
+2026/11/17 10:28:38 🐳 Stopping container: 0117bc76a949
+2026/11/17 10:28:38 🐳 Terminating container: 0117bc76a949
+2026/11/17 10:28:38 🚫 Container terminated: 0117bc76a949
+ok  	strand/tests/e2e	606.962s

@@ -3,11 +3,14 @@ package governor
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	mysqldrv "github.com/go-sql-driver/mysql"
 )
 
 // SignalFilter lọc tín hiệu thô qua median của 3 mẫu gần nhất rồi tính EWMA (α = 0.3).
@@ -193,7 +196,11 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 
 	var status map[string]uint64
 	if r.db != nil {
-		status = readGlobalStatus(ctx, r.db, HardSignalCounters)
+		var err error
+		status, err = readGlobalStatus(ctx, r.db, HardSignalCounters)
+		if err != nil {
+			return signals, fmt.Errorf("governor: read mysql global status: %w", err)
+		}
 	}
 	var used, hard int64
 	if r.SpoolUsage != nil {
@@ -205,38 +212,77 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 		return signals, nil
 	}
 
-	// Đọc độ trễ replica từ SHOW REPLICA STATUS (MySQL 8.4) hoặc SHOW SLAVE STATUS (MySQL 8.0)
+	// Đọc độ trễ replica từ SHOW REPLICA STATUS (MySQL 8.0.22+) hoặc SHOW SLAVE STATUS (cũ hơn).
+	// Chỉ lỗi "cú pháp không được hỗ trợ" mới được fallback/bỏ qua; mọi lỗi query khác là lỗi thật.
 	start := time.Now()
-	rows, err := r.db.QueryContext(ctx, "SHOW REPLICA STATUS")
-	if err != nil {
-		// Fallback sang cú pháp cũ
-		rows, err = r.db.QueryContext(ctx, "SHOW SLAVE STATUS")
-	}
+	lag, err := readReplicaLag(ctx, r.db)
 	r.latencyTracker.Record(time.Since(start))
+	if err != nil {
+		return signals, fmt.Errorf("governor: read mysql replica status: %w", err)
+	}
+	if lag != nil {
+		signals.ReplicaLagSeconds = *lag
+	}
+	return signals, nil
+}
 
-	if err == nil && rows != nil {
-		defer rows.Close()
-		cols, _ := rows.Columns()
-		if rows.Next() {
-			vals := make([]any, len(cols))
-			ptrs := make([]any, len(cols))
-			for i := range vals {
-				ptrs[i] = &vals[i]
+// errReplicaStatusUnsupported: máy chủ không hiểu câu lệnh SHOW ... STATUS này (khác với query lỗi).
+var errReplicaStatusUnsupported = errors.New("replica status statement unsupported")
+
+// isUnsupportedStatement: MySQL ER_PARSE_ERROR (1064) / ER_UNKNOWN_COM_ERROR (1047) cho cú pháp không có ở phiên bản này.
+func isUnsupportedStatement(err error) bool {
+	var me *mysqldrv.MySQLError
+	return errors.As(err, &me) && me.Number == 1064
+}
+
+// queryReplicaLag chạy một câu SHOW ... STATUS. lag == nil nghĩa là primary không có replica status (0 dòng,
+// hoặc cột lag NULL). Lỗi cú pháp không hỗ trợ trả errReplicaStatusUnsupported; lỗi khác trả nguyên.
+func queryReplicaLag(ctx context.Context, db *sql.DB, stmt string) (*float64, error) {
+	rows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		if isUnsupportedStatement(err) {
+			return nil, errReplicaStatusUnsupported
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	vals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return nil, err
+	}
+	for i, col := range cols {
+		if col == "Seconds_Behind_Source" || col == "Seconds_Behind_Master" {
+			if vals[i] == nil {
+				return nil, nil
 			}
-			if err := rows.Scan(ptrs...); err == nil {
-				for i, col := range cols {
-					if col == "Seconds_Behind_Source" || col == "Seconds_Behind_Master" {
-						if vals[i] != nil {
-							signals.ReplicaLagSeconds = parseLagValue(vals[i])
-						}
-						break
-					}
-				}
-			}
+			v := parseLagValue(vals[i])
+			return &v, nil
 		}
 	}
+	return nil, nil
+}
 
-	return signals, nil
+func readReplicaLag(ctx context.Context, db *sql.DB) (*float64, error) {
+	lag, err := queryReplicaLag(ctx, db, "SHOW REPLICA STATUS")
+	if errors.Is(err, errReplicaStatusUnsupported) {
+		lag, err = queryReplicaLag(ctx, db, "SHOW SLAVE STATUS")
+		if errors.Is(err, errReplicaStatusUnsupported) {
+			// Cả hai cú pháp đều không được hỗ trợ: không có tín hiệu replica để đọc, không phải lỗi query.
+			return nil, nil
+		}
+	}
+	return lag, err
 }
 
 // HardSignalCounters là các counter của SHOW GLOBAL STATUS tạo tín hiệu cứng cho MySQL
@@ -291,12 +337,13 @@ func SpoolNearFull(used, hard int64) bool {
 	return hard > 0 && float64(used) >= SpoolHardSignalRatio*float64(hard)
 }
 
-// readGlobalStatus đọc các counter cần thiết từ SHOW GLOBAL STATUS. Lỗi thì trả map rỗng:
-// thiếu một lần đọc chỉ làm lỡ một delta, không được làm hỏng tick của governor.
-func readGlobalStatus(ctx context.Context, db *sql.DB, names []string) map[string]uint64 {
+// readGlobalStatus đọc các counter cần thiết từ SHOW GLOBAL STATUS. Mọi lỗi query/scan/duyệt dòng đều được
+// trả về: tín hiệu cần thiết thiếu không được coi là áp suất thấp. Không có dòng nào cho các counter yêu cầu
+// cũng là lỗi.
+func readGlobalStatus(ctx context.Context, db *sql.DB, names []string) (map[string]uint64, error) {
 	out := map[string]uint64{}
 	if len(names) == 0 {
-		return out
+		return out, nil
 	}
 	quoted := make([]string, len(names))
 	for i, n := range names {
@@ -304,20 +351,29 @@ func readGlobalStatus(ctx context.Context, db *sql.DB, names []string) map[strin
 	}
 	rows, err := db.QueryContext(ctx, "SHOW GLOBAL STATUS WHERE Variable_name IN ("+strings.Join(quoted, ", ")+")")
 	if err != nil {
-		return out
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var name, val string
 		if err := rows.Scan(&name, &val); err != nil {
-			return out
+			return nil, err
 		}
 		var v uint64
-		if _, err := fmt.Sscanf(strings.TrimSpace(val), "%d", &v); err == nil {
-			out[name] = v
+		if _, err := fmt.Sscanf(strings.TrimSpace(val), "%d", &v); err != nil {
+			return nil, fmt.Errorf("parse SHOW GLOBAL STATUS %s value: %w", name, err)
+		}
+		out[name] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		if _, ok := out[name]; !ok {
+			return nil, fmt.Errorf("SHOW GLOBAL STATUS omitted required counter %s", name)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // SimulatedSignalReader là reader mô phỏng phục vụ unit test.

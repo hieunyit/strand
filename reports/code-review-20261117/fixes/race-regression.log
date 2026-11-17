@@ -1,0 +1,8 @@
+ok  	strand/internal/assemble	1.087s
+ok  	strand/internal/pipeline	1.804s
+ok  	strand/internal/snapshot	1.599s
+ok  	strand/internal/writer	1.667s
+ok  	strand/internal/spool	1.999s
+ok  	strand/internal/verify	1.718s
+ok  	strand/internal/validate	1.649s
+ok  	strand/internal/web	3.572s

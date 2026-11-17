@@ -1,0 +1,13 @@
+{"time":"2026-11-17T11:02:20.057440689+07:00","level":"INFO","msg":"pipeline lock acquired","pipeline":"pg-strict-diag","epoch":1}
+{"time":"2026-11-17T11:02:20.118453035+07:00","level":"INFO","msg":"target schema initialized","pipeline":"pg-strict-diag","epoch":1,"created_tables":0}
+{"time":"2026-11-17T11:02:20.123325487+07:00","level":"INFO","msg":"metrics and healthz server listening","pipeline":"pg-strict-diag","epoch":1,"addr":"127.0.0.1:21123"}
+2026/11/17 11:02:20 INFO đã tạo replication slot slot=strand_strict_diag_slot consistent_point=0/1C93128 snapshot_name=0000007E-00000003-1 failover=false standby=false
+{"time":"2026-11-17T11:02:20.221864848+07:00","level":"INFO","msg":"snapshot visibility gate: exported snapshot of the new slot","pipeline":"pg-strict-diag","epoch":1,"snapshot":"759:759:"}
+{"time":"2026-11-17T11:02:20.253176781+07:00","level":"INFO","msg":"periodic sequence sync started","pipeline":"pg-strict-diag","epoch":1,"sequences":0,"interval":"5s"}
+{"time":"2026-11-17T11:02:20.253347993+07:00","level":"INFO","msg":"pipeline running","pipeline":"pg-strict-diag","epoch":1,"workers":1,"strict":true,"snapshot_pending":1,"start":""}
+{"time":"2026-11-17T11:02:20.257354723+07:00","level":"INFO","msg":"snapshot start","pipeline":"pg-strict-diag","epoch":1,"table":"bench.accounts"}
+2026/11/17 11:02:20 INFO pg reader bắt đầu stream slot=strand_strict_diag_slot start_lsn=0/1C93128 proto_version=4 streaming=true two_phase=true messages=true
+{"time":"2026-11-17T11:02:20.652294833+07:00","level":"INFO","msg":"snapshot done","pipeline":"pg-strict-diag","epoch":1,"table":"bench.accounts","duration":"394.936075ms","reread_keys":0}
+{"time":"2026-11-17T11:02:20.652387823+07:00","level":"INFO","msg":"bootstrap finished: pipeline synced","pipeline":"pg-strict-diag","epoch":1}
+{"time":"2026-11-17T11:02:27.215548914+07:00","level":"INFO","msg":"stop requested: draining","pipeline":"pg-strict-diag","epoch":1}
+{"time":"2026-11-17T11:02:27.233424346+07:00","level":"INFO","msg":"pipeline stopped cleanly","pipeline":"pg-strict-diag","epoch":1,"applied_txns":19000,"reapplied_in_seq_order":0}

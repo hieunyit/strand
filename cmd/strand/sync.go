@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -108,13 +109,19 @@ func (c *SyncCoordinator) gracefulStop() error {
 	return nil
 }
 
-var syncSeedManifest string
+var (
+	syncSeedManifest     string
+	syncCPUProfile       string
+	syncBlockProfile     string
+	syncBlockProfileRate int
+	syncProfileOverwrite bool
+)
 
 func newSyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Chạy pipeline đồng bộ CDC (spec/02 §10, spec/03 §4)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			// review R08: --dry-run (cờ persistent "không tác động đích") từng bị bỏ qua, sync chạy thật.
 			// sync không có chế độ chạy thử: từ chối trước khi đọc cấu hình hay chạm DSN nào.
 			if dryRun {
@@ -132,6 +139,24 @@ func newSyncCmd() *cobra.Command {
 				return startBackground(cmd, cfg)
 			}
 			defer childPidFileCleanup()()
+
+			prof, err := startProfiling(profileConfig{
+				cpuPath:        syncCPUProfile,
+				blockPath:      syncBlockProfile,
+				blockRate:      syncBlockProfileRate,
+				allowOverwrite: syncProfileOverwrite,
+			})
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if prof != nil {
+					if pErr := prof.Stop(); pErr != nil {
+						slog.Default().Error("stop profiler failed", "error", pErr)
+						err = errors.Join(err, fmt.Errorf("stop profiler: %w", pErr))
+					}
+				}
+			}()
 			level := slog.LevelInfo
 			switch strings.ToLower(cfg.Observability.Log.Level) {
 			case "debug":
@@ -169,6 +194,10 @@ func newSyncCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&syncBackground, "background", "d", false, "Chạy nền: tách khỏi terminal, log ra --log-file, PID ra --pid-file; dừng bằng strand stop -c ...")
 	cmd.Flags().StringVar(&syncLogFile, "log-file", "", "Với --background: file log (mặc định <resources.spool.path>/strand.log)")
 	cmd.Flags().StringVar(&syncPidFile, "pid-file", "", "Với --background: file pid (mặc định <resources.spool.path>/strand.pid)")
+	cmd.Flags().StringVar(&syncCPUProfile, "cpu-profile", "", "Đường dẫn file ghi CPU profile (pprof)")
+	cmd.Flags().StringVar(&syncBlockProfile, "block-profile", "", "Đường dẫn file ghi block profile (pprof)")
+	cmd.Flags().IntVar(&syncBlockProfileRate, "block-profile-rate", 1, "Tỷ lệ lấy mẫu block profile theo nanosecond (mặc định 1)")
+	cmd.Flags().BoolVar(&syncProfileOverwrite, "profile-overwrite", false, "Cho phép ghi đè file profile nếu đã tồn tại")
 	return cmd
 }
 

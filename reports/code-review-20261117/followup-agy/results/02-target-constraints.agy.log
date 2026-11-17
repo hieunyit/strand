@@ -1,0 +1,50 @@
+Implementation and verification for **Task 02: Source-vs-Target Constraint Compatibility Verification** are complete.
+
+### Summary of Changes
+
+1. **New Constraint Compatibility Engine** ([constraint_compat.go](file:///home/hellc/strand/internal/validate/constraint_compat.go)):
+   - **Catalog Inspection (`InspectTableConstraints`)**: Derives full constraint descriptors across MySQL (`information_schema.TABLES`, `information_schema.COLUMNS`, `information_schema.STATISTICS`) and PostgreSQL (`pg_class`, `pg_index`, `pg_attribute`, `information_schema`).
+   - **Rename Contract Handling**: Supports table rename mapping (`ConstraintCheckOptions.TableRename`) and column rename contracts (`ConstraintCheckOptions.ColumnRename`).
+   - **Constraint Implication Theorem ($S \subseteq T$)**: A target unique constraint on columns $T$ is acceptable if source has a constraint on columns $S$ such that mapped source columns are a subset of target columns ($S \subseteq T$).
+     - Extra superset target unique constraints (e.g. source `PRIMARY(id)` &rarr; target `UNIQUE(id, tenant_id)`) are accepted because uniqueness on $S$ guarantees uniqueness on $T$.
+     - Mirrored constraints (e.g. `PRIMARY(id)` + `UNIQUE(email)`) are accepted when descriptors match.
+     - Strict subsets (e.g. target `UNIQUE(id)` vs source composite `PRIMARY(tenant_id, id)`) and unimplied target-only constraints are rejected.
+   - **Strict Descriptors & Semantics Verification**:
+     - *Nullable semantics*: A nullable source column cannot guarantee uniqueness on a target superset constraint. For mirrored constraints, target requiring `NOT NULL` or enforcing `NULLS NOT DISTINCT` while source allows `NULL` is rejected.
+     - *Functional / Expression descriptors*: Target expression indexes are rejected unless identical mirrored descriptors exist on source.
+     - *Prefix descriptors (`SUB_PART`)*: Prefix unique constraints are rejected because prefix constraints cannot guarantee full-value uniqueness.
+     - *Collation looseness*: Target looser collations are rejected with `ErrCollationLooser` (`exitcode.ErrCollationLooser`).
+   - **Distinct Hazard Explanations with Actionable Remediation**:
+     - *MySQL targets*: Explains silent row merge / overwrite hazard under `ON DUPLICATE KEY UPDATE`.
+     - *PostgreSQL targets*: Explains `ON CONFLICT` duplicate key violation replication abort errors.
+     - Every failure provides explicit remediation commands.
+   - **Target Missing Table**: Missing target tables return `nil` so preflight checks pass before `strand schema init` creates target tables.
+
+2. **Validate Caller Integration** ([rowkey.go](file:///home/hellc/strand/internal/validate/rowkey.go)):
+   - Wired `CheckConstraintCompatibility` into `CheckKeys` whenever both source and target `*sql.DB` handles are connected.
+   - Preserved fallback row key `CheckTargetKey` execution and exact identity rules.
+   - Exported `CheckRowKeys` as a direct validation helper.
+
+3. **Regression Test Suite** ([constraint_compat_test.go](file:///home/hellc/strand/internal/validate/constraint_compat_test.go)):
+   - `TestRegression_PrimaryIDAndMirroredEmailAccepted`: Mirrored `PRIMARY(id)` + `UNIQUE(email)` accepted for MySQL&rarr;MySQL and MySQL&rarr;PG.
+   - `TestRegression_TargetOnlyEmailRejected`: Target-only `UNIQUE(email)` rejected with MySQL silent merge warning and PG `ON CONFLICT` failure message.
+   - `TestRegression_NullableUnique`: Source nullable with target `NOT NULL` rejected; source nullable subset with superset rejected; mirrored nullable accepted; PG `NULLS NOT DISTINCT` rejected.
+   - `TestRegression_StrictSubsetVsSuperset`: Superset accepted; strict subset rejected.
+   - `TestRegression_FunctionalAndPrefixDescriptors`: Target functional and prefix indexes rejected with remediation; mirrored functional accepted.
+   - `TestRegression_TargetMissingTable`: Uncreated target table gracefully skipped.
+   - `TestRegression_RenamedTableAndColumns`: Table rename and column rename contracts verified.
+   - `TestRegression_CollationLooser`: Target looser collation rejected with `collation_looser`.
+   - `TestRegression_CheckRowKeysIntegration`: End-to-end `CheckRowKeys` integration verifies mirrored passes & target-only fails.
+   - `TestIsolatedLiveMySQLCheck`: Isolated live MySQL 8.4 container test validating DDL, catalog inspection, mirrored acceptance, target-only rejection, and superset acceptance.
+
+---
+
+### Verification Outcomes
+
+- **Regression Unit Suite**: `/usr/local/go/bin/go test -v ./internal/validate -run TestRegression` &rarr; `PASS` (9/9 passed, 0.35s)
+- **Isolated Live MySQL 8.4 Test**: `/usr/local/go/bin/go test -v ./internal/validate -run TestIsolatedLiveMySQLCheck` &rarr; `PASS` (20.44s)
+- **Existing Target Key Suite**: `/usr/local/go/bin/go test -v ./internal/validate -run "TestCheckTargetKey|TestUniqueIndex"` &rarr; `PASS` (0.33s)
+- **Full Validate Package**: `go test -v ./internal/validate` &rarr; `PASS` (153.85s)
+- **Formatting**: Ran `/usr/local/go/bin/gofmt -w` and verified `git diff --check` cleanly.
+
+The full result report has been recorded in [02-target-constraints.md](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/results/02-target-constraints.md).

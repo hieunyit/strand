@@ -13,7 +13,8 @@ import (
 // writer stream (snapshot flush, xóa phần chưa đọc, clear bảng) kiểm fence TRONG transaction (review R07):
 // đọc _strand_pipeline.epoch với khóa chia sẻ. AdvanceEpoch của instance mới khóa ghi đúng row đó
 // (SELECT … FOR UPDATE) nên phải chờ các transaction snapshot đang mở commit xong; sau đó mọi transaction
-// của instance cũ thấy epoch mới và rollback. Stream writer không đụng row này nên không tranh khóa.
+// của instance cũ thấy epoch mới và rollback. Khởi tạo worker cũng kiểm fence một lần;
+// các batch stream không đụng row này nên không tranh khóa.
 type Fence struct {
 	PipelineID string
 	Epoch      int64
@@ -58,7 +59,7 @@ func CheckFence(ctx context.Context, q Querier, pg bool) error {
 	}
 	if cur != f.Epoch {
 		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced,
-			fmt.Sprintf("snapshot write fenced: pipeline %s epoch is %d, this instance holds %d", f.PipelineID, cur, f.Epoch), nil)
+			fmt.Sprintf("pipeline %s fenced: epoch is %d, this instance holds %d", f.PipelineID, cur, f.Epoch), nil)
 	}
 	return nil
 }

@@ -442,6 +442,11 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 			// Bảng không có PK trong event (MySQL 5.7 hoặc bảng không PK) và cột không đổi: giữ PK đã đăng ký
 			// (pipeline chọn unique key thay PK).
 			pk := ev.PKColumns
+			// Relation flags enumerate physical columns, while the resolved identity may use
+			// a different index order. Preserve that logical order when membership is unchanged.
+			if ev.Pos.Engine == model.EnginePG && cur != nil && sameColumnSet(cur.PKColumns, pk) {
+				pk = cur.PKColumns
+			}
 			if len(pk) == 0 && a.keyless != nil && a.keyless(model.TableID{Schema: ev.Schema, Table: ev.Table}) {
 				pk = ev.Columns
 			}
@@ -641,4 +646,21 @@ func (a *Assembler) Process(ctx context.Context, in <-chan reader.Event) (<-chan
 	}()
 
 	return out, errCh
+}
+
+func sameColumnSet(a, b []string) bool {
+	if len(a) != len(b) || len(a) == 0 {
+		return false
+	}
+	count := make(map[string]int, len(a))
+	for _, c := range a {
+		count[c]++
+	}
+	for _, c := range b {
+		if count[c] == 0 {
+			return false
+		}
+		count[c]--
+	}
+	return true
 }

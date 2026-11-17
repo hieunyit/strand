@@ -1,0 +1,24 @@
+=== TARGET POSTGRES WAIT EVENTS ===
+Client          ClientRead                idle       203
+CPU             running                   active     53
+Client          ClientRead                idle in transaction 29
+CPU             running                   idle in transaction 6
+Client          ClientRead                active     2
+IO              WalSync                   active     2
+IO              DataFileTruncate          active     1
+Client          ClientRead                starting   1
+CPU             running                   idle       1
+IO              DataFileExtend            active     1
+IO              WalInitWrite              active     1
+
+=== SOURCE POSTGRES WAIT EVENTS ===
+Client          ClientRead                idle       459
+LWLock          WALWrite                  active     68
+IO              WalSync                   active     45
+CPU             running                   active     42
+Client          ClientRead                active     34
+CPU             running                   idle       33
+IO              WalWrite                  active     6
+IO              WalSync                   idle       4
+LWLock          WALWrite                  idle       2
+CPU             running                   starting   1

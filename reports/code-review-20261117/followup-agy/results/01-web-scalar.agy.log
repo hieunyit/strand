@@ -1,0 +1,32 @@
+Implementation and regression testing for **Task 01: Web Config Scalar-Based Masking & Unmasking** are complete.
+
+### Summary of Changes
+
+1. **Replaced Line-Based Unmasking with Scalar Path Identity** ([masktext.go](file:///home/hellc/strand/internal/web/masktext.go)):
+   - Replaced `yamlLinePaths` and line-based token replacement with AST logical path identity (`/%d:key` mapping paths and `[%d]` sequence indices) and exact byte-span replacement.
+   - Preserves user-edited plaintext credentials on the same line while restoring masked placeholders according to field identity rather than line appearance.
+   - Handled syntax-aware quoting / encoding when secrets (e.g. unquoted plain scalars containing commas or quotes) are converted between block YAML, flow YAML, and compact JSON.
+   - Embedded DSNs bind to scalar path + placeholder ordinal within the scalar.
+   - Scanner and matcher handle quoted and escaped keyword/URL/MySQL DSNs (`\"...\"`, `\'...\'`, `''...''`).
+   - Retained fail-closed guarantees on unmatched placeholders, ambiguous embedded secret count changes, secret aliases, and multi-line block scalars. Comments with asterisks remain untouched.
+
+2. **Updated Test Cases** ([masktext_test.go](file:///home/hellc/strand/internal/web/masktext_test.go)):
+   - Updated `TestUnmaskReorderedCompactJSON` to verify that reordered compact JSON restores each field to its corresponding secret by scalar path instead of failing closed on line grouping.
+
+3. **Added Comprehensive Regression Suite** ([maskscalar_regression_test.go](file:///home/hellc/strand/internal/web/maskscalar_regression_test.go)):
+   - `TestRegression_CompactReorderSourceTarget`
+   - `TestRegression_OneRealEditedOnePlaceholderSameLine`
+   - `TestRegression_LineSplitJoin`
+   - `TestRegression_SequenceIndexes`
+   - `TestRegression_EmbeddedDSNs`
+   - `TestRegression_PlainSecretWithCommaOrQuotesMovedIntoFlow`
+   - `TestRegression_UnmatchedPlaceholderAndAliasFailClosed`
+   - `TestRegression_StarsInCommentsPreserved`
+
+### Verification Outcomes
+- **New Regression Suite**: `/usr/local/go/bin/go test -v ./internal/web -run TestRegression_` &rarr; `PASS` (8/8 passed, 0.41s)
+- **Selected Mask Tests**: `/usr/local/go/bin/go test -v ./internal/web -run "TestMask|TestUnmask"` &rarr; `PASS` (8/8 passed, 0.34s)
+- **Full Web Package**: `/usr/local/go/bin/go test ./internal/web` &rarr; `PASS` (ok strand/internal/web 22.34s)
+- **Formatting**: Ran `/usr/local/go/bin/gofmt -w` on all owned files.
+
+The full result report has been recorded in [01-web-scalar.md](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/results/01-web-scalar.md).

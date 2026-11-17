@@ -1,0 +1,60 @@
+I have initiated the existing spool test suite to verify baseline behavior before introducing changes. I will proceed once the test run completes.
+I have started the full internal/spool test suite to verify all unit, integration, and new inventory test cases together. I will review the results once complete.
+### Task 05 Complete: Spool Inventory & Trusted Roots Import for Orphan Spill Sidecars
+
+#### Overview of Changes
+1. **Operator-Provided Trusted Roots & Security Boundaries** (`internal/spool/inventory.go`):
+   - Implemented `CleanAndValidateTrustedRoots`: cleans, converts to canonical absolute paths (`filepath.Abs`, `filepath.EvalSymlinks`), deduplicates identical roots, and identifies/prunes nested/overlapping child roots with warnings.
+   - Prohibits arbitrary filesystem scanning: only explicitly provided trusted spill roots are inspected.
+   - Enforces strict symlink escape detection (`ErrSymlinkEscape`): symlinks whose evaluated destination falls outside the canonical trusted root boundary fail closed.
+   - Avoids cyclic loops: symlinks to directories are not traversed.
+   - Enforces regular-file checks: non-regular entries (FIFOs, sockets, devices) are skipped with warnings.
+
+2. **Read-Only Inventory by Default**:
+   - `ScanInventory` and `ScanInventoryOffline` inspect trusted roots against indexed sidecars without writing to Pebble or modifying in-memory accounting (`s.sideBytes`).
+
+3. **Explicit Idempotent Accounting Import**:
+   - `ImportInventory`, `ImportTrustedRoots`, and `ImportInventoryOffline` require explicit action (`--apply`) to update the durable charge index (`spill/path/<base64>`).
+   - **Preserves Live Refcounts**: Existing entries with active references (`refs > 0`) retain their refcounts and are never reset.
+   - **Retention**: Imported orphan sidecars are retained in Pebble and `s.sidecars` even with `refs == 0`, until the external owner physically deletes the file from disk (`os.Remove`).
+   - **Quota Integration**: Imported bytes are tracked in `s.Usage().LocalBytes`, subjecting subsequent transaction appends to configured local and total hard limits.
+   - **Atomic & Resumable Batch Commit**: Writes in atomic synced batches (`WithInventoryBatchSize`); interruptions roll back cleanly, and retries resume idempotently without double-counting.
+
+4. **Never Deletes Borrowed Files**:
+   - The spool lifecycle, truncations, and restarts never delete sidecar files on disk; file removal is strictly owned by external callers.
+
+5. **Diagnostic CLI & Standalone Tooling**:
+   - **Strand CLI** (`cmd/strand/spool_inspect.go`): Registered `strand spool-inspect` with Cobra via `init()` without touching `cmd/strand/root.go` or modifying `seed/prefetch`.
+   - **Offline Standalone Tool** (`tools/diagnostics/spool-inventory/main.go`): Independent binary supporting `-spool-dir`, `-trusted-root`, `-apply`, `-dry-run`, and `-json`.
+
+#### Executed Checks & Verification Outcomes
+- **New Inventory Test Suite** (`/usr/local/go/bin/go test -v ./internal/spool -run TestInventory_`):
+  `PASS` (0.65s, 11 tests passed):
+  - `TestInventory_OutsideRootOrphan`: verified discovery and accounting update for outside-root orphans.
+  - `TestInventory_DuplicateRootsAndPath`: verified deduplication across duplicate and nested roots.
+  - `TestInventory_SymlinkEscape`: verified `ErrSymlinkEscape` when symlinks point outside root.
+  - `TestInventory_SymlinkWithinRoot`: verified deduplication of symlinks within trusted root.
+  - `TestInventory_MissingAndPermissionError`: verified `ErrMissingPath` and `ErrPermission` (mode 0000).
+  - `TestInventory_Reopen`: verified imported charge persistence across spool reopen without roots.
+  - `TestInventory_PartialFailureAndResumable`: verified rollback on failure and idempotent resumption.
+  - `TestInventory_QuotaAfterImport`: verified imported bytes trigger `DataError` on hard limits.
+  - `TestInventory_NeverDeletesBorrowedFiles`: verified borrowed files are preserved across restart and truncate.
+  - `TestInventory_PreservesLiveRefcounts`: verified live `refs == 1` is not overwritten by import.
+  - `TestInventory_OfflineScanAndImport`: verified offline read-only scan and apply functions.
+- **Strand CLI Test Suite** (`/usr/local/go/bin/go test -v ./cmd/strand -run TestSpoolInspectCmd_`):
+  `PASS` (0.47s)
+- **Standalone Diagnostic Tool Test Suite** (`/usr/local/go/bin/go test -v -count=1 ./tools/diagnostics/spool-inventory`):
+  `PASS` (6.23s)
+- **Full Internal Spool Suite** (`/usr/local/go/bin/go test -v ./internal/spool/...`):
+  `PASS` (7.44s, all 26 tests passed)
+- **Formatting**:
+  `gofmt -w` executed with clean formatting across all modified/created files.
+
+#### Modified and Created Files
+- [inventory.go](file:///home/hellc/strand/internal/spool/inventory.go)
+- [inventory_test.go](file:///home/hellc/strand/internal/spool/inventory_test.go)
+- [spool_inspect.go](file:///home/hellc/strand/cmd/strand/spool_inspect.go)
+- [spool_inspect_test.go](file:///home/hellc/strand/cmd/strand/spool_inspect_test.go)
+- [main.go](file:///home/hellc/strand/tools/diagnostics/spool-inventory/main.go)
+- [main_test.go](file:///home/hellc/strand/tools/diagnostics/spool-inventory/main_test.go)
+- [05-spool-inventory.md](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/results/05-spool-inventory.md)

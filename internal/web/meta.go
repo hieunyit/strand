@@ -230,6 +230,9 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 		return err
 	}
 	row.ConfigYAML, row.HasConfig = string(cfgB), true
+	if p.EnvFile != "" {
+		row.EnvPath = p.EnvFile
+	}
 	if row.EnvPath != "" {
 		if envB, err := os.ReadFile(row.EnvPath); err == nil {
 			if s.db.box != nil {

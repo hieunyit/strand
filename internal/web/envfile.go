@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -14,8 +15,13 @@ func envBareSafe(r rune) bool {
 	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_@%+=:,./-", r)
 }
 
+var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // formatEnvLine trả `KEY=VALUE` (có xuống dòng cuối) đã quote đúng; lỗi 400 nếu giá trị có newline/CR/NUL.
 func formatEnvLine(key, v string) (string, error) {
+	if !envKeyRE.MatchString(key) {
+		return "", BadRequest("invalid environment variable name")
+	}
 	if strings.ContainsAny(v, "\n\r\x00") {
 		return "", BadRequest("value of %s must not contain a newline, carriage return or NUL character (not representable in a systemd EnvironmentFile)", key)
 	}

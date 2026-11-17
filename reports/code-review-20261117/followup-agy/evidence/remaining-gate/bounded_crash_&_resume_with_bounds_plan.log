@@ -1,0 +1,49 @@
+=== RUN   TestE2E_PGToastCompletionCrashResume
+    harness_test.go:58: SEED=1794889175859286659
+2026/11/17 11:20:24 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: e6945e387280df11be5cbb6fae929f967c4af45976e65989d31764987b93a373
+  Test ProcessID: b892542d-c20e-4137-8bb7-d366ff5b5b5a
+2026/11/17 11:20:24 🐳 Creating container for image postgres:18
+2026/11/17 11:20:24 ✅ Container created: 46f1b4af8146
+2026/11/17 11:20:24 🐳 Starting container: 46f1b4af8146
+2026/11/17 11:20:24 ✅ Container started: 46f1b4af8146
+2026/11/17 11:20:24 ⏳ Waiting for container id 46f1b4af8146 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0xe6cf1a6c338 Strategies:[0xe6cf175a6c0 0xe6cf175a6f0]}
+2026/11/17 11:20:29 🔔 Container is ready: 46f1b4af8146
+2026/11/17 11:20:29 🐳 Creating container for image postgres:18
+2026/11/17 11:20:29 ✅ Container created: 742df720c8b4
+2026/11/17 11:20:29 🐳 Starting container: 742df720c8b4
+2026/11/17 11:20:29 ✅ Container started: 742df720c8b4
+2026/11/17 11:20:29 ⏳ Waiting for container id 742df720c8b4 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0xe6cf1a6c278 Strategies:[0xe6cf1a821e0 0xe6cf1a82210]}
+2026/11/17 11:20:34 🔔 Container is ready: 742df720c8b4
+    toast_completion_crash_test.go:114: Simulating crash: sending SIGKILL (kill -9) to Strand pid=2415247
+    toast_completion_crash_test.go:129: State directory verified after crash: 3 files/dirs present (foundState=false)
+    toast_completion_crash_test.go:132: Resuming Strand from persisted checkpoint state...
+    toast_completion_crash_test.go:151: Workload summary: 6481 ops, 0 errs, 5902 TOAST PK moves, 203 standard PK moves
+    pg_harness_test.go:772: ver monotonic over 96 samples
+    toast_completion_crash_test.go:167: final state: 31805 rows in 4 tables identical
+    toast_completion_crash_test.go:168: invariants: doc never NULL, 40883 row versions applied exactly once
+    toast_completion_crash_test.go:169: PASS: Crash and resume scenario successfully completed with verified data parity and checkpoint invariants.
+2026/11/17 11:21:12 🐳 Stopping container: 742df720c8b4
+2026/11/17 11:21:12 ✅ Container stopped: 742df720c8b4
+2026/11/17 11:21:12 🐳 Terminating container: 742df720c8b4
+2026/11/17 11:21:13 🚫 Container terminated: 742df720c8b4
+2026/11/17 11:21:13 🐳 Stopping container: 46f1b4af8146
+2026/11/17 11:21:13 ✅ Container stopped: 46f1b4af8146
+2026/11/17 11:21:13 🐳 Terminating container: 46f1b4af8146
+2026/11/17 11:21:14 🚫 Container terminated: 46f1b4af8146
+--- PASS: TestE2E_PGToastCompletionCrashResume (50.26s)
+PASS
+2026/11/17 11:21:14 🐳 Stopping container: 742df720c8b4
+2026/11/17 11:21:14 🐳 Terminating container: 742df720c8b4
+2026/11/17 11:21:14 🚫 Container terminated: 742df720c8b4
+2026/11/17 11:21:14 🐳 Stopping container: 46f1b4af8146
+2026/11/17 11:21:14 🐳 Terminating container: 46f1b4af8146
+2026/11/17 11:21:14 🚫 Container terminated: 46f1b4af8146
+ok  	strand/tests/e2e	60.531s

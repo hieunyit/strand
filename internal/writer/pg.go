@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 	"strand/internal/model"
 )
@@ -167,15 +168,26 @@ func (w *PGWriter) GetStats() (mergeCount, totalMergeRows int64) {
 // EnsureWorkerRow đảm bảo row cho worker_id đã tồn tại trong _strand_worker_delta trên Postgres.
 // Không bao giờ hạ epoch: instance có epoch cũ hơn nhận lỗi fenced (SG-1).
 func (w *PGWriter) EnsureWorkerRow(ctx context.Context) error {
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin worker row transaction: %w", err)
+	}
+	defer tx.Rollback()
+	// Match AdvanceEpoch's pipeline-before-worker lock order. The shared lock
+	// remains held until insertion commits, so takeover must then advance this row.
+	fenceCtx := checkpoint.WithFence(ctx, checkpoint.Fence{PipelineID: w.pipelineID, Epoch: w.epoch})
+	if err := checkpoint.CheckFence(fenceCtx, tx, true); err != nil {
+		return err
+	}
 	query := `INSERT INTO _strand_worker_delta (pipeline_id, worker_id, epoch, batch_no, applied)
 	VALUES ($1, $2, $3, 1, '')
 	ON CONFLICT (pipeline_id, worker_id) DO UPDATE SET epoch = EXCLUDED.epoch
 	WHERE _strand_worker_delta.epoch <= EXCLUDED.epoch`
-	if _, err := w.db.ExecContext(ctx, query, w.pipelineID, w.workerID, w.epoch); err != nil {
+	if _, err := tx.ExecContext(ctx, query, w.pipelineID, w.workerID, w.epoch); err != nil {
 		return fmt.Errorf("failed to ensure pg worker row: %w", err)
 	}
 	var cur int64
-	if err := w.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		"SELECT epoch FROM _strand_worker_delta WHERE pipeline_id = $1 AND worker_id = $2",
 		w.pipelineID, w.workerID).Scan(&cur); err != nil {
 		return fmt.Errorf("failed to read pg worker row epoch: %w", err)
@@ -184,7 +196,7 @@ func (w *PGWriter) EnsureWorkerRow(ctx context.Context) error {
 		return exitcode.New(exitcode.ErrFenced, exitcode.Fenced,
 			fmt.Sprintf("worker %d fenced: row epoch %d, instance epoch %d", w.workerID, cur, w.epoch), nil)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ApplyBatch ghi dữ liệu của batch và row delta (hoặc row toàn cục ở strict) trong CÙNG một

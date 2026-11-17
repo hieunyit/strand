@@ -1,0 +1,164 @@
+{
+  "start_time": "2026-11-17T11:02:22.20952434+07:00",
+  "end_time": "2026-11-17T11:02:27.210640465+07:00",
+  "duration_sec": 5,
+  "warmup_sec": 2,
+  "steady_sec": 5.001116156,
+  "clients": 4,
+  "seed_rows": 5000,
+  "seed": 42,
+  "reproduces_280_to_300": false,
+  "raw_target_commit_tps": 475.92767216116374,
+  "pipeline_efficiency_pct": 599.2430193957363,
+  "warmup_tps": 2339.5,
+  "steady_tps": 2851.963352798399,
+  "steady_row_rate": 2851.963352798399,
+  "source_commit_rate": 2849.9637991611567,
+  "avg_batch_size": 1,
+  "target_top_waits": [
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle",
+      "count": 73
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "active",
+      "count": 19
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle in transaction",
+      "count": 8
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle in transaction",
+      "count": 2
+    },
+    {
+      "type": "IO",
+      "event": "DataFileTruncate",
+      "state": "active",
+      "count": 1
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle",
+      "count": 1
+    }
+  ],
+  "source_top_waits": [
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle",
+      "count": 159
+    },
+    {
+      "type": "LWLock",
+      "event": "WALWrite",
+      "state": "active",
+      "count": 26
+    },
+    {
+      "type": "IO",
+      "event": "WalSync",
+      "state": "active",
+      "count": 16
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "active",
+      "count": 12
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle",
+      "count": 12
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "active",
+      "count": 11
+    },
+    {
+      "type": "IO",
+      "event": "WalWrite",
+      "state": "active",
+      "count": 3
+    },
+    {
+      "type": "IO",
+      "event": "WalSync",
+      "state": "idle",
+      "count": 2
+    },
+    {
+      "type": "LWLock",
+      "event": "WALWrite",
+      "state": "idle",
+      "count": 2
+    },
+    {
+      "type": "IO",
+      "event": "WalInitWrite",
+      "state": "active",
+      "count": 1
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "unknown",
+      "count": 1
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "starting",
+      "count": 1
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "starting",
+      "count": 1
+    }
+  ],
+  "versions": {
+    "docker_cpu": "2.0",
+    "go_version": "go1.27.3",
+    "os_arch": "linux/amd64",
+    "postgres_source": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "postgres_target": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "strand_tool": "pg-strict-diag"
+  },
+  "fsync_settings": {
+    "fsync": "on",
+    "max_wal_size": "1024",
+    "shared_buffers": "32768",
+    "synchronous_commit": "on",
+    "wal_level": "replica"
+  },
+  "observations": [
+    "Source workload generation achieved 2850.0 commits/sec across 4 concurrent clients.",
+    "Target database raw single-connection commit capacity was measured at 475.9 commits/sec.",
+    "Strand strict mode applied 2852.0 transactions/sec with average batch size 1.00 rows/batch (pipeline efficiency 599.2% of raw DB commit ceiling).",
+    "Top target wait event: Client:ClientRead (73 occurrences)",
+    "Measured throughput (2852.0 TPS) exceeds 300 TPS on this host due to local NVMe write cache, but runs at 599.2% of raw single-connection DB commit saturation."
+  ],
+  "artifact_files": {
+    "block_profile": "reports/code-review-20261117/followup-agy/evidence/pg-strict/txntrace-test/block.pprof",
+    "config": "reports/code-review-20261117/followup-agy/evidence/pg-strict/txntrace-test/strand.yaml",
+    "cpu_profile": "reports/code-review-20261117/followup-agy/evidence/pg-strict/txntrace-test/cpu.pprof",
+    "strand_log": "reports/code-review-20261117/followup-agy/evidence/pg-strict/txntrace-test/strand.log"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "task": "09-toast-crash-gate",
+  "model": "gemini-3.8-flash-medium",
+  "exit_code": 0,
+  "elapsed_seconds": 376.4,
+  "result_exists": true
+}

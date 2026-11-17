@@ -1,0 +1,7 @@
+{
+  "task": "07-browser-repros",
+  "model": "gemini-3.8-flash-high",
+  "exit_code": 3,
+  "elapsed_seconds": 904.0,
+  "result_exists": false
+}

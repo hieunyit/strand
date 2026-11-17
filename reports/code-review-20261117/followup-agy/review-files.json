@@ -1,0 +1,17 @@
+[
+  {
+    "path": "cmd/strand/profile.go",
+    "added": 136,
+    "removed": 0
+  },
+  {
+    "path": "cmd/strand/profile_test.go",
+    "added": 205,
+    "removed": 0
+  },
+  {
+    "path": "cmd/strand/sync.go",
+    "added": 28,
+    "removed": 1
+  }
+]

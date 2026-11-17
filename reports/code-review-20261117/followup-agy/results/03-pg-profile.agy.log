@@ -1,0 +1,26 @@
+Implementation and investigation for **Task 03 (PostgreSQL Strict Mode Profiling & Investigation)** are complete.
+
+The detailed investigation, telemetry analysis, profiler verification, and recommended optimization patch have been documented in:
+[03-pg-profile.md](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/results/03-pg-profile.md)
+
+### Key Work Summary
+
+1. **Opt-in CPU & Block Profiling for Sync**:
+   - Implemented in [profile.go](file:///home/hellc/strand/cmd/strand/profile.go) and [sync.go](file:///home/hellc/strand/cmd/strand/sync.go#L111-L208).
+   - Only file-based CPU (`--cpu-profile`) and block profiling (`--block-profile`, `--block-profile-rate`), with zero unauthenticated network pprof endpoints.
+   - Default `os.O_EXCL` prevents unexpected overwriting of existing profiles unless `--profile-overwrite` is explicitly specified.
+   - Negligible disabled overhead (returns `(nil, nil)` immediately with zero allocations when unset).
+   - Full lifecycle management ensures profiles flush cleanly on completion, cancellation, SIGTERM, or errors.
+   - Verified via 8 unit tests in [profile_test.go](file:///home/hellc/strand/cmd/strand/profile_test.go) (`PASS`, 0.415s).
+
+2. **Reproducible Diagnostic Harness**:
+   - Implemented in [main.go](file:///home/hellc/strand/tools/diagnostics/pg-strict/main.go) and [main_test.go](file:///home/hellc/strand/tools/diagnostics/pg-strict/main_test.go).
+   - Sets up isolated PostgreSQL instances with fixed CPU limits (`--cpus=2.0`), explicit durability verification (`fsync=on`, `synchronous_commit=on`), deterministic dataset schema and seed (5,000 rows, seed 42), and configurable warmup/steady windows.
+   - Captures CPU/block profiles, `pg_stat_activity` wait events, commit/batch sizes, raw PostgreSQL single-connection commit capacity, and Prometheus metrics simultaneously.
+
+3. **Empirical Findings on 280–300 TPS**:
+   - In `strict` mode, Strand enforces a single sequential writer (`nWorkers = 1`) to preserve strict commit ordering (CP-5).
+   - When transactions arrive sequentially, each transaction executes in an individual target transaction with synchronous WAL flush (`WalSync`).
+   - On storage media where single `fdatasync()`/`fsync()` latency is ~3.0–3.5 ms (typical for AWS EBS gp3 or physical SATA SSDs), single-writer sequential throughput is mathematically bounded by $1 / 0.0033\text{ s} \approx 300\text{ TPS}$.
+   - On fast local NVMe write cache, the harness demonstrated single-writer throughput of 810–2,669 TPS.
+   - A precise recommended patch for `gatherBatch` adaptive windowing has been provided in the result file for the parent agent to assign separately.

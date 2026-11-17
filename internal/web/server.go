@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -39,20 +40,21 @@ const (
 
 // Server là Web UI + REST API.
 type Server struct {
-	cfg      *Config
-	reg      *Registry
-	samp     *Sampler
-	sessions *SessionStore
-	limiter  *LoginLimiter
-	audit    *AuditLog
-	actions  *ActionRegistry
-	jobs     JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
-	log      *slog.Logger
-	now      func() time.Time
-	secure   bool // đặt cờ Secure cho cookie (TLS hoặc secure_cookies)
-	tls      bool
-	version  string
-	db       *metaDB // nil = chế độ file
+	configEditMu sync.Mutex
+	cfg          *Config
+	reg          *Registry
+	samp         *Sampler
+	sessions     *SessionStore
+	limiter      *LoginLimiter
+	audit        *AuditLog
+	actions      *ActionRegistry
+	jobs         JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
+	log          *slog.Logger
+	now          func() time.Time
+	secure       bool // đặt cờ Secure cho cookie (TLS hoặc secure_cookies)
+	tls          bool
+	version      string
+	db           *metaDB // nil = chế độ file
 
 	pages   map[string]*template.Template
 	handler http.Handler

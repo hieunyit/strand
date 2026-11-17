@@ -1256,7 +1256,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		if p.beforeRegister(rc.Table) {
 			// Bảng chờ snapshot mà range chưa được đăng ký (source PG và MySQL, review N10): xem keepBeforeRegister.
 			var err error
-			if parts, err = p.keepBeforeRegister(rc); err != nil {
+			if parts, err = p.keepBeforeRegisterXID(rc, pos, t.XID); err != nil {
 				return err
 			}
 		} else if p.snap.Manager.IsRegistered(rc.Table) {
@@ -2065,26 +2065,96 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	p.snapReaders.Add(1)
 	defer p.snapReaders.Add(-1)
 	rereads := p.snap.RereadKeysTotal.Load()
-	var err error
-	if m.PKNumeric {
-		err = p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], writableColumns(m), p.rendezvous)
-	} else {
-		err = p.snap.SnapshotAddKeys(ctx, p.src, p.dst, id, m.PKCodec, writableColumns(m), p.rendezvous)
-	}
-	if err != nil {
-		return err
+	for {
+		var high uint64
+		wait := func(ctx context.Context, set checkpoint.AppliedSet) error {
+			if err := p.rendezvous(ctx, set); err != nil {
+				return err
+			}
+			if p.srcEngine == model.EnginePG {
+				high = set.High().LSN
+			}
+			return nil
+		}
+		var err error
+		if m.PKNumeric {
+			err = p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], writableColumns(m), wait)
+		} else {
+			err = p.snap.SnapshotAddKeys(ctx, p.src, p.dst, id, m.PKCodec, writableColumns(m), wait)
+		}
+		if err != nil {
+			return err
+		}
+		if p.srcEngine == model.EnginePG {
+			// Rendezvous only establishes router progress. Make it durable before
+			// deleting the saved bounds guard, and catch rereads routed meanwhile.
+			retry, err := p.finishPGSnapshot(ctx, id, high)
+			if err != nil {
+				return err
+			}
+			if retry {
+				continue
+			}
+		} else {
+			if err := p.state.SetDone(id.String(), true); err != nil {
+				return err
+			}
+			p.routeMu.Lock()
+			p.snap.Manager.RemoveTable(id)
+			p.routeMu.Unlock()
+		}
+		break
 	}
 	rereads = p.snap.RereadKeysTotal.Load() - rereads
-	if err := p.state.SetDone(id.String(), true); err != nil {
-		return err
-	}
-	p.routeMu.Lock()
-	p.snap.Manager.RemoveTable(id)
-	p.routeMu.Unlock()
 	p.snapTablesDone.Add(1)
 	p.log.Info("snapshot done", "table", id.String(), "duration", time.Since(start).String(),
 		"reread_keys", rereads) // khóa được đọc lại do UPDATE đổi PK mà cột TOAST không đổi (02 §8)
 	return nil
+}
+
+// finishPGSnapshot keeps the saved bounds guard until all routed work through
+// the completion watermark is durably represented by the global checkpoint.
+func (p *Pipeline) finishPGSnapshot(ctx context.Context, id model.TableID, high uint64) (bool, error) {
+	if high == 0 {
+		return false, fmt.Errorf("snapshot completion watermark missing for %s", id)
+	}
+	retry := false
+	err := p.barrier(ctx, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(p.snap.Manager.RereadBounds(id)) != 0 {
+			retry = true
+			return nil
+		}
+		if err := p.comp.Compact(ctx); err != nil {
+			return fmt.Errorf("snapshot completion compaction: %w", err)
+		}
+		q := "SELECT applied FROM _strand_checkpoint WHERE pipeline_id = ? AND epoch = ?"
+		if p.dstEngine == model.EnginePG {
+			q = "SELECT applied FROM _strand_checkpoint WHERE pipeline_id = $1 AND epoch = $2"
+		}
+		var applied string
+		if err := p.dst.QueryRowContext(ctx, q, p.id, p.epoch).Scan(&applied); err != nil {
+			return fmt.Errorf("read snapshot completion checkpoint: %w", err)
+		}
+		set, err := checkpoint.ParseAppliedSet(model.EnginePG, applied)
+		if err != nil {
+			return fmt.Errorf("parse snapshot completion checkpoint: %w", err)
+		}
+		if set.Lwd().LSN < high {
+			return fmt.Errorf("snapshot completion checkpoint %X does not cover watermark %X", set.Lwd().LSN, high)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := p.state.SetDone(id.String(), true); err != nil {
+			return err
+		}
+		p.snap.Manager.RemoveTable(id)
+		return nil
+	})
+	return retry, err
 }
 
 // SnapshotAdd thêm một bảng khi pipeline đang chạy (strand snapshot add, 02 §10).

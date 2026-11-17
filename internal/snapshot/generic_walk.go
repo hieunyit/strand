@@ -35,7 +35,21 @@ func (s *MySQLSnapshotter) registerGeneric(ctx context.Context, dstDB *sql.DB, t
 	kq keySQL, plan *SnapshotPlan, resumed bool, cur *SnapshotPlan) error {
 	*cur = *plan
 	if plan.Empty {
+		var keys []Bound
+		for _, vals := range plan.RereadKeyVals {
+			b, err := kq.bound(fromKeyVals(vals))
+			if err != nil {
+				return err
+			}
+			keys = append(keys, b)
+		}
+		if resumed && len(keys) > 0 {
+			if err := s.clearUnreadKeys(ctx, dstDB, kq, Bound{}, Bound{}, false, keys); err != nil {
+				return fmt.Errorf("clear resumed rereads of empty snapshot %s: %w", table, err)
+			}
+		}
 		s.Manager.RegisterTableKeys(table, pkCol, kq.codec, nil, nil)
+		s.Manager.AddRereadKeys(table, keys, time.Now())
 		return nil
 	}
 	minB, maxB, last, hasLast, err := planBounds(kq, plan)
@@ -85,6 +99,11 @@ func (s *MySQLSnapshotter) registerGeneric(ctx context.Context, dstDB *sql.DB, t
 func (s *MySQLSnapshotter) walkGeneric(ctx context.Context, srcDB *sql.DB, table model.TableID, kq keySQL,
 	cur SnapshotPlan, processChunk func(*Chunk) error, nextRows func(rows int64) int64) error {
 	if cur.Empty {
+		for chunk := s.Manager.TakeReread(table, time.Now(), true); chunk != nil; chunk = s.Manager.TakeReread(table, time.Now(), true) {
+			if err := processChunk(chunk); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	minB, maxB, last, hasLast, err := planBounds(kq, &cur)
@@ -241,9 +260,6 @@ func (s *MySQLSnapshotter) keysetEndKeys(ctx context.Context, srcDB *sql.DB, kq 
 // PendingKey (plan khóa tổng quát): khóa thuộc phần sẽ được snapshot đọc — chưa flush (sau LastKey,
 // ≤ MaxKey, plan chưa Finished) hoặc đang chờ đọc lại.
 func (p SnapshotPlan) PendingKey(codec *PKCodec, key []model.Value) (bool, error) {
-	if p.Empty {
-		return false, nil
-	}
 	kq := newKeySQL(model.TableID{}, codec)
 	k, err := kq.codec.Encode(key)
 	if err != nil {
@@ -254,7 +270,7 @@ func (p SnapshotPlan) PendingKey(codec *PKCodec, key []model.Value) (bool, error
 			return true, nil
 		}
 	}
-	if p.Finished {
+	if p.Empty || p.Finished {
 		return false, nil
 	}
 	minB, maxB, last, hasLast, err := planBounds(kq, &p)

@@ -17,6 +17,7 @@ import (
 	"strand/internal/reader"
 	archivereader "strand/internal/reader/archive"
 	mysqlreader "strand/internal/reader/mysql"
+	"strand/internal/seed"
 	"strand/internal/spool"
 )
 
@@ -32,6 +33,13 @@ func readSourceGTID(ctx context.Context, sourceDSN string) (*checkpoint.MySQLApp
 		return nil, err
 	}
 	return checkpoint.ParseMySQLGTIDSet(strings.ReplaceAll(executed, "\n", ""))
+}
+
+type seedManifestLite struct {
+	P              string
+	Tables         []string
+	SchemaSnapshot string
+	ArchiveSchema  string
 }
 
 // prefetch (02 §9, P1-14): đọc log từ P vào spool, archive trước rồi source, song song với
@@ -72,7 +80,11 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 	}
 	defer sp.Close()
 
-	covered, err := checkpoint.ParseMySQLGTIDSet(m.P)
+	startGTID := ""
+	if m != nil {
+		startGTID = m.P
+	}
+	covered, err := checkpoint.ParseMySQLGTIDSet(startGTID)
 	if err != nil {
 		return 0, err
 	}
@@ -90,8 +102,96 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 	spillDir := filepath.Join(spoolDir, "spill")
 	_ = os.MkdirAll(spillDir, 0o750)
 	n := 0
+
+	var sidecar *archivereader.SchemaSidecar
+	if m != nil {
+		sidecarPath := m.ArchiveSchema
+		if sidecarPath == "" {
+			sidecarPath = m.SchemaSnapshot
+		}
+		if sidecarPath != "" {
+			if sc, err := archivereader.LoadSchemaSidecar(sidecarPath); err == nil {
+				sidecar = sc
+			} else {
+				return 0, fmt.Errorf("load archive schema sidecar %s: %w", sidecarPath, err)
+			}
+		}
+	}
+
+	var tableScope func(schema, table string) bool
+	if m != nil && len(m.Tables) > 0 {
+		hasStar := false
+		for _, t := range m.Tables {
+			if strings.TrimSpace(t) == "*" {
+				hasStar = true
+				break
+			}
+		}
+		if !hasStar {
+			var patterns []seed.TablePattern
+			for _, t := range m.Tables {
+				if p, err := seed.ParseTablePattern(t); err == nil {
+					patterns = append(patterns, p)
+				}
+			}
+			if len(patterns) > 0 {
+				tableScope = func(schema, table string) bool {
+					tid := model.TableID{Schema: schema, Table: table}
+					for _, p := range patterns {
+						if p.Match(tid) {
+							return true
+						}
+					}
+					return false
+				}
+			}
+		}
+	}
+
+	var keylessFunc func(model.TableID) bool
+	if sidecar != nil {
+		keylessFunc = func(tid model.TableID) bool {
+			if tbl, ok := sidecar.GetTable(tid.Schema, tid.Table); ok {
+				return tbl.IdentityMode == archivereader.IdentityModeKeyless
+			}
+			return false
+		}
+	}
+
 	consume := func(events <-chan reader.Event, stopAt *checkpoint.MySQLAppliedSet, untilCh <-chan struct{}) error {
-		asm := assemble.New(assemble.WithSpillDir(spillDir))
+		var asmOpts []assemble.Option
+		asmOpts = append(asmOpts, assemble.WithSpillDir(spillDir))
+		if keylessFunc != nil {
+			asmOpts = append(asmOpts, assemble.WithKeylessFunc(keylessFunc))
+		}
+		if sidecar != nil {
+			kmMap := make(map[model.TableID]assemble.KeyMeta)
+			for _, tbl := range sidecar.Tables {
+				tid := model.TableID{Schema: tbl.Schema, Table: tbl.Table}
+				var km assemble.KeyMeta
+				if tbl.IdentityMode == archivereader.IdentityModeKeyless {
+					km.Unique = append(km.Unique, assemble.UniqueIndex{
+						Name:    assemble.KeylessIndexName,
+						Columns: tbl.Columns,
+						Prefix:  true,
+					})
+				}
+				if len(km.Unique) > 0 {
+					kmMap[tid] = km
+				}
+			}
+			if len(kmMap) > 0 {
+				asmOpts = append(asmOpts, assemble.WithKeyMetadata(kmMap))
+			}
+		}
+		asm := assemble.New(asmOpts...)
+		if sidecar != nil {
+			for _, tbl := range sidecar.Tables {
+				if tbl.IdentityMode == archivereader.IdentityModeUnique && len(tbl.KeyColumns) > 0 {
+					asm.Registry().RegisterTable(tbl.Schema, tbl.Table, tbl.KeyColumns, tbl.Columns)
+				}
+			}
+		}
 		inTxn := false
 		// Khi untilCh đóng (restore-cmd kết thúc), chốt stopAt bằng gtid_executed hiện tại của source.
 		checkUntil := func() error {
@@ -116,6 +216,14 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
+					if inTxn {
+						return exitcode.New(
+							exitcode.ErrLogGap,
+							exitcode.DataError,
+							"event stream closed unexpectedly while inside transaction (partial transaction not covered)",
+							nil,
+						)
+					}
 					if stopAt != nil && !stopAt.IsSubsetOf(covered) {
 						return fmt.Errorf("source event stream closed before reaching %s", stopAt)
 					}
@@ -136,6 +244,20 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 					continue
 				}
 				inTxn = false
+				if sidecar != nil {
+					for _, rc := range t.Rows {
+						if tbl, ok := sidecar.GetTable(rc.Table.Schema, rc.Table.Table); ok {
+							if err := archivereader.VerifyRowChangeIdentity(*tbl, rc); err != nil {
+								return exitcode.New(
+									exitcode.ErrBinlogConfigInvalid,
+									exitcode.Rejected,
+									fmt.Sprintf("spool prefetch downstream safety violation: %v", err),
+									err,
+								)
+							}
+						}
+					}
+				}
 				if !covered.Contains(t.SourcePos) {
 					if err := sp.Append(ctx, t); err != nil {
 						return err // prefetch_exhausted khi mọi tầng spool chạm hard limit
@@ -168,7 +290,12 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 		} else {
 			fmt.Println("archive prefetch: no --source; values of non-UTF-8 string columns are not converted")
 		}
-		ar, err := archivereader.New(archivereader.Config{Dir: archiveDir, CollationCharsets: charsets})
+		ar, err := archivereader.New(archivereader.Config{
+			Dir:               archiveDir,
+			CollationCharsets: charsets,
+			Sidecar:           sidecar,
+			TableScope:        tableScope,
+		})
 		if err != nil {
 			return n, err
 		}
@@ -185,6 +312,12 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 			}
 			var se *exitcode.Error
 			if errors.As(err, &se) && se.Code == exitcode.ErrPrefetchExhausted {
+				return n, err
+			}
+			if sourceDSN == "" {
+				return n, fmt.Errorf("archive prefetch failed with no source fallback: %w", err)
+			}
+			if exitcode.GetExitCode(err) == exitcode.Rejected || exitcode.GetExitCode(err) == exitcode.NeedsDecision {
 				return n, err
 			}
 			fmt.Printf("archive prefetch stopped: %v (continuing from source)\n", err)
@@ -254,8 +387,6 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 	}
 	return n, nil
 }
-
-type seedManifestLite struct{ P string }
 
 // loadSourceCharsets đọc bảng collation id -> charset của source.
 func loadSourceCharsets(ctx context.Context, dsn string) (map[uint64]string, error) {

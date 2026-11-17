@@ -43,3 +43,84 @@ func TestMaskConfigTextBlockScalarSecretRejected(t *testing.T) {
 		t.Fatal("block scalar bí mật phải bị từ chối thay vì rò rỉ")
 	}
 }
+
+func TestMaskConfigTextCompactJSONAndFlowYAML(t *testing.T) {
+	for _, raw := range []string{
+		`{"source":{"password":"json-canary"},"target":{"password":"target-canary"}}`,
+		`source: {password: 'flow canary', nested: {api_token: compact-token}}`,
+	} {
+		masked, err := MaskConfigText([]byte(raw))
+		if err != nil {
+			t.Fatalf("MaskConfigText(%q): %v", raw, err)
+		}
+		for _, secret := range []string{"json-canary", "target-canary", "flow canary", "compact-token"} {
+			if strings.Contains(masked, secret) {
+				t.Errorf("secret %q leaked from %q as %q", secret, raw, masked)
+			}
+		}
+		if !strings.Contains(masked, `"********"`) && !strings.Contains(masked, `password: "********"`) && !strings.Contains(masked, `api_token: "********"`) {
+			t.Errorf("no placeholder in masked %q", masked)
+		}
+		back, err := UnmaskConfigText(masked, []byte(raw))
+		if err != nil || back != raw {
+			t.Errorf("round trip: got %q err %v, want %q", back, err, raw)
+		}
+	}
+}
+
+func TestUnmaskRejectsCompactUnmatchedMaskedPassword(t *testing.T) {
+	orig := []byte(`{"source":{"password":"original"}}`)
+	back, err := UnmaskConfigText(`{"source":{"password":"********"}}`, orig)
+	if err != nil || back != `{"source":{"password":"original"}}` {
+		t.Fatalf("matching compact placeholder was not restored: back=%q err=%v", back, err)
+	}
+	if _, err := UnmaskConfigText(`{"target":{"password":"********"}}`, orig); err == nil {
+		t.Fatal("unmatched compact placeholder must not be persisted")
+	}
+}
+
+func TestMaskConfigTextSecretAliasRejected(t *testing.T) {
+	raw := "common: &pw topsecret\nsource: {password: *pw}\n"
+	if _, err := MaskConfigText([]byte(raw)); err == nil {
+		t.Fatal("secret alias must fail closed because its anchor may expose the scalar")
+	}
+}
+
+func TestMaskUnmaskWhitespaceOnlyPassword(t *testing.T) {
+	orig := []byte("source:\n  password: '   '\n")
+	masked, err := MaskConfigText(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(masked, "password: '   '") || !strings.Contains(masked, `password: "********"`) {
+		t.Fatalf("whitespace-only password was not masked: %q", masked)
+	}
+	back, err := UnmaskConfigText(masked, orig)
+	if err != nil || back != string(orig) {
+		t.Fatalf("whitespace-only password round trip: got %q err=%v, want %q", back, err, orig)
+	}
+	yamlMasked, err := MaskConfigYAML(orig)
+	if err != nil || strings.Contains(yamlMasked, "password: '   '") || !strings.Contains(yamlMasked, "********") {
+		t.Fatalf("MaskConfigYAML did not mask whitespace-only password: %q err=%v", yamlMasked, err)
+	}
+}
+
+func TestUnmaskReorderedCompactJSON(t *testing.T) {
+	orig := []byte(`{"source":{"password":"source-secret"},"target":{"password":"target-secret"}}`)
+	masked, err := MaskConfigText(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reordered := strings.Replace(masked, `"source":{"password":"********"},"target":{"password":"********"}`, `"target":{"password":"********"},"source":{"password":"********"}`, 1)
+	if reordered == masked {
+		t.Fatalf("test did not reorder masked JSON: %s", masked)
+	}
+	got, err := UnmaskConfigText(reordered, orig)
+	if err != nil {
+		t.Fatalf("reordered compact placeholders should restore by scalar path: %v", err)
+	}
+	want := `{"target":{"password":"target-secret"},"source":{"password":"source-secret"}}`
+	if got != want {
+		t.Fatalf("reordered compact JSON restored wrongly:\ngot:  %s\nwant: %s", got, want)
+	}
+}

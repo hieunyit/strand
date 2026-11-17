@@ -1,0 +1,24 @@
+=== RUN   TestNK07_PostgresCitextDomainArrayGate
+2026/11/17 10:30:30 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 55f34de335d50582bceba42320ef179e4d74b4ff7d4087c1a822149ff4e58bfa
+  Test ProcessID: 142f3aae-c986-4091-9780-64ab0caa15a2
+2026/11/17 10:30:30 🐳 Creating container for image postgres:18
+2026/11/17 10:30:30 ✅ Container created: 016341e1d0cd
+2026/11/17 10:30:30 🐳 Starting container: 016341e1d0cd
+2026/11/17 10:30:31 ✅ Container started: 016341e1d0cd
+2026/11/17 10:30:31 ⏳ Waiting for container id 016341e1d0cd image: postgres:18. Waiting for: &{timeout:0x31800fa96c50 Log:database system is ready to accept connections IsRegexp:false Occurrence:2 PollInterval:100ms}
+2026/11/17 10:30:35 🔔 Container is ready: 016341e1d0cd
+2026/11/17 10:30:35 🐳 Stopping container: 016341e1d0cd
+2026/11/17 10:30:35 ✅ Container stopped: 016341e1d0cd
+2026/11/17 10:30:35 🐳 Terminating container: 016341e1d0cd
+2026/11/17 10:30:36 🚫 Container terminated: 016341e1d0cd
+--- PASS: TestNK07_PostgresCitextDomainArrayGate (6.00s)
+PASS
+ok  	strand/internal/pipeline	6.357s

@@ -1,0 +1,9 @@
+{
+  "pipeline_id": "pg-strict-diag",
+  "snapshot_done": {
+    "bench.accounts": true
+  },
+  "table_targets": {
+    "bench.accounts": "bench.accounts"
+  }
+}

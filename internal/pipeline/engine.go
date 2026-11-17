@@ -211,7 +211,14 @@ func loadSourceTablesPG(ctx context.Context, db *sql.DB, f *tableFilter) (map[mo
 	for _, r := range rels {
 		m := &tableMeta{ID: r.id}
 		cr, err := db.QueryContext(ctx, `
-			SELECT a.attname, t.typname, a.atttypid, a.atttypmod FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+			SELECT a.attname, base.typname, a.atttypid, a.atttypmod FROM pg_attribute a
+             JOIN LATERAL (
+                 WITH RECURSIVE types AS (
+                     SELECT t.oid, t.typname, t.typbasetype, t.typelem, t.typcategory, 0 AS depth FROM pg_type t WHERE t.oid=a.atttypid
+                     UNION ALL
+                     SELECT t.oid, t.typname, t.typbasetype, t.typelem, t.typcategory, p.depth+1 FROM pg_type t JOIN types p ON t.oid=CASE WHEN p.typbasetype<>0 THEN p.typbasetype WHEN p.typcategory='A' THEN p.typelem ELSE 0 END
+                 ) SELECT typname FROM types WHERE typbasetype=0 ORDER BY (typname IN ('citext','float4','float8','json','xml','point','line','lseg','box','path','polygon','circle')) DESC, depth LIMIT 1
+             ) base ON true
 			 WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
 			 ORDER BY a.attnum`, r.oid)
 		if err != nil {
@@ -1079,20 +1086,86 @@ func (p *Pipeline) beforeRegister(t model.TableID) bool {
 // không đổi, khóa cũ sẽ được đọc lại còn khóa mới thì không: nửa upsert thiếu giá trị TOAST nên khóa mới
 // được thêm vào plan.Reread (lưu bền ngay, trước khi Txn được Admit) và nửa upsert bị bỏ (toast_pk.go).
 func (p *Pipeline) keepBeforeRegister(rc *model.RowChange) ([]*model.RowChange, error) {
+	return p.keepBeforeRegisterXID(rc, model.Pos{}, 0)
+}
+
+func (p *Pipeline) keepBeforeRegisterXID(rc *model.RowChange, pos model.Pos, xid uint64) ([]*model.RowChange, error) {
 	plan, ok := p.state.Plan(rc.Table.String())
 	if !ok {
 		return nil, nil
 	}
-	if plan.Empty {
-		return []*model.RowChange{rc}, nil
+	var codec *snapshot.PKCodec
+	if m := p.table(rc.Table); m != nil {
+		codec = m.PKCodec
+	}
+	// During replay the saved bounds guard must be active even before the
+	// snapshot goroutine has registered its ranges.
+	stale := plan.BoundSnapshot != nil && pos.Engine == model.EnginePG && pos.LSN != 0 &&
+		(plan.BoundSnapshot.BoundsLSN == 0 || pos.LSN <= plan.BoundSnapshot.BoundsLSN) && plan.BoundSnapshot.Visible(xid)
+	outside := func(key []model.Value) (bool, error) {
+		if plan.Empty {
+			return true, nil
+		}
+		if !plan.GenericKey {
+			v, err := snapshotPK(key)
+			if err != nil {
+				return false, err
+			}
+			return v < plan.MinPK || v > plan.MaxPK, nil
+		}
+		if codec == nil {
+			return false, fmt.Errorf("missing primary key codec for %s", rc.Table)
+		}
+		values := func(in []snapshot.KeyVal) []model.Value {
+			out := make([]model.Value, len(in))
+			for i, v := range in {
+				switch {
+				case v.I != nil:
+					out[i] = *v.I
+				case v.U != nil:
+					out[i] = *v.U
+				case v.Bin:
+					out[i] = v.B
+				case v.S != nil:
+					out[i] = *v.S
+				}
+			}
+			return out
+		}
+		k, err := codec.Encode(key)
+		if err != nil {
+			return false, err
+		}
+		lo, err := codec.Encode(values(plan.MinKey))
+		if err != nil {
+			return false, err
+		}
+		hi, err := codec.Encode(values(plan.MaxKey))
+		if err != nil {
+			return false, err
+		}
+		return k < lo || k > hi, nil
+	}
+	oldStale, newStale := false, false
+	if stale && snapshot.HasUnchanged(rc) {
+		var err error
+		newStale, err = outside(rc.Key)
+		if err != nil {
+			return nil, err
+		}
+		if len(rc.OldKey) > 0 {
+			oldStale, err = outside(rc.OldKey)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(rc.OldKey) == 0 && newStale {
+			return nil, nil
+		}
 	}
 	reread := make(map[int64]bool, len(plan.Reread))
 	for _, k := range plan.Reread {
 		reread[k] = true
-	}
-	var codec *snapshot.PKCodec
-	if m := p.table(rc.Table); m != nil {
-		codec = m.PKCodec
 	}
 	inside := func(key []model.Value) bool {
 		if plan.GenericKey { // việc C: PK tổng quát
@@ -1104,6 +1177,28 @@ func (p *Pipeline) keepBeforeRegister(rc *model.RowChange) ([]*model.RowChange, 
 	}
 	if len(rc.OldKey) > 0 && snapshot.HasUnchanged(rc) {
 		oldIn, newIn := inside(rc.OldKey), inside(rc.Key)
+		if oldStale || newStale {
+			var out []*model.RowChange
+			if !oldIn {
+				out = append(out, snapshot.SplitStreamEvent(rc)[0])
+			}
+			if !newStale && !newIn {
+				if plan.GenericKey {
+					if _, err := p.snap.AddPlanRereadKey(rc.Table, codec, rc.Key); err != nil {
+						return nil, err
+					}
+				} else {
+					key, err := snapshotPK(rc.Key)
+					if err != nil {
+						return nil, err
+					}
+					if _, err := p.snap.AddPlanReread(rc.Table, key); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return out, nil
+		}
 		switch {
 		case !oldIn && !newIn:
 			return []*model.RowChange{rc}, nil // SQL điều kiện của writer (cả hai khóa đã ở target)

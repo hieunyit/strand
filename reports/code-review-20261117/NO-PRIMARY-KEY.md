@@ -1,5 +1,7 @@
 # Review đồng bộ bảng không có khóa chính — 17/11/2026
 
+> Cập nhật xử lý: xem [kết quả sửa và kiểm chứng](fixes/STATUS.md). Nội dung bên dưới là phát hiện tại thời điểm review trước sửa.
+
 Bổ sung cho [báo cáo chính](REVIEW.md). Phạm vi là working tree hiện tại, gồm các bản sửa chưa commit từ lượt trước. Lượt này chỉ review và bổ sung bằng chứng, **chưa sửa mã sản phẩm**.
 
 ## Phân công theo model

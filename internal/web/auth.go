@@ -172,15 +172,17 @@ func (s *SessionStore) gcLocked(t time.Time) {
 // LoginLimiter: tối đa 5 lần sai/phút/IP; sau đó khóa, thời gian khóa tăng gấp đôi mỗi lần sai tiếp
 // (1 phút, 2, 4, ... tối đa 15 phút). Đăng nhập đúng xóa bộ đếm của IP.
 type LoginLimiter struct {
-	mu  sync.Mutex
-	m   map[string]*ipState
-	now func() time.Time
+	mu        sync.Mutex
+	m         map[string]*ipState
+	now       func() time.Time
+	nextSweep time.Time
 }
 
 type ipState struct {
 	fails     []time.Time
 	lockUntil time.Time
 	strikes   int
+	lastFail  time.Time
 }
 
 func NewLoginLimiter(now func() time.Time) *LoginLimiter {
@@ -195,7 +197,11 @@ func (l *LoginLimiter) Allow(ip string) (bool, time.Duration) {
 	t := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.expire(t)
 	st := l.m[ip]
+	if st == nil && len(l.m) >= 10000 {
+		return false, loginWindow
+	}
 	if st != nil && t.Before(st.lockUntil) {
 		return false, st.lockUntil.Sub(t)
 	}
@@ -207,11 +213,16 @@ func (l *LoginLimiter) Fail(ip string) {
 	t := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.expire(t)
 	st := l.m[ip]
 	if st == nil {
+		if len(l.m) >= 10000 {
+			return
+		}
 		st = &ipState{}
 		l.m[ip] = st
 	}
+	st.lastFail = t
 	kept := st.fails[:0]
 	for _, f := range st.fails {
 		if t.Sub(f) < loginWindow {
@@ -235,4 +246,17 @@ func (l *LoginLimiter) Success(ip string) {
 	l.mu.Lock()
 	delete(l.m, ip)
 	l.mu.Unlock()
+}
+
+// expire runs under mu and bounds both idle retention and sweep frequency.
+func (l *LoginLimiter) expire(now time.Time) {
+	if now.Before(l.nextSweep) {
+		return
+	}
+	for ip, st := range l.m {
+		if !now.Before(st.lockUntil) && now.Sub(st.lastFail) >= maxLockout {
+			delete(l.m, ip)
+		}
+	}
+	l.nextSweep = now.Add(loginWindow)
 }

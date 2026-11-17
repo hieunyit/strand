@@ -3,6 +3,7 @@ package snapshot_test
 // spec: 02 §8 (đổi PK khi cột TOAST không đổi), §6 (max_pending_cross_range), design §6.1
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -281,5 +282,85 @@ func TestToastPK_AddRereadFromPlan(t *testing.T) {
 	}
 	if a, _ := m.HandleStreamEventXID(pgRow(5000, col("id", int64(5000))), pgPos, 1); a != snapshot.ActionDiscard {
 		t.Fatalf("event on restored re-read key: %s, want Discard", a)
+	}
+}
+
+// G2-7 / risk #5: lúc đăng ký bảng, router còn đứng SAU các Txn đã commit (lag). Chúng visible với
+// snapshot đọc biên (BoundSnap) nhưng vẫn đi qua router sau ClearTarget. Khóa ngoài [min, max] (ở đây
+// 1, 2 < min = 3) không thuộc chunk nào nên bị coi "Xong", trong khi row nền của chúng đã bị ClearTarget
+// xóa và snapshot không đọc lại: UPDATE thiếu cột TOAST apply xuống target → ToastRowMissingError.
+// Phải bỏ event của Txn visible với BoundSnap; Txn sau snapshot (xid ≥ 100) vẫn apply như range "Xong".
+func TestToastPK_OutsideBoundsVisibleToBoundSnap_Discarded(t *testing.T) {
+	m := snapshot.NewRangeStateManager()
+	pend := &snapshot.Chunk{Table: toastTbl, PKCol: "id", StartPK: 3, EndPK: 100, State: snapshot.StatePending}
+	m.RegisterTable(toastTbl, "id", []*snapshot.Chunk{pend}, 100)
+	m.SetBoundSnapshot(toastTbl, &snapshot.PGSnapshot{Xmin: 100, Xmax: 100}) // xid < 100 visible
+	now := time.Now()
+
+	// Đổi PK 1 → 2 (cả hai dưới min) của Txn visible với BoundSnap: không được apply UPDATE một phần.
+	rs, reread := m.HandleToastPKChangeXID(toastMove(1, 2), pgPos, 50, now)
+	if reread || actions(rs) != "Apply:delete[1] Discard:insert[2] " {
+		t.Fatalf("below min, visible: %s reread=%v", actions(rs), reread)
+	}
+	// Cùng event ở đuôi (> b_last).
+	rs, reread = m.HandleToastPKChangeXID(toastMove(300, 301), pgPos, 50, now)
+	if reread || actions(rs) != "Apply:delete[300] Discard:insert[301] " {
+		t.Fatalf("tail, visible: %s reread=%v", actions(rs), reread)
+	}
+	// Txn sau snapshot đăng ký: row nền do chính stream dựng nên SQL điều kiện của writer là đúng.
+	rs, reread = m.HandleToastPKChangeXID(toastMove(1, 2), pgPos, 150, now)
+	if reread || len(rs) != 1 || rs[0].Action != snapshot.ActionApply || rs[0].Event.OldKey == nil {
+		t.Fatalf("below min, after snapshot: %s reread=%v", actions(rs), reread)
+	}
+	// UPDATE thường thiếu cột TOAST (không đổi PK).
+	upd := &model.RowChange{Table: toastTbl, Op: model.OpUpdate, Key: []model.Value{int64(1)},
+		Cols: []model.ColValue{col("id", 1), col("q", 2), unchanged("doc")}}
+	if rs := m.HandleStreamEventWithPKSplitXID(upd, pgPos, 50); actions(rs) != "Discard:update[1] " {
+		t.Fatalf("partial update below min, visible: %s", actions(rs))
+	}
+	if rs := m.HandleStreamEventWithPKSplitXID(upd, pgPos, 150); actions(rs) != "Apply:update[1] " {
+		t.Fatalf("partial update below min, after snapshot: %s", actions(rs))
+	}
+}
+
+func TestToastPK_HistoricalMoveAfterPlanRestart(t *testing.T) {
+	// Original source history: T1 moves 1->101, T2 moves 101->2.
+	// Bounds read after T2 see [2,100], but router has not seen T1 yet.
+	plan := snapshot.SnapshotPlan{MinPK: 2, MaxPK: 100, NextPK: 2, BoundSnapshot: &snapshot.PGSnapshot{Xmin: 70, Xmax: 100, Xip: map[uint64]struct{}{70: {}}, BoundsLSN: 100}}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored snapshot.SnapshotPlan
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	m := snapshot.NewRangeStateManager()
+	m.RegisterTable(toastTbl, "id", []*snapshot.Chunk{{Table: toastTbl, PKCol: "id", StartPK: restored.MinPK, EndPK: restored.MaxPK, State: snapshot.StatePending}}, restored.MaxPK)
+	m.SetBoundSnapshot(toastTbl, restored.BoundSnapshot)
+	rs, reread := m.HandleToastPKChangeXID(toastMove(1, 101), pgPos, 50, time.Now())
+	if reread || actions(rs) != "Apply:delete[1] Discard:insert[101] " {
+		t.Fatalf("historical move after restart: %s reread=%v", actions(rs), reread)
+	}
+	rs, _ = m.HandleToastPKChangeXID(toastMove(101, 2), pgPos, 51, time.Now())
+	if actions(rs) != "Apply:delete[101] Discard:insert[2] " {
+		t.Fatalf("historical second move: %s", actions(rs))
+	}
+	// An in-flight transaction at original bounds is not covered by that snapshot.
+	rs, _ = m.HandleToastPKChangeXID(toastMove(101, 102), pgPos, 70, time.Now())
+	if len(rs) != 1 || rs[0].Action != snapshot.ActionApply || rs[0].Event.OldKey == nil {
+		t.Fatalf("in-flight move incorrectly dropped: %s", actions(rs))
+	}
+	// After enough transactions a 32-bit xid can resemble an old visible xid.
+	// The durable WAL fence must prevent suppressing any newer transaction.
+	rs, _ = m.HandleToastPKChangeXID(toastMove(101, 102), model.Pos{Engine: model.EnginePG, LSN: 101}, 50, time.Now())
+	if len(rs) != 1 || rs[0].Action != snapshot.ActionApply || rs[0].Event.OldKey == nil {
+		t.Fatalf("newer WAL transaction incorrectly treated as historical: %s", actions(rs))
+	}
+	// A new registration without visibility (legacy plan/MySQL) cannot inherit it.
+	m.RegisterTable(toastTbl, "id", nil, 100)
+	rs, _ = m.HandleToastPKChangeXID(toastMove(1, 101), pgPos, 50, time.Now())
+	if len(rs) != 1 || rs[0].Action != snapshot.ActionApply {
+		t.Fatalf("visibility leaked across registration: %s", actions(rs))
 	}
 }

@@ -1,5 +1,7 @@
 # Kiểm tra chéo theo model — 17/11/2026
 
+> Cập nhật xử lý: xem [kết quả sửa và kiểm chứng](fixes/STATUS.md). Nội dung bên dưới là phát hiện tại thời điểm review trước sửa.
+
 Đối tượng: working tree đang chứa các bản sửa từ lượt 16–17/11. Lượt này **không sửa mã sản phẩm**; chỉ bổ sung báo cáo và test overlay ngoài source. Các phát hiện dưới đây còn mở.
 
 ## Phân công để giảm token

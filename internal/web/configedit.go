@@ -40,6 +40,10 @@ func unifiedDiff(oldName, newName, oldText, newText string) string {
 	newLines := splitLines(newText)
 
 	n, m := len(oldLines), len(newLines)
+	// Bound LCS memory and CPU, including configurations read from disk.
+	if n > 0 && m > 1_000_000/n {
+		return fmt.Sprintf("--- %s\n+++ %s\n(diff omitted: configuration too large)\n", oldName, newName)
+	}
 	dp := make([][]int, n+1)
 	for i := range dp {
 		dp[i] = make([]int, m+1)
@@ -217,8 +221,15 @@ func (s *Server) validateConfigContent(ctx context.Context, p *Pipeline, yamlCon
 	valid := runErr == nil && exitCode == 0
 
 	origBytes, _ := os.ReadFile(p.ConfigPath)
-	origText := string(origBytes)
-	diff := unifiedDiff(p.ConfigPath, p.ConfigPath+" (new)", origText, string(unmasked))
+	origText, err := MaskConfigText(origBytes)
+	if err != nil {
+		return nil, fmt.Errorf("mask original config: %w", err)
+	}
+	newText, err := MaskConfigText(unmasked)
+	if err != nil {
+		return nil, fmt.Errorf("mask edited config: %w", err)
+	}
+	diff := unifiedDiff(p.ConfigPath, p.ConfigPath+" (new)", origText, newText)
 
 	return &ConfigValidateResult{
 		Valid:    valid,
@@ -235,6 +246,8 @@ func (s *Server) validateConfigContent(ctx context.Context, p *Pipeline, yamlCon
 // (d) ghi đè nguyên tử (rename)
 // (e) restart nếu được yêu cầu.
 func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent string, restart bool, ip string) (*ConfigSaveResult, error) {
+	s.configEditMu.Lock()
+	defer s.configEditMu.Unlock()
 	if p == nil || p.ConfigPath == "" {
 		return nil, errors.New("pipeline has no config path")
 	}
@@ -307,7 +320,8 @@ func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent
 
 	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo).
 	if err := s.persistPipelineFiles(p); err != nil {
-		s.log.Warn("config saved to file but storing it in the database failed", "pipeline", p.Name, "err", err)
+		rollbackErr := writeFilePreserving(p.ConfigPath, origBytes, false, false)
+		return nil, errors.Join(fmt.Errorf("persist config: %w", err), rollbackErr)
 	}
 
 	// Làm mới cấu hình trong registry
@@ -385,7 +399,10 @@ func (s *Server) getEnvView(p *Pipeline) EnvView {
 
 // saveEnvContent lưu file .env (mode 0600), giữ nguyên giá trị cũ nếu người dùng gửi '********'.
 func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[string]string, ip string) (string, error) {
+	s.configEditMu.Lock()
+	defer s.configEditMu.Unlock()
 	envPath := s.envPathFor(p)
+	origEnv, origEnvErr := os.ReadFile(envPath)
 	dir := filepath.Dir(envPath)
 	_ = os.MkdirAll(dir, 0o750)
 
@@ -473,11 +490,16 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 		return "", fmt.Errorf("rename to %s: %w", envPath, err)
 	}
 
-	if p.EnvFile == "" {
-		p.EnvFile = envPath
-	}
-	if err := s.persistPipelineFiles(p); err != nil {
-		s.log.Warn(".env saved to file but storing it in the database failed", "pipeline", p.Name, "err", err)
+	updated := *p
+	updated.EnvFile = envPath
+	if err := s.persistPipelineFiles(&updated); err != nil {
+		var rollbackErr error
+		if errors.Is(origEnvErr, os.ErrNotExist) {
+			rollbackErr = os.Remove(envPath)
+		} else {
+			rollbackErr = writeFilePreserving(envPath, origEnv, true, false)
+		}
+		return "", errors.Join(fmt.Errorf("persist env: %w", err), rollbackErr)
 	}
 	s.reg.Refresh(ctx)
 
@@ -508,6 +530,7 @@ func (s *Server) apiConfigValidate(w http.ResponseWriter, r *http.Request, sess 
 		writeErr(w, http.StatusNotFound, "unknown pipeline")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req configEditReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -528,6 +551,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request, sess *Ses
 		writeErr(w, http.StatusNotFound, "unknown pipeline")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req configEditReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -568,6 +592,7 @@ func (s *Server) apiEnvSave(w http.ResponseWriter, r *http.Request, sess *Sessio
 		writeErr(w, http.StatusNotFound, "unknown pipeline")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req envSaveReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -593,7 +618,8 @@ func (s *Server) apiEnvSave(w http.ResponseWriter, r *http.Request, sess *Sessio
 // registerConfigEditOps đăng ký các action liên quan tới sửa cấu hình.
 func (s *Server) registerConfigEditOps() {
 	s.actions.Register(Action{
-		Name: "config-validate",
+		Name:       "config-validate",
+		SecretArgs: []string{"yaml"},
 		Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
 			res, err := srv.validateConfigContent(ctx, req.Pipeline, req.Args["yaml"])
 			if err != nil {
@@ -611,7 +637,8 @@ func (s *Server) registerConfigEditOps() {
 		},
 	})
 	s.actions.Register(Action{
-		Name: "config-save",
+		Name:       "config-save",
+		SecretArgs: []string{"yaml"},
 		Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
 			restart := req.Args["restart"] == "true" || req.Args["restart"] == "1"
 			res, err := srv.saveConfigContent(ctx, req.Pipeline, req.Args["yaml"], restart, req.IP)
@@ -629,7 +656,8 @@ func (s *Server) registerConfigEditOps() {
 		},
 	})
 	s.actions.Register(Action{
-		Name: "env-save",
+		Name:          "env-save",
+		SecretAllArgs: true,
 		Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
 			var entries map[string]string
 			if raw := req.Args["entries"]; raw != "" {
