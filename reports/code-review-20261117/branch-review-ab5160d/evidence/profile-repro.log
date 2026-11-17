@@ -1,0 +1,12 @@
+=== RUN   TestReviewCPUWriteErrorMustSurface
+    profile_review_test.go:14: CPU profile writes to /dev/full failed but Stop returned nil
+--- FAIL: TestReviewCPUWriteErrorMustSurface (0.00s)
+=== RUN   TestReviewProfileNewRelativeAbsoluteAlias
+    profile_review_test.go:25: CPU and block profiles allowed on same previously nonexistent file via relative/absolute aliases
+--- FAIL: TestReviewProfileNewRelativeAbsoluteAlias (0.01s)
+=== RUN   TestReviewProfileOverwriteKeeps0600
+    profile_review_test.go:33: profile overwrite permissions=644, want0600
+--- FAIL: TestReviewProfileOverwriteKeeps0600 (0.00s)
+FAIL
+FAIL	strand/cmd/strand	0.306s
+FAIL

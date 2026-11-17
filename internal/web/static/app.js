@@ -104,6 +104,10 @@
         var doc = new DOMParser().parseFromString(html, 'text/html');
         var fresh = doc.getElementById('content');
         if (!fresh || fresh.innerHTML === lastFresh) { return; }
+        // A proxy may serve another tab's HTML without an HTTP redirect. Bind
+        // the server's active tab to the requested path before replacing content.
+        var activeTab = fresh.querySelector('nav.tabs a.active');
+        if (activeTab && new URL(activeTab.getAttribute('href'), location.href).pathname !== location.pathname) { return; }
         if (force !== true && (editing() || selecting())) { return; }
         var st = saveState();
         content.innerHTML = fresh.innerHTML;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,12 +94,14 @@ func TestPGKill9_MilestoneFaultInjection(t *testing.T) {
 }
 
 // TestGhOst_RealTool_Harness là harness thực thi gh-ost binary thật.
-// Nếu gh-ost không có trong môi trường, harness được giữ nguyên và đánh dấu NOT RUN (không dùng t.Skip* theo Rule 9).
+// Missing gh-ost is an explicit Go skip; STRAND_E2E_REQUIRE_GHOST=1 makes it a required gate.
 func TestGhOst_RealTool_Harness(t *testing.T) {
 	bin := lookTool("STRAND_E2E_GHOST_BIN", "gh-ost")
 	if bin == "" {
-		t.Log("NOT RUN: gh-ost real binary not installed in PATH or STRAND_E2E_GHOST_BIN; harness retained for execution when tool is installed")
-		return
+		if os.Getenv("STRAND_E2E_REQUIRE_GHOST") == "1" {
+			t.Fatal("required real gh-ost binary missing: install gh-ost or set STRAND_E2E_GHOST_BIN")
+		}
+		t.Skip("real gh-ost binary not installed in PATH or STRAND_E2E_GHOST_BIN")
 	}
 	t.Logf("gh-ost real binary found at %s; executing real tool e2e", bin)
 	onlineDDLMySQL(t, "gh-ost")
@@ -110,8 +113,10 @@ func TestGhOst_CutOverLiveWritesWitness(t *testing.T) {
 	// Kiểm tra xem tool thật có sẵn không; tuyệt đối không gắn nhãn bản mô phỏng là tool thật.
 	bin := lookTool("STRAND_E2E_GHOST_BIN", "gh-ost")
 	if bin == "" {
-		t.Log("NOT RUN: gh-ost real binary not installed in PATH or STRAND_E2E_GHOST_BIN; harness retained for execution when tool is installed")
-		return
+		if os.Getenv("STRAND_E2E_REQUIRE_GHOST") == "1" {
+			t.Fatal("required real gh-ost binary missing: install gh-ost or set STRAND_E2E_GHOST_BIN")
+		}
+		t.Skip("real gh-ost binary not installed in PATH or STRAND_E2E_GHOST_BIN")
 	}
 	t.Logf("using real gh-ost binary: %s", bin)
 

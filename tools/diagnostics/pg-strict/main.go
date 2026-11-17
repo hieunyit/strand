@@ -1,8 +1,8 @@
 // Package main implements the pg-strict diagnostic harness and benchmark runner.
 // It sets up isolated source/target PostgreSQL instances, applies fixed schemas and deterministic seeds,
-// measures raw single-connection commit latency, runs a concurrent OLTP workload on the source,
+// measures raw single-connection commit throughput, runs a concurrent OLTP workload on the source,
 // invokes `strand sync` in strict mode with CPU and block profiling, and captures pg_stat_activity waits,
-// commit/batch sizes, and read->route->apply throughput simultaneously.
+// rows per source transaction, optional batch traces, and applied throughput.
 package main
 
 import (
@@ -32,22 +32,23 @@ import (
 )
 
 type Config struct {
-	SourceDSN    string
-	TargetDSN    string
-	AutoDocker   bool
-	SrcPort      int
-	DstPort      int
-	CPUQuota     string
-	Duration     time.Duration
-	Warmup       time.Duration
-	Clients      int
-	Rows         int
-	Seed         int64
-	OutputDir    string
-	TxnTrace     bool
-	StrandBin    string
-	MetricsPort  int
-	BatchMaxWait string
+	SourceDSN                  string
+	TargetDSN                  string
+	AutoDocker                 bool
+	AllowDestructiveExistingDB bool
+	SrcPort                    int
+	DstPort                    int
+	CPUQuota                   string
+	Duration                   time.Duration
+	Warmup                     time.Duration
+	Clients                    int
+	Rows                       int
+	Seed                       int64
+	OutputDir                  string
+	TxnTrace                   bool
+	StrandBin                  string
+	MetricsPort                int
+	BatchMaxWait               string
 }
 
 type MetricSample struct {
@@ -60,7 +61,7 @@ type MetricSample struct {
 	ApplyTxnRate   float64   `json:"apply_txn_rate"`
 	ApplyRowRate   float64   `json:"apply_row_rate"`
 	SourceXactRate float64   `json:"source_xact_rate"`
-	BatchSize      float64   `json:"avg_batch_size"`
+	RowsPerTxn     float64   `json:"rows_per_source_txn"`
 }
 
 type WaitEventStat struct {
@@ -71,28 +72,28 @@ type WaitEventStat struct {
 }
 
 type BenchmarkReport struct {
-	StartTime          time.Time         `json:"start_time"`
-	EndTime            time.Time         `json:"end_time"`
-	DurationSec        float64           `json:"duration_sec"`
-	WarmupSec          float64           `json:"warmup_sec"`
-	SteadySec          float64           `json:"steady_sec"`
-	Clients            int               `json:"clients"`
-	SeedRows           int               `json:"seed_rows"`
-	Seed               int64             `json:"seed"`
-	Reproduces280to300 bool              `json:"reproduces_280_to_300"`
-	RawTargetCommitTPS float64           `json:"raw_target_commit_tps"`
-	PipelineEfficiency float64           `json:"pipeline_efficiency_pct"`
-	WarmupTPS          float64           `json:"warmup_tps"`
-	SteadyTPS          float64           `json:"steady_tps"`
-	SteadyRowRate      float64           `json:"steady_row_rate"`
-	SourceCommitRate   float64           `json:"source_commit_rate"`
-	AvgBatchSize       float64           `json:"avg_batch_size"`
-	TargetTopWaits     []WaitEventStat   `json:"target_top_waits"`
-	SourceTopWaits     []WaitEventStat   `json:"source_top_waits"`
-	Versions           map[string]string `json:"versions"`
-	FsyncSettings      map[string]string `json:"fsync_settings"`
-	Observations       []string          `json:"observations"`
-	ArtifactFiles      map[string]string `json:"artifact_files"`
+	StartTime             time.Time         `json:"start_time"`
+	EndTime               time.Time         `json:"end_time"`
+	DurationSec           float64           `json:"duration_sec"`
+	WarmupSec             float64           `json:"warmup_sec"`
+	SteadySec             float64           `json:"steady_sec"`
+	Clients               int               `json:"clients"`
+	SeedRows              int               `json:"seed_rows"`
+	Seed                  int64             `json:"seed"`
+	Reproduces280to300    bool              `json:"reproduces_280_to_300"`
+	RawTargetCommitTPS    float64           `json:"raw_target_commit_tps"`
+	ApplyToRawCommitRatio float64           `json:"apply_txns_to_raw_commits_ratio"`
+	WarmupTPS             float64           `json:"warmup_tps"`
+	SteadyTPS             float64           `json:"steady_tps"`
+	SteadyRowRate         float64           `json:"steady_row_rate"`
+	SourceCommitRate      float64           `json:"source_commit_rate"`
+	RowsPerSourceTxn      float64           `json:"rows_per_source_txn"`
+	TargetTopWaits        []WaitEventStat   `json:"target_top_waits"`
+	SourceTopWaits        []WaitEventStat   `json:"source_top_waits"`
+	Versions              map[string]string `json:"versions"`
+	FsyncSettings         map[string]string `json:"fsync_settings"`
+	Observations          []string          `json:"observations"`
+	ArtifactFiles         map[string]string `json:"artifact_files"`
 }
 
 func main() {
@@ -100,8 +101,9 @@ func main() {
 	flag.StringVar(&cfg.SourceDSN, "source", "", "Source PostgreSQL DSN (if empty and auto-docker is enabled, spins up docker container)")
 	flag.StringVar(&cfg.TargetDSN, "target", "", "Target PostgreSQL DSN (if empty and auto-docker is enabled, spins up docker container)")
 	flag.BoolVar(&cfg.AutoDocker, "auto-docker", true, "Manage isolated docker containers for source and target")
-	flag.IntVar(&cfg.SrcPort, "src-port", 54331, "Source PostgreSQL host port for auto-docker")
-	flag.IntVar(&cfg.DstPort, "dst-port", 54332, "Target PostgreSQL host port for auto-docker")
+	flag.BoolVar(&cfg.AllowDestructiveExistingDB, "allow-destructive-existing-databases", false, "DANGER: allow truncating bench.accounts and replacing the diagnostic publication in external source/target databases")
+	flag.IntVar(&cfg.SrcPort, "src-port", 0, "Source loopback host port for auto-docker (0: Docker assigns a free port)")
+	flag.IntVar(&cfg.DstPort, "dst-port", 0, "Target loopback host port for auto-docker (0: Docker assigns a free port)")
 	flag.StringVar(&cfg.CPUQuota, "cpus", "2.0", "Docker container CPU limit")
 	flag.DurationVar(&cfg.Duration, "duration", 15*time.Second, "Steady measurement window duration")
 	flag.DurationVar(&cfg.Warmup, "warmup", 5*time.Second, "Warmup window duration")
@@ -111,7 +113,7 @@ func main() {
 	flag.StringVar(&cfg.OutputDir, "out-dir", "reports/code-review-20261117/followup-agy/evidence/pg-strict", "Directory for output artifacts")
 	flag.BoolVar(&cfg.TxnTrace, "txntrace", false, "Enable STRAND_TXN_TRACE (note instrumentation overhead)")
 	flag.StringVar(&cfg.StrandBin, "strand-bin", "", "Path to strand binary (if empty, builds ./cmd/strand)")
-	flag.IntVar(&cfg.MetricsPort, "metrics-port", 21123, "Port for strand metrics server")
+	flag.IntVar(&cfg.MetricsPort, "metrics-port", 0, "Port for strand metrics server (0: OS assigns a free port)")
 	flag.StringVar(&cfg.BatchMaxWait, "batch-max-wait", "0s", "target.batch.max_wait duration string (default 0s)")
 	flag.Parse()
 
@@ -124,55 +126,44 @@ func runBenchmark(cfg Config) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-		return fmt.Errorf("create out-dir: %w", err)
+	if err := validateConfig(cfg); err != nil {
+		return err
 	}
-
-	srcContainer := "strand-strict-diag-src"
-	dstContainer := "strand-strict-diag-dst"
-
+	if err := privateDir(cfg.OutputDir); err != nil {
+		return fmt.Errorf("create private out-dir: %w", err)
+	}
+	unlock, err := lockOutputDir(cfg.OutputDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Configuration was moved outside the artifact directory; use an absolute
+	// spool path so its location does not depend on the temporary config path.
+	cfg.OutputDir, err = filepath.Abs(cfg.OutputDir)
+	if err != nil {
+		return err
+	}
 	if cfg.AutoDocker {
-		log.Printf("Starting isolated docker containers on ports %d (source) and %d (target)...", cfg.SrcPort, cfg.DstPort)
-		_ = exec.Command("docker", "rm", "-f", srcContainer, dstContainer).Run()
-
-		defer func() {
-			log.Printf("Cleaning up docker containers %s, %s...", srcContainer, dstContainer)
-			_ = exec.Command("docker", "rm", "-f", srcContainer, dstContainer).Run()
-		}()
-
-		srcCmd := exec.Command("docker", "run", "-d",
-			"--name", srcContainer,
-			"--cpus="+cfg.CPUQuota,
-			"-p", fmt.Sprintf("%d:5432", cfg.SrcPort),
-			"-e", "POSTGRES_PASSWORD=dev",
-			"-e", "POSTGRES_DB=strand",
-			"postgres:18",
-			"-c", "wal_level=logical",
-			"-c", "max_replication_slots=4",
-			"-c", "max_wal_senders=4",
-			"-c", "fsync=on",
-			"-c", "synchronous_commit=on",
-			"-c", "shared_buffers=256MB",
-		)
-		if out, err := srcCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("start source container: %v: %s", err, string(out))
+		// Retain only IDs returned by successful creates. A failed second create
+		// still cleans up the first; no pre-existing container is ever removed.
+		var owned []string
+		defer func() { cleanupContainers(owned, dockerCommand) }()
+		var err error
+		var id string
+		id, cfg.SrcPort, err = startContainer("source", cfg.SrcPort, cfg.CPUQuota, dockerCommand)
+		if id != "" {
+			owned = append(owned, id)
 		}
-
-		dstCmd := exec.Command("docker", "run", "-d",
-			"--name", dstContainer,
-			"--cpus="+cfg.CPUQuota,
-			"-p", fmt.Sprintf("%d:5432", cfg.DstPort),
-			"-e", "POSTGRES_PASSWORD=dev",
-			"-e", "POSTGRES_DB=strand",
-			"postgres:18",
-			"-c", "fsync=on",
-			"-c", "synchronous_commit=on",
-			"-c", "shared_buffers=256MB",
-		)
-		if out, err := dstCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("start target container: %v: %s", err, string(out))
+		if err != nil {
+			return err
 		}
-
+		id, cfg.DstPort, err = startContainer("target", cfg.DstPort, cfg.CPUQuota, dockerCommand)
+		if id != "" {
+			owned = append(owned, id)
+		}
+		if err != nil {
+			return err
+		}
 		cfg.SourceDSN = fmt.Sprintf("postgres://postgres:dev@127.0.0.1:%d/strand?sslmode=disable", cfg.SrcPort)
 		cfg.TargetDSN = fmt.Sprintf("postgres://postgres:dev@127.0.0.1:%d/strand?sslmode=disable", cfg.DstPort)
 	}
@@ -219,7 +210,7 @@ func runBenchmark(cfg Config) error {
 	}
 
 	// Measure Raw Target Single-Connection Commit TPS
-	log.Printf("Measuring raw single-connection commit TPS on target PostgreSQL (baseline fsync overhead)...")
+	log.Printf("Measuring separate single-connection update/commit workload on target PostgreSQL...")
 	rawCommitTPS := measureRawCommitTPS(ctx, dstDB, 3*time.Second)
 	log.Printf("Raw single-connection commit TPS on target: %.1f TPS", rawCommitTPS)
 
@@ -236,9 +227,16 @@ func runBenchmark(cfg Config) error {
 	}
 
 	// Create strand config
-	configPath := filepath.Join(cfg.OutputDir, "strand.yaml")
+	privateConfigDir, err := os.MkdirTemp("", "strand-pg-strict-config-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(privateConfigDir)
+	configPath := filepath.Join(privateConfigDir, "strand.yaml")
 	spoolDir := filepath.Join(cfg.OutputDir, "spool")
-	_ = os.MkdirAll(spoolDir, 0o755)
+	if err := privateDir(spoolDir); err != nil {
+		return err
+	}
 
 	batchSection := ""
 	if cfg.BatchMaxWait != "" && cfg.BatchMaxWait != "0s" {
@@ -275,14 +273,20 @@ observability:
     format: json
 `, cfg.SourceDSN, cfg.TargetDSN, batchSection, spoolDir, cfg.MetricsPort)
 
-	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+	if err := writePrivateFile(configPath, []byte(configContent)); err != nil {
 		return fmt.Errorf("write config: %w", err)
+	}
+
+	redact := newArtifactRedactor(cfg.SourceDSN, cfg.TargetDSN)
+	redactedConfigPath := filepath.Join(cfg.OutputDir, "strand.redacted.yaml")
+	if err := writePrivateFile(redactedConfigPath, []byte(redact(configContent))); err != nil {
+		return err
 	}
 
 	cpuProfilePath := filepath.Join(cfg.OutputDir, "cpu.pprof")
 	blockProfilePath := filepath.Join(cfg.OutputDir, "block.pprof")
 	strandLogPath := filepath.Join(cfg.OutputDir, "strand.log")
-	strandLogFile, err := os.Create(strandLogPath)
+	strandLogFile, err := os.OpenFile(strandLogPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create strand log: %w", err)
 	}
@@ -298,12 +302,23 @@ observability:
 	}
 
 	syncCmd := exec.Command(strandBin, syncArgs...)
-	syncCmd.Stdout = strandLogFile
-	syncCmd.Stderr = strandLogFile
+	metricsReady := make(chan string, 1)
+	childLog := &redactingWriter{dst: strandLogFile, redact: redact, onLines: func(lines string) {
+		if addr := childMetricsAddress(lines); addr != "" {
+			select {
+			case metricsReady <- addr:
+			default:
+			}
+		}
+	}}
+	defer childLog.Flush()
+	syncCmd.Stdout = childLog
+	syncCmd.Stderr = childLog
+	tracePath := ""
 	if cfg.TxnTrace {
-		tracePath := filepath.Join(cfg.OutputDir, "txntrace.log")
-		syncCmd.Env = append(os.Environ(), "STRAND_TXN_TRACE="+tracePath)
+		tracePath = filepath.Join(privateConfigDir, "txntrace.log")
 	}
+	syncCmd.Env = childEnvironment(tracePath)
 
 	if err := syncCmd.Start(); err != nil {
 		return fmt.Errorf("start strand sync: %w", err)
@@ -318,11 +333,22 @@ observability:
 			case <-done:
 			case <-time.After(5 * time.Second):
 				_ = syncCmd.Process.Kill()
+				<-done
 			}
 		}
 	}()
 
-	metricsURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", cfg.MetricsPort)
+	// Discover the endpoint from this child's successful bind. A fixed/shared
+	// endpoint could otherwise belong to a concurrent diagnostic run.
+	var metricsAddr string
+	select {
+	case metricsAddr = <-metricsReady:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("child did not announce its own metrics listener (see %s)", strandLogPath)
+	}
+	metricsURL := "http://" + metricsAddr + "/metrics"
 	log.Printf("Waiting for strand sync metrics endpoint at %s...", metricsURL)
 	if err := waitForHTTP(ctx, metricsURL, 15*time.Second); err != nil {
 		return fmt.Errorf("wait for metrics server: %w (check %s)", err, strandLogPath)
@@ -362,7 +388,9 @@ observability:
 	stopSampling := make(chan struct{})
 	var samples []MetricSample
 
+	waitsDone := make(chan struct{})
 	go func() {
+		defer close(waitsDone)
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -378,7 +406,8 @@ observability:
 
 	// Metric poller
 	pollerDone := make(chan struct{})
-	currentPhase := "warmup"
+	var currentPhase phaseLabel
+	currentPhase.Store("warmup")
 	var prevAppliedTxns int64
 	var prevAppliedRows int64
 	var prevSourceCommits int64
@@ -412,7 +441,7 @@ observability:
 
 				samples = append(samples, MetricSample{
 					Timestamp:      t,
-					Phase:          currentPhase,
+					Phase:          currentPhase.Load(),
 					AppliedTxns:    appTxns,
 					AppliedRows:    appRows,
 					SourceCommits:  sCommits,
@@ -420,7 +449,7 @@ observability:
 					ApplyTxnRate:   txnRate,
 					ApplyRowRate:   rowRate,
 					SourceXactRate: srcRate,
-					BatchSize:      bSize,
+					RowsPerTxn:     bSize,
 				})
 
 				prevAppliedTxns = appTxns
@@ -434,7 +463,7 @@ observability:
 	log.Printf("Running warmup period for %v...", cfg.Warmup)
 	time.Sleep(cfg.Warmup)
 
-	currentPhase = "steady"
+	currentPhase.Store("steady")
 	warmupEndTxns, warmupEndRows, _ := scrapeMetrics(metricsURL)
 	warmupEndSrcCommits := sourceCommits.Load()
 	steadyStart := time.Now()
@@ -451,10 +480,25 @@ observability:
 	wg.Wait()
 	close(stopSampling)
 	<-pollerDone
+	<-waitsDone
 
 	log.Printf("Stopping `strand sync` gracefully via SIGTERM...")
 	_ = syncCmd.Process.Signal(syscall.SIGTERM)
-	_ = syncCmd.Wait()
+	if err := syncCmd.Wait(); err != nil {
+		return fmt.Errorf("strand sync failed: %w (see redacted child log)", err)
+	}
+	if err := childLog.Flush(); err != nil {
+		return fmt.Errorf("flush redacted child log: %w", err)
+	}
+	if cfg.TxnTrace {
+		raw, err := os.ReadFile(filepath.Join(privateConfigDir, "txntrace.log"))
+		if err != nil {
+			return fmt.Errorf("read transaction trace: %w", err)
+		}
+		if err := writePrivateFile(filepath.Join(cfg.OutputDir, "txntrace.log"), []byte(redact(string(raw)))); err != nil {
+			return err
+		}
+	}
 
 	// Calculate results
 	steadyDur := steadyEnd.Sub(steadyStart).Seconds()
@@ -465,7 +509,7 @@ observability:
 	steadyTPS := 0.0
 	steadyRowRate := 0.0
 	sourceCommitRate := 0.0
-	avgBatchSize := 0.0
+	rowsPerTxn := 0.0
 
 	if steadyDur > 0 {
 		steadyTPS = steadyTxns / steadyDur
@@ -473,7 +517,7 @@ observability:
 		sourceCommitRate = steadySrc / steadyDur
 	}
 	if steadyTxns > 0 {
-		avgBatchSize = steadyRows / steadyTxns
+		rowsPerTxn = steadyRows / steadyTxns
 	}
 
 	warmupTPS := 0.0
@@ -481,14 +525,14 @@ observability:
 		warmupTPS = float64(warmupEndTxns) / cfg.Warmup.Seconds()
 	}
 
-	reproduces := (steadyTPS >= 250.0 && steadyTPS <= 350.0)
-	efficiency := 0.0
+	reproduces := (steadyTPS >= 280.0 && steadyTPS <= 300.0)
+	applyRawRatio := 0.0
 	if rawCommitTPS > 0 {
-		efficiency = (steadyTPS / rawCommitTPS) * 100.0
+		applyRawRatio = steadyTPS / rawCommitTPS
 	}
 
-	log.Printf("Results: Steady TPS = %.1f, Warmup TPS = %.1f, Raw PG TPS = %.1f, Efficiency = %.1f%%, Batch size = %.2f, Reproduces 280-300: %v",
-		steadyTPS, warmupTPS, rawCommitTPS, efficiency, avgBatchSize, reproduces)
+	log.Printf("Results: Steady TPS = %.1f, Warmup TPS = %.1f, Raw PG TPS = %.1f, Apply txns/raw commits ratio = %.2f, Rows/source txn = %.2f, Reproduces 280-300: %v",
+		steadyTPS, warmupTPS, rawCommitTPS, applyRawRatio, rowsPerTxn, reproduces)
 
 	// Collect top waits
 	topWaitsDst := sortWaitStats(waitStatsDst)
@@ -500,48 +544,46 @@ observability:
 
 	var observations []string
 	observations = append(observations, fmt.Sprintf("Source workload generation achieved %.1f commits/sec across %d concurrent clients.", sourceCommitRate, cfg.Clients))
-	observations = append(observations, fmt.Sprintf("Target database raw single-connection commit capacity was measured at %.1f commits/sec.", rawCommitTPS))
-	observations = append(observations, fmt.Sprintf("Strand strict mode applied %.1f transactions/sec with average batch size %.2f rows/batch (pipeline efficiency %.1f%% of raw DB commit ceiling).", steadyTPS, avgBatchSize, efficiency))
+	observations = append(observations, fmt.Sprintf("Separate target single-connection update/commit workload achieved %.1f commits/sec.", rawCommitTPS))
+	observations = append(observations, fmt.Sprintf("Strand strict mode applied %.1f source transactions/sec, averaging %.2f rows/source transaction. Target commit batch size is not measured by these counters. The raw single-connection commit rate is a separate workload, not an apply throughput ceiling.", steadyTPS, rowsPerTxn))
 
 	if len(topWaitsDst) > 0 {
 		observations = append(observations, fmt.Sprintf("Top target wait event: %s:%s (%d occurrences)", topWaitsDst[0].Type, topWaitsDst[0].Event, topWaitsDst[0].Count))
 	}
 
 	if reproduces {
-		observations = append(observations, "Measured throughput squarely reproduces the reported 280-300 TPS baseline in PG->PG strict mode.")
-	} else if steadyTPS < 250.0 {
-		observations = append(observations, fmt.Sprintf("Measured throughput (%.1f TPS) is below the 280-300 TPS band due to disk write/fsync latency or hardware constraints.", steadyTPS))
+		observations = append(observations, "Local throughput is within the 280-300 source-transactions/sec comparison band; this alone does not establish the user-host root cause.")
 	} else {
-		observations = append(observations, fmt.Sprintf("Measured throughput (%.1f TPS) exceeds 300 TPS on this host due to local NVMe write cache, but runs at %.1f%% of raw single-connection DB commit saturation.", steadyTPS, efficiency))
+		observations = append(observations, "This isolated local run did not reproduce the reported throughput band. Storage latency and batching remain hypotheses requiring measurements on the affected host.")
 	}
 
 	report := BenchmarkReport{
-		StartTime:          steadyStart,
-		EndTime:            steadyEnd,
-		DurationSec:        cfg.Duration.Seconds(),
-		WarmupSec:          cfg.Warmup.Seconds(),
-		SteadySec:          steadyDur,
-		Clients:            cfg.Clients,
-		SeedRows:           cfg.Rows,
-		Seed:               cfg.Seed,
-		Reproduces280to300: reproduces,
-		RawTargetCommitTPS: rawCommitTPS,
-		PipelineEfficiency: efficiency,
-		WarmupTPS:          warmupTPS,
-		SteadyTPS:          steadyTPS,
-		SteadyRowRate:      steadyRowRate,
-		SourceCommitRate:   sourceCommitRate,
-		AvgBatchSize:       avgBatchSize,
-		TargetTopWaits:     topWaitsDst,
-		SourceTopWaits:     topWaitsSrc,
-		Versions:           versions,
-		FsyncSettings:      fsyncSettings,
-		Observations:       observations,
+		StartTime:             steadyStart,
+		EndTime:               steadyEnd,
+		DurationSec:           cfg.Duration.Seconds(),
+		WarmupSec:             cfg.Warmup.Seconds(),
+		SteadySec:             steadyDur,
+		Clients:               cfg.Clients,
+		SeedRows:              cfg.Rows,
+		Seed:                  cfg.Seed,
+		Reproduces280to300:    reproduces,
+		RawTargetCommitTPS:    rawCommitTPS,
+		ApplyToRawCommitRatio: applyRawRatio,
+		WarmupTPS:             warmupTPS,
+		SteadyTPS:             steadyTPS,
+		SteadyRowRate:         steadyRowRate,
+		SourceCommitRate:      sourceCommitRate,
+		RowsPerSourceTxn:      rowsPerTxn,
+		TargetTopWaits:        topWaitsDst,
+		SourceTopWaits:        topWaitsSrc,
+		Versions:              versions,
+		FsyncSettings:         fsyncSettings,
+		Observations:          observations,
 		ArtifactFiles: map[string]string{
-			"cpu_profile":   cpuProfilePath,
-			"block_profile": blockProfilePath,
-			"config":        configPath,
-			"strand_log":    strandLogPath,
+			"cpu_profile":     cpuProfilePath,
+			"block_profile":   blockProfilePath,
+			"redacted_config": redactedConfigPath,
+			"strand_log":      strandLogPath,
 		},
 	}
 

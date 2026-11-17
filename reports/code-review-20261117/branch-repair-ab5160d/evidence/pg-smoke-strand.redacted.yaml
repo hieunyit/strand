@@ -1,0 +1,28 @@
+version: 1
+name: pg-strict-diag
+source:
+  kind: postgres
+  dsn: "[REDACTED_DSN]"
+  slot: strand_strict_diag_slot
+  publication: strand_strict_diag_pub
+  create_slot: true
+target:
+  kind: postgres
+  dsn: "[REDACTED_DSN]"
+  commit_order: strict
+tables:
+  include: ["bench.*"]
+bootstrap:
+  default: logical
+checkpoint:
+  store: target
+  flush_every: 200ms
+resources:
+  spool:
+    path: "/tmp/strand-repair-pg-smoke-final/spool"
+    hard: 2GiB
+observability:
+  metrics: "127.0.0.1:0"
+  log:
+    level: info
+    format: json

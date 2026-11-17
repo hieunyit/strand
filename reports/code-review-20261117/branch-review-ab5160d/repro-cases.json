@@ -1,0 +1,74 @@
+[
+  {
+    "name": "constraints",
+    "package": "./internal/validate",
+    "pattern": "^TestReview",
+    "observed_exit": 0,
+    "mappings": [
+      {
+        "virtual": "internal/validate/review_data_test.go",
+        "source": "evidence/constraints-0_test.go.txt"
+      }
+    ]
+  },
+  {
+    "name": "archive",
+    "package": "./internal/reader/archive",
+    "pattern": "^TestReview",
+    "observed_exit": 0,
+    "mappings": [
+      {
+        "virtual": "internal/reader/archive/review_data_test.go",
+        "source": "evidence/archive-0_test.go.txt"
+      }
+    ]
+  },
+  {
+    "name": "prefetch",
+    "package": "./cmd/strand",
+    "pattern": "^TestReviewSQLSnapshot",
+    "observed_exit": 0,
+    "mappings": [
+      {
+        "virtual": "cmd/strand/review_data_test.go",
+        "source": "evidence/prefetch-0_test.go.txt"
+      }
+    ]
+  },
+  {
+    "name": "web",
+    "package": "./internal/web",
+    "pattern": "^TestSurface",
+    "observed_exit": 1,
+    "mappings": [
+      {
+        "virtual": "internal/web/surface_review_test.go",
+        "source": "evidence/web-0_test.go.txt"
+      }
+    ]
+  },
+  {
+    "name": "spool",
+    "package": "./internal/spool",
+    "pattern": "^TestSurface",
+    "observed_exit": 1,
+    "mappings": [
+      {
+        "virtual": "internal/spool/surface_review_test.go",
+        "source": "evidence/spool-0_test.go.txt"
+      }
+    ]
+  },
+  {
+    "name": "profile",
+    "package": "./cmd/strand",
+    "pattern": "^TestReviewProfile|^TestReviewCPU",
+    "observed_exit": 1,
+    "mappings": [
+      {
+        "virtual": "cmd/strand/profile_review_test.go",
+        "source": "evidence/profile-0_test.go.txt"
+      }
+    ]
+  }
+]

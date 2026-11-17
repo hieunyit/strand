@@ -40,8 +40,9 @@ async function run() {
     return parsed;
   }
 
-  console.log('Connecting to Chromium via CDP on 127.0.0.1:9222...');
-  const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+  const cdpURL = process.env.STRAND_BROWSER_CDP_URL || 'http://127.0.0.1:9222';
+  console.log(`Connecting to Chromium via CDP on ${cdpURL}...`);
+  const browser = await chromium.connectOverCDP(cdpURL);
   results.browser_version = browser.version();
   console.log(`Connected to Chromium ${browser.version()}`);
 
@@ -422,33 +423,67 @@ async function run() {
     const startTab = await page.textContent('nav.tabs a.active');
     assert('Starts on Graph tab', startTab.includes('Graph'));
 
-    // Inject interceptor on route to simulate proxy returning stale /tables HTML for /pipelines/orders
-    console.log('  Testing refresh behavior when a proxy/load-balancer returns stale /tables HTML...');
-    const tablesHtmlRes = await fetch(`${proxyURL}/pipelines/orders/tables`, {
-      headers: { 'Cookie': (await ctx.cookies()).map(c => `${c.name}=${c.value}`).join('; ') }
+    // Fulfill the application's next periodic fetch with delayed, wrong-tab HTML.
+    // This exercises app.js's actual refresh Promise chain, rather than computing
+    // a mismatch in test-owned DOMParser code.
+    const tablesResponse = await ctx.request.get(`${proxyURL}/pipelines/orders/tables`);
+    const tablesHtml = (await tablesResponse.text()).replace('</main>', '<div id="stale-response-witness">STALE TABLES</div></main>');
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    let interceptedResolve;
+    const intercepted = new Promise(resolve => { interceptedResolve = resolve; });
+    await page.route(`${proxyURL}/pipelines/orders`, async route => {
+      if (route.request().headers()['x-requested-with'] !== 'fetch') {
+        await route.continue();
+        return;
+      }
+      interceptedResolve();
+      await held;
+      await route.fulfill({ status: 200, contentType: 'text/html', body: tablesHtml });
     });
-    const tablesHtml = await tablesHtmlRes.text();
+    await Promise.race([intercepted, new Promise((_, reject) => setTimeout(() => reject(new Error('app periodic refresh did not fetch within 15s')), 15000))]);
+    // Observe any content replacement, including a transient stale replacement.
+    await page.evaluate(() => {
+      window.staleResponseApplied = false;
+      new MutationObserver(() => {
+        if (document.querySelector('#stale-response-witness')) window.staleResponseApplied = true;
+      }).observe(document.querySelector('#content'), { childList: true, subtree: true });
+    });
+    const completed = page.waitForResponse(response => response.url() === `${proxyURL}/pipelines/orders` && response.request().headers()['x-requested-with'] === 'fetch');
+    release();
+    await completed;
+    await page.waitForTimeout(300);
+    const after = await page.evaluate(() => ({
+      path: location.pathname,
+      active: document.querySelector('nav.tabs a.active')?.getAttribute('href'),
+      staleApplied: window.staleResponseApplied || !!document.querySelector('#stale-response-witness')
+    }));
+    assert('Actual app refresh discards delayed wrong-tab response',
+      !after.staleApplied && after.path === '/pipelines/orders' && after.active === '/pipelines/orders', JSON.stringify(after));
+    await page.unroute(`${proxyURL}/pipelines/orders`);
 
-    // Now on the page, attempt to feed the stale tables HTML into refresh or DOM
-    const testResult = await page.evaluate(async (staleHtml) => {
-      const doc = new DOMParser().parseFromString(staleHtml, 'text/html');
-      const fresh = doc.getElementById('content');
-      const activeInFresh = fresh ? fresh.querySelector('nav.tabs a.active') : null;
-      const freshActiveHref = activeInFresh ? activeInFresh.getAttribute('href') : null;
-      const currentPath = location.pathname;
-      const wouldMismatch = !!(activeInFresh && activeInFresh.pathname && activeInFresh.pathname !== location.pathname);
-
-      return {
-        currentPath,
-        freshActiveHref,
-        wouldMismatch
-      };
-    }, tablesHtml);
-
-    assert('Tables HTML active tab href is /pipelines/orders/tables',
-      testResult.freshActiveHref === '/pipelines/orders/tables', testResult.freshActiveHref);
-    assert('Pathname mismatch detected between Graph (/pipelines/orders) and Tables tab',
-      testResult.wouldMismatch === true, `current=${testResult.currentPath}`);
+    // A response that was valid when requested also becomes stale if history
+    // changes while it is in flight (without a document reload).
+    let releaseNavigation;
+    const navigationHeld = new Promise(resolve => { releaseNavigation = resolve; });
+    let startedResolve;
+    const started = new Promise(resolve => { startedResolve = resolve; });
+    const graphHtml = (await (await ctx.request.get(`${proxyURL}/pipelines/orders`)).text()).replace('</main>', '<div id="old-location-witness">OLD LOCATION</div></main>');
+    await page.route(`${proxyURL}/pipelines/orders`, async route => {
+      if (route.request().headers()['x-requested-with'] !== 'fetch') { await route.continue(); return; }
+      startedResolve();
+      await navigationHeld;
+      await route.fulfill({ status: 200, contentType: 'text/html', body: graphHtml });
+    });
+    await Promise.race([started, new Promise((_, reject) => setTimeout(() => reject(new Error('second app refresh missing')), 15000))]);
+    await page.evaluate(() => history.pushState({}, '', '/pipelines/orders?view=changed'));
+    const navigationCompleted = page.waitForResponse(response => response.url() === `${proxyURL}/pipelines/orders` && response.request().headers()['x-requested-with'] === 'fetch');
+    releaseNavigation();
+    await navigationCompleted;
+    await page.waitForTimeout(300);
+    assert('In-flight response is dropped after query navigation',
+      await page.locator('#old-location-witness').count() === 0 && page.url().endsWith('?view=changed'));
+    await page.unroute(`${proxyURL}/pipelines/orders`);
 
     await page.close();
     await ctx.close();

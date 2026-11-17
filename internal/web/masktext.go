@@ -36,9 +36,9 @@ type secretScalar struct {
 
 type embeddedSecret struct {
 	ordinal int
-	start   int // relative to scalar raw start
-	end     int // relative to scalar raw start
-	raw     string
+	start   int    // relative to the decoded scalar value
+	end     int    // relative to the decoded scalar value
+	value   string // decoded DSN component, including its own quoting/escapes
 }
 
 type replacementRange struct {
@@ -140,73 +140,6 @@ func scalarEnd(raw []byte, off int, n *yaml.Node, flow bool) (int, bool) {
 	return end, true
 }
 
-// scanKVValueInScalar quét giá trị key=value trong ngữ cảnh chuỗi scalar, hỗ trợ cả dấu nháy bị escape trong YAML (ví dụ \"...\").
-func scanKVValueInScalar(s string, start int) int {
-	if start >= len(s) {
-		return start
-	}
-	// Case 1: Dấu nháy bị escape trong chuỗi YAML double-quoted: \" hoặc \'
-	if s[start] == '\\' && start+1 < len(s) && (s[start+1] == '"' || s[start+1] == '\'') {
-		q := s[start+1]
-		i := start + 2
-		for i < len(s) {
-			if s[i] == '\\' {
-				// \\\" là escaped quote trong DSN bên trong YAML double-quoted string
-				if i+3 < len(s) && s[i+1] == '\\' && s[i+2] == '\\' && s[i+3] == q {
-					i += 4
-					continue
-				}
-				// \\ là escaped backslash
-				if i+1 < len(s) && s[i+1] == '\\' {
-					i += 2
-					continue
-				}
-				// \" (chỉ 1 backslash) là dấu nháy đóng
-				if i+1 < len(s) && s[i+1] == q {
-					return i + 2
-				}
-				i += 2
-				continue
-			}
-			i++
-		}
-		return len(s)
-	}
-
-	// Case 2: Dấu nháy chuẩn: ' hoặc "
-	if q := s[start]; q == '\'' || q == '"' {
-		for i := start + 1; i < len(s); i++ {
-			if s[i] == '\\' {
-				i++
-				continue
-			}
-			if s[i] == q {
-				if q == '\'' && i+1 < len(s) && s[i+1] == '\'' {
-					i++ // '' trong chuỗi single-quoted
-					continue
-				}
-				return i + 1
-			}
-		}
-		return len(s)
-	}
-
-	// Case 3: Giá trị trần (bare value)
-	i := start
-	for i < len(s) {
-		c := s[i]
-		if c == '\\' && i+1 < len(s) {
-			i += 2
-			continue
-		}
-		if c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '&' || c == '"' || c == '\'' {
-			break
-		}
-		i++
-	}
-	return i
-}
-
 type kvScalarHit struct {
 	valStart, end int
 }
@@ -219,7 +152,7 @@ func findKVSecretsInScalar(s string) []kvScalarHit {
 			continue
 		}
 		valStart := loc[1]
-		end := scanKVValueInScalar(s, valStart)
+		end := scanKVValue(s, valStart)
 		if end <= valStart {
 			continue
 		}
@@ -237,7 +170,7 @@ func isMaskedKVValueInScalar(value string) bool {
 		value == `\'`+maskStr+`\'`
 }
 
-// findEmbeddedInScalar tìm các bí mật nhúng trong chuỗi scalar gốc (URL, MySQL DSN, keyword DSN).
+// findEmbeddedInScalar finds secrets in a decoded scalar (URL, MySQL DSN, keyword DSN).
 func findEmbeddedInScalar(s string) []embeddedSecret {
 	type hit struct {
 		start, end int
@@ -273,7 +206,7 @@ func findEmbeddedInScalar(s string) []embeddedSecret {
 			ordinal: len(res),
 			start:   h.start,
 			end:     h.end,
-			raw:     h.val,
+			value:   h.val,
 		})
 		lastEnd = h.end
 	}
@@ -315,7 +248,7 @@ func findEmbeddedPlaceholdersInScalar(s string) []embeddedSecret {
 			ordinal: len(res),
 			start:   h.start,
 			end:     h.end,
-			raw:     h.val,
+			value:   h.val,
 		})
 		lastEnd = h.end
 	}
@@ -399,31 +332,39 @@ func collectSecrets(raw []byte) (map[string]*secretScalar, error) {
 				return
 			}
 
-			// Scalar không có khóa bí mật: quét mật khẩu nhúng (DSN)
+			// Discover secrets in the decoded value first: raw YAML escapes and
+			// multiline scalars must not hide credentials from the masker.
+			embs := findEmbeddedInScalar(n.Value)
+			if len(embs) == 0 {
+				return
+			}
+			if n.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
+				fail("contains an embedded secret in a multi-line block scalar")
+				return
+			}
 			off, ok := scalarStart(raw, starts, n.Line, n.Column)
 			if !ok {
+				fail("has an unlocatable embedded secret")
 				return
 			}
 			end, ok := scalarEnd(raw, off, n, inFlow)
 			if !ok {
+				fail("contains an embedded secret in a multi-line or non-locatable value")
 				return
 			}
 			scalarRaw := string(raw[off:end])
-			embs := findEmbeddedInScalar(scalarRaw)
-			if len(embs) > 0 {
-				secrets[path] = &secretScalar{
-					path:     path,
-					isKeyed:  false,
-					raw:      scalarRaw,
-					val:      n.Value,
-					style:    n.Style,
-					line:     n.Line,
-					col:      n.Column,
-					flow:     inFlow,
-					start:    off,
-					end:      end,
-					embedded: embs,
-				}
+			secrets[path] = &secretScalar{
+				path:     path,
+				isKeyed:  false,
+				raw:      scalarRaw,
+				val:      n.Value,
+				style:    n.Style,
+				line:     n.Line,
+				col:      n.Column,
+				flow:     inFlow,
+				start:    off,
+				end:      end,
+				embedded: embs,
 			}
 		}
 	}
@@ -442,6 +383,35 @@ func safeDoubleQuote(s string) string {
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(s)
 	return strings.TrimRight(buf.String(), "\n")
+}
+
+// Encode a decoded scalar in its current YAML context. Never copy escapes
+// from a different quote style into the edited scalar.
+func encodeEmbeddedScalar(val string, style yaml.Style, flow, isJSON bool) string {
+	if isJSON || style&yaml.DoubleQuotedStyle != 0 {
+		return safeDoubleQuote(val)
+	}
+	if style&yaml.SingleQuotedStyle != 0 {
+		return "'" + strings.ReplaceAll(val, "'", "''") + "'"
+	}
+	var parsed yaml.Node
+	if (!flow || !strings.ContainsAny(val, ",{}[]")) && yaml.Unmarshal([]byte(val), &parsed) == nil &&
+		len(parsed.Content) == 1 && parsed.Content[0].Kind == yaml.ScalarNode && parsed.Content[0].Tag == "!!str" && parsed.Content[0].Value == val {
+		return val
+	}
+	return safeDoubleQuote(val)
+}
+
+func replaceEmbeddedValues(val string, hits []embeddedSecret, values []string) string {
+	var b strings.Builder
+	pos := 0
+	for i, hit := range hits {
+		b.WriteString(val[pos:hit.start])
+		b.WriteString(values[i])
+		pos = hit.end
+	}
+	b.WriteString(val[pos:])
+	return b.String()
 }
 
 // isJSONText kiểm tra nhanh xem chuỗi có phải cú pháp JSON hay không.
@@ -502,18 +472,19 @@ func MaskConfigText(raw []byte) (string, error) {
 		repl       string
 	}
 	var spans []maskSpan
+	isJSON := isJSONText(string(raw))
 
 	for _, sec := range secrets {
 		if sec.isKeyed {
 			spans = append(spans, maskSpan{start: sec.start, end: sec.end, repl: `"` + maskStr + `"`})
 		} else {
-			for _, emb := range sec.embedded {
-				spans = append(spans, maskSpan{
-					start: sec.start + emb.start,
-					end:   sec.start + emb.end,
-					repl:  maskStr,
-				})
+			values := make([]string, len(sec.embedded))
+			for i := range values {
+				values[i] = maskStr
 			}
+			val := replaceEmbeddedValues(sec.val, sec.embedded, values)
+			spans = append(spans, maskSpan{start: sec.start, end: sec.end,
+				repl: encodeEmbeddedScalar(val, sec.style, sec.flow, isJSON)})
 		}
 	}
 
@@ -623,7 +594,7 @@ func UnmaskConfigText(edited string, orig []byte) (string, error) {
 			}
 
 			// Non-keyed scalar: kiểm tra placeholder nhúng (DSN)
-			embs := findEmbeddedPlaceholdersInScalar(scalarRaw)
+			embs := findEmbeddedPlaceholdersInScalar(n.Value)
 			if len(embs) > 0 {
 				origSec := origSecrets[path]
 				if origSec == nil || origSec.isKeyed || len(origSec.embedded) == 0 {
@@ -634,16 +605,16 @@ func UnmaskConfigText(edited string, orig []byte) (string, error) {
 					firstErr = fmt.Errorf("line %d: ambiguous masked values ******** at path %s; count changed from %d to %d", n.Line, path, len(origSec.embedded), len(embs))
 					return
 				}
-				for k, emb := range embs {
-					replacements = append(replacements, replacementRange{
-						start:       off + emb.start,
-						end:         off + emb.end,
-						repl:        origSec.embedded[k].raw,
-						path:        path,
-						expectedVal: origSec.embedded[k].raw,
-						isKeyed:     false,
-					})
+				values := make([]string, len(embs))
+				for i := range embs {
+					values[i] = origSec.embedded[i].value
 				}
+				val := replaceEmbeddedValues(n.Value, embs, values)
+				replacements = append(replacements, replacementRange{
+					start: off, end: end,
+					repl: encodeEmbeddedScalar(val, n.Style, inFlow, isJSON),
+					path: path, expectedVal: val,
+				})
 			} else if strings.Contains(scalarRaw, maskStr) {
 				// Scalar không bí mật nhưng chứa placeholder ********
 				firstErr = fmt.Errorf("line %d: cannot restore masked value ******** for path %s (not found in original file)", n.Line, path)
@@ -686,6 +657,10 @@ func UnmaskConfigText(edited string, orig []byte) (string, error) {
 	}
 
 	// Duyệt checkDoc để đảm bảo không còn secret scalar hoặc embedded DSN nào mang giá trị '********'
+	expected := make(map[string]string, len(replacements))
+	for _, replacement := range replacements {
+		expected[replacement.path] = replacement.expectedVal
+	}
 	var verifyErr error
 	var verifyWalk func(n *yaml.Node, key string, path string, inFlow bool)
 	verifyWalk = func(n *yaml.Node, key string, path string, inFlow bool) {
@@ -709,6 +684,13 @@ func UnmaskConfigText(edited string, orig []byte) (string, error) {
 				verifyWalk(n.Content[i+1], k, fmt.Sprintf("%s/%d:%s", path, len(k), k), f)
 			}
 		case yaml.ScalarNode:
+			if want, ok := expected[path]; ok {
+				if n.Value != want {
+					verifyErr = fmt.Errorf("line %d: restored secret changed semantic value at path %s", n.Line, path)
+					return
+				}
+				delete(expected, path)
+			}
 			if isSecretYAMLKey(key) && n.Value == maskStr {
 				verifyErr = maskedLeft(n.Line)
 				return
@@ -722,6 +704,9 @@ func UnmaskConfigText(edited string, orig []byte) (string, error) {
 	verifyWalk(&checkDoc, "", "", false)
 	if verifyErr != nil {
 		return "", verifyErr
+	}
+	if len(expected) != 0 {
+		return "", fmt.Errorf("restored config lost a secret scalar")
 	}
 
 	return res, nil

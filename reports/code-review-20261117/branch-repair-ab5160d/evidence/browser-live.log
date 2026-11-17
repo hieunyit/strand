@@ -1,0 +1,373 @@
+=== 1. Starting Owned Headless Chromium (Docker --net=host, allocated CDP port) ===
+=== 2. Building and Starting Web Server Fixture ===
+Fixture info ready:
+{
+  "attacker_url": "http://127.0.0.1:42227",
+  "audit_file": "/tmp/strand-browser-repro-526143650/state/audit.log",
+  "direct_url": "http://127.0.0.1:43185",
+  "password": "strand_browser_test_pw_2026",
+  "proxy_url": "http://127.0.0.1:33507",
+  "state_dir": "/tmp/strand-browser-repro-526143650"
+}=== 3. Executing Playwright Browser Test Suite ===
+Connecting to Chromium via CDP on http://127.0.0.1:43925...
+Connected to Chromium 124.0.6367.78
+
+========================================
+RUNNING SCENARIO: 1. Direct Normal Login
+========================================
+  [PASS] strand_login cookie set on GET /login (httpOnly=true, sameSite=Strict)
+  [PASS] Redirects to root after successful login (http://127.0.0.1:43185/)
+  [PASS] strand_session cookie set (httpOnly=true, sameSite=Strict)
+  [PASS] strand_login cleared or expired 
+  [PASS] Audit log records successful login (ip=127.0.0.1, action=login)
+
+========================================
+RUNNING SCENARIO: 2. Direct Login with Wrong Password
+========================================
+  [PASS] Login page displays wrong password error (wrong password)
+  [PASS] Audit log records bad_password denial (reason=bad_password)
+
+========================================
+RUNNING SCENARIO: 3. Multi-Tab Login Race (Stale Tab Token vs Newer Tab Cookie)
+========================================
+  [PASS] Tab 1 and Tab 2 receive distinct CSRF tokens 
+  [PASS] Tab 2 overwrites strand_login cookie 
+  [PASS] Tab 1 successfully logs in despite overwritten cookie (via Sec-Fetch-Site: same-origin) (http://127.0.0.1:43185/)
+  [PASS] Audit log confirms login ok for multi-tab 
+
+========================================
+RUNNING SCENARIO: 4. Missing/Cleared Login Cookie (Same-Origin Browser Fallback)
+========================================
+  [PASS] strand_login cookie deleted prior to submit 
+  [PASS] Login succeeds via Sec-Fetch-Site same-origin even with missing cookie (http://127.0.0.1:43185/)
+  [PASS] Audit records login ok with missing login cookie 
+
+========================================
+RUNNING SCENARIO: 5. HTTP Reverse Proxy Origin with X-Forwarded-* IP Trust
+========================================
+  [PASS] Login via reverse proxy succeeds (http://127.0.0.1:33507/)
+  [PASS] Audit log captures forwarded IP (203.0.113.195) (got ip=203.0.113.195)
+
+========================================
+RUNNING SCENARIO: 6. Cross-Origin / Forged Origin CSRF Attack Rejection
+========================================
+  [PASS] Attacker page loaded 
+  [PASS] Cross-origin form submission lands on login with 403 Forbidden or error (
+
+
+  StrandChange data capture console
+  Sign in to manage your replication pipelines.
+  missing or )
+  [PASS] Cross-origin fetch is rejected (403 or CORS block) (FETCH_ERR: Failed to fetch)
+  [PASS] Audit log explicitly records login_csrf_rejected for cross-origin attacks (found 1 rejection entries)
+  [PASS] Audit detail records cross_site reason (reason=cross_site_same-site)
+
+========================================
+RUNNING SCENARIO: 7. Navigation Integrity: Slow Overlapping Refresh During Tab Switching
+========================================
+  [PASS] Initially on Graph tab (Graph)
+  Navigating to Tables tab (response delayed by 1500ms)...
+  Quickly switching to Checkpoint tab before Tables refresh completes...
+  Waiting 2500ms for delayed responses to settle...
+  [PASS] URL remains on Checkpoint (/pipelines/orders/checkpoint) (http://127.0.0.1:33507/pipelines/orders/checkpoint)
+  [PASS] Active tab remains Checkpoint (did not spontaneously switch to Tables) (Checkpoint)
+  [PASS] Content shows Checkpoint details and not Tables snapshot progress (Content correctly displays Checkpoint view)
+
+========================================
+RUNNING SCENARIO: 8. History Back/Forward Navigation & Refresh State Preservation
+========================================
+  [PASS] Arrived at Tables tab 
+  [PASS] Arrived at Checkpoint tab 
+  [PASS] Back button restores Tables tab URL and active tab (Tables)
+  [PASS] Page scroll position maintained across periodic refresh (before=150, after=150)
+  [PASS] Back button restores Graph tab URL and active tab (Graph)
+  [PASS] Forward button restores Tables tab URL and active tab (Tables)
+
+========================================
+RUNNING SCENARIO: 9. Navigation Integrity: Stale/Mismatched Response Protection
+========================================
+  [PASS] Starts on Graph tab 
+  [PASS] Actual app refresh discards delayed wrong-tab response ({"path":"/pipelines/orders","active":"/pipelines/orders","staleApplied":false})
+  [PASS] In-flight response is dropped after query navigation 
+
+========================================
+RUNNING SCENARIO: 10. Audit Log Secrets Redaction Verification
+========================================
+  [PASS] Audit log exists and has content 
+  [PASS] Plaintext fixture password is never leaked into audit log (password safely redacted)
+  [PASS] Plaintext database passwords not leaked into audit log (passwords safely redacted)
+  [PASS] All audit log entries are valid JSON with time and action fields 
+
+========================================
+TEST SUITE COMPLETED
+========================================
+Summary: 10/10 scenarios passed.
+Results saved to /tmp/strand-browser-run-6ApOGa/suite-results.json
+=== 4. Test Suite Output ===
+{
+  "timestamp": "2026-11-17T10:32:21.952Z",
+  "browser_version": "124.0.6367.78",
+  "playwright_version": "1.65.1",
+  "scenarios": [
+    {
+      "name": "1. Direct Normal Login",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "strand_login cookie set on GET /login",
+          "pass": true,
+          "detail": "httpOnly=true, sameSite=Strict"
+        },
+        {
+          "desc": "Redirects to root after successful login",
+          "pass": true,
+          "detail": "http://127.0.0.1:43185/"
+        },
+        {
+          "desc": "strand_session cookie set",
+          "pass": true,
+          "detail": "httpOnly=true, sameSite=Strict"
+        },
+        {
+          "desc": "strand_login cleared or expired",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Audit log records successful login",
+          "pass": true,
+          "detail": "ip=127.0.0.1, action=login"
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "2. Direct Login with Wrong Password",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Login page displays wrong password error",
+          "pass": true,
+          "detail": "wrong password"
+        },
+        {
+          "desc": "Audit log records bad_password denial",
+          "pass": true,
+          "detail": "reason=bad_password"
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "3. Multi-Tab Login Race (Stale Tab Token vs Newer Tab Cookie)",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Tab 1 and Tab 2 receive distinct CSRF tokens",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Tab 2 overwrites strand_login cookie",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Tab 1 successfully logs in despite overwritten cookie (via Sec-Fetch-Site: same-origin)",
+          "pass": true,
+          "detail": "http://127.0.0.1:43185/"
+        },
+        {
+          "desc": "Audit log confirms login ok for multi-tab",
+          "pass": true,
+          "detail": ""
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "4. Missing/Cleared Login Cookie (Same-Origin Browser Fallback)",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "strand_login cookie deleted prior to submit",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Login succeeds via Sec-Fetch-Site same-origin even with missing cookie",
+          "pass": true,
+          "detail": "http://127.0.0.1:43185/"
+        },
+        {
+          "desc": "Audit records login ok with missing login cookie",
+          "pass": true,
+          "detail": ""
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "5. HTTP Reverse Proxy Origin with X-Forwarded-* IP Trust",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Login via reverse proxy succeeds",
+          "pass": true,
+          "detail": "http://127.0.0.1:33507/"
+        },
+        {
+          "desc": "Audit log captures forwarded IP (203.0.113.195)",
+          "pass": true,
+          "detail": "got ip=203.0.113.195"
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "6. Cross-Origin / Forged Origin CSRF Attack Rejection",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Attacker page loaded",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Cross-origin form submission lands on login with 403 Forbidden or error",
+          "pass": true,
+          "detail": "\n\n\n  StrandChange data capture console\n  Sign in to manage your replication pipelines.\n  missing or "
+        },
+        {
+          "desc": "Cross-origin fetch is rejected (403 or CORS block)",
+          "pass": true,
+          "detail": "FETCH_ERR: Failed to fetch"
+        },
+        {
+          "desc": "Audit log explicitly records login_csrf_rejected for cross-origin attacks",
+          "pass": true,
+          "detail": "found 1 rejection entries"
+        },
+        {
+          "desc": "Audit detail records cross_site reason",
+          "pass": true,
+          "detail": "reason=cross_site_same-site"
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "7. Navigation Integrity: Slow Overlapping Refresh During Tab Switching",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Initially on Graph tab",
+          "pass": true,
+          "detail": "Graph"
+        },
+        {
+          "desc": "URL remains on Checkpoint (/pipelines/orders/checkpoint)",
+          "pass": true,
+          "detail": "http://127.0.0.1:33507/pipelines/orders/checkpoint"
+        },
+        {
+          "desc": "Active tab remains Checkpoint (did not spontaneously switch to Tables)",
+          "pass": true,
+          "detail": "Checkpoint"
+        },
+        {
+          "desc": "Content shows Checkpoint details and not Tables snapshot progress",
+          "pass": true,
+          "detail": "Content correctly displays Checkpoint view"
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "8. History Back/Forward Navigation & Refresh State Preservation",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Arrived at Tables tab",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Arrived at Checkpoint tab",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Back button restores Tables tab URL and active tab",
+          "pass": true,
+          "detail": "Tables"
+        },
+        {
+          "desc": "Page scroll position maintained across periodic refresh",
+          "pass": true,
+          "detail": "before=150, after=150"
+        },
+        {
+          "desc": "Back button restores Graph tab URL and active tab",
+          "pass": true,
+          "detail": "Graph"
+        },
+        {
+          "desc": "Forward button restores Tables tab URL and active tab",
+          "pass": true,
+          "detail": "Tables"
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "9. Navigation Integrity: Stale/Mismatched Response Protection",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Starts on Graph tab",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Actual app refresh discards delayed wrong-tab response",
+          "pass": true,
+          "detail": "{\"path\":\"/pipelines/orders\",\"active\":\"/pipelines/orders\",\"staleApplied\":false}"
+        },
+        {
+          "desc": "In-flight response is dropped after query navigation",
+          "pass": true,
+          "detail": ""
+        }
+      ],
+      "logs": []
+    },
+    {
+      "name": "10. Audit Log Secrets Redaction Verification",
+      "status": "PASS",
+      "checks": [
+        {
+          "desc": "Audit log exists and has content",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "desc": "Plaintext fixture password is never leaked into audit log",
+          "pass": true,
+          "detail": "password safely redacted"
+        },
+        {
+          "desc": "Plaintext database passwords not leaked into audit log",
+          "pass": true,
+          "detail": "passwords safely redacted"
+        },
+        {
+          "desc": "All audit log entries are valid JSON with time and action fields",
+          "pass": true,
+          "detail": ""
+        }
+      ],
+      "logs": []
+    }
+  ]
+}Cleaning up...

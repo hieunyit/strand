@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"strand/internal/checkpoint"
@@ -194,10 +195,31 @@ func (d *MySQLTargetDriver) ApplyRemaining(ctx context.Context) error {
 	}
 }
 
+// quoteMySQLIdent bao bọc định danh MySQL (cột, bảng, schema) trong dấu backtick.
+// Ký tự backtick bên trong được nhân đôi ("“") để tránh SQL injection hoặc syntax error.
+func quoteMySQLIdent(s string) string {
+	s = strings.Trim(strings.TrimSpace(s), "`")
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
+// quoteMySQLQualified bao bọc tên có thể có dạng schema.table thành `schema`.`table`.
+func quoteMySQLQualified(name string) string {
+	name = strings.TrimSpace(name)
+	if strings.Contains(name, ".") {
+		parts := strings.Split(name, ".")
+		quoted := make([]string, len(parts))
+		for i, p := range parts {
+			quoted[i] = quoteMySQLIdent(p)
+		}
+		return strings.Join(quoted, ".")
+	}
+	return quoteMySQLIdent(name)
+}
+
 // FindColumnMax tìm giá trị MAX của cột trong bảng target.
 func (d *MySQLTargetDriver) FindColumnMax(ctx context.Context, table, column string) (int64, error) {
 	var maxVal sql.NullInt64
-	q := fmt.Sprintf("SELECT MAX(`%s`) FROM `%s`;", column, table)
+	q := fmt.Sprintf("SELECT MAX(%s) FROM %s;", quoteMySQLIdent(column), quoteMySQLQualified(table))
 	err := d.db.QueryRowContext(ctx, q).Scan(&maxVal)
 	if err != nil {
 		return 0, err
@@ -210,7 +232,7 @@ func (d *MySQLTargetDriver) FindColumnMax(ctx context.Context, table, column str
 
 // Setval cập nhật AUTO_INCREMENT cho bảng.
 func (d *MySQLTargetDriver) Setval(ctx context.Context, seq SequenceInfo, val int64) error {
-	q := fmt.Sprintf("ALTER TABLE `%s` AUTO_INCREMENT = %d;", seq.Table, val)
+	q := fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d;", quoteMySQLQualified(seq.Table), val)
 	_, err := d.db.ExecContext(ctx, q)
 	return err
 }

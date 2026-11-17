@@ -704,6 +704,10 @@ Cờ `seed apply`:
 
 Trần spool tính cả file payload spill còn giữ trên disk, một lần theo đường dẫn, kể cả khi metadata đã tràn sang bucket. Truncate transaction chưa giải phóng dung lượng file đang được mượn; quota chỉ giảm khi owner đã dọn file vật lý.
 
+Spool prefetch mới lưu provenance và ordered identity contract cùng mỗi transaction (định dạng STX4). `sync` kiểm lại mode, tên/thứ tự key và columns trước khi coi vị trí là đã phủ, rồi kiểm lại trước apply, kể cả payload spill. Spool generic STX2/STX3 vẫn đọc được, nhưng bản ghi prefetch cũ chưa có contract và chưa được checkpoint sẽ bị từ chối; cần dựng lại từ source/archive tin cậy. Không tự xóa spool khi phần log tương ứng đã bị purge. Dùng cùng phiên bản mới cho `seed apply` và `sync`; binary cũ không đọc STX4.
+
+Prefetch trực tiếp từ source chỉ nhận bảng có metadata cột/key rõ ràng từ reader và row image FULL; không suy UNIQUE/keyless từ cột đầu. Bảng không PK cần đường archive với sidecar đã xác minh và metadata FULL, hoặc restore seed không prefetch rồi dùng CDC trực tiếp khi log còn đủ. Metadata do catalog hiện tại cung cấp vẫn không tự chứng minh schema ở một vị trí lịch sử. Với sidecar archive, TABLE_MAP phải có tên cột theo thứ tự và mọi QUERY ngoài BEGIN/COMMIT/ROLLBACK bị từ chối; mirrored expression indexes cũng bị validator từ chối khi chưa chứng minh được tương đương.
+
 `seed apply` theo engine:
 
 - **MySQL:** kiểm `gtid_executed` của target bằng P và gỡ cấu hình replication còn sót. Tạo schema metadata với `SET SESSION sql_log_bin=0; CREATE DATABASE strand; SET SESSION sql_log_bin=1;` để `gtid_executed` vẫn đúng bằng P.

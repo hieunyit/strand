@@ -23,6 +23,11 @@ import (
 
 // Config chứa cấu hình kết nối của MySQLReader.
 type Config struct {
+	// Prefetch cannot represent omitted columns as SQL NULL.
+	RequireFullRowImage bool
+	// Optional verified seed table scope; transaction boundaries still pass through.
+	TableScope func(schema, table string) bool
+
 	DSN        string
 	Host       string
 	Port       uint16
@@ -417,10 +422,20 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 		if tm, found := st.tableMap[rowsEv.TableID]; found {
 			schema, table = string(tm.Schema), string(tm.Table)
 		}
+		if r.cfg.TableScope != nil && !r.cfg.TableScope(schema, table) {
+			return true
+		}
 		tm, info := st.tableMap[rowsEv.TableID], st.info[rowsEv.TableID]
 		if comp := st.compressed[rowsEv.TableID]; len(comp) > 0 {
 			if err := decompressRows(tm, rowsEv.Rows, comp); err != nil {
 				return fail(err)
+			}
+		}
+		if r.cfg.RequireFullRowImage {
+			for _, skipped := range rowsEv.SkippedColumns {
+				if len(skipped) > 0 {
+					return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "source prefetch requires FULL row images; refusing omitted columns", nil))
+				}
 			}
 		}
 		segs := []rowSeg{{op: op, rows: rowsEv.Rows}}
@@ -586,6 +601,9 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				st.compressed[tmEv.TableID] = comp
 			}
 			st.tableMap[tmEv.TableID] = tmEv
+			if r.cfg.TableScope != nil && !r.cfg.TableScope(string(tmEv.Schema), string(tmEv.Table)) {
+				return true
+			}
 			info, err := r.resolveInfo(st, tmEv)
 			if err != nil {
 				return fail(err)

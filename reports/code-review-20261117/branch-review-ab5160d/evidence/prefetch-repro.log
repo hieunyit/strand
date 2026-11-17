@@ -1,0 +1,6 @@
+=== RUN   TestReviewSQLSnapshotTreatedAsSidecar
+spool usage: local 0 bytes, bucket 0 bytes
+    review_data_test.go:13: source-only/no-archive fails on ordinary SQL snapshot: load archive schema sidecar /tmp/TestReviewSQLSnapshotTreatedAsSidecar1982244538/001/dump.sql: unmarshal schema sidecar /tmp/TestReviewSQLSnapshotTreatedAsSidecar1982244538/001/dump.sql: invalid character 'C' looking for beginning of value
+--- PASS: TestReviewSQLSnapshotTreatedAsSidecar (0.05s)
+PASS
+ok  	strand/cmd/strand	0.366s

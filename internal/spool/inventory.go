@@ -411,14 +411,54 @@ func (s *PebbleSpool) ImportInventory(report *InventoryReport, opts ...Inventory
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A report is a snapshot, not authority for current sizes or references.
+	// Recheck the paths and index while Append/Truncate are excluded by mu.
+	roots, _, err := CleanAndValidateTrustedRoots(report.TrustedRoots)
+	if err != nil {
+		return nil, err
+	}
 	var toImport []InventoryEntry
+	seen := make(map[string]bool)
 	for _, entry := range report.Entries {
-		if entry.Status != StatusNew {
+		if entry.Status != StatusNew && entry.Status != StatusAlreadyIndexed {
 			continue
 		}
-		if existing, ok := s.sidecars[entry.Path]; ok && existing.size == entry.Size {
+		path, err := normalizeSidecar(entry.Path)
+		if err != nil {
+			return nil, err
+		}
+		canonical, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, fmt.Errorf("spool import revalidate %s: %w", path, err)
+		}
+		allowed := false
+		for _, root := range roots {
+			rel, err := filepath.Rel(root, canonical)
+			if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed || canonical != path {
+			return nil, fmt.Errorf("%w: inventory path %s changed or left its trusted root", ErrSymlinkEscape, path)
+		}
+		if seen[path] {
 			continue
 		}
+		seen[path] = true
+		size, err := sidecarStat(path)
+		if err != nil {
+			return nil, err
+		}
+		if existing := s.sidecars[path]; existing != nil {
+			if existing.size == size {
+				continue
+			}
+			if existing.refs > 0 {
+				return nil, fmt.Errorf("spool sidecar %s changed size while referenced", path)
+			}
+		}
+		entry.Path, entry.Size = path, size
 		toImport = append(toImport, entry)
 	}
 

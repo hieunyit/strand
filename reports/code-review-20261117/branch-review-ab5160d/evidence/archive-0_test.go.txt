@@ -1,0 +1,16 @@
+package archive
+import (
+ "testing"
+ "strand/internal/model"
+)
+func TestReviewQuotedQualifiedDDL(t *testing.T) {
+ s,err:=NewSchemaSidecar(TableIdentity{Schema:"app",Table:"accounts",Columns:[]string{"id","a"},IdentityMode:IdentityModeUnique,KeyColumns:[]string{"id"}}); if err!=nil {t.Fatal(err)}
+ r,err:=New(Config{Sidecar:s}); if err!=nil {t.Fatal(err)}
+ if _,ok:=r.isDDLMismatch("other", "ALTER TABLE `app`.`accounts` RENAME COLUMN id TO id_old"); ok {t.Fatal("unexpected detection")}
+ t.Log("qualified quoted DDL is missed with different default schema")
+}
+func TestReviewWrongSameLengthKey(t *testing.T) {
+ id:=TableIdentity{Schema:"app",Table:"accounts",Columns:[]string{"a","b"},IdentityMode:IdentityModeUnique,KeyColumns:[]string{"a"}}
+ if err:=VerifyRowChangeIdentity(id,model.RowChange{Key:[]model.Value{123}}); err!=nil {t.Fatal(err)}
+ t.Log("only key length checked; actual column identity not encoded")
+}

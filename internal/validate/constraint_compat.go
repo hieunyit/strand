@@ -162,17 +162,10 @@ func VerifyConstraintsCompatible(srcTC, dstTC *TableConstraints, opts Constraint
 }
 
 func constraintImplies(srcTC *TableConstraints, srcC UniqueConstraint, dstTC *TableConstraints, dstC UniqueConstraint, opts ConstraintCheckOptions) (bool, string, bool) {
-	// 1. Functional / Expression descriptors:
-	if dstC.HasExpr {
-		if !srcC.HasExpr {
-			return false, fmt.Sprintf("target unique index %q is a functional/expression index not provably equivalent to source", dstC.Name), false
-		}
-		if !descriptorsMatch(srcC, dstC) {
-			return false, fmt.Sprintf("target unique index %q functional expression does not match source index %q", dstC.Name, srcC.Name), false
-		}
-	}
-	if srcC.HasExpr && !dstC.HasExpr {
-		return false, fmt.Sprintf("source index %q has expressions and cannot imply standard unique constraint on target", srcC.Name), false
+	// The catalog descriptor does not capture expression semantics, collation,
+	// or operator classes. Matching the presence of expressions proves nothing.
+	if dstC.HasExpr || srcC.HasExpr {
+		return false, fmt.Sprintf("target unique index %q functional/expression index not provably equivalent to source index %q", dstC.Name, srcC.Name), false
 	}
 
 	// 2. Prefix descriptors (SUB_PART):
@@ -252,7 +245,7 @@ func constraintImplies(srcTC *TableConstraints, srcC UniqueConstraint, dstTC *Ta
 				// Target requires NOT NULL while source allows NULL: target will reject rows containing NULL.
 				return false, fmt.Sprintf("source column %q allows NULL but target column %q is NOT NULL", origCol, mappedCol), false
 			}
-			if dstC.NullsNotDistinct {
+			if dstC.NullsNotDistinct && !srcC.NullsNotDistinct {
 				return false, fmt.Sprintf("target index %q enforces NULLS NOT DISTINCT while source allows duplicate NULLs", dstC.Name), false
 			}
 		}
@@ -277,21 +270,6 @@ func constraintImplies(srcTC *TableConstraints, srcC UniqueConstraint, dstTC *Ta
 	}
 
 	return true, "", false
-}
-
-func descriptorsMatch(a, b UniqueConstraint) bool {
-	if a.HasExpr != b.HasExpr || a.HasPrefix != b.HasPrefix || a.IsPartial != b.IsPartial {
-		return false
-	}
-	if len(a.Columns) != len(b.Columns) {
-		return false
-	}
-	for i := range a.Columns {
-		if a.Columns[i] != b.Columns[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func formatConstraintIncompatibilityError(srcTC, dstTC *TableConstraints, dstC UniqueConstraint, strictSubset bool, strictSubsetSrc string, reasons []string) error {
@@ -547,12 +525,14 @@ type pgIndexEntry struct {
 }
 
 func readPGConstraints(ctx context.Context, db *sql.DB, table model.TableID, cols map[string]ColumnDescriptor) (*UniqueConstraint, []UniqueConstraint, error) {
-	// First attempt: pg_class and pg_index catalog query
+	// to_jsonb permits the PG 15+ field to be absent on older supported servers;
+	// absent means ordinary NULLS DISTINCT semantics.
 	q := `SELECT
 		ic.relname,
 		i.indisprimary,
 		i.indpred IS NOT NULL AS is_partial,
 		i.indexprs IS NOT NULL AS has_expr,
+		COALESCE((to_jsonb(i)->>'indnullsnotdistinct')::boolean, false) AS nulls_not_distinct,
 		k.ord,
 		COALESCE(a.attname, '') AS attname,
 		COALESCE(a.attnotnull, false) AS attnotnull,
@@ -570,8 +550,8 @@ func readPGConstraints(ctx context.Context, db *sql.DB, table model.TableID, col
 
 	rows, err := db.QueryContext(ctx, q, table.Schema, table.Table)
 	if err != nil {
-		// Fallback to information_schema for fake drivers / mocks
-		return readPGConstraintsFallback(ctx, db, table, cols)
+		// information_schema cannot describe expression indexes or NULLS NOT DISTINCT.
+		return nil, nil, fmt.Errorf("read PostgreSQL unique index metadata: %w", err)
 	}
 	defer rows.Close()
 
@@ -580,22 +560,23 @@ func readPGConstraints(ctx context.Context, db *sql.DB, table model.TableID, col
 
 	for rows.Next() {
 		var relname string
-		var isPrimary, isPartial, hasExpr bool
+		var isPrimary, isPartial, hasExpr, nullsNotDistinct bool
 		var ord int
 		var attname, collname string
 		var attnotnull bool
 
-		if err := rows.Scan(&relname, &isPrimary, &isPartial, &hasExpr, &ord, &attname, &attnotnull, &collname); err != nil {
+		if err := rows.Scan(&relname, &isPrimary, &isPartial, &hasExpr, &nullsNotDistinct, &ord, &attname, &attnotnull, &collname); err != nil {
 			return nil, nil, err
 		}
 
 		entry, ok := indexMap[relname]
 		if !ok {
 			entry = &pgIndexEntry{
-				name:      relname,
-				isPrimary: isPrimary,
-				isPartial: isPartial,
-				hasExpr:   hasExpr,
+				name:             relname,
+				isPrimary:        isPrimary,
+				isPartial:        isPartial,
+				hasExpr:          hasExpr,
+				nullsNotDistinct: nullsNotDistinct,
 			}
 			indexMap[relname] = entry
 			indexOrder = append(indexOrder, relname)
@@ -645,62 +626,5 @@ func readPGConstraints(ctx context.Context, db *sql.DB, table model.TableID, col
 		}
 	}
 
-	return pk, uniques, nil
-}
-
-func readPGConstraintsFallback(ctx context.Context, db *sql.DB, table model.TableID, cols map[string]ColumnDescriptor) (*UniqueConstraint, []UniqueConstraint, error) {
-	q := `SELECT tc.constraint_name, tc.constraint_type, kcu.column_name
-	      FROM information_schema.table_constraints tc
-	      JOIN information_schema.key_column_usage kcu
-	        ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema AND tc.table_name = kcu.table_name
-	      WHERE tc.table_schema = $1 AND tc.table_name = $2 AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-	      ORDER BY tc.constraint_name, kcu.ordinal_position`
-
-	rows, err := db.QueryContext(ctx, q, table.Schema, table.Table)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-
-	indexMap := make(map[string]*pgIndexEntry)
-	var indexOrder []string
-
-	for rows.Next() {
-		var cName, cType, colName string
-		if err := rows.Scan(&cName, &cType, &colName); err != nil {
-			return nil, nil, err
-		}
-		entry, ok := indexMap[cName]
-		if !ok {
-			entry = &pgIndexEntry{
-				name:      cName,
-				isPrimary: strings.EqualFold(cType, "PRIMARY KEY"),
-			}
-			indexMap[cName] = entry
-			indexOrder = append(indexOrder, cName)
-		}
-		entry.cols = append(entry.cols, colName)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
-
-	var pk *UniqueConstraint
-	var uniques []UniqueConstraint
-
-	sort.Strings(indexOrder)
-	for _, name := range indexOrder {
-		entry := indexMap[name]
-		uc := UniqueConstraint{
-			Name:      entry.name,
-			IsPrimary: entry.isPrimary,
-			Columns:   entry.cols,
-		}
-		if entry.isPrimary {
-			pk = &uc
-		} else {
-			uniques = append(uniques, uc)
-		}
-	}
 	return pk, uniques, nil
 }

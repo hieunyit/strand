@@ -1,0 +1,13 @@
+=== RUN   TestSurfaceMultilineDSNLeak
+    surface_review_test.go:13: masked="source:\n  dsn: >-\n    postgres://u:SurfaceBlockCanary@h/db\n" err=<nil>
+    surface_review_test.go:14: DSN password leaked
+    surface_review_test.go:13: masked="source:\n  dsn: \"postgres://u:SurfaceQuoteCanary@h/db\n    ?sslmode=disable\"\n" err=<nil>
+    surface_review_test.go:14: DSN password leaked
+--- FAIL: TestSurfaceMultilineDSNLeak (0.00s)
+=== RUN   TestSurfaceDSNQuoteConversion
+    surface_review_test.go:25: original semantic DSN="user:pa\\ss@tcp(localhost:3306)/db" restored semantic DSN="user:pa\\\\ss@tcp(localhost:3306)/db"
+    surface_review_test.go:26: credential changed by quote-only edit
+--- FAIL: TestSurfaceDSNQuoteConversion (0.00s)
+FAIL
+FAIL	strand/internal/web	0.303s
+FAIL

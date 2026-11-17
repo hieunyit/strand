@@ -209,7 +209,7 @@ func buildMockPGDB(exists bool, cols []ColumnDescriptor, ucs []UniqueConstraint)
 	for _, uc := range ucs {
 		relname := uc.Name
 		if uc.HasExpr && len(uc.Columns) == 0 {
-			pgIndexRows = append(pgIndexRows, []driver.Value{relname, uc.IsPrimary, uc.IsPartial, true, 1, "", false, ""})
+			pgIndexRows = append(pgIndexRows, []driver.Value{relname, uc.IsPrimary, uc.IsPartial, true, uc.NullsNotDistinct, 1, "", false, ""})
 		}
 		for ord, col := range uc.Columns {
 			attName := col
@@ -226,11 +226,11 @@ func buildMockPGDB(exists bool, cols []ColumnDescriptor, ucs []UniqueConstraint)
 					break
 				}
 			}
-			pgIndexRows = append(pgIndexRows, []driver.Value{relname, uc.IsPrimary, uc.IsPartial, hasExpr, ord + 1, attName, isNotNull, collName})
+			pgIndexRows = append(pgIndexRows, []driver.Value{relname, uc.IsPrimary, uc.IsPartial, hasExpr, uc.NullsNotDistinct, ord + 1, attName, isNotNull, collName})
 		}
 	}
 	resp["pg_class"] = &mockTableData{
-		cols: []string{"relname", "indisprimary", "is_partial", "has_expr", "ord", "attname", "attnotnull", "collname"},
+		cols: []string{"relname", "indisprimary", "is_partial", "has_expr", "nulls_not_distinct", "ord", "attname", "attnotnull", "collname"},
 		rows: pgIndexRows,
 	}
 
@@ -675,8 +675,8 @@ func TestRegression_FunctionalAndPrefixDescriptors(t *testing.T) {
 		}
 
 		err := VerifyConstraintsCompatible(srcTC, dstTC, ConstraintCheckOptions{})
-		if err != nil {
-			t.Fatalf("expected mirrored functional index to be accepted, got: %v", err)
+		if err == nil {
+			t.Fatal("expected unverifiable functional index to be rejected")
 		}
 	})
 }
@@ -954,5 +954,40 @@ func TestIsolatedLiveMySQLCheck(t *testing.T) {
 
 	if err := CheckTableConstraintCompatibility(ctx, db, model.EngineMySQL, db, model.EngineMySQL, srcTable, dstTable, ConstraintCheckOptions{}); err != nil {
 		t.Fatalf("expected live check with superset to pass, got: %v", err)
+	}
+}
+
+func TestRegressionExpressionSemanticsUnknown(t *testing.T) {
+	cols := []ColumnDescriptor{{Name: "email"}, {Name: "phone"}}
+	src := buildMockMySQLDB(true, cols, []UniqueConstraint{{Name: "lower_email", HasExpr: true}})
+	dst := buildMockMySQLDB(true, cols, []UniqueConstraint{{Name: "lower_phone", HasExpr: true}})
+	defer src.Close()
+	defer dst.Close()
+	table := model.TableID{Schema: "app", Table: "t"}
+	if err := CheckTableConstraintCompatibility(context.Background(), src, model.EngineMySQL, dst, model.EngineMySQL, table, table, ConstraintCheckOptions{}); err == nil {
+		t.Fatal("different expressions must not be accepted")
+	}
+}
+func TestRegressionPGNullsNotDistinctCatalog(t *testing.T) {
+	cols := []ColumnDescriptor{{Name: "email", Nullable: true}}
+	table := model.TableID{Schema: "app", Table: "t"}
+	for _, tc := range []struct {
+		name                   string
+		source, target, reject bool
+	}{
+		{"ordinary to not distinct", false, true, true},
+		{"ordinary to ordinary", false, false, false},
+		{"not distinct to not distinct", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := buildMockPGDB(true, cols, []UniqueConstraint{{Name: "src", Columns: []string{"email"}, NullsNotDistinct: tc.source}})
+			dst := buildMockPGDB(true, cols, []UniqueConstraint{{Name: "dst", Columns: []string{"email"}, NullsNotDistinct: tc.target}})
+			defer src.Close()
+			defer dst.Close()
+			err := CheckTableConstraintCompatibility(context.Background(), src, model.EnginePG, dst, model.EnginePG, table, table, ConstraintCheckOptions{})
+			if (err != nil) != tc.reject {
+				t.Fatalf("reject=%v: %v", tc.reject, err)
+			}
+		})
 	}
 }

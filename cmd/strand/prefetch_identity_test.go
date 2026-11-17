@@ -215,3 +215,13 @@ func TestPrefetch_ValidArchiveWithSidecar(t *testing.T) {
 		t.Fatalf("expected 1 prefetched transaction, got %d", n)
 	}
 }
+
+func TestPrefetchSourceOnlyIgnoresSQLSnapshot(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(p, []byte("CREATE TABLE t (id int);"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prefetch(context.Background(), &seedManifestLite{SchemaSnapshot: p}, t.TempDir(), 0, 0, "", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1,0 +1,5 @@
+ok  	strand/cmd/strand	0.498s
+ok  	strand/internal/web	0.297s
+ok  	strand/internal/validate	0.247s
+ok  	strand/internal/reader/archive	0.341s
+ok  	strand/internal/spool	0.666s

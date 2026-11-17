@@ -544,6 +544,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 				// Không được nuốt lỗi: đếm thiếu ở đây biến thành log_gap giả (hoặc bỏ sót Txn).
 				return fmt.Errorf("read prefetch spool: %w", err)
 			}
+			if !applied.Contains(t.SourcePos) {
+				if _, err := p.archiveIdentityChecker(t, true); err != nil {
+					it.Close()
+					return fmt.Errorf("validate prefetch identity before covering its position: %w", err)
+				}
+			}
 			streamFrom.Add(t.SourcePos)
 			n++
 		}
@@ -1218,6 +1224,10 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		p.noteRouted(pos, 0)
 		return nil
 	}
+	archiveCheck, err := p.archiveIdentityChecker(t, false)
+	if err != nil {
+		return fmt.Errorf("validate archive identity before routing: %w", err)
+	}
 	if t.DDL != "" {
 		// P1–P2 (02 §12): DDL trên bảng thuộc pipeline (kể cả bảng MỚI khớp bộ lọc do CREATE/RENAME)
 		// chỉ đi tiếp khi schema ở target đã khớp source; nếu không thì dừng schema_change_pending.
@@ -1226,6 +1236,12 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		}
 	}
 
+	if t.DDL != "" {
+		archiveCheck, err = p.archiveIdentityChecker(t, false)
+		if err != nil {
+			return fmt.Errorf("validate archive identity after DDL: %w", err)
+		}
+	}
 	out := &model.Txn{SourcePos: pos, SourceTS: t.SourceTS}
 	handedOff := false
 	defer func() {
@@ -1239,6 +1255,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	var rereadTables map[model.TableID]bool
 	lane := false // Txn chạm bảng LaneTable (relaxed, source PG): đi làn tuần tự
 	keep := func(rc *model.RowChange, emit func(model.RowChange) error) error {
+		if err := archiveCheck(rc); err != nil {
+			return err
+		}
 		if p.table(rc.Table) == nil {
 			// Partition lá của một bảng thuộc pipeline (publication không publish_via_partition_root):
 			// bỏ qua là mất row âm thầm — dừng (review R02, pg_partition.go).
@@ -1482,6 +1501,12 @@ func (p *Pipeline) drainPrefetch(ctx context.Context, out chan<- *model.Txn) err
 		if err != nil {
 			it.Close()
 			return fmt.Errorf("read prefetch spool: %w", err)
+		}
+		if p.applied0 == nil || !p.applied0.Contains(t.SourcePos) {
+			if _, err := p.archiveIdentityChecker(t, true); err != nil {
+				it.Close()
+				return fmt.Errorf("validate prefetch replay identity: %w", err)
+			}
 		}
 		select {
 		case out <- t:

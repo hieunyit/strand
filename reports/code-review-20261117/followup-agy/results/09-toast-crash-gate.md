@@ -8,7 +8,7 @@ In accordance with specifications and task rules:
 2. **Safe Cancellation & Cleanup of Owned Resources**: Traps `SIGINT` (Ctrl+C) and `SIGTERM` signals, cancels running contexts, and performs teardown of **only** owned ephemeral resources while strictly preserving failure logs, artifacts, and summary metadata.
 3. **Stage Classification & Honest Reporting (Rule R15)**: Execution is categorized into independently labeled stages (`build`, `vet`, `unit`, `regression`, `race`, `e2e-bounded`, `e2e-stress`, and `fullsuite`). Unexecuted stages are never claimed as passed; full suite and heavy 15-iteration stress are staged separately so they can run after concurrent profiling lanes conclude.
 4. **Baseline Metadata Recording**: Automatically records Git tree hash, Go toolchain version, Docker engine version, PostgreSQL engine version, and random seed.
-5. **Real Crash/Resume Verification**: Executed `TestE2E_PGToastCompletionCrashResume` on live PostgreSQL 18 testcontainers, simulating mid-flight process termination (`SIGKILL`), validating checkpoint preservation, resuming from persisted range plans, and confirming 100% row parity, monotonically increasing row versions, and non-NULL TOAST external documents.
+5. **Historical Crash/Resume Evidence**: The original live PostgreSQL bounded test established post-restart convergence and final parity. It did not require a durable bounds plan at the kill point; `foundState` was only logged. Its original PASS does not prove saved-plan preservation or distinguish clean bootstrap from resume. The strengthened repair and its separate live rerun are recorded below.
 
 ---
 
@@ -18,7 +18,7 @@ In accordance with specifications and task rules:
 - `tools/diagnostics/remaining-gate/types.go` (NEW): Data structures for gate configuration, stage telemetry, and execution summaries.
 - `tools/diagnostics/remaining-gate/runner_test.go` (NEW): Unit tests covering baseline metadata collection, LIFO resource cleanup guarantees, and stage log capture.
 - `tools/diagnostics/remaining-gate/README.md` (NEW): Operational documentation covering architecture, isolation model, stage categorization, CLI options, and artifact formats.
-- `tests/e2e/toast_completion_crash_test.go` (NEW): End-to-end bounded test (`TestE2E_PGToastCompletionCrashResume`) validating mid-flight `SIGKILL` crash during PostgreSQL logical snapshot with active TOAST PK moves, saved plan preservation, resume without re-reading finished ranges, and final data verification.
+- `tests/e2e/toast_completion_crash_test.go` (NEW): End-to-end bounded test (`TestE2E_PGToastCompletionCrashResume`) validating bounded `SIGKILL` restart and final data parity; strengthened during the branch-review repair to require the actual new-format saved plan and table-specific resume evidence.
 - `reports/code-review-20261117/followup-agy/evidence/remaining-gate/` (ARTIFACTS):
   - `summary.json`: Complete machine-readable run report.
   - `build_packages.log`: Build log for target snapshot and pipeline packages.
@@ -46,7 +46,7 @@ In accordance with specifications and task rules:
 
 ## Verification Stages & Execution Results
 
-All stages executed cleanly with zero errors:
+The listed historical stages passed their then-current assertions. Heavy stress and fullsuite were not run; the original bounded test lacked the saved-plan assertions described above:
 
 | Stage | Category | Status | Duration | Log Artifact |
 | :--- | :--- | :--- | :--- | :--- |
@@ -82,13 +82,13 @@ All stages executed cleanly with zero errors:
    - Executed against two live PostgreSQL 18.6 testcontainers (`46f1b4af8146` and `742df720c8b4`).
    - Workload generated: 6,481 ops, 0 client-side errors, 5,902 TOAST PK moves, 203 standard PK moves.
    - Crash simulation: Sent `SIGKILL` (kill -9) mid-snapshot while chunks were actively reading.
-   - Verified state directory persistence: checkpoint and range states saved to disk.
-   - Resumed Strand with the exact state directory: Strand loaded existing checkpoint, resumed streaming and chunk read without resetting finished bounds.
+   - The original test only logged whether generic state entries existed; it did not fail on their absence or decode `bound_snapshot`.
+   - Restart used the same state directory, but the original assertions could not distinguish saved-plan resume from clean bootstrap.
    - Invariant verifications:
      - Version monotonicity: Monotonic across 96 ver-sampler checkpoints.
      - Final state: 31,805 rows across 4 application tables (`app.items`, `app.events`, `app.accounts`, etc.) verified identical between source and target databases.
      - TOAST documents: `doc` column verified non-NULL across all rows.
-     - Idempotency / No duplicates: 40,883 row versions applied exactly once.
+     - Snapshot-kill invariant checks passed; this is not an exactly-once witness for every intermediate snapshot range.
 
 ---
 
@@ -109,3 +109,12 @@ To maintain isolation and avoid interfering with concurrent lane workloads:
    ./tools/diagnostics/remaining-gate/remaining-gate -fullsuite
    ```
    Per Rule R15, `fullsuite` remains unexecuted in this run and will only be marked `PASS` when invoked through this flag.
+
+
+## Branch-review strengthened gate and bounded rerun (2026-11-17)
+
+The repaired test waits for `state/pipeline-state.json` with the matching pipeline identity and the specific `app.items` plan. It requires a nonempty new-format `bound_snapshot` (including `bounds_lsn`), saved completed progress (`next_pk > min_pk`), pending ranges or reread keys, and a durable target checkpoint before SIGKILL. After kill it rereads and asserts that the plan is still unfinished and preserves the bounds snapshot, minimum/maximum and completed boundary. After restart it requires the table-specific `snapshot resumes from saved plan` log and rereads the same bounds/progress before final convergence. No fallback sleep or arbitrary JSON filename satisfies the gate.
+
+A separate live bounded run passed with `SEED=42`, `chunk_rows=100` and a 15-second post-resume load window. At SIGKILL the durable app.items plan had `next_pk=223`, `max_pk=10036221`, and zero reread keys: this run proves pending-range resume, not a kill inside an active reread. It retained the saved bounds/progress, reached bootstrap completion, and compared 64,725 rows across four tables. The scenario took 85.51 s; the command including build, parser regressions and teardown took 98.649 s. Its two owned PostgreSQL containers were terminated. Log: `/tmp/strand-repair-crash.log` (ephemeral local evidence).
+
+Parser regressions also passed for unrelated/legacy JSON, wrong pipeline/table, unstarted/finished plans, pending ranges, and pending reread keys. The broader active-reread fault gate, 15-iteration stress and `go test ./...` were not run in this repair. Neither the historical bounded PASS nor the stronger bounded rerun substitutes for those gates.

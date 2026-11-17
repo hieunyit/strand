@@ -1,10 +1,10 @@
 # Task 03: PostgreSQL Strict Mode Profiling & Throughput Investigation
 
 ## Summary
-Investigated the reported PostgreSQL → PostgreSQL `strict` mode throughput (280–300 TPS) through empirical measurement rather than speculative configuration or durability changes. Implemented:
+Investigated PostgreSQL → PostgreSQL `strict` mode throughput in an isolated local lab. The stored baseline was 2,669.8 source transactions/sec and `reproduces_280_to_300=false`; the affected user host was not measured. The original 280–300 TPS root cause remains unproven. Implemented:
 1. Opt-in safe file-based CPU and block profiling for `strand sync` (with no unauthenticated network pprof, safe non-overwriting file creation semantics, negligible disabled overhead, and full lifecycle cleanup upon errors or cancellation).
-2. A reproducible, isolated source/target benchmark harness (`tools/diagnostics/pg-strict`) that configures fixed schemas, deterministic seeds, fixed CPU quotas, fsync/synchronous_commit verification, warmup and steady windows, and captures CPU/block profiles, target/source `pg_stat_activity` wait events, commit/batch sizes, and read→route→apply throughput simultaneously.
-3. An empirical investigation determining the exact physics of the 280–300 TPS ceiling: in `strict` mode (`scfg.Serial = true`), Strand enforces a single sequential writer (`nWorkers = 1`) committing in strict sequence order (CP-5). When individual transactions arrive sequentially or without queue accumulation, each transaction is committed in an individual target transaction with synchronous WAL flush (`WalSync`). On storage media with ~3.0–3.5 ms fsync latency (typical for cloud block storage like AWS EBS gp3 or standard SATA SSDs), sequential commit latency mathematically bounds throughput to $1 / 0.0033\text{ s} \approx 300\text{ TPS}$. On high-speed local NVMe write-cached storage, the harness achieved 810–2669 TPS at 100% single-writer sequential saturation.
+2. A reproducible, isolated source/target benchmark harness (`tools/diagnostics/pg-strict`) that configures fixed schemas, deterministic seeds, fixed CPU quotas, fsync/synchronous_commit verification, warmup and steady windows, and captures CPU/block profiles, target/source `pg_stat_activity` wait events, applied source transactions/rows, optional transaction traces, and sampled wait events.
+3. A conditional throughput hypothesis: serialized synchronous commits can limit throughput when commit batches are small and measured commit latency is high. The local evidence includes batching (about 3.36 and 31.30 source transactions per target batch in separate trace runs), so raw single-connection commit TPS is not a ceiling for applied source TPS. No fsync latency on the affected user host was measured; no diagnosis of its storage hardware follows from this lab.
 
 ---
 
@@ -44,8 +44,8 @@ Investigated the reported PostgreSQL → PostgreSQL `strict` mode throughput (28
 
 The harness provides an end-to-end, fully reproducible experimental setup:
 1. **Isolated Infrastructure**:
-   - Manages dedicated PostgreSQL 18 containers (`strand-strict-diag-src`, `strand-strict-diag-dst`) with isolated ports, strict memory (`shared_buffers=256MB`), and container CPU quota (`--cpus=2.0`).
-   - Cleans up containers reliably on exit or termination signal.
+   - Manages PostgreSQL 18 containers with unique per-run names/labels, returned container IDs, and Docker-allocated loopback ports, strict memory (`shared_buffers=256MB`), and container CPU quota (`--cpus=2.0`).
+   - Cleans up only returned container IDs when the runner returns.
 2. **Durability & Fsync Verification**:
    - Explicitly verifies and records database settings: `fsync = on`, `synchronous_commit = on`, `wal_level = logical`.
 3. **Deterministic Workload**:
@@ -53,7 +53,7 @@ The harness provides an end-to-end, fully reproducible experimental setup:
    - Populates 5,000 deterministic rows using fixed seed `42`.
    - Drives concurrent worker goroutines executing single-row transactional updates (`BEGIN; UPDATE ...; COMMIT;`).
 4. **Direct Target Raw Baseline Probe**:
-   - Directly probes target PostgreSQL single-connection commit capacity prior to starting Strand, measuring the raw fsync/WAL commit ceiling of the underlying storage hardware.
+   - Directly probes target PostgreSQL single-connection commit capacity prior to starting Strand, measuring a separate single-connection update/commit workload; this is not an apply TPS ceiling.
 5. **Simultaneous Multi-Dimensional Telemetry Capture**:
    - Scrapes `http://127.0.0.1:21123/metrics` every 500 ms for `strand_apply_txn_total`, `strand_apply_rows_total`, and `strand_lag_seconds`.
    - Samples `pg_stat_activity` on target and source every 200 ms for active wait events (`wait_event_type`, `wait_event`, `state`).
@@ -119,7 +119,7 @@ Command executed:
 | **Strand Strict Steady Throughput** | **2,669.8 TPS** |
 | Strand Strict Warmup Throughput | 2,476.2 TPS |
 | Target Raw Single-Connection Commit TPS | 461.5 TPS |
-| Average Transaction Batch Size | 1.00 rows/batch |
+| Rows per applied source transaction (old artifact incorrectly calls this `avg_batch_size`) | 1.00 rows/source transaction |
 | Top Target Wait Events | `Client:ClientRead (idle: 203)`, `CPU:running (active: 53)`, `ClientRead (idle in tx: 29)`, `IO:WalSync (active: 2)` |
 | Top Source Wait Events | `Client:ClientRead (459)`, `LWLock:WALWrite (68)`, `IO:WalSync (45)`, `CPU:running (42)` |
 
@@ -135,42 +135,13 @@ Command executed:
 
 ---
 
-## Root Cause Analysis: The Physics of the 280–300 TPS Phenomenon
+## What the Local Evidence Establishes
 
-1. **Strict Ordering Contract (CP-5)**:
-   In `internal/pipeline/pipeline.go` (lines 664–676):
-   ```go
-   scfg.Serial = p.strict // strict: một writer, apply tuần tự theo seq
-   if p.strict {
-       p.orderer = writer.NewCommitOrderer("strict", 1)
-       nWorkers = 1
-   }
-   ```
-   `strict` mode intentionally constrains writer parallelism to exactly $N=1$ worker (`nWorkers = 1`) to preserve total commit order matching the source binlog/WAL sequence.
+Strict mode uses one ordered writer, and the PostgreSQL writer commits target batches synchronously. A batch may contain several source transactions. The stored single-client trace reports 1,696 batches for 5,705 transactions (about 3.36 transactions/batch); another trace reports 607 batches for 19,000 transactions (about 31.30 transactions/batch). These traces establish that the original metric `appliedRows/appliedTxns` is not commit batch size.
 
-2. **Commit Latency vs Throughput Bound**:
-   In `internal/writer/pg.go` (`applyTx`), each batch execution commits synchronously to PostgreSQL:
-   ```go
-   tag, gerr := tx.Exec(ctx, "UPDATE _strand_checkpoint SET applied = $1, updated_at = now() WHERE pipeline_id = $2 AND epoch = $3", applied, pid, ep)
-   *committing = true
-   if err := tx.Commit(ctx); err != nil { ... }
-   ```
-   With `fsync = on` and `synchronous_commit = on`, `tx.Commit()` blocks until the PostgreSQL WAL buffer is flushed to disk via an `fdatasync()` / `fsync()` kernel system call.
+A hypothetical one-source-transaction-per-commit workload with a measured 3.3 ms total commit time would support about 300 source transactions/sec. Neither that batch shape nor that latency was measured on the affected user host. The local 2,669.8 TPS result therefore does not reproduce or explain the reported 280–300 TPS symptom. The 0.38 ms reciprocal of local apply TPS is not a measured fsync or target commit latency.
 
-3. **Storage Latency Derivation**:
-   The commit latency $T_{\text{commit}}$ consists of:
-   $$T_{\text{commit}} = T_{\text{roundtrip}} + T_{\text{exec}} + T_{\text{fsync}}$$
-   - On standard cloud storage (e.g. AWS EBS gp3, standard SAN, or spinning disks):
-     $T_{\text{fsync}} \approx 2.5\text{ ms} - 3.5\text{ ms}$.
-   - If batch size $= 1$ transaction:
-     $$\text{Throughput} = \frac{1 \text{ txn}}{T_{\text{commit}}} = \frac{1}{0.0033\text{ s}} \approx 300\text{ TPS}$$
-   This demonstrates why external benchmarks on cloud storage or physical drives observe **280–300 TPS**: it is the physical saturation point of single-threaded synchronous disk writes.
-   On our local WSL2 Linux host with NVMe page cache, $T_{\text{commit}} \approx 0.38\text{ ms}$, yielding $\sim 2,670\text{ TPS}$ for the exact same single-threaded commit pattern.
-
-4. **txntrace Validation**:
-   Analysis of `txntrace.log` in our multi-client run showed:
-   `Total batches: 607 Total txns: 19000 Avg txns/batch: 31.30`
-   The pipeline performed group commit of consecutive sequence numbers when transactions accumulated, achieving thousands of TPS while strictly respecting sequential order. When transactions arrive with even minor latency separation or under small loads, batch size collapses to 1, exposing the application directly to the disk's physical fsync latency.
+The hypotheses to investigate on the affected host are target commit latency, source transaction arrival spacing, actual source transactions per target commit batch, queueing, and competing load. Collect matching traces, wait samples and storage/roundtrip measurements before attributing the user symptom to strict ordering or fsync. No durability or strict-order defaults were changed by the diagnostic repair.
 
 ---
 
@@ -232,7 +203,7 @@ default:
 ## Remaining Limits & Security
 - **No Unauthenticated pprof**: CPU and block profiling flags only output to local files; no HTTP debug endpoints were introduced.
 - **Safety Invariants Maintained**: No durability settings (`fsync`, `synchronous_commit`), strict order checks, epoch fences, or TOAST guards were disabled or modified.
-- **Docker Resources Cleaned**: All benchmark containers (`strand-strict-diag-src`, `strand-strict-diag-dst`) and temporary socket/PID files were cleaned up automatically. Real customer credentials or data dumps were never used.
+- **Docker Resources Cleaned**: The historical lab reported cleanup of its benchmark containers. The corrected harness cleans up only IDs returned by its own creates; it never removes a pre-existing name to make room. Real customer credentials or data dumps were never used.
 
 ---
 
@@ -267,3 +238,14 @@ Addressed all 5 review items from `reports/code-review-20261117/followup-agy/REV
 - **Round 1 (Unit & Race)**: `go test -v -race ./cmd/strand -run "TestProfile"` $\to$ 15/15 passed (`PASS`, 1.836s).
 - **Round 2 (Static & Full Package Integration)**: `go vet ./cmd/strand/...` (clean), `gofmt -d` (clean), `go test -v ./cmd/strand` (all integration tests with live MySQL 8.4 and PostgreSQL 17/18 containers passed, 203.173s).
 - **Round 3 (Multi-Iteration Race Stress & Diagnostics)**: `go test -v -race -count=10 ./cmd/strand -run "TestProfile"` $\to$ 150/150 test runs passed with zero race warnings (2.993s); `go test -v ./tools/diagnostics/pg-strict/...` $\to$ `PASS` (0.027s).
+
+
+## Branch-review corrections (2026-11-17)
+
+The harness now rejects external DSNs by default, before connecting or mutating anything. `-auto-docker=false` requires the separate `-allow-destructive-existing-databases` flag, whose help explicitly warns that it permits truncating `bench.accounts` and replacing the diagnostic publication. Auto-Docker rejects supplied external DSNs instead of silently ignoring them.
+
+Fresh output directories are created private (0700). Existing directories must already be owned and 0700; permissive directories or symlink components are rejected without chmodding an arbitrary user-selected path. The credential-bearing config is written 0600 in a temporary private directory and removed on return; only `strand.redacted.yaml` is included in the report artifacts. Actual child stdout/stderr are redacted across write boundaries, and a private transaction trace is redacted before export. Per-run container IDs and allocated loopback database/metrics ports prevent taking over another run's fixture. Phase labels use atomic synchronization, and both samplers are joined before results are read.
+
+The corrected JSON field is `rows_per_source_txn`; `avg_batch_size` is removed. `apply_txns_to_raw_commits_ratio` compares two different workloads and does not claim pipeline efficiency or a physical ceiling. Historical JSON artifacts retain their original field names and must be interpreted with the correction above.
+
+Repair checks: race-enabled pg-strict/remaining-gate unit tests passed, including external-DB refusal, ID-only cleanup, private replacement, actual child-output redaction, metric-unit and phase-concurrency regressions. A race-enabled live smoke run (20 seed rows, one client, 1 s warmup / 2 s steady, private trace export) completed using allocated database/metrics ports and cleaned its owned fixtures. Artifact permissions/redaction and absence of retained plaintext config were checked. Log: `/tmp/strand-repair-pg-smoke-final.log`; artifacts: `/tmp/strand-repair-pg-smoke-final/`. This is a functionality smoke, not evidence of the user-host root cause. The prior test logs below/above describe their historical revision and did not prove the branch-review counterexamples safe.

@@ -1,0 +1,4 @@
+ok  	strand/internal/reader/mysql	1.531s
+ok  	strand/cmd/strand	2.294s
+ok  	strand/internal/pipeline	1.898s
+ok  	strand/internal/spool	1.645s

@@ -230,7 +230,7 @@ func (r *ArchiveReader) handleEventDepth(ctxRead context.Context, tableMap map[u
 				return exitcode.New(
 					exitcode.ErrSchemaChangePending,
 					exitcode.NeedsDecision,
-					fmt.Sprintf("archive binlog encountered DDL query %q modifying table %s with immutable schema sidecar; schema change requires operator decision before transaction covered", qStr, matchedTbl),
+					fmt.Sprintf("archive binlog encountered query %q with uncertain scope %s and immutable schema sidecar; schema change requires operator decision before transaction covered", qStr, matchedTbl),
 					nil,
 				)
 			}
@@ -385,42 +385,22 @@ func (r *ArchiveReader) handleEventDepth(ctxRead context.Context, tableMap map[u
 	return nil
 }
 
-func isDDLQuery(q string) bool {
-	fields := strings.Fields(q)
-	if len(fields) == 0 {
-		return false
-	}
-	switch fields[0] {
-	case "ALTER", "CREATE", "DROP", "TRUNCATE", "RENAME":
-		return true
-	}
-	return false
-}
-
-func (r *ArchiveReader) isDDLMismatch(schema, query string) (string, bool) {
+func (r *ArchiveReader) isDDLMismatch(_ string, query string) (string, bool) {
 	if r.cfg.Sidecar == nil || len(r.cfg.Sidecar.Tables) == 0 {
 		return "", false
 	}
 	qUpper := strings.ToUpper(strings.TrimSpace(query))
-	if !isDDLQuery(qUpper) {
+	// Only known transaction-control queries are safe without parsing SQL.
+	// Reject unknown statements, including DDL hidden behind comments.
+	switch strings.TrimSuffix(qUpper, ";") {
+	case "BEGIN", "COMMIT", "ROLLBACK":
 		return "", false
 	}
-	words := strings.FieldsFunc(query, func(c rune) bool {
-		return c == ' ' || c == '\t' || c == '\n' || c == ';' || c == '`' || c == '(' || c == ')' || c == ','
-	})
-	for _, w := range words {
-		parts := strings.SplitN(w, ".", 2)
-		if len(parts) == 2 {
-			if _, ok := r.cfg.Sidecar.GetTable(parts[0], parts[1]); ok {
-				return fmt.Sprintf("%s.%s", parts[0], parts[1]), true
-			}
-		} else if schema != "" {
-			if _, ok := r.cfg.Sidecar.GetTable(schema, w); ok {
-				return fmt.Sprintf("%s.%s", schema, w), true
-			}
-		}
-	}
-	return "", false
+	// Query events can use quoted, qualified identifiers, multiple table names,
+	// comments, or a default schema unrelated to the modified object. Without a
+	// complete SQL parser and an interval-bound schema generation, no DDL can
+	// safely be proven unrelated to the sidecar.
+	return "unknown scope", true
 }
 
 func undecoded(ev *replication.BinlogEvent) error {
@@ -458,7 +438,14 @@ func verifyAgainstIdentity(tm *replication.TableMapEvent, tid *TableIdentity) (c
 		}
 	}
 
-	// 3. Tên cột (nếu binlog có tên cột)
+	// A sidecar has no trustworthy association with a binlog interval. Without
+	// names in this TABLE_MAP, matching count and type cannot detect reordered
+	// columns after historical DDL.
+	if len(tm.ColumnName) == 0 {
+		return nil, nil, exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+			fmt.Sprintf("archive TABLE_MAP for %s lacks column names; sidecar schema generation cannot be verified", name), nil)
+	}
+	// 3. Verify ordered column names from the binlog.
 	if len(tm.ColumnName) > 0 {
 		binlogCols := tm.ColumnNameString()
 		if len(binlogCols) != len(tid.Columns) {

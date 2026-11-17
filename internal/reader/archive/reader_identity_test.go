@@ -614,3 +614,32 @@ func TestArchiveIdentity_NoGuessedCol0(t *testing.T) {
 		t.Fatalf("expected Rejected exit code, got %v", gotErr)
 	}
 }
+
+func TestSidecarRejectsUncertainDDL(t *testing.T) {
+	sidecar, err := NewSchemaSidecar(TableIdentity{Schema: "app", Table: "accounts", Columns: []string{"id", "a"}, IdentityMode: IdentityModeUnique, KeyColumns: []string{"id"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(Config{Sidecar: sidecar})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"ALTER TABLE `app`.`accounts` RENAME COLUMN id TO id_old", "/* comment */ ALTER TABLE app.accounts ADD c INT", "RENAME TABLE app.accounts TO app.old"} {
+		if _, ok := r.isDDLMismatch("other", q); !ok {
+			t.Fatalf("accepted %q", q)
+		}
+	}
+	for _, q := range []string{"BEGIN", "COMMIT", "ROLLBACK"} {
+		if _, ok := r.isDDLMismatch("other", q); ok {
+			t.Fatalf("rejected transaction control %q", q)
+		}
+	}
+}
+
+func TestSidecarRejectsMinimalTableMap(t *testing.T) {
+	id := TableIdentity{Schema: "app", Table: "accounts", Columns: []string{"id", "a"}, IdentityMode: IdentityModeUnique, KeyColumns: []string{"id"}}
+	tm := &replication.TableMapEvent{Schema: []byte("app"), Table: []byte("accounts"), ColumnCount: 2, ColumnType: []byte{mysql.MYSQL_TYPE_LONG, mysql.MYSQL_TYPE_LONG}}
+	if _, _, err := verifyAgainstIdentity(tm, &id); err == nil {
+		t.Fatal("minimal metadata cannot establish sidecar column order")
+	}
+}

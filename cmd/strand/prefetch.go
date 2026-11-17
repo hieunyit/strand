@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 
 	"strand/internal/assemble"
@@ -92,29 +95,34 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 	if it, err := sp.Iter(ctx, model.Pos{}); err == nil {
 		for {
 			t, err := it.Next(ctx)
-			if err != nil {
+			if errors.Is(err, io.EOF) {
 				break
+			}
+			if err != nil {
+				it.Close()
+				return 0, fmt.Errorf("read existing prefetch spool: %w", err)
+			}
+			if !covered.Contains(t.SourcePos) && t.PrefetchOrigin != "source" && t.PrefetchOrigin != "archive" {
+				it.Close()
+				return 0, fmt.Errorf("legacy prefetch transaction has no verified provenance; rebuild the prefetch spool before resuming")
 			}
 			covered.Add(t.SourcePos)
 		}
 		it.Close()
+	} else {
+		return 0, fmt.Errorf("open existing prefetch spool: %w", err)
 	}
 	spillDir := filepath.Join(spoolDir, "spill")
 	_ = os.MkdirAll(spillDir, 0o750)
 	n := 0
 
 	var sidecar *archivereader.SchemaSidecar
-	if m != nil {
-		sidecarPath := m.ArchiveSchema
-		if sidecarPath == "" {
-			sidecarPath = m.SchemaSnapshot
-		}
-		if sidecarPath != "" {
-			if sc, err := archivereader.LoadSchemaSidecar(sidecarPath); err == nil {
-				sidecar = sc
-			} else {
-				return 0, fmt.Errorf("load archive schema sidecar %s: %w", sidecarPath, err)
-			}
+	// SchemaSnapshot may be SQL dump metadata, not an archive sidecar.
+	if archiveDir != "" && m != nil && m.ArchiveSchema != "" {
+		var err error
+		sidecar, err = archivereader.LoadSchemaSidecar(m.ArchiveSchema)
+		if err != nil {
+			return 0, fmt.Errorf("load archive schema sidecar %s: %w", m.ArchiveSchema, err)
 		}
 	}
 
@@ -158,13 +166,13 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 		}
 	}
 
-	consume := func(events <-chan reader.Event, stopAt *checkpoint.MySQLAppliedSet, untilCh <-chan struct{}) error {
+	consume := func(events <-chan reader.Event, stopAt *checkpoint.MySQLAppliedSet, untilCh <-chan struct{}, fromArchive bool) error {
 		var asmOpts []assemble.Option
 		asmOpts = append(asmOpts, assemble.WithSpillDir(spillDir))
-		if keylessFunc != nil {
+		if fromArchive && keylessFunc != nil {
 			asmOpts = append(asmOpts, assemble.WithKeylessFunc(keylessFunc))
 		}
-		if sidecar != nil {
+		if fromArchive && sidecar != nil {
 			kmMap := make(map[model.TableID]assemble.KeyMeta)
 			for _, tbl := range sidecar.Tables {
 				tid := model.TableID{Schema: tbl.Schema, Table: tbl.Table}
@@ -185,13 +193,15 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 			}
 		}
 		asm := assemble.New(asmOpts...)
-		if sidecar != nil {
+		if fromArchive && sidecar != nil {
 			for _, tbl := range sidecar.Tables {
 				if tbl.IdentityMode == archivereader.IdentityModeUnique && len(tbl.KeyColumns) > 0 {
 					asm.Registry().RegisterTable(tbl.Schema, tbl.Table, tbl.KeyColumns, tbl.Columns)
 				}
 			}
 		}
+		currentIdentities := make(map[model.TableID]model.ArchiveIdentity)
+		txnIdentities := make(map[model.TableID]model.ArchiveIdentity)
 		inTxn := false
 		// Khi untilCh đóng (restore-cmd kết thúc), chốt stopAt bằng gtid_executed hiện tại của source.
 		checkUntil := func() error {
@@ -240,11 +250,63 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 				if err != nil {
 					return err
 				}
+				if ev.Type == reader.EventTableMap {
+					id := model.TableID{Schema: ev.Schema, Table: ev.Table}
+					if !fromArchive && (len(ev.Columns) == 0 || len(ev.PKColumns) == 0) {
+						return fmt.Errorf("source prefetch table %s has no explicit column/key metadata; refusing guessed row identity", id)
+					}
+					schema := asm.Registry().GetTable(ev.Schema, ev.Table)
+					if schema == nil {
+						return fmt.Errorf("archive TABLE_MAP has no assembled schema for %s", id)
+					}
+					identity := model.ArchiveIdentity{Table: id, Mode: "pk", Columns: append([]string(nil), schema.Columns...), KeyColumns: append([]string(nil), schema.PKColumns...)}
+					if fromArchive && sidecar != nil {
+						if declared, ok := sidecar.GetTable(ev.Schema, ev.Table); ok {
+							identity.Mode = string(declared.IdentityMode)
+						}
+					}
+					if err := identity.Validate(); err != nil {
+						return err
+					}
+					currentIdentities[id] = identity
+				}
+				if ev.Type == reader.EventRows {
+					id := model.TableID{Schema: ev.Schema, Table: ev.Table}
+					identity, ok := currentIdentities[id]
+					if !ok {
+						return fmt.Errorf("archive row has no identity contract for %s", id)
+					}
+					if prior, seen := txnIdentities[id]; seen && !reflect.DeepEqual(prior, identity) {
+						return fmt.Errorf("archive identity changed within transaction for %s", id)
+					}
+					for _, image := range ev.Rows {
+						row := model.RowChange{Table: id, Key: asm.Registry().ExtractPK(ev.Schema, ev.Table, image)}
+						if err := identity.CheckRowKey(&row); err != nil {
+							return err
+						}
+					}
+					txnIdentities[id] = identity
+				}
 				if t == nil {
 					continue
 				}
+				t.PrefetchOrigin = "source"
+				if fromArchive {
+					t.PrefetchOrigin = "archive"
+				}
+				for _, identity := range txnIdentities {
+					t.ArchiveIdentities = append(t.ArchiveIdentities, identity)
+				}
+				sort.Slice(t.ArchiveIdentities, func(i, j int) bool {
+					return t.ArchiveIdentities[i].Table.String() < t.ArchiveIdentities[j].Table.String()
+				})
+				if t.TotalRows() > 0 && len(t.ArchiveIdentities) == 0 {
+					return fmt.Errorf("prefetch rows have no identity contracts")
+				}
+				txnIdentities = make(map[model.TableID]model.ArchiveIdentity)
+
 				inTxn = false
-				if sidecar != nil {
+				if fromArchive && sidecar != nil {
 					for _, rc := range t.Rows {
 						if tbl, ok := sidecar.GetTable(rc.Table.Schema, rc.Table.Table); ok {
 							if err := archivereader.VerifyRowChangeIdentity(*tbl, rc); err != nil {
@@ -302,7 +364,7 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 		actx, cancel := context.WithCancel(ctx)
 		events, err := ar.Start(actx, nil)
 		if err == nil {
-			err = consume(events, nil, nil)
+			err = consume(events, nil, nil, true)
 		}
 		cancel()
 		_ = ar.Close()
@@ -355,7 +417,7 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 				return n, err
 			}
 			rd, err := mysqlreader.New(mysqlreader.Config{DSN: sourceDSN, ServerID: 49000 + uint32(os.Getpid()%1000), Flavor: srcVer.SyncerFlavor(), CollationCharsets: charsets,
-				TableInfo: mysqlreader.NewInfoSchemaProvider(infoDB)})
+				TableInfo: mysqlreader.NewInfoSchemaProvider(infoDB), RequireFullRowImage: true, TableScope: tableScope})
 			if err != nil {
 				return n, err
 			}
@@ -368,7 +430,7 @@ func prefetch(ctx context.Context, m *seedManifestLite, spoolDir string, localHa
 				}
 				return n, exitcode.New(exitcode.ErrLogGap, exitcode.DataError, fmt.Sprintf("prefetch from source: %v", err), err)
 			}
-			err = consume(events, stopAt, until)
+			err = consume(events, stopAt, until, false)
 			cancel()
 			_ = rd.Close()
 			if err != nil {

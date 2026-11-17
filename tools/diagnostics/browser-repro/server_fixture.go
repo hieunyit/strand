@@ -35,7 +35,7 @@ type mockPipeline struct {
 func (m *mockPipeline) Top(ctx context.Context) (*admin.TopInfo, error) {
 	return &admin.TopInfo{PipelineID: "orders", State: "synced", LagSeconds: 0.12, Throughput: 1500, Zone: "green"}, nil
 }
-func (m *mockPipeline) Pause(ctx context.Context) (*admin.PauseResult, error)  { return nil, nil }
+func (m *mockPipeline) Pause(ctx context.Context) (*admin.PauseResult, error) { return nil, nil }
 func (m *mockPipeline) Resume(ctx context.Context, so bool) (*admin.ResumeResult, error) {
 	return nil, nil
 }
@@ -93,6 +93,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to start fixture: %v\n", err)
 		os.Exit(1)
 	}
+
+	defer os.RemoveAll(f.Dir)
 
 	info := map[string]any{
 		"direct_url":   f.DirectURL,

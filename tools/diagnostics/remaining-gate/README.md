@@ -86,3 +86,10 @@ The `remaining-gate` tool automates the verification gate for remaining CDC revi
 The gate produces structured output files under `reports/code-review-20261117/followup-agy/evidence/remaining-gate/`:
 - `summary.json`: Machine-readable run summary containing timestamp, overall status, total duration, Git tree hash, toolchain/DB versions, seed, and per-stage status.
 - `<stage_name>.log`: Complete stdout/stderr trace of each executed stage.
+
+Real gh-ost e2e tests use `t.Skip` if the binary is absent. To make real-tool
+availability a required acceptance gate, run the gh-ost tests with
+`STRAND_E2E_REQUIRE_GHOST=1` and install `gh-ost` on PATH or provide
+`STRAND_E2E_GHOST_BIN`. A skipped test is not evidence of real-tool execution.
+The bounded crash test requires a durable table-specific `bound_snapshot` plan;
+its PASS does not replace active-reread fault injection, stress15 or fullsuite.

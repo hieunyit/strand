@@ -156,6 +156,11 @@ type Txn struct {
 	Rows      []RowChange `json:"rows"`
 	Bytes     int64       `json:"bytes"`
 
+	// PrefetchOrigin distinguishes verified live-source and archive prefetch from
+	// legacy records with unknown provenance. Archive contracts bind source keys.
+	PrefetchOrigin    string            `json:"prefetch_origin,omitempty"`
+	ArchiveIdentities []ArchiveIdentity `json:"archive_identities,omitempty"`
+
 	// Hỗ trợ transaction lớn tràn đĩa theo spec: design §6.4
 	SpillPath string `json:"spill_path,omitempty"`
 	// SpillOwned chỉ đánh dấu file tạm do process này tạo; spool decode luôn coi là file bền mượn.

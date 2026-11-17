@@ -1,0 +1,98 @@
+[
+  {
+    "name": "constraints",
+    "exit_code": 0,
+    "expected_on_reviewed_head": 0,
+    "command": [
+      "/usr/local/go/bin/go",
+      "test",
+      "-overlay",
+      "<temporary mapping>",
+      "./internal/validate",
+      "-run",
+      "^TestReview",
+      "-count=1",
+      "-v"
+    ]
+  },
+  {
+    "name": "archive",
+    "exit_code": 0,
+    "expected_on_reviewed_head": 0,
+    "command": [
+      "/usr/local/go/bin/go",
+      "test",
+      "-overlay",
+      "<temporary mapping>",
+      "./internal/reader/archive",
+      "-run",
+      "^TestReview",
+      "-count=1",
+      "-v"
+    ]
+  },
+  {
+    "name": "prefetch",
+    "exit_code": 0,
+    "expected_on_reviewed_head": 0,
+    "command": [
+      "/usr/local/go/bin/go",
+      "test",
+      "-overlay",
+      "<temporary mapping>",
+      "./cmd/strand",
+      "-run",
+      "^TestReviewSQLSnapshot",
+      "-count=1",
+      "-v"
+    ]
+  },
+  {
+    "name": "web",
+    "exit_code": 1,
+    "expected_on_reviewed_head": 1,
+    "command": [
+      "/usr/local/go/bin/go",
+      "test",
+      "-overlay",
+      "<temporary mapping>",
+      "./internal/web",
+      "-run",
+      "^TestSurface",
+      "-count=1",
+      "-v"
+    ]
+  },
+  {
+    "name": "spool",
+    "exit_code": 1,
+    "expected_on_reviewed_head": 1,
+    "command": [
+      "/usr/local/go/bin/go",
+      "test",
+      "-overlay",
+      "<temporary mapping>",
+      "./internal/spool",
+      "-run",
+      "^TestSurface",
+      "-count=1",
+      "-v"
+    ]
+  },
+  {
+    "name": "profile",
+    "exit_code": 1,
+    "expected_on_reviewed_head": 1,
+    "command": [
+      "/usr/local/go/bin/go",
+      "test",
+      "-overlay",
+      "<temporary mapping>",
+      "./cmd/strand",
+      "-run",
+      "^TestReviewProfile|^TestReviewCPU",
+      "-count=1",
+      "-v"
+    ]
+  }
+]

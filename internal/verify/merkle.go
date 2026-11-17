@@ -668,6 +668,16 @@ func (mv *MerkleVerifier) saveProgress(ctx context.Context, table string, r Chun
 	return err
 }
 
+func (mv *MerkleVerifier) waiter() ApplyWaiter {
+	if mv.cfg.ApplyWaiter != nil {
+		return mv.cfg.ApplyWaiter
+	}
+	if mv.cfg.LiveVerifier != nil {
+		return mv.cfg.LiveVerifier.waiter()
+	}
+	return nil
+}
+
 // VerifyTableFull chạy full verify một bảng (xem chú thích đầu file).
 func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, pkCol string) (*FullVerifyReport, error) {
 	src, dstTable := mv.srcDB(), mv.targetTable(t)
@@ -700,6 +710,11 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 	if mv.cfg.Resume {
 		if cached, err = mv.loadProgress(ctx, tableKey); err != nil {
 			return nil, fmt.Errorf("load _strand_verify progress: %w", err)
+		}
+		// Khi chạy tiếp (--resume) trong lúc pipeline đang hoạt động, chờ target apply tới vị trí
+		// hiện tại của source trước khi dùng lại cache tiến độ, tránh false-negative do replication lag.
+		if w := mv.waiter(); w != nil {
+			_ = waitMark(ctx, w)
 		}
 	} else if err := mv.clearProgress(ctx, tableKey); err != nil {
 		return nil, fmt.Errorf("clear _strand_verify progress: %w", err)

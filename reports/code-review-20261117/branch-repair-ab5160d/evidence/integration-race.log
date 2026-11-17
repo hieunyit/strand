@@ -1,0 +1,7 @@
+ok  	strand/internal/validate	1.861s
+ok  	strand/internal/reader/archive	1.827s
+ok  	strand/internal/web	5.104s
+ok  	strand/internal/spool	2.550s
+ok  	strand/tools/diagnostics/pg-strict	1.266s
+ok  	strand/tools/diagnostics/browser-repro	1.382s [no tests to run]
+ok  	strand/tools/diagnostics/remaining-gate	1.143s [no tests to run]

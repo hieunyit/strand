@@ -1,0 +1,107 @@
+path,reviewer,scope
+cmd/strand/prefetch.go,Terra/high,new/changed code inspected; relevant test assertions checked
+cmd/strand/prefetch_identity_test.go,Terra/high,new/changed code inspected; relevant test assertions checked
+cmd/strand/profile.go,Coordinator,new/changed code inspected; relevant test assertions checked
+cmd/strand/profile_test.go,Coordinator,new/changed code inspected; relevant test assertions checked
+cmd/strand/seed.go,Terra/high,new/changed code inspected; relevant test assertions checked
+cmd/strand/spool_inspect.go,Sol/high,new/changed code inspected; relevant test assertions checked
+cmd/strand/spool_inspect_test.go,Sol/high,new/changed code inspected; relevant test assertions checked
+cmd/strand/sync.go,Coordinator,new/changed code inspected; relevant test assertions checked
+cmd/strand/verify.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+docs/USAGE.md,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/assemble/assembler.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/assemble/keyorder_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/checkpoint/compactor.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/checkpoint/fence.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/config/env.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/config/env_internal_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/governor/signals.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/governor/signals_mysql_errors_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/pipeline/engine.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/pipeline/keyerr.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/pipeline/keyless_citext_db_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/pipeline/keyless_metadata_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/pipeline/pipeline.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/pipeline/schema.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/pipeline/snapshot_completion_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/reader/archive/reader.go,Terra/high,new/changed code inspected; relevant test assertions checked
+internal/reader/archive/reader_fencing_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/reader/archive/reader_identity_test.go,Terra/high,new/changed code inspected; relevant test assertions checked
+internal/reader/archive/schema.go,Terra/high,new/changed code inspected; relevant test assertions checked
+internal/reader/pg/eventlog.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/reader/pg/eventlog_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/rowkey/keyless.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/rowkey/keyless_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/seed/archive_schema.go,Terra/high,new/changed code inspected; relevant test assertions checked
+internal/snapshot/completion_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/generic_walk.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/mysql_bit_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/mysql_snapshot.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/pg_bounds_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/pg_snapshot.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/pg_watermark.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/range_state.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/reread_bounds_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/toast_pk.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/snapshot/toast_pk_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/spool/inventory.go,Sol/high,new/changed code inspected; relevant test assertions checked
+internal/spool/inventory_test.go,Sol/high,new/changed code inspected; relevant test assertions checked
+internal/spool/pebble.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/spool/sidecar.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/spool/sidecar_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/spool/spill_ownership_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/testutil/minio.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+internal/testutil/minio_regression_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+internal/typemap/typemap.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/typemap/typemap_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/validate/constraint_compat.go,Terra/high,new/changed code inspected; relevant test assertions checked
+internal/validate/constraint_compat_test.go,Terra/high,new/changed code inspected; relevant test assertions checked
+internal/validate/rowkey.go,Terra/high,new/changed code inspected; relevant test assertions checked
+internal/validate/rowkey_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/validate/targetkey_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/verify/keyless.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/verify/keyless_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/actions.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/auth.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/configedit.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/envfile.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/mask.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/maskscalar_regression_test.go,Sol/high,new/changed code inspected; relevant test assertions checked
+internal/web/masktext.go,Sol/high,new/changed code inspected; relevant test assertions checked
+internal/web/masktext_test.go,Sol/high,new/changed code inspected; relevant test assertions checked
+internal/web/meta.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/pipelines.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/security_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/server.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/tuning.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/web/web_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/keyless.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/keyless_partition_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/keyless_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/keyless_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/pg.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/worker_fencing_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/worker_mysql_db_regression_test.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+internal/writer/writer.go,prior review + SHA256 unchanged,reused prior source review; build/vet and selected regressions rechecked
+tests/e2e/pg_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tests/e2e/remaining_repro_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tests/e2e/toast_completion_crash_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/breaker/analyzer.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/breaker/cmd/main.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/breaker/collector.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/breaker/collector_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/breaker/repro_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/breaker/sanitizer.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/breaker/types.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/browser-repro/run.sh,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/browser-repro/server_fixture.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/browser-repro/suite.mjs,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/pg-strict/main.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/pg-strict/main_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/remaining-gate/README.md,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/remaining-gate/main.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/remaining-gate/runner.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/remaining-gate/runner_test.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/remaining-gate/types.go,Luna/medium,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/spool-inventory/main.go,Sol/high,new/changed code inspected; relevant test assertions checked
+tools/diagnostics/spool-inventory/main_test.go,Sol/high,new/changed code inspected; relevant test assertions checked

@@ -103,7 +103,10 @@ func (s *PebbleSpool) initSidecars() error {
 		return err
 	}
 	it.Close()
-	return s.refreshSidecars()
+	if err := s.refreshSidecars(); err != nil {
+		return err
+	}
+	return s.reconcileStandardSpill()
 }
 func (s *PebbleSpool) migrateSidecars() error {
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("txn/"), UpperBound: []byte("txn/\xff")})
@@ -183,8 +186,21 @@ func (s *PebbleSpool) migrateSidecars() error {
 	if e := it.Error(); e != nil {
 		return e
 	}
-	// Older prefetch versions did not index sidecars and left truncated files
-	// in this directory. Account those physical files even without live refs.
+
+	if err = b.Set(sidecarVersionKey, []byte{1}, nil); err != nil {
+		return err
+	}
+	return b.Commit(pebble.Sync)
+}
+
+// A spill can survive a crash between assembler creation and Append. Discover
+// these on every startup; the version gates only database schema migration.
+// This walk is restricted to the assembler's standard spill tree and never
+// follows symlinks or removes files owned by callers.
+func (s *PebbleSpool) reconcileStandardSpill() error {
+	b := s.db.NewBatch()
+	defer b.Close()
+	discovered := make(map[string]int64)
 	spillDir := filepath.Join(s.dir, "spill")
 	if err := filepath.WalkDir(spillDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if errors.Is(walkErr, os.ErrNotExist) && path == spillDir {
@@ -196,11 +212,17 @@ func (s *PebbleSpool) migrateSidecars() error {
 		if entry.IsDir() {
 			return nil
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if path == spillDir {
+				return fmt.Errorf("standard spill directory is a symlink")
+			}
+			return nil
+		}
 		absolute, err := normalizeSidecar(path)
 		if err != nil {
 			return err
 		}
-		if seen[absolute] {
+		if s.sidecars[absolute] != nil {
 			return nil
 		}
 		size, err := sidecarStat(absolute)
@@ -210,15 +232,23 @@ func (s *PebbleSpool) migrateSidecars() error {
 		if err := b.Set(sidecarKey(absolute), sidecarValue(size), nil); err != nil {
 			return err
 		}
-		seen[absolute] = true
+		discovered[absolute] = size
 		return nil
 	}); err != nil {
-		return fmt.Errorf("scan legacy spool spill files: %w", err)
+		return fmt.Errorf("reconcile spool spill files: %w", err)
 	}
-	if err = b.Set(sidecarVersionKey, []byte{1}, nil); err != nil {
+	if len(discovered) == 0 {
+		return nil
+	}
+	if err := b.Commit(pebble.Sync); err != nil {
 		return err
 	}
-	return b.Commit(pebble.Sync)
+	// Publish charges only after all newly discovered paths are durable.
+	for path, size := range discovered {
+		s.sidecars[path] = &sidecar{size: size}
+		s.sideBytes += size
+	}
+	return nil
 }
 
 // refreshSidecars accounts size changes and only removes a charge after physical

@@ -1,0 +1,8 @@
+=== RUN   TestReviewExpressionIndistinguishable
+    review_data_test.go:15: unsafe expression constraints accepted as equivalent
+--- PASS: TestReviewExpressionIndistinguishable (0.00s)
+=== RUN   TestReviewPGNullsMetadataOmitted
+    review_data_test.go:24: target NULLS NOT DISTINCT omitted from catalog metadata and accepted
+--- PASS: TestReviewPGNullsMetadataOmitted (0.00s)
+PASS
+ok  	strand/internal/validate	0.334s

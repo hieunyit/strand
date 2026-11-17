@@ -9,7 +9,7 @@ In accordance with specifications and review rules:
 2. **Security & Least Privilege**: No real user accounts or credentials were used. Plaintext passwords, session cookies, and CSRF tokens are strictly redacted in telemetry logs, audit assertions, and reports (`[REDACTED]`).
 3. **Dual Network Topologies Tested**: Validated direct browser connections and HTTP reverse-proxy setups (`X-Forwarded-For`, `X-Forwarded-Proto`, and trusted IP header propagation).
 4. **Zero CSRF Weakening**: All cross-origin and forged-origin form submissions and fetches were rejected (`403 Forbidden`, `login_csrf_rejected`), proving that multi-tab and stale-token handling did not weaken CSRF protection.
-5. **Deterministic Navigation Integrity**: Verified that delayed background fetches and periodic UI refreshes cannot spontaneously switch active tabs or navigate URLs away from user selection.
+5. **Navigation Evidence Limit**: The original scenario 9 only parsed HTML in test code and did not exercise application stale-response handling. It cannot support the original protection claim. A replacement application-path regression was run during the branch-review repair (details below).
 
 ---
 
@@ -32,17 +32,26 @@ In accordance with specifications and review rules:
 | 6 | **Cross-Origin / Forged Origin Attack** | Attacker domain `http://127.0.0.1:38017` POSTs to login | `PASS` | Cross-origin form POST returns `403 Forbidden`. Cross-origin fetch blocked. Audit log records `login_csrf_rejected` with `reason=cross_site_same-site`. |
 | 7 | **Navigation Integrity: Overlapping Refresh** | Delayed `/tables` response (1500ms) while user switches to `/checkpoint` | `PASS` | Active tab remains Checkpoint. Content displays Checkpoint details; did not spontaneously revert to Tables. |
 | 8 | **History Navigation & Scroll State** | Browser Back/Forward buttons and periodic polling refresh | `PASS` | Back/Forward accurately restores Tab states and URLs. Page scroll position (`150px`) preserved across periodic refreshes. |
-| 9 | **Stale / Mismatched Response Protection** | Proxy returns stale `/tables` HTML while user is on `/pipelines/orders` | `PASS` | Pathname mismatch detected; UI preserves current tab `/pipelines/orders`. |
+| 9 (historical) | **Stale / Mismatched Response Protection** | Test-owned DOMParser mismatch calculation | `INSUFFICIENT` | Original PASS did not deliver a stale response to the application. Replaced by the repair regression below. |
 | 10 | **Audit Log Secrets Redaction** | Inspection of audit trail for leaked credentials | `PASS` | Zero password or session secrets leaked in audit file; all entries valid JSON. |
 
 ---
 
-## Root Cause Analysis of Reported Issues
+## Lab Scenarios and Limits on User-Host Attribution
 
 1. **User Login CSRF Failures in Real Browsers**:
-   - **Root Cause**: When users open login in multiple tabs or have browser privacy extensions that purge short-lived cookies, `strand_login` cookie is overwritten by the latest tab. If the backend strictly checks `cookie(strand_login) == form(token)`, the earlier tab's form submission was rejected as CSRF forgery.
+   - **Reproduced mechanism**: When users open login in multiple tabs or have browser privacy extensions that purge short-lived cookies, `strand_login` cookie is overwritten by the latest tab. If the backend strictly checks `cookie(strand_login) == form(token)`, the earlier tab's form submission was rejected as CSRF forgery.
    - **Verification**: The Web server's modern fallback checking browser-enforced `Sec-Fetch-Site: same-origin` allows multi-tab submissions while continuing to strictly reject cross-origin attacks (Scenario 3, 4 vs 6).
 
 2. **Spontaneous Navigation to Tables Tab**:
-   - **Root Cause**: Previously, if an asynchronous partial HTML refresh for `/tables` was in-flight when the user clicked another tab, the arriving late response could replace DOM elements without verifying `window.location.pathname`.
-   - **Verification**: In `app.js` and modern client routing, in-flight responses are tagged with the request URL; late responses arriving after navigation are dropped (Scenario 7, 9).
+   - **Hypothesized mechanism**: If an asynchronous partial HTML refresh for `/tables` was in-flight when the user clicked another tab, the arriving late response could replace DOM elements without verifying `window.location.pathname`.
+   - **Verification limit**: The original scenario 9 was insufficient. The replacement now routes a delayed HTTP response through the actual periodic `app.js` refresh and observes the rendered DOM. These fixture results do not establish the cause of a user-host incident.
+
+
+## Branch-review repair and rerun (2026-11-17)
+
+The Chromium wrapper now uses Docker's returned container ID for cleanup and an OS-allocated CDP port announced by that owned browser. It never stops the fixed `strand-chrome-fixture` name. The fixture's own temporary directory is removed on normal signal shutdown. A fake-Docker executable regression exercises the real wrapper and asserts that only the returned ID is stopped.
+
+Scenario 9 now intercepts the application's `X-Requested-With: fetch` periodic request, holds it, and fulfills it with wrong-tab `/tables` HTML. A mutation observer and the active-tab/URL assertions verify that the application's refresh never installs the stale content. The application now checks the fresh response's active tab path before replacing content. A second actual in-flight response is released after a query-string history change and must also be discarded. Existing busy/sequence checks continue to serialize refresh generations.
+
+The real owned Chromium 124.0.6367.78 fixture suite passed all 10 scenarios after the repair. Scenario 9 passed both actual-refresh assertions. Repair log: `/tmp/strand-repair-browser.log` (ephemeral local evidence). This is bounded fixture coverage, not proof that every user browser or proxy is unaffected.

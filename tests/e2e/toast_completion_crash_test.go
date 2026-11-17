@@ -1,13 +1,21 @@
 package e2e
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"strand/internal/checkpoint"
+	"strand/internal/model"
+	"strand/internal/snapshot"
 )
 
 // TestE2E_PGToastCompletionCrashResume executes a bounded crash and resume scenario
@@ -16,7 +24,7 @@ import (
 // 1. Initial snapshot start with chunk planning and bounds.
 // 2. Mid-flight SIGKILL interruption (simulated crash) during snapshot execution.
 // 3. Saved checkpoint/plan preservation in the state directory.
-// 4. Safe resume from the saved plan without re-reading finished ranges or corrupting TOAST keys.
+// 4. Resume retaining the saved bounds snapshot and completed range boundary.
 // 5. Final completion (bootstrap finished: pipeline synced) and exact data parity.
 func TestE2E_PGToastCompletionCrashResume(t *testing.T) {
 	seed := seedFromEnv(t)
@@ -65,7 +73,8 @@ func TestE2E_PGToastCompletionCrashResume(t *testing.T) {
 		Include:     []string{"app.*"},
 		Dir:         stateDir,
 		Bootstrap:   "logical",
-		SourceIOPS:  30, // Paced chunk reading
+		SourceIOPS:  30,    // Paced chunk reading
+		ChunkRows:   "100", // Require several completed and pending ranges in this bounded fixture.
 		LagSLO:      "10m",
 	}
 
@@ -75,62 +84,59 @@ func TestE2E_PGToastCompletionCrashResume(t *testing.T) {
 	// Phase 1: Start Strand
 	p := startStrand(t, cfgPath)
 
-	// Wait until Strand has begun snapshotting and executed query activity
-	var lastSeen time.Time
-	_ = src.DB.QueryRow("SELECT now()").Scan(&lastSeen)
-
-	snapshotStarted := false
-	killDeadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(killDeadline) {
-		if p.exited() {
-			t.Fatalf("strand exited prematurely with code %d\n%s", p.exitCode(), p.tail())
-		}
-
-		var count int
-		err := src.DB.QueryRow(`SELECT count(*) FROM pg_stat_activity 
-			WHERE pid <> pg_backend_pid() AND (query LIKE '%app.items%' OR query LIKE '%strand%')`).Scan(&count)
-		if err == nil && count > 0 {
-			snapshotStarted = true
+	// Wait for the exact durable app.items plan, including the original bounds
+	// visibility snapshot, completed progress and unfinished range/reread work.
+	// A SQL query or a generic "snapshot" log is not a resume milestone.
+	var before snapshot.SnapshotPlan
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		pl, done, err := readCrashItemsPlan(stateDir, cfg.Name)
+		cp, cpErr := checkpoint.LoadAppliedSnapshotPG(context.Background(), dst.DB, cfg.Name, model.EnginePG)
+		if err == nil && !done && resumableCrashPlan(pl) && cpErr == nil && cp.Lwd().LSN > 0 {
+			before = pl
 			break
 		}
-
-		// Also check output log
-		if strings.Contains(p.output.String(), "snapshot") || strings.Contains(p.output.String(), "chunk") {
-			snapshotStarted = true
-			break
+		if p.exited() || time.Now().After(deadline) {
+			t.Fatalf("never reached durable app.items bounds plan with saved progress and pending work: plan=%+v done=%v err=%v checkpoint=%v\n%s", pl, done, err, cpErr, p.tail())
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
-
-	if !snapshotStarted {
-		t.Log("warning: snapshot activity query not detected directly, giving 1.5s runtime before SIGKILL")
-		time.Sleep(1500 * time.Millisecond)
-	} else {
-		// Let it process a chunk or two
-		time.Sleep(1 * time.Second)
-	}
-
-	// Phase 2: Kill Strand with SIGKILL (-9) mid-snapshot
-	t.Logf("Simulating crash: sending SIGKILL (kill -9) to Strand pid=%d", p.cmd.Process.Pid)
+	t.Logf("SIGKILL with durable app.items plan: next=%d max=%d reread=%d bounds=%+v", before.NextPK, before.MaxPK, len(before.Reread), before.BoundSnapshot)
 	p.kill9()
-
-	// Verify state directory invariants: plan / checkpoint or pebble dir should exist
-	entries, err := os.ReadDir(stateDir)
-	if err != nil {
-		t.Fatalf("failed to read state dir after kill: %v", err)
+	afterKill, done, err := readCrashItemsPlan(stateDir, cfg.Name)
+	if err != nil || done || !resumableCrashPlan(afterKill) {
+		t.Fatalf("crash missed pending saved plan: plan=%+v done=%v err=%v", afterKill, done, err)
 	}
-	var foundState bool
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".json") || strings.Contains(e.Name(), "spool") || strings.Contains(e.Name(), "checkpoint") {
-			foundState = true
-			break
-		}
+	if !reflect.DeepEqual(before.BoundSnapshot, afterKill.BoundSnapshot) || before.MinPK != afterKill.MinPK || before.MaxPK != afterKill.MaxPK || afterKill.NextPK < before.NextPK {
+		t.Fatalf("saved app.items plan lost bounds/progress across SIGKILL: before=%+v after=%+v", before, afterKill)
 	}
-	t.Logf("State directory verified after crash: %d files/dirs present (foundState=%v)", len(entries), foundState)
 
 	// Phase 3: Resume Strand from the same stateDir
 	t.Log("Resuming Strand from persisted checkpoint state...")
 	p = startStrand(t, cfgPath)
+	// Read the actual new-format plan during resume and require the table-specific
+	// resume log. A clean bootstrap can converge too, so final parity alone is insufficient.
+	resumeDeadline := time.Now().Add(30 * time.Second)
+	for {
+		resumed, done, err := readCrashItemsPlan(stateDir, cfg.Name)
+		resumeLogged := false
+		for _, line := range strings.Split(p.output.String(), "\n") {
+			if strings.Contains(line, "snapshot resumes from saved plan") && strings.Contains(line, "app.items") {
+				resumeLogged = true
+				break
+			}
+		}
+		if err == nil && !done && resumed.BoundSnapshot != nil && resumeLogged {
+			if !reflect.DeepEqual(afterKill.BoundSnapshot, resumed.BoundSnapshot) || resumed.MinPK != afterKill.MinPK || resumed.MaxPK != afterKill.MaxPK || resumed.NextPK < afterKill.NextPK {
+				t.Fatalf("resume replaced saved app.items bounds/progress: saved=%+v resumed=%+v", afterKill, resumed)
+			}
+			break
+		}
+		if p.exited() || time.Now().After(resumeDeadline) || done {
+			t.Fatalf("did not observe app.items resume from original bound_snapshot plan: done=%v err=%v\n%s", done, err, p.tail())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Stop workload after bounded window to allow convergence
 	loadWindow := time.Duration(envInt("STRAND_E2E_PG_TOAST_PK_LOAD_SECONDS", 15)) * time.Second
@@ -167,4 +173,66 @@ func TestE2E_PGToastCompletionCrashResume(t *testing.T) {
 	comparePG(t, src, dst, pgAppTables...)
 	checkPGInvariantsSnapshotKilled(t, dst)
 	t.Log("PASS: Crash and resume scenario successfully completed with verified data parity and checkpoint invariants.")
+}
+
+// readCrashItemsPlan deliberately decodes the product's new plan format, including
+// BoundSnapshot; unrelated JSON or a Pebble directory cannot satisfy the gate.
+func readCrashItemsPlan(dir, pipeline string) (snapshot.SnapshotPlan, bool, error) {
+	var state struct {
+		Pipeline string                           `json:"pipeline_id"`
+		Done     map[string]bool                  `json:"snapshot_done"`
+		Plans    map[string]snapshot.SnapshotPlan `json:"snapshot_plans"`
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "state", "pipeline-state.json"))
+	if err != nil {
+		return snapshot.SnapshotPlan{}, false, err
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return snapshot.SnapshotPlan{}, false, err
+	}
+	if state.Pipeline != pipeline {
+		return snapshot.SnapshotPlan{}, false, fmt.Errorf("wrong pipeline identity %q", state.Pipeline)
+	}
+	pl, ok := state.Plans["app.items"]
+	if !ok {
+		return pl, state.Done["app.items"], fmt.Errorf("missing app.items snapshot plan")
+	}
+	return pl, state.Done["app.items"], nil
+}
+func resumableCrashPlan(pl snapshot.SnapshotPlan) bool {
+	return pl.BoundSnapshot != nil && pl.BoundSnapshot.Xmax > 0 && pl.BoundSnapshot.BoundsLSN > 0 &&
+		pl.NextPK > pl.MinPK && ((!pl.Finished && pl.NextPK <= pl.MaxPK) || len(pl.Reread) > 0)
+}
+
+func TestCrashItemsPlanRequiresBoundsAndPendingProgress(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "state", "pipeline-state.json")
+	cases := []struct {
+		name, raw string
+		valid     bool
+	}{
+		{"unrelated JSON", `{"checkpoint":"present"}`, false},
+		{"legacy plan without bounds", `{"pipeline_id":"test","snapshot_plans":{"app.items":{"min_pk":1,"max_pk":100,"next_pk":20}}}`, false},
+		{"wrong table", `{"pipeline_id":"test","snapshot_plans":{"app.other":{"min_pk":1,"max_pk":100,"next_pk":20,"bound_snapshot":{"Xmin":5,"Xmax":10,"bounds_lsn":42}}}}`, false},
+		{"wrong pipeline", `{"pipeline_id":"other","snapshot_plans":{"app.items":{"min_pk":1,"max_pk":100,"next_pk":20,"bound_snapshot":{"Xmin":5,"Xmax":10,"bounds_lsn":42}}}}`, false},
+		{"unstarted", `{"pipeline_id":"test","snapshot_plans":{"app.items":{"min_pk":1,"max_pk":100,"next_pk":1,"bound_snapshot":{"Xmin":5,"Xmax":10,"bounds_lsn":42}}}}`, false},
+		{"finished", `{"pipeline_id":"test","snapshot_plans":{"app.items":{"min_pk":1,"max_pk":100,"next_pk":101,"finished":true,"bound_snapshot":{"Xmin":5,"Xmax":10,"bounds_lsn":42}}}}`, false},
+		{"pending ranges", `{"pipeline_id":"test","snapshot_plans":{"app.items":{"min_pk":1,"max_pk":100,"next_pk":20,"bound_snapshot":{"Xmin":5,"Xmax":10,"bounds_lsn":42}}}}`, true},
+		{"pending reread", `{"pipeline_id":"test","snapshot_plans":{"app.items":{"min_pk":1,"max_pk":100,"next_pk":101,"finished":true,"reread_keys":[22],"bound_snapshot":{"Xmin":5,"Xmax":10,"bounds_lsn":42}}}}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pl, done, err := readCrashItemsPlan(dir, "test")
+			got := err == nil && !done && resumableCrashPlan(pl)
+			if got != tc.valid {
+				t.Fatalf("gate=%v want=%v plan=%+v err=%v", got, tc.valid, pl, err)
+			}
+		})
+	}
 }
