@@ -86,6 +86,7 @@ func (p *Pipeline) setupGovernor(ctx context.Context) error {
 	} else {
 		mr := governor.NewMySQLDBSignalReader(p.src, nil)
 		mr.SpoolUsage = p.spoolUsage
+		p.mysqlSignals = mr
 		reader = mr
 	}
 	p.govAlgo = algo
@@ -167,7 +168,21 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 			p.log.Warn("governor tick failed", "error", err)
 			continue
 		}
+		wasOpen, oldReason := breakerWas, reasonWas
 		breakerWas, reasonWas = p.logBreaker(breakerWas, reasonWas)
+		if breakerWas && (!wasOpen || reasonWas != oldReason) && p.mysqlSignals != nil {
+			d := p.mysqlSignals.Diagnostic()
+			attrs := []any{
+				"trigger", reasonWas, "source_status", d.Status, "source_status_delta", d.Delta,
+				"query_p99", d.QueryP99.String(), "query_baseline", d.QueryBaseline.String(),
+				"hard_reason", d.HardReason, "sampled_at", d.SampledAt.UTC().Format(time.RFC3339Nano),
+				"spool_used_bytes", d.SpoolUsed, "spool_hard_bytes", d.SpoolHard,
+			}
+			if d.ReplicaLag != nil {
+				attrs = append(attrs, "replica_lag_seconds", *d.ReplicaLag)
+			}
+			p.log.Warn("source DB governor diagnostic", attrs...)
+		}
 		if isGrace {
 			// GRACE tự xuất metric §11 (zone, pressure theo signal, rate, breaker, sensitivity_unknown).
 			p.graceAlerts(gg, &alerts)

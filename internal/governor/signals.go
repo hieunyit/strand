@@ -169,10 +169,50 @@ type MySQLDBSignalReader struct {
 	db             *sql.DB
 	latencyTracker *LatencyTracker
 	hard           *HardSignalDetector
+	diagMu         sync.RWMutex
+	lastStatus     map[string]uint64
+	diagnostic     MySQLSignalDiagnostic
 
 	// SpoolUsage (tùy chọn) trả về số byte spool local đang dùng và hard limit của nó;
 	// dùng cho tín hiệu cứng "spool local ≥ 95% hard limit".
 	SpoolUsage func() (used, hard int64)
+}
+
+// MySQLSignalDiagnostic is the latest source-side sample used by the governor.
+// It contains counters only; no query text, credentials, or row data.
+type MySQLSignalDiagnostic struct {
+	SampledAt     time.Time
+	Status        map[string]uint64
+	Delta         map[string]uint64
+	HardSignal    bool
+	HardReason    string
+	QueryP99      time.Duration
+	QueryBaseline time.Duration
+	ReplicaLag    *float64
+	SpoolUsed     int64
+	SpoolHard     int64
+}
+
+// Diagnostic returns a copy of the latest source-side governor sample.
+func (r *MySQLDBSignalReader) Diagnostic() MySQLSignalDiagnostic {
+	r.diagMu.RLock()
+	defer r.diagMu.RUnlock()
+	d := r.diagnostic
+	d.Status = cloneCounters(d.Status)
+	d.Delta = cloneCounters(d.Delta)
+	if d.ReplicaLag != nil {
+		v := *d.ReplicaLag
+		d.ReplicaLag = &v
+	}
+	return d
+}
+
+func cloneCounters(in map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func NewMySQLDBSignalReader(db *sql.DB, tracker *LatencyTracker) *MySQLDBSignalReader {
@@ -197,7 +237,7 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 	var status map[string]uint64
 	if r.db != nil {
 		var err error
-		status, err = readGlobalStatus(ctx, r.db, HardSignalCounters)
+		status, err = readGlobalStatusRequired(ctx, r.db, MySQLDiagnosticCounters, HardSignalCounters)
 		if err != nil {
 			return signals, fmt.Errorf("governor: read mysql global status: %w", err)
 		}
@@ -207,6 +247,15 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 		used, hard = r.SpoolUsage()
 	}
 	signals.HardSignal, signals.HardReason = r.hard.Evaluate(status, used, hard)
+	diag := MySQLSignalDiagnostic{
+		SampledAt: time.Now(), Status: cloneCounters(status), Delta: r.statusDeltas(status),
+		HardSignal: signals.HardSignal, HardReason: signals.HardReason,
+		QueryP99: signals.QueryP99, QueryBaseline: signals.QueryBaseline,
+		SpoolUsed: used, SpoolHard: hard,
+	}
+	r.diagMu.Lock()
+	r.diagnostic = diag
+	r.diagMu.Unlock()
 
 	if r.db == nil {
 		return signals, nil
@@ -223,7 +272,28 @@ func (r *MySQLDBSignalReader) ReadSignals(ctx context.Context) (DBSignals, error
 	if lag != nil {
 		signals.ReplicaLagSeconds = *lag
 	}
+	r.diagMu.Lock()
+	r.diagnostic.QueryP99 = r.latencyTracker.P99()
+	r.diagnostic.QueryBaseline = r.latencyTracker.Baseline()
+	if lag != nil {
+		v := *lag
+		r.diagnostic.ReplicaLag = &v
+	}
+	r.diagMu.Unlock()
 	return signals, nil
+}
+
+func (r *MySQLDBSignalReader) statusDeltas(current map[string]uint64) map[string]uint64 {
+	r.diagMu.Lock()
+	defer r.diagMu.Unlock()
+	delta := make(map[string]uint64, len(current))
+	for name, value := range current {
+		if previous, ok := r.lastStatus[name]; ok && value >= previous {
+			delta[name] = value - previous
+		}
+	}
+	r.lastStatus = cloneCounters(current)
+	return delta
 }
 
 // errReplicaStatusUnsupported: máy chủ không hiểu câu lệnh SHOW ... STATUS này (khác với query lỗi).
@@ -290,6 +360,14 @@ func readReplicaLag(ctx context.Context, db *sql.DB) (*float64, error) {
 // lock wait (Innodb_row_lock_waits) thuộc tín hiệu mềm theo đồng thời, chỉ hạ trần L, nên không ở đây.
 var HardSignalCounters = []string{"Innodb_buffer_pool_wait_free", "Innodb_log_waits"}
 
+// MySQLDiagnosticCounters are lightweight GLOBAL STATUS counters sampled with each governor tick.
+var MySQLDiagnosticCounters = []string{
+	"Innodb_buffer_pool_wait_free", "Innodb_log_waits",
+	"Innodb_buffer_pool_pages_free", "Innodb_buffer_pool_pages_dirty", "Innodb_buffer_pool_pages_total",
+	"Innodb_buffer_pool_read_requests", "Innodb_buffer_pool_reads",
+	"Innodb_data_pending_reads", "Innodb_data_pending_writes",
+}
+
 // SpoolHardSignalRatio: spool local chạm 95% hard limit là tín hiệu cứng.
 const SpoolHardSignalRatio = 0.95
 
@@ -341,6 +419,12 @@ func SpoolNearFull(used, hard int64) bool {
 // trả về: tín hiệu cần thiết thiếu không được coi là áp suất thấp. Không có dòng nào cho các counter yêu cầu
 // cũng là lỗi.
 func readGlobalStatus(ctx context.Context, db *sql.DB, names []string) (map[string]uint64, error) {
+	return readGlobalStatusRequired(ctx, db, names, names)
+}
+
+// readGlobalStatusRequired reads a status snapshot while allowing optional diagnostic counters to be
+// absent on server variants. Counters that drive safety decisions remain mandatory.
+func readGlobalStatusRequired(ctx context.Context, db *sql.DB, names, required []string) (map[string]uint64, error) {
 	out := map[string]uint64{}
 	if len(names) == 0 {
 		return out, nil
@@ -368,7 +452,7 @@ func readGlobalStatus(ctx context.Context, db *sql.DB, names []string) (map[stri
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for _, name := range names {
+	for _, name := range required {
 		if _, ok := out[name]; !ok {
 			return nil, fmt.Errorf("SHOW GLOBAL STATUS omitted required counter %s", name)
 		}

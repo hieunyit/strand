@@ -153,6 +153,7 @@ type Pipeline struct {
 	snapRowsEst     atomic.Int64
 	snapRate        rateWindow
 	breaker         *governor.Breaker
+	mysqlSignals    *governor.MySQLDBSignalReader
 	breakerLogged   time.Time
 	verifying       atomic.Bool // chờ verify sau seed (02 §9)
 	strictMu        sync.Mutex
@@ -769,7 +770,20 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.log.Info("snapshot chunk", "table", d.Table.String(), "start_pk", d.StartPK, "end_pk", d.EndPK,
 			"rows", d.Rows, "bytes", d.Bytes, "reread", d.Reread,
 			"read", d.Read.Round(time.Millisecond).String(), "rendezvous", d.Rendezvous.Round(time.Millisecond).String(),
-			"flush", d.Flush.Round(time.Millisecond).String(), "pace", d.Pace.Round(time.Millisecond).String())
+			"flush", d.Flush.Round(time.Millisecond).String(),
+			"barrier_wait", d.BarrierWait.Round(time.Millisecond).String(),
+			"target_flush", d.TargetFlush.Round(time.Millisecond).String(),
+			"plan_save", d.PlanSave.Round(time.Millisecond).String(),
+			"pace", d.Pace.Round(time.Millisecond).String())
+	}
+	p.snap.OnTargetFlush = func(table model.TableID, d snapshot.TargetFlushDiagnostic) {
+		p.log.Info("snapshot target flush detail", "table", table.String(),
+			"rows", d.Rows, "batches", d.Batches, "attempts", d.Attempts,
+			"pool_wait", d.PoolWait.Round(time.Millisecond).String(),
+			"session_setup", d.SessionSetup.Round(time.Millisecond).String(),
+			"begin", d.Begin.Round(time.Millisecond).String(), "fence", d.Fence.Round(time.Millisecond).String(),
+			"delete", d.Delete.Round(time.Millisecond).String(), "upsert", d.Upsert.Round(time.Millisecond).String(),
+			"commit", d.Commit.Round(time.Millisecond).String())
 	}
 	if p.adaptiveChunks {
 		p.snap.NextChunkRows = p.nextChunkRows

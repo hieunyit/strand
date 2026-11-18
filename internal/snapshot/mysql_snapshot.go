@@ -377,6 +377,8 @@ type MySQLSnapshotter struct {
 	// OnChunk reports phase timings for operational diagnosis; credentials and row values are never included.
 	OnChunk func(ChunkDiagnostic)
 	OnPhase func(table model.TableID, startPK, endPK int64, phase string, elapsed time.Duration)
+	// OnTargetFlush reports MySQL target transaction timing without SQL arguments or row data.
+	OnTargetFlush func(table model.TableID, d TargetFlushDiagnostic)
 
 	// FlushRows / ClearTarget (tùy chọn) thay phần ghi target khi target không phải MySQL
 	// (MySQL→PG). FlushRows phải thay nguyên range [startPK, endPK] của bảng đích bằng rows trong
@@ -421,12 +423,19 @@ type MySQLSnapshotter struct {
 
 // ChunkDiagnostic summarizes one chunk without logging row data or connection details.
 type ChunkDiagnostic struct {
-	Table                         model.TableID
-	StartPK, EndPK                int64
-	Rows                          int
-	Bytes                         int64
-	Read, Rendezvous, Flush, Pace time.Duration
-	Reread                        bool
+	Table                              model.TableID
+	StartPK, EndPK                     int64
+	Rows                               int
+	Bytes                              int64
+	Read, Rendezvous, Flush, Pace      time.Duration
+	BarrierWait, TargetFlush, PlanSave time.Duration
+	Reread                             bool
+}
+
+// TargetFlushDiagnostic separates MySQL target-side work for a snapshot chunk.
+type TargetFlushDiagnostic struct {
+	PoolWait, SessionSetup, Begin, Fence, Delete, Upsert, Commit time.Duration
+	Rows, Batches, Attempts                                      int
 }
 
 // ChunkSource là phần phụ thuộc engine của SOURCE khi snapshot một bảng: biên PK, keyset walk và đọc
@@ -622,6 +631,15 @@ func (s *MySQLSnapshotter) FlushChunk(
 	pkCol string,
 	columnNames []string,
 ) (retErr error) {
+	var targetDiag TargetFlushDiagnostic
+	targetMeasured := false
+	if s.OnTargetFlush != nil {
+		defer func() {
+			if targetMeasured {
+				s.OnTargetFlush(s.target(table), targetDiag)
+			}
+		}()
+	}
 	s.Manager.mu.Lock()
 	defer s.Manager.mu.Unlock()
 
@@ -687,8 +705,20 @@ func (s *MySQLSnapshotter) FlushChunk(
 	if err != nil {
 		return err
 	}
+	targetMeasured = true
 	for attempt := 1; ; attempt++ {
-		err := flushRowsRange(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, cond, condArgs)
+		one := TargetFlushDiagnostic{Rows: len(mergedRows)}
+		err := flushRowsRangeTimed(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, cond, condArgs, &one)
+		targetDiag.PoolWait += one.PoolWait
+		targetDiag.SessionSetup += one.SessionSetup
+		targetDiag.Begin += one.Begin
+		targetDiag.Fence += one.Fence
+		targetDiag.Delete += one.Delete
+		targetDiag.Upsert += one.Upsert
+		targetDiag.Commit += one.Commit
+		targetDiag.Rows = one.Rows
+		targetDiag.Batches += one.Batches
+		targetDiag.Attempts++
 		if err == nil {
 			break
 		}
@@ -994,19 +1024,31 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		// Flush trong barrier: mọi Txn router đã nhận phải commit xong trước, để cả bảng ở
 		// target nhất quán tại đúng vị trí của router (không xung đột unique key giữa row
 		// của chunk và row ở range khác do Txn còn trong hàng đợi).
-		flush := func() error { return s.FlushChunk(ctx, dstDB, chunk, table, pkCol, columnNames) }
+		var targetFlush time.Duration
+		flush := func() error {
+			targetStart := time.Now()
+			err := s.FlushChunk(ctx, dstDB, chunk, table, pkCol, columnNames)
+			targetFlush = time.Since(targetStart)
+			return err
+		}
 		flushStart := time.Now()
 		if s.Barrier != nil {
 			err = s.Barrier(ctx, flush)
 		} else {
 			err = flush()
 		}
+		diag.TargetFlush = targetFlush
+		if elapsed := time.Since(flushStart); elapsed > targetFlush {
+			diag.BarrierWait = elapsed - targetFlush
+		}
 		if err == nil {
 			// Plan lưu ở file state local, không cùng transaction với flush ở target: crash giữa hai bước
 			// để range này "Chưa đọc" trong plan, lần chạy sau dọn rồi đọc lại nó (xem register) — ghi lại
 			// các phiên bản đã có, dữ liệu vẫn đúng (RS-1/RS-2). Chấp nhận có chủ ý; test e2e phân biệt ghi
 			// lại của snapshot với Txn bị apply hai lần (applyLogDup, tests/e2e).
+			planStart := time.Now()
 			err = savePlan(chunk)
+			diag.PlanSave = time.Since(planStart)
 		}
 		diag.Flush = time.Since(flushStart)
 		if s.OnPhase != nil {
@@ -1178,39 +1220,88 @@ func flushRowsRange(
 	rangeCond string,
 	rangeArgs []any,
 ) error {
+	return flushRowsRangeTimed(ctx, dstDB, table, pkCol, columnNames, rows, rangeCond, rangeArgs, nil)
+}
+
+func flushRowsRangeTimed(
+	ctx context.Context,
+	dstDB *sql.DB,
+	table model.TableID,
+	pkCol string,
+	columnNames []string,
+	rows []*model.RowChange,
+	rangeCond string,
+	rangeArgs []any,
+	diag *TargetFlushDiagnostic,
+) error {
 	// Kết nối riêng: tắt kiểm tra FK chỉ trong phiên flush (bảng con có thể được flush trước khi
 	// Txn của row cha còn trong hàng đợi được apply; thứ tự stream vẫn do writeset bảo đảm).
+	phaseStart := time.Now()
 	conn, err := dstDB.Conn(ctx)
+	if diag != nil {
+		diag.PoolWait += time.Since(phaseStart)
+	}
 	if err != nil {
 		return err
 	}
 	// Kết nối trở lại pool với foreign_key_checks=0, đúng mặc định phiên ghi của pipeline
 	// (DSN target). Không đặt lại 1, vì writer dùng chung pool.
 	defer conn.Close()
+	phaseStart = time.Now()
 	if _, err := conn.ExecContext(ctx, "SET SESSION foreign_key_checks = 0"); err != nil {
+		if diag != nil {
+			diag.SessionSetup += time.Since(phaseStart)
+		}
 		return err
 	}
+	if diag != nil {
+		diag.SessionSetup += time.Since(phaseStart)
+	}
+	phaseStart = time.Now()
 	tx, err := conn.BeginTx(ctx, nil)
+	if diag != nil {
+		diag.Begin += time.Since(phaseStart)
+	}
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	phaseStart = time.Now()
 	if err := checkpoint.CheckFence(ctx, tx, false); err != nil { // SG-1, review R07
+		if diag != nil {
+			diag.Fence += time.Since(phaseStart)
+		}
 		return err
+	}
+	if diag != nil {
+		diag.Fence += time.Since(phaseStart)
 	}
 
 	// Range [startPK, endPK] ở target phải đúng bằng ảnh đã merge: xóa row không còn ở source
 	// (bị DELETE trong lúc range "Chưa đọc", hoặc còn sót từ lần snapshot trước khi crash),
 	// cùng transaction với upsert nên target không bao giờ hiển thị trạng thái lùi (RS-1).
+	phaseStart = time.Now()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", quoteTable(table), rangeCond), rangeArgs...); err != nil {
+		if diag != nil {
+			diag.Delete += time.Since(phaseStart)
+		}
 		return fmt.Errorf("clear chunk range on target: %w", err)
 	}
+	if diag != nil {
+		diag.Delete += time.Since(phaseStart)
+	}
 	if len(rows) == 0 {
-		return tx.Commit()
+		phaseStart = time.Now()
+		err := tx.Commit()
+		if diag != nil {
+			diag.Commit += time.Since(phaseStart)
+		}
+		return err
 	}
 
 	// Ghi theo batch multi-row upsert
 	const batchSize = 1000
+	phaseStart = time.Now()
 	for i := 0; i < len(rows); i += batchSize {
 		end := i + batchSize
 		if end > len(rows) {
@@ -1256,11 +1347,25 @@ func flushRowsRange(
 		)
 
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			if diag != nil {
+				diag.Upsert += time.Since(phaseStart)
+			}
 			return fmt.Errorf("upsert flush batch failed: %w", err)
 		}
+		if diag != nil {
+			diag.Batches++
+		}
+	}
+	if diag != nil {
+		diag.Upsert += time.Since(phaseStart)
 	}
 
-	return tx.Commit()
+	phaseStart = time.Now()
+	err = tx.Commit()
+	if diag != nil {
+		diag.Commit += time.Since(phaseStart)
+	}
+	return err
 }
 
 func quoteIdent(name string) string {
