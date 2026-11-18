@@ -135,6 +135,10 @@
           <input type="number" name="chunk_rows" class="num mono" min="1" placeholder="default: auto (5000)">
           <small class="muted">Rows per snapshot chunk. Empty = auto-tuned.</small>
         </label>
+        <label>Start position (--start-at)
+          <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678 or GTID (skips snapshot)">
+          <small class="muted">Tùy chọn: Nhập vị trí binlog hoặc GTID sau khi đã tự import DB sang Target để bỏ qua bước snapshot.</small>
+        </label>
         <label>Snapshot windows
           <input type="text" name="windows" class="mono" placeholder="default: any time, e.g. 22:00-06:00">
           <small class="muted">Hours the snapshot may run (local time of the process), comma-separated; may cross midnight.</small>

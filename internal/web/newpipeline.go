@@ -72,6 +72,7 @@ type NewPipelineOpts struct {
 	IOPSHard int    `json:"iops_hard,omitempty"`
 
 	ChunkRows       int      `json:"chunk_rows,omitempty"`
+	StartAt         string   `json:"start_at,omitempty"`
 	Windows         []string `json:"windows,omitempty"`
 	BreakerMaxRatio float64  `json:"breaker_max_ratio,omitempty"`
 	ReplicaLagMax   string   `json:"replica_lag_max,omitempty"`
@@ -169,9 +170,14 @@ tables:
 {{- end}}
 
 bootstrap:
+{{- if .StartAt}}
+  default: start_at
+  start_at: "{{.StartAt}}"
+{{- else}}
   default: logical
 {{- if or .ChunkRows .Windows}}
   logical: { {{if .ChunkRows}}chunk_rows: {{.ChunkRows}}{{if .Windows}}, {{end}}{{end}}{{if .Windows}}windows: [{{range $i, $e := .Windows}}{{if $i}}, {{end}}"{{$e}}"{{end}}]{{end}} }
+{{- end}}
 {{- end}}
 
 resources:
@@ -225,6 +231,7 @@ type tmplData struct {
 	IOPSSoft          int
 	IOPSHard          int
 	ChunkRows         int
+	StartAt           string
 	Windows           []string
 	BreakerMaxRatio   float64
 	ReplicaLagMax     string
@@ -269,6 +276,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		IOPSSoft:          opts.IOPSSoft,
 		IOPSHard:          opts.IOPSHard,
 		ChunkRows:         opts.ChunkRows,
+		StartAt:           opts.StartAt,
 		Windows:           opts.Windows,
 		BreakerMaxRatio:   opts.BreakerMaxRatio,
 		ReplicaLagMax:     opts.ReplicaLagMax,
@@ -889,6 +897,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.LagSLO = f.Get("lag_slo")
 	opts.Metrics = f.Get("metrics")
 	opts.LogFormat = f.Get("log_format")
+	opts.StartAt = strings.TrimSpace(f.Get("start_at"))
 	opts.Databases = splitList(f.Get("databases"))
 	opts.Includes = splitList(f.Get("include"))
 	opts.Excludes = splitList(f.Get("exclude"))

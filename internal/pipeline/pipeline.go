@@ -200,6 +200,9 @@ func Run(ctx context.Context, opts Options) error {
 		opts.ShutdownTimeout = 100 * time.Second
 	}
 	cfg := opts.Config
+	if opts.StartAt == "" && cfg.Bootstrap.StartAt != "" {
+		opts.StartAt = cfg.Bootstrap.StartAt
+	}
 	srcEngine, dstEngine := engineOf(cfg.Source.Kind), engineOf(cfg.Target.Kind)
 	switch {
 	case srcEngine == model.EngineMySQL && dstEngine == model.EngineMySQL,

@@ -95,7 +95,11 @@ func (s *Server) registerOps() {
 	for _, v := range []string{ActStart, ActStop, ActRestart} {
 		v := v
 		a.Register(Action{Name: v, Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
-			return srv.runLifecycle(ctx, req.Pipeline, v)
+			startAt := ""
+			if req.Args != nil {
+				startAt = req.Args["start_at"]
+			}
+			return srv.runLifecycle(ctx, req.Pipeline, v, startAt)
 		}})
 	}
 	for _, v := range []string{ActEnable, ActDisable} {
@@ -388,7 +392,7 @@ func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResul
 
 // ---- start / stop / restart ----
 
-func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (ActionResult, error) {
+func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string, startAt ...string) (ActionResult, error) {
 	if p.Mode() == ModeSystemd {
 		return s.systemctl(ctx, verb, p)
 	}
@@ -397,7 +401,7 @@ func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (Ac
 	}
 	switch verb {
 	case ActStart:
-		res, err := s.bgStart(ctx, p)
+		res, err := s.bgStart(ctx, p, startAt...)
 		if err == nil {
 			s.setDesired(p, store.DesiredRunning)
 		}
@@ -413,7 +417,7 @@ func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (Ac
 		if err != nil {
 			return res, err
 		}
-		res, err = s.bgStart(ctx, p)
+		res, err = s.bgStart(ctx, p, startAt...)
 		if err == nil {
 			s.setDesired(p, store.DesiredRunning)
 		}
@@ -474,8 +478,11 @@ func (s *Server) runStrand(ctx context.Context, p *Pipeline, args ...string) (st
 }
 
 // bgStart: `strand sync -c <cfg> --background` (chế độ nền; tự tách khỏi web bằng setsid).
-func (s *Server) bgStart(ctx context.Context, p *Pipeline) (ActionResult, error) {
+func (s *Server) bgStart(ctx context.Context, p *Pipeline, startAt ...string) (ActionResult, error) {
 	args := []string{"sync", "-c", p.ConfigPath, "--background"}
+	if len(startAt) > 0 && startAt[0] != "" {
+		args = append(args, "--start-at="+startAt[0])
+	}
 	if p.LogFile != "" {
 		args = append(args, "--log-file="+p.LogFile)
 	}

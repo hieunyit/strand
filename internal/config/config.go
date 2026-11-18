@@ -101,6 +101,7 @@ func (t TablesConfig) KeylessOn() bool {
 
 type BootstrapConfig struct {
 	Default  string                        `yaml:"default" json:"default"` // logical | seed | start_at
+	StartAt  string                        `yaml:"start_at,omitempty" json:"start_at,omitempty"`
 	PerTable map[string]BootstrapTableMode `yaml:"per_table,omitempty" json:"per_table,omitempty"`
 	CatchUp  CatchUpConfig                 `yaml:"catch_up,omitempty" json:"catch_up,omitempty"`
 	Logical  LogicalBootstrapConfig        `yaml:"logical,omitempty" json:"logical,omitempty"`

@@ -99,6 +99,7 @@ const JSONSchema = `{
       "additionalProperties": false,
       "properties": {
         "default": { "type": "string", "enum": ["logical", "seed", "start_at"] },
+        "start_at": { "type": "string" },
         "per_table": {
           "type": "object",
           "additionalProperties": {

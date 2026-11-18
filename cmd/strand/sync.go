@@ -180,9 +180,13 @@ func newSyncCmd() *cobra.Command {
 			// SIGTERM/SIGINT: ngừng đọc, chờ writer xong, ghi checkpoint rồi thoát (01 §3).
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
 			defer stop()
+			startAt := syncStartAt
+			if startAt == "" && cfg.Bootstrap.StartAt != "" {
+				startAt = cfg.Bootstrap.StartAt
+			}
 			return pipeline.Run(ctx, pipeline.Options{
 				Config:       cfg,
-				StartAt:      syncStartAt,
+				StartAt:      startAt,
 				SeedManifest: syncSeedManifest,
 				Logger:       logger,
 				Events:       events,
