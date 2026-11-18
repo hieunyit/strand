@@ -65,7 +65,11 @@ func pkColumnQuery(ver mysqlver.Version) string {
 var weighQueryTimeout = 30 * time.Second
 
 // weighBatch: số giá trị tối đa trong một truy vấn WEIGHT_STRING của WeighMany.
-const weighBatch = 128
+// Giới hạn byte cũng được áp dụng bên dưới để PK dài không tạo câu SQL/packet quá lớn.
+const (
+	weighBatch      = 512
+	weighBatchBytes = 256 * 1024
+)
 
 // mysqlWeigher: WEIGHT_STRING(CONVERT(v USING charset) COLLATE collation) tính trên db, có cache (giá
 // trị lặp lại nhiều: biên chunk, khóa nóng). Weight là khóa sắp xếp của collation: so byte cho đúng thứ
@@ -204,8 +208,17 @@ func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) error {
 			todo = append(todo, s)
 		}
 	}
-	for i := 0; i < len(todo); i += weighBatch {
-		part := todo[i:min(i+weighBatch, len(todo))]
+	for i := 0; i < len(todo); {
+		end, bytes := i, 0
+		for end < len(todo) && end-i < weighBatch {
+			n := len(todo[end])
+			if end > i && bytes+n > weighBatchBytes {
+				break
+			}
+			bytes += n
+			end++
+		}
+		part := todo[i:end]
 		r, err := w.raw(col, part)
 		if err != nil {
 			return err
@@ -217,6 +230,7 @@ func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) error {
 			}
 			w.put(cacheKey(col, s), wt)
 		}
+		i = end
 	}
 	return nil
 }

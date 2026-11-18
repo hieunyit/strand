@@ -319,8 +319,8 @@ func TestG2_WeighManyBatchesAndMatchesSingleWeigh(t *testing.T) {
 		if err := batch.weighMany(col, vals); err != nil {
 			t.Fatal(err)
 		}
-		// 305 giá trị khác nhau ("a" lặp) → ⌈305/128⌉ = 3 truy vấn (+1 weight của space khi PAD SPACE).
-		want := int64(3)
+		// 305 giá trị khác nhau → một truy vấn với batch 512 (+1 weight của space khi PAD SPACE).
+		want := int64(1)
 		if pad {
 			want++
 		}
