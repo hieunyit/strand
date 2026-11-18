@@ -241,18 +241,18 @@ func (s *Server) validateConfigContent(ctx context.Context, p *Pipeline, yamlCon
 
 // saveConfigContent thực hiện các bước lưu cấu hình:
 // (a) ghi ra file tạm cùng thư mục
-// (b) chạy strand validate -c <tmp> (với env của pipeline); thất bại thì dừng ngay và không ghi đè
+// (b) chạy strand validate -c <tmp> (với env của pipeline); thất bại thì dừng ngay và không ghi đè trừ khi force=true
 // (c) ghi bản sao lưu <file>.bak.<timestamp>
 // (d) ghi đè nguyên tử (rename)
-// (e) restart nếu được yêu cầu.
-func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent string, restart bool, ip string) (*ConfigSaveResult, error) {
+// (e) restart nếu được yêu cầu (và không có lỗi validate).
+func (s *Server) saveConfigContent(ctx context.Context, p *Pipeline, yamlContent string, restart bool, force bool, ip string) (*ConfigSaveResult, error) {
 	s.configEditMu.Lock()
 	defer s.configEditMu.Unlock()
-	return s.saveConfigContentLocked(ctx, p, yamlContent, restart, ip)
+	return s.saveConfigContentLocked(ctx, p, yamlContent, restart, force, ip)
 }
 
 // Caller holds configEditMu through any read-modify-write of the config file.
-func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlContent string, restart bool, ip string) (*ConfigSaveResult, error) {
+func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlContent string, restart bool, force bool, ip string) (*ConfigSaveResult, error) {
 	if p == nil || p.ConfigPath == "" {
 		return nil, errors.New("pipeline has no config path")
 	}
@@ -292,7 +292,7 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 	if code != nil {
 		exitCode = *code
 	}
-	if runErr != nil || exitCode != 0 {
+	if (runErr != nil || exitCode != 0) && !force {
 		_ = s.audit.Log(AuditEntry{
 			IP:       ip,
 			Action:   "config.edit",
@@ -333,7 +333,7 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 	s.reg.Refresh(ctx)
 
 	restarted := false
-	if restart {
+	if restart && exitCode == 0 {
 		_, rErr := s.runLifecycle(ctx, p, ActRestart)
 		if rErr == nil {
 			restarted = true
@@ -349,14 +349,21 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 		Pipeline: p.Name,
 		Result:   "ok",
 		ExitCode: &zero,
-		Detail:   map[string]any{"backup": bakPath, "restarted": restarted},
+		Detail:   map[string]any{"backup": bakPath, "restarted": restarted, "force": force, "val_exit": exitCode},
 	})
+
+	msg := "Configuration updated successfully"
+	if exitCode != 0 {
+		msg = fmt.Sprintf("Configuration saved with validation warnings/errors (exit %d) — please review before Start: %s", exitCode, out)
+	} else if restarted {
+		msg += " and pipeline restarted"
+	}
 
 	return &ConfigSaveResult{
 		OK:        true,
 		Backup:    bakPath,
 		Restarted: restarted,
-		Message:   "Configuration updated successfully",
+		Message:   msg,
 	}, nil
 }
 
@@ -526,6 +533,7 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 type configEditReq struct {
 	YAML    string `json:"yaml"`
 	Restart bool   `json:"restart"`
+	Force   bool   `json:"force,omitempty"`
 }
 
 func (s *Server) apiConfigValidate(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -562,7 +570,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request, sess *Ses
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	res, err := s.saveConfigContent(r.Context(), p, req.YAML, req.Restart, s.clientIP(r))
+	res, err := s.saveConfigContent(r.Context(), p, req.YAML, req.Restart, req.Force, s.clientIP(r))
 	if err != nil {
 		var ae *ActionError
 		if errors.As(err, &ae) {
@@ -646,7 +654,8 @@ func (s *Server) registerConfigEditOps() {
 		SecretArgs: []string{"yaml"},
 		Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
 			restart := req.Args["restart"] == "true" || req.Args["restart"] == "1"
-			res, err := srv.saveConfigContent(ctx, req.Pipeline, req.Args["yaml"], restart, req.IP)
+			force := req.Args["force"] == "true" || req.Args["force"] == "1"
+			res, err := srv.saveConfigContent(ctx, req.Pipeline, req.Args["yaml"], restart, force, req.IP)
 			if err != nil {
 				return ActionResult{}, err
 			}

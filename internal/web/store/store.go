@@ -90,6 +90,7 @@ type Store interface {
 	UpsertPipeline(ctx context.Context, p Pipeline) error
 	GetPipeline(ctx context.Context, name string) (Pipeline, bool, error)
 	ListPipelines(ctx context.Context) ([]Pipeline, error)
+	DeletePipeline(ctx context.Context, name string) error
 
 	SetDesired(ctx context.Context, name, desired string) error
 	Desired(ctx context.Context) (map[string]string, error)

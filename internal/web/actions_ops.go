@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ const (
 	ActRewind         = "checkpoint-rewind"
 	ActVerify         = "verify"
 	ActJobCancel      = "job-cancel"
+	ActDelete         = "delete"
 )
 
 var (
@@ -189,6 +191,34 @@ func (s *Server) registerOps() {
 		}
 		return ActionResult{Message: "cancel requested", JobID: id}, nil
 	}})
+	a.Register(Action{
+		Name:        ActDelete,
+		ConfirmName: true,
+		Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
+			p := req.Pipeline
+			if p == nil {
+				return ActionResult{}, errors.New("pipeline is required")
+			}
+			_, _ = srv.runLifecycle(ctx, p, ActStop)
+			if p.ConfigPath != "" {
+				_ = os.Remove(p.ConfigPath)
+				pattern := p.ConfigPath + ".bak.*"
+				if matches, err := filepath.Glob(pattern); err == nil {
+					for _, m := range matches {
+						_ = os.Remove(m)
+					}
+				}
+			}
+			if p.EnvFile != "" {
+				_ = os.Remove(p.EnvFile)
+			}
+			if err := srv.reg.RemovePipeline(p.Name); err != nil {
+				return ActionResult{}, fmt.Errorf("remove pipeline from registry: %w", err)
+			}
+			srv.reg.Refresh(ctx)
+			return ActionResult{Message: fmt.Sprintf("Pipeline %s deleted successfully", p.Name)}, nil
+		},
+	})
 }
 
 // adminCall gọi admin socket của pipeline; lỗi chuyển thành ActionError 502 với lời dễ hiểu.

@@ -139,6 +139,7 @@
         <div class="rowgap mt10">
           <button class="btn" type="button" id="cfg-btn-diff">Validate &amp; Preview Diff</button>
           <label><input type="checkbox" name="restart" id="cfg-restart-check" value="true"> Restart pipeline after saving</label>
+          <label><input type="checkbox" name="force" id="cfg-force-check" value="true"> Save anyway (force save if validation has warnings)</label>
           <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
           <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
         </div>
@@ -200,6 +201,13 @@
         </tbody>
       </table></div>
       <button class="btn primary" type="button" id="env-btn-save">Save .env</button>
+    </form>
+  </section>
+
+  <section class="card danger-card"><h2>Danger Zone</h2>
+    <p class="muted small">Permanently delete this pipeline, stopping it if running and removing its configuration. This action cannot be undone.</p>
+    <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}">
+      <button class="btn danger" type="submit">Delete pipeline {{.View.Name}}</button>
     </form>
   </section>
 {{end}}

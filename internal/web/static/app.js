@@ -374,6 +374,10 @@
         form.removeAttribute('data-dirty');
         if (res.j.job_id && !form.hasAttribute('data-stay')) { location.href = '/jobs/' + res.j.job_id; return; }
         toast(action + ': ' + (res.j.message || 'ok'), true);
+        if (action === 'delete') {
+          setTimeout(function () { location.href = '/'; }, 1000);
+          return;
+        }
         setTimeout(function () { refresh(true); }, 1500);
       } else {
         toast(action + ' failed (' + res.status + '): ' + (res.j.error || 'error'), false);
@@ -479,19 +483,29 @@
       var form = document.getElementById('cfg-edit-form');
       var ta = document.getElementById('cfg-yaml-textarea');
       var restart = document.getElementById('cfg-restart-check');
+      var force = document.getElementById('cfg-force-check');
       var p = form ? form.getAttribute('data-pipeline') : '';
       if (!p || !ta) return;
       var rst = restart && restart.checked;
+      var frc = force && force.checked;
       toast('Saving configuration...', true);
-      api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/config', { yaml: ta.value, restart: rst })
+      api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/config', { yaml: ta.value, restart: rst, force: frc })
         .then(function (r) {
           return r.json().then(function (j) { return { ok: r.ok, j: j }; });
         })
         .then(function (res) {
           if (res.ok) {
-            toast('Configuration saved!' + (res.j.restarted ? ' Pipeline restarted.' : ''), true);
+            toast(res.j.message || ('Configuration saved!' + (res.j.restarted ? ' Pipeline restarted.' : '')), true);
             setTimeout(function () { location.reload(); }, 1200);
           } else {
+            var box = document.getElementById('cfg-diff-box');
+            var st = document.getElementById('cfg-val-status');
+            var out = document.getElementById('cfg-diff-output');
+            if (box && st && out) {
+              box.hidden = false;
+              st.innerHTML = '<span class="badge st-failed">Save rejected: validation failed</span>';
+              out.textContent = res.j.error || 'Validation failed. Check "Save anyway" to bypass and save.';
+            }
             toast('Save failed: ' + (res.j.error || 'error'), false);
           }
         })

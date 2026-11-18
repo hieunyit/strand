@@ -226,6 +226,15 @@ func (p *PG) ListPipelines(ctx context.Context) ([]Pipeline, error) {
 	return out, p.wrap(rows.Err())
 }
 
+func (p *PG) DeletePipeline(ctx context.Context, name string) error {
+	_, err := p.db.ExecContext(ctx, `DELETE FROM pipelines WHERE name = $1`, name)
+	if err != nil {
+		return p.wrap(err)
+	}
+	_, err = p.db.ExecContext(ctx, `DELETE FROM pipeline_desired WHERE name = $1`, name)
+	return p.wrap(err)
+}
+
 func (p *PG) SetDesired(ctx context.Context, name, desired string) error {
 	if desired != DesiredRunning && desired != DesiredStopped {
 		return fmt.Errorf("invalid desired state %q", desired)

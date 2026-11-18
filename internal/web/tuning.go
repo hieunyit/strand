@@ -579,7 +579,7 @@ func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any
 		res.Message = "Preview only, nothing was written"
 		return res, nil
 	}
-	sr, err := s.saveConfigContentLocked(ctx, p, string(out), restart, ip)
+	sr, err := s.saveConfigContentLocked(ctx, p, string(out), restart, false, ip)
 	if err != nil {
 		return nil, err
 	}

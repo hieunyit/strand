@@ -172,6 +172,15 @@ func (m *Mem) ListPipelines(context.Context) ([]Pipeline, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
+func (m *Mem) DeletePipeline(_ context.Context, name string) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	delete(m.pipes, name)
+	delete(m.desired, name)
+	return nil
+}
 
 func (m *Mem) SetDesired(_ context.Context, name, d string) error {
 	if d != DesiredRunning && d != DesiredStopped {

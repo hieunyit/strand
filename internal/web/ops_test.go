@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -14,7 +15,7 @@ func TestOpsActionsRequireAuthAndCSRF(t *testing.T) {
 	e := opsEnv(t, true, nil)
 	e.sampleNow()
 	names := []string{ActStart, ActStop, ActRestart, ActEnable, ActDisable, ActPause, ActPauseSnapshot, ActResume, ActResumeSnapOnly,
-		ActThrottle, ActSnapshotAdd, ActCheckpointShow, ActRewind, ActVerify, ActJobCancel}
+		ActThrottle, ActSnapshotAdd, ActCheckpointShow, ActRewind, ActVerify, ActJobCancel, ActDelete}
 	for _, n := range names {
 		if _, ok := e.srv.Actions().Get(n); !ok {
 			t.Errorf("action %s not registered", n)
@@ -374,5 +375,33 @@ func TestOpsSystemdDeniedHints(t *testing.T) {
 		if code != 502 || !strings.Contains(msg, want) {
 			t.Errorf("%s: %d %q, want 502 containing %q", verb, code, msg, want)
 		}
+	}
+}
+
+func TestOpsDeletePipeline(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, csrf := e.loginOK()
+
+	// Pipeline requires confirmation to delete
+	code, body := e.act(c, csrf, "orders", ActDelete, nil)
+	if code != 400 {
+		t.Fatalf("delete without confirmation: got %d, want 400: %v", code, body)
+	}
+
+	// Delete with confirmation
+	code, body = e.act(c, csrf, "orders", ActDelete, map[string]string{"confirm_name": "orders"})
+	if code != 200 {
+		t.Fatalf("delete with confirmation: got %d, want 200: %v", code, body)
+	}
+
+	// Pipeline should be gone from registry
+	if p := e.srv.Registry().Get("orders"); p != nil {
+		t.Fatalf("orders still in registry after delete")
+	}
+
+	// Config file should be deleted
+	cfgPath := filepath.Join(e.dir, "orders.yaml")
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("orders.yaml still exists after delete")
 	}
 }

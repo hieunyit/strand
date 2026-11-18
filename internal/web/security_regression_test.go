@@ -125,7 +125,7 @@ func TestEditPersistenceFailureRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.srv.db = db
-	if _, err := e.srv.saveConfigContent(t.Context(), p, string(orig)+"\n# updated\n", false, "test"); err == nil {
+	if _, err := e.srv.saveConfigContent(t.Context(), p, string(orig)+"\n# updated\n", false, false, "test"); err == nil {
 		t.Fatal("config save succeeded despite database failure")
 	}
 	got, _ := os.ReadFile(p.ConfigPath)
