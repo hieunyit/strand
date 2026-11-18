@@ -666,6 +666,82 @@ func TestPersistPipelineFilesCreatesRowForWebYamlPipeline(t *testing.T) {
 	}
 }
 
+func TestTuningAndEnvViewSaveWhenDiskFileMissing(t *testing.T) {
+	st := store.NewMem()
+	cfgDir := t.TempDir()
+	t.Setenv(EnvSecretKey, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	e := dbEnv(t, st, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir; c.Scan = nil }, nil)
+	c, csrf := e.loginOK()
+	e.setExit(0)
+
+	// Tạo pipeline qua wizard
+	if code, _, _, out := createNP(t, e, c, csrf, newOpts("tuneenv", "MySrcSecret", "MyDstSecret")); code != 200 {
+		t.Fatalf("create pipeline failed: %d %s", code, out)
+	}
+
+	p := e.srv.reg.Get("tuneenv")
+	if p == nil {
+		t.Fatal("pipeline tuneenv not found")
+	}
+
+	// Xóa cả file config và file .env trên đĩa để mô phỏng môi trường DB-first
+	_ = os.Remove(p.ConfigPath)
+	_ = os.Remove(p.EnvFile)
+
+	// 1. tuningView phải đọc được từ DB
+	tv := e.srv.tuningView(p)
+	if tv.Error != "" {
+		t.Fatalf("tuningView returned error: %s", tv.Error)
+	}
+
+	// 2. getEnvView phải đọc được từ DB
+	ev := e.srv.getEnvView(p)
+	if ev.Error != "" || !ev.Exists {
+		t.Fatalf("getEnvView failed: exists=%v, err=%s", ev.Exists, ev.Error)
+	}
+	if ev.Entries["SRC_PW"] != maskStr {
+		t.Fatalf("SRC_PW should be masked, got: %s", ev.Entries["SRC_PW"])
+	}
+
+	// 3. saveTuning với force: true thành công và lưu vào DB
+	tBody, _ := json.Marshal(map[string]any{"chunk_rows": "8888", "force": true})
+	resp, out := e.do(c, "POST", "/api/v1/pipelines/tuneenv/tuning", string(tBody), map[string]string{
+		csrfHeader: csrf, "Content-Type": "application/json",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("save tuning: %d %s", resp.StatusCode, out)
+	}
+
+	// 4. saveEnv gửi lại masked password không được ghi '********' vào file
+	eBody, _ := json.Marshal(map[string]any{
+		"entries": map[string]string{
+			"SRC_PW":  maskStr, // giữ nguyên mật khẩu cũ từ DB
+			"NEW_KEY": "newval",
+		},
+	})
+	resp, out = e.do(c, "POST", "/api/v1/pipelines/tuneenv/env", string(eBody), map[string]string{
+		csrfHeader: csrf, "Content-Type": "application/json",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("save env: %d %s", resp.StatusCode, out)
+	}
+
+	// Đọc lại file .env vừa materialize và kiểm tra
+	envBytes, err := os.ReadFile(p.EnvFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if strings.Contains(string(envBytes), "********") {
+		t.Fatalf(".env file contains masked stars '********'")
+	}
+	if !strings.Contains(string(envBytes), "MySrcSecret") {
+		t.Fatalf(".env file lost original secret, content:\n%s", envBytes)
+	}
+	if !strings.Contains(string(envBytes), "NEW_KEY=newval") {
+		t.Fatalf(".env file missing NEW_KEY, content:\n%s", envBytes)
+	}
+}
+
 func must0(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

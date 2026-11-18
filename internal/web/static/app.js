@@ -424,6 +424,10 @@
     var form = ev.target && ev.target.form;
     if (form) { form.setAttribute('data-dirty', '1'); }
   });
+  document.addEventListener('change', function (ev) {
+    var form = ev.target && ev.target.form;
+    if (form) { form.setAttribute('data-dirty', '1'); }
+  });
 
   // ---- live job output: poll the offset endpoint until the job ends ----
   var out = document.getElementById('joboutput');
@@ -534,7 +538,11 @@
       var tp = tform ? tform.getAttribute('data-pipeline') : '';
       if (!tp) return;
       var dry = t.id === 'tuning-btn-diff';
-      var body = { dry_run: dry, restart: !dry && !!(document.getElementById('tuning-restart') || {}).checked };
+      var body = {
+        dry_run: dry,
+        restart: !dry && !!(document.getElementById('tuning-restart') || {}).checked,
+        force: !dry && !!(document.getElementById('tuning-force') || {}).checked
+      };
       Array.prototype.forEach.call(tform.querySelectorAll('[data-tuning]'), function (el) {
         body[el.getAttribute('data-tuning')] = el.value.trim(); // rỗng = bỏ khóa (về mặc định)
       });

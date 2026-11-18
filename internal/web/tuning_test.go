@@ -27,7 +27,7 @@ func TestConcurrentTuningPreservesIndependentUpdates(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := e.srv.saveTuning(t.Context(), p, map[string]any{key: value}, false, false, "test")
+			_, err := e.srv.saveTuning(t.Context(), p, map[string]any{key: value}, false, false, false, "test")
 			errs <- err
 		}()
 	}

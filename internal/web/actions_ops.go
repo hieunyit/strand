@@ -212,6 +212,16 @@ func (s *Server) registerOps() {
 			if p.EnvFile != "" {
 				_ = os.Remove(p.EnvFile)
 			}
+			lp, pp := p.BgPaths()
+			if lp != "" {
+				_ = os.Remove(lp)
+			}
+			if pp != "" {
+				_ = os.Remove(pp)
+			}
+			if sock := p.AdminSocket(); sock != "" {
+				_ = os.Remove(sock)
+			}
 			if srv.cfg != nil && srv.cfg.StateDir != "" {
 				statePipeDir := filepath.Join(srv.cfg.StateDir, "pipelines", p.Name)
 				_ = os.RemoveAll(statePipeDir)

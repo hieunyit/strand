@@ -345,10 +345,17 @@ type TuningView struct {
 
 func (s *Server) tuningView(p *Pipeline) TuningView {
 	v := TuningView{Path: p.ConfigPath, Fields: []TuningField{}}
-	raw, err := os.ReadFile(p.ConfigPath)
-	if err != nil {
-		v.Error = "cannot read config file: " + err.Error()
-		return v
+	if s.db != nil {
+		s.materialize(p.Name)
+	}
+	raw := s.getOriginalConfig(p)
+	if len(raw) == 0 {
+		var err error
+		raw, err = os.ReadFile(p.ConfigPath)
+		if err != nil {
+			v.Error = "cannot read config file: " + err.Error()
+			return v
+		}
 	}
 	var doc yaml.Node
 	var root *yaml.Node
@@ -518,10 +525,12 @@ func (s *Server) apiTuningSave(w http.ResponseWriter, r *http.Request, sess *Ses
 	}
 	restart, _ := req["restart"].(bool)
 	dry, _ := req["dry_run"].(bool)
+	force, _ := req["force"].(bool)
 	delete(req, "restart")
 	delete(req, "dry_run")
+	delete(req, "force")
 
-	res, err := s.saveTuning(r.Context(), p, req, restart, dry, s.clientIP(r))
+	res, err := s.saveTuning(r.Context(), p, req, restart, dry, force, s.clientIP(r))
 	if err != nil {
 		var fe tuningFieldErrors
 		var ae *ActionError
@@ -538,15 +547,22 @@ func (s *Server) apiTuningSave(w http.ResponseWriter, r *http.Request, sess *Ses
 	writeJSON(w, http.StatusOK, res)
 }
 
-func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any, restart, dry bool, ip string) (*tuningResult, error) {
+func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any, restart, dry, force bool, ip string) (*tuningResult, error) {
 	s.configEditMu.Lock()
 	defer s.configEditMu.Unlock()
 	if p == nil || p.ConfigPath == "" {
 		return nil, errors.New("pipeline has no config path")
 	}
-	orig, err := os.ReadFile(p.ConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+	if s.db != nil {
+		s.materialize(p.Name)
+	}
+	orig := s.getOriginalConfig(p)
+	if len(orig) == 0 {
+		var err error
+		orig, err = os.ReadFile(p.ConfigPath)
+		if err != nil {
+			return nil, fmt.Errorf("read config: %w", err)
+		}
 	}
 	out, changed, err := applyTuning(orig, req)
 	if err != nil {
@@ -579,7 +595,7 @@ func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any
 		res.Message = "Preview only, nothing was written"
 		return res, nil
 	}
-	sr, err := s.saveConfigContentLocked(ctx, p, string(out), restart, false, ip)
+	sr, err := s.saveConfigContentLocked(ctx, p, string(out), restart, force, ip)
 	if err != nil {
 		return nil, err
 	}

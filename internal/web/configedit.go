@@ -404,6 +404,9 @@ func (s *Server) envPathFor(p *Pipeline) string {
 }
 
 func (s *Server) getEnvView(p *Pipeline) EnvView {
+	if s.db != nil {
+		s.materialize(p.Name)
+	}
 	path := s.envPathFor(p)
 	v := EnvView{Path: path, Entries: map[string]string{}}
 	lines, err := ReadEnvFile(path)
@@ -433,6 +436,9 @@ func (s *Server) getEnvView(p *Pipeline) EnvView {
 func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[string]string, ip string) (string, error) {
 	s.configEditMu.Lock()
 	defer s.configEditMu.Unlock()
+	if s.db != nil {
+		s.materialize(p.Name)
+	}
 	envPath := s.envPathFor(p)
 	origEnv, origEnvErr := os.ReadFile(envPath)
 	dir := filepath.Dir(envPath)
@@ -462,6 +468,9 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 			// Giữ nguyên giá trị cũ nếu đã có
 			if _, ok := existingVals[k]; ok {
 				continue
+			}
+			if v == maskStr {
+				continue // không bao giờ ghi '********' vào file nếu không có giá trị cũ
 			}
 		}
 		merged[k] = v
@@ -519,7 +528,9 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 
 	copyOwner(tmpName, envPath)
 	if err := os.Rename(tmpName, envPath); err != nil {
-		return "", fmt.Errorf("rename to %s: %w", envPath, err)
+		if werr := writeFilePreserving(envPath, b.Bytes(), true, false); werr != nil {
+			return "", fmt.Errorf("write %s: %w (rename err: %v)", envPath, werr, err)
+		}
 	}
 
 	updated := *p
