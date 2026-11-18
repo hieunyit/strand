@@ -682,7 +682,7 @@
     if (listDBButton) listDBButton.addEventListener('click', function () {
       var status = document.getElementById('np-database-list-status');
       var box = document.getElementById('np-database-list');
-      var field = newPipeForm.querySelector('[name="database"]');
+      var field = document.getElementById('np-database');
       var value = function (name) { var el = newPipeForm.querySelector('[name="' + name + '"]'); return el ? el.value.trim() : ''; };
       listDBButton.disabled = true;
       if (status) status.textContent = ' Connecting to source…';
@@ -692,17 +692,20 @@
           if (!box || !field) return;
           box.innerHTML = '';
           if (!data.databases || !data.databases.length) { if (status) status.textContent = ' No accessible user databases found.'; box.hidden = true; return; }
-          data.databases.forEach(function (name) {
+          data.databases.forEach(function (name, index) {
             var label = document.createElement('label'); label.className = 'np-db-option';
             var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = name;
+            cb.id = 'np-db-option-' + index;
             cb.checked = field.value.split(',').map(function (x) { return x.trim(); }).indexOf(name) >= 0;
             var text = document.createElement('span'); text.textContent = name;
-            label.appendChild(cb); label.appendChild(text); box.appendChild(label);
+            label.htmlFor = cb.id;
+            box.appendChild(cb); box.appendChild(label);
           });
           var actions = document.createElement('button'); actions.type = 'button'; actions.className = 'btn'; actions.textContent = 'Use selected databases';
           actions.addEventListener('click', function () {
-            var selected = Array.prototype.map.call(box.querySelectorAll('input:checked'), function (cb) { return cb.value; });
+            var selected = Array.prototype.map.call(box.querySelectorAll('input[type="checkbox"]:checked'), function (cb) { return cb.value; });
             field.value = selected.join(', '); field.dispatchEvent(new Event('input', {bubbles:true}));
+            if (status) status.textContent = selected.length ? ' Applied ' + selected.length + ' database(s).' : ' Choose at least one database.';
           });
           box.appendChild(actions); box.hidden = false;
           if (status) status.textContent = ' Select one or more databases.';

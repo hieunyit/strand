@@ -269,6 +269,13 @@ form.np legend { font-weight: 650; padding: 0 8px; }
 form.np .np-row { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 6px; }
 form.np .np-row label { display: flex; flex-direction: column; gap: 3px; max-width: 360px; margin: 0 0 8px; font-weight: 500; }
 form.np .np-row small { line-height: 1.35; font-weight: 400; }
+.np-database-picker { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; width: min(100%, 520px); }
+.np-database-picker > label { display: block; font-weight: 600; }
+.np-database-picker > input { width: 100%; }
+.np-db-list { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; width: 100%; margin-top: 4px; }
+.np-db-list > input[type="checkbox"] { margin: 0 0 0 2px; }
+.np-db-list > label { display: inline-flex; align-items: center; flex-direction: row; gap: 6px; max-width: none; margin: 0; font-weight: 400; cursor: pointer; }
+.np-db-list > button { flex-basis: 100%; width: max-content; }
 form.np details.np-adv { margin: 4px 0 12px; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 8px 16px; }
 form.np details.np-adv > summary { cursor: pointer; font-weight: 600; margin-bottom: 4px; }
 form.np .np-preview { background: var(--surface-2); border: 1px dashed var(--line-strong); border-radius: var(--r-md); padding: 6px 10px; margin: 6px 0 10px; }
