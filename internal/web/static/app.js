@@ -688,19 +688,33 @@
           } else if (k === 'include' || k === 'exclude' || k === 'databases' || k === 'windows') {
             // API nhận mảng chuỗi: tách theo dấu phẩy
             payload[k] = str.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+          } else if (k === 'overwrite') {
+            payload[k] = v === 'true' || v === '1' || v === 'on';
           } else {
             payload[k] = str;
           }
         }
       });
+      if (newPipeForm.getAttribute('data-allow-overwrite') === payload.name) {
+        payload.overwrite = true;
+      }
       api('POST', '/api/v1/pipelines', payload)
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
         .then(function (res) {
           var resBox = document.getElementById('new-pipeline-result');
           var resBody = document.getElementById('result-body');
           if (resBox && resBody) {
             resBox.hidden = false;
             if (res.ok) {
+              if (res.j.ok) {
+                newPipeForm.removeAttribute('data-allow-overwrite');
+                var owBox = document.getElementById('np-overwrite');
+                if (owBox) owBox.checked = false;
+              } else {
+                newPipeForm.setAttribute('data-allow-overwrite', res.j.pipeline);
+                var owBox = document.getElementById('np-overwrite');
+                if (owBox) owBox.checked = true;
+              }
               var vPass = res.j.validate && res.j.validate.exit_code === 0;
               var pPass = res.j.plan && res.j.plan.exit_code === 0;
               var html = '';
@@ -723,7 +737,20 @@
               if (res.j.ok) { toast('Pipeline created successfully!', true); }
               else { toast('Pipeline created but validation FAILED: fix it before Start', false); }
             } else {
-              resBody.innerHTML = '<p class="err">Error: ' + escHtml(res.j.error || 'Failed to create pipeline') + '</p>';
+              var errHtml = '<p class="err">Error: ' + escHtml(res.j.error || 'Failed to create pipeline') + '</p>';
+              if (res.status === 409) {
+                errHtml += '<p class="mt10"><button type="button" class="btn warning" id="btn-force-overwrite">Overwrite &amp; recreate "' + escHtml(payload.name || '') + '"</button></p>';
+              }
+              resBody.innerHTML = errHtml;
+              var forceBtn = document.getElementById('btn-force-overwrite');
+              if (forceBtn) {
+                forceBtn.addEventListener('click', function () {
+                  newPipeForm.setAttribute('data-allow-overwrite', payload.name);
+                  var owBox = document.getElementById('np-overwrite');
+                  if (owBox) owBox.checked = true;
+                  btn.click();
+                });
+              }
               toast('Creation failed: ' + (res.j.error || 'error'), false);
             }
           }

@@ -65,7 +65,8 @@
     <th scope="col" class="hide-md">Lag (5 min)</th>
     <th scope="col" class="r" aria-sort="none"><button type="button" class="sortbtn" data-sort="rate">Rows/s</button></th>
     <th scope="col">Tables</th>
-    <th scope="col" class="hide-md">Zone</th><th scope="col" class="hide-md">Managed by</th><th scope="col" class="hide-md">Last exit</th></tr></thead>
+    <th scope="col" class="hide-md">Zone</th><th scope="col" class="hide-md">Managed by</th><th scope="col" class="hide-md">Last exit</th>
+    <th scope="col" class="r">Action</th></tr></thead>
   <tbody>
   {{range .Body.Views}}<tr data-name="{{.Name}}" data-state="{{.State}}" data-sev="{{stateSev .State}}" data-lag="{{lagSort .}}" data-rate="{{if .Top}}{{.Top.Throughput}}{{else}}-1{{end}}">
     <td><a class="mono" href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}</td>
@@ -78,8 +79,13 @@
     <td class="hide-md">{{if .Top}}{{.Top.Zone}}{{else}}-{{end}}</td>
     <td class="hide-md">{{.Mode}} <span class="muted small">({{.Origin}})</span></td>
     <td class="hide-md">{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
-  </tr>{{else}}<tr class="empty"><td colspan="10"><div class="empty-state">{{icon "empty"}}<b>No pipelines registered yet</b><span>Create one, or add existing configs to web.yaml (<code>scan</code> or <code>pipelines</code>).</span><a class="btn primary" href="/pipelines/new">{{icon "plus"}}Create pipeline</a></div></td></tr>{{end}}
-  <tr class="nomatch" hidden><td colspan="10" class="muted">No pipeline matches the filter. <a href="/pipelines">Clear filter</a></td></tr>
+    <td class="r nowrap">
+      <form class="act inline" data-action="delete" data-pipeline="{{.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.Name}}'?" data-retype="{{.Name}}">
+        <button class="btn danger small" type="submit">Delete</button>
+      </form>
+    </td>
+  </tr>{{else}}<tr class="empty"><td colspan="11"><div class="empty-state">{{icon "empty"}}<b>No pipelines registered yet</b><span>Create one, or add existing configs to web.yaml (<code>scan</code> or <code>pipelines</code>).</span><a class="btn primary" href="/pipelines/new">{{icon "plus"}}Create pipeline</a></div></td></tr>{{end}}
+  <tr class="nomatch" hidden><td colspan="11" class="muted">No pipeline matches the filter. <a href="/pipelines">Clear filter</a></td></tr>
   </tbody>
 </table>
 </div>
@@ -132,6 +138,7 @@
     </span>
     <span class="grp">
     <form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start."{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn danger" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>Stop</button></form>
+    <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}"><button class="btn danger" type="submit" title="Permanently delete pipeline {{.View.Name}}">Delete</button></form>
     </span>
     {{if .Ctl.JobActive}}<a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
   </div>

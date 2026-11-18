@@ -9,8 +9,9 @@
       <legend>1. Pipeline</legend>
       <div class="np-row">
         <label>Name <span class="err">*</span>
-          <input type="text" name="name" required class="wide mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+          <input type="text" name="name" id="np-name" required class="wide mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
           <small class="muted">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
+          <span class="block mt4"><label class="small muted"><input type="checkbox" name="overwrite" id="np-overwrite" value="true"> Overwrite if pipeline already exists (re-create/update)</label></span>
         </label>
         <label>Copy from (source)
           <select name="from" id="np-from">

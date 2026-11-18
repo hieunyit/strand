@@ -29,9 +29,10 @@ import (
 
 // NewPipelineOpts là tham số tạo pipeline mới.
 type NewPipelineOpts struct {
-	Name string `json:"name"`
-	From string `json:"from"` // mysql | mariadb | postgres
-	To   string `json:"to"`   // mysql | postgres
+	Name      string `json:"name"`
+	From      string `json:"from"` // mysql | mariadb | postgres
+	To        string `json:"to"`   // mysql | postgres
+	Overwrite bool   `json:"overwrite,omitempty"`
 
 	SourceHost string `json:"source_host"`
 	SourcePort int    `json:"source_port"`
@@ -571,9 +572,13 @@ func (s *Server) usedMetricsPorts() map[int]string {
 // pickMetricsAddr chọn cổng /metrics riêng: tìm từ 9464 trở lên, bỏ cổng đã dùng trong cấu hình của pipeline khác
 // và cổng đang có tiến trình lắng nghe.
 func (s *Server) pickMetricsAddr() (string, error) {
+	return s.pickMetricsAddrFor("")
+}
+
+func (s *Server) pickMetricsAddrFor(pipelineName string) (string, error) {
 	used := s.usedMetricsPorts()
 	for port := 9464; port < 9464+1000; port++ {
-		if _, taken := used[port]; taken {
+		if other, taken := used[port]; taken && other != pipelineName {
 			continue
 		}
 		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
@@ -599,8 +604,15 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	if !ValidName(opts.Name) {
 		return nil, BadRequest("invalid pipeline name %q (allowed: letters, digits, _ . - ; up to 63 chars)", opts.Name)
 	}
-	if s.reg.Get(opts.Name) != nil {
-		return nil, Conflict("pipeline %q already exists in registry", opts.Name)
+
+	existing := s.reg.Get(opts.Name)
+	if existing != nil {
+		if s.isRunning(existing) {
+			return nil, Conflict("pipeline %q is currently running; stop it first before overwriting", opts.Name)
+		}
+		if !opts.Overwrite {
+			return nil, Conflict("pipeline %q already exists in registry (check 'Overwrite' to update it)", opts.Name)
+		}
 	}
 
 	configDir := s.ConfigDir()
@@ -616,11 +628,13 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		return nil, BadRequest("path traversal detected")
 	}
 
-	if fileExists(yamlPath) {
-		return nil, Conflict("config file %s already exists", yamlPath)
-	}
-	if fileExists(envPath) {
-		return nil, Conflict("env file %s already exists", envPath)
+	if !opts.Overwrite {
+		if fileExists(yamlPath) {
+			return nil, Conflict("config file %s already exists (check 'Overwrite' to update it)", yamlPath)
+		}
+		if fileExists(envPath) {
+			return nil, Conflict("env file %s already exists (check 'Overwrite' to update it)", envPath)
+		}
 	}
 
 	spoolDir := opts.SpoolDir
@@ -636,7 +650,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	// Mỗi pipeline một cổng /metrics riêng; cổng do người dùng đặt không được trùng pipeline khác.
 	opts.Metrics = strings.TrimSpace(opts.Metrics)
 	if opts.Metrics == "" {
-		addr, err := s.pickMetricsAddr()
+		addr, err := s.pickMetricsAddrFor(opts.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -646,7 +660,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		if port <= 0 || port > 65535 {
 			return nil, BadRequest("invalid metrics address %q (want host:port)", opts.Metrics)
 		}
-		if other, taken := s.usedMetricsPorts()[port]; taken {
+		if other, taken := s.usedMetricsPorts()[port]; taken && other != opts.Name {
 			return nil, Conflict("metrics port %d is already used by pipeline %q", port, other)
 		}
 	}
@@ -853,6 +867,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.Name = f.Get("name")
 	opts.From = f.Get("from")
 	opts.To = f.Get("to")
+	opts.Overwrite = f.Get("overwrite") == "true" || f.Get("overwrite") == "1" || f.Get("overwrite") == "on"
 	opts.SourceHost = f.Get("source_host")
 	opts.TargetHost = f.Get("target_host")
 	opts.SourceUser = f.Get("source_user")
