@@ -434,8 +434,8 @@ type ChunkDiagnostic struct {
 
 // TargetFlushDiagnostic separates MySQL target-side work for a snapshot chunk.
 type TargetFlushDiagnostic struct {
-	PoolWait, SessionSetup, Begin, Fence, Delete, Upsert, Commit time.Duration
-	Rows, Batches, Attempts                                      int
+	ManagerLockWait, Merge, PoolWait, SessionSetup, Begin, Fence, Delete, Upsert, Commit time.Duration
+	Rows, Batches, Attempts                                                              int
 }
 
 // ChunkSource là phần phụ thuộc engine của SOURCE khi snapshot một bảng: biên PK, keyset walk và đọc
@@ -640,10 +640,15 @@ func (s *MySQLSnapshotter) FlushChunk(
 			}
 		}()
 	}
+	managerLockStart := time.Now()
+	targetMeasured = s.OnTargetFlush != nil
 	s.Manager.mu.Lock()
 	defer s.Manager.mu.Unlock()
+	targetDiag.ManagerLockWait = time.Since(managerLockStart)
 
+	mergeStart := time.Now()
 	mergedRows := s.Manager.MergeLocked(chunk)
+	targetDiag.Merge = time.Since(mergeStart)
 	defer func() {
 		if retErr == nil {
 			s.RowsFlushed.Add(int64(len(mergedRows)))

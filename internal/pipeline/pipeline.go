@@ -776,14 +776,18 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			"plan_save", d.PlanSave.Round(time.Millisecond).String(),
 			"pace", d.Pace.Round(time.Millisecond).String())
 	}
-	p.snap.OnTargetFlush = func(table model.TableID, d snapshot.TargetFlushDiagnostic) {
-		p.log.Info("snapshot target flush detail", "table", table.String(),
-			"rows", d.Rows, "batches", d.Batches, "attempts", d.Attempts,
-			"pool_wait", d.PoolWait.Round(time.Millisecond).String(),
-			"session_setup", d.SessionSetup.Round(time.Millisecond).String(),
-			"begin", d.Begin.Round(time.Millisecond).String(), "fence", d.Fence.Round(time.Millisecond).String(),
-			"delete", d.Delete.Round(time.Millisecond).String(), "upsert", d.Upsert.Round(time.Millisecond).String(),
-			"commit", d.Commit.Round(time.Millisecond).String())
+	if p.dstEngine == model.EngineMySQL {
+		p.snap.OnTargetFlush = func(table model.TableID, d snapshot.TargetFlushDiagnostic) {
+			p.log.Info("snapshot flush detail", "table", table.String(),
+				"rows", d.Rows, "batches", d.Batches, "attempts", d.Attempts,
+				"manager_lock_wait", d.ManagerLockWait.Round(time.Millisecond).String(),
+				"merge", d.Merge.Round(time.Millisecond).String(),
+				"pool_wait", d.PoolWait.Round(time.Millisecond).String(),
+				"session_setup", d.SessionSetup.Round(time.Millisecond).String(),
+				"begin", d.Begin.Round(time.Millisecond).String(), "fence", d.Fence.Round(time.Millisecond).String(),
+				"delete", d.Delete.Round(time.Millisecond).String(), "upsert", d.Upsert.Round(time.Millisecond).String(),
+				"commit", d.Commit.Round(time.Millisecond).String())
+		}
 	}
 	if p.adaptiveChunks {
 		p.snap.NextChunkRows = p.nextChunkRows

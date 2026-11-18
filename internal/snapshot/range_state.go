@@ -603,13 +603,37 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 	// 1. Nạp snapshot rows. Khóa không mã hóa được thì ghi lỗi vào chunk (FlushChunk dừng) — không bỏ
 	// row âm thầm: flush sẽ xóa/không ghi nó ở target dù nó còn ở source.
 	chunk.mergeErr = nil
-	for _, row := range chunk.SnapshotRows {
-		pk, err := codec.Encode(row.Key)
+	var encoded []Key
+	if codec.WeighMany != nil && len(chunk.SnapshotRows) > 0 {
+		// PKWeight normally asks MySQL for WEIGHT_STRING. Precompute those values in batches;
+		// encoding each row individually here would otherwise issue one source query per row
+		// inside FlushChunk, making a fast snapshot read look like a slow target flush.
+		tuples := make([][]model.Value, len(chunk.SnapshotRows))
+		for i, row := range chunk.SnapshotRows {
+			tuples[i] = row.Key
+		}
+		var err error
+		encoded, err = codec.EncodeMany(tuples)
 		if err != nil {
-			if chunk.mergeErr == nil {
-				chunk.mergeErr = fmt.Errorf("primary key of a snapshot row: %w", err)
+			chunk.mergeErr = fmt.Errorf("encode snapshot primary keys in batch: %w", err)
+		}
+	}
+	for i, row := range chunk.SnapshotRows {
+		var pk Key
+		if encoded != nil {
+			pk = encoded[i]
+		} else {
+			if chunk.mergeErr != nil {
+				continue // batched key encoding failed; the chunk will be rejected below
 			}
-			continue
+			var err error
+			pk, err = codec.Encode(row.Key)
+			if err != nil {
+				if chunk.mergeErr == nil {
+					chunk.mergeErr = fmt.Errorf("primary key of a snapshot row: %w", err)
+				}
+				continue
+			}
 		}
 		if !skip(pk) {
 			mergedMap[pk] = row
