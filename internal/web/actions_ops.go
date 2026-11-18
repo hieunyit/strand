@@ -212,6 +212,10 @@ func (s *Server) registerOps() {
 			if p.EnvFile != "" {
 				_ = os.Remove(p.EnvFile)
 			}
+			if srv.cfg != nil && srv.cfg.StateDir != "" {
+				statePipeDir := filepath.Join(srv.cfg.StateDir, "pipelines", p.Name)
+				_ = os.RemoveAll(statePipeDir)
+			}
 			if err := srv.reg.RemovePipeline(p.Name); err != nil {
 				return ActionResult{}, fmt.Errorf("remove pipeline from registry: %w", err)
 			}

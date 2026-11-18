@@ -53,6 +53,28 @@ func (s *Server) apiPipeline(w http.ResponseWriter, r *http.Request, _ *Session)
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) apiPipelineDelete(w http.ResponseWriter, r *http.Request, _ *Session) {
+	p := s.lookup(w, r)
+	if p == nil {
+		return
+	}
+	a, ok := s.actions.Get(ActDelete)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "delete action not supported")
+		return
+	}
+	res, err := a.Run(r.Context(), s, ActionRequest{
+		Pipeline: p,
+		Args:     map[string]string{"confirm_name": p.Name},
+		IP:       s.clientIP(r),
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *Server) apiPipelineTab(w http.ResponseWriter, r *http.Request, tab string) {
 	p := s.lookup(w, r)
 	if p == nil {

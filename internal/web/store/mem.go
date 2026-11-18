@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -179,6 +180,11 @@ func (m *Mem) DeletePipeline(_ context.Context, name string) error {
 	defer m.mu.Unlock()
 	delete(m.pipes, name)
 	delete(m.desired, name)
+	for k := range m.wizards {
+		if strings.HasSuffix(k, "/"+name) {
+			delete(m.wizards, k)
+		}
+	}
 	return nil
 }
 

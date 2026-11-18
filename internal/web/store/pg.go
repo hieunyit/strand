@@ -231,8 +231,9 @@ func (p *PG) DeletePipeline(ctx context.Context, name string) error {
 	if err != nil {
 		return p.wrap(err)
 	}
-	_, err = p.db.ExecContext(ctx, `DELETE FROM pipeline_desired WHERE name = $1`, name)
-	return p.wrap(err)
+	_, _ = p.db.ExecContext(ctx, `DELETE FROM pipeline_desired WHERE name = $1`, name)
+	_, _ = p.db.ExecContext(ctx, `DELETE FROM wizards WHERE pipeline = $1`, name)
+	return nil
 }
 
 func (p *PG) SetDesired(ctx context.Context, name, desired string) error {
