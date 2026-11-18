@@ -2,7 +2,7 @@
 <div class="card">
   <h2>Create new pipeline</h2>
   <p class="muted small">Fill in the source and target, choose what to copy, then <b>Create and validate</b>: Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</p>
-  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="act np" data-action="new-pipeline">
+  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="np">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
 
     <fieldset class="np-step">

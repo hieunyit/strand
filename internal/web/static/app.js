@@ -389,6 +389,7 @@
   document.addEventListener('submit', function (ev) {
     var form = ev.target;
     if (!form || !form.classList || !form.classList.contains('act')) { return; }
+    if (form.id === 'new-pipeline-form' || !form.getAttribute('data-pipeline')) { return; }
     ev.preventDefault();
     var body = collect(form);
     // A form may have several submit buttons, each its own action (data-do) with its own dialogs.
