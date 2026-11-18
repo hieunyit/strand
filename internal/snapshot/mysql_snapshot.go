@@ -374,6 +374,9 @@ type MySQLSnapshotter struct {
 	// NextChunkRows (tùy chọn) chọn cỡ (số hàng) của chunk chính kế tiếp từ số liệu đọc của chunk chính
 	// vừa xong — luật 250 ms và trần chi phí R · 0,25 s của governor (02 §7). nil = cố định ChunkRows của plan.
 	NextChunkRows func(table model.TableID, st ChunkStat) int64
+	// OnChunk reports phase timings for operational diagnosis; credentials and row values are never included.
+	OnChunk func(ChunkDiagnostic)
+	OnPhase func(table model.TableID, startPK, endPK int64, phase string, elapsed time.Duration)
 
 	// FlushRows / ClearTarget (tùy chọn) thay phần ghi target khi target không phải MySQL
 	// (MySQL→PG). FlushRows phải thay nguyên range [startPK, endPK] của bảng đích bằng rows trong
@@ -414,6 +417,16 @@ type MySQLSnapshotter struct {
 	// Chunks (tùy chọn) thay phần đọc source khi source không phải MySQL (PG: PGChunkSource).
 	// Khi nil: đọc MySQL như cũ (srcDB, Source).
 	Chunks ChunkSource
+}
+
+// ChunkDiagnostic summarizes one chunk without logging row data or connection details.
+type ChunkDiagnostic struct {
+	Table                         model.TableID
+	StartPK, EndPK                int64
+	Rows                          int
+	Bytes                         int64
+	Read, Rendezvous, Flush, Pace time.Duration
+	Reread                        bool
 }
 
 // ChunkSource là phần phụ thuộc engine của SOURCE khi snapshot một bảng: biên PK, keyset walk và đọc
@@ -932,6 +945,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		var read ChunkRead
 		var chunkHigh checkpoint.AppliedSet
 		var err error
+		diag := ChunkDiagnostic{Table: table, StartPK: chunk.StartPK, EndPK: chunk.EndPK, Reread: chunk.KeySet != nil}
 		readStart := time.Now()
 		if s.Chunks != nil {
 			read, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdxs, table)
@@ -944,9 +958,14 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		if err != nil {
 			return nil, err
 		}
-		stat.Elapsed += time.Since(readStart)
+		diag.Read = time.Since(readStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "read", diag.Read)
+		}
+		stat.Elapsed += diag.Read
 		stat.Bytes += read.Bytes
 		stat.ReadRows += int64(len(read.Rows))
+		diag.Rows, diag.Bytes = len(read.Rows), read.Bytes
 		rows := read.Rows
 		var rest *Chunk
 		if read.Truncated {
@@ -962,8 +981,13 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		s.Manager.FinishReading(chunk, chunkHigh, rows)
 
 		// Rendezvous: chờ stream xử lý hết high watermark
+		rendezvousStart := time.Now()
 		if err := rendezvousWaitFn(ctx, chunkHigh); err != nil {
 			return nil, fmt.Errorf("rendezvous wait failed: %w", err)
+		}
+		diag.Rendezvous = time.Since(rendezvousStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "rendezvous", diag.Rendezvous)
 		}
 
 		// Flush: merge có thứ tự snapshot và buffer trong 1 transaction ở target và chuyển sang StateDone
@@ -971,6 +995,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		// target nhất quán tại đúng vị trí của router (không xung đột unique key giữa row
 		// của chunk và row ở range khác do Txn còn trong hàng đợi).
 		flush := func() error { return s.FlushChunk(ctx, dstDB, chunk, table, pkCol, columnNames) }
+		flushStart := time.Now()
 		if s.Barrier != nil {
 			err = s.Barrier(ctx, flush)
 		} else {
@@ -983,6 +1008,10 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			// lại của snapshot với Txn bị apply hai lần (applyLogDup, tests/e2e).
 			err = savePlan(chunk)
 		}
+		diag.Flush = time.Since(flushStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "flush", diag.Flush)
+		}
 		if err == nil && chunk.KeySet != nil {
 			s.RereadKeysTotal.Add(int64(len(chunk.KeySet)))
 		}
@@ -991,12 +1020,20 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		}
 
 		// Throttling nếu có
+		paceStart := time.Now()
 		if s.Pace != nil {
 			if err := s.Pace(ctx, read.Bytes); err != nil {
 				return nil, err
 			}
 		} else if s.opts.SleepBetweenChunks > 0 {
 			time.Sleep(s.opts.SleepBetweenChunks)
+		}
+		diag.Pace = time.Since(paceStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "pace", diag.Pace)
+		}
+		if s.OnChunk != nil {
+			s.OnChunk(diag)
 		}
 		return rest, nil
 	}

@@ -678,6 +678,38 @@
   var newPipeForm = document.getElementById('new-pipeline-form');
   if (newPipeForm) {
     npSetup(newPipeForm);
+    var listDBButton = document.getElementById('np-list-databases');
+    if (listDBButton) listDBButton.addEventListener('click', function () {
+      var status = document.getElementById('np-database-list-status');
+      var box = document.getElementById('np-database-list');
+      var field = newPipeForm.querySelector('[name="database"]');
+      var value = function (name) { var el = newPipeForm.querySelector('[name="' + name + '"]'); return el ? el.value.trim() : ''; };
+      listDBButton.disabled = true;
+      if (status) status.textContent = ' Connecting to source…';
+      api('POST', '/api/v1/source/databases', {from: value('from'), host: value('source_host'), port: Number(value('source_port')), user: value('source_user'), password: value('source_password')})
+        .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Could not list databases'); return j; }); })
+        .then(function (data) {
+          if (!box || !field) return;
+          box.innerHTML = '';
+          if (!data.databases || !data.databases.length) { if (status) status.textContent = ' No accessible user databases found.'; box.hidden = true; return; }
+          data.databases.forEach(function (name) {
+            var label = document.createElement('label'); label.className = 'np-db-option';
+            var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = name;
+            cb.checked = field.value.split(',').map(function (x) { return x.trim(); }).indexOf(name) >= 0;
+            var text = document.createElement('span'); text.textContent = name;
+            label.appendChild(cb); label.appendChild(text); box.appendChild(label);
+          });
+          var actions = document.createElement('button'); actions.type = 'button'; actions.className = 'btn'; actions.textContent = 'Use selected databases';
+          actions.addEventListener('click', function () {
+            var selected = Array.prototype.map.call(box.querySelectorAll('input:checked'), function (cb) { return cb.value; });
+            field.value = selected.join(', '); field.dispatchEvent(new Event('input', {bubbles:true}));
+          });
+          box.appendChild(actions); box.hidden = false;
+          if (status) status.textContent = ' Select one or more databases.';
+        })
+        .catch(function (err) { if (status) status.textContent = ' ' + err.message; })
+        .finally(function () { listDBButton.disabled = false; });
+    });
     newPipeForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var btn = document.getElementById('btn-create-pipeline');

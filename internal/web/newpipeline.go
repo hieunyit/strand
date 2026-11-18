@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,8 +15,11 @@ import (
 	"strconv"
 	"strings"
 	texttmpl "text/template"
+	"time"
 
 	"strand/internal/config"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"gopkg.in/yaml.v3"
 )
@@ -965,4 +969,71 @@ func (s *Server) apiPipelineCreate(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+type sourceDatabaseRequest struct {
+	From     string `json:"from"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
+// apiSourceDatabases lists databases reachable by the credentials currently entered in the new-pipeline form.
+// The password is used only for this request and is never logged or persisted by this handler.
+func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, _ *Session) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var req sourceDatabaseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.From == "postgres" {
+		writeErr(w, http.StatusNotImplemented, "database discovery is currently supported for MySQL and MariaDB sources")
+		return
+	}
+	if req.From != "mysql" && req.From != "mariadb" {
+		writeErr(w, http.StatusBadRequest, "unsupported source engine")
+		return
+	}
+	if strings.TrimSpace(req.Host) == "" || strings.TrimSpace(req.User) == "" || req.Port < 1 || req.Port > 65535 {
+		writeErr(w, http.StatusBadRequest, "source host, user, and valid port are required")
+		return
+	}
+	cfg := mysqldriver.NewConfig()
+	cfg.User, cfg.Passwd = req.User, req.Password
+	cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(strings.TrimSpace(req.Host), strconv.Itoa(req.Port))
+	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = 5*time.Second, 5*time.Second, 5*time.Second
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "could not configure source connection")
+		return
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "source connection failed or user cannot list databases")
+		return
+	}
+	defer rows.Close()
+	databases := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			writeErr(w, http.StatusBadGateway, "failed to read source database list")
+			return
+		}
+		switch strings.ToLower(name) {
+		case "information_schema", "performance_schema", "mysql", "sys":
+			continue
+		}
+		databases = append(databases, name)
+	}
+	if err := rows.Err(); err != nil {
+		writeErr(w, http.StatusBadGateway, "failed while reading source database list")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"databases": databases})
 }

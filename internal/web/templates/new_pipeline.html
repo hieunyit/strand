@@ -83,6 +83,9 @@
         <label>Databases <span class="err">*</span>
           <input type="text" name="database" value="app" class="wide mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
           <small class="muted">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>
+          <button type="button" class="btn mt4" id="np-list-databases" data-when="src:mysql,mariadb">List source databases</button>
+          <small class="muted" id="np-database-list-status" aria-live="polite"></small>
+          <div id="np-database-list" class="np-db-list" hidden></div>
         </label>
       </div>
       <details class="np-adv" id="np-tables">

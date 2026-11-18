@@ -761,6 +761,16 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.snap.Pos = &posWatermarks{db: p.src, base: p.binlogBase}
 	}
 	p.snap.Pace = p.pace
+	p.snap.OnPhase = func(table model.TableID, startPK, endPK int64, phase string, elapsed time.Duration) {
+		p.log.Info("snapshot chunk phase", "table", table.String(), "start_pk", startPK, "end_pk", endPK,
+			"phase", phase, "duration", elapsed.Round(time.Millisecond).String())
+	}
+	p.snap.OnChunk = func(d snapshot.ChunkDiagnostic) {
+		p.log.Info("snapshot chunk", "table", d.Table.String(), "start_pk", d.StartPK, "end_pk", d.EndPK,
+			"rows", d.Rows, "bytes", d.Bytes, "reread", d.Reread,
+			"read", d.Read.Round(time.Millisecond).String(), "rendezvous", d.Rendezvous.Round(time.Millisecond).String(),
+			"flush", d.Flush.Round(time.Millisecond).String(), "pace", d.Pace.Round(time.Millisecond).String())
+	}
 	if p.adaptiveChunks {
 		p.snap.NextChunkRows = p.nextChunkRows
 	}
