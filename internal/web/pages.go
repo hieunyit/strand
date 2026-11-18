@@ -487,12 +487,12 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		b.Charts = s.charts(p.Name)
 	case "tables":
 		b.Tables = s.tablesView(ctx, p)
-		if b.Ctl.Reachable {
+		if b.Ctl.Running {
 			b.Src = s.sourceTablesView(ctx, p)
 		}
 	case "jobs":
 		b.Jobs = s.listJobs(p.Name)
-		if b.Ctl.Reachable {
+		if b.Ctl.Running {
 			b.Src = s.sourceTablesView(ctx, p)
 		}
 	case "checkpoint":

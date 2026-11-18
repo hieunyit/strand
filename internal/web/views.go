@@ -23,11 +23,15 @@ const adminTimeout = 4 * time.Second
 
 // withAdmin gọi admin socket của pipeline với timeout.
 func (s *Server) withAdmin(ctx context.Context, p *Pipeline, f func(ctx context.Context, c *admin.Client) error) error {
+	return s.withAdminTimeout(ctx, p, adminTimeout, f)
+}
+
+func (s *Server) withAdminTimeout(ctx context.Context, p *Pipeline, timeout time.Duration, f func(ctx context.Context, c *admin.Client) error) error {
 	sock := p.AdminSocket()
 	if sock == "" {
 		return errNoSocket
 	}
-	ctx, cancel := context.WithTimeout(ctx, adminTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return f(ctx, admin.NewClient(sock))
 }

@@ -319,6 +319,7 @@ func srvSnapshotAdd(ctx context.Context, srv *Server, req ActionRequest) (Action
 			return ActionResult{Data: map[string]any{"started": done}}, err
 		}
 		done = append(done, t)
+		srv.invalidateSourceTables(req.Pipeline.Name)
 	}
 	return ActionResult{Message: "snapshot started for " + strings.Join(done, ", "), Data: map[string]any{"started": done}}, nil
 }

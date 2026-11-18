@@ -40,21 +40,23 @@ const (
 
 // Server là Web UI + REST API.
 type Server struct {
-	configEditMu sync.Mutex
-	cfg          *Config
-	reg          *Registry
-	samp         *Sampler
-	sessions     *SessionStore
-	limiter      *LoginLimiter
-	audit        *AuditLog
-	actions      *ActionRegistry
-	jobs         JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
-	log          *slog.Logger
-	now          func() time.Time
-	secure       bool // đặt cờ Secure cho cookie (TLS hoặc secure_cookies)
-	tls          bool
-	version      string
-	db           *metaDB // nil = chế độ file
+	configEditMu      sync.Mutex
+	sourceTablesMu    sync.Mutex
+	sourceTablesCache map[string]sourceTablesCacheEntry
+	cfg               *Config
+	reg               *Registry
+	samp              *Sampler
+	sessions          *SessionStore
+	limiter           *LoginLimiter
+	audit             *AuditLog
+	actions           *ActionRegistry
+	jobs              JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
+	log               *slog.Logger
+	now               func() time.Time
+	secure            bool // đặt cờ Secure cho cookie (TLS hoặc secure_cookies)
+	tls               bool
+	version           string
+	db                *metaDB // nil = chế độ file
 
 	pages   map[string]*template.Template
 	handler http.Handler
@@ -117,7 +119,8 @@ func New(o Options) (*Server, error) {
 	iv := time.Duration(o.Config.SampleIntervalSec) * time.Second
 	s := &Server{
 		cfg: o.Config, reg: reg, samp: NewSampler(reg, iv),
-		sessions: NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
+		sourceTablesCache: make(map[string]sourceTablesCacheEntry),
+		sessions:          NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
 		actions: NewActionRegistry(), log: o.Logger, now: o.Now, version: o.Version,
 		tls:    o.Config.TLSCert != "",
 		secure: o.Config.TLSCert != "" || o.Config.SecureCookies,

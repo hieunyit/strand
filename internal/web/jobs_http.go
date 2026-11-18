@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"time"
 
 	"strand/internal/admin"
 )
@@ -16,9 +17,28 @@ type SourceTablesView struct {
 	Error  string              `json:"error,omitempty"`
 }
 
+type sourceTablesCacheEntry struct {
+	tables    []admin.SourceTable
+	expiresAt time.Time
+}
+
+const sourceTablesCacheTTL = 30 * time.Second
+
 func (s *Server) sourceTablesView(ctx context.Context, p *Pipeline) SourceTablesView {
+	if p == nil {
+		return SourceTablesView{Tables: []admin.SourceTable{}, Error: "pipeline is unavailable"}
+	}
+	now := time.Now()
+	s.sourceTablesMu.Lock()
+	if cached, ok := s.sourceTablesCache[p.Name]; ok && now.Before(cached.expiresAt) {
+		v := SourceTablesView{Tables: append([]admin.SourceTable(nil), cached.tables...)}
+		s.sourceTablesMu.Unlock()
+		return v
+	}
+	s.sourceTablesMu.Unlock()
+
 	v := SourceTablesView{Tables: []admin.SourceTable{}}
-	err := s.withAdmin(ctx, p, func(ctx context.Context, c *admin.Client) (err error) {
+	err := s.withAdminTimeout(ctx, p, 9*time.Second, func(ctx context.Context, c *admin.Client) (err error) {
 		v.Tables, err = c.SourceTables(ctx)
 		return
 	})
@@ -28,7 +48,20 @@ func (s *Server) sourceTablesView(ctx context.Context, p *Pipeline) SourceTables
 	if v.Tables == nil {
 		v.Tables = []admin.SourceTable{}
 	}
+	if err == nil {
+		s.sourceTablesMu.Lock()
+		s.sourceTablesCache[p.Name] = sourceTablesCacheEntry{
+			tables: append([]admin.SourceTable(nil), v.Tables...), expiresAt: now.Add(sourceTablesCacheTTL),
+		}
+		s.sourceTablesMu.Unlock()
+	}
 	return v
+}
+
+func (s *Server) invalidateSourceTables(name string) {
+	s.sourceTablesMu.Lock()
+	delete(s.sourceTablesCache, name)
+	s.sourceTablesMu.Unlock()
 }
 
 func (s *Server) listJobs(pipeline string) []JobStatus {

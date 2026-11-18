@@ -75,6 +75,8 @@
       <form class="act inline" data-action="resume-snapshot-only" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (snapshot only, defer stream)</button></form>
       <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (normal)</button></form>
     </div>
+  </section>{{end}}
+  {{if .Ctl.Running}}<section class="card">
     <h3>Add tables</h3>
     {{if .Src.Error}}<p class="muted">{{.Src.Error}}</p>{{else}}
     <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
