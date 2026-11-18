@@ -222,14 +222,28 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 	if err != nil {
 		return err
 	}
+	now := s.now().UTC()
 	if !ok {
-		return nil
+		row = store.Pipeline{
+			Name:        p.Name,
+			ConfigPath:  p.ConfigPath,
+			EnvPath:     p.EnvFile,
+			SystemdUnit: p.SystemdUnit,
+			LogFile:     p.LogFile,
+			PidFile:     p.PidFile,
+			Created:     now,
+			Updated:     now,
+		}
+	}
+	if row.ConfigPath == "" && p.ConfigPath != "" {
+		row.ConfigPath = p.ConfigPath
 	}
 	cfgB, err := os.ReadFile(row.ConfigPath)
 	if err != nil {
 		return err
 	}
 	row.ConfigYAML, row.HasConfig = string(cfgB), true
+	row.Updated = now
 	if p.EnvFile != "" {
 		row.EnvPath = p.EnvFile
 	}

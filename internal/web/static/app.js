@@ -24,6 +24,10 @@
     var a = document.activeElement;
     if (a && content.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) { return true; }
     if (document.querySelector('dialog[open]')) { return true; }
+    var cfgEdit = document.getElementById('cfg-edit-mode');
+    if (cfgEdit && !cfgEdit.hidden) { return true; }
+    var envEdit = document.getElementById('env-edit-mode');
+    if (envEdit && !envEdit.hidden) { return true; }
     return !!content.querySelector('form[data-dirty]');
   }
 
@@ -418,7 +422,7 @@
 
   document.addEventListener('input', function (ev) {
     var form = ev.target && ev.target.form;
-    if (form && form.classList && form.classList.contains('act')) { form.setAttribute('data-dirty', '1'); }
+    if (form) { form.setAttribute('data-dirty', '1'); }
   });
 
   // ---- live job output: poll the offset endpoint until the job ends ----
@@ -452,11 +456,25 @@
     if (t.id === 'cfg-btn-toggle') {
       var vm = document.getElementById('cfg-view-mode');
       var em = document.getElementById('cfg-edit-mode');
-      if (vm && em) { vm.hidden = true; em.hidden = false; }
+      var tb = document.getElementById('cfg-btn-toggle');
+      if (vm && em) {
+        vm.hidden = true;
+        em.hidden = false;
+        if (tb) tb.hidden = true;
+        var form = document.getElementById('cfg-edit-form');
+        if (form) form.setAttribute('data-dirty', '1');
+      }
     } else if (t.id === 'cfg-btn-cancel') {
       var vm = document.getElementById('cfg-view-mode');
       var em = document.getElementById('cfg-edit-mode');
-      if (vm && em) { vm.hidden = false; em.hidden = true; }
+      var tb = document.getElementById('cfg-btn-toggle');
+      if (vm && em) {
+        vm.hidden = false;
+        em.hidden = true;
+        if (tb) tb.hidden = false;
+        var form = document.getElementById('cfg-edit-form');
+        if (form) form.removeAttribute('data-dirty');
+      }
     } else if (t.id === 'cfg-btn-diff') {
       var form = document.getElementById('cfg-edit-form');
       var ta = document.getElementById('cfg-yaml-textarea');
@@ -505,6 +523,7 @@
               box.hidden = false;
               st.innerHTML = '<span class="badge st-failed">Save rejected: validation failed</span>';
               out.textContent = res.j.error || 'Validation failed. Check "Save anyway" to bypass and save.';
+              if (force) { force.focus(); }
             }
             toast('Save failed: ' + (res.j.error || 'error'), false);
           }

@@ -430,7 +430,19 @@ type ConfigView struct {
 
 func (s *Server) configView(p *Pipeline) ConfigView {
 	v := ConfigView{Path: p.ConfigPath, Unimplemented: []string{}}
+	if s.db != nil {
+		s.materialize(p.Name)
+	}
 	raw, err := os.ReadFile(p.ConfigPath)
+	if err != nil && s.db != nil {
+		ctx, cancel := dbCtx()
+		row, ok, dberr := s.db.st.GetPipeline(ctx, p.Name)
+		cancel()
+		if dberr == nil && ok && row.HasConfig && len(row.ConfigYAML) > 0 {
+			raw = []byte(row.ConfigYAML)
+			err = nil
+		}
+	}
 	if err != nil {
 		v.Error = "cannot read config file: " + err.Error()
 		return v

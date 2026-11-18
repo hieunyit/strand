@@ -157,13 +157,29 @@ func unifiedDiff(oldName, newName, oldText, newText string) string {
 	return buf.String()
 }
 
+func (s *Server) getOriginalConfig(p *Pipeline) []byte {
+	if p == nil {
+		return nil
+	}
+	if p.ConfigPath != "" {
+		if b, err := os.ReadFile(p.ConfigPath); err == nil && len(b) > 0 {
+			return b
+		}
+	}
+	if s.db != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		row, ok, err := s.db.st.GetPipeline(ctx, p.Name)
+		if err == nil && ok && row.HasConfig && len(row.ConfigYAML) > 0 {
+			return []byte(row.ConfigYAML)
+		}
+	}
+	return nil
+}
+
 // unmaskConfigYAML khôi phục giá trị bí mật từ file gốc nếu người dùng gửi lại chuỗi '********'
 // (theo dòng, giữ nguyên định dạng). Lỗi nếu không khôi phục được: không bao giờ ghi '********' như mật khẩu thật.
-func unmaskConfigYAML(newYAML []byte, origPath string) ([]byte, error) {
-	origBytes, err := os.ReadFile(origPath)
-	if err != nil {
-		origBytes = nil
-	}
+func unmaskConfigYAML(newYAML []byte, origBytes []byte) ([]byte, error) {
 	out, err := UnmaskConfigText(string(newYAML), origBytes)
 	if err != nil {
 		return nil, BadRequest("%s", err.Error())
@@ -193,14 +209,19 @@ func (s *Server) validateConfigContent(ctx context.Context, p *Pipeline, yamlCon
 		return nil, errors.New("pipeline has no config path")
 	}
 	dir := filepath.Dir(p.ConfigPath)
+	_ = os.MkdirAll(dir, 0o750)
 	tmp, err := os.CreateTemp(dir, ".cfg-val-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temp config file in %s: %w", dir, err)
+		tmp, err = os.CreateTemp("", ".cfg-val-*")
+		if err != nil {
+			return nil, fmt.Errorf("create temp config file in %s: %w", dir, err)
+		}
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	unmasked, err := unmaskConfigYAML([]byte(yamlContent), p.ConfigPath)
+	origBytes := s.getOriginalConfig(p)
+	unmasked, err := unmaskConfigYAML([]byte(yamlContent), origBytes)
 	if err != nil {
 		tmp.Close()
 		return nil, err
@@ -220,15 +241,8 @@ func (s *Server) validateConfigContent(ctx context.Context, p *Pipeline, yamlCon
 	}
 	valid := runErr == nil && exitCode == 0
 
-	origBytes, _ := os.ReadFile(p.ConfigPath)
-	origText, err := MaskConfigText(origBytes)
-	if err != nil {
-		return nil, fmt.Errorf("mask original config: %w", err)
-	}
-	newText, err := MaskConfigText(unmasked)
-	if err != nil {
-		return nil, fmt.Errorf("mask edited config: %w", err)
-	}
+	origText, _ := MaskConfigText(origBytes)
+	newText, _ := MaskConfigText(unmasked)
 	diff := unifiedDiff(p.ConfigPath, p.ConfigPath+" (new)", origText, newText)
 
 	return &ConfigValidateResult{
@@ -257,9 +271,13 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 		return nil, errors.New("pipeline has no config path")
 	}
 	dir := filepath.Dir(p.ConfigPath)
+	_ = os.MkdirAll(dir, 0o750)
 	tmp, err := os.CreateTemp(dir, ".cfg-save-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temp file in %s: %w", dir, err)
+		tmp, err = os.CreateTemp("", ".cfg-save-*")
+		if err != nil {
+			return nil, fmt.Errorf("create temp file in %s: %w", dir, err)
+		}
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
@@ -273,7 +291,8 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 		return nil, err
 	}
 
-	unmasked, err := unmaskConfigYAML([]byte(yamlContent), p.ConfigPath)
+	origBytes := s.getOriginalConfig(p)
+	unmasked, err := unmaskConfigYAML([]byte(yamlContent), origBytes)
 	if err != nil {
 		tmp.Close()
 		return nil, err
@@ -308,19 +327,20 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 	}
 
 	// (c) Sao lưu <file>.bak.<timestamp>
-	origBytes, _ := os.ReadFile(p.ConfigPath)
 	ts := s.now().UTC().Format("20060102T150405Z")
 	bakPath := p.ConfigPath + ".bak." + ts
 	if len(origBytes) > 0 {
 		if err := writeBackup(bakPath, origBytes, p.ConfigPath, perm); err != nil {
-			return nil, fmt.Errorf("write backup %s: %w", bakPath, err)
+			s.log.Warn("write backup failed", "path", bakPath, "err", err)
 		}
 	}
 
 	// (d) Ghi đè nguyên tử (rename)
 	copyOwner(tmpName, p.ConfigPath)
 	if err := os.Rename(tmpName, p.ConfigPath); err != nil {
-		return nil, fmt.Errorf("atomic rename %s -> %s: %w", tmpName, p.ConfigPath, err)
+		if werr := writeFilePreserving(p.ConfigPath, unmasked, false, false); werr != nil {
+			return nil, fmt.Errorf("atomic rename %s -> %s: %w (fallback write: %v)", tmpName, p.ConfigPath, err, werr)
+		}
 	}
 
 	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo).
