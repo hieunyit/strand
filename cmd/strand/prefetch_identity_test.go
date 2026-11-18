@@ -263,3 +263,19 @@ func TestSourceUniquePrefetchIdentitySpoolRoundTrip(t *testing.T) {
 		t.Fatalf("identity lost: %+v", got.ArchiveIdentities)
 	}
 }
+
+func TestPrefetchIdentityFailClosed(t *testing.T) {
+	id := model.TableID{Schema: "app", Table: "items"}
+	ev := reader.Event{Schema: id.Schema, Table: id.Table, KeyMode: ""}
+	// 1. Source event with empty KeyMode must not default to pk
+	ident1 := prefetchIdentity(ev, &assemble.TableSchema{Columns: []string{"a", "b"}, PKColumns: nil}, false, nil)
+	if err := ident1.Validate(); err == nil {
+		t.Fatalf("expected error for unproven identity mode, got nil: %+v", ident1)
+	}
+
+	// 2. Archive without sidecar and without PK columns must not default to pk
+	ident2 := prefetchIdentity(ev, &assemble.TableSchema{Columns: []string{"a", "b"}, PKColumns: nil}, true, nil)
+	if err := ident2.Validate(); err == nil {
+		t.Fatalf("expected error for archive table without sidecar or PK, got nil: %+v", ident2)
+	}
+}

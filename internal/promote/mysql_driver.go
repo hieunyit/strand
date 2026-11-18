@@ -226,7 +226,13 @@ func (d *MySQLTargetDriver) FindColumnMax(ctx context.Context, table, column str
 
 // Setval cập nhật AUTO_INCREMENT cho bảng.
 func (d *MySQLTargetDriver) Setval(ctx context.Context, seq SequenceInfo, val int64) error {
-	q := fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d;", quoteMySQLQualified(seq.Table), val)
+	var targetTable string
+	if seq.Schema != "" {
+		targetTable = quoteMySQLIdent(seq.Schema) + "." + quoteMySQLIdent(seq.Table)
+	} else {
+		targetTable = quoteMySQLQualified(seq.Table)
+	}
+	q := fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d;", targetTable, val)
 	_, err := d.db.ExecContext(ctx, q)
 	return err
 }

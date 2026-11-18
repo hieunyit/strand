@@ -778,6 +778,16 @@ func parseMetricCounter(value string) (int64, error) {
 	return int64(f), nil
 }
 
+// isMetricNamed checks if the Prometheus line matches metric name with word boundaries
+// (either space, tab, or '{' for labels), preventing false prefix matches like metric_duration.
+func isMetricNamed(line, name string) bool {
+	if !strings.HasPrefix(line, name) {
+		return false
+	}
+	rest := line[len(name):]
+	return len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == '{')
+}
+
 func scrapeMetrics(url string) (appliedTxns int64, appliedRows int64, lagSeconds float64) {
 	client := http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Get(url)
@@ -792,24 +802,34 @@ func scrapeMetrics(url string) (appliedTxns int64, appliedRows int64, lagSeconds
 		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.HasPrefix(line, "strand_apply_txn_total") {
+		if isMetricNamed(line, "strand_apply_txn_total") {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
-				if val, err := parseMetricCounter(parts[len(parts)-1]); err == nil {
-					appliedTxns = val
+				val, err := parseMetricCounter(parts[len(parts)-1])
+				if err != nil {
+					log.Printf("warning: scrapeMetrics failed to parse strand_apply_txn_total %q: %v", parts[len(parts)-1], err)
+					continue
 				}
+				appliedTxns = val
 			}
-		} else if strings.HasPrefix(line, "strand_apply_rows_total") {
+		} else if isMetricNamed(line, "strand_apply_rows_total") {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
-				if val, err := parseMetricCounter(parts[len(parts)-1]); err == nil {
-					appliedRows = val
+				val, err := parseMetricCounter(parts[len(parts)-1])
+				if err != nil {
+					log.Printf("warning: scrapeMetrics failed to parse strand_apply_rows_total %q: %v", parts[len(parts)-1], err)
+					continue
 				}
+				appliedRows = val
 			}
-		} else if strings.HasPrefix(line, "strand_lag_seconds") {
+		} else if isMetricNamed(line, "strand_lag_seconds") {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
-				val, _ := strconv.ParseFloat(parts[len(parts)-1], 64)
+				val, err := strconv.ParseFloat(parts[len(parts)-1], 64)
+				if err != nil || math.IsNaN(val) || math.IsInf(val, 0) {
+					log.Printf("warning: scrapeMetrics failed to parse strand_lag_seconds %q: %v", parts[len(parts)-1], err)
+					continue
+				}
 				lagSeconds = val
 			}
 		}

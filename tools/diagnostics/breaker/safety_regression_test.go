@@ -132,3 +132,39 @@ Log flushed up to 123400
 		t.Fatalf("lost numeric semaphore diagnostics: %q", got.SemaphoresWaitInfo)
 	}
 }
+
+func TestEngineStatusMariaDBAndLegacyFormatsRetained(t *testing.T) {
+	fixture := `----------
+SEMAPHORES
+----------
+Mutex spin waits 120, rounds 240, OS waits 12
+RW-shared spins 10, rounds 20, OS waits 2
+--------
+FILE I/O
+--------
+Pending flushes (fsync) log: 3; buffer pool: 5
+----------------------
+BUFFER POOL AND MEMORY
+----------------------
+Total memory allocated 2147483648
+Dictionary memory allocated 1048576
+Buffer pool size 131072
+Free buffers 1000
+Database pages 120000
+---
+LOG
+---
+Log sequence number 999999
+`
+	got := SanitizeEngineStatus(fixture)
+	for _, expected := range []string{
+		"Mutex spin waits 120, rounds 240, OS waits 12",
+		"Pending flushes (fsync) log: 3; buffer pool: 5",
+		"Total memory allocated 2147483648",
+		"Log sequence number 999999",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("SanitizeEngineStatus omitted expected metric %q: %s", expected, got)
+		}
+	}
+}

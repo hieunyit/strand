@@ -335,17 +335,38 @@ func SaveProtectedSnapshot(snap *DiagnosticSnapshot, destPath string) error {
 // Writing directly would preserve an existing permissive mode, expose partial
 // contents, and follow a destination symlink or modify other hard links.
 func SaveProtectedArtifact(data []byte, destPath string) error {
-	f, err := os.CreateTemp(filepath.Dir(destPath), ".breaker-*")
+	dir := filepath.Dir(destPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".breaker-*")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name())
+	tmpName := f.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
 	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), destPath)
+	if err := os.Rename(tmpName, destPath); err != nil {
+		return err
+	}
+	tmpName = "" // Rename succeeded, clear so defer does not delete target
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }

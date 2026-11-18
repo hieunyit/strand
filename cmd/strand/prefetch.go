@@ -47,13 +47,17 @@ type seedManifestLite struct {
 
 func prefetchIdentity(ev reader.Event, schema *assemble.TableSchema, fromArchive bool, sidecar *archivereader.SchemaSidecar) model.ArchiveIdentity {
 	id := model.TableID{Schema: ev.Schema, Table: ev.Table}
-	identity := model.ArchiveIdentity{Table: id, Mode: "pk", Columns: append([]string(nil), schema.Columns...), KeyColumns: append([]string(nil), schema.PKColumns...)}
+	identity := model.ArchiveIdentity{Table: id, Mode: "", Columns: append([]string(nil), schema.Columns...), KeyColumns: append([]string(nil), schema.PKColumns...)}
 	if !fromArchive {
 		identity.Mode = ev.KeyMode
 	} else if sidecar != nil {
 		if declared, ok := sidecar.GetTable(ev.Schema, ev.Table); ok {
 			identity.Mode = string(declared.IdentityMode)
+		} else if schema != nil && len(schema.PKColumns) > 0 {
+			identity.Mode = "pk"
 		}
+	} else if schema != nil && len(schema.PKColumns) > 0 {
+		identity.Mode = "pk"
 	}
 	return identity
 }

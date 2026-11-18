@@ -100,3 +100,18 @@ func TestMySQLSequenceOperationsPreserveRawIdentifiers(t *testing.T) {
 		t.Fatalf("raw names changed: queries=%q, want %q and %q", queries, wantSelect, wantAlter)
 	}
 }
+
+func TestMySQLSequenceExplicitSchema(t *testing.T) {
+	var queries []string
+	db := sql.OpenDB(autoIncIdentConnector{queries: &queries})
+	defer db.Close()
+	d := NewMySQLTargetDriver(db)
+	// Table with dot in table name when schema is explicitly provided
+	if err := d.Setval(context.Background(), SequenceInfo{Schema: "my_db", Table: "order.details"}, 50); err != nil {
+		t.Fatal(err)
+	}
+	wantAlter := "ALTER TABLE `my_db`.`order.details` AUTO_INCREMENT = 50;"
+	if len(queries) != 1 || queries[0] != wantAlter {
+		t.Fatalf("explicit schema: queries=%q, want %q", queries, wantAlter)
+	}
+}

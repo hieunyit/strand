@@ -86,3 +86,25 @@ func TestSortWaitStats(t *testing.T) {
 		t.Errorf("expected running third with 45 count, got %s %d", sorted[2].Event, sorted[2].Count)
 	}
 }
+
+func TestScrapeMetricsPrefixBoundaryAndInvalidValues(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Similar prefix but different metric name: must NOT match
+		fmt.Fprintln(w, `strand_apply_txn_total_duration_seconds 999`)
+		fmt.Fprintln(w, `strand_apply_rows_total_bytes 888`)
+		// Valid metric with label
+		fmt.Fprintln(w, `strand_apply_txn_total{pipeline="test"} 42`)
+		fmt.Fprintln(w, `strand_apply_rows_total{pipeline="test"} 84`)
+		// Succeeded by invalid value: must skip invalid without overwriting valid
+		fmt.Fprintln(w, `strand_apply_txn_total{pipeline="test"} not_a_number`)
+	}))
+	defer ts.Close()
+
+	txns, rows, _ := scrapeMetrics(ts.URL)
+	if txns != 42 {
+		t.Fatalf("expected 42 txns, got %d", txns)
+	}
+	if rows != 84 {
+		t.Fatalf("expected 84 rows, got %d", rows)
+	}
+}

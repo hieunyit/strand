@@ -401,6 +401,20 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 			fmt.Sprintf("invalid schema.destructive %q (want pause | approve)", cfg.Schema.Destructive), nil)
 	}
 
+	for i, inc := range cfg.Tables.Include {
+		cfg.Tables.Include[i] = strings.TrimSpace(inc)
+	}
+	for i, exc := range cfg.Tables.Exclude {
+		cfg.Tables.Exclude[i] = strings.TrimSpace(exc)
+	}
+	if len(cfg.Tables.Rename) > 0 {
+		cleaned := make(map[string]string, len(cfg.Tables.Rename))
+		for k, v := range cfg.Tables.Rename {
+			cleaned[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		cfg.Tables.Rename = cleaned
+	}
+
 	if err := ValidateRename(cfg.Tables.Rename, TargetFoldsTableCase(cfg.Target.Kind)); err != nil {
 		return nil, err
 	}
