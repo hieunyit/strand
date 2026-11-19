@@ -221,3 +221,35 @@ func TestMalformedInput(t *testing.T) {
 		t.Fatalf("invalid request = %v", r)
 	}
 }
+
+// A client that closes stdin right after its last request still receives the responses.
+func TestEOFDrainsInFlightCalls(t *testing.T) {
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_backup","arguments":{"backup_id":"b1"}}}
+`)
+	var out strings.Builder
+	var mu sync.Mutex
+	w := writerFunc(func(p []byte) (int, error) { mu.Lock(); defer mu.Unlock(); return out.Write(p) })
+	if err := Serve(context.Background(), in, w, slowService{&fakeService{}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"id":2,"result"`) {
+		t.Fatalf("in-flight call cancelled at EOF: %s", out.String())
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+type slowService struct{ *fakeService }
+
+func (slowService) GetBackup(ctx context.Context, id string) (Record, error) {
+	select {
+	case <-time.After(100 * time.Millisecond):
+		return Record{"id": id}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}

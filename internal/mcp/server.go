@@ -90,7 +90,8 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, service BackupServi
 			return ctx.Err()
 		case line, ok := <-lines:
 			if !ok {
-				conn.cancelAll()
+				// stdin closed: the client is done sending, but calls already accepted still get their
+				// responses (a piped/scripted client closes stdin right after its last request).
 				conn.wg.Wait()
 				if err := <-readErr; err != nil {
 					return fmt.Errorf("mcp: read stdin: %w", err)
