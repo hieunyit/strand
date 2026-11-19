@@ -107,6 +107,36 @@ func (p *Pipeline) checkKeylessTargetCollations(ctx context.Context, id model.Ta
 		return nil
 	}
 	tgt := p.filter.Target(id)
+	// Resolve domain and array element chains: both retain their nested type equality.
+	unsafe, err := p.dst.QueryContext(ctx, `WITH RECURSIVE column_types AS (
+        SELECT a.attname, t.oid, t.typname, t.typbasetype, t.typelem, t.typcategory
+        FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_type t ON t.oid=a.atttypid
+        WHERE n.nspname=$1 AND c.relname=$2 AND a.attnum>0 AND NOT a.attisdropped
+        UNION ALL
+        SELECT ct.attname, t.oid, t.typname, t.typbasetype, t.typelem, t.typcategory
+        FROM column_types ct JOIN pg_type t ON t.oid=CASE WHEN ct.typbasetype<>0 THEN ct.typbasetype WHEN ct.typcategory='A' THEN ct.typelem ELSE 0 END
+    ) SELECT DISTINCT attname FROM column_types WHERE typname='citext'`, tgt.Schema, tgt.Table)
+	if err != nil {
+		return fmt.Errorf("check target keyless equality types %s: %w", tgt, err)
+	}
+	var unsafeCols []string
+	for unsafe.Next() {
+		var col string
+		if err := unsafe.Scan(&col); err != nil {
+			unsafe.Close()
+			return err
+		}
+		unsafeCols = append(unsafeCols, col)
+	}
+	err = unsafe.Err()
+	unsafe.Close()
+	if err != nil {
+		return err
+	}
+	if len(unsafeCols) > 0 {
+		return exitcode.New(exitcode.ErrCollationLooser, exitcode.Rejected, fmt.Sprintf("keyless table %s: target column(s) %s use citext equality, which is case-insensitive and cannot preserve the full row image; use text", tgt, strings.Join(unsafeCols, ", ")), nil)
+	}
 	rows, err := p.dst.QueryContext(ctx, `SELECT a.attname, co.collname FROM pg_attribute a
 		JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_collation co ON co.oid = a.attcollation

@@ -1,0 +1,28 @@
+version: 1
+name: pg-strict-diag
+source:
+  kind: postgres
+  dsn: "postgres://postgres:dev@127.0.0.1:54331/strand?sslmode=disable"
+  slot: strand_strict_diag_slot
+  publication: strand_strict_diag_pub
+  create_slot: true
+target:
+  kind: postgres
+  dsn: "postgres://postgres:dev@127.0.0.1:54332/strand?sslmode=disable"
+  commit_order: strict
+tables:
+  include: ["bench.*"]
+bootstrap:
+  default: logical
+checkpoint:
+  store: target
+  flush_every: 200ms
+resources:
+  spool:
+    path: "reports/code-review-20261117/followup-agy/evidence/pg-strict/single-client/spool"
+    hard: 2GiB
+observability:
+  metrics: "127.0.0.1:21123"
+  log:
+    level: info
+    format: json

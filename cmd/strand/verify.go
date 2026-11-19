@@ -188,6 +188,7 @@ func newVerifyCmd() *cobra.Command {
 					fullRate = rate
 				}
 				var bad []string
+				keylessIncomplete := false
 				for _, id := range ids {
 					pkCols, err := verify.FindPKColumns(cmd.Context(), src, srcEngine, id)
 					if err != nil && cfg.Tables.KeylessOn() {
@@ -200,7 +201,13 @@ func newVerifyCmd() *cobra.Command {
 						if kerr != nil {
 							return kerr
 						}
-						fmt.Printf("verify %s (keyless, count+checksum only): source %s target %s match=%v\n", id, krep.SourceRows, krep.TargetRows, krep.Match)
+						fmt.Printf("verify %s (keyless, count+checksum only): source %s target %s match=%v stable_source=%v attempts=%d\n",
+							id, krep.SourceRows, krep.TargetRows, krep.Match, krep.StableOnSource, krep.Attempts)
+						if !krep.StableOnSource {
+							keylessIncomplete = true
+							bad = append(bad, fmt.Sprintf("keyless table %s inconclusive: changing source (%d attempts)", id, krep.Attempts))
+							continue
+						}
 						if !krep.Match {
 							if repair == "fix" {
 								return exitcode.New("invalid_repair", exitcode.InvalidSyntax,
@@ -280,6 +287,9 @@ func newVerifyCmd() *cobra.Command {
 					bad = append(bad, fmt.Sprintf("%d mismatched rows in %s (pk %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), ",")))
 				}
 				if len(bad) > 0 {
+					if keylessIncomplete {
+						return exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError, strings.Join(bad, "; "), nil)
+					}
 					return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError, strings.Join(bad, "; "), nil)
 				}
 				return nil

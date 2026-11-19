@@ -38,7 +38,7 @@ func TestR08_EventLogSpillRoundTripAndSubxactTruncate(t *testing.T) {
 			l := newEventLog(dir)
 			var want []reader.Event
 			tm := reader.Event{Type: reader.EventTableMap, Schema: "app", Table: "t", TableID: 7,
-				Columns: []string{"id", "v", "n", "b", "f", "ok", "ts", "doc"}, PKColumns: []string{"id"}}
+				Columns: []string{"id", "v", "n", "b", "f", "ok", "ts", "doc"}, PKColumns: []string{"id"}, SchemaChanged: true}
 			add := func(i int, ev reader.Event) {
 				if i == spillAt {
 					if _, err := l.spill(); err != nil {

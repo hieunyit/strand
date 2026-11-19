@@ -51,7 +51,7 @@ func (b *metricsBuf) add(name string, s Sample) {
 	b.mu.Lock()
 	if len(b.pending) < 200000 { // DB mất lâu: không để RAM phình vô hạn
 		b.pending = append(b.pending, store.MetricSample{Pipeline: name, T: s.T.UTC(), State: s.State, Lag: s.Lag,
-			Throughput: s.Throughput, ApplyRate: s.ApplyRate, Holes: s.Holes, Writeset: s.Writeset, SpoolBytes: s.SpoolBytes})
+			Throughput: s.Throughput, ApplyRate: s.ApplyRate, Rows: s.Rows, SnapRows: s.SnapRows, Holes: s.Holes, Writeset: s.Writeset, SpoolBytes: s.SpoolBytes})
 	}
 	b.mu.Unlock()
 }
@@ -149,7 +149,7 @@ func sampleOf(r store.MetricSample, useMax bool) Sample {
 	if useMax {
 		lag = r.LagMax // khoảng dài: đỉnh trễ của bucket, không để trung bình che mất
 	}
-	return Sample{T: r.T, State: r.State, Lag: lag, Throughput: r.Throughput, ApplyRate: r.ApplyRate, Holes: r.Holes,
+	return Sample{T: r.T, State: r.State, Lag: lag, Throughput: r.Throughput, ApplyRate: r.ApplyRate, Rows: r.Rows, SnapRows: r.SnapRows, Holes: r.Holes,
 		Writeset: r.Writeset, SpoolBytes: r.SpoolBytes}
 }
 

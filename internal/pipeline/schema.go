@@ -273,9 +273,11 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 		}
 		idx := map[string][]string{}
 		prefix := map[string]bool{}
+		expression := map[string]bool{}
 		var names []string
 		for ir.Next() {
-			var n, c string
+			var n string
+			var c sql.NullString
 			var sub sql.NullInt64
 			if err := ir.Scan(&n, &c, &sub); err != nil {
 				ir.Close()
@@ -284,10 +286,7 @@ func loadSourceTables(ctx context.Context, db *sql.DB, f *tableFilter) (map[mode
 			if _, ok := idx[n]; !ok {
 				names = append(names, n)
 			}
-			idx[n] = append(idx[n], c)
-			if sub.Valid {
-				prefix[n] = true
-			}
+			appendMySQLUniqueColumn(idx, prefix, expression, n, c, sub)
 		}
 		ir.Close()
 		if err := checkPrimaryKeyPrefix(id, prefix); err != nil {
@@ -373,4 +372,18 @@ func mysqlPKCodec(ctx context.Context, db *sql.DB, id model.TableID, pk []string
 // mysqlCollationCharsets: xem mysqlreader.LoadCollationCharsets.
 func mysqlCollationCharsets(ctx context.Context, db *sql.DB) (map[uint64]string, error) {
 	return mysqlreader.LoadCollationCharsets(ctx, db)
+}
+
+// Functional unique expressions cannot supply row-key columns. Their constant
+// writeset dependency still serializes transactions that could conflict.
+func appendMySQLUniqueColumn(idx map[string][]string, prefix, expression map[string]bool, name string, col sql.NullString, sub sql.NullInt64) {
+	if !col.Valid {
+		idx[name] = nil
+		expression[name] = true
+	} else if !expression[name] {
+		idx[name] = append(idx[name], col.String)
+	}
+	if sub.Valid || !col.Valid {
+		prefix[name] = true
+	}
 }

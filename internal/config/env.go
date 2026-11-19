@@ -154,6 +154,12 @@ func setEnvField(v reflect.Value, index []int, raw string) error {
 		}
 		v = v.Field(i)
 	}
+	// String values are preserved exactly (passwords may have leading/trailing spaces);
+	// only parse-only values (duration, bool, numbers) are trimmed.
+	if v.Kind() == reflect.String && v.Type() != durationType {
+		v.SetString(raw)
+		return nil
+	}
 	raw = strings.TrimSpace(raw)
 	if v.Type() == durationType {
 		d, err := time.ParseDuration(raw)

@@ -1,0 +1,20 @@
+I have completed the investigation and implementation for **Task 04: Archive Reader Identity Contract, Schema Sidecar, Outside-Table Scope Filtering & Prefetch Safety**.
+
+The full results and verification outcomes are documented in [04-archive-identity.md](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/results/04-archive-identity.md).
+
+### Summary of Completed Work
+
+1. **Verified Identity Contract & Schema Sidecar**:
+   - Implemented `TableIdentity` and `SchemaSidecar` in [schema.go](file:///home/hellc/strand/internal/reader/archive/schema.go) and exported aliases in [archive_schema.go](file:///home/hellc/strand/internal/seed/archive_schema.go).
+   - Supported explicit `IdentityModePK`, `IdentityModeUnique` (with resolved key order), and `IdentityModeKeyless` (`full_row` identity requiring FULL row images).
+   - Preserved all **S04** (`binlog_row_value_options=PARTIAL_JSON` rejection) and **S05** (missing metadata/PK rejection for unmapped tables, never guessing `col0`) fail-closed invariants.
+   - Enforced deterministic SHA-256 fingerprinting and fail-closed rejection on DDL, column count, type, name, or fingerprint mismatch against immutable sidecar tables before transactions are covered.
+
+2. **Outside-Table Scope Filtering with Boundary Preservation**:
+   - Integrated `TableScope` in [reader.go](file:///home/hellc/strand/internal/reader/archive/reader.go). When explicit verified scope is configured, outside-table events are skipped without failing on missing metadata.
+   - Preserved GTID transaction boundaries (GTID, XID) so that excluded rows in mixed transactions never skip or misalign sibling included rows.
+
+3. **Concrete Prefetch Fixes & Downstream Spool Safety**:
+   - Fixed [prefetch.go](file:///home/hellc/strand/cmd/strand/prefetch.go): Archive errors when `sourceDSN == ""` now return the error immediately instead of printing continuing and falsely report[agy] print timeout after 15m0s with turn in progress; returning partial output
+error: print timeout after 15m0s with the turn still in progress; the response is partial
+AGY_ERROR: {"short_error":"print timeout after 15m0s with the turn still in progress; the response is partial","status":"DEADLINE_EXCEEDED","retryable":false,"reason":"print_timeout"}

@@ -316,11 +316,11 @@ func TestG2_WeighManyBatchesAndMatchesSingleWeigh(t *testing.T) {
 		vals = append(vals, "a", "A", "a ", "a", "", " ")
 		batch := newMySQLWeigherState(db)
 		q0 := g2Queries.Load()
-		if err := batch.weighMany(col, vals); err != nil {
+		if _, err := batch.weighMany(col, vals); err != nil {
 			t.Fatal(err)
 		}
-		// 305 giá trị khác nhau ("a" lặp) → ⌈305/128⌉ = 3 truy vấn (+1 weight của space khi PAD SPACE).
-		want := int64(3)
+		// 305 giá trị khác nhau → một truy vấn với batch 512 (+1 weight của space khi PAD SPACE).
+		want := int64(1)
 		if pad {
 			want++
 		}
@@ -364,7 +364,7 @@ func TestG2_WeighManyBatchesAndMatchesSingleWeigh(t *testing.T) {
 		if ks[0] != ks[2] || ks[0] == ks[1] {
 			t.Fatalf("EncodeMany keys %q", ks)
 		}
-		if err := batch.weighMany(col, []model.Value{"NULL!"}); err == nil {
+		if _, err := batch.weighMany(col, []model.Value{"NULL!"}); err == nil {
 			t.Fatal("NULL weight accepted")
 		}
 	}

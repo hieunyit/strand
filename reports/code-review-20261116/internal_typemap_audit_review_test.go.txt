@@ -1,0 +1,19 @@
+package typemap
+import("testing";"reflect")
+func TestAuditBitSnapshotVsCDC(t *testing.T){
+ for _,policy:=range []string{"bit varying","bytea"}{
+  opts:=DefaultOptions();opts.BitPolicy=policy
+  m,err:=MapMySQLColumn(MySQLColumn{Name:"flag",DataType:"bit",ColumnType:"bit(8)"},opts);if err!=nil{t.Fatal(err)}
+  a,ae:=m.Convert(string([]byte{49})); b,be:=m.Convert(int64(49))
+  if ae!=nil||be!=nil||!reflect.DeepEqual(a,b){t.Errorf("policy=%s snapshot=%#v CDC=%#v errors=%v/%v",policy,a,b,ae,be)}
+ }
+}
+func TestAuditSetWhitespace(t *testing.T){
+ m,err:=MapMySQLColumn(MySQLColumn{Name:"x",DataType:"set",ColumnType:"set(' a','b')"},DefaultOptions());if err!=nil{t.Fatal(err)}
+ v,err:=m.Convert(" a,b");if err!=nil{t.Fatal(err)};if !reflect.DeepEqual(v,[]string{" a","b"}){t.Errorf("SET value changed: %#v",v)}
+}
+
+func TestAuditEnumWhitespace(t *testing.T){
+ m,err:=MapMySQLColumn(MySQLColumn{Name:"x",DataType:"enum",ColumnType:"enum(' a','b')"},DefaultOptions());if err!=nil{t.Fatal(err)}
+ v,err:=m.Convert(" a");if err!=nil||v!=" a"{t.Errorf("valid ENUM leading whitespace rejected or changed: value=%#v error=%v",v,err)}
+}

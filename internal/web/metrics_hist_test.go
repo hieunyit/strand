@@ -60,8 +60,8 @@ func TestMetricsHistoryInDatabase(t *testing.T) {
 			t.Fatalf("series %s: %+v (want a point with lag %v)", rng, v, want)
 		}
 	}
-	resp, body := e2.do(c, "GET", "/pipelines/orders?range=24h", "", nil)
-	if resp.StatusCode != 200 || !strings.Contains(body, `href="?range=7d"`) || !strings.Contains(body, `aria-current="true">24 h`) {
+	resp, body := e2.do(c, "GET", "/pipelines/orders", "", nil)
+	if resp.StatusCode != 200 || !strings.Contains(body, `data-range="604800"`) || !strings.Contains(body, `data-range="86400"`) {
 		t.Fatalf("graph tab range selector missing: %d", resp.StatusCode)
 	}
 }
@@ -75,7 +75,7 @@ func TestMetricsHistoryFileMode(t *testing.T) {
 		t.Fatalf("file mode 7d: %d %s", resp.StatusCode, body)
 	}
 	_, page := e.do(c, "GET", "/pipelines/orders", "", nil)
-	if strings.Contains(page, `href="?range=7d"`) {
+	if strings.Contains(page, `data-range="604800"`) {
 		t.Fatal("file mode offers ranges it cannot serve")
 	}
 }

@@ -1,0 +1,24 @@
+package spool_test
+import (
+ "context"
+ "os"
+ "path/filepath"
+ "strings"
+ "testing"
+ "strand/internal/assemble"
+ "strand/internal/model"
+ "strand/internal/spool"
+)
+func TestAuditSpillExceedsTotalHardLimit(t *testing.T) {
+ dir:=t.TempDir()
+ sb:=assemble.NewSpillBuffer(1,dir)
+ if err:=sb.Append(model.RowChange{Table:model.TableID{Schema:"app",Table:"t"},Op:model.OpInsert,Key:[]model.Value{int64(1)},Cols:[]model.ColValue{{Name:"v",Value:strings.Repeat("x",256*1024)}}});err!=nil {t.Fatal(err)}
+ if err:=sb.Append(model.RowChange{Table:model.TableID{Schema:"app",Table:"t"},Op:model.OpInsert,Key:[]model.Value{int64(2)}});err!=nil {t.Fatal(err)}
+ tx:=&model.Txn{SourcePos:model.Pos{Engine:model.EngineMySQL,GTID:"3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}}
+ if err:=sb.Finish(tx);err!=nil {t.Fatal(err)}
+ fi,err:=os.Stat(tx.SpillPath);if err!=nil {t.Fatal(err)}
+ sp,err:=spool.New(filepath.Join(dir,"spool"),spool.WithTotalHardLimit(64*1024));if err!=nil {t.Fatal(err)};defer sp.Close()
+ err=sp.Append(context.Background(),tx)
+ t.Logf("spill bytes=%d, configured hard limit=65536, reported usage=%+v, append err=%v",fi.Size(),sp.Usage(),err)
+ if err==nil {t.Fatal("spool accepted spill larger than total hard limit")}
+}

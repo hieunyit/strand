@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ const (
 	ActRewind         = "checkpoint-rewind"
 	ActVerify         = "verify"
 	ActJobCancel      = "job-cancel"
+	ActDelete         = "delete"
 )
 
 var (
@@ -93,7 +95,11 @@ func (s *Server) registerOps() {
 	for _, v := range []string{ActStart, ActStop, ActRestart} {
 		v := v
 		a.Register(Action{Name: v, Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
-			return srv.runLifecycle(ctx, req.Pipeline, v)
+			startAt := ""
+			if req.Args != nil {
+				startAt = req.Args["start_at"]
+			}
+			return srv.runLifecycle(ctx, req.Pipeline, v, startAt)
 		}})
 	}
 	for _, v := range []string{ActEnable, ActDisable} {
@@ -189,6 +195,48 @@ func (s *Server) registerOps() {
 		}
 		return ActionResult{Message: "cancel requested", JobID: id}, nil
 	}})
+	a.Register(Action{
+		Name:        ActDelete,
+		ConfirmName: true,
+		Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
+			p := req.Pipeline
+			if p == nil {
+				return ActionResult{}, errors.New("pipeline is required")
+			}
+			_, _ = srv.runLifecycle(ctx, p, ActStop)
+			if p.ConfigPath != "" {
+				_ = os.Remove(p.ConfigPath)
+				pattern := p.ConfigPath + ".bak.*"
+				if matches, err := filepath.Glob(pattern); err == nil {
+					for _, m := range matches {
+						_ = os.Remove(m)
+					}
+				}
+			}
+			if p.EnvFile != "" {
+				_ = os.Remove(p.EnvFile)
+			}
+			lp, pp := p.BgPaths()
+			if lp != "" {
+				_ = os.Remove(lp)
+			}
+			if pp != "" {
+				_ = os.Remove(pp)
+			}
+			if sock := p.AdminSocket(); sock != "" {
+				_ = os.Remove(sock)
+			}
+			if srv.cfg != nil && srv.cfg.StateDir != "" {
+				statePipeDir := filepath.Join(srv.cfg.StateDir, "pipelines", p.Name)
+				_ = os.RemoveAll(statePipeDir)
+			}
+			if err := srv.reg.RemovePipeline(p.Name); err != nil {
+				return ActionResult{}, fmt.Errorf("remove pipeline from registry: %w", err)
+			}
+			srv.reg.Refresh(ctx)
+			return ActionResult{Message: fmt.Sprintf("Pipeline %s deleted successfully", p.Name)}, nil
+		},
+	})
 }
 
 // adminCall gọi admin socket của pipeline; lỗi chuyển thành ActionError 502 với lời dễ hiểu.
@@ -271,6 +319,7 @@ func srvSnapshotAdd(ctx context.Context, srv *Server, req ActionRequest) (Action
 			return ActionResult{Data: map[string]any{"started": done}}, err
 		}
 		done = append(done, t)
+		srv.invalidateSourceTables(req.Pipeline.Name)
 	}
 	return ActionResult{Message: "snapshot started for " + strings.Join(done, ", "), Data: map[string]any{"started": done}}, nil
 }
@@ -345,7 +394,7 @@ func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResul
 
 // ---- start / stop / restart ----
 
-func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (ActionResult, error) {
+func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string, startAt ...string) (ActionResult, error) {
 	if p.Mode() == ModeSystemd {
 		if verb != ActStop {
 			s.materialize(p.Name) // unit đọc file: dựng lại từ DB nếu thiếu/khác (chế độ DB)
@@ -357,7 +406,7 @@ func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (Ac
 	}
 	switch verb {
 	case ActStart:
-		res, err := s.bgStart(ctx, p)
+		res, err := s.bgStart(ctx, p, startAt...)
 		if err == nil {
 			s.setDesired(p, store.DesiredRunning)
 		}
@@ -373,7 +422,7 @@ func (s *Server) runLifecycle(ctx context.Context, p *Pipeline, verb string) (Ac
 		if err != nil {
 			return res, err
 		}
-		res, err = s.bgStart(ctx, p)
+		res, err = s.bgStart(ctx, p, startAt...)
 		if err == nil {
 			s.setDesired(p, store.DesiredRunning)
 		}
@@ -434,8 +483,11 @@ func (s *Server) runStrand(ctx context.Context, p *Pipeline, args ...string) (st
 }
 
 // bgStart: `strand sync -c <cfg> --background` (chế độ nền; tự tách khỏi web bằng setsid).
-func (s *Server) bgStart(ctx context.Context, p *Pipeline) (ActionResult, error) {
+func (s *Server) bgStart(ctx context.Context, p *Pipeline, startAt ...string) (ActionResult, error) {
 	args := []string{"sync", "-c", p.ConfigPath, "--background"}
+	if len(startAt) > 0 && startAt[0] != "" {
+		args = append(args, "--start-at="+startAt[0])
+	}
 	if p.LogFile != "" {
 		args = append(args, "--log-file="+p.LogFile)
 	}

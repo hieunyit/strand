@@ -1,0 +1,80 @@
+{
+  "mode": "read-only repository; test artifacts only under /tmp",
+  "source_files_inspected": [
+    "internal/checkpoint/fence.go",
+    "internal/checkpoint/store.go",
+    "internal/checkpoint/compactor.go",
+    "internal/checkpoint/mysql_store.go",
+    "internal/checkpoint/pg_applied_set.go",
+    "internal/writer/orderer.go",
+    "internal/writer/writer.go",
+    "internal/writer/pg.go",
+    "internal/writer/keyless.go",
+    "internal/sched/scheduler.go",
+    "internal/spool/spool.go",
+    "internal/spool/pebble.go",
+    "internal/spool/codec.go",
+    "internal/promote/promoter.go",
+    "internal/promote/state.go",
+    "internal/promote/types.go",
+    "internal/promote/mysql_fence.go",
+    "internal/promote/mysql_driver.go",
+    "internal/promote/pg_driver.go",
+    "internal/seed/invariants.go",
+    "internal/seed/xtrabackup.go",
+    "internal/seed/binlogpos.go",
+    "internal/seed/prefetch.go",
+    "internal/seed/export.go",
+    "internal/objects/apply.go",
+    "internal/objects/users.go",
+    "internal/objects/export.go",
+    "internal/objects/types.go",
+    "internal/verify/live.go",
+    "internal/verify/keyless.go",
+    "internal/verify/recheck.go",
+    "internal/verify/merkle_cross.go",
+    "internal/pipeline/pipeline.go",
+    "internal/pipeline/binlogpos.go",
+    "internal/pipeline/keyerr.go",
+    "internal/assemble/spill.go",
+    "internal/model/model.go",
+    "cmd/strand/prefetch.go"
+  ],
+  "inspection_detail": "Deep path inspection: checkpoint epoch/compaction; writer entry/fencing and keyless SQL; spool encode/quota/lifecycle; promote resume/cutover. Selective sections only for wider pipeline, verify, seed, objects helpers. Not exhaustive review of all listed packages.",
+  "invariants": [
+    "SG-1 stale instance cannot create a worker row that grants itself write authority after takeover",
+    "CP-1 target data and applied checkpoint commit together",
+    "CP-5 strict orderer waits before target row locks and fails on uncertain commit",
+    "CO-1 scheduler retains dependencies and uses table fallback for spilled writesets",
+    "spool usage must include durable sidecar data and hard limits must bound prefetch disk use",
+    "keyless UPDATE/DELETE must affect exactly one physical row, including partitioned targets",
+    "promote resume must revalidate catchup after a connection-scoped fence was lost",
+    "source position metadata parsing and seed invariants fail closed",
+    "verify stable source recheck must compare canonical same-column data"
+  ],
+  "findings": [
+    "stale relaxed worker inserted after takeover bypasses epoch fence",
+    "PG keyless SQL uses ctid without tableoid across partitioned/inherited relations",
+    "spool hard limits exclude spilled transaction sidecar bytes"
+  ],
+  "conditional_findings": [
+    "FTWRL re-fence resume skips already-completed catchup and setval; requires writes while prior process absent, which is a documented FTWRL operational caveat"
+  ],
+  "retracted_candidates": [
+    "spool does not serialize PG XID, but current production prefetch replay is source-MySQL-only, so no reachable PG bug shown"
+  ],
+  "verification": {
+    "overlay": "overlay.json",
+    "expected_failure_log": "repro.log",
+    "selective_existing_tests": "selective.log",
+    "unexecuted_database_repro": "keyless_partition_repro.sql"
+  },
+  "gaps": [
+    "No Docker, DB, E2E, full suite, or races run because benchmark active",
+    "Stale-worker reproducer uses deterministic fake SQL state and real EnsureWorkerRow/Compact/ApplyBatch; no live takeover process test",
+    "Keyless partition defect confirmed by generated SQL and physical tuple identity reasoning; SQL reproduction supplied but not executed",
+    "No deep inspection of seed physical WAL planners, seed dump parsing, objects SQL conversion/parser/discovery, spool bucket HTTP implementation",
+    "PGStore and applied_set/range_set/binlog_pos algebra not deeply inspected",
+    "No exhaustive writer SQL type or cascading-constraint validation; coverage focused on boundary guarantees"
+  ]
+}

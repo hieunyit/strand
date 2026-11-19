@@ -6,8 +6,71 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestConcurrentTuningPreservesIndependentUpdates(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	p := e.srv.reg.Get("orders")
+	// Make validation long enough for concurrent requests to overlap their reads.
+	// Only the first validation needs to block; all saves use the same fixture.
+	e.hold(true)
+	t.Cleanup(func() { e.hold(false) })
+	updates := map[string]any{"workers": "4", "chunk_rows": "12345", "algorithm": "static", "lag_slo": "17s", "replica_lag_max": "31s"}
+	start := make(chan struct{})
+	errs := make(chan error, len(updates))
+	var wg sync.WaitGroup
+	for key, value := range updates {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := e.srv.saveTuning(t.Context(), p, map[string]any{key: value}, false, false, false, "test")
+			errs <- err
+		}()
+	}
+	close(start)
+	// Wait until the first validator is running, then keep it blocked while the
+	// remaining requests arrive. Their independent changes must all survive.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(e.fakeCalls()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(e.fakeCalls()) == 0 {
+		e.hold(false)
+		wg.Wait()
+		t.Fatal("validator did not start")
+	}
+	time.Sleep(100 * time.Millisecond)
+	e.hold(false)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	view := e.srv.tuningView(p)
+	for _, field := range view.Fields {
+		if want, ok := updates[field.Key]; ok && field.Value != want {
+			t.Errorf("concurrent update lost for %s: got %q want %q", field.Key, field.Value, want)
+		}
+	}
+}
+
+func TestTuningSaveRejectsOversizedBody(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, csrf := e.loginOK()
+	// Whitespace is valid in a duration string and is trimmed by validation.
+	// Without a body limit this request succeeds after allocating the whole body.
+	body := `{"lag_slo":"` + strings.Repeat(" ", 1<<20) + `17s"}`
+	resp, out := e.do(c, "POST", "/api/v1/pipelines/orders/tuning", body, tuningHdr(csrf))
+	if resp.StatusCode != 400 {
+		t.Fatalf("oversized tuning request: status=%d body=%s", resp.StatusCode, out)
+	}
+}
 
 var tuningHdr = func(csrf string) map[string]string {
 	return map[string]string{csrfHeader: csrf, "Content-Type": "application/json"}

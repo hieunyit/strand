@@ -278,6 +278,13 @@ form.np legend { font-weight: 650; padding: 0 8px; }
 form.np .np-row { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 6px; }
 form.np .np-row label { display: flex; flex-direction: column; gap: 3px; max-width: 360px; margin: 0 0 8px; font-weight: 500; }
 form.np .np-row small { line-height: 1.35; font-weight: 400; }
+.np-database-picker { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; width: min(100%, 520px); }
+.np-database-picker > label { display: block; font-weight: 600; }
+.np-database-picker > input { width: 100%; }
+.np-db-list { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; width: 100%; margin-top: 4px; }
+.np-db-list > input[type="checkbox"] { margin: 0 0 0 2px; }
+.np-db-list > label { display: inline-flex; align-items: center; flex-direction: row; gap: 6px; max-width: none; margin: 0; font-weight: 400; cursor: pointer; }
+.np-db-list > button { flex-basis: 100%; width: max-content; }
 form.np details.np-adv { margin: 4px 0 12px; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 8px 16px; }
 form.np details.np-adv > summary { cursor: pointer; font-weight: 600; margin-bottom: 4px; }
 form.np .np-preview { background: var(--surface-2); border: 1px dashed var(--line-strong); border-radius: var(--r-md); padding: 6px 10px; margin: 6px 0 10px; }
@@ -460,3 +467,67 @@ dialog.dlg h3 { margin: 0 0 8px; font-size: var(--fs-lg); }
   .headrow .meta { margin-left: 0; }
   .actions .grp + .grp { padding-left: 0; border-left: 0; }
 }
+
+/* ---------- live data (live.js) ---------- */
+/* Digits never shift: tabular figures wherever a number is shown, fixed minimum widths for live cells. */
+.c-num, [data-bind], .kpi-value, .m-value, td.r, .f-value { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+.c-num { white-space: nowrap; }
+table.grid th.c-num, table.grid td.c-num { width: 10ch; min-width: 10ch; }
+.metric .m-value.c-num { min-width: 8ch; }
+.c-pct { display: inline-block; min-width: 6ch; text-align: right; }
+.c-frac { display: inline-block; min-width: 7ch; }
+.c-time { display: inline-block; min-width: 11ch; }
+.m-hint { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); font-size: var(--fs-xs); margin-left: 4px; opacity: .85; }
+
+/* Stale: the last poll failed; the last good values stay, greyed, with "updated N s ago" and a warning icon. */
+.is-stale [data-bind], .is-stale .m-value, .is-stale svg.pbar, .is-stale svg.spark { color: var(--muted); opacity: .6; }
+.is-stale .badge { opacity: .7; }
+.stale-tag { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 1px 8px; border-radius: var(--r-pill);
+  background: var(--warn-soft); color: var(--warn); font-size: var(--fs-xs); font-weight: 600; white-space: nowrap; vertical-align: middle; }
+.stale-tag .ic { width: 12px; height: 12px; }
+.is-stale .stale-tag [data-bind-age] { color: var(--warn); opacity: 1; }
+
+/* connection pill in the top bar */
+.livepill { display: inline-flex; align-items: center; gap: 7px; padding: 3px 11px; border-radius: var(--r-pill); border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--muted); font-size: var(--fs-sm); font-weight: 600; min-width: 92px; white-space: nowrap; }
+.livepill .livedot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); flex: none; }
+.livepill[data-conn="live"] { color: var(--ok); border-color: var(--ok-soft); background: var(--ok-soft); }
+.livepill[data-conn="live"] .livedot { background: var(--ok); }
+.livepill[data-conn="polling"] { color: var(--info); background: var(--info-soft); border-color: var(--info-soft); }
+.livepill[data-conn="polling"] .livedot { background: var(--info); }
+.livepill[data-conn="reconnecting"], .livepill[data-conn="quiet"] { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-soft); }
+.livepill[data-conn="reconnecting"] .livedot, .livepill[data-conn="quiet"] .livedot { background: var(--warn); }
+.livepill[data-conn="offline"] { color: var(--bad); background: var(--bad-soft); border-color: var(--bad-soft); }
+.livepill[data-conn="offline"] .livedot { background: var(--bad); }
+@media (prefers-reduced-motion: no-preference) {
+  .livepill[data-conn="live"] .livedot { animation: livepulse 2s ease-in-out infinite; }
+  @keyframes livepulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(18, 112, 60, .45); } 50% { box-shadow: 0 0 0 4px rgba(18, 112, 60, 0); } }
+  tr.is-new td { animation: rowflash 2.4s ease-out; }
+  @keyframes rowflash { from { background: var(--warn-soft); } to { background: transparent; } }
+  svg.pbar .fg { transition: width .6s ease; }
+}
+.asof .asof-live { font-weight: 600; color: var(--ink); }
+
+/* Tables tab: "Copying now" lists every running table (several can run in parallel) */
+.running h3 { display: flex; align-items: center; gap: 8px; margin: 4px 0 6px; font-size: var(--fs-base); }
+.runlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 340px; overflow-y: auto; }
+.runlist li { display: grid; grid-template-columns: minmax(12ch, 2fr) minmax(120px, 3fr) 7ch minmax(16ch, 1.4fr) 9ch; gap: 12px; align-items: center;
+  padding: 7px 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: var(--r-md); background: var(--surface-2); }
+.runlist .rl-bar svg.pbar { width: 100%; }
+.runlist .rl-pct, .runlist .rl-eta, .runlist .rl-rows { text-align: right; }
+@media (max-width: 720px) { .runlist li { grid-template-columns: 1fr 7ch; } .runlist .rl-bar { grid-column: 1 / -1; grid-row: 2; } .runlist .rl-rows, .runlist .rl-eta { display: none; } }
+
+/* Graph tab: range selector */
+.chartbar { padding-top: 10px; padding-bottom: 10px; }
+.chartbar .cardhead { margin-bottom: 0; }
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-md); overflow: hidden; }
+.segbtn { font: inherit; font-size: var(--fs-sm); padding: 4px 12px; background: var(--surface); color: var(--ink); border: 0; border-left: 1px solid var(--line-strong); cursor: pointer; }
+.segbtn:first-child { border-left: 0; }
+.segbtn:hover { background: var(--surface-2); }
+.segbtn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+/* Logs tab */
+.logbar { margin-bottom: var(--sp-2); }
+.toolbar label.switch { color: var(--ink); font-weight: 600; }
+.cardhead h2 .ic { color: var(--muted); }
+.attncard .cardhead h2 .ic { color: var(--bad); }

@@ -17,6 +17,8 @@ type MetricSample struct {
 	LagMax     float64
 	Throughput float64
 	ApplyRate  float64
+	Rows       float64 // rows/s đã làm mượt (số hiển thị ở UI)
+	SnapRows   float64 // snapshot rows/s đã làm mượt
 	Holes      float64
 	Writeset   float64
 	SpoolBytes float64
@@ -47,15 +49,15 @@ func (p *PG) AppendMetrics(ctx context.Context, rows []MetricSample) error {
 		return nil
 	}
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO metric_samples (pipeline, ts, state, lag, throughput, apply_rate, holes, writeset, spool_bytes) VALUES `)
-	args := make([]any, 0, len(rows)*9)
+	sb.WriteString(`INSERT INTO metric_samples (pipeline, ts, state, lag, throughput, apply_rate, rows_rate, snap_rate, holes, writeset, spool_bytes) VALUES `)
+	args := make([]any, 0, len(rows)*11)
 	for i, r := range rows {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		b := i * 9
-		fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8, b+9)
-		args = append(args, r.Pipeline, r.T, r.State, r.Lag, r.Throughput, r.ApplyRate, r.Holes, r.Writeset, r.SpoolBytes)
+		b := i * 11
+		fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8, b+9, b+10, b+11)
+		args = append(args, r.Pipeline, r.T, r.State, r.Lag, r.Throughput, r.ApplyRate, r.Rows, r.SnapRows, r.Holes, r.Writeset, r.SpoolBytes)
 	}
 	sb.WriteString(` ON CONFLICT (pipeline, ts) DO NOTHING`)
 	_, err := p.db.ExecContext(ctx, sb.String(), args...)
@@ -72,7 +74,7 @@ func (p *PG) QueryMetrics(ctx context.Context, pipeline string, from, to time.Ti
 		table, lagMax = "metric_samples_1m", "max(lag_max)"
 	}
 	q := `SELECT to_timestamp(floor(extract(epoch FROM ts) / $4) * $4) AS b,
-		(array_agg(state ORDER BY ts DESC))[1], avg(lag), ` + lagMax + `, avg(throughput), avg(apply_rate), avg(holes), avg(writeset), avg(spool_bytes)
+		(array_agg(state ORDER BY ts DESC))[1], avg(lag), ` + lagMax + `, avg(throughput), avg(apply_rate), avg(rows_rate), avg(snap_rate), avg(holes), avg(writeset), avg(spool_bytes)
 		FROM ` + table + ` WHERE pipeline = $1 AND ts >= $2 AND ts <= $3 GROUP BY b ORDER BY b`
 	rows, err := p.db.QueryContext(ctx, q, pipeline, from, to, sec)
 	if err != nil {
@@ -82,7 +84,7 @@ func (p *PG) QueryMetrics(ctx context.Context, pipeline string, from, to time.Ti
 	var out []MetricSample
 	for rows.Next() {
 		m := MetricSample{Pipeline: pipeline}
-		if err := rows.Scan(&m.T, &m.State, &m.Lag, &m.LagMax, &m.Throughput, &m.ApplyRate, &m.Holes, &m.Writeset, &m.SpoolBytes); err != nil {
+		if err := rows.Scan(&m.T, &m.State, &m.Lag, &m.LagMax, &m.Throughput, &m.ApplyRate, &m.Rows, &m.SnapRows, &m.Holes, &m.Writeset, &m.SpoolBytes); err != nil {
 			return nil, p.wrap(err)
 		}
 		out = append(out, m)
@@ -98,12 +100,12 @@ func (p *PG) MaintainMetrics(ctx context.Context, rollupBefore, rawBefore, rollu
 	defer tx.Rollback() //nolint:errcheck
 	// Chỉ các phút đã đóng (trước rollupBefore) và còn raw; tính lại là idempotent.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO metric_samples_1m
-		(pipeline, ts, state, lag, lag_max, throughput, apply_rate, holes, writeset, spool_bytes)
+		(pipeline, ts, state, lag, lag_max, throughput, apply_rate, rows_rate, snap_rate, holes, writeset, spool_bytes)
 		SELECT pipeline, date_trunc('minute', ts) AS m, (array_agg(state ORDER BY ts DESC))[1], avg(lag), max(lag),
-		       avg(throughput), avg(apply_rate), avg(holes), avg(writeset), avg(spool_bytes)
+		       avg(throughput), avg(apply_rate), avg(rows_rate), avg(snap_rate), avg(holes), avg(writeset), avg(spool_bytes)
 		FROM metric_samples WHERE ts < date_trunc('minute', $1::timestamptz) GROUP BY pipeline, m
 		ON CONFLICT (pipeline, ts) DO UPDATE SET state = EXCLUDED.state, lag = EXCLUDED.lag, lag_max = EXCLUDED.lag_max,
-		  throughput = EXCLUDED.throughput, apply_rate = EXCLUDED.apply_rate, holes = EXCLUDED.holes,
+		  throughput = EXCLUDED.throughput, apply_rate = EXCLUDED.apply_rate, rows_rate = EXCLUDED.rows_rate, snap_rate = EXCLUDED.snap_rate, holes = EXCLUDED.holes,
 		  writeset = EXCLUDED.writeset, spool_bytes = EXCLUDED.spool_bytes`, rollupBefore); err != nil {
 		return p.wrap(err)
 	}
@@ -148,6 +150,7 @@ func bucketize(src []MetricSample, pipeline string, from, to time.Time, step tim
 		s                               MetricSample
 		last                            time.Time
 		lag, thr, app, holes, ws, spool float64
+		rows, snap                      float64
 		lagMax                          float64
 	}
 	bk := map[int64]*acc{}
@@ -165,6 +168,8 @@ func bucketize(src []MetricSample, pipeline string, from, to time.Time, step tim
 		a.lag += r.Lag
 		a.thr += r.Throughput
 		a.app += r.ApplyRate
+		a.rows += r.Rows
+		a.snap += r.SnapRows
 		a.holes += r.Holes
 		a.ws += r.Writeset
 		a.spool += r.SpoolBytes
@@ -184,7 +189,7 @@ func bucketize(src []MetricSample, pipeline string, from, to time.Time, step tim
 	for _, k := range keys {
 		a := bk[k]
 		out = append(out, MetricSample{Pipeline: pipeline, T: time.Unix(k, 0).UTC(), State: a.s.State, Lag: a.lag / a.n, LagMax: a.lagMax,
-			Throughput: a.thr / a.n, ApplyRate: a.app / a.n, Holes: a.holes / a.n, Writeset: a.ws / a.n, SpoolBytes: a.spool / a.n})
+			Throughput: a.thr / a.n, ApplyRate: a.app / a.n, Rows: a.rows / a.n, SnapRows: a.snap / a.n, Holes: a.holes / a.n, Writeset: a.ws / a.n, SpoolBytes: a.spool / a.n})
 	}
 	return out
 }

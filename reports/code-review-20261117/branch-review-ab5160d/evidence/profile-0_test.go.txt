@@ -1,0 +1,34 @@
+package main
+
+import (
+ "os"
+ "path/filepath"
+ "testing"
+)
+
+func TestReviewCPUWriteErrorMustSurface(t *testing.T) {
+ if _,err:=os.Stat("/dev/full");err!=nil{t.Skip("requires /dev/full")}
+ p,err:=startProfiling(profileConfig{cpuPath:"/dev/full",allowOverwrite:true})
+ if err!=nil{t.Fatal(err)}
+ err=p.Stop()
+ if err==nil{t.Fatal("CPU profile writes to /dev/full failed but Stop returned nil")}
+}
+func TestReviewProfileNewRelativeAbsoluteAlias(t *testing.T) {
+ absolute:=filepath.Join(t.TempDir(),"same.pprof")
+ cwd,err:=os.Getwd();if err!=nil{t.Fatal(err)}
+ relative,err:=filepath.Rel(cwd,absolute);if err!=nil{t.Fatal(err)}
+ p,err:=startProfiling(profileConfig{cpuPath:relative,blockPath:absolute,allowOverwrite:true})
+ if err!=nil{return}
+ defer p.Stop()
+ a,err:=p.cpuFile.Stat();if err!=nil{t.Fatal(err)}
+ b,err:=p.blockFile.Stat();if err!=nil{t.Fatal(err)}
+ if os.SameFile(a,b){t.Fatal("CPU and block profiles allowed on same previously nonexistent file via relative/absolute aliases")}
+}
+func TestReviewProfileOverwriteKeeps0600(t *testing.T) {
+ path:=filepath.Join(t.TempDir(),"cpu.pprof")
+ if err:=os.WriteFile(path,[]byte("previous"),0644);err!=nil{t.Fatal(err)}
+ p,err:=startProfiling(profileConfig{cpuPath:path,allowOverwrite:true});if err!=nil{t.Fatal(err)}
+ defer p.Stop()
+ st,err:=os.Stat(path);if err!=nil{t.Fatal(err)}
+ if st.Mode().Perm()!=0600{t.Fatalf("profile overwrite permissions=%o, want0600",st.Mode().Perm())}
+}

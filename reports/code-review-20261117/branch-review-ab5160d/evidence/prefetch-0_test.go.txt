@@ -1,0 +1,14 @@
+package main
+import (
+ "context"
+ "os"
+ "path/filepath"
+ "strings"
+ "testing"
+)
+func TestReviewSQLSnapshotTreatedAsSidecar(t *testing.T){
+ p:=filepath.Join(t.TempDir(),"dump.sql"); if err:=os.WriteFile(p,[]byte("CREATE TABLE t (id int);"),0600); err!=nil {t.Fatal(err)}
+ _,err:=prefetch(context.Background(),&seedManifestLite{SchemaSnapshot:p},t.TempDir(),0,0,"","","",nil)
+ if err==nil || !strings.Contains(err.Error(),"load archive schema sidecar") {t.Fatalf("expected incorrect sidecar load failure: %v",err)}
+ t.Logf("source-only/no-archive fails on ordinary SQL snapshot: %v",err)
+}

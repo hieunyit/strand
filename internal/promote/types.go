@@ -38,6 +38,7 @@ const (
 // SequenceInfo chứa thông tin sequence cần setval.
 type SequenceInfo struct {
 	Name            string       `json:"name"`
+	Schema          string       `json:"schema,omitempty"`
 	Table           string       `json:"table"`
 	Column          string       `json:"column"`
 	Type            SequenceType `json:"type"`

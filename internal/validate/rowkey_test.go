@@ -13,11 +13,14 @@ import (
 func TestUniqueIndexCoversMySQLSubsetAndPGExact(t *testing.T) {
 	idx := map[string][]string{"uk_a": {"a"}, "uk_ab": {"a", "b"}}
 	key := []string{"a", "b"}
-	if n, ok := uniqueIndexCovers(idx, key, false); !ok || n != "uk_a" {
-		t.Fatalf("MySQL: a subset unique index also guarantees uniqueness, got %q %v", n, ok)
+	if n, ok := uniqueIndexCovers(idx, key, false); !ok || n != "uk_ab" {
+		t.Fatalf("MySQL: exact source identity is required, got %q %v", n, ok)
 	}
 	if n, ok := uniqueIndexCovers(idx, key, true); !ok || n != "uk_ab" {
 		t.Fatalf("PG needs the exact column set for ON CONFLICT, got %q %v", n, ok)
+	}
+	if _, ok := uniqueIndexCovers(map[string][]string{"uk_a": {"a"}}, key, false); ok {
+		t.Fatal("MySQL subset unique cannot represent all source rows")
 	}
 	if _, ok := uniqueIndexCovers(map[string][]string{"uk_a": {"a"}}, key, true); ok {
 		t.Fatal("PG: a subset index cannot be the ON CONFLICT arbiter")
@@ -61,6 +64,20 @@ func TestMissingKeysErrorListsEveryTable(t *testing.T) {
 	for _, w := range []string{"2 table(s)", "INVISIBLE", "REPLICA IDENTITY USING INDEX \"ix\""} {
 		if !strings.Contains(err.Error(), w) {
 			t.Errorf("missing %q in %s", w, err)
+		}
+	}
+}
+
+func TestIndexContainsIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		cols []string
+		safe bool
+	}{
+		{[]string{"a"}, false}, {[]string{"b"}, false}, {[]string{"c"}, false},
+		{[]string{"b", "a"}, true}, {[]string{"c", "a", "b"}, true},
+	} {
+		if got := indexContainsIdentity(tc.cols, []string{"a", "b"}); got != tc.safe {
+			t.Fatalf("%v safe=%v want %v", tc.cols, got, tc.safe)
 		}
 	}
 }

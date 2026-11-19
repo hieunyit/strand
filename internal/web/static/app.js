@@ -1,4 +1,5 @@
-// Strand web console: periodic refresh of the server-rendered content. No libraries.
+// Strand web console. Live numbers arrive over Server-Sent Events and are updated in place (data-bind);
+// the whole content is re-fetched only for structural changes. No libraries.
 (function () {
   'use strict';
   var content = document.getElementById('content');
@@ -7,6 +8,7 @@
   var csrf = csrfMeta ? csrfMeta.getAttribute('content') : '';
   var seconds = parseInt(content.getAttribute('data-refresh') || '0', 10);
   var busy = false;
+  var onSwap = []; // called after a structural refresh replaced #content (the live module re-attaches)
 
   // Same-origin fetch that always carries the session cookie and the CSRF header (for POST).
   function api(method, url, body) {
@@ -24,6 +26,10 @@
     var a = document.activeElement;
     if (a && content.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) { return true; }
     if (document.querySelector('dialog[open]')) { return true; }
+    var cfgEdit = document.getElementById('cfg-edit-mode');
+    if (cfgEdit && !cfgEdit.hidden) { return true; }
+    var envEdit = document.getElementById('env-edit-mode');
+    if (envEdit && !envEdit.hidden) { return true; }
     return !!content.querySelector('form[data-dirty]');
   }
 
@@ -104,6 +110,10 @@
         var doc = new DOMParser().parseFromString(html, 'text/html');
         var fresh = doc.getElementById('content');
         if (!fresh || fresh.innerHTML === lastFresh) { return; }
+        // A proxy may serve another tab's HTML without an HTTP redirect. Bind
+        // the server's active tab to the requested path before replacing content.
+        var activeTab = fresh.querySelector('nav.tabs a.active');
+        if (activeTab && new URL(activeTab.getAttribute('href'), location.href).pathname !== location.pathname) { return; }
         if (force !== true && (editing() || selecting())) { return; }
         var st = saveState();
         content.innerHTML = fresh.innerHTML;
@@ -111,6 +121,7 @@
         restoreState(st);
         applyList();
         applyTables();
+        onSwap.forEach(function (f) { f(); });
       })
       .catch(function () {
         // Transient error: keep the old content but say that it is stale.
@@ -288,6 +299,8 @@
   });
 
   if (seconds > 0) { setInterval(refresh, seconds * 1000); }
+  // Hooks for /static/live.js (the SSE client): structural refresh, re-attach after a swap, table filters.
+  window.strandConsole = { refresh: refresh, onSwap: onSwap, applyTables: applyTables, applyList: applyList, editing: editing, selecting: selecting };
 
   // ---- toast and confirmation dialog (no inline script: everything is wired here) ----
   var toastEl = document.getElementById('toast');
@@ -370,6 +383,10 @@
         form.removeAttribute('data-dirty');
         if (res.j.job_id && !form.hasAttribute('data-stay')) { location.href = '/jobs/' + res.j.job_id; return; }
         toast(action + ': ' + (res.j.message || 'ok'), true);
+        if (action === 'delete') {
+          setTimeout(function () { location.href = '/'; }, 1000);
+          return;
+        }
         setTimeout(function () { refresh(true); }, 1500);
       } else {
         toast(action + ' failed (' + res.status + '): ' + (res.j.error || 'error'), false);
@@ -385,6 +402,7 @@
   document.addEventListener('submit', function (ev) {
     var form = ev.target;
     if (!form || !form.classList || !form.classList.contains('act')) { return; }
+    if (form.id === 'new-pipeline-form' || !form.getAttribute('data-pipeline')) { return; }
     ev.preventDefault();
     var body = collect(form);
     // A form may have several submit buttons, each its own action (data-do) with its own dialogs.
@@ -409,7 +427,11 @@
 
   document.addEventListener('input', function (ev) {
     var form = ev.target && ev.target.form;
-    if (form && form.classList && form.classList.contains('act')) { form.setAttribute('data-dirty', '1'); }
+    if (form) { form.setAttribute('data-dirty', '1'); }
+  });
+  document.addEventListener('change', function (ev) {
+    var form = ev.target && ev.target.form;
+    if (form) { form.setAttribute('data-dirty', '1'); }
   });
 
   // ---- live job output: poll the offset endpoint until the job ends ----
@@ -443,11 +465,25 @@
     if (t.id === 'cfg-btn-toggle') {
       var vm = document.getElementById('cfg-view-mode');
       var em = document.getElementById('cfg-edit-mode');
-      if (vm && em) { vm.hidden = true; em.hidden = false; }
+      var tb = document.getElementById('cfg-btn-toggle');
+      if (vm && em) {
+        vm.hidden = true;
+        em.hidden = false;
+        if (tb) tb.hidden = true;
+        var form = document.getElementById('cfg-edit-form');
+        if (form) form.setAttribute('data-dirty', '1');
+      }
     } else if (t.id === 'cfg-btn-cancel') {
       var vm = document.getElementById('cfg-view-mode');
       var em = document.getElementById('cfg-edit-mode');
-      if (vm && em) { vm.hidden = false; em.hidden = true; }
+      var tb = document.getElementById('cfg-btn-toggle');
+      if (vm && em) {
+        vm.hidden = false;
+        em.hidden = true;
+        if (tb) tb.hidden = false;
+        var form = document.getElementById('cfg-edit-form');
+        if (form) form.removeAttribute('data-dirty');
+      }
     } else if (t.id === 'cfg-btn-diff') {
       var form = document.getElementById('cfg-edit-form');
       var ta = document.getElementById('cfg-yaml-textarea');
@@ -474,19 +510,30 @@
       var form = document.getElementById('cfg-edit-form');
       var ta = document.getElementById('cfg-yaml-textarea');
       var restart = document.getElementById('cfg-restart-check');
+      var force = document.getElementById('cfg-force-check');
       var p = form ? form.getAttribute('data-pipeline') : '';
       if (!p || !ta) return;
       var rst = restart && restart.checked;
+      var frc = force && force.checked;
       toast('Saving configuration...', true);
-      api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/config', { yaml: ta.value, restart: rst })
+      api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/config', { yaml: ta.value, restart: rst, force: frc })
         .then(function (r) {
           return r.json().then(function (j) { return { ok: r.ok, j: j }; });
         })
         .then(function (res) {
           if (res.ok) {
-            toast('Configuration saved!' + (res.j.restarted ? ' Pipeline restarted.' : ''), true);
+            toast(res.j.message || ('Configuration saved!' + (res.j.restarted ? ' Pipeline restarted.' : '')), true);
             setTimeout(function () { location.reload(); }, 1200);
           } else {
+            var box = document.getElementById('cfg-diff-box');
+            var st = document.getElementById('cfg-val-status');
+            var out = document.getElementById('cfg-diff-output');
+            if (box && st && out) {
+              box.hidden = false;
+              st.innerHTML = '<span class="badge st-failed">Save rejected: validation failed</span>';
+              out.textContent = res.j.error || 'Validation failed. Check "Save anyway" to bypass and save.';
+              if (force) { force.focus(); }
+            }
             toast('Save failed: ' + (res.j.error || 'error'), false);
           }
         })
@@ -496,7 +543,11 @@
       var tp = tform ? tform.getAttribute('data-pipeline') : '';
       if (!tp) return;
       var dry = t.id === 'tuning-btn-diff';
-      var body = { dry_run: dry, restart: !dry && !!(document.getElementById('tuning-restart') || {}).checked };
+      var body = {
+        dry_run: dry,
+        restart: !dry && !!(document.getElementById('tuning-restart') || {}).checked,
+        force: !dry && !!(document.getElementById('tuning-force') || {}).checked
+      };
       Array.prototype.forEach.call(tform.querySelectorAll('[data-tuning]'), function (el) {
         body[el.getAttribute('data-tuning')] = el.value.trim(); // rỗng = bỏ khóa (về mặc định)
       });
@@ -632,6 +683,41 @@
   var newPipeForm = document.getElementById('new-pipeline-form');
   if (newPipeForm) {
     npSetup(newPipeForm);
+    var listDBButton = document.getElementById('np-list-databases');
+    if (listDBButton) listDBButton.addEventListener('click', function () {
+      var status = document.getElementById('np-database-list-status');
+      var box = document.getElementById('np-database-list');
+      var field = document.getElementById('np-database');
+      var value = function (name) { var el = newPipeForm.querySelector('[name="' + name + '"]'); return el ? el.value.trim() : ''; };
+      listDBButton.disabled = true;
+      if (status) status.textContent = ' Connecting to source…';
+      api('POST', '/api/v1/source/databases', {from: value('from'), host: value('source_host'), port: Number(value('source_port')), user: value('source_user'), password: value('source_password')})
+        .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Could not list databases'); return j; }); })
+        .then(function (data) {
+          if (!box || !field) return;
+          box.innerHTML = '';
+          if (!data.databases || !data.databases.length) { if (status) status.textContent = ' No accessible user databases found.'; box.hidden = true; return; }
+          data.databases.forEach(function (name, index) {
+            var label = document.createElement('label'); label.className = 'np-db-option';
+            var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = name;
+            cb.id = 'np-db-option-' + index;
+            cb.checked = field.value.split(',').map(function (x) { return x.trim(); }).indexOf(name) >= 0;
+            var text = document.createElement('span'); text.textContent = name;
+            label.htmlFor = cb.id;
+            box.appendChild(cb); box.appendChild(label);
+          });
+          var actions = document.createElement('button'); actions.type = 'button'; actions.className = 'btn'; actions.textContent = 'Use selected databases';
+          actions.addEventListener('click', function () {
+            var selected = Array.prototype.map.call(box.querySelectorAll('input[type="checkbox"]:checked'), function (cb) { return cb.value; });
+            field.value = selected.join(', '); field.dispatchEvent(new Event('input', {bubbles:true}));
+            if (status) status.textContent = selected.length ? ' Applied ' + selected.length + ' database(s).' : ' Choose at least one database.';
+          });
+          box.appendChild(actions); box.hidden = false;
+          if (status) status.textContent = ' Select one or more databases.';
+        })
+        .catch(function (err) { if (status) status.textContent = ' ' + err.message; })
+        .finally(function () { listDBButton.disabled = false; });
+    });
     newPipeForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var btn = document.getElementById('btn-create-pipeline');
@@ -650,19 +736,33 @@
           } else if (k === 'include' || k === 'exclude' || k === 'databases' || k === 'windows') {
             // API nhận mảng chuỗi: tách theo dấu phẩy
             payload[k] = str.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+          } else if (k === 'overwrite') {
+            payload[k] = v === 'true' || v === '1' || v === 'on';
           } else {
             payload[k] = str;
           }
         }
       });
+      if (newPipeForm.getAttribute('data-allow-overwrite') === payload.name) {
+        payload.overwrite = true;
+      }
       api('POST', '/api/v1/pipelines', payload)
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
         .then(function (res) {
           var resBox = document.getElementById('new-pipeline-result');
           var resBody = document.getElementById('result-body');
           if (resBox && resBody) {
             resBox.hidden = false;
             if (res.ok) {
+              if (res.j.ok) {
+                newPipeForm.removeAttribute('data-allow-overwrite');
+                var owBox = document.getElementById('np-overwrite');
+                if (owBox) owBox.checked = false;
+              } else {
+                newPipeForm.setAttribute('data-allow-overwrite', res.j.pipeline);
+                var owBox = document.getElementById('np-overwrite');
+                if (owBox) owBox.checked = true;
+              }
               var vPass = res.j.validate && res.j.validate.exit_code === 0;
               var pPass = res.j.plan && res.j.plan.exit_code === 0;
               var html = '';
@@ -685,7 +785,20 @@
               if (res.j.ok) { toast('Pipeline created successfully!', true); }
               else { toast('Pipeline created but validation FAILED: fix it before Start', false); }
             } else {
-              resBody.innerHTML = '<p class="err">Error: ' + escHtml(res.j.error || 'Failed to create pipeline') + '</p>';
+              var errHtml = '<p class="err">Error: ' + escHtml(res.j.error || 'Failed to create pipeline') + '</p>';
+              if (res.status === 409) {
+                errHtml += '<p class="mt10"><button type="button" class="btn warning" id="btn-force-overwrite">Overwrite &amp; recreate "' + escHtml(payload.name || '') + '"</button></p>';
+              }
+              resBody.innerHTML = errHtml;
+              var forceBtn = document.getElementById('btn-force-overwrite');
+              if (forceBtn) {
+                forceBtn.addEventListener('click', function () {
+                  newPipeForm.setAttribute('data-allow-overwrite', payload.name);
+                  var owBox = document.getElementById('np-overwrite');
+                  if (owBox) owBox.checked = true;
+                  btn.click();
+                });
+              }
               toast('Creation failed: ' + (res.j.error || 'error'), false);
             }
           }

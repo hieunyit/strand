@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ func TestTablesTabTwoThousandTables(t *testing.T) {
 			RowsEstimate: int64(i) * 1_000_003, RowsCopied: int64(i) * 500_000, ProgressPct: 50, PK: []string{"id"}})
 	}
 	e.mock.mockPipeline.tables = ts
+	e.srv.samp.SampleOnce(context.Background()) // trang đọc từ bộ nhớ đệm của sampler
 	c, _ := e.loginOK()
 	var worst time.Duration
 	var body string

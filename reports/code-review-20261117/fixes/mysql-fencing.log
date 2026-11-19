@@ -1,0 +1,24 @@
+=== RUN   TestS03_MySQLStaleWorkerCreationAfterTakeover
+2026/11/17 10:32:17 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: bc62bf155e311a8b1c38ede515de5c7e154a38c6cac084bed7b5f1fbde833f80
+  Test ProcessID: 71aa9530-4ffe-42b9-80b2-3488c06734ce
+2026/11/17 10:32:17 🐳 Creating container for image mysql:8.4
+2026/11/17 10:32:17 ✅ Container created: e29fa66c87c9
+2026/11/17 10:32:17 🐳 Starting container: e29fa66c87c9
+2026/11/17 10:32:17 ✅ Container started: e29fa66c87c9
+2026/11/17 10:32:17 ⏳ Waiting for container id e29fa66c87c9 image: mysql:8.4. Waiting for: &{timeout:0xc94ad7842e8 Log:port: 3306  MySQL Community Server IsRegexp:false Occurrence:1 PollInterval:100ms}
+2026/11/17 10:32:35 🔔 Container is ready: e29fa66c87c9
+--- PASS: TestS03_MySQLStaleWorkerCreationAfterTakeover (18.76s)
+PASS
+2026/11/17 10:32:35 🐳 Stopping container: e29fa66c87c9
+2026/11/17 10:32:38 ✅ Container stopped: e29fa66c87c9
+2026/11/17 10:32:38 🐳 Terminating container: e29fa66c87c9
+2026/11/17 10:32:39 🚫 Container terminated: e29fa66c87c9
+ok  	strand/internal/writer	22.499s

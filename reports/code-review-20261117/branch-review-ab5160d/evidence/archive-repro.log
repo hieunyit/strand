@@ -1,0 +1,8 @@
+=== RUN   TestReviewQuotedQualifiedDDL
+    review_data_test.go:10: qualified quoted DDL is missed with different default schema
+--- PASS: TestReviewQuotedQualifiedDDL (0.00s)
+=== RUN   TestReviewWrongSameLengthKey
+    review_data_test.go:15: only key length checked; actual column identity not encoded
+--- PASS: TestReviewWrongSameLengthKey (0.00s)
+PASS
+ok  	strand/internal/reader/archive	0.244s

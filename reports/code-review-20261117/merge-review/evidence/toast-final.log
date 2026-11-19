@@ -1,0 +1,129 @@
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove
+    harness_test.go:58: SEED=42
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove/run1
+2026/11/17 22:09:54 github.com/testcontainers/testcontainers-go - Connected to docker:
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 1bc319dbed386e4b9cfac41602b6d21c18e6fba7e4e4ea5ccd0bae33736637be
+  Test ProcessID: 80d52d61-5609-49b2-99f9-fd79228c8426
+2026/11/17 22:09:54 🐳 Creating container for image postgres:18
+2026/11/17 22:09:54 ✅ Container created: e59e10ef660d
+2026/11/17 22:09:54 🐳 Starting container: e59e10ef660d
+2026/11/17 22:09:55 ✅ Container started: e59e10ef660d
+2026/11/17 22:09:55 ⏳ Waiting for container id e59e10ef660d image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x261cd1013dc0 Strategies:[0x261cd1018b70 0x261cd1018ba0]}
+2026/11/17 22:09:59 🔔 Container is ready: e59e10ef660d
+2026/11/17 22:09:59 🐳 Creating container for image postgres:18
+2026/11/17 22:10:00 ✅ Container created: 70b19c7301e3
+2026/11/17 22:10:00 🐳 Starting container: 70b19c7301e3
+2026/11/17 22:10:00 ✅ Container started: 70b19c7301e3
+2026/11/17 22:10:00 ⏳ Waiting for container id 70b19c7301e3 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x261cd0f2a5d8 Strategies:[0x261cd1282e40 0x261cd1282e70]}
+2026/11/17 22:10:04 🔔 Container is ready: 70b19c7301e3
+    pg_toast_pk_test.go:119: workload: 6236 ops, 0 client-side errors, 11128 items PK moves with unchanged TOAST, 66 events PK moves
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:10:10.755348157+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.accounts","duration":"2.488915903s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:10:18.757697485+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.events","duration":"8.002263941s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:12:28.22749142+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.items","duration":"2m9.469686401s","reread_keys":425}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:12:28.297848074+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.marker","duration":"70.276311ms","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:12:28.297901988+07:00","level":"INFO","msg":"bootstrap finished: pipeline synced","pipeline":"e2e-pg-toastpk","epoch":1}
+    pg_toast_pk_test.go:140: app.items: 425 keys re-read during the snapshot
+    pg_harness_test.go:772: ver monotonic over 350 samples
+    pg_toast_pk_test.go:142: final state: 42572 rows in 4 tables identical
+    pg_toast_pk_test.go:143: invariants: doc never NULL, 47036 row versions applied exactly once
+2026/11/17 22:12:33 🐳 Stopping container: 70b19c7301e3
+2026/11/17 22:12:34 ✅ Container stopped: 70b19c7301e3
+2026/11/17 22:12:34 🐳 Terminating container: 70b19c7301e3
+2026/11/17 22:12:35 🚫 Container terminated: 70b19c7301e3
+2026/11/17 22:12:35 🐳 Stopping container: e59e10ef660d
+2026/11/17 22:12:36 ✅ Container stopped: e59e10ef660d
+2026/11/17 22:12:36 🐳 Terminating container: e59e10ef660d
+2026/11/17 22:12:36 🚫 Container terminated: e59e10ef660d
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove/run2
+2026/11/17 22:12:36 🐳 Creating container for image postgres:18
+2026/11/17 22:12:36 ✅ Container created: ba834cc704b4
+2026/11/17 22:12:36 🐳 Starting container: ba834cc704b4
+2026/11/17 22:12:37 ✅ Container started: ba834cc704b4
+2026/11/17 22:12:37 ⏳ Waiting for container id ba834cc704b4 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x261cd756c380 Strategies:[0x261cd11366f0 0x261cd1136720]}
+2026/11/17 22:12:42 🔔 Container is ready: ba834cc704b4
+2026/11/17 22:12:42 🐳 Creating container for image postgres:18
+2026/11/17 22:12:42 ✅ Container created: 58d6dcb0033e
+2026/11/17 22:12:42 🐳 Starting container: 58d6dcb0033e
+2026/11/17 22:12:43 ✅ Container started: 58d6dcb0033e
+2026/11/17 22:12:43 ⏳ Waiting for container id 58d6dcb0033e image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x261cd77f0438 Strategies:[0x261cd77c3cb0 0x261cd77c3ce0]}
+2026/11/17 22:12:47 🔔 Container is ready: 58d6dcb0033e
+    pg_toast_pk_test.go:119: workload: 6539 ops, 0 client-side errors, 12069 items PK moves with unchanged TOAST, 66 events PK moves
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:12:53.297290746+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.accounts","duration":"2.798891339s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:12:59.537614977+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.events","duration":"6.24027667s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:15:10.619014118+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.items","duration":"2m11.081210526s","reread_keys":590}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:15:10.704727542+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.marker","duration":"85.618495ms","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:15:10.704820306+07:00","level":"INFO","msg":"bootstrap finished: pipeline synced","pipeline":"e2e-pg-toastpk","epoch":1}
+    pg_toast_pk_test.go:140: app.items: 590 keys re-read during the snapshot
+    pg_harness_test.go:772: ver monotonic over 350 samples
+    pg_toast_pk_test.go:142: final state: 45864 rows in 4 tables identical
+    pg_toast_pk_test.go:143: invariants: doc never NULL, 51129 row versions applied exactly once
+2026/11/17 22:15:16 🐳 Stopping container: 58d6dcb0033e
+2026/11/17 22:15:17 ✅ Container stopped: 58d6dcb0033e
+2026/11/17 22:15:17 🐳 Terminating container: 58d6dcb0033e
+2026/11/17 22:15:17 🚫 Container terminated: 58d6dcb0033e
+2026/11/17 22:15:17 🐳 Stopping container: ba834cc704b4
+2026/11/17 22:15:18 ✅ Container stopped: ba834cc704b4
+2026/11/17 22:15:18 🐳 Terminating container: ba834cc704b4
+2026/11/17 22:15:18 🚫 Container terminated: ba834cc704b4
+=== RUN   TestP2_E2E_PGLogicalSnapshotToastPKMove/run3
+2026/11/17 22:15:19 🐳 Creating container for image postgres:18
+2026/11/17 22:15:19 ✅ Container created: 979d8f17ffe1
+2026/11/17 22:15:19 🐳 Starting container: 979d8f17ffe1
+2026/11/17 22:15:19 ✅ Container started: 979d8f17ffe1
+2026/11/17 22:15:19 ⏳ Waiting for container id 979d8f17ffe1 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x261cd78282f8 Strategies:[0x261cdae10960 0x261cdae10990]}
+2026/11/17 22:15:24 🔔 Container is ready: 979d8f17ffe1
+2026/11/17 22:15:24 🐳 Creating container for image postgres:18
+2026/11/17 22:15:24 ✅ Container created: 5613ecf01c9b
+2026/11/17 22:15:24 🐳 Starting container: 5613ecf01c9b
+2026/11/17 22:15:25 ✅ Container started: 5613ecf01c9b
+2026/11/17 22:15:25 ⏳ Waiting for container id 5613ecf01c9b image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x261cd76b27f8 Strategies:[0x261cd13c76b0 0x261cd13c76e0]}
+2026/11/17 22:15:29 🔔 Container is ready: 5613ecf01c9b
+    pg_toast_pk_test.go:119: workload: 5974 ops, 0 client-side errors, 10389 items PK moves with unchanged TOAST, 36 events PK moves
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:15:35.368728066+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.accounts","duration":"2.930643788s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:15:41.958453633+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.events","duration":"6.589664466s","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:17:51.865532301+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.items","duration":"2m9.907022596s","reread_keys":490}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:17:51.942119685+07:00","level":"INFO","msg":"snapshot done","pipeline":"e2e-pg-toastpk","epoch":1,"table":"app.marker","duration":"76.503158ms","reread_keys":0}
+    pg_toast_pk_test.go:131: {"time":"2026-11-17T22:17:51.942199805+07:00","level":"INFO","msg":"bootstrap finished: pipeline synced","pipeline":"e2e-pg-toastpk","epoch":1}
+    pg_toast_pk_test.go:140: app.items: 490 keys re-read during the snapshot
+    pg_harness_test.go:772: ver monotonic over 335 samples
+    pg_toast_pk_test.go:142: final state: 51499 rows in 4 tables identical
+    pg_toast_pk_test.go:143: invariants: doc never NULL, 56127 row versions applied exactly once
+2026/11/17 22:17:57 🐳 Stopping container: 5613ecf01c9b
+2026/11/17 22:17:58 ✅ Container stopped: 5613ecf01c9b
+2026/11/17 22:17:58 🐳 Terminating container: 5613ecf01c9b
+2026/11/17 22:17:59 🚫 Container terminated: 5613ecf01c9b
+2026/11/17 22:17:59 🐳 Stopping container: 979d8f17ffe1
+2026/11/17 22:18:00 ✅ Container stopped: 979d8f17ffe1
+2026/11/17 22:18:00 🐳 Terminating container: 979d8f17ffe1
+2026/11/17 22:18:00 🚫 Container terminated: 979d8f17ffe1
+--- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove (486.50s)
+    --- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove/run1 (162.43s)
+    --- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove/run2 (162.23s)
+    --- PASS: TestP2_E2E_PGLogicalSnapshotToastPKMove/run3 (161.84s)
+PASS
+2026/11/17 22:18:00 🐳 Stopping container: 5613ecf01c9b
+2026/11/17 22:18:00 🐳 Terminating container: 5613ecf01c9b
+2026/11/17 22:18:00 🚫 Container terminated: 5613ecf01c9b
+2026/11/17 22:18:00 🐳 Stopping container: 979d8f17ffe1
+2026/11/17 22:18:00 🐳 Terminating container: 979d8f17ffe1
+2026/11/17 22:18:00 🚫 Container terminated: 979d8f17ffe1
+2026/11/17 22:18:00 🐳 Stopping container: 58d6dcb0033e
+2026/11/17 22:18:00 🐳 Terminating container: 58d6dcb0033e
+2026/11/17 22:18:00 🚫 Container terminated: 58d6dcb0033e
+2026/11/17 22:18:00 🐳 Stopping container: ba834cc704b4
+2026/11/17 22:18:00 🐳 Terminating container: ba834cc704b4
+2026/11/17 22:18:00 🚫 Container terminated: ba834cc704b4
+2026/11/17 22:18:00 🐳 Stopping container: 70b19c7301e3
+2026/11/17 22:18:00 🐳 Terminating container: 70b19c7301e3
+2026/11/17 22:18:00 🚫 Container terminated: 70b19c7301e3
+2026/11/17 22:18:00 🐳 Stopping container: e59e10ef660d
+2026/11/17 22:18:00 🐳 Terminating container: e59e10ef660d
+2026/11/17 22:18:00 🚫 Container terminated: e59e10ef660d
+ok  	strand/tests/e2e	496.580s

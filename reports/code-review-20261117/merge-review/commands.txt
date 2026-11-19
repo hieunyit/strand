@@ -1,0 +1,19 @@
+PATH=/usr/local/go/bin:$PATH
+# Initial broad package gate; failed in two outdated fixture groups, preserved as evidence.
+go test ./cmd/... ./internal/... ./tools/... ./tests/checker/... -short -count=1 -timeout=8m
+# Reruns after fixture repairs.
+go test ./internal/writer -count=1 -timeout=5m
+go test ./internal/pipeline -short -count=1 -timeout=6m
+# Integrated race regressions after all production fixes.
+go test -race ./cmd/strand ./internal/reader/mysql ./internal/pipeline ./internal/promote ./internal/verify ./internal/web ./tools/diagnostics/breaker ./tools/diagnostics/pg-strict -run '^Test(Prefetch|SourceUniquePrefetch|Profile|QuoteMySQL|ApplyAutoIncrementPreserves|MySQLSequenceOperationsPreserve|MerkleResume|ConcurrentTuning|TuningSaveRejects|ProtectedSnapshot|EngineStatus|SanitizeEngine|DSN|ScrapeMetrics|ParseMetricCounter)' -count=1 -timeout=3m
+go test -race ./internal/web ./tools/diagnostics/breaker ./tools/diagnostics/pg-strict -count=1 -timeout=4m
+SEED=42 STRAND_E2E_COMMIT_ORDER=strict go test ./tests/e2e -run '^Test(KL_E2E_PGToPG_KeylessReplicaIdentityFull|UK_E2E_MySQLToMySQL_UniqueKey)$' -count=1 -timeout=6m -v
+SEED=42 STRAND_E2E_COMMIT_ORDER=strict STRAND_E2E_PG_TOAST_PK_ITERATIONS=3 STRAND_E2E_PG_TOAST_PK_LOAD_SECONDS=15 go test ./tests/e2e -run '^TestP2_E2E_PGLogicalSnapshotToastPKMove$' -count=1 -timeout=10m -v
+go vet ./...
+go build ./...
+go mod tidy -diff
+git diff --check
+
+# Pipeline exceeded the aggregate6m budget after81 completed tests. Resume coverage with
+# the exact42 names in evidence/pipeline-remaining.txt (join names with | and anchor).
+# That isolated tail passed with -short -count=1 -timeout=8m -v.

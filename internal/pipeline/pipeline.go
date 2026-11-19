@@ -153,6 +153,7 @@ type Pipeline struct {
 	snapRowsEst     atomic.Int64
 	snapRate        rateWindow
 	breaker         *governor.Breaker
+	mysqlSignals    *governor.MySQLDBSignalReader
 	breakerLogged   time.Time
 	verifying       atomic.Bool // chờ verify sau seed (02 §9)
 	strictMu        sync.Mutex
@@ -200,6 +201,9 @@ func Run(ctx context.Context, opts Options) error {
 		opts.ShutdownTimeout = 100 * time.Second
 	}
 	cfg := opts.Config
+	if opts.StartAt == "" && cfg.Bootstrap.StartAt != "" {
+		opts.StartAt = cfg.Bootstrap.StartAt
+	}
 	srcEngine, dstEngine := engineOf(cfg.Source.Kind), engineOf(cfg.Target.Kind)
 	switch {
 	case srcEngine == model.EngineMySQL && dstEngine == model.EngineMySQL,
@@ -544,6 +548,12 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 				// Không được nuốt lỗi: đếm thiếu ở đây biến thành log_gap giả (hoặc bỏ sót Txn).
 				return fmt.Errorf("read prefetch spool: %w", err)
 			}
+			if !applied.Contains(t.SourcePos) {
+				if _, err := p.archiveIdentityChecker(t, true); err != nil {
+					it.Close()
+					return fmt.Errorf("validate prefetch identity before covering its position: %w", err)
+				}
+			}
 			streamFrom.Add(t.SourcePos)
 			n++
 		}
@@ -752,6 +762,33 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		p.snap.Pos = &posWatermarks{db: p.src, base: p.binlogBase}
 	}
 	p.snap.Pace = p.pace
+	p.snap.OnPhase = func(table model.TableID, startPK, endPK int64, phase string, elapsed time.Duration) {
+		p.log.Info("snapshot chunk phase", "table", table.String(), "start_pk", startPK, "end_pk", endPK,
+			"phase", phase, "duration", elapsed.Round(time.Millisecond).String())
+	}
+	p.snap.OnChunk = func(d snapshot.ChunkDiagnostic) {
+		p.log.Info("snapshot chunk", "table", d.Table.String(), "start_pk", d.StartPK, "end_pk", d.EndPK,
+			"rows", d.Rows, "bytes", d.Bytes, "reread", d.Reread,
+			"read", d.Read.Round(time.Millisecond).String(), "rendezvous", d.Rendezvous.Round(time.Millisecond).String(),
+			"flush", d.Flush.Round(time.Millisecond).String(),
+			"barrier_wait", d.BarrierWait.Round(time.Millisecond).String(),
+			"target_flush", d.TargetFlush.Round(time.Millisecond).String(),
+			"plan_save", d.PlanSave.Round(time.Millisecond).String(),
+			"pace", d.Pace.Round(time.Millisecond).String())
+	}
+	if p.dstEngine == model.EngineMySQL {
+		p.snap.OnTargetFlush = func(table model.TableID, d snapshot.TargetFlushDiagnostic) {
+			p.log.Info("snapshot flush detail", "table", table.String(),
+				"rows", d.Rows, "batches", d.Batches, "attempts", d.Attempts,
+				"manager_lock_wait", d.ManagerLockWait.Round(time.Millisecond).String(),
+				"merge", d.Merge.Round(time.Millisecond).String(),
+				"pool_wait", d.PoolWait.Round(time.Millisecond).String(),
+				"session_setup", d.SessionSetup.Round(time.Millisecond).String(),
+				"begin", d.Begin.Round(time.Millisecond).String(), "fence", d.Fence.Round(time.Millisecond).String(),
+				"delete", d.Delete.Round(time.Millisecond).String(), "upsert", d.Upsert.Round(time.Millisecond).String(),
+				"commit", d.Commit.Round(time.Millisecond).String())
+		}
+	}
 	if p.adaptiveChunks {
 		p.snap.NextChunkRows = p.nextChunkRows
 	}
@@ -1218,6 +1255,10 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		p.noteRouted(pos, 0)
 		return nil
 	}
+	archiveCheck, err := p.archiveIdentityChecker(t, false)
+	if err != nil {
+		return fmt.Errorf("validate archive identity before routing: %w", err)
+	}
 	if t.DDL != "" {
 		// P1–P2 (02 §12): DDL trên bảng thuộc pipeline (kể cả bảng MỚI khớp bộ lọc do CREATE/RENAME)
 		// chỉ đi tiếp khi schema ở target đã khớp source; nếu không thì dừng schema_change_pending.
@@ -1226,6 +1267,12 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		}
 	}
 
+	if t.DDL != "" {
+		archiveCheck, err = p.archiveIdentityChecker(t, false)
+		if err != nil {
+			return fmt.Errorf("validate archive identity after DDL: %w", err)
+		}
+	}
 	out := &model.Txn{SourcePos: pos, SourceTS: t.SourceTS}
 	handedOff := false
 	defer func() {
@@ -1239,6 +1286,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 	var rereadTables map[model.TableID]bool
 	lane := false // Txn chạm bảng LaneTable (relaxed, source PG): đi làn tuần tự
 	keep := func(rc *model.RowChange, emit func(model.RowChange) error) error {
+		if err := archiveCheck(rc); err != nil {
+			return err
+		}
 		if p.table(rc.Table) == nil {
 			// Partition lá của một bảng thuộc pipeline (publication không publish_via_partition_root):
 			// bỏ qua là mất row âm thầm — dừng (review R02, pg_partition.go).
@@ -1256,7 +1306,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		if p.beforeRegister(rc.Table) {
 			// Bảng chờ snapshot mà range chưa được đăng ký (source PG và MySQL, review N10): xem keepBeforeRegister.
 			var err error
-			if parts, err = p.keepBeforeRegister(rc); err != nil {
+			if parts, err = p.keepBeforeRegisterXID(rc, pos, t.XID); err != nil {
 				return err
 			}
 		} else if p.snap.Manager.IsRegistered(rc.Table) {
@@ -1482,6 +1532,12 @@ func (p *Pipeline) drainPrefetch(ctx context.Context, out chan<- *model.Txn) err
 		if err != nil {
 			it.Close()
 			return fmt.Errorf("read prefetch spool: %w", err)
+		}
+		if p.applied0 == nil || !p.applied0.Contains(t.SourcePos) {
+			if _, err := p.archiveIdentityChecker(t, true); err != nil {
+				it.Close()
+				return fmt.Errorf("validate prefetch replay identity: %w", err)
+			}
 		}
 		select {
 		case out <- t:
@@ -1895,7 +1951,11 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 	return nil
 }
 
-func (p *Pipeline) pace(ctx context.Context, chunkBytes int64) error {
+// readStart: lúc bắt đầu đọc chunk vừa xong. Thời gian đọc + flush đã trôi qua được trừ vào khoảng giãn
+// (tốc độ đọc nguồn trung bình = chi phí / R tính từ lúc đọc), thay vì chờ trọn chi phí/R SAU flush — cách
+// cũ làm tốc độ đọc thực tế thấp hơn R đã cấu hình (vd. soft 500 mà chỉ ~350 token/s khi flush ~2 s).
+// readStart rỗng: tính từ bây giờ (hành vi cũ).
+func (p *Pipeline) pace(ctx context.Context, chunkBytes int64, readStart time.Time) error {
 	if err := p.paceGate(ctx); err != nil {
 		return err
 	}
@@ -1906,7 +1966,11 @@ func (p *Pipeline) pace(ctx context.Context, chunkBytes int64) error {
 		return nil
 	}
 	cost := chunkReadPages(chunkBytes, p.curAvgRow.Load(), p.snapChunkRows.Load())
-	wait := p.snapBucket.reserve(time.Now(), time.Duration(cost/rate*float64(time.Second)))
+	now := time.Now()
+	if readStart.IsZero() || readStart.After(now) {
+		readStart = now
+	}
+	wait := p.snapBucket.reserve(readStart, now, time.Duration(cost/rate*float64(time.Second)))
 	if wait > 0 {
 		select {
 		case <-ctx.Done():
@@ -2012,23 +2076,27 @@ func (p *Pipeline) nextChunkRows(_ model.TableID, st snapshot.ChunkStat) int64 {
 	return n
 }
 
-// tokenBucket giãn nhịp kiểu trả sau (virtual scheduling): chunk vừa đọc tốn d = chi phí / R; thời điểm
-// được đọc chunk kế tiếp (tat) lùi thêm d, tính từ max(tat, now). Một reader: chờ đúng d sau mỗi chunk
-// (như trước). Nhiều reader: các khoản d cộng dồn, nên tổng tốc độ vẫn ≤ R.
+// tokenBucket giãn nhịp kiểu trả sau (virtual scheduling): chunk đọc lúc start tốn d = chi phí / R; thời
+// điểm được đọc chunk kế tiếp (tat) = max(tat, start) + d. Một reader: chunk kế tiếp bắt đầu đọc ≥ d sau
+// lúc bắt đầu đọc chunk trước (thời gian đọc/flush đã nằm trong d). Nhiều reader: các khoản d cộng dồn,
+// nên tổng tốc độ vẫn ≤ R.
 type tokenBucket struct {
 	mu  sync.Mutex
 	tat time.Time
 }
 
-// reserve ghi nhận chi phí d tại now và trả thời gian phải chờ.
-func (b *tokenBucket) reserve(now time.Time, d time.Duration) time.Duration {
+// reserve ghi nhận chi phí d của một chunk bắt đầu đọc lúc start và trả thời gian còn phải chờ tính từ now.
+func (b *tokenBucket) reserve(start, now time.Time, d time.Duration) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.tat.Before(now) {
-		b.tat = now
+	if b.tat.Before(start) {
+		b.tat = start
 	}
 	b.tat = b.tat.Add(d)
-	return b.tat.Sub(now)
+	if w := b.tat.Sub(now); w > 0 {
+		return w
+	}
+	return 0
 }
 
 func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {
@@ -2065,26 +2133,96 @@ func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	p.snapReaders.Add(1)
 	defer p.snapReaders.Add(-1)
 	rereads := p.snap.RereadKeysTotal.Load()
-	var err error
-	if m.PKNumeric {
-		err = p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], writableColumns(m), p.rendezvous)
-	} else {
-		err = p.snap.SnapshotAddKeys(ctx, p.src, p.dst, id, m.PKCodec, writableColumns(m), p.rendezvous)
-	}
-	if err != nil {
-		return err
+	for {
+		var high uint64
+		wait := func(ctx context.Context, set checkpoint.AppliedSet) error {
+			if err := p.rendezvous(ctx, set); err != nil {
+				return err
+			}
+			if p.srcEngine == model.EnginePG {
+				high = set.High().LSN
+			}
+			return nil
+		}
+		var err error
+		if m.PKNumeric {
+			err = p.snap.SnapshotAdd(ctx, p.src, p.dst, id, m.PK[0], writableColumns(m), wait)
+		} else {
+			err = p.snap.SnapshotAddKeys(ctx, p.src, p.dst, id, m.PKCodec, writableColumns(m), wait)
+		}
+		if err != nil {
+			return err
+		}
+		if p.srcEngine == model.EnginePG {
+			// Rendezvous only establishes router progress. Make it durable before
+			// deleting the saved bounds guard, and catch rereads routed meanwhile.
+			retry, err := p.finishPGSnapshot(ctx, id, high)
+			if err != nil {
+				return err
+			}
+			if retry {
+				continue
+			}
+		} else {
+			if err := p.state.SetDone(id.String(), true); err != nil {
+				return err
+			}
+			p.routeMu.Lock()
+			p.snap.Manager.RemoveTable(id)
+			p.routeMu.Unlock()
+		}
+		break
 	}
 	rereads = p.snap.RereadKeysTotal.Load() - rereads
-	if err := p.state.SetDone(id.String(), true); err != nil {
-		return err
-	}
-	p.routeMu.Lock()
-	p.snap.Manager.RemoveTable(id)
-	p.routeMu.Unlock()
 	p.snapTablesDone.Add(1)
 	p.log.Info("snapshot done", "table", id.String(), "duration", time.Since(start).String(),
 		"reread_keys", rereads) // khóa được đọc lại do UPDATE đổi PK mà cột TOAST không đổi (02 §8)
 	return nil
+}
+
+// finishPGSnapshot keeps the saved bounds guard until all routed work through
+// the completion watermark is durably represented by the global checkpoint.
+func (p *Pipeline) finishPGSnapshot(ctx context.Context, id model.TableID, high uint64) (bool, error) {
+	if high == 0 {
+		return false, fmt.Errorf("snapshot completion watermark missing for %s", id)
+	}
+	retry := false
+	err := p.barrier(ctx, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(p.snap.Manager.RereadBounds(id)) != 0 {
+			retry = true
+			return nil
+		}
+		if err := p.comp.Compact(ctx); err != nil {
+			return fmt.Errorf("snapshot completion compaction: %w", err)
+		}
+		q := "SELECT applied FROM _strand_checkpoint WHERE pipeline_id = ? AND epoch = ?"
+		if p.dstEngine == model.EnginePG {
+			q = "SELECT applied FROM _strand_checkpoint WHERE pipeline_id = $1 AND epoch = $2"
+		}
+		var applied string
+		if err := p.dst.QueryRowContext(ctx, q, p.id, p.epoch).Scan(&applied); err != nil {
+			return fmt.Errorf("read snapshot completion checkpoint: %w", err)
+		}
+		set, err := checkpoint.ParseAppliedSet(model.EnginePG, applied)
+		if err != nil {
+			return fmt.Errorf("parse snapshot completion checkpoint: %w", err)
+		}
+		if set.Lwd().LSN < high {
+			return fmt.Errorf("snapshot completion checkpoint %X does not cover watermark %X", set.Lwd().LSN, high)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := p.state.SetDone(id.String(), true); err != nil {
+			return err
+		}
+		p.snap.Manager.RemoveTable(id)
+		return nil
+	})
+	return retry, err
 }
 
 // SnapshotAdd thêm một bảng khi pipeline đang chạy (strand snapshot add, 02 §10).

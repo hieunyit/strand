@@ -251,21 +251,6 @@ func (p *PG) SetPipelineConflicts(ctx context.Context, name, conflicts string) e
 	return p.wrap(err)
 }
 
-func (p *PG) DeletePipeline(ctx context.Context, name string) error {
-	tx, err := p.db.BeginTx(ctx, nil)
-	if err != nil {
-		return p.wrap(err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.ExecContext(ctx, `DELETE FROM pipelines WHERE name = $1`, name); err != nil {
-		return p.wrap(err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM pipeline_desired WHERE name = $1`, name); err != nil {
-		return p.wrap(err)
-	}
-	return p.wrap(tx.Commit())
-}
-
 func (p *PG) GetPipeline(ctx context.Context, name string) (Pipeline, bool, error) {
 	r, err := scanPipeline(p.db.QueryRowContext(ctx, `SELECT `+pipelineCols+` FROM pipelines WHERE name = $1`, name))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -289,6 +274,21 @@ func (p *PG) ListPipelines(ctx context.Context) ([]Pipeline, error) {
 		out = append(out, r)
 	}
 	return out, p.wrap(rows.Err())
+}
+
+func (p *PG) DeletePipeline(ctx context.Context, name string) error {
+	// Một transaction: không để lại trạng thái mong muốn "running" mồ côi (tự chạy lại nếu tên được dùng lại).
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return p.wrap(err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, q := range []string{`DELETE FROM pipelines WHERE name = $1`, `DELETE FROM pipeline_desired WHERE name = $1`, `DELETE FROM wizards WHERE pipeline = $1`} {
+		if _, err := tx.ExecContext(ctx, q, name); err != nil {
+			return p.wrap(err)
+		}
+	}
+	return p.wrap(tx.Commit())
 }
 
 func (p *PG) SetDesired(ctx context.Context, name, desired string) error {

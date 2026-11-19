@@ -23,6 +23,11 @@ import (
 
 // Config chứa cấu hình kết nối của MySQLReader.
 type Config struct {
+	// Prefetch cannot represent omitted columns as SQL NULL.
+	RequireFullRowImage bool
+	// Optional verified seed table scope; transaction boundaries still pass through.
+	TableScope func(schema, table string) bool
+
 	DSN        string
 	Host       string
 	Port       uint16
@@ -325,7 +330,7 @@ func isTxnControlQuery(q string) bool {
 // resolveInfo trả info cho TABLE_MAP không có tên cột. Dùng cache; lệch số cột/kiểu thì đọc lại một lần từ
 // information_schema, vẫn lệch thì lỗi (fail closed, không ánh xạ cột sai). Bảng không còn tồn tại: nil.
 func (r *MySQLReader) resolveInfo(st *streamState, tm *replication.TableMapEvent) (*TableInfo, error) {
-	if r.cfg.TableInfo == nil || len(tm.ColumnName) > 0 {
+	if r.cfg.TableInfo == nil || (len(tm.ColumnName) > 0 && !(r.cfg.RequireFullRowImage && len(tm.PrimaryKey) == 0)) {
 		return nil, nil
 	}
 	key := string(tm.Schema) + "." + string(tm.Table)
@@ -417,10 +422,20 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 		if tm, found := st.tableMap[rowsEv.TableID]; found {
 			schema, table = string(tm.Schema), string(tm.Table)
 		}
+		if r.cfg.TableScope != nil && !r.cfg.TableScope(schema, table) {
+			return true
+		}
 		tm, info := st.tableMap[rowsEv.TableID], st.info[rowsEv.TableID]
 		if comp := st.compressed[rowsEv.TableID]; len(comp) > 0 {
 			if err := decompressRows(tm, rowsEv.Rows, comp); err != nil {
 				return fail(err)
+			}
+		}
+		if r.cfg.RequireFullRowImage {
+			for _, skipped := range rowsEv.SkippedColumns {
+				if len(skipped) > 0 {
+					return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "source prefetch requires FULL row images; refusing omitted columns", nil))
+				}
 			}
 		}
 		segs := []rowSeg{{op: op, rows: rowsEv.Rows}}
@@ -586,6 +601,9 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				st.compressed[tmEv.TableID] = comp
 			}
 			st.tableMap[tmEv.TableID] = tmEv
+			if r.cfg.TableScope != nil && !r.cfg.TableScope(string(tmEv.Schema), string(tmEv.Table)) {
+				return true
+			}
 			info, err := r.resolveInfo(st, tmEv)
 			if err != nil {
 				return fail(err)
@@ -595,17 +613,25 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 			}
 			st.info[tmEv.TableID] = info
 			var cols, pkCols []string
+			var keyMode string
 			if info != nil {
 				for _, c := range info.Columns {
 					cols = append(cols, c.Name)
 				}
 				pkCols = info.PK
+				keyMode = info.KeyMode
+				if len(tmEv.ColumnName) > 0 && keyMode == "pk" && len(tmEv.PrimaryKey) == 0 {
+					return fail(fmt.Errorf("table %s.%s: catalog primary key is absent from full TABLE_MAP", tmEv.Schema, tmEv.Table))
+				}
 			} else if len(tmEv.ColumnName) > 0 {
 				cols = tmEv.ColumnNameString()
 				for _, idx := range tmEv.PrimaryKey {
 					if int(idx) < len(cols) {
 						pkCols = append(pkCols, cols[idx])
 					}
+				}
+				if len(pkCols) > 0 {
+					keyMode = "pk"
 				}
 			}
 			return emit(reader.Event{
@@ -618,6 +644,7 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				Table:      string(tmEv.Table),
 				Columns:    cols,
 				PKColumns:  pkCols,
+				KeyMode:    keyMode,
 				Timestamp:  ts,
 			})
 		}

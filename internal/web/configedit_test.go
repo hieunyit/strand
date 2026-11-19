@@ -125,6 +125,38 @@ func TestConfigSaveValidationFailureDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+func TestConfigSaveForceSavesDespiteValidationFailure(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, csrf := e.loginOK()
+
+	cfgPath := filepath.Join(e.dir, "orders.yaml")
+	origBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake strand exits with code 2 on validate failure
+	e.setExit(2)
+
+	modified := string(origBytes) + "\n# forced change with warnings\n"
+	body, _ := json.Marshal(map[string]any{"yaml": modified, "force": true})
+
+	resp, out := e.do(c, "POST", "/api/v1/pipelines/orders/config", string(body),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("save forced config: got status %d, want 200. Body: %s", resp.StatusCode, out)
+	}
+
+	// Config file MUST be updated because force=true
+	afterBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterBytes) != modified {
+		t.Errorf("file was not updated with force=true")
+	}
+}
+
 func TestConfigSaveAtomicAndBackup(t *testing.T) {
 	e := opsEnv(t, false, nil)
 	c, csrf := e.loginOK()

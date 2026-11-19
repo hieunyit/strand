@@ -148,6 +148,10 @@ func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, args []any,
 		return nil, 0, err
 	}
 	defer rows.Close()
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, 0, err
+	}
 
 	var result []*model.RowChange
 	var totalBytes int64
@@ -179,7 +183,7 @@ func (c *sqlChunkConn) QueryChunk(ctx context.Context, query string, args []any,
 				rawBytes = b
 				rc.Cols = append(rc.Cols, model.ColValue{
 					Name:  colName,
-					Value: string(b),
+					Value: snapshotColumnValue(b, columnTypes[i].DatabaseTypeName()),
 				})
 			} else {
 				rc.Cols = append(rc.Cols, model.ColValue{
@@ -364,12 +368,18 @@ type MySQLSnapshotter struct {
 	SavePlan func(table model.TableID, plan SnapshotPlan) error
 
 	// Pace (tùy chọn) được gọi giữa các chunk; governor dùng để giãn khoảng cách chunk. chunkBytes:
-	// số byte row thật của chunk vừa đọc (chi phí đọc dùng để giãn nhịp; ≤ 0 nếu không biết).
-	Pace func(ctx context.Context, chunkBytes int64) error
+	// số byte row thật của chunk vừa đọc (chi phí đọc dùng để giãn nhịp; ≤ 0 nếu không biết); readStart:
+	// lúc bắt đầu đọc chunk đó (thời gian đọc + flush được trừ vào khoảng giãn).
+	Pace func(ctx context.Context, chunkBytes int64, readStart time.Time) error
 
 	// NextChunkRows (tùy chọn) chọn cỡ (số hàng) của chunk chính kế tiếp từ số liệu đọc của chunk chính
 	// vừa xong — luật 250 ms và trần chi phí R · 0,25 s của governor (02 §7). nil = cố định ChunkRows của plan.
 	NextChunkRows func(table model.TableID, st ChunkStat) int64
+	// OnChunk reports phase timings for operational diagnosis; credentials and row values are never included.
+	OnChunk func(ChunkDiagnostic)
+	OnPhase func(table model.TableID, startPK, endPK int64, phase string, elapsed time.Duration)
+	// OnTargetFlush reports MySQL target transaction timing without SQL arguments or row data.
+	OnTargetFlush func(table model.TableID, d TargetFlushDiagnostic)
 
 	// FlushRows / ClearTarget (tùy chọn) thay phần ghi target khi target không phải MySQL
 	// (MySQL→PG). FlushRows phải thay nguyên range [startPK, endPK] của bảng đích bằng rows trong
@@ -412,6 +422,23 @@ type MySQLSnapshotter struct {
 	Chunks ChunkSource
 }
 
+// ChunkDiagnostic summarizes one chunk without logging row data or connection details.
+type ChunkDiagnostic struct {
+	Table                              model.TableID
+	StartPK, EndPK                     int64
+	Rows                               int
+	Bytes                              int64
+	Read, Rendezvous, Flush, Pace      time.Duration
+	BarrierWait, TargetFlush, PlanSave time.Duration
+	Reread                             bool
+}
+
+// TargetFlushDiagnostic separates MySQL target-side work for a snapshot chunk.
+type TargetFlushDiagnostic struct {
+	ManagerLockWait, Merge, PoolWait, SessionSetup, Begin, Fence, Delete, Upsert, Commit time.Duration
+	Rows, Batches, Attempts                                                              int
+}
+
 // ChunkSource là phần phụ thuộc engine của SOURCE khi snapshot một bảng: biên PK, keyset walk và đọc
 // một chunk kèm watermark (02 §5). Range-state, barrier, rendezvous, flush và plan là phần chung.
 type ChunkSource interface {
@@ -438,11 +465,13 @@ func NewMySQLSnapshotter(opts ChunkOptions) *MySQLSnapshotter {
 
 // SnapshotPlan là tiến độ snapshot của một bảng.
 type SnapshotPlan struct {
-	Empty     bool  `json:"empty"`
-	MinPK     int64 `json:"min_pk"`
-	MaxPK     int64 `json:"max_pk"`
-	ChunkRows int64 `json:"chunk_rows"`
-	NextPK    int64 `json:"next_pk"` // mọi chunk có EndPK < NextPK đã flush
+	// Original bounds visibility must survive restart while delayed stream events remain.
+	BoundSnapshot *PGSnapshot `json:"bound_snapshot,omitempty"`
+	Empty         bool        `json:"empty"`
+	MinPK         int64       `json:"min_pk"`
+	MaxPK         int64       `json:"max_pk"`
+	ChunkRows     int64       `json:"chunk_rows"`
+	NextPK        int64       `json:"next_pk"` // mọi chunk có EndPK < NextPK đã flush
 	// Finished: đã flush tới MaxPK. Cần cờ riêng vì khi MaxPK == MaxInt64 thì NextPK = MaxPK+1
 	// không biểu diễn được (tràn thành MinInt64 → resume đọc lại cả bảng).
 	Finished bool `json:"finished,omitempty"`
@@ -603,10 +632,24 @@ func (s *MySQLSnapshotter) FlushChunk(
 	pkCol string,
 	columnNames []string,
 ) (retErr error) {
+	var targetDiag TargetFlushDiagnostic
+	targetMeasured := false
+	if s.OnTargetFlush != nil {
+		defer func() {
+			if targetMeasured {
+				s.OnTargetFlush(s.target(table), targetDiag)
+			}
+		}()
+	}
+	managerLockStart := time.Now()
+	targetMeasured = s.OnTargetFlush != nil
 	s.Manager.mu.Lock()
 	defer s.Manager.mu.Unlock()
+	targetDiag.ManagerLockWait = time.Since(managerLockStart)
 
+	mergeStart := time.Now()
 	mergedRows := s.Manager.MergeLocked(chunk)
+	targetDiag.Merge = time.Since(mergeStart)
 	defer func() {
 		if retErr == nil {
 			s.RowsFlushed.Add(int64(len(mergedRows)))
@@ -668,8 +711,20 @@ func (s *MySQLSnapshotter) FlushChunk(
 	if err != nil {
 		return err
 	}
+	targetMeasured = true
 	for attempt := 1; ; attempt++ {
-		err := flushRowsRange(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, cond, condArgs)
+		one := TargetFlushDiagnostic{Rows: len(mergedRows)}
+		err := flushRowsRangeTimed(ctx, dstDB, s.target(table), pkCol, columnNames, mergedRows, cond, condArgs, &one)
+		targetDiag.PoolWait += one.PoolWait
+		targetDiag.SessionSetup += one.SessionSetup
+		targetDiag.Begin += one.Begin
+		targetDiag.Fence += one.Fence
+		targetDiag.Delete += one.Delete
+		targetDiag.Upsert += one.Upsert
+		targetDiag.Commit += one.Commit
+		targetDiag.Rows = one.Rows
+		targetDiag.Batches += one.Batches
+		targetDiag.Attempts++
 		if err == nil {
 			break
 		}
@@ -750,6 +805,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 				return err
 			}
 		}
+		boundSnap := plan.BoundSnapshot // original bounds visibility on resume
 		if !resumed {
 			// 1. Biên đọc sau khi barrier giữ router: khóa > b_last thuộc range "Xong" ngay từ đầu.
 			plan = SnapshotPlan{ChunkRows: s.opts.DefaultChunkRows}
@@ -781,6 +837,10 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 					plan.MinPK, plan.MaxPK, plan.NextPK = bounds.MinPK, bounds.MaxPK, bounds.MinPK
 				}
 			}
+			if bs, ok := s.Chunks.(interface{ BoundSnapshot() *PGSnapshot }); ok {
+				boundSnap = bs.BoundSnapshot() // Txn visible với snapshot này mà chưa qua router: xem TableRanges.BoundSnap
+				plan.BoundSnapshot = boundSnap
+			}
 			// Snapshot mới của bảng bắt đầu từ target rỗng: row cũ còn sót (lần chạy trước,
 			// hoặc dữ liệu có sẵn khi snapshot add) có thể giữ giá trị unique key mà row mới
 			// cần, và không bao giờ được dọn nếu range của nó bị DELETE ở source.
@@ -801,9 +861,13 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			return fmt.Errorf("saved snapshot plan of %s was made for a different primary key shape: clear the pipeline state to snapshot it again", table)
 		}
 		if generic {
-			return s.registerGeneric(ctx, dstDB, table, pkCol, kq, &plan, resumed, &cur)
+			err := s.registerGeneric(ctx, dstDB, table, pkCol, kq, &plan, resumed, &cur)
+			if err == nil {
+				s.Manager.SetBoundSnapshot(table, boundSnap)
+			}
+			return err
 		}
-		if resumed && !plan.Empty {
+		if resumed && (!plan.Empty || len(plan.Reread) > 0) {
 			// Chạy tiếp plan dở: flush chunk và lưu plan là hai bước (target commit rồi mới fsync plan).
 			// Crash ở giữa để lại ở target row của phần plan còn coi là "Chưa đọc" — ảnh tại high watermark
 			// CŨ. Event của phần đó bị bỏ (chờ chunk đọc lại) nên các row cũ không bao giờ được cập nhật
@@ -811,7 +875,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 			// (source đã giải phóng nó) → 1062 (kill -9 e2e, 2026-11-04). Xóa phần chưa đọc trước khi
 			// đăng ký: chunk walk sẽ đọc lại toàn bộ phần này, nên không mất gì (RS-1/2, CP-5).
 			lo, hi := plan.NextPK, plan.MaxPK
-			hasRange := !plan.Finished && lo <= hi
+			hasRange := !plan.Empty && !plan.Finished && lo <= hi
 			if hasRange || len(plan.Reread) > 0 {
 				if err := s.clearUnread(ctx, dstDB, table, pkCol, lo, hi, hasRange, plan.Reread); err != nil {
 					return fmt.Errorf("clear unread part of resumed snapshot of %s: %w", table, err)
@@ -821,6 +885,10 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		cur = plan
 		if plan.Empty {
 			s.Manager.RegisterTable(table, pkCol, nil, math.MinInt64)
+			s.Manager.SetBoundSnapshot(table, boundSnap)
+			if len(plan.Reread) > 0 {
+				s.Manager.AddReread(table, plan.Reread, time.Now())
+			}
 			return nil
 		}
 		// 2. Keyset walk (02 §5): chỉ đăng ký phần đã xong [Min, Next-1] và phần chưa đọc
@@ -836,6 +904,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 				EndPK: plan.MaxPK, State: StatePending, BufferedChanges: map[Key]*model.RowChange{}})
 		}
 		s.Manager.RegisterTable(table, pkCol, chunks, plan.MaxPK)
+		s.Manager.SetBoundSnapshot(table, boundSnap)
 		if len(plan.Reread) > 0 {
 			// Khóa chờ đọc lại từ lần chạy trước (hoặc từ lúc bảng chờ đăng ký): nghĩa vụ vẫn còn.
 			s.Manager.AddReread(table, plan.Reread, time.Now())
@@ -880,6 +949,21 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	if err != nil {
 		return fmt.Errorf("snapshot add %s: register ranges: %w", table, err)
 	}
+	finish := func() error {
+		if source, ok := s.Chunks.(interface {
+			CompletionWatermark(context.Context) (checkpoint.AppliedSet, error)
+		}); ok {
+			high, err := source.CompletionWatermark(ctx)
+			if err != nil {
+				return fmt.Errorf("snapshot %s completion watermark: %w", table, err)
+			}
+			// Never wait under Barrier: the router must run to reach high.
+			if err := rendezvousWaitFn(ctx, high); err != nil {
+				return fmt.Errorf("snapshot %s completion rendezvous: %w", table, err)
+			}
+		}
+		return nil
+	}
 
 	// 3. Xử lý lần lượt từng chunk
 	quotedSel := make([]string, len(columnNames))
@@ -897,6 +981,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		var read ChunkRead
 		var chunkHigh checkpoint.AppliedSet
 		var err error
+		diag := ChunkDiagnostic{Table: table, StartPK: chunk.StartPK, EndPK: chunk.EndPK, Reread: chunk.KeySet != nil}
 		readStart := time.Now()
 		if s.Chunks != nil {
 			read, chunkHigh, err = s.Chunks.ReadChunk(ctx, s, chunk, columnNames, pkIdxs, table)
@@ -909,9 +994,14 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		if err != nil {
 			return nil, err
 		}
-		stat.Elapsed += time.Since(readStart)
+		diag.Read = time.Since(readStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "read", diag.Read)
+		}
+		stat.Elapsed += diag.Read
 		stat.Bytes += read.Bytes
 		stat.ReadRows += int64(len(read.Rows))
+		diag.Rows, diag.Bytes = len(read.Rows), read.Bytes
 		rows := read.Rows
 		var rest *Chunk
 		if read.Truncated {
@@ -927,26 +1017,48 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		s.Manager.FinishReading(chunk, chunkHigh, rows)
 
 		// Rendezvous: chờ stream xử lý hết high watermark
+		rendezvousStart := time.Now()
 		if err := rendezvousWaitFn(ctx, chunkHigh); err != nil {
 			return nil, fmt.Errorf("rendezvous wait failed: %w", err)
+		}
+		diag.Rendezvous = time.Since(rendezvousStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "rendezvous", diag.Rendezvous)
 		}
 
 		// Flush: merge có thứ tự snapshot và buffer trong 1 transaction ở target và chuyển sang StateDone
 		// Flush trong barrier: mọi Txn router đã nhận phải commit xong trước, để cả bảng ở
 		// target nhất quán tại đúng vị trí của router (không xung đột unique key giữa row
 		// của chunk và row ở range khác do Txn còn trong hàng đợi).
-		flush := func() error { return s.FlushChunk(ctx, dstDB, chunk, table, pkCol, columnNames) }
+		var targetFlush time.Duration
+		flush := func() error {
+			targetStart := time.Now()
+			err := s.FlushChunk(ctx, dstDB, chunk, table, pkCol, columnNames)
+			targetFlush = time.Since(targetStart)
+			return err
+		}
+		flushStart := time.Now()
 		if s.Barrier != nil {
 			err = s.Barrier(ctx, flush)
 		} else {
 			err = flush()
+		}
+		diag.TargetFlush = targetFlush
+		if elapsed := time.Since(flushStart); elapsed > targetFlush {
+			diag.BarrierWait = elapsed - targetFlush
 		}
 		if err == nil {
 			// Plan lưu ở file state local, không cùng transaction với flush ở target: crash giữa hai bước
 			// để range này "Chưa đọc" trong plan, lần chạy sau dọn rồi đọc lại nó (xem register) — ghi lại
 			// các phiên bản đã có, dữ liệu vẫn đúng (RS-1/RS-2). Chấp nhận có chủ ý; test e2e phân biệt ghi
 			// lại của snapshot với Txn bị apply hai lần (applyLogDup, tests/e2e).
+			planStart := time.Now()
 			err = savePlan(chunk)
+			diag.PlanSave = time.Since(planStart)
+		}
+		diag.Flush = time.Since(flushStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "flush", diag.Flush)
 		}
 		if err == nil && chunk.KeySet != nil {
 			s.RereadKeysTotal.Add(int64(len(chunk.KeySet)))
@@ -956,12 +1068,20 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		}
 
 		// Throttling nếu có
+		paceStart := time.Now()
 		if s.Pace != nil {
-			if err := s.Pace(ctx, read.Bytes); err != nil {
+			if err := s.Pace(ctx, read.Bytes, readStart); err != nil {
 				return nil, err
 			}
 		} else if s.opts.SleepBetweenChunks > 0 {
 			time.Sleep(s.opts.SleepBetweenChunks)
+		}
+		diag.Pace = time.Since(paceStart)
+		if s.OnPhase != nil {
+			s.OnPhase(table, chunk.StartPK, chunk.EndPK, "pace", diag.Pace)
+		}
+		if s.OnChunk != nil {
+			s.OnChunk(diag)
 		}
 		return rest, nil
 	}
@@ -979,10 +1099,13 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 	}
 
 	if generic {
-		return s.walkGeneric(ctx, srcDB, table, kq, cur, processChunk, func(rows int64) int64 {
+		if err := s.walkGeneric(ctx, srcDB, table, kq, cur, processChunk, func(rows int64) int64 {
 			stat.Rows = rows
 			return s.nextChunkRows(table, stat)
-		})
+		}); err != nil {
+			return err
+		}
+		return finish()
 	}
 	// mainDone: walk chính đã xong. Theo dõi bằng cờ thay vì next > MaxPK (tràn khi MaxPK == MaxInt64).
 	mainDone := cur.Empty || cur.Finished || cur.NextPK > cur.MaxPK
@@ -1032,7 +1155,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		chunkRows = s.nextChunkRows(table, stat)
 	}
 
-	return nil
+	return finish()
 }
 
 // ChunkStat là số liệu đọc của một chunk chính vừa xong, đầu vào của luật cỡ chunk (02 §7).
@@ -1103,45 +1226,99 @@ func flushRowsRange(
 	rangeCond string,
 	rangeArgs []any,
 ) error {
+	return flushRowsRangeTimed(ctx, dstDB, table, pkCol, columnNames, rows, rangeCond, rangeArgs, nil)
+}
+
+func flushRowsRangeTimed(
+	ctx context.Context,
+	dstDB *sql.DB,
+	table model.TableID,
+	pkCol string,
+	columnNames []string,
+	rows []*model.RowChange,
+	rangeCond string,
+	rangeArgs []any,
+	diag *TargetFlushDiagnostic,
+) error {
 	// Kết nối riêng: tắt kiểm tra FK chỉ trong phiên flush (bảng con có thể được flush trước khi
 	// Txn của row cha còn trong hàng đợi được apply; thứ tự stream vẫn do writeset bảo đảm).
+	phaseStart := time.Now()
 	conn, err := dstDB.Conn(ctx)
+	if diag != nil {
+		diag.PoolWait += time.Since(phaseStart)
+	}
 	if err != nil {
 		return err
 	}
 	// Kết nối trở lại pool với foreign_key_checks=0, đúng mặc định phiên ghi của pipeline
 	// (DSN target). Không đặt lại 1, vì writer dùng chung pool.
 	defer conn.Close()
+	phaseStart = time.Now()
 	if _, err := conn.ExecContext(ctx, "SET SESSION foreign_key_checks = 0"); err != nil {
+		if diag != nil {
+			diag.SessionSetup += time.Since(phaseStart)
+		}
 		return err
 	}
+	if diag != nil {
+		diag.SessionSetup += time.Since(phaseStart)
+	}
+	phaseStart = time.Now()
 	tx, err := conn.BeginTx(ctx, nil)
+	if diag != nil {
+		diag.Begin += time.Since(phaseStart)
+	}
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	phaseStart = time.Now()
 	if err := checkpoint.CheckFence(ctx, tx, false); err != nil { // SG-1, review R07
+		if diag != nil {
+			diag.Fence += time.Since(phaseStart)
+		}
 		return err
+	}
+	if diag != nil {
+		diag.Fence += time.Since(phaseStart)
 	}
 
 	// Range [startPK, endPK] ở target phải đúng bằng ảnh đã merge: xóa row không còn ở source
 	// (bị DELETE trong lúc range "Chưa đọc", hoặc còn sót từ lần snapshot trước khi crash),
 	// cùng transaction với upsert nên target không bao giờ hiển thị trạng thái lùi (RS-1).
+	phaseStart = time.Now()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", quoteTable(table), rangeCond), rangeArgs...); err != nil {
+		if diag != nil {
+			diag.Delete += time.Since(phaseStart)
+		}
 		return fmt.Errorf("clear chunk range on target: %w", err)
 	}
+	if diag != nil {
+		diag.Delete += time.Since(phaseStart)
+	}
 	if len(rows) == 0 {
-		return tx.Commit()
+		phaseStart = time.Now()
+		err := tx.Commit()
+		if diag != nil {
+			diag.Commit += time.Since(phaseStart)
+		}
+		return err
 	}
 
-	// Ghi theo batch multi-row upsert
-	const batchSize = 1000
-	for i := 0; i < len(rows); i += batchSize {
-		end := i + batchSize
-		if end > len(rows) {
-			end = len(rows)
-		}
-		batch := rows[i:end]
+	// Ghi theo batch multi-row upsert, cắt theo số row VÀ theo byte (≤ max_allowed_packet/4 của target,
+	// chừa chỗ cho escape khi interpolate): trước đây cố định 1000 row — row lớn thì câu lệnh vượt
+	// max_allowed_packet (server cắt kết nối), row nhỏ thì quá nhiều round-trip tới target ở xa.
+	maxPacket, err := snapshotTargetMaxPacket(ctx, tx, dstDB)
+	if err != nil {
+		return err
+	}
+	bounds, err := snapshotUpsertBatches(rows, snapshotUpsertBudget(maxPacket), snapshotUpsertMaxRows, maxPacket)
+	if err != nil {
+		return fmt.Errorf("table %s: %w", table, err)
+	}
+	phaseStart = time.Now()
+	for _, bd := range bounds {
+		batch := rows[bd[0]:bd[1]]
 
 		var valPlaceholders []string
 		var args []any
@@ -1181,11 +1358,25 @@ func flushRowsRange(
 		)
 
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			if diag != nil {
+				diag.Upsert += time.Since(phaseStart)
+			}
 			return fmt.Errorf("upsert flush batch failed: %w", err)
 		}
+		if diag != nil {
+			diag.Batches++
+		}
+	}
+	if diag != nil {
+		diag.Upsert += time.Since(phaseStart)
 	}
 
-	return tx.Commit()
+	phaseStart = time.Now()
+	err = tx.Commit()
+	if diag != nil {
+		diag.Commit += time.Since(phaseStart)
+	}
+	return err
 }
 
 func quoteIdent(name string) string {
@@ -1294,4 +1485,84 @@ func (s *MySQLSnapshotter) clearUnread(ctx context.Context, dstDB *sql.DB, table
 		return err
 	}
 	return restore()
+}
+
+// MySQL BIT values are packed bytes; textual columns keep the established string representation.
+func snapshotColumnValue(b []byte, databaseType string) model.Value {
+	if databaseType == "BIT" {
+		return append([]byte(nil), b...)
+	}
+	return string(b)
+}
+
+const (
+	// snapshotUpsertMaxRows / snapshotUpsertMaxBytes: trần một câu INSERT ... ON DUPLICATE KEY UPDATE của flush
+	// snapshot. Ngân sách byte thực = min(snapshotUpsertMaxBytes, max_allowed_packet/4).
+	snapshotUpsertMaxRows  = 5000
+	snapshotUpsertMaxBytes = 8 << 20
+	snapshotPacketSlack    = 64 << 10
+)
+
+// snapshotMaxPacket: @@max_allowed_packet đã đọc của mỗi pool target (giá trị toàn cục, đọc một lần).
+var snapshotMaxPacket sync.Map // *sql.DB → int64
+
+func snapshotTargetMaxPacket(ctx context.Context, tx *sql.Tx, db *sql.DB) (int64, error) {
+	if v, ok := snapshotMaxPacket.Load(db); ok {
+		return v.(int64), nil
+	}
+	var mp int64
+	if err := tx.QueryRowContext(ctx, "SELECT @@max_allowed_packet").Scan(&mp); err != nil {
+		return 0, fmt.Errorf("read target max_allowed_packet: %w", err)
+	}
+	snapshotMaxPacket.Store(db, mp)
+	return mp, nil
+}
+
+func snapshotUpsertBudget(maxPacket int64) int64 {
+	b := int64(snapshotUpsertMaxBytes)
+	if maxPacket > 0 && maxPacket/4 < b {
+		b = maxPacket / 4
+	}
+	if b < 1 {
+		b = 1
+	}
+	return b
+}
+
+// snapshotRowBytes ước lượng payload của một row khi gửi (độ dài chuỗi/byte, số cố định cho kiểu khác).
+func snapshotRowBytes(r *model.RowChange) int64 {
+	var n int64
+	for _, c := range r.Cols {
+		switch v := c.Value.(type) {
+		case string:
+			n += int64(len(v)) + 4
+		case []byte:
+			n += int64(len(v)) + 4
+		default:
+			n += 24
+		}
+	}
+	return n
+}
+
+// snapshotUpsertBatches chia rows thành các đoạn [i, j): mỗi đoạn ≤ maxRows row và ≤ budget byte (một row
+// lớn hơn budget đi một mình). Row mà riêng nó (tính cả escape ~2x) không vừa max_allowed_packet: lỗi rõ.
+func snapshotUpsertBatches(rows []*model.RowChange, budget int64, maxRows int, maxPacket int64) ([][2]int, error) {
+	var out [][2]int
+	start, bytes := 0, int64(0)
+	for i, r := range rows {
+		rb := snapshotRowBytes(r)
+		if maxPacket > 0 && 2*rb+snapshotPacketSlack > maxPacket {
+			return nil, fmt.Errorf("snapshot row key %v: payload ~%d bytes cannot fit target max_allowed_packet %d; raise max_allowed_packet on the target", r.Key, rb, maxPacket)
+		}
+		if i > start && (i-start >= maxRows || bytes+rb > budget) {
+			out = append(out, [2]int{start, i})
+			start, bytes = i, 0
+		}
+		bytes += rb
+	}
+	if start < len(rows) {
+		out = append(out, [2]int{start, len(rows)})
+	}
+	return out, nil
 }

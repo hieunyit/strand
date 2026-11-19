@@ -119,6 +119,10 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if d["orders"] != "running" || d["bare"] != "stopped" || len(d) != 2 {
 			t.Fatalf("desired = %v", d)
 		}
+		must(t, s.DeletePipeline(ctx, "orders"))
+		if _, ok, _ := s.GetPipeline(ctx, "orders"); ok {
+			t.Fatal("deleted pipeline still there")
+		}
 	})
 	t.Run("jobs_wizards", func(t *testing.T) {
 		s := mk(t)

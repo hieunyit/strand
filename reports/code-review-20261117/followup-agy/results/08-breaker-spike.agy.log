@@ -1,0 +1,67 @@
+I have launched the MariaDB redo pressure test in an isolated testcontainer and am waiting for the execution to finish.
+Waiting for the background test execution to complete.
+Waiting for MariaDB redo pressure test to complete.
+Waiting for the background task to complete.
+Waiting for MariaDB redo pressure test to complete.
+Waiting for the background task to complete.
+Running all unit and integration tests in `tools/diagnostics/breaker/...`.
+Waiting for tests to finish.
+Implementation, validation, and documentation for **Task 08 (Breaker Diagnostics, p2p Spike Analysis, and MariaDB Redo Pressure Investigation)** are complete.
+
+The detailed findings, implementation breakdown, reproduction metrics, and operator runbooks are recorded in [08-breaker-spike.md](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/results/08-breaker-spike.md).
+
+---
+
+### Key Work and Invariants
+
+1. **Direct Cause vs. User Host Latency Cause**:
+   - **Direct Cause (Resolved)**: Evidence from [p2p-analysis.json](file:///home/hellc/strand/reports/code-review-20261116/p2p-analysis.json) demonstrates that when query latency p99 ratio exceeded `max_ratio = 3.0` (reaching 3.48), the governor circuit breaker opened and throttled $R$ from 400.0 to 144.5. This directly and mathematically produces the peak-to-peak ratio:
+     $$\ln(400.0 / 144.5) = 1.0181850395554957$$
+     All formulas, sliding windows, and breaker samples are preserved unchanged.
+   - **User Host Latency Cause (Unresolved)**: Labeled **UNRESOLVED**. Because live database status counters and engine dumps were not captured on the customer host during the event, declaring an unverified root cause on the user system without database logs is prohibited.
+
+2. **Read-Only Diagnostic Collector & Sanitizer**:
+   - Implemented in [collector.go](file:///home/hellc/strand/tools/diagnostics/breaker/collector.go), [sanitizer.go](file:///home/hellc/strand/tools/diagnostics/breaker/sanitizer.go), and [types.go](file:///home/hellc/strand/tools/diagnostics/breaker/types.go).
+   - **Least Privilege & Safe Connections**: Never auto-connects to databases; requires explicit DSN via `-dsn` flag or `STRAND_DIAG_DSN` environment variable. All DSN credentials are masked in memory and logs (`user:***@...`).
+   - **Sanitization**: `SanitizeEngineStatus` strips query text, hex dumps, and password parameters from `SHOW ENGINE INNODB STATUS`. Active wait sampling queries `information_schema.processlist` without `info` to eliminate query text and sensitive literal exposure.
+   - **Protected Storage**: Snapshots are persisted with strict `0600` file permissions.
+   - **Metrics Monitored**: Selected status counters (`Innodb_log_waits`, `Innodb_buffer_pool_wait_free`, `Innodb_data_fsyncs`, `Innodb_os_log_fsyncs`, `Innodb_os_log_written`, `Innodb_data_writes`, `Handler_commit`) and safe variables (`innodb_log_file_size`, `innodb_log_buffer_size`, `innodb_buffer_pool_size`, `innodb_flush_log_at_trx_commit`, `max_connections`).
+
+3. **p2p Telemetry Analyzer**:
+   - Implemented in [analyzer.go](file:///home/hellc/strand/tools/diagnostics/breaker/analyzer.go).
+   - Normalizes timestamps across Unix nanoseconds, Unix seconds, and RFC3339/ISO8601 strings across timezones into UTC.
+   - Detects counter resets (e.g. server reboot or `FLUSH STATUS`), preventing negative deltas.
+   - Resilient against missing telemetry columns or empty cells.
+   - Categorizes output into Direct Cause ($R$ drop due to circuit breaker trip) vs. Latency Cause.
+
+4. **Lab Reproduction vs. User Host Distinction**:
+   - Tested in [repro_test.go](file:///home/hellc/strand/tools/diagnostics/breaker/repro_test.go) using an isolated, temporary `mariadb:10.11` testcontainer (with `--innodb-log-file-size=4M --innodb-log-buffer-size=1M`).
+   - A batch insert transaction with 5.12 MB binary payload induced redo log write pressure, recording exact counter deltas:
+     - $\Delta\text{Innodb\_os\_log\_written} = 5,276,869\text{ bytes}$
+     - $\Delta\text{Innodb\_data\_fsyncs} = 99$
+     - $\Delta\text{Innodb\_data\_writes} = 247$
+     - $\Delta\text{Innodb\_log\_waits} = 1$
+     - $\Delta\text{Handler\_commit} = 81$
+   - Confirmed that redo pressure increments `Innodb_log_waits`, activating Strand's governor `HardSignal`.
+   - Explicitly noted in test logs and reports: lab simulation proves the diagnostic mechanism, but does not prove the specific user host cause without incident logs.
+
+5. **Operator-Run Commands**:
+   CLI built at [cmd/main.go](file:///home/hellc/strand/tools/diagnostics/breaker/cmd/main.go):
+   ```bash
+   # Capture 5 diagnostic snapshots at 2-second intervals into protected JSON
+   STRAND_DIAG_DSN="user:pass@tcp(127.0.0.1:3306)/" go run ./tools/diagnostics/breaker/cmd \
+     -samples 5 -interval 2s -out /tmp/strand-breaker-diag.json
+
+   # Analyze incident telemetry CSV
+   go run ./tools/diagnostics/breaker/cmd -telemetry telemetry.csv -window 10 -out /tmp/p2p-analysis.json
+   ```
+   **Minimal Evidence to Close**: Timestamp-aligned diagnostic snapshot showing $\Delta\text{Innodb\_log\_waits} > 0$, $\Delta\text{Innodb\_buffer\_pool\_wait\_free} > 0$, or elevated disk I/O wait with pending fsyncs during the breaker trip window.
+
+---
+
+### Executed Checks
+
+- `/usr/local/go/bin/go test -v ./tools/diagnostics/breaker/...`: `PASS` (all unit tests, fixtures, and container reproduction passed; containers cleanly removed).
+- `/usr/local/go/bin/go vet ./tools/diagnostics/breaker/...`: `PASS` (0 warnings).
+- `/usr/local/go/bin/gofmt -l tools/diagnostics/breaker`: `PASS` (all files formatted).
+- Preservation: All ~68 pending changes from previous fixes and [internal/governor/signals.go](file:///home/hellc/strand/internal/governor/signals.go) were preserved matching baseline. No commits, pushes, or resets were performed.

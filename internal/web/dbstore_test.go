@@ -569,6 +569,177 @@ func slogTo(w io.Writer) *slog.Logger {
 
 func state(e *testEnv) string { return e.srv.cfg.StateDir }
 
+func TestConfigViewAndSaveFromDBWhenDiskFileMissing(t *testing.T) {
+	st := store.NewMem()
+	cfgDir := t.TempDir()
+	t.Setenv(EnvSecretKey, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	e := dbEnv(t, st, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir; c.Scan = nil }, nil)
+	c, csrf := e.loginOK()
+	e.setExit(0)
+
+	// Tạo pipeline qua wizard (được lưu vào DB và disk)
+	if code, _, _, out := createNP(t, e, c, csrf, newOpts("dbcfg", "SrcSecretPw", "DstSecretPw")); code != 200 {
+		t.Fatalf("create pipeline failed: %d %s", code, out)
+	}
+
+	p := e.srv.reg.Get("dbcfg")
+	if p == nil {
+		t.Fatal("pipeline dbcfg not found")
+	}
+
+	// Xóa file config trên đĩa để giả lập trường hợp file chưa kịp ghi hoặc chạy trên node mới
+	_ = os.Remove(p.ConfigPath)
+
+	// configView phải khôi phục từ DB và không trả về lỗi
+	cv := e.srv.configView(p)
+	if cv.Error != "" {
+		t.Fatalf("configView returned error: %s", cv.Error)
+	}
+	if !strings.Contains(cv.YAML, "name: dbcfg") {
+		t.Fatalf("configView YAML missing expected content: %s", cv.YAML)
+	}
+
+	// Sửa config qua API với masked password:
+	editedYAML := cv.YAML + "\n# test comment added\n"
+	body, _ := json.Marshal(map[string]any{"yaml": editedYAML, "force": true})
+	resp, out := e.do(c, "POST", "/api/v1/pipelines/dbcfg/config", string(body), map[string]string{
+		csrfHeader: csrf, "Content-Type": "application/json",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("save config: status %d, body: %s", resp.StatusCode, out)
+	}
+
+	// Kiểm tra file trên đĩa đã được tạo lại và DB đã cập nhật
+	fileBytes, err := os.ReadFile(p.ConfigPath)
+	if err != nil {
+		t.Fatalf("file not recreated: %v", err)
+	}
+	if !strings.Contains(string(fileBytes), "# test comment added") {
+		t.Fatalf("file content does not contain comment: %s", fileBytes)
+	}
+
+	ctx := context.Background()
+	row, ok, err := st.GetPipeline(ctx, "dbcfg")
+	if err != nil || !ok {
+		t.Fatalf("pipeline not found in store: %v", err)
+	}
+	if !strings.Contains(row.ConfigYAML, "# test comment added") {
+		t.Fatalf("store does not contain updated config YAML: %s", row.ConfigYAML)
+	}
+}
+
+func TestPersistPipelineFilesCreatesRowForWebYamlPipeline(t *testing.T) {
+	st := store.NewMem()
+	cfgDir := t.TempDir()
+	yamlFile := filepath.Join(cfgDir, "orders.yaml")
+	must0(t, os.WriteFile(yamlFile, []byte("name: orders\n"), 0o640))
+
+	e := dbEnv(t, st, func(e *testEnv, c *Config) {
+		c.Pipelines = []PipelineEntry{{Name: "orders", Config: yamlFile}}
+		c.Scan = nil
+	}, nil)
+
+	p := e.srv.reg.Get("orders")
+	if p == nil {
+		t.Fatal("pipeline orders not found in registry")
+	}
+
+	// Chế độ DB đăng ký pipeline khai báo trong web.yaml ngay khi quét (registry trong DB); xóa dòng để kiểm
+	// persistPipelineFiles tự tạo lại dòng khi chưa có.
+	ctx := context.Background()
+	must0(t, st.DeletePipeline(ctx, "orders"))
+
+	// Gọi persistPipelineFiles (như khi người dùng lưu config hoặc tạo)
+	if err := e.srv.persistPipelineFiles(p); err != nil {
+		t.Fatalf("persistPipelineFiles failed: %v", err)
+	}
+
+	// Giờ đây pipeline đã được ghi vào DB
+	row, ok, err := st.GetPipeline(ctx, "orders")
+	if err != nil || !ok {
+		t.Fatalf("orders not persisted to store: %v", err)
+	}
+	if row.ConfigYAML != "name: orders\n" {
+		t.Fatalf("unexpected ConfigYAML in store: %q", row.ConfigYAML)
+	}
+}
+
+func TestTuningAndEnvViewSaveWhenDiskFileMissing(t *testing.T) {
+	st := store.NewMem()
+	cfgDir := t.TempDir()
+	t.Setenv(EnvSecretKey, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	e := dbEnv(t, st, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir; c.Scan = nil }, nil)
+	c, csrf := e.loginOK()
+	e.setExit(0)
+
+	// Tạo pipeline qua wizard
+	if code, _, _, out := createNP(t, e, c, csrf, newOpts("tuneenv", "MySrcSecret", "MyDstSecret")); code != 200 {
+		t.Fatalf("create pipeline failed: %d %s", code, out)
+	}
+
+	p := e.srv.reg.Get("tuneenv")
+	if p == nil {
+		t.Fatal("pipeline tuneenv not found")
+	}
+
+	// Xóa cả file config và file .env trên đĩa để mô phỏng môi trường DB-first
+	_ = os.Remove(p.ConfigPath)
+	_ = os.Remove(p.EnvFile)
+
+	// 1. tuningView phải đọc được từ DB
+	tv := e.srv.tuningView(p)
+	if tv.Error != "" {
+		t.Fatalf("tuningView returned error: %s", tv.Error)
+	}
+
+	// 2. getEnvView phải đọc được từ DB
+	ev := e.srv.getEnvView(p)
+	if ev.Error != "" || !ev.Exists {
+		t.Fatalf("getEnvView failed: exists=%v, err=%s", ev.Exists, ev.Error)
+	}
+	if ev.Entries["SRC_PW"] != maskStr {
+		t.Fatalf("SRC_PW should be masked, got: %s", ev.Entries["SRC_PW"])
+	}
+
+	// 3. saveTuning với force: true thành công và lưu vào DB
+	tBody, _ := json.Marshal(map[string]any{"chunk_rows": "8888", "force": true})
+	resp, out := e.do(c, "POST", "/api/v1/pipelines/tuneenv/tuning", string(tBody), map[string]string{
+		csrfHeader: csrf, "Content-Type": "application/json",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("save tuning: %d %s", resp.StatusCode, out)
+	}
+
+	// 4. saveEnv gửi lại masked password không được ghi '********' vào file
+	eBody, _ := json.Marshal(map[string]any{
+		"entries": map[string]string{
+			"SRC_PW":  maskStr, // giữ nguyên mật khẩu cũ từ DB
+			"NEW_KEY": "newval",
+		},
+	})
+	resp, out = e.do(c, "POST", "/api/v1/pipelines/tuneenv/env", string(eBody), map[string]string{
+		csrfHeader: csrf, "Content-Type": "application/json",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("save env: %d %s", resp.StatusCode, out)
+	}
+
+	// Đọc lại file .env vừa materialize và kiểm tra
+	envBytes, err := os.ReadFile(p.EnvFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if strings.Contains(string(envBytes), "********") {
+		t.Fatalf(".env file contains masked stars '********'")
+	}
+	if !strings.Contains(string(envBytes), "MySrcSecret") {
+		t.Fatalf(".env file lost original secret, content:\n%s", envBytes)
+	}
+	if !strings.Contains(string(envBytes), "NEW_KEY=newval") {
+		t.Fatalf(".env file missing NEW_KEY, content:\n%s", envBytes)
+	}
+}
+
 func must0(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

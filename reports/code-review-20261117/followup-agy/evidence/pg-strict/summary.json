@@ -1,0 +1,176 @@
+{
+  "start_time": "2026-11-17T11:00:22.49496907+07:00",
+  "end_time": "2026-11-17T11:00:37.495090681+07:00",
+  "duration_sec": 15,
+  "warmup_sec": 5,
+  "steady_sec": 15.000121581,
+  "clients": 4,
+  "seed_rows": 5000,
+  "seed": 42,
+  "reproduces_280_to_300": false,
+  "raw_target_commit_tps": 461.5068663759647,
+  "pipeline_efficiency_pct": 578.4915794088215,
+  "warmup_tps": 2476.2,
+  "steady_tps": 2669.778360378478,
+  "steady_row_rate": 2669.778360378478,
+  "source_commit_rate": 2669.3116974943005,
+  "avg_batch_size": 1,
+  "target_top_waits": [
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle",
+      "count": 203
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "active",
+      "count": 53
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle in transaction",
+      "count": 29
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle in transaction",
+      "count": 6
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "active",
+      "count": 2
+    },
+    {
+      "type": "IO",
+      "event": "WalSync",
+      "state": "active",
+      "count": 2
+    },
+    {
+      "type": "IO",
+      "event": "DataFileTruncate",
+      "state": "active",
+      "count": 1
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "starting",
+      "count": 1
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle",
+      "count": 1
+    },
+    {
+      "type": "IO",
+      "event": "DataFileExtend",
+      "state": "active",
+      "count": 1
+    },
+    {
+      "type": "IO",
+      "event": "WalInitWrite",
+      "state": "active",
+      "count": 1
+    }
+  ],
+  "source_top_waits": [
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle",
+      "count": 459
+    },
+    {
+      "type": "LWLock",
+      "event": "WALWrite",
+      "state": "active",
+      "count": 68
+    },
+    {
+      "type": "IO",
+      "event": "WalSync",
+      "state": "active",
+      "count": 45
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "active",
+      "count": 42
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "active",
+      "count": 34
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle",
+      "count": 33
+    },
+    {
+      "type": "IO",
+      "event": "WalWrite",
+      "state": "active",
+      "count": 6
+    },
+    {
+      "type": "IO",
+      "event": "WalSync",
+      "state": "idle",
+      "count": 4
+    },
+    {
+      "type": "LWLock",
+      "event": "WALWrite",
+      "state": "idle",
+      "count": 2
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "starting",
+      "count": 1
+    }
+  ],
+  "versions": {
+    "docker_cpu": "2.0",
+    "go_version": "go1.27.3",
+    "os_arch": "linux/amd64",
+    "postgres_source": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "postgres_target": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "strand_tool": "pg-strict-diag"
+  },
+  "fsync_settings": {
+    "fsync": "on",
+    "max_wal_size": "1024",
+    "shared_buffers": "32768",
+    "synchronous_commit": "on",
+    "wal_level": "replica"
+  },
+  "observations": [
+    "Source workload generation achieved 2669.3 commits/sec across 4 concurrent clients.",
+    "Target database raw single-connection commit capacity was measured at 461.5 commits/sec.",
+    "Strand strict mode applied 2669.8 transactions/sec with average batch size 1.00 rows/batch (pipeline efficiency 578.5% of raw DB commit ceiling).",
+    "Top target wait event: Client:ClientRead (203 occurrences)",
+    "Measured throughput (2669.8 TPS) exceeds 300 TPS on this host due to local NVMe write cache, but runs at 578.5% of raw single-connection DB commit saturation."
+  ],
+  "artifact_files": {
+    "block_profile": "reports/code-review-20261117/followup-agy/evidence/pg-strict/block.pprof",
+    "config": "reports/code-review-20261117/followup-agy/evidence/pg-strict/strand.yaml",
+    "cpu_profile": "reports/code-review-20261117/followup-agy/evidence/pg-strict/cpu.pprof",
+    "strand_log": "reports/code-review-20261117/followup-agy/evidence/pg-strict/strand.log"
+  }
+}

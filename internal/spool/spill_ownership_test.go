@@ -2,6 +2,7 @@ package spool_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,14 +14,14 @@ import (
 func TestSpoolTakesSpillOwnership(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		options  func() []spool.Option
+		options  func(int64) []spool.Option
 		accepted bool
 	}{
-		{"local", func() []spool.Option { return nil }, true},
-		{"buffered_bucket", func() []spool.Option {
-			return []spool.Option{spool.WithLocalHardLimit(1), spool.WithBucket(spool.NewMemoryBucketBackend(), "test/")}
+		{"local", func(int64) []spool.Option { return nil }, true},
+		{"buffered_bucket", func(size int64) []spool.Option {
+			return []spool.Option{spool.WithLocalHardLimit(size + 1), spool.WithBucket(spool.NewMemoryBucketBackend(), "test/")}
 		}, true},
-		{"capacity_rejected", func() []spool.Option { return []spool.Option{spool.WithTotalHardLimit(1)} }, false},
+		{"capacity_rejected", func(int64) []spool.Option { return []spool.Option{spool.WithTotalHardLimit(1)} }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -37,7 +38,11 @@ func TestSpoolTakesSpillOwnership(t *testing.T) {
 			if !txn.SpillOwned {
 				t.Fatal("assembler did not mark temporary spill owned")
 			}
-			sp, err := spool.New(filepath.Join(dir, "spool"), tc.options()...)
+			info, err := os.Stat(txn.SpillPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp, err := spool.New(filepath.Join(dir, "spool"), tc.options(info.Size())...)
 			if err != nil {
 				t.Fatal(err)
 			}

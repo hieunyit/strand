@@ -19,6 +19,13 @@ const KeylessLabel = "full row (keyless)"
 //     (MySQL geometry; PG point/line/box/circle... so bằng theo diện tích hoặc không xác định): từ chối.
 func KeylessColumnProblem(dataType string, pg, allowFloat bool) string {
 	t := strings.ToLower(strings.TrimSpace(dataType))
+	if pg {
+		// Catalog array names use an underscore; textual callers may use [].
+		t = strings.TrimPrefix(t, "_")
+		for strings.HasSuffix(t, "[]") {
+			t = strings.TrimSuffix(t, "[]")
+		}
+	}
 	switch t {
 	case "float", "double", "real", "float4", "float8", "double precision":
 		if !allowFloat {
@@ -29,6 +36,8 @@ func KeylessColumnProblem(dataType string, pg, allowFloat bool) string {
 	}
 	if pg {
 		switch t {
+		case "citext":
+			return "citext column (case-insensitive equality does not preserve the full row image)"
 		case "point", "line", "lseg", "box", "path", "polygon", "circle":
 			return t + " column (no reliable equality)"
 		}

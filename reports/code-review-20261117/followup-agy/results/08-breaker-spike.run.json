@@ -1,0 +1,7 @@
+{
+  "task": "08-breaker-spike",
+  "model": "gemini-3.8-flash-medium",
+  "exit_code": 0,
+  "elapsed_seconds": 695.3,
+  "result_exists": true
+}

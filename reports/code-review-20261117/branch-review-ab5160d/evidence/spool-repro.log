@@ -1,0 +1,14 @@
+=== RUN   TestSurfaceStaleInventoryOverwritesLiveSize
+    surface_review_test.go:17: live sidecar: indexed bytes=100 actual bytes=200 refs=1
+2026/11/17 17:03:25 [JOB 1] WAL file /tmp/TestSurfaceStaleInventoryOverwritesLiveSize2105913137/001/db/000002.log with log number 000002 stopped reading at offset: 790; replayed 8 keys in 4 batches
+    surface_review_test.go:20: legal scan->grow->append->import sequence prevented spool reopen: initialize spool sidecars: spool sidecar /tmp/TestSurfaceStaleInventoryOverwritesLiveSize2105913137/001/trusted/orphan changed size while referenced
+--- FAIL: TestSurfaceStaleInventoryOverwritesLiveSize (0.05s)
+=== RUN   TestSurfacePostVersionCrashOrphanNotCharged
+2026/11/17 17:03:25 [JOB 1] WAL file /tmp/TestSurfacePostVersionCrashOrphanNotCharged3367259307/001/db/000002.log with log number 000002 stopped reading at offset: 47; replayed 1 keys in 1 batches
+    surface_review_test.go:33: physical retained spill=4096B, reported local=0
+    surface_review_test.go:34: known default-directory crash orphan was not indexed on restart
+    surface_review_test.go:36: append allowed despite retained sidecar already exceeding total limit
+--- FAIL: TestSurfacePostVersionCrashOrphanNotCharged (0.02s)
+FAIL
+FAIL	strand/internal/spool	0.418s
+FAIL

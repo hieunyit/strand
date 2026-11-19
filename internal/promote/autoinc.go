@@ -144,11 +144,13 @@ func (d *MySQLTargetDriver) ApplyAutoIncrement(ctx context.Context, counters []A
 			return fmt.Errorf("inspect target %s: %w", c.DstTable, err)
 		}
 		var maxID sql.NullInt64
-		if err := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT MAX(`%s`) FROM `%s`.`%s`", col, schema, table)).Scan(&maxID); err != nil {
+		qSelect := fmt.Sprintf("SELECT MAX(%s) FROM %s.%s", quoteMySQLIdent(col), quoteMySQLIdent(schema), quoteMySQLIdent(table))
+		if err := conn.QueryRowContext(ctx, qSelect).Scan(&maxID); err != nil {
 			return fmt.Errorf("read max(%s) of target %s: %w", col, c.DstTable, err)
 		}
 		next := ComputeAutoIncrement(c.Next, maxID.Int64, cur.Int64)
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf("ALTER TABLE `%s`.`%s` AUTO_INCREMENT = %d", schema, table, next)); err != nil {
+		qAlter := fmt.Sprintf("ALTER TABLE %s.%s AUTO_INCREMENT = %d", quoteMySQLIdent(schema), quoteMySQLIdent(table), next)
+		if _, err := conn.ExecContext(ctx, qAlter); err != nil {
 			return fmt.Errorf("set AUTO_INCREMENT of target %s to %d: %w", c.DstTable, next, err)
 		}
 	}

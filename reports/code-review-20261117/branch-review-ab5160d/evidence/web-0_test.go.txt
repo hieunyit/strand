@@ -1,0 +1,27 @@
+package web
+import (
+ "strings"
+ "testing"
+ "gopkg.in/yaml.v3"
+)
+func TestSurfaceMultilineDSNLeak(t *testing.T) {
+ for _, orig := range []string{
+  "source:\n  dsn: >-\n    postgres://u:SurfaceBlockCanary@h/db\n",
+  "source:\n  dsn: \"postgres://u:SurfaceQuoteCanary@h/db\n    ?sslmode=disable\"\n",
+ } {
+  masked, err := MaskConfigText([]byte(orig))
+  t.Logf("masked=%q err=%v", masked, err)
+  if err == nil && (strings.Contains(masked,"SurfaceBlockCanary") || strings.Contains(masked,"SurfaceQuoteCanary")) {t.Error("DSN password leaked")}
+ }
+}
+func TestSurfaceDSNQuoteConversion(t *testing.T) {
+ orig:=[]byte("source:\n  dsn: \"user:pa\\\\ss@tcp(localhost:3306)/db\"\n")
+ edited:="source:\n  dsn: 'user:********@tcp(localhost:3306)/db'\n"
+ restored,err:=UnmaskConfigText(edited,orig)
+ if err!=nil {t.Fatal(err)}
+ var a,b map[string]map[string]string
+ if err:=yaml.Unmarshal(orig,&a);err!=nil {t.Fatal(err)}
+ if err:=yaml.Unmarshal([]byte(restored),&b);err!=nil {t.Fatal(err)}
+ t.Logf("original semantic DSN=%q restored semantic DSN=%q",a["source"]["dsn"],b["source"]["dsn"])
+ if a["source"]["dsn"]!=b["source"]["dsn"] {t.Error("credential changed by quote-only edit")}
+}

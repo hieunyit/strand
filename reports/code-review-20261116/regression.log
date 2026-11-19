@@ -1,0 +1,7 @@
+ok  	strand/internal/web	0.621s
+ok  	strand/internal/reader/pg	0.438s [no tests to run]
+ok  	strand/internal/snapshot	2.214s
+ok  	strand/internal/typemap	0.478s [no tests to run]
+ok  	strand/internal/pipeline	0.690s
+ok  	strand/internal/sched	0.010s [no tests to run]
+ok  	strand/internal/writer	0.481s [no tests to run]

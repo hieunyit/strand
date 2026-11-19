@@ -3,6 +3,7 @@ package writer
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"strand/internal/exitcode"
@@ -36,11 +37,38 @@ func keylessMatchCols(r *pkRegistry, row *model.RowChange, img []model.Value) ([
 }
 
 // keylessBefore: ảnh trước của UPDATE; nil nếu ảnh trước = ảnh sau (không đổi gì → không cần ghi).
+// So bằng keylessImagesDiffer (phân biệt kiểu/NULL), KHÔNG dùng keysDiffer (fmt.Sprint): NULL và chuỗi literal
+// "<nil>" có cùng biểu diễn chuỗi nên keysDiffer coi là bằng → UPDATE bị bỏ trong khi checkpoint vẫn tiến (NK01).
 func keylessBefore(row *model.RowChange) []model.Value {
-	if len(row.OldKey) > 0 && keysDiffer(row.OldKey, row.Key) {
+	if len(row.OldKey) > 0 && keylessImagesDiffer(row.OldKey, row.Key) {
 		return row.OldKey
 	}
 	return nil
+}
+
+// keylessImagesDiffer so hai ảnh hàng theo kiểu: NULL chỉ bằng NULL, giá trị khác kiểu Go là khác nhau, cùng
+// kiểu thì so sâu (reflect.DeepEqual; []byte so theo byte). Cùng ngữ nghĩa với assemble.KeysEqual — nơi
+// assembler quyết định có giữ OldKey hay không — để writer không bỏ một thay đổi mà assembler đã giữ lại.
+func keylessImagesDiffer(a, b []model.Value) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if !keylessValueEqual(a[i], b[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func keylessValueEqual(a, b model.Value) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if reflect.TypeOf(a) != reflect.TypeOf(b) {
+		return false
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // --- MySQL ---
@@ -184,14 +212,32 @@ func colNamesVals(cols []model.ColValue, skipUnchanged bool) ([]string, []any) {
 
 // --- PostgreSQL ---
 
-// pgMatchSubquery: `ctid = (SELECT ctid FROM t WHERE c IS NOT DISTINCT FROM $n ... LIMIT 1)`; tham số đánh số từ start.
+// pgMatchSubquery: `(tableoid, ctid) = (SELECT tableoid, ctid FROM t WHERE c IS NOT DISTINCT FROM $n ... LIMIT 1)`;
+// tham số đánh số từ start. ctid chỉ duy nhất trong MỘT relation vật lý: target là bảng partitioned/có bảng con
+// kế thừa thì hai partition có thể có cùng ctid, nên định danh hàng vật lý phải là cặp (tableoid, ctid) (NK05/S02).
 func pgMatchSubquery(t model.TableID, cols []string, start int) string {
 	conds := make([]string, len(cols))
 	for i, c := range cols {
 		conds[i] = fmt.Sprintf("%s IS NOT DISTINCT FROM $%d", quotePG(c), start+i)
 	}
 	tbl := quotePGTable(t)
-	return fmt.Sprintf("ctid = (SELECT ctid FROM %s WHERE %s LIMIT 1)", tbl, strings.Join(conds, " AND "))
+	return fmt.Sprintf("(tableoid, ctid) = (SELECT tableoid, ctid FROM %s WHERE %s LIMIT 1)", tbl, strings.Join(conds, " AND "))
+}
+
+// keylessAffectedPG: UPDATE/DELETE keyless phải tác động ĐÚNG MỘT hàng. 0 = target lệch (keyless_row_missing);
+// >1 = định danh hàng vật lý không duy nhất (vd. trùng ctid giữa partition) — dừng, rollback cả batch thay vì
+// sửa/xóa nhiều hàng rồi commit checkpoint.
+func keylessAffectedPG(t model.TableID, op model.Op, n int64) error {
+	switch {
+	case n == 1:
+		return nil
+	case n == 0:
+		return keylessMissing(t, op)
+	default:
+		return exitcode.New(exitcode.ErrKeylessRowMissing, exitcode.DataError, fmt.Sprintf(
+			"keyless table %s: %s affected %d rows on the target, expected exactly one (the physical row identity is not unique); "+
+				"the batch was rolled back", t, op, n), nil)
+	}
 }
 
 // buildKeylessInsertPG: INSERT thường một hàng.
@@ -205,7 +251,7 @@ func buildKeylessInsertPG(t model.TableID, cols []string) string {
 	return fmt.Sprintf("INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE VALUES (%s)", quotePGTable(t), strings.Join(q, ", "), strings.Join(ph, ", "))
 }
 
-// buildKeylessUpdatePG: UPDATE đúng một hàng (chọn bằng ctid của hàng đầu tiên khớp ảnh trước).
+// buildKeylessUpdatePG: UPDATE đúng một hàng (chọn bằng (tableoid, ctid) của hàng đầu tiên khớp ảnh trước).
 func buildKeylessUpdatePG(t model.TableID, setCols, matchCols []string) string {
 	sets := make([]string, len(setCols))
 	for i, c := range setCols {
@@ -250,8 +296,8 @@ func (a *pgApplier) applyKeyless(row *model.RowChange) error {
 		if err != nil {
 			return fmt.Errorf("keyless update on %s: %w", row.Table, err)
 		}
-		if tag.RowsAffected() == 0 {
-			return keylessMissing(row.Table, row.Op)
+		if err := keylessAffectedPG(row.Table, row.Op, tag.RowsAffected()); err != nil {
+			return err
 		}
 	case model.OpDelete:
 		match, err := keylessMatchCols(&a.w.pk, row, row.Key)
@@ -262,8 +308,8 @@ func (a *pgApplier) applyKeyless(row *model.RowChange) error {
 		if err != nil {
 			return fmt.Errorf("keyless delete on %s: %w", row.Table, err)
 		}
-		if tag.RowsAffected() == 0 {
-			return keylessMissing(row.Table, row.Op)
+		if err := keylessAffectedPG(row.Table, row.Op, tag.RowsAffected()); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)

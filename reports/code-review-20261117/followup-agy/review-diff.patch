@@ -1,0 +1,399 @@
+--- baseline/cmd/strand/profile.go
++++ working/cmd/strand/profile.go
+@@ -0,0 +1,136 @@
++package main
++
++import (
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"runtime"
++	"runtime/pprof"
++	"sync"
++)
++
++// profileConfig chứa các tùy chọn cấu hình cho việc ghi profile ra file.
++type profileConfig struct {
++	cpuPath        string
++	blockPath      string
++	blockRate      int
++	allowOverwrite bool
++}
++
++// profiler quản lý vòng đời lấy mẫu CPU và block profile.
++type profiler struct {
++	mu        sync.Mutex
++	once      sync.Once
++	cpuFile   *os.File
++	blockFile *os.File
++	cpuOn     bool
++	blockOn   bool
++}
++
++// startProfiling kích hoạt file CPU profile và block profile theo cấu hình.
++// Nếu cả hai đường dẫn đều rỗng, hàm trả về (nil, nil) với chi phí tối thiểu (negligible disabled overhead).
++// Nếu file đích đã tồn tại và không bật allowOverwrite, hàm trả về lỗi tránh vô tình ghi đè.
++func startProfiling(cfg profileConfig) (*profiler, error) {
++	if cfg.cpuPath == "" && cfg.blockPath == "" {
++		return nil, nil
++	}
++
++	p := &profiler{}
++	cleanup := func() {
++		_ = p.Stop()
++	}
++
++	openFlag := os.O_WRONLY | os.O_CREATE
++	if cfg.allowOverwrite {
++		openFlag |= os.O_TRUNC
++	} else {
++		openFlag |= os.O_EXCL
++	}
++
++	// Khởi tạo CPU profile nếu có đường dẫn
++	if cfg.cpuPath != "" {
++		f, err := os.OpenFile(cfg.cpuPath, openFlag, 0o644)
++		if err != nil {
++			if errors.Is(err, os.ErrExist) {
++				return nil, fmt.Errorf("cpu profile file already exists (use --profile-overwrite to replace): %s", cfg.cpuPath)
++			}
++			return nil, fmt.Errorf("create cpu profile file %q: %w", cfg.cpuPath, err)
++		}
++		p.cpuFile = f
++		if err := pprof.StartCPUProfile(f); err != nil {
++			_ = f.Close()
++			p.cpuFile = nil
++			return nil, fmt.Errorf("start cpu profile: %w", err)
++		}
++		p.cpuOn = true
++	}
++
++	// Khởi tạo Block profile nếu có đường dẫn
++	if cfg.blockPath != "" {
++		f, err := os.OpenFile(cfg.blockPath, openFlag, 0o644)
++		if err != nil {
++			cleanup()
++			if errors.Is(err, os.ErrExist) {
++				return nil, fmt.Errorf("block profile file already exists (use --profile-overwrite to replace): %s", cfg.blockPath)
++			}
++			return nil, fmt.Errorf("create block profile file %q: %w", cfg.blockPath, err)
++		}
++		p.blockFile = f
++		rate := cfg.blockRate
++		if rate <= 0 {
++			rate = 1 // mặc định lấy mẫu mọi block event nếu chỉ định block profile
++		}
++		runtime.SetBlockProfileRate(rate)
++		p.blockOn = true
++	}
++
++	return p, nil
++}
++
++// Stop dừng việc ghi profile, xả dữ liệu ra file và đóng file an toàn.
++// Phương thức này an toàn khi gọi nhiều lần (idempotent).
++func (p *profiler) Stop() error {
++	if p == nil {
++		return nil
++	}
++
++	var firstErr error
++	p.once.Do(func() {
++		p.mu.Lock()
++		defer p.mu.Unlock()
++
++		if p.cpuOn {
++			pprof.StopCPUProfile()
++			p.cpuOn = false
++		}
++		if p.cpuFile != nil {
++			if err := p.cpuFile.Close(); err != nil && firstErr == nil {
++				firstErr = fmt.Errorf("close cpu profile file: %w", err)
++			}
++			p.cpuFile = nil
++		}
++
++		if p.blockOn {
++			// Ghi dữ liệu block profile
++			if p.blockFile != nil {
++				if bp := pprof.Lookup("block"); bp != nil {
++					if err := bp.WriteTo(p.blockFile, 0); err != nil && firstErr == nil && !errors.Is(err, io.ErrClosedPipe) {
++						firstErr = fmt.Errorf("write block profile: %w", err)
++					}
++				}
++			}
++			// Đặt lại tỷ lệ block profile về 0 để tắt
++			runtime.SetBlockProfileRate(0)
++			p.blockOn = false
++		}
++		if p.blockFile != nil {
++			if err := p.blockFile.Close(); err != nil && firstErr == nil {
++				firstErr = fmt.Errorf("close block profile file: %w", err)
++			}
++			p.blockFile = nil
++		}
++	})
++
++	return firstErr
++}
+--- baseline/cmd/strand/profile_test.go
++++ working/cmd/strand/profile_test.go
+@@ -0,0 +1,205 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestProfile_Disabled(t *testing.T) {
++	p, err := startProfiling(profileConfig{})
++	if err != nil {
++		t.Fatalf("expected nil error when profiling disabled, got: %v", err)
++	}
++	if p != nil {
++		t.Fatalf("expected nil profiler when profiling disabled, got: %v", p)
++	}
++	if err := p.Stop(); err != nil {
++		t.Fatalf("expected nil error calling Stop on nil profiler, got: %v", err)
++	}
++}
++
++func TestProfile_CPU(t *testing.T) {
++	tmpDir := t.TempDir()
++	cpuFile := filepath.Join(tmpDir, "cpu.pprof")
++
++	p, err := startProfiling(profileConfig{
++		cpuPath: cpuFile,
++	})
++	if err != nil {
++		t.Fatalf("startProfiling failed: %v", err)
++	}
++
++	// Tạo một chút tải CPU để ghi nhận sample
++	done := make(chan struct{})
++	go func() {
++		sum := 0
++		for i := 0; i < 1_000_000; i++ {
++			sum += i
++		}
++		_ = sum
++		close(done)
++	}()
++	<-done
++	time.Sleep(10 * time.Millisecond)
++
++	if err := p.Stop(); err != nil {
++		t.Fatalf("p.Stop() failed: %v", err)
++	}
++
++	info, err := os.Stat(cpuFile)
++	if err != nil {
++		t.Fatalf("stat cpu file failed: %v", err)
++	}
++	if info.Size() == 0 {
++		t.Fatalf("expected non-empty cpu profile file, got size 0")
++	}
++}
++
++func TestProfile_Block(t *testing.T) {
++	tmpDir := t.TempDir()
++	blockFile := filepath.Join(tmpDir, "block.pprof")
++
++	p, err := startProfiling(profileConfig{
++		blockPath: blockFile,
++		blockRate: 1, // sample all blocking events
++	})
++	if err != nil {
++		t.Fatalf("startProfiling failed: %v", err)
++	}
++
++	// Tạo sự kiện blocking (khóa mutex)
++	var mu sync.Mutex
++	mu.Lock()
++	go func() {
++		time.Sleep(10 * time.Millisecond)
++		mu.Unlock()
++	}()
++	time.Sleep(2 * time.Millisecond)
++	mu.Lock()
++	mu.Unlock()
++
++	if err := p.Stop(); err != nil {
++		t.Fatalf("p.Stop() failed: %v", err)
++	}
++
++	info, err := os.Stat(blockFile)
++	if err != nil {
++		t.Fatalf("stat block file failed: %v", err)
++	}
++	if info.Size() == 0 {
++		t.Fatalf("expected non-empty block profile file, got size 0")
++	}
++}
++
++func TestProfile_NoUnexpectedOverwrite(t *testing.T) {
++	tmpDir := t.TempDir()
++	cpuFile := filepath.Join(tmpDir, "cpu.pprof")
++	if err := os.WriteFile(cpuFile, []byte("existing"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++
++	_, err := startProfiling(profileConfig{
++		cpuPath:        cpuFile,
++		allowOverwrite: false,
++	})
++	if err == nil {
++		t.Fatalf("expected error when file already exists and allowOverwrite is false")
++	}
++
++	// Thử tương tự với block profile
++	blockFile := filepath.Join(tmpDir, "block.pprof")
++	if err := os.WriteFile(blockFile, []byte("existing"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	_, err = startProfiling(profileConfig{
++		blockPath:      blockFile,
++		allowOverwrite: false,
++	})
++	if err == nil {
++		t.Fatalf("expected error when block profile file already exists and allowOverwrite is false")
++	}
++}
++
++func TestProfile_AllowOverwrite(t *testing.T) {
++	tmpDir := t.TempDir()
++	cpuFile := filepath.Join(tmpDir, "cpu.pprof")
++	if err := os.WriteFile(cpuFile, []byte("existing-data"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++
++	p, err := startProfiling(profileConfig{
++		cpuPath:        cpuFile,
++		allowOverwrite: true,
++	})
++	if err != nil {
++		t.Fatalf("expected success with allowOverwrite=true, got: %v", err)
++	}
++	if err := p.Stop(); err != nil {
++		t.Fatalf("Stop failed: %v", err)
++	}
++
++	info, err := os.Stat(cpuFile)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if info.Size() == 0 {
++		t.Fatalf("expected non-empty cpu profile file after overwrite")
++	}
++}
++
++func TestProfile_InvalidPath(t *testing.T) {
++	invalidPath := filepath.Join(t.TempDir(), "non-existent-dir", "sub", "cpu.pprof")
++	_, err := startProfiling(profileConfig{
++		cpuPath: invalidPath,
++	})
++	if err == nil {
++		t.Fatalf("expected error for non-existent directory path")
++	}
++}
++
++func TestProfile_StopIdempotent(t *testing.T) {
++	tmpDir := t.TempDir()
++	cpuFile := filepath.Join(tmpDir, "cpu.pprof")
++	p, err := startProfiling(profileConfig{
++		cpuPath: cpuFile,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if err := p.Stop(); err != nil {
++		t.Fatalf("first Stop failed: %v", err)
++	}
++	// Gọi Stop lần 2 phải không lỗi
++	if err := p.Stop(); err != nil {
++		t.Fatalf("second Stop failed: %v", err)
++	}
++}
++
++func TestProfile_PartialFailureCleanup(t *testing.T) {
++	tmpDir := t.TempDir()
++	cpuFile := filepath.Join(tmpDir, "cpu.pprof")
++	invalidBlock := filepath.Join(tmpDir, "nonexistent", "block.pprof")
++
++	_, err := startProfiling(profileConfig{
++		cpuPath:   cpuFile,
++		blockPath: invalidBlock,
++	})
++	if err == nil {
++		t.Fatalf("expected error when block profile path is invalid")
++	}
++
++	// Đảm bảo CPU profile đã được dừng sau khi block profile thất bại
++	// Thử bật lại CPU profile mới để chứng minh không bị xung đột pprof
++	newCPU := filepath.Join(tmpDir, "cpu2.pprof")
++	p2, err2 := startProfiling(profileConfig{
++		cpuPath: newCPU,
++	})
++	if err2 != nil {
++		t.Fatalf("failed to start new cpu profile after cleanup: %v", err2)
++	}
++	_ = p2.Stop()
++}
+--- baseline/cmd/strand/sync.go
++++ working/cmd/strand/sync.go
+@@ -108,7 +108,13 @@
+ 	return nil
+ }
+ 
+-var syncSeedManifest string
++var (
++	syncSeedManifest     string
++	syncCPUProfile       string
++	syncBlockProfile     string
++	syncBlockProfileRate int
++	syncProfileOverwrite bool
++)
+ 
+ func newSyncCmd() *cobra.Command {
+ 	cmd := &cobra.Command{
+@@ -132,6 +138,23 @@
+ 				return startBackground(cmd, cfg)
+ 			}
+ 			defer childPidFileCleanup()()
++
++			prof, err := startProfiling(profileConfig{
++				cpuPath:        syncCPUProfile,
++				blockPath:      syncBlockProfile,
++				blockRate:      syncBlockProfileRate,
++				allowOverwrite: syncProfileOverwrite,
++			})
++			if err != nil {
++				return err
++			}
++			defer func() {
++				if prof != nil {
++					if pErr := prof.Stop(); pErr != nil {
++						slog.Default().Error("stop profiler failed", "error", pErr)
++					}
++				}
++			}()
+ 			level := slog.LevelInfo
+ 			switch strings.ToLower(cfg.Observability.Log.Level) {
+ 			case "debug":
+@@ -169,6 +192,10 @@
+ 	cmd.Flags().BoolVarP(&syncBackground, "background", "d", false, "Chạy nền: tách khỏi terminal, log ra --log-file, PID ra --pid-file; dừng bằng strand stop -c ...")
+ 	cmd.Flags().StringVar(&syncLogFile, "log-file", "", "Với --background: file log (mặc định <resources.spool.path>/strand.log)")
+ 	cmd.Flags().StringVar(&syncPidFile, "pid-file", "", "Với --background: file pid (mặc định <resources.spool.path>/strand.pid)")
++	cmd.Flags().StringVar(&syncCPUProfile, "cpu-profile", "", "Đường dẫn file ghi CPU profile (pprof)")
++	cmd.Flags().StringVar(&syncBlockProfile, "block-profile", "", "Đường dẫn file ghi block profile (pprof)")
++	cmd.Flags().IntVar(&syncBlockProfileRate, "block-profile-rate", 1, "Tỷ lệ lấy mẫu block profile theo nanosecond (mặc định 1)")
++	cmd.Flags().BoolVar(&syncProfileOverwrite, "profile-overwrite", false, "Cho phép ghi đè file profile nếu đã tồn tại")
+ 	return cmd
+ }
+ 

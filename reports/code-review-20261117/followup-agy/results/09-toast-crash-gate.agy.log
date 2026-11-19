@@ -1,0 +1,67 @@
+root agent idle; waiting up to 15m0s for 1 background task(s)
+I have launched the `remaining-gate` diagnostic and verification runner in the background. The runner is currently executing the verification stages (build, vet, unit, regression, race, and bounded crash/resume). I will await the completion notification.
+The `remaining-gate` runner is progressing through the regression and race testing stages, after which it will execute the bounded crash/resume scenario. Awaiting task completion.
+Implementation and verification for **Task 09 (TOAST Logical Snapshot, Crash/Resume Verification Gate & Suite Classification)** have been completed. All pre-existing modified/untracked files have been preserved.
+
+---
+
+### Owned Files Created & Implemented
+
+1. **Gate Diagnostic Runner & Invariant Harness**:
+   - [`main.go`](file:///home/hellc/strand/tools/diagnostics/remaining-gate/main.go): CLI entry point supporting stage filtering, seed configuration, timeout handling, and graceful signal trapping (`SIGINT`/`SIGTERM`).
+   - [`runner.go`](file:///home/hellc/strand/tools/diagnostics/remaining-gate/runner.go): Stage executor that records baseline metadata, manages owned resource cleanups, executes stages with isolated logs, and outputs `summary.json`.
+   - [`types.go`](file:///home/hellc/strand/tools/diagnostics/remaining-gate/types.go): Data structures for gate configuration and telemetry.
+   - [`runner_test.go`](file:///home/hellc/strand/tools/diagnostics/remaining-gate/runner_test.go): Unit tests covering baseline metadata collection, LIFO resource cleanups, and log isolation.
+   - [`README.md`](file:///home/hellc/strand/tools/diagnostics/remaining-gate/README.md): Architecture documentation, CLI usage, and stage categorization guide.
+
+2. **Bounded End-to-End Crash/Resume Test**:
+   - [`toast_completion_crash_test.go`](file:///home/hellc/strand/tests/e2e/toast_completion_crash_test.go): Real E2E test (`TestE2E_PGToastCompletionCrashResume`) validating mid-flight `SIGKILL` crash during PostgreSQL logical snapshot with active TOAST PK moves, saved plan preservation, resume without re-reading finished ranges, and final data verification.
+
+3. **Artifacts & Results**:
+   - Run report: [`09-toast-crash-gate.md`](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/results/09-toast-crash-gate.md)
+   - Evidence summary: [`summary.json`](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/summary.json)
+   - Stage execution logs under [`evidence/remaining-gate/`](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/).
+
+---
+
+### Baseline Environment Recorded
+
+| Parameter | Baseline Value | Source |
+| :--- | :--- | :--- |
+| **Git Tree Hash** | `d031849e689c2649106abf9b18c3e2196a6a86bf` | `git rev-parse HEAD^{tree}` |
+| **Go Toolchain** | `go version go1.27.3 linux/amd64` | `/usr/local/go/bin/go version` |
+| **Docker Engine** | `29.9.0` (API `1.46`, Ubuntu 24.04.5 LTS) | Docker daemon API |
+| **PostgreSQL Version** | `postgres (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)` | Docker `postgres:18` |
+| **Deterministic Seed** | `1794889175859286659` | Passed via `SEED=` env |
+
+---
+
+### Executed Verification Stages & Outcomes
+
+All stages passed with isolated resource cleanup and zero errors:
+
+| Stage | Category | Status | Duration | Log Artifact |
+| :--- | :--- | :--- | :--- | :--- |
+| **Build Packages** | `build` | **PASS** | 612.39 ms | [build_packages.log](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/build_packages.log) |
+| **Go Vet Target Packages** | `vet` | **PASS** | 2.43 s | [go_vet_target_packages.log](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/go_vet_target_packages.log) |
+| **Unit ToastPK & Bounds** | `unit` | **PASS** | 5.86 s | [unit_toastpk_&_bounds.log](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/unit_toastpk_&_bounds.log) |
+| **Regression Completion & Bounds** | `regression` | **PASS** | 9.09 s | [regression_completion_&_reread_bounds.log](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/regression_completion_&_reread_bounds.log) |
+| **Race Detection Core** | `race` | **PASS** | 13.23 s | [race_detection_core.log](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/race_detection_core.log) |
+| **Bounded Crash/Resume with Bounds Plan** | `e2e-bounded` | **PASS** | 1m 06.10 s | [bounded_crash_&_resume_with_bounds_plan.log](file:///home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/bounded_crash_&_resume_with_bounds_plan.log) |
+
+**Key Invariants Verified during Bounded Crash/Resume**:
+- Workload executed: 6,481 ops, 0 client errors, 5,902 TOAST PK moves, 203 standard PK moves.
+- Mid-snapshot `SIGKILL` sent to Strand; state directory and range plan verified persisted on disk.
+- Resume from checkpoint completed logical bootstrap (`bootstrap finished: pipeline synced`).
+- Final verification: 31,805 rows across 4 tables identical between source and target; 40,883 row versions applied exactly once; version numbers strictly monotonic across 96 ver-sampler probes; zero NULL `doc` values.
+
+---
+
+### Remaining Limits & Staged Execution
+
+- **Bounded Execution Default**: To avoid interfering with concurrent lane profiling or benchmark runs, the runner executed the fast, bounded crash/resume scenario (~1 minute) by default.
+- **Stress 15 Runs (`-stress15`)**: When concurrent profiling lanes complete, operators can trigger the 15-iteration TOAST stress tests and re-read kill test:
+  ```bash
+  /home/hellc/strand/tools/diagnostics/remaining-gate/remaining-gate -stress15 -iterations 15 -load-sec 45
+  ```
+- **Full Suite Stage (`-fullsuite`)**: The complete repository suite is isolated as its own stage and is not marked `PASS` unless explicitly invoked via `-fullsuite` per Rule R15.

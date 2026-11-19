@@ -1,0 +1,80 @@
+[
+  {
+    "source_directory": "/tmp/claude-1000/-home-hellc-strand/3f91425d-47ef-4f67-86b3-48546e739000/scratchpad/cmp-keep/strand-e2e-TestP2_E2E_PGLogicalSnapshotToastPKMove_run2-276585853",
+    "items_plan": {
+      "empty": false,
+      "min_pk": 3,
+      "max_pk": 10022564,
+      "chunk_rows": 5000,
+      "next_pk": 3
+    },
+    "events": [
+      {
+        "time": "2026-11-13T20:49:29.5073096+07:00",
+        "level": "INFO",
+        "msg": "snapshot start",
+        "pipeline": "e2e-pg-toastpk",
+        "epoch": 1,
+        "table": "app.items"
+      },
+      {
+        "time": "2026-11-13T20:49:29.811197872+07:00",
+        "level": "ERROR",
+        "msg": "toast row missing at target: verify and repair this key, then restart",
+        "pipeline": "e2e-pg-toastpk",
+        "epoch": 1,
+        "code": "verify_mismatch",
+        "table": "app.items",
+        "key": "[2]",
+        "hint": "strand verify --mode full --table app.items --repair fix"
+      },
+      {
+        "time": "2026-11-13T20:49:29.811180838+07:00",
+        "level": "ERROR",
+        "msg": "pipeline failed",
+        "pipeline": "e2e-pg-toastpk",
+        "epoch": 1,
+        "error": "scheduler stopped after apply failure: txn seq=12713 failed: failed to apply row changes: [verify_mismatch] table app.items: partial update for key [2] but row missing at target: partial (toast) update: row missing at target: table=app.items key=[2]"
+      }
+    ]
+  },
+  {
+    "source_directory": "/tmp/claude-1000/-home-hellc-strand/3f91425d-47ef-4f67-86b3-48546e739000/scratchpad/exp-keep/strand-e2e-TestP2_E2E_PGLogicalSnapshotToastPKMove_run3-2522364685",
+    "items_plan": {
+      "empty": false,
+      "min_pk": 3,
+      "max_pk": 10012334,
+      "chunk_rows": 5000,
+      "next_pk": 3
+    },
+    "events": [
+      {
+        "time": "2026-11-13T21:58:40.498533632+07:00",
+        "level": "INFO",
+        "msg": "snapshot start",
+        "pipeline": "e2e-pg-toastpk",
+        "epoch": 1,
+        "table": "app.items"
+      },
+      {
+        "time": "2026-11-13T21:58:42.508883479+07:00",
+        "level": "ERROR",
+        "msg": "toast row missing at target: verify and repair this key, then restart",
+        "pipeline": "e2e-pg-toastpk",
+        "epoch": 1,
+        "code": "verify_mismatch",
+        "table": "app.items",
+        "key": "[1]",
+        "hint": "strand verify --mode full --table app.items --repair fix"
+      },
+      {
+        "time": "2026-11-13T21:58:42.508881083+07:00",
+        "level": "ERROR",
+        "msg": "pipeline failed",
+        "pipeline": "e2e-pg-toastpk",
+        "epoch": 1,
+        "error": "scheduler stopped after apply failure: txn seq=6708 failed: failed to apply row changes: [verify_mismatch] table app.items: partial update for key [1] but row missing at target: partial (toast) update: row missing at target: table=app.items key=[1]"
+      }
+    ]
+  }
+]

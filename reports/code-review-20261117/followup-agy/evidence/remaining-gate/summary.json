@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-11-17T11:19:35.859287039+07:00",
+  "overall_status": "PASS",
+  "total_duration_ns": 98564881498,
+  "tree_hash": "d031849e689c2649106abf9b18c3e2196a6a86bf",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "docker_version": "29.9.0",
+  "pg_version": "postgres (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)",
+  "seed": 1794889175859286659,
+  "stages": [
+    {
+      "name": "Build Packages",
+      "category": "build",
+      "status": "PASS",
+      "duration_ns": 612390387,
+      "duration_human": "612.390387ms",
+      "command": "/usr/local/go/bin/go build ./internal/snapshot/... ./internal/pipeline/...",
+      "log_path": "/home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/build_packages.log"
+    },
+    {
+      "name": "Go Vet Target Packages",
+      "category": "vet",
+      "status": "PASS",
+      "duration_ns": 2428702579,
+      "duration_human": "2.428702579s",
+      "command": "/usr/local/go/bin/go vet ./internal/snapshot/... ./internal/pipeline/...",
+      "log_path": "/home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/go_vet_target_packages.log"
+    },
+    {
+      "name": "Unit ToastPK \u0026 Bounds",
+      "category": "unit",
+      "status": "PASS",
+      "duration_ns": 5855249780,
+      "duration_human": "5.85524978s",
+      "command": "/usr/local/go/bin/go test -v -run ^TestToastPK ./internal/snapshot/...",
+      "log_path": "/home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/unit_toastpk_\u0026_bounds.log"
+    },
+    {
+      "name": "Regression Completion \u0026 Reread Bounds",
+      "category": "regression",
+      "status": "PASS",
+      "duration_ns": 9094431258,
+      "duration_human": "9.094431258s",
+      "command": "/usr/local/go/bin/go test -v -run ^Test(SnapshotCompletion|ToastPK|RereadBounds) ./internal/snapshot/... ./internal/pipeline/...",
+      "log_path": "/home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/regression_completion_\u0026_reread_bounds.log"
+    },
+    {
+      "name": "Race Detection Core",
+      "category": "race",
+      "status": "PASS",
+      "duration_ns": 13225418503,
+      "duration_human": "13.225418503s",
+      "command": "/usr/local/go/bin/go test -race -v -run ^Test(ToastPK|Completion) ./internal/snapshot/...",
+      "log_path": "/home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/race_detection_core.log"
+    },
+    {
+      "name": "Bounded Crash \u0026 Resume with Bounds Plan",
+      "category": "e2e-bounded",
+      "status": "PASS",
+      "duration_ns": 66104489552,
+      "duration_human": "1m6.104489552s",
+      "command": "/usr/local/go/bin/go test -v -timeout 10m -run ^TestE2E_PGToastCompletionCrashResume$ ./tests/e2e/...",
+      "log_path": "/home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate/bounded_crash_\u0026_resume_with_bounds_plan.log"
+    }
+  ],
+  "artifacts_dir": "/home/hellc/strand/reports/code-review-20261117/followup-agy/evidence/remaining-gate",
+  "resources_cleaned": []
+}

@@ -1,0 +1,5 @@
+=== RUN   TestAuditSubset
+    nokey_audit_test.go:7: source unique (a,b); target unique (a): accepted=true index=target_unique_a
+--- PASS: TestAuditSubset (0.00s)
+PASS
+ok  	strand/internal/validate	0.336s

@@ -1,0 +1,249 @@
+{
+  "scope": "Read-only focused audit; not a complete review of listed packages",
+  "files": [
+    {
+      "path": "internal/assemble/assembler.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/assemble/schema.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/assemble/spill.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/model/keycanon.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/model/model.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/model/spill.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/reader/archive/archiver.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/reader/archive/reader.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/reader/mysql/binlogpos.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/charset.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/gtid.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/headpos.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/legacy_status.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/legacy_temporal.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/mariadb_compress.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/mariadb_tablemap.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/reader/mysql/mariadb_types.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/reader.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/reader/mysql/schemahist.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/sysversion.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/mysql/tableinfo.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/reader/pg/config.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/pg/eventlog.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/reader/pg/mapping.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/pg/messages.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/pg/reader.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/reader/pg/stream.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/reader/reader.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/rowkey/keyless.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/rowkey/mysql.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/rowkey/pg.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/rowkey/rowkey.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/rowkey/suggest.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/snapshot/chunker.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/snapshot/cross_order.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/snapshot/generic_walk.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/snapshot/key_sample.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/snapshot/keyspace.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/snapshot/keysql.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/snapshot/keysql_pg.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/snapshot/mysql_snapshot.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/snapshot/pg_snapshot.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/snapshot/pg_watermark.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/snapshot/pkey.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/snapshot/pkey_catalog.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/snapshot/range_state.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/snapshot/toast_pk.go",
+      "inspection": "body fully read"
+    },
+    {
+      "path": "internal/snapshot/types.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/typemap/collation.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/typemap/inspect.go",
+      "inspection": "not examined beyond file enumeration/search"
+    },
+    {
+      "path": "internal/typemap/typemap.go",
+      "inspection": "selected functions/diff only"
+    },
+    {
+      "path": "internal/typemap/validate.go",
+      "inspection": "not examined beyond file enumeration/search"
+    }
+  ],
+  "additional_selected_files": [
+    "internal/pipeline/pipeline.go",
+    "internal/pipeline/engine.go",
+    "reports/code-review-20261116/REVIEW.md",
+    "go-mysql replication/row_event.go",
+    "go-sql-driver/mysql fields.go",
+    "internal/seed/prefetch.go",
+    "cmd/strand/prefetch.go",
+    "docs/USAGE.md"
+  ],
+  "invariants_checked": [
+    "bound snapshot persists and WAL LSN gate used for outside-bounds suppression",
+    "registration/completion and reread control flow",
+    "pg spill SchemaChanged codec",
+    "BIT SQL packed bytes and binlog integer conversion",
+    "enum and set whitespace",
+    "reread chunk ownership and copy",
+    "row key candidates and replica identity",
+    "model key normalization intent",
+    "archive event switch versus live reader for partial JSON and compressed transactions",
+    "archive source metadata availability and assembler schema fallback",
+    "archiver recovery, fsync/rename and GTID tracking",
+    "assembler spill file cleanup and ownership"
+  ],
+  "unverified": [
+    "end-to-end postgres WAL, persisted checkpoint replay and real target behavior",
+    "complete production audit of any package",
+    "full suite, race, Docker, database or E2E testing",
+    "re-read completion race independently reachable after successful final watermark",
+    "archive partial JSON and minimal metadata findings not reproduced with real binlogs/database",
+    "archiver fsync failure and external deletion scenarios"
+  ],
+  "tests": [
+    "Selected non-DB tests reader/pg, snapshot, assemble, model, typemap, rowkey: passed (some packages had no matching tests)",
+    "Overlay TestAuditCompletionDropsBoundsGuard: new-empty, resume-empty, resume-finished passed; demonstrates guard removal and no rendezvous"
+  ]
+}

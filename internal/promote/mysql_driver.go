@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"strand/internal/checkpoint"
@@ -194,10 +195,25 @@ func (d *MySQLTargetDriver) ApplyRemaining(ctx context.Context) error {
 	}
 }
 
+// quoteMySQLIdent bao bọc định danh MySQL (cột, bảng, schema) trong dấu backtick.
+// Catalog names are raw identifiers: whitespace and boundary backticks are data.
+func quoteMySQLIdent(s string) string {
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
+// quoteMySQLQualified quotes raw catalog names in the schema.table representation
+// used by SequenceInfo. Components are identifiers, not preformatted SQL.
+func quoteMySQLQualified(name string) string {
+	if schema, table, ok := strings.Cut(name, "."); ok {
+		return quoteMySQLIdent(schema) + "." + quoteMySQLIdent(table)
+	}
+	return quoteMySQLIdent(name)
+}
+
 // FindColumnMax tìm giá trị MAX của cột trong bảng target.
 func (d *MySQLTargetDriver) FindColumnMax(ctx context.Context, table, column string) (int64, error) {
 	var maxVal sql.NullInt64
-	q := fmt.Sprintf("SELECT MAX(`%s`) FROM `%s`;", column, table)
+	q := fmt.Sprintf("SELECT MAX(%s) FROM %s;", quoteMySQLIdent(column), quoteMySQLQualified(table))
 	err := d.db.QueryRowContext(ctx, q).Scan(&maxVal)
 	if err != nil {
 		return 0, err
@@ -210,7 +226,13 @@ func (d *MySQLTargetDriver) FindColumnMax(ctx context.Context, table, column str
 
 // Setval cập nhật AUTO_INCREMENT cho bảng.
 func (d *MySQLTargetDriver) Setval(ctx context.Context, seq SequenceInfo, val int64) error {
-	q := fmt.Sprintf("ALTER TABLE `%s` AUTO_INCREMENT = %d;", seq.Table, val)
+	var targetTable string
+	if seq.Schema != "" {
+		targetTable = quoteMySQLIdent(seq.Schema) + "." + quoteMySQLIdent(seq.Table)
+	} else {
+		targetTable = quoteMySQLQualified(seq.Table)
+	}
+	q := fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d;", targetTable, val)
 	_, err := d.db.ExecContext(ctx, q)
 	return err
 }

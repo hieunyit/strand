@@ -1,0 +1,15 @@
+package web
+import("testing";"strings")
+func TestAudit2CompactYAMLSecret(t *testing.T){
+ raw:=[]byte(`{"source":{"password":"compact-canary"}}`)
+ got,err:=MaskConfigText(raw);if err!=nil{t.Fatal(err)}
+ if strings.Contains(got,"compact-canary"){t.Error("valid compact JSON/YAML password remains visible")}
+}
+func TestAudit2QuotedPGDSNSecret(t *testing.T){
+ got:=MaskSecrets("host=localhost user=u password='quoted canary' dbname=d")
+ if strings.Contains(got,"quoted canary"){t.Error("quoted keyword DSN password remains visible")}
+}
+func TestAudit2UnrestoredCompactPlaceholder(t *testing.T){
+ got,err:=UnmaskConfigText(`{"source":{"password":"********"}}`,[]byte(`{"source":{"password":"compact-canary"}}`))
+ if err==nil&&strings.Contains(got,"********"){t.Error("unrestored secret placeholder can be saved as actual password")}
+}

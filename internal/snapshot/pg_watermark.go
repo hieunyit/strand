@@ -31,6 +31,9 @@ import (
 type PGSnapshot struct {
 	Xmin, Xmax uint64
 	Xip        map[uint64]struct{}
+	// BoundsLSN caps historical-event suppression for a persisted bounds snapshot.
+	// A 32-bit pgoutput xid alone becomes ambiguous after half an xid cycle.
+	BoundsLSN uint64 `json:"bounds_lsn,omitempty"`
 }
 
 // ParsePGSnapshot đọc dạng text "xmin:xmax:xip1,xip2,..." của pg_snapshot.

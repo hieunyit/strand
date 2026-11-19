@@ -65,7 +65,11 @@ func pkColumnQuery(ver mysqlver.Version) string {
 var weighQueryTimeout = 30 * time.Second
 
 // weighBatch: số giá trị tối đa trong một truy vấn WEIGHT_STRING của WeighMany.
-const weighBatch = 128
+// Giới hạn byte cũng được áp dụng bên dưới để PK dài không tạo câu SQL/packet quá lớn.
+const (
+	weighBatch      = 512
+	weighBatchBytes = 256 * 1024
+)
 
 // mysqlWeigher: WEIGHT_STRING(CONVERT(v USING charset) COLLATE collation) tính trên db, có cache (giá
 // trị lặp lại nhiều: biên chunk, khóa nóng). Weight là khóa sắp xếp của collation: so byte cho đúng thứ
@@ -187,38 +191,55 @@ func (w *mysqlWeigher) weigh(col PKColumn, v model.Value) ([]byte, error) {
 // dọn phần chưa đọc / verify full khác thứ tự (CrossEngineKeySet) cần khóa source của mọi row target —
 // một truy vấn mỗi row thì quá chậm. Chỉ là tối ưu: Encode sau đó vẫn đi qua weigh (cache bị xóa giữa
 // chừng thì weigh tự hỏi lại MySQL), nên kết quả không phụ thuộc cache.
-func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) error {
+func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) (map[string][]byte, error) {
 	var todo []string
+	out := make(map[string][]byte, len(vs))
 	seen := map[string]bool{}
 	for _, v := range vs {
 		s, err := toText(v)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
 		ck := cacheKey(col, s)
 		w.mu.Lock()
-		_, ok := w.cache[ck]
+		wt, ok := w.cache[ck]
 		w.mu.Unlock()
-		if !ok && !seen[s] {
-			seen[s] = true
+		if ok {
+			out[s] = wt
+		} else {
 			todo = append(todo, s)
 		}
 	}
-	for i := 0; i < len(todo); i += weighBatch {
-		part := todo[i:min(i+weighBatch, len(todo))]
+	for i := 0; i < len(todo); {
+		end, bytes := i, 0
+		for end < len(todo) && end-i < weighBatch {
+			n := len(todo[end])
+			if end > i && bytes+n > weighBatchBytes {
+				break
+			}
+			bytes += n
+			end++
+		}
+		part := todo[i:end]
 		r, err := w.raw(col, part)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for j, s := range part {
 			wt, err := w.finish(col, r[j])
 			if err != nil {
-				return err
+				return nil, err
 			}
+			out[s] = wt
 			w.put(cacheKey(col, s), wt)
 		}
+		i = end
 	}
-	return nil
+	return out, nil
 }
 
 // PGPKCodec dựng codec PK (PGPKColumn) từ catalog: kiểu gốc (typname, qua domain) và collation.

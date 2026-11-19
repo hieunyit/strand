@@ -1,0 +1,26 @@
+=== RUN   TestAuditSpillExceedsTotalHardLimit
+    audit_storage_test.go:22: spill bytes=262182, configured hard limit=65536, reported usage={LocalBytes:200 BucketBytes:0}, append err=<nil>
+    audit_storage_test.go:23: spool accepted spill larger than total hard limit
+--- FAIL: TestAuditSpillExceedsTotalHardLimit (0.04s)
+FAIL
+FAIL	strand/internal/spool	0.347s
+=== RUN   TestAuditResumeRefenceRechecksCatchup
+2026/11/17 05:18:02 INFO resuming promote from interrupted step pipeline=audit current_step=open_writes completed_steps="[fence_source hold_readonly apply_remaining setval]"
+2026/11/17 05:18:02 WARN source fence is not held by this process; fencing again reason="connection gone"
+2026/11/17 05:18:02 INFO promote completed successfully: DNS/VIP switchover ready pipeline=audit
+    audit_storage_test.go:20: refence calls=1, catchup calls=0, open writes calls=1
+    audit_storage_test.go:21: opened writes after a new fence without rechecking catchup
+--- FAIL: TestAuditResumeRefenceRechecksCatchup (0.00s)
+FAIL
+FAIL	strand/internal/promote	0.304s
+=== RUN   TestAuditOldWorkerInsertedAfterTakeover
+    audit_storage_test.go:63: pipeline epoch=2, stale worker epoch=1, apply error=<nil>, data writes=1, committed=true
+    audit_storage_test.go:64: stale relaxed writer committed data after takeover
+--- FAIL: TestAuditOldWorkerInsertedAfterTakeover (0.00s)
+=== RUN   TestAuditPartitionedKeylessNeedsTableOID
+    audit_storage_test.go:68: DELETE FROM "app"."parent" WHERE ctid = (SELECT ctid FROM "app"."parent" WHERE "partition_key" IS NOT DISTINCT FROM $1 AND "value" IS NOT DISTINCT FROM $2 LIMIT 1)
+    audit_storage_test.go:69: ctid is only unique inside one physical relation; partitioned/inherited target needs tableoid too
+--- FAIL: TestAuditPartitionedKeylessNeedsTableOID (0.00s)
+FAIL
+FAIL	strand/internal/writer	0.304s
+FAIL

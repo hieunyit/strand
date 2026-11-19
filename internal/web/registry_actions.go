@@ -99,7 +99,7 @@ func (s *Server) registerRegistryOps() {
 				switch c.File {
 				case "config":
 					// Đường sửa cấu hình thường: validate, .bak, ghi file + DB (thất bại thì không đổi gì).
-					if _, err := srv.saveConfigContent(ctx, p, string(b), false, req.IP); err != nil {
+					if _, err := srv.saveConfigContent(ctx, p, string(b), false, false, req.IP); err != nil {
 						return ActionResult{}, err
 					}
 				case "env":

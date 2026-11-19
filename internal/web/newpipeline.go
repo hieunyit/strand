@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,8 +15,11 @@ import (
 	"strconv"
 	"strings"
 	texttmpl "text/template"
+	"time"
 
 	"strand/internal/config"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"gopkg.in/yaml.v3"
 )
@@ -29,9 +33,10 @@ import (
 
 // NewPipelineOpts là tham số tạo pipeline mới.
 type NewPipelineOpts struct {
-	Name string `json:"name"`
-	From string `json:"from"` // mysql | mariadb | postgres
-	To   string `json:"to"`   // mysql | postgres
+	Name      string `json:"name"`
+	From      string `json:"from"` // mysql | mariadb | postgres
+	To        string `json:"to"`   // mysql | postgres
+	Overwrite bool   `json:"overwrite,omitempty"`
 
 	SourceHost string `json:"source_host"`
 	SourcePort int    `json:"source_port"`
@@ -71,6 +76,7 @@ type NewPipelineOpts struct {
 	IOPSHard int    `json:"iops_hard,omitempty"`
 
 	ChunkRows       int      `json:"chunk_rows,omitempty"`
+	StartAt         string   `json:"start_at,omitempty"`
 	Windows         []string `json:"windows,omitempty"`
 	BreakerMaxRatio float64  `json:"breaker_max_ratio,omitempty"`
 	ReplicaLagMax   string   `json:"replica_lag_max,omitempty"`
@@ -168,9 +174,14 @@ tables:
 {{- end}}
 
 bootstrap:
+{{- if .StartAt}}
+  default: start_at
+  start_at: "{{.StartAt}}"
+{{- else}}
   default: logical
 {{- if or .ChunkRows .Windows}}
   logical: { {{if .ChunkRows}}chunk_rows: {{.ChunkRows}}{{if .Windows}}, {{end}}{{end}}{{if .Windows}}windows: [{{range $i, $e := .Windows}}{{if $i}}, {{end}}"{{$e}}"{{end}}]{{end}} }
+{{- end}}
 {{- end}}
 
 resources:
@@ -224,6 +235,7 @@ type tmplData struct {
 	IOPSSoft          int
 	IOPSHard          int
 	ChunkRows         int
+	StartAt           string
 	Windows           []string
 	BreakerMaxRatio   float64
 	ReplicaLagMax     string
@@ -268,6 +280,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		IOPSSoft:          opts.IOPSSoft,
 		IOPSHard:          opts.IOPSHard,
 		ChunkRows:         opts.ChunkRows,
+		StartAt:           opts.StartAt,
 		Windows:           opts.Windows,
 		BreakerMaxRatio:   opts.BreakerMaxRatio,
 		ReplicaLagMax:     opts.ReplicaLagMax,
@@ -571,9 +584,13 @@ func (s *Server) usedMetricsPorts() map[int]string {
 // pickMetricsAddr chọn cổng /metrics riêng: tìm từ 9464 trở lên, bỏ cổng đã dùng trong cấu hình của pipeline khác
 // và cổng đang có tiến trình lắng nghe.
 func (s *Server) pickMetricsAddr() (string, error) {
+	return s.pickMetricsAddrFor("")
+}
+
+func (s *Server) pickMetricsAddrFor(pipelineName string) (string, error) {
 	used := s.usedMetricsPorts()
 	for port := 9464; port < 9464+1000; port++ {
-		if _, taken := used[port]; taken {
+		if other, taken := used[port]; taken && other != pipelineName {
 			continue
 		}
 		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
@@ -599,8 +616,15 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	if !ValidName(opts.Name) {
 		return nil, BadRequest("invalid pipeline name %q (allowed: letters, digits, _ . - ; up to 63 chars)", opts.Name)
 	}
-	if s.reg.Get(opts.Name) != nil {
-		return nil, Conflict("pipeline %q already exists in registry", opts.Name)
+
+	existing := s.reg.Get(opts.Name)
+	if existing != nil {
+		if s.isRunning(existing) {
+			return nil, Conflict("pipeline %q is currently running; stop it first before overwriting", opts.Name)
+		}
+		if !opts.Overwrite {
+			return nil, Conflict("pipeline %q already exists in registry (check 'Overwrite' to update it)", opts.Name)
+		}
 	}
 
 	configDir := s.ConfigDir()
@@ -616,11 +640,13 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		return nil, BadRequest("path traversal detected")
 	}
 
-	if fileExists(yamlPath) {
-		return nil, Conflict("config file %s already exists", yamlPath)
-	}
-	if fileExists(envPath) {
-		return nil, Conflict("env file %s already exists", envPath)
+	if !opts.Overwrite {
+		if fileExists(yamlPath) {
+			return nil, Conflict("config file %s already exists (check 'Overwrite' to update it)", yamlPath)
+		}
+		if fileExists(envPath) {
+			return nil, Conflict("env file %s already exists (check 'Overwrite' to update it)", envPath)
+		}
 	}
 
 	spoolDir := opts.SpoolDir
@@ -636,7 +662,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	// Mỗi pipeline một cổng /metrics riêng; cổng do người dùng đặt không được trùng pipeline khác.
 	opts.Metrics = strings.TrimSpace(opts.Metrics)
 	if opts.Metrics == "" {
-		addr, err := s.pickMetricsAddr()
+		addr, err := s.pickMetricsAddrFor(opts.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -646,7 +672,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		if port <= 0 || port > 65535 {
 			return nil, BadRequest("invalid metrics address %q (want host:port)", opts.Metrics)
 		}
-		if other, taken := s.usedMetricsPorts()[port]; taken {
+		if other, taken := s.usedMetricsPorts()[port]; taken && other != opts.Name {
 			return nil, Conflict("metrics port %d is already used by pipeline %q", port, other)
 		}
 	}
@@ -853,6 +879,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.Name = f.Get("name")
 	opts.From = f.Get("from")
 	opts.To = f.Get("to")
+	opts.Overwrite = f.Get("overwrite") == "true" || f.Get("overwrite") == "1" || f.Get("overwrite") == "on"
 	opts.SourceHost = f.Get("source_host")
 	opts.TargetHost = f.Get("target_host")
 	opts.SourceUser = f.Get("source_user")
@@ -874,6 +901,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.LagSLO = f.Get("lag_slo")
 	opts.Metrics = f.Get("metrics")
 	opts.LogFormat = f.Get("log_format")
+	opts.StartAt = strings.TrimSpace(f.Get("start_at"))
 	opts.Databases = splitList(f.Get("databases"))
 	opts.Includes = splitList(f.Get("include"))
 	opts.Excludes = splitList(f.Get("exclude"))
@@ -941,4 +969,71 @@ func (s *Server) apiPipelineCreate(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+type sourceDatabaseRequest struct {
+	From     string `json:"from"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
+// apiSourceDatabases lists databases reachable by the credentials currently entered in the new-pipeline form.
+// The password is used only for this request and is never logged or persisted by this handler.
+func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, _ *Session) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var req sourceDatabaseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.From == "postgres" {
+		writeErr(w, http.StatusNotImplemented, "database discovery is currently supported for MySQL and MariaDB sources")
+		return
+	}
+	if req.From != "mysql" && req.From != "mariadb" {
+		writeErr(w, http.StatusBadRequest, "unsupported source engine")
+		return
+	}
+	if strings.TrimSpace(req.Host) == "" || strings.TrimSpace(req.User) == "" || req.Port < 1 || req.Port > 65535 {
+		writeErr(w, http.StatusBadRequest, "source host, user, and valid port are required")
+		return
+	}
+	cfg := mysqldriver.NewConfig()
+	cfg.User, cfg.Passwd = req.User, req.Password
+	cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(strings.TrimSpace(req.Host), strconv.Itoa(req.Port))
+	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = 5*time.Second, 5*time.Second, 5*time.Second
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "could not configure source connection")
+		return
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "source connection failed or user cannot list databases")
+		return
+	}
+	defer rows.Close()
+	databases := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			writeErr(w, http.StatusBadGateway, "failed to read source database list")
+			return
+		}
+		switch strings.ToLower(name) {
+		case "information_schema", "performance_schema", "mysql", "sys":
+			continue
+		}
+		databases = append(databases, name)
+	}
+	if err := rows.Err(); err != nil {
+		writeErr(w, http.StatusBadGateway, "failed while reading source database list")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"databases": databases})
 }

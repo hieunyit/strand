@@ -120,3 +120,68 @@ func (r *Registry) AddCreated(e PipelineEntry) error {
 	}
 	return os.Rename(tmp.Name(), r.createdPath())
 }
+
+// RemovePipeline xóa pipeline khỏi config khai báo và created registry (DB hoặc file).
+func (r *Registry) RemovePipeline(name string) error {
+	r.mu.Lock()
+	if r.cfg != nil {
+		var newPipes []PipelineEntry
+		for _, p := range r.cfg.Pipelines {
+			if p.Name != name {
+				newPipes = append(newPipes, p)
+			}
+		}
+		r.cfg.Pipelines = newPipes
+	}
+	r.mu.Unlock()
+	return r.RemoveCreated(name)
+}
+
+// RemoveCreated xóa entry khỏi DB hoặc <state_dir>/pipelines.json.
+func (r *Registry) RemoveCreated(name string) error {
+	if r.db != nil {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		return r.db.st.DeletePipeline(ctx, name)
+	}
+	r.createdMu.Lock()
+	defer r.createdMu.Unlock()
+	cur, err := r.loadCreated()
+	if err != nil {
+		return err
+	}
+	var out []PipelineEntry
+	for _, c := range cur {
+		if c.Name != name {
+			out = append(out, c)
+		}
+	}
+	b, err := json.MarshalIndent(createdFileDoc{Version: 1, Pipelines: out}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(r.cfg.StateDir, 0o750); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(r.cfg.StateDir, ".pipelines-json-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), r.createdPath())
+}

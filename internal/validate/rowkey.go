@@ -71,10 +71,8 @@ func CheckPGRowKeyOpts(ctx context.Context, db *sql.DB, tables []model.TableID, 
 	return labels, warnings, missingKeysError(missing)
 }
 
-// uniqueIndexCovers: trong idx (tên index → cột khóa, chỉ index unique dùng được) có index đảm bảo tính duy nhất
-// của khóa key không. exactSet: cần đúng tập cột của key (PostgreSQL: ON CONFLICT (cols) suy ra index theo tập
-// cột); ngược lại index trên tập con của key cũng đủ (MySQL: ON DUPLICATE KEY UPDATE chạy trên mọi unique index,
-// tập con còn chặt hơn nên không tạo trùng).
+// uniqueIndexCovers requires an exact identity, for both engines. A subset unique
+// cannot represent all rows allowed by the source key.
 func uniqueIndexCovers(idx map[string][]string, key []string, exactSet bool) (string, bool) {
 	want := map[string]bool{}
 	for _, c := range key {
@@ -87,7 +85,7 @@ func uniqueIndexCovers(idx map[string][]string, key []string, exactSet bool) (st
 	sort.Strings(names)
 	for _, n := range names {
 		cols := idx[n]
-		if len(cols) == 0 || (exactSet && len(cols) != len(want)) {
+		if len(cols) == 0 || len(cols) != len(want) {
 			continue
 		}
 		ok := true
@@ -130,6 +128,7 @@ func CheckTargetKey(ctx context.Context, dstDB *sql.DB, engine model.Engine, src
 		return nil
 	}
 	idx := map[string][]string{}
+	unusable := map[string]bool{}
 	var q string
 	if engine == model.EnginePG {
 		q = `SELECT ic.relname, a.attname
@@ -141,17 +140,13 @@ func CheckTargetKey(ctx context.Context, dstDB *sql.DB, engine model.Engine, src
 		   AND i.indpred IS NULL AND i.indexprs IS NULL AND k.ord <= i.indnkeyatts
 		 ORDER BY ic.relname, k.ord`
 	} else {
-		// Index prefix (SUB_PART) không đảm bảo tính duy nhất của cả giá trị cột: bỏ qua.
-		q = `SELECT s.INDEX_NAME, s.COLUMN_NAME FROM information_schema.STATISTICS s
-		 WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0 AND s.COLUMN_NAME IS NOT NULL
-		   AND s.INDEX_NAME NOT IN (SELECT INDEX_NAME FROM information_schema.STATISTICS
-		        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND NON_UNIQUE = 0 AND (SUB_PART IS NOT NULL OR COLUMN_NAME IS NULL))
-		 ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX`
+		// Include every unique constraint: even an unusable arbiter can cause
+		// ON DUPLICATE KEY UPDATE to overwrite a different source row.
+		q = `SELECT s.INDEX_NAME, s.COLUMN_NAME, s.SUB_PART FROM information_schema.STATISTICS s
+         WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0
+         ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX`
 	}
 	args := []any{dst.Schema, dst.Table}
-	if engine != model.EnginePG {
-		args = append(args, dst.Schema, dst.Table)
-	}
 	var exists int
 	existsQ := "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
 	if engine == model.EnginePG {
@@ -169,16 +164,42 @@ func CheckTargetKey(ctx context.Context, dstDB *sql.DB, engine model.Engine, src
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var n, c string
-		if err := rows.Scan(&n, &c); err != nil {
+		var n string
+		var c sql.NullString
+		var sub sql.NullInt64
+		var err error
+		if engine == model.EnginePG {
+			err = rows.Scan(&n, &c)
+		} else {
+			err = rows.Scan(&n, &c, &sub)
+		}
+		if err != nil {
 			return err
 		}
-		idx[n] = append(idx[n], c)
+		if !c.Valid || sub.Valid {
+			unusable[n] = true
+		}
+		if c.Valid {
+			idx[n] = append(idx[n], c.String)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if _, ok := uniqueIndexCovers(idx, key.Columns, engine == model.EnginePG); ok {
+	for n := range unusable {
+		delete(idx, n)
+	}
+	if _, ok := uniqueIndexCovers(idx, key.Columns, true); ok {
+		if engine == model.EngineMySQL {
+			for n, cols := range idx {
+				// A strict subset provably excludes rows allowed by this source
+				// identity. Other constraints need source-index metadata to compare;
+				// unrelated mirrored unique constraints remain supported.
+				if len(cols) > 0 && len(cols) < len(key.Columns) && indexContainsIdentity(key.Columns, cols) {
+					return incompatibleTargetIndex(src, dst, n)
+				}
+			}
+		}
 		return nil
 	}
 	return TargetKeyError(src, dst, key, engine)
@@ -220,6 +241,10 @@ func CheckKeys(ctx context.Context, src *sql.DB, srcKind string, dst *sql.DB, ds
 	if strings.EqualFold(dstKind, "postgres") {
 		engine = model.EnginePG
 	}
+	srcEngine := model.EngineMySQL
+	if strings.EqualFold(srcKind, "postgres") {
+		srcEngine = model.EnginePG
+	}
 	for _, t := range tables {
 		k := keys[t]
 		if k == nil || k.IsPrimary() {
@@ -236,7 +261,18 @@ func CheckKeys(ctx context.Context, src *sql.DB, srcKind string, dst *sql.DB, ds
 			return lines, err
 		}
 	}
+	if dst != nil && src != nil {
+		opts := ConstraintCheckOptions{TableRename: rename}
+		if err := CheckConstraintCompatibility(ctx, src, srcEngine, dst, engine, tables, opts); err != nil {
+			return lines, err
+		}
+	}
 	return lines, nil
+}
+
+// CheckRowKeys validates row keys and constraint compatibility across source and target databases.
+func CheckRowKeys(ctx context.Context, src *sql.DB, srcKind string, dst *sql.DB, dstKind string, tables []model.TableID, rename map[string]string, ko KeylessOpts) ([]string, error) {
+	return CheckKeys(ctx, src, srcKind, dst, dstKind, tables, rename, ko)
 }
 
 // KeylessOpts: cấu hình chế độ keyless (tables.keyless=full_row) cho validate.
@@ -295,7 +331,13 @@ func mysqlColTypes(ctx context.Context, db *sql.DB, schema, table string) ([]str
 }
 
 func pgColTypes(ctx context.Context, db *sql.DB, oid int64) ([]string, map[string]string, error) {
-	rs, err := db.QueryContext(ctx, `SELECT a.attname, t.typname FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+	rs, err := db.QueryContext(ctx, `SELECT a.attname, base.typname FROM pg_attribute a
+        JOIN LATERAL (
+            WITH RECURSIVE types AS (
+                SELECT t.oid, t.typname, t.typbasetype, t.typelem, t.typcategory, 0 AS depth FROM pg_type t WHERE t.oid=a.atttypid
+                UNION ALL SELECT t.oid, t.typname, t.typbasetype, t.typelem, t.typcategory, p.depth+1 FROM pg_type t JOIN types p ON t.oid=CASE WHEN p.typbasetype<>0 THEN p.typbasetype WHEN p.typcategory='A' THEN p.typelem ELSE 0 END
+            ) SELECT typname FROM types WHERE typbasetype=0 ORDER BY (typname IN ('citext','float4','float8','json','xml','point','line','lseg','box','path','polygon','circle')) DESC, depth LIMIT 1
+        ) base ON true
 		WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' ORDER BY a.attnum`, oid)
 	if err != nil {
 		return nil, nil, err
@@ -321,4 +363,20 @@ func prefixWarn(ws []string) []string {
 		out[i] = "warning: " + w
 	}
 	return out
+}
+
+func indexContainsIdentity(cols, key []string) bool {
+	have := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		have[c] = true
+	}
+	for _, c := range key {
+		if !have[c] {
+			return false
+		}
+	}
+	return true
+}
+func incompatibleTargetIndex(src, dst model.TableID, name string) error {
+	return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("target table %s: unique index %q can conflict between distinct rows from source %s; align target unique constraints with the complete source row identity", dst, name, src), nil)
 }

@@ -72,7 +72,7 @@ func TestTablesTabMarkup(t *testing.T) {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
 	for _, want := range []string{
-		`id="snapshot-summary"`, `id="snap-tables"`, `1 <small>of 3 done`, `id="tables-table"`,
+		`id="snapshot-summary"`, `id="snap-tables"`, `<span data-bind="tables_done">1</span> <small>of <span data-bind="tables_total">3</span> done`, `id="tables-table"`,
 		`data-tfilter="all"`, `data-tfilter="running"`, `data-tfilter="pending"`, `data-tfilter="done"`,
 		`id="tb-filter"`, `id="tb-sort"`, `class="keytag pk"`, `data-state="running"`,
 		`aria-label="Tables done: 33.3%"`, `class="trow is-running"`,
@@ -114,7 +114,7 @@ func TestOverviewAttentionAndKPIs(t *testing.T) {
 	c := e.client()
 	e.login(c, testPassword)
 	_, body := e.do(c, "GET", "/", "", nil)
-	for _, want := range []string{`class="kpis"`, "Needs attention", "Total rows/s", "Everything is running normally", `/static/icons.svg#i-overview`} {
+	for _, want := range []string{`class="kpis"`, "Needs attention", "Rows/s", "30 s avg", "Everything is running normally", `/static/icons.svg#i-overview`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("overview lacks %q", want)
 		}

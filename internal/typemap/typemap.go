@@ -579,67 +579,63 @@ func MapMySQLColumn(col MySQLColumn, opts Options) (ColumnMapping, error) {
 	// 3. Bit
 	// -------------------------------------------------------------------------
 	case "bit":
-		// bit(n) -> bit varying(n) hoặc bytea theo BitPolicy
+		// SQL drivers return packed bytes; the binlog decoder returns integers.
+		// Strings are reserved for explicit binary text, never inferred from bytes.
+		width := 1
+		if params != "" {
+			var err error
+			width, err = strconv.Atoi(strings.Trim(params, "()"))
+			if err != nil || width < 1 || width > 64 {
+				return ColumnMapping{}, fmt.Errorf("invalid MySQL BIT width %q", params)
+			}
+		}
 		mapping.Policy = opts.BitPolicy
+		mapping.TargetType = fmt.Sprintf("bit varying(%d)", width)
 		if opts.BitPolicy == "bytea" {
 			mapping.TargetType = "bytea"
-			mapping.Convert = func(v model.Value) (model.Value, error) {
-				if v == nil {
-					return nil, nil
-				}
-				switch x := v.(type) {
-				case []byte:
-					return x, nil
-				case string:
-					return []byte(x), nil
-				default:
-					u, err := toUint64(v)
-					if err != nil {
-						return nil, err
-					}
-					return []byte(strconv.FormatUint(u, 2)), nil
-				}
+		}
+		mapping.Convert = func(v model.Value) (model.Value, error) {
+			if v == nil {
+				return nil, nil
 			}
-		} else {
-			if params != "" {
-				mapping.TargetType = "bit varying" + params
-			} else {
-				mapping.TargetType = "bit varying"
-			}
-			mapping.Convert = func(v model.Value) (model.Value, error) {
-				if v == nil {
-					return nil, nil
+			var u uint64
+			var err error
+			switch x := v.(type) {
+			case []byte:
+				if len(x) > 8 {
+					return nil, fmt.Errorf("BIT value exceeds 64 bits")
 				}
-				switch x := v.(type) {
-				case string:
-					return strings.TrimSpace(x), nil
-				case []byte:
-					// Nếu là chuỗi byte ASCII '0'/'1'
-					s := strings.TrimSpace(string(x))
-					isBinaryStr := true
-					for _, c := range s {
-						if c != '0' && c != '1' {
-							isBinaryStr = false
-							break
-						}
-					}
-					if isBinaryStr && len(s) > 0 {
-						return s, nil
-					}
-					// Hoặc byte thô nhị phân -> chuyển sang chuỗi bit
-					var sb strings.Builder
-					for _, b := range x {
-						sb.WriteString(fmt.Sprintf("%08b", b))
-					}
-					return strings.TrimLeft(sb.String(), "0"), nil
-				default:
-					u, err := toUint64(v)
-					if err != nil {
-						return nil, err
-					}
-					return strconv.FormatUint(u, 2), nil
+				for _, b := range x {
+					u = u<<8 | uint64(b)
 				}
+			case int64:
+				// go-mysql decodes BIT(64) through int64, preserving the
+				// unsigned bit pattern even when its high bit is set.
+				if width == 64 {
+					u = uint64(x)
+				} else {
+					u, err = toUint64(x)
+				}
+			case string:
+				u, err = strconv.ParseUint(x, 2, 64)
+			default:
+				u, err = toUint64(v)
 			}
+			if err != nil {
+				return nil, err
+			}
+			if width < 64 && u >= uint64(1)<<width {
+				return nil, fmt.Errorf("BIT value %d exceeds declared width %d", u, width)
+			}
+			if opts.BitPolicy == "bytea" {
+				out := make([]byte, (width+7)/8)
+				for i := len(out) - 1; i >= 0; i-- {
+					out[i] = byte(u)
+					u >>= 8
+				}
+				return out, nil
+			}
+			return fmt.Sprintf("%0*b", width, u), nil
 		}
 
 	// -------------------------------------------------------------------------
@@ -931,9 +927,9 @@ func MapMySQLColumn(col MySQLColumn, opts Options) (ColumnMapping, error) {
 			var str string
 			switch x := v.(type) {
 			case string:
-				str = strings.TrimSpace(x)
+				str = x
 			case []byte:
-				str = strings.TrimSpace(string(x))
+				str = string(x)
 			default:
 				str = fmt.Sprintf("%v", x)
 			}
@@ -970,24 +966,18 @@ func MapMySQLColumn(col MySQLColumn, opts Options) (ColumnMapping, error) {
 			case []string:
 				return x, nil
 			case string:
-				s := strings.TrimSpace(x)
+				s := x
 				if s == "" {
 					return []string{}, nil
 				}
 				parts := strings.Split(s, ",")
-				for i := range parts {
-					parts[i] = strings.TrimSpace(parts[i])
-				}
 				return parts, nil
 			case []byte:
-				s := strings.TrimSpace(string(x))
+				s := string(x)
 				if s == "" {
 					return []string{}, nil
 				}
 				parts := strings.Split(s, ",")
-				for i := range parts {
-					parts[i] = strings.TrimSpace(parts[i])
-				}
 				return parts, nil
 			default:
 				return nil, fmt.Errorf("cannot convert %T to text[]", v)

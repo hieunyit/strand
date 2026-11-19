@@ -480,6 +480,9 @@ func TestMaskConfigYAMLAndSecrets(t *testing.T) {
 	for in, want := range map[string]string{
 		"dial postgres://u:secret@h/db failed": "dial postgres://u:********@h/db failed",
 		"x password=hunter2 y":                 "x password=******** y",
+		"password='quoted canary' dbname=d":    "password=******** dbname=d",
+		`password="quote\"d canary" dbname=d`:  `password=******** dbname=d`,
+		`password=escaped\ canary dbname=d`:    `password=******** dbname=d`,
 		"nothing here":                         "nothing here",
 	} {
 		if got := MaskSecrets(in); got != want {

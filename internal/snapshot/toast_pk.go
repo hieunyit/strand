@@ -86,7 +86,8 @@ func (m *RangeStateManager) HandleToastPKChangeXID(event *model.RowChange, pos m
 	}
 	newPK := newB.K
 	oldC, newC := tr.FindChunkKey(oldPK), tr.FindChunkKey(newPK)
-	if isDoneChunk(oldC) && isDoneChunk(newC) {
+	// Khóa ngoài mọi chunk mà Txn visible với snapshot đăng ký: không phải "Xong" thật (staleOutside).
+	if !tr.staleOutside(oldC, pos, xid) && !tr.staleOutside(newC, pos, xid) && isDoneChunk(oldC) && isDoneChunk(newC) {
 		// 1. Cả hai range đã flush: SQL điều kiện của writer, trong transaction của T.
 		return []StreamActionResult{{Action: ActionApply, Chunk: newC, Event: event}}, false
 	}
@@ -103,6 +104,8 @@ func (m *RangeStateManager) HandleToastPKChangeXID(event *model.RowChange, pos m
 		a, c = m.handleLocked(tr, ups, pos, xid)
 		res = append(res, StreamActionResult{Action: a, Chunk: c, Event: ups})
 		return res, false
+	case tr.staleOutside(newC, pos, xid):
+		// 2b. n ngoài mọi chunk, đã vắng ở snapshot đăng ký: Txn visible khác sẽ xóa/đổi khóa nó; bỏ nửa upsert.
 	case !isDoneChunk(newC) && inLow(newC, pos, xid):
 		// 3. Row snapshot của chunk đang đọc đã phản ánh T: ảnh cũ hơn của n trong buffer cũng lỗi thời.
 		delete(newC.BufferedChanges, newPK)
@@ -241,12 +244,25 @@ func (m *RangeStateManager) RereadBounds(table model.TableID) []Bound {
 		return nil
 	}
 	out := make([]Bound, 0, len(tr.Reread))
-	for k, c := range tr.Reread {
+	// A chunk owns many keys; scan each chunk once, retaining only keys
+	// still assigned to it (a newer reread can supersede individual keys).
+	seen := make(map[*Chunk]bool)
+	for _, c := range tr.Reread {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
 		for _, b := range c.KeySet {
-			if b.K == k {
-				out = append(out, b)
-				break
+			if tr.Reread[b.K] != c {
+				continue
 			}
+			b.V = append([]model.Value(nil), b.V...)
+			for i, v := range b.V {
+				if bytes, ok := v.([]byte); ok {
+					b.V[i] = append([]byte(nil), bytes...)
+				}
+			}
+			out = append(out, b)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].K < out[j].K })

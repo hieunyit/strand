@@ -35,16 +35,17 @@ var (
 )
 
 type segEntry struct {
-	seq  uint64
-	pos  model.Pos
-	data []byte
+	seq     uint64
+	pos     model.Pos
+	data    []byte
+	sidecar string
 }
 
 // Option cấu hình PebbleSpool.
 type Option func(*PebbleSpool)
 
-// WithLocalHardLimit đặt giới hạn dung lượng cứng cho tầng Pebble local (bytes).
-// Vượt qua ngưỡng này thì Txn sẽ tràn sang bucket staging (nếu có bucket).
+// WithLocalHardLimit đặt giới hạn cho dữ liệu Pebble và các spill sidecar trên đĩa local.
+// Metadata có thể tràn sang bucket; sidecar vẫn ở local và phải nằm trong giới hạn.
 func WithLocalHardLimit(limit int64) Option {
 	return func(s *PebbleSpool) {
 		s.localHardLimit = limit
@@ -87,6 +88,9 @@ type PebbleSpool struct {
 	db                *pebble.DB
 	nextSeq           uint64
 	usage             SpoolUsage
+	sidecars          map[string]*sidecar
+	sidecarRefs       map[uint64]string
+	sideBytes         int64
 	closed            bool
 	localHardLimit    int64
 	totalHardLimit    int64
@@ -177,6 +181,10 @@ func New(dir string, opts ...Option) (*PebbleSpool, error) {
 		_ = bCloser.Close()
 	}
 
+	if err := s.initSidecars(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initialize spool sidecars: %w", err)
+	}
 	return s, nil
 }
 
@@ -256,6 +264,12 @@ func (s *PebbleSpool) discardSegmentLocked() {
 	if len(s.segEntries) > 0 {
 		s.nextSeq = s.segEntries[0].seq
 	}
+	for _, e := range s.segEntries {
+		if e.sidecar != "" {
+			s.sidecars[e.sidecar].refs--
+			delete(s.sidecarRefs, e.seq)
+		}
+	}
 	s.segEntries = nil
 	s.segBytes = 0
 	s.segRawBytes = 0
@@ -294,6 +308,12 @@ func (s *PebbleSpool) flushSegmentLocked(ctx context.Context) error {
 	defer batch.Close()
 
 	for i, e := range entries {
+		if e.sidecar != "" {
+			if err := batch.Set(sidecarRefKey(e.seq), []byte(e.sidecar), nil); err != nil {
+				s.discardSegmentLocked()
+				return err
+			}
+		}
 		refVal := []byte(fmt.Sprintf("BUCKETSEG:%s:%d", objKey, i))
 		if err := batch.Set(txnKey(e.seq), refVal, nil); err != nil {
 			s.discardSegmentLocked()
@@ -326,7 +346,11 @@ func (s *PebbleSpool) flushSegmentLocked(ctx context.Context) error {
 	}
 
 	if err := batch.Commit(pebble.Sync); err != nil {
-		s.discardSegmentLocked()
+		// Commit may have succeeded: retain in-memory refs until reopen resolves it.
+		s.segEntries = nil
+		s.segBytes = 0
+		s.segRawBytes = 0
+		s.segOldestAt = time.Time{}
 		return err
 	}
 
@@ -352,6 +376,24 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 		return fmt.Errorf("spool is closed")
 	}
 
+	var path string
+	var extraSide int64
+	if t.SpillPath != "" {
+		var err error
+		path, err = normalizeSidecar(t.SpillPath)
+		if err != nil {
+			return err
+		}
+		size, err := sidecarStat(path)
+		if err != nil {
+			return err
+		}
+		if known := s.sidecars[path]; known == nil {
+			extraSide = size
+		} else if known.size != size {
+			return fmt.Errorf("spool sidecar %s changed size", path)
+		}
+	}
 	data, err := encodeTxn(t)
 	if err != nil {
 		return fmt.Errorf("failed to encode txn: %w", err)
@@ -361,8 +403,16 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 	newNextSeq := seq + 1
 	dataLen := int64(len(data))
 
+	// Reclaim charges for externally removed unreferenced files when capacity is
+	// tight. Avoid statting every retained file on every append.
+	if (s.totalHardLimit > 0 && s.usage.LocalBytes+s.sideBytes+extraSide+s.usage.BucketBytes+s.segBytes+dataLen > s.totalHardLimit) ||
+		(s.localHardLimit > 0 && s.usage.LocalBytes+s.sideBytes+extraSide > s.localHardLimit) {
+		if err := s.refreshSidecars(); err != nil {
+			return err
+		}
+	}
 	// 1. Kiểm tra giới hạn tổng hard limit của mọi tầng spool (spec: 02 §9)
-	if s.totalHardLimit > 0 && (s.usage.LocalBytes+s.usage.BucketBytes+s.segBytes+dataLen) > s.totalHardLimit {
+	if s.totalHardLimit > 0 && (s.usage.LocalBytes+s.sideBytes+extraSide+s.usage.BucketBytes+s.segBytes+dataLen) > s.totalHardLimit {
 		return exitcode.New(
 			exitcode.ErrPrefetchExhausted,
 			exitcode.DataError,
@@ -371,9 +421,13 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 		)
 	}
 
+	// Sidecars remain local even when txn metadata overflows to the bucket.
+	if s.localHardLimit > 0 && s.usage.LocalBytes+s.sideBytes+extraSide > s.localHardLimit {
+		return exitcode.New(exitcode.ErrPrefetchExhausted, exitcode.DataError, fmt.Sprintf("local spool hard limit reached (%d bytes) by retained sidecars", s.localHardLimit), nil)
+	}
 	// 2. Kiểm tra xem có cần tràn sang tầng Bucket không
 	overflow := false
-	if s.localHardLimit > 0 && (s.usage.LocalBytes+dataLen) > s.localHardLimit {
+	if s.localHardLimit > 0 && (s.usage.LocalBytes+s.sideBytes+extraSide+dataLen) > s.localHardLimit {
 		if s.bucket == nil {
 			// Không có cấu hình bucket overflow -> chạm hard limit local
 			return exitcode.New(
@@ -386,7 +440,20 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 		overflow = true
 	}
 
+	// Persist retained-file accounting before either local commit or buffering.
+	// A commit error can be ambiguous, so accounting must survive even then.
+	if path != "" && s.sidecars[path] == nil {
+		if err := s.db.Set(sidecarKey(path), sidecarValue(extraSide), pebble.Sync); err != nil {
+			return err
+		}
+		s.sidecars[path] = &sidecar{size: extraSide}
+		s.sideBytes += extraSide
+	}
 	if overflow {
+		if path != "" {
+			s.sidecars[path].refs++
+			s.sidecarRefs[seq] = path
+		}
 		if len(s.segEntries) == 0 {
 			s.segOldestAt = time.Now()
 			s.segRawBytes = int64(len(segmentMagic))
@@ -394,9 +461,10 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 		var uvBuf [binary.MaxVarintLen64]byte
 		uvLen := binary.PutUvarint(uvBuf[:], uint64(dataLen))
 		s.segEntries = append(s.segEntries, segEntry{
-			seq:  seq,
-			pos:  t.SourcePos,
-			data: data,
+			seq:     seq,
+			pos:     t.SourcePos,
+			data:    data,
+			sidecar: path,
 		})
 		// Segment đã nhận reference; giữ file kể cả khi flush báo lỗi vì kết quả
 		// commit I/O có thể không xác định và các reference khác có thể đã bền.
@@ -425,6 +493,11 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 	defer batch.Close()
 
 	newLocalBytes := s.usage.LocalBytes + dataLen
+	if path != "" {
+		if err := batch.Set(sidecarRefKey(seq), []byte(path), nil); err != nil {
+			return err
+		}
+	}
 	if err := batch.Set(txnKey(seq), data, nil); err != nil {
 		return err
 	}
@@ -453,11 +526,19 @@ func (s *PebbleSpool) Append(ctx context.Context, t *model.Txn) error {
 	// Commit lỗi có thể có kết quả không xác định; giữ file để tránh mất reference đã bền.
 	t.SpillOwned = false
 	if err := batch.Commit(pebble.Sync); err != nil {
+		if path != "" {
+			s.sidecars[path].refs++
+			s.sidecarRefs[seq] = path
+		}
 		return err
 	}
 
 	s.nextSeq = newNextSeq
 	s.usage.LocalBytes = newLocalBytes
+	if path != "" {
+		s.sidecars[path].refs++
+		s.sidecarRefs[seq] = path
+	}
 	return nil
 }
 
@@ -561,6 +642,20 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 
 	var deletedLocalBytes int64
 	var deletedBucketBytes int64
+	var deletedSidecarSeqs []uint64
+	removeSidecarRef := func(key []byte) error {
+		seq, err := strconv.ParseUint(string(key[len("txn/"):]), 16, 64)
+		if err != nil {
+			return err
+		}
+		if _, ok := s.sidecarRefs[seq]; ok {
+			if err := batch.Delete(sidecarRefKey(seq), nil); err != nil {
+				return err
+			}
+			deletedSidecarSeqs = append(deletedSidecarSeqs, seq)
+		}
+		return nil
+	}
 	// Object trong bucket chỉ được xóa SAU khi batch Pebble gỡ tham chiếu đã commit;
 	// crash ở giữa chỉ để lại object mồ côi, không để lại tham chiếu treo.
 	var bucketKeysToDelete []string
@@ -608,6 +703,9 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 				}
 			}
 			if t != nil && applied.Contains(t.SourcePos) {
+				if err := removeSidecarRef(iter.Key()); err != nil {
+					return err
+				}
 				if err := batch.Delete(iter.Key(), nil); err != nil {
 					return err
 				}
@@ -646,6 +744,9 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 		}
 
 		if t != nil && applied.Contains(t.SourcePos) {
+			if err := removeSidecarRef(iter.Key()); err != nil {
+				return err
+			}
 			if err := batch.Delete(iter.Key(), nil); err != nil {
 				return err
 			}
@@ -700,6 +801,11 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 
 		s.usage.LocalBytes = newLocalBytes
 		s.usage.BucketBytes = newBucketBytes
+		for _, seq := range deletedSidecarSeqs {
+			path := s.sidecarRefs[seq]
+			s.sidecars[path].refs--
+			delete(s.sidecarRefs, seq)
+		}
 	}
 
 	if s.bucket != nil {
@@ -710,12 +816,17 @@ func (s *PebbleSpool) Truncate(ctx context.Context, applied checkpoint.AppliedSe
 	return nil
 }
 
-// Usage trả về thông tin dung lượng byte của các tầng spool.
+// Usage trả dung lượng từng tầng, đối chiếu các sidecar còn giữ với filesystem.
 func (s *PebbleSpool) Usage() SpoolUsage {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Usage cannot return an error: retain the previous conservative charge if
+	// a referenced sidecar is missing or otherwise cannot be inspected.
+	if !s.closed {
+		_ = s.refreshSidecars()
+	}
 	return SpoolUsage{
-		LocalBytes:  s.usage.LocalBytes,
+		LocalBytes:  s.usage.LocalBytes + s.sideBytes,
 		BucketBytes: s.usage.BucketBytes + s.segBytes,
 	}
 }

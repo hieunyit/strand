@@ -2,15 +2,16 @@
 <div class="card">
   <h2>Create new pipeline</h2>
   <p class="muted small">Fill in the source and target, choose what to copy, then <b>Create and validate</b>: Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</p>
-  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="act np" data-action="new-pipeline">
+  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="np">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
 
     <fieldset class="np-step">
       <legend>1. Pipeline</legend>
       <div class="np-row">
         <label>Name <span class="err">*</span>
-          <input type="text" name="name" required class="wide mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+          <input type="text" name="name" id="np-name" required class="wide mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
           <small class="muted">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
+          <span class="block mt4"><label class="small muted"><input type="checkbox" name="overwrite" id="np-overwrite" value="true"> Overwrite if pipeline already exists (re-create/update)</label></span>
         </label>
         <label>Copy from (source)
           <select name="from" id="np-from">
@@ -79,10 +80,14 @@
     <fieldset class="np-step">
       <legend>4. What to copy</legend>
       <div class="np-row" data-when="src:mysql,mariadb">
-        <label>Databases <span class="err">*</span>
-          <input type="text" name="database" value="app" class="wide mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
+        <div class="np-database-picker">
+          <label for="np-database">Databases <span class="err">*</span></label>
+          <input type="text" name="database" id="np-database" value="app" class="wide mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
           <small class="muted">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>
-        </label>
+          <button type="button" class="btn mt4" id="np-list-databases" data-when="src:mysql,mariadb">List source databases</button>
+          <small class="muted" id="np-database-list-status" aria-live="polite"></small>
+          <div id="np-database-list" class="np-db-list" hidden></div>
+        </div>
       </div>
       <details class="np-adv" id="np-tables">
         <summary>Only some tables? (optional)</summary>
@@ -133,6 +138,10 @@
         <label>Chunk rows
           <input type="number" name="chunk_rows" class="num mono" min="1" placeholder="default: auto (5000)">
           <small class="muted">Rows per snapshot chunk. Empty = auto-tuned.</small>
+        </label>
+        <label>Start position (--start-at)
+          <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678 or GTID (skips snapshot)">
+          <small class="muted">Tùy chọn: Nhập vị trí binlog hoặc GTID sau khi đã tự import DB sang Target để bỏ qua bước snapshot.</small>
         </label>
         <label>Snapshot windows
           <input type="text" name="windows" class="mono" placeholder="default: any time, e.g. 22:00-06:00">

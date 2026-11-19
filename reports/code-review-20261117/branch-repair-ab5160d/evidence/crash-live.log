@@ -1,0 +1,66 @@
+=== RUN   TestE2E_PGToastCompletionCrashResume
+    harness_test.go:58: SEED=42
+2026/11/17 17:33:13 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 0faed2079dd256bcc84061832f9e1a62a99675d52d9be46df75f53f858ea2e1c
+  Test ProcessID: 1486dfdc-2980-4e65-a418-7d0266a5b608
+2026/11/17 17:33:13 🐳 Creating container for image postgres:18
+2026/11/17 17:33:14 ✅ Container created: 1010b2a922cf
+2026/11/17 17:33:14 🐳 Starting container: 1010b2a922cf
+2026/11/17 17:33:14 ✅ Container started: 1010b2a922cf
+2026/11/17 17:33:14 ⏳ Waiting for container id 1010b2a922cf image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x17cee05acab0 Strategies:[0x17cee03f21e0 0x17cee03f2210]}
+2026/11/17 17:33:18 🔔 Container is ready: 1010b2a922cf
+2026/11/17 17:33:18 🐳 Creating container for image postgres:18
+2026/11/17 17:33:18 ✅ Container created: b7e70ae61888
+2026/11/17 17:33:18 🐳 Starting container: b7e70ae61888
+2026/11/17 17:33:18 ✅ Container started: b7e70ae61888
+2026/11/17 17:33:18 ⏳ Waiting for container id b7e70ae61888 image: postgres:18. Waiting for: &{timeout:<nil> deadline:0x17cee0788938 Strategies:[0x17cee0808ea0 0x17cee0808ed0]}
+2026/11/17 17:33:22 🔔 Container is ready: b7e70ae61888
+    toast_completion_crash_test.go:104: SIGKILL with durable app.items plan: next=223 max=10036221 reread=0 bounds=44570:44598:44570,44594
+    toast_completion_crash_test.go:115: Resuming Strand from persisted checkpoint state...
+    toast_completion_crash_test.go:157: Workload summary: 21400 ops, 0 errs, 20599 TOAST PK moves, 2007 standard PK moves
+    pg_harness_test.go:772: ver monotonic over 172 samples
+    toast_completion_crash_test.go:173: final state: 64725 rows in 4 tables identical
+    toast_completion_crash_test.go:174: invariants: doc never NULL, 80884 row versions applied exactly once
+    toast_completion_crash_test.go:175: PASS: Crash and resume scenario successfully completed with verified data parity and checkpoint invariants.
+2026/11/17 17:34:36 🐳 Stopping container: b7e70ae61888
+2026/11/17 17:34:37 ✅ Container stopped: b7e70ae61888
+2026/11/17 17:34:37 🐳 Terminating container: b7e70ae61888
+2026/11/17 17:34:37 🚫 Container terminated: b7e70ae61888
+2026/11/17 17:34:37 🐳 Stopping container: 1010b2a922cf
+2026/11/17 17:34:38 ✅ Container stopped: 1010b2a922cf
+2026/11/17 17:34:38 🐳 Terminating container: 1010b2a922cf
+2026/11/17 17:34:39 🚫 Container terminated: 1010b2a922cf
+--- PASS: TestE2E_PGToastCompletionCrashResume (85.51s)
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/unrelated_JSON
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/legacy_plan_without_bounds
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/wrong_table
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/wrong_pipeline
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/unstarted
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/finished
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/pending_ranges
+=== RUN   TestCrashItemsPlanRequiresBoundsAndPendingProgress/pending_reread
+--- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress (0.01s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/unrelated_JSON (0.00s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/legacy_plan_without_bounds (0.00s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/wrong_table (0.00s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/wrong_pipeline (0.00s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/unstarted (0.00s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/finished (0.00s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/pending_ranges (0.00s)
+    --- PASS: TestCrashItemsPlanRequiresBoundsAndPendingProgress/pending_reread (0.00s)
+PASS
+2026/11/17 17:34:39 🐳 Stopping container: b7e70ae61888
+2026/11/17 17:34:39 🐳 Terminating container: b7e70ae61888
+2026/11/17 17:34:39 🚫 Container terminated: b7e70ae61888
+2026/11/17 17:34:39 🐳 Stopping container: 1010b2a922cf
+2026/11/17 17:34:39 🐳 Terminating container: 1010b2a922cf
+2026/11/17 17:34:39 🚫 Container terminated: 1010b2a922cf
+ok  	strand/tests/e2e	98.649s

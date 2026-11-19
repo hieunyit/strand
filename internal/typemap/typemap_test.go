@@ -580,3 +580,61 @@ func TestMapMySQLColumn_Geometry_Unmappable(t *testing.T) {
 		}
 	}
 }
+
+func TestMapMySQLColumnBitSnapshotAndCDC(t *testing.T) {
+	for _, policy := range []string{"varbit", "bytea"} {
+		for _, tc := range []struct {
+			column string
+			raw    []byte
+			cdc    int64
+			text   string
+		}{
+			{"bit(8)", []byte{0x31}, 49, "00110001"},
+			{"bit(8)", []byte{0}, 0, "00000000"},
+			{"bit(1)", []byte{0}, 0, "0"},
+			{"bit(9)", []byte{0, 1}, 1, "000000001"},
+			{"bit(64)", []byte{255, 255, 255, 255, 255, 255, 255, 255}, -1, strings.Repeat("1", 64)},
+		} {
+			opts := typemap.DefaultOptions()
+			opts.BitPolicy = policy
+			m, err := typemap.MapMySQLColumn(typemap.MySQLColumn{DataType: "bit", ColumnType: tc.column}, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, input := range []any{tc.raw, tc.cdc, tc.text} {
+				got, err := m.Convert(input)
+				var want any = tc.text
+				if policy == "bytea" {
+					want = tc.raw
+				}
+				if err != nil || !reflect.DeepEqual(got, want) {
+					t.Errorf("%s %s input %T: got %v, err %v; want %v", policy, tc.column, input, got, err, want)
+				}
+			}
+		}
+	}
+}
+
+func TestMapMySQLColumnEnumSetPreserveWhitespace(t *testing.T) {
+	for _, kind := range []string{"enum", "set"} {
+		m, err := typemap.MapMySQLColumn(typemap.MySQLColumn{DataType: kind, EnumValues: []string{" a", "b"}}, typemap.DefaultOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bytes := range []bool{false, true} {
+			var input any = " a"
+			var want any = " a"
+			if kind == "set" {
+				input = " a,b"
+				want = []string{" a", "b"}
+			}
+			if bytes {
+				input = []byte(input.(string))
+			}
+			got, err := m.Convert(input)
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("%s: got %#v, err %v; want %#v", kind, got, err, want)
+			}
+		}
+	}
+}

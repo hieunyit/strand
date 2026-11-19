@@ -248,6 +248,13 @@ func encodeEvent(b []byte, ev reader.Event) ([]byte, error) {
 	b = appendStr(b, ev.Table)
 	b = binary.AppendUvarint(b, ev.TableID)
 	b = binary.AppendUvarint(b, ev.XID)
+	// Spill files are private to this reader run; preserve the Relation barrier
+	// along with its columns so spilling cannot bypass schema evolution.
+	var schemaChanged byte
+	if ev.SchemaChanged {
+		schemaChanged = 1
+	}
+	b = append(b, schemaChanged)
 	for _, list := range [][]string{ev.Columns, ev.PKColumns} {
 		b = binary.AppendUvarint(b, uint64(len(list)))
 		for _, c := range list {
@@ -313,6 +320,14 @@ func readEvent(r *bufio.Reader) (reader.Event, error) {
 	if ev.XID, err = binary.ReadUvarint(r); err != nil {
 		return ev, err
 	}
+	flag, err := r.ReadByte()
+	if err != nil {
+		return ev, err
+	}
+	if flag > 1 {
+		return ev, fmt.Errorf("pg reader spill: invalid schema-changed flag %d", flag)
+	}
+	ev.SchemaChanged = flag == 1
 	for _, dst := range []*[]string{&ev.Columns, &ev.PKColumns} {
 		n, err := binary.ReadUvarint(r)
 		if err != nil {

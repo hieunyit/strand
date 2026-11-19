@@ -153,7 +153,7 @@ func newSeedCmd() *cobra.Command {
 	plan.Flags().BoolVar(&acceptUnverifiedLockMode, "accept-unverified-lock-mode", false, "Chấp nhận backup mydumper không có log xác minh chế độ khóa")
 	plan.Flags().StringVar(&out, "out", "seed.json", "File seed.json")
 
-	var manifestPath, applyTarget, pfSpool, pfArchive, pfSource string
+	var manifestPath, applyTarget, pfSpool, pfArchive, pfArchiveSchema, pfSource string
 	var printOnly, pfOn bool
 	var pfHard, pfLocalHard int64
 	var pfOverflow, restoreCmd string
@@ -208,11 +208,21 @@ func newSeedCmd() *cobra.Command {
 							return runRestoreShellCmd(rctx, restoreCmd)
 						},
 						func(pctx context.Context, until <-chan struct{}) (int, error) {
-							return prefetch(pctx, &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource, until)
+							return prefetch(pctx, &seedManifestLite{
+								P:              m.StartPosition.GTIDSet,
+								Tables:         m.Tables,
+								SchemaSnapshot: m.SchemaSnapshot,
+								ArchiveSchema:  pfArchiveSchema,
+							}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource, until)
 						},
 					)
 				} else {
-					n, err = prefetch(cmd.Context(), &seedManifestLite{P: m.StartPosition.GTIDSet}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource, nil)
+					n, err = prefetch(cmd.Context(), &seedManifestLite{
+						P:              m.StartPosition.GTIDSet,
+						Tables:         m.Tables,
+						SchemaSnapshot: m.SchemaSnapshot,
+						ArchiveSchema:  pfArchiveSchema,
+					}, pfSpool, pfLocalHard, pfHard, pfOverflow, pfArchive, pfSource, nil)
 				}
 				if err != nil {
 					return err
@@ -250,6 +260,7 @@ func newSeedCmd() *cobra.Command {
 	apply.Flags().StringVar(&pfSpool, "spool", "", "Thư mục spool prefetch (= <resources.spool.path>/prefetch của pipeline)")
 	apply.Flags().Int64Var(&pfHard, "spool-hard", 0, "Hard limit (byte) của spool; 0 = không giới hạn")
 	apply.Flags().StringVar(&pfArchive, "archive", "", "Thư mục binlog archive")
+	apply.Flags().StringVar(&pfArchiveSchema, "archive-schema", "", "Đường dẫn file sidecar schema cho archive binlog (JSON)")
 	apply.Flags().Int64Var(&pfLocalHard, "spool-local-hard", 0, "Hard limit (byte) tầng local; vượt thì tràn sang --overflow")
 	apply.Flags().StringVar(&pfOverflow, "overflow", "", "Tầng bucket s3://bucket/prefix (endpoint/credential qua STRAND_S3_*)")
 	apply.Flags().StringVar(&pfSource, "source", "", "DSN source/replica để prefetch phần chưa archive")

@@ -1,0 +1,126 @@
+?   	strand/cmd/replay	[no test files]
+ok  	strand/cmd/strand	287.266s
+ok  	strand/internal/admin	0.135s
+ok  	strand/internal/assemble	68.097s
+ok  	strand/internal/checkpoint	70.545s
+ok  	strand/internal/config	0.210s
+ok  	strand/internal/exitcode	0.042s
+ok  	strand/internal/governor	59.157s
+ok  	strand/internal/metrics	0.292s
+ok  	strand/internal/model	0.047s
+ok  	strand/internal/mysqlver	47.045s
+?   	strand/internal/mysqlver/mysql57test	[no test files]
+ok  	strand/internal/objects	0.059s
+2026/11/17 22:04:45 INFO create BinlogSyncer config="{ServerID:4545 Flavor:mysql Host:localhost Port:52052 User:root Password: Localhost: Charset: SemiSyncEnabled:false RawModeEnabled:false TLSConfig:<nil> ParseTime:false TimestampStringLocation:UTC UseDecimal:false UseFloatWithTrailingZero:false RenderJSONAsMySQLText:false RecvBufferSize:0 ReadAheadBufferSize:0 HeartbeatPeriod:0s ReadTimeout:0s MaxReconnectAttempts:0 DisableRetrySync:false VerifyChecksum:false DumpCommandFlag:0 Option:<nil> Logger:0x19b1a828930 Dialer:0x9c65c0 RowsEventDecodeFunc:<nil> TableMapOptionalMetaDecodeFunc:<nil> DiscardGTIDSet:false EventCacheCount:10240 FillZeroLogPos:false PayloadDecoderConcurrency:0 SynchronousEventHandler:<nil>}"
+2026/11/17 22:04:45 INFO begin to sync binlog from GTID set "GTID set"=28c821d2-e298-11f1-94fb-8ae83b383eb7:1-14
+2026/11/17 22:04:46 INFO Connected to server flavor=mysql version=8.4.13
+2026/11/17 22:04:46 INFO rotate to next binlog file=binlog.000002 position=4
+2026/11/17 22:04:46 INFO syncer is closing...
+2026/11/17 22:04:46 INFO kill last connection id=12
+2026/11/17 22:04:46 INFO syncer is closed
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x20 pc=0x69d714]
+
+goroutine 16091 [running]:
+database/sql.(*DB).conn(0x0, {0x22faf10, 0x19b1aa1ec80}, 0x1)
+	/usr/local/go/src/database/sql/sql.go:1322 +0x54
+database/sql.(*DB).query(0x0, {0x22faf10, 0x19b1aa1ec80}, {0x13a754c, 0x4c}, {0x19b1a647810, 0x2, 0x2}, 0x82?)
+	/usr/local/go/src/database/sql/sql.go:1764 +0x57
+database/sql.(*DB).QueryContext.func1(0x50?)
+	/usr/local/go/src/database/sql/sql.go:1747 +0x4f
+database/sql.(*DB).retry(0x21878d8?, 0x19b1a6476b8)
+	/usr/local/go/src/database/sql/sql.go:1581 +0x42
+database/sql.(*DB).QueryContext(0x13cf9d0?, {0x22faf10?, 0x19b1aa1ec80?}, {0x13a754c?, 0x0?}, {0x19b1a647810?, 0x0?, 0x0?})
+	/usr/local/go/src/database/sql/sql.go:1746 +0x98
+database/sql.(*DB).QueryRowContext(...)
+	/usr/local/go/src/database/sql/sql.go:1847
+strand/internal/pipeline.(*Pipeline).finishPGSnapshot.func1()
+	/home/hellc/strand/internal/pipeline/pipeline.go:2163 +0x291
+strand/internal/pipeline.(*Pipeline).barrier(0x19b1a87cf08, {0x0?, 0x0?}, 0x19b1a6479c8)
+	/home/hellc/strand/internal/pipeline/pipeline.go:1884 +0x162
+strand/internal/pipeline.(*Pipeline).finishPGSnapshot(0x19b1b147980?, {0x22faf10?, 0x19b1aa1ec80?}, {{0x133d423, 0x3}, {0x133ebf7, 0x6}}, 0x19b1aa1ec80?)
+	/home/hellc/strand/internal/pipeline/pipeline.go:2147 +0x174
+strand/internal/pipeline.(*Pipeline).snapshotTable(0x19b1a87cf08, {0x22faf10, 0x19b1aa1ec80}, {{0x133d423?, 0x3?}, {0x133ebf7?, 0x6?}})
+	/home/hellc/strand/internal/pipeline/pipeline.go:2116 +0x92e
+strand/internal/pipeline.(*cSim).snapshotAdd.func1()
+	/home/hellc/strand/internal/pipeline/f11_combined_sim_test.go:1192 +0x58
+created by strand/internal/pipeline.(*cSim).snapshotAdd in goroutine 16130
+	/home/hellc/strand/internal/pipeline/f11_combined_sim_test.go:1191 +0x53d
+FAIL	strand/internal/pipeline	98.360s
+ok  	strand/internal/promote	154.716s
+?   	strand/internal/reader	[no test files]
+ok  	strand/internal/reader/archive	94.194s
+ok  	strand/internal/reader/mysql	300.982s
+ok  	strand/internal/reader/pg	181.134s
+ok  	strand/internal/rowkey	113.594s
+ok  	strand/internal/sched	27.427s
+ok  	strand/internal/schemachange	0.035s
+ok  	strand/internal/schemagen	141.985s
+ok  	strand/internal/seed	61.853s
+ok  	strand/internal/snapshot	193.055s
+ok  	strand/internal/spool	30.780s
+ok  	strand/internal/testutil	36.866s
+ok  	strand/internal/txntrace	0.733s
+ok  	strand/internal/typemap	64.590s
+ok  	strand/internal/validate	213.879s
+ok  	strand/internal/verify	185.684s
+ok  	strand/internal/web	35.191s
+ok  	strand/internal/web/store	25.535s
+?   	strand/internal/web/store/storetest	[no test files]
+[mysql] 2026/11/17 22:05:36 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:36 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:36 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:37 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:37 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:37 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:38 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:38 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:38 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:39 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:39 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:39 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:40 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:40 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:40 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:41 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:41 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:41 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:42 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:42 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:42 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:43 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:43 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:43 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:44 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:44 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:44 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:45 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:45 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:45 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:46 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:46 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:46 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:47 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:47 connection.go:49: unexpected EOF
+[mysql] 2026/11/17 22:05:47 connection.go:49: unexpected EOF
+--- FAIL: TestAC1_MySQLMultiRowUpsert (0.05s)
+    writer_test.go:673: ensure worker row: [fenced] pipeline pipe-ac1 has no metadata row: fenced
+--- FAIL: TestAC2_TxnNeverSplit (0.12s)
+    writer_test.go:805: ensure worker row: [fenced] pipeline pipe-ac2 has no metadata row: fenced
+--- FAIL: TestCP5_StrictCommitOrderPrefix (0.08s)
+    writer_test.go:919: ensure worker row 1: [fenced] pipeline pipe-cp5 has no metadata row: fenced
+FAIL
+FAIL	strand/internal/writer	114.278s
+ok  	strand/tools/bench	3.067s
+ok  	strand/tools/benchclient	0.030s
+ok  	strand/tools/diagnostics/breaker	28.082s
+?   	strand/tools/diagnostics/breaker/cmd	[no test files]
+ok  	strand/tools/diagnostics/browser-repro	3.097s
+ok  	strand/tools/diagnostics/pg-strict	0.082s
+ok  	strand/tools/diagnostics/remaining-gate	4.895s
+ok  	strand/tools/diagnostics/spool-inventory	5.744s
+ok  	strand/tools/g2bench	3.661s
+?   	strand/tools/genload	[no test files]
+ok  	strand/tools/soak	0.106s
+ok  	strand/tests/checker	0.022s
+FAIL

@@ -1,0 +1,31 @@
+package pipeline
+import(
+ "context"
+ "database/sql"
+ "database/sql/driver"
+ "io"
+ "testing"
+ "strand/internal/config"
+ "strand/internal/model"
+)
+type auditEmptyDriver struct{}
+func(auditEmptyDriver)Open(string)(driver.Conn,error){return auditEmptyConn{},nil}
+type auditEmptyConn struct{driver.Conn}
+func(auditEmptyConn)Close()error{return nil}
+func(auditEmptyConn)QueryContext(context.Context,string,[]driver.NamedValue)(driver.Rows,error){return auditEmptyRows{},nil}
+type auditEmptyRows struct{}
+func(auditEmptyRows)Columns()[]string{return []string{"attname","collname"}}
+func(auditEmptyRows)Close()error{return nil}
+func(auditEmptyRows)Next([]driver.Value)error{return io.EOF}
+func TestAuditKeylessCitextGate(t *testing.T){
+ sql.Register("audit-nokey-empty",auditEmptyDriver{});db,err:=sql.Open("audit-nokey-empty","");if err!=nil{t.Fatal(err)};defer db.Close()
+ id:=model.TableID{Schema:"public",Table:"audit_citext"}
+ cfg:=&config.Config{};cfg.Tables.Keyless="full_row"
+ f,err:=newTableFilter([]string{id.String()},nil,nil);if err!=nil{t.Fatal(err)}
+ p:=&Pipeline{cfg:cfg,srcEngine:model.EnginePG,dstEngine:model.EnginePG,dst:db,filter:f}
+ m:=&tableMeta{ID:id,Columns:[]string{"v"},ColTypes:map[string]string{"v":"citext"},ReplIdent:"f"}
+ p.markKeyless(map[model.TableID]*tableMeta{id:m})
+ if !m.Keyless{t.Logf("citext rejected: %s",m.KeylessWhy);return}
+ if err:=p.checkKeylessTargetCollations(context.Background(),id,m);err!=nil{t.Logf("collation gate rejected: %v",err);return}
+ t.Fatalf("citext source accepted as keyless with PK=%v; deterministic target collation accepted, despite case-folding equality",m.PK)
+}

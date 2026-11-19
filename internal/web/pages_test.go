@@ -52,7 +52,9 @@ func TestSamplerSamplesAndBuildsOverview(t *testing.T) {
 		t.Fatalf("series %+v", ser)
 	}
 	ov := s.BuildOverview()
-	if ov.Total != 1 || ov.Counts[StateSynced] != 1 || ov.MaxLagSeconds != 0.25 || ov.MaxLagPipeline != "orders" || ov.RowsPerSec != 1234 {
+	// Rows/s là tốc độ đã làm mượt: bộ đếm applied_rows của mock đứng yên (5555) nên sau 3 mẫu tốc độ là 0,
+	// dù `top` báo tức thời 1234 (mẫu đầu tiên chưa có cửa sổ thì lấy giá trị đó làm gốc).
+	if ov.Total != 1 || ov.Counts[StateSynced] != 1 || ov.MaxLagSeconds != 0.25 || ov.MaxLagPipeline != "orders" || ov.RowsPerSec != s.Latest("orders").Rates.Rows || ov.RowsPerSec != 0 {
 		t.Fatalf("overview %+v", ov)
 	}
 	// Pipeline bị gỡ khỏi cấu hình thì dữ liệu cũng bị dọn (không rò bộ nhớ).
@@ -116,10 +118,8 @@ func TestPagesRenderLiveData(t *testing.T) {
 		return body
 	}
 	ov := get("/")
-	for _, want := range []string{"orders", "synced", "mysql → postgres", "1234", "0.25"} {
-		if want == "0.25" {
-			want = "250 ms"
-		}
+	// Rows/s is the 30 s average of the applied-rows counter (flat in the mock, so 0); lag has stable units.
+	for _, want := range []string{"orders", "synced", "mysql → postgres", `data-bind="rows">0<`, "0.25 s"} {
 		if !strings.Contains(ov, want) {
 			t.Errorf("overview lacks %q", want)
 		}
@@ -131,7 +131,7 @@ func TestPagesRenderLiveData(t *testing.T) {
 		}
 	}
 	tb := get("/pipelines/orders/tables")
-	for _, want := range []string{"app.users", "app.orders", "app.codes", "Done 2, Pending 6", "250,000 / 1,000,000", "25.0%", "generic key", "1 done, 1 running, 1 pending"} {
+	for _, want := range []string{"app.users", "app.orders", "app.codes", "Done 2, Pending 6", "250,000 / 1,000,000", "25.0%", "generic key", `<span data-bind="tables_done">1</span> done, <span data-bind="tables_running">1</span> running, <span data-bind="tables_pending">1</span> pending`} {
 		if !strings.Contains(tb, want) {
 			t.Errorf("tables tab lacks %q:\n%s", want, tb)
 		}

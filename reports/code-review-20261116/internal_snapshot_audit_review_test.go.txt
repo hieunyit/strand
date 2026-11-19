@@ -1,0 +1,20 @@
+package snapshot_test
+import("fmt";"testing";"time";"strand/internal/snapshot";"strand/internal/model")
+func TestAuditHistoricalToastMoveOutsideFreshBounds(t *testing.T){
+ // Source committed T1: 1->101, then T2: 101->2. Bounds are read after T2: [2,100].
+ // Router is paused during registration, target is cleared, then delayed T1 is routed.
+ m:=snapshot.NewRangeStateManager();tb:=model.TableID{Schema:"app",Table:"items"}
+ m.RegisterTable(tb,"id",[]*snapshot.Chunk{{Table:tb,PKCol:"id",StartPK:2,EndPK:100,State:snapshot.StatePending}},100)
+ ev:=&model.RowChange{Table:tb,Op:model.OpUpdate,OldKey:[]model.Value{int64(1)},Key:[]model.Value{int64(101)},Cols:[]model.ColValue{{Name:"id",Value:int64(101)},{Name:"doc",Unchanged:true}}}
+ rs,_:=m.HandleToastPKChangeXID(ev,model.Pos{Engine:model.EnginePG,LSN:100},10,time.Now())
+ for _,r:=range rs {if r.Action==snapshot.ActionApply&&r.Event.Op==model.OpUpdate{t.Error("historical partial move sent to empty target; neither old=1 nor new=101 exists; writer raises ToastRowMissingError before T2/snapshot can recover")}}
+}
+
+func BenchmarkAuditRereadBounds(b *testing.B){
+ for _,n:=range []int{500,5000,10000}{b.Run(fmt.Sprint(n),func(b *testing.B){
+  m:=snapshot.NewRangeStateManager();tb:=model.TableID{Schema:"app",Table:"items"}
+  m.RegisterTable(tb,"id",[]*snapshot.Chunk{{Table:tb,PKCol:"id",StartPK:1,EndPK:int64(n),State:snapshot.StateReading}},int64(n))
+  for i:=1;i<=n;i++{ev:=&model.RowChange{Table:tb,Op:model.OpUpdate,OldKey:[]model.Value{int64(n+i)},Key:[]model.Value{int64(i)},Cols:[]model.ColValue{{Name:"id",Value:int64(i)},{Name:"doc",Unchanged:true}}};m.HandleToastPKChangeXID(ev,model.Pos{Engine:model.EnginePG,LSN:uint64(i)},uint64(i),time.Now())}
+  b.ResetTimer();for i:=0;i<b.N;i++{if len(m.RereadBounds(tb))!=n{b.Fatal("keys lost")}}
+ })}
+}

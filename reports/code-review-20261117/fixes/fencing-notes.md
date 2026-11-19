@@ -1,0 +1,7 @@
+S03: MySQL and PostgreSQL worker creation now starts a transaction and checks the writer's own pipeline ID and epoch under a shared pipeline row lock before inserting/updating and reading the worker row; commit releases the lock. AdvanceEpoch takes the pipeline row exclusively before it updates worker rows. Thus creation either precedes takeover and is updated by it, or follows takeover and is fenced. No lock is added to batch processing. Existing newer worker epochs still fence, and missing pipeline metadata fences.
+
+Compaction now reads the checkpoint at the configured epoch before either no-work return (including unchanged vouch); a missing matching checkpoint is fenced. Worker query rows are closed before the second query. Error text for the shared fence check is no longer specific to snapshot writes.
+
+Deterministic fake SQL tests TestWorkerCreationFencedByPipelineEpoch and TestCompactorNoWorkChecksEpoch pass for both dialects. They check transaction/lock/query ordering, commit and rollback, missing and stale epoch handling, and the vouch path. git diff --check passes. Real concurrent database takeover was not exercised: integration helpers start Docker containers, and the fake driver models transaction/lock protocol rather than database lock scheduling. Pipeline simulations are being checked separately.
+
+Pipeline simulations passed: STRAND_SIM_SEEDS=2 F11_COMBINED_SEEDS=2 go test ./internal/pipeline -run TestBinlogPosSimCrashRestart\|TestF11CombinedSim_PipelineRelaxedSnapshotAdd -count=1.

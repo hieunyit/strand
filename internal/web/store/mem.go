@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -202,15 +203,6 @@ func (m *Mem) SetPipelineConflicts(_ context.Context, name, conflicts string) er
 	return nil
 }
 
-func (m *Mem) DeletePipeline(_ context.Context, name string) error {
-	if err := m.enter(); err != nil {
-		return err
-	}
-	defer m.mu.Unlock()
-	delete(m.pipes, name)
-	delete(m.desired, name)
-	return nil
-}
 func (m *Mem) GetPipeline(_ context.Context, name string) (Pipeline, bool, error) {
 	if err := m.enter(); err != nil {
 		return Pipeline{}, false, err
@@ -230,6 +222,20 @@ func (m *Mem) ListPipelines(context.Context) ([]Pipeline, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+func (m *Mem) DeletePipeline(_ context.Context, name string) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	delete(m.pipes, name)
+	delete(m.desired, name)
+	for k := range m.wizards {
+		if strings.HasSuffix(k, "\x00"+name) { // khóa: kind + "\x00" + pipeline
+			delete(m.wizards, k)
+		}
+	}
+	return nil
 }
 
 func (m *Mem) SetDesired(_ context.Context, name, d string) error {

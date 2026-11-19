@@ -1,0 +1,26 @@
+=== RUN   TestNK05_PostgresKeylessPartitionPhysicalIdentity
+2026/11/17 10:18:11 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.9.0
+  API Version: 1.46
+  Operating System: Ubuntu 24.04.5 LTS
+  Total Memory: 32050 MB
+  Testcontainers for Go Version: v0.34.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: bccab3e8bfd8c6281c87bd6ef73e7daac9f93824130b740c39074f1b3cdaee47
+  Test ProcessID: e32ee58e-ccc9-49b6-85f4-64a10ce4aae9
+2026/11/17 10:18:11 🐳 Creating container for image postgres:18
+2026/11/17 10:18:11 ✅ Container created: 633d231ef958
+2026/11/17 10:18:11 🐳 Starting container: 633d231ef958
+2026/11/17 10:18:12 ✅ Container started: 633d231ef958
+2026/11/17 10:18:12 ⏳ Waiting for container id 633d231ef958 image: postgres:18. Waiting for: &{Port:5432/tcp timeout:0xbc7e15246c0 PollInterval:100ms skipInternalCheck:false}
+2026/11/17 10:18:16 🔔 Container is ready: 633d231ef958
+--- PASS: TestNK05_PostgresKeylessPartitionPhysicalIdentity (4.99s)
+=== RUN   TestS03_PostgresStaleWorkerCreationAfterTakeover
+--- PASS: TestS03_PostgresStaleWorkerCreationAfterTakeover (0.02s)
+PASS
+2026/11/17 10:18:16 🐳 Stopping container: 633d231ef958
+2026/11/17 10:18:16 ✅ Container stopped: 633d231ef958
+2026/11/17 10:18:16 🐳 Terminating container: 633d231ef958
+2026/11/17 10:18:17 🚫 Container terminated: 633d231ef958
+ok  	strand/internal/writer	6.151s

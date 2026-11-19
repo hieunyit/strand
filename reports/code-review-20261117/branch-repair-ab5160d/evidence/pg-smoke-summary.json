@@ -1,0 +1,110 @@
+{
+  "start_time": "2026-11-17T17:44:16.042053204+07:00",
+  "end_time": "2026-11-17T17:44:18.042197903+07:00",
+  "duration_sec": 2,
+  "warmup_sec": 1,
+  "steady_sec": 2.000144621,
+  "clients": 1,
+  "seed_rows": 20,
+  "seed": 42,
+  "reproduces_280_to_300": false,
+  "raw_target_commit_tps": 362.99486979350525,
+  "apply_txns_to_raw_commits_ratio": 2.6196823063303567,
+  "warmup_tps": 830,
+  "steady_tps": 950.9312376867373,
+  "steady_row_rate": 950.9312376867373,
+  "source_commit_rate": 952.9310930761941,
+  "rows_per_source_txn": 1,
+  "target_top_waits": [
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle",
+      "count": 29
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle in transaction",
+      "count": 10
+    },
+    {
+      "type": "IO",
+      "event": "WalSync",
+      "state": "active",
+      "count": 3
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle",
+      "count": 1
+    },
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "active",
+      "count": 1
+    }
+  ],
+  "source_top_waits": [
+    {
+      "type": "Client",
+      "event": "ClientRead",
+      "state": "idle",
+      "count": 53
+    },
+    {
+      "type": "IO",
+      "event": "WalSync",
+      "state": "active",
+      "count": 3
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "active",
+      "count": 2
+    },
+    {
+      "type": "IO",
+      "event": "WalWrite",
+      "state": "active",
+      "count": 1
+    },
+    {
+      "type": "CPU",
+      "event": "running",
+      "state": "idle",
+      "count": 1
+    }
+  ],
+  "versions": {
+    "docker_cpu": "2.0",
+    "go_version": "go1.27.3",
+    "os_arch": "linux/amd64",
+    "postgres_source": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "postgres_target": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "strand_tool": "pg-strict-diag"
+  },
+  "fsync_settings": {
+    "fsync": "on",
+    "max_wal_size": "1024",
+    "shared_buffers": "32768",
+    "synchronous_commit": "on",
+    "wal_level": "replica"
+  },
+  "observations": [
+    "Source workload generation achieved 952.9 commits/sec across 1 concurrent clients.",
+    "Target database raw single-connection commit capacity was measured at 363.0 commits/sec.",
+    "Strand strict mode applied 950.9 source transactions/sec, averaging 1.00 rows/source transaction. Target commit batch size is not measured by these counters. The raw single-connection commit rate is a separate workload, not an apply throughput ceiling.",
+    "Top target wait event: Client:ClientRead (29 occurrences)",
+    "This isolated local run did not reproduce the reported throughput band. Storage latency and batching remain hypotheses requiring measurements on the affected host."
+  ],
+  "artifact_files": {
+    "block_profile": "/tmp/strand-repair-pg-smoke-final/block.pprof",
+    "cpu_profile": "/tmp/strand-repair-pg-smoke-final/cpu.pprof",
+    "redacted_config": "/tmp/strand-repair-pg-smoke-final/strand.redacted.yaml",
+    "strand_log": "/tmp/strand-repair-pg-smoke-final/strand.log"
+  }
+}

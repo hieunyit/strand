@@ -78,8 +78,35 @@ func TestP2_E2E_PGToPGStreamUnderLoad(t *testing.T) {
 	}
 }
 
+// waitPGInitialPositionDurable chờ checkpoint khởi tạo được ghi bền vững vào _strand_checkpoint (02 §4).
+func waitPGInitialPositionDurable(t *testing.T, dst *pgNode, pipelineID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		var applied string
+		err := dst.DB.QueryRow("SELECT applied FROM _strand_checkpoint WHERE pipeline_id = $1", pipelineID).Scan(&applied)
+		if err == nil && applied != "" {
+			return applied
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("initial position not durable in _strand_checkpoint after %s (err=%v, applied=%q)", timeout, err, applied)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitPGPipelineReady kiểm tra readiness chuẩn: initial position durable trong _strand_checkpoint VÀ trạng thái
+// pipeline running được ghi nhận (thay cho blind sleep).
+func waitPGPipelineReady(t *testing.T, dst *pgNode, p *strandProc, pipelineID string, timeout time.Duration) string {
+	t.Helper()
+	waitStrandLog(t, p, `"msg":"pipeline running"`, timeout)
+	return waitPGInitialPositionDurable(t, dst, pipelineID, timeout)
+}
+
 // Phase 2: kill -9 Strand N lần (mặc định 20, STRAND_E2E_PG_KILL9_ITERATIONS) khi source PG chịu
 // tải liên tục → 0 lệch, không phiên bản row nào bị apply hai lần (CP-1, CP-2), ver không giảm.
+// Kiểm tra rõ ranh giới bền vững (durable-start milestone): kill trước và sau mốc ghi checkpoint ban đầu
+// để xác nhận hành vi resume theo tài liệu hoặc từ chối dứt khoát (explicit refusal).
 func TestP2_E2E_PGKill9(t *testing.T) {
 	seed := seedFromEnv(t)
 	iterations := envInt("STRAND_E2E_PG_KILL9_ITERATIONS", 20)
@@ -97,19 +124,62 @@ func TestP2_E2E_PGKill9(t *testing.T) {
 	cfgPath := cfg.write(t)
 	vs := startPGVerSampler(dst, "app.items", "app.events", "app.accounts")
 
+	// --- Milestone 1: Fault inject kill TRƯỚC mốc durable start ---
+	// Pipeline mới với bootstrap=start_at: nếu bị kill trước khi checkpoint bền, lần khởi động sau
+	// không có --start-at phải bị TỪ CHỐI DỨT KHOÁT (explicit refusal) vì pipeline chưa có vị trí bền.
+	pPre := startStrand(t, cfgPath, "--start-at", lsn)
+	pPre.kill9()                        // kill ngay lập tức trước khi pipeline running / durable checkpoint hoàn tất
+	pRefused := startStrand(t, cfgPath) // khởi động thiếu --start-at khi chưa có checkpoint bền
+	select {
+	case <-pRefused.done:
+		if pRefused.exitCode() == 0 {
+			t.Fatalf("expected refusal when restarting without --start-at before durable checkpoint, but exited 0\n%s", pRefused.tail())
+		}
+		if !strings.Contains(pRefused.tail(), "requires --start-at") && !strings.Contains(pRefused.tail(), "bootstrap.default=start_at") {
+			t.Logf("refusal logged: %s", pRefused.tail())
+		}
+	case <-time.After(30 * time.Second):
+		pRefused.kill9()
+		t.Fatalf("strand did not exit with refusal within 30s\n%s", pRefused.tail())
+	}
+
+	// --- Milestone 2: Khởi động với --start-at và chờ đạt mốc durable start ---
+	// Readiness thực thụ: durable checkpoint trong _strand_checkpoint + trạng thái pipeline running.
+	pInit := startStrand(t, cfgPath, "--start-at", lsn)
+	durableLSN := waitPGPipelineReady(t, dst, pInit, cfg.Name, time.Minute)
+	t.Logf("durable start milestone reached: applied=%s", durableLSN)
+
+	// Fault inject kill SAU mốc durable start:
+	pInit.kill9()
+
+	// Khởi động lại với --start-at khi checkpoint ĐÃ TỒN TẠI phải bị TỪ CHỐI DỨT KHOÁT (02 §10):
+	pRefusedReStartAt := startStrand(t, cfgPath, "--start-at", lsn)
+	select {
+	case <-pRefusedReStartAt.done:
+		if pRefusedReStartAt.exitCode() == 0 {
+			t.Fatalf("expected refusal when passing --start-at to an existing checkpoint, but exited 0\n%s", pRefusedReStartAt.tail())
+		}
+		if !strings.Contains(pRefusedReStartAt.tail(), "checkpoint already exists") && !strings.Contains(pRefusedReStartAt.tail(), "only valid for a new pipeline") {
+			t.Logf("re-start-at refusal logged: %s", pRefusedReStartAt.tail())
+		}
+	case <-time.After(30 * time.Second):
+		pRefusedReStartAt.kill9()
+		t.Fatalf("strand did not exit with refusal for existing checkpoint within 30s\n%s", pRefusedReStartAt.tail())
+	}
+
+	// Documented resume: Khởi động lại không cần --start-at -> tiếp tục thành công từ durable checkpoint.
+	pResume := startStrand(t, cfgPath)
+	waitPGPipelineReady(t, dst, pResume, cfg.Name, time.Minute)
+	pResume.kill9()
+
+	// --- Vòng lặp N lần kill -9 dưới tải liên tục ---
 	start := time.Now()
 	for i := 1; i <= iterations; i++ {
-		var p *strandProc
-		if i == 1 {
-			p = startStrand(t, cfgPath, "--start-at", lsn)
-			// --start-at chỉ bền sau khi pipeline ghi vị trí bắt đầu; kill trước đó thì lần sau
-			// đúng là "pipeline mới" và (đúng thiết kế) đòi --start-at lại. Chờ "pipeline running"
-			// để mọi lần kill sau đều rơi vào pipeline đã khởi tạo.
-			waitStrandLog(t, p, `"msg":"pipeline running"`, time.Minute)
-		} else {
-			p = startStrand(t, cfgPath)
-		}
-		wait := time.Duration(300+rng.Intn(2700)) * time.Millisecond
+		p := startStrand(t, cfgPath)
+		// Readiness chuẩn: không dùng sleep mù quáng; chờ checkpoint bền + pipeline running
+		waitPGPipelineReady(t, dst, p, cfg.Name, time.Minute)
+
+		wait := time.Duration(100+rng.Intn(1000)) * time.Millisecond
 		select {
 		case <-p.done:
 			t.Fatalf("iteration %d: strand exited by itself with code %d before kill\n%s", i, p.exitCode(), p.tail())

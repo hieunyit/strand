@@ -190,3 +190,29 @@ tables:
 		t.Fatalf("TargetFoldsTableCase wrong")
 	}
 }
+
+func TestTablesConfigNormalizeTrimSpace(t *testing.T) {
+	yml := `
+version: 1
+name: trim-test
+source: { kind: mysql, dsn: "root:secret@tcp(127.0.0.1:3306)/a" }
+target: { kind: postgres, dsn: "postgres://u:p@127.0.0.1:5432/b" }
+tables:
+  include: ["  app.orders  ", " app.users "]
+  exclude: ["  app.audit  "]
+  rename: { " app.users ": " public.users " }
+`
+	cfg, err := config.LoadYAMLStrict([]byte(yml))
+	if err != nil {
+		t.Fatalf("LoadYAMLStrict: %v", err)
+	}
+	if len(cfg.Tables.Include) != 2 || cfg.Tables.Include[0] != "app.orders" || cfg.Tables.Include[1] != "app.users" {
+		t.Fatalf("tables.include not trimmed: %#v", cfg.Tables.Include)
+	}
+	if len(cfg.Tables.Exclude) != 1 || cfg.Tables.Exclude[0] != "app.audit" {
+		t.Fatalf("tables.exclude not trimmed: %#v", cfg.Tables.Exclude)
+	}
+	if renameVal, ok := cfg.Tables.Rename["app.users"]; !ok || renameVal != "public.users" {
+		t.Fatalf("tables.rename not trimmed: %#v", cfg.Tables.Rename)
+	}
+}

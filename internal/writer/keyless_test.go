@@ -50,11 +50,11 @@ func TestKeylessPGSQL(t *testing.T) {
 		t.Fatalf("insert: %s", got)
 	}
 	if got, want := buildKeylessUpdatePG(klT, []string{"a", "b"}, []string{"a", "b"}),
-		`UPDATE "d"."k" SET "a" = $1, "b" = $2 WHERE ctid = (SELECT ctid FROM "d"."k" WHERE "a" IS NOT DISTINCT FROM $3 AND "b" IS NOT DISTINCT FROM $4 LIMIT 1)`; got != want {
+		`UPDATE "d"."k" SET "a" = $1, "b" = $2 WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "d"."k" WHERE "a" IS NOT DISTINCT FROM $3 AND "b" IS NOT DISTINCT FROM $4 LIMIT 1)`; got != want {
 		t.Fatalf("update: %s", got)
 	}
 	if got, want := buildKeylessDeletePG(klT, []string{"a"}),
-		`DELETE FROM "d"."k" WHERE ctid = (SELECT ctid FROM "d"."k" WHERE "a" IS NOT DISTINCT FROM $1 LIMIT 1)`; got != want {
+		`DELETE FROM "d"."k" WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "d"."k" WHERE "a" IS NOT DISTINCT FROM $1 LIMIT 1)`; got != want {
 		t.Fatalf("delete: %s", got)
 	}
 }

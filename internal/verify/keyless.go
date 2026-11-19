@@ -108,13 +108,12 @@ func (mv *MerkleVerifier) VerifyTableKeyless(ctx context.Context, t model.TableI
 		}
 		rep.SourceRows, rep.TargetRows = s1, d
 		rep.StableOnSource = s1 == s2
-		rep.Match = s1 == d
-		if rep.Match || rep.StableOnSource && mv.cfg.ApplyWaiter == nil {
-			return rep, nil
-		}
+		rep.Match = rep.StableOnSource && (s1 == d)
 		if rep.StableOnSource {
 			return rep, nil
 		}
 	}
+	rep.Match = false
+	rep.StableOnSource = false
 	return rep, nil
 }

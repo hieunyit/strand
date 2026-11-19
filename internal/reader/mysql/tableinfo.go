@@ -31,6 +31,7 @@ type ColumnInfo struct {
 type TableInfo struct {
 	Columns []ColumnInfo
 	PK      []string
+	KeyMode string
 	// SysVersioned: bảng MariaDB WITH SYSTEM VERSIONING (TABLE_TYPE = 'SYSTEM VERSIONED'). information_schema
 	// ẩn row_start/row_end nhưng TABLE_MAP/ROWS của binlog có thêm hai cột đó ở cuối (sysversion.go).
 	SysVersioned bool
@@ -87,6 +88,10 @@ func (p infoSchemaProvider) LoadTable(ctx context.Context, schema, table string)
 	}
 	if res.Key != nil {
 		info.PK = res.Key.Columns
+		info.KeyMode = "unique"
+		if res.Key.IsPrimary() {
+			info.KeyMode = "pk"
+		}
 	}
 	return info, true, nil
 }
@@ -174,6 +179,9 @@ func infoMismatch(tm *replication.TableMapEvent, info *TableInfo) string {
 		}
 	}
 	for i, c := range info.Columns {
+		if len(tm.ColumnName) > 0 && (i >= len(tm.ColumnName) || string(tm.ColumnName[i]) != c.Name) {
+			return fmt.Sprintf("column %d name does not match information_schema", i+1)
+		}
 		if !typeOK(tm, i, c.DataType) {
 			return fmt.Sprintf("column %d (%s %s) does not match binlog column type %d", i+1, c.Name, c.DataType, tm.ColumnType[i])
 		}

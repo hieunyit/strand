@@ -169,6 +169,64 @@ func TestNewPipelineDuplicateRejected(t *testing.T) {
 	}
 }
 
+func TestNewPipelineOverwriteUnstarted(t *testing.T) {
+	customCfgDir := t.TempDir()
+	e := opsEnv(t, false, func(c *Config) {
+		c.ConfigDir = customCfgDir
+	})
+	c, csrf := e.loginOK()
+	e.setExit(0)
+
+	opts := NewPipelineOpts{
+		Name:           "retry-pipe",
+		From:           "mysql",
+		To:             "postgres",
+		SourceHost:     "10.0.0.1",
+		SourcePort:     3306,
+		TargetHost:     "10.0.0.2",
+		TargetPort:     5432,
+		SourceUser:     "user1",
+		SourcePassword: "pw1",
+		TargetUser:     "user2",
+		TargetPassword: "pw2",
+		Database:       "app",
+	}
+
+	body, _ := json.Marshal(opts)
+	resp, out := e.do(c, "POST", "/api/v1/pipelines", string(body),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first creation: %d %s", resp.StatusCode, out)
+	}
+
+	// Tạo lại mà không có overwrite -> 409 Conflict
+	opts.SourceHost = "10.0.0.99"
+	body, _ = json.Marshal(opts)
+	resp, out = e.do(c, "POST", "/api/v1/pipelines", string(body),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict without overwrite, got %d %s", resp.StatusCode, out)
+	}
+
+	// Tạo lại kèm overwrite: true -> thành công 200 và cập nhật cấu hình mới
+	opts.Overwrite = true
+	body, _ = json.Marshal(opts)
+	resp, out = e.do(c, "POST", "/api/v1/pipelines", string(body),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK with overwrite, got %d %s", resp.StatusCode, out)
+	}
+
+	// Kiểm tra file trên đĩa đã được cập nhật host mới
+	yamlContent, err := os.ReadFile(filepath.Join(customCfgDir, "retry-pipe.yaml"))
+	if err != nil {
+		t.Fatalf("read yaml: %v", err)
+	}
+	if !strings.Contains(string(yamlContent), "10.0.0.99") {
+		t.Fatalf("expected updated host 10.0.0.99 in yaml, got:\n%s", yamlContent)
+	}
+}
+
 func TestNewPipelinePathTraversalBlocked(t *testing.T) {
 	e := opsEnv(t, false, nil)
 	c, csrf := e.loginOK()

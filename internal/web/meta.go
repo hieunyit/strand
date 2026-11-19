@@ -361,16 +361,31 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 	if err != nil {
 		return err
 	}
+	now := s.now().UTC()
 	if !ok {
-		return nil
+		row = store.Pipeline{
+			Name:        p.Name,
+			ConfigPath:  p.ConfigPath,
+			EnvPath:     p.EnvFile,
+			SystemdUnit: p.SystemdUnit,
+			LogFile:     p.LogFile,
+			PidFile:     p.PidFile,
+			Origin:      storeOrigin(p.Origin),
+			Created:     now,
+			Updated:     now,
+		}
+	}
+	if row.ConfigPath == "" && p.ConfigPath != "" {
+		row.ConfigPath = p.ConfigPath
 	}
 	cfgB, err := os.ReadFile(row.ConfigPath)
 	if err != nil {
 		return err
 	}
 	row.ConfigYAML, row.HasConfig = string(cfgB), true
-	if row.EnvPath == "" && p.EnvFile != "" {
-		row.EnvPath = p.EnvFile // .env tạo sau (tab Config) cho pipeline chưa có
+	row.Updated = now
+	if p.EnvFile != "" {
+		row.EnvPath = p.EnvFile
 	}
 	if row.EnvPath != "" {
 		if envB, err := os.ReadFile(row.EnvPath); err == nil {
@@ -520,4 +535,15 @@ func b64dec(s string) []byte {
 		return nil
 	}
 	return b
+}
+
+// storeOrigin: Pipeline.Origin -> cột origin.
+func storeOrigin(o string) string {
+	switch o {
+	case "web.yaml":
+		return store.OriginFile
+	case "scan":
+		return store.OriginScan
+	}
+	return store.OriginCreated
 }

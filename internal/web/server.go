@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -39,23 +41,32 @@ const (
 
 // Server là Web UI + REST API.
 type Server struct {
-	cfg      *Config
-	reg      *Registry
-	samp     *Sampler
-	sessions *SessionStore
-	limiter  *LoginLimiter
-	audit    *AuditLog
-	actions  *ActionRegistry
-	jobs     JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
-	log      *slog.Logger
-	now      func() time.Time
-	tls      bool
-	live     liveSettings // cài đặt hiệu lực (trang Settings)
-	version  string
-	db       *metaDB // nil = chế độ file
+	configEditMu      sync.Mutex
+	sourceTablesMu    sync.Mutex
+	sourceTablesCache map[string]sourceTablesCacheEntry
+	cfg               *Config
+	reg               *Registry
+	samp              *Sampler
+	sessions          *SessionStore
+	limiter           *LoginLimiter
+	audit             *AuditLog
+	actions           *ActionRegistry
+	jobs              JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
+	log               *slog.Logger
+	now               func() time.Time
+	tls               bool
+	live              liveSettings // cài đặt hiệu lực (trang Settings)
+	version           string
+	db                *metaDB // nil = chế độ file
 
 	pages   map[string]*template.Template
 	handler http.Handler
+
+	// Luồng sống (stream.go): hub phát sự kiện của sampler; delta nhớ phần đã phát; streams đếm kết nối SSE.
+	hub          *liveHub
+	delta        liveDelta
+	streams      atomic.Int32
+	sseHeartbeat time.Duration
 }
 
 // Options của New.
@@ -120,7 +131,8 @@ func New(o Options) (*Server, error) {
 	reg.db = db
 	s := &Server{
 		cfg: o.Config, reg: reg,
-		sessions: NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
+		sourceTablesCache: make(map[string]sourceTablesCacheEntry),
+		sessions:          NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
 		actions: NewActionRegistry(), log: o.Logger, now: o.Now, version: o.Version,
 		tls: o.Config.TLSCert != "",
 	}
@@ -134,6 +146,11 @@ func New(o Options) (*Server, error) {
 	iv, _ := s.live.get("sample_interval_sec").(int)
 	s.samp = NewSampler(reg, time.Duration(iv)*time.Second)
 	s.samp.Now = o.Now
+	s.hub = newLiveHub()
+	s.delta = liveDelta{tables: map[string]map[string]string{}, events: map[string]map[string]bool{}}
+	s.sseHeartbeat = 15 * time.Second
+	s.samp.OnSample = s.onSample
+	s.samp.OnRound = s.onRound
 	if db != nil {
 		if err := s.initDB(); err != nil {
 			return nil, err
@@ -159,7 +176,6 @@ func New(o Options) (*Server, error) {
 	reg.Refresh(context.Background())
 	if db != nil {
 		s.preloadSeries()
-		s.samp.OnSample = db.metrics.add
 	}
 	s.handler = s.routes()
 	return s, nil
@@ -304,9 +320,13 @@ func (s *Server) routes() http.Handler {
 	// REST API.
 	mux.Handle("GET /api/v1/session", s.auth(true, s.apiSession))
 	mux.Handle("GET /api/v1/overview", s.auth(true, s.apiOverview))
+	mux.Handle("GET /api/v1/stream", s.auth(true, s.apiStream))
+	mux.Handle("GET /api/v1/live", s.auth(true, s.apiLive))
 	mux.Handle("GET /api/v1/pipelines", s.auth(true, s.apiPipelines))
 	mux.Handle("POST /api/v1/pipelines", s.auth(true, s.apiPipelineCreate))
+	mux.Handle("POST /api/v1/source/databases", s.auth(true, s.apiSourceDatabases))
 	mux.Handle("GET /api/v1/pipelines/{name}", s.auth(true, s.apiPipeline))
+	mux.Handle("DELETE /api/v1/pipelines/{name}", s.auth(true, s.apiPipelineDelete))
 	mux.Handle("POST /api/v1/pipelines/{name}/config/validate", s.auth(true, s.apiConfigValidate))
 	mux.Handle("POST /api/v1/pipelines/{name}/config", s.auth(true, s.apiConfigSave))
 	mux.Handle("GET /api/v1/pipelines/{name}/tuning", s.auth(true, s.apiTuningGet))

@@ -3,6 +3,7 @@ package spool
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -186,7 +187,61 @@ const txnMagicV2 = "STX2"
 const txnMagicV3 = "STX3"
 
 // encodeTxn tuần tự hóa model.Txn thành byte buffer.
+const txnMagicV4 = "STX4"
+const maxArchiveIdentityBytes = 1 << 20
+
+type prefetchEnvelope struct {
+	Origin     string                  `json:"origin"`
+	Identities []model.ArchiveIdentity `json:"identities,omitempty"`
+}
+
+func validatePrefetchEnvelope(t *model.Txn) error {
+	switch t.PrefetchOrigin {
+	case "source", "archive":
+		if t.TotalRows() > 0 && len(t.ArchiveIdentities) == 0 {
+			return fmt.Errorf("spool: prefetch rows have no identity contract")
+		}
+	default:
+		return fmt.Errorf("spool: unknown prefetch origin %q", t.PrefetchOrigin)
+	}
+	for _, i := range t.ArchiveIdentities {
+		if err := i.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func encodeTxn(t *model.Txn) ([]byte, error) {
+	if t.PrefetchOrigin == "" {
+		if len(t.ArchiveIdentities) > 0 {
+			return nil, fmt.Errorf("spool: archive identity without prefetch provenance")
+		}
+		return encodeTxnBase(t)
+	}
+	if err := validatePrefetchEnvelope(t); err != nil {
+		return nil, err
+	}
+	header, err := json.Marshal(prefetchEnvelope{Origin: t.PrefetchOrigin, Identities: t.ArchiveIdentities})
+	if err != nil {
+		return nil, err
+	}
+	if len(header) > maxArchiveIdentityBytes {
+		return nil, fmt.Errorf("spool: prefetch identity contract too large")
+	}
+	payload, err := encodeTxnBase(t)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	buf.WriteString(txnMagicV4)
+	if err := writeString(&buf, string(header)); err != nil {
+		return nil, err
+	}
+	buf.Write(payload)
+	return buf.Bytes(), nil
+}
+
+func encodeTxnBase(t *model.Txn) ([]byte, error) {
 	var buf bytes.Buffer
 	v3 := t.SourcePos.File != "" || t.SourcePos.BinlogPos != 0 || t.BinlogFile != "" || t.BinlogPos != 0
 	if v3 {
@@ -241,6 +296,39 @@ func encodeTxn(t *model.Txn) ([]byte, error) {
 
 // decodeTxn giải mã byte buffer thành model.Txn.
 func decodeTxn(data []byte) (*model.Txn, error) {
+	if len(data) >= 4 && string(data[:4]) == txnMagicV4 {
+		r := bytes.NewReader(data[4:])
+		var size uint32
+		if err := binary.Read(r, binary.LittleEndian, &size); err != nil {
+			return nil, err
+		}
+		if size > maxArchiveIdentityBytes || uint64(size) > uint64(r.Len()) {
+			return nil, fmt.Errorf("spool: invalid archive identity length")
+		}
+		raw := make([]byte, int(size))
+		if _, err := io.ReadFull(r, raw); err != nil {
+			return nil, err
+		}
+		var envelope prefetchEnvelope
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return nil, fmt.Errorf("spool: decode prefetch identity: %w", err)
+		}
+		payload := data[len(data)-r.Len():]
+		if len(payload) < 4 || (string(payload[:4]) != txnMagicV2 && string(payload[:4]) != txnMagicV3) {
+			return nil, fmt.Errorf("spool: invalid prefetch transaction payload")
+		}
+		t, err := decodeTxn(payload)
+		if err != nil {
+			return nil, err
+		}
+		t.PrefetchOrigin = envelope.Origin
+		t.ArchiveIdentities = envelope.Identities
+		if err := validatePrefetchEnvelope(t); err != nil {
+			return nil, err
+		}
+		return t, nil
+	}
+
 	if len(data) < len(txnMagicV2) || (string(data[:len(txnMagicV2)]) != txnMagicV2 && string(data[:len(txnMagicV3)]) != txnMagicV3) {
 		return nil, fmt.Errorf("spool: unknown txn encoding")
 	}

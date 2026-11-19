@@ -1,0 +1,60 @@
+
+citext-gate_test.go.txt
+=== RUN   TestAuditKeylessCitextGate
+    nokey_pipeline_audit_test.go:30: citext source accepted as keyless with PK=[v]; deterministic target collation accepted, despite case-folding equality
+--- FAIL: TestAuditKeylessCitextGate (0.00s)
+FAIL
+FAIL	strand/internal/pipeline	0.390s
+FAIL
+
+reader-order_test.go.txt
+=== RUN   TestAuditIndexOrder
+    nokey_audit_test.go:13: configured key order: [b a]; pre-event extracted key: [2 1]
+    nokey_audit_test.go:15: relation flag order: [a b]; post-event extracted key: [1 2]
+--- PASS: TestAuditIndexOrder (0.00s)
+PASS
+ok  	strand/internal/reader/pg	0.369s
+
+target-subset_test.go.txt
+=== RUN   TestAuditSubset
+    nokey_audit_test.go:7: source unique (a,b); target unique (a): accepted=true index=target_unique_a
+--- PASS: TestAuditSubset (0.00s)
+PASS
+ok  	strand/internal/validate	0.385s
+
+writer-null_test.go.txt
+=== RUN   TestAuditKeylessNullLiteralMySQL
+=== RUN   TestAuditKeylessNullLiteralMySQL/false
+    nokey_writer_audit_test.go:37: assembler: before=<nil> after="<nil>" OldKey=[]model.Value{1, model.Value(nil)} Key=[]model.Value{1, "<nil>"}
+    nokey_writer_audit_test.go:40: committed=true delta_updated=true rows_written=1 SQL=["UPDATE _strand_worker_delta SET applied = ?, batch_no = batch_no + 1 WHERE pipeline_id = ? AND worker_id = ? AND epoch = ?"]
+    nokey_writer_audit_test.go:41: changed keyless row was silently skipped while checkpoint committed
+=== RUN   TestAuditKeylessNullLiteralMySQL/true
+    nokey_writer_audit_test.go:37: assembler: before="<nil>" after=<nil> OldKey=[]model.Value{1, "<nil>"} Key=[]model.Value{1, model.Value(nil)}
+    nokey_writer_audit_test.go:40: committed=true delta_updated=true rows_written=1 SQL=["UPDATE _strand_worker_delta SET applied = ?, batch_no = batch_no + 1 WHERE pipeline_id = ? AND worker_id = ? AND epoch = ?"]
+    nokey_writer_audit_test.go:41: changed keyless row was silently skipped while checkpoint committed
+--- FAIL: TestAuditKeylessNullLiteralMySQL (0.00s)
+    --- FAIL: TestAuditKeylessNullLiteralMySQL/false (0.00s)
+    --- FAIL: TestAuditKeylessNullLiteralMySQL/true (0.00s)
+=== RUN   TestAuditKeylessNullLiteralPG
+    nokey_writer_audit_test.go:50: assembler: before=<nil> after="<nil>" OldKey=[]model.Value{1, model.Value(nil)} Key=[]model.Value{1, "<nil>"}
+    nokey_writer_audit_test.go:54: committed=true delta="gtid:1" rows_written=1 SQL=["UPDATE _strand_worker_delta SET applied = $1, batch_no = batch_no + 1 WHERE pipeline_id = $2 AND worker_id = $3 AND epoch = $4"]
+    nokey_writer_audit_test.go:55: changed keyless row was silently skipped while checkpoint committed
+--- FAIL: TestAuditKeylessNullLiteralPG (0.00s)
+=== RUN   TestAuditKeylessChangedControl
+    nokey_writer_audit_test.go:59: assembler: before=<nil> after="ordinary" OldKey=[]model.Value{1, model.Value(nil)} Key=[]model.Value{1, "ordinary"}
+--- PASS: TestAuditKeylessChangedControl (0.00s)
+=== RUN   TestAuditKeylessNullLiteralStrict
+=== RUN   TestAuditKeylessNullLiteralStrict/mysql
+    nokey_writer_audit_test.go:67: assembler: before=<nil> after="<nil>" OldKey=[]model.Value{1, model.Value(nil)} Key=[]model.Value{1, "<nil>"}
+    nokey_writer_audit_test.go:81: committed=true rows_written=1 next_commit=2 SQL=["UPDATE _strand_checkpoint SET applied = ?, updated_at = NOW(6) WHERE pipeline_id = ? AND epoch = ?"]
+    nokey_writer_audit_test.go:82: strict checkpoint committed and orderer advanced with no changed-row DML
+=== RUN   TestAuditKeylessNullLiteralStrict/pg
+    nokey_writer_audit_test.go:67: assembler: before=<nil> after="<nil>" OldKey=[]model.Value{1, model.Value(nil)} Key=[]model.Value{1, "<nil>"}
+    nokey_writer_audit_test.go:81: committed=true rows_written=1 next_commit=2 SQL=["UPDATE _strand_checkpoint SET applied = $1, updated_at = now() WHERE pipeline_id = $2 AND epoch = $3"]
+    nokey_writer_audit_test.go:82: strict checkpoint committed and orderer advanced with no changed-row DML
+--- FAIL: TestAuditKeylessNullLiteralStrict (0.00s)
+    --- FAIL: TestAuditKeylessNullLiteralStrict/mysql (0.00s)
+    --- FAIL: TestAuditKeylessNullLiteralStrict/pg (0.00s)
+FAIL
+FAIL	strand/internal/writer	0.374s
+FAIL

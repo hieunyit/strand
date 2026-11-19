@@ -637,13 +637,19 @@ func TestAC3_MySQLClientFoundRows(t *testing.T) {
 	}
 }
 
-func ensureMySQLMetadataTables(t *testing.T, db *sql.DB, pipelineID string) {
+func ensureMySQLMetadataTables(t *testing.T, db *sql.DB, pipelineID string) int64 {
 	t.Helper()
 	store := checkpoint.NewMySQLStore(db, pipelineID, model.EngineMySQL)
 	defer store.Close()
 	if err := store.EnsureTables(context.Background()); err != nil {
 		t.Fatalf("ensure metadata tables failed: %v", err)
 	}
+	// Worker creation requires the same initialized pipeline epoch as production.
+	epoch, err := store.AdvanceEpoch(context.Background(), pipelineID, "writer-test", "writer-test")
+	if err != nil {
+		t.Fatalf("initialize pipeline epoch: %v", err)
+	}
+	return epoch
 }
 
 // AC1: multi-row upsert
@@ -654,7 +660,7 @@ func TestAC1_MySQLMultiRowUpsert(t *testing.T) {
 	}
 
 	pipelineID := "pipe-ac1"
-	ensureMySQLMetadataTables(t, db, pipelineID)
+	epoch := ensureMySQLMetadataTables(t, db, pipelineID)
 
 	ctx := context.Background()
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS multi_items (
@@ -668,7 +674,7 @@ func TestAC1_MySQLMultiRowUpsert(t *testing.T) {
 	_, _ = db.ExecContext(ctx, "TRUNCATE TABLE multi_items")
 
 	tbl := model.TableID{Schema: "strand", Table: "multi_items"}
-	w := writer.NewMySQLWriter(db, pipelineID, 1, 100)
+	w := writer.NewMySQLWriter(db, pipelineID, 1, epoch)
 	if err := w.EnsureWorkerRow(ctx); err != nil {
 		t.Fatalf("ensure worker row: %v", err)
 	}
@@ -692,7 +698,7 @@ func TestAC1_MySQLMultiRowUpsert(t *testing.T) {
 	delta1 := writer.DeltaRow{
 		PipelineID: "pipe-ac1",
 		WorkerID:   1,
-		Epoch:      100,
+		Epoch:      epoch,
 		Applied:    "uuid:1",
 	}
 
@@ -743,7 +749,7 @@ func TestAC1_MySQLMultiRowUpsert(t *testing.T) {
 	delta2 := writer.DeltaRow{
 		PipelineID: "pipe-ac1",
 		WorkerID:   1,
-		Epoch:      100,
+		Epoch:      epoch,
 		Applied:    "uuid:2",
 	}
 	if err := w.ApplyBatch(ctx, []*model.Txn{txn2}, delta2); err != nil {
@@ -798,9 +804,9 @@ func TestAC2_TxnNeverSplit(t *testing.T) {
 	_, _ = db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=1")
 
 	pipelineID := "pipe-ac2"
-	ensureMySQLMetadataTables(t, db, pipelineID)
+	epoch := ensureMySQLMetadataTables(t, db, pipelineID)
 
-	w := writer.NewMySQLWriter(db, pipelineID, 1, 200)
+	w := writer.NewMySQLWriter(db, pipelineID, 1, epoch)
 	if err := w.EnsureWorkerRow(ctx); err != nil {
 		t.Fatalf("ensure worker row: %v", err)
 	}
@@ -827,7 +833,7 @@ func TestAC2_TxnNeverSplit(t *testing.T) {
 	deltaBad := writer.DeltaRow{
 		PipelineID: "pipe-ac2",
 		WorkerID:   1,
-		Epoch:      200,
+		Epoch:      epoch,
 		Applied:    "uuid:bad",
 	}
 
@@ -908,13 +914,13 @@ func TestCP5_StrictCommitOrderPrefix(t *testing.T) {
 	_, _ = db.ExecContext(ctx, "TRUNCATE TABLE strict_prefix_test")
 
 	pipelineID := "pipe-cp5"
-	ensureMySQLMetadataTables(t, db, pipelineID)
+	epoch := ensureMySQLMetadataTables(t, db, pipelineID)
 
 	numTxns := 40
 	numWorkers := 6
 
 	for wID := 1; wID <= numWorkers; wID++ {
-		w := writer.NewMySQLWriter(db, pipelineID, wID, 500)
+		w := writer.NewMySQLWriter(db, pipelineID, wID, epoch)
 		if err := w.EnsureWorkerRow(ctx); err != nil {
 			t.Fatalf("ensure worker row %d: %v", wID, err)
 		}
@@ -1002,7 +1008,7 @@ func TestCP5_StrictCommitOrderPrefix(t *testing.T) {
 		workerID := wID
 		go func() {
 			defer workersWg.Done()
-			w := writer.NewMySQLWriter(db, pipelineID, workerID, 500)
+			w := writer.NewMySQLWriter(db, pipelineID, workerID, epoch)
 			w.SetCommitOrderer(orderer)
 
 			for txn := range txnCh {
@@ -1013,7 +1019,7 @@ func TestCP5_StrictCommitOrderPrefix(t *testing.T) {
 				delta := writer.DeltaRow{
 					PipelineID: "pipe-cp5",
 					WorkerID:   workerID,
-					Epoch:      500,
+					Epoch:      epoch,
 					Applied:    fmt.Sprintf("uuid:%d", txn.Seq()),
 				}
 

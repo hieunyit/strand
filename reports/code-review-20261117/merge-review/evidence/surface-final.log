@@ -1,0 +1,3 @@
+ok  	strand/internal/web	93.319s
+ok  	strand/tools/diagnostics/breaker	15.555s
+ok  	strand/tools/diagnostics/pg-strict	2.268s

@@ -56,3 +56,20 @@ func TestApplyEnvOverrides_AmbiguousPath(t *testing.T) {
 		t.Fatal("expected ambiguity error")
 	}
 }
+
+func TestApplyEnvOverrides_PreservesStringWhitespace(t *testing.T) {
+	var p envProbe
+	if err := applyEnvOverrides(&p, []string{
+		"STRAND_OUTER_SIZE=  secret with spaces  ",
+		"STRAND_OUTER_COUNT= 12 ",
+		"STRAND_OUTER_INTERVAL= 2s ",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if p.Outer.Size != "  secret with spaces  " {
+		t.Fatalf("string override trimmed: %q", p.Outer.Size)
+	}
+	if p.Outer.Count != 12 || p.Outer.Interval != 2*time.Second {
+		t.Fatalf("numeric and duration overrides should trim before parsing: %+v", p.Outer)
+	}
+}

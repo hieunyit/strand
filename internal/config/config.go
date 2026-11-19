@@ -101,6 +101,7 @@ func (t TablesConfig) KeylessOn() bool {
 
 type BootstrapConfig struct {
 	Default  string                        `yaml:"default" json:"default"` // logical | seed | start_at
+	StartAt  string                        `yaml:"start_at,omitempty" json:"start_at,omitempty"`
 	PerTable map[string]BootstrapTableMode `yaml:"per_table,omitempty" json:"per_table,omitempty"`
 	CatchUp  CatchUpConfig                 `yaml:"catch_up,omitempty" json:"catch_up,omitempty"`
 	Logical  LogicalBootstrapConfig        `yaml:"logical,omitempty" json:"logical,omitempty"`
@@ -399,6 +400,20 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 	default:
 		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
 			fmt.Sprintf("invalid schema.destructive %q (want pause | approve)", cfg.Schema.Destructive), nil)
+	}
+
+	for i, inc := range cfg.Tables.Include {
+		cfg.Tables.Include[i] = strings.TrimSpace(inc)
+	}
+	for i, exc := range cfg.Tables.Exclude {
+		cfg.Tables.Exclude[i] = strings.TrimSpace(exc)
+	}
+	if len(cfg.Tables.Rename) > 0 {
+		cleaned := make(map[string]string, len(cfg.Tables.Rename))
+		for k, v := range cfg.Tables.Rename {
+			cleaned[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		cfg.Tables.Rename = cleaned
 	}
 
 	if err := ValidateRename(cfg.Tables.Rename, TargetFoldsTableCase(cfg.Target.Kind)); err != nil {

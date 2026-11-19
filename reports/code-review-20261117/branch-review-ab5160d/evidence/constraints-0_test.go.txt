@@ -1,0 +1,25 @@
+package validate
+
+import (
+ "context"
+ "testing"
+ "strand/internal/model"
+)
+func TestReviewExpressionIndistinguishable(t *testing.T) {
+ c:=[]ColumnDescriptor{{Name:"email"},{Name:"phone"}}
+ src:=buildMockMySQLDB(true,c,[]UniqueConstraint{{Name:"source_lower_email",HasExpr:true}})
+ dst:=buildMockMySQLDB(true,c,[]UniqueConstraint{{Name:"target_lower_phone",HasExpr:true}})
+ defer src.Close(); defer dst.Close()
+ table:=model.TableID{Schema:"app",Table:"t"}
+ if err:=CheckTableConstraintCompatibility(context.Background(),src,model.EngineMySQL,dst,model.EngineMySQL,table,table,ConstraintCheckOptions{}); err!=nil {t.Fatalf("unexpected rejection: %v",err)}
+ t.Log("unsafe expression constraints accepted as equivalent")
+}
+func TestReviewPGNullsMetadataOmitted(t *testing.T) {
+ c:=[]ColumnDescriptor{{Name:"email",Nullable:true}}
+ src:=buildMockPGDB(true,c,[]UniqueConstraint{{Name:"src",Columns:[]string{"email"}}})
+ dst:=buildMockPGDB(true,c,[]UniqueConstraint{{Name:"dst",Columns:[]string{"email"},NullsNotDistinct:true}})
+ defer src.Close(); defer dst.Close()
+ table:=model.TableID{Schema:"app",Table:"t"}
+ if err:=CheckTableConstraintCompatibility(context.Background(),src,model.EnginePG,dst,model.EnginePG,table,table,ConstraintCheckOptions{}); err!=nil {t.Fatalf("unexpected rejection: %v",err)}
+ t.Log("target NULLS NOT DISTINCT omitted from catalog metadata and accepted")
+}

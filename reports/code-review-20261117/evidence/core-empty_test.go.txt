@@ -1,0 +1,33 @@
+package snapshot
+
+import (
+ "context"
+ "database/sql"
+ "testing"
+ "strand/internal/checkpoint"
+ "strand/internal/model"
+)
+
+type emptyPGSource struct { *PGChunkSource }
+func (s *emptyPGSource) Bounds(context.Context, model.TableID, string) (*TableBounds,error) { s.boundSnap=&PGSnapshot{Xmin:100,Xmax:100,BoundsLSN:256}; return &TableBounds{},nil }
+func TestAuditCompletionDropsBoundsGuard(t *testing.T) {
+ db,err:=sql.Open("snapshot-bounds-test", ""); if err!=nil {t.Fatal(err)}; defer db.Close()
+ table:=model.TableID{Schema:"app",Table:"t"}
+ for _,kind:=range []string{"new-empty","resume-empty","resume-finished"} { t.Run(kind,func(t *testing.T){
+  s:=NewMySQLSnapshotter(DefaultChunkOptions()); s.Chunks=&emptyPGSource{&PGChunkSource{DB:db}}
+  s.ClearTarget=func(context.Context,model.TableID)error{return nil}
+  s.ClearUnread=func(context.Context,model.TableID,string,int64,int64,bool,[]int64)error{return nil}
+  bound:=&PGSnapshot{Xmin:100,Xmax:100,BoundsLSN:256}
+  s.LoadPlan=func(model.TableID)(SnapshotPlan,bool){return SnapshotPlan{Empty:kind=="resume-empty",Finished:kind=="resume-finished",MinPK:2,MaxPK:100,NextPK:100,BoundSnapshot:bound},kind!="new-empty"}
+  waits:=0
+  err:=s.SnapshotAdd(context.Background(),nil,nil,table,"id",[]string{"id"},func(context.Context,checkpoint.AppliedSet)error{waits++;return nil})
+  if err!=nil {t.Fatal(err)}; if waits!=0 {t.Fatalf("unexpected rendezvous: %d",waits)}
+  ev:=&model.RowChange{Table:table,Op:model.OpUpdate,Key:[]model.Value{int64(1)},Cols:[]model.ColValue{{Name:"doc",Unchanged:true}}}
+  pos:=model.Pos{Engine:model.EnginePG,LSN:128}
+  before,_:=s.Manager.HandleStreamEventXID(ev,pos,50)
+  s.Manager.RemoveTable(table) // snapshotTable marks done then removes range state
+  after,_:=s.Manager.HandleStreamEventXID(ev,pos,50)
+  if before!=ActionDiscard || after!=ActionApply {t.Fatalf("before=%v after=%v",before,after)}
+  t.Logf("no rendezvous; historical partial event: before removal=%v, after=%v",before,after)
+ })}
+}

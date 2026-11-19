@@ -1,0 +1,14 @@
+{
+  "scope": ["cmd/", "deploy/", "scripts/", "schema/", "Dockerfile", "Makefile"],
+  "fully_inspected_paths": ["cmd/strand/root.go", "cmd/strand/background.go", "cmd/strand/promote.go (entire file)", "cmd/strand/verify.go (entire file)", "cmd/strand/seed.go (first 240 lines and restore command helpers)", "cmd/strand/objects.go (command registration/apply flow)", "cmd/strand/web.go", "cmd/strand/archive.go", "cmd/replay/main.go", "deploy/compose/entrypoint.sh", "deploy/compose/healthcheck.sh", "deploy/fke/statefulset.yaml", "deploy/systemd/strand-web.service", "deploy/systemd/strand@.service", "scripts/install.sh", "scripts/package.sh", "scripts/check.sh", "scripts/gate1-e2e.sh", "schema/validator.go", "schema/seed.schema.json", "Dockerfile", "Makefile"],
+  "inventory_only_paths": ["cmd/strand/checkpoint.go", "cmd/strand/config.go", "cmd/strand/config_init.go", "cmd/strand/export.go", "cmd/strand/main.go", "cmd/strand/pause_resume.go", "cmd/strand/plan.go", "cmd/strand/prefetch.go", "cmd/strand/schema.go", "cmd/strand/seed_pg.go", "cmd/strand/sync.go", "cmd/strand/throttle.go", "cmd/strand/top.go", "cmd/strand/validate.go", "cmd/strand/version.go", "cmd/strand/background_test.go", "cmd/strand/config_init_test.go", "cmd/strand/repair_test.go", "cmd/strand/repair_tz_test.go", "cmd/strand/seed_pg_test.go", "cmd/strand/seed_tables_test.go", "cmd/strand/seed_test.go", "cmd/strand/sync_dryrun_test.go", "cmd/strand/sync_test.go", "cmd/strand/verify_applywait_test.go", "cmd/strand/verify_full_test.go", "cmd/strand/verify_keys_test.go", "cmd/strand/verify_paused_test.go", "cmd/strand/verify_scope_test.go", "cmd/strand/web_db_test.go", "cmd/strand/web_init_test.go", "schema/schema_test.go"],
+  "checks": [
+    {"check": "sh -n deploy/compose/entrypoint.sh deploy/compose/healthcheck.sh scripts/install.sh", "result": "passed"},
+    {"check": "bash -n scripts/check.sh scripts/package.sh scripts/gate1-e2e.sh", "result": "passed"},
+    {"check": "PATH=/usr/local/go/bin:$PATH go build -o /tmp/strand-audit2-surface/strand ./cmd/strand", "result": "passed"},
+    {"check": "PATH=/usr/local/go/bin:$PATH go build -o /tmp/strand-audit2-surface/replay ./cmd/replay", "result": "passed"},
+    {"check": "docs cross-check for container DSN/config behavior", "result": "docs/INSTALL.md and docs/USAGE.md confirm custom web config still receives DSN and credentials from environment"}
+  ],
+  "findings": [],
+  "gaps": ["No Docker, E2E, full-suite, deployment, or network checks performed per instruction.", "Review is static and limited to assigned scope; inventory-only paths were not fully analyzed."]
+}

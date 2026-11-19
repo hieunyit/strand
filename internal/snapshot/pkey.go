@@ -113,15 +113,18 @@ type PKCodec struct {
 	// Weigh trả WEIGHT_STRING của giá trị v theo collation của cột (PKWeight, mức 2) — tính bởi chính
 	// MySQL (MySQLPKCodec gắn sẵn, có cache). nil: codec không có cột PKWeight.
 	Weigh func(col PKColumn, v model.Value) ([]byte, error)
-	// WeighMany (tùy chọn) tính trước weight của nhiều giá trị một lúc (cache của Weigh): chỉ là tối ưu
-	// cho EncodeMany, không đổi kết quả của Encode.
-	WeighMany func(col PKColumn, vs []model.Value) error
+	// WeighMany (tùy chọn) tính weight của nhiều giá trị theo lô và trả chúng (khóa: text của giá trị) — đúng
+	// các weight mà Weigh trả. EncodeMany dùng TRỰC TIẾP kết quả này: không dựa vào cache dùng chung của
+	// Weigh (cache bị xóa khi đầy, có thể giữa lúc điền lô → Encode quay về một truy vấn MySQL mỗi giá trị).
+	WeighMany func(col PKColumn, vs []model.Value) (map[string][]byte, error)
 }
 
 // EncodeMany mã hóa nhiều tuple PK; với cột PKWeight, weight được tính trước theo lô (WeighMany) thay vì
 // một truy vấn MySQL mỗi giá trị. Kết quả giống hệt gọi Encode từng tuple.
 func (c *PKCodec) EncodeMany(tuples [][]model.Value) ([]Key, error) {
-	if c.WeighMany != nil {
+	enc := c
+	if c.WeighMany != nil && c.Weigh != nil {
+		local := map[int]map[string][]byte{} // chỉ số cột → weight theo text của giá trị
 		for i, col := range c.Cols {
 			if col.Kind != PKWeight {
 				continue
@@ -132,14 +135,35 @@ func (c *PKCodec) EncodeMany(tuples [][]model.Value) ([]Key, error) {
 					vs = append(vs, t[i])
 				}
 			}
-			if err := c.WeighMany(col, vs); err != nil {
+			m, err := c.WeighMany(col, vs)
+			if err != nil {
 				return nil, fmt.Errorf("primary key column %s: weight string: %w", col.Name, err)
 			}
+			local[i] = m
+		}
+		if len(local) > 0 {
+			byName := map[string]map[string][]byte{}
+			for i, m := range local {
+				byName[c.Cols[i].Name] = m
+			}
+			cc := *c
+			weigh := c.Weigh
+			cc.Weigh = func(col PKColumn, v model.Value) ([]byte, error) {
+				if m := byName[col.Name]; m != nil {
+					if s, err := toText(v); err == nil {
+						if wt, ok := m[s]; ok {
+							return wt, nil
+						}
+					}
+				}
+				return weigh(col, v)
+			}
+			enc = &cc
 		}
 	}
 	out := make([]Key, len(tuples))
 	for i, t := range tuples {
-		k, err := c.Encode(t)
+		k, err := enc.Encode(t)
 		if err != nil {
 			return nil, err
 		}

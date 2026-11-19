@@ -210,6 +210,10 @@ func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 		return nil, fmt.Errorf("rows error querying deltas: %w", err)
 	}
 
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close worker delta rows: %w", err)
+	}
+
 	if c.stepHook != nil {
 		if err := c.stepHook(StepReadDeltas); err != nil {
 			return nil, err
@@ -224,10 +228,6 @@ func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 			break
 		}
 	}
-	if !hasWork && c.vouch == nil {
-		return nil, nil
-	}
-
 	// 2. Đọc row toàn cục hiện tại và gộp deltas vào
 	var globalAppliedStr string
 	var globalQuery string
@@ -238,8 +238,14 @@ func (c *Compactor) compactLocked(ctx context.Context) (AppliedSet, error) {
 	}
 
 	err = c.db.QueryRowContext(ctx, globalQuery, c.pipelineID, epoch).Scan(&globalAppliedStr)
-	if err != nil && err != sql.ErrNoRows {
+	if err == sql.ErrNoRows {
+		return nil, exitcode.New(exitcode.ErrFenced, exitcode.Fenced, "checkpoint compaction fenced: epoch has changed or checkpoint is missing", nil)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("failed to read global checkpoint: %w", err)
+	}
+	if !hasWork && c.vouch == nil {
+		return nil, nil
 	}
 
 	globalSet, err := ParseAppliedSet(c.sourceEngine, globalAppliedStr)

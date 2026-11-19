@@ -324,7 +324,7 @@ Khóa đang dùng được in ở `validate` (`table app.t: no primary key, row 
 | MySQL 5.5–8.x, MariaDB | `binlog_row_image=FULL` (đã bắt buộc) nên ảnh trước/sau chứa đủ cột khóa. Cột `INVISIBLE` (MySQL 8.0.23+, MariaDB 10.3.3+) được đọc như cột thường |
 | PostgreSQL | UPDATE/DELETE chỉ mang các cột của **REPLICA IDENTITY**, nên khóa phải là index của `REPLICA IDENTITY USING INDEX` (index unique, không partial, không deferrable, mọi cột NOT NULL; PG tự kiểm lúc `ALTER`). Bảng không PK mà replica identity là DEFAULT/NOTHING: `validate` exit 3 và in đúng lệnh `ALTER TABLE "s"."t" REPLICA IDENTITY USING INDEX "idx";` khi có index đủ điều kiện. `REPLICA IDENTITY FULL` không PK **không** được coi là khóa (xem keyless) |
 
-**Ở target:** `strand schema init` / tự tạo bảng sao chép luôn unique index (MySQL→MySQL qua `SHOW CREATE TABLE`; MySQL→PG và PG→PG tạo `CREATE UNIQUE INDEX`/constraint) nên PG `ON CONFLICT (cột khóa)` và MySQL `ON DUPLICATE KEY UPDATE` hoạt động. Nếu bảng đích **đã tồn tại** mà không có unique index khớp khóa của nguồn, `validate` exit 3 (`no matching unique index/constraint`) kèm lệnh tạo index, vì upsert sẽ nhân đôi hàng. UPDATE đổi giá trị khóa chạy như UPDATE đổi PK (xóa khóa cũ, upsert khóa mới).
+**Ở target:** `strand schema init` / tự tạo bảng sao chép luôn unique index (MySQL→MySQL qua `SHOW CREATE TABLE`; MySQL→PG và PG→PG tạo `CREATE UNIQUE INDEX`/constraint) nên PG `ON CONFLICT (cột khóa)` và MySQL `ON DUPLICATE KEY UPDATE` hoạt động. Nếu bảng đích **đã tồn tại** mà không có unique index khớp khóa của nguồn, `validate` exit 3 (`no matching unique index/constraint`) kèm lệnh tạo index, vì upsert sẽ nhân đôi hàng. UPDATE đổi giá trị khóa chạy như UPDATE đổi PK (xóa khóa cũ, upsert khóa mới). Unique identity ở target phải khớp **đúng tập cột** của khóa nguồn; unique trên tập con không đủ vì có thể gộp hai row nguồn thành một. MySQL cũng từ chối unique cạnh tranh trên tập con đó. Kiểm tra identity không thay thế việc đối chiếu các unique constraint khác giữa source và target.
 
 #### 5.1.2 Bảng chưa có khóa: thêm khóa
 
@@ -356,11 +356,11 @@ bootstrap: { default: seed }  # hoặc start_at, hoặc per_table[bảng].mode: 
 
 - **Chỉ với seed.** Dữ liệu đầu của bảng phải đến từ backup (`strand seed plan/apply` + `sync --start-at seed`) hoặc `--start-at` (bạn cam kết target đã khớp source). Snapshot logic của bảng keyless bị từ chối (exit 3 `missing_pk`) vì không có khóa để chia range và đối soát.
 - **Nguồn MySQL/MariaDB:** `binlog_row_image=FULL` (`validate` đã bắt buộc). **Nguồn PG:** bảng phải có `REPLICA IDENTITY FULL`; nếu không `validate` exit 3 và in `ALTER TABLE ... REPLICA IDENTITY FULL;`.
-- **Apply:** INSERT là INSERT thường (hai hàng giống hệt là hai hàng). UPDATE/DELETE khớp **ảnh trước** theo mọi cột, NULL-safe (MySQL `<=>`, PG `IS NOT DISTINCT FROM`), đúng **một** hàng (MySQL `LIMIT 1`, PG `ctid = (SELECT ctid ... LIMIT 1)`). Không khớp hàng nào nghĩa là target lệch: dừng với exit 5 `keyless_row_missing`, không bỏ qua im lặng. Checkpoint commit cùng dữ liệu trong một transaction target nên không có replay đôi.
+- **Apply:** INSERT là INSERT thường (hai hàng giống hệt là hai hàng). UPDATE/DELETE khớp **ảnh trước** theo mọi cột, NULL-safe (MySQL `<=>`, PG `IS NOT DISTINCT FROM`), đúng **một** hàng (MySQL `LIMIT 1`, PG chọn cặp `(tableoid, ctid)` của một row để phân biệt cả các partition). Không khớp hàng nào nghĩa là target lệch: dừng với exit 5 `keyless_row_missing`, không bỏ qua im lặng. Checkpoint commit cùng dữ liệu trong một transaction target nên không có replay đôi.
 - **Lập lịch:** mọi thay đổi của một bảng keyless được áp tuần tự theo thứ tự commit (một khóa xung đột chung cho bảng) ở cả `strict` và `relaxed`; bảng khác vẫn song song.
 - **Hiệu năng:** mỗi UPDATE/DELETE quét bảng đích trừ khi có index hỗ trợ; hãy tạo index không-unique trên cột chọn lọc ở target. Bảng lớn dưới tải ghi cao sẽ chậm.
-- **Kiểu cột bị từ chối:** `FLOAT/DOUBLE/REAL` (so bằng có thể lệch sau chuyển đổi; mở bằng `keyless_allow_float: true` nếu bạn chấp nhận), `JSON`, kiểu hình học (MySQL `geometry`, `point`...; PG `point/line/box/polygon/circle`), `json`/`xml` của PG. Cột TEXT theo collation PAD SPACE coi `'a'` và `'a '` là bằng nhau: rủi ro lệch hiếm nhưng có.
-- **Verify:** chỉ so **số hàng + checksum không phụ thuộc thứ tự** (`strand verify --mode full`); không chỉ ra hàng lệch và `--repair fix` bị từ chối (nạp lại bảng từ seed). Verify theo mẫu/delta trong lúc chạy bỏ qua bảng keyless.
+- **Kiểu cột bị từ chối:** `FLOAT/DOUBLE/REAL` (so bằng có thể lệch sau chuyển đổi; mở bằng `keyless_allow_float: true` nếu bạn chấp nhận), `JSON`, kiểu hình học (MySQL `geometry`, `point`...; PG `point/line/box/polygon/circle`), `json`/`xml` và `citext` của PG (kể cả domain/array chứa kiểu equality không phù hợp). Cột TEXT theo collation PAD SPACE coi `'a'` và `'a '` là bằng nhau: rủi ro lệch hiếm nhưng có.
+- **Verify:** chỉ so **số hàng + checksum không phụ thuộc thứ tự** (`strand verify --mode full`); không chỉ ra hàng lệch và `--repair fix` bị từ chối (nạp lại bảng từ seed). Nguồn thay đổi giữa hai lần hash thì thử lại tối đa 5 lượt; nếu vẫn chưa ổn định, CLI trả `verify_incomplete`, không báo match. Verify theo mẫu/delta trong lúc chạy bỏ qua bảng keyless.
 - Web UI / `top`: cột key của bảng hiện `full row (keyless)`.
 
 ### 5.2 Snapshot logic với từng kiểu PK
@@ -702,6 +702,12 @@ Cờ `seed apply`:
 | `--archive` | rỗng | Thư mục binlog archive |
 | `--spool-local-hard`, `--overflow`, `--spool-hard` | 0, rỗng, 0 | Trần tầng local, tầng bucket, trần tổng (chạm thì exit 5 `prefetch_exhausted`) |
 
+Trần spool tính cả file payload spill còn giữ trên disk, một lần theo đường dẫn, kể cả khi metadata đã tràn sang bucket. Truncate transaction chưa giải phóng dung lượng file đang được mượn; quota chỉ giảm khi owner đã dọn file vật lý.
+
+Spool prefetch mới lưu provenance và ordered identity contract cùng mỗi transaction (định dạng STX4). `sync` kiểm lại mode, tên/thứ tự key và columns trước khi coi vị trí là đã phủ, rồi kiểm lại trước apply, kể cả payload spill. Spool generic STX2/STX3 vẫn đọc được, nhưng bản ghi prefetch cũ chưa có contract và chưa được checkpoint sẽ bị từ chối; cần dựng lại từ source/archive tin cậy. Không tự xóa spool khi phần log tương ứng đã bị purge. Dùng cùng phiên bản mới cho `seed apply` và `sync`; binary cũ không đọc STX4.
+
+Prefetch trực tiếp từ source chỉ nhận bảng có metadata cột/key rõ ràng từ reader và row image FULL; không suy UNIQUE/keyless từ cột đầu. Khóa UNIQUE NOT NULL được xác định từ catalog source; bảng keyless cần archive với sidecar đã xác minh và metadata FULL, hoặc restore seed không prefetch rồi dùng CDC trực tiếp khi log còn đủ. Metadata do catalog hiện tại cung cấp vẫn không tự chứng minh schema ở một vị trí lịch sử. Với sidecar archive, TABLE_MAP phải có tên cột theo thứ tự và mọi QUERY ngoài BEGIN/COMMIT/ROLLBACK bị từ chối; mirrored expression indexes cũng bị validator từ chối khi chưa chứng minh được tương đương.
+
 `seed apply` theo engine:
 
 - **MySQL:** kiểm `gtid_executed` của target bằng P và gỡ cấu hình replication còn sót. Tạo schema metadata với `SET SESSION sql_log_bin=0; CREATE DATABASE strand; SET SESSION sql_log_bin=1;` để `gtid_executed` vẫn đúng bằng P.
@@ -823,6 +829,7 @@ strand archive binlog --from "mysql://archiver:***@replica1:3306/" --to /archive
 
 Lưu binlog liên tục từ một MySQL (nên là replica) vào thư mục, thay cho script `mysqlbinlog --raw --stop-never`. Thư mục này dùng trực tiếp cho `seed apply --archive`.
 
+- Khi đọc archive để prefetch/catch-up: cần `binlog_row_metadata=FULL`, `binlog_row_image=FULL`, primary key được xác minh từ TABLE_MAP và không dùng `binlog_row_value_options=PARTIAL_JSON`. Reader từ chối metadata thiếu/row image thiếu cột thay vì đoán dữ liệu rồi đánh dấu GTID đã phủ. Hiện kiểm này áp cho mọi bảng gặp trong archive, kể cả ngoài filter; archive prefetch chưa hỗ trợ bảng keyless hoặc chỉ có unique thay PK khi archive không cung cấp identity được xác minh.
 - Quyền: `REPLICATION SLAVE, REPLICATION CLIENT`. Cờ `tls=` trong DSN được áp cho kết nối binlog.
 - File chỉ xuất hiện dưới tên `NNNNNNNN-<tên trên server>` khi server rotate (đủ transaction, đã fsync). File đang ghi tên `.partial-*`, reader bỏ qua. Số thứ tự ở đầu tên giữ đúng thứ tự cả khi replica được dựng lại và đánh số binlog lại từ đầu.
 - Chạy lại sau khi dừng hoặc crash: tiếp tục theo GTID (trạng thái ở `.strand-archive.json`), không lặp, không hở. Có thể trỏ `--from` sang replica khác có cùng GTID.

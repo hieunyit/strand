@@ -1,0 +1,12 @@
+I have initiated the compilation of the `tests/e2e` package to verify the new and updated tests and will check the output once it finishes.
+root agent idle; waiting up to 15m0s for 2 background task(s)
+I have launched the `TestPGKill9_MilestoneFaultInjection` test in the background to execute the bounded PG milestone fault injection check and will inspect the execution logs once it completes.
+I will wait for `TestPGKill9_MilestoneFaultInjection` to finish its execution.
+I will wait for the background test execution to complete.
+I am waiting for `TestPGKill9_MilestoneFaultInjection` to complete.
+Waiting for the test execution to complete.
+I will wait for the background test execution to notify when complete.
+I will wait for the final catch-up and invariant checks of `TestPGKill9_MilestoneFaultInjection` to conclude.
+I am waiting for `waitPGCaughtUp` in `TestPGKill9_MilestoneFaultInjection` to complete.
+I will wait for the rebuild to finish.
+I will wait for `TestPGKill9_MilestoneFaultInjection` to finish executing.

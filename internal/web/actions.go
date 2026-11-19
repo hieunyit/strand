@@ -39,7 +39,8 @@ type Action struct {
 	// ConfirmName: UI bắt gõ lại tên pipeline (Rewind, Repair, Promote).
 	ConfirmName bool
 	// SecretArgs: tên tham số body mang bí mật (DSN); giá trị bị che trong dòng audit.
-	SecretArgs []string
+	SecretArgs    []string
+	SecretAllArgs bool
 	// Run thực hiện thao tác. Lỗi trả về được audit với result=error. Đối số tiến trình con phải là mảng.
 	Run func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error)
 }
@@ -177,6 +178,9 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 	argv := make([]string, 0, len(args))
 	for _, k := range sortedKeys(args) {
 		v := args[k]
+		if a.SecretAllArgs {
+			v = "<hidden>"
+		}
 		for _, sk := range a.SecretArgs {
 			if sk == k {
 				v = "<hidden>"
@@ -202,6 +206,10 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 		entry.Detail = map[string]any{"error": err.Error()}
 	}
 	_ = s.audit.Log(entry)
+	if err == nil && act != ActDelete {
+		// Lấy mẫu lại ngay: trạng thái do chính thao tác này gây ra hiện lên không chờ chu kỳ sau.
+		s.samp.Kick(context.WithoutCancel(r.Context()), name)
+	}
 	if err != nil {
 		status := http.StatusBadGateway
 		var ae *ActionError

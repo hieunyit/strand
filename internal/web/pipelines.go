@@ -304,6 +304,14 @@ func (r *Registry) publish(byName map[string]*Pipeline, warns []string) {
 	names := make([]string, 0, len(byName))
 	for n, p := range byName {
 		names = append(names, n)
+		// The editor's conventional env path is durable across refresh/restart,
+		// including explicit entries without an env_file setting.
+		if p.EnvFile == "" {
+			path := filepath.Join(filepath.Dir(p.ConfigPath), p.Name+".env")
+			if fileExists(path) {
+				p.EnvFile = path
+			}
+		}
 		if c, err := config.LoadFileForPaths(p.ConfigPath); err != nil {
 			p.CfgErr = err.Error()
 		} else {
