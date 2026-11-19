@@ -9,6 +9,10 @@ if [ "${1:-serve}" != "serve" ]; then
 fi
 
 : "${STRAND_WEB_DATABASE_DSN:?STRAND_WEB_DATABASE_DSN is required (postgres://user:pass@host:5432/db), see .env.example}"
+# Mật khẩu mẫu của .env.example còn nguyên: từ chối (DB metadata giữ hash admin, .env mã hóa, audit).
+case "$STRAND_WEB_DATABASE_DSN" in
+  *change-me*) echo "POSTGRES_PASSWORD is still the placeholder from .env.example: set a real one (openssl rand -hex 24) in .env" >&2; exit 2 ;;
+esac
 LISTEN="${STRAND_WEB_LISTEN:-0.0.0.0:8080}"
 STATE_DIR="${STRAND_WEB_STATE_DIR:-/var/lib/strand-web}"
 CONFIG_DIR="${STRAND_CONFIG_DIR:-/etc/strand}"

@@ -191,6 +191,8 @@ func TestRepairWizardFlowBackground(t *testing.T) {
 	if len(e.fakeCalls()) != 0 {
 		t.Fatalf("stop ran with lag above threshold: %v", e.fakeCalls())
 	}
+	// The wizard page shows the sampler's lag (rendering never calls the admin socket): take a sample first.
+	e.sampleNow()
 	v := e.wizState(c, "repair")
 	if v["lag_ok"] != false || v["lag_seconds"] != float64(30) {
 		t.Errorf("view lag: %v %v", v["lag_ok"], v["lag_seconds"])

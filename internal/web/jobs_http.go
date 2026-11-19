@@ -58,6 +58,17 @@ func (s *Server) sourceTablesView(ctx context.Context, p *Pipeline) SourceTables
 	return v
 }
 
+// cachedSourceTables trả bảng của source nếu còn trong cache (không gọi admin socket); ok=false: trang để
+// trình duyệt tải qua GET /api/v1/pipelines/{name}/source-tables khi người dùng cần.
+func (s *Server) cachedSourceTables(p *Pipeline) (SourceTablesView, bool) {
+	s.sourceTablesMu.Lock()
+	defer s.sourceTablesMu.Unlock()
+	if cached, ok := s.sourceTablesCache[p.Name]; ok && time.Now().Before(cached.expiresAt) {
+		return SourceTablesView{Tables: append([]admin.SourceTable(nil), cached.tables...)}, true
+	}
+	return SourceTablesView{Tables: []admin.SourceTable{}}, false
+}
+
 func (s *Server) invalidateSourceTables(name string) {
 	s.sourceTablesMu.Lock()
 	delete(s.sourceTablesCache, name)

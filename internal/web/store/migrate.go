@@ -50,6 +50,25 @@ func Migrations() ([]Migration, error) {
 	return out, nil
 }
 
+// SchemaStatus returns the number of applied migrations and the number embedded in this binary (0 applied when
+// the schema_migrations table does not exist yet).
+func SchemaStatus(ctx context.Context, db *sql.DB) (applied, latest int, err error) {
+	ms, err := Migrations()
+	if err != nil {
+		return 0, 0, err
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+		return 0, 0, err
+	}
+	if exists {
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&applied); err != nil {
+			return 0, 0, err
+		}
+	}
+	return applied, len(ms), nil
+}
+
 // migrateLockName is the advisory-lock name shared by all web instances: two instances starting at once
 // serialise here, the second finds everything applied.
 const migrateLockName = "migrate"

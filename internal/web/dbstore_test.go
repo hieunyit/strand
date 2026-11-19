@@ -644,12 +644,10 @@ func TestPersistPipelineFilesCreatesRowForWebYamlPipeline(t *testing.T) {
 		t.Fatal("pipeline orders not found in registry")
 	}
 
-	// Ban đầu pipeline không nằm trong DB
+	// Chế độ DB đăng ký pipeline khai báo trong web.yaml ngay khi quét (registry trong DB); xóa dòng để kiểm
+	// persistPipelineFiles tự tạo lại dòng khi chưa có.
 	ctx := context.Background()
-	_, ok, _ := st.GetPipeline(ctx, "orders")
-	if ok {
-		t.Fatal("orders should not be in store initially")
-	}
+	must0(t, st.DeletePipeline(ctx, "orders"))
 
 	// Gọi persistPipelineFiles (như khi người dùng lưu config hoặc tạo)
 	if err := e.srv.persistPipelineFiles(p); err != nil {

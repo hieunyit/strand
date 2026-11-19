@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -53,13 +54,19 @@ type Server struct {
 	jobs              JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
 	log               *slog.Logger
 	now               func() time.Time
-	secure            bool // đặt cờ Secure cho cookie (TLS hoặc secure_cookies)
 	tls               bool
+	live              liveSettings // cài đặt hiệu lực (trang Settings)
 	version           string
 	db                *metaDB // nil = chế độ file
 
 	pages   map[string]*template.Template
 	handler http.Handler
+
+	// Luồng sống (stream.go): hub phát sự kiện của sampler; delta nhớ phần đã phát; streams đếm kết nối SSE.
+	hub          *liveHub
+	delta        liveDelta
+	streams      atomic.Int32
+	sseHeartbeat time.Duration
 }
 
 // Options của New.
@@ -75,6 +82,8 @@ type Options struct {
 	Store store.Store
 	// SecretKey thay STRAND_WEB_SECRET_KEY (test).
 	SecretKey string
+	// PreviousSecretKey thay STRAND_WEB_SECRET_KEY_PREVIOUS (test).
+	PreviousSecretKey string
 }
 
 // New dựng Server (chưa lắng nghe, chưa chạy sampler). Trả lỗi nếu cấu hình không đủ điều kiện khởi động.
@@ -105,6 +114,10 @@ func New(o Options) (*Server, error) {
 		if db, err = newMetaDB(o.Store, secret, o.Logger); err != nil {
 			return nil, err
 		}
+		db.previous = o.PreviousSecretKey
+		if db.previous == "" {
+			db.previous = strings.TrimSpace(os.Getenv(EnvSecretKeyPrevious))
+		}
 	}
 	audit, err := OpenAuditLog(o.Config.StateDir, o.Now)
 	if err != nil {
@@ -116,18 +129,28 @@ func New(o Options) (*Server, error) {
 	reg := NewRegistry(o.Config, o.Commander)
 	reg.now = o.Now
 	reg.db = db
-	iv := time.Duration(o.Config.SampleIntervalSec) * time.Second
 	s := &Server{
-		cfg: o.Config, reg: reg, samp: NewSampler(reg, iv),
+		cfg: o.Config, reg: reg,
 		sourceTablesCache: make(map[string]sourceTablesCacheEntry),
 		sessions:          NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
 		actions: NewActionRegistry(), log: o.Logger, now: o.Now, version: o.Version,
-		tls:    o.Config.TLSCert != "",
-		secure: o.Config.TLSCert != "" || o.Config.SecureCookies,
+		tls: o.Config.TLSCert != "",
 	}
-	s.samp.Now = o.Now
 	s.db = db
 	s.sessions.db = db
+	// Cài đặt hiệu lực (env > DB > web.yaml > mặc định), trước sampler vì chu kỳ lấy mẫu là một cài đặt.
+	if err := s.loadSettings(true); err != nil {
+		return nil, fmt.Errorf("load settings from the metadata database: %w", err)
+	}
+	reg.scanFn = func() []string { return s.settingList("scan") }
+	iv, _ := s.live.get("sample_interval_sec").(int)
+	s.samp = NewSampler(reg, time.Duration(iv)*time.Second)
+	s.samp.Now = o.Now
+	s.hub = newLiveHub()
+	s.delta = liveDelta{tables: map[string]map[string]string{}, events: map[string]map[string]bool{}}
+	s.sseHeartbeat = 15 * time.Second
+	s.samp.OnSample = s.onSample
+	s.samp.OnRound = s.onRound
 	if db != nil {
 		if err := s.initDB(); err != nil {
 			return nil, err
@@ -146,10 +169,14 @@ func New(o Options) (*Server, error) {
 	s.registerOps()
 	s.registerWizards()
 	s.registerConfigEditOps()
+	s.registerRegistryOps()
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
 	}
 	reg.Refresh(context.Background())
+	if db != nil {
+		s.preloadSeries()
+	}
 	s.handler = s.routes()
 	return s, nil
 }
@@ -158,6 +185,9 @@ func New(o Options) (*Server, error) {
 func (s *Server) initDB() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	if err := s.db.checkSecretKey(ctx, s.db.previous); err != nil {
+		return err
+	}
 	sum, err := s.importFiles(ctx)
 	if err != nil {
 		return fmt.Errorf("import file state into database: %w", err)
@@ -210,6 +240,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	defer cancel()
 	go s.samp.Run(ctx)
 	go s.ResumeDesired(ctx)
+	go s.runMetricsHistory(ctx)
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -234,11 +265,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
 		_ = srv.Shutdown(sctx)
-		if s.db != nil && s.cfg.ShutdownStopPipelines {
+		if s.db != nil && s.settingBool("shutdown_stop_pipelines") {
 			s.stopForShutdown()
 		}
 		_ = s.audit.Close()
 		if s.db != nil {
+			s.flushMetrics()
 			_ = s.db.st.Close()
 		}
 		return nil
@@ -269,6 +301,10 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /pipelines/new", s.auth(false, s.pageNewPipeline))
 	mux.Handle("POST /pipelines/new", s.auth(false, s.apiPipelineCreate))
 	mux.Handle("GET /jobs", s.auth(false, s.pageJobs))
+	mux.Handle("GET /settings", s.auth(false, s.pageSettings))
+	mux.Handle("POST /settings", s.auth(false, s.pageSettings))
+	mux.Handle("GET /api/v1/settings", s.auth(true, s.apiSettingsGet))
+	mux.Handle("POST /api/v1/settings", s.auth(true, s.apiSettingsSave))
 	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
 	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs"} {
 		tab := tab
@@ -284,6 +320,8 @@ func (s *Server) routes() http.Handler {
 	// REST API.
 	mux.Handle("GET /api/v1/session", s.auth(true, s.apiSession))
 	mux.Handle("GET /api/v1/overview", s.auth(true, s.apiOverview))
+	mux.Handle("GET /api/v1/stream", s.auth(true, s.apiStream))
+	mux.Handle("GET /api/v1/live", s.auth(true, s.apiLive))
 	mux.Handle("GET /api/v1/pipelines", s.auth(true, s.apiPipelines))
 	mux.Handle("POST /api/v1/pipelines", s.auth(true, s.apiPipelineCreate))
 	mux.Handle("POST /api/v1/source/databases", s.auth(true, s.apiSourceDatabases))
@@ -322,6 +360,9 @@ func (s *Server) routes() http.Handler {
 	return s.secureHeaders(mux)
 }
 
+// secureCookies: cờ Secure cho cookie (web phục vụ TLS, hoặc cài đặt secure_cookies sau reverse proxy TLS).
+func (s *Server) secureCookies() bool { return s.tls || s.settingBool("secure_cookies") }
+
 // secureHeaders thêm header bảo mật vào mọi phản hồi.
 func (s *Server) secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -333,7 +374,7 @@ func (s *Server) secureHeaders(next http.Handler) http.Handler {
 		if !strings.HasPrefix(r.URL.Path, "/static/") {
 			h.Set("Cache-Control", "no-store")
 		}
-		if s.secure {
+		if s.secureCookies() {
 			h.Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		next.ServeHTTP(w, r)
@@ -406,7 +447,7 @@ func safeNext(n string) bool {
 }
 
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustForwardedFor {
+	if s.settingBool("trust_forwarded_for") {
 		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
 			first, _, _ := strings.Cut(xf, ",")
 			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
@@ -429,7 +470,7 @@ func (s *Server) auditDenied(r *http.Request, action string) {
 // ---- đăng nhập ----
 
 func (s *Server) setCookie(w http.ResponseWriter, name, val string, maxAge int) {
-	http.SetCookie(w, &http.Cookie{Name: name, Value: val, Path: "/", HttpOnly: true, Secure: s.secure,
+	http.SetCookie(w, &http.Cookie{Name: name, Value: val, Path: "/", HttpOnly: true, Secure: s.secureCookies(),
 		SameSite: http.SameSiteStrictMode, MaxAge: maxAge})
 }
 

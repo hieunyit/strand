@@ -17,10 +17,15 @@ type Mem struct {
 	pipes    map[string]Pipeline
 	desired  map[string]string
 	jobs     map[string]Job
-	wizards  map[string][]byte
-	audit    []AuditRow
-	meta     map[string]string
-	locks    map[string]*sync.Mutex
+	jobOut   map[string]map[int64][]byte
+	// metrics, metrics1m: pipeline -> UnixNano(ts) -> mẫu.
+	metrics   map[string]map[int64]MetricSample
+	metrics1m map[string]map[int64]MetricSample
+	settings  map[string]string
+	wizards   map[string][]byte
+	audit     []AuditRow
+	meta      map[string]string
+	locks     map[string]*sync.Mutex
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }
@@ -150,9 +155,54 @@ func (m *Mem) UpsertPipeline(_ context.Context, p Pipeline) error {
 	}
 	p.Updated = now
 	p.EnvEnc = append([]byte(nil), p.EnvEnc...)
+	p.normalize()
 	m.pipes[p.Name] = p
 	return nil
 }
+
+func (m *Mem) CreatePipeline(ctx context.Context, p Pipeline) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	_, exists := m.pipes[p.Name]
+	m.mu.Unlock()
+	if exists {
+		return false, nil
+	}
+	return true, m.UpsertPipeline(ctx, p)
+}
+
+func (m *Mem) UpdatePipelineMeta(_ context.Context, r Pipeline) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	cur, ok := m.pipes[r.Name]
+	if !ok {
+		return nil
+	}
+	r.normalize()
+	cur.ConfigPath, cur.EnvPath, cur.SystemdUnit, cur.LogFile, cur.PidFile = r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile
+	cur.Origin, cur.MissingSince, cur.Updated = r.Origin, r.MissingSince, time.Now()
+	m.pipes[r.Name] = cur
+	return nil
+}
+
+func (m *Mem) SetPipelineConflicts(_ context.Context, name, conflicts string) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	if conflicts == "" {
+		conflicts = "[]"
+	}
+	if cur, ok := m.pipes[name]; ok {
+		cur.Conflicts = conflicts
+		m.pipes[name] = cur
+	}
+	return nil
+}
+
 func (m *Mem) GetPipeline(_ context.Context, name string) (Pipeline, bool, error) {
 	if err := m.enter(); err != nil {
 		return Pipeline{}, false, err
@@ -181,7 +231,7 @@ func (m *Mem) DeletePipeline(_ context.Context, name string) error {
 	delete(m.pipes, name)
 	delete(m.desired, name)
 	for k := range m.wizards {
-		if strings.HasSuffix(k, "/"+name) {
+		if strings.HasSuffix(k, "\x00"+name) { // khóa: kind + "\x00" + pipeline
 			delete(m.wizards, k)
 		}
 	}
@@ -237,7 +287,81 @@ func (m *Mem) DeleteJob(_ context.Context, id string) error {
 	}
 	defer m.mu.Unlock()
 	delete(m.jobs, id)
+	delete(m.jobOut, id)
 	return nil
+}
+
+func (m *Mem) AppendJobOutput(_ context.Context, id string, off int64, data []byte) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	if _, ok := m.jobs[id]; !ok {
+		return errors.New("store: job_output for unknown job " + id)
+	}
+	if m.jobOut == nil {
+		m.jobOut = map[string]map[int64][]byte{}
+	}
+	if m.jobOut[id] == nil {
+		m.jobOut[id] = map[int64][]byte{}
+	}
+	if _, ok := m.jobOut[id][off]; !ok {
+		m.jobOut[id][off] = append([]byte(nil), data...)
+	}
+	return nil
+}
+
+func (m *Mem) ReadJobOutput(_ context.Context, id string, off int64, max int) ([]byte, error) {
+	if err := m.enter(); err != nil {
+		return nil, err
+	}
+	defer m.mu.Unlock()
+	return readChunks(m.jobOut[id], off, max), nil
+}
+
+func (m *Mem) JobOutputSize(_ context.Context, id string) (int64, error) {
+	if err := m.enter(); err != nil {
+		return 0, err
+	}
+	defer m.mu.Unlock()
+	return contiguous(m.jobOut[id]), nil
+}
+
+// contiguous: số byte liên tục từ offset 0.
+func contiguous(ch map[int64][]byte) int64 {
+	var n int64
+	for {
+		d, ok := ch[n]
+		if !ok || len(d) == 0 {
+			return n
+		}
+		n += int64(len(d))
+	}
+}
+
+func readChunks(ch map[int64][]byte, off int64, max int) []byte {
+	offs := make([]int64, 0, len(ch))
+	for o := range ch {
+		offs = append(offs, o)
+	}
+	sort.Slice(offs, func(i, k int) bool { return offs[i] < offs[k] })
+	var out []byte
+	for _, o := range offs {
+		d := ch[o]
+		end := o + int64(len(d))
+		if end <= off {
+			continue
+		}
+		start := off + int64(len(out))
+		if o > start {
+			break // lỗ: dừng ở phần liên tục
+		}
+		out = append(out, d[start-o:]...)
+		if len(out) >= max {
+			return out[:max]
+		}
+	}
+	return out
 }
 
 func (m *Mem) GetWizard(_ context.Context, kind, pipeline string) ([]byte, bool, error) {
@@ -266,11 +390,17 @@ func (m *Mem) AppendAudit(_ context.Context, r AuditRow) error {
 	m.audit = append(m.audit, r)
 	return nil
 }
-func (m *Mem) AppendAuditBatch(ctx context.Context, rows []AuditRow) error {
+func (m *Mem) AppendAuditBatch(_ context.Context, rows []AuditRow, progress *MetaKV) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
 	for _, r := range rows {
-		if err := m.AppendAudit(ctx, r); err != nil {
-			return err
-		}
+		r.ID = int64(len(m.audit) + 1)
+		m.audit = append(m.audit, r)
+	}
+	if progress != nil {
+		m.meta[progress.Key] = progress.Value
 	}
 	return nil
 }

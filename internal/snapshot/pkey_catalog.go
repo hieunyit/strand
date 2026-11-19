@@ -191,20 +191,26 @@ func (w *mysqlWeigher) weigh(col PKColumn, v model.Value) ([]byte, error) {
 // dọn phần chưa đọc / verify full khác thứ tự (CrossEngineKeySet) cần khóa source của mọi row target —
 // một truy vấn mỗi row thì quá chậm. Chỉ là tối ưu: Encode sau đó vẫn đi qua weigh (cache bị xóa giữa
 // chừng thì weigh tự hỏi lại MySQL), nên kết quả không phụ thuộc cache.
-func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) error {
+func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) (map[string][]byte, error) {
 	var todo []string
+	out := make(map[string][]byte, len(vs))
 	seen := map[string]bool{}
 	for _, v := range vs {
 		s, err := toText(v)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
 		ck := cacheKey(col, s)
 		w.mu.Lock()
-		_, ok := w.cache[ck]
+		wt, ok := w.cache[ck]
 		w.mu.Unlock()
-		if !ok && !seen[s] {
-			seen[s] = true
+		if ok {
+			out[s] = wt
+		} else {
 			todo = append(todo, s)
 		}
 	}
@@ -221,18 +227,19 @@ func (w *mysqlWeigher) weighMany(col PKColumn, vs []model.Value) error {
 		part := todo[i:end]
 		r, err := w.raw(col, part)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for j, s := range part {
 			wt, err := w.finish(col, r[j])
 			if err != nil {
-				return err
+				return nil, err
 			}
+			out[s] = wt
 			w.put(cacheKey(col, s), wt)
 		}
 		i = end
 	}
-	return nil
+	return out, nil
 }
 
 // PGPKCodec dựng codec PK (PGPKColumn) từ catalog: kiểu gốc (typname, qua domain) và collation.

@@ -52,13 +52,15 @@ services:
     environment:
       STRAND_WEB_DATABASE_DSN: postgres://strand:${POSTGRES_PASSWORD}@db:5432/strand?sslmode=disable
       STRAND_WEB_SECRET_KEY: ${STRAND_WEB_SECRET_KEY:-}
+      STRAND_WEB_SECRET_KEY_PREVIOUS: ${STRAND_WEB_SECRET_KEY_PREVIOUS:-}
       STRAND_WEB_ADMIN_PASSWORD: ${STRAND_WEB_ADMIN_PASSWORD:-}
       # Docker secrets thay cho biến trên: bỏ comment khối `secrets` cuối file, đặt
       #   STRAND_WEB_ADMIN_PASSWORD_FILE: /run/secrets/strand_admin_password
       STRAND_WEB_LISTEN: 0.0.0.0:8080
       STRAND_WEB_ALLOW_PLAIN_HTTP: ${STRAND_WEB_ALLOW_PLAIN_HTTP:-true}
-      STRAND_WEB_SECURE_COOKIES: ${STRAND_WEB_SECURE_COOKIES:-false}
-      STRAND_WEB_TRUST_FORWARDED_FOR: ${STRAND_WEB_TRUST_FORWARDED_FOR:-false}
+      # Đặt (true/false) thì thắng giá trị trên trang Settings; để trống thì sửa được trên trang Settings.
+      STRAND_WEB_SECURE_COOKIES: ${STRAND_WEB_SECURE_COOKIES:-}
+      STRAND_WEB_TRUST_FORWARDED_FOR: ${STRAND_WEB_TRUST_FORWARDED_FOR:-}
       STRAND_WEB_TLS_CERT: ${STRAND_WEB_TLS_CERT:-}
       STRAND_WEB_TLS_KEY: ${STRAND_WEB_TLS_KEY:-}
     volumes:
