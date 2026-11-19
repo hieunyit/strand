@@ -83,11 +83,7 @@ func writeTuningBase(t *testing.T, e *testEnv, extra string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := "# keep me: header comment\n" + string(b) + extra
-	if err := os.WriteFile(p, []byte(s), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	e.srv.reg.Refresh(t.Context())
+	e.writePipelineFile("orders", p, "# keep me: header comment\n"+string(b)+extra, 0o640)
 	return p
 }
 

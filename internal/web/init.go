@@ -130,10 +130,11 @@ listen: %[2]s
 # Thư mục ghi audit.log và trạng thái web.
 state_dir: %[5]s
 
-# Pipeline: quét các file cấu hình theo glob (tên pipeline = tên file bỏ .yaml).
+# Nhập (một lần) pipeline từ file có sẵn theo glob vào DB; sau đó DB là nguồn sự thật.
 scan:
 %[6]s
-# password_hash và api_token_hash do strand web init/passwd/token ghi vào cuối file.
+# Mật khẩu admin, token, pipeline, job, audit, cài đặt: trong kho metadata PostgreSQL (database.dsn).
+# Cần STRAND_WEB_SECRET_KEY trong môi trường dịch vụ (/etc/strand/web.env).
 `
 
 func renderInitTemplate(o InitOptions) string {
@@ -216,18 +217,19 @@ func RunInit(o InitOptions) (*InitResult, error) {
 	if err := ValidateInit(eff); err != nil {
 		return nil, err
 	}
-	haveAdmin := existing != nil && existing.PasswordHash != ""
-	if o.Store != nil {
-		adm, ok, err := o.Store.Admin(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		haveAdmin = ok && adm.PasswordHash != ""
-		if o.IfNoAdmin && haveAdmin {
-			// Admin đã có: không đổi mật khẩu/token, không in mật khẩu sinh ra.
-			o.Password, o.PrintPassword, o.NewToken = "", false, false
-			fmt.Fprintln(o.Stderr, "admin account already exists in the database: keeping it")
-		}
+	_ = existing
+	if o.Store == nil {
+		return nil, errors.New(ErrNoDatabase)
+	}
+	adm, ok, err := o.Store.Admin(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	haveAdmin := ok && adm.PasswordHash != ""
+	if o.IfNoAdmin && haveAdmin {
+		// Admin đã có: không đổi mật khẩu/token, không in mật khẩu sinh ra.
+		o.Password, o.PrintPassword, o.NewToken = "", false, false
+		fmt.Fprintln(o.Stderr, "admin account already exists in the database: keeping it")
 	}
 	if o.Password == "" && !haveAdmin {
 		return nil, errors.New("no password: use --password-stdin or --generate-password (or run interactively on a terminal)")
@@ -299,21 +301,13 @@ func RunInit(o InitOptions) (*InitResult, error) {
 	}
 
 	if hash != "" {
-		if o.Store != nil {
-			if err := SetStorePassword(context.Background(), o.Store, hash); err != nil {
-				return nil, err
-			}
-		} else if err := SetConfigKey(o.ConfigPath, "password_hash", hash); err != nil {
+		if err := SetStorePassword(context.Background(), o.Store, hash); err != nil {
 			return nil, err
 		}
 	}
 	if o.NewToken {
 		res.Token = NewAPIToken()
-		if o.Store != nil {
-			if err := o.Store.SetAPITokenHash(context.Background(), HashAPIToken(res.Token)); err != nil {
-				return nil, err
-			}
-		} else if err := SetConfigKey(o.ConfigPath, "api_token_hash", HashAPIToken(res.Token)); err != nil {
+		if err := o.Store.SetAPITokenHash(context.Background(), HashAPIToken(res.Token)); err != nil {
 			return nil, err
 		}
 	}

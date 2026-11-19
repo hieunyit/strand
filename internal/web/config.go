@@ -38,9 +38,9 @@ type Config struct {
 	Listen  string `yaml:"listen"`
 	TLSCert string `yaml:"tls_cert,omitempty"`
 	TLSKey  string `yaml:"tls_key,omitempty"`
-	// PasswordHash: bcrypt của mật khẩu admin (đặt bằng `strand web passwd`). Rỗng = không khởi động.
+	// PasswordHash, APITokenHash: chỉ còn để NHẬP từ bản cài cũ (chế độ file) vào DB lúc khởi động đầu /
+	// `strand web db migrate`; mật khẩu và token hiệu lực nằm trong DB (`strand web passwd|token`).
 	PasswordHash string `yaml:"password_hash,omitempty"`
-	// APITokenHash: sha256 hex của token tĩnh cho script (tùy chọn; tạo bằng `strand web token`).
 	APITokenHash string `yaml:"api_token_hash,omitempty"`
 	// StateDir: thư mục ghi audit log (và trạng thái web về sau).
 	StateDir string `yaml:"state_dir,omitempty"`
@@ -58,7 +58,7 @@ type Config struct {
 	// AllowPlainHTTP: cho phép bind ngoài loopback (ví dụ 0.0.0.0:8080) KHÔNG có TLS. Mật khẩu và cookie
 	// phiên đi dạng rõ trên mạng: chỉ dùng trong mạng nội bộ tin cậy. Mặc định false.
 	AllowPlainHTTP bool `yaml:"allow_plain_http,omitempty"`
-	// Database: kho metadata PostgreSQL (mục `database:` hoặc STRAND_WEB_DATABASE_DSN). Rỗng = chế độ file.
+	// Database: kho metadata PostgreSQL (mục `database:` hoặc STRAND_WEB_DATABASE_DSN). Bắt buộc.
 	Database DatabaseConfig `yaml:"database,omitempty"`
 	// ShutdownStopPipelines: khi web thoát (SIGTERM) thì dừng êm các pipeline nền đang chạy; lần khởi động sau
 	// tự chạy lại theo trạng thái mong muốn (chế độ DB). Dùng cho container.
@@ -131,20 +131,9 @@ func LoadConfig(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Validate kiểm các điều kiện bắt buộc để khởi động: có mật khẩu, TLS khi không loopback,
-// tên pipeline hợp lệ và không trùng.
-func (c *Config) Validate() error { return c.validate(c.DBEnabled()) }
-
-// validate: dbMode = mật khẩu nằm trong DB, kiểm lúc mở kho (Server.New) thay vì ở đây.
-func (c *Config) validate(dbMode bool) error {
-	if !dbMode {
-		if c.PasswordHash == "" {
-			return errors.New("no admin password set: run `strand web passwd --config <web.yaml>` first")
-		}
-		if _, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil {
-			return fmt.Errorf("password_hash is not a valid bcrypt hash: %w", err)
-		}
-	}
+// Validate kiểm các điều kiện bắt buộc của web.yaml: TLS khi không loopback, tên pipeline hợp lệ và không trùng.
+// Mật khẩu admin nằm trong DB (kiểm lúc mở kho trong Server.New).
+func (c *Config) Validate() error {
 	if err := c.ValidateListen(); err != nil {
 		return err
 	}

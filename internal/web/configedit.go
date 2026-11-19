@@ -166,13 +166,11 @@ func (s *Server) getOriginalConfig(p *Pipeline) []byte {
 			return b
 		}
 	}
-	if s.db != nil {
-		ctx, cancel := dbCtx()
-		defer cancel()
-		row, ok, err := s.db.st.GetPipeline(ctx, p.Name)
-		if err == nil && ok && row.HasConfig && len(row.ConfigYAML) > 0 {
-			return []byte(row.ConfigYAML)
-		}
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row, ok, err := s.db.st.GetPipeline(ctx, p.Name)
+	if err == nil && ok && row.HasConfig && len(row.ConfigYAML) > 0 {
+		return []byte(row.ConfigYAML)
 	}
 	return nil
 }
@@ -418,9 +416,7 @@ func (s *Server) envPathFor(p *Pipeline) string {
 }
 
 func (s *Server) getEnvView(p *Pipeline) EnvView {
-	if s.db != nil {
-		s.materialize(p.Name)
-	}
+	s.materialize(p.Name)
 	path := s.envPathFor(p)
 	v := EnvView{Path: path, Entries: map[string]string{}}
 	lines, err := ReadEnvFile(path)
@@ -450,9 +446,7 @@ func (s *Server) getEnvView(p *Pipeline) EnvView {
 func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[string]string, ip string) (string, error) {
 	s.configEditMu.Lock()
 	defer s.configEditMu.Unlock()
-	if s.db != nil {
-		s.materialize(p.Name)
-	}
+	s.materialize(p.Name)
 	envPath := s.envPathFor(p)
 	origEnv, origEnvErr := os.ReadFile(envPath)
 	dir := filepath.Dir(envPath)

@@ -348,9 +348,7 @@ type TuningView struct {
 
 func (s *Server) tuningView(p *Pipeline) TuningView {
 	v := TuningView{Path: p.ConfigPath, Fields: []TuningField{}}
-	if s.db != nil {
-		s.materialize(p.Name)
-	}
+	s.materialize(p.Name)
 	raw := s.getOriginalConfig(p)
 	if len(raw) == 0 {
 		var err error
@@ -556,9 +554,7 @@ func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any
 	if p == nil || p.ConfigPath == "" {
 		return nil, errors.New("pipeline has no config path")
 	}
-	if s.db != nil {
-		s.materialize(p.Name)
-	}
+	s.materialize(p.Name)
 	orig := s.getOriginalConfig(p)
 	if len(orig) == 0 {
 		var err error

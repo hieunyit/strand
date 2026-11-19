@@ -65,17 +65,3 @@ func TestMetricsHistoryInDatabase(t *testing.T) {
 		t.Fatalf("graph tab range selector missing: %d", resp.StatusCode)
 	}
 }
-
-// File mode: only the in-memory hour; the API says so for longer ranges.
-func TestMetricsHistoryFileMode(t *testing.T) {
-	e := newEnv(t, nil)
-	c, _ := e.loginOK()
-	resp, body := e.do(c, "GET", "/api/v1/pipelines/orders/series?range=7d", "", nil)
-	if resp.StatusCode != 200 || !strings.Contains(body, `"range": "1h"`) || !strings.Contains(body, "PostgreSQL") {
-		t.Fatalf("file mode 7d: %d %s", resp.StatusCode, body)
-	}
-	_, page := e.do(c, "GET", "/pipelines/orders", "", nil)
-	if strings.Contains(page, `data-range="604800"`) {
-		t.Fatal("file mode offers ranges it cannot serve")
-	}
-}

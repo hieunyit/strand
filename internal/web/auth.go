@@ -42,7 +42,7 @@ func NewAPIToken() string { return "strand_" + randToken(32) }
 
 func constEq(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 
-// Session là một phiên đăng nhập trong RAM.
+// Session là một phiên đăng nhập.
 type Session struct {
 	CSRF     string
 	Created  time.Time
@@ -50,10 +50,8 @@ type Session struct {
 	IP       string
 }
 
-// SessionStore giữ session trong RAM (khóa là sha256 của token trong cookie).
+// SessionStore giữ session trong PostgreSQL (khóa là sha256 của token trong cookie).
 type SessionStore struct {
-	mu  sync.Mutex
-	m   map[string]*Session
 	now func() time.Time
 	// db: session lưu trong PostgreSQL (chỉ sha256 của id); phiên sống qua lần khởi động lại web.
 	db *metaDB
@@ -64,7 +62,7 @@ func NewSessionStore(now func() time.Time) *SessionStore {
 	if now == nil {
 		now = time.Now
 	}
-	return &SessionStore{m: map[string]*Session{}, now: now}
+	return &SessionStore{now: now}
 }
 
 // Create tạo session mới, trả token cookie (256 bit) và session.
@@ -72,20 +70,13 @@ func (s *SessionStore) Create(ip string) (string, *Session) {
 	tok := randToken(32)
 	t := s.now()
 	sess := &Session{CSRF: randToken(32), Created: t, LastSeen: t, IP: ip}
-	if s.db != nil {
-		ctx, cancel := dbCtx()
-		defer cancel()
-		_ = s.db.st.PurgeSessions(ctx, t.Add(-SessionIdleTimeout), t.Add(-SessionMaxAge))
-		if err := s.db.st.PutSession(ctx, store.Session{IDHash: hashKey(tok), CSRF: sess.CSRF, IP: ip, Created: t, LastSeen: t}); err != nil {
-			s.db.log.Error("store session failed", "err", err)
-			return "", nil
-		}
-		return tok, sess
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_ = s.db.st.PurgeSessions(ctx, t.Add(-SessionIdleTimeout), t.Add(-SessionMaxAge))
+	if err := s.db.st.PutSession(ctx, store.Session{IDHash: hashKey(tok), CSRF: sess.CSRF, IP: ip, Created: t, LastSeen: t}); err != nil {
+		s.db.log.Error("store session failed", "err", err)
+		return "", nil
 	}
-	s.mu.Lock()
-	s.gcLocked(t)
-	s.m[hashKey(tok)] = sess
-	s.mu.Unlock()
 	return tok, sess
 }
 
@@ -94,27 +85,7 @@ func (s *SessionStore) Get(tok string) *Session {
 	if tok == "" {
 		return nil
 	}
-	k := hashKey(tok)
-	t := s.now()
-	if s.db != nil {
-		return s.getDB(k, t)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess := s.m[k]
-	if sess == nil {
-		return nil
-	}
-	if t.Sub(sess.LastSeen) > SessionIdleTimeout || t.Sub(sess.Created) > SessionMaxAge {
-		delete(s.m, k)
-		return nil
-	}
-	sess.LastSeen = t
-	c := *sess
-	return &c
-}
-
-func (s *SessionStore) getDB(k string, t time.Time) *Session {
+	k, t := hashKey(tok), s.now()
 	ctx, cancel := dbCtx()
 	defer cancel()
 	row, ok, err := s.db.st.GetSession(ctx, k)
@@ -137,36 +108,17 @@ func (s *SessionStore) getDB(k string, t time.Time) *Session {
 
 // Delete hủy session (đăng xuất).
 func (s *SessionStore) Delete(tok string) {
-	if s.db != nil {
-		ctx, cancel := dbCtx()
-		defer cancel()
-		_ = s.db.st.DeleteSession(ctx, hashKey(tok))
-		return
-	}
-	s.mu.Lock()
-	delete(s.m, hashKey(tok))
-	s.mu.Unlock()
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_ = s.db.st.DeleteSession(ctx, hashKey(tok))
 }
 
 // Len: số session đang giữ (test).
 func (s *SessionStore) Len() int {
-	if s.db != nil {
-		ctx, cancel := dbCtx()
-		defer cancel()
-		n, _ := s.db.st.CountSessions(ctx)
-		return n
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.m)
-}
-
-func (s *SessionStore) gcLocked(t time.Time) {
-	for k, v := range s.m {
-		if t.Sub(v.LastSeen) > SessionIdleTimeout || t.Sub(v.Created) > SessionMaxAge {
-			delete(s.m, k)
-		}
-	}
+	ctx, cancel := dbCtx()
+	defer cancel()
+	n, _ := s.db.st.CountSessions(ctx)
+	return n
 }
 
 // LoginLimiter: tối đa 5 lần sai/phút/IP; sau đó khóa, thời gian khóa tăng gấp đôi mỗi lần sai tiếp

@@ -192,7 +192,6 @@ type Registry struct {
 
 	createdMu sync.Mutex
 	db        *metaDB // chế độ DB: pipeline do web tạo nằm trong PostgreSQL
-	lastDB    []PipelineEntry
 	lastRows  []store.Pipeline
 
 	// scanFn: glob scan hiệu lực (cài đặt có thể đổi khi đang chạy); nil = cfg.Scan.
@@ -237,79 +236,8 @@ func (r *Registry) UnitExists(ctx context.Context, unit string) bool {
 // Refresh quét lại web.yaml + glob scan. Pipeline khai báo tường minh thắng pipeline từ scan cùng tên.
 // Tên không qua whitelist bị bỏ và ghi vào Warnings.
 func (r *Registry) Refresh(ctx context.Context) {
-	if r.db != nil {
-		r.refreshDB(ctx)
-		return
-	}
-	byName := map[string]*Pipeline{}
-	var warns []string
-	for _, e := range r.cfg.Pipelines {
-		if !ValidName(e.Name) {
-			warns = append(warns, fmt.Sprintf("pipeline %q skipped: invalid name", e.Name))
-			continue
-		}
-		unit := e.SystemdUnit
-		if unit != "" && !strings.HasSuffix(unit, ".service") {
-			unit += ".service"
-		}
-		byName[e.Name] = &Pipeline{Name: e.Name, ConfigPath: e.Config, EnvFile: e.EnvFile, SystemdUnit: unit,
-			LogFile: e.LogFile, PidFile: e.PidFile, Origin: "web.yaml"}
-	}
-	// Pipeline tạo từ web: <state_dir>/pipelines.json. Entry tường minh trong web.yaml thắng cùng tên.
-	created, cerr := r.loadCreated()
-	if cerr != nil {
-		warns = append(warns, cerr.Error())
-	}
-	for _, e := range created {
-		if !ValidName(e.Name) || e.Config == "" {
-			warns = append(warns, fmt.Sprintf("%s: entry %q skipped: invalid name or empty config", CreatedFile, e.Name))
-			continue
-		}
-		if prev, dup := byName[e.Name]; dup {
-			if prev.Origin == "web.yaml" {
-				warns = append(warns, fmt.Sprintf("pipeline %q is in both web.yaml and %s: using the web.yaml entry", e.Name, r.createdPath()))
-			}
-			continue
-		}
-		byName[e.Name] = &Pipeline{Name: e.Name, ConfigPath: e.Config, EnvFile: e.EnvFile, SystemdUnit: e.SystemdUnit,
-			LogFile: e.LogFile, PidFile: e.PidFile, Origin: "created"}
-	}
-	scan := r.cfg.Scan
-	if r.scanFn != nil {
-		scan = r.scanFn()
-	}
-	for _, pat := range scan {
-		matches, err := filepath.Glob(pat)
-		if err != nil {
-			warns = append(warns, fmt.Sprintf("scan %q: %v", pat, err))
-			continue
-		}
-		sort.Strings(matches)
-		for _, m := range matches {
-			base := filepath.Base(m)
-			// web.yaml thường nằm cạnh các file pipeline (/etc/strand): không phải pipeline.
-			if abs, _ := filepath.Abs(m); (r.cfg.SourcePath != "" && abs == r.cfg.SourcePath) || base == "web.yaml" || base == "web.yml" {
-				continue
-			}
-			name := strings.TrimSuffix(strings.TrimSuffix(base, ".yaml"), ".yml")
-			if !ValidName(name) {
-				warns = append(warns, fmt.Sprintf("scan: %s skipped: file name is not a valid pipeline name", m))
-				continue
-			}
-			if _, dup := byName[name]; dup {
-				continue
-			}
-			p := &Pipeline{Name: name, ConfigPath: m, Origin: "scan"}
-			if env := filepath.Join(filepath.Dir(m), name+".env"); fileExists(env) {
-				p.EnvFile = env
-			}
-			if unit := "strand@" + name + ".service"; r.UnitExists(ctx, unit) {
-				p.SystemdUnit = unit
-			}
-			byName[name] = p
-		}
-	}
-	r.publish(byName, warns)
+	r.refreshDB(ctx)
+	return
 }
 
 // publish nạp cấu hình của từng pipeline rồi thay danh sách.

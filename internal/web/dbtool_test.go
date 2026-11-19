@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"strand/internal/web/store"
 )
@@ -15,25 +19,7 @@ import (
 // File mode installation -> `strand web db migrate` (dry run, real, re-run) -> web in DB mode sees everything
 // -> `strand web db export` gives back a file-mode tree with the same content.
 func TestDBMigrateVerifyAndExport(t *testing.T) {
-	cfgDir := t.TempDir()
-	e := newEnv(t, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir })
-	c, csrf := e.loginOK()
-	e.setExit(0)
-	if code, _, _, out := createNP(t, e, c, csrf, newOpts("filepipe", "SrcSecretPw", "DstSecretPw")); code != 200 {
-		t.Fatalf("create: %d %s", code, out)
-	}
-	if code, body := e.act(c, csrf, "orders", "verify", map[string]string{"mode": "full"}); code != 200 {
-		t.Fatalf("verify: %d %v", code, body)
-	}
-	waitFor(t, "job done", func() bool {
-		for _, j := range e.srv.jobs.List("") {
-			if j.Running {
-				return false
-			}
-		}
-		return true
-	})
-	cfg := e.srv.cfg
+	cfg, cmd := legacyFileState(t)
 	st := store.NewMem()
 	box, _ := store.NewBox(dbKey)
 	ctx := context.Background()
@@ -92,7 +78,7 @@ func TestDBMigrateVerifyAndExport(t *testing.T) {
 
 	// Web in DB mode on the migrated database: no second import, pipelines and job output there.
 	c2 := *cfg
-	srv, err := New(Options{Config: &c2, Version: "test", Commander: e.cmd, Store: st, SecretKey: dbKey})
+	srv, err := New(Options{Config: &c2, Version: "test", Commander: cmd, Store: st, SecretKey: dbKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,4 +132,46 @@ func TestDBMigrateVerifyAndExport(t *testing.T) {
 	if err := exportWith(ctx, st, cfg, box, ExportOptions{Dir: dir}); err == nil {
 		t.Fatal("export into a non-empty directory accepted")
 	}
+}
+
+// legacyFileState dựng trạng thái của một bản cài chế độ file cũ (trước khi web bắt buộc PostgreSQL): web.yaml
+// với password_hash và pipeline khai báo, <state_dir>/pipelines.json với một pipeline tạo từ web (.env có bí
+// mật), một job verify xong cùng output, audit.log. Dùng cho `strand web db migrate` / nhập lần khởi động đầu.
+func legacyFileState(t *testing.T) (*Config, *fakeCmd) {
+	t.Helper()
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(state, "jobs"), 0o750))
+	write := func(path, data string, perm os.FileMode) { t.Helper(); must(os.WriteFile(path, []byte(data), perm)) }
+	spool := filepath.Join(dir, "spool")
+	must(os.MkdirAll(spool, 0o750))
+	orders := filepath.Join(dir, "orders.yaml")
+	write(orders, fmt.Sprintf(pipelineYAML, spool, filepath.Join(dir, "a.sock")), 0o640)
+	cfgDir := filepath.Join(dir, "pipelines")
+	must(os.MkdirAll(cfgDir, 0o750))
+	fp := filepath.Join(cfgDir, "filepipe.yaml")
+	write(fp, "version: 1\nname: filepipe\nsource: { kind: mysql, host: 10.0.0.1, user: u, password_env: SRC_PW }\n"+
+		"target: { kind: postgres, host: 10.0.0.2, user: u, password_env: DST_PW, database: app }\ntables: { include: [\"app.*\"] }\n", 0o640)
+	write(filepath.Join(cfgDir, "filepipe.env"), "SRC_PW=SrcSecretPw\nDST_PW=DstSecretPw\n", 0o600)
+	b, _ := json.Marshal(createdFileDoc{Version: 1, Pipelines: []PipelineEntry{{Name: "filepipe", Config: fp, EnvFile: filepath.Join(cfgDir, "filepipe.env")}}})
+	write(filepath.Join(state, CreatedFile), string(b), 0o600)
+	id := "20261115T100000Z-b5290e1c"
+	zero := 0
+	end := time.Date(2026, 11, 15, 10, 0, 5, 0, time.UTC)
+	jb, _ := json.Marshal(JobStatus{ID: id, Pipeline: "orders", Kind: "verify", Args: []string{"verify", "--mode", "full"},
+		Started: end.Add(-5 * time.Second), Ended: &end, ExitCode: &zero})
+	write(filepath.Join(state, "jobs", id+".json"), string(jb), 0o600)
+	write(filepath.Join(state, "jobs", id+".log"), "line one\nline two\n", 0o600)
+	write(filepath.Join(state, "audit.log"), `{"time":"2026-11-15T10:00:00Z","ip":"127.0.0.1","action":"login","result":"ok"}`+"\n"+
+		`{"time":"2026-11-15T10:00:01Z","ip":"127.0.0.1","action":"verify","pipeline":"orders","result":"started"}`+"\n", 0o600)
+	h, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+	must(err)
+	return &Config{StrandBinary: "x", Listen: "127.0.0.1:0", StateDir: state, ConfigDir: cfgDir, PasswordHash: string(h),
+		Pipelines: []PipelineEntry{{Name: "orders", Config: orders}}}, &fakeCmd{out: map[string]string{}}
 }

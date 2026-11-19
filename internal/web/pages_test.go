@@ -58,7 +58,10 @@ func TestSamplerSamplesAndBuildsOverview(t *testing.T) {
 		t.Fatalf("overview %+v", ov)
 	}
 	// Pipeline bị gỡ khỏi cấu hình thì dữ liệu cũng bị dọn (không rò bộ nhớ).
-	e.srv.reg.cfg.Pipelines = nil
+	if err := e.srv.reg.RemovePipeline("orders"); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.reg.Refresh(context.Background())
 	s.SampleOnce(context.Background())
 	if s.Latest("orders") != nil || len(s.Series("orders")) != 0 {
 		t.Fatal("removed pipeline must be dropped from the sampler")

@@ -61,7 +61,7 @@ type Server struct {
 	tls               bool
 	live              liveSettings // cài đặt hiệu lực (trang Settings)
 	version           string
-	db                *metaDB      // nil = chế độ file
+	db                *metaDB      // kho metadata PostgreSQL (Mem trong test); luôn khác nil
 	stops             *stopTracker // dừng do web thực hiện (phân biệt với dừng ngoài web)
 	lease             *leaseMgr    // chế độ DB: lease instance active (lease.go)
 	desired           desiredCache
@@ -86,7 +86,7 @@ type Options struct {
 	Commander Commander
 	// Now thay đồng hồ (test).
 	Now func() time.Time
-	// Store thay kho PostgreSQL (test dùng store.Mem). nil + Config.Database.DSN rỗng: chế độ file.
+	// Store thay kho PostgreSQL (test dùng store.Mem). nil: mở Config.Database.DSN (bắt buộc).
 	Store store.Store
 	// SecretKey thay STRAND_WEB_SECRET_KEY (test).
 	SecretKey string
@@ -98,7 +98,7 @@ type Options struct {
 
 // New dựng Server (chưa lắng nghe, chưa chạy sampler). Trả lỗi nếu cấu hình không đủ điều kiện khởi động.
 func New(o Options) (*Server, error) {
-	if err := o.Config.validate(o.Store != nil || o.Config.DBEnabled()); err != nil {
+	if err := o.Config.Validate(); err != nil {
 		return nil, err
 	}
 	if o.Logger == nil {
@@ -107,35 +107,36 @@ func New(o Options) (*Server, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	var db *metaDB
-	if o.Store == nil && o.Config.DBEnabled() {
+	if o.Store == nil && !o.Config.DBEnabled() {
+		return nil, errors.New(ErrNoDatabase)
+	}
+	secret := o.SecretKey
+	if secret == "" {
+		secret = strings.TrimSpace(os.Getenv(EnvSecretKey))
+	}
+	if secret == "" {
+		return nil, errors.New(ErrNoSecretKey)
+	}
+	if o.Store == nil {
 		st, err := OpenStore(context.Background(), o.Config, o.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("metadata database: %w", err)
 		}
 		o.Store = st
 	}
-	if o.Store != nil {
-		secret := o.SecretKey
-		if secret == "" {
-			secret = strings.TrimSpace(os.Getenv(EnvSecretKey))
-		}
-		var err error
-		if db, err = newMetaDB(o.Store, secret, o.Logger); err != nil {
-			return nil, err
-		}
-		db.previous = o.PreviousSecretKey
-		if db.previous == "" {
-			db.previous = strings.TrimSpace(os.Getenv(EnvSecretKeyPrevious))
-		}
+	db, err := newMetaDB(o.Store, secret, o.Logger)
+	if err != nil {
+		return nil, err
+	}
+	db.previous = o.PreviousSecretKey
+	if db.previous == "" {
+		db.previous = strings.TrimSpace(os.Getenv(EnvSecretKeyPrevious))
 	}
 	audit, err := OpenAuditLog(o.Config.StateDir, o.Now)
 	if err != nil {
 		return nil, err
 	}
-	if db != nil {
-		audit.useDB(db, o.Config.Database.Audit)
-	}
+	audit.useDB(db, o.Config.Database.Audit)
 	reg := NewRegistry(o.Config, o.Commander)
 	reg.now = o.Now
 	reg.db = db
@@ -147,11 +148,9 @@ func New(o Options) (*Server, error) {
 		tls: o.Config.TLSCert != "",
 	}
 	s.db = db
-	if db != nil {
-		s.backups, err = backup.NewCatalog(db.st)
-		if err != nil {
-			return nil, err
-		}
+	s.backups, err = backup.NewCatalog(db.st)
+	if err != nil {
+		return nil, err
 	}
 	s.stops = newStopTracker()
 	s.sessions.db = db
@@ -170,34 +169,24 @@ func New(o Options) (*Server, error) {
 	s.sseHeartbeat = 15 * time.Second
 	s.samp.OnSample = s.onSample
 	s.samp.OnRound = s.onRound
-	if db != nil {
-		if err := s.initDB(); err != nil {
-			return nil, err
-		}
+	if err := s.initDB(); err != nil {
+		return nil, err
 	}
-	if db != nil {
-		// Nhiều instance trên một DB: chỉ instance giữ lease là active; không lấy được thì chạy standby (chỉ đọc).
-		s.lease = newLeaseMgr(o.Config.Listen, o.Version, leaseTTL(o))
-		s.leaseTick()
-		if !s.isActive() {
-			o.Logger.Warn("another strand web instance holds the active lease: this instance runs as STANDBY (read-only) and takes over when the lease expires",
-				"active", s.leaseInfo().Active)
-		}
+	// Nhiều instance trên một DB: chỉ instance giữ lease là active; không lấy được thì chạy standby (chỉ đọc).
+	s.lease = newLeaseMgr(o.Config.Listen, o.Version, leaseTTL(o))
+	s.leaseTick()
+	if !s.isActive() {
+		o.Logger.Warn("another strand web instance holds the active lease: this instance runs as STANDBY (read-only) and takes over when the lease expires",
+			"active", s.leaseInfo().Active)
 	}
-	var jst store.Store
-	if db != nil {
-		jst = db.st
-	}
-	jr, err := newJobRunner(filepath.Join(o.Config.StateDir, "jobs"), s.strandBinary(), o.Now, jst, !s.isActive())
+	jr, err := newJobRunner(filepath.Join(o.Config.StateDir, "jobs"), s.strandBinary(), o.Now, db.st, !s.isActive())
 	if err != nil {
 		return nil, err
 	}
 	jr.OnEnd = s.auditJobEnd
 	s.jobs = jr
-	if s.db != nil {
-		if err := s.resumeBackupJobs(context.Background()); err != nil {
-			s.log.Error("resume scheduled backup jobs", "error", err)
-		}
+	if err := s.resumeBackupJobs(context.Background()); err != nil {
+		s.log.Error("resume scheduled backup jobs", "error", err)
 	}
 	s.registerOps()
 	s.registerWizards()
@@ -207,10 +196,8 @@ func New(o Options) (*Server, error) {
 		return nil, err
 	}
 	reg.Refresh(context.Background())
-	if db != nil {
-		s.preloadSeries()
-		s.refreshDesired()
-	}
+	s.preloadSeries()
+	s.refreshDesired()
 	s.handler = s.routes()
 	return s, nil
 }
@@ -301,17 +288,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
 		_ = srv.Shutdown(sctx)
-		if s.db != nil && s.settingBool("shutdown_stop_pipelines") && s.isActive() {
+		if s.settingBool("shutdown_stop_pipelines") && s.isActive() {
 			s.stopForShutdown()
 		}
-		if s.db != nil {
-			s.flushMetrics()
-			s.releaseLease() // standby tiếp quản ngay, không chờ hết TTL
-		}
+		s.flushMetrics()
+		s.releaseLease() // standby tiếp quản ngay, không chờ hết TTL
 		_ = s.audit.Close()
-		if s.db != nil {
-			_ = s.db.st.Close()
-		}
+		_ = s.db.st.Close()
 		return nil
 	case err := <-errc:
 		if errors.Is(err, http.ErrServerClosed) {

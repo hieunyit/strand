@@ -58,9 +58,6 @@ func (b *metricsBuf) add(name string, s Sample) {
 
 // flushMetrics ghi các mẫu đang chờ; lỗi thì giữ lại cho lần sau.
 func (s *Server) flushMetrics() {
-	if s.db == nil {
-		return
-	}
 	b := &s.db.metrics
 	b.mu.Lock()
 	rows := b.pending
@@ -86,7 +83,7 @@ func (s *Server) flushMetrics() {
 }
 
 func (s *Server) maintainMetrics() {
-	if s.db == nil || !s.isActive() {
+	if !s.isActive() {
 		return
 	}
 	now := s.now().UTC().Truncate(time.Minute)
@@ -102,9 +99,6 @@ func (s *Server) maintainMetrics() {
 
 // runMetricsHistory: vòng ghi lô + bảo trì, tới khi ctx hủy (ghi nốt khi thoát).
 func (s *Server) runMetricsHistory(ctx context.Context) {
-	if s.db == nil {
-		return
-	}
 	s.maintainMetrics()
 	fl := time.NewTicker(metricsFlushEvery)
 	mt := time.NewTicker(metricsMaintEvery)
@@ -124,9 +118,6 @@ func (s *Server) runMetricsHistory(ctx context.Context) {
 
 // preloadSeries nạp ring 1 giờ từ DB lúc khởi động (biểu đồ không trống sau khi web khởi động lại).
 func (s *Server) preloadSeries() {
-	if s.db == nil {
-		return
-	}
 	now := s.now()
 	for _, p := range s.reg.List() {
 		ctx, cancel := dbCtx()
@@ -153,13 +144,10 @@ func sampleOf(r store.MetricSample, useMax bool) Sample {
 		Writeset: r.Writeset, SpoolBytes: r.SpoolBytes}
 }
 
-// seriesFor trả các điểm của khoảng rng: 1 giờ từ RAM; dài hơn từ DB (nil, false ở chế độ file).
+// seriesFor trả các điểm của khoảng rng: 1 giờ từ RAM; dài hơn từ DB .
 func (s *Server) seriesFor(name string, rng ChartRange) ([]Sample, bool) {
 	if rng.Step == 0 {
 		return s.samp.Series(name), true
-	}
-	if s.db == nil {
-		return nil, false
 	}
 	now := s.now().UTC()
 	from := now.Add(-rng.Dur)

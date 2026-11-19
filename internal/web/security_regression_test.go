@@ -151,6 +151,7 @@ func TestEnvRegistrationSurvivesRegistryRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := NewRegistry(e.srv.cfg, e.cmd)
+	reg.db = e.srv.db
 	reg.Refresh(t.Context())
 	if got := reg.Get(p.Name); got == nil || got.EnvFile != e.srv.envPathFor(p) {
 		t.Fatalf("env path lost after restart: %+v", got)

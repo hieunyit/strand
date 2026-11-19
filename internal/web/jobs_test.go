@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -113,20 +114,13 @@ func TestVerifyJobStreamingHistoryAndAudit(t *testing.T) {
 	if j.ExitCode == nil || *j.ExitCode != 5 || j.Ended == nil {
 		t.Errorf("job %+v", j)
 	}
-	// History persisted on disk: JSON per job + output file.
+	// History persisted in the metadata database: job row + output.
 	jobsDir := filepath.Join(e.srv.cfg.StateDir, "jobs")
-	for _, f := range []string{id + ".json", id + ".log"} {
-		if _, err := os.Stat(filepath.Join(jobsDir, f)); err != nil {
-			t.Errorf("missing %s: %v", f, err)
-		}
+	if b, err := e.srv.db.st.ReadJobOutput(context.Background(), id, 0, 1<<20); err != nil || !strings.Contains(string(b), "line two") {
+		t.Errorf("job output not in the database: %q %v", b, err)
 	}
-	raw, _ := os.ReadFile(filepath.Join(jobsDir, id+".json"))
-	var disk JobStatus
-	if err := json.Unmarshal(raw, &disk); err != nil || disk.Running || disk.ExitCode == nil || *disk.ExitCode != 5 {
-		t.Errorf("persisted job %s (%v)", raw, err)
-	}
-	// A fresh runner (web restart) sees the history.
-	r2, err := NewFileJobRunner(jobsDir, e.bin, nil)
+	// A fresh runner on the same database (web restart) sees the history.
+	r2, err := newJobRunner(jobsDir, e.bin, nil, e.srv.db.st, false)
 	if err != nil {
 		t.Fatal(err)
 	}

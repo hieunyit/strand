@@ -51,17 +51,13 @@ func (e *testEnv) setOut(s string) {
 	_ = os.WriteFile(filepath.Join(filepath.Dir(e.bin), "out.txt"), []byte(s), 0o600)
 }
 
-// lastJobDone chờ job hiện tại của wizard (theo file state) kết thúc và trả về nó.
+// lastJobDone chờ job hiện tại của wizard (theo state trong DB) kết thúc và trả về nó.
 func (e *testEnv) lastJobDone(kind string) JobStatus {
 	e.t.Helper()
 	var j JobStatus
 	waitFor(e.t, "job to finish", func() bool {
-		b, err := os.ReadFile(e.srv.wizPath(kind, "orders"))
-		if err != nil {
-			return false
-		}
-		var st wizardState
-		if json.Unmarshal(b, &st) != nil || st.JobID == "" {
+		st, err := e.srv.wizLoad(kind, "orders")
+		if err != nil || st == nil || st.JobID == "" {
 			return false
 		}
 		got, ok := e.srv.jobs.Get(st.JobID)
@@ -375,7 +371,8 @@ func TestWizardStateSurvivesRestart(t *testing.T) {
 	e.lastJobDone("repair")
 
 	// "Restart": a second server on the same state dir and the same config.
-	srv2, err := New(Options{Config: e.srv.cfg, Version: "test", Commander: e.cmd, Now: e.clock.Now})
+	e.srv.releaseLease()
+	srv2, err := New(Options{Config: e.srv.cfg, Version: "test", Commander: e.cmd, Now: e.clock.Now, Store: e.srv.db.st})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,10 +395,12 @@ func TestWizardStateSurvivesRestart(t *testing.T) {
 	if !stepIs(e2.wizState(c2, "repair"), "done") {
 		t.Errorf("not done")
 	}
-	// The state file is private.
-	fi, err := os.Stat(filepath.Join(e.srv.cfg.StateDir, "wizards", "repair-orders.json"))
-	if err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("state file: %v %v", fi, err)
+	// The state lives in the metadata database, not in a state file.
+	if _, err := os.Stat(filepath.Join(e.srv.cfg.StateDir, "wizards", "repair-orders.json")); err == nil {
+		t.Error("wizard state written to a file")
+	}
+	if _, ok, err := e.srv.db.st.GetWizard(context.Background(), "repair", "orders"); !ok || err != nil {
+		t.Errorf("wizard state not in the database: %v", err)
 	}
 }
 

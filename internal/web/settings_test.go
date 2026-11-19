@@ -122,16 +122,3 @@ func TestSettingsDatabaseMode(t *testing.T) {
 		t.Fatalf("settings POST without CSRF: %d", resp.StatusCode)
 	}
 }
-
-func TestSettingsFileModeReadOnly(t *testing.T) {
-	e := newEnv(t, nil)
-	c, csrf := e.loginOK()
-	resp, page := e.do(c, "GET", "/settings", "", nil)
-	if resp.StatusCode != 200 || !strings.Contains(page, "File mode") {
-		t.Fatalf("file mode page: %d", resp.StatusCode)
-	}
-	resp, _ = e.do(c, "POST", "/api/v1/settings", `{"scan": []}`, map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
-	if resp.StatusCode != 409 {
-		t.Fatalf("file mode save: %d, want 409", resp.StatusCode)
-	}
-}

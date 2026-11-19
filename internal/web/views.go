@@ -508,11 +508,9 @@ type ConfigView struct {
 
 func (s *Server) configView(p *Pipeline) ConfigView {
 	v := ConfigView{Path: p.ConfigPath, Unimplemented: []string{}}
-	if s.db != nil {
-		s.materialize(p.Name)
-	}
+	s.materialize(p.Name)
 	raw, err := os.ReadFile(p.ConfigPath)
-	if err != nil && s.db != nil {
+	if err != nil {
 		ctx, cancel := dbCtx()
 		row, ok, dberr := s.db.st.GetPipeline(ctx, p.Name)
 		cancel()
