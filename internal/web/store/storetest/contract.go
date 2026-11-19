@@ -119,6 +119,25 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if d["orders"] != "running" || d["bare"] != "stopped" || len(d) != 2 {
 			t.Fatalf("desired = %v", d)
 		}
+		// ObserveStop: running -> stopped (reason observed_stop) once; never touches a stopped/unknown row.
+		if ch, err := s.ObserveStop(ctx, "orders"); err != nil || !ch {
+			t.Fatalf("observe stop of a running pipeline: changed=%v err=%v", ch, err)
+		}
+		if ch, _ := s.ObserveStop(ctx, "orders"); ch {
+			t.Fatal("observe stop changed an already stopped pipeline")
+		}
+		if ch, _ := s.ObserveStop(ctx, "nobody"); ch {
+			t.Fatal("observe stop created a row")
+		}
+		ds, err := s.DesiredStates(ctx)
+		must(t, err)
+		if ds["orders"].Desired != "stopped" || ds["orders"].Reason != store.ReasonObservedStop || ds["orders"].Updated.IsZero() || ds["bare"].Reason != "" {
+			t.Fatalf("desired states = %+v", ds)
+		}
+		must(t, s.SetDesired(ctx, "orders", store.DesiredRunning)) // a web Start clears the reason
+		if ds, _ = s.DesiredStates(ctx); ds["orders"].Desired != "running" || ds["orders"].Reason != "" {
+			t.Fatalf("desired after web start = %+v", ds["orders"])
+		}
 		must(t, s.DeletePipeline(ctx, "orders"))
 		if _, ok, _ := s.GetPipeline(ctx, "orders"); ok {
 			t.Fatal("deleted pipeline still there")
@@ -194,6 +213,103 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		must(t, s.MetaSet(ctx, "k", "v2"))
 		if v, ok, _ := s.MetaGet(ctx, "k"); !ok || v != "v2" {
 			t.Fatalf("meta = %q", v)
+		}
+	})
+	t.Run("audit_archive", func(t *testing.T) {
+		s := mk(t)
+		old := time.Now().Add(-400 * 24 * time.Hour)
+		for i := 0; i < 5; i++ {
+			must(t, s.AppendAudit(ctx, store.AuditRow{Time: old.Add(time.Duration(i) * time.Hour), Action: "start", Pipeline: "p", Result: "ok", Data: []byte(`{"i":` + string(rune('0'+i)) + `}`)}))
+		}
+		must(t, s.AppendAudit(ctx, store.AuditRow{Time: time.Now(), Action: "login", Result: "ok", Data: []byte(`{}`)}))
+		before := time.Now().Add(-365 * 24 * time.Hour)
+		pl, err := s.PlanAuditArchive(ctx, before)
+		must(t, err)
+		if pl.Count != 5 || pl.MaxID <= pl.MinID || !pl.MinTS.Before(pl.MaxTS) {
+			t.Fatalf("plan = %+v", pl)
+		}
+		var ids []int64
+		must(t, s.ScanAudit(ctx, before, pl.MaxID, func(r store.AuditRow) error { ids = append(ids, r.ID); return nil }))
+		if len(ids) != 5 || ids[0] != pl.MinID || ids[4] != pl.MaxID {
+			t.Fatalf("scan ids = %v", ids)
+		}
+		// Count mismatch (rows changed since the export): nothing deleted.
+		if _, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: before, MaxID: pl.MaxID, Count: 4, File: "a.jsonl.gz", SHA256: strings.Repeat("a", 64)}); err == nil {
+			t.Fatal("archive with a wrong count accepted")
+		}
+		// Cutoff younger than a day: refused.
+		if _, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: time.Now(), MaxID: 1 << 40, Count: 6, File: "x", SHA256: strings.Repeat("a", 64)}); err == nil {
+			t.Fatal("archive of recent rows accepted")
+		}
+		n, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: before, MaxID: pl.MaxID, Count: 5, File: "a.jsonl.gz", SHA256: strings.Repeat("b", 64),
+			Detail: map[string]any{"by": "test"}})
+		if err != nil || n != 5 {
+			t.Fatalf("archive: n=%d err=%v", n, err)
+		}
+		rows, _ := s.ListAudit(ctx, 10)
+		if len(rows) != 2 || rows[0].Action != store.AuditArchiveAction || rows[1].Action != "login" {
+			t.Fatalf("audit after archive = %+v", rows)
+		}
+		if !strings.Contains(string(rows[0].Data), strings.Repeat("b", 64)) || !strings.Contains(string(rows[0].Data), `"rows"`) {
+			t.Fatalf("archive entry = %s", rows[0].Data)
+		}
+		ar, err := s.ListAuditArchives(ctx, 5)
+		must(t, err)
+		if len(ar) != 1 || ar[0].Count != 5 || ar[0].MaxID != pl.MaxID || ar[0].SHA256 != strings.Repeat("b", 64) {
+			t.Fatalf("archives = %+v", ar)
+		}
+		// New rows get new ids; the archive entry itself is never archivable.
+		must(t, s.AppendAudit(ctx, store.AuditRow{Time: old, Action: "late-import", Data: []byte(`{}`)}))
+		rows, _ = s.ListAudit(ctx, 1)
+		if rows[0].ID <= ar[0].MaxID+1 {
+			t.Fatalf("audit id reused: %d", rows[0].ID)
+		}
+		if pl, _ = s.PlanAuditArchive(ctx, time.Now().Add(-25*time.Hour)); pl.Count != 1 {
+			t.Fatalf("plan after archive = %+v (audit.archive must not be archivable)", pl)
+		}
+	})
+	t.Run("lease", func(t *testing.T) {
+		s := mk(t)
+		a, err := s.TryLease(ctx, "A", `{"host":"a"}`, 400*time.Millisecond)
+		must(t, err)
+		if !a.Held || a.Holder != "A" || a.Epoch != 1 || a.Remaining <= 0 {
+			t.Fatalf("first acquire = %+v", a)
+		}
+		b, err := s.TryLease(ctx, "B", `{}`, time.Second)
+		must(t, err)
+		if b.Held || b.Holder != "A" || !strings.Contains(b.Info, `"a"`) {
+			t.Fatalf("B took a live lease: %+v", b)
+		}
+		if a, _ = s.TryLease(ctx, "A", `{}`, 400*time.Millisecond); !a.Held || a.Epoch != 1 {
+			t.Fatalf("renew = %+v", a)
+		}
+		time.Sleep(500 * time.Millisecond) // A stops renewing: the lease expires
+		b, _ = s.TryLease(ctx, "B", `{}`, time.Second)
+		if !b.Held || b.Holder != "B" || b.Epoch != 2 {
+			t.Fatalf("takeover after expiry = %+v", b)
+		}
+		if a, _ = s.TryLease(ctx, "A", `{}`, time.Second); a.Held {
+			t.Fatalf("old holder got the lease back while B holds it: %+v", a)
+		}
+		must(t, s.ReleaseLease(ctx, "A")) // not the holder: no effect
+		if b, _ = s.TryLease(ctx, "B", `{}`, time.Second); !b.Held || b.Epoch != 2 {
+			t.Fatalf("release by a non-holder changed the lease: %+v", b)
+		}
+		must(t, s.ReleaseLease(ctx, "B"))
+		if a, _ = s.TryLease(ctx, "A", `{}`, time.Second); !a.Held || a.Epoch != 3 {
+			t.Fatalf("acquire after release = %+v", a)
+		}
+		must(t, s.HeartbeatInstance(ctx, "A", `{"host":"a"}`, "active"))
+		must(t, s.HeartbeatInstance(ctx, "B", `{}`, "standby"))
+		must(t, s.HeartbeatInstance(ctx, "B", `{}`, "active"))
+		in, err := s.ListInstances(ctx)
+		must(t, err)
+		if len(in) != 2 || in[1].ID != "B" || in[1].Role != "active" || in[0].LastSeen.IsZero() {
+			t.Fatalf("instances = %+v", in)
+		}
+		must(t, s.RemoveInstance(ctx, "A"))
+		if in, _ = s.ListInstances(ctx); len(in) != 1 {
+			t.Fatalf("instances after remove = %+v", in)
 		}
 	})
 	t.Run("settings", func(t *testing.T) {

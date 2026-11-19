@@ -85,7 +85,7 @@ func (s *Server) apiPipelineTab(w http.ResponseWriter, r *http.Request, tab stri
 	case "status":
 		writeJSON(w, http.StatusOK, s.statusView(ctx, p))
 	case "tables":
-		writeJSON(w, http.StatusOK, s.tablesView(ctx, p))
+		writeJSON(w, http.StatusOK, s.tablesAPIView(p, r))
 	case "checkpoint":
 		writeJSON(w, http.StatusOK, s.checkpointView(ctx, p))
 	case "errors":

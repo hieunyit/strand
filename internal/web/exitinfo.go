@@ -216,6 +216,10 @@ type LogOutcome struct {
 	Failed bool
 	Err    string // lý do (đã gồm [code] nếu có)
 	Code   string // mã lỗi [code], rỗng nếu lỗi không gắn mã
+	// Clean: lần chạy cuối kết thúc bằng "pipeline stopped cleanly" (exit 0: `strand stop`, SIGTERM); CleanAt là
+	// thời điểm của dòng đó (zero nếu không đọc được). Bị giết (SIGKILL/OOM) thì không có dòng này: Clean=false.
+	Clean   bool
+	CleanAt time.Time
 }
 
 // ParseLogOutcome duyệt log từ cũ tới mới: mốc khởi động hoặc dừng êm xóa lỗi trước đó; ERROR "pipeline failed"
@@ -236,7 +240,12 @@ func ParseLogOutcome(lines []string) LogOutcome {
 			continue
 		}
 		switch {
-		case runMarkers[r.Msg] || cleanEndMarkers[r.Msg]:
+		case cleanEndMarkers[r.Msg]:
+			o = LogOutcome{Clean: true}
+			if t, err := time.Parse(time.RFC3339Nano, r.Time); err == nil {
+				o.CleanAt = t
+			}
+		case runMarkers[r.Msg]:
 			o = LogOutcome{}
 		case r.Level == "ERROR" && r.Msg == "pipeline failed":
 			e := r.Attrs["error"]

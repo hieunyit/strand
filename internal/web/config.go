@@ -65,6 +65,13 @@ type Config struct {
 	ShutdownStopPipelines bool `yaml:"shutdown_stop_pipelines,omitempty"`
 	// SampleInterval, tính bằng giây (mặc định 5); chủ yếu cho test.
 	SampleIntervalSec int `yaml:"sample_interval_sec,omitempty"`
+	// Lưu giữ audit (trang Settings): audit_retention_days (mặc định 365, 0 = mãi mãi), audit_archive_auto,
+	// audit_archive_dir; xoay audit.log: audit_rotate_mb (mặc định 100), audit_rotate_days (mặc định 0 = tắt).
+	AuditRetentionDays int    `yaml:"audit_retention_days,omitempty"`
+	AuditArchiveAuto   bool   `yaml:"audit_archive_auto,omitempty"`
+	AuditArchiveDir    string `yaml:"audit_archive_dir,omitempty"`
+	AuditRotateMB      int    `yaml:"audit_rotate_mb,omitempty"`
+	AuditRotateDays    int    `yaml:"audit_rotate_days,omitempty"`
 
 	// SourcePath: đường dẫn tuyệt đối của chính web.yaml (không đọc từ file); scan bỏ qua file này.
 	SourcePath string `yaml:"-"`

@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"strand/internal/admin"
@@ -54,12 +55,15 @@ type PipelineView struct {
 	Missing   string         `json:"missing,omitempty"`
 	Conflicts []DiskConflict `json:"disk_conflicts,omitempty"`
 	// Live: số liệu của sampler (docs/WEB-API.md "Live stream").
-	RawState string    `json:"raw_state,omitempty"`
-	Stale    bool      `json:"stale"`
-	LastOK   time.Time `json:"last_ok"`
-	PollErr  string    `json:"poll_error,omitempty"`
-	Rates    Rates     `json:"rates"`
-	LagLevel string    `json:"lag_level"`
+	RawState string `json:"raw_state,omitempty"`
+	// StoppedOutside: chế độ DB, pipeline nền đã dừng êm không do web (strand stop, SIGTERM): desired=stopped,
+	// không tự khởi động lại.
+	StoppedOutside bool      `json:"stopped_outside_web,omitempty"`
+	Stale          bool      `json:"stale"`
+	LastOK         time.Time `json:"last_ok"`
+	PollErr        string    `json:"poll_error,omitempty"`
+	Rates          Rates     `json:"rates"`
+	LagLevel       string    `json:"lag_level"`
 }
 
 func (s *Server) view(p *Pipeline) PipelineView {
@@ -73,6 +77,7 @@ func (s *Server) view(p *Pipeline) PipelineView {
 		e := explainExitFor(*v.Runtime.ExitCode, v.Mode)
 		v.LastExit = &e
 	}
+	v.StoppedOutside = !v.Runtime.Running && s.stoppedOutside(p)
 	return v
 }
 
@@ -146,6 +151,15 @@ type TablesView struct {
 	RowsEstimate int64   `json:"rows_estimate"`
 	RowsPct      float64 `json:"rows_pct"`
 	Error        string  `json:"error,omitempty"`
+	// Paged (tables_page.go): Tables is one page of the Matching tables (search/filter/sort applied by the server).
+	Paged       bool              `json:"paged,omitempty"`
+	Query       *TableQuery       `json:"query,omitempty"`
+	Matching    int               `json:"matching,omitempty"`
+	Pages       int               `json:"pages,omitempty"`
+	First       int               `json:"first,omitempty"`
+	Last        int               `json:"last,omitempty"`
+	RunningRows []admin.TableInfo `json:"-"` // "Copying now" (page only), at most runningListMax
+	RunningMore int               `json:"-"`
 }
 
 // tableRank orders the groups: running (0), pending (1), done (2).
@@ -190,6 +204,23 @@ func tablesFromSnap(sn *Snap) TablesView {
 		v.Error = sn.TablesErr
 		return v
 	}
+	if c := sn.tables; c != nil {
+		// Snap không đổi sau khi lưu: sắp xếp + tổng hợp một lần cho mọi người đọc (10.000 bảng: vài ms mỗi lần).
+		// Tables của kết quả là dùng chung, CHỈ ĐỌC (applyPage tạo slice mới).
+		c.once.Do(func() { c.v = buildTablesView(sn) })
+		return c.v
+	}
+	return buildTablesView(sn)
+}
+
+// tablesCache: TablesView của một Snap, tính lười một lần.
+type tablesCache struct {
+	once sync.Once
+	v    TablesView
+}
+
+func buildTablesView(sn *Snap) TablesView {
+	var v TablesView
 	v.Tables = append([]admin.TableInfo{}, sn.Tables...) // finish sắp xếp tại chỗ: không đụng Snap dùng chung
 	v.finish()
 	return v
@@ -197,8 +228,10 @@ func tablesFromSnap(sn *Snap) TablesView {
 
 // finish sorts the tables and computes the counts and aggregates.
 func (v *TablesView) finish() {
-	sort.SliceStable(v.Tables, func(i, j int) bool {
-		a, b := v.Tables[i], v.Tables[j]
+	// sort.Slice (not stable): the key (status group, name) is total, and TableInfo is large: the stable sort's
+	// rotations made a 10,000-table page cost ~70 ms.
+	sort.Slice(v.Tables, func(i, j int) bool {
+		a, b := &v.Tables[i], &v.Tables[j]
 		if ra, rb := tableRank(a.State), tableRank(b.State); ra != rb {
 			return ra < rb
 		}

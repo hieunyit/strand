@@ -186,6 +186,8 @@ type Registry struct {
 
 	// scanFn: glob scan hiệu lực (cài đặt có thể đổi khi đang chạy); nil = cfg.Scan.
 	scanFn func() []string
+	// writable: chế độ DB, instance này được ghi registry (active). nil = luôn.
+	writable func() bool
 
 	unitMu    sync.Mutex
 	unitCache map[string]unitCacheEntry
@@ -366,6 +368,10 @@ type Runtime struct {
 	Error       string `json:"error,omitempty"`
 	// LastError: chế độ nền, lý do lần chạy gần nhất thất bại (suy ra từ đuôi log; đã che bí mật).
 	LastError string `json:"last_error,omitempty"`
+	// StoppedCleanly: chế độ nền, tiến trình không chạy và lần chạy cuối kết thúc êm ("pipeline stopped
+	// cleanly", exit 0); StoppedAt là thời điểm dòng log đó. Dùng để nhận ra lần dừng không do web thực hiện.
+	StoppedCleanly bool       `json:"stopped_cleanly,omitempty"`
+	StoppedAt      *time.Time `json:"stopped_at,omitempty"`
 }
 
 // Runtime hỏi systemctl show (chế độ systemd) hoặc kiểm file pid (chế độ nền).
@@ -436,6 +442,13 @@ func bgInferExit(p *Pipeline, rt *Runtime) {
 		return
 	}
 	o := ParseLogOutcome(lines)
+	if o.Clean {
+		rt.StoppedCleanly = true
+		if !o.CleanAt.IsZero() {
+			t := o.CleanAt
+			rt.StoppedAt = &t
+		}
+	}
 	if !o.Failed {
 		return
 	}

@@ -15,7 +15,7 @@ type Mem struct {
 	admin    *Admin
 	sessions map[string]Session
 	pipes    map[string]Pipeline
-	desired  map[string]string
+	desired  map[string]DesiredState
 	jobs     map[string]Job
 	jobOut   map[string]map[int64][]byte
 	// metrics, metrics1m: pipeline -> UnixNano(ts) -> mẫu.
@@ -26,12 +26,16 @@ type Mem struct {
 	audit     []AuditRow
 	meta      map[string]string
 	locks     map[string]*sync.Mutex
+	lease     *Lease
+	auditSeq  int64
+	archives  []AuditArchiveRec
+	instances map[string]Instance
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }
 
 func NewMem() *Mem {
-	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]string{},
+	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]DesiredState{},
 		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, locks: map[string]*sync.Mutex{}}
 }
 
@@ -246,8 +250,19 @@ func (m *Mem) SetDesired(_ context.Context, name, d string) error {
 		return err
 	}
 	defer m.mu.Unlock()
-	m.desired[name] = d
+	m.desired[name] = DesiredState{Desired: d, Updated: time.Now()}
 	return nil
+}
+func (m *Mem) ObserveStop(_ context.Context, name string) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	if m.desired[name].Desired != DesiredRunning {
+		return false, nil
+	}
+	m.desired[name] = DesiredState{Desired: DesiredStopped, Reason: ReasonObservedStop, Updated: time.Now()}
+	return true, nil
 }
 func (m *Mem) Desired(context.Context) (map[string]string, error) {
 	if err := m.enter(); err != nil {
@@ -255,6 +270,17 @@ func (m *Mem) Desired(context.Context) (map[string]string, error) {
 	}
 	defer m.mu.Unlock()
 	out := map[string]string{}
+	for k, v := range m.desired {
+		out[k] = v.Desired
+	}
+	return out, nil
+}
+func (m *Mem) DesiredStates(context.Context) (map[string]DesiredState, error) {
+	if err := m.enter(); err != nil {
+		return nil, err
+	}
+	defer m.mu.Unlock()
+	out := make(map[string]DesiredState, len(m.desired))
 	for k, v := range m.desired {
 		out[k] = v
 	}
@@ -386,7 +412,7 @@ func (m *Mem) AppendAudit(_ context.Context, r AuditRow) error {
 		return err
 	}
 	defer m.mu.Unlock()
-	r.ID = int64(len(m.audit) + 1)
+	r.ID = m.nextAuditID()
 	m.audit = append(m.audit, r)
 	return nil
 }
@@ -396,7 +422,7 @@ func (m *Mem) AppendAuditBatch(_ context.Context, rows []AuditRow, progress *Met
 	}
 	defer m.mu.Unlock()
 	for _, r := range rows {
-		r.ID = int64(len(m.audit) + 1)
+		r.ID = m.nextAuditID()
 		m.audit = append(m.audit, r)
 	}
 	if progress != nil {
@@ -444,4 +470,10 @@ func (m *Mem) Locked(ctx context.Context, key string, fn func(ctx context.Contex
 	l.Lock()
 	defer l.Unlock()
 	return fn(ctx)
+}
+
+// nextAuditID: bigserial of audit_log (never reused, also after an archive removed rows). Caller holds m.mu.
+func (m *Mem) nextAuditID() int64 {
+	m.auditSeq++
+	return m.auditSeq
 }

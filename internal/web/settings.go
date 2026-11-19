@@ -37,8 +37,10 @@ type settingDef struct {
 	Kind    string // bool | int | string | list
 	Restart bool   // chỉ có hiệu lực sau khi khởi động lại web
 	Env     string // biến môi trường ghi đè (rỗng: không có)
-	file    func(c *Config) any
-	def     any
+	// Min, Max: khoảng hợp lệ của khóa int (Max 0: 1..300).
+	Min, Max int
+	file     func(c *Config) any
+	def      any
 }
 
 var settingDefs = []settingDef{
@@ -60,6 +62,21 @@ var settingDefs = []settingDef{
 	{Key: "sample_interval_sec", Label: "Sample interval (seconds)", Kind: "int", Restart: true,
 		Help: "How often pipelines are sampled for the dashboard and metrics history (1 to 300). Needs a web restart.",
 		file: func(c *Config) any { return c.SampleIntervalSec }, def: 5},
+	{Key: "audit_retention_days", Label: "Audit retention (days)", Kind: "int", Min: 0, Max: 36500,
+		Help: "PostgreSQL mode: audit rows older than this are archived (exported to a verified, compressed JSONL file with a sha256 manifest, then removed; an audit.archive entry records it) by `strand web db audit-archive`, or automatically when enabled below. 0 = keep forever.",
+		file: func(c *Config) any { return c.AuditRetentionDays }, def: 365},
+	{Key: "audit_archive_auto", Label: "Archive old audit rows automatically", Kind: "bool",
+		Help: "PostgreSQL mode: once a day the active web instance archives the audit rows older than the retention into the archive directory. Off: run `strand web db audit-archive` yourself.",
+		file: func(c *Config) any { return c.AuditArchiveAuto }, def: false},
+	{Key: "audit_archive_dir", Label: "Audit archive directory", Kind: "string",
+		Help: "Where archive files (.jsonl.gz, .sha256, .manifest.json) are written. Empty: <state_dir>/audit-archive. Files are never deleted by Strand.",
+		file: func(c *Config) any { return c.AuditArchiveDir }, def: ""},
+	{Key: "audit_rotate_mb", Label: "Rotate audit.log at (MiB)", Kind: "int", Min: 0, Max: 102400,
+		Help: "The audit.log file (file mode, and the file copy in PostgreSQL mode) is rotated to audit-<time>.log.gz (with a .sha256; the new file starts with an audit.rotate line naming it) when it reaches this size. 0 = never.",
+		file: func(c *Config) any { return c.AuditRotateMB }, def: 100},
+	{Key: "audit_rotate_days", Label: "Rotate audit.log after (days)", Kind: "int", Min: 0, Max: 36500,
+		Help: "Also rotate audit.log when its first line is older than this (checked daily). 0 = never.",
+		file: func(c *Config) any { return c.AuditRotateDays }, def: 0},
 }
 
 func settingDefOf(key string) *settingDef {
@@ -127,8 +144,12 @@ func parseSetting(d *settingDef, raw any) (any, error) {
 		default:
 			return nil, fmt.Errorf("%s: expected a whole number", d.Key)
 		}
-		if n < 1 || n > 300 {
-			return nil, fmt.Errorf("%s: must be between 1 and 300", d.Key)
+		lo, hi := 1, 300
+		if d.Max != 0 {
+			lo, hi = d.Min, d.Max
+		}
+		if n < lo || n > hi {
+			return nil, fmt.Errorf("%s: must be between %d and %d", d.Key, lo, hi)
 		}
 		return n, nil
 	case "string":
@@ -263,6 +284,8 @@ type SettingView struct {
 	RestartNeeded  bool   `json:"restart_required"`
 	PendingRestart bool   `json:"pending_restart,omitempty"`
 	Text           string `json:"-"` // giá trị dạng text cho form
+	Min            int    `json:"min,omitempty"`
+	Max            int    `json:"max,omitempty"`
 }
 
 type settingsBody struct {
@@ -284,6 +307,12 @@ func (s *Server) settingsView() []SettingView {
 			FileValue: d.file(s.cfg), Env: d.Env, RestartNeeded: d.Restart, PendingRestart: pending}
 		v.Editable = s.db != nil && v.Source != SrcEnv
 		v.Text = settingText(v.Value)
+		if d.Kind == "int" {
+			v.Min, v.Max = 1, 300
+			if d.Max != 0 {
+				v.Min, v.Max = d.Min, d.Max
+			}
+		}
 		out = append(out, v)
 	}
 	return out
@@ -403,6 +432,9 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Sess
 			if r.PostForm.Get("reset_"+it.Key) == "1" {
 				changes[it.Key] = nil
 				continue
+			}
+			if _, posted := r.PostForm[it.Key]; !posted {
+				continue // không có trong form (form cũ, client script): giữ nguyên
 			}
 			var nv any
 			switch it.Kind {

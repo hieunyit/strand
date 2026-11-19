@@ -25,7 +25,7 @@
       {{else if eq .Kind "list"}}
         <textarea id="set-{{.Key}}" name="{{.Key}}" rows="3" class="wide mono"{{if not .Editable}} disabled{{end}}>{{.Text}}</textarea>
       {{else if eq .Kind "int"}}
-        <input id="set-{{.Key}}" type="number" min="1" max="300" name="{{.Key}}" value="{{.Text}}" class="num mono"{{if not .Editable}} disabled{{end}}>
+        <input id="set-{{.Key}}" type="number" min="{{.Min}}" max="{{.Max}}" name="{{.Key}}" value="{{.Text}}" class="num mono"{{if not .Editable}} disabled{{end}}>
       {{else}}
         <input id="set-{{.Key}}" type="text" name="{{.Key}}" value="{{.Text}}" class="wide mono"{{if not .Editable}} disabled{{end}}>
       {{end}}

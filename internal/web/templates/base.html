@@ -42,6 +42,7 @@
       </details>
     </div>
   </header>
+  {{if .Standby}}<p class="warnbox standby" role="status" id="standby-banner">{{.Standby}}</p>{{end}}
   <main id="content" data-refresh="{{.Refresh}}"{{if .Live}} data-live="{{.Live}}" data-interval="{{.Interval}}"{{if .LiveLogs}} data-live-logs="1"{{end}}{{end}}><p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>{{template "content" .}}</main>
 </div>
 <dialog id="confirm" class="dlg" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
