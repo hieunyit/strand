@@ -32,6 +32,9 @@ func newPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if cfg.IsMongoDB() {
+				return mongoValidate(cmd.Context(), cmd.OutOrStdout(), cfg, true, force)
+			}
 			db, err := sql.Open("mysql", cfg.Source.DSN)
 			if err != nil {
 				return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)

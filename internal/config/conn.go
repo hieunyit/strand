@@ -25,6 +25,22 @@ type connFields struct {
 //   - hoặc host/port/user/password|password_env/database tách riêng;
 //   - dạng DSN của driver (`user:pass@tcp(host:port)/db`) vẫn nhận nguyên như cũ.
 func resolveConnections(cfg *Config) error {
+	for _, m := range []struct {
+		name string
+		kind, dsn, uriEnv, host, user, password, passwordEnv *string
+		port                                                 *int
+	}{
+		{"source", &cfg.Source.Kind, &cfg.Source.DSN, &cfg.Source.URIEnv, &cfg.Source.Host, &cfg.Source.User, &cfg.Source.Password, &cfg.Source.PasswordEnv, &cfg.Source.Port},
+		{"target", &cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.URIEnv, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password, &cfg.Target.PasswordEnv, &cfg.Target.Port},
+	} {
+		if IsMongoKind(*m.kind) {
+			if err := resolveMongoConn(m.name, m.kind, m.dsn, m.uriEnv, m.host, m.user, m.password, m.passwordEnv, m.port); err != nil {
+				return exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)
+			}
+		} else if *m.uriEnv != "" {
+			return exitcode.New("invalid_connection", exitcode.InvalidSyntax, m.name+": uri_env is supported for kind mongodb only", nil)
+		}
+	}
 	for _, c := range []struct {
 		name string
 		f    connFields
@@ -42,6 +58,9 @@ func resolveConnections(cfg *Config) error {
 }
 
 func resolveConn(name string, f connFields) error {
+	if IsMongoKind(*f.kind) {
+		return nil // resolveMongoConn
+	}
 	split := *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 || *f.database != ""
 	if !strings.EqualFold(*f.kind, "mysql") {
 		if split {

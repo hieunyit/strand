@@ -174,12 +174,20 @@ func newSyncCmd() *cobra.Command {
 			events := admin.NewEventRing(admin.DefaultEventCapacity)
 			logger := slog.New(events.Wrap(handler))
 			for _, k := range cfg.UnimplementedKeys() {
-				logger.Warn(config.UnimplementedWarning(k), "key", k)
+				if !cfg.IsMongoDB() {
+					logger.Warn(config.UnimplementedWarning(k), "key", k)
+				}
 			}
 
 			// SIGTERM/SIGINT: ngừng đọc, chờ writer xong, ghi checkpoint rồi thoát (01 §3).
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
 			defer stop()
+			if cfg.IsMongoDB() {
+				if syncStartAt != "" {
+					return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, "--start-at is not supported for MongoDB pipelines", nil)
+				}
+				return runMongoSync(ctx, cfg, logger, events)
+			}
 			startAt := syncStartAt
 			if startAt == "" && cfg.Bootstrap.StartAt != "" {
 				startAt = cfg.Bootstrap.StartAt

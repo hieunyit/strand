@@ -33,8 +33,9 @@ const JSONSchema = `{
       "required": ["kind"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "type": "string", "enum": ["mysql", "postgres"] },
-        "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/db hoặc user:pass@tcp(host:3306)/db; bỏ trống khi dùng host/user" },
+        "kind": { "type": "string", "enum": ["mysql", "postgres", "mongodb"] },
+        "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/db hoặc user:pass@tcp(host:3306)/db; bỏ trống khi dùng host/user; kind mongodb: mongodb://h1,h2,h3/?replicaSet=rs0" },
+        "uri_env": { "type": "string", "description": "kind mongodb: tên biến môi trường chứa URI (thay cho dsn)" },
         "host": { "type": "string" },
         "port": { "type": "integer" },
         "user": { "type": "string" },
@@ -55,8 +56,9 @@ const JSONSchema = `{
       "required": ["kind"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "type": "string", "enum": ["mysql", "postgres"] },
-        "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/strand hoặc user:pass@tcp(host:3306)/strand; bỏ trống khi dùng host/user" },
+        "kind": { "type": "string", "enum": ["mysql", "postgres", "mongodb"] },
+        "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/strand hoặc user:pass@tcp(host:3306)/strand; bỏ trống khi dùng host/user; kind mongodb: mongodb:// URI" },
+        "uri_env": { "type": "string", "description": "kind mongodb: tên biến môi trường chứa URI (thay cho dsn)" },
         "host": { "type": "string" },
         "port": { "type": "integer" },
         "user": { "type": "string" },
@@ -275,6 +277,17 @@ const JSONSchema = `{
             "rate": { "type": "string" }
           }
         }
+      }
+    },
+    "mongodb": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Chỉ dùng khi source.kind = target.kind = mongodb",
+      "properties": {
+        "overwrite_target": { "type": "boolean" },
+        "updates": { "type": "string", "enum": ["auto", "delta", "lookup"] },
+        "indexes": { "type": "string", "enum": ["off", "replicate"] },
+        "lease_ttl": { "type": "string" }
       }
     },
     "observability": {

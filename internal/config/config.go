@@ -26,12 +26,16 @@ type Config struct {
 	Governor      GovernorConfig      `yaml:"governor" json:"governor"`
 	Verify        VerifyConfig        `yaml:"verify" json:"verify"`
 	Observability ObservabilityConfig `yaml:"observability" json:"observability"`
+	// MongoDB: chỉ dùng khi source.kind = target.kind = mongodb (internal/mongocdc).
+	MongoDB MongoDBConfig `yaml:"mongodb,omitempty" json:"mongodb,omitempty"`
 }
 
 type SourceConfig struct {
-	Kind     string `yaml:"kind" json:"kind"` // mysql | postgres
+	Kind     string `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
 	DSN      string `yaml:"dsn" json:"dsn"`
 	ServerID uint32 `yaml:"server_id" json:"server_id"`
+	// URIEnv (kind mongodb): tên biến môi trường chứa URI mongodb:// (thay cho dsn).
+	URIEnv string `yaml:"uri_env,omitempty" json:"uri_env,omitempty"`
 	// Kết nối dạng tách trường (thay cho dsn): host, port (mặc định 3306), user, password hoặc
 	// password_env (tên biến môi trường chứa mật khẩu), database. dsn còn nhận dạng URL mysql://.
 	Host        string `yaml:"host,omitempty" json:"host,omitempty"`
@@ -58,8 +62,10 @@ type SourceConfig struct {
 }
 
 type TargetConfig struct {
-	Kind string `yaml:"kind" json:"kind"` // mysql | postgres
+	Kind string `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
 	DSN  string `yaml:"dsn" json:"dsn"`
+	// URIEnv (kind mongodb): tên biến môi trường chứa URI mongodb:// (thay cho dsn).
+	URIEnv string `yaml:"uri_env,omitempty" json:"uri_env,omitempty"`
 	// Kết nối dạng tách trường (thay cho dsn): host, port (mặc định 3306), user, password hoặc
 	// password_env (tên biến môi trường chứa mật khẩu), database. dsn còn nhận dạng URL mysql://.
 	Host        string      `yaml:"host,omitempty" json:"host,omitempty"`
@@ -352,6 +358,11 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 	}
 	if cfg.Target.Kind == "" || cfg.Target.DSN == "" {
 		return nil, exitcode.New("missing_target", exitcode.InvalidSyntax, "missing required target configuration", nil)
+	}
+	if cfg.IsMongoDB() {
+		if err := validateMongoDB(&cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	switch strings.ToLower(strings.TrimSpace(cfg.Tables.Keyless)) {
