@@ -78,6 +78,8 @@ type InitOptions struct {
 	IfNoAdmin bool
 	// Quiet: bỏ phần tóm tắt "next steps" (dành cho container).
 	Quiet bool
+	// DatabaseDSN: ghi database.dsn vào web.yaml (chế độ PostgreSQL).
+	DatabaseDSN string
 
 	Enable bool
 	// Runner mặc định chạy lệnh thật; Poll mặc định GET url tới khi 200.
@@ -283,6 +285,17 @@ func RunInit(o InitOptions) (*InitResult, error) {
 		fmt.Fprintf(o.Stderr, "updated listen/state_dir/scan in %s (--force)\n", o.ConfigPath)
 	default:
 		fmt.Fprintf(o.Stderr, "%s exists: keeping its listen/state_dir/scan/TLS settings (use --force to overwrite); only the password/token you asked for are (re)set\n", o.ConfigPath)
+	}
+
+	if o.DatabaseDSN != "" {
+		db := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "dsn"},
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: o.DatabaseDSN, Style: yaml.DoubleQuotedStyle},
+		}}
+		if err := setConfigNodes(o.ConfigPath, []configKV{{"database", db}}); err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(o.Stderr, "database.dsn written to %s (PostgreSQL metadata store)\n", o.ConfigPath)
 	}
 
 	if hash != "" {

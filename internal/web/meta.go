@@ -1,9 +1,9 @@
 package web
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -175,7 +174,7 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 		}
 		currentOK := true
 		if have {
-			currentOK = opens(m.box, []byte(v), keyCheckAAD)
+			currentOK = opens(m.box, b64dec(v), keyCheckAAD)
 		} else {
 			// DB của bản cũ chưa có dấu kiểm: thử với các .env đã lưu.
 			for _, r := range rows {
@@ -219,7 +218,7 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 		if err != nil {
 			return err
 		}
-		return m.st.MetaSet(ctx, keyCheckMetaKey, string(sealed))
+		return m.st.MetaSet(ctx, keyCheckMetaKey, base64.StdEncoding.EncodeToString(sealed))
 	})
 }
 
@@ -468,195 +467,6 @@ func (s *Server) stopForShutdown() {
 	wg.Wait()
 }
 
-// ---- import file state -> DB (một lần) ----
-
-const importedMetaKey = "files_imported"
-
-// ImportSummary mô tả những gì đã nhập.
-type ImportSummary struct {
-	Admin     bool `json:"admin"`
-	Token     bool `json:"api_token"`
-	Pipelines int  `json:"pipelines"`
-	Jobs      int  `json:"jobs"`
-	Wizards   int  `json:"wizards"`
-	Audit     int  `json:"audit_lines"`
-}
-
-// importFiles nhập trạng thái file hiện có (web.yaml hash, pipelines.json, jobs/, wizards/, audit.log) vào DB
-// đúng một lần: khóa advisory + cờ files_imported trong web_meta. Chạy lại là no-op; không xóa file gốc.
-func (s *Server) importFiles(ctx context.Context) (*ImportSummary, error) {
-	st := s.db.st
-	var sum *ImportSummary
-	err := st.Locked(ctx, "import", func(ctx context.Context) error {
-		if _, done, err := st.MetaGet(ctx, importedMetaKey); err != nil || done {
-			return err
-		}
-		sum = &ImportSummary{}
-		adm, have, err := st.Admin(ctx)
-		if err != nil {
-			return err
-		}
-		if (!have || adm.PasswordHash == "") && s.cfg.PasswordHash != "" {
-			if err := st.SetPasswordHash(ctx, s.cfg.PasswordHash); err != nil {
-				return err
-			}
-			sum.Admin = true
-		}
-		if adm.APITokenHash == "" && s.cfg.APITokenHash != "" {
-			if err := st.SetAPITokenHash(ctx, s.cfg.APITokenHash); err != nil {
-				return err
-			}
-			sum.Token = true
-		}
-		// pipelines.json
-		reg := NewRegistry(s.cfg, nil)
-		created, cerr := reg.loadCreatedFile()
-		if cerr != nil {
-			s.log.Warn("import: pipelines.json skipped", "err", cerr)
-		}
-		for _, e := range created {
-			if !ValidName(e.Name) || e.Config == "" {
-				continue
-			}
-			if _, ok, _ := st.GetPipeline(ctx, e.Name); ok {
-				continue
-			}
-			row := store.Pipeline{Name: e.Name, ConfigPath: e.Config, EnvPath: e.EnvFile, SystemdUnit: e.SystemdUnit, LogFile: e.LogFile, PidFile: e.PidFile}
-			if b, err := os.ReadFile(e.Config); err == nil {
-				row.ConfigYAML, row.HasConfig = string(b), true
-			}
-			if e.EnvFile != "" && s.db.box != nil {
-				if b, err := os.ReadFile(e.EnvFile); err == nil {
-					if row.EnvEnc, err = s.db.box.Seal(b, e.Name); err != nil {
-						return err
-					}
-				}
-			}
-			if err := st.UpsertPipeline(ctx, row); err != nil {
-				return err
-			}
-			sum.Pipelines++
-		}
-		// jobs/*.json
-		have2 := map[string]bool{}
-		if js, err := st.ListJobs(ctx); err == nil {
-			for _, j := range js {
-				have2[j.ID] = true
-			}
-		}
-		jdir := filepath.Join(s.cfg.StateDir, "jobs")
-		if ents, err := os.ReadDir(jdir); err == nil {
-			for _, e := range ents {
-				if !strings.HasSuffix(e.Name(), ".json") {
-					continue
-				}
-				b, err := os.ReadFile(filepath.Join(jdir, e.Name()))
-				if err != nil {
-					continue
-				}
-				var js JobStatus
-				if json.Unmarshal(b, &js) != nil || !JobIDRE.MatchString(js.ID) || e.Name() != js.ID+".json" || have2[js.ID] {
-					continue
-				}
-				if err := st.UpsertJob(ctx, store.Job{ID: js.ID, Pipeline: js.Pipeline, Started: js.Started, Running: js.Running, Data: b}); err != nil {
-					return err
-				}
-				sum.Jobs++
-			}
-		}
-		// wizards/<kind>-<pipeline>.json
-		wdir := filepath.Join(s.cfg.StateDir, "wizards")
-		if ents, err := os.ReadDir(wdir); err == nil {
-			for _, e := range ents {
-				if !strings.HasSuffix(e.Name(), ".json") {
-					continue
-				}
-				b, err := os.ReadFile(filepath.Join(wdir, e.Name()))
-				if err != nil {
-					continue
-				}
-				var w wizardState
-				if json.Unmarshal(b, &w) != nil || w.Kind == "" || w.Pipeline == "" {
-					continue
-				}
-				if _, ok, _ := st.GetWizard(ctx, w.Kind, w.Pipeline); ok {
-					continue
-				}
-				if err := st.PutWizard(ctx, w.Kind, w.Pipeline, b); err != nil {
-					return err
-				}
-				sum.Wizards++
-			}
-		}
-		// audit.log
-		n, err := s.importAuditFile(ctx, filepath.Join(s.cfg.StateDir, "audit.log"))
-		if err != nil {
-			return err
-		}
-		sum.Audit = n
-		b, _ := json.Marshal(sum)
-		return st.MetaSet(ctx, importedMetaKey, time.Now().UTC().Format(time.RFC3339)+" "+string(b))
-	})
-	return sum, err
-}
-
-const auditImportProgressKey = "audit_import_lines"
-
-func (s *Server) importAuditFile(ctx context.Context, path string) (int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, nil
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 8<<20)
-	// Tiến độ (số dòng hợp lệ đã nhập) ghi cùng transaction với mỗi lô: lần nhập bị ngắt giữa chừng (mất DB,
-	// container bị dừng) tiếp tục đúng chỗ, không nhân đôi dòng (audit_log chỉ-thêm, không xóa được).
-	skip := 0
-	if v, ok, err := s.db.st.MetaGet(ctx, auditImportProgressKey); err != nil {
-		return 0, err
-	} else if ok {
-		skip, _ = strconv.Atoi(v)
-	}
-	var batch []store.AuditRow
-	total, seen := 0, 0
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		if err := s.db.st.AppendAuditBatch(ctx, batch, &store.MetaKV{Key: auditImportProgressKey, Value: strconv.Itoa(seen)}); err != nil {
-			return err
-		}
-		total += len(batch)
-		batch = batch[:0]
-		return nil
-	}
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var e AuditEntry
-		if json.Unmarshal(line, &e) != nil || e.Action == "" {
-			continue
-		}
-		seen++
-		if seen <= skip {
-			continue
-		}
-		batch = append(batch, store.AuditRow{Time: e.Time, IP: e.IP, Action: e.Action, Pipeline: e.Pipeline, Result: e.Result, Data: append([]byte(nil), line...)})
-		if len(batch) >= 1000 {
-			if err := flush(); err != nil {
-				return total, err
-			}
-		}
-	}
-	if err := flush(); err != nil {
-		return total, err
-	}
-	return total, sc.Err()
-}
-
 // CLIStore dùng cho `strand web passwd|token|init`: nếu có DSN (STRAND_WEB_DATABASE_DSN hoặc database.dsn trong
 // web.yaml đã tồn tại) thì mở kho (thử lại, migrate) và trả về; không thì (nil, nil) = chế độ file.
 func CLIStore(ctx context.Context, cfgPath string, log *slog.Logger) (store.Store, error) {
@@ -701,4 +511,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, code, out)
+}
+
+// b64dec: giá trị web_meta là text (UTF-8), nên dữ liệu nhị phân lưu dạng base64.
+func b64dec(s string) []byte {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil
+	}
+	return b
 }

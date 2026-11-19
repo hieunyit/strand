@@ -104,7 +104,7 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 			switch {
 			case !fileExists(r.logPath(id)):
 			case js.Running:
-				go r.shipLoop(id) // nhận nuôi: chạy tới khi job xong
+				go r.shipLoop(id, true) // nhận nuôi: chạy tới khi job xong
 			default:
 				pending = append(pending, id)
 			}
@@ -112,7 +112,9 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 		sort.Strings(pending)
 		go func() {
 			for _, id := range pending {
-				r.shipLoop(id)
+				// Job đã xong (ví dụ log của chế độ file trước khi chuyển sang DB): chép vào DB nhưng giữ
+				// file, để còn quay lại chế độ file được.
+				r.shipLoop(id, false)
 			}
 		}()
 	}
@@ -235,7 +237,7 @@ func (r *FileJobRunner) Start(_ context.Context, spec JobSpec) (string, error) {
 	r.pruneLocked(spec.Pipeline)
 	go r.wait(id, cmd)
 	if r.st != nil {
-		go r.shipLoop(id)
+		go r.shipLoop(id, true)
 	}
 	return id, nil
 }
@@ -455,7 +457,7 @@ var shipEvery = time.Second
 // shipLoop chuyển <id>.log vào DB theo chu kỳ khi job chạy, lần cuối khi job xong, rồi xóa file spool. DB lỗi
 // thì thử lại (file vẫn giữ nên Output đọc file, không mất gì); bỏ cuộc sau 10 phút kể từ khi job xong và để
 // lại file.
-func (r *FileJobRunner) shipLoop(id string) {
+func (r *FileJobRunner) shipLoop(id string, removeSpool bool) {
 	var shipped int64 = -1
 	var endedAt time.Time
 	for {
@@ -470,7 +472,9 @@ func (r *FileJobRunner) shipLoop(id string) {
 		}
 		if !running {
 			if err == nil && complete {
-				_ = os.Remove(r.logPath(id))
+				if removeSpool {
+					_ = os.Remove(r.logPath(id))
+				}
 				return
 			}
 			if endedAt.IsZero() {

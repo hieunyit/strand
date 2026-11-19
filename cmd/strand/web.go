@@ -49,7 +49,7 @@ Chưa đặt mật khẩu (strand web passwd) thì không khởi động.`,
 			return srv.ListenAndServe(ctx)
 		},
 	}
-	cmd.AddCommand(newWebPasswdCmd(), newWebTokenCmd(), newWebInitCmd())
+	cmd.AddCommand(newWebPasswdCmd(), newWebTokenCmd(), newWebInitCmd(), newWebDBCmd())
 	return cmd
 }
 
@@ -218,6 +218,10 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 					o.Password = pw
 				}
 			}
+			if o.DatabaseDSN != "" {
+				// Bootstrap admin vào DB này (CLIStore đọc biến môi trường) và ghi database.dsn vào web.yaml.
+				_ = os.Setenv(web.EnvDatabaseDSN, o.DatabaseDSN)
+			}
 			if st, err := web.CLIStore(cmd.Context(), o.ConfigPath, nil); err != nil {
 				return fail(err)
 			} else if st != nil {
@@ -245,6 +249,7 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 	f.BoolVar(&wantEnbl, "enable", false, "chạy `systemctl enable --now strand-web` rồi chờ /login trả 200 (tối đa 30 giây)")
 	f.BoolVar(&o.IfNoAdmin, "if-no-admin", false, "chế độ DB (STRAND_WEB_DATABASE_DSN): chỉ đặt mật khẩu/token khi database chưa có admin (bootstrap container, chạy lại an toàn)")
 	f.BoolVar(&o.Quiet, "quiet", false, "không in phần tóm tắt các bước tiếp theo")
+	f.StringVar(&o.DatabaseDSN, "database-dsn", "", "chế độ PostgreSQL (khuyến nghị): ghi database.dsn vào web.yaml (0600/0640) và đặt admin trong DB. Không muốn DSN nằm trong file: đặt "+web.EnvDatabaseDSN+" cho dịch vụ thay vì cờ này")
 	f.BoolVar(&o.Force, "force", false, "ghi đè listen/state_dir/scan của web.yaml có sẵn")
 	return cmd
 }

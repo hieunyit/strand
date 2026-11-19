@@ -156,6 +156,7 @@ type Store interface {
 
 	MetricsStore
 	SettingsStore
+	ExportStore
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error
