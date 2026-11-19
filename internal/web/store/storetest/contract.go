@@ -278,6 +278,7 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		}
 	})
 	t.Run("backups", func(t *testing.T) { runBackups(t, mk(t)) })
+	t.Run("backup_jobs", func(t *testing.T) { runBackupJobs(t, mk(t)) })
 }
 
 func must(t *testing.T, err error) {
@@ -448,4 +449,69 @@ func ids(rs []backup.Record) []string {
 		out[i] = r.ID
 	}
 	return out
+}
+
+func runBackupJobs(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	j := backup.Job{ID: "bjob-1", Name: "nightly", Command: "/opt/strand-backup.d/mysql", EverySeconds: 3600,
+		ArtifactTemplate: "/var/backups/{id}.sql", ManifestTemplate: "/var/backups/{id}.json", Bucket: "central-backups", Enabled: true}
+	must(t, s.CreateBackupJob(ctx, j))
+	if err := s.CreateBackupJob(ctx, j); err == nil {
+		t.Fatal("duplicate job id accepted")
+	}
+	got, ok, err := s.GetBackupJob(ctx, "bjob-1")
+	if err != nil || !ok || got.Name != "nightly" {
+		t.Fatalf("get = %+v %v %v", got, ok, err)
+	}
+	// next_run_at CAS on updated_at.
+	next := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+	if ok, err := s.SetBackupJobNextRun(ctx, j.ID, got.UpdatedAt, next); err != nil || !ok {
+		t.Fatalf("set next run: %v %v", ok, err)
+	}
+	got.Name = "nightly-2"
+	if ok, err := s.UpdateBackupJob(ctx, got); err != nil || !ok {
+		t.Fatalf("update: %v %v", ok, err)
+	}
+	upd, _, _ := s.GetBackupJob(ctx, j.ID)
+	if !upd.UpdatedAt.After(got.UpdatedAt) {
+		t.Fatal("update must advance updated_at (other schedulers detect the new revision)")
+	}
+	if ok, _ := s.SetBackupJobNextRun(ctx, j.ID, got.UpdatedAt, next); ok {
+		t.Fatal("stale revision must not move next_run_at")
+	}
+	if _, ok, _ := s.BeginBackupJobRun(ctx, j.ID, got.UpdatedAt); ok {
+		t.Fatal("stale revision must not start a run")
+	}
+	started, ok, err := s.BeginBackupJobRun(ctx, j.ID, upd.UpdatedAt)
+	if err != nil || !ok {
+		t.Fatalf("begin: %v %v", ok, err)
+	}
+	running, _, _ := s.GetBackupJob(ctx, j.ID)
+	if running.LastRunStatus != backup.RunStatusRunning || running.NextRunAt == nil || running.NextRunAt.Before(started.Add(59*time.Minute)) {
+		t.Fatalf("running job = %+v (next run must be one interval after start: no catch-up burst)", running)
+	}
+	// A crashed run is recovered as interrupted exactly once.
+	if ok, err := s.RecoverBackupJobRun(ctx, j.ID, running.UpdatedAt); err != nil || !ok {
+		t.Fatalf("recover: %v %v", ok, err)
+	}
+	if ok, _ := s.FinishBackupJobRun(ctx, j.ID, started, backup.RunStatusSucceeded); ok {
+		t.Fatal("finishing an already-recovered run must be a no-op")
+	}
+	rec, _, _ := s.GetBackupJob(ctx, j.ID)
+	if rec.LastRunStatus != backup.RunStatusInterrupted || rec.RunFinishedAt == nil {
+		t.Fatalf("recovered = %+v", rec)
+	}
+	started, _, _ = s.BeginBackupJobRun(ctx, j.ID, rec.UpdatedAt)
+	if ok, err := s.FinishBackupJobRun(ctx, j.ID, started, backup.RunStatusSucceeded); err != nil || !ok {
+		t.Fatalf("finish: %v %v", ok, err)
+	}
+	if l, _ := s.ListBackupJobs(ctx); len(l) != 1 {
+		t.Fatalf("list = %d", len(l))
+	}
+	if ok, err := s.DeleteBackupJob(ctx, j.ID); err != nil || !ok {
+		t.Fatalf("delete: %v %v", ok, err)
+	}
+	if _, ok, _ := s.GetBackupJob(ctx, j.ID); ok {
+		t.Fatal("deleted job still there")
+	}
 }
