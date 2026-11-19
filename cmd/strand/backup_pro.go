@@ -468,7 +468,7 @@ func newBackupLogArchiveCmd() *cobra.Command {
 func newBackupVerifyCmd() *cobra.Command {
 	var id, jobID string
 	var sample int
-	var head, asJSON bool
+	var head, asJSON, testRestore bool
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Check backup integrity (re-read and decrypt payloads, chains, log continuity)",
@@ -514,6 +514,14 @@ func newBackupVerifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if testRestore {
+				res, terr := env.TestRestore(ctx, job)
+				if terr != nil {
+					rep.Problems = append(rep.Problems, "test restore: "+terr.Error())
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "test restore: %s\n", res.Detail)
+				}
+			}
 			result := "ok"
 			if !rep.OK() {
 				result = "error"
@@ -543,6 +551,7 @@ func newBackupVerifyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&jobID, "job-id", "", "verify every backup of a job")
 	cmd.Flags().IntVar(&sample, "sample", 0, "percent of payloads fully re-read (default: job setting, else 100)")
 	cmd.Flags().BoolVar(&head, "head-only", false, "with --id: only check existence, size and digest metadata")
+	cmd.Flags().BoolVar(&testRestore, "test-restore", false, "with --job-id: also restore the newest backup into a scratch database and count rows")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
 }

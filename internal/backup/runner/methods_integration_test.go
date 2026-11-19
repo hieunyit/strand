@@ -59,6 +59,7 @@ func TestBuiltinMethodsMySQLAndPostgres(t *testing.T) {
 	}
 	wrapper(t, tools, "mysqldump", my.Container, "mysqldump", "MYSQL_PWD")
 	wrapper(t, tools, "pg_dump", pg.Container, "pg_dump", "PGPASSWORD")
+	wrapper(t, tools, "mysql", my.Container, "mysql", "MYSQL_PWD")
 	wrapper(t, tools, "pg_basebackup", pg.Container, "pg_basebackup", "PGPASSWORD")
 
 	mustExec(t, my.DB, "CREATE DATABASE shop")
@@ -152,6 +153,31 @@ func TestBuiltinMethodsMySQLAndPostgres(t *testing.T) {
 	}
 	if _, err := repo.Store.Head(ctx, r3.ObjectKey); err != nil {
 		t.Fatal("kept backup deleted")
+	}
+
+	// Automated test restore into a scratch database: rows counted and recorded, scratch dropped.
+	myJob.TestRestore, myJob.Scratch = true, backup.ConnSpec{Host: "127.0.0.1", Port: my.Port, User: "root", PasswordEnv: "MYSQL_BACKUP_PW"}
+	tr, err := e.TestRestore(ctx, myJob)
+	if err != nil || tr.Status != backup.CheckOK || tr.Metrics["rows"] != "200" || tr.Metrics["rows.orders"] != "200" {
+		t.Fatalf("test restore %+v %v", tr, err)
+	}
+	var scratchLeft int
+	_ = my.DB.QueryRow("SELECT count(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE 'strand_verify_%'").Scan(&scratchLeft)
+	if scratchLeft != 0 {
+		t.Fatal("scratch database not dropped")
+	}
+	// Verification detects a payload replaced behind the catalog's back.
+	if err := e.VerifyBackup(ctx, r3, true); err != nil {
+		t.Fatalf("verify intact: %v", err)
+	}
+	if _, err := repo.Store.Upload(ctx, r3.ObjectKey, bytes.NewReader(make([]byte, r3.Bytes)), r3.Bytes, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.VerifyBackup(ctx, r3, true); err == nil {
+		t.Fatal("tampered payload passed verification")
+	}
+	if cs, _ := e.Catalog.Checks(ctx, r3.ID, 5); len(cs) < 2 || cs[0].Status != backup.CheckFailed {
+		t.Fatalf("checks %+v", cs)
 	}
 
 	// PostgreSQL logical + physical.

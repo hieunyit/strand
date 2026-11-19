@@ -74,6 +74,17 @@ func (s *Server) startBackupOp(kind, pipeline string, args ...string) (string, e
 	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full})
 }
 
+// startOwnedBackupOp starts a long-running backup process owned by this instance (stopped on step-down).
+func (s *Server) startOwnedBackupOp(kind, pipeline string, args ...string) (string, error) {
+	id, err := s.startBackupOp(kind, pipeline, args...)
+	if err == nil {
+		if st, ok := s.jobs.Get(id); ok && st.PID > 0 {
+			s.ownedBackupProcs.Store(id, st.PID)
+		}
+	}
+	return id, err
+}
+
 type recoveryView struct {
 	backup.SourceSummary
 	AgeSeconds  int64      `json:"age_seconds,omitempty"`
@@ -524,6 +535,19 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 	now := s.now().UTC()
 	n := &runner.Notifier{Getenv: os.Getenv}
 	for _, j := range jobs {
+		if j.Enabled && j.LogArchive && !j.IsCustom() && s.jobs != nil {
+			running := false
+			for _, p := range s.jobs.List(backupJobPipeline(j.ID)) {
+				if p.Kind == "backup-logs" && p.Running {
+					running = true
+				}
+			}
+			if !running {
+				if _, err := s.startOwnedBackupOp("backup-logs", backupJobPipeline(j.ID), "log-archive", "--job-id", j.ID); err != nil {
+					s.log.Warn("start log archiving", "job", j.ID, "error", err)
+				}
+			}
+		}
 		if j.Retention.Enabled() {
 			if ok, _ := s.db.st.ClaimBackupJobPrune(ctx, j.ID, now, time.Hour); ok {
 				if _, err := s.startBackupOp("backup-prune", backupJobPipeline(j.ID), "prune", "--job-id", j.ID); err != nil {

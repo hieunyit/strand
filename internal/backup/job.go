@@ -260,8 +260,8 @@ func ValidateJob(j Job) error {
 			return bad("log_flush_seconds must be between 10 and 86400")
 		}
 		if j.TestRestore {
-			if j.Method != MethodMySQLDump && j.Method != MethodMariaDBDump && j.Method != MethodPGDump && j.Method != MethodMongodump {
-				return bad("test restores support logical methods (mysqldump, mariadb-dump, pg_dump, mongodump)")
+			if j.Method != MethodMySQLDump && j.Method != MethodMariaDBDump && j.Method != MethodPGDump {
+				return bad("test restores support mysqldump, mariadb-dump and pg_dump")
 			}
 			if err := validateConn("scratch connection", j.Scratch, engine, false); err != nil {
 				return err
