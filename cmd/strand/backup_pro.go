@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"strand/internal/backup"
 	"strand/internal/backup/runner"
+	"strand/internal/exitcode"
 	"strand/internal/objectstore"
 	"strand/internal/web/store"
 )
@@ -308,7 +310,159 @@ func uploadPushPayload(ctx context.Context, obj interface {
 }
 
 func addBackupProCommands(cmd *cobra.Command) {
-	cmd.AddCommand(newBackupPruneCmd(), newBackupKeygenCmd(), newBackupCopyCmd(), newBackupVerifyCmd())
+	cmd.AddCommand(newBackupPruneCmd(), newBackupKeygenCmd(), newBackupCopyCmd(), newBackupVerifyCmd(),
+		newBackupRestoreCmd(), newBackupLogArchiveCmd())
+}
+
+func newBackupRestoreCmd() *cobra.Command {
+	var id, source, toTime, targetDB, targetDir string
+	var target backup.ConnSpec
+	var yes, dryRun bool
+	cmd := &cobra.Command{
+		Use:   "restore",
+		Short: "Restore a backup (or a source to a point in time) into a NEW database or directory",
+		Long: `Restore --id <backup> as is, or --source <identity> --to-time <RFC3339> (point-in-time: the base
+backup is chosen automatically and archived logs are replayed up to the target time). The target is
+always new: --target-database must not exist on the target server (logical backups), --target-dir must
+not exist or be empty (physical backups: pg_basebackup, xtrabackup). The source is never written.
+Passwords come from the environment variable named by --target-password-env.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if (id == "") == (source == "") {
+				return backupUsageErr("exactly one of --id and --source is required")
+			}
+			if source != "" && toTime == "" {
+				return backupUsageErr("--source needs --to-time")
+			}
+			if !dryRun && (targetDB == "") == (targetDir == "") {
+				return backupUsageErr("exactly one of --target-database and --target-dir is required")
+			}
+			if target.PasswordEnv != "" && !backup.ValidEnvName(target.PasswordEnv) || target.URIEnv != "" && !backup.ValidEnvName(target.URIEnv) {
+				return backupUsageErr("invalid or reserved environment variable name for the target secret")
+			}
+			var at *time.Time
+			if toTime != "" {
+				t, err := time.Parse(time.RFC3339, toTime)
+				if err != nil {
+					return backupUsageErr("--to-time must be RFC3339")
+				}
+				at = &t
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+			defer stop()
+			st, err := openBackupStoreOnly(ctx)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			env, err := backupRunnerEnv(st, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			var chosen *backup.Record
+			if id != "" {
+				rec, ok, err := env.Catalog.Get(ctx, id)
+				if err != nil || !ok {
+					return backupUsageErr("backup not found")
+				}
+				if rec.Status != backup.StatusComplete {
+					return backupUsageErr("only complete backups can be restored")
+				}
+				chosen, source = &rec, rec.Source
+			}
+			all, err := env.Catalog.ListAll(ctx, backup.Filter{Source: source, Status: backup.StatusComplete}, 0)
+			if err != nil {
+				return err
+			}
+			plan, err := runner.PlanRestore(all, chosen, at)
+			if err != nil {
+				return exitcode.New("restore_plan", exitcode.Rejected, err.Error(), err)
+			}
+			if dryRun {
+				return printJSON(cmd.OutOrStdout(), plan)
+			}
+			if !yes {
+				return backupUsageErr("restores need --yes (the target must be new; nothing is overwritten)")
+			}
+			return env.Restore(ctx, plan, runner.RestoreTarget{Conn: target, Database: targetDB, Dir: targetDir})
+		},
+	}
+	cmd.Flags().StringVar(&id, "id", "", "backup to restore")
+	cmd.Flags().StringVar(&source, "source", "", "source identity (with --to-time)")
+	cmd.Flags().StringVar(&toTime, "to-time", "", "point-in-time target (RFC3339)")
+	cmd.Flags().StringVar(&target.Host, "target-host", "", "target server host")
+	cmd.Flags().IntVar(&target.Port, "target-port", 0, "target server port")
+	cmd.Flags().StringVar(&target.User, "target-user", "", "target server user")
+	cmd.Flags().StringVar(&target.PasswordEnv, "target-password-env", "", "environment variable holding the target password")
+	cmd.Flags().StringVar(&target.URIEnv, "target-uri-env", "", "MongoDB: environment variable holding the target URI")
+	cmd.Flags().StringVar(&targetDB, "target-database", "", "new database to create (logical restores)")
+	cmd.Flags().StringVar(&targetDir, "target-dir", "", "new data directory (physical restores)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm the restore")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the restore plan (base, chain, logs) only")
+	return cmd
+}
+
+func newBackupLogArchiveCmd() *cobra.Command {
+	var jobID, staging string
+	cmd := &cobra.Command{
+		Use:   "log-archive",
+		Short: "Continuously archive binlog/WAL/oplog of a job's source for point-in-time recovery",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !backup.ValidID(jobID) {
+				return backupUsageErr("--job-id is required")
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+			defer stop()
+			st, err := openBackupStoreOnly(ctx)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			job, ok, err := st.GetBackupJob(ctx, jobID)
+			if err != nil || !ok || job.IsCustom() || !job.LogArchive {
+				return backupUsageErr("backup job not found or log archiving is off")
+			}
+			env, err := backupRunnerEnv(st, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			revision := job.UpdatedAt
+			// One archiver per job across instances; stop when the job definition changes.
+			return st.Locked(ctx, "backup-log-archive:"+jobID, func(lctx context.Context) error {
+				actx, cancel := context.WithCancel(lctx)
+				defer cancel()
+				go func() {
+					for actx.Err() == nil {
+						time.Sleep(5 * time.Second)
+						j, ok, err := st.GetBackupJob(actx, jobID)
+						if err == nil && (!ok || !j.UpdatedAt.Equal(revision) || !j.LogArchive) {
+							cancel()
+						}
+					}
+				}()
+				switch job.Engine() {
+				case backup.EnginePostgres:
+					return env.ArchiveWAL(actx, job)
+				case backup.EngineMongoDB:
+					return env.ArchiveOplog(actx, job)
+				default:
+					dir := staging
+					if dir == "" {
+						base := os.Getenv("STRAND_BACKUP_TMPDIR")
+						if base == "" {
+							base = os.TempDir()
+						}
+						dir = filepath.Join(base, "strand-binlog-"+jobID)
+					}
+					return env.ArchiveBinlog(actx, job, dir)
+				}
+			})
+		},
+	}
+	cmd.Flags().StringVar(&jobID, "job-id", "", "managed backup job with log_archive enabled")
+	cmd.Flags().StringVar(&staging, "staging-dir", "", "MySQL: local staging directory (default $STRAND_BACKUP_TMPDIR/strand-binlog-<job>)")
+	return cmd
 }
 
 func newBackupVerifyCmd() *cobra.Command {

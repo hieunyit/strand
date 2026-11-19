@@ -230,6 +230,14 @@ func (e *Env) finalize(ctx context.Context, repo *Repository, rec backup.Record,
 	manifest := rec
 	manifest.Bytes, manifest.SHA256, manifest.Status = size, sha, backup.StatusComplete
 	manifestKey := strings.TrimPrefix(rec.ManifestURI, "s3://"+rec.Bucket+"/")
+	if manifestKey == rec.ObjectKey {
+		// Log segments are self-describing (the catalog row is their manifest): no sidecar.
+		out, _, err := e.Catalog.Finalize(ctx, rec.ID, backup.StatusVerifying, size, sha, rec.ManifestURI, e.now())
+		if err != nil {
+			return fail(fmt.Errorf("finalize catalog record: %w", err))
+		}
+		return out, nil
+	}
 	minfo, err := repo.PutJSON(ctx, manifestKey, manifest, lockDays)
 	if err != nil {
 		return fail(fmt.Errorf("upload manifest sidecar: %w", err))
@@ -330,6 +338,9 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 	}
 	if meta.Details == nil {
 		meta.Details = map[string]string{}
+	}
+	if len(job.Conn.Databases) > 0 {
+		meta.Details["databases"] = strings.Join(job.Conn.Databases, ",")
 	}
 	switch job.Method {
 	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
