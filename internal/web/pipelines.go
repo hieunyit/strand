@@ -186,6 +186,8 @@ type Registry struct {
 
 	// scanFn: glob scan hiệu lực (cài đặt có thể đổi khi đang chạy); nil = cfg.Scan.
 	scanFn func() []string
+	// writable: chế độ DB, instance này được ghi registry (active). nil = luôn.
+	writable func() bool
 
 	unitMu    sync.Mutex
 	unitCache map[string]unitCacheEntry

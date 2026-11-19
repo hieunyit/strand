@@ -26,6 +26,8 @@ type Mem struct {
 	audit     []AuditRow
 	meta      map[string]string
 	locks     map[string]*sync.Mutex
+	lease     *Lease
+	instances map[string]Instance
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }

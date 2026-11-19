@@ -428,8 +428,8 @@ func (s *Server) setDesired(p *Pipeline, desired string) {
 // ResumeDesired khởi động lại các pipeline chế độ nền có trạng thái mong muốn "running" mà đang không chạy
 // (container/web khởi động lại). Trả tên các pipeline đã thử khởi động.
 func (s *Server) ResumeDesired(ctx context.Context) []string {
-	if s.db == nil {
-		return nil
+	if s.db == nil || !s.isActive() {
+		return nil // standby: instance active làm việc này (tiếp quản thì chạy lại)
 	}
 	dctx, cancel := dbCtx()
 	desired, err := s.db.st.Desired(dctx)
@@ -512,6 +512,10 @@ func CLIStore(ctx context.Context, cfgPath string, log *slog.Logger) (store.Stor
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"status": "ok", "version": s.version}
+	if lv := s.leaseInfo(); lv != nil {
+		out["role"] = lv.Role
+		out["lease"] = lv
+	}
 	code := http.StatusOK
 	if s.db == nil {
 		out["database"] = map[string]any{"mode": "file"}

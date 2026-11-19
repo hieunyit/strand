@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,6 +48,8 @@ type FileJobRunner struct {
 
 	mu   sync.Mutex
 	jobs map[string]*JobStatus
+	// passive: instance standby (chỉ đọc; Start bị từ chối).
+	passive atomic.Bool
 }
 
 // ErrJobRunning: pipeline đã có job đang chạy.
@@ -67,6 +70,12 @@ func NewFileJobRunner(dir, bin string, now func() time.Time) (*FileJobRunner, er
 // NewJobRunner như NewFileJobRunner; st != nil thì lịch sử job và output nằm trong PostgreSQL (<id>.log chỉ là
 // spool khi job chạy: được chuyển dần vào bảng job_output rồi xóa khi job xong).
 func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJobRunner, error) {
+	return newJobRunner(dir, bin, now, st, false)
+}
+
+// newJobRunner: passive=true (instance standby, chế độ DB): chỉ đọc lịch sử, KHÔNG đánh dấu interrupted/nhận nuôi
+// các job "running" (chúng là job của instance active, có thể ở máy khác); Recover() làm việc đó khi tiếp quản.
+func newJobRunner(dir, bin string, now func() time.Time, st store.Store, passive bool) (*FileJobRunner, error) {
 	if now == nil {
 		now = time.Now
 	}
@@ -74,11 +83,42 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 		return nil, fmt.Errorf("create jobs dir: %w", err)
 	}
 	r := &FileJobRunner{dir: dir, bin: bin, now: now, MaxHistory: 100, KillGrace: 10 * time.Second, jobs: map[string]*JobStatus{}, st: st}
+	if passive {
+		r.passive.Store(true)
+		return r, r.Reload()
+	}
+	return r, r.Recover()
+}
+
+// Reload (standby): thay lịch sử trong bộ nhớ bằng bản trong DB (job do instance active chạy).
+func (r *FileJobRunner) Reload() error {
 	loaded, err := r.loadHistory()
 	if err != nil {
-		return nil, err
+		return err
 	}
+	m := make(map[string]*JobStatus, len(loaded))
+	for _, js := range loaded {
+		cp := js
+		m[js.ID] = &cp
+	}
+	r.mu.Lock()
+	r.jobs = m
+	r.mu.Unlock()
+	return nil
+}
+
+// Recover nạp lịch sử và xử lý các job còn "running" của lần chạy trước (nhận nuôi nếu tiến trình còn, không thì
+// đánh dấu interrupted), rồi chuyển nốt spool vào DB. Gọi khi khởi tạo (active) hoặc khi standby tiếp quản.
+func (r *FileJobRunner) Recover() error {
+	r.passive.Store(false)
+	loaded, err := r.loadHistory()
+	if err != nil {
+		return err
+	}
+	now, bin, st := r.now, r.bin, r.st
 	var adopt []string
+	r.mu.Lock()
+	r.jobs = map[string]*JobStatus{}
 	for _, js := range loaded {
 		if js.Running {
 			if js.PID > 0 && procIsBinary(js.PID, bin) {
@@ -93,6 +133,7 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 		cp := js
 		r.jobs[js.ID] = &cp
 	}
+	r.mu.Unlock()
 	for _, id := range adopt {
 		go r.adopt(id)
 	}
@@ -100,6 +141,7 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 		// Spool còn sót (job đang được nhận nuôi, job bị ngắt khi web dừng, hoặc output của bản web cũ chỉ ghi
 		// file): chuyển nốt vào DB, tuần tự, nền.
 		var pending []string
+		r.mu.Lock()
 		for id, js := range r.jobs {
 			switch {
 			case !fileExists(r.logPath(id)):
@@ -109,6 +151,7 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 				pending = append(pending, id)
 			}
 		}
+		r.mu.Unlock()
 		sort.Strings(pending)
 		go func() {
 			for _, id := range pending {
@@ -118,7 +161,7 @@ func NewJobRunner(dir, bin string, now func() time.Time, st store.Store) (*FileJ
 			}
 		}()
 	}
-	return r, nil
+	return nil
 }
 
 // loadHistory đọc lịch sử job từ DB (nếu có) hoặc thư mục <dir>/*.json.
@@ -200,6 +243,9 @@ func newJobID(t time.Time) string {
 func (r *FileJobRunner) Start(_ context.Context, spec JobSpec) (string, error) {
 	if !ValidName(spec.Pipeline) || !ValidName(spec.Kind) {
 		return "", errors.New("invalid job spec")
+	}
+	if r.passive.Load() {
+		return "", errStandby
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -172,6 +172,7 @@ type Store interface {
 
 	MetricsStore
 	SettingsStore
+	LeaseStore
 	ExportStore
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.

@@ -100,6 +100,8 @@ func TestObservedStopOutsideWebIsNotAutostarted(t *testing.T) {
 		if a := e3.auditFor("desired.observed_stop"); len(a) != 1 {
 			t.Fatalf("observed stop recorded twice: %d", len(a))
 		}
+		e2 = e3
+		c2, csrf2 = e2.loginOK()
 
 		// Start again from the web (reason cleared), then the process crashes: autostart is still wanted.
 		if code, _ := e2.act(c2, csrf2, "orders", "start", nil); code != 200 {
@@ -121,6 +123,7 @@ func TestObservedStopOutsideWebIsNotAutostarted(t *testing.T) {
 			if ds, _ = st.DesiredStates(ctx); ds["orders"].Desired != store.DesiredRunning {
 				t.Fatalf("crash changed desired: %+v", ds["orders"])
 			}
+			e2 = e4
 		}
 
 		// The web's own stop (shutdown_stop_pipelines, restart...) is not an outside stop.

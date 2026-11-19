@@ -324,6 +324,7 @@ type pageData struct {
 	Nav      []NavItem
 	Version  string
 	Host     string // host name shown in the top bar
+	Standby  string // non-empty on a standby instance (banner)
 	Refresh  int    // giây; 0 = không tự làm mới toàn trang
 	// Live: trang nhận số liệu qua SSE ("all" hoặc tên pipeline); "" = trang tĩnh. Interval: chu kỳ của sampler.
 	Live     string
@@ -334,6 +335,7 @@ type pageData struct {
 
 func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pageData) {
 	d.CSRF, d.Nav, d.Version = sess.CSRF, s.navItems(), s.version
+	d.Standby = s.standbyMessage()
 	d.Host = hostName()
 	d.Interval = int(s.samp.Interval().Seconds())
 	if d.AsOf.IsZero() {

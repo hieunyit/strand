@@ -215,6 +215,50 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 			t.Fatalf("meta = %q", v)
 		}
 	})
+	t.Run("lease", func(t *testing.T) {
+		s := mk(t)
+		a, err := s.TryLease(ctx, "A", `{"host":"a"}`, 400*time.Millisecond)
+		must(t, err)
+		if !a.Held || a.Holder != "A" || a.Epoch != 1 || a.Remaining <= 0 {
+			t.Fatalf("first acquire = %+v", a)
+		}
+		b, err := s.TryLease(ctx, "B", `{}`, time.Second)
+		must(t, err)
+		if b.Held || b.Holder != "A" || !strings.Contains(b.Info, `"a"`) {
+			t.Fatalf("B took a live lease: %+v", b)
+		}
+		if a, _ = s.TryLease(ctx, "A", `{}`, 400*time.Millisecond); !a.Held || a.Epoch != 1 {
+			t.Fatalf("renew = %+v", a)
+		}
+		time.Sleep(500 * time.Millisecond) // A stops renewing: the lease expires
+		b, _ = s.TryLease(ctx, "B", `{}`, time.Second)
+		if !b.Held || b.Holder != "B" || b.Epoch != 2 {
+			t.Fatalf("takeover after expiry = %+v", b)
+		}
+		if a, _ = s.TryLease(ctx, "A", `{}`, time.Second); a.Held {
+			t.Fatalf("old holder got the lease back while B holds it: %+v", a)
+		}
+		must(t, s.ReleaseLease(ctx, "A")) // not the holder: no effect
+		if b, _ = s.TryLease(ctx, "B", `{}`, time.Second); !b.Held || b.Epoch != 2 {
+			t.Fatalf("release by a non-holder changed the lease: %+v", b)
+		}
+		must(t, s.ReleaseLease(ctx, "B"))
+		if a, _ = s.TryLease(ctx, "A", `{}`, time.Second); !a.Held || a.Epoch != 3 {
+			t.Fatalf("acquire after release = %+v", a)
+		}
+		must(t, s.HeartbeatInstance(ctx, "A", `{"host":"a"}`, "active"))
+		must(t, s.HeartbeatInstance(ctx, "B", `{}`, "standby"))
+		must(t, s.HeartbeatInstance(ctx, "B", `{}`, "active"))
+		in, err := s.ListInstances(ctx)
+		must(t, err)
+		if len(in) != 2 || in[1].ID != "B" || in[1].Role != "active" || in[0].LastSeen.IsZero() {
+			t.Fatalf("instances = %+v", in)
+		}
+		must(t, s.RemoveInstance(ctx, "A"))
+		if in, _ = s.ListInstances(ctx); len(in) != 1 {
+			t.Fatalf("instances after remove = %+v", in)
+		}
+	})
 	t.Run("settings", func(t *testing.T) {
 		s := mk(t)
 		must(t, s.PutSetting(ctx, "scan", `["/a/*.yaml"]`))

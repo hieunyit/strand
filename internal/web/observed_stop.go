@@ -164,6 +164,3 @@ func (s *Server) stoppedOutside(p *Pipeline) bool {
 	d := s.desiredState(p.Name)
 	return d.Desired == store.DesiredStopped && d.Reason == store.ReasonObservedStop
 }
-
-// isActive: this instance runs the singleton work (autostart, observed stops, metrics persistence...).
-func (s *Server) isActive() bool { return true }
