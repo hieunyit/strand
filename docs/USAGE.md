@@ -879,7 +879,7 @@ Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, s�
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
-**Kho metadata PostgreSQL (`database`, dùng cho docker compose).** Mặc định web giữ trạng thái trong file như mô tả bên dưới. Đặt `database.dsn` trong `web.yaml` hoặc biến `STRAND_WEB_DATABASE_DSN` (biến thắng file) thì web lưu trong PostgreSQL:
+**Kho metadata PostgreSQL (`database`; chế độ khuyến nghị, mặc định của docker compose).** Không có DSN thì web giữ trạng thái trong file như mô tả bên dưới (cài đặt nhỏ). Chuyển một bản cài file sang DB: `strand web db migrate` (dry-run, nhập, kiểm chứng); xuất DB ra file để sao lưu hoặc quay lại: `strand web db export` (INSTALL.md mục 11). Đặt `database.dsn` trong `web.yaml` hoặc biến `STRAND_WEB_DATABASE_DSN` (biến thắng file) thì web lưu trong PostgreSQL:
 
 ```yaml
 database:
