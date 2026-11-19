@@ -119,6 +119,25 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if d["orders"] != "running" || d["bare"] != "stopped" || len(d) != 2 {
 			t.Fatalf("desired = %v", d)
 		}
+		// ObserveStop: running -> stopped (reason observed_stop) once; never touches a stopped/unknown row.
+		if ch, err := s.ObserveStop(ctx, "orders"); err != nil || !ch {
+			t.Fatalf("observe stop of a running pipeline: changed=%v err=%v", ch, err)
+		}
+		if ch, _ := s.ObserveStop(ctx, "orders"); ch {
+			t.Fatal("observe stop changed an already stopped pipeline")
+		}
+		if ch, _ := s.ObserveStop(ctx, "nobody"); ch {
+			t.Fatal("observe stop created a row")
+		}
+		ds, err := s.DesiredStates(ctx)
+		must(t, err)
+		if ds["orders"].Desired != "stopped" || ds["orders"].Reason != store.ReasonObservedStop || ds["orders"].Updated.IsZero() || ds["bare"].Reason != "" {
+			t.Fatalf("desired states = %+v", ds)
+		}
+		must(t, s.SetDesired(ctx, "orders", store.DesiredRunning)) // a web Start clears the reason
+		if ds, _ = s.DesiredStates(ctx); ds["orders"].Desired != "running" || ds["orders"].Reason != "" {
+			t.Fatalf("desired after web start = %+v", ds["orders"])
+		}
 		must(t, s.DeletePipeline(ctx, "orders"))
 		if _, ok, _ := s.GetPipeline(ctx, "orders"); ok {
 			t.Fatal("deleted pipeline still there")

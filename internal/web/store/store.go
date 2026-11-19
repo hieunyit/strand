@@ -95,6 +95,17 @@ const (
 	DesiredStopped = "stopped"
 )
 
+// ReasonObservedStop: the desired state was set to stopped because the active web observed a clean stop it
+// did not initiate (`strand stop`, SIGTERM from an operator): such a pipeline is not autostarted again.
+const ReasonObservedStop = "observed_stop"
+
+// DesiredState is one pipeline_desired row. Reason is "" when set by a web action, ReasonObservedStop otherwise.
+type DesiredState struct {
+	Desired string
+	Reason  string
+	Updated time.Time
+}
+
 // Store is the metadata store contract.
 type Store interface {
 	Ping(ctx context.Context) error
@@ -126,8 +137,13 @@ type Store interface {
 	// DeletePipeline removes the registry row and its desired state (files are left alone).
 	DeletePipeline(ctx context.Context, name string) error
 
+	// SetDesired records a desired state chosen from the web (clears Reason).
 	SetDesired(ctx context.Context, name, desired string) error
+	// ObserveStop flips desired running -> stopped with Reason=ReasonObservedStop, atomically (compare-and-set:
+	// a concurrent Start that set running again wins only if it commits later). Reports whether it changed.
+	ObserveStop(ctx context.Context, name string) (bool, error)
 	Desired(ctx context.Context) (map[string]string, error)
+	DesiredStates(ctx context.Context) (map[string]DesiredState, error)
 
 	UpsertJob(ctx context.Context, j Job) error
 	ListJobs(ctx context.Context) ([]Job, error)

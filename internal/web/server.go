@@ -57,7 +57,9 @@ type Server struct {
 	tls               bool
 	live              liveSettings // cài đặt hiệu lực (trang Settings)
 	version           string
-	db                *metaDB // nil = chế độ file
+	db                *metaDB      // nil = chế độ file
+	stops             *stopTracker // dừng do web thực hiện (phân biệt với dừng ngoài web)
+	desired           desiredCache
 
 	pages   map[string]*template.Template
 	handler http.Handler
@@ -137,6 +139,7 @@ func New(o Options) (*Server, error) {
 		tls: o.Config.TLSCert != "",
 	}
 	s.db = db
+	s.stops = newStopTracker()
 	s.sessions.db = db
 	// Cài đặt hiệu lực (env > DB > web.yaml > mặc định), trước sampler vì chu kỳ lấy mẫu là một cài đặt.
 	if err := s.loadSettings(true); err != nil {
@@ -176,6 +179,7 @@ func New(o Options) (*Server, error) {
 	reg.Refresh(context.Background())
 	if db != nil {
 		s.preloadSeries()
+		s.refreshDesired()
 	}
 	s.handler = s.routes()
 	return s, nil

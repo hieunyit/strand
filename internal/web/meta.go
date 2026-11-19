@@ -443,8 +443,12 @@ func (s *Server) ResumeDesired(ctx context.Context) []string {
 		if desired[p.Name] != store.DesiredRunning || p.Mode() != ModeBackground {
 			continue
 		}
-		if rt := s.reg.Runtime(ctx, p); rt.Running {
+		rt := s.reg.Runtime(ctx, p)
+		if rt.Running {
 			continue
+		}
+		if s.observeStop(p, rt) {
+			continue // dừng êm ngoài web (strand stop) khi web không chạy: không tự khởi động lại
 		}
 		_ = s.audit.Log(AuditEntry{Action: "autostart", Pipeline: p.Name, Result: "started"})
 		_, err := s.runLifecycle(ctx, p, ActStart)

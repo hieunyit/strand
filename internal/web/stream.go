@@ -368,6 +368,7 @@ func (s *Server) onSample(name string, sn *Snap, smp Sample) {
 	if p == nil {
 		return
 	}
+	s.observeStop(p, sn.Runtime) // dừng êm không do web: desired -> stopped (không tự chạy lại)
 	now := s.now()
 	pt := smp
 	lite := s.liveRecord(p, sn, &pt, now)
@@ -378,6 +379,7 @@ func (s *Server) onSample(name string, sn *Snap, smp Sample) {
 
 // onRound (móc của sampler): phát tổng hợp Overview; danh sách pipeline đổi thì phát `structure`.
 func (s *Server) onRound(structural bool) {
+	s.refreshDesired()
 	now := s.now()
 	ov := s.liveOverview(now)
 	if structural {

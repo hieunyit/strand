@@ -280,6 +280,10 @@ func stateReason(v PipelineView) string {
 			return "config error: " + v.ConfigErr
 		}
 		return "no sample yet"
+	case StateStopped:
+		if v.StoppedOutside {
+			return "stopped outside the web (strand stop or a signal); it is not started automatically"
+		}
 	}
 	if v.Top != nil && v.Top.BreakerOpen {
 		return "breaker open: " + v.Top.BreakerReason

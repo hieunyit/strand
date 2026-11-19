@@ -54,12 +54,15 @@ type PipelineView struct {
 	Missing   string         `json:"missing,omitempty"`
 	Conflicts []DiskConflict `json:"disk_conflicts,omitempty"`
 	// Live: số liệu của sampler (docs/WEB-API.md "Live stream").
-	RawState string    `json:"raw_state,omitempty"`
-	Stale    bool      `json:"stale"`
-	LastOK   time.Time `json:"last_ok"`
-	PollErr  string    `json:"poll_error,omitempty"`
-	Rates    Rates     `json:"rates"`
-	LagLevel string    `json:"lag_level"`
+	RawState string `json:"raw_state,omitempty"`
+	// StoppedOutside: chế độ DB, pipeline nền đã dừng êm không do web (strand stop, SIGTERM): desired=stopped,
+	// không tự khởi động lại.
+	StoppedOutside bool      `json:"stopped_outside_web,omitempty"`
+	Stale          bool      `json:"stale"`
+	LastOK         time.Time `json:"last_ok"`
+	PollErr        string    `json:"poll_error,omitempty"`
+	Rates          Rates     `json:"rates"`
+	LagLevel       string    `json:"lag_level"`
 }
 
 func (s *Server) view(p *Pipeline) PipelineView {
@@ -73,6 +76,7 @@ func (s *Server) view(p *Pipeline) PipelineView {
 		e := explainExitFor(*v.Runtime.ExitCode, v.Mode)
 		v.LastExit = &e
 	}
+	v.StoppedOutside = !v.Runtime.Running && s.stoppedOutside(p)
 	return v
 }
 
