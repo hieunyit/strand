@@ -329,7 +329,13 @@ func TestOpsPagesRenderControls(t *testing.T) {
 		return body
 	}
 	has("/pipelines/orders", `data-action="restart"`, `data-action="stop"`, `data-action="enable"`, `data-action="disable"`, `data-action="pause"`, `data-action="throttle"`, `data-confirm=`)
-	has("/pipelines/orders/tables", `data-action="snapshot-add"`, `value="app.extra"`, `data-action="pause-snapshot"`, `data-action="resume-snapshot-only"`)
+	// The page never asks the admin socket while rendering: before the source tables are cached, the picker
+	// is loaded on demand by the browser from the API; once cached, the page lists them directly.
+	has("/pipelines/orders/tables", `data-action="snapshot-add"`, `data-src-tables="/api/v1/pipelines/orders/source-tables"`, `data-action="pause-snapshot"`, `data-action="resume-snapshot-only"`)
+	if resp, _ := e.do(c, "GET", "/api/v1/pipelines/orders/source-tables", "", nil); resp.StatusCode != 200 {
+		t.Fatalf("source-tables: %d", resp.StatusCode)
+	}
+	has("/pipelines/orders/tables", `data-action="snapshot-add"`, `value="app.extra"`)
 	body := has("/pipelines/orders/tables")
 	if strings.Contains(body, `value="app.users"`) {
 		t.Errorf("tables already in the pipeline must not be offered for snapshot add")

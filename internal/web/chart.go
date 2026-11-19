@@ -5,6 +5,7 @@ import (
 	"html"
 	"html/template"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -175,7 +176,7 @@ func lastReadout(series []ChartSeries) string {
 // Sparkline vẽ đường nhỏ không trục cho bảng/danh sách.
 func Sparkline(vals []float64, w, h int) template.HTML {
 	if len(vals) < 2 {
-		return template.HTML(fmt.Sprintf(`<svg class="spark" viewBox="0 0 %d %d" aria-hidden="true"></svg>`, w, h))
+		return template.HTML(fmt.Sprintf(`<svg class="spark" viewBox="0 0 %d %d" aria-hidden="true" data-spark="%s"></svg>`, w, h, sparkValues(vals)))
 	}
 	vmax := 0.0
 	for _, v := range vals {
@@ -197,7 +198,19 @@ func Sparkline(vals []float64, w, h int) template.HTML {
 	}
 	last := strings.Split(pts[len(pts)-1], ",")
 	lastX, lastY := last[0], last[1]
-	return template.HTML(fmt.Sprintf(`<svg class="spark" viewBox="0 0 %d %d" aria-hidden="true"><polyline class="line s1" points="%s"/><circle class="pt s1" cx="%s" cy="%s" r="1.8"/></svg>`, w, h, strings.Join(pts, " "), lastX, lastY))
+	return template.HTML(fmt.Sprintf(`<svg class="spark" viewBox="0 0 %d %d" aria-hidden="true" data-spark="%s"><polyline class="line s1" points="%s"/><circle class="pt s1" cx="%s" cy="%s" r="1.8"/></svg>`, w, h, sparkValues(vals), strings.Join(pts, " "), lastX, lastY))
+}
+
+// sparkValues: các giá trị của sparkline (app.js nối thêm điểm mới và vẽ lại tại chỗ).
+func sparkValues(vals []float64) string {
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			v = 0
+		}
+		parts[i] = strconv.FormatFloat(v, 'g', 6, 64)
+	}
+	return strings.Join(parts, ",")
 }
 
 // ProgressBar vẽ thanh tiến độ bằng SVG (CSP cấm style nội tuyến nên không dùng width: x%).
@@ -219,7 +232,8 @@ func ProgressBar(pct float64) template.HTML {
 type GraphNode struct {
 	Title string
 	Lines []string
-	Class string // ok | warn | bad | idle
+	Binds []string // khóa data-bind của từng dòng ("" = tĩnh), để app.js cập nhật tại chỗ
+	Class string   // ok | warn | bad | idle
 }
 
 // PipelineGraph vẽ Source → Assembler → Scheduler → Writer×N → Target (dòng chảy trái sang phải).
@@ -234,13 +248,17 @@ func PipelineGraph(nodes []GraphNode) template.HTML {
 		if cls == "" {
 			cls = "idle"
 		}
-		fmt.Fprintf(&sb, `<g class="node %s"><rect x="%d" y="2" width="%d" height="%d" rx="6"/>`, cls, x, nw, nh)
+		fmt.Fprintf(&sb, `<g class="node %s" data-graph-node><rect x="%d" y="2" width="%d" height="%d" rx="6"/>`, cls, x, nw, nh)
 		fmt.Fprintf(&sb, `<text class="ntitle" x="%d" y="22">%s</text>`, x+10, html.EscapeString(n.Title))
 		for j, ln := range n.Lines {
 			if j >= 4 {
 				break
 			}
-			fmt.Fprintf(&sb, `<text class="nline" x="%d" y="%d">%s</text>`, x+10, 42+j*16, html.EscapeString(ln))
+			bind := ""
+			if j < len(n.Binds) && n.Binds[j] != "" {
+				bind = ` data-bind="` + html.EscapeString(n.Binds[j]) + `"`
+			}
+			fmt.Fprintf(&sb, `<text class="nline" x="%d" y="%d"%s>%s</text>`, x+10, 42+j*16, bind, html.EscapeString(ln))
 		}
 		sb.WriteString(`</g>`)
 		if i < len(nodes)-1 {

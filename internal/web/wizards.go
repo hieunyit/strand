@@ -741,11 +741,16 @@ func (s *Server) wizardView(ctx context.Context, p *Pipeline, kind string) (wiza
 		thr, _ := strconv.ParseFloat(v.Opts["lag_threshold"], 64)
 		v.Thr = thr
 		if v.Running {
-			if lag, lerr := s.liveLag(ctx, p); lerr == nil {
+			// Trang chỉ hiển thị lag theo mẫu của sampler (không gọi socket khi render); bước "stop" vẫn đọc
+			// lag trực tiếp từ admin socket ngay trước khi quyết định (liveLag).
+			if top := v.View.Top; top != nil && !v.View.Stale {
+				lag := top.LagSeconds
 				v.Lag = &lag
 				v.LagOK = lag <= thr
+			} else if v.View.PollErr != "" {
+				v.LagNote = v.View.PollErr
 			} else {
-				v.LagNote = lerr.Error()
+				v.LagNote = errNoSample
 			}
 		}
 		s.repairSteps(&v)
@@ -860,7 +865,7 @@ func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Sessio
 	if v.Job != nil && v.Job.Running {
 		refresh = 2
 	}
-	s.render(w, "wizard", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[pg.Kind], Active: p.Name, Refresh: refresh, Body: pg})
+	s.render(w, "wizard", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[pg.Kind], Active: p.Name, Refresh: refresh, Live: p.Name, Body: pg})
 }
 
 func (s *Server) wizardRoutes(mux *http.ServeMux) {

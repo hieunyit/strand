@@ -23,6 +23,10 @@ func templateFuncs() template.FuncMap {
 	return template.FuncMap{
 		"stateClass": func(s string) string { return "st-" + s },
 		"secs":       fmtSecs,
+		"lag":        fmtLag,
+		"governor":   fmtGovernor,
+		"tblRows":    tblRowsText,
+		"tblETA":     tblETAText,
 		"num":        fmtNum,
 		"int64":      func(v int64) string { return fmtInt(v) },
 		"clock": func(t time.Time) string {
@@ -150,6 +154,25 @@ func fmtSecs(v float64) string {
 	return fmt.Sprintf("%dm %02ds", m, s)
 }
 
+// fmtLag formats a replication lag with stable units so the digits do not jump between ms and s:
+// "0.25 s" below 10 s, "12.3 s" below a minute, then "4m 05s" and "2h 03m".
+func fmtLag(v float64) string {
+	switch {
+	case math.IsNaN(v) || v <= 0:
+		return "0.00 s"
+	case v < 10:
+		return fmt.Sprintf("%.2f s", v)
+	case v < 60:
+		return fmt.Sprintf("%.1f s", v)
+	}
+	d := time.Duration(v * float64(time.Second)).Round(time.Second)
+	h, m, sec := int(d/time.Hour), int(d/time.Minute)%60, int(d/time.Second)%60
+	if h > 0 {
+		return fmt.Sprintf("%dh %02dm", h, m)
+	}
+	return fmt.Sprintf("%dm %02ds", m, sec)
+}
+
 // groupDigits inserts thousands separators into a plain integer string.
 func groupDigits(s string) string {
 	neg := strings.HasPrefix(s, "-")
@@ -209,16 +232,25 @@ func lagSort(v PipelineView) float64 {
 	return math.Max(v.Top.LagSeconds, 0)
 }
 
+// lagClass colours the lag (thresholds LagWarnSeconds / LagBadSeconds with hysteresis, computed by the sampler).
 func lagClass(v PipelineView) string {
-	switch {
-	case v.Top == nil:
+	if v.Top == nil || v.LagLevel == "" {
 		return ""
-	case v.Top.LagSeconds >= 300:
-		return "lag-bad"
-	case v.Top.LagSeconds >= 30:
-		return "lag-warn"
 	}
-	return ""
+	return "lag-" + v.LagLevel
+}
+
+// fmtGovernor is the governor line of the Run card (also sent live).
+func fmtGovernor(g admin.GovernorInfo) string {
+	s := g.Algorithm
+	if g.Zone != "" {
+		s += ", zone " + g.Zone
+	}
+	s += ", rate " + fmtNum(g.BackgroundRate) + "/s background, pressure " + fmt.Sprintf("%.2f", g.Pressure)
+	if g.BreakerOpen {
+		s += ", breaker open: " + g.BreakerReason
+	}
+	return s
 }
 
 // stateReason says why a pipeline is not healthy (empty when there is nothing to add).
@@ -288,13 +320,18 @@ type pageData struct {
 	Nav      []NavItem
 	Version  string
 	Host     string // host name shown in the top bar
-	Refresh  int    // giây; 0 = không tự làm mới
+	Refresh  int    // giây; 0 = không tự làm mới toàn trang
+	// Live: trang nhận số liệu qua SSE ("all" hoặc tên pipeline); "" = trang tĩnh. Interval: chu kỳ của sampler.
+	Live     string
+	LiveLogs bool
+	Interval int
 	Body     any
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pageData) {
 	d.CSRF, d.Nav, d.Version = sess.CSRF, s.navItems(), s.version
 	d.Host = hostName()
+	d.Interval = int(s.samp.Interval().Seconds())
 	if d.AsOf.IsZero() {
 		d.AsOf = s.now()
 	}
@@ -323,8 +360,8 @@ type overviewBody struct {
 
 func (s *Server) sparkFor(name string) template.HTML {
 	smp := s.samp.Series(name)
-	if n := len(smp); n > 60 {
-		smp = smp[n-60:] // 5 phút gần nhất
+	if n := len(smp); n > sparkPoints {
+		smp = smp[n-sparkPoints:] // 5 phút gần nhất
 	}
 	vals := make([]float64, len(smp))
 	for i, x := range smp {
@@ -332,6 +369,9 @@ func (s *Server) sparkFor(name string) template.HTML {
 	}
 	return Sparkline(vals, 90, 22)
 }
+
+// sparkPoints is the number of lag samples in the overview sparkline (5 min at the default interval).
+const sparkPoints = 60
 
 // sortViews puts the pipelines that need attention first (failed, unreachable, ...), then by lag, then by name.
 func sortViews(vs []PipelineView) {
@@ -378,7 +418,7 @@ func (s *Server) pageOverview(w http.ResponseWriter, r *http.Request, sess *Sess
 	}
 	sortViews(b.Views)
 	b.summarize()
-	s.render(w, "overview", sess, pageData{Title: "Overview", Active: "overview", Refresh: 5, Body: b})
+	s.render(w, "overview", sess, pageData{Title: "Overview", Active: "overview", Live: "all", Body: b})
 }
 
 func (s *Server) pagePipelines(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -388,7 +428,7 @@ func (s *Server) pagePipelines(w http.ResponseWriter, r *http.Request, sess *Ses
 		b.Sparks[p.Name] = s.sparkFor(p.Name)
 	}
 	sortViews(b.Views)
-	s.render(w, "pipelines", sess, pageData{Title: "Pipelines", Active: "pipelines", Refresh: 5, Body: b})
+	s.render(w, "pipelines", sess, pageData{Title: "Pipelines", Active: "pipelines", Live: "all", Body: b})
 }
 
 // detailBody là dữ liệu của trang chi tiết; chỉ trường của tab đang xem được điền.
@@ -398,7 +438,7 @@ type detailBody struct {
 	Tabs       []tabLink
 	Status     StatusView
 	Graph      template.HTML
-	Charts     []template.HTML
+	Charts     []chartCard
 	Metrics    map[string]float64
 	Tables     TablesView
 	Checkpoint CheckpointView
@@ -410,6 +450,7 @@ type detailBody struct {
 	Follow     bool
 	Jobs       []JobStatus
 	Src        SourceTablesView
+	SrcLoaded  bool // Src có sẵn trong cache; không thì trình duyệt tải khi người dùng bấm (không gọi socket khi render)
 	Ctl        Controls
 	Head       HeadInfo
 }
@@ -471,12 +512,10 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		}
 		b.Tabs = append(b.Tabs, tabLink{Key: t[0], Label: t[1], Href: href})
 	}
+	// Mọi số liệu đọc từ bộ nhớ của sampler: render trang không bao giờ gọi admin socket.
 	ctx := r.Context()
-	refresh := 5
-	if b.Ctl.Reachable && tab != "config" && tab != "logs" && tab != "repair" && tab != "promote" {
-		// two cheap admin calls, only for a running pipeline: the header shows uptime and the last checkpoint
-		b.Head = s.headInfo(ctx, p)
-	}
+	b.Head = s.headInfo(ctx, p)
+	live, liveLogs := p.Name, false
 	switch tab {
 	case "graph":
 		b.Status = s.statusView(ctx, p)
@@ -488,12 +527,12 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	case "tables":
 		b.Tables = s.tablesView(ctx, p)
 		if b.Ctl.Running {
-			b.Src = s.sourceTablesView(ctx, p)
+			b.Src, b.SrcLoaded = s.cachedSourceTables(p)
 		}
 	case "jobs":
 		b.Jobs = s.listJobs(p.Name)
 		if b.Ctl.Running {
-			b.Src = s.sourceTablesView(ctx, p)
+			b.Src, b.SrcLoaded = s.cachedSourceTables(p)
 		}
 	case "checkpoint":
 		b.Checkpoint = s.checkpointView(ctx, p)
@@ -505,20 +544,22 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		b.Config = s.configView(p)
 		b.Tuning = s.tuningView(p)
 		b.Env = s.getEnvView(p)
-		refresh = 0
 	case "logs":
 		n, _ := strconv.Atoi(r.URL.Query().Get("lines"))
 		b.Logs = s.logsView(ctx, p, n)
-		b.Follow = r.URL.Query().Get("follow") == "1"
-		refresh = 0
-		if b.Follow {
-			refresh = 5
-		}
+		b.Follow = r.URL.Query().Get("follow") != "0" // theo dõi đuôi log trực tiếp, mặc định bật
+		liveLogs = true
 	}
-	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Active: p.Name, Refresh: refresh, Body: b})
+	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Active: p.Name, Live: live, LiveLogs: liveLogs, Body: b})
 }
 
-func (s *Server) charts(name string) []template.HTML {
+// chartCard is one chart of the Graph tab; Key names it for the live redraw in app.js.
+type chartCard struct {
+	Key  string
+	HTML template.HTML
+}
+
+func (s *Server) charts(name string) []chartCard {
 	smp := s.samp.Series(name)
 	pick := func(f func(Sample) float64) []Point {
 		pts := make([]Point, len(smp))
@@ -527,17 +568,18 @@ func (s *Server) charts(name string) []template.HTML {
 		}
 		return pts
 	}
-	return []template.HTML{
-		LineChart("Replication lag", "seconds", []ChartSeries{{Name: "lag", Class: "s1", Points: pick(func(x Sample) float64 { return x.Lag })}}, 560, 190),
-		LineChart("Throughput", "rows/s", []ChartSeries{
-			{Name: "stream (top)", Class: "s1", Points: pick(func(x Sample) float64 { return x.Throughput })},
-			{Name: "applied (metrics)", Class: "s2", Points: pick(func(x Sample) float64 { return x.ApplyRate })},
-		}, 560, 190),
-		LineChart("Holes and writeset", "count", []ChartSeries{
+	// Keys and series must match CHARTS in app.js (the live redraw).
+	return []chartCard{
+		{"lag", LineChart("Replication lag", "seconds", []ChartSeries{{Name: "lag", Class: "s1", Points: pick(func(x Sample) float64 { return x.Lag })}}, 560, 190)},
+		{"rate", LineChart("Throughput", "rows/s", []ChartSeries{
+			{Name: "applied, 30 s avg", Class: "s1", Points: pick(func(x Sample) float64 { return x.Rows })},
+			{Name: "snapshot, 30 s avg", Class: "s2", Points: pick(func(x Sample) float64 { return x.SnapRows })},
+		}, 560, 190)},
+		{"holes", LineChart("Holes and writeset", "count", []ChartSeries{
 			{Name: "holes", Class: "s3", Points: pick(func(x Sample) float64 { return x.Holes })},
 			{Name: "writeset entries", Class: "s2", Points: pick(func(x Sample) float64 { return x.Writeset })},
-		}, 560, 190),
-		LineChart("Spool", "bytes", []ChartSeries{{Name: "spool bytes", Class: "s4", Points: pick(func(x Sample) float64 { return x.SpoolBytes })}}, 560, 190),
+		}, 560, 190)},
+		{"spool", LineChart("Spool", "bytes", []ChartSeries{{Name: "spool bytes", Class: "s4", Points: pick(func(x Sample) float64 { return x.SpoolBytes })}}, 560, 190)},
 	}
 }
 
@@ -565,10 +607,7 @@ func (s *Server) graphNodes(v PipelineView, st *admin.StatusInfo, m map[string]f
 	}
 	lag, rate := "-", "-"
 	if v.Top != nil {
-		lag, rate = fmtSecs(v.Top.LagSeconds), FormatValue(v.Top.Throughput)+" rows/s"
-		if v.Top.LagSeconds <= 0 {
-			lag = "0 s"
-		}
+		lag, rate = fmtLag(v.Top.LagSeconds), FormatValue(v.Rates.Rows)+" rows/s"
 	}
 	workers, order, zone, txns, rows := "-", "-", "-", "-", "-"
 	if st != nil {
@@ -581,11 +620,11 @@ func (s *Server) graphNodes(v PipelineView, st *admin.StatusInfo, m map[string]f
 		txns, rows = FormatValue(float64(st.AppliedTxns)), FormatValue(float64(st.AppliedRows))
 	}
 	return []GraphNode{
-		{Title: "Source", Class: cls, Lines: []string{srcKind, "lag " + lag, "state " + v.State}},
-		{Title: "Assembler", Class: cls, Lines: []string{"pending x-range " + mval(m, "strand_pending_cross_range"), "spool " + fmtBytesOrDash(m, "strand_spool_bytes")}},
-		{Title: "Scheduler", Class: cls, Lines: []string{"holes " + mval(m, "strand_holes"), "writeset " + mval(m, "strand_writeset_entries"), "order " + order}},
-		{Title: "Writer x" + workers, Class: cls, Lines: []string{rate, "governor " + zone}},
-		{Title: "Target", Class: cls, Lines: []string{dstKind, "txns " + txns, "rows " + rows}},
+		{Title: "Source", Class: cls, Lines: []string{srcKind, "lag " + lag, "state " + v.State}, Binds: []string{"", "g_lag", "g_state"}},
+		{Title: "Assembler", Class: cls, Lines: []string{"pending x-range " + mval(m, "strand_pending_cross_range"), "spool " + fmtBytesOrDash(m, "strand_spool_bytes")}, Binds: []string{"g_xrange", "g_spool"}},
+		{Title: "Scheduler", Class: cls, Lines: []string{"holes " + mval(m, "strand_holes"), "writeset " + mval(m, "strand_writeset_entries"), "order " + order}, Binds: []string{"g_holes", "g_ws", ""}},
+		{Title: "Writer x" + workers, Class: cls, Lines: []string{rate, "governor " + zone}, Binds: []string{"g_rate", "g_zone"}},
+		{Title: "Target", Class: cls, Lines: []string{dstKind, "txns " + txns, "rows " + rows}, Binds: []string{"", "g_txns", "g_rows"}},
 	}
 }
 

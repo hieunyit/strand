@@ -33,7 +33,7 @@ Trạng thái (`state`) của pipeline: `synced`, `bootstrapping`, `paused`, `st
 
 ```json
 {"counts": {"synced": 1, "bootstrapping": 0, "paused": 0, "starting": 0, "failed": 0, "stopped": 0, "unreachable": 0, "unknown": 0},
- "total": 1, "max_lag_seconds": 0.25, "max_lag_pipeline": "orders", "rows_per_sec": 1234,
+ "total": 1, "max_lag_seconds": 0.25, "max_lag_pipeline": "orders", "rows_per_sec": 1234.5,
  "warnings": ["scan: ... skipped ..."],
  "pipelines": [ <PipelineView> ]}
 ```
@@ -147,7 +147,54 @@ Cập nhật file `.env`: nếu giá trị gửi lên là `********` thì giữ 
 
 ### `GET /api/v1/pipelines/{name}/series`
 
-`{"interval_seconds": 5, "samples": [{"t", "state", "lag_seconds", "throughput", "apply_rows_per_s", "holes", "writeset_entries", "spool_bytes"}]}` — tối đa 720 mẫu (1 giờ) từ ring buffer trong RAM.
+`{"interval_seconds": 5, "samples": [{"t", "state", "lag_seconds", "throughput", "apply_rows_per_s", "rows_per_s", "snapshot_rows_per_s", "holes", "writeset_entries", "spool_bytes", "stale"}]}` — tối đa 720 mẫu (1 giờ) từ ring buffer trong RAM. `rows_per_s`/`snapshot_rows_per_s` là tốc độ đã làm mượt (xem §3.3); `stale: true` khi lần lấy mẫu đó thất bại (giá trị là của lần tốt gần nhất).
+
+### 3.3 Số liệu sống: sampler, SSE `GET /api/v1/stream`, `GET /api/v1/live`
+
+**Đường dữ liệu.** Bộ lấy mẫu (sampler) trong `strand web` là thành phần **duy nhất** hỏi admin socket (`top`, `status`, `tables`, `checkpoint show`, `events`) và `/metrics` của pipeline: mỗi pipeline tối đa một lần hỏi mỗi chu kỳ (`sample_interval_sec`, mặc định 5 s), hạn giờ `min(0.8 × chu kỳ, 4 s)` (tối thiểu 1 s), tối đa 8 pipeline song song, pipeline còn đang được hỏi từ chu kỳ trước thì bỏ lượt (không dồn). Trang HTML, các route đọc ở §3 và luồng SSE chỉ đọc bản mẫu mới nhất trong RAM: **không request nào gọi admin socket** (trừ thao tác §4 và `source-tables`, là truy vấn source theo yêu cầu, có cache 30 s). Sau một thao tác thành công, pipeline đó được lấy mẫu lại ngay.
+
+**Ổn định số liệu.**
+- Tốc độ (`rows_per_s` = dòng apply CDC/s, `txn_per_s`, `snapshot_rows_per_s`) là trung bình trên cửa sổ trượt **30 s** của bộ đếm (`status.applied_rows`, `status.applied_txns`, `top.snapshot_rows`); bộ đếm giảm (pipeline khởi động lại) thì cửa sổ bắt đầu lại. Chưa có cửa sổ (mẫu đầu) hoặc thiếu `status`: EWMA hằng số thời gian 30 s của tốc độ tức thời trong `top`. Pipeline không có bộ đếm byte nên không có bytes/s.
+- Lag hiển thị với đơn vị cố định: `0.25 s` (dưới 10 s), `12.3 s` (dưới 1 phút), `4m 05s`, `2h 03m`. Màu: `warn` từ 30 s, `bad` từ 300 s, có **trễ pha**: chỉ hạ mức khi xuống dưới 80% ngưỡng (24 s / 240 s), trường `lag_level`.
+- **Luật trạng thái**: huy hiệu trạng thái chỉ đổi khi **hai mẫu liên tiếp** cùng trạng thái mới; riêng `failed` và `stopped` đổi ngay (và lần lấy mẫu đầu tiên, và mẫu lấy lại ngay sau một thao tác của người dùng). `raw_state` là trạng thái suy từ riêng mẫu mới nhất.
+- **Stale**: lần hỏi thất bại (hết giờ, lỗi) khi tiến trình vẫn chạy thì giữ số liệu tốt gần nhất, đặt `stale: true`, `last_ok` (thời điểm mẫu tốt), `poll_error`; giao diện làm mờ số, hiện biểu tượng cảnh báo và "updated N s ago" thay vì để trống. Tiến trình đã dừng thì không giữ số cũ.
+
+**`GET /api/v1/stream?pipeline=<name>|all[&logs=1]`** — Server-Sent Events (`text/event-stream`), xác thực như mọi route (cookie session hoặc `Authorization: Bearer`; GET nên không cần CSRF). `pipeline=<name>`: bản ghi của pipeline đó đầy đủ (bảng, sự kiện lỗi, chuỗi của sơ đồ Graph), pipeline khác ở dạng gọn; `all` (mặc định): mọi bản ghi dạng gọn. `logs=1` (chỉ với một pipeline): thêm sự kiện `log`. Tên không tồn tại: **404**. Quá 128 luồng đồng thời: **503**.
+
+Khung: đầu tiên `retry: 3000`, rồi:
+
+| `event:` | `id:` | `data` |
+| --- | --- | --- |
+| `snapshot` | có | `LiveSnapshot`: `{"interval_s", "server_time", "last_event_id", "pipeline", "overview": LiveOverview, "pipelines": [LiveRecord]}` — trạng thái đầy đủ: khi kết nối, khi `Last-Event-ID` không nối tiếp được, hoặc khi client quá chậm làm rơi sự kiện |
+| `sample` | có | `LiveRecord` của một pipeline, sau mỗi lần lấy mẫu pipeline đó |
+| `overview` | có | `LiveOverview`, sau mỗi chu kỳ |
+| `structure` | có | `{"pipelines": [tên]}` khi danh sách pipeline đổi (client tải lại trang) |
+| `log` | không | `{"pipeline", "lines": [...], "initial", "gap", "error"}` mỗi 2 s khi có dòng mới; `initial: true` là 200 dòng cuối (client bỏ phần trùng với dòng đã hiện), `gap: true` khi có dòng bị bỏ qua; mật khẩu đã che |
+| `bye` | không | `{"reason"}` khi session hết hạn/đăng xuất; luồng đóng |
+
+Comment `: hb <unix>` mỗi 15 s (giữ kết nối qua proxy; mỗi nhịp kiểm lại session). **Nối lại**: `EventSource` tự gửi `Last-Event-ID`; còn trong vòng 512 sự kiện gần nhất thì server phát lại đúng các sự kiện bị lỡ, không thì gửi `snapshot`. Proxy phía trước cần tắt buffering (server gửi `X-Accel-Buffering: no`).
+
+`LiveRecord`:
+
+```json
+{"name": "orders", "state": "synced", "raw_state": "synced", "reachable": true, "stale": false,
+ "sampled_at": "...", "last_ok": "...", "age_s": 0.4,
+ "lag_s": 0.25, "lag_level": "", "rows_s": 1234.5, "txn_s": 41.2, "snapshot_rows_s": 0, "zone": "green",
+ "sev": 7, "attention": false,
+ "tables": {"done": 1, "running": 1, "pending": 1, "total": 3, "pct": 33.3, "rows_copied": 250000, "rows_estimate": 1000000, "rows_pct": 25, "eta_s": 90},
+ "uptime_s": 3600, "checkpoint_at": "...",
+ "f": {"state": "synced", "lag": "0.25 s", "rows": "1,235", "txn": "41.2", "tables": "1 / 3", "tables_pct": "33.3%", "uptime": "1h 00m 00s", "ckpt": "3 s ago", "reason": "", "...": "..."},
+ "pt": {"t": "...", "lag_seconds": 0.25, "rows_per_s": 1234.5, "...": "một điểm như /series"},
+ "table_rows": [{"table": "app.orders", "state": "running", "pct": 25, "rows_copied": 250000, "rows_estimate": 1000000, "eta_s": 90, "f": {"pct": "25.0%", "rows": "250,000 / 1,000,000", "eta": "1m 30s"}}],
+ "tables_full": false,
+ "events_new": [{"time", "level", "message"}]}
+```
+
+`f` là chuỗi hiển thị theo khóa `data-bind` của trang, định dạng giống hệt trang render ở server (số không "nhảy" khi trang tải lại). `lag_s` vắng khi không có số đọc. Ở bản đầy đủ: `table_rows` chỉ gồm bảng **đổi** từ sự kiện trước (`tables_full: true` = toàn bộ danh sách, ví dụ trong `snapshot` hoặc khi danh sách bảng đổi), `events_new` chỉ gồm cảnh báo/lỗi mới; `f` có thêm `g_*` (sơ đồ Graph), `governor`, `ckpt_applied`, `epoch`. `LiveOverview`: `{"total", "healthy", "attention": [tên], "max_lag_s", "max_lag_pipeline", "rows_s", "tables_done", "tables_total", "tables_pct", "counts": {trạng thái: n}, "pipelines": [tên], "f": {...}}`.
+
+**`GET /api/v1/live?pipeline=<name>|all`** → `LiveSnapshot` (JSON thường). Trình duyệt dùng khi `EventSource` không có hoặc lỗi liên tục (3 lần): hỏi mỗi chu kỳ, thử lại SSE sau 60 s.
+
+Ví dụ: `curl -N -H "Authorization: Bearer $TOKEN" 'https://web:8443/api/v1/stream?pipeline=orders'`.
 
 ## 4. Thao tác
 
@@ -224,4 +271,4 @@ Chế độ file: `<state_dir>/audit.log`. Chế độ PostgreSQL (`database.dsn
 
 ## 6. Trang HTML
 
-`/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs|repair|promote}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang tự làm mới 5 giây bằng `fetch` cùng URL (trừ Config và Logs; Logs có `?follow=1`).
+`/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs|repair|promote}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Overview, Pipelines và mọi tab của trang pipeline nhận số liệu qua SSE (§3.3) và cập nhật **tại chỗ** (phần tử có `data-bind*`: số, huy hiệu, thanh tiến độ, sparkline, biểu đồ, danh sách bảng đang chép, Errors, đuôi Logs), không tải lại cả trang; trang chỉ tải lại khi cấu trúc đổi (danh sách pipeline, tập "Needs attention", trạng thái của pipeline đang xem, bảng mới) và không bao giờ khi người dùng đang gõ, đang mở hộp thoại hoặc đang bôi đen chữ. Logs: bám đuôi trực tiếp (mặc định bật, `?follow=0` để tắt; cuộn lên thì tạm dừng và hiện số dòng mới). Trang Jobs vẫn tự làm mới 5 giây.

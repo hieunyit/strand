@@ -147,12 +147,12 @@ func TestFailedBackgroundPipelinePagesShowStateAndReason(t *testing.T) {
 	e.login(c, testPassword)
 	for _, path := range []string{"/", "/pipelines"} {
 		_, body := e.do(c, "GET", path, "", nil)
-		if !strings.Contains(body, `badge st-failed">failed<`) {
+		if !strings.Contains(body, `badge st-failed" data-bind-badge="state">failed<`) {
 			t.Errorf("%s: no failed badge: %s", path, body)
 		}
 	}
 	_, body := e.do(c, "GET", "/pipelines/bg", "", nil)
-	for _, want := range []string{`badge big st-failed">failed<`, "Last exit code", "Unclassified or transient error", "Reason:", "connection refused"} {
+	for _, want := range []string{`badge big st-failed" data-bind-badge="state">failed<`, "Last exit code", "Unclassified or transient error", "Reason:", "connection refused"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail header lacks %q: %s", want, body)
 		}
