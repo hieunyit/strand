@@ -98,7 +98,10 @@ scheduler processes: a standby starts none and answers backup-job writes with
 503 like every other write; on takeover the new active instance starts the
 enabled schedulers and the old one stops its own when it steps down (a run in
 progress there is recorded as interrupted). As a safety net, PostgreSQL advisory
-locks still elect one scheduler per job across Web replicas, and a persisted next-run timestamp prevents a Web restart from
+locks still elect one scheduler per job across Web replicas (scheduler processes are
+detached: if the old active instance exits abruptly, its scheduler keeps the job's
+lock and schedule until it ends or the job is paused/edited, and the new active
+instance's scheduler waits for that lock, so runs never double up), and a persisted next-run timestamp prevents a Web restart from
 triggering an extra backup. A second replica waits for the scheduler lock and
 takes over if the active scheduler exits. Scheduled and **Run now** executions
 share a per-job execution lock, so invocations of one job do not overlap.
