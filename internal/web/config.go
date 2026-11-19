@@ -68,6 +68,9 @@ type Config struct {
 
 	// SourcePath: đường dẫn tuyệt đối của chính web.yaml (không đọc từ file); scan bỏ qua file này.
 	SourcePath string `yaml:"-"`
+	// FileKeys: các khóa cấp cao nhất có trong web.yaml (trang Settings hiện nguồn của giá trị). nil: Config
+	// không nạp từ file.
+	FileKeys map[string]bool `yaml:"-"`
 }
 
 // DefaultStateDir là thư mục trạng thái mặc định của `strand web`.
@@ -95,6 +98,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if abs, err := filepath.Abs(path); err == nil {
 		c.SourcePath = abs
+	}
+	var top map[string]any
+	_ = yaml.Unmarshal(b, &top)
+	c.FileKeys = map[string]bool{}
+	for k := range top {
+		c.FileKeys[k] = true
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8080"

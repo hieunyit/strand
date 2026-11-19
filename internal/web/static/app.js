@@ -1,4 +1,5 @@
-// Strand web console: periodic refresh of the server-rendered content. No libraries.
+// Strand web console. Live numbers arrive over Server-Sent Events and are updated in place (data-bind);
+// the whole content is re-fetched only for structural changes. No libraries.
 (function () {
   'use strict';
   var content = document.getElementById('content');
@@ -7,6 +8,7 @@
   var csrf = csrfMeta ? csrfMeta.getAttribute('content') : '';
   var seconds = parseInt(content.getAttribute('data-refresh') || '0', 10);
   var busy = false;
+  var onSwap = []; // called after a structural refresh replaced #content (the live module re-attaches)
 
   // Same-origin fetch that always carries the session cookie and the CSRF header (for POST).
   function api(method, url, body) {
@@ -119,6 +121,7 @@
         restoreState(st);
         applyList();
         applyTables();
+        onSwap.forEach(function (f) { f(); });
       })
       .catch(function () {
         // Transient error: keep the old content but say that it is stale.
@@ -296,6 +299,8 @@
   });
 
   if (seconds > 0) { setInterval(refresh, seconds * 1000); }
+  // Hooks for /static/live.js (the SSE client): structural refresh, re-attach after a swap, table filters.
+  window.strandConsole = { refresh: refresh, onSwap: onSwap, applyTables: applyTables, applyList: applyList, editing: editing, selecting: selecting };
 
   // ---- toast and confirmation dialog (no inline script: everything is wired here) ----
   var toastEl = document.getElementById('toast');

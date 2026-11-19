@@ -206,6 +206,10 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 		entry.Detail = map[string]any{"error": err.Error()}
 	}
 	_ = s.audit.Log(entry)
+	if err == nil && act != ActDelete {
+		// Lấy mẫu lại ngay: trạng thái do chính thao tác này gây ra hiện lên không chờ chu kỳ sau.
+		s.samp.Kick(context.WithoutCancel(r.Context()), name)
+	}
 	if err != nil {
 		status := http.StatusBadGateway
 		var ae *ActionError

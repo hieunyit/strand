@@ -18,6 +18,7 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/web/store"
 )
 
 // Commander chạy lệnh ngoài (systemctl, journalctl). Tách ra interface để test không cần systemd.
@@ -65,7 +66,12 @@ type Pipeline struct {
 	SystemdUnit string // rỗng = chế độ nền
 	LogFile     string // ghi đè (chế độ nền)
 	PidFile     string
-	Origin      string // "web.yaml" | "scan"
+	Origin      string // "web.yaml" | "scan" | "created"
+
+	// Chế độ DB: Missing khác rỗng khi entry web.yaml / file scan của pipeline đã mất (pipeline vẫn giữ
+	// trong DB, không xóa lặng lẽ); Conflicts là các bản sửa trên đĩa đã bị đặt sang bên vì bản DB thắng.
+	Missing   string
+	Conflicts []DiskConflict
 
 	// Lấy từ file cấu hình pipeline (rỗng nếu đọc lỗi; xem CfgErr).
 	Cfg    *config.Config
@@ -176,6 +182,10 @@ type Registry struct {
 	createdMu sync.Mutex
 	db        *metaDB // chế độ DB: pipeline do web tạo nằm trong PostgreSQL
 	lastDB    []PipelineEntry
+	lastRows  []store.Pipeline
+
+	// scanFn: glob scan hiệu lực (cài đặt có thể đổi khi đang chạy); nil = cfg.Scan.
+	scanFn func() []string
 
 	unitMu    sync.Mutex
 	unitCache map[string]unitCacheEntry
@@ -214,6 +224,10 @@ func (r *Registry) UnitExists(ctx context.Context, unit string) bool {
 // Refresh quét lại web.yaml + glob scan. Pipeline khai báo tường minh thắng pipeline từ scan cùng tên.
 // Tên không qua whitelist bị bỏ và ghi vào Warnings.
 func (r *Registry) Refresh(ctx context.Context) {
+	if r.db != nil {
+		r.refreshDB(ctx)
+		return
+	}
 	byName := map[string]*Pipeline{}
 	var warns []string
 	for _, e := range r.cfg.Pipelines {
@@ -247,7 +261,11 @@ func (r *Registry) Refresh(ctx context.Context) {
 		byName[e.Name] = &Pipeline{Name: e.Name, ConfigPath: e.Config, EnvFile: e.EnvFile, SystemdUnit: e.SystemdUnit,
 			LogFile: e.LogFile, PidFile: e.PidFile, Origin: "created"}
 	}
-	for _, pat := range r.cfg.Scan {
+	scan := r.cfg.Scan
+	if r.scanFn != nil {
+		scan = r.scanFn()
+	}
+	for _, pat := range scan {
 		matches, err := filepath.Glob(pat)
 		if err != nil {
 			warns = append(warns, fmt.Sprintf("scan %q: %v", pat, err))
@@ -278,6 +296,11 @@ func (r *Registry) Refresh(ctx context.Context) {
 			byName[name] = p
 		}
 	}
+	r.publish(byName, warns)
+}
+
+// publish nạp cấu hình của từng pipeline rồi thay danh sách.
+func (r *Registry) publish(byName map[string]*Pipeline, warns []string) {
 	names := make([]string, 0, len(byName))
 	for n, p := range byName {
 		names = append(names, n)

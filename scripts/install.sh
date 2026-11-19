@@ -11,7 +11,8 @@
 # --tls-cert/--tls-key thì dùng HTTPS; chỉ cho máy chủ truy cập: --listen 127.0.0.1:8080. web.yaml có sẵn đang
 # nghe loopback mà không đưa --listen thì được chuyển sang 0.0.0.0:8080. Các tùy chọn sau đây
 # được chuyển nguyên cho nó: --listen X, --state-dir X, --scan X, --tls-cert X, --tls-key X, --secure-cookies,
-# --trust-forwarded-for, --allow-plain-http, --generate-password, --password-stdin, --token, --force.
+# --trust-forwarded-for, --allow-plain-http, --generate-password, --password-stdin, --token, --force,
+# --database-dsn X (chế độ PostgreSQL, khuyến nghị; DSN được ghi vào /etc/strand/web.yaml 0640 root:strand).
 set -eu
 
 usage() {
@@ -53,7 +54,7 @@ while [ $# -gt 0 ]; do
 		no_start=1
 		shift
 		;;
-	--listen | --state-dir | --scan | --tls-cert | --tls-key)
+	--listen | --state-dir | --scan | --tls-cert | --tls-key | --database-dsn)
 		[ $# -ge 2 ] || usage
 		case "$1" in
 		--listen) listen_set=1 ;;

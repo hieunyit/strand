@@ -343,10 +343,17 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 		}
 	}
 
-	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo).
+	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo). Không lưu được thì
+	// trả file về bản cũ và báo lỗi: chỉ giữ bản trên đĩa thì lần start/khởi động sau DB sẽ ghi đè lặng lẽ.
 	if err := s.persistPipelineFiles(p); err != nil {
 		rollbackErr := writeFilePreserving(p.ConfigPath, origBytes, false, false)
-		return nil, errors.Join(fmt.Errorf("persist config: %w", err), rollbackErr)
+		_ = s.audit.Log(AuditEntry{IP: ip, Action: "config.edit", Pipeline: p.Name, Result: "error",
+			Detail: map[string]any{"error": "metadata database: " + err.Error()}})
+		msg := "config NOT saved: storing it in the metadata database failed (" + err.Error() + "); the file was left unchanged, try again"
+		if rollbackErr != nil {
+			msg = "config NOT stored in the metadata database (" + err.Error() + ") and restoring the previous file failed (" + rollbackErr.Error() + "): the file on disk has the new content"
+		}
+		return nil, &ActionError{Status: http.StatusServiceUnavailable, Msg: msg}
 	}
 
 	// Làm mới cấu hình trong registry
@@ -385,6 +392,13 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 		Restarted: restarted,
 		Message:   msg,
 	}, nil
+}
+
+// rollbackFile đặt lại nội dung cũ của path (giữ quyền/chủ) sau khi lưu vào DB thất bại.
+func (s *Server) rollbackFile(path string, orig []byte) {
+	if err := writeFilePreserving(path, orig, false, false); err != nil {
+		s.log.Error("rollback of file after database failure failed", "path", path, "err", err)
+	}
 }
 
 // EnvView thể hiện các biến môi trường của pipeline (.env), các khóa bí mật được che bằng '********'.
@@ -542,7 +556,13 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 		} else {
 			rollbackErr = writeFilePreserving(envPath, origEnv, true, false)
 		}
-		return "", errors.Join(fmt.Errorf("persist env: %w", err), rollbackErr)
+		_ = s.audit.Log(AuditEntry{IP: ip, Action: "env.edit", Pipeline: p.Name, Result: "error",
+			Detail: map[string]any{"error": "metadata database: " + err.Error()}})
+		msg := ".env NOT saved: storing it in the metadata database failed (" + err.Error() + "); the file was left unchanged, try again"
+		if rollbackErr != nil {
+			msg += " (restoring the previous file failed: " + rollbackErr.Error() + ")"
+		}
+		return "", &ActionError{Status: http.StatusServiceUnavailable, Msg: msg}
 	}
 	s.reg.Refresh(ctx)
 

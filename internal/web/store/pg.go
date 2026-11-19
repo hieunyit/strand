@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -114,7 +115,12 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 	defer func() {
 		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_, _ = conn.ExecContext(uctx, `SELECT pg_advisory_unlock($1)`, k)
+		var released bool
+		if err := conn.QueryRowContext(uctx, `SELECT pg_advisory_unlock($1)`, k).Scan(&released); err != nil || !released {
+			// Không chắc đã nhả khóa (lỗi mạng, timeout): hủy kết nối thay vì trả về pool, nếu không khóa phiên
+			// này bị giữ mãi trên một kết nối rảnh và mọi instance khác chờ vô hạn ở lần migrate/import sau.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 	}()
 	return fn(ctx)
 }
@@ -181,26 +187,70 @@ func (p *PG) CountSessions(ctx context.Context) (int, error) {
 	return n, p.wrap(err)
 }
 
-const pipelineCols = `name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, created_at, updated_at`
+const pipelineCols = `name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts::text, created_at, updated_at`
 
 func scanPipeline(sc interface{ Scan(...any) error }) (Pipeline, error) {
 	var p Pipeline
 	var y sql.NullString
-	err := sc.Scan(&p.Name, &p.ConfigPath, &p.EnvPath, &p.SystemdUnit, &p.LogFile, &p.PidFile, &y, &p.EnvEnc, &p.Created, &p.Updated)
+	var miss sql.NullTime
+	err := sc.Scan(&p.Name, &p.ConfigPath, &p.EnvPath, &p.SystemdUnit, &p.LogFile, &p.PidFile, &y, &p.EnvEnc, &p.Origin, &miss, &p.Conflicts, &p.Created, &p.Updated)
 	p.ConfigYAML, p.HasConfig = y.String, y.Valid
+	if miss.Valid {
+		p.MissingSince = miss.Time
+	}
 	return p, err
 }
 
-func (p *PG) UpsertPipeline(ctx context.Context, r Pipeline) error {
-	var y any
+func pipelineArgs(r Pipeline) []any {
+	r.normalize()
+	var y, miss any
 	if r.HasConfig {
 		y = r.ConfigYAML
 	}
-	_, err := p.db.ExecContext(ctx, `INSERT INTO pipelines (`+pipelineCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now(), now())
+	if !r.MissingSince.IsZero() {
+		miss = r.MissingSince
+	}
+	return []any{r.Name, r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile, y, r.EnvEnc, r.Origin, miss, r.Conflicts}
+}
+
+const pipelineInsert = `INSERT INTO pipelines (name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts, created_at, updated_at)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb, now(), now())`
+
+func (p *PG) UpsertPipeline(ctx context.Context, r Pipeline) error {
+	_, err := p.db.ExecContext(ctx, pipelineInsert+`
 		ON CONFLICT (name) DO UPDATE SET config_path = EXCLUDED.config_path, env_path = EXCLUDED.env_path,
 		  systemd_unit = EXCLUDED.systemd_unit, log_file = EXCLUDED.log_file, pid_file = EXCLUDED.pid_file,
-		  config_yaml = EXCLUDED.config_yaml, env_enc = EXCLUDED.env_enc, updated_at = now()`,
-		r.Name, r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile, y, r.EnvEnc)
+		  config_yaml = EXCLUDED.config_yaml, env_enc = EXCLUDED.env_enc, origin = EXCLUDED.origin,
+		  missing_since = EXCLUDED.missing_since, conflicts = EXCLUDED.conflicts, updated_at = now()`, pipelineArgs(r)...)
+	return p.wrap(err)
+}
+
+func (p *PG) CreatePipeline(ctx context.Context, r Pipeline) (bool, error) {
+	res, err := p.db.ExecContext(ctx, pipelineInsert+` ON CONFLICT (name) DO NOTHING`, pipelineArgs(r)...)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+func (p *PG) UpdatePipelineMeta(ctx context.Context, r Pipeline) error {
+	r.normalize()
+	var miss any
+	if !r.MissingSince.IsZero() {
+		miss = r.MissingSince
+	}
+	_, err := p.db.ExecContext(ctx, `UPDATE pipelines SET config_path = $2, env_path = $3, systemd_unit = $4, log_file = $5, pid_file = $6,
+		origin = $7, missing_since = $8, updated_at = now() WHERE name = $1`,
+		r.Name, r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile, r.Origin, miss)
+	return p.wrap(err)
+}
+
+func (p *PG) SetPipelineConflicts(ctx context.Context, name, conflicts string) error {
+	if conflicts == "" {
+		conflicts = "[]"
+	}
+	_, err := p.db.ExecContext(ctx, `UPDATE pipelines SET conflicts = $2::jsonb, updated_at = now() WHERE name = $1`, name, conflicts)
 	return p.wrap(err)
 }
 
@@ -230,13 +280,18 @@ func (p *PG) ListPipelines(ctx context.Context) ([]Pipeline, error) {
 }
 
 func (p *PG) DeletePipeline(ctx context.Context, name string) error {
-	_, err := p.db.ExecContext(ctx, `DELETE FROM pipelines WHERE name = $1`, name)
+	// Một transaction: không để lại trạng thái mong muốn "running" mồ côi (tự chạy lại nếu tên được dùng lại).
+	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return p.wrap(err)
 	}
-	_, _ = p.db.ExecContext(ctx, `DELETE FROM pipeline_desired WHERE name = $1`, name)
-	_, _ = p.db.ExecContext(ctx, `DELETE FROM wizards WHERE pipeline = $1`, name)
-	return nil
+	defer tx.Rollback() //nolint:errcheck
+	for _, q := range []string{`DELETE FROM pipelines WHERE name = $1`, `DELETE FROM pipeline_desired WHERE name = $1`, `DELETE FROM wizards WHERE pipeline = $1`} {
+		if _, err := tx.ExecContext(ctx, q, name); err != nil {
+			return p.wrap(err)
+		}
+	}
+	return p.wrap(tx.Commit())
 }
 
 func (p *PG) SetDesired(ctx context.Context, name, desired string) error {
@@ -296,6 +351,45 @@ func (p *PG) DeleteJob(ctx context.Context, id string) error {
 	return p.wrap(err)
 }
 
+func (p *PG) AppendJobOutput(ctx context.Context, id string, off int64, data []byte) error {
+	_, err := p.db.ExecContext(ctx, `INSERT INTO job_output (job_id, off, data) VALUES ($1,$2,$3) ON CONFLICT (job_id, off) DO NOTHING`, id, off, data)
+	return p.wrap(err)
+}
+
+func (p *PG) ReadJobOutput(ctx context.Context, id string, off int64, max int) ([]byte, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT off, data FROM job_output WHERE job_id = $1 AND off + length(data) > $2 AND off < $3 ORDER BY off`,
+		id, off, off+int64(max))
+	if err != nil {
+		return nil, p.wrap(err)
+	}
+	defer rows.Close()
+	var out []byte
+	for rows.Next() {
+		var o int64
+		var d []byte
+		if err := rows.Scan(&o, &d); err != nil {
+			return nil, p.wrap(err)
+		}
+		start := off + int64(len(out))
+		if o > start {
+			break
+		}
+		out = append(out, d[start-o:]...)
+		if len(out) >= max {
+			out = out[:max]
+			break
+		}
+	}
+	return out, p.wrap(rows.Err())
+}
+
+func (p *PG) JobOutputSize(ctx context.Context, id string) (int64, error) {
+	// Các chunk được ghi nối tiếp nhau nên offset cuối + độ dài là kích thước (giả định không có lỗ).
+	var n sql.NullInt64
+	err := p.db.QueryRowContext(ctx, `SELECT max(off + length(data)) FROM job_output WHERE job_id = $1`, id).Scan(&n)
+	return n.Int64, p.wrap(err)
+}
+
 func (p *PG) GetWizard(ctx context.Context, kind, pipeline string) ([]byte, bool, error) {
 	var d string
 	err := p.db.QueryRowContext(ctx, `SELECT data::text FROM wizards WHERE kind = $1 AND pipeline = $2`, kind, pipeline).Scan(&d)
@@ -317,7 +411,7 @@ func (p *PG) AppendAudit(ctx context.Context, r AuditRow) error {
 	return p.wrap(err)
 }
 
-func (p *PG) AppendAuditBatch(ctx context.Context, rows []AuditRow) error {
+func (p *PG) AppendAuditBatch(ctx context.Context, rows []AuditRow, progress *MetaKV) error {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return p.wrap(err)
@@ -330,6 +424,12 @@ func (p *PG) AppendAuditBatch(ctx context.Context, rows []AuditRow) error {
 	defer st.Close()
 	for _, r := range rows {
 		if _, err := st.ExecContext(ctx, r.Time, r.IP, r.Action, r.Pipeline, r.Result, string(r.Data)); err != nil {
+			return p.wrap(err)
+		}
+	}
+	if progress != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO web_meta (key, value) VALUES ($1,$2)
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, progress.Key, progress.Value); err != nil {
 			return p.wrap(err)
 		}
 	}

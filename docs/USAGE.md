@@ -873,13 +873,13 @@ sudo systemctl enable --now strand@orders-sync
 
 Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, sự cố thường gặp): [INSTALL.md](INSTALL.md).
 
-`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ 1 giờ), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng, chế độ sửa YAML và .env), **Logs**. Từ M3 có **thao tác**; M5 có **sửa cấu hình** và **tạo pipeline mới**; từ M4 có **wizard Repair và Promote** (đoạn dưới). REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
+`strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ: 1 giờ trong RAM; chế độ PostgreSQL thêm bộ chọn 6 h, 24 h, 7 d đọc từ lịch sử trong DB và giữ biểu đồ qua lần khởi động lại web), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng, chế độ sửa YAML và .env), **Logs**. Từ M3 có **thao tác**; M5 có **sửa cấu hình** và **tạo pipeline mới**; từ M4 có **wizard Repair và Promote** (đoạn dưới). REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 
 **Chỉnh tốc độ snapshot trên web.** Form tạo pipeline có mục "Snapshot speed & safety" (tùy chọn), và tab Config có thẻ **Tuning** cho pipeline đang có: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.*` (`strand_query_p99.max_ratio`, `replica_lag.max`), `resources.workers.max` (mục 6.2, 8.1). Chỉ gồm khóa đã có tác dụng, không gồm khóa ở 6.3. Lưu qua đường sửa cấu hình thường (validate, diff, `.bak`), có hiệu lực sau restart; đổi nóng tốc độ đọc dùng Throttle (tab Graph). `GET/POST /api/v1/pipelines/{name}/tuning` trong `docs/WEB-API.md`.
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
-**Kho metadata PostgreSQL (`database`, dùng cho docker compose).** Mặc định web giữ trạng thái trong file như mô tả bên dưới. Đặt `database.dsn` trong `web.yaml` hoặc biến `STRAND_WEB_DATABASE_DSN` (biến thắng file) thì web lưu trong PostgreSQL:
+**Kho metadata PostgreSQL (`database`; chế độ khuyến nghị, mặc định của docker compose).** Không có DSN thì web giữ trạng thái trong file như mô tả bên dưới (cài đặt nhỏ). Chuyển một bản cài file sang DB: `strand web db migrate` (dry-run, nhập, kiểm chứng); xuất DB ra file để sao lưu hoặc quay lại: `strand web db export` (INSTALL.md mục 11). Đặt `database.dsn` trong `web.yaml` hoặc biến `STRAND_WEB_DATABASE_DSN` (biến thắng file) thì web lưu trong PostgreSQL:
 
 ```yaml
 database:
@@ -892,14 +892,21 @@ shutdown_stop_pipelines: true   # web thoát (SIGTERM) thì dừng êm pipeline 
 | --- | --- | --- |
 | Hash mật khẩu admin, hash token | `web.yaml` (`password_hash`, `api_token_hash`) | bảng `admin`; `strand web passwd/token/init` ghi vào DB khi có DSN, có hiệu lực ngay (không cần restart) |
 | Phiên đăng nhập | RAM (restart là đăng xuất) | bảng `sessions` (chỉ sha256 của id cookie); luật idle 30 phút / tối đa 12 giờ giữ nguyên; restart không đăng xuất |
-| Pipeline tạo từ web | `<state_dir>/pipelines.json` + `<config_dir>/<name>.yaml|.env` | bảng `pipelines` (YAML là nguồn sự thật; `.env` mã hóa AES-GCM, chỉ khi có `STRAND_WEB_SECRET_KEY`); file được dựng lại từ DB trước validate/start (0640/0600) vì CLI `strand` chỉ đọc file |
+| Danh sách pipeline (tạo từ web, khai báo `pipelines:` trong web.yaml, tìm thấy bởi `scan`) | `<state_dir>/pipelines.json` + web.yaml + glob | bảng `pipelines` cho **mọi** pipeline (cột `origin`: `created`, `web.yaml`, `scan`). YAML là nguồn sự thật; `.env` mã hóa AES-GCM (chỉ khi có `STRAND_WEB_SECRET_KEY`); file được dựng lại từ DB trước validate/start/job (0640/0600) vì CLI `strand` chỉ đọc file. Xem "Registry trong DB" bên dưới |
 | Trạng thái mong muốn running/stopped | không có | bảng `pipeline_desired`; Start/Restart đặt `running`, Stop đặt `stopped` (chế độ nền); web khởi động thì chạy lại pipeline `running` đang không chạy |
-| Lịch sử job | `<state_dir>/jobs/<id>.json` | bảng `jobs` (output vẫn là file `<id>.log`) |
+| Lịch sử job | `<state_dir>/jobs/<id>.json` + `<id>.log` | bảng `jobs` + `job_output` (10 MB đầu mỗi job; `<id>.log` chỉ là spool khi job chạy) |
+| Cài đặt web (`scan`, `config_dir`, cookie, X-Forwarded-For, dừng pipeline khi thoát, chu kỳ lấy mẫu) | `web.yaml` | trang **Settings** / bảng `web_settings`; ưu tiên: env > DB > web.yaml > mặc định |
 | Wizard Repair/Promote | `<state_dir>/wizards/*.json` | bảng `wizards` |
 | Audit log | `<state_dir>/audit.log` | bảng `audit_log` chỉ-thêm (trigger chặn UPDATE/DELETE/TRUNCATE). `audit: both` (mặc định) vẫn ghi cả file làm bản sao khi mất DB; `db` chỉ DB; `file` chỉ file |
-| Đồ thị/số liệu 1 giờ | RAM | RAM |
+| Đồ thị/số liệu | RAM, 1 giờ | bảng `metric_samples` (24 giờ) + `metric_samples_1m` (7 ngày); biểu đồ 1 h / 6 h / 24 h / 7 d |
 
-`web.yaml` khai báo `pipelines:` và `scan:` vẫn hoạt động như cũ ở cả hai chế độ (khai báo tường minh thắng; pipeline quét theo glob không nằm trong DB nhưng vẫn có trạng thái mong muốn). `.env` không có khóa mã hóa thì chỉ nằm trên đĩa.
+**Registry trong DB (chế độ DB).** Pipeline khai báo trong `web.yaml` và file tìm thấy bởi `scan` được **phát hiện** vào bảng `pipelines` ở lần quét đầu thấy chúng (chụp YAML, và `.env` mã hóa khi có khóa); từ đó bản DB là nguồn sự thật như pipeline tạo từ web: sửa trên tab Config ghi cả DB lẫn file, trạng thái mong muốn áp dụng. Thứ tự ưu tiên khi trùng tên: khai báo trong `web.yaml` > pipeline tạo từ web > `scan`; đường dẫn/unit của pipeline khai báo lấy theo `web.yaml`. Quy tắc với file trên đĩa:
+
+- **Sửa tay file trên đĩa**: trước validate/start/job, nếu file khác bản DB thì bản DB được ghi lại, bản trên đĩa được **cất** thành `<file>.conflict-<thời gian UTC>` (quyền không rộng hơn file gốc), audit `config.conflict`, và trang pipeline có banner với hai nút: **Adopt disk version** (đi qua đường sửa cấu hình thường: validate, `.bak`, ghi DB + file; validate lỗi thì không đổi gì) hoặc **Keep database version**. Không có ghi đè lặng lẽ.
+- **Entry `web.yaml` bị xóa hoặc file scan biến mất**: pipeline **được giữ** trong DB, đánh dấu (`missing_since`), có cảnh báo ở Overview và banner với **Restore file** (dựng lại file từ DB) hoặc **Remove from registry** (gõ lại tên; xóa dòng DB và trạng thái mong muốn, giữ file và lịch sử job). Pipeline bị đánh dấu không được tự dựng lại file.
+- Chế độ file giữ nguyên hành vi cũ (không có DB, không có cất bản xung đột).
+
+`.env` không có khóa mã hóa thì chỉ nằm trên đĩa.
 
 Lược đồ do migration nhúng sẵn (`internal/web/store/migrations/NNN_*.sql`) tạo lúc khởi động: mỗi file một transaction, bảng `schema_migrations`, `pg_advisory_lock` nên nhiều instance khởi động cùng lúc không đạp nhau; chạy lại là no-op. Web thử kết nối lại với backoff (0,5 s tới 5 s, tối đa 60 s) rồi mới lỗi; lỗi và log luôn che mật khẩu DSN. `GET /healthz` (không cần đăng nhập) trả `200 {"status":"ok","database":{"mode":"postgres","ok":true}}` hoặc `503` khi DB hỏng; chế độ file trả `"database":{"mode":"file"}`.
 
@@ -989,7 +996,7 @@ Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2).
 
 `*` có hộp thoại xác nhận. `**` phải gõ lại đúng tên pipeline (API: trường `confirm_name`).
 
-**Job verify.** Chạy nền dưới web, output hiện trực tiếp ở `/jobs/<id>` (cập nhật mỗi giây, mật khẩu/DSN bị che). Mỗi pipeline tối đa **một** job đang chạy: bấm thêm thì bị từ chối (409). Lịch sử (JSON + file output mỗi job, 100 job gần nhất mỗi pipeline) nằm ở `<state_dir>/jobs/`, xem ở tab Jobs của pipeline và trang Jobs chung; có nút Cancel (SIGTERM). Verify nhận một bảng (`schema.table`) hoặc, với `full`, tất cả bảng. Điều kiện an toàn và exit code là của CLI (lệch dữ liệu: exit 5, hiện ở trạng thái job `exit 5`). Khi web khởi động lại giữa lúc job chạy, tiến trình verify vẫn chạy tiếp (process group riêng, output ghi thẳng vào file) và được web mới nhận nuôi; mã thoát của job loại này không đọc được nên để trống.
+**Job verify.** Chạy nền dưới web, output hiện trực tiếp ở `/jobs/<id>` (cập nhật mỗi giây, mật khẩu/DSN bị che). Mỗi pipeline tối đa **một** job đang chạy: bấm thêm thì bị từ chối (409). Lịch sử (JSON + file output mỗi job, 100 job gần nhất mỗi pipeline) nằm ở `<state_dir>/jobs/` (chế độ PostgreSQL: bảng `jobs` + `job_output`, giữ 10 MB đầu của output mỗi job kèm dòng ghi chú khi bị cắt; file `<id>.log` chỉ là spool khi job chạy), xem ở tab Jobs của pipeline và trang Jobs chung; có nút Cancel (SIGTERM). Verify nhận một bảng (`schema.table`) hoặc, với `full`, tất cả bảng. Điều kiện an toàn và exit code là của CLI (lệch dữ liệu: exit 5, hiện ở trạng thái job `exit 5`). Khi web khởi động lại giữa lúc job chạy, tiến trình verify vẫn chạy tiếp (process group riêng, output ghi thẳng vào file) và được web mới nhận nuôi; mã thoát của job loại này không đọc được nên để trống.
 
 **Wizard Repair (M4).** Tab **Repair** của pipeline. Bốn bước, mỗi bước là một thao tác người dùng bấm; server ép đúng thứ tự (gọi bước 3 trước bước 2 thì 409):
 

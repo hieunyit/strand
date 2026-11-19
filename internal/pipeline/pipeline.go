@@ -1951,7 +1951,11 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 	return nil
 }
 
-func (p *Pipeline) pace(ctx context.Context, chunkBytes int64) error {
+// readStart: lúc bắt đầu đọc chunk vừa xong. Thời gian đọc + flush đã trôi qua được trừ vào khoảng giãn
+// (tốc độ đọc nguồn trung bình = chi phí / R tính từ lúc đọc), thay vì chờ trọn chi phí/R SAU flush — cách
+// cũ làm tốc độ đọc thực tế thấp hơn R đã cấu hình (vd. soft 500 mà chỉ ~350 token/s khi flush ~2 s).
+// readStart rỗng: tính từ bây giờ (hành vi cũ).
+func (p *Pipeline) pace(ctx context.Context, chunkBytes int64, readStart time.Time) error {
 	if err := p.paceGate(ctx); err != nil {
 		return err
 	}
@@ -1962,7 +1966,11 @@ func (p *Pipeline) pace(ctx context.Context, chunkBytes int64) error {
 		return nil
 	}
 	cost := chunkReadPages(chunkBytes, p.curAvgRow.Load(), p.snapChunkRows.Load())
-	wait := p.snapBucket.reserve(time.Now(), time.Duration(cost/rate*float64(time.Second)))
+	now := time.Now()
+	if readStart.IsZero() || readStart.After(now) {
+		readStart = now
+	}
+	wait := p.snapBucket.reserve(readStart, now, time.Duration(cost/rate*float64(time.Second)))
 	if wait > 0 {
 		select {
 		case <-ctx.Done():
@@ -2068,23 +2076,27 @@ func (p *Pipeline) nextChunkRows(_ model.TableID, st snapshot.ChunkStat) int64 {
 	return n
 }
 
-// tokenBucket giãn nhịp kiểu trả sau (virtual scheduling): chunk vừa đọc tốn d = chi phí / R; thời điểm
-// được đọc chunk kế tiếp (tat) lùi thêm d, tính từ max(tat, now). Một reader: chờ đúng d sau mỗi chunk
-// (như trước). Nhiều reader: các khoản d cộng dồn, nên tổng tốc độ vẫn ≤ R.
+// tokenBucket giãn nhịp kiểu trả sau (virtual scheduling): chunk đọc lúc start tốn d = chi phí / R; thời
+// điểm được đọc chunk kế tiếp (tat) = max(tat, start) + d. Một reader: chunk kế tiếp bắt đầu đọc ≥ d sau
+// lúc bắt đầu đọc chunk trước (thời gian đọc/flush đã nằm trong d). Nhiều reader: các khoản d cộng dồn,
+// nên tổng tốc độ vẫn ≤ R.
 type tokenBucket struct {
 	mu  sync.Mutex
 	tat time.Time
 }
 
-// reserve ghi nhận chi phí d tại now và trả thời gian phải chờ.
-func (b *tokenBucket) reserve(now time.Time, d time.Duration) time.Duration {
+// reserve ghi nhận chi phí d của một chunk bắt đầu đọc lúc start và trả thời gian còn phải chờ tính từ now.
+func (b *tokenBucket) reserve(start, now time.Time, d time.Duration) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.tat.Before(now) {
-		b.tat = now
+	if b.tat.Before(start) {
+		b.tat = start
 	}
 	b.tat = b.tat.Add(d)
-	return b.tat.Sub(now)
+	if w := b.tat.Sub(now); w > 0 {
+		return w
+	}
+	return 0
 }
 
 func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {

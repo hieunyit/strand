@@ -41,9 +41,31 @@ type Pipeline struct {
 	ConfigYAML string
 	HasConfig  bool
 	// EnvEnc is the AES-GCM sealed .env (nil when no secret key was configured).
-	EnvEnc  []byte
-	Created time.Time
-	Updated time.Time
+	EnvEnc []byte
+	// Origin: created (web) | web.yaml (declared) | scan (discovered by a scan glob). "" = created.
+	Origin string
+	// MissingSince: non-zero when a declared/scanned pipeline's web.yaml entry or file has gone.
+	MissingSince time.Time
+	// Conflicts: JSON list of on-disk edits set aside because the database copy won ("" = none).
+	Conflicts string
+	Created   time.Time
+	Updated   time.Time
+}
+
+// Pipeline origins.
+const (
+	OriginCreated = "created"
+	OriginFile    = "web.yaml"
+	OriginScan    = "scan"
+)
+
+func (p *Pipeline) normalize() {
+	if p.Origin == "" {
+		p.Origin = OriginCreated
+	}
+	if p.Conflicts == "" {
+		p.Conflicts = "[]"
+	}
 }
 
 // Job is one job-history row; Data is the JSON of web.JobStatus.
@@ -65,6 +87,9 @@ type AuditRow struct {
 	Result   string
 	Data     []byte
 }
+
+// MetaKV is one web_meta key/value.
+type MetaKV struct{ Key, Value string }
 
 // Desired states.
 const (
@@ -92,6 +117,15 @@ type Store interface {
 	UpsertPipeline(ctx context.Context, p Pipeline) error
 	GetPipeline(ctx context.Context, name string) (Pipeline, bool, error)
 	ListPipelines(ctx context.Context) ([]Pipeline, error)
+	// CreatePipeline inserts p only if no row has that name (discovery: never overwrites). Reports whether
+	// it inserted.
+	CreatePipeline(ctx context.Context, p Pipeline) (bool, error)
+	// UpdatePipelineMeta updates only the registry metadata of an existing row (paths, unit, origin,
+	// missing_since), never config_yaml/env_enc/conflicts: safe against a concurrent config edit.
+	UpdatePipelineMeta(ctx context.Context, p Pipeline) error
+	// SetPipelineConflicts replaces the conflicts JSON of a row.
+	SetPipelineConflicts(ctx context.Context, name, conflicts string) error
+	// DeletePipeline removes the registry row and its desired state (files are left alone).
 	DeletePipeline(ctx context.Context, name string) error
 
 	SetDesired(ctx context.Context, name, desired string) error
@@ -100,18 +134,31 @@ type Store interface {
 	UpsertJob(ctx context.Context, j Job) error
 	ListJobs(ctx context.Context) ([]Job, error)
 	DeleteJob(ctx context.Context, id string) error
+	// AppendJobOutput stores data at byte offset off of the job's output. Idempotent: a chunk already stored
+	// at off is kept (re-shipping after a restart is harmless). The job row must exist.
+	AppendJobOutput(ctx context.Context, id string, off int64, data []byte) error
+	// ReadJobOutput returns up to max bytes of the job output starting at off (shorter at the end).
+	ReadJobOutput(ctx context.Context, id string, off int64, max int) ([]byte, error)
+	// JobOutputSize is the number of contiguous bytes stored from offset 0.
+	JobOutputSize(ctx context.Context, id string) (int64, error)
 
 	GetWizard(ctx context.Context, kind, pipeline string) ([]byte, bool, error)
 	PutWizard(ctx context.Context, kind, pipeline string, data []byte) error
 
 	AppendAudit(ctx context.Context, r AuditRow) error
-	// AppendAuditBatch inserts many rows in one transaction (import of audit.log).
-	AppendAuditBatch(ctx context.Context, rows []AuditRow) error
+	// AppendAuditBatch inserts many rows in one transaction (import of audit.log). A non-nil progress is
+	// upserted into web_meta in the same transaction, so an interrupted import can resume exactly where it
+	// stopped (audit_log is append-only: duplicates could never be removed).
+	AppendAuditBatch(ctx context.Context, rows []AuditRow, progress *MetaKV) error
 	// ListAudit returns the newest n rows, newest first.
 	ListAudit(ctx context.Context, n int) ([]AuditRow, error)
 
 	MetaGet(ctx context.Context, key string) (string, bool, error)
 	MetaSet(ctx context.Context, key, value string) error
+
+	MetricsStore
+	SettingsStore
+	ExportStore
 
 	// Central backup catalog metadata; payloads stay in object storage.
 	CreateBackup(ctx context.Context, r backup.Record) (backup.Record, bool, error)

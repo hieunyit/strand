@@ -98,6 +98,6 @@ func (s *Server) apiPipelineTab(w http.ResponseWriter, r *http.Request, tab stri
 		n, _ := strconv.Atoi(r.URL.Query().Get("lines"))
 		writeJSON(w, http.StatusOK, s.logsView(ctx, p, n))
 	case "series":
-		writeJSON(w, http.StatusOK, s.seriesView(p))
+		writeJSON(w, http.StatusOK, s.seriesView(p, r.URL.Query().Get("range")))
 	}
 }

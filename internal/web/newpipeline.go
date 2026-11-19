@@ -124,8 +124,8 @@ func isWritableDir(dir string) bool {
 // 2. /etc/strand nếu ghi được
 // 3. <state_dir>/pipelines
 func (s *Server) ConfigDir() string {
-	if s.cfg.ConfigDir != "" {
-		return s.cfg.ConfigDir
+	if d := s.settingStr("config_dir"); d != "" {
+		return d
 	}
 	if isWritableDir("/etc/strand") {
 		return "/etc/strand"
@@ -755,7 +755,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	// Đăng ký pipeline vào registry:
 	// Nếu configDir không khớp bất kỳ mẫu scan nào, ghi vào <state_dir>/pipelines.json
 	coveredByScan := false
-	for _, pat := range s.cfg.Scan {
+	for _, pat := range s.settingList("scan") {
 		if matched, _ := filepath.Match(pat, yamlPath); matched {
 			coveredByScan = true
 			break
@@ -793,8 +793,14 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		}
 	}
 
-	// Chạy validate
-	vOut, vCode, vErr := s.runStrand(ctx, p, "validate", "-c", yamlPath)
+	// Chạy validate (và plan), mỗi lệnh có hạn giờ: nguồn/đích không trả lời (tường lửa nuốt gói) làm lệnh
+	// treo nhiều phút, vượt WriteTimeout của server và client nhận phản hồi rỗng dù pipeline đã được tạo.
+	vctx, vcancel := context.WithTimeout(ctx, newPipelineCheckTimeout)
+	vOut, vCode, vErr := s.runStrand(vctx, p, "validate", "-c", yamlPath)
+	if vctx.Err() == context.DeadlineExceeded {
+		vOut += fmt.Sprintf("\n[strand web: validate stopped after %s: the source or target did not answer (check host, port and firewall)]", newPipelineCheckTimeout)
+	}
+	vcancel()
 	valExit := 0
 	if vCode != nil {
 		valExit = *vCode
@@ -804,7 +810,12 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	valOK := vErr == nil && valExit == 0
 
 	// Chạy plan
-	pOut, pCode, _ := s.runStrand(ctx, p, "plan", "-c", yamlPath)
+	pctx, pcancel := context.WithTimeout(ctx, newPipelineCheckTimeout)
+	pOut, pCode, _ := s.runStrand(pctx, p, "plan", "-c", yamlPath)
+	if pctx.Err() == context.DeadlineExceeded {
+		pOut += fmt.Sprintf("\n[strand web: plan stopped after %s: the source or target did not answer]", newPipelineCheckTimeout)
+	}
+	pcancel()
 	planExit := 0
 	if pCode != nil {
 		planExit = *pCode
@@ -942,6 +953,9 @@ func (s *Server) pageNewPipeline(w http.ResponseWriter, r *http.Request, sess *S
 	s.render(w, "new_pipeline", sess, data)
 }
 
+// newPipelineCheckTimeout: hạn giờ của validate và của plan khi tạo pipeline (biến để test rút ngắn).
+var newPipelineCheckTimeout = 60 * time.Second
+
 func (s *Server) apiPipelineCreate(w http.ResponseWriter, r *http.Request, sess *Session) {
 	var opts NewPipelineOpts
 	ct := r.Header.Get("Content-Type")
@@ -958,6 +972,8 @@ func (s *Server) apiPipelineCreate(w http.ResponseWriter, r *http.Request, sess 
 		}
 	}
 
+	// validate + plan có thể mất tới 2 x newPipelineCheckTimeout: nới hạn ghi của riêng request này.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(2*newPipelineCheckTimeout + 30*time.Second))
 	res, err := s.createPipeline(r.Context(), opts, s.clientIP(r))
 	if err != nil {
 		var ae *ActionError
