@@ -79,6 +79,7 @@ func (s *Server) resumeBackupJobs(ctx context.Context) error {
 	if s.db == nil || !s.isActive() {
 		return nil
 	}
+	s.startBackupMaintenance()
 	jobs, err := s.db.st.ListBackupJobs(ctx)
 	if err != nil {
 		return err
@@ -166,6 +167,9 @@ func (s *Server) validateBackupJob(j backup.Job) error {
 	if err := backup.ValidateJob(j); err != nil {
 		return err
 	}
+	if !j.IsCustom() {
+		return nil // built-in methods: Strand builds the native tool's argv itself
+	}
 	if err := backupCommandAllowed(j.Command); err != nil {
 		return err
 	}
@@ -201,8 +205,21 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 	if s.cfg.SourcePath != "" {
 		args = append(args, "--config", s.cfg.SourcePath)
 	}
+	if !j.IsCustom() {
+		args = append(args, "backup", "schedule", "--job-id", j.ID)
+		if once {
+			args = append(args, "--once")
+		}
+		return s.startBackupJobProcess(j, once, args)
+	}
 	args = append(args, "backup", "schedule", "--every", (time.Duration(j.EverySeconds) * time.Second).String(),
 		"--artifact", j.ArtifactTemplate, "--manifest", j.ManifestTemplate, "--bucket", j.Bucket, "--job-id", j.ID)
+	if j.Compress {
+		args = append(args, "--compress")
+	}
+	if j.Encrypt {
+		args = append(args, "--encrypt")
+	}
 	if j.CleanupLocal {
 		args = append(args, "--cleanup-local")
 	}
@@ -222,6 +239,10 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 		}
 	}
 	args = append(args, "--", j.Command)
+	return s.startBackupJobProcess(j, once, args)
+}
+
+func (s *Server) startBackupJobProcess(j backup.Job, once bool, args []string) (string, error) {
 	kind := "backup-schedule"
 	if once {
 		kind = "backup-run"
