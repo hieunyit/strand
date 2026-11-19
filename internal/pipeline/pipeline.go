@@ -146,8 +146,8 @@ type Pipeline struct {
 	// không bao giờ "synced" — admin socket mở sớm hơn lúc biết có bootstrap hay không.
 	running       atomic.Bool
 	retentionRisk atomic.Bool
-	// strand top khi bootstrap: bảng đang snapshot, số bảng, ước lượng row; breaker để log/hiện lý do.
-	snapCurTable    atomic.Value // string
+	// strand top khi bootstrap: số bảng, ước lượng row; breaker để log/hiện lý do. Bảng đang snapshot (có thể
+	// nhiều, max_parallel): snapRuns.
 	snapTablesTotal atomic.Int64
 	snapTablesDone  atomic.Int64
 	snapRowsEst     atomic.Int64
@@ -165,8 +165,11 @@ type Pipeline struct {
 	gov             governor.Governor
 	govAlgo         string
 	govTick         time.Duration
-	curAvgRow       atomic.Int64
-	snapChunkRows   atomic.Int64 // cỡ chunk hiệu lực gần nhất (ước lượng chi phí chunk khi không biết byte)
+	// curAvgRow / snapChunkRows: giá trị mặc định cho bảng KHÔNG có snapRun (chỉ test gọi pace/nextChunkRows
+	// trực tiếp); bảng đang snapshot dùng trạng thái riêng của nó (snapRun.avgRow / chunkRows) — trước đây
+	// hai biến này là của cả pipeline, bảng chạy song song ghi đè lẫn nhau.
+	curAvgRow     atomic.Int64
+	snapChunkRows atomic.Int64
 	// adaptiveChunks: cỡ chunk theo luật 250 ms của governor (chunk_rows = auto, governor ≠ static).
 	adaptiveChunks bool
 	// snapBucket: token bucket chung của mọi reader snapshot (bootstrap và `snapshot add` chạy song song
@@ -175,6 +178,13 @@ type Pipeline struct {
 	// snapReaders / snapGated: số reader snapshot đang chạy / đang bị giữ ở cổng của pace (cửa sổ L).
 	snapReaders atomic.Int32
 	snapGated   atomic.Int32
+	// snapPacing: số reader đang ở trong pace (giãn nhịp / cổng) — không sắp tới barrier (xem barrierGroup).
+	snapPacing atomic.Int32
+	// snapRuns: bảng đang snapshot (bootstrap song song và snapshot add) với trạng thái riêng từng bảng.
+	snapRunMu sync.Mutex
+	snapRuns  map[model.TableID]*snapRun
+	// bgroup: lần dừng router dùng chung của các flush chunk (barrier, snapshot_parallel.go).
+	bgroup barrierGroup
 	// pgSignals: bộ đọc tín hiệu governor của source PG (nil với source MySQL).
 	pgSignals *governor.PGDBSignalReader
 	touched   *touchedKeys
@@ -186,6 +196,10 @@ type Pipeline struct {
 	// kết nối song song; IsRegistered chỉ đúng sau khi snapshot đã đăng ký range (review R14).
 	snapAddMu  sync.Mutex
 	snapAdding map[model.TableID]bool
+	// snapPoolRunning: pool bootstrap (runSnapshots) chưa xong; snapPoolDeferred: pool đã xong nhưng còn
+	// snapshot add chạy — "bootstrap finished" được ghi khi cái cuối cùng xong (maybeFinishBootstrap).
+	snapPoolRunning  bool
+	snapPoolDeferred bool
 
 	failMu  sync.Mutex
 	failErr error
@@ -710,6 +724,18 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 		p.writers = append(p.writers, w)
 	}
+	// Kết nối target: mỗi writer CDC giữ ≤ 1 kết nối (một transaction mỗi batch), mỗi bảng snapshot đang
+	// flush giữ 1 (flush trong barrier, song song tới max_parallel), cộng compactor/fence/truy vấn lẻ. Pool
+	// mặc định 64 đủ cho workers.max ≤ 8 và max_parallel ≤ 32; cấu hình lớn hơn thì nới pool để flush
+	// snapshot không giành kết nối của writer (và ngược lại).
+	snapN := p.snapParallel()
+	if need := total + snapN + 8; need > 64 {
+		p.dst.SetMaxOpenConns(need)
+	}
+	if p.srcEngine == model.EnginePG && p.cfg.Bootstrap.Logical.MaxParallel > 1 {
+		p.log.Warn("bootstrap.logical.max_parallel is ignored for PostgreSQL sources: tables are snapshotted one at a time",
+			"max_parallel", p.cfg.Bootstrap.Logical.MaxParallel)
+	}
 	ccfg := checkpoint.DefaultCompactorConfig(p.id, p.epoch)
 	ccfg.Interval = durationOr(p.cfg.Checkpoint.FlushEvery, 500*time.Millisecond)
 	p.comp = checkpoint.NewCompactor(p.dst, p.store, p.id, p.srcEngine, p.dstEngine, ccfg)
@@ -761,7 +787,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.posMode {
 		p.snap.Pos = &posWatermarks{db: p.src, base: p.binlogBase}
 	}
-	p.snap.Pace = p.pace
+	p.snap.Pace = p.paceTable
+	p.snap.OnFlushed = p.noteSnapFlushed
 	p.snap.OnPhase = func(table model.TableID, startPK, endPK int64, phase string, elapsed time.Duration) {
 		p.log.Info("snapshot chunk phase", "table", table.String(), "start_pk", startPK, "end_pk", endPK,
 			"phase", phase, "duration", elapsed.Round(time.Millisecond).String())
@@ -988,6 +1015,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	p.running.Store(true)
 	p.log.Info("pipeline running", "workers", nWorkers, "strict", p.strict, "snapshot_pending", len(pending),
+		"snapshot_max_parallel", snapN,
 		"start", applied.(fmt.Stringer).String())
 
 	// --- Chờ dừng ---
@@ -1902,19 +1930,6 @@ func (p *Pipeline) deltaFor(ctx context.Context, mine checkpoint.AppliedSet) (st
 // Snapshot (chế độ A và snapshot add)
 // ---------------------------------------------------------------------------
 
-// barrier dừng router, chờ mọi Txn đã nhận được commit, rồi chạy fn (02 §5).
-func (p *Pipeline) barrier(ctx context.Context, fn func() error) error {
-	p.routeMu.Lock()
-	defer p.routeMu.Unlock()
-	if !p.drain(10 * time.Minute) {
-		if err := p.failed(); err != nil {
-			return err
-		}
-		return fmt.Errorf("snapshot barrier: pipeline did not drain")
-	}
-	return fn()
-}
-
 // rendezvous chờ router đã xử lý mọi GTID trong high watermark.
 func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) error {
 	if p.posMode {
@@ -1956,6 +1971,14 @@ func (p *Pipeline) rendezvous(ctx context.Context, high checkpoint.AppliedSet) e
 // cũ làm tốc độ đọc thực tế thấp hơn R đã cấu hình (vd. soft 500 mà chỉ ~350 token/s khi flush ~2 s).
 // readStart rỗng: tính từ bây giờ (hành vi cũ).
 func (p *Pipeline) pace(ctx context.Context, chunkBytes int64, readStart time.Time) error {
+	return p.paceTable(ctx, model.TableID{}, chunkBytes, readStart)
+}
+
+// paceTable: pace của một chunk của bảng table (snapshot.MySQLSnapshotter.Pace). Mọi bảng chạy song song
+// cùng qua paceGate và cùng chia token bucket snapBucket: tổng tốc độ đọc nguồn vẫn ≤ R.
+func (p *Pipeline) paceTable(ctx context.Context, table model.TableID, chunkBytes int64, readStart time.Time) error {
+	p.snapPacing.Add(1)
+	defer p.snapPacing.Add(-1)
 	if err := p.paceGate(ctx); err != nil {
 		return err
 	}
@@ -1965,7 +1988,11 @@ func (p *Pipeline) pace(ctx context.Context, chunkBytes int64, readStart time.Ti
 	if rate <= 0 {
 		return nil
 	}
-	cost := chunkReadPages(chunkBytes, p.curAvgRow.Load(), p.snapChunkRows.Load())
+	avgRow, chunkRows := p.curAvgRow.Load(), p.snapChunkRows.Load()
+	if r := p.snapRunOf(table); r != nil {
+		avgRow, chunkRows = r.avgRow.Load(), r.chunkRows.Load()
+	}
+	cost := chunkReadPages(chunkBytes, avgRow, chunkRows)
 	now := time.Now()
 	if readStart.IsZero() || readStart.After(now) {
 		readStart = now
@@ -2059,8 +2086,15 @@ func (p *Pipeline) backgroundRate() float64 {
 // nextChunkRows: luật cỡ chunk của governor (02 §7) — rows · clamp(250 ms / thời gian chunk trước,
 // 0,5, 2), rồi chi phí ước lượng ≤ R · 0,25 s với R = backgroundRate. Chi phí một row tính theo trang
 // 16 KiB từ byte thực đọc (không có thì AVG_ROW_LENGTH).
-func (p *Pipeline) nextChunkRows(_ model.TableID, st snapshot.ChunkStat) int64 {
-	avg := p.curAvgRow.Load()
+//
+// Trạng thái (avg row, cỡ chunk hiện hành) là của TỪNG BẢNG (snapRun): các bảng chạy song song không
+// đọc/ghi đè cỡ chunk của nhau.
+func (p *Pipeline) nextChunkRows(table model.TableID, st snapshot.ChunkStat) int64 {
+	avgRow, chunkRows := &p.curAvgRow, &p.snapChunkRows
+	if r := p.snapRunOf(table); r != nil {
+		avgRow, chunkRows = &r.avgRow, &r.chunkRows
+	}
+	avg := avgRow.Load()
 	if st.ReadRows > 0 && st.Bytes > 0 {
 		avg = st.Bytes / st.ReadRows
 	}
@@ -2069,10 +2103,10 @@ func (p *Pipeline) nextChunkRows(_ model.TableID, st snapshot.ChunkStat) int64 {
 	}
 	rows := st.Rows
 	if rows <= 0 {
-		rows = p.snapChunkRows.Load()
+		rows = chunkRows.Load()
 	}
 	n := int64(governor.NextChunkRows(int(rows), st.Elapsed, float64(avg)/16384, p.backgroundRate()))
-	p.snapChunkRows.Store(n)
+	chunkRows.Store(n)
 	return n
 }
 
@@ -2099,26 +2133,10 @@ func (b *tokenBucket) reserve(start, now time.Time, d time.Duration) time.Durati
 	return 0
 }
 
-func (p *Pipeline) runSnapshots(ctx context.Context, tables []model.TableID) {
-	p.snapTablesTotal.Store(int64(len(tables)))
-	p.snapRowsEst.Store(p.estimateRows(ctx, tables))
-	for _, id := range tables {
-		p.snapCurTable.Store(id.String())
-		if err := p.snapshotTable(ctx, id); err != nil {
-			if ctx.Err() == nil {
-				p.fail(fmt.Errorf("snapshot %s: %w", id, err))
-			}
-			return
-		}
-	}
-	p.bootstrap.Store(false)
-	p.retentionRisk.Store(false)
-	p.log.Info("bootstrap finished: pipeline synced")
-}
-
 func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	m := p.table(id)
-	p.curAvgRow.Store(m.AvgRow)
+	p.startSnapRun(id, m.AvgRow)
+	defer p.endSnapRun(id)
 	start := time.Now()
 	p.log.Info("snapshot start", "table", id.String())
 	if pl, ok := p.state.Plan(id.String()); ok && !pl.Empty && pl.NextPK > pl.MinPK {
@@ -2322,14 +2340,15 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	p.bootstrap.Store(true)
 	started = true
 	go func() {
-		defer p.releaseSnapshotAdd(id)
-		if err := p.snapshotTable(ctx, id); err != nil && ctx.Err() == nil {
-			p.fail(fmt.Errorf("snapshot add %s: %w", id, err))
+		err := p.snapshotTable(ctx, id)
+		p.releaseSnapshotAdd(id)
+		if err != nil {
+			if ctx.Err() == nil {
+				p.fail(fmt.Errorf("snapshot add %s: %w", id, err))
+			}
 			return
 		}
-		if p.snap.Manager.TableCount() == 0 {
-			p.bootstrap.Store(false)
-		}
+		p.maybeFinishBootstrap()
 	}()
 	return nil
 }

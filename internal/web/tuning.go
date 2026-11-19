@@ -18,7 +18,7 @@ import (
 )
 
 // Tuning: các khóa điều chỉnh tốc độ/an toàn của snapshot, sửa qua Web UI/API. Chỉ gồm khóa ĐÃ có tác dụng
-// (USAGE §6.2); khóa chỉ được nhận mà chưa dùng (§6.3, ví dụ bootstrap.logical.max_parallel) cố ý không đưa vào.
+// (USAGE §6.2); khóa chỉ được nhận mà chưa dùng (§6.3) cố ý không đưa vào.
 // Lưu bằng cách sửa node YAML tại chỗ (giữ comment và khóa khác) rồi đi qua saveConfigContent
 // (validate -> sao lưu -> ghi nguyên tử).
 
@@ -55,6 +55,9 @@ var tuningDefs = []tuningDef{
 	{Key: "chunk_rows", Path: []string{"bootstrap", "logical", "chunk_rows"}, Kind: kChunk, Min: 1, Max: 10000000, Default: "auto (5000)",
 		Label: "Chunk rows",
 		Help:  "Rows per snapshot chunk: a number, or auto. Smaller chunks mean shorter locks and less load per read."},
+	{Key: "max_parallel", Path: []string{"bootstrap", "logical", "max_parallel"}, Kind: kInt, Min: 1, Max: 32, Default: "1",
+		Label: "Tables in parallel",
+		Help:  "How many tables the snapshot copies at the same time (1-32). The source read limit is shared by all of them; memory and target connections grow with this number. Ignored for PostgreSQL sources. Takes effect after a restart."},
 	{Key: "windows", Path: []string{"bootstrap", "logical", "windows"}, Kind: kWindows, Default: "any time",
 		Label: "Snapshot windows",
 		Help:  "Hours when the snapshot may run, local time of the process, comma-separated, for example 22:00-06:00 (may cross midnight). Empty = any time."},

@@ -41,7 +41,7 @@ func observeTestPipeline(t *testing.T) *Pipeline {
 		{ID: 1, Table: b, PKCol: "id", StartPK: 1, EndPK: 500, State: snapshot.StateDone, BufferedChanges: map[snapshot.Key]*model.RowChange{}},
 		{ID: 2, Table: b, PKCol: "id", StartPK: 501, EndPK: 1000, State: snapshot.StatePending, BufferedChanges: map[snapshot.Key]*model.RowChange{}},
 	}, 1000)
-	p.snapCurTable.Store(b.String())
+	p.startSnapRun(b, 0)
 	p.tableRowsEst.Store(b, int64(1000))
 	p.tableRowsEst.Store(c, int64(50))
 	p.running.Store(true)

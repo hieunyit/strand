@@ -285,7 +285,6 @@ func TestNewKeys_ParseFromYAML(t *testing.T) {
 		"resources.spool.soft (only spool.hard is used, as a hard-signal threshold)",
 		"resources.workers.min (adaptive worker count; workers.max is used)",
 		"bootstrap.catch_up.binlog_archive (use strand seed apply --archive)",
-		"bootstrap.logical.max_parallel",
 		"verify.full (no scheduled full verify; run strand verify --mode full)",
 		`bootstrap.per_table."app.orders".seed.credentials`,
 		`bootstrap.per_table."app.orders".seed.encryption_key`,
@@ -312,7 +311,6 @@ func TestUnimplementedKeys_SpecExampleWarnsEveryUnenforcedLimit(t *testing.T) {
 		"resources.workers.min (adaptive worker count; workers.max is used)",
 		"source.read_from=replica (point the source connection at the replica)",
 		"bootstrap.catch_up.binlog_archive (use strand seed apply --archive)",
-		"bootstrap.logical.max_parallel",
 		"verify.full (no scheduled full verify; run strand verify --mode full)",
 	})
 	if got != want {
@@ -340,7 +338,7 @@ resources: { spool: { path: /var/lib/strand/a } }
 		{"read_from replica", ", read_from: replica", "", "source.read_from=replica"},
 		{"read_from primary", ", read_from: primary", "", ""},
 		{"binlog_archive", "", "bootstrap: { catch_up: { binlog_archive: /arch } }\n", "bootstrap.catch_up.binlog_archive"},
-		{"max_parallel", "", "bootstrap: { logical: { max_parallel: 4 } }\n", "bootstrap.logical.max_parallel"},
+		{"max_parallel", "", "bootstrap: { logical: { max_parallel: 4 } }\n", ""}, // đã thi hành: snapshot song song
 		{"additive auto", "", "schema: { additive: auto }\n", ""},
 		{"additive pause", "", "schema: { additive: pause }\n", ""},
 		{"destructive approve", "", "schema: { destructive: approve }\n", ""},

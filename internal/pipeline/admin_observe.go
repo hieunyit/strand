@@ -78,8 +78,16 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 	p.tablesMu.RUnlock()
 	sort.Slice(metas, func(i, j int) bool { return metas[i].ID.String() < metas[j].ID.String() })
 
-	cur, _ := p.snapCurTable.Load().(string)
+	// Bảng đang chạy (nhiều bảng khi max_parallel > 1): ETA theo tốc độ RIÊNG của bảng; chưa đủ mẫu thì
+	// chia đều tốc độ chung cho số bảng đang chạy.
+	runs := map[string]*snapRun{}
+	for _, r := range p.runningSnapshots() {
+		runs[r.id.String()] = r
+	}
 	rate := p.snapRate.rate()
+	if len(runs) > 1 {
+		rate /= float64(len(runs))
+	}
 	out := make([]admin.TableInfo, 0, len(metas))
 	for _, m := range metas {
 		name := m.ID.String()
@@ -88,7 +96,7 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 		switch {
 		case p.state.IsDone(name):
 			ti.State, ti.ProgressPct = "done", 100
-		case active || name == cur:
+		case active || runs[name] != nil:
 			ti.State = "running"
 		default:
 			ti.State = "pending"
@@ -98,8 +106,14 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 			ti.RowsEstimate = h.rowsEstimate(ctx, m.ID)
 			ti.ProgressPct = tableProgress(p.state, name, rc)
 			ti.RowsCopied = int64(float64(ti.RowsEstimate) * ti.ProgressPct / 100)
-			if ti.State == "running" && rate > 0 && ti.RowsEstimate > ti.RowsCopied {
-				ti.ETASeconds = float64(ti.RowsEstimate-ti.RowsCopied) / rate
+			r := rate
+			if run := runs[name]; run != nil {
+				if own := run.rate.rate(); own > 0 {
+					r = own
+				}
+			}
+			if ti.State == "running" && r > 0 && ti.RowsEstimate > ti.RowsCopied {
+				ti.ETASeconds = float64(ti.RowsEstimate-ti.RowsCopied) / r
 			}
 		}
 		out = append(out, ti)

@@ -147,7 +147,7 @@ const JSONSchema = `{
           "additionalProperties": false,
           "properties": {
             "chunk_rows": { "type": "string" },
-            "max_parallel": { "type": "integer" },
+            "max_parallel": { "type": "integer", "minimum": 1, "maximum": 32 },
             "windows": { "type": "array", "items": { "type": "string" } }
           }
         },

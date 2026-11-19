@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"strand/internal/admin"
@@ -68,8 +69,9 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 	}
 	if total := p.snapTablesTotal.Load(); total > 0 {
 		info.TablesTotal, info.TablesDone = total, p.snapTablesDone.Load()
-		if t, ok := p.snapCurTable.Load().(string); ok && info.TablesDone < total {
-			info.SnapshotTable = t
+		if running := p.runningSnapshotNames(); len(running) > 0 && info.TablesDone < total {
+			info.SnapshotTables = running
+			info.SnapshotTable = strings.Join(running, ", ")
 		}
 		if p.snap != nil {
 			info.SnapshotRows = p.snap.RowsFlushed.Load()
