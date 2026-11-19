@@ -116,6 +116,9 @@ func TestObservedStopOutsideWebIsNotAutostarted(t *testing.T) {
 		} {
 			writePipelineLog(t, e2, "orders", tail...)
 			e4 := e2.restart()
+			// Autostart is the active instance's job: wait until the restarted instance holds the lease
+			// (under load the lease loop can lag the restart by a moment).
+			waitFor(t, "restarted instance becomes active", func() bool { return e4.srv.isActive() })
 			n := syncCallCount(e4)
 			if got := e4.srv.ResumeDesired(ctx); len(got) != 1 || syncCallCount(e4) != n+1 {
 				t.Fatalf("crashed pipeline not autostarted (%v): %v", tail, got)

@@ -42,6 +42,9 @@ const (
 
 // Server là Web UI + REST API.
 type Server struct {
+	// ownedBackupProcs: job runner id → pid của tiến trình backup (scheduler/Run now) do instance NÀY khởi
+	// động; dùng khi mất quyền active (stopBackupSchedulers).
+	ownedBackupProcs  sync.Map
 	configEditMu      sync.Mutex
 	sourceTablesMu    sync.Mutex
 	sourceTablesCache map[string]sourceTablesCacheEntry

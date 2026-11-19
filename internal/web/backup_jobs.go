@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"strand/internal/backup"
@@ -233,6 +234,12 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Ghi nhớ tiến trình do CHÍNH instance này khởi động: khi mất quyền active chỉ dừng đúng các tiến trình
+	// này. Danh sách job dùng chung qua DB không dùng được cho việc đó: instance mới lên active đánh dấu
+	// tiến trình của instance cũ là "không chạy" (dù vẫn sống) và có tiến trình mới cùng pipeline.
+	if st, ok := s.jobs.Get(id); ok && st.PID > 0 {
+		s.ownedBackupProcs.Store(id, st.PID)
+	}
 	return id, nil
 }
 
@@ -241,25 +248,33 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 // new active instance's schedulers take over; a run in progress is recorded as interrupted by the next
 // scheduler and the job's next run is kept.
 func (s *Server) stopBackupSchedulers() {
-	if s.jobs == nil {
-		return
+	grace := 10 * time.Second
+	if jr, ok := s.jobs.(*FileJobRunner); ok && jr.KillGrace > 0 {
+		grace = jr.KillGrace
 	}
-	ids := map[string]bool{}
-	for _, j := range s.jobs.List("") {
-		if j.Running && (j.Kind == "backup-schedule" || j.Kind == "backup-run") {
-			switch {
-			case strings.HasPrefix(j.Pipeline, "backup-"):
-				ids[strings.TrimPrefix(j.Pipeline, "backup-")] = true
-			case strings.HasPrefix(j.Pipeline, "run-"):
-				ids[strings.TrimPrefix(j.Pipeline, "run-")] = true
+	s.ownedBackupProcs.Range(func(k, v any) bool {
+		id, pid := k.(string), v.(int)
+		s.ownedBackupProcs.Delete(id)
+		if syscall.Kill(pid, 0) != nil {
+			return true // đã thoát
+		}
+		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
+		go func() {
+			deadline := time.Now().Add(grace)
+			for time.Now().Before(deadline) {
+				if syscall.Kill(pid, 0) != nil {
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
 			}
-		}
-	}
-	for id := range ids {
-		if err := s.stopBackupJob(id); err != nil {
-			s.log.Warn("step-down: stop backup scheduler", "job", id, "error", err)
-		}
-	}
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}()
+		s.log.Info("step-down: stopped backup process started by this instance", "job", id, "pid", pid)
+		return true
+	})
 }
 
 func (s *Server) stopBackupJob(id string) error {

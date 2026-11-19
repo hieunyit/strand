@@ -95,9 +95,19 @@ func TestBackupSchedulersFollowTheLease(t *testing.T) {
 		if e1.srv.leaseStep(ctx, true) {
 			t.Fatal("old instance still active after the takeover")
 		}
+		newPID := 0
+		for _, jj := range runningSchedulers(e2, j.ID) {
+			newPID = jj.PID
+		}
 		waitFor(t, "old active kills its scheduler process on step-down", func() bool {
 			return syscall.Kill(firstPID, 0) != nil
 		})
+		// Step-down must only stop processes this instance started: the new active's scheduler (same
+		// pipeline name, visible in the shared job list) must survive.
+		time.Sleep(500 * time.Millisecond)
+		if newPID <= 0 || syscall.Kill(newPID, 0) != nil {
+			t.Fatalf("step-down of the old instance killed the NEW active's scheduler (pid %d)", newPID)
+		}
 		if _, err := e1.srv.startBackupJob(j); err == nil {
 			t.Fatal("stepped-down instance started a scheduler")
 		}
