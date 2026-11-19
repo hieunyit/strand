@@ -4,13 +4,16 @@
 // Correctness model (see docs/mongodb-cdc.md):
 //   - The change-stream start position is captured (a resume token from a freshly opened
 //     stream) BEFORE the first document is read, so every write that the snapshot may
-//     miss is replayed afterwards. Replay is idempotent: insert/replace/update become
-//     an upsert of a full document image by _id, delete is delete-if-exists.
+//     miss is replayed afterwards. Replay converges: insert/replace carry a full image,
+//     update events are applied as update descriptions to the target image (or re-read
+//     from the source when that is not exact), delete is delete-if-exists.
 //   - Every target write batch is committed in a target transaction together with
-//     (a) the resume token / snapshot progress it reaches and (b) a fencing update of
-//     the lease document owned by this process. A process whose lease was taken over
-//     cannot commit anything, however long it was paused.
+//     (a) the resume token / snapshot progress it reaches and (b) a fencing update of a
+//     fence document owned by this process. A process whose lease was taken over cannot
+//     commit anything, however long it was paused.
 //   - Lost oplog history fails closed with ErrResyncRequired.
+//   - Transient failures (elections, network errors, step-downs) restart the work from
+//     the last committed checkpoint inside the same process, keeping the lease.
 package mongocdc
 
 import (
@@ -25,6 +28,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -36,9 +40,11 @@ import (
 )
 
 const (
-	stateDatabase   = "_strand_cdc"
-	stateCollection = "mongo_sync_state"
-	lockCollection  = "mongo_sync_locks"
+	stateDatabase      = "_strand_cdc"
+	stateCollection    = "mongo_sync_state"
+	progressCollection = "mongo_sync_progress"
+	lockCollection     = "mongo_sync_locks"
+	indexCollection    = "mongo_sync_indexes"
 
 	defaultLeaseDuration   = 45 * time.Second
 	defaultSnapshotBatch   = 1000
@@ -47,8 +53,22 @@ const (
 	streamBatchBytes       = 8 << 20
 	defaultCheckpointEvery = time.Second
 	defaultMaxAwait        = 500 * time.Millisecond
+	defaultRetryBackoffMax = 30 * time.Second
+	defaultIndexReconcile  = time.Minute
 	progressLogInterval    = 10 * time.Second
-	minWireVersion44       = 9 // MongoDB 4.4: implicit collection creation inside transactions.
+	minWireVersion44       = 9  // MongoDB 4.4: implicit collection creation inside transactions.
+	wireVersion50          = 13 // MongoDB 5.0: $v:2 update diffs, $setField.
+	wireVersion60          = 17 // MongoDB 6.0: showExpandedEvents.
+	wireVersion61          = 18 // MongoDB 6.1: disambiguatedPaths in update descriptions.
+	maxSnapshotParallel    = 32
+
+	// UpdateModeDelta applies update descriptions to the target image (default).
+	UpdateModeDelta = "delta"
+	// UpdateModeLookup requests fullDocument: updateLookup and writes the full image.
+	UpdateModeLookup = "lookup"
+	// UpdateModeAuto (""): delta on 4.4 and 6.1+, lookup on 5.0-6.0 (where a field name
+	// containing '.' cannot be told apart from a nested path in an update description).
+	UpdateModeAuto = "auto"
 )
 
 // ErrResyncRequired reports that the source no longer has the change history needed to
@@ -75,11 +95,21 @@ type Config struct {
 	Logger          *slog.Logger
 
 	// Tuning; zero means default.
-	LeaseDuration   time.Duration // lease TTL on the target (target clock); refreshed at TTL/3
-	SnapshotBatch   int           // documents per snapshot write transaction
-	StreamBatch     int           // change events per apply transaction
-	CheckpointEvery time.Duration // idle resume-token checkpoint interval
-	MaxAwait        time.Duration // change stream getMore maxAwaitTimeMS
+	LeaseDuration    time.Duration // lease TTL on the target (target clock); refreshed at TTL/3
+	SnapshotBatch    int           // documents per snapshot write transaction
+	StreamBatch      int           // change events per apply transaction
+	CheckpointEvery  time.Duration // idle resume-token checkpoint interval
+	MaxAwait         time.Duration // change stream getMore maxAwaitTimeMS
+	SnapshotParallel int           // collections copied concurrently (default 1, max 32)
+	// UpdateMode: UpdateModeDelta (default) or UpdateModeLookup.
+	UpdateMode string
+	// ReplicateIndexes creates the source's indexes and collection options (validators,
+	// collation, TTL, ...) on the target and keeps them in sync (opt-in).
+	ReplicateIndexes    bool
+	IndexReconcileEvery time.Duration
+	RetryBackoffMax     time.Duration // cap of the backoff between automatic restarts
+	// Observer receives progress for the admin socket and metrics (optional).
+	Observer *Observer
 }
 
 func (c *Config) setDefaults() {
@@ -101,9 +131,44 @@ func (c *Config) setDefaults() {
 	if c.MaxAwait <= 0 {
 		c.MaxAwait = defaultMaxAwait
 	}
+	if c.SnapshotParallel <= 0 {
+		c.SnapshotParallel = 1
+	}
+	if c.IndexReconcileEvery <= 0 {
+		c.IndexReconcileEvery = defaultIndexReconcile
+	}
+	if c.RetryBackoffMax <= 0 {
+		c.RetryBackoffMax = defaultRetryBackoffMax
+	}
+	if c.Observer == nil {
+		c.Observer = NewObserver(c.Pipeline)
+	}
 }
 
+// collProgress is the copy progress of one collection (initial snapshot or re-copy),
+// one document per collection in _strand_cdc.mongo_sync_progress.
 type collProgress struct {
+	ID       progressID    `bson:"_id"`
+	Kind     string        `bson:"kind"` // progressSnapshot | progressRecopy
+	LastID   bson.RawValue `bson:"last_id,omitempty"`
+	Copied   int64         `bson:"copied"`
+	Done     bool          `bson:"done"`
+	Estimate int64         `bson:"estimate,omitempty"`
+}
+
+type progressID struct {
+	Pipeline   string `bson:"p"`
+	Collection string `bson:"c"`
+}
+
+const (
+	progressSnapshot = "snapshot"
+	progressRecopy   = "recopy"
+)
+
+// legacyProgress is the per-collection progress kept inside the state document by the
+// first (experimental) version; it is migrated to progress documents on load.
+type legacyProgress struct {
 	Name   string        `bson:"name"`
 	LastID bson.RawValue `bson:"last_id,omitempty"`
 	Copied int64         `bson:"copied"`
@@ -120,39 +185,43 @@ type syncState struct {
 	SnapshotStarted bool           `bson:"snapshot_started,omitempty"`
 	InitialDone     bool           `bson:"initial_done"`
 	StartAt         bson.Timestamp `bson:"start_at"`
-	ResumeToken     bson.Raw       `bson:"resume_token,omitempty"`
-	StartAfter      bool           `bson:"start_after,omitempty"`
-	Collections     []collProgress `bson:"collections,omitempty"`
-	UpdatedAt       time.Time      `bson:"updated_at"`
+	// ConsistentAt: source cluster time after the initial snapshot completed. Events
+	// after it are applied to a target that matches the source at the previous event.
+	ConsistentAt bson.Timestamp   `bson:"consistent_at,omitempty"`
+	ResumeToken  bson.Raw         `bson:"resume_token,omitempty"`
+	StartAfter   bool             `bson:"start_after,omitempty"`
+	AppliedTime  bson.Timestamp   `bson:"applied_time,omitempty"` // cluster time of the last applied event
+	Collections  []legacyProgress `bson:"collections,omitempty"`
+	UpdatedAt    time.Time        `bson:"updated_at"`
 }
 
 func (s syncState) clone() syncState {
-	s.Collections = append([]collProgress(nil), s.Collections...)
+	s.Collections = nil
 	s.ResumeToken = append(bson.Raw(nil), s.ResumeToken...)
 	return s
 }
 
-func (s *syncState) progress(name string) *collProgress {
-	for i := range s.Collections {
-		if s.Collections[i].Name == name {
-			return &s.Collections[i]
-		}
-	}
-	return nil
-}
-
 // Run snapshots selected collections, then applies and checkpoints change events.
 // It returns ctx.Err() on cancellation, ErrLeaseLost when fenced out, and
-// ErrResyncRequired when the oplog no longer covers the checkpoint.
+// ErrResyncRequired when the oplog no longer covers the checkpoint. Transient errors
+// (failover, network) are retried from the last checkpoint with backoff.
 func Run(ctx context.Context, cfg Config) (err error) {
 	if ctx == nil {
 		return errors.New("mongodb cdc: context is required")
 	}
 	cfg.setDefaults()
-	defer func() { err = redactError(err, cfg.SourceURI, cfg.TargetURI) }()
+	obs := cfg.Observer
+	defer func() {
+		err = redactError(err, cfg.SourceURI, cfg.TargetURI)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			obs.setFailed(err.Error())
+		}
+		obs.setPhase(PhaseStopped)
+	}()
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
+	obs.setPhase(PhaseStarting)
 	source, err := connect(ctx, cfg.SourceURI, nil)
 	if err != nil {
 		return fmt.Errorf("connect MongoDB source: %w", err)
@@ -178,6 +247,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	if err := checkTopology("target", tgtHello); err != nil {
 		return err
 	}
+	cfg.UpdateMode = resolveUpdateMode(cfg.UpdateMode, srcHello.MaxWireVersion)
 	sourceEndpoint, err := canonicalEndpoint(cfg.SourceURI)
 	if err != nil {
 		return fmt.Errorf("canonicalize MongoDB source URI: %w", err)
@@ -192,9 +262,8 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		return errors.New("mongodb cdc: source and target resolve to the same MongoDB deployment and database; refusing a self-replicating pipeline")
 	}
 
-	control := target.Database(stateDatabase)
-	states := control.Collection(stateCollection)
-	l, err := acquireLease(ctx, target, control.Collection(lockCollection), cfg.TargetDB, cfg.Pipeline, cfg.LeaseDuration)
+	control := target.Database(stateDatabase, options.Database().SetReadConcern(readconcern.Majority()))
+	l, err := acquireLease(ctx, target, control.Collection(lockCollection), cfg.TargetDB, cfg.Pipeline, cfg.LeaseDuration, cfg.SnapshotParallel+1, cfg.Logger)
 	if err != nil {
 		return err
 	}
@@ -205,42 +274,131 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	refreshDone := make(chan struct{})
 	go func() {
 		defer close(refreshDone)
-		l.refreshLoop(runCtx, cfg.Logger, cancel)
+		l.refreshLoop(runCtx, cfg.Logger, cancel, obs.fenced)
 	}()
 	defer func() {
 		cancel(nil)
 		<-refreshDone
 	}()
 
-	sourceDB := source.Database(cfg.SourceDB, options.Database().SetReadConcern(readconcern.Majority()))
-	targetDB := target.Database(cfg.TargetDB)
-	r := &runner{cfg: cfg, source: sourceDB, target: targetDB, states: states, sourceID: sourceID, lease: l}
-
-	err = r.run(runCtx, targetID, srcHello.OperationTime)
-	if cause := context.Cause(runCtx); cause != nil && errors.Is(cause, ErrLeaseLost) {
-		return ErrLeaseLost
+	backoff := time.Second
+	for attempt := 0; ; attempt++ {
+		r := &runner{
+			cfg: cfg, obs: obs, srcClient: source, tgtClient: target,
+			source:   source.Database(cfg.SourceDB, options.Database().SetReadConcern(readconcern.Majority())),
+			target:   target.Database(cfg.TargetDB, options.Database().SetReadConcern(readconcern.Majority())),
+			states:   control.Collection(stateCollection),
+			progress: control.Collection(progressCollection),
+			indexes:  control.Collection(indexCollection),
+			sourceID: sourceID, targetID: targetID, lease: l, srcWire: srcHello.MaxWireVersion,
+		}
+		began := time.Now()
+		err = r.run(runCtx, srcHello.OperationTime)
+		if cause := context.Cause(runCtx); cause != nil && errors.Is(cause, ErrLeaseLost) {
+			return ErrLeaseLost
+		}
+		if err == nil || ctx.Err() != nil || errors.Is(err, ErrLeaseLost) || !retryable(err) {
+			if errors.Is(err, ErrLeaseLost) {
+				obs.fenced()
+			}
+			return err
+		}
+		if time.Since(began) > 2*cfg.RetryBackoffMax {
+			backoff = time.Second
+		}
+		obs.retried(err)
+		cfg.Logger.Warn("MongoDB CDC transient error; resuming from the last checkpoint", "pipeline", cfg.Pipeline,
+			"error", redactString(err.Error(), cfg.SourceURI, cfg.TargetURI), "retry_in", backoff.String(), "attempt", attempt+1)
+		obs.setPhase(PhaseRetrying)
+		select {
+		case <-runCtx.Done():
+			if cause := context.Cause(runCtx); errors.Is(cause, ErrLeaseLost) {
+				return ErrLeaseLost
+			}
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, cfg.RetryBackoffMax)
 	}
-	return err
+}
+
+// resolveUpdateMode picks the update application for the source version.
+func resolveUpdateMode(mode string, srcWire int32) string {
+	if mode == UpdateModeDelta || mode == UpdateModeLookup {
+		return mode
+	}
+	if srcWire >= wireVersion50 && srcWire < wireVersion61 {
+		return UpdateModeLookup
+	}
+	return UpdateModeDelta
+}
+
+// retryable reports errors after which restarting from the last committed checkpoint
+// is expected to succeed: network errors, elections and step-downs, server shutdown,
+// killed cursors, write-concern timeouts and unknown commit results. Everything else
+// (auth, configuration, lost history, unsupported events) stops the process.
+func retryable(err error) bool {
+	if err == nil || errors.Is(err, ErrResyncRequired) || errors.Is(err, ErrLeaseLost) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if mongo.IsNetworkError(err) || mongo.IsTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var le mongo.LabeledError
+	if errors.As(err, &le) {
+		for _, l := range []string{"TransientTransactionError", "UnknownTransactionCommitResult", "RetryableWriteError", "ResumableChangeStreamError", "NetworkError"} {
+			if le.HasErrorLabel(l) {
+				return true
+			}
+		}
+	}
+	if serverErrorCode(err,
+		6, 7, 89, 91, 9001, // HostUnreachable, HostNotFound, NetworkTimeout, ShutdownInProgress, SocketException
+		10107, 13435, 13436, 189, 11600, 11602, // not primary / step-down / interrupted
+		43, 175, 237, // CursorNotFound, QueryPlanKilled, CursorKilled
+		64, 262, 50, // WriteConcernFailed, ExceededTimeLimit, MaxTimeMSExpired
+		112, 117, 133, 134, 251, // WriteConflict, ConflictingOperationInProgress, FailedToSatisfyReadPreference, ReadConcernMajorityNotAvailableYet, NoSuchTransaction
+	) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "server selection error") || strings.Contains(msg, "connection pool") ||
+		strings.Contains(msg, "not primary") || strings.Contains(msg, "node is recovering")
 }
 
 type runner struct {
-	cfg      Config
-	source   *mongo.Database
-	target   *mongo.Database
-	states   *mongo.Collection
-	sourceID string
-	lease    *lease
-	state    syncState
+	cfg                  Config
+	obs                  *Observer
+	srcClient, tgtClient *mongo.Client
+	source               *mongo.Database
+	target               *mongo.Database
+	states               *mongo.Collection
+	progress             *mongo.Collection
+	indexes              *mongo.Collection
+	sourceID, targetID   string
+	lease                *lease
+	state                syncState
+	srcWire              int32
+	// consistent: applied events are past the snapshot overlap (ConsistentAt) or the
+	// stream has caught up; unique indexes may be built from then on.
+	consistent       atomic.Bool
+	reconcileTrigger chan struct{}
 }
 
-func (r *runner) run(ctx context.Context, targetID string, operationTime bson.Timestamp) error {
+func (r *runner) run(ctx context.Context, operationTime bson.Timestamp) error {
 	cfg := r.cfg
-	state, created, err := loadOrCreateState(ctx, r.states, cfg, r.sourceID, targetID, operationTime)
+	state, created, err := loadOrCreateState(ctx, r.states, cfg, r.sourceID, r.targetID, operationTime)
 	if err != nil {
 		return err
 	}
 	r.state = state
+	if len(r.state.Collections) > 0 {
+		if err := r.migrateLegacyProgress(ctx); err != nil {
+			return fmt.Errorf("migrate MongoDB snapshot progress: %w", err)
+		}
+	}
 	if !r.state.InitialDone {
+		r.obs.setPhase(PhaseSnapshot)
 		if created || len(r.state.ResumeToken) == 0 && !r.state.SnapshotStarted {
 			if !cfg.OverwriteTarget {
 				if err := ensureTargetCollectionsAbsent(ctx, r.target, cfg); err != nil {
@@ -248,7 +406,7 @@ func (r *runner) run(ctx context.Context, targetID string, operationTime bson.Ti
 				}
 			}
 			// Capture the change-stream start position BEFORE reading any document.
-			// Every change after this token is replayed after the snapshot; replay is idempotent.
+			// Every change after this token is replayed after the snapshot.
 			token, err := currentResumeToken(ctx, r.source, cfg.MaxAwait)
 			if err != nil {
 				return fmt.Errorf("capture MongoDB change stream start position: %w", err)
@@ -260,28 +418,62 @@ func (r *runner) run(ctx context.Context, targetID string, operationTime bson.Ti
 		if err := r.persist(ctx); err != nil {
 			return fmt.Errorf("save MongoDB snapshot-start checkpoint: %w", err)
 		}
-		cfg.Logger.Info("MongoDB initial snapshot started", "pipeline", cfg.Pipeline, "source_database", cfg.SourceDB, "target_database", cfg.TargetDB, "resumed_collections", len(r.state.Collections))
+		cfg.Logger.Info("MongoDB initial snapshot started", "pipeline", cfg.Pipeline, "source_database", cfg.SourceDB, "target_database", cfg.TargetDB, "parallel", cfg.SnapshotParallel)
 		if err := r.snapshot(ctx); err != nil {
 			return fmt.Errorf("MongoDB initial snapshot: %w", err)
 		}
+		at, err := r.sourceTime(ctx)
+		if err != nil {
+			return fmt.Errorf("read MongoDB source cluster time: %w", err)
+		}
+		r.state.ConsistentAt = at
 		r.state.InitialDone = true
 		if err := r.persist(ctx); err != nil {
 			return fmt.Errorf("save MongoDB snapshot checkpoint: %w", err)
 		}
 		cfg.Logger.Info("MongoDB initial snapshot complete", "pipeline", cfg.Pipeline)
 	}
+	if r.state.ConsistentAt.T == 0 {
+		// Checkpoint of the first experimental version: treat everything up to now as
+		// possibly overlapping the snapshot (safe: renames re-copy instead of renaming).
+		at, err := r.sourceTime(ctx)
+		if err != nil {
+			return fmt.Errorf("read MongoDB source cluster time: %w", err)
+		}
+		r.state.ConsistentAt = at
+		if err := r.persist(ctx); err != nil {
+			return err
+		}
+	}
 	return r.stream(ctx)
 }
 
-// persist saves the state with a fenced transaction.
+// sourceTime returns the source's current majority cluster time (>= every read so far).
+func (r *runner) sourceTime(ctx context.Context) (bson.Timestamp, error) {
+	h, err := hello(ctx, r.srcClient)
+	if err != nil {
+		return bson.Timestamp{}, err
+	}
+	if h.LastWrite.MajorityOpTime.TS.T != 0 && h.LastWrite.MajorityOpTime.TS.After(h.OperationTime) {
+		return h.LastWrite.MajorityOpTime.TS, nil
+	}
+	return h.OperationTime, nil
+}
+
+// persist saves the state with a fenced transaction (slot 0).
 func (r *runner) persist(ctx context.Context) error {
 	st := r.state.clone()
-	return r.lease.txn(ctx, func(tx context.Context) error { return r.saveState(tx, st) })
+	if err := r.lease.txn(ctx, 0, func(tx context.Context) error { return r.saveState(tx, st) }); err != nil {
+		return err
+	}
+	r.state = st
+	return nil
 }
 
 // saveState writes st; callers adopt st as r.state only after the transaction commits.
 func (r *runner) saveState(ctx context.Context, st syncState) error {
 	st.UpdatedAt = time.Now().UTC()
+	st.Collections = nil
 	result, err := r.states.ReplaceOne(ctx, bson.D{{Key: "_id", Value: st.ID}, {Key: "source_id", Value: r.sourceID}}, st)
 	if err != nil {
 		return err
@@ -289,6 +481,25 @@ func (r *runner) saveState(ctx context.Context, st syncState) error {
 	if result.MatchedCount != 1 {
 		return errors.New("checkpoint row disappeared or source identity changed")
 	}
+	return nil
+}
+
+func (r *runner) migrateLegacyProgress(ctx context.Context) error {
+	legacy := r.state.Collections
+	st := r.state.clone()
+	err := r.lease.txn(ctx, 0, func(tx context.Context) error {
+		for _, c := range legacy {
+			p := collProgress{ID: progressID{r.cfg.Pipeline, c.Name}, Kind: progressSnapshot, LastID: c.LastID, Copied: c.Copied, Done: c.Done}
+			if _, err := r.progress.ReplaceOne(tx, bson.D{{Key: "_id", Value: p.ID}}, p, options.Replace().SetUpsert(true)); err != nil {
+				return err
+			}
+		}
+		return r.saveState(tx, st)
+	})
+	if err != nil {
+		return err
+	}
+	r.state = st
 	return nil
 }
 
@@ -304,7 +515,7 @@ func ensureTargetCollectionsAbsent(ctx context.Context, target *mongo.Database, 
 	}
 	for _, name := range names {
 		if selected(cfg, cfg.SourceDB+"."+name) {
-			return fmt.Errorf("target collection %s already exists; use --overwrite-target only if replacing its contents is intended", name)
+			return fmt.Errorf("target collection %s already exists; use --overwrite-target (mongodb.overwrite_target: true) only if replacing its contents is intended", name)
 		}
 	}
 	return nil
@@ -324,6 +535,12 @@ func validateConfig(cfg Config) error {
 		if db == "admin" || db == "local" || db == "config" {
 			return fmt.Errorf("mongodb cdc: system database %q cannot be replicated", db)
 		}
+	}
+	if cfg.UpdateMode != "" && cfg.UpdateMode != UpdateModeAuto && cfg.UpdateMode != UpdateModeDelta && cfg.UpdateMode != UpdateModeLookup {
+		return fmt.Errorf("mongodb cdc: invalid update mode %q (want %s | %s)", cfg.UpdateMode, UpdateModeDelta, UpdateModeLookup)
+	}
+	if cfg.SnapshotParallel > maxSnapshotParallel {
+		return fmt.Errorf("mongodb cdc: snapshot parallelism %d exceeds %d", cfg.SnapshotParallel, maxSnapshotParallel)
 	}
 	if len(cfg.Include) == 0 {
 		return errors.New("mongodb cdc: at least one --include database.collection pattern is required")
@@ -356,7 +573,7 @@ func connect(ctx context.Context, uri string, wc *writeconcern.WriteConcern) (*m
 	if err != nil {
 		return nil, err
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if err := client.Ping(pingCtx, readpref.Primary()); err != nil {
 		_ = client.Disconnect(context.Background())
@@ -380,11 +597,16 @@ type helloReply struct {
 		ProcessID bson.ObjectID `bson:"processId"`
 	} `bson:"topologyVersion"`
 	OperationTime bson.Timestamp `bson:"operationTime"`
+	LastWrite     struct {
+		MajorityOpTime struct {
+			TS bson.Timestamp `bson:"ts"`
+		} `bson:"majorityOpTime"`
+	} `bson:"lastWrite"`
 }
 
 func hello(ctx context.Context, client *mongo.Client) (helloReply, error) {
 	var h helloReply
-	err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Decode(&h)
+	err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}, options.RunCmd().SetReadPreference(readpref.Primary())).Decode(&h)
 	return h, err
 }
 

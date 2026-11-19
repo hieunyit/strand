@@ -366,6 +366,10 @@ func TestContainer_FencedAfterLeaseTakeover(t *testing.T) {
 	if err != nil || res.ModifiedCount != 1 {
 		t.Fatalf("steal lease: %v %+v", err, res)
 	}
+	// A new owner rewrites every fence document of the database (claimFences).
+	if res, err := locks.UpdateMany(ctx, bson.D{{Key: "_id", Value: bson.Regex{Pattern: "^" + db + "#"}}}, bson.D{{Key: "$set", Value: bson.D{{Key: "owner", Value: "intruder"}}}}); err != nil || res.ModifiedCount == 0 {
+		t.Fatalf("steal fences: %v %+v", err, res)
+	}
 	if _, err := p.srcC.Database(db).Collection("c").InsertOne(ctx, bson.D{{Key: "_id", Value: "after-takeover"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -399,21 +403,20 @@ func TestContainer_SnapshotResumeMixedIDs(t *testing.T) {
 		if err := <-r.done; err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
-		var st syncState
-		_ = p.dstC.Database(stateDatabase).Collection(stateCollection).FindOne(ctx, bson.D{{Key: "_id", Value: "resume"}}).Decode(&st)
-		if len(st.Collections) > 0 {
-			t.Logf("after stop %d: copied=%d done=%v", i, st.Collections[0].Copied, st.Collections[0].Done)
+		var pr collProgress
+		if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"resume", "m"}}}).Decode(&pr); err == nil {
+			t.Logf("after stop %d: copied=%d done=%v", i, pr.Copied, pr.Done)
 		}
 	}
 	r := start(cfg)
 	p.waitIdentical(t, db, time.Minute, r)
 	r.stop(t)
-	var st syncState
-	if err := p.dstC.Database(stateDatabase).Collection(stateCollection).FindOne(ctx, bson.D{{Key: "_id", Value: "resume"}}).Decode(&st); err != nil {
+	var pr collProgress
+	if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"resume", "m"}}}).Decode(&pr); err != nil {
 		t.Fatal(err)
 	}
-	if st.Collections[0].Copied != 7000 {
-		t.Fatalf("snapshot copied %d documents in total across restarts, want exactly 7000 (no re-copy, no skip)", st.Collections[0].Copied)
+	if pr.Copied != 7000 || !pr.Done {
+		t.Fatalf("snapshot copied %d documents in total across restarts (done=%v), want exactly 7000 (no re-copy, no skip)", pr.Copied, pr.Done)
 	}
 }
 
