@@ -149,6 +149,7 @@ func New(o Options) (*Server, error) {
 		return nil, fmt.Errorf("load settings from the metadata database: %w", err)
 	}
 	reg.scanFn = func() []string { return s.settingList("scan") }
+	audit.rotateBytes = func() int64 { return int64(s.settingInt("audit_rotate_mb")) << 20 }
 	reg.writable = s.isActive
 	iv, _ := s.live.get("sample_interval_sec").(int)
 	s.samp = NewSampler(reg, time.Duration(iv)*time.Second)
@@ -259,6 +260,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	go s.ResumeDesired(ctx)
 	go s.runMetricsHistory(ctx)
 	go s.runLease(ctx)
+	go s.runAuditMaintenance(ctx)
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,

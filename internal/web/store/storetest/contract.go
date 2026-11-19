@@ -215,6 +215,59 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 			t.Fatalf("meta = %q", v)
 		}
 	})
+	t.Run("audit_archive", func(t *testing.T) {
+		s := mk(t)
+		old := time.Now().Add(-400 * 24 * time.Hour)
+		for i := 0; i < 5; i++ {
+			must(t, s.AppendAudit(ctx, store.AuditRow{Time: old.Add(time.Duration(i) * time.Hour), Action: "start", Pipeline: "p", Result: "ok", Data: []byte(`{"i":` + string(rune('0'+i)) + `}`)}))
+		}
+		must(t, s.AppendAudit(ctx, store.AuditRow{Time: time.Now(), Action: "login", Result: "ok", Data: []byte(`{}`)}))
+		before := time.Now().Add(-365 * 24 * time.Hour)
+		pl, err := s.PlanAuditArchive(ctx, before)
+		must(t, err)
+		if pl.Count != 5 || pl.MaxID <= pl.MinID || !pl.MinTS.Before(pl.MaxTS) {
+			t.Fatalf("plan = %+v", pl)
+		}
+		var ids []int64
+		must(t, s.ScanAudit(ctx, before, pl.MaxID, func(r store.AuditRow) error { ids = append(ids, r.ID); return nil }))
+		if len(ids) != 5 || ids[0] != pl.MinID || ids[4] != pl.MaxID {
+			t.Fatalf("scan ids = %v", ids)
+		}
+		// Count mismatch (rows changed since the export): nothing deleted.
+		if _, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: before, MaxID: pl.MaxID, Count: 4, File: "a.jsonl.gz", SHA256: strings.Repeat("a", 64)}); err == nil {
+			t.Fatal("archive with a wrong count accepted")
+		}
+		// Cutoff younger than a day: refused.
+		if _, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: time.Now(), MaxID: 1 << 40, Count: 6, File: "x", SHA256: strings.Repeat("a", 64)}); err == nil {
+			t.Fatal("archive of recent rows accepted")
+		}
+		n, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: before, MaxID: pl.MaxID, Count: 5, File: "a.jsonl.gz", SHA256: strings.Repeat("b", 64),
+			Detail: map[string]any{"by": "test"}})
+		if err != nil || n != 5 {
+			t.Fatalf("archive: n=%d err=%v", n, err)
+		}
+		rows, _ := s.ListAudit(ctx, 10)
+		if len(rows) != 2 || rows[0].Action != store.AuditArchiveAction || rows[1].Action != "login" {
+			t.Fatalf("audit after archive = %+v", rows)
+		}
+		if !strings.Contains(string(rows[0].Data), strings.Repeat("b", 64)) || !strings.Contains(string(rows[0].Data), `"rows"`) {
+			t.Fatalf("archive entry = %s", rows[0].Data)
+		}
+		ar, err := s.ListAuditArchives(ctx, 5)
+		must(t, err)
+		if len(ar) != 1 || ar[0].Count != 5 || ar[0].MaxID != pl.MaxID || ar[0].SHA256 != strings.Repeat("b", 64) {
+			t.Fatalf("archives = %+v", ar)
+		}
+		// New rows get new ids; the archive entry itself is never archivable.
+		must(t, s.AppendAudit(ctx, store.AuditRow{Time: old, Action: "late-import", Data: []byte(`{}`)}))
+		rows, _ = s.ListAudit(ctx, 1)
+		if rows[0].ID <= ar[0].MaxID+1 {
+			t.Fatalf("audit id reused: %d", rows[0].ID)
+		}
+		if pl, _ = s.PlanAuditArchive(ctx, time.Now().Add(-25*time.Hour)); pl.Count != 1 {
+			t.Fatalf("plan after archive = %+v (audit.archive must not be archivable)", pl)
+		}
+	})
 	t.Run("lease", func(t *testing.T) {
 		s := mk(t)
 		a, err := s.TryLease(ctx, "A", `{"host":"a"}`, 400*time.Millisecond)

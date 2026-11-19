@@ -27,6 +27,8 @@ type Mem struct {
 	meta      map[string]string
 	locks     map[string]*sync.Mutex
 	lease     *Lease
+	auditSeq  int64
+	archives  []AuditArchiveRec
 	instances map[string]Instance
 	// Down makes every call fail (simulates a database outage).
 	down bool
@@ -410,7 +412,7 @@ func (m *Mem) AppendAudit(_ context.Context, r AuditRow) error {
 		return err
 	}
 	defer m.mu.Unlock()
-	r.ID = int64(len(m.audit) + 1)
+	r.ID = m.nextAuditID()
 	m.audit = append(m.audit, r)
 	return nil
 }
@@ -420,7 +422,7 @@ func (m *Mem) AppendAuditBatch(_ context.Context, rows []AuditRow, progress *Met
 	}
 	defer m.mu.Unlock()
 	for _, r := range rows {
-		r.ID = int64(len(m.audit) + 1)
+		r.ID = m.nextAuditID()
 		m.audit = append(m.audit, r)
 	}
 	if progress != nil {
@@ -468,4 +470,10 @@ func (m *Mem) Locked(ctx context.Context, key string, fn func(ctx context.Contex
 	l.Lock()
 	defer l.Unlock()
 	return fn(ctx)
+}
+
+// nextAuditID: bigserial of audit_log (never reused, also after an archive removed rows). Caller holds m.mu.
+func (m *Mem) nextAuditID() int64 {
+	m.auditSeq++
+	return m.auditSeq
 }
