@@ -51,6 +51,13 @@ func resolveConn(name string, f connFields) error {
 
 func resolveConnWithEnv(name string, f connFields, env map[string]string) error {
 	split := *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 || *f.database != ""
+	if strings.EqualFold(*f.kind, KindMongoDB) {
+		// MongoDB: kết nối qua uri/dsn; database chỉ chọn database dữ liệu.
+		if *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 {
+			return fmt.Errorf("%s: kind mongodb takes uri (or dsn) and database only", name)
+		}
+		return nil
+	}
 	if !strings.EqualFold(*f.kind, "mysql") {
 		if split {
 			return fmt.Errorf("%s: host/port/user/password fields are supported for kind mysql only; use dsn", name)

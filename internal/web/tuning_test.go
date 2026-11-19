@@ -113,8 +113,14 @@ func TestTuningGetCurrentAndDefaults(t *testing.T) {
 			t.Errorf("%s: got %+v, want unset with default %q", key, got[key], def)
 		}
 	}
-	if len(v.Fields) != len(tuningDefs) {
-		t.Errorf("fields = %d", len(v.Fields))
+	sql := 0
+	for _, d := range tuningDefs {
+		if !d.Mongo {
+			sql++
+		}
+	}
+	if len(v.Fields) != sql {
+		t.Errorf("fields = %d, want the %d SQL-pipeline fields", len(v.Fields), sql)
 	}
 }
 

@@ -612,13 +612,13 @@
   function npSetup(form) {
     var from = document.getElementById('np-from'), to = document.getElementById('np-to');
     if (!from || !to) return;
-    function engineOf(v) { return v === 'postgres' ? 'postgres' : 'mysql'; }
+    function engineOf(v) { return v === 'postgres' ? 'postgres' : (v === 'mongodb' ? 'mongodb' : 'mysql'); }
     function matches(cond, src, dst) {
       var kv = cond.split(':'), vals = kv[1].split(',');
       return vals.indexOf(kv[0] === 'src' ? src : dst) >= 0;
     }
     function setPort(el, eng) {
-      if (el && !el.dataset.touched) el.value = el.dataset[eng];
+      if (el && !el.dataset.touched && el.dataset[eng]) el.value = el.dataset[eng];
     }
     ['np-src-port', 'np-dst-port'].forEach(function (id) {
       var el = document.getElementById(id);
@@ -632,6 +632,12 @@
       var src = from.value, out = document.getElementById('np-preview');
       if (!out) return;
       var inc = val('include'), exc = val('exclude'), what;
+      if (src === 'mongodb') {
+        what = (inc || ((val('source_database') || '?') + '.* (every collection)')) + (exc ? '  except ' + exc : '') +
+          '  ->  MongoDB database ' + (val('target_mongo_database') || '?');
+        out.textContent = what;
+        return;
+      }
       if (inc) {
         what = inc;
       } else if (src === 'postgres') {
@@ -661,7 +667,7 @@
       });
       if (to.selectedOptions[0] && to.selectedOptions[0].disabled && firstOK) to.value = firstOK.value;
       var note = document.getElementById('np-pair-note');
-      if (note) note.textContent = src === 'postgres' ? 'PostgreSQL can only be copied to PostgreSQL.' : (src === 'mariadb' ? 'MariaDB can only be copied to MySQL.' : '');
+      if (note) note.textContent = src === 'postgres' ? 'PostgreSQL can only be copied to PostgreSQL.' : (src === 'mariadb' ? 'MariaDB can only be copied to MySQL.' : (src === 'mongodb' ? 'MongoDB can only be copied to MongoDB.' : ''));
       var dst = to.value;
       form.querySelectorAll('[data-when]').forEach(function (el) {
         var on = matches(el.dataset.when, src, dst);
@@ -671,9 +677,10 @@
       setPort(document.getElementById('np-src-port'), engineOf(src));
       setPort(document.getElementById('np-dst-port'), engineOf(dst));
       var ns = src === 'postgres' ? 'schema' : 'db';
+      if (src === 'mongodb') ns = 'db';
       form.querySelectorAll('.np-ns').forEach(function (e) { e.textContent = ns; });
       var exInc = document.getElementById('np-include-ex'), exExc = document.getElementById('np-exclude-ex');
-      var pre = src === 'postgres' ? (val('schema') || 'public') : ((val('database').split(',')[0] || 'shop').trim().replace('*', 'shop'));
+      var pre = src === 'postgres' ? (val('schema') || 'public') : (src === 'mongodb' ? (val('source_database') || 'app') : ((val('database').split(',')[0] || 'shop').trim().replace('*', 'shop')));
       if (exInc) exInc.textContent = pre + '.orders, ' + pre + '.customers';
       if (exExc) exExc.textContent = pre + '.log_*, ' + pre + '.tmp_*';
       preview();
