@@ -639,7 +639,7 @@ func TestPromoteWizardMySQLTarget(t *testing.T) {
 	// Same pipeline, but a MySQL target: --engine=mysql and --objects-post allowed, PG-only flags dropped.
 	cp := filepath.Join(e.dir, cfgOrders)
 	raw, _ := os.ReadFile(cp)
-	_ = os.WriteFile(cp, []byte(strings.Replace(string(raw), "kind: postgres", "kind: mysql", 1)), 0o640)
+	e.writePipelineFile("orders", cp, strings.Replace(string(raw), "kind: postgres", "kind: mysql", 1), 0o640)
 	e.sampleNow()
 	c, csrf := e.loginOK()
 	cfg := filepath.Join(e.dir, cfgOrders)

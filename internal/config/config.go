@@ -508,6 +508,11 @@ func LoadFileForPaths(path string) (*Config, error) {
 	if err != nil {
 		return nil, exitcode.New("config_read_error", exitcode.InvalidSyntax, fmt.Sprintf("cannot read config file: %s", path), err)
 	}
+	return LoadBytesForPaths(data)
+}
+
+// LoadBytesForPaths như LoadFileForPaths nhưng từ nội dung đã có (bản cấu hình lưu trong kho metadata của web).
+func LoadBytesForPaths(data []byte) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader([]byte(os.ExpandEnv(string(data)))))
 	dec.KnownFields(true)
 	var cfg Config

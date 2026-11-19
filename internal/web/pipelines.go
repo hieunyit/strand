@@ -77,6 +77,8 @@ type Pipeline struct {
 	// Lấy từ file cấu hình pipeline (rỗng nếu đọc lỗi; xem CfgErr).
 	Cfg    *config.Config
 	CfgErr string
+
+	dbYAML []byte // bản cấu hình trong kho metadata (nil: chưa có trong DB, đọc từ file)
 }
 
 // Mode trả cách quản lý hiệu lực.
@@ -253,7 +255,11 @@ func (r *Registry) publish(byName map[string]*Pipeline, warns []string) {
 				p.EnvFile = path
 			}
 		}
-		if c, err := config.LoadFileForPaths(p.ConfigPath); err != nil {
+		load := func() (*config.Config, error) { return config.LoadFileForPaths(p.ConfigPath) }
+		if p.dbYAML != nil {
+			load = func() (*config.Config, error) { return config.LoadBytesForPaths(p.dbYAML) }
+		}
+		if c, err := load(); err != nil {
 			p.CfgErr = err.Error()
 		} else {
 			p.Cfg = c

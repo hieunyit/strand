@@ -161,16 +161,17 @@ func (s *Server) getOriginalConfig(p *Pipeline) []byte {
 	if p == nil {
 		return nil
 	}
-	if p.ConfigPath != "" {
-		if b, err := os.ReadFile(p.ConfigPath); err == nil && len(b) > 0 {
-			return b
-		}
-	}
+	// Bản trong DB là nguồn sự thật; file trên đĩa chỉ là bản vật chất hóa (dự phòng khi DB chưa có bản).
 	ctx, cancel := dbCtx()
 	defer cancel()
 	row, ok, err := s.db.st.GetPipeline(ctx, p.Name)
 	if err == nil && ok && row.HasConfig && len(row.ConfigYAML) > 0 {
 		return []byte(row.ConfigYAML)
+	}
+	if p.ConfigPath != "" {
+		if b, err := os.ReadFile(p.ConfigPath); err == nil && len(b) > 0 {
+			return b
+		}
 	}
 	return nil
 }

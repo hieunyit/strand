@@ -54,9 +54,7 @@ func TestAuditConfigDiffLeaksSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw = append(raw, []byte("\n# comment\npassword: diff-canary-secret\n")...)
-	if err = os.WriteFile(p.ConfigPath, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
+	e.writePipelineFile("orders", p.ConfigPath, string(raw), 0o600)
 	masked, err := MaskConfigText(raw)
 	if err != nil {
 		t.Fatal(err)
