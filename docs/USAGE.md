@@ -1270,3 +1270,15 @@ Chi tiết nằm trong `questions/DECISIONS-2026-11-02.md` và `docs/HANDOFF-COD
 | 14 | Soak trước Gate 1: 12 giờ thay vì 72 giờ | 04 §1 |
 | 17 | `bootstrap.create_schema: auto` mặc định | 02 §10 |
 | — | `verify --repair fix` yêu cầu pipeline dừng và target đã bắt kịp (review R04); runbook spec cần cập nhật | 05 |
+
+
+## Web UI: tính năng và phần chỉ có ở CLI
+
+Web UI (PostgreSQL bắt buộc) làm được: tạo pipeline cho mọi cặp được hỗ trợ (MySQL/MariaDB/PostgreSQL → MySQL/PostgreSQL, MongoDB → MongoDB) kèm tuning; sửa cấu hình, `.env`, tuning; tải về/tải lên YAML; start/stop/restart/enable/disable, pause/resume, throttle, `snapshot add`, checkpoint show/rewind; `verify`; wizard Repair và Promote; `plan`; duyệt thay đổi schema (`schema diff`/`approve`, xem trước DDL); `schema init --dry-run`; database objects (`objects list`/`apply`); backup (catalog, job); trang MCP; Settings; audit.
+
+Cố ý để lại CLI (lý do):
+
+- `seed plan/apply`: điều phối restore bản backup vật lý lên máy target (cần quyền và đường dẫn trên máy DB, thao tác phá hủy dữ liệu đích); không an toàn để bấm từ web.
+- `archive binlog`: tiến trình lưu trữ chạy liên tục, độc lập với pipeline (thường là một unit systemd riêng trên replica), không có trạng thái để web quan sát.
+- `tunnel open`: tiến trình SSH chạy liên tục; cấu hình pipeline chưa có khóa tunnel nên web chưa gắn được tunnel vào source/target (tunnel cho job backup thuộc phần backup).
+- `spool-inspect`, `top`, `export`, `config schema`, `mongodb sync` (lệnh thử nghiệm; pipeline MongoDB chạy qua `strand sync` khi engine hỗ trợ), `web db migrate|export|audit-archive` (công cụ quản trị chạy ngoài web: chuyển bản cài cũ, sao lưu/quay về).
