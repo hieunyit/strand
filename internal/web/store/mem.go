@@ -159,6 +159,7 @@ func (m *Mem) UpsertPipeline(_ context.Context, p Pipeline) error {
 	}
 	p.Updated = now
 	p.EnvEnc = append([]byte(nil), p.EnvEnc...)
+	p.ConfigJSON = append([]byte(nil), p.ConfigJSON...)
 	p.normalize()
 	m.pipes[p.Name] = p
 	return nil
@@ -213,6 +214,8 @@ func (m *Mem) GetPipeline(_ context.Context, name string) (Pipeline, bool, error
 	}
 	defer m.mu.Unlock()
 	p, ok := m.pipes[name]
+	p.ConfigJSON = append([]byte(nil), p.ConfigJSON...)
+	p.EnvEnc = append([]byte(nil), p.EnvEnc...)
 	return p, ok, nil
 }
 func (m *Mem) ListPipelines(context.Context) ([]Pipeline, error) {
@@ -222,6 +225,8 @@ func (m *Mem) ListPipelines(context.Context) ([]Pipeline, error) {
 	defer m.mu.Unlock()
 	var out []Pipeline
 	for _, p := range m.pipes {
+		p.ConfigJSON = append([]byte(nil), p.ConfigJSON...)
+		p.EnvEnc = append([]byte(nil), p.EnvEnc...)
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

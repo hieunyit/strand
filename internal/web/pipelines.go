@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,8 +143,14 @@ func ReadEnvFile(path string) ([]string, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return ParseEnvData(f)
+}
+
+// ParseEnvData parses the restricted KEY=VALUE format used for pipeline secrets.
+// Database-backed pipelines pass decrypted bytes here without materializing an env file.
+func ParseEnvData(r io.Reader) ([]string, error) {
 	var out []string
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	for n := 1; sc.Scan(); n++ {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -153,7 +160,7 @@ func ReadEnvFile(path string) ([]string, error) {
 		k, v, ok := strings.Cut(line, "=")
 		k = strings.TrimSpace(k)
 		if !ok || k == "" || strings.ContainsAny(k, " \t") {
-			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE", path, n)
+			return nil, fmt.Errorf("pipeline env line %d: expected KEY=VALUE", n)
 		}
 		v = strings.TrimSpace(v)
 		out = append(out, k+"="+parseEnvValue(v))
