@@ -370,7 +370,15 @@ func (m *RangeStateManager) handleLocked(tr *TableRanges, event *model.RowChange
 		}
 		return ActionDiscard, chunk
 
-	case StateReading, StateRendezvous, StateFlushing:
+	case StateFlushing:
+		if chunk.unlockedFlush {
+			// Chunk đang được ghi xuống target ngoài khóa: flush đã merge buffer, event mới mà buffer vào đây
+			// sẽ mất khi MarkDone. Chỉ xảy ra khi router chạy trong lúc Barrier đáng lẽ đã dừng nó — dừng
+			// pipeline (RS-1) thay vì mất event âm thầm.
+			return ActionReject, chunk
+		}
+		fallthrough
+	case StateReading, StateRendezvous:
 		// spec: 02 §5 "Đang đọc / Chờ điểm hẹn: GTID ∈ low: bỏ. Ngược lại: gộp theo PK vào buffer có thứ tự, chỉ giữ image cuối"
 		// Source PG: "∈ low" là "Txn visible với snapshot S0 của chunk" (pg_watermark.go).
 		if inLow(chunk, pos, xid) {
@@ -602,41 +610,17 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 
 	// 1. Nạp snapshot rows. Khóa không mã hóa được thì ghi lỗi vào chunk (FlushChunk dừng) — không bỏ
 	// row âm thầm: flush sẽ xóa/không ghi nó ở target dù nó còn ở source.
-	chunk.mergeErr = nil
-	var encoded []Key
-	if codec.WeighMany != nil && len(chunk.SnapshotRows) > 0 {
-		// PKWeight normally asks MySQL for WEIGHT_STRING. Precompute those values in batches;
-		// encoding each row individually here would otherwise issue one source query per row
-		// inside FlushChunk, making a fast snapshot read look like a slow target flush.
-		tuples := make([][]model.Value, len(chunk.SnapshotRows))
-		for i, row := range chunk.SnapshotRows {
-			tuples[i] = row.Key
-		}
-		var err error
-		encoded, err = codec.EncodeMany(tuples)
-		if err != nil {
-			chunk.mergeErr = fmt.Errorf("encode snapshot primary keys in batch: %w", err)
-		}
+	encoded, encErr := chunk.preKeys, chunk.preKeysErr
+	if encoded == nil && encErr == nil {
+		encoded, encErr = encodeSnapshotKeys(codec, chunk.SnapshotRows)
 	}
-	for i, row := range chunk.SnapshotRows {
-		var pk Key
-		if encoded != nil {
-			pk = encoded[i]
-		} else {
-			if chunk.mergeErr != nil {
-				continue // batched key encoding failed; the chunk will be rejected below
+	chunk.preKeys, chunk.preKeysErr = nil, nil
+	chunk.mergeErr = encErr
+	if encErr == nil {
+		for i, row := range chunk.SnapshotRows {
+			if pk := encoded[i]; !skip(pk) {
+				mergedMap[pk] = row
 			}
-			var err error
-			pk, err = codec.Encode(row.Key)
-			if err != nil {
-				if chunk.mergeErr == nil {
-					chunk.mergeErr = fmt.Errorf("primary key of a snapshot row: %w", err)
-				}
-				continue
-			}
-		}
-		if !skip(pk) {
-			mergedMap[pk] = row
 		}
 	}
 
@@ -674,6 +658,44 @@ func (m *RangeStateManager) MergeLocked(chunk *Chunk) []*model.RowChange {
 	}
 
 	return result
+}
+
+// encodeSnapshotKeys mã hóa khóa của các row snapshot (thuần: chỉ phụ thuộc codec và rows). PKWeight
+// có WeighMany thì tính theo lô (một truy vấn WEIGHT_STRING mỗi lô thay vì mỗi row). Không cần
+// RangeStateManager.mu: FlushChunk gọi TRƯỚC khi lấy khóa (precomputeKeys), để truy vấn source của
+// weight không nằm trong đoạn găng mà router và các reader bảng khác cũng cần.
+func encodeSnapshotKeys(codec *PKCodec, rows []*model.RowChange) ([]Key, error) {
+	if len(rows) == 0 {
+		return []Key{}, nil
+	}
+	if codec.WeighMany != nil {
+		// PKWeight normally asks MySQL for WEIGHT_STRING. Precompute those values in batches;
+		// encoding each row individually would otherwise issue one source query per row.
+		tuples := make([][]model.Value, len(rows))
+		for i, row := range rows {
+			tuples[i] = row.Key
+		}
+		out, err := codec.EncodeMany(tuples)
+		if err != nil {
+			return nil, fmt.Errorf("encode snapshot primary keys in batch: %w", err)
+		}
+		return out, nil
+	}
+	out := make([]Key, len(rows))
+	for i, row := range rows {
+		pk, err := codec.Encode(row.Key)
+		if err != nil {
+			return nil, fmt.Errorf("primary key of a snapshot row: %w", err)
+		}
+		out[i] = pk
+	}
+	return out, nil
+}
+
+// precomputeKeys mã hóa trước khóa của row snapshot của chunk (ngoài RangeStateManager.mu); MergeLocked
+// dùng kết quả này thay vì tự mã hóa trong đoạn găng.
+func (c *Chunk) precomputeKeys() {
+	c.preKeys, c.preKeysErr = encodeSnapshotKeys(codecOrInt(c.codec), c.SnapshotRows)
 }
 
 // HasUnchanged: row có cột TOAST không đổi (giá trị vắng mặt, chỉ source PG).
@@ -722,6 +744,7 @@ func (m *RangeStateManager) MarkDoneLocked(chunk *Chunk) {
 		}
 	}
 	chunk.State = StateDone
+	chunk.unlockedFlush = false
 	chunk.SnapshotRows = nil
 	chunk.BufferedChanges = make(map[Key]*model.RowChange)
 }

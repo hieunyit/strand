@@ -76,6 +76,7 @@ type NewPipelineOpts struct {
 	IOPSHard int    `json:"iops_hard,omitempty"`
 
 	ChunkRows       int      `json:"chunk_rows,omitempty"`
+	MaxParallel     int      `json:"max_parallel,omitempty"` // bootstrap.logical.max_parallel: số bảng snapshot cùng lúc
 	StartAt         string   `json:"start_at,omitempty"`
 	Windows         []string `json:"windows,omitempty"`
 	BreakerMaxRatio float64  `json:"breaker_max_ratio,omitempty"`
@@ -179,8 +180,8 @@ bootstrap:
   start_at: "{{.StartAt}}"
 {{- else}}
   default: logical
-{{- if or .ChunkRows .Windows}}
-  logical: { {{if .ChunkRows}}chunk_rows: {{.ChunkRows}}{{if .Windows}}, {{end}}{{end}}{{if .Windows}}windows: [{{range $i, $e := .Windows}}{{if $i}}, {{end}}"{{$e}}"{{end}}]{{end}} }
+{{- if or .ChunkRows .Windows .MaxParallel}}
+  logical: { {{logical .}} }
 {{- end}}
 {{- end}}
 
@@ -235,6 +236,7 @@ type tmplData struct {
 	IOPSSoft          int
 	IOPSHard          int
 	ChunkRows         int
+	MaxParallel       int
 	StartAt           string
 	Windows           []string
 	BreakerMaxRatio   float64
@@ -249,8 +251,28 @@ type tmplData struct {
 }
 
 var pipelineTmpl = texttmpl.Must(texttmpl.New("pipe").Funcs(texttmpl.FuncMap{
-	"slot": func(s string) string { return strings.ReplaceAll(s, "-", "_") },
+	"slot":    func(s string) string { return strings.ReplaceAll(s, "-", "_") },
+	"logical": logicalYAML,
 }).Parse(pipelineTmplText))
+
+// logicalYAML: nội dung khối bootstrap.logical (chunk_rows, max_parallel, windows) của pipeline mới.
+func logicalYAML(td tmplData) string {
+	var parts []string
+	if td.ChunkRows > 0 {
+		parts = append(parts, fmt.Sprintf("chunk_rows: %d", td.ChunkRows))
+	}
+	if td.MaxParallel > 0 {
+		parts = append(parts, fmt.Sprintf("max_parallel: %d", td.MaxParallel))
+	}
+	if len(td.Windows) > 0 {
+		ws := make([]string, len(td.Windows))
+		for i, w := range td.Windows {
+			ws[i] = `"` + w + `"`
+		}
+		parts = append(parts, "windows: ["+strings.Join(ws, ", ")+"]")
+	}
+	return strings.Join(parts, ", ")
+}
 
 // buildNewPipelineYAML sinh chuỗi YAML từ NewPipelineOpts.
 func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (string, error) {
@@ -280,6 +302,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		IOPSSoft:          opts.IOPSSoft,
 		IOPSHard:          opts.IOPSHard,
 		ChunkRows:         opts.ChunkRows,
+		MaxParallel:       opts.MaxParallel,
 		StartAt:           opts.StartAt,
 		Windows:           opts.Windows,
 		BreakerMaxRatio:   opts.BreakerMaxRatio,
@@ -506,6 +529,9 @@ func checkOpts(opts NewPipelineOpts) error {
 	}
 	if opts.ChunkRows < 0 || opts.ChunkRows > 10000000 {
 		return fmt.Errorf("chunk_rows: %d is not an integer between 1 and 10000000", opts.ChunkRows)
+	}
+	if opts.MaxParallel < 0 || opts.MaxParallel > config.MaxSnapshotParallel {
+		return fmt.Errorf("max_parallel: %d is not an integer between 1 and %d", opts.MaxParallel, config.MaxSnapshotParallel)
 	}
 	if td := strings.TrimSpace(opts.TargetDatabase); td != "" && !plainDBNameRE.MatchString(td) {
 		return fmt.Errorf("target_database %q is not a plain database name (letters, digits, _ and $ only)", td)
@@ -909,7 +935,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	for field, dst := range map[string]*int{
 		"source_port": &opts.SourcePort, "target_port": &opts.TargetPort, "workers": &opts.Workers,
 		"server_id": &opts.ServerID, "iops_soft": &opts.IOPSSoft, "iops_hard": &opts.IOPSHard,
-		"chunk_rows": &opts.ChunkRows,
+		"chunk_rows": &opts.ChunkRows, "max_parallel": &opts.MaxParallel,
 	} {
 		n, err := atoiField(r, field)
 		if err != nil {

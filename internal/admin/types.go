@@ -150,14 +150,17 @@ type TopInfo struct {
 	ETASeconds float64 `json:"eta_seconds"`
 
 	// Bootstrap (snapshot logic): bảng đang chạy, số bảng xong/tổng, row đã ghi / ước lượng, tốc độ.
-	SnapshotTable     string  `json:"snapshot_table,omitempty"`
-	TablesDone        int64   `json:"tables_done,omitempty"`
-	TablesTotal       int64   `json:"tables_total,omitempty"`
-	SnapshotRows      int64   `json:"snapshot_rows,omitempty"`
-	SnapshotRowsTotal int64   `json:"snapshot_rows_total,omitempty"` // ước lượng từ thống kê của source
-	SnapshotRate      float64 `json:"snapshot_rate,omitempty"`       // row/giây (~60 s gần nhất)
-	BreakerOpen       bool    `json:"breaker_open,omitempty"`
-	BreakerReason     string  `json:"breaker_reason,omitempty"`
+	// SnapshotTable: các bảng đang snapshot, nối bằng ", " (giữ cho client cũ); SnapshotTables: danh sách
+	// (bootstrap.logical.max_parallel > 1 có thể nhiều bảng cùng chạy).
+	SnapshotTable     string   `json:"snapshot_table,omitempty"`
+	SnapshotTables    []string `json:"snapshot_tables,omitempty"`
+	TablesDone        int64    `json:"tables_done,omitempty"`
+	TablesTotal       int64    `json:"tables_total,omitempty"`
+	SnapshotRows      int64    `json:"snapshot_rows,omitempty"`
+	SnapshotRowsTotal int64    `json:"snapshot_rows_total,omitempty"` // ước lượng từ thống kê của source
+	SnapshotRate      float64  `json:"snapshot_rate,omitempty"`       // row/giây (~60 s gần nhất)
+	BreakerOpen       bool     `json:"breaker_open,omitempty"`
+	BreakerReason     string   `json:"breaker_reason,omitempty"`
 }
 
 // PauseResult chứa kết quả của lệnh `strand pause`.

@@ -120,6 +120,14 @@ type Chunk struct {
 	codec  *PKCodec // codec PK của bảng (nil = số nguyên)
 	// mergeErr: lỗi mã hóa khóa của row snapshot trong lần MergeLocked gần nhất (FlushChunk dừng).
 	mergeErr error
+	// preKeys/preKeysErr: khóa mã hóa của SnapshotRows tính trước ngoài khóa (precomputeKeys); MergeLocked
+	// dùng rồi xóa. nil = MergeLocked tự mã hóa.
+	preKeys    []Key
+	preKeysErr error
+	// unlockedFlush: FlushChunk ghi target của chunk này mà KHÔNG giữ RangeStateManager.mu (router đang dừng
+	// trong Barrier, xem MySQLSnapshotter.Barrier). Event stream nào chạm chunk lúc đó là vi phạm hợp đồng
+	// barrier: handleLocked từ chối (ActionReject) thay vì buffer vào chunk mà flush đã merge xong (mất event).
+	unlockedFlush bool
 
 	// Keys khác nil: chunk "đọc lại" (re-read) một TẬP khóa rời rạc thay vì đoạn [StartPK, EndPK]
 	// (StartPK/EndPK khi đó chỉ là min/max để ghi log). Dùng cho UPDATE đổi PK mà cột TOAST không

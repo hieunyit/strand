@@ -139,6 +139,10 @@
           <input type="number" name="chunk_rows" class="num mono" min="1" placeholder="default: auto (5000)">
           <small class="muted">Rows per snapshot chunk. Empty = auto-tuned.</small>
         </label>
+        <label>Tables in parallel
+          <input type="number" name="max_parallel" class="num mono" min="1" max="32" placeholder="default: 1">
+          <small class="muted">How many tables the snapshot copies at the same time (1-32). They share the source read limit; memory and target connections grow with this number. Ignored for PostgreSQL sources.</small>
+        </label>
         <label>Start position (--start-at)
           <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678 or GTID (skips snapshot)">
           <small class="muted">Tùy chọn: Nhập vị trí binlog hoặc GTID sau khi đã tự import DB sang Target để bỏ qua bước snapshot.</small>

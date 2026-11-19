@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"strand/internal/config"
 	"strand/internal/exitcode"
 )
 
@@ -28,6 +29,7 @@ type initOpts struct {
 	Excludes                 []string
 	IOPSSoft, IOPSHard       int
 	Workers, ChunkRows       int
+	MaxParallel              int
 	CommitOrder              string
 	BreakerMaxRatio          float64
 	ReplicaLagMax            string
@@ -91,10 +93,10 @@ tables:
 
 bootstrap:
   default: logical            # snapshot dữ liệu ban đầu trực tiếp từ nguồn (không cần backup)
-{{- if or .ChunkRows .Windows}}
-  logical: { {{if .ChunkRows}}chunk_rows: {{.ChunkRows}}{{if .Windows}}, {{end}}{{end}}{{if .Windows}}windows: [{{range $i, $e := .Windows}}{{if $i}}, {{end}}"{{$e}}"{{end}}]{{end}} }   # chunk_rows cố định tắt tự chỉnh cỡ chunk
+{{- if or .ChunkRows .Windows .MaxParallel}}
+  logical: { {{logical .}} }   # chunk_rows cố định tắt tự chỉnh cỡ chunk; max_parallel: số bảng snapshot cùng lúc
 {{- else}}
-  # logical: { chunk_rows: 20000, windows: ["22:00-06:00"] }   # cỡ chunk cố định; chỉ snapshot trong khung giờ
+  # logical: { chunk_rows: 20000, max_parallel: 4, windows: ["22:00-06:00"] }   # cỡ chunk cố định; 4 bảng cùng lúc; chỉ snapshot trong khung giờ
 {{- end}}
 
 resources:
@@ -125,8 +127,28 @@ observability:
 `
 
 var initTemplate = template.Must(template.New("cfg").Funcs(template.FuncMap{
-	"slot": func(s string) string { return strings.ReplaceAll(s, "-", "_") },
+	"slot":    func(s string) string { return strings.ReplaceAll(s, "-", "_") },
+	"logical": logicalInitLine,
 }).Parse(initTemplateText))
+
+// logicalInitLine: nội dung khối bootstrap.logical của file mẫu (chunk_rows, max_parallel, windows).
+func logicalInitLine(o initOpts) string {
+	var parts []string
+	if o.ChunkRows > 0 {
+		parts = append(parts, fmt.Sprintf("chunk_rows: %d", o.ChunkRows))
+	}
+	if o.MaxParallel > 0 {
+		parts = append(parts, fmt.Sprintf("max_parallel: %d", o.MaxParallel))
+	}
+	if len(o.Windows) > 0 {
+		ws := make([]string, len(o.Windows))
+		for i, w := range o.Windows {
+			ws[i] = `"` + w + `"`
+		}
+		parts = append(parts, "windows: ["+strings.Join(ws, ", ")+"]")
+	}
+	return strings.Join(parts, ", ")
+}
 
 // renderInitConfig sinh nội dung file cấu hình mẫu.
 func renderInitConfig(o initOpts) (string, error) {
@@ -217,8 +239,12 @@ func renderInitConfig(o initOpts) (string, error) {
 	if o.LogFormat != "json" && o.LogFormat != "text" {
 		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, fmt.Sprintf("--log-format must be json or text, got %q", o.LogFormat), nil)
 	}
-	if o.IOPSSoft < 0 || o.IOPSHard < 0 || o.Workers < 0 || o.ChunkRows < 0 || o.BreakerMaxRatio < 0 {
+	if o.IOPSSoft < 0 || o.IOPSHard < 0 || o.Workers < 0 || o.ChunkRows < 0 || o.BreakerMaxRatio < 0 || o.MaxParallel < 0 {
 		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax, "numeric options must not be negative", nil)
+	}
+	if o.MaxParallel > config.MaxSnapshotParallel {
+		return "", exitcode.New("invalid_flag", exitcode.InvalidSyntax,
+			fmt.Sprintf("--max-parallel must be between 1 and %d, got %d", config.MaxSnapshotParallel, o.MaxParallel), nil)
 	}
 	if o.IOPSHard > 0 && o.IOPSSoft == 0 {
 		o.IOPSSoft = o.IOPSHard / 2
@@ -311,6 +337,7 @@ func newConfigInitCmd() *cobra.Command {
 	f.IntVar(&o.IOPSHard, "iops-hard", 0, "Giới hạn cứng tải đọc (mặc định 2 × --iops-soft)")
 	f.IntVar(&o.Workers, "workers", 0, "Số luồng ghi song song lên đích (mặc định Strand 8)")
 	f.IntVar(&o.ChunkRows, "chunk-rows", 0, "Cỡ chunk snapshot cố định (mặc định: tự chỉnh)")
+	f.IntVar(&o.MaxParallel, "max-parallel", 0, "Số bảng snapshot cùng lúc, 1-32 (mặc định 1; nguồn PostgreSQL luôn 1)")
 	f.StringSliceVar(&o.Windows, "snapshot-window", nil, "Khung giờ được snapshot, vd 22:00-06:00 (lặp lại được)")
 	f.StringVar(&o.CommitOrder, "commit-order", "relaxed", "relaxed | strict")
 	f.Float64Var(&o.BreakerMaxRatio, "breaker-max-ratio", 0, "Breaker: p99 câu kiểm tra nguồn / baseline tự học (mặc định 3)")

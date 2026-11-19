@@ -724,7 +724,7 @@
         var str = (v || '').trim();
         if (str !== '') {
           if (k === 'source_port' || k === 'target_port' || k === 'workers' || k === 'server_id' ||
-              k === 'iops_soft' || k === 'iops_hard' || k === 'chunk_rows') {
+              k === 'iops_soft' || k === 'iops_hard' || k === 'chunk_rows' || k === 'max_parallel') {
             payload[k] = parseInt(str, 10);
           } else if (k === 'breaker_max_ratio') {
             payload[k] = parseFloat(str);
