@@ -192,6 +192,7 @@ func New(o Options) (*Server, error) {
 	s.registerWizards()
 	s.registerConfigEditOps()
 	s.registerRegistryOps()
+	s.registerCLIOps()
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
 	}
@@ -371,6 +372,10 @@ func (s *Server) routes() http.Handler {
 		}))
 	}
 	mux.Handle("GET /api/v1/pipelines/{name}/source-tables", s.auth(true, s.apiSourceTables))
+	mux.Handle("GET /api/v1/pipelines/{name}/config/download", s.auth(true, s.apiConfigDownload))
+	mux.Handle("GET /pipelines/{name}/config.yaml", s.auth(false, s.apiConfigDownload))
+	mux.Handle("GET /mcp", s.auth(false, s.pageMCP))
+	mux.Handle("GET /api/v1/mcp", s.auth(true, s.apiMCP))
 	mux.Handle("GET /api/v1/pipelines/{name}/jobs", s.auth(true, s.apiPipelineJobs))
 	mux.Handle("GET /api/v1/jobs", s.auth(true, s.apiJobs))
 	mux.Handle("GET /api/v1/jobs/{id}", s.auth(true, s.apiJob))

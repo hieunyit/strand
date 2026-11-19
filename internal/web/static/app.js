@@ -604,6 +604,25 @@
     }
   });
 
+  // Config editor: "Upload YAML" replaces the editor text (nothing is saved until Save), then previews the diff.
+  document.addEventListener('change', function (ev) {
+    var inp = ev.target;
+    if (!inp || inp.id !== 'cfg-upload' || !inp.files || !inp.files[0]) { return; }
+    var f = inp.files[0];
+    if (f.size > 1048576) { toast('Upload failed: the file is larger than 1 MiB', false); inp.value = ''; return; }
+    f.text().then(function (txt) {
+      var ta = document.getElementById('cfg-yaml-textarea');
+      if (!ta) { return; }
+      ta.value = txt;
+      var form = document.getElementById('cfg-edit-form');
+      if (form) { form.setAttribute('data-dirty', '1'); }
+      toast('Loaded ' + f.name + ': review the diff, then Save', true);
+      var b = document.getElementById('cfg-btn-diff');
+      if (b) { b.click(); }
+    }, function (e) { toast('Upload failed: ' + e, false); });
+    inp.value = '';
+  });
+
   // ---- New pipeline form handler (M5) ----
   function escHtml(x) {
     return String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

@@ -17,7 +17,7 @@ import (
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings"}
+var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings", "mcp"}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{

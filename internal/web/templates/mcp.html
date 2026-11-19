@@ -1,0 +1,24 @@
+{{define "content"}}
+<section class="card"><div class="cardhead"><h2>MCP (Model Context Protocol)</h2></div>
+<p class="muted small"><code>strand mcp</code> is a <strong>read-only</strong> MCP server over stdio. Your MCP client (Claude Desktop, Claude Code, an IDE) starts it on a machine that has the <code>strand</code> binary and can reach this web's PostgreSQL metadata database; the web does not run it. Every tool call is written to the audit log as <code>mcp.&lt;tool&gt;</code>.</p>
+<h3>Connect</h3>
+<p class="small">Command: <code>{{.Body.Command}}</code></p>
+<p class="small">Claude Code:</p>
+<pre class="code wrapcode">{{.Body.ClaudeCode}}</pre>
+<p class="small">Claude Desktop / other clients (<code>mcpServers</code> entry):</p>
+<pre class="code wrapcode">{{.Body.ClientJSON}}</pre>
+<p class="muted small">The process needs read access to <code>{{.Body.ConfigPath}}</code> (for <code>database.dsn</code>), or set <code>STRAND_WEB_DATABASE_DSN</code> in the client's environment for the server. Run it as a user that may read the backup catalog.</p>
+</section>
+<section class="card"><h2>Tools (allowlist, read-only)</h2>
+<table class="tbl"><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>
+{{range .Body.Tools}}<tr><td class="mono">{{.Name}}</td><td>{{.Description}}</td></tr>{{end}}
+</tbody></table>
+</section>
+<section class="card"><h2>Recent calls</h2>
+{{if .Body.RecentCalls}}
+<table class="tbl"><thead><tr><th>Time</th><th>Tool</th><th>Result</th></tr></thead><tbody>
+{{range .Body.RecentCalls}}<tr><td class="mono small">{{.Time.UTC.Format "2006-01-02 15:04:05"}}</td><td class="mono">{{.Tool}}</td><td>{{.Result}}</td></tr>{{end}}
+</tbody></table>
+{{else}}<p class="muted">No MCP tool calls recorded yet.</p>{{end}}
+</section>
+{{end}}

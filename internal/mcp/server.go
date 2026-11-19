@@ -604,3 +604,19 @@ func toolDefinitions() []toolDefinition {
 		},
 	}
 }
+
+// ToolInfo mô tả một tool MCP (tên + mô tả) cho trang MCP của Web UI.
+type ToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// Tools trả allowlist tool mà server MCP cung cấp (đều chỉ đọc).
+func Tools() []ToolInfo {
+	defs := toolDefinitions()
+	out := make([]ToolInfo, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, ToolInfo{Name: d.Name, Description: d.Description})
+	}
+	return out
+}

@@ -41,6 +41,8 @@ func (s *Server) withAdminTimeout(ctx context.Context, p *Pipeline, timeout time
 type PipelineView struct {
 	Name       string         `json:"name"`
 	Pair       string         `json:"pair"`
+	SourceKind string         `json:"source_kind,omitempty"`
+	TargetKind string         `json:"target_kind,omitempty"`
 	Mode       string         `json:"mode"`
 	Origin     string         `json:"origin"`
 	ConfigPath string         `json:"config_path"`
@@ -69,6 +71,9 @@ type PipelineView struct {
 func (s *Server) view(p *Pipeline) PipelineView {
 	v := PipelineView{Name: p.Name, Pair: p.Pair(), Mode: p.Mode(), Origin: p.Origin, ConfigPath: p.ConfigPath, ConfigErr: p.CfgErr, State: StateUnknown,
 		Missing: p.Missing, Conflicts: p.Conflicts}
+	if p.Cfg != nil {
+		v.SourceKind, v.TargetKind = strings.ToLower(p.Cfg.Source.Kind), strings.ToLower(p.Cfg.Target.Kind)
+	}
 	if sn := s.samp.Latest(p.Name); sn != nil {
 		v.State, v.Reachable, v.Runtime, v.Top, v.SampledAt = sn.State, sn.Reachable, sn.Runtime, sn.Top, sn.At
 		v.RawState, v.Stale, v.LastOK, v.PollErr, v.Rates, v.LagLevel = sn.RawState, sn.Stale, sn.LastOK, sn.PollErr, sn.Rates, sn.LagLevel
@@ -509,18 +514,9 @@ type ConfigView struct {
 func (s *Server) configView(p *Pipeline) ConfigView {
 	v := ConfigView{Path: p.ConfigPath, Unimplemented: []string{}}
 	s.materialize(p.Name)
-	raw, err := os.ReadFile(p.ConfigPath)
-	if err != nil {
-		ctx, cancel := dbCtx()
-		row, ok, dberr := s.db.st.GetPipeline(ctx, p.Name)
-		cancel()
-		if dberr == nil && ok && row.HasConfig && len(row.ConfigYAML) > 0 {
-			raw = []byte(row.ConfigYAML)
-			err = nil
-		}
-	}
-	if err != nil {
-		v.Error = "cannot read config file: " + err.Error()
+	raw := s.getOriginalConfig(p) // bản trong DB (nguồn sự thật); file chỉ là dự phòng
+	if len(raw) == 0 {
+		v.Error = "cannot read the pipeline configuration (not in the database, and " + p.ConfigPath + " is not readable)"
 		return v
 	}
 	masked, err := MaskConfigText(raw)
