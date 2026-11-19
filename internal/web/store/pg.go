@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // driver "pgx"
+
+	"strand/internal/backup"
 )
 
 // PG is the PostgreSQL implementation of Store.
@@ -365,4 +368,173 @@ func (p *PG) MetaSet(ctx context.Context, key, value string) error {
 	_, err := p.db.ExecContext(ctx, `INSERT INTO web_meta (key, value) VALUES ($1,$2)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, key, value)
 	return p.wrap(err)
+}
+
+const backupCols = `id, source, engine, tool, tool_version, bucket, object_key, bytes, sha256,
+	gtid_set, lsn, binlog_file, binlog_pos, manifest_uri, status, created_at, verified_at, expires_at, legal_hold`
+
+func scanBackup(sc interface{ Scan(...any) error }) (backup.Record, error) {
+	var r backup.Record
+	var verified, expires sql.NullTime
+	err := sc.Scan(&r.ID, &r.Source, &r.Engine, &r.Tool, &r.ToolVersion, &r.Bucket, &r.ObjectKey, &r.Bytes,
+		&r.SHA256, &r.Position.GTIDSet, &r.Position.LSN, &r.Position.BinlogFile, &r.Position.BinlogPos,
+		&r.ManifestURI, &r.Status, &r.CreatedAt, &verified, &expires, &r.LegalHold)
+	if verified.Valid {
+		t := verified.Time
+		r.VerifiedAt = &t
+	}
+	if expires.Valid {
+		t := expires.Time
+		r.ExpiresAt = &t
+	}
+	return r, err
+}
+
+func (p *PG) CreateBackup(ctx context.Context, r backup.Record) (backup.Record, bool, error) {
+	r.SHA256 = strings.ToLower(r.SHA256)
+	if err := backup.ValidateCreate(r); err != nil {
+		return backup.Record{}, false, err
+	}
+	res, err := p.db.ExecContext(ctx, `INSERT INTO backups (`+backupCols+`) VALUES
+		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		ON CONFLICT DO NOTHING`, r.ID, r.Source, r.Engine, r.Tool, r.ToolVersion, r.Bucket, r.ObjectKey,
+		r.Bytes, strings.ToLower(r.SHA256), r.Position.GTIDSet, r.Position.LSN, r.Position.BinlogFile,
+		r.Position.BinlogPos, r.ManifestURI, r.Status, r.CreatedAt, r.VerifiedAt, r.ExpiresAt, r.LegalHold)
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	if n == 1 {
+		return r, true, nil
+	}
+	old, ok, err := p.GetBackup(ctx, r.ID)
+	if err != nil {
+		return backup.Record{}, false, err
+	}
+	if !ok || !backup.SameIdentity(old, r) {
+		return backup.Record{}, false, backup.ErrConflict
+	}
+	return old, false, nil
+}
+
+func (p *PG) GetBackup(ctx context.Context, id string) (backup.Record, bool, error) {
+	r, err := scanBackup(p.db.QueryRowContext(ctx, `SELECT `+backupCols+` FROM backups WHERE id = $1`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return backup.Record{}, false, nil
+	}
+	return r, err == nil, p.wrap(err)
+}
+
+func (p *PG) ListBackups(ctx context.Context, f backup.Filter) ([]backup.Record, error) {
+	if f.Limit <= 0 || f.Limit > backup.MaxListLimit {
+		f.Limit = backup.MaxListLimit
+	}
+	query := `SELECT ` + backupCols + ` FROM backups WHERE true`
+	args := make([]any, 0, 5)
+	add := func(clause string, value any) {
+		args = append(args, value)
+		query += fmt.Sprintf(" AND %s $%d", clause, len(args))
+	}
+	if f.Source != "" {
+		add("source =", f.Source)
+	}
+	if f.Engine != "" {
+		add("engine =", f.Engine)
+	}
+	if f.Status != "" {
+		add("status =", f.Status)
+	}
+	if f.CreatedAfter != nil {
+		add("created_at >=", *f.CreatedAfter)
+	}
+	if f.CreatedBefore != nil {
+		add("created_at <=", *f.CreatedBefore)
+	}
+	args = append(args, f.Limit)
+	query += fmt.Sprintf(" ORDER BY created_at DESC, id LIMIT $%d", len(args))
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, p.wrap(err)
+	}
+	defer rows.Close()
+	out := make([]backup.Record, 0)
+	for rows.Next() {
+		r, err := scanBackup(rows)
+		if err != nil {
+			return nil, p.wrap(err)
+		}
+		out = append(out, r)
+	}
+	return out, p.wrap(rows.Err())
+}
+
+func (p *PG) UpdateBackupStatus(ctx context.Context, id string, expected, next backup.Status, verifiedAt *time.Time) (backup.Record, bool, error) {
+	if next == backup.StatusComplete {
+		return backup.Record{}, false, fmt.Errorf("%w: use finalization to complete a backup", backup.ErrInvalid)
+	}
+	if !backup.CanTransition(expected, next) {
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	if verifiedAt != nil {
+		return backup.Record{}, false, fmt.Errorf("%w: verified_at is set by finalization", backup.ErrInvalid)
+	}
+	res, err := p.db.ExecContext(ctx, `UPDATE backups SET status = $3,
+		verified_at = CASE WHEN $3 = 'uploading' THEN NULL ELSE verified_at END
+		WHERE id = $1 AND status = $2
+		AND (NOT legal_hold OR $3 <> 'expired')`, id, expected, next)
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	if n == 0 {
+		cur, ok, err := p.GetBackup(ctx, id)
+		if err != nil || !ok {
+			return cur, ok, err
+		}
+		if cur.Status == expected && cur.LegalHold && next == backup.StatusExpired {
+			return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
+		}
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	return p.GetBackup(ctx, id)
+}
+
+func (p *PG) FinalizeBackup(ctx context.Context, id string, expected backup.Status, bytes int64, sha256, manifestURI string, verifiedAt time.Time) (backup.Record, bool, error) {
+	if expected != backup.StatusVerifying {
+		return backup.Record{}, false, fmt.Errorf("%w: invalid finalization metadata", backup.ErrInvalid)
+	}
+	if err := backup.ValidateFinalization(bytes, sha256, manifestURI, verifiedAt); err != nil {
+		return backup.Record{}, false, err
+	}
+	sha256 = strings.ToLower(sha256)
+	res, err := p.db.ExecContext(ctx, `UPDATE backups SET bytes = $3, sha256 = $4, manifest_uri = $5,
+		status = 'complete', verified_at = $6
+		WHERE id = $1 AND status = $2 AND $6 >= created_at`, id, expected, bytes, sha256, manifestURI, verifiedAt)
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	if n == 0 {
+		cur, ok, err := p.GetBackup(ctx, id)
+		if err != nil || !ok {
+			return cur, ok, err
+		}
+		if cur.Status == backup.StatusComplete && cur.Bytes == bytes && cur.SHA256 == sha256 && cur.ManifestURI == manifestURI {
+			return cur, false, nil
+		}
+		if cur.Status == expected && verifiedAt.Before(cur.CreatedAt) {
+			return backup.Record{}, false, fmt.Errorf("%w: verified_at precedes created_at", backup.ErrInvalid)
+		}
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	return p.GetBackup(ctx, id)
 }

@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"strand/internal/backup"
 	"strand/internal/web/store"
 )
 
@@ -57,6 +58,7 @@ type Server struct {
 	tls               bool
 	version           string
 	db                *metaDB // nil = chế độ file
+	backups           *backup.Catalog
 
 	pages   map[string]*template.Template
 	handler http.Handler
@@ -127,6 +129,12 @@ func New(o Options) (*Server, error) {
 	}
 	s.samp.Now = o.Now
 	s.db = db
+	if db != nil {
+		s.backups, err = backup.NewCatalog(db.st)
+		if err != nil {
+			return nil, err
+		}
+	}
 	s.sessions.db = db
 	if db != nil {
 		if err := s.initDB(); err != nil {
@@ -270,6 +278,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /pipelines/new", s.auth(false, s.apiPipelineCreate))
 	mux.Handle("GET /jobs", s.auth(false, s.pageJobs))
 	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
+	mux.Handle("GET /backups", s.auth(false, s.pageBackups))
 	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs"} {
 		tab := tab
 		p := "GET /pipelines/{name}"
@@ -306,6 +315,9 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/jobs", s.auth(true, s.apiJobs))
 	mux.Handle("GET /api/v1/jobs/{id}", s.auth(true, s.apiJob))
 	mux.Handle("GET /api/v1/jobs/{id}/output", s.auth(true, s.apiJobOutput))
+	mux.Handle("GET /api/v1/backups", s.auth(true, s.apiBackups))
+	mux.Handle("GET /api/v1/backups/{id}", s.auth(true, s.apiBackup))
+	mux.Handle("GET /api/v1/backups/{id}/status", s.auth(true, s.apiBackupStatus))
 	mux.Handle("POST /api/v1/pipelines/{name}/actions/{action}", s.auth(true, s.apiAction))
 	s.wizardRoutes(mux)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

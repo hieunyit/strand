@@ -1,0 +1,27 @@
+{{define "content"}}
+<section class="card">
+  <div class="cardhead"><h2>Central backup catalog</h2></div>
+  <p class="muted">Backup artifacts and their recovery metadata stored in the configured object store.</p>
+  {{if .Body.Message}}<p class="warnbox" role="status">{{.Body.Message}}</p>{{else if .Body.Backups}}
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="sr-only">Central backup catalog</caption>
+      <thead><tr><th>ID</th><th>Source</th><th>Engine / tool</th><th>Status</th><th class="r">Size</th><th>Recovery point</th><th>Created</th><th>Verified</th><th>Expires</th></tr></thead>
+      <tbody>{{range .Body.Backups}}
+      <tr>
+        <td class="mono">{{.ID}}{{if .LegalHold}} <span class="badge st-paused">legal hold</span>{{end}}</td>
+        <td>{{.Source}}</td>
+        <td>{{.Engine}} / {{.Tool}} {{.ToolVersion}}</td>
+        <td><span class="badge {{stateClass (printf "%s" .Status)}}">{{.Status}}</span></td>
+        <td class="r nowrap">{{bytes .Bytes}}</td>
+        <td class="mono small">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else}}-{{end}}</td>
+        <td class="nowrap">{{ts .CreatedAt}}</td>
+        <td class="nowrap">{{if .VerifiedAt}}{{ts (deref2 .VerifiedAt)}}{{else}}-{{end}}</td>
+        <td class="nowrap">{{if .ExpiresAt}}{{ts (deref2 .ExpiresAt)}}{{else}}never{{end}}</td>
+      </tr>
+      {{end}}</tbody>
+    </table>
+  </div>
+  {{else}}<div class="empty-state"><b>No backups registered</b><span>Upload a backup artifact to the configured object store to add it to this catalog.</span></div>{{end}}
+</section>
+{{end}}

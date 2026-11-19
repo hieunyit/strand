@@ -3,10 +3,13 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"strand/internal/backup"
 )
 
 // Mem is an in-memory Store for tests (several web Servers can share one Mem to model a restart).
@@ -20,6 +23,7 @@ type Mem struct {
 	wizards  map[string][]byte
 	audit    []AuditRow
 	meta     map[string]string
+	backups  map[string]backup.Record
 	locks    map[string]*sync.Mutex
 	// Down makes every call fail (simulates a database outage).
 	down bool
@@ -27,7 +31,7 @@ type Mem struct {
 
 func NewMem() *Mem {
 	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]string{},
-		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, locks: map[string]*sync.Mutex{}}
+		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, backups: map[string]backup.Record{}, locks: map[string]*sync.Mutex{}}
 }
 
 var errDown = errors.New("store: database is down")
@@ -301,6 +305,150 @@ func (m *Mem) MetaSet(_ context.Context, k, v string) error {
 	defer m.mu.Unlock()
 	m.meta[k] = v
 	return nil
+}
+
+func cloneBackup(r backup.Record) backup.Record {
+	if r.VerifiedAt != nil {
+		t := *r.VerifiedAt
+		r.VerifiedAt = &t
+	}
+	if r.ExpiresAt != nil {
+		t := *r.ExpiresAt
+		r.ExpiresAt = &t
+	}
+	return r
+}
+
+func (m *Mem) CreateBackup(_ context.Context, r backup.Record) (backup.Record, bool, error) {
+	r.SHA256 = strings.ToLower(r.SHA256)
+	if err := backup.ValidateCreate(r); err != nil {
+		return backup.Record{}, false, err
+	}
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	if old, ok := m.backups[r.ID]; ok {
+		if !backup.SameIdentity(old, r) {
+			return backup.Record{}, false, backup.ErrConflict
+		}
+		return cloneBackup(old), false, nil
+	}
+	for _, old := range m.backups {
+		if old.Bucket == r.Bucket && old.ObjectKey == r.ObjectKey {
+			return backup.Record{}, false, backup.ErrConflict
+		}
+	}
+	r.SHA256 = strings.ToLower(r.SHA256)
+	m.backups[r.ID] = cloneBackup(r)
+	return cloneBackup(r), true, nil
+}
+
+func (m *Mem) GetBackup(_ context.Context, id string) (backup.Record, bool, error) {
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	return cloneBackup(r), ok, nil
+}
+
+func (m *Mem) ListBackups(_ context.Context, f backup.Filter) ([]backup.Record, error) {
+	if err := m.enter(); err != nil {
+		return nil, err
+	}
+	defer m.mu.Unlock()
+	limit := f.Limit
+	if limit <= 0 || limit > backup.MaxListLimit {
+		limit = backup.MaxListLimit
+	}
+	out := make([]backup.Record, 0)
+	for _, r := range m.backups {
+		if (f.Source != "" && r.Source != f.Source) || (f.Engine != "" && r.Engine != f.Engine) || (f.Status != "" && r.Status != f.Status) {
+			continue
+		}
+		if (f.CreatedAfter != nil && r.CreatedAt.Before(*f.CreatedAfter)) || (f.CreatedBefore != nil && r.CreatedAt.After(*f.CreatedBefore)) {
+			continue
+		}
+		out = append(out, cloneBackup(r))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *Mem) UpdateBackupStatus(_ context.Context, id string, expected, next backup.Status, verifiedAt *time.Time) (backup.Record, bool, error) {
+	if next == backup.StatusComplete {
+		return backup.Record{}, false, fmt.Errorf("%w: use finalization to complete a backup", backup.ErrInvalid)
+	}
+	if !backup.CanTransition(expected, next) {
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	if verifiedAt != nil {
+		return backup.Record{}, false, fmt.Errorf("%w: verified_at is set by finalization", backup.ErrInvalid)
+	}
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	if !ok {
+		return backup.Record{}, false, nil
+	}
+	if r.Status != expected {
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	if r.LegalHold && next == backup.StatusExpired {
+		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
+	}
+	r.Status = next
+	if next == backup.StatusUploading {
+		r.VerifiedAt = nil
+	}
+	m.backups[id] = cloneBackup(r)
+	return cloneBackup(r), true, nil
+}
+
+func (m *Mem) FinalizeBackup(_ context.Context, id string, expected backup.Status, bytes int64, sha256, manifestURI string, verifiedAt time.Time) (backup.Record, bool, error) {
+	if expected != backup.StatusVerifying {
+		return backup.Record{}, false, fmt.Errorf("%w: invalid expected status", backup.ErrInvalid)
+	}
+	if err := backup.ValidateFinalization(bytes, sha256, manifestURI, verifiedAt); err != nil {
+		return backup.Record{}, false, err
+	}
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	if !ok {
+		return backup.Record{}, false, nil
+	}
+	sha256 = strings.ToLower(sha256)
+	if r.Status == backup.StatusComplete && r.Bytes == bytes && r.SHA256 == sha256 && r.ManifestURI == manifestURI {
+		return cloneBackup(r), false, nil
+	}
+	if r.Status != expected {
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	if verifiedAt.Before(r.CreatedAt) {
+		return backup.Record{}, false, fmt.Errorf("%w: verified_at precedes created_at", backup.ErrInvalid)
+	}
+	r.Bytes = bytes
+	r.SHA256 = sha256
+	r.ManifestURI = manifestURI
+	r.Status = backup.StatusComplete
+	t := verifiedAt.UTC()
+	r.VerifiedAt = &t
+	m.backups[id] = cloneBackup(r)
+	return cloneBackup(r), true, nil
 }
 
 func (m *Mem) Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error {

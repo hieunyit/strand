@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"strand/internal/backup"
 )
 
 // Admin is the single admin account.
@@ -110,6 +112,13 @@ type Store interface {
 
 	MetaGet(ctx context.Context, key string) (string, bool, error)
 	MetaSet(ctx context.Context, key, value string) error
+
+	// Central backup catalog metadata; payloads stay in object storage.
+	CreateBackup(ctx context.Context, r backup.Record) (backup.Record, bool, error)
+	GetBackup(ctx context.Context, id string) (backup.Record, bool, error)
+	ListBackups(ctx context.Context, f backup.Filter) ([]backup.Record, error)
+	UpdateBackupStatus(ctx context.Context, id string, expected, next backup.Status, verifiedAt *time.Time) (backup.Record, bool, error)
+	FinalizeBackup(ctx context.Context, id string, expected backup.Status, bytes int64, sha256, manifestURI string, verifiedAt time.Time) (backup.Record, bool, error)
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error

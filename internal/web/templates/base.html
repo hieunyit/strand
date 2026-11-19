@@ -18,6 +18,7 @@
     <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>{{icon "pipelines"}}Pipelines</a>
     <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>
     <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
+    <a href="/backups" class="{{if eq .Active "backups"}}active{{end}}"{{if eq .Active "backups"}} aria-current="page"{{end}}>{{icon "db"}}Backups</a>
     <div class="navhead">Registered pipelines</div>
     {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"{{if eq $.Active .Name}} aria-current="page"{{end}} title="{{.Name}}: {{.State}}"><span class="dot {{stateClass .State}}" role="img" aria-label="{{.State}}"></span>{{.Name}}</a>
     {{else}}<span class="muted pad small">none registered</span>{{end}}
