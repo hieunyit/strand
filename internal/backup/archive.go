@@ -47,6 +47,14 @@ func OpenArtifact(ctx context.Context, path string) (io.ReadCloser, int64, error
 	if !rootInfo.IsDir() {
 		return nil, 0, fmt.Errorf("backup artifact must be a regular file or directory")
 	}
+	if abs == string(filepath.Separator) {
+		return nil, 0, fmt.Errorf("backup artifact cannot be the filesystem root")
+	}
+	archiveRoot := filepath.Base(abs)
+	if archiveRoot == string(filepath.Separator) || archiveRoot == "." || archiveRoot == "" {
+		// Defensive fallback: archive member names must always be relative.
+		archiveRoot = "artifact"
+	}
 	r, w := io.Pipe()
 	jobCtx, cancel := context.WithCancel(ctx)
 	stream := &archiveReadCloser{ReadCloser: r, cancel: cancel}
@@ -75,7 +83,7 @@ func OpenArtifact(ctx context.Context, path string) (io.ReadCloser, int64, error
 			if err != nil {
 				return err
 			}
-			name := filepath.Base(abs)
+			name := archiveRoot
 			if rel != "." {
 				name = filepath.Join(name, rel)
 			}

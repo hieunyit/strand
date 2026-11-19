@@ -333,6 +333,9 @@ func validateManifestURI(raw string) error {
 }
 
 func validID(id string) bool { return idRE.MatchString(id) }
+
+// ValidID reports whether s is safe to use as a catalog or managed-job ID.
+func ValidID(s string) bool { return validID(s) }
 func validStatus(s Status) bool {
 	switch s {
 	case StatusQueued, StatusUploading, StatusVerifying, StatusComplete, StatusFailed, StatusExpired:

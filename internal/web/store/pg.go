@@ -122,7 +122,34 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
-	return fn(ctx)
+	// Session advisory locks are released automatically when PostgreSQL drops
+	// their connection. Monitor the owning session and cancel callback work on
+	// disconnect, or another Web replica could take the lock while a backup keeps
+	// running without coordination.
+	lockCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- fn(lockCtx) }()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			cancel()
+			return <-done
+		case <-ticker.C:
+			pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+			err := conn.PingContext(pingCtx)
+			pingCancel()
+			if err != nil {
+				cancel()
+				callbackErr := <-done
+				return errors.Join(fmt.Errorf("advisory lock connection lost: %w", err), callbackErr)
+			}
+		}
+	}
 }
 
 func (p *PG) Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error {
@@ -641,4 +668,140 @@ func (p *PG) FinalizeBackup(ctx context.Context, id string, expected backup.Stat
 		return backup.Record{}, false, backup.ErrTransition
 	}
 	return p.GetBackup(ctx, id)
+}
+
+const backupJobCols = `id, name, command, every_seconds, artifact_template, manifest_template, bucket, prefix,
+	enabled, tunnel_ssh, tunnel_user, tunnel_identity_file, tunnel_known_hosts, tunnel_remote, cleanup_local, next_run_at, updated_at,
+	run_started_at, run_finished_at, last_run_status`
+
+func scanBackupJob(sc interface{ Scan(...any) error }) (backup.Job, error) {
+	var j backup.Job
+	var nextRun, runStarted, runFinished sql.NullTime
+	err := sc.Scan(&j.ID, &j.Name, &j.Command, &j.EverySeconds, &j.ArtifactTemplate, &j.ManifestTemplate,
+		&j.Bucket, &j.Prefix, &j.Enabled, &j.TunnelSSH, &j.TunnelUser, &j.TunnelIdentity, &j.TunnelKnownHosts,
+		&j.TunnelRemote, &j.CleanupLocal, &nextRun, &j.UpdatedAt, &runStarted, &runFinished, &j.LastRunStatus)
+	if nextRun.Valid {
+		t := nextRun.Time
+		j.NextRunAt = &t
+	}
+	if runStarted.Valid {
+		t := runStarted.Time
+		j.RunStartedAt = &t
+	}
+	if runFinished.Valid {
+		t := runFinished.Time
+		j.RunFinishedAt = &t
+	}
+	return j, err
+}
+
+func (p *PG) CreateBackupJob(ctx context.Context, j backup.Job) error {
+	if err := backup.ValidateJob(j); err != nil {
+		return err
+	}
+	_, err := p.db.ExecContext(ctx, `INSERT INTO backup_jobs
+		(id, name, command, every_seconds, artifact_template, manifest_template, bucket, prefix, enabled,
+		tunnel_ssh, tunnel_user, tunnel_identity_file, tunnel_known_hosts, tunnel_remote, cleanup_local, next_run_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, j.ID, j.Name, j.Command, j.EverySeconds,
+		j.ArtifactTemplate, j.ManifestTemplate, j.Bucket, j.Prefix, j.Enabled, j.TunnelSSH, j.TunnelUser,
+		j.TunnelIdentity, j.TunnelKnownHosts, j.TunnelRemote, j.CleanupLocal, j.NextRunAt)
+	return p.wrap(err)
+}
+
+func (p *PG) GetBackupJob(ctx context.Context, id string) (backup.Job, bool, error) {
+	j, err := scanBackupJob(p.db.QueryRowContext(ctx, `SELECT `+backupJobCols+` FROM backup_jobs WHERE id=$1`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return backup.Job{}, false, nil
+	}
+	return j, err == nil, p.wrap(err)
+}
+
+func (p *PG) ListBackupJobs(ctx context.Context) ([]backup.Job, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT `+backupJobCols+` FROM backup_jobs ORDER BY name, id`)
+	if err != nil {
+		return nil, p.wrap(err)
+	}
+	defer rows.Close()
+	out := make([]backup.Job, 0)
+	for rows.Next() {
+		j, err := scanBackupJob(rows)
+		if err != nil {
+			return nil, p.wrap(err)
+		}
+		out = append(out, j)
+	}
+	return out, p.wrap(rows.Err())
+}
+
+func (p *PG) UpdateBackupJob(ctx context.Context, j backup.Job) (bool, error) {
+	if err := backup.ValidateJob(j); err != nil {
+		return false, err
+	}
+	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET name=$2, command=$3, every_seconds=$4,
+		artifact_template=$5, manifest_template=$6, bucket=$7, prefix=$8, enabled=$9, tunnel_ssh=$10,
+		tunnel_user=$11, tunnel_identity_file=$12, tunnel_known_hosts=$13, tunnel_remote=$14, cleanup_local=$15,
+		next_run_at=$16, updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
+		WHERE id=$1`, j.ID, j.Name, j.Command, j.EverySeconds, j.ArtifactTemplate, j.ManifestTemplate,
+		j.Bucket, j.Prefix, j.Enabled, j.TunnelSSH, j.TunnelUser, j.TunnelIdentity, j.TunnelKnownHosts,
+		j.TunnelRemote, j.CleanupLocal, j.NextRunAt)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, p.wrap(err)
+}
+
+func (p *PG) SetBackupJobNextRun(ctx context.Context, id string, expectedUpdatedAt, nextRunAt time.Time) (bool, error) {
+	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET next_run_at=$3 WHERE id=$1 AND updated_at=$2`, id, expectedUpdatedAt, nextRunAt)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, p.wrap(err)
+}
+
+func (p *PG) BeginBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (time.Time, bool, error) {
+	var startedAt time.Time
+	err := p.db.QueryRowContext(ctx, `UPDATE backup_jobs SET run_started_at=clock_timestamp(), run_finished_at=NULL,
+		last_run_status='running',
+		next_run_at=CASE WHEN enabled THEN clock_timestamp() + make_interval(secs => every_seconds) ELSE next_run_at END
+		WHERE id=$1 AND updated_at=$2 RETURNING run_started_at`, id, expectedUpdatedAt).Scan(&startedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	return startedAt, err == nil, p.wrap(err)
+}
+
+func (p *PG) FinishBackupJobRun(ctx context.Context, id string, startedAt time.Time, status backup.RunStatus) (bool, error) {
+	if status != backup.RunStatusSucceeded && status != backup.RunStatusFailed && status != backup.RunStatusCancelled {
+		return false, fmt.Errorf("%w: invalid backup job run status", backup.ErrInvalid)
+	}
+	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET run_finished_at=clock_timestamp(), last_run_status=$3,
+		next_run_at=CASE WHEN enabled THEN clock_timestamp() + make_interval(secs => every_seconds) ELSE NULL END
+		WHERE id=$1 AND run_started_at=$2 AND run_finished_at IS NULL AND last_run_status='running'`, id, startedAt, status)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, p.wrap(err)
+}
+
+func (p *PG) RecoverBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (bool, error) {
+	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET run_finished_at=clock_timestamp(), last_run_status='interrupted',
+		next_run_at=CASE WHEN enabled THEN clock_timestamp() + make_interval(secs => every_seconds) ELSE NULL END
+		WHERE id=$1 AND updated_at=$2 AND run_started_at IS NOT NULL AND run_finished_at IS NULL AND last_run_status='running'`, id, expectedUpdatedAt)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, p.wrap(err)
+}
+
+func (p *PG) DeleteBackupJob(ctx context.Context, id string) (bool, error) {
+	res, err := p.db.ExecContext(ctx, `DELETE FROM backup_jobs WHERE id=$1`, id)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, p.wrap(err)
 }

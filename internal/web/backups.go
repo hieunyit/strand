@@ -14,6 +14,7 @@ type backupsPageBody struct {
 	Message    string
 	NextCursor string
 	Paged      bool
+	Jobs       []backupJobView
 }
 
 const backupsPageSize = 200
@@ -40,8 +41,12 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 			b.Backups = items
 			b.NextCursor = backup.NextCursor(items, f.Limit)
 		}
+		b.Jobs, err = s.backupJobViews(r.Context())
+		if err != nil {
+			b.Message = "Could not read backup jobs."
+		}
 	}
-	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Body: b})
+	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Refresh: 10, Body: b})
 }
 
 func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request, _ *Session) {
