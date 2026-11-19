@@ -217,7 +217,7 @@ Thứ tự ưu tiên của giá trị hiệu lực: **biến môi trường** (k
 
 ### `GET /api/v1/backups`, `GET /api/v1/backups/{id}`, `GET /api/v1/backups/{id}/status` (trang `/backups`)
 
-Catalog backup tập trung (chỉ đọc, cần chế độ PostgreSQL; chế độ file trả 503). `GET /api/v1/backups` nhận
+Catalog backup tập trung (chỉ đọc). `GET /api/v1/backups` nhận
 `source`, `engine`, `status`, `limit` (1..500, mặc định 200), `created_after`, `created_before` (RFC3339) và
 `cursor`; trả `{"backups": [Record], "limit": N, "next_cursor": "..."}` (mới nhất trước; `next_cursor` chỉ có khi
 trang đầy). Xem `docs/CENTRAL-BACKUPS.md`.

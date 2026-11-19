@@ -441,7 +441,7 @@ func exportWith(ctx context.Context, st store.Store, cfg *Config, box *store.Box
 	if envSkipped > 0 {
 		fmt.Fprintf(o.Out, "warning: %d pipeline .env copies are sealed and were not exported (set %s); the .env files on disk are not affected\n", envSkipped, EnvSecretKey)
 	}
-	fmt.Fprintln(o.Out, "rollback to file mode: stop the web; copy state/* into the state_dir; copy pipelines/<name>.yaml|.env to the paths in pipelines/MANIFEST.json if they differ; use the exported web.yaml (no database section) and unset "+EnvDatabaseDSN+"; start the web")
+	fmt.Fprintln(o.Out, "rollback to an older strand build (file mode; this build needs PostgreSQL): stop the web; copy state/* into the state_dir; copy pipelines/<name>.yaml|.env to the paths in pipelines/MANIFEST.json if they differ; use the exported web.yaml (no database section) and unset "+EnvDatabaseDSN+"; start the web")
 	return nil
 }
 

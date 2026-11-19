@@ -1,5 +1,8 @@
 # Strand CDC Web UI bằng docker compose: PostgreSQL (metadata) + strand web (pipeline chạy chế độ nền trong container web).
-#   cp .env.example .env   # đặt POSTGRES_PASSWORD, STRAND_WEB_SECRET_KEY, STRAND_WEB_ADMIN_PASSWORD
+#   cp .env.example .env   # đặt POSTGRES_PASSWORD, STRAND_WEB_SECRET_KEY (bắt buộc, openssl rand -hex 32),
+#                          # tùy chọn STRAND_WEB_ADMIN_PASSWORD
+# Mọi thứ (pipeline, bí mật mã hóa, job, audit, cài đặt) nằm trong PostgreSQL; volume strand_config chỉ là
+# bản vật chất hóa cho tiến trình strand (mất volume: web dựng lại từ DB lúc khởi động).
 #   docker compose up -d --build
 #   mở http://<host>:8080  (không đặt STRAND_WEB_ADMIN_PASSWORD thì mật khẩu sinh ra nằm ở: docker compose logs web)
 # Hướng dẫn đầy đủ: docs/INSTALL.md mục "Chạy bằng docker compose".
@@ -51,7 +54,7 @@ services:
       - "${STRAND_WEB_BIND:-0.0.0.0}:${STRAND_WEB_PORT:-8080}:8080"
     environment:
       STRAND_WEB_DATABASE_DSN: postgres://strand:${POSTGRES_PASSWORD}@db:5432/strand?sslmode=disable
-      STRAND_WEB_SECRET_KEY: ${STRAND_WEB_SECRET_KEY:-}
+      STRAND_WEB_SECRET_KEY: ${STRAND_WEB_SECRET_KEY:?set STRAND_WEB_SECRET_KEY in .env (openssl rand -hex 32)}
       STRAND_WEB_SECRET_KEY_PREVIOUS: ${STRAND_WEB_SECRET_KEY_PREVIOUS:-}
       STRAND_WEB_ADMIN_PASSWORD: ${STRAND_WEB_ADMIN_PASSWORD:-}
       # Docker secrets thay cho biến trên: bỏ comment khối `secrets` cuối file, đặt
@@ -64,7 +67,7 @@ services:
       STRAND_WEB_TLS_CERT: ${STRAND_WEB_TLS_CERT:-}
       STRAND_WEB_TLS_KEY: ${STRAND_WEB_TLS_KEY:-}
     volumes:
-      - strand_config:/etc/strand          # file cấu hình pipeline (vật chất hóa từ DB), .env
+      - strand_config:/etc/strand          # bản vật chất hóa từ DB (cấu hình + .env) cho tiến trình strand
       - strand_state:/var/lib/strand-web   # spool, checkpoint, output job, audit.log (bản sao)
       # TLS tại web: mount cert/key rồi đặt STRAND_WEB_TLS_CERT=/certs/tls.crt, STRAND_WEB_TLS_KEY=/certs/tls.key
       #   - ./certs:/certs:ro
