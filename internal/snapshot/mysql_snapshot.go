@@ -1305,15 +1305,20 @@ func flushRowsRangeTimed(
 		return err
 	}
 
-	// Ghi theo batch multi-row upsert
-	const batchSize = 1000
+	// Ghi theo batch multi-row upsert, cắt theo số row VÀ theo byte (≤ max_allowed_packet/4 của target,
+	// chừa chỗ cho escape khi interpolate): trước đây cố định 1000 row — row lớn thì câu lệnh vượt
+	// max_allowed_packet (server cắt kết nối), row nhỏ thì quá nhiều round-trip tới target ở xa.
+	maxPacket, err := snapshotTargetMaxPacket(ctx, tx, dstDB)
+	if err != nil {
+		return err
+	}
+	bounds, err := snapshotUpsertBatches(rows, snapshotUpsertBudget(maxPacket), snapshotUpsertMaxRows, maxPacket)
+	if err != nil {
+		return fmt.Errorf("table %s: %w", table, err)
+	}
 	phaseStart = time.Now()
-	for i := 0; i < len(rows); i += batchSize {
-		end := i + batchSize
-		if end > len(rows) {
-			end = len(rows)
-		}
-		batch := rows[i:end]
+	for _, bd := range bounds {
+		batch := rows[bd[0]:bd[1]]
 
 		var valPlaceholders []string
 		var args []any
@@ -1488,4 +1493,76 @@ func snapshotColumnValue(b []byte, databaseType string) model.Value {
 		return append([]byte(nil), b...)
 	}
 	return string(b)
+}
+
+const (
+	// snapshotUpsertMaxRows / snapshotUpsertMaxBytes: trần một câu INSERT ... ON DUPLICATE KEY UPDATE của flush
+	// snapshot. Ngân sách byte thực = min(snapshotUpsertMaxBytes, max_allowed_packet/4).
+	snapshotUpsertMaxRows  = 5000
+	snapshotUpsertMaxBytes = 8 << 20
+	snapshotPacketSlack    = 64 << 10
+)
+
+// snapshotMaxPacket: @@max_allowed_packet đã đọc của mỗi pool target (giá trị toàn cục, đọc một lần).
+var snapshotMaxPacket sync.Map // *sql.DB → int64
+
+func snapshotTargetMaxPacket(ctx context.Context, tx *sql.Tx, db *sql.DB) (int64, error) {
+	if v, ok := snapshotMaxPacket.Load(db); ok {
+		return v.(int64), nil
+	}
+	var mp int64
+	if err := tx.QueryRowContext(ctx, "SELECT @@max_allowed_packet").Scan(&mp); err != nil {
+		return 0, fmt.Errorf("read target max_allowed_packet: %w", err)
+	}
+	snapshotMaxPacket.Store(db, mp)
+	return mp, nil
+}
+
+func snapshotUpsertBudget(maxPacket int64) int64 {
+	b := int64(snapshotUpsertMaxBytes)
+	if maxPacket > 0 && maxPacket/4 < b {
+		b = maxPacket / 4
+	}
+	if b < 1 {
+		b = 1
+	}
+	return b
+}
+
+// snapshotRowBytes ước lượng payload của một row khi gửi (độ dài chuỗi/byte, số cố định cho kiểu khác).
+func snapshotRowBytes(r *model.RowChange) int64 {
+	var n int64
+	for _, c := range r.Cols {
+		switch v := c.Value.(type) {
+		case string:
+			n += int64(len(v)) + 4
+		case []byte:
+			n += int64(len(v)) + 4
+		default:
+			n += 24
+		}
+	}
+	return n
+}
+
+// snapshotUpsertBatches chia rows thành các đoạn [i, j): mỗi đoạn ≤ maxRows row và ≤ budget byte (một row
+// lớn hơn budget đi một mình). Row mà riêng nó (tính cả escape ~2x) không vừa max_allowed_packet: lỗi rõ.
+func snapshotUpsertBatches(rows []*model.RowChange, budget int64, maxRows int, maxPacket int64) ([][2]int, error) {
+	var out [][2]int
+	start, bytes := 0, int64(0)
+	for i, r := range rows {
+		rb := snapshotRowBytes(r)
+		if maxPacket > 0 && 2*rb+snapshotPacketSlack > maxPacket {
+			return nil, fmt.Errorf("snapshot row key %v: payload ~%d bytes cannot fit target max_allowed_packet %d; raise max_allowed_packet on the target", r.Key, rb, maxPacket)
+		}
+		if i > start && (i-start >= maxRows || bytes+rb > budget) {
+			out = append(out, [2]int{start, i})
+			start, bytes = i, 0
+		}
+		bytes += rb
+	}
+	if start < len(rows) {
+		out = append(out, [2]int{start, len(rows)})
+	}
+	return out, nil
 }
