@@ -50,12 +50,20 @@ type PipelineView struct {
 	LastExit   *ExitInfo      `json:"last_exit,omitempty"`
 	ConfigErr  string         `json:"config_error,omitempty"`
 	SampledAt  time.Time      `json:"sampled_at"`
+	// Live: số liệu của sampler (docs/WEB-API.md "Live stream").
+	RawState string    `json:"raw_state,omitempty"`
+	Stale    bool      `json:"stale"`
+	LastOK   time.Time `json:"last_ok"`
+	PollErr  string    `json:"poll_error,omitempty"`
+	Rates    Rates     `json:"rates"`
+	LagLevel string    `json:"lag_level"`
 }
 
 func (s *Server) view(p *Pipeline) PipelineView {
 	v := PipelineView{Name: p.Name, Pair: p.Pair(), Mode: p.Mode(), Origin: p.Origin, ConfigPath: p.ConfigPath, ConfigErr: p.CfgErr, State: StateUnknown}
 	if sn := s.samp.Latest(p.Name); sn != nil {
 		v.State, v.Reachable, v.Runtime, v.Top, v.SampledAt = sn.State, sn.Reachable, sn.Runtime, sn.Top, sn.At
+		v.RawState, v.Stale, v.LastOK, v.PollErr, v.Rates, v.LagLevel = sn.RawState, sn.Stale, sn.LastOK, sn.PollErr, sn.Rates, sn.LagLevel
 	}
 	if !v.Runtime.Running && v.Runtime.ExitCode != nil {
 		e := explainExitFor(*v.Runtime.ExitCode, v.Mode)
@@ -88,14 +96,20 @@ type StatusView struct {
 	Error  string            `json:"error,omitempty"`
 }
 
-func (s *Server) statusView(ctx context.Context, p *Pipeline) StatusView {
+// errNoSample: sampler chưa lấy mẫu pipeline này lần nào (vừa khởi động hoặc vừa đăng ký).
+const errNoSample = "no sample yet; the console polls every pipeline in the background"
+
+// statusView đọc kết quả `status` từ mẫu mới nhất của sampler (không gọi admin socket).
+func (s *Server) statusView(_ context.Context, p *Pipeline) StatusView {
 	var v StatusView
-	err := s.withAdmin(ctx, p, func(ctx context.Context, c *admin.Client) (err error) {
-		v.Status, err = c.Status(ctx)
-		return
-	})
-	if err != nil {
-		v.Error = notRunningMsg(err)
+	sn := s.samp.Latest(p.Name)
+	switch {
+	case sn == nil:
+		v.Error = errNoSample
+	case sn.Status != nil:
+		v.Status = sn.Status
+	default:
+		v.Error = sn.StatusErr
 	}
 	return v
 }
@@ -157,16 +171,22 @@ func tblEst(t admin.TableInfo) int64 {
 	return t.RowsEstimate
 }
 
-func (s *Server) tablesView(ctx context.Context, p *Pipeline) TablesView {
+// tablesView đọc danh sách bảng từ mẫu mới nhất của sampler (không gọi admin socket).
+func (s *Server) tablesView(_ context.Context, p *Pipeline) TablesView {
+	return tablesFromSnap(s.samp.Latest(p.Name))
+}
+
+func tablesFromSnap(sn *Snap) TablesView {
 	var v TablesView
-	err := s.withAdmin(ctx, p, func(ctx context.Context, c *admin.Client) (err error) {
-		v.Tables, err = c.Tables(ctx)
-		return
-	})
-	if err != nil {
-		v.Error = notRunningMsg(err)
+	switch {
+	case sn == nil:
+		v.Error = errNoSample
+		return v
+	case sn.Tables == nil && sn.TablesErr != "":
+		v.Error = sn.TablesErr
 		return v
 	}
+	v.Tables = append([]admin.TableInfo{}, sn.Tables...) // finish sắp xếp tại chỗ: không đụng Snap dùng chung
 	v.finish()
 	return v
 }
@@ -303,20 +323,22 @@ type HeadInfo struct {
 	HasInfo bool
 }
 
-func (s *Server) headInfo(ctx context.Context, p *Pipeline) HeadInfo {
+func (s *Server) headInfo(_ context.Context, p *Pipeline) HeadInfo {
+	return headFromSnap(s.samp.Latest(p.Name))
+}
+
+func headFromSnap(sn *Snap) HeadInfo {
 	var h HeadInfo
-	if sv := s.statusView(ctx, p); sv.Status != nil {
-		h.Uptime, h.HasInfo = sv.Status.UptimeSeconds, true
-	} else {
+	if sn == nil || sn.Status == nil {
 		return h
 	}
-	_ = s.withAdmin(ctx, p, func(ctx context.Context, c *admin.Client) error {
-		r, err := c.CheckpointShow(ctx)
-		if err == nil && r != nil {
-			h.CkptAt = r.UpdatedAt
-		}
-		return err
-	})
+	h.Uptime, h.HasInfo = sn.Status.UptimeSeconds, true
+	if sn.Stale && !sn.LastOK.IsZero() {
+		h.Uptime += sn.At.Sub(sn.LastOK).Seconds()
+	}
+	if sn.Checkpoint != nil {
+		h.CkptAt = sn.Checkpoint.UpdatedAt
+	}
 	return h
 }
 
@@ -328,21 +350,28 @@ type CheckpointView struct {
 	Error             string                  `json:"error,omitempty"`
 }
 
-func (s *Server) checkpointView(ctx context.Context, p *Pipeline) CheckpointView {
+// checkpointView đọc checkpoint từ mẫu mới nhất của sampler (không gọi admin socket).
+func (s *Server) checkpointView(_ context.Context, p *Pipeline) CheckpointView {
 	var v CheckpointView
-	err := s.withAdmin(ctx, p, func(ctx context.Context, c *admin.Client) (err error) {
-		v.Checkpoint, err = c.CheckpointShow(ctx)
-		return
-	})
-	if err != nil {
-		// Pipeline dừng: không đọc target ở M2 (đắt và cần mật khẩu); chỉ báo rõ.
-		v.Error = notRunningMsg(err) + "; the position is shown only while the pipeline runs"
+	sn := s.samp.Latest(p.Name)
+	switch {
+	case sn == nil:
+		v.Error = errNoSample
+		return v
+	case sn.Checkpoint == nil:
+		// Pipeline dừng: không đọc target (đắt và cần mật khẩu); chỉ báo rõ.
+		msg := sn.CheckpointErr
+		if msg == "" {
+			msg = "no checkpoint reported"
+		}
+		v.Error = msg + "; the position is shown only while the pipeline runs"
 		return v
 	}
-	if st := s.statusView(ctx, p); st.Status != nil {
-		v.StartPosition = st.Status.StartPosition
+	v.Checkpoint = sn.Checkpoint
+	if sn.Status != nil {
+		v.StartPosition = sn.Status.StartPosition
 	}
-	if sn := s.samp.Latest(p.Name); sn != nil && sn.Metrics != nil {
+	if sn.Metrics != nil {
 		if x, ok := sn.Metrics["strand_checkpoint_compaction_lag_seconds"]; ok {
 			v.CompactionLagSecs = &x
 		}
@@ -382,12 +411,15 @@ func exitForErrorCode(code string) (int, bool) {
 func (s *Server) errorsView(ctx context.Context, p *Pipeline) ErrorsView {
 	var v ErrorsView
 	var ev []admin.EventRecord
-	err := s.withAdmin(ctx, p, func(ctx context.Context, c *admin.Client) (err error) {
-		ev, err = c.Events(ctx)
-		return
-	})
-	if err != nil {
-		v.LiveErr = notRunningMsg(err)
+	sn := s.samp.Latest(p.Name)
+	switch {
+	case sn == nil:
+		v.LiveErr = errNoSample
+	default:
+		ev = sn.Events
+		if ev == nil {
+			v.LiveErr = sn.EventsErr
+		}
 	}
 	v.Live = EventsToLog(ev)
 	for i := range v.Live {
@@ -405,7 +437,12 @@ func (s *Server) errorsView(ctx context.Context, p *Pipeline) ErrorsView {
 			}
 		}
 	}
-	rt := s.reg.Runtime(ctx, p)
+	var rt Runtime
+	if sn != nil {
+		rt = sn.Runtime
+	} else {
+		rt = s.reg.Runtime(ctx, p)
+	}
 	if !rt.Running {
 		switch {
 		case rt.ExitCode != nil:

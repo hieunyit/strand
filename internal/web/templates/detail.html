@@ -10,10 +10,10 @@
   <section class="card"><h2>Run</h2>
     <dl class="dl">
       <dt>Epoch</dt><dd>{{.Epoch}}</dd>
-      <dt>Uptime</dt><dd>{{secs .UptimeSeconds}} (since {{ts .StartedAt}})</dd>
+      <dt>Uptime</dt><dd><span class="c-num" data-bind="uptime">{{secs .UptimeSeconds}}</span> (since {{ts .StartedAt}})</dd>
       <dt>Start position</dt><dd class="mono">{{if .StartPosition}}{{.StartPosition}}{{else}}-{{end}}{{if .StartAt}} (--start-at {{.StartAt}}){{end}}</dd>
       <dt>Commit order</dt><dd>{{.CommitOrder}}, {{.Workers}} writer(s)</dd>
-      <dt>Governor</dt><dd>{{.Governor.Algorithm}}{{if .Governor.Zone}}, zone {{.Governor.Zone}}{{end}}, rate {{num .Governor.BackgroundRate}}/s background, pressure {{printf "%.2f" .Governor.Pressure}}{{if .Governor.BreakerOpen}}, <span class="err">breaker open: {{.Governor.BreakerReason}}</span>{{end}}</dd>
+      <dt>Governor</dt><dd data-bind="governor">{{governor .Governor}}</dd>
       <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
     </dl>
   </section>{{end}}
@@ -23,28 +23,36 @@
       <button class="btn" type="submit">Apply</button>
       <span class="muted small hint">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</span>
     </form></section>{{end}}
-  <section class="charts">{{range .Charts}}<div class="card">{{.}}</div>{{end}}</section>
+  <section class="card chartbar" aria-label="Chart range"><div class="cardhead"><h2>{{icon "graph"}}History <span class="muted small">sampled every {{$.Interval}} s, kept 1 h in memory; new points arrive live</span></h2>
+    <div class="seg" role="group" aria-label="Time range" id="chart-range"><button type="button" class="segbtn" data-range="300" aria-pressed="false">5 min</button><button type="button" class="segbtn" data-range="900" aria-pressed="true">15 min</button><button type="button" class="segbtn" data-range="3600" aria-pressed="false">1 h</button></div></div></section>
+  <section class="charts" id="charts" data-pipeline="{{.View.Name}}">{{range .Charts}}<div class="card" data-chart="{{.Key}}">{{.HTML}}</div>{{end}}</section>
 {{end}}
 
 {{if eq .Tab "tables"}}
   {{if .Tables.Error}}<section class="card"><h2>Tables</h2><p class="muted">{{.Tables.Error}}</p></section>{{else}}
-  <section class="card snap" id="snapshot-summary" aria-label="Snapshot progress">
+  <section class="card snap" id="snapshot-summary" aria-label="Snapshot progress" data-live-row="{{.View.Name}}">
     <div class="snap-top">
       <h2>Snapshot progress {{if and (gt .Tables.Total 0) (eq .Tables.Done .Tables.Total)}}<span class="badge st-synced">complete</span>{{else if gt .Tables.Running 0}}<span class="badge st-bootstrapping">copying</span>{{else if gt .Tables.Total 0}}<span class="badge st-tbl-pending">waiting</span>{{end}}</h2>
       <div class="snap-figs">
-        <div class="snap-fig"><div class="f-label">Tables</div><div class="f-value" id="snap-tables">{{.Tables.Done}} <small>of {{.Tables.Total}} done ({{pct .Tables.TablesPct}})</small></div></div>
-        <div class="snap-fig"><div class="f-label">Rows (estimate)</div><div class="f-value" id="snap-rows">{{int64 .Tables.RowsCopied}} <small>of ~{{int64 .Tables.RowsEstimate}}{{if gt .Tables.RowsEstimate 0}} ({{pct .Tables.RowsPct}}){{end}}</small></div></div>
-        {{if .View.Top}}{{if gt .View.Top.ETASeconds 0.0}}<div class="snap-fig"><div class="f-label">ETA</div><div class="f-value">{{secs .View.Top.ETASeconds}}</div></div>{{end}}{{end}}
+        <div class="snap-fig"><div class="f-label">Tables</div><div class="f-value c-num" id="snap-tables"><span data-bind="tables_done">{{.Tables.Done}}</span> <small>of <span data-bind="tables_total">{{.Tables.Total}}</span> done (<span data-bind="tables_pct">{{pct .Tables.TablesPct}}</span>)</small></div></div>
+        <div class="snap-fig"><div class="f-label">Rows (estimate)</div><div class="f-value c-num" id="snap-rows"><span data-bind="snap_rows_copied">{{int64 .Tables.RowsCopied}}</span> <small>of <span data-bind="snap_rows_est">~{{int64 .Tables.RowsEstimate}}</span>{{if gt .Tables.RowsEstimate 0}} (<span data-bind="rows_pct">{{pct .Tables.RowsPct}}</span>){{end}}</small></div></div>
+        <div class="snap-fig"><div class="f-label" title="Snapshot rows copied per second, averaged over 30 s">Copy rate</div><div class="f-value c-num"><span data-bind="snap_rows">{{num .View.Rates.SnapRows}}</span> <small>rows/s</small></div></div>
+        <div class="snap-fig"><div class="f-label">ETA</div><div class="f-value c-num" data-bind="eta">{{if .View.Top}}{{if gt .View.Top.ETASeconds 0.0}}{{secs .View.Top.ETASeconds}}{{else}}-{{end}}{{else}}-{{end}}</div></div>
       </div>
     </div>
-    <div class="bars">{{bigbar .Tables.TablesPct "Tables done"}}</div>
-    {{if gt .Tables.RowsEstimate 0}}<div class="bars">{{bigbar .Tables.RowsPct "Rows copied (estimate)"}}</div>{{end}}
-    <p class="muted small">{{.Tables.Done}} done, {{.Tables.Running}} running, {{.Tables.Pending}} pending. Row counts are estimates from the source statistics and can be off. Completion times per table are not reported by the pipeline, so none are shown.</p>
+    <div class="bars" data-bind-bar="tables_pct">{{bigbar .Tables.TablesPct "Tables done"}}</div>
+    {{if gt .Tables.RowsEstimate 0}}<div class="bars" data-bind-bar="rows_pct">{{bigbar .Tables.RowsPct "Rows copied (estimate)"}}</div>{{end}}
+    <div class="running" id="running-tables" aria-live="off">
+      <h3>Copying now <span class="badge st-tbl-running c-num" data-bind="tables_running">{{.Tables.Running}}</span></h3>
+      <ul class="runlist" id="runlist">{{range .Tables.Tables}}{{if eq .State "running"}}<li data-run="{{.Table}}"><span class="mono wrap rl-name">{{.Table}}</span><span class="rl-bar">{{bar .ProgressPct}}</span><span class="c-num rl-pct">{{pct .ProgressPct}}</span><span class="c-num small muted rl-rows">{{tblRows .}}</span><span class="c-num small rl-eta">{{tblETA .}}</span></li>{{end}}{{end}}</ul>
+      <p class="muted small" id="runlist-empty"{{if gt .Tables.Running 0}} hidden{{end}}>No table is being copied right now.</p>
+    </div>
+    <p class="muted small"><span data-bind="tables_done">{{.Tables.Done}}</span> done, <span data-bind="tables_running">{{.Tables.Running}}</span> running, <span data-bind="tables_pending">{{.Tables.Pending}}</span> pending. Row counts are estimates from the source statistics and can be off. Completion times per table are not reported by the pipeline, so none are shown.</p>
     <div class="chips" role="group" aria-label="Filter tables by status">
-      <button type="button" class="chip c-all" data-tfilter="all" aria-pressed="true">All <b>{{.Tables.Total}}</b></button>
-      <button type="button" class="chip c-running" data-tfilter="running" aria-pressed="false"><span class="dot"></span>Running <b>{{.Tables.Running}}</b></button>
-      <button type="button" class="chip c-pending" data-tfilter="pending" aria-pressed="false"><span class="dot"></span>Pending <b>{{.Tables.Pending}}</b></button>
-      <button type="button" class="chip c-done" data-tfilter="done" aria-pressed="false"><span class="dot"></span>Done <b>{{.Tables.Done}}</b></button>
+      <button type="button" class="chip c-all" data-tfilter="all" aria-pressed="true">All <b data-bind="tables_total">{{.Tables.Total}}</b></button>
+      <button type="button" class="chip c-running" data-tfilter="running" aria-pressed="false"><span class="dot"></span>Running <b data-bind="tables_running">{{.Tables.Running}}</b></button>
+      <button type="button" class="chip c-pending" data-tfilter="pending" aria-pressed="false"><span class="dot"></span>Pending <b data-bind="tables_pending">{{.Tables.Pending}}</b></button>
+      <button type="button" class="chip c-done" data-tfilter="done" aria-pressed="false"><span class="dot"></span>Done <b data-bind="tables_done">{{.Tables.Done}}</b></button>
     </div>
   </section>
   <section class="card"><h2>Tables</h2>
@@ -58,10 +66,10 @@
       <thead><tr><th scope="col">Table</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col" class="r">Rows copied / estimate</th><th scope="col" class="r">ETA</th><th scope="col">Row key</th><th scope="col" class="hide-md">Ranges</th></tr></thead>
       <tbody>{{range $i, $t := .Tables.Tables}}{{$k := keyKind $t}}<tr class="trow{{if eq $t.State "running"}} is-running{{end}}" data-table="{{$t.Table}}" data-state="{{$t.State}}" data-ord="{{$i}}" data-pct="{{printf "%.2f" $t.ProgressPct}}" data-rows="{{tblEst $t}}" data-eta="{{if gt $t.ETASeconds 0.0}}{{printf "%.0f" $t.ETASeconds}}{{else}}-1{{end}}" data-key="{{$k.Kind}}">
         <td class="mono wrap">{{$t.Table}}</td>
-        <td><span class="badge st-tbl-{{$t.State}}">{{$t.State}}</span></td>
-        <td><span class="pcell">{{bar $t.ProgressPct}}<span class="small">{{pct $t.ProgressPct}}</span></span></td>
-        <td class="r nowrap">{{if eq $t.State "done"}}{{int64 (tblCopied $t)}}{{if gt $t.RowsEstimate 0}} <span class="muted small" title="Estimate from the source statistics">(~{{int64 $t.RowsEstimate}})</span>{{end}}{{else}}{{int64 $t.RowsCopied}} / {{int64 $t.RowsEstimate}}{{end}}</td>
-        <td class="r nowrap">{{if gt $t.ETASeconds 0.0}}{{secs $t.ETASeconds}}{{else}}-{{end}}</td>
+        <td><span class="badge st-tbl-{{$t.State}}" data-tb="state">{{$t.State}}</span></td>
+        <td><span class="pcell"><span data-tb="bar">{{bar $t.ProgressPct}}</span><span class="small c-num c-pct" data-tb="pct">{{pct $t.ProgressPct}}</span></span></td>
+        <td class="r nowrap c-num" data-tb="rows" title="Estimates come from the source statistics">{{tblRows $t}}</td>
+        <td class="r nowrap c-num" data-tb="eta">{{tblETA $t}}</td>
         <td><span class="keytag {{$k.Kind}}" title="{{$k.Title}}">{{$k.Label}}</span>{{if $k.Detail}} <span class="small mono muted">{{$k.Detail}}</span>{{end}}</td>
         <td class="small hide-md">{{ranges $t.Ranges}}</td>
       </tr>{{else}}<tr class="empty"><td colspan="7"><div class="empty-state">{{icon "table"}}<b>No tables</b><span>The pipeline reports no tables yet.</span></div></td></tr>{{end}}
@@ -80,7 +88,7 @@
     <h3>Add tables</h3>
     {{if .Src.Error}}<p class="muted">{{.Src.Error}}</p>{{else}}
     <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
-      <div class="picklist">{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}" aria-label="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}</div>
+      <div class="picklist" id="src-picklist"{{if not .SrcLoaded}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{if .SrcLoaded}}{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}" aria-label="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}{{else}}<button type="button" class="btn" data-load-src>List source tables</button> <span class="muted small">Asks the running pipeline for the tables of the source database (a query on the source).</span>{{end}}</div>
       <p class="muted small">Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.</p>
       <button class="btn primary" type="submit">Snapshot selected tables</button>
     </form>{{end}}
@@ -91,9 +99,9 @@
   <section class="card"><h2>Checkpoint</h2>
   {{if .Checkpoint.Error}}<p class="muted">{{.Checkpoint.Error}}</p>{{else}}{{with .Checkpoint.Checkpoint}}
   <dl class="dl">
-    <dt>Applied position</dt><dd class="mono wrap">{{.Applied}}</dd>
-    <dt>Epoch</dt><dd>{{.Epoch}}</dd>
-    <dt>Updated</dt><dd>{{ts .UpdatedAt}}</dd>
+    <dt>Applied position</dt><dd class="mono wrap" data-bind="ckpt_applied">{{.Applied}}</dd>
+    <dt>Epoch</dt><dd data-bind="epoch">{{.Epoch}}</dd>
+    <dt>Updated</dt><dd><span data-bind="ckpt_ts">{{ts .UpdatedAt}}</span> (<span data-bind="ckpt">{{rel .UpdatedAt}}</span>)</dd>
     {{if $.Body.Checkpoint.StartPosition}}<dt>Start position</dt><dd class="mono wrap">{{$.Body.Checkpoint.StartPosition}}</dd>{{end}}
     {{if $.Body.Checkpoint.CompactionLagSecs}}<dt>Compaction lag</dt><dd>{{secs (deref $.Body.Checkpoint.CompactionLagSecs)}}</dd>{{end}}
   </dl>{{end}}{{end}}
@@ -113,9 +121,12 @@
     <p>{{.Errors.LastExit.Meaning}}</p><p><b>What to do:</b> {{.Errors.LastExit.Action}}</p>
     <p class="muted small">{{if .Errors.LastExit.AutoRestart}}systemd restarts this exit code automatically.{{else}}This exit code needs an operator: it is not restarted automatically.{{end}}</p>
   </section>{{end}}
-  <section class="card"><h2>Recent warnings and errors (running process, last 200)</h2>
+  <section class="card"><h2>Recent warnings and errors <span class="muted small">running process, last 200, newest last; new ones appear live</span></h2>
     {{if .Errors.LiveErr}}<p class="muted">{{.Errors.LiveErr}}</p>{{end}}
-    {{template "events" .Errors.Live}}
+    <div class="tablewrap tall" id="live-events-wrap"><table class="grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody id="live-events">
+    {{range .Errors.Live}}<tr data-ev="{{.Time}}|{{.Level}}|{{.Message}}"><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>
+    {{end}}<tr class="empty-row"{{if .Errors.Live}} hidden{{end}}><td colspan="3" class="muted">None.</td></tr>
+    </tbody></table></div>
   </section>
   <section class="card"><h2>From the log tail</h2>{{template "events" .Errors.FromLog}}</section>
 {{end}}
@@ -221,7 +232,7 @@
     <form class="act" data-action="verify" data-pipeline="{{.View.Name}}">
       <label>Mode <select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select></label>
       <label>Table (schema.table) <input type="text" name="table" list="verify-tables" class="wide mono" placeholder="schema.table" autocomplete="off"></label>
-      <datalist id="verify-tables">{{range .Src.Tables}}<option value="{{.Table}}">{{end}}</datalist>
+      <datalist id="verify-tables"{{if and .Ctl.Running (not .SrcLoaded)}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{range .Src.Tables}}<option value="{{.Table}}">{{end}}</datalist>
       <label>Rate (sample fraction or chunks/s) <input type="text" name="rate" class="num" placeholder="default"></label>
       <label><input type="checkbox" name="resume" value="true"> resume an interrupted full run</label>
       <button class="btn primary" type="submit">Start verify</button>
@@ -233,9 +244,14 @@
 
 {{if eq .Tab "logs"}}
   <section class="card"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2>
-    <p class="small">{{if .Follow}}<a href="?lines=200">Stop following</a>{{else}}<a href="?lines=200&follow=1">Follow (refresh every 5 s)</a>{{end}}</p>
-    {{if .Logs.Error}}<p class="err">{{.Logs.Error}}</p>{{end}}
-    <pre class="code log wrapcode" tabindex="0" aria-label="Log tail">{{range .Logs.Lines}}{{.}}
+    <div class="toolbar logbar">
+      <label class="switch"><input type="checkbox" id="log-follow"{{if .Follow}} checked{{end}}> Follow live tail</label>
+      <span class="muted small" id="log-status" aria-live="polite">{{if .Follow}}Following{{else}}Not following: new lines are not added (reload for the latest){{end}}</span>
+      <button type="button" class="btn ghost" id="log-jump" hidden>Jump to latest</button>
+      <a class="small push" href="?lines=1000{{if .Follow}}&amp;follow=1{{end}}">Show 1000 lines</a>
+    </div>
+    {{if .Logs.Error}}<p class="err" id="log-error">{{.Logs.Error}}</p>{{end}}
+    <pre class="code log wrapcode" id="logtail" tabindex="0" aria-label="Log tail">{{range .Logs.Lines}}{{.}}
 {{else}}(no log lines){{end}}</pre>
   </section>
 {{end}}

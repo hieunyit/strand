@@ -69,14 +69,16 @@ func TestPagesShowLastUpdatedAndState(t *testing.T) {
 	e.sampleNow()
 	c := e.client()
 	e.login(c, testPassword)
-	for path, refresh := range map[string]string{"/": "refreshes every 5 s", "/pipelines/orders": "refreshes every 5 s", "/pipelines/orders/config": "auto-refresh off"} {
+	// Live pages (numbers arrive over SSE) say how often the sampler polls; static pages keep "Data as of".
+	for path, refresh := range map[string]string{"/": "sampled every 5 s in the background", "/pipelines/orders": "sampled every 5 s in the background",
+		"/pipelines/orders/config": "sampled every 5 s in the background", "/jobs": "refreshes every 5 s"} {
 		_, body := e.do(c, "GET", path, "", nil)
-		if !regexp.MustCompile(`Data as of <time datetime="[^"]+">\d\d:\d\d:\d\d [^<]+</time>`).MatchString(body) || !strings.Contains(body, refresh) {
+		if !regexp.MustCompile(`(Data as of|page rendered) <time datetime="[^"]+">\d\d:\d\d:\d\d [^<]+</time>`).MatchString(body) || !strings.Contains(body, refresh) {
 			t.Errorf("%s: no last-updated marker (%q)", path, refresh)
 		}
 	}
 	_, body := e.do(c, "GET", "/pipelines/orders", "", nil)
-	for _, want := range []string{`badge big st-synced">synced<`, "Sampled <b>", `aria-current="page"`} {
+	for _, want := range []string{`badge big st-synced" data-bind-badge="state">synced<`, "sampled <b", `aria-current="page"`, `data-live="orders"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail lacks %q", want)
 		}

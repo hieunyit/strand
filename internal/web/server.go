@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -60,6 +61,12 @@ type Server struct {
 
 	pages   map[string]*template.Template
 	handler http.Handler
+
+	// Luồng sống (stream.go): hub phát sự kiện của sampler; delta nhớ phần đã phát; streams đếm kết nối SSE.
+	hub          *liveHub
+	delta        liveDelta
+	streams      atomic.Int32
+	sseHeartbeat time.Duration
 }
 
 // Options của New.
@@ -126,6 +133,11 @@ func New(o Options) (*Server, error) {
 		secure: o.Config.TLSCert != "" || o.Config.SecureCookies,
 	}
 	s.samp.Now = o.Now
+	s.hub = newLiveHub()
+	s.delta = liveDelta{tables: map[string]map[string]string{}, events: map[string]map[string]bool{}}
+	s.sseHeartbeat = 15 * time.Second
+	s.samp.OnSample = s.onSample
+	s.samp.OnRound = s.onRound
 	s.db = db
 	s.sessions.db = db
 	if db != nil {
@@ -284,6 +296,8 @@ func (s *Server) routes() http.Handler {
 	// REST API.
 	mux.Handle("GET /api/v1/session", s.auth(true, s.apiSession))
 	mux.Handle("GET /api/v1/overview", s.auth(true, s.apiOverview))
+	mux.Handle("GET /api/v1/stream", s.auth(true, s.apiStream))
+	mux.Handle("GET /api/v1/live", s.auth(true, s.apiLive))
 	mux.Handle("GET /api/v1/pipelines", s.auth(true, s.apiPipelines))
 	mux.Handle("POST /api/v1/pipelines", s.auth(true, s.apiPipelineCreate))
 	mux.Handle("POST /api/v1/source/databases", s.auth(true, s.apiSourceDatabases))
