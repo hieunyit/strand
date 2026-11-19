@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"strand/internal/backup"
 	"strand/internal/mcp"
 	"strand/internal/web"
+	"strand/internal/web/store"
 )
 
 // newMcpCmd exposes the durable backup catalog over MCP stdio. stdout is reserved
@@ -42,7 +44,8 @@ func newMcpCmd() *cobra.Command {
 				return fmt.Errorf("initialize backup catalog: %w", err)
 			}
 			service := catalogMCPService{catalog: catalog}
-			if err := mcp.Serve(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), service); err != nil && ctx.Err() == nil {
+			auditor := mcpAuditor{st: st}
+			if err := mcp.Serve(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), service, mcp.WithAuditor(auditor)); err != nil && ctx.Err() == nil {
 				return fmt.Errorf("MCP stdio server: %w", err)
 			}
 			return nil
@@ -72,7 +75,7 @@ func (s catalogMCPService) ListBackups(ctx context.Context, filters map[string]a
 	}
 	rows, err := s.catalog.List(ctx, f)
 	if err != nil {
-		return nil, err
+		return nil, mcpErr(err)
 	}
 	result := make([]mcp.Record, 0, len(rows))
 	for _, row := range rows {
@@ -84,10 +87,10 @@ func (s catalogMCPService) ListBackups(ctx context.Context, filters map[string]a
 func (s catalogMCPService) GetBackup(ctx context.Context, backupID string) (mcp.Record, error) {
 	row, ok, err := s.catalog.Get(ctx, backupID)
 	if err != nil {
-		return nil, err
+		return nil, mcpErr(err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("backup not found")
+		return nil, mcp.ErrNotFound
 	}
 	return safeBackupRecord(row), nil
 }
@@ -95,10 +98,10 @@ func (s catalogMCPService) GetBackup(ctx context.Context, backupID string) (mcp.
 func (s catalogMCPService) BackupStatus(ctx context.Context, backupID string) (mcp.Record, error) {
 	row, ok, err := s.catalog.Get(ctx, backupID)
 	if err != nil {
-		return nil, err
+		return nil, mcpErr(err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("backup not found")
+		return nil, mcp.ErrNotFound
 	}
 	return mcp.Record{
 		"id": row.ID, "status": row.Status, "created_at": row.CreatedAt,
@@ -114,4 +117,36 @@ func safeBackupRecord(row backup.Record) mcp.Record {
 		"created_at": row.CreatedAt, "verified_at": row.VerifiedAt,
 		"expires_at": row.ExpiresAt, "legal_hold": row.LegalHold,
 	}
+}
+
+// mcpErr exposes validation messages (they contain only the caller's own input) and hides the rest.
+func mcpErr(err error) error {
+	if errors.Is(err, backup.ErrInvalid) {
+		return &mcp.InvalidArgumentError{Msg: err.Error()}
+	}
+	return err
+}
+
+// mcpAuditor writes one Web audit row per MCP tool call (action "mcp.<tool>"), so MCP access shows up
+// in the same audit trail as the Web UI and the backup CLI.
+type mcpAuditor struct{ st store.Store }
+
+func (a mcpAuditor) Audit(ctx context.Context, tool string, args map[string]any, result string) error {
+	known, other := map[string]any{}, 0
+	for k, v := range args {
+		switch k {
+		case "source", "engine", "status", "limit", "backup_id":
+			if s, ok := v.(string); ok && len(s) > 256 {
+				v = s[:256]
+			}
+			known[k] = v
+		default:
+			other++
+		}
+	}
+	detail := map[string]any{"arguments": known, "transport": "stdio"}
+	if other > 0 {
+		detail["unrecognised_arguments"] = other
+	}
+	return auditBackup(ctx, a.st, "mcp."+tool, result, detail)
 }

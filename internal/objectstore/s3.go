@@ -139,6 +139,19 @@ func New(cfg Config) (*S3, error) {
 	return &S3{cfg: cfg, endpoint: u, client: client}, nil
 }
 
+// CreateBucket creates the configured bucket (explicit operator/test tooling; uploads never create buckets).
+func (s *S3) CreateBucket(ctx context.Context) error {
+	resp, err := s.request(ctx, http.MethodPut, "", nil, nil, nil, 0)
+	if err != nil {
+		return err
+	}
+	if !isSuccess(resp.StatusCode) {
+		return s.responseError("create bucket", resp)
+	}
+	closeResponse(resp)
+	return nil
+}
+
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true

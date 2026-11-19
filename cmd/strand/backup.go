@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,19 +20,83 @@ import (
 	"github.com/spf13/cobra"
 
 	"strand/internal/backup"
+	"strand/internal/exitcode"
 	"strand/internal/objectstore"
 	"strand/internal/seed"
 	"strand/internal/web"
+	"strand/internal/web/store"
 )
 
 func newBackupCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "backup", Short: "Manage centralized database backups"}
-	cmd.AddCommand(newBackupPushCmd())
+	cmd.AddCommand(newBackupPushCmd(), newBackupListCmd(), newBackupFetchCmd())
 	return cmd
+}
+
+func backupUsageErr(msg string) error {
+	return exitcode.New("invalid_arguments", exitcode.InvalidSyntax, msg, nil)
+}
+
+// backupObjectStore builds the S3 client from STRAND_BACKUP_S3_* variables. Configuration errors never
+// echo values (the endpoint may carry user info; the keys are secrets).
+func backupObjectStore(bucket string, partSizeMiB, concurrency int) (*objectstore.S3, error) {
+	insecure := strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL"))
+	obj, err := objectstore.New(objectstore.Config{
+		Endpoint: strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_ENDPOINT")), Bucket: bucket,
+		Region:             strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_REGION")),
+		AccessKey:          os.Getenv("STRAND_BACKUP_S3_ACCESS_KEY"),
+		SecretKey:          os.Getenv("STRAND_BACKUP_S3_SECRET_KEY"),
+		SessionToken:       os.Getenv("STRAND_BACKUP_S3_SESSION_TOKEN"),
+		AllowInsecureLocal: strings.EqualFold(insecure, "true") || insecure == "1",
+		PartSize:           int64(partSizeMiB) << 20,
+		Concurrency:        concurrency,
+		TempDir:            os.Getenv("STRAND_BACKUP_TMPDIR"),
+	})
+	if err != nil {
+		return nil, exitcode.New("invalid_arguments", exitcode.InvalidSyntax,
+			"configure backup object storage: invalid settings; check STRAND_BACKUP_S3_ENDPOINT (https, or loopback http with STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL=true), STRAND_BACKUP_S3_REGION, credential variables, --part-size-mib (5-1024) and --upload-concurrency (1-32)", nil)
+	}
+	return obj, nil
+}
+
+// openBackupCatalog opens the Web metadata database (required: the catalog lives there).
+func openBackupCatalog(ctx context.Context) (store.Store, *backup.Catalog, error) {
+	catalogCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	st, err := web.CLIStore(catalogCtx, cfgPath, nil)
+	cancel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("open backup metadata store: %s", store.Redact(err.Error()))
+	}
+	if st == nil {
+		return nil, nil, backupUsageErr("backup metadata database is required; provide --config web.yaml with database.dsn or set STRAND_WEB_DATABASE_DSN")
+	}
+	catalog, err := backup.NewCatalog(st)
+	if err != nil {
+		st.Close()
+		return nil, nil, fmt.Errorf("initialize backup catalog: %w", err)
+	}
+	return st, catalog, nil
+}
+
+// auditBackup appends a row to the Web audit log (same table the Web UI shows). Backup operations are
+// fail-closed on audit: a caller that cannot record the operation reports failure.
+func auditBackup(ctx context.Context, st store.Store, action, result string, detail map[string]any) error {
+	e := web.AuditEntry{Time: time.Now().UTC(), IP: "cli", Action: action, Result: result, Detail: detail}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := st.AppendAudit(actx, store.AuditRow{Time: e.Time, IP: e.IP, Action: e.Action, Result: e.Result, Data: b}); err != nil {
+		return fmt.Errorf("record audit entry %s: %s", action, store.Redact(err.Error()))
+	}
+	return nil
 }
 
 func newBackupPushCmd() *cobra.Command {
 	var manifestPath, artifactPath, bucket, prefix, id string
+	var partSizeMiB, concurrency int
 	cmd := &cobra.Command{
 		Use:   "push",
 		Short: "Upload a backup artifact and register it in the central catalog",
@@ -41,15 +106,15 @@ func newBackupPushCmd() *cobra.Command {
 			defer stop()
 
 			if manifestPath == "" || artifactPath == "" || bucket == "" {
-				return errors.New("--manifest, --artifact, and --bucket are required")
+				return backupUsageErr("--manifest, --artifact, and --bucket are required")
 			}
 			manifestBytes, manifest, err := readBackupManifest(manifestPath)
 			if err != nil {
-				return err
+				return backupUsageErr(err.Error())
 			}
 			position, engine, err := backupPosition(manifest)
 			if err != nil {
-				return err
+				return backupUsageErr(err.Error())
 			}
 			if id == "" {
 				id, err = newBackupID()
@@ -59,48 +124,28 @@ func newBackupPushCmd() *cobra.Command {
 			}
 			cleanPrefix, err := sanitizeBackupPrefix(prefix)
 			if err != nil {
-				return err
+				return backupUsageErr(err.Error())
 			}
 			artifactRoot, err := os.Lstat(artifactPath)
 			if err != nil {
-				return fmt.Errorf("stat backup artifact: %w", err)
+				return backupUsageErr(fmt.Sprintf("stat backup artifact: %v", err))
 			}
 			if artifactRoot.Mode()&os.ModeSymlink != 0 || (!artifactRoot.IsDir() && !artifactRoot.Mode().IsRegular()) {
-				return errors.New("backup artifact must be a regular file or directory, not a symlink or special file")
+				return backupUsageErr("backup artifact must be a regular file or directory, not a symlink or special file")
 			}
 			artifactKey, manifestKey := backupObjectKeys(cleanPrefix, id, artifactRoot.IsDir())
 			manifestURI := "s3://" + bucket + "/" + manifestKey
 			artifactURI := "s3://" + bucket + "/" + artifactKey
 
-			endpoint := strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_ENDPOINT"))
-			region := strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_REGION"))
-			allowInsecureLocal := strings.EqualFold(strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL")), "true") || strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL")) == "1"
-			obj, err := objectstore.New(objectstore.Config{
-				Endpoint: endpoint, Bucket: bucket, Region: region,
-				AccessKey:          os.Getenv("STRAND_BACKUP_S3_ACCESS_KEY"),
-				SecretKey:          os.Getenv("STRAND_BACKUP_S3_SECRET_KEY"),
-				SessionToken:       os.Getenv("STRAND_BACKUP_S3_SESSION_TOKEN"),
-				AllowInsecureLocal: allowInsecureLocal,
-			})
+			obj, err := backupObjectStore(bucket, partSizeMiB, concurrency)
 			if err != nil {
-				// The endpoint comes from an environment variable and may accidentally
-				// contain user info. Do not return configuration values in diagnostics.
-				return errors.New("configure backup object storage: invalid settings; check STRAND_BACKUP_S3_ENDPOINT, STRAND_BACKUP_S3_REGION, and credential variables")
+				return err
 			}
-			catalogCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			st, err := web.CLIStore(catalogCtx, cfgPath, nil)
-			cancel()
+			st, catalog, err := openBackupCatalog(ctx)
 			if err != nil {
-				return fmt.Errorf("open backup metadata store: %w", err)
-			}
-			if st == nil {
-				return errors.New("backup metadata database is required; provide --config web.yaml with database.dsn or set STRAND_WEB_DATABASE_DSN")
+				return err
 			}
 			defer st.Close()
-			catalog, err := backup.NewCatalog(st)
-			if err != nil {
-				return fmt.Errorf("initialize backup catalog: %w", err)
-			}
 			record := backup.Record{
 				ID: id, Source: manifest.SourceIdentity, Engine: engine,
 				Tool: manifest.Kind, ToolVersion: manifest.ToolVersion,
@@ -111,16 +156,28 @@ func newBackupPushCmd() *cobra.Command {
 			if manifest.BackupExpiresAt != nil && strings.TrimSpace(*manifest.BackupExpiresAt) != "" {
 				expiresAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(*manifest.BackupExpiresAt))
 				if parseErr != nil {
-					return errors.New("backup manifest backup_expires_at must be RFC3339")
+					return backupUsageErr("backup manifest backup_expires_at must be RFC3339")
 				}
 				expiresAt = expiresAt.UTC()
 				record.ExpiresAt = &expiresAt
 			}
-			return st.Locked(ctx, "backup-upload:"+record.ID, func(lockCtx context.Context) error {
+			// Print the ID first: an interrupted push is resumed by re-running with --id <this ID>.
+			fmt.Fprintf(cmd.ErrOrStderr(), "backup %s: uploading to s3://%s/%s (re-run with --id %s to retry)\n", id, bucket, artifactKey, id)
+			pushErr := st.Locked(ctx, "backup-upload:"+record.ID, func(lockCtx context.Context) error {
 				return pushBackupArtifact(lockCtx, cmd, obj, catalog, record, artifactPath, artifactKey, manifestKey, artifactURI, manifestURI, manifestBytes)
 			})
+			result, detail := "ok", map[string]any{"backup_id": id, "source": record.Source, "object": artifactURI}
+			if pushErr != nil {
+				result, detail["error"] = "error", store.Redact(pushErr.Error())
+			}
+			if err := auditBackup(ctx, st, "backup.push", result, detail); err != nil {
+				return errors.Join(pushErr, err)
+			}
+			return pushErr
 		},
 	}
+	cmd.Flags().IntVar(&partSizeMiB, "part-size-mib", 64, "multipart part size in MiB (5-1024); temporary disk use is part size × concurrency")
+	cmd.Flags().IntVar(&concurrency, "upload-concurrency", 4, "parts uploaded in parallel (1-32)")
 	cmd.Flags().StringVar(&manifestPath, "manifest", "", "seed manifest JSON path")
 	cmd.Flags().StringVar(&artifactPath, "artifact", "", "backup artifact file or directory")
 	cmd.Flags().StringVar(&bucket, "bucket", "", "destination S3 bucket")
@@ -162,6 +219,15 @@ func pushBackupArtifact(ctx context.Context, cmd *cobra.Command, obj *objectstor
 		defer failCancel()
 		_, _, _ = catalog.UpdateStatus(failedCtx, record.ID, backup.StatusFailed, nil)
 		return cause
+	}
+	// We hold the per-backup lock, so any unfinished multipart upload for these keys belongs to a
+	// previous attempt that was killed before it could abort: reclaim its parts.
+	for _, k := range []string{artifactKey, manifestKey} {
+		if n, err := obj.AbortStaleUploads(ctx, k); err != nil {
+			return fail(fmt.Errorf("abort stale multipart uploads: %w", err))
+		} else if n > 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "backup %s: aborted %d unfinished multipart upload(s) from an earlier attempt\n", record.ID, n)
+		}
 	}
 	reader, size, err := backup.OpenArtifact(ctx, artifactPath)
 	if err != nil {
@@ -320,4 +386,206 @@ func backupObjectKeys(prefix, id string, directory bool) (string, string) {
 		artifact += ".tar"
 	}
 	return artifact, base + "/manifest.json"
+}
+
+func newBackupListCmd() *cobra.Command {
+	var source, engine, status, cursor string
+	var limit int
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List backups in the central catalog (newest first)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit < 1 || limit > backup.MaxListLimit {
+				return backupUsageErr(fmt.Sprintf("--limit must be between 1 and %d", backup.MaxListLimit))
+			}
+			f := backup.Filter{Source: source, Engine: engine, Status: backup.Status(status), Limit: limit}
+			if cursor != "" {
+				c, err := backup.ParseCursor(cursor)
+				if err != nil {
+					return backupUsageErr("--cursor is malformed")
+				}
+				f.After = &c
+			}
+			st, catalog, err := openBackupCatalog(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			rows, err := catalog.List(cmd.Context(), f)
+			if err != nil {
+				if errors.Is(err, backup.ErrInvalid) {
+					return backupUsageErr(err.Error())
+				}
+				return fmt.Errorf("list backups: %s", store.Redact(err.Error()))
+			}
+			next := backup.NextCursor(rows, limit)
+			out := cmd.OutOrStdout()
+			if asJSON {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(map[string]any{"backups": rows, "next_cursor": next})
+			}
+			fmt.Fprintf(out, "%-36s %-24s %-8s %-12s %-10s %14s  %s\n", "ID", "SOURCE", "ENGINE", "TOOL", "STATUS", "BYTES", "CREATED")
+			for _, r := range rows {
+				fmt.Fprintf(out, "%-36s %-24s %-8s %-12s %-10s %14d  %s\n", r.ID, r.Source, r.Engine, r.Tool, r.Status, r.Bytes, r.CreatedAt.UTC().Format(time.RFC3339))
+			}
+			if next != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "more backups: re-run with --cursor %s\n", next)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&source, "source", "", "filter by source identity")
+	cmd.Flags().StringVar(&engine, "engine", "", "filter by engine (mysql|postgres)")
+	cmd.Flags().StringVar(&status, "status", "", "filter by status (queued|uploading|verifying|complete|failed|expired)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "maximum rows")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "continue after a previous page")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+// newBackupFetchCmd downloads a complete backup to a local path, verifying its size and SHA-256 against
+// the catalog before the file appears under its final name. It never overwrites an existing path and
+// never touches a database: restoring is done with the native tool on the verified file.
+func newBackupFetchCmd() *cobra.Command {
+	var id, outPath string
+	var withManifest bool
+	cmd := &cobra.Command{
+		Use:   "fetch",
+		Short: "Download a cataloged backup artifact and verify it against the catalog SHA-256",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+			defer stop()
+			if id == "" || outPath == "" {
+				return backupUsageErr("--id and --out are required")
+			}
+			if _, err := os.Lstat(outPath); err == nil {
+				return backupUsageErr("--out " + outPath + " already exists; refusing to overwrite")
+			}
+			st, catalog, err := openBackupCatalog(ctx)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			rec, ok, err := catalog.Get(ctx, id)
+			if err != nil {
+				if errors.Is(err, backup.ErrInvalid) {
+					return backupUsageErr(err.Error())
+				}
+				return fmt.Errorf("read backup catalog: %s", store.Redact(err.Error()))
+			}
+			if !ok {
+				return backupUsageErr("backup " + id + " not found")
+			}
+			if rec.Status != backup.StatusComplete {
+				return exitcode.New("backup_not_complete", exitcode.Rejected, fmt.Sprintf("backup %s is %s, only complete backups can be fetched", id, rec.Status), nil)
+			}
+			obj, err := backupObjectStore(rec.Bucket, 64, 4)
+			if err != nil {
+				return err
+			}
+			fetchErr := fetchVerified(ctx, obj, rec.ObjectKey, rec.Bytes, rec.SHA256, outPath)
+			if fetchErr == nil && withManifest {
+				fetchErr = fetchManifest(ctx, obj, rec, outPath+".manifest.json")
+			}
+			result, detail := "ok", map[string]any{"backup_id": id, "out": outPath}
+			if fetchErr != nil {
+				result, detail["error"] = "error", store.Redact(fetchErr.Error())
+			}
+			if err := auditBackup(ctx, st, "backup.fetch", result, detail); err != nil {
+				// Fail closed: do not leave an unaudited copy of the backup behind.
+				_ = os.Remove(outPath)
+				_ = os.Remove(outPath + ".manifest.json")
+				return errors.Join(fetchErr, err)
+			}
+			if fetchErr != nil {
+				return fetchErr
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "backup %s fetched to %s (%d bytes, sha256 %s verified)\n", id, outPath, rec.Bytes, rec.SHA256)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&id, "id", "", "backup ID")
+	cmd.Flags().StringVar(&outPath, "out", "", "destination file (must not exist)")
+	cmd.Flags().BoolVar(&withManifest, "with-manifest", false, "also fetch the manifest sidecar to <out>.manifest.json")
+	return cmd
+}
+
+func fetchVerified(ctx context.Context, obj *objectstore.S3, key string, size int64, sha string, outPath string) error {
+	body, _, err := obj.DownloadVerified(ctx, key, size, sha)
+	if err != nil {
+		return verifyErr(fmt.Errorf("download backup artifact: %w", err))
+	}
+	defer body.Close()
+	tmp, err := os.CreateTemp(filepathDir(outPath), ".strand-fetch-*")
+	if err != nil {
+		return fmt.Errorf("create temporary download file: %w", err)
+	}
+	tmpName := tmp.Name()
+	keep := false
+	defer func() {
+		if !keep {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := io.Copy(tmp, body); err != nil {
+		return verifyErr(fmt.Errorf("download backup artifact: %w", err))
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Link (not rename) so an --out created meanwhile is never replaced.
+	if err := os.Link(tmpName, outPath); err != nil {
+		return fmt.Errorf("publish downloaded backup: %w", err)
+	}
+	_ = os.Remove(tmpName)
+	keep = true
+	return nil
+}
+
+func fetchManifest(ctx context.Context, obj *objectstore.S3, rec backup.Record, outPath string) error {
+	prefix := "s3://" + rec.Bucket + "/"
+	if !strings.HasPrefix(rec.ManifestURI, prefix) {
+		return fmt.Errorf("manifest %s is not in bucket %s", rec.ManifestURI, rec.Bucket)
+	}
+	body, _, err := obj.Download(ctx, strings.TrimPrefix(rec.ManifestURI, prefix))
+	if err != nil {
+		return fmt.Errorf("download manifest sidecar: %w", err)
+	}
+	defer body.Close()
+	b, err := io.ReadAll(io.LimitReader(body, 16<<20))
+	if err != nil {
+		return verifyErr(fmt.Errorf("download manifest sidecar: %w", err))
+	}
+	f, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func verifyErr(err error) error {
+	if strings.Contains(err.Error(), "mismatch") || strings.Contains(err.Error(), "does not match") {
+		return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError, "backup artifact failed integrity verification", err)
+	}
+	return err
+}
+
+func filepathDir(p string) string {
+	d := filepath.Dir(p)
+	if d == "" {
+		return "."
+	}
+	return d
 }

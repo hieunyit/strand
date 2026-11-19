@@ -40,10 +40,34 @@ type BackupService interface {
 	BackupStatus(ctx context.Context, backupID string) (Record, error)
 }
 
+// ErrNotFound is returned by a BackupService when the requested backup does not exist.
+var ErrNotFound = errors.New("backup not found")
+
+// InvalidArgumentError marks a service error caused by the caller's arguments; its message is shown to
+// the client (it must not contain secrets). Other service errors are reported generically.
+type InvalidArgumentError struct{ Msg string }
+
+func (e *InvalidArgumentError) Error() string { return e.Msg }
+
+// Auditor records every tool call. Serve is fail-closed: when Audit returns an error the call's result is
+// withheld and the client receives an error instead.
+type Auditor interface {
+	Audit(ctx context.Context, tool string, args map[string]any, result string) error
+}
+
+// MaxConcurrentCalls bounds in-flight tools/call requests per connection.
+const MaxConcurrentCalls = 16
+
+// Option configures Serve.
+type Option func(*connection)
+
+// WithAuditor sets the audit sink for tool calls.
+func WithAuditor(a Auditor) Option { return func(c *connection) { c.auditor = a } }
+
 // Serve runs a newline-delimited JSON-RPC MCP stdio server. The caller owns in
 // and out. Tool calls run concurrently so notifications/cancelled can be read
 // and honored while a service call is in progress.
-func Serve(ctx context.Context, in io.Reader, out io.Writer, service BackupService) error {
+func Serve(ctx context.Context, in io.Reader, out io.Writer, service BackupService, opts ...Option) error {
 	if in == nil || out == nil {
 		return errors.New("mcp: stdin and stdout are required")
 	}
@@ -51,6 +75,9 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, service BackupServi
 		ctx = context.Background()
 	}
 	conn := &connection{ctx: ctx, out: out, service: service, active: make(map[string]context.CancelFunc)}
+	for _, o := range opts {
+		o(conn)
+	}
 	lines := make(chan []byte)
 	readErr := make(chan error, 1)
 	go scanInput(ctx, in, lines, readErr)
@@ -95,6 +122,7 @@ type connection struct {
 	ctx     context.Context
 	out     io.Writer
 	service BackupService
+	auditor Auditor
 
 	writeMu sync.Mutex
 	stateMu sync.Mutex
@@ -299,6 +327,12 @@ func (c *connection) startToolCall(req rpcMessage, modern bool) {
 		c.respond(req.ID, nil, &rpcError{Code: -32600, Message: "Request id is already active"})
 		return
 	}
+	if len(c.active) >= MaxConcurrentCalls {
+		c.stateMu.Unlock()
+		cancel()
+		c.respond(req.ID, nil, &rpcError{Code: -32000, Message: "Too many concurrent requests"})
+		return
+	}
 	c.active[key] = cancel
 	c.wg.Add(1)
 	c.stateMu.Unlock()
@@ -333,6 +367,31 @@ func (c *connection) callTool(ctx context.Context, raw json.RawMessage) (any, er
 	if params.Arguments == nil {
 		params.Arguments = map[string]any{}
 	}
+	value, err := c.dispatch(ctx, params.Name, params.Arguments)
+	if c.auditor == nil {
+		return value, err
+	}
+	result := "ok"
+	if err != nil {
+		result = "error"
+	} else if m, ok := value.(map[string]any); ok && m["isError"] == true {
+		result = "denied"
+	}
+	tool := params.Name
+	if len(tool) > 64 {
+		tool = tool[:64]
+	}
+	if aerr := c.auditor.Audit(context.WithoutCancel(ctx), tool, params.Arguments, result); aerr != nil {
+		return toolError("audit log unavailable; request refused"), nil
+	}
+	return value, err
+}
+
+func (c *connection) dispatch(ctx context.Context, name string, args map[string]any) (any, error) {
+	params := struct {
+		Name      string
+		Arguments map[string]any
+	}{name, args}
 	var value any
 	var err error
 	switch params.Name {
@@ -369,6 +428,13 @@ func (c *connection) callTool(ctx context.Context, raw json.RawMessage) (any, er
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		var inv *InvalidArgumentError
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return toolError("backup not found"), nil
+		case errors.As(err, &inv):
+			return toolError(inv.Msg), nil
 		}
 		return toolError("backup service request failed"), nil
 	}
