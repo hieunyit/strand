@@ -47,28 +47,30 @@ func templateFuncs() template.FuncMap {
 			}
 			return t.Local().Format("2006-01-02 15:04:05 MST")
 		},
-		"pct":       func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
-		"bar":       ProgressBar,
-		"bigbar":    BigProgressBar,
-		"ranges":    fmtRanges,
-		"lower":     strings.ToLower,
-		"ptrInt":    func(p *int) int { return *p },
-		"deref":     func(p *float64) float64 { return *p },
-		"stateKey":  func(s string) string { return s },
-		"icon":      icon,
-		"tabIcon":   tabIcon,
-		"engines":   engines,
-		"keyKind":   keyKind,
-		"tblCopied": tblCopied,
-		"tblEst":    tblEst,
-		"tablesOf":  tablesOf,
-		"rel":       func(t time.Time) string { return fmtRel(t, time.Now()) },
-		"join":      strings.Join,
-		"jobState":  jobState,
-		"jobClass":  jobClass,
-		"jobDur":    jobDur,
-		"deref2":    func(t *time.Time) time.Time { return *t },
-		"div":       func(a, b int) int { return a / b },
+		"pct":        func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
+		"bar":        ProgressBar,
+		"bigbar":     BigProgressBar,
+		"ranges":     fmtRanges,
+		"lower":      strings.ToLower,
+		"ptrInt":     func(p *int) int { return *p },
+		"deref":      func(p *float64) float64 { return *p },
+		"stateKey":   func(s string) string { return s },
+		"icon":       icon,
+		"tabIcon":    tabIcon,
+		"engines":    engines,
+		"keyKind":    keyKind,
+		"tblCopied":  tblCopied,
+		"tblEst":     tblEst,
+		"tablesOf":   tablesOf,
+		"tablesHref": tablesHref,
+		"add":        func(a, b int) int { return a + b },
+		"rel":        func(t time.Time) string { return fmtRel(t, time.Now()) },
+		"join":       strings.Join,
+		"jobState":   jobState,
+		"jobClass":   jobClass,
+		"jobDur":     jobDur,
+		"deref2":     func(t *time.Time) time.Time { return *t },
+		"div":        func(a, b int) int { return a / b },
 		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
 			Jobs         []JobStatus
 			ShowPipeline bool
@@ -282,6 +284,10 @@ func stateReason(v PipelineView) string {
 			return "config error: " + v.ConfigErr
 		}
 		return "no sample yet"
+	case StateStopped:
+		if v.StoppedOutside {
+			return "stopped outside the web (strand stop or a signal); it is not started automatically"
+		}
 	}
 	if v.Top != nil && v.Top.BreakerOpen {
 		return "breaker open: " + v.Top.BreakerReason
@@ -322,6 +328,7 @@ type pageData struct {
 	Nav      []NavItem
 	Version  string
 	Host     string // host name shown in the top bar
+	Standby  string // non-empty on a standby instance (banner)
 	Refresh  int    // giây; 0 = không tự làm mới toàn trang
 	// Live: trang nhận số liệu qua SSE ("all" hoặc tên pipeline); "" = trang tĩnh. Interval: chu kỳ của sampler.
 	Live     string
@@ -332,6 +339,7 @@ type pageData struct {
 
 func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pageData) {
 	d.CSRF, d.Nav, d.Version = sess.CSRF, s.navItems(), s.version
+	d.Standby = s.standbyMessage()
 	d.Host = hostName()
 	d.Interval = int(s.samp.Interval().Seconds())
 	if d.AsOf.IsZero() {
@@ -444,6 +452,7 @@ type detailBody struct {
 	HasHistory bool // chế độ DB: lịch sử số liệu quá 1 giờ (6 h, 24 h, 7 d) trong DB
 	Metrics    map[string]float64
 	Tables     TablesView
+	TablesBase string
 	Checkpoint CheckpointView
 	Errors     ErrorsView
 	Config     ConfigView
@@ -529,7 +538,8 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		b.HasHistory = s.db != nil
 		b.Charts = s.charts(p.Name)
 	case "tables":
-		b.Tables = s.tablesView(ctx, p)
+		b.Tables = s.tablesPageView(p, r)
+		b.TablesBase = base + "/tables"
 		if b.Ctl.Running {
 			b.Src, b.SrcLoaded = s.cachedSourceTables(p)
 		}

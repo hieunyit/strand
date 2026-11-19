@@ -281,8 +281,9 @@ func TestTuningCardMarkup(t *testing.T) {
 			t.Errorf("config tab lacks %q", want)
 		}
 	}
-	if strings.Contains(page, `id="tuning-card"`) && strings.Contains(page[strings.Index(page, `id="tuning-card"`):], "max_parallel") {
-		t.Errorf("unimplemented key max_parallel must not be exposed")
+	// bootstrap.logical.max_parallel đã thi hành (snapshot song song): có trên Tuning card.
+	if !strings.Contains(page, `name="max_parallel"`) || !strings.Contains(page, "Tables in parallel") {
+		t.Errorf("tuning card lacks max_parallel (Tables in parallel)")
 	}
 }
 
@@ -293,12 +294,12 @@ func TestNewPipelineTuningFields(t *testing.T) {
 		"source_host": {"10.0.0.1"}, "target_host": {"10.0.0.2"}, "databases": {"shop"},
 		"iops_soft": {"250"}, "iops_hard": {"500"}, "chunk_rows": {"2000"}, "windows": {"22:00-06:00, 01:00-02:00"},
 		"governor_algorithm": {"grace-v2"}, "lag_slo": {"10s"}, "breaker_max_ratio": {"3"}, "replica_lag_max": {"30s"},
-		"metrics": {"127.0.0.1:19470"},
+		"metrics": {"127.0.0.1:19470"}, "max_parallel": {"4"},
 	})
 	if code != 200 {
 		t.Fatalf("create: %d %s", code, out)
 	}
-	for _, want := range []string{"soft: 250, hard: 500", "chunk_rows: 2000", `windows: ["22:00-06:00", "01:00-02:00"]`,
+	for _, want := range []string{"soft: 250, hard: 500", "chunk_rows: 2000, max_parallel: 4", `windows: ["22:00-06:00", "01:00-02:00"]`,
 		"algorithm: grace-v2", "lag_slo: 10s", "max_ratio: 3", "max: 30s"} {
 		if !strings.Contains(y, want) {
 			t.Errorf("yaml lacks %q:\n%s", want, y)
@@ -318,6 +319,7 @@ func TestNewPipelineTuningFields(t *testing.T) {
 		"lag_slo":            {"lag_slo": {"soon"}},
 		"breaker_max_ratio":  {"breaker_max_ratio": {"0.5"}},
 		"iops_hard":          {"iops_soft": {"500"}, "iops_hard": {"100"}},
+		"max_parallel":       {"max_parallel": {"33"}},
 	} {
 		base := url.Values{"name": {"bad-" + strings.ReplaceAll(name, "_", "-")}, "from": {"mysql"}, "to": {"mysql"},
 			"source_host": {"10.0.0.1"}, "target_host": {"10.0.0.2"}, "databases": {"shop"}}
@@ -335,7 +337,7 @@ func TestNewPipelinePageHasTuningSection(t *testing.T) {
 	e := opsEnv(t, false, nil)
 	c, _ := e.loginOK()
 	_, page := e.do(c, "GET", "/pipelines/new", "", nil)
-	for _, want := range []string{"Snapshot speed", `name="iops_soft"`, `name="iops_hard"`, `name="chunk_rows"`, `name="windows"`,
+	for _, want := range []string{"Snapshot speed", `name="iops_soft"`, `name="iops_hard"`, `name="chunk_rows"`, `name="max_parallel"`, `name="windows"`,
 		`name="governor_algorithm"`, `name="breaker_max_ratio"`, `name="replica_lag_max"`, `placeholder="default: 600"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("new pipeline page lacks %q", want)

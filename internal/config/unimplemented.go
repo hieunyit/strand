@@ -59,9 +59,6 @@ func (c *Config) UnimplementedKeys() []string {
 	if c.Bootstrap.CatchUp.BinlogArchive != "" {
 		keys = append(keys, "bootstrap.catch_up.binlog_archive (use strand seed apply --archive)")
 	}
-	if c.Bootstrap.Logical.MaxParallel > 0 {
-		keys = append(keys, "bootstrap.logical.max_parallel")
-	}
 	if s := c.Checkpoint.Store; s != "" && !strings.EqualFold(s, "target") {
 		keys = append(keys, "checkpoint.store="+s+" (the checkpoint is always stored in the target)")
 	}

@@ -117,3 +117,44 @@ func TestConfigInitTuningOptions(t *testing.T) {
 		t.Fatal("bad --commit-order accepted")
 	}
 }
+
+// --max-parallel: ghi bootstrap.logical.max_parallel (nạp lại được), kiểm 1..32.
+func TestConfigInitMaxParallel(t *testing.T) {
+	t.Setenv("SRC_PW", "s")
+	t.Setenv("DST_PW", "d")
+	s, err := renderInitConfig(initOpts{Name: "par", From: "mariadb", To: "mysql", SourceHost: "h1", TargetHost: "h2", SourceUser: "u", TargetUser: "u", Databases: []string{"call_logs"}, MaxParallel: 4, ChunkRows: 25000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadYAMLStrict([]byte(os.ExpandEnv(s)))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, s)
+	}
+	if cfg.Bootstrap.Logical.MaxParallel != 4 || !strings.Contains(s, "chunk_rows: 25000, max_parallel: 4") {
+		t.Fatalf("max_parallel not written:\n%s", s)
+	}
+	if len(cfg.UnimplementedKeys()) != 0 {
+		t.Fatalf("max_parallel reported as unimplemented: %v", cfg.UnimplementedKeys())
+	}
+	if _, err := renderInitConfig(initOpts{Name: "x", From: "mysql", To: "mysql", Databases: []string{"a"}, MaxParallel: 33}); err == nil {
+		t.Fatal("--max-parallel 33 accepted")
+	}
+	// Không đặt: khối logical là comment, gợi ý max_parallel.
+	s, _ = renderInitConfig(initOpts{Name: "y", From: "mysql", To: "mysql", Databases: []string{"a"}})
+	if !strings.Contains(s, "# logical: { chunk_rows: 20000, max_parallel: 4") {
+		t.Fatalf("hint missing:\n%s", s)
+	}
+}
+
+func TestMaxParallelWarningForPGSource(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Source.Kind = "postgres"
+	cfg.Bootstrap.Logical.MaxParallel = 4
+	if w := maxParallelWarning(cfg); !strings.Contains(w, "ignored for PostgreSQL") {
+		t.Fatalf("warning = %q", w)
+	}
+	cfg.Source.Kind = "mysql"
+	if w := maxParallelWarning(cfg); w != "" {
+		t.Fatalf("mysql source warning = %q", w)
+	}
+}

@@ -198,6 +198,8 @@
   function applyTables() {
     var table = document.getElementById('tables-table');
     if (!table) { return; }
+    // Paged list (many tables): the server filters, sorts and pages; nothing to do here.
+    if (table.hasAttribute('data-paged')) { return; }
     var body = table.tBodies[0];
     var rows = Array.prototype.slice.call(body.querySelectorAll('tr[data-table]'));
     var qEl = document.getElementById('tb-filter'), sEl = document.getElementById('tb-sort');
@@ -246,6 +248,7 @@
   });
   document.addEventListener('change', function (ev) {
     if (ev.target && ev.target.id === 'tb-sort') { tblState.sort = ev.target.value; applyTables(); }
+    if (ev.target && ev.target.id === 'tb-psort' && ev.target.form) { ev.target.form.submit(); }
   });
   applyTables();
 
@@ -729,7 +732,7 @@
         var str = (v || '').trim();
         if (str !== '') {
           if (k === 'source_port' || k === 'target_port' || k === 'workers' || k === 'server_id' ||
-              k === 'iops_soft' || k === 'iops_hard' || k === 'chunk_rows') {
+              k === 'iops_soft' || k === 'iops_hard' || k === 'chunk_rows' || k === 'max_parallel') {
             payload[k] = parseInt(str, 10);
           } else if (k === 'breaker_max_ratio') {
             payload[k] = parseFloat(str);

@@ -37,6 +37,9 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 	id := strings.TrimPrefix(pipeline, "backup-")
 	delay := reconcileDelay.first
 	for attempt := 1; ; attempt++ {
+		if !s.isActive() {
+			return // a standby runs no schedulers; the active instance (or a takeover) does
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		job, found, err := s.db.st.GetBackupJob(ctx, id)
 		cancel()
@@ -68,7 +71,13 @@ func randomBackupJobID() (string, error) {
 	return "bjob-" + hex.EncodeToString(b[:]), nil
 }
 
+// resumeBackupJobs starts the scheduler process of every enabled job. Only the ACTIVE instance (the lease
+// holder) runs schedulers: it is called at startup when active and on takeover. The per-job database locks
+// in `strand backup schedule` remain the safety net if two instances ever overlap.
 func (s *Server) resumeBackupJobs(ctx context.Context) error {
+	if s.db == nil || !s.isActive() {
+		return nil
+	}
 	jobs, err := s.db.st.ListBackupJobs(ctx)
 	if err != nil {
 		return err
@@ -177,6 +186,9 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 	if s.jobs == nil {
 		return "", errors.New("job runner unavailable")
 	}
+	if !s.isActive() {
+		return "", errors.New("this web instance is standby; backup jobs run on the active instance")
+	}
 	if !once {
 		for _, current := range s.jobs.List(backupJobPipeline(j.ID)) {
 			if current.Kind == "backup-schedule" && current.Running {
@@ -222,6 +234,32 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+// stopBackupSchedulers stops every backup scheduler and Run-now process of this instance (SIGTERM, then
+// SIGKILL after the runner's grace period). Called when this instance stops being the active one, so the
+// new active instance's schedulers take over; a run in progress is recorded as interrupted by the next
+// scheduler and the job's next run is kept.
+func (s *Server) stopBackupSchedulers() {
+	if s.jobs == nil {
+		return
+	}
+	ids := map[string]bool{}
+	for _, j := range s.jobs.List("") {
+		if j.Running && (j.Kind == "backup-schedule" || j.Kind == "backup-run") {
+			switch {
+			case strings.HasPrefix(j.Pipeline, "backup-"):
+				ids[strings.TrimPrefix(j.Pipeline, "backup-")] = true
+			case strings.HasPrefix(j.Pipeline, "run-"):
+				ids[strings.TrimPrefix(j.Pipeline, "run-")] = true
+			}
+		}
+	}
+	for id := range ids {
+		if err := s.stopBackupJob(id); err != nil {
+			s.log.Warn("step-down: stop backup scheduler", "job", id, "error", err)
+		}
+	}
 }
 
 func (s *Server) stopBackupJob(id string) error {

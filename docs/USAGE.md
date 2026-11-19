@@ -464,6 +464,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `bootstrap.default` | `logical` | `logical` (chế độ A). `seed` hoặc `start_at` cho pipeline mới bắt buộc `--start-at`, không có thì exit 2 |
 | `bootstrap.per_table.<t>.mode` | — | Chỉ `strand plan` đọc (ETA theo bảng); `sync` không dùng |
 | `bootstrap.logical.chunk_rows` | `auto` (5000) | Số row mỗi chunk snapshot |
+| `bootstrap.logical.max_parallel` | 1 | Số bảng snapshot logic **cùng lúc** (1–32). Chunk của một bảng vẫn đọc tuần tự; các bảng khác nhau chạy song song và cùng chia **một** ngân sách đọc nguồn (`iops.soft/hard`). Bảng lớn được bắt đầu trước. Source PostgreSQL: bỏ qua (luôn 1, có cảnh báo). Mục 8.1 |
 | `bootstrap.logical.windows` | rỗng (mọi lúc) | Khung giờ cho phép snapshot, ví dụ `["22:00-06:00"]` (giờ địa phương của process; qua nửa đêm được). Khi `bootstrap_retention_risk` bật, snapshot chạy cả ngoài khung |
 | `bootstrap.create_schema` | `auto` | Mục 3.1 |
 | `checkpoint.flush_every` | `500ms` | Chu kỳ gộp row delta vào checkpoint toàn cục (relaxed) |
@@ -506,7 +507,7 @@ Biến môi trường:
 - `checkpoint.store` khác `target`: checkpoint luôn nằm ở target.
 - `governor.metrics_source`
 - `verify.full.cron`, `verify.full.rate`: không có verify full theo lịch; chạy `strand verify --mode full` bằng cron ngoài.
-- `bootstrap.logical.max_parallel`, `bootstrap.catch_up.binlog_archive` (dùng `seed apply --archive`).
+- `bootstrap.catch_up.binlog_archive` (dùng `seed apply --archive`).
 
 Không cảnh báo khi giá trị đúng là hành vi thật: `read_from: primary`, `checkpoint.store: target`.
 
@@ -597,13 +598,13 @@ Lệnh nói chuyện với `sync` đang chạy (`top`, `pause`, `resume`, `throt
 
 `strand config init --from mysql|mariadb|postgres --to mysql|postgres [--name N] [--source-host H] [--target-host H] [--database app] [--systemd] [-o file] [--force]`. Sinh file cấu hình mẫu có chú thích; mật khẩu luôn đọc từ biến môi trường `SRC_PW`/`DST_PW`. Không có `-o` thì in ra màn hình. File đã có thì không ghi đè, trừ khi có `--force`. Cặp nguồn/đích không hỗ trợ (MariaDB → PG, PG → MySQL) bị từ chối.
 
-Tùy chọn thêm (không đặt thì dùng mặc định của Strand, file ghi dạng comment): `--exclude a.log_*,b.tmp`, `--source-user`, `--target-user`, `--server-id`, `--commit-order relaxed|strict`, `--iops-soft N` (`--iops-hard`, mặc định gấp đôi soft), `--workers N`, `--chunk-rows N` (cỡ chunk cố định; mặc định tự chỉnh), `--snapshot-window 22:00-06:00`, `--breaker-max-ratio X`, `--replica-lag-max 30s`, `--metrics host:port`, `--log-format json|text`.
+Tùy chọn thêm (không đặt thì dùng mặc định của Strand, file ghi dạng comment): `--exclude a.log_*,b.tmp`, `--source-user`, `--target-user`, `--server-id`, `--commit-order relaxed|strict`, `--iops-soft N` (`--iops-hard`, mặc định gấp đôi soft), `--workers N`, `--chunk-rows N` (cỡ chunk cố định; mặc định tự chỉnh), `--max-parallel N` (số bảng snapshot cùng lúc, 1–32; mặc định 1), `--snapshot-window 22:00-06:00`, `--breaker-max-ratio X`, `--replica-lag-max 30s`, `--metrics host:port`, `--log-format json|text`.
 
 Ví dụ chuyển cả server MariaDB, đọc nhanh hơn mặc định:
 
 ```bash
 strand config init --from mariadb --to mysql --name sea --database '*' --exclude 'call_logs.tmp_*' \
-  --source-host 10.5.0.21 --target-host 10.5.0.31 --iops-soft 4000 --workers 16 --chunk-rows 20000 -o sea.yaml
+  --source-host 10.5.0.21 --target-host 10.5.0.31 --iops-soft 4000 --workers 16 --chunk-rows 20000 --max-parallel 4 -o sea.yaml
 ```
 
 ### 7.0b `sync --background`, `stop`, `status`
@@ -730,6 +731,8 @@ Lệnh tạo slot cùng exported snapshot, rồi chạy `pg_dump --snapshot` (`-
 ### 7.7 `snapshot add`
 
 `strand snapshot add --table app.t -c p.yaml` thêm bảng vào pipeline đang chạy. Bảng được snapshot logic có điều tốc, không dừng stream. PK theo mục 5.2. PG source: bảng phải có trong publication.
+
+Bảng thêm chạy song song với snapshot của bootstrap đang dở (không tính vào `max_parallel`, nhưng cùng chia ngân sách đọc nguồn). Bảng còn trong hàng đợi của bootstrap (chưa tới lượt) bị từ chối với `already being snapshotted`: nó sẽ được snapshot khi tới lượt. Pipeline chỉ báo `synced` khi bootstrap và mọi `snapshot add` đều xong.
 
 Bảng thêm bằng lệnh này mà không nằm trong `tables.include` được ghi vào state cục bộ (`pipeline-state.json` trong `resources.spool.path`, trường `added_tables`) và **vẫn thuộc pipeline sau khi restart**: khởi động hợp chúng vào bộ lọc, nạp metadata/schema như bảng thường và không snapshot lại bảng đã xong. Bảng đã bị xóa ở source thì chỉ log WARN và bỏ qua.
 
@@ -875,7 +878,7 @@ Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, s�
 
 `strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ: 1 giờ trong RAM; chế độ PostgreSQL thêm bộ chọn 6 h, 24 h, 7 d đọc từ lịch sử trong DB và giữ biểu đồ qua lần khởi động lại web), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng, chế độ sửa YAML và .env), **Logs**. Từ M3 có **thao tác**; M5 có **sửa cấu hình** và **tạo pipeline mới**; từ M4 có **wizard Repair và Promote** (đoạn dưới). REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 
-**Chỉnh tốc độ snapshot trên web.** Form tạo pipeline có mục "Snapshot speed & safety" (tùy chọn), và tab Config có thẻ **Tuning** cho pipeline đang có: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.*` (`strand_query_p99.max_ratio`, `replica_lag.max`), `resources.workers.max` (mục 6.2, 8.1). Chỉ gồm khóa đã có tác dụng, không gồm khóa ở 6.3. Lưu qua đường sửa cấu hình thường (validate, diff, `.bak`), có hiệu lực sau restart; đổi nóng tốc độ đọc dùng Throttle (tab Graph). `GET/POST /api/v1/pipelines/{name}/tuning` trong `docs/WEB-API.md`.
+**Chỉnh tốc độ snapshot trên web.** Form tạo pipeline có mục "Snapshot speed & safety" (tùy chọn), và tab Config có thẻ **Tuning** cho pipeline đang có: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.max_parallel` ("Tables in parallel"), `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.*` (`strand_query_p99.max_ratio`, `replica_lag.max`), `resources.workers.max` (mục 6.2, 8.1). Chỉ gồm khóa đã có tác dụng, không gồm khóa ở 6.3. Lưu qua đường sửa cấu hình thường (validate, diff, `.bak`), có hiệu lực sau restart; đổi nóng tốc độ đọc dùng Throttle (tab Graph). `GET/POST /api/v1/pipelines/{name}/tuning` trong `docs/WEB-API.md`.
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
@@ -893,11 +896,12 @@ shutdown_stop_pipelines: true   # web thoát (SIGTERM) thì dừng êm pipeline 
 | Hash mật khẩu admin, hash token | `web.yaml` (`password_hash`, `api_token_hash`) | bảng `admin`; `strand web passwd/token/init` ghi vào DB khi có DSN, có hiệu lực ngay (không cần restart) |
 | Phiên đăng nhập | RAM (restart là đăng xuất) | bảng `sessions` (chỉ sha256 của id cookie); luật idle 30 phút / tối đa 12 giờ giữ nguyên; restart không đăng xuất |
 | Danh sách pipeline (tạo từ web, khai báo `pipelines:` trong web.yaml, tìm thấy bởi `scan`) | `<state_dir>/pipelines.json` + web.yaml + glob | bảng `pipelines` cho **mọi** pipeline (cột `origin`: `created`, `web.yaml`, `scan`). YAML là nguồn sự thật; `.env` mã hóa AES-GCM (chỉ khi có `STRAND_WEB_SECRET_KEY`); file được dựng lại từ DB trước validate/start/job (0640/0600) vì CLI `strand` chỉ đọc file. Xem "Registry trong DB" bên dưới |
-| Trạng thái mong muốn running/stopped | không có | bảng `pipeline_desired`; Start/Restart đặt `running`, Stop đặt `stopped` (chế độ nền); web khởi động thì chạy lại pipeline `running` đang không chạy |
+| Trạng thái mong muốn running/stopped | không có | bảng `pipeline_desired`; Start/Restart đặt `running`, Stop đặt `stopped` (chế độ nền); web khởi động thì chạy lại pipeline `running` đang không chạy. Pipeline dừng êm ngoài web (`strand stop`, SIGTERM) được ghi `stopped` (cột `reason` = `observed_stop`, audit `desired.observed_stop`, trang ghi "stopped outside the web") và không tự chạy lại; pipeline chết (lỗi, kill) vẫn `running` |
 | Lịch sử job | `<state_dir>/jobs/<id>.json` + `<id>.log` | bảng `jobs` + `job_output` (10 MB đầu mỗi job; `<id>.log` chỉ là spool khi job chạy) |
 | Cài đặt web (`scan`, `config_dir`, cookie, X-Forwarded-For, dừng pipeline khi thoát, chu kỳ lấy mẫu) | `web.yaml` | trang **Settings** / bảng `web_settings`; ưu tiên: env > DB > web.yaml > mặc định |
 | Wizard Repair/Promote | `<state_dir>/wizards/*.json` | bảng `wizards` |
-| Audit log | `<state_dir>/audit.log` | bảng `audit_log` chỉ-thêm (trigger chặn UPDATE/DELETE/TRUNCATE). `audit: both` (mặc định) vẫn ghi cả file làm bản sao khi mất DB; `db` chỉ DB; `file` chỉ file |
+| Audit log | `<state_dir>/audit.log` (tự xoay theo `audit_rotate_mb`/`audit_rotate_days` thành `audit-<ts>.log.gz` + sha256) | bảng `audit_log` chỉ-thêm (trigger chặn UPDATE/DELETE/TRUNCATE; dòng cũ chỉ rời bảng qua `strand web db audit-archive` / lưu trữ tự động: file `.jsonl.gz` đã kiểm chứng + sha256, dòng `audit.archive` vĩnh viễn; INSTALL.md 12.1). `audit: both` (mặc định) vẫn ghi cả file làm bản sao khi mất DB; `db` chỉ DB; `file` chỉ file |
+| Nhiều instance web | không hỗ trợ (một `state_dir` cho một web) | một instance **active** (lease `web_lease`), các instance khác **standby** chỉ đọc, tự tiếp quản khi lease hết hạn (INSTALL.md 12.2) |
 | Đồ thị/số liệu | RAM, 1 giờ | bảng `metric_samples` (24 giờ) + `metric_samples_1m` (7 ngày); biểu đồ 1 h / 6 h / 24 h / 7 d |
 
 **Registry trong DB (chế độ DB).** Pipeline khai báo trong `web.yaml` và file tìm thấy bởi `scan` được **phát hiện** vào bảng `pipelines` ở lần quét đầu thấy chúng (chụp YAML, và `.env` mã hóa khi có khóa); từ đó bản DB là nguồn sự thật như pipeline tạo từ web: sửa trên tab Config ghi cả DB lẫn file, trạng thái mong muốn áp dụng. Thứ tự ưu tiên khi trùng tên: khai báo trong `web.yaml` > pipeline tạo từ web > `scan`; đường dẫn/unit của pipeline khai báo lấy theo `web.yaml`. Quy tắc với file trên đĩa:
@@ -1052,9 +1056,21 @@ Governor chỉ điều tốc **phần đọc snapshot** trên source. Stream lu�
 | Nhường source giờ cao điểm | `pause --snapshot` / `resume --snapshot-only`, hoặc `bootstrap.logical.windows` | Ngay / khởi động lại |
 | Governor nhạy hơn | `governor.lag_slo`, `governor.tick` | Khởi động lại |
 | Target bắt kịp nhanh hơn | `commit_order: relaxed`, tăng `workers.max` | Khởi động lại |
+| Snapshot nhiều bảng nhanh hơn khi **ghi target** (flush) là nút cổ chai | `bootstrap.logical.max_parallel` (vd 4) | Khởi động lại |
 | Ít commit hơn | `target.batch.max_rows` / `max_bytes` | Khởi động lại |
 | Đệm khi target chậm | `spool.hard`, `spool.overflow` | Khởi động lại |
 | Không chạm primary (MySQL) | Trỏ source vào replica | Khởi động lại |
+
+**Snapshot song song (`bootstrap.logical.max_parallel` = N).** Tối đa N bảng được snapshot cùng lúc; worker rảnh nhận bảng chờ còn nhiều việc nhất (ước lượng row × độ dài row × phần chưa xong), nên phần đuôi chỉ còn bảng nhỏ. Chunk của một bảng vẫn tuần tự (keyset walk). Điều tốc không đổi:
+
+- **Ngân sách đọc nguồn là chung:** mọi bảng chia một token bucket, tổng tốc độ đọc ≤ R (`iops.soft`, governor, `throttle set`) như khi N = 1. N chỉ giúp khi nút cổ chai là ghi target (flush upsert) hoặc độ trễ mỗi chunk, không giúp khi R đã là giới hạn.
+- **Cổng chung:** `pause --snapshot`, breaker, `windows`, governor dừng background giữ **mọi** worker (cả trước khi nhận bảng mới).
+- **Router và flush:** mỗi flush chunk vẫn chạy trong barrier (router dừng, mọi Txn đã nhận đã commit). Flush của nhiều bảng dùng chung một lần dừng router và chạy song song, mỗi flush trên một kết nối target riêng; trong lúc đó stream không được route (như khi N = 1, một lần dừng mỗi chunk).
+- **Bộ nhớ:** ~N × cỡ chunk (trần byte của chunk: 64 MiB) cho row snapshot đang giữ, cộng buffer event của các chunk đang đọc.
+- **Kết nối:** nguồn: N kết nối đọc chunk (MariaDB/MySQL không GTID: thêm một kết nối `LOCK TABLES … READ` ngắn mỗi chunk). Target: N kết nối flush cộng `workers.max` kết nối writer; pool target tự nới khi `workers.max + N + 8` > 64.
+- **FK:** target PG có FK (schema tự tạo): bảng con chỉ bắt đầu khi bảng cha đã xong. Target MySQL không kiểm FK khi ghi nên không ràng buộc thứ tự.
+- **Restart / kill -9:** mỗi bảng dở dang chạy tiếp từ plan riêng (`pipeline-state.json`); `strand top` và tab Tables của Web UI hiện mọi bảng đang chạy, ETA theo tốc độ riêng của từng bảng.
+- **Source PostgreSQL:** luôn tuần tự (khóa được nhận, có cảnh báo khi `validate`/`sync`).
 
 Bộ nhớ: không có trần RSS (`resources.memory` chưa thi hành). Các phần lớn được tràn ra đĩa:
 

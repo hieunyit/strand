@@ -325,9 +325,37 @@ func (p *PG) SetDesired(ctx context.Context, name, desired string) error {
 	if desired != DesiredRunning && desired != DesiredStopped {
 		return fmt.Errorf("invalid desired state %q", desired)
 	}
-	_, err := p.db.ExecContext(ctx, `INSERT INTO pipeline_desired (name, desired) VALUES ($1,$2)
-		ON CONFLICT (name) DO UPDATE SET desired = EXCLUDED.desired, updated_at = now()`, name, desired)
+	_, err := p.db.ExecContext(ctx, `INSERT INTO pipeline_desired (name, desired, reason) VALUES ($1,$2,'')
+		ON CONFLICT (name) DO UPDATE SET desired = EXCLUDED.desired, reason = '', updated_at = now()`, name, desired)
 	return p.wrap(err)
+}
+
+func (p *PG) ObserveStop(ctx context.Context, name string) (bool, error) {
+	res, err := p.db.ExecContext(ctx, `UPDATE pipeline_desired SET desired = 'stopped', reason = $2, updated_at = now()
+		WHERE name = $1 AND desired = 'running'`, name, ReasonObservedStop)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+func (p *PG) DesiredStates(ctx context.Context) (map[string]DesiredState, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT name, desired, reason, updated_at FROM pipeline_desired`)
+	if err != nil {
+		return nil, p.wrap(err)
+	}
+	defer rows.Close()
+	m := map[string]DesiredState{}
+	for rows.Next() {
+		var n string
+		var d DesiredState
+		if err := rows.Scan(&n, &d.Desired, &d.Reason, &d.Updated); err != nil {
+			return nil, p.wrap(err)
+		}
+		m[n] = d
+	}
+	return m, p.wrap(rows.Err())
 }
 
 func (p *PG) Desired(ctx context.Context) (map[string]string, error) {

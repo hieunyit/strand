@@ -119,6 +119,9 @@ type Snap struct {
 
 	Rates    Rates  `json:"rates"`
 	LagLevel string `json:"lag_level"` // "", warn, bad (có trễ pha)
+
+	// tables: TablesView đã sắp xếp của mẫu này, tính một lần (trang, API, luồng sống đọc chung; chỉ đọc).
+	tables *tablesCache
 }
 
 // Các trạng thái hiển thị.
@@ -382,7 +385,7 @@ func (s *Sampler) sampleOne(ctx context.Context, p *Pipeline, force bool) {
 	}()
 	start := time.Now()
 	now := s.Now()
-	snap := &Snap{Name: p.Name, At: now}
+	snap := &Snap{Name: p.Name, At: now, tables: &tablesCache{}}
 	if p.CfgErr != "" {
 		snap.Err = p.CfgErr
 	}

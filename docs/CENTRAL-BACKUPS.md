@@ -93,8 +93,12 @@ these recurring job definitions. The Web service must have its S3 credentials,
 metadata DSN, wrapper executable, backup output directory, and (for tunnels)
 SSH identity and `known_hosts` files mounted and readable in its own container
 or host. Job configuration is stored in PostgreSQL and enabled schedules resume
-when Web starts. PostgreSQL advisory locks elect one scheduler per job across
-Web replicas, and a persisted next-run timestamp prevents a Web restart from
+when Web starts. Only the ACTIVE Web instance (the `web_lease` holder) starts
+scheduler processes: a standby starts none and answers backup-job writes with
+503 like every other write; on takeover the new active instance starts the
+enabled schedulers and the old one stops its own when it steps down (a run in
+progress there is recorded as interrupted). As a safety net, PostgreSQL advisory
+locks still elect one scheduler per job across Web replicas, and a persisted next-run timestamp prevents a Web restart from
 triggering an extra backup. A second replica waits for the scheduler lock and
 takes over if the active scheduler exits. Scheduled and **Run now** executions
 share a per-job execution lock, so invocations of one job do not overlap.

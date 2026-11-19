@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"strings"
 	"sync"
@@ -115,6 +116,57 @@ func TestAuditAppendOnly(t *testing.T) {
 		if _, err := p.DB().Exec(q); err == nil || !strings.Contains(err.Error(), "append-only") {
 			t.Fatalf("%s: err = %v, want append-only rejection", q, err)
 		}
+	}
+}
+
+// The archive path does not open a hole in append-only: a DELETE outside strand_audit_archive is rejected, also
+// with the session flag the trigger checks set by hand (no manifest row in the same transaction), the
+// audit.archive entries and the audit_archives manifest are immutable, and the function deletes all or nothing.
+func TestAuditArchiveKeepsAppendOnly(t *testing.T) {
+	ctx := context.Background()
+	p, err := store.Open(ctx, testutil.NewPostgresDSN(t), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	old := time.Now().Add(-48 * time.Hour)
+	for i := 0; i < 3; i++ {
+		if err := p.AppendAudit(ctx, store.AuditRow{Time: old, Action: "start", Data: []byte(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db := p.DB()
+	reject := func(what string, f func(*sql.Tx) error) {
+		t.Helper()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := f(tx); err == nil || !strings.Contains(err.Error(), "append-only") {
+			t.Fatalf("%s: err = %v, want append-only rejection", what, err)
+		}
+	}
+	reject("plain delete", func(tx *sql.Tx) error { _, err := tx.Exec(`DELETE FROM audit_log`); return err })
+	reject("delete with a forged flag", func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`SELECT set_config('strand.audit_archive_nonce', 'forged', true)`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM audit_log`)
+		return err
+	})
+	pl, _ := p.PlanAuditArchive(ctx, time.Now().Add(-24*time.Hour))
+	if n, err := p.ArchiveAudit(ctx, store.AuditArchive{Before: pl.Before, MaxID: pl.MaxID, Count: pl.Count, File: "f.jsonl.gz", SHA256: strings.Repeat("c", 64)}); err != nil || n != 3 {
+		t.Fatalf("archive: %d %v", n, err)
+	}
+	reject("delete of the audit.archive entry", func(tx *sql.Tx) error { _, err := tx.Exec(`DELETE FROM audit_log`); return err })
+	reject("update of the manifest", func(tx *sql.Tx) error { _, err := tx.Exec(`UPDATE audit_archives SET row_count = 0`); return err })
+	reject("delete of the manifest", func(tx *sql.Tx) error { _, err := tx.Exec(`DELETE FROM audit_archives`); return err })
+	reject("truncate of the manifest", func(tx *sql.Tx) error { _, err := tx.Exec(`TRUNCATE audit_archives`); return err })
+	reject("truncate audit_log", func(tx *sql.Tx) error { _, err := tx.Exec(`TRUNCATE audit_log`); return err })
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_log WHERE action = 'audit.archive'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("audit.archive entries = %d %v", n, err)
 	}
 }
 

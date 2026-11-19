@@ -71,6 +71,7 @@ func TestDeclaredPipelineRegisteredInDatabase(t *testing.T) {
 	// web.yaml entry removed: pipeline kept and flagged; not re-materialised; restore and forget.
 	c2 := *e.srv.cfg
 	c2.Pipelines = nil
+	e.srv.releaseLease() // web restarts with the edited web.yaml
 	srv, err := New(Options{Config: &c2, Version: "test", Commander: e.cmd, Now: e.clock.Now, Store: st})
 	if err != nil {
 		t.Fatal(err)

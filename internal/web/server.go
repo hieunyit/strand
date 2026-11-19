@@ -58,7 +58,10 @@ type Server struct {
 	tls               bool
 	live              liveSettings // cài đặt hiệu lực (trang Settings)
 	version           string
-	db                *metaDB // nil = chế độ file
+	db                *metaDB      // nil = chế độ file
+	stops             *stopTracker // dừng do web thực hiện (phân biệt với dừng ngoài web)
+	lease             *leaseMgr    // chế độ DB: lease instance active (lease.go)
+	desired           desiredCache
 	backups           *backup.Catalog
 
 	pages   map[string]*template.Template
@@ -86,6 +89,8 @@ type Options struct {
 	SecretKey string
 	// PreviousSecretKey thay STRAND_WEB_SECRET_KEY_PREVIOUS (test).
 	PreviousSecretKey string
+	// LeaseTTL thay thời hạn lease instance active (test; mặc định 30 s hoặc STRAND_WEB_LEASE_TTL).
+	LeaseTTL time.Duration
 }
 
 // New dựng Server (chưa lắng nghe, chưa chạy sampler). Trả lỗi nếu cấu hình không đủ điều kiện khởi động.
@@ -145,12 +150,15 @@ func New(o Options) (*Server, error) {
 			return nil, err
 		}
 	}
+	s.stops = newStopTracker()
 	s.sessions.db = db
 	// Cài đặt hiệu lực (env > DB > web.yaml > mặc định), trước sampler vì chu kỳ lấy mẫu là một cài đặt.
 	if err := s.loadSettings(true); err != nil {
 		return nil, fmt.Errorf("load settings from the metadata database: %w", err)
 	}
 	reg.scanFn = func() []string { return s.settingList("scan") }
+	audit.rotateBytes = func() int64 { return int64(s.settingInt("audit_rotate_mb")) << 20 }
+	reg.writable = s.isActive
 	iv, _ := s.live.get("sample_interval_sec").(int)
 	s.samp = NewSampler(reg, time.Duration(iv)*time.Second)
 	s.samp.Now = o.Now
@@ -164,11 +172,20 @@ func New(o Options) (*Server, error) {
 			return nil, err
 		}
 	}
+	if db != nil {
+		// Nhiều instance trên một DB: chỉ instance giữ lease là active; không lấy được thì chạy standby (chỉ đọc).
+		s.lease = newLeaseMgr(o.Config.Listen, o.Version, leaseTTL(o))
+		s.leaseTick()
+		if !s.isActive() {
+			o.Logger.Warn("another strand web instance holds the active lease: this instance runs as STANDBY (read-only) and takes over when the lease expires",
+				"active", s.leaseInfo().Active)
+		}
+	}
 	var jst store.Store
 	if db != nil {
 		jst = db.st
 	}
-	jr, err := NewJobRunner(filepath.Join(o.Config.StateDir, "jobs"), s.strandBinary(), o.Now, jst)
+	jr, err := newJobRunner(filepath.Join(o.Config.StateDir, "jobs"), s.strandBinary(), o.Now, jst, !s.isActive())
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +206,7 @@ func New(o Options) (*Server, error) {
 	reg.Refresh(context.Background())
 	if db != nil {
 		s.preloadSeries()
+		s.refreshDesired()
 	}
 	s.handler = s.routes()
 	return s, nil
@@ -254,6 +272,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	go s.samp.Run(ctx)
 	go s.ResumeDesired(ctx)
 	go s.runMetricsHistory(ctx)
+	go s.runLease(ctx)
+	go s.runAuditMaintenance(ctx)
 	srv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -278,12 +298,15 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
 		_ = srv.Shutdown(sctx)
-		if s.db != nil && s.settingBool("shutdown_stop_pipelines") {
+		if s.db != nil && s.settingBool("shutdown_stop_pipelines") && s.isActive() {
 			s.stopForShutdown()
+		}
+		if s.db != nil {
+			s.flushMetrics()
+			s.releaseLease() // standby tiếp quản ngay, không chờ hết TTL
 		}
 		_ = s.audit.Close()
 		if s.db != nil {
-			s.flushMetrics()
 			_ = s.db.st.Close()
 		}
 		return nil
@@ -415,6 +438,9 @@ func (s *Server) auth(api bool, next authedHandler) http.Handler {
 		if tok := bearer(r); tok != "" {
 			if s.apiTokenHash() != "" && constEq(hashKey(tok), s.apiTokenHash()) {
 				// Token tĩnh không dùng cookie nên không cần CSRF.
+				if s.standbyGuard(w, r) {
+					return
+				}
 				next(w, r, &Session{CSRF: "", IP: s.clientIP(r)})
 				return
 			}
@@ -440,6 +466,9 @@ func (s *Server) auth(api bool, next authedHandler) http.Handler {
 				writeErr(w, http.StatusForbidden, "missing or invalid CSRF token")
 				return
 			}
+		}
+		if s.standbyGuard(w, r) {
+			return
 		}
 		next(w, r, sess)
 	})
