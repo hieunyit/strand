@@ -3,12 +3,12 @@ package web
 import (
 	"bytes"
 	"context"
-	"errors"
-	"sync"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 

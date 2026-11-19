@@ -22,15 +22,15 @@ type Mem struct {
 	jobs     map[string]Job
 	jobOut   map[string]map[int64][]byte
 	// metrics, metrics1m: pipeline -> UnixNano(ts) -> mẫu.
-	metrics   map[string]map[int64]MetricSample
-	metrics1m map[string]map[int64]MetricSample
-	settings  map[string]string
-	wizards   map[string][]byte
-	audit     []AuditRow
-	meta      map[string]string
-	backups   map[string]backup.Record
+	metrics    map[string]map[int64]MetricSample
+	metrics1m  map[string]map[int64]MetricSample
+	settings   map[string]string
+	wizards    map[string][]byte
+	audit      []AuditRow
+	meta       map[string]string
+	backups    map[string]backup.Record
 	backupJobs map[string]backup.Job
-	locks     map[string]*sync.Mutex
+	locks      map[string]*sync.Mutex
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }
