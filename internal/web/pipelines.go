@@ -143,7 +143,11 @@ func ReadEnvFile(path string) ([]string, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return ParseEnvData(f)
+	out, err := ParseEnvData(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return out, nil
 }
 
 // ParseEnvData parses the restricted KEY=VALUE format used for pipeline secrets.
@@ -160,7 +164,7 @@ func ParseEnvData(r io.Reader) ([]string, error) {
 		k, v, ok := strings.Cut(line, "=")
 		k = strings.TrimSpace(k)
 		if !ok || k == "" || strings.ContainsAny(k, " \t") {
-			return nil, fmt.Errorf("pipeline env line %d: expected KEY=VALUE", n)
+			return nil, fmt.Errorf("line %d: expected KEY=VALUE", n)
 		}
 		v = strings.TrimSpace(v)
 		out = append(out, k+"="+parseEnvValue(v))

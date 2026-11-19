@@ -40,9 +40,6 @@ type Pipeline struct {
 	// ConfigYAML is the source of truth of the pipeline config; HasConfig=false means "not stored".
 	ConfigYAML string
 	HasConfig  bool
-	// ConfigJSON is the canonical typed pipeline configuration for database-managed pipelines.
-	// ConfigYAML remains only for importing installations created by older versions.
-	ConfigJSON []byte
 	// EnvEnc is the AES-GCM sealed .env (nil when no secret key was configured).
 	EnvEnc []byte
 	// Origin: created (web) | web.yaml (declared) | scan (discovered by a scan glob). "" = created.
