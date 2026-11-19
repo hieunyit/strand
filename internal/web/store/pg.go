@@ -214,14 +214,16 @@ func (p *PG) CountSessions(ctx context.Context) (int, error) {
 	return n, p.wrap(err)
 }
 
-const pipelineCols = `name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts::text, created_at, updated_at`
+const pipelineCols = `name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts::text, created_at, updated_at, config_json`
 
 func scanPipeline(sc interface{ Scan(...any) error }) (Pipeline, error) {
 	var p Pipeline
 	var y sql.NullString
 	var miss sql.NullTime
-	err := sc.Scan(&p.Name, &p.ConfigPath, &p.EnvPath, &p.SystemdUnit, &p.LogFile, &p.PidFile, &y, &p.EnvEnc, &p.Origin, &miss, &p.Conflicts, &p.Created, &p.Updated)
+	var cfgJSON []byte
+	err := sc.Scan(&p.Name, &p.ConfigPath, &p.EnvPath, &p.SystemdUnit, &p.LogFile, &p.PidFile, &y, &p.EnvEnc, &p.Origin, &miss, &p.Conflicts, &p.Created, &p.Updated, &cfgJSON)
 	p.ConfigYAML, p.HasConfig = y.String, y.Valid
+	p.ConfigJSON = append([]byte(nil), cfgJSON...)
 	if miss.Valid {
 		p.MissingSince = miss.Time
 	}
@@ -237,17 +239,21 @@ func pipelineArgs(r Pipeline) []any {
 	if !r.MissingSince.IsZero() {
 		miss = r.MissingSince
 	}
-	return []any{r.Name, r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile, y, r.EnvEnc, r.Origin, miss, r.Conflicts}
+	var cfgJSON any
+	if len(r.ConfigJSON) > 0 {
+		cfgJSON = r.ConfigJSON
+	}
+	return []any{r.Name, r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile, y, r.EnvEnc, r.Origin, miss, r.Conflicts, cfgJSON}
 }
 
-const pipelineInsert = `INSERT INTO pipelines (name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts, created_at, updated_at)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb, now(), now())`
+const pipelineInsert = `INSERT INTO pipelines (name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts, config_json, created_at, updated_at)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb, now(), now())`
 
 func (p *PG) UpsertPipeline(ctx context.Context, r Pipeline) error {
 	_, err := p.db.ExecContext(ctx, pipelineInsert+`
 		ON CONFLICT (name) DO UPDATE SET config_path = EXCLUDED.config_path, env_path = EXCLUDED.env_path,
 		  systemd_unit = EXCLUDED.systemd_unit, log_file = EXCLUDED.log_file, pid_file = EXCLUDED.pid_file,
-		  config_yaml = EXCLUDED.config_yaml, env_enc = EXCLUDED.env_enc, origin = EXCLUDED.origin,
+		  config_yaml = EXCLUDED.config_yaml, config_json = EXCLUDED.config_json, env_enc = EXCLUDED.env_enc, origin = EXCLUDED.origin,
 		  missing_since = EXCLUDED.missing_since, conflicts = EXCLUDED.conflicts, updated_at = now()`, pipelineArgs(r)...)
 	return p.wrap(err)
 }

@@ -105,6 +105,7 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 			ti.Ranges = rc
 			ti.RowsEstimate = h.rowsEstimate(ctx, m.ID)
 			ti.ProgressPct = tableProgress(p.state, name, rc)
+			ti.ProgressPct = p.monotonicSnapshotProgress(name, ti.ProgressPct)
 			ti.RowsCopied = int64(float64(ti.RowsEstimate) * ti.ProgressPct / 100)
 			r := rate
 			if run := runs[name]; run != nil {
@@ -119,6 +120,22 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 		out = append(out, ti)
 	}
 	return out, nil
+}
+
+// monotonicSnapshotProgress prevents the progress display from moving backwards when a
+// generic-key walk adds more ranges. The underlying ranges remain authoritative for routing
+// and recovery; this cache only stabilizes the observational percentage within this process.
+func (p *Pipeline) monotonicSnapshotProgress(table string, pct float64) float64 {
+	p.snapProgressMu.Lock()
+	defer p.snapProgressMu.Unlock()
+	if p.snapProgressPct == nil {
+		p.snapProgressPct = make(map[string]float64)
+	}
+	if previous, ok := p.snapProgressPct[table]; ok && previous > pct {
+		return previous
+	}
+	p.snapProgressPct[table] = pct
+	return pct
 }
 
 func (h *adminHandler) rowsEstimate(ctx context.Context, id model.TableID) int64 {

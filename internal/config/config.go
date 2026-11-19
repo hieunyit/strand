@@ -322,6 +322,23 @@ func LoadFile(path string) (*Config, error) {
 
 // LoadYAMLStrict giải mã YAML nghiêm ngặt, từ chối mọi trường không xác định (exit code 2)
 func LoadYAMLStrict(data []byte) (*Config, error) {
+	return loadYAMLStrict(data, nil)
+}
+
+// LoadYAMLStrictWithEnv expands environment references using per-pipeline values
+// first and the process environment as fallback. It lets database-managed pipelines
+// resolve encrypted secrets without mutating process-global environment variables.
+func LoadYAMLStrictWithEnv(data []byte, env map[string]string) (*Config, error) {
+	expanded := os.Expand(string(data), func(key string) string {
+		if value, ok := env[key]; ok {
+			return value
+		}
+		return os.Getenv(key)
+	})
+	return loadYAMLStrict([]byte(expanded), env)
+}
+
+func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true) // Bắt buộc: từ chối key lạ
 
@@ -336,7 +353,7 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 	}
 
 	// DSN dạng URL (mysql://) hoặc tách trường (host/port/user/...) → DSN của driver.
-	if err := resolveConnections(&cfg); err != nil {
+	if err := resolveConnectionsWithEnv(&cfg, secretEnv); err != nil {
 		return nil, err
 	}
 

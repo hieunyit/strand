@@ -25,6 +25,10 @@ type connFields struct {
 //   - hoặc host/port/user/password|password_env/database tách riêng;
 //   - dạng DSN của driver (`user:pass@tcp(host:port)/db`) vẫn nhận nguyên như cũ.
 func resolveConnections(cfg *Config) error {
+	return resolveConnectionsWithEnv(cfg, nil)
+}
+
+func resolveConnectionsWithEnv(cfg *Config, env map[string]string) error {
 	for _, c := range []struct {
 		name string
 		f    connFields
@@ -34,7 +38,7 @@ func resolveConnections(cfg *Config) error {
 		{"target", connFields{&cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password,
 			&cfg.Target.PasswordEnv, &cfg.Target.Database, &cfg.Target.Port}},
 	} {
-		if err := resolveConn(c.name, c.f); err != nil {
+		if err := resolveConnWithEnv(c.name, c.f, env); err != nil {
 			return exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)
 		}
 	}
@@ -42,6 +46,10 @@ func resolveConnections(cfg *Config) error {
 }
 
 func resolveConn(name string, f connFields) error {
+	return resolveConnWithEnv(name, f, nil)
+}
+
+func resolveConnWithEnv(name string, f connFields, env map[string]string) error {
 	split := *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 || *f.database != ""
 	if !strings.EqualFold(*f.kind, "mysql") {
 		if split {
@@ -61,7 +69,10 @@ func resolveConn(name string, f connFields) error {
 			if pass != "" {
 				return fmt.Errorf("%s: set either password or password_env, not both", name)
 			}
-			v, ok := os.LookupEnv(*f.passwordEnv)
+			v, ok := env[*f.passwordEnv]
+			if !ok {
+				v, ok = os.LookupEnv(*f.passwordEnv)
+			}
 			if !ok {
 				return fmt.Errorf("%s: password_env %s is not set in the environment", name, *f.passwordEnv)
 			}

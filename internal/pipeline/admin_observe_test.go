@@ -105,6 +105,20 @@ func TestAdminTables(t *testing.T) {
 	}
 }
 
+func TestSnapshotProgressDoesNotMoveBackWhenGenericWalkAddsRanges(t *testing.T) {
+	p := &Pipeline{}
+	for i, sample := range []float64{30, 20, 41, 41, 100} {
+		got := p.monotonicSnapshotProgress("app.keyed", sample)
+		want := []float64{30, 30, 41, 41, 100}[i]
+		if got != want {
+			t.Fatalf("sample %.1f: progress = %.1f, want %.1f", sample, got, want)
+		}
+	}
+	if got := p.monotonicSnapshotProgress("app.keyed", 20); got != 100 {
+		t.Fatalf("progress must stay monotonic, got %.1f after reaching 100", got)
+	}
+}
+
 func TestAdminEvents(t *testing.T) {
 	p := observeTestPipeline(t)
 	log := slog.New(p.opts.Events.Wrap(slog.NewTextHandler(discard{}, nil)))
