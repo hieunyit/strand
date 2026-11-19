@@ -211,6 +211,13 @@ Thứ tự ưu tiên của giá trị hiệu lực: **biến môi trường** (k
 
 `POST` body `{"khóa": giá_trị, ...}`; `null` = reset (xóa dòng DB, trở về web.yaml/mặc định). Kiểm hợp lệ trước khi ghi (400 kèm lý do), mỗi khóa đổi ghi audit `settings.edit` (`started` trước, rồi `ok`/`error`, `detail.key/old/new/old_source`; không ghi được audit thì không đổi). → `{"ok": true, "changed": [...], "settings": [...]}`. Chế độ file: **409** (sửa `web.yaml` rồi khởi động lại).
 
+### `GET /api/v1/backups`, `GET /api/v1/backups/{id}`, `GET /api/v1/backups/{id}/status` (trang `/backups`)
+
+Catalog backup tập trung (chỉ đọc, cần chế độ PostgreSQL; chế độ file trả 503). `GET /api/v1/backups` nhận
+`source`, `engine`, `status`, `limit` (1..500, mặc định 200), `created_after`, `created_before` (RFC3339) và
+`cursor`; trả `{"backups": [Record], "limit": N, "next_cursor": "..."}` (mới nhất trước; `next_cursor` chỉ có khi
+trang đầy). Xem `docs/CENTRAL-BACKUPS.md`.
+
 ### Registry trong DB (chế độ PostgreSQL)
 
 `PipelineView` có thêm `origin` (`created` | `web.yaml` | `scan`), `missing` (lý do, khi entry web.yaml/file scan đã mất) và `disk_conflicts` (`[{"file": "config|env", "path": "<bản cất>", "at"}]`). Action liên quan (§4): `registry-restore`, `registry-forget` (cần `confirm_name`; 409 khi pipeline đang chạy), `conflict-adopt` và `conflict-dismiss` (tham số `path` phải là một bản cất của pipeline đó). Chế độ file: 409.
