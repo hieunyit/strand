@@ -151,6 +151,11 @@ func New(o Options) (*Server, error) {
 	}
 	jr.OnEnd = s.auditJobEnd
 	s.jobs = jr
+	if s.db != nil {
+		if err := s.resumeBackupJobs(context.Background()); err != nil {
+			s.log.Error("resume scheduled backup jobs", "error", err)
+		}
+	}
 	s.registerOps()
 	s.registerWizards()
 	s.registerConfigEditOps()
@@ -279,6 +284,14 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /jobs", s.auth(false, s.pageJobs))
 	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
 	mux.Handle("GET /backups", s.auth(false, s.pageBackups))
+	mux.Handle("GET /api/v1/backup-jobs", s.auth(true, s.apiBackupJobs))
+	mux.Handle("GET /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobGet))
+	mux.Handle("POST /api/v1/backup-jobs", s.auth(true, s.apiBackupJobCreate))
+	mux.Handle("PUT /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobUpdate))
+	mux.Handle("DELETE /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobDelete))
+	mux.Handle("POST /api/v1/backup-jobs/{id}/start", s.auth(true, s.apiBackupJobStart))
+	mux.Handle("POST /api/v1/backup-jobs/{id}/stop", s.auth(true, s.apiBackupJobStop))
+	mux.Handle("POST /api/v1/backup-jobs/{id}/run", s.auth(true, s.apiBackupJobRun))
 	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs"} {
 		tab := tab
 		p := "GET /pipelines/{name}"
@@ -650,4 +663,7 @@ func (s *Server) auditJobEnd(j JobStatus) {
 		detail["error"] = j.Error
 	}
 	_ = s.audit.Log(AuditEntry{Action: "job.end", Pipeline: j.Pipeline, Args: append([]string{j.Kind}, j.Args...), Result: res, ExitCode: j.ExitCode, Detail: detail})
+	if j.Kind == "backup-schedule" && !j.Cancelled {
+		go s.reconcileBackupSchedule(j.Pipeline)
+	}
 }

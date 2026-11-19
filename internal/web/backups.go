@@ -11,6 +11,7 @@ import (
 
 type backupsPageBody struct {
 	Backups []backup.Record
+	Jobs    []backupJobView
 	Message string
 }
 
@@ -26,8 +27,12 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 		} else {
 			b.Backups = items
 		}
+		b.Jobs, err = s.backupJobViews(r.Context())
+		if err != nil {
+			b.Message = "Could not read backup jobs."
+		}
 	}
-	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Body: b})
+	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Refresh: 10, Body: b})
 }
 
 func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request, _ *Session) {

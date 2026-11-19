@@ -48,6 +48,7 @@ func init() {
 	rootCmd.AddCommand(newWebCmd())
 	rootCmd.AddCommand(newBackupCmd())
 	rootCmd.AddCommand(newMcpCmd())
+	rootCmd.AddCommand(newTunnelCmd())
 	rootCmd.Version = versionString()
 	rootCmd.SetVersionTemplate("strand {{.Version}}\n")
 }

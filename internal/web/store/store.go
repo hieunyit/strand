@@ -119,6 +119,15 @@ type Store interface {
 	ListBackups(ctx context.Context, f backup.Filter) ([]backup.Record, error)
 	UpdateBackupStatus(ctx context.Context, id string, expected, next backup.Status, verifiedAt *time.Time) (backup.Record, bool, error)
 	FinalizeBackup(ctx context.Context, id string, expected backup.Status, bytes int64, sha256, manifestURI string, verifiedAt time.Time) (backup.Record, bool, error)
+	CreateBackupJob(ctx context.Context, j backup.Job) error
+	GetBackupJob(ctx context.Context, id string) (backup.Job, bool, error)
+	ListBackupJobs(ctx context.Context) ([]backup.Job, error)
+	UpdateBackupJob(ctx context.Context, j backup.Job) (bool, error)
+	SetBackupJobNextRun(ctx context.Context, id string, expectedUpdatedAt time.Time, nextRunAt time.Time) (bool, error)
+	BeginBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (time.Time, bool, error)
+	FinishBackupJobRun(ctx context.Context, id string, startedAt time.Time, status backup.RunStatus) (bool, error)
+	RecoverBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (bool, error)
+	DeleteBackupJob(ctx context.Context, id string) (bool, error)
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error

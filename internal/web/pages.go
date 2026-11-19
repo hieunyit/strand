@@ -63,6 +63,7 @@ func templateFuncs() template.FuncMap {
 		"jobClass":  jobClass,
 		"jobDur":    jobDur,
 		"deref2":    func(t *time.Time) time.Time { return *t },
+		"div":       func(a, b int) int { return a / b },
 		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
 			Jobs         []JobStatus
 			ShowPipeline bool
