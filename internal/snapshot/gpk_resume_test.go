@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"strand/internal/checkpoint"
 	"strand/internal/model"
@@ -91,7 +92,7 @@ func TestGPK_ResumeFromSavedPlanWithGenericKeys(t *testing.T) {
 	s1 := newSnap()
 	cctx, cancel := context.WithCancel(ctx)
 	chunks := 0
-	s1.Pace = func(context.Context, int64) error {
+	s1.Pace = func(context.Context, int64, time.Time) error {
 		if chunks++; chunks == 4 {
 			cancel()
 			return context.Canceled

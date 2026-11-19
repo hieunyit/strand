@@ -368,8 +368,9 @@ type MySQLSnapshotter struct {
 	SavePlan func(table model.TableID, plan SnapshotPlan) error
 
 	// Pace (tùy chọn) được gọi giữa các chunk; governor dùng để giãn khoảng cách chunk. chunkBytes:
-	// số byte row thật của chunk vừa đọc (chi phí đọc dùng để giãn nhịp; ≤ 0 nếu không biết).
-	Pace func(ctx context.Context, chunkBytes int64) error
+	// số byte row thật của chunk vừa đọc (chi phí đọc dùng để giãn nhịp; ≤ 0 nếu không biết); readStart:
+	// lúc bắt đầu đọc chunk đó (thời gian đọc + flush được trừ vào khoảng giãn).
+	Pace func(ctx context.Context, chunkBytes int64, readStart time.Time) error
 
 	// NextChunkRows (tùy chọn) chọn cỡ (số hàng) của chunk chính kế tiếp từ số liệu đọc của chunk chính
 	// vừa xong — luật 250 ms và trần chi phí R · 0,25 s của governor (02 §7). nil = cố định ChunkRows của plan.
@@ -1069,7 +1070,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		// Throttling nếu có
 		paceStart := time.Now()
 		if s.Pace != nil {
-			if err := s.Pace(ctx, read.Bytes); err != nil {
+			if err := s.Pace(ctx, read.Bytes, readStart); err != nil {
 				return nil, err
 			}
 		} else if s.opts.SleepBetweenChunks > 0 {

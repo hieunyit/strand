@@ -247,7 +247,7 @@ func TestPaceGate_CountsGatedReaders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- p.pace(ctx, 0) }()
+	go func() { done <- p.pace(ctx, 0, time.Time{}) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for p.snapGated.Load() != 1 {
 		if time.Now().After(deadline) {
@@ -276,7 +276,7 @@ func TestPace_RetentionRiskStillRateLimited(t *testing.T) {
 	p.retentionRisk.Store(true)
 	p.cfg.Bootstrap.Logical.Windows = []string{"00:00-00:00"} // không bao giờ mở: retention risk bỏ qua
 	start := time.Now()
-	if err := p.pace(context.Background(), 16384); err != nil {
+	if err := p.pace(context.Background(), 16384, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if el := time.Since(start); el < 80*time.Millisecond {
@@ -327,16 +327,16 @@ func TestTokenBucket_SharedAcrossReaders(t *testing.T) {
 	var b tokenBucket
 	t0 := time.Unix(1000, 0)
 	d := 100 * time.Millisecond
-	// Một reader: chờ đúng d sau mỗi chunk (hành vi cũ).
-	if w := b.reserve(t0, d); w != d {
+	// Một reader, đọc + flush tức thời: chờ đúng d sau mỗi chunk.
+	if w := b.reserve(t0, t0, d); w != d {
 		t.Fatalf("first wait = %v, want %v", w, d)
 	}
-	if w := b.reserve(t0.Add(d+50*time.Millisecond), d); w != d {
+	if w := b.reserve(t0.Add(d+50*time.Millisecond), t0.Add(d+50*time.Millisecond), d); w != d {
 		t.Fatalf("single reader second wait = %v, want %v", w, d)
 	}
 	// Hai reader xong chunk cùng lúc: khoản chờ cộng dồn → tổng tốc độ ≤ R.
 	var c tokenBucket
-	if w1, w2 := c.reserve(t0, d), c.reserve(t0, d); w1 != d || w2 != 2*d {
+	if w1, w2 := c.reserve(t0, t0, d), c.reserve(t0, t0, d); w1 != d || w2 != 2*d {
 		t.Fatalf("concurrent waits = %v, %v; want %v, %v", w1, w2, d, 2*d)
 	}
 }
@@ -367,5 +367,41 @@ func TestNextChunkRows_RuleAndCostCap(t *testing.T) {
 	p.curAvgRow.Store(16384)
 	if got := p.nextChunkRows(id, snapshot.ChunkStat{Rows: 1000, Elapsed: 250 * time.Millisecond}); got != 150 {
 		t.Fatalf("avg-row cost cap: next rows = %d, want 150", got)
+	}
+}
+
+// Thời gian đọc + flush của chunk nằm trong khoảng giãn: chunk bắt đầu đọc lúc t0, flush xong lúc t0+2s,
+// chi phí/R = 5s → chỉ còn chờ 3s (trước đây chờ trọn 5s sau flush, tốc độ thực tế < R). Đọc + flush lâu
+// hơn chi phí/R → không chờ.
+func TestTokenBucket_CreditsReadAndFlushTime(t *testing.T) {
+	t0 := time.Unix(2000, 0)
+	var b tokenBucket
+	if w := b.reserve(t0, t0.Add(2*time.Second), 5*time.Second); w != 3*time.Second {
+		t.Fatalf("wait = %v, want 3s (5s cost minus 2s already spent reading/flushing)", w)
+	}
+	// Chunk kế tiếp bắt đầu đúng lúc được phép (t0+5s), flush 6s > chi phí 5s: không chờ.
+	if w := b.reserve(t0.Add(5*time.Second), t0.Add(11*time.Second), 5*time.Second); w != 0 {
+		t.Fatalf("wait = %v, want 0 when read+flush already took longer than the cost", w)
+	}
+	// Tốc độ dài hạn vẫn ≤ R: chunk bắt đầu sớm hơn tat vẫn phải chờ tới tat + d.
+	var c tokenBucket
+	_ = c.reserve(t0, t0, 5*time.Second)
+	if w := c.reserve(t0.Add(time.Second), t0.Add(time.Second), 5*time.Second); w != 9*time.Second {
+		t.Fatalf("early second chunk wait = %v, want 9s (tat 5s + 5s - now 1s)", w)
+	}
+}
+
+// pace với readStart trong quá khứ: phần thời gian đã trôi qua được trừ.
+func TestPace_CreditsElapsedSinceReadStart(t *testing.T) {
+	p := wiringPipeline(model.EngineMySQL, "static")
+	p.govAlgo = "static"
+	p.cfg.Resources.Source.IOPS.Hard = 0
+	p.setSoftRate(10) // 1 trang = 100 ms
+	start := time.Now()
+	if err := p.pace(context.Background(), 16384, start.Add(-90*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el > 60*time.Millisecond {
+		t.Fatalf("pace waited %v; 90ms of the 100ms cost had already elapsed since the chunk read started", el)
 	}
 }
