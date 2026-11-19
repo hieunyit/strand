@@ -61,6 +61,11 @@ func ValidateJob(j Job) error {
 		if !filepath.IsAbs(path) || !strings.Contains(path, "{id}") || strings.ContainsAny(path, "\x00\r\n") {
 			return bad(label + " path must be absolute and contain {id}")
 		}
+		// Local cleanup removes these paths recursively: no "..", "//" or "." segments, so the expanded
+		// path can never climb out of the directory the operator wrote.
+		if filepath.Clean(path) != path || strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") {
+			return bad(label + " path must be a clean absolute path without '..' segments")
+		}
 	}
 	if !safeBucket(j.Bucket) {
 		return bad("invalid object bucket")

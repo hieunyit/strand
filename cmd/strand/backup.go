@@ -421,7 +421,7 @@ func executeScheduledBackup(ctx context.Context, cmd *cobra.Command, args []stri
 			return err
 		}
 	}
-	env := append(os.Environ(), "STRAND_BACKUP_ID="+id, "STRAND_BACKUP_ARTIFACT="+artifactPath,
+	env := append(wrapperEnv(os.Environ()), "STRAND_BACKUP_ID="+id, "STRAND_BACKUP_ARTIFACT="+artifactPath,
 		"STRAND_BACKUP_MANIFEST="+manifestPath)
 	if forward != nil {
 		env = append(env, "STRAND_BACKUP_SOURCE_ADDR="+forward.Address())
@@ -441,6 +441,23 @@ func executeScheduledBackup(ctx context.Context, cmd *cobra.Command, args []stri
 		cleanupArtifact(cmd, manifestPath)
 	}
 	return nil
+}
+
+// wrapperEnv is the environment handed to the native backup wrapper: Strand's own secrets (metadata DSN,
+// Web secret key, admin/API credentials, S3 credentials) are removed. The wrapper needs only the source
+// database credentials it is configured with; it must not be able to read or forge the catalog, decrypt
+// stored pipeline secrets, or write to the backup bucket directly.
+func wrapperEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "STRAND_WEB_") || strings.HasPrefix(name, "STRAND_BACKUP_S3_") ||
+			strings.HasPrefix(name, "STRAND_SECRET") || name == "AWS_SECRET_ACCESS_KEY" || name == "AWS_SESSION_TOKEN" {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func runBackupCommand(ctx context.Context, args, env []string, stdout, stderr io.Writer) error {
@@ -525,16 +542,13 @@ func publishScheduledBackup(ctx context.Context, cmd *cobra.Command, id, manifes
 	}
 	artifactKey, manifestKey := backupObjectKeys(cleanPrefix, id, root.IsDir())
 	manifestURI, artifactURI := "s3://"+bucket+"/"+manifestKey, "s3://"+bucket+"/"+artifactKey
-	obj, err := objectstore.New(objectstore.Config{Endpoint: os.Getenv("STRAND_BACKUP_S3_ENDPOINT"),
-		Bucket: bucket, Region: os.Getenv("STRAND_BACKUP_S3_REGION"), AccessKey: os.Getenv("STRAND_BACKUP_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("STRAND_BACKUP_S3_SECRET_KEY"), SessionToken: os.Getenv("STRAND_BACKUP_S3_SESSION_TOKEN"),
-		AllowInsecureLocal: strings.EqualFold(strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL")), "true") || strings.TrimSpace(os.Getenv("STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL")) == "1"})
+	obj, err := backupObjectStore(bucket, 64, 4)
 	if err != nil {
-		return errors.New("configure backup object storage: check STRAND_BACKUP_S3_* variables")
+		return err
 	}
 	st, err := web.CLIStore(ctx, cfgPath, nil)
 	if err != nil {
-		return fmt.Errorf("open backup metadata store: %w", err)
+		return fmt.Errorf("open backup metadata store: %s", store.Redact(err.Error()))
 	}
 	if st == nil {
 		return errors.New("backup metadata database is required")
@@ -544,7 +558,7 @@ func publishScheduledBackup(ctx context.Context, cmd *cobra.Command, id, manifes
 	if err != nil {
 		return err
 	}
-	return st.Locked(ctx, "backup-upload:"+id, func(lockCtx context.Context) error {
+	pushErr := st.Locked(ctx, "backup-upload:"+id, func(lockCtx context.Context) error {
 		r := backup.Record{ID: id, Source: manifest.SourceIdentity, Engine: engine, Tool: manifest.Kind,
 			ToolVersion: manifest.ToolVersion, Bucket: bucket, ObjectKey: artifactKey, Position: position,
 			ManifestURI: manifestURI, Status: backup.StatusQueued, CreatedAt: time.Now().UTC(),
@@ -558,6 +572,14 @@ func publishScheduledBackup(ctx context.Context, cmd *cobra.Command, id, manifes
 		}
 		return pushBackupArtifact(lockCtx, cmd, obj, catalog, r, artifactPath, artifactKey, manifestKey, artifactURI, manifestURI, manifestBytes)
 	})
+	result, detail := "ok", map[string]any{"backup_id": id, "source": manifest.SourceIdentity, "object": artifactURI, "scheduled": true}
+	if pushErr != nil {
+		result, detail["error"] = "error", store.Redact(pushErr.Error())
+	}
+	if err := auditBackup(ctx, st, "backup.push", result, detail); err != nil {
+		return errors.Join(pushErr, err)
+	}
+	return pushErr
 }
 
 func newBackupPushCmd() *cobra.Command {

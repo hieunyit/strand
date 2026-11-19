@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,28 +26,36 @@ type backupJobView struct {
 func backupJobPipeline(id string) string    { return "backup-" + id }
 func backupJobRunPipeline(id string) string { return "run-" + id }
 
+// reconcileDelay bounds the backoff between attempts to restart an enabled job's scheduler process.
+var reconcileDelay = struct{ first, max time.Duration }{time.Second, 5 * time.Minute}
+
+// reconcileBackupSchedule restarts the scheduler process of an enabled job after it exited unexpectedly or
+// could not be started. It keeps retrying (capped exponential backoff) until the scheduler is running or
+// the job is disabled/deleted: giving up after a short metadata-database outage would silently stop the
+// job's backups until the next Web restart.
 func (s *Server) reconcileBackupSchedule(pipeline string) {
-	const attempts = 6
-	delay := time.Second
-	for i := 0; i < attempts; i++ {
+	id := strings.TrimPrefix(pipeline, "backup-")
+	delay := reconcileDelay.first
+	for attempt := 1; ; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		id := strings.TrimPrefix(pipeline, "backup-")
 		job, found, err := s.db.st.GetBackupJob(ctx, id)
 		cancel()
 		if err != nil {
-			s.log.Warn("recheck scheduled backup job", "job", id, "error", err)
+			s.log.Warn("recheck scheduled backup job", "job", id, "attempt", attempt, "error", err)
 		} else if !found || !job.Enabled {
 			return
+		} else if verr := s.validateBackupJob(job); verr != nil {
+			// Permanent (configuration) problem: retrying cannot help; the job page shows it on Start.
+			s.log.Error("scheduled backup job refused", "job", id, "error", verr)
+			return
+		} else if _, err := s.startBackupJob(job); err == nil {
+			return
 		} else {
-			if _, err := s.startBackupJob(job); err == nil {
-				return
-			} else {
-				s.log.Warn("restart scheduled backup job", "job", id, "error", err)
-			}
+			s.log.Warn("restart scheduled backup job", "job", id, "attempt", attempt, "error", err)
 		}
 		time.Sleep(delay)
-		if delay < 30*time.Second {
-			delay *= 2
+		if delay *= 2; delay > reconcileDelay.max {
+			delay = reconcileDelay.max
 		}
 	}
 }
@@ -66,6 +75,10 @@ func (s *Server) resumeBackupJobs(ctx context.Context) error {
 	}
 	for _, j := range jobs {
 		if j.Enabled {
+			if err := s.validateBackupJob(j); err != nil {
+				s.log.Error("scheduled backup job refused", "job", j.ID, "error", err)
+				continue
+			}
 			if _, err := s.startBackupJob(j); err != nil {
 				s.log.Error("start scheduled backup job", "job", j.ID, "error", err)
 				go s.reconcileBackupSchedule(backupJobPipeline(j.ID))
@@ -110,8 +123,40 @@ func (s *Server) backupJobViews(ctx context.Context) ([]backupJobView, error) {
 	return out, nil
 }
 
+// EnvBackupCommandDir names the only directory whose executables backup jobs may run. Backup jobs run as
+// the Web service account, so without this boundary anyone holding the Web admin password or API token
+// could run any program on the host (/bin/sh, curl, ...). Unset: managed backup jobs are disabled.
+const EnvBackupCommandDir = "STRAND_WEB_BACKUP_COMMAND_DIR"
+
+func backupCommandAllowed(command string) error {
+	dir := strings.TrimSpace(os.Getenv(EnvBackupCommandDir))
+	if dir == "" {
+		return errors.New("managed backup jobs are disabled: set " + EnvBackupCommandDir + " to a root-owned directory of backup wrapper scripts")
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("%s is not accessible: %w", EnvBackupCommandDir, err)
+	}
+	if filepath.Dir(filepath.Clean(command)) != filepath.Clean(dir) && filepath.Dir(filepath.Clean(command)) != realDir {
+		return fmt.Errorf("backup command must be an executable directly inside %s (%s)", EnvBackupCommandDir, dir)
+	}
+	for _, p := range []string{realDir, command} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return fmt.Errorf("backup command is not accessible to the Web service: %w", err)
+		}
+		if fi.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("%s must not be group- or world-writable", p)
+		}
+	}
+	return nil
+}
+
 func (s *Server) validateBackupJob(j backup.Job) error {
 	if err := backup.ValidateJob(j); err != nil {
+		return err
+	}
+	if err := backupCommandAllowed(j.Command); err != nil {
 		return err
 	}
 	fi, err := os.Lstat(j.Command)
@@ -215,6 +260,17 @@ func (s *Server) stopBackupJob(id string) error {
 	return nil
 }
 
+// auditBackupJob records a mutating backup-job request before it takes effect; like pipeline actions, the
+// request is refused when the audit log cannot be written.
+func (s *Server) auditBackupJob(w http.ResponseWriter, r *http.Request, action, id string) bool {
+	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: action, Pipeline: id, Result: "started"}); err != nil {
+		s.log.Error("audit backup job", "action", action, "error", err)
+		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing to change backup jobs")
+		return false
+	}
+	return true
+}
+
 func (s *Server) apiBackupJobs(w http.ResponseWriter, r *http.Request, _ *Session) {
 	views, err := s.backupJobViews(r.Context())
 	if err != nil {
@@ -283,12 +339,12 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !s.auditBackupJob(w, r, "backup_job.create", j.ID) {
+		return
+	}
 	if err := s.db.st.CreateBackupJob(r.Context(), j); err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
-	}
-	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "backup_job.create", Result: "ok", Pipeline: j.ID}); err != nil {
-		s.log.Error("audit backup job create", "error", err)
 	}
 	var processID string
 	var err error
@@ -321,6 +377,9 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 	}
 	if err := s.validateBackupJob(j); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditBackupJob(w, r, "backup_job.update", j.ID) {
 		return
 	}
 	changed, err := s.db.st.UpdateBackupJob(r.Context(), j)
@@ -365,6 +424,13 @@ func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Se
 		writeErr(w, http.StatusNotFound, "backup job not found")
 		return
 	}
+	if err := s.validateBackupJob(j); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditBackupJob(w, r, "backup_job.start", id) {
+		return
+	}
 	j.Enabled = true
 	next := s.now().UTC()
 	j.NextRunAt = &next
@@ -383,7 +449,6 @@ func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Se
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "backup_job.start", Result: "ok", Pipeline: id})
 	writeJSON(w, http.StatusOK, map[string]any{"job": j, "process_id": processID})
 }
 
@@ -402,12 +467,18 @@ func (s *Server) apiBackupJobRun(w http.ResponseWriter, r *http.Request, _ *Sess
 		writeErr(w, http.StatusNotFound, "backup job not found")
 		return
 	}
+	if err := s.validateBackupJob(j); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditBackupJob(w, r, "backup_job.run", id) {
+		return
+	}
 	processID, err := s.startBackupProcess(j, true)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
-	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "backup_job.run", Result: "started", Pipeline: id})
 	writeJSON(w, http.StatusAccepted, map[string]any{"job": j, "process_id": processID})
 }
 
@@ -420,6 +491,9 @@ func (s *Server) apiBackupJobStop(w http.ResponseWriter, r *http.Request, _ *Ses
 	j, found, err := s.db.st.GetBackupJob(r.Context(), id)
 	if err != nil || !found {
 		writeErr(w, http.StatusNotFound, "backup job not found")
+		return
+	}
+	if !s.auditBackupJob(w, r, "backup_job.stop", id) {
 		return
 	}
 	j.Enabled = false
@@ -437,7 +511,6 @@ func (s *Server) apiBackupJobStop(w http.ResponseWriter, r *http.Request, _ *Ses
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
-	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "backup_job.stop", Result: "ok", Pipeline: id})
 	writeJSON(w, http.StatusOK, map[string]any{"job": j})
 }
 
@@ -447,6 +520,9 @@ func (s *Server) apiBackupJobDelete(w http.ResponseWriter, r *http.Request, _ *S
 		return
 	}
 	id := r.PathValue("id")
+	if !s.auditBackupJob(w, r, "backup_job.delete", id) {
+		return
+	}
 	deleted, err := s.db.st.DeleteBackupJob(r.Context(), id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "could not delete backup job")
@@ -460,6 +536,5 @@ func (s *Server) apiBackupJobDelete(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
-	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "backup_job.delete", Result: "ok", Pipeline: id})
 	w.WriteHeader(http.StatusNoContent)
 }

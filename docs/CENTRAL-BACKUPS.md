@@ -105,7 +105,20 @@ the persisted due time again so a queued schedule does not run immediately
 after a **Run now** operation.
 Each invocation receives unique `{id}`-expanded output paths.
 The wrapper runs as the Web service OS account, so install only trusted wrapper
-scripts and grant that account the minimum required access. Job output and exit
+scripts and grant that account the minimum required access. Web-managed jobs
+are disabled until `STRAND_WEB_BACKUP_COMMAND_DIR` names a directory of wrapper
+scripts (not group/world-writable, ideally root-owned); a job's command must be
+an executable directly inside it. Otherwise anyone with the Web admin password
+or API token could run any program on the host. Artifact/manifest templates
+must be clean absolute paths (no `..`), because local cleanup removes them
+recursively. The wrapper's environment has Strand's own secrets removed
+(`STRAND_WEB_*`, `STRAND_BACKUP_S3_*`, `AWS_SECRET_ACCESS_KEY`,
+`AWS_SESSION_TOKEN`); give it only its source-database credentials. Creating,
+editing, starting, pausing, running and deleting jobs is audited
+(`backup_job.*`) and refused when the audit log cannot be written; scheduled
+uploads write `backup.push` audit rows. If a job's scheduler process exits
+unexpectedly, Web restarts it with capped backoff (up to 5 minutes) for as long
+as the job is enabled. Job output and exit
 status are available through the Web Jobs view. **Run now** starts a separate
 one-off execution; it waits for an active run to finish before it starts.
 The Web form enables local cleanup by default: after a verified successful S3
@@ -203,7 +216,11 @@ strand tunnel open --ssh bastion.example.net --user backup \
 ```
 
 The SSH host must already be present in `~/.ssh/known_hosts` (or the file passed
-with `--known-hosts`). Unknown host keys are rejected. The tunnel stops when the
+with `--known-hosts`). Unknown host keys are rejected. The forward only reaches the
+configured `--remote` (no SOCKS/dynamic forwarding) and listens on loopback
+only; note that any local user on the backup host can connect to that loopback
+port while the tunnel is open. The SSH handshake is bounded (15 s) and SSH
+keepalives (every 30 s) close the forward when the bastion stops answering. The tunnel stops when the
 process receives SIGINT or SIGTERM. Scheduled backup jobs can manage this tunnel
 for each run using the `--tunnel-*` options.
 

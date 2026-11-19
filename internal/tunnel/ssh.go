@@ -28,6 +28,11 @@ type Config struct {
 	HostKeysFile string
 	LocalAddress string // host:port; bind to loopback by default
 	Remote       string // host:port as resolved from the SSH server
+	// HandshakeTimeout bounds the TCP connect plus SSH handshake/authentication (default 15s).
+	HandshakeTimeout time.Duration
+	// KeepAlive is the interval of SSH keepalive requests (default 30s); the forward is closed when the
+	// server stops answering, so a backup client fails instead of hanging on a dead bastion.
+	KeepAlive time.Duration
 }
 
 // Forward owns one SSH session and a local TCP listener until Close or ctx end.
@@ -71,20 +76,36 @@ func Start(ctx context.Context, cfg Config) (*Forward, error) {
 		return nil, err
 	}
 	defer cleanup()
+	if cfg.HandshakeTimeout <= 0 {
+		cfg.HandshakeTimeout = 15 * time.Second
+	}
+	if cfg.KeepAlive <= 0 {
+		cfg.KeepAlive = 30 * time.Second
+	}
 	clientCfg := &ssh.ClientConfig{
 		User: cfg.SSHUser, Auth: auth, HostKeyCallback: hostKeys,
-		Timeout: 15 * time.Second,
+		Timeout: cfg.HandshakeTimeout,
 	}
-	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	dialer := &net.Dialer{Timeout: cfg.HandshakeTimeout, KeepAlive: 30 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", sshAddr)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: connect to SSH server: %w", err)
 	}
+	// ClientConfig.Timeout only applies to ssh.Dial; with NewClientConn a server that accepts TCP but never
+	// speaks SSH would block forever (and with it the backup job's execution lock). Bound the handshake by
+	// a deadline and by ctx.
+	_ = conn.SetDeadline(time.Now().Add(cfg.HandshakeTimeout))
+	stopWatch := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	cc, chans, reqs, err := ssh.NewClientConn(conn, sshAddr, clientCfg)
+	stopWatch()
 	if err != nil {
 		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("tunnel: SSH handshake cancelled: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("tunnel: SSH authentication or host-key verification failed: %w", err)
 	}
+	_ = conn.SetDeadline(time.Time{})
 	client := ssh.NewClient(cc, chans, reqs)
 	listener, err := net.Listen("tcp", cfg.LocalAddress)
 	if err != nil {
@@ -98,6 +119,7 @@ func Start(ctx context.Context, cfg Config) (*Forward, error) {
 	}
 	f := &Forward{listener: listener, client: client, closed: make(chan struct{})}
 	go f.accept(ctx, cfg.Remote)
+	go f.keepAlive(cfg.KeepAlive)
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -220,6 +242,41 @@ func (f *Forward) accept(ctx context.Context, remote string) {
 		}()
 	}
 }
+
+func (f *Forward) keepAlive(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-f.closed:
+			return
+		case <-t.C:
+		}
+		reply := make(chan error, 1)
+		go func() {
+			_, _, err := f.client.SendRequest("keepalive@openssh.com", true, nil)
+			reply <- err
+		}()
+		timeout := time.NewTimer(every)
+		select {
+		case err := <-reply:
+			timeout.Stop()
+			if err != nil {
+				_ = f.Close()
+				return
+			}
+		case <-timeout.C:
+			_ = f.Close()
+			return
+		case <-f.closed:
+			timeout.Stop()
+			return
+		}
+	}
+}
+
+// Done is closed when the forward stops (Close, ctx end, or a dead SSH connection).
+func (f *Forward) Done() <-chan struct{} { return f.closed }
 
 func closeWrite(c net.Conn) {
 	if cw, ok := c.(interface{ CloseWrite() error }); ok {
