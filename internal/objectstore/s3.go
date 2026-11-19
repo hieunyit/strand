@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -64,6 +66,9 @@ type ObjectInfo struct {
 	ETag         string
 	LastModified time.Time
 	SHA256       string
+	VersionID    string     // set by versioned (Object Lock) buckets
+	LockMode     string     // GOVERNANCE / COMPLIANCE when the object is locked
+	RetainUntil  *time.Time // Object Lock retain-until date
 }
 
 // Store is the S3-compatible backup artifact interface.
@@ -164,6 +169,17 @@ func isLoopbackHost(host string) bool {
 // Set size to -1 when unknown. A supplied SHA-256 is verified before finalization and stored
 // as object metadata; when omitted, Upload still calculates and returns the SHA-256.
 func (s *S3) Upload(ctx context.Context, key string, src io.Reader, size int64, sha256Hex string) (ObjectInfo, error) {
+	return s.UploadWith(ctx, key, src, size, sha256Hex, PutOptions{})
+}
+
+// UploadWith is Upload with Object Lock retention and/or a bandwidth limit.
+func (s *S3) UploadWith(ctx context.Context, key string, src io.Reader, size int64, sha256Hex string, opt PutOptions) (ObjectInfo, error) {
+	if err := opt.validate(); err != nil {
+		return ObjectInfo{}, err
+	}
+	if src != nil && opt.BytesPerSecond > 0 {
+		src = newRateLimitedReader(ctx, src, opt.BytesPerSecond)
+	}
 	if ctx == nil || src == nil {
 		return ObjectInfo{}, errors.New("objectstore: context and upload reader are required")
 	}
@@ -189,7 +205,7 @@ func (s *S3) Upload(ctx context.Context, key string, src io.Reader, size int64, 
 			return ObjectInfo{}, fmt.Errorf("objectstore: probe upload stream: %w", err)
 		}
 		if int64(len(probe)) <= singlePutLimit {
-			return s.uploadSingle(ctx, key, probe, want)
+			return s.uploadSingle(ctx, key, probe, want, opt)
 		}
 		src = io.MultiReader(bytes.NewReader(probe), src)
 	}
@@ -198,7 +214,7 @@ func (s *S3) Upload(ctx context.Context, key string, src io.Reader, size int64, 
 		if err != nil {
 			return ObjectInfo{}, err
 		}
-		return s.uploadSingle(ctx, key, data, want)
+		return s.uploadSingle(ctx, key, data, want, opt)
 	}
 	partSize := s.cfg.PartSize
 	if size > 0 {
@@ -211,10 +227,10 @@ func (s *S3) Upload(ctx context.Context, key string, src io.Reader, size int64, 
 			return ObjectInfo{}, fmt.Errorf("objectstore: size %d exceeds the multipart limit (%d parts × %d-byte maximum part)", size, maxParts, maxPartSize)
 		}
 	}
-	return s.uploadMultipart(ctx, key, src, size, strings.ToLower(sha256Hex), partSize)
+	return s.uploadMultipart(ctx, key, src, size, strings.ToLower(sha256Hex), partSize, opt)
 }
 
-func (s *S3) uploadSingle(ctx context.Context, key string, data []byte, want []byte) (ObjectInfo, error) {
+func (s *S3) uploadSingle(ctx context.Context, key string, data []byte, want []byte, opt PutOptions) (ObjectInfo, error) {
 	sum := sha256.Sum256(data)
 	if len(want) > 0 && !bytes.Equal(sum[:], want) {
 		return ObjectInfo{}, errors.New("objectstore: upload SHA-256 does not match supplied digest")
@@ -222,6 +238,10 @@ func (s *S3) uploadSingle(ctx context.Context, key string, data []byte, want []b
 	// The digest is known before a single PUT, so always store it: Download can then verify the body even
 	// without catalog metadata.
 	headers := http.Header{"Content-Type": {"application/octet-stream"}, "X-Amz-Meta-Strand-Sha256": {hex.EncodeToString(sum[:])}}
+	opt.apply(headers)
+	if opt.LockMode != "" {
+		headers.Set("Content-Md5", contentMD5(data))
+	}
 	resp, err := s.request(ctx, http.MethodPut, key, nil, headers, data, int64(len(data)))
 	if err != nil {
 		return ObjectInfo{}, err
@@ -229,7 +249,8 @@ func (s *S3) uploadSingle(ctx context.Context, key string, data []byte, want []b
 	if !isSuccess(resp.StatusCode) {
 		return ObjectInfo{}, s.responseError("PUT object", resp)
 	}
-	info := ObjectInfo{Key: key, Size: int64(len(data)), ETag: cleanETag(resp.Header.Get("ETag")), SHA256: hex.EncodeToString(sum[:])}
+	info := ObjectInfo{Key: key, Size: int64(len(data)), ETag: cleanETag(resp.Header.Get("ETag")), SHA256: hex.EncodeToString(sum[:]),
+		VersionID: resp.Header.Get("X-Amz-Version-Id")}
 	closeResponse(resp)
 	return info, nil
 }
@@ -253,8 +274,9 @@ func readExactBounded(ctx context.Context, r io.Reader, size int64) ([]byte, err
 	return buf, nil
 }
 
-func (s *S3) initiateMultipart(ctx context.Context, key, digest string) (string, error) {
+func (s *S3) initiateMultipart(ctx context.Context, key, digest string, opt PutOptions) (string, error) {
 	headers := http.Header{"Content-Type": {"application/octet-stream"}}
+	opt.apply(headers)
 	if digest != "" {
 		headers.Set("X-Amz-Meta-Strand-Sha256", digest)
 	}
@@ -297,8 +319,8 @@ func unknownSizePartSize(base int64, partNo int) int64 {
 // uploads up to Concurrency parts in parallel. At most Concurrency staged parts exist at any time, so the
 // temporary-disk requirement is Concurrency × part size. Any failure (including cancellation) aborts the
 // multipart upload so no orphaned parts remain billed in the bucket.
-func (s *S3) uploadMultipart(ctx context.Context, key string, src io.Reader, size int64, digest string, partSize int64) (_ ObjectInfo, retErr error) {
-	uploadID, err := s.initiateMultipart(ctx, key, digest)
+func (s *S3) uploadMultipart(ctx context.Context, key string, src io.Reader, size int64, digest string, partSize int64, opt PutOptions) (_ ObjectInfo, retErr error) {
+	uploadID, err := s.initiateMultipart(ctx, key, digest, opt)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
@@ -369,7 +391,7 @@ read:
 			break read
 		}
 		release := func() { <-sem }
-		partFile, err := os.CreateTemp(s.cfg.TempDir, "strand-s3-part-*")
+		partFile, err := os.CreateTemp(s.cfg.TempDir, stagedPartPattern())
 		if err != nil {
 			release()
 			setErr(fmt.Errorf("objectstore: create temporary upload part: %w", err))
@@ -404,12 +426,16 @@ read:
 			defer discard()
 			// The SigV4 payload hash of the part is computed here, off the sequential read path, so
 			// hashing overlaps across parts on multi-core hosts. S3 verifies it against the received body.
-			ph := sha256.New()
-			if _, err := io.Copy(ph, io.NewSectionReader(f, 0, length)); err != nil {
+			ph, pm := sha256.New(), md5.New()
+			if _, err := io.Copy(io.MultiWriter(ph, pm), io.NewSectionReader(f, 0, length)); err != nil {
 				setErr(fmt.Errorf("objectstore: hash staged part %d: %w", n, err))
 				return
 			}
-			eTag, err := s.uploadPart(upCtx, key, uploadID, n, f, length, hex.EncodeToString(ph.Sum(nil)))
+			md := ""
+			if opt.LockMode != "" {
+				md = base64.StdEncoding.EncodeToString(pm.Sum(nil))
+			}
+			eTag, err := s.uploadPart(upCtx, key, uploadID, n, f, length, hex.EncodeToString(ph.Sum(nil)), md)
 			if err != nil {
 				setErr(err)
 				return
@@ -454,18 +480,22 @@ read:
 		return ObjectInfo{}, errors.New("objectstore: upload SHA-256 does not match supplied digest")
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].Number < parts[j].Number })
-	eTag, err := s.completeMultipart(ctx, key, uploadID, parts, total)
+	eTag, version, err := s.completeMultipart(ctx, key, uploadID, parts, total)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
 	completed = true
-	return ObjectInfo{Key: key, Size: total, ETag: eTag, SHA256: actualDigest}, nil
+	return ObjectInfo{Key: key, Size: total, ETag: eTag, SHA256: actualDigest, VersionID: version}, nil
 }
 
-func (s *S3) uploadPart(ctx context.Context, key, uploadID string, n int, f *os.File, length int64, sum string) (string, error) {
+func (s *S3) uploadPart(ctx context.Context, key, uploadID string, n int, f *os.File, length int64, sum, md5b64 string) (string, error) {
 	q := url.Values{"partNumber": {strconv.Itoa(n)}, "uploadId": {uploadID}}
 	body := func() io.Reader { return io.NewSectionReader(f, 0, length) }
-	resp, err := s.do(ctx, http.MethodPut, key, q, nil, body, length, sum)
+	var headers http.Header
+	if md5b64 != "" {
+		headers = http.Header{"Content-Md5": {md5b64}}
+	}
+	resp, err := s.do(ctx, http.MethodPut, key, q, headers, body, length, sum)
 	if err != nil {
 		return "", err
 	}
@@ -483,10 +513,10 @@ func (s *S3) uploadPart(ctx context.Context, key, uploadID string, n int, f *os.
 // completeMultipart retries transient failures, including S3's documented "200 OK with an error body".
 // If a retry finds the upload gone (the first completion succeeded but its response was lost), the
 // object is accepted only when HEAD shows the expected size and a multipart ETag with the same part count.
-func (s *S3) completeMultipart(ctx context.Context, key, uploadID string, parts []completedPart, total int64) (string, error) {
+func (s *S3) completeMultipart(ctx context.Context, key, uploadID string, parts []completedPart, total int64) (string, string, error) {
 	body, err := xml.Marshal(completeMultipart{Parts: parts})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	q := url.Values{"uploadId": {uploadID}}
 	headers := http.Header{"Content-Type": {"application/xml"}}
@@ -494,21 +524,21 @@ func (s *S3) completeMultipart(ctx context.Context, key, uploadID string, parts 
 	for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
 			if err := s.backoff(ctx, attempt); err != nil {
-				return "", err
+				return "", "", err
 			}
 		}
 		cr, err := s.request(ctx, http.MethodPost, key, q, headers, body, int64(len(body)))
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if !isSuccess(cr.StatusCode) {
 			rerr := s.responseError("complete multipart upload", cr)
 			if attempt > 0 && strings.Contains(rerr.Error(), "NoSuchUpload") {
 				if head, herr := s.Head(ctx, key); herr == nil && head.Size == total && strings.HasSuffix(head.ETag, "-"+strconv.Itoa(len(parts))) {
-					return head.ETag, nil
+					return head.ETag, head.VersionID, nil
 				}
 			}
-			return "", rerr
+			return "", "", rerr
 		}
 		var result struct {
 			ETag    string `xml:"ETag"`
@@ -517,23 +547,24 @@ func (s *S3) completeMultipart(ctx context.Context, key, uploadID string, parts 
 		}
 		err = xml.NewDecoder(io.LimitReader(cr.Body, maxErrorBody)).Decode(&result)
 		headerETag := cr.Header.Get("ETag")
+		version := cr.Header.Get("X-Amz-Version-Id")
 		closeResponse(cr)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("objectstore: decode multipart completion response: %w", err)
+			return "", "", fmt.Errorf("objectstore: decode multipart completion response: %w", err)
 		}
 		if result.Code != "" {
 			lastErr = fmt.Errorf("objectstore: complete multipart upload failed (%s): %s", result.Code, s.redact(result.Message))
 			if result.Code == "InternalError" || result.Code == "SlowDown" || result.Code == "ServiceUnavailable" {
 				continue
 			}
-			return "", lastErr
+			return "", "", lastErr
 		}
 		if result.ETag == "" {
 			result.ETag = headerETag
 		}
-		return cleanETag(result.ETag), nil
+		return cleanETag(result.ETag), version, nil
 	}
-	return "", lastErr
+	return "", "", lastErr
 }
 
 // AbortStaleUploads aborts every unfinished multipart upload whose key is exactly key. A crashed or killed
@@ -1058,7 +1089,11 @@ func (s *S3) responseError(op string, resp *http.Response) error {
 }
 
 func infoFromHeaders(key string, h http.Header) ObjectInfo {
-	info := ObjectInfo{Key: key, Size: -1, ETag: cleanETag(h.Get("ETag")), SHA256: strings.ToLower(h.Get("X-Amz-Meta-Strand-Sha256"))}
+	info := ObjectInfo{Key: key, Size: -1, ETag: cleanETag(h.Get("ETag")), SHA256: strings.ToLower(h.Get("X-Amz-Meta-Strand-Sha256")),
+		VersionID: h.Get("X-Amz-Version-Id"), LockMode: h.Get("X-Amz-Object-Lock-Mode")}
+	if t, err := time.Parse(time.RFC3339, h.Get("X-Amz-Object-Lock-Retain-Until-Date")); err == nil {
+		info.RetainUntil = &t
+	}
 	if n, err := strconv.ParseInt(h.Get("Content-Length"), 10, 64); err == nil {
 		info.Size = n
 	}
