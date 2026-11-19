@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -112,11 +113,10 @@ type docOp struct {
 }
 
 // batch accumulates document events between DDL boundaries. Several events for the
-// same document collapse to the last one; ops are applied in order of their last
-// occurrence, which also keeps numerically-equal _ids of different BSON types (1 vs
-// 1.0, the same document for the unique _id index) in source order.
+// same document collapse to the last one (keyed by MongoDB _id equality, see idKey).
 type batch struct {
 	ops    map[string]*docOp
+	slow   map[string]bool // collections with _ids idKey cannot canonicalize
 	seq    int
 	bytes  int
 	events int
@@ -125,15 +125,44 @@ type batch struct {
 	last   bson.Timestamp
 }
 
-func newBatch() *batch { return &batch{ops: make(map[string]*docOp)} }
+func newBatch() *batch { return &batch{ops: make(map[string]*docOp), slow: make(map[string]bool)} }
+
+// idKey returns a key equal for _ids the unique _id index treats as equal. Numbers of
+// different BSON types compare by value (1 == 1.0 == NumberLong(1)); other scalar types
+// compare by bytes within their own type. Decimal128, documents, arrays and symbols are
+// not canonicalized (ok=false): such collections take the ordered per-document path.
+func idKey(id bson.RawValue) (string, bool) {
+	switch id.Type {
+	case bson.TypeInt32:
+		return fmt.Sprintf("n%d", id.Int32()), true
+	case bson.TypeInt64:
+		return fmt.Sprintf("n%d", id.Int64()), true
+	case bson.TypeDouble:
+		f := id.Double()
+		if f == math.Trunc(f) && math.Abs(f) < 1<<63 { // exact in int64
+			return fmt.Sprintf("n%d", int64(f)), true
+		}
+		if math.IsNaN(f) {
+			return "nNaN", true
+		}
+		return fmt.Sprintf("f%v", f), true
+	case bson.TypeString, bson.TypeObjectID, bson.TypeBinary, bson.TypeDateTime, bson.TypeTimestamp, bson.TypeBoolean, bson.TypeNull, bson.TypeMinKey, bson.TypeMaxKey:
+		return string([]byte{byte(id.Type)}) + string(id.Value), true
+	}
+	return string([]byte{byte(id.Type)}) + string(id.Value), false
+}
 
 func (b *batch) add(coll string, id bson.RawValue, doc bson.Raw) {
-	key := coll + "\x00" + string([]byte{byte(id.Type)}) + string(id.Value)
+	k, ok := idKey(id)
+	if !ok {
+		b.slow[coll] = true
+	}
+	key := coll + "\x00" + k
 	b.seq++
 	b.events++
 	b.bytes += len(doc) + len(id.Value)
 	if op, ok := b.ops[key]; ok {
-		op.doc, op.seq = doc, b.seq
+		op.id, op.doc, op.seq = id, doc, b.seq
 		return
 	}
 	b.ops[key] = &docOp{coll: coll, id: id, doc: doc, seq: b.seq}
@@ -141,27 +170,47 @@ func (b *batch) add(coll string, id bson.RawValue, doc bson.Raw) {
 
 func (b *batch) empty() bool { return b.events == 0 }
 
-// models returns per-collection ordered write models.
-func (b *batch) models() (map[string][]mongo.WriteModel, []string) {
+// collWrites is the net effect of a batch on one collection.
+type collWrites struct {
+	fast   bool
+	ids    []any // fast path: every touched _id (deleted first)
+	docs   []any // fast path: final images (inserted after the delete)
+	models []mongo.WriteModel
+}
+
+// writes groups the batch per collection. Fast path (all _ids canonicalized, so every
+// key is a distinct document): one deleteMany({_id: {$in}}) + one insertMany inside
+// the transaction, i.e. replace-or-insert / delete-if-exists, ~5x faster than
+// per-document upserts. Otherwise: ordered replace/delete models in order of last
+// occurrence, which keeps source order between equal _ids of different BSON types.
+func (b *batch) writes() (map[string]*collWrites, []string) {
 	ops := make([]*docOp, 0, len(b.ops))
 	for _, op := range b.ops {
 		ops = append(ops, op)
 	}
 	sort.Slice(ops, func(i, j int) bool { return ops[i].seq < ops[j].seq })
-	out := make(map[string][]mongo.WriteModel)
+	out := make(map[string]*collWrites)
 	var colls []string
 	for _, op := range ops {
-		filter := bson.D{{Key: "_id", Value: op.id}}
-		var m mongo.WriteModel
-		if op.doc == nil {
-			m = mongo.NewDeleteOneModel().SetFilter(filter)
-		} else {
-			m = mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(op.doc).SetUpsert(true)
-		}
-		if _, ok := out[op.coll]; !ok {
+		w, ok := out[op.coll]
+		if !ok {
+			w = &collWrites{fast: !b.slow[op.coll]}
+			out[op.coll] = w
 			colls = append(colls, op.coll)
 		}
-		out[op.coll] = append(out[op.coll], m)
+		if w.fast {
+			w.ids = append(w.ids, op.id)
+			if op.doc != nil {
+				w.docs = append(w.docs, op.doc)
+			}
+			continue
+		}
+		filter := bson.D{{Key: "_id", Value: op.id}}
+		if op.doc == nil {
+			w.models = append(w.models, mongo.NewDeleteOneModel().SetFilter(filter))
+		} else {
+			w.models = append(w.models, mongo.NewReplaceOneModel().SetFilter(filter).SetReplacement(op.doc).SetUpsert(true))
+		}
 	}
 	sort.Strings(colls)
 	return out, colls
@@ -169,6 +218,7 @@ func (b *batch) models() (map[string][]mongo.WriteModel, []string) {
 
 type streamStats struct {
 	events, batches, writes int64
+	applyTime               time.Duration
 	start, lastLog          time.Time
 	lastClusterTime         bson.Timestamp
 }
@@ -179,7 +229,16 @@ func (r *runner) stream(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open MongoDB change stream: %w", err)
 	}
-	defer func() { _ = cs.Close(context.Background()) }()
+	// The reader goroutine fetches and copies events while the previous batch commits on
+	// the target (source reads and target writes overlap; the channel bounds memory).
+	items, readerDone, stopReader := startReader(ctx, cs)
+	defer func() {
+		stopReader()
+		<-readerDone
+		if cs != nil {
+			_ = cs.Close(context.Background())
+		}
+	}()
 	cfg.Logger.Info("MongoDB change stream started", "pipeline", cfg.Pipeline)
 
 	stats := &streamStats{start: time.Now(), lastLog: time.Now()}
@@ -190,9 +249,11 @@ func (r *runner) stream(ctx context.Context) error {
 		if b.empty() && (len(b.token) == 0 || bytes.Equal(b.token, persistedToken)) {
 			return nil
 		}
+		applyStart := time.Now()
 		if err := r.applyBatch(ctx, b); err != nil {
 			return err
 		}
+		stats.applyTime += time.Since(applyStart)
 		stats.events += int64(b.events)
 		stats.writes += int64(len(b.ops))
 		stats.batches++
@@ -209,17 +270,23 @@ func (r *runner) stream(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !cs.TryNext(ctx) {
-			if err := cs.Err(); err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				return fmt.Errorf("MongoDB change stream stopped: %w", classifyStreamError(err))
+		var it streamItem
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case it = <-items:
+		}
+		if it.err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
+			return fmt.Errorf("MongoDB change stream stopped: %w", classifyStreamError(it.err))
+		}
+		if it.raw == nil {
 			// Empty getMore: the server had nothing more. Commit what we have, and keep the
 			// post-batch resume token fresh so an idle pipeline does not fall off the oplog.
-			if tok := cs.ResumeToken(); len(tok) > 0 {
-				b.token = append(b.token[:0:0], tok...)
+			if len(it.token) > 0 {
+				b.token = it.token
 			}
 			if !b.empty() || time.Since(lastCheckpoint) >= cfg.CheckpointEvery {
 				if err := flush(); err != nil {
@@ -229,12 +296,11 @@ func (r *runner) stream(ctx context.Context) error {
 			r.logStreamProgress(stats, false)
 			continue
 		}
-		raw := append(bson.Raw(nil), cs.Current...)
 		var event streamEvent
-		if err := bson.Unmarshal(raw, &event); err != nil {
+		if err := bson.Unmarshal(it.raw, &event); err != nil {
 			return fmt.Errorf("decode MongoDB change event: %w", err)
 		}
-		token := append(bson.Raw(nil), cs.ResumeToken()...)
+		token := it.token
 		if len(token) == 0 {
 			return errors.New("MongoDB change stream returned an empty resume token")
 		}
@@ -281,11 +347,15 @@ func (r *runner) stream(ctx context.Context) error {
 			r.state = next
 			persistedToken = token
 			b = newBatch()
+			stopReader()
+			<-readerDone // the reader stops by itself after an invalidate
 			_ = cs.Close(ctx)
 			cs, err = openStream(ctx, r.source, r.state, cfg.MaxAwait)
 			if err != nil {
+				cs = nil
 				return fmt.Errorf("reopen MongoDB change stream after invalidate: %w", err)
 			}
+			items, readerDone, stopReader = startReader(ctx, cs)
 			continue
 		}
 		if err := flush(); err != nil {
@@ -294,13 +364,60 @@ func (r *runner) stream(ctx context.Context) error {
 	}
 }
 
+// streamItem is one event (raw != nil), an empty getMore (raw == nil, token = post-batch
+// resume token), or a terminal error.
+type streamItem struct {
+	raw   bson.Raw
+	token bson.Raw
+	err   error
+}
+
+const readerBuffer = 4096
+
+func startReader(parent context.Context, cs *mongo.ChangeStream) (<-chan streamItem, <-chan struct{}, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	out := make(chan streamItem, readerBuffer)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		send := func(it streamItem) bool {
+			select {
+			case out <- it:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		for {
+			if !cs.TryNext(ctx) {
+				if err := cs.Err(); err != nil {
+					send(streamItem{err: err})
+					return
+				}
+				if !send(streamItem{token: append(bson.Raw(nil), cs.ResumeToken()...)}) {
+					return
+				}
+				continue
+			}
+			raw := append(bson.Raw(nil), cs.Current...)
+			if !send(streamItem{raw: raw, token: append(bson.Raw(nil), cs.ResumeToken()...)}) {
+				return
+			}
+			if op, ok := raw.Lookup("operationType").StringValueOK(); ok && op == "invalidate" {
+				return // the stream is closed by the server; the consumer reopens it
+			}
+		}
+	}()
+	return out, done, cancel
+}
+
 func (r *runner) logStreamProgress(stats *streamStats, force bool) {
 	if !force && time.Since(stats.lastLog) < progressLogInterval {
 		return
 	}
 	elapsed := time.Since(stats.start).Seconds()
 	stats.lastLog = time.Now()
-	attrs := []any{"pipeline", r.cfg.Pipeline, "events", stats.events, "document_writes", stats.writes, "batches", stats.batches, "events_per_sec", int64(float64(stats.events) / elapsed)}
+	attrs := []any{"pipeline", r.cfg.Pipeline, "events", stats.events, "document_writes", stats.writes, "batches", stats.batches, "events_per_sec", int64(float64(stats.events) / elapsed), "apply_seconds", stats.applyTime.Seconds()}
 	if stats.lastClusterTime.T != 0 {
 		attrs = append(attrs, "lag_seconds", time.Now().Unix()-int64(stats.lastClusterTime.T))
 	}
@@ -356,14 +473,23 @@ func (r *runner) addEvent(b *batch, event *streamEvent) (bool, error) {
 // applyBatch commits the document writes and the resume token in one fenced target
 // transaction: after a crash either both are durable or neither is.
 func (r *runner) applyBatch(ctx context.Context, b *batch) error {
-	models, colls := b.models()
+	writes, colls := b.writes()
 	next := r.state.clone()
 	if len(b.token) > 0 {
 		next.ResumeToken, next.StartAfter = b.token, false
 	}
 	err := r.lease.txn(ctx, func(tx context.Context) error {
 		for _, coll := range colls {
-			if _, err := r.target.Collection(coll).BulkWrite(tx, models[coll], options.BulkWrite().SetOrdered(true)); err != nil {
+			w, c := writes[coll], r.target.Collection(coll)
+			var err error
+			if w.fast {
+				if _, err = c.DeleteMany(tx, bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: w.ids}}}}); err == nil && len(w.docs) > 0 {
+					_, err = c.InsertMany(tx, w.docs, options.InsertMany().SetOrdered(false))
+				}
+			} else {
+				_, err = c.BulkWrite(tx, w.models, options.BulkWrite().SetOrdered(true))
+			}
+			if err != nil {
 				return fmt.Errorf("write %s.%s: %w", r.cfg.TargetDB, coll, err)
 			}
 		}

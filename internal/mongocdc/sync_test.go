@@ -19,27 +19,43 @@ func rawID(t *testing.T, v any) bson.RawValue {
 }
 
 // Several events for one document collapse to the last; numerically equal _ids of
-// different BSON types (same document for MongoDB) keep source order.
-func TestBatchCollapsesAndKeepsOrder(t *testing.T) {
+// different BSON types are the same document (unique _id index) and collapse too.
+func TestBatchCollapsesEqualIDs(t *testing.T) {
 	b := newBatch()
-	doc := bson.Raw(bson.D{{Key: "_id", Value: int32(1)}}.String()) // placeholder bytes, not inspected
+	doc := bson.Raw{5, 0, 0, 0, 0}
 	b.add("c", rawID(t, int32(1)), doc)
-	b.add("c", rawID(t, 1.0), nil) // delete the same document via a double _id
-	b.add("c", rawID(t, int32(1)), doc)
+	b.add("c", rawID(t, 1.0), nil) // same document via a double _id
+	b.add("c", rawID(t, int64(1)), doc)
+	b.add("c", rawID(t, float64(1<<60)), nil)
+	b.add("c", rawID(t, int64(1<<60)), doc)
 	b.add("d", rawID(t, "x"), doc)
 	b.add("c", rawID(t, int32(2)), nil)
-	models, colls := b.models()
-	if strings.Join(colls, ",") != "c,d" {
-		t.Fatalf("colls %v", colls)
+	w, colls := b.writes()
+	if strings.Join(colls, ",") != "c,d" || b.events != 7 {
+		t.Fatalf("colls %v events %d", colls, b.events)
 	}
-	if b.events != 5 || len(models["c"]) != 3 {
-		t.Fatalf("events=%d models=%d", b.events, len(models["c"]))
+	c := w["c"]
+	if !c.fast || len(c.ids) != 3 || len(c.docs) != 2 {
+		t.Fatalf("fast=%v ids=%d docs=%d", c.fast, len(c.ids), len(c.docs))
 	}
-	if _, ok := models["c"][0].(*mongo.DeleteOneModel); !ok {
-		t.Fatalf("first op must be the double-_id delete (earlier last occurrence), got %T", models["c"][0])
+}
+
+// _ids that cannot be canonicalized (documents, Decimal128) use ordered per-document
+// writes in order of last occurrence.
+func TestBatchSlowPathKeepsOrder(t *testing.T) {
+	b := newBatch()
+	doc := bson.Raw{5, 0, 0, 0, 0}
+	dec, _ := bson.ParseDecimal128("1")
+	b.add("c", rawID(t, int32(1)), doc)
+	b.add("c", rawID(t, dec), nil)
+	b.add("c", rawID(t, bson.D{{Key: "a", Value: 1}}), doc)
+	w, _ := b.writes()
+	c := w["c"]
+	if c.fast || len(c.models) != 3 {
+		t.Fatalf("fast=%v models=%d", c.fast, len(c.models))
 	}
-	if _, ok := models["c"][1].(*mongo.ReplaceOneModel); !ok {
-		t.Fatalf("second op must be the int32 upsert, got %T", models["c"][1])
+	if _, ok := c.models[1].(*mongo.DeleteOneModel); !ok {
+		t.Fatalf("order not kept: %T", c.models[1])
 	}
 }
 

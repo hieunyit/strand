@@ -226,16 +226,15 @@ func (p *pair) waitIdentical(t testing.TB, db string, timeout time.Duration, ali
 		for _, r := range alive {
 			r.failIfExited(t)
 		}
-		a, err := dbDigest(ctx, p.srcC.Database(db))
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := dbDigest(ctx, p.dstC.Database(db))
-		if err != nil {
-			t.Fatal(err)
-		}
-		last = diffDigest(a, b)
-		if last == "" {
+		// A non-snapshot scan can return a document twice while it is being rewritten
+		// (the target applies replace-or-insert as delete+insert in one transaction, which
+		// moves the record); that is a reader artifact, so it only means "not settled
+		// yet". A real duplicate is impossible (unique _id) and would never converge.
+		a, errA := dbDigest(ctx, p.srcC.Database(db))
+		b, errB := dbDigest(ctx, p.dstC.Database(db))
+		if errA != nil || errB != nil {
+			last = fmt.Sprintf("read: %v %v", errA, errB)
+		} else if last = diffDigest(a, b); last == "" {
 			return countDocs(a)
 		}
 		if time.Now().After(deadline) {

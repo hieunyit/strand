@@ -125,81 +125,124 @@ func (r *runner) copyCollection(ctx context.Context, name string) error {
 	if err != nil {
 		return r.vanished(ctx, name, err)
 	}
-	defer cursor.Close(ctx)
+	// The reader fills the next batch while the previous one commits on the target.
+	readCtx, stopRead := context.WithCancel(ctx)
+	batches := make(chan snapBatch, 2)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		defer cursor.Close(context.Background())
+		r.readSnapshot(readCtx, cursor, prog.LastID, batches)
+	}()
+	defer func() {
+		stopRead()
+		<-readDone
+	}()
 
 	start := time.Now()
 	lastLog := start
 	startCopied := prog.Copied
-	docs := make([]any, 0, r.cfg.SnapshotBatch)
-	var lastID bson.RawValue
-	batchBytes := 0
-	first := true
-	flush := func(done bool) error {
-		if len(docs) == 0 && !done {
-			return nil
+	target := r.target.Collection(name)
+	for {
+		var sb snapBatch
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case sb = <-batches:
 		}
-		target := r.target.Collection(name)
+		if sb.err != nil {
+			if verr := r.vanished(ctx, name, sb.err); verr != nil {
+				return verr
+			}
+			sb.last = true
+		}
 		next := r.state.clone()
 		p := next.progress(name)
-		if len(docs) > 0 {
-			p.LastID = lastID
-			p.Copied += int64(len(docs))
+		if len(sb.docs) > 0 {
+			p.LastID = sb.lastID
+			p.Copied += int64(len(sb.docs))
 		}
-		p.Done = done
-		err := r.lease.txn(ctx, func(tx context.Context) error {
-			if len(docs) > 0 {
-				if _, err := target.InsertMany(tx, docs, options.InsertMany().SetOrdered(false)); err != nil {
-					return err
+		p.Done = sb.last
+		if len(sb.docs) > 0 || sb.last {
+			err := r.lease.txn(ctx, func(tx context.Context) error {
+				if len(sb.docs) > 0 {
+					if _, err := target.InsertMany(tx, sb.docs, options.InsertMany().SetOrdered(false)); err != nil {
+						return err
+					}
 				}
+				return r.saveState(tx, next)
+			})
+			if err != nil {
+				return err
 			}
-			return r.saveState(tx, next)
-		})
-		if err != nil {
-			return err
+			r.state = next
 		}
-		r.state = next
-		docs = docs[:0]
-		batchBytes = 0
 		if time.Since(lastLog) >= progressLogInterval {
 			lastLog = time.Now()
 			rate := float64(p.Copied-startCopied) / time.Since(start).Seconds()
 			log.Info("MongoDB snapshot progress", "pipeline", r.cfg.Pipeline, "collection", name, "copied", p.Copied, "docs_per_sec", int64(rate))
 		}
-		return nil
+		if sb.last {
+			log.Info("MongoDB collection snapshot complete", "pipeline", r.cfg.Pipeline, "collection", r.cfg.SourceDB+"."+name, "documents", p.Copied, "seconds", time.Since(start).Seconds())
+			return nil
+		}
 	}
+}
+
+// snapBatch is one snapshot write batch; last marks the end of the scan, err a scan error.
+type snapBatch struct {
+	docs   []any
+	lastID bson.RawValue
+	last   bool
+	err    error
+}
+
+func (r *runner) readSnapshot(ctx context.Context, cursor *mongo.Cursor, resumeID bson.RawValue, out chan<- snapBatch) {
+	send := func(sb snapBatch) bool {
+		select {
+		case out <- sb:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	sb := snapBatch{docs: make([]any, 0, r.cfg.SnapshotBatch)}
+	size := 0
+	first := true
 	for cursor.Next(ctx) {
 		raw := cursor.Current
 		id, err := raw.LookupErr("_id")
 		if err != nil {
-			return fmt.Errorf("source document without _id: %w", err)
+			send(snapBatch{err: fmt.Errorf("source document without _id: %w", err)})
+			return
 		}
 		if first {
 			first = false
-			if !prog.LastID.IsZero() && id.Type == prog.LastID.Type && bytes.Equal(id.Value, prog.LastID.Value) {
+			if !resumeID.IsZero() && id.Type == resumeID.Type && bytes.Equal(id.Value, resumeID.Value) {
 				continue // inclusive min() bound: already copied
 			}
 		}
 		doc := append(bson.Raw(nil), raw...)
-		docs = append(docs, doc)
-		lastID = bson.RawValue{Type: id.Type, Value: append([]byte(nil), id.Value...)}
-		batchBytes += len(doc)
-		if len(docs) >= r.cfg.SnapshotBatch || batchBytes >= snapshotBatchBytes {
-			if err := flush(false); err != nil {
-				return err
+		sb.docs = append(sb.docs, doc)
+		sb.lastID = bson.RawValue{Type: id.Type, Value: append([]byte(nil), id.Value...)}
+		size += len(doc)
+		if len(sb.docs) >= r.cfg.SnapshotBatch || size >= snapshotBatchBytes {
+			if !send(sb) {
+				return
 			}
+			sb = snapBatch{docs: make([]any, 0, r.cfg.SnapshotBatch)}
+			size = 0
 		}
 	}
 	if err := cursor.Err(); err != nil {
-		if verr := r.vanished(ctx, name, err); verr != nil {
-			return verr
+		if len(sb.docs) > 0 && !send(sb) {
+			return
 		}
+		send(snapBatch{err: err})
+		return
 	}
-	if err := flush(true); err != nil {
-		return err
-	}
-	p := r.state.progress(name)
-	log.Info("MongoDB collection snapshot complete", "pipeline", r.cfg.Pipeline, "collection", r.cfg.SourceDB+"."+name, "documents", p.Copied, "seconds", time.Since(start).Seconds())
-	return nil
+	sb.last = true
+	send(sb)
 }
 
 // vanished turns a scan error into success when the source collection was dropped or
