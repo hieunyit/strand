@@ -10,21 +10,35 @@ import (
 )
 
 type backupsPageBody struct {
-	Backups []backup.Record
-	Message string
+	Backups    []backup.Record
+	Message    string
+	NextCursor string
+	Paged      bool
 }
+
+const backupsPageSize = 200
 
 func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Session) {
 	b := backupsPageBody{}
 	if s.backups == nil {
 		b.Message = "Central backup catalog is unavailable: configure the web metadata database."
 	} else {
-		items, err := s.backups.List(r.Context(), backup.Filter{Limit: 200})
+		f := backup.Filter{Limit: backupsPageSize}
+		if v := r.URL.Query().Get("cursor"); v != "" {
+			c, err := backup.ParseCursor(v)
+			if err != nil {
+				http.Error(w, "invalid cursor", http.StatusBadRequest)
+				return
+			}
+			f.After, b.Paged = &c, true
+		}
+		items, err := s.backups.List(r.Context(), f)
 		if err != nil {
 			s.log.Error("list backup catalog", "error", err)
 			b.Message = "Could not read the backup catalog."
 		} else {
 			b.Backups = items
+			b.NextCursor = backup.NextCursor(items, f.Limit)
 		}
 	}
 	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Body: b})
@@ -61,6 +75,14 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request, _ *Session) 
 		}
 		f.CreatedBefore = &t
 	}
+	if v := r.URL.Query().Get("cursor"); v != "" {
+		c, parseErr := backup.ParseCursor(v)
+		if parseErr != nil {
+			writeErr(w, http.StatusBadRequest, "cursor is malformed")
+			return
+		}
+		f.After = &c
+	}
 	items, err := s.backups.List(r.Context(), f)
 	if err != nil {
 		if errors.Is(err, backup.ErrInvalid) {
@@ -71,7 +93,11 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request, _ *Session) 
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"backups": items, "limit": f.Limit})
+	out := map[string]any{"backups": items, "limit": f.Limit}
+	if next := backup.NextCursor(items, f.Limit); next != "" {
+		out["next_cursor"] = next
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) apiBackup(w http.ResponseWriter, r *http.Request, _ *Session) {

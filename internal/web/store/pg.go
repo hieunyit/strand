@@ -553,8 +553,12 @@ func (p *PG) ListBackups(ctx context.Context, f backup.Filter) ([]backup.Record,
 	if f.CreatedBefore != nil {
 		add("created_at <=", *f.CreatedBefore)
 	}
+	if f.After != nil {
+		args = append(args, f.After.CreatedAt, f.After.ID)
+		query += fmt.Sprintf(" AND (created_at, id) < ($%d, $%d)", len(args)-1, len(args))
+	}
 	args = append(args, f.Limit)
-	query += fmt.Sprintf(" ORDER BY created_at DESC, id LIMIT $%d", len(args))
+	query += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args))
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, p.wrap(err)

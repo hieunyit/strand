@@ -500,11 +500,14 @@ func (m *Mem) ListBackups(_ context.Context, f backup.Filter) ([]backup.Record, 
 		if (f.CreatedAfter != nil && r.CreatedAt.Before(*f.CreatedAfter)) || (f.CreatedBefore != nil && r.CreatedAt.After(*f.CreatedBefore)) {
 			continue
 		}
+		if f.After != nil && (r.CreatedAt.After(f.After.CreatedAt) || (r.CreatedAt.Equal(f.After.CreatedAt) && r.ID >= f.After.ID)) {
+			continue
+		}
 		out = append(out, cloneBackup(r))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].ID < out[j].ID
+			return out[i].ID > out[j].ID
 		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})

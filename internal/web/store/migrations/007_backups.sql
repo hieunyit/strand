@@ -27,6 +27,7 @@ CREATE TABLE backups (
     CHECK (expires_at IS NULL OR expires_at >= created_at),
     CHECK (status <> 'complete' OR (verified_at IS NOT NULL AND sha256 <> '' AND manifest_uri <> ''))
 );
-CREATE INDEX backups_source_created_idx ON backups (source, created_at DESC);
-CREATE INDEX backups_status_created_idx ON backups (status, created_at DESC);
+CREATE INDEX backups_created_idx ON backups (created_at DESC, id DESC);
+CREATE INDEX backups_source_created_idx ON backups (source, created_at DESC, id DESC);
+CREATE INDEX backups_status_created_idx ON backups (status, created_at DESC, id DESC);
 CREATE INDEX backups_expiry_idx ON backups (expires_at) WHERE expires_at IS NOT NULL;

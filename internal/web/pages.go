@@ -40,6 +40,7 @@ func templateFuncs() template.FuncMap {
 		"stateSev":    stateSev,
 		"lagClass":    lagClass,
 		"bytes":       fmtBytes,
+		"bytes64":     func(n int64) string { return fmtBytes(float64(n)) },
 		"ts": func(t time.Time) string {
 			if t.IsZero() {
 				return "-"

@@ -13,7 +13,7 @@
         <td>{{.Source}}</td>
         <td>{{.Engine}} / {{.Tool}} {{.ToolVersion}}</td>
         <td><span class="badge {{stateClass (printf "%s" .Status)}}">{{.Status}}</span></td>
-        <td class="r nowrap">{{bytes .Bytes}}</td>
+        <td class="r nowrap">{{bytes64 .Bytes}}</td>
         <td class="mono small">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else}}-{{end}}</td>
         <td class="nowrap">{{ts .CreatedAt}}</td>
         <td class="nowrap">{{if .VerifiedAt}}{{ts (deref2 .VerifiedAt)}}{{else}}-{{end}}</td>
@@ -22,6 +22,7 @@
       {{end}}</tbody>
     </table>
   </div>
-  {{else}}<div class="empty-state"><b>No backups registered</b><span>Upload a backup artifact to the configured object store to add it to this catalog.</span></div>{{end}}
+  {{if or .Body.NextCursor .Body.Paged}}<nav class="pad" aria-label="Backup catalog pages">{{if .Body.Paged}}<a href="/backups">Newest backups</a>{{end}}{{if .Body.NextCursor}} <a href="/backups?cursor={{.Body.NextCursor}}" rel="next">Older backups</a>{{end}}</nav>{{end}}
+  {{else if .Body.Paged}}<div class="empty-state"><b>No older backups</b><span><a href="/backups">Back to the newest backups</a></span></div>{{else}}<div class="empty-state"><b>No backups registered</b><span>Upload a backup artifact to the configured object store to add it to this catalog.</span></div>{{end}}
 </section>
 {{end}}

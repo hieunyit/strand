@@ -4,6 +4,7 @@ package backup
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -72,7 +73,44 @@ type Filter struct {
 	Status        Status
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
-	Limit         int
+	// After continues a listing: only records strictly older than the cursor in the listing order
+	// (created_at DESC, id DESC) are returned. Use NextCursor of the previous page.
+	After *Cursor
+	Limit int
+}
+
+// Cursor is a keyset position in the catalog listing order.
+type Cursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// Encode returns an opaque URL-safe token for c.
+func (c Cursor) Encode() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(c.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + c.ID))
+}
+
+// ParseCursor decodes a token produced by Cursor.Encode.
+func ParseCursor(token string) (Cursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(token) > 512 {
+		return Cursor{}, fmt.Errorf("%w: malformed cursor", ErrInvalid)
+	}
+	ts, id, ok := strings.Cut(string(raw), "|")
+	t, terr := time.Parse(time.RFC3339Nano, ts)
+	if !ok || terr != nil || !validID(id) {
+		return Cursor{}, fmt.Errorf("%w: malformed cursor", ErrInvalid)
+	}
+	return Cursor{CreatedAt: t, ID: id}, nil
+}
+
+// NextCursor returns the cursor for the page after rows when the page is full, else "".
+func NextCursor(rows []Record, limit int) string {
+	if limit <= 0 || len(rows) < limit {
+		return ""
+	}
+	last := rows[len(rows)-1]
+	return Cursor{CreatedAt: last.CreatedAt, ID: last.ID}.Encode()
 }
 
 const MaxListLimit = 500
