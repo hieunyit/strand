@@ -46,27 +46,29 @@ func templateFuncs() template.FuncMap {
 			}
 			return t.Local().Format("2006-01-02 15:04:05 MST")
 		},
-		"pct":       func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
-		"bar":       ProgressBar,
-		"bigbar":    BigProgressBar,
-		"ranges":    fmtRanges,
-		"lower":     strings.ToLower,
-		"ptrInt":    func(p *int) int { return *p },
-		"deref":     func(p *float64) float64 { return *p },
-		"stateKey":  func(s string) string { return s },
-		"icon":      icon,
-		"tabIcon":   tabIcon,
-		"engines":   engines,
-		"keyKind":   keyKind,
-		"tblCopied": tblCopied,
-		"tblEst":    tblEst,
-		"tablesOf":  tablesOf,
-		"rel":       func(t time.Time) string { return fmtRel(t, time.Now()) },
-		"join":      strings.Join,
-		"jobState":  jobState,
-		"jobClass":  jobClass,
-		"jobDur":    jobDur,
-		"deref2":    func(t *time.Time) time.Time { return *t },
+		"pct":        func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
+		"bar":        ProgressBar,
+		"bigbar":     BigProgressBar,
+		"ranges":     fmtRanges,
+		"lower":      strings.ToLower,
+		"ptrInt":     func(p *int) int { return *p },
+		"deref":      func(p *float64) float64 { return *p },
+		"stateKey":   func(s string) string { return s },
+		"icon":       icon,
+		"tabIcon":    tabIcon,
+		"engines":    engines,
+		"keyKind":    keyKind,
+		"tblCopied":  tblCopied,
+		"tblEst":     tblEst,
+		"tablesOf":   tablesOf,
+		"tablesHref": tablesHref,
+		"add":        func(a, b int) int { return a + b },
+		"rel":        func(t time.Time) string { return fmtRel(t, time.Now()) },
+		"join":       strings.Join,
+		"jobState":   jobState,
+		"jobClass":   jobClass,
+		"jobDur":     jobDur,
+		"deref2":     func(t *time.Time) time.Time { return *t },
 		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
 			Jobs         []JobStatus
 			ShowPipeline bool
@@ -448,6 +450,7 @@ type detailBody struct {
 	HasHistory bool // chế độ DB: lịch sử số liệu quá 1 giờ (6 h, 24 h, 7 d) trong DB
 	Metrics    map[string]float64
 	Tables     TablesView
+	TablesBase string
 	Checkpoint CheckpointView
 	Errors     ErrorsView
 	Config     ConfigView
@@ -533,7 +536,8 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		b.HasHistory = s.db != nil
 		b.Charts = s.charts(p.Name)
 	case "tables":
-		b.Tables = s.tablesView(ctx, p)
+		b.Tables = s.tablesPageView(p, r)
+		b.TablesBase = base + "/tables"
 		if b.Ctl.Running {
 			b.Src, b.SrcLoaded = s.cachedSourceTables(p)
 		}

@@ -157,7 +157,7 @@
     });
     if (rec.name === page) {
       bindScope(content, scope, f, rec);
-      if (rec.table_rows) { applyTables(rec.table_rows, rec.tables_full); }
+      if (rec.table_rows || rec.tables_changed) { applyTables(rec.table_rows, rec.tables_full, rec.tables_changed); }
       if (rec.events_new) { applyEvents(rec.events_new); }
       if (rec.pt) { chartPush(rec.pt); }
     }
@@ -185,9 +185,11 @@
   }
 
   // ---------- Tables tab ----------
-  function applyTables(rows, full) {
+  function applyTables(rows, full, changed) {
     var table = document.getElementById('tables-table');
     if (!table) { return; }
+    if (table.hasAttribute('data-paged')) { applyTablesPaged(table, rows || [], changed); return; }
+    if (!rows) { if (changed) { structural(); } return; }
     var known = {};
     Array.prototype.forEach.call(table.querySelectorAll('tr[data-table]'), function (tr) { known[tr.getAttribute('data-table')] = tr; });
     var missing = false;
@@ -210,6 +212,49 @@
     if (missing) { structural(); return; }
     renderRunning(table);
     if (hooks.applyTables && !document.activeElement.closest('#tables-table')) { hooks.applyTables(); }
+  }
+  // Paged list: update the rows of this page in place, keep "Copying now" from the running rows the server sends;
+  // re-render the page (same filter/sort/page, server side) when the list changed or a visible row changed state.
+  function applyTablesPaged(table, rows, changed) {
+    var known = {}, restate = false;
+    Array.prototype.forEach.call(table.querySelectorAll('tr[data-table]'), function (tr) { known[tr.getAttribute('data-table')] = tr; });
+    rows.forEach(function (r) {
+      var tr = known[r.table];
+      if (tr) {
+        if (tr.getAttribute('data-state') !== r.state) { restate = true; }
+        tr.setAttribute('data-pct', r.pct.toFixed(2));
+        Array.prototype.forEach.call(tr.querySelectorAll('[data-tb]'), function (el) {
+          var k = el.getAttribute('data-tb');
+          if (k === 'bar') { setBar(el, r.pct); } else if (k !== 'state' && r.f[k] !== undefined) { setText(el, r.f[k]); }
+        });
+      }
+      runlistPut(r);
+    });
+    if (changed || restate) { structural(); }
+  }
+  function runlistPut(r) {
+    var list = document.getElementById('runlist');
+    if (!list) { return; }
+    var li = null;
+    Array.prototype.forEach.call(list.querySelectorAll('li[data-run]'), function (x) { if (x.getAttribute('data-run') === r.table) { li = x; } });
+    if (r.state !== 'running') { if (li) { list.removeChild(li); } }
+    else {
+      if (!li) {
+        if (list.children.length >= 50) { return; }
+        li = document.createElement('li'); li.setAttribute('data-run', r.table);
+        var n = document.createElement('span'); n.className = 'mono wrap rl-name'; n.textContent = r.table;
+        var b = document.createElement('span'); b.className = 'rl-bar'; b.appendChild(barSVG(0));
+        li.appendChild(n); li.appendChild(b);
+        ['c-num rl-pct', 'c-num small muted rl-rows', 'c-num small rl-eta'].forEach(function (c) { var e = document.createElement('span'); e.className = c; li.appendChild(e); });
+        list.appendChild(li);
+      }
+      setBar(li.querySelector('.rl-bar'), r.pct);
+      setText(li.querySelector('.rl-pct'), r.f.pct);
+      setText(li.querySelector('.rl-rows'), r.f.rows);
+      setText(li.querySelector('.rl-eta'), r.f.eta);
+    }
+    var empty = document.getElementById('runlist-empty');
+    if (empty) { empty.hidden = list.querySelectorAll('li[data-run]').length > 0; }
   }
   // "Copying now": one line per running table (several run in parallel), updated in place, keyed by name.
   function renderRunning(table) {

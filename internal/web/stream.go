@@ -72,7 +72,10 @@ type LiveRecord struct {
 	// Chỉ có ở bản đầy đủ (client đang xem pipeline này).
 	TableRows  []LiveTableRow `json:"table_rows,omitempty"`
 	TablesFull bool           `json:"tables_full,omitempty"` // TableRows là toàn bộ danh sách, không phải phần đổi
-	EventsNew  []LogEvent     `json:"events_new,omitempty"`
+	// TablesChanged: danh sách nhiều bảng (> tablesInlineMax) đã đổi (bảng mới/bỏ, hoặc quá nhiều dòng đổi):
+	// không gửi toàn bộ, trang dựng lại phần đang xem từ server.
+	TablesChanged bool       `json:"tables_changed,omitempty"`
+	EventsNew     []LogEvent `json:"events_new,omitempty"`
 }
 
 // LiveOverview là tổng hợp của trang Overview.
@@ -258,10 +261,20 @@ func (s *Server) fullDelta(p *Pipeline, r *LiveRecord, sn *Snap, all bool) {
 		ev[i].Message = MaskSecrets(ev[i].Message)
 		ev[i].Raw = ""
 	}
+	big := len(tv.Tables) > tablesInlineMax
 	if all {
-		r.TablesFull = true
-		for _, t := range tv.Tables {
-			r.TableRows = append(r.TableRows, liveTableRow(t))
+		if big {
+			// Nhiều bảng: chỉ các bảng đang chép (trang đang xem lấy phần còn lại từ HTML/API phân trang).
+			for _, t := range tv.Tables {
+				if t.State == "running" && len(r.TableRows) < tablesInlineMax {
+					r.TableRows = append(r.TableRows, liveTableRow(t))
+				}
+			}
+		} else {
+			r.TablesFull = true
+			for _, t := range tv.Tables {
+				r.TableRows = append(r.TableRows, liveTableRow(t))
+			}
 		}
 		r.EventsNew = ev
 		return
@@ -278,7 +291,20 @@ func (s *Server) fullDelta(p *Pipeline, r *LiveRecord, sn *Snap, all bool) {
 				r.TableRows = append(r.TableRows, liveTableRow(t))
 			}
 		}
-		if prev == nil || len(prev) != len(cur) {
+		switch {
+		case big && prev != nil && (len(prev) != len(cur) || len(r.TableRows) > tablesInlineMax):
+			// Nhiều bảng: không bao giờ gửi cả danh sách; client dựng lại trang đang xem.
+			r.TableRows, r.TablesChanged = nil, true
+		case big && prev == nil:
+			// Lần đầu (web vừa khởi động): chỉ gửi bảng đang chép.
+			var run []LiveTableRow
+			for _, row := range r.TableRows {
+				if row.State == "running" && len(run) < tablesInlineMax {
+					run = append(run, row)
+				}
+			}
+			r.TableRows = run
+		case prev == nil || len(prev) != len(cur):
 			// Danh sách bảng đổi (bảng mới, bảng bị bỏ): gửi toàn bộ để client dựng lại.
 			r.TableRows, r.TablesFull = nil, true
 			for _, t := range tv.Tables {

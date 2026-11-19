@@ -531,3 +531,5 @@ table.grid th.c-num, table.grid td.c-num { width: 10ch; min-width: 10ch; }
 .toolbar label.switch { color: var(--ink); font-weight: 600; }
 .cardhead h2 .ic { color: var(--muted); }
 .attncard .cardhead h2 .ic { color: var(--bad); }
+a.chip { text-decoration: none; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: var(--sp-3); }
