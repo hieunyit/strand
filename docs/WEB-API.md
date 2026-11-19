@@ -22,7 +22,7 @@ Giới hạn đăng nhập: 5 lần sai/phút/IP, lần thứ 6 trả **429** k�
 | --- | --- |
 | `POST /api/v1/login` | như trên. 401 sai mật khẩu, 403 thiếu CSRF, 429 bị chặn |
 | `POST /api/v1/logout` | hủy session. Cần CSRF. **200** `{"ok": true}` |
-| `GET /healthz` | **Không cần xác thực.** `200 {"status":"ok","version","database":{"mode":"file"` hoặc `"postgres","ok":true}}`; chế độ PostgreSQL mà DB không ping được: **503** `{"status":"degraded","database":{"ok":false,"error":"metadata database unreachable (details in the web log)"}}` (chi tiết lỗi chỉ ghi vào log của web, không lộ host/user cho người chưa đăng nhập). Dùng cho HEALTHCHECK/orchestrator |
+| `GET /healthz` | **Không cần xác thực.** `200 {"status":"ok","version","database":{"mode":"file"` hoặc `"postgres","ok":true}}`; chế độ PostgreSQL mà DB không ping được: **503** `{"status":"degraded","database":{"ok":false,"error":"metadata database unreachable (details in the web log)"}}` (chi tiết lỗi chỉ ghi vào log của web, không lộ host/user cho người chưa đăng nhập). Chế độ PostgreSQL có thêm `"role": "active"|"standby"` và `"lease": {"role", "instance", "active_instance", "active": {host, listen, version, started}, "epoch", "expires_in_s"}` (§7). Standby vẫn trả 200. Dùng cho HEALTHCHECK/orchestrator |
 | `GET /api/v1/session` | `{"authenticated": true, "version", "csrf", "idle_timeout_s", "max_age_s"}` (`csrf` vắng khi dùng Bearer) |
 
 ## 3. Tài nguyên
@@ -86,6 +86,8 @@ Lỗi: **400** tên sai whitelist hoặc tham số sai, **409** tên pipeline ho
 
 `{"tables": [{"table", "state": "done|running|pending", "ranges": {"Done": 2, "Pending": 6}, "rows_estimate", "rows_copied", "progress_pct", "eta_seconds", "pk": ["id"], "generic_pk": false}], "done", "running", "pending", "error"}`. `rows_estimate` lấy từ thống kê của source (lệch được); `rows_copied` là xấp xỉ theo tiến độ PK.
 
+**Phân trang** (pipeline nhiều bảng): thêm bất kỳ tham số nào trong `q` (chuỗi con của tên bảng, không phân biệt hoa thường), `state` (`all|running|pending|done`), `sort` (`ord` = đang chạy trước rồi theo tên, `name`, `pct` giảm dần, `rows` giảm dần, `eta` tăng dần, chưa biết ở cuối), `page` (từ 1), `per_page` (mặc định 100, tối đa 500) thì server lọc/sắp xếp và chỉ trả một trang: `tables` = các bảng của trang, kèm `"paged": true, "query": {q, state, sort, page, per_page}, "matching", "pages", "first", "last"`; `done/running/pending/total` và các tổng vẫn là của **toàn bộ** danh sách. Không có tham số: toàn bộ danh sách như trước (tương thích).
+
 ### `GET /api/v1/pipelines/{name}/checkpoint`
 
 `{"checkpoint": {"pipeline_id", "epoch", "applied", "updated_at"}, "start_position", "compaction_lag_seconds", "error"}`. Chỉ có khi pipeline đang chạy.
@@ -121,16 +123,16 @@ Trả về **200**: `{"ok": true, "backup": "<path>", "restarted": bool, "messag
 
 ### `GET /api/v1/pipelines/{name}/tuning`
 
-Giá trị hiện tại của các khóa chỉnh tốc độ/an toàn snapshot, đọc từ file YAML: `{"path", "fields": [{"key", "label", "help", "yaml_key", "value", "set", "default", "options"?}], "error"?}`. `set=false` nghĩa là khóa vắng và Strand dùng `default`. Khóa (đều đã có tác dụng): `iops_soft` (`resources.source.iops.soft`), `iops_hard` (`resources.source.iops.hard`), `chunk_rows` (`bootstrap.logical.chunk_rows`), `windows` (`bootstrap.logical.windows`), `algorithm` (`governor.algorithm`), `lag_slo` (`governor.lag_slo`), `breaker_max_ratio` (`governor.breaker.strand_query_p99.max_ratio`), `replica_lag_max` (`governor.breaker.replica_lag.max`), `workers` (`resources.workers.max`). Khóa chỉ được nhận mà chưa dùng (USAGE.md 6.3, ví dụ `bootstrap.logical.max_parallel`) cố ý không có.
+Giá trị hiện tại của các khóa chỉnh tốc độ/an toàn snapshot, đọc từ file YAML: `{"path", "fields": [{"key", "label", "help", "yaml_key", "value", "set", "default", "options"?}], "error"?}`. `set=false` nghĩa là khóa vắng và Strand dùng `default`. Khóa (đều đã có tác dụng): `iops_soft` (`resources.source.iops.soft`), `iops_hard` (`resources.source.iops.hard`), `chunk_rows` (`bootstrap.logical.chunk_rows`), `max_parallel` (`bootstrap.logical.max_parallel`, 1–32), `windows` (`bootstrap.logical.windows`), `algorithm` (`governor.algorithm`), `lag_slo` (`governor.lag_slo`), `breaker_max_ratio` (`governor.breaker.strand_query_p99.max_ratio`), `replica_lag_max` (`governor.breaker.replica_lag.max`), `workers` (`resources.workers.max`). Khóa chỉ được nhận mà chưa dùng (USAGE.md 6.3) cố ý không có.
 
 ### `POST /api/v1/pipelines/{name}/tuning`
 
 Body JSON phẳng, chỉ gồm khóa muốn đổi: `{"iops_soft": 300, "windows": ["22:00-06:00"], "algorithm": "grace-v2", "lag_slo": "", "restart": false, "dry_run": false}`. Khóa vắng = giữ nguyên; giá trị rỗng (`""`/`null`) = xóa khóa khỏi file (về mặc định). `windows` nhận mảng hoặc chuỗi cách nhau dấu phẩy. `dry_run=true`: chỉ validate và trả diff, không ghi.
 Sửa node YAML tại chỗ (giữ chú thích và khóa khác), rồi đi đường lưu cấu hình như `POST .../config`: file tạm, `strand validate` với env của pipeline (lỗi thì **502**, không ghi), sao lưu `<file>.bak.<timestamp>`, ghi đè nguyên tử giữ mode/owner, tùy chọn `restart`. Khóa mới có hiệu lực sau restart; muốn đổi tốc độ đọc ngay dùng Throttle (`throttle set`), không ghi vào file.
-Kiểm tra: `iops_*` số nguyên 1..10000000 và `iops_hard` >= `iops_soft`; `chunk_rows` `auto` hoặc số nguyên 1..10000000; `windows` dạng `HH:MM-HH:MM`; `algorithm` thuộc `static|onoff|grace-v2`; `lag_slo`, `replica_lag_max` là duration (1ms..24h); `breaker_max_ratio` số lớn hơn 1 và tối đa 1000; `workers` 1..1024. Sai thì **400** `{"error": "...", "fields": {"<khóa>": "<lý do>"}}` và file không đổi; khóa lạ cũng 400.
+Kiểm tra: `iops_*` số nguyên 1..10000000 và `iops_hard` >= `iops_soft`; `chunk_rows` `auto` hoặc số nguyên 1..10000000; `max_parallel` 1..32; `windows` dạng `HH:MM-HH:MM`; `algorithm` thuộc `static|onoff|grace-v2`; `lag_slo`, `replica_lag_max` là duration (1ms..24h); `breaker_max_ratio` số lớn hơn 1 và tối đa 1000; `workers` 1..1024. Sai thì **400** `{"error": "...", "fields": {"<khóa>": "<lý do>"}}` và file không đổi; khóa lạ cũng 400.
 Trả về **200**: `{"ok", "dry_run"?, "changed": [...], "diff", "valid"?, "output"?, "backup", "restarted", "message"}`. Không có gì đổi thì `changed` rỗng và không ghi. Audit: `config.tuning` (khóa đã đổi) và `config.edit`.
 
-`POST /api/v1/pipelines` (tạo mới) nhận thêm các trường tùy chọn cùng ý nghĩa: `iops_soft`, `iops_hard`, `chunk_rows`, `windows` (mảng), `governor_algorithm`, `lag_slo`, `breaker_max_ratio`, `replica_lag_max`; giá trị sai trả 400.
+`POST /api/v1/pipelines` (tạo mới) nhận thêm các trường tùy chọn cùng ý nghĩa: `iops_soft`, `iops_hard`, `chunk_rows`, `max_parallel`, `windows` (mảng), `governor_algorithm`, `lag_slo`, `breaker_max_ratio`, `replica_lag_max`; giá trị sai trả 400.
 
 ### `GET /api/v1/pipelines/{name}/env`
 
@@ -195,6 +197,8 @@ Comment `: hb <unix>` mỗi 15 s (giữ kết nối qua proxy; mỗi nhịp ki�
  "events_new": [{"time", "level", "message"}]}
 ```
 
+**Nhiều bảng** (> 200 bảng): luồng sống không bao giờ gửi toàn bộ danh sách. `snapshot` chỉ chứa các bảng đang chạy (`tables_full` vắng); sự kiện `sample` chỉ chứa các bảng đổi; khi danh sách bảng đổi (bảng mới/bị bỏ) hoặc hơn 200 bảng đổi cùng lúc thì gửi `"tables_changed": true` không kèm dòng nào, và trang Tables dựng lại trang đang xem từ server (giữ bộ lọc/sắp xếp/trang).
+
 `f` là chuỗi hiển thị theo khóa `data-bind` của trang, định dạng giống hệt trang render ở server (số không "nhảy" khi trang tải lại). `lag_s` vắng khi không có số đọc. Ở bản đầy đủ: `table_rows` chỉ gồm bảng **đổi** từ sự kiện trước (`tables_full: true` = toàn bộ danh sách, ví dụ trong `snapshot` hoặc khi danh sách bảng đổi), `events_new` chỉ gồm cảnh báo/lỗi mới; `f` có thêm `g_*` (sơ đồ Graph), `governor`, `ckpt_applied`, `epoch`. `LiveOverview`: `{"total", "healthy", "attention": [tên], "max_lag_s", "max_lag_pipeline", "rows_s", "tables_done", "tables_total", "tables_pct", "counts": {trạng thái: n}, "pipelines": [tên], "f": {...}}`.
 
 **`GET /api/v1/live?pipeline=<name>|all`** → `LiveSnapshot` (JSON thường). Trình duyệt dùng khi `EventSource` không có hoặc lỗi liên tục (3 lần): hỏi mỗi chu kỳ, thử lại SSE sau 60 s.
@@ -205,11 +209,18 @@ Ví dụ: `curl -N -H "Authorization: Bearer $TOKEN" 'https://web:8443/api/v1/st
 
 `GET` → `{"database_mode": bool, "settings": [{"key", "label", "help", "kind": "bool|int|string|list", "value", "source": "env|database|web.yaml|default", "file_value", "env", "editable", "restart_required", "pending_restart"}]}`.
 
-Khóa: `scan` (danh sách glob tuyệt đối, áp dụng ở lần quét kế tiếp), `config_dir` (đường dẫn tuyệt đối hoặc rỗng), `secure_cookies` (env `STRAND_WEB_SECURE_COOKIES`), `trust_forwarded_for` (env `STRAND_WEB_TRUST_FORWARDED_FOR`), `shutdown_stop_pipelines`, `sample_interval_sec` (1 đến 300, **cần khởi động lại web**). Cài đặt khởi động (`listen`, TLS, `allow_plain_http`, `state_dir`, `database`, `strand_binary`, mật khẩu/token) chỉ ở `web.yaml`/env và không sửa được ở đây.
+Khóa: `scan` (danh sách glob tuyệt đối, áp dụng ở lần quét kế tiếp), `config_dir` (đường dẫn tuyệt đối hoặc rỗng), `secure_cookies` (env `STRAND_WEB_SECURE_COOKIES`), `trust_forwarded_for` (env `STRAND_WEB_TRUST_FORWARDED_FOR`), `shutdown_stop_pipelines`, `sample_interval_sec` (1 đến 300, **cần khởi động lại web**), `audit_retention_days` (0..36500, mặc định 365, 0 = giữ mãi), `audit_archive_auto` (mặc định tắt), `audit_archive_dir` (rỗng = `<state_dir>/audit-archive`), `audit_rotate_mb` (0..102400, mặc định 100, 0 = không xoay), `audit_rotate_days` (0..36500, mặc định 0 = tắt) (§5). Khóa `int` có thêm `min`, `max`. Cài đặt khởi động (`listen`, TLS, `allow_plain_http`, `state_dir`, `database`, `strand_binary`, mật khẩu/token) chỉ ở `web.yaml`/env và không sửa được ở đây.
 
 Thứ tự ưu tiên của giá trị hiệu lực: **biến môi trường** (khác rỗng) > **database** (bảng `web_settings`, đã lưu trên trang Settings) > **web.yaml** > mặc định. Khóa do env đặt thì không sửa được (409).
 
 `POST` body `{"khóa": giá_trị, ...}`; `null` = reset (xóa dòng DB, trở về web.yaml/mặc định). Kiểm hợp lệ trước khi ghi (400 kèm lý do), mỗi khóa đổi ghi audit `settings.edit` (`started` trước, rồi `ok`/`error`, `detail.key/old/new/old_source`; không ghi được audit thì không đổi). → `{"ok": true, "changed": [...], "settings": [...]}`. Chế độ file: **409** (sửa `web.yaml` rồi khởi động lại).
+
+### `GET /api/v1/backups`, `GET /api/v1/backups/{id}`, `GET /api/v1/backups/{id}/status` (trang `/backups`)
+
+Catalog backup tập trung (chỉ đọc, cần chế độ PostgreSQL; chế độ file trả 503). `GET /api/v1/backups` nhận
+`source`, `engine`, `status`, `limit` (1..500, mặc định 200), `created_after`, `created_before` (RFC3339) và
+`cursor`; trả `{"backups": [Record], "limit": N, "next_cursor": "..."}` (mới nhất trước; `next_cursor` chỉ có khi
+trang đầy). Xem `docs/CENTRAL-BACKUPS.md`.
 
 ### Registry trong DB (chế độ PostgreSQL)
 
@@ -286,8 +297,23 @@ Khi web chết hoặc khởi động lại: tiến trình con có process group 
 
 ## 5. Audit log
 
-Chế độ file: `<state_dir>/audit.log`. Chế độ PostgreSQL (`database.dsn`): bảng `audit_log` chỉ-thêm (cột `ts, ip, action, pipeline, result, data`); `database.audit: both` (mặc định) vẫn ghi file làm bản sao (USAGE.md 7.15). Mỗi dòng/bản ghi là một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, `config.edit`, `env.edit`, `pipeline.create`, `autostart` (web tự chạy lại pipeline có trạng thái mong muốn `running` khi khởi động), `state.import` (lần nhập file vào DB đầu tiên), `settings.edit`, và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
+Chế độ file: `<state_dir>/audit.log`. Chế độ PostgreSQL (`database.dsn`): bảng `audit_log` chỉ-thêm (cột `ts, ip, action, pipeline, result, data`); `database.audit: both` (mặc định) vẫn ghi file làm bản sao (USAGE.md 7.15). Mỗi dòng/bản ghi là một JSON: `{"time", "ip", "action", "pipeline", "args", "result": "ok|denied|error|started", "exit_code", "detail"}`. Hành động: `login` (ok/denied, `detail.reason` = `bad_password`/`rate_limited`), `login_csrf_rejected`, `csrf_rejected`, `logout`, `config.view`, `config.edit`, `env.edit`, `pipeline.create`, `autostart` (web tự chạy lại pipeline có trạng thái mong muốn `running` khi khởi động), `desired.observed_stop` (pipeline nền dừng êm **không do web**, ví dụ `strand stop` từ CLI: trạng thái mong muốn chuyển `stopped`, không tự chạy lại; `detail.stopped_at`), `web.lease.acquired` (instance này thành active; `detail.epoch`, `previous_holder`), `audit.archive` (lưu trữ audit cũ: `detail.rows`, `min_id`, `max_id`, `from`, `to`, `before`, `file`, `sha256`, `by`), `audit.rotate` (dòng đầu của `audit.log` mới sau khi xoay: `detail.previous`, `sha256`, `bytes`, `reason`), `state.import` (lần nhập file vào DB đầu tiên), `settings.edit`, và mọi action ở §4 (hai dòng: `started`, rồi `ok`/`error` kèm `exit_code` khi có). Job kết thúc ghi thêm `job.end` (`result` `ok` khi exit 0, `error` nếu khác hoặc không quan sát được; `exit_code`; `detail.job_id`, `cancelled`).
+
+### 5.1 Lưu giữ (retention)
+
+`audit_log` vẫn chỉ-thêm: UPDATE và TRUNCATE luôn bị từ chối; DELETE chỉ đi qua hàm `strand_audit_archive()` (migration 009). Quy trình (`strand web db audit-archive`, hoặc tự động mỗi ngày trên instance active khi `audit_archive_auto` bật): (1) chọn các dòng `ts` < mốc (mặc định `now - audit_retention_days`, ít nhất 1 ngày trước), trừ các dòng `audit.archive`; (2) xuất theo `id` ra `audit-<from>-<to>.jsonl.gz` (gzip, một dòng JSON `{"id","ts","ip","action","pipeline","result","data"}` mỗi bản ghi, 0600, ghi file tạm + fsync + rename); (3) đọc lại để kiểm chứng (số dòng, id đầu/cuối, sha256); (4) ghi `<file>.sha256` (định dạng `sha256sum`) và `<file>.manifest.json`; (5) hàm DB ghi một dòng manifest vào `audit_archives` (cũng chỉ-thêm), xóa **đúng** các dòng đó (số lượng phải khớp số dòng trong file, không thì không xóa gì) và thêm dòng `audit.archive`, trong một transaction. Trigger chỉ cho DELETE đi qua với dòng nằm trong một manifest tạo **trong cùng transaction** (đặt cờ phiên bằng tay không đủ) và không bao giờ cho xóa dòng `audit.archive`: mọi lần xóa audit đều để lại bản ghi vĩnh viễn trỏ tới sha256 của file. File lưu trữ không bao giờ bị Strand xóa. Tăng cứng: để bảng thuộc một role quản trị, cấp cho role của web INSERT/SELECT trên `audit_log` và EXECUTE trên `strand_audit_archive` (hàm là SECURITY DEFINER).
+
+Chế độ file (và bản sao file ở chế độ DB `database.audit: both|file`): `audit.log` được xoay khi vượt `audit_rotate_mb` MiB (kiểm mỗi lần ghi) hoặc dòng đầu cũ hơn `audit_rotate_days` ngày (kiểm hằng ngày) thành `audit-<thời điểm>.log.gz` + `.log.gz.sha256`; `audit.log` mới bắt đầu bằng dòng `audit.rotate` ghi tên và sha256 của file vừa xoay (chuỗi băm). `strand web db migrate` chỉ nhập `audit.log` hiện tại, không nhập các file đã xoay.
 
 ## 6. Trang HTML
 
 `/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs|repair|promote}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/settings` (GET; POST form có `csrf`), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Overview, Pipelines và mọi tab của trang pipeline nhận số liệu qua SSE (§3.3) và cập nhật **tại chỗ** (phần tử có `data-bind*`: số, huy hiệu, thanh tiến độ, sparkline, biểu đồ, danh sách bảng đang chép, Errors, đuôi Logs), không tải lại cả trang; trang chỉ tải lại khi cấu trúc đổi (danh sách pipeline, tập "Needs attention", trạng thái của pipeline đang xem, bảng mới) và không bao giờ khi người dùng đang gõ, đang mở hộp thoại hoặc đang bôi đen chữ. Logs: bám đuôi trực tiếp (mặc định bật, `?follow=0` để tắt; cuộn lên thì tạm dừng và hiện số dòng mới). Trang Jobs vẫn tự làm mới 5 giây.
+
+Tab Tables với hơn 200 bảng được **phân trang ở server** (100 dòng/trang): tìm kiếm (`?tq=`), lọc trạng thái (`tstate=running|pending|done`, các chip là liên kết), sắp xếp (`tsort=name|pct|rows|eta`), trang (`tpage=`); phần tổng hợp, bộ đếm và "Copying now" (tối đa 50 bảng đang chép) luôn hiện. Dòng của trang được cập nhật tại chỗ; trang dựng lại khi một dòng đang hiện đổi trạng thái hoặc danh sách bảng đổi. 2.000 bảng: ~120 KiB, 10.000 bảng: ~130 KiB mỗi trang. Tối đa 200 bảng: như cũ (mọi dòng, lọc/sắp xếp ở trình duyệt).
+
+Pipeline nền đã dừng êm ngoài web có `"stopped_outside_web": true` trong `PipelineView` và lý do "stopped outside the web (strand stop or a signal); it is not started automatically".
+
+## 7. Nhiều instance web trên một database (active / standby)
+
+Chế độ PostgreSQL: chỉ **một** instance là **active**, giữ lease trong bảng `web_lease` (migration 008; gia hạn mỗi TTL/3, TTL mặc định 30 s, `STRAND_WEB_LEASE_TTL=<giây>` 3..600; hết hạn tính bằng đồng hồ của DB; `epoch` tăng mỗi lần đổi chủ). Chỉ instance active: tự chạy lại pipeline theo trạng thái mong muốn, nhận ra pipeline dừng ngoài web, ghi và bảo trì lịch sử số liệu, xử lý job còn `running` của lần trước, ghi registry từ `web.yaml`/scan, lưu trữ audit tự động, và nhận **mọi request ghi**. Các instance khác là **standby** (chỉ đọc): trang, API đọc, SSE và đăng nhập vẫn chạy (session nằm trong DB nên đăng nhập dùng được ở mọi instance); request ghi (trừ logout) trả **503** `{"error": "This web instance is a standby (read-only) ... (<host> <listen>) ..."}` với `X-Strand-Role: standby` và `Retry-After`; trang có banner. Standby tiếp quản khi lease hết hạn (active chết hoặc mất DB lâu hơn TTL) hoặc **ngay** khi active dừng êm (nhả lease); khi tiếp quản nó ghi `web.lease.acquired`, xử lý lại job và chạy autostart. Active không gia hạn được thì tự thôi làm active khi tới hạn cục bộ (trước khi standby có thể lấy lease). Bảng `web_instances` giữ nhịp tim từng instance.
+

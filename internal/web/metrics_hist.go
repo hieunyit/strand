@@ -86,7 +86,7 @@ func (s *Server) flushMetrics() {
 }
 
 func (s *Server) maintainMetrics() {
-	if s.db == nil {
+	if s.db == nil || !s.isActive() {
 		return
 	}
 	now := s.now().UTC().Truncate(time.Minute)

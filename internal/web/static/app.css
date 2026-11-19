@@ -262,6 +262,15 @@ input.wide, form.act input[type=text].wide { max-width: 100%; }
 .picklist { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 12px; margin-bottom: 8px; background: var(--surface-2); }
 .pick { display: block; margin: 2px 0; }
 form[aria-busy="true"] { opacity: .7; pointer-events: none; }
+#backup-job-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px 18px; margin-top: 18px; }
+#backup-job-form h3, #backup-job-form fieldset, #backup-job-form .toolbar { grid-column: 1 / -1; }
+#backup-job-form label:not(.check) { display: flex; flex-direction: column; gap: 4px; font-weight: 550; }
+#backup-job-form input:not([type="checkbox"]) { width: 100%; }
+#backup-job-form fieldset { display: flex; flex-wrap: wrap; gap: 10px 18px; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 12px; }
+#backup-job-form fieldset label { min-width: min(100%, 240px); flex: 1; }
+#backup-job-form .check { display: inline-flex; align-items: center; gap: 8px; }
+#backup-job-form small { font-weight: 400; }
+#backup-job-form [hidden] { display: none !important; }
 .env-wrap { max-width: 680px; margin-bottom: 12px; }
 .envkey { width: 150px; }
 .cfg-textarea { width: 100%; min-height: 350px; font-family: var(--mono); font-size: 12.5px; background: var(--code-bg); color: var(--code-ink); border-color: var(--line); }
@@ -531,3 +540,5 @@ table.grid th.c-num, table.grid td.c-num { width: 10ch; min-width: 10ch; }
 .toolbar label.switch { color: var(--ink); font-weight: 600; }
 .cardhead h2 .ic { color: var(--muted); }
 .attncard .cardhead h2 .ic { color: var(--bad); }
+a.chip { text-decoration: none; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: var(--sp-3); }

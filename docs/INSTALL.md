@@ -120,7 +120,7 @@ sudo strand config init --from mysql --to postgres --name orders-sync \
      --systemd -o /etc/strand/orders-sync.yaml
 ```
 
-`--systemd` đặt state ở `/var/lib/strand/<name>` và admin socket ở `/run/strand/<name>/admin.sock`, đúng với `StateDirectory`/`RuntimeDirectory` của `strand@.service`. Cờ khác (`--exclude`, `--snapshot-window`, `--metrics`...): [USAGE.md](USAGE.md) mục 7.0. Có thể chép `/usr/share/doc/strand/examples/pipeline.yaml` thay vì dùng `config init`. Mật khẩu không nằm trong YAML, mà đọc từ biến môi trường `SRC_PW` / `DST_PW`.
+`--systemd` đặt state ở `/var/lib/strand/<name>` và admin socket ở `/run/strand/<name>/admin.sock`, đúng với `StateDirectory`/`RuntimeDirectory` của `strand@.service`. Cờ khác (`--exclude`, `--snapshot-window`, `--max-parallel` — số bảng snapshot cùng lúc, `--metrics`...): [USAGE.md](USAGE.md) mục 7.0. Có thể chép `/usr/share/doc/strand/examples/pipeline.yaml` thay vì dùng `config init`. Mật khẩu không nằm trong YAML, mà đọc từ biến môi trường `SRC_PW` / `DST_PW`.
 
 Tạo file `.env` (định dạng `KEY=VALUE` mỗi dòng, systemd nạp qua `EnvironmentFile`) và đặt quyền:
 
@@ -301,7 +301,7 @@ Form chỉ hiện ô hợp với cặp engine đã chọn (PG chỉ sang PG, Mar
 - Bước 3: đích PG có **Target database** (database PostgreSQL để chép vào; trống = cùng tên database nguồn; bắt buộc khi nguồn MySQL là `*`), phải tạo trước bằng `CREATE DATABASE`. Đích MySQL có **Strand metadata database** (`strand`, chỉ chứa checkpoint `_strand_*`, không phải dữ liệu), cũng phải tạo trước.
 - Bước 4 (nguồn MySQL/MariaDB): **Databases** cần chép, cách nhau dấu phẩy, `*` = tất cả (bỏ database hệ thống). Mục "Only some tables?" (tùy chọn): **Include only** / **Skip** theo mẫu `db.bảng` (PG: `schema.bảng`), ví dụ `shop.orders` hay `shop.log_*`; để trống là lấy hết.
 - Bước 5 (Advanced, tùy chọn): commit order, số worker, thư mục spool, tên biến mật khẩu.
-- Bước 6 (**Snapshot speed & safety**, tùy chọn, gập sẵn): giới hạn đọc source soft/hard (mặc định soft 600), chunk rows (mặc định tự chỉnh, 5000), khung giờ snapshot (`22:00-06:00`), governor algorithm (`static|onoff|grace-v2`), lag SLO, ngưỡng breaker (tỉ lệ độ trễ query, replica lag max). Để trống là dùng mặc định. Snapshot chậm hoặc breaker mở trên source MariaDB/MySQL thì chỉnh ở đây (hoặc sau này ở tab Config).
+- Bước 6 (**Snapshot speed & safety**, tùy chọn, gập sẵn): giới hạn đọc source soft/hard (mặc định soft 600), chunk rows (mặc định tự chỉnh, 5000), **Tables in parallel** (`bootstrap.logical.max_parallel`, số bảng snapshot cùng lúc, mặc định 1; các bảng chia chung giới hạn đọc source, cần thêm RAM ≈ N × cỡ chunk và N kết nối target), khung giờ snapshot (`22:00-06:00`), governor algorithm (`static|onoff|grace-v2`), lag SLO, ngưỡng breaker (tỉ lệ độ trễ query, replica lag max). Để trống là dùng mặc định. Snapshot chậm hoặc breaker mở trên source MariaDB/MySQL thì chỉnh ở đây (hoặc sau này ở tab Config).
 
 Validate sẽ gợi ý `CREATE DATABASE` nếu database đích hoặc metadata chưa có. Nơi lưu file và quyền ghi: mục 5.3.
 
@@ -309,7 +309,7 @@ Validate sẽ gợi ý `CREATE DATABASE` nếu database đích hoặc metadata c
 
 Tab **Config**: hiện đúng văn bản file (giữ chú thích), mật khẩu/bí mật che bằng `********`, kèm cảnh báo khóa chưa có tác dụng. Chế độ sửa: ghi file tạm, chạy `strand validate` với env của pipeline, hiện kết quả và **diff**, rồi mới ghi đè nguyên tử và giữ bản sao lưu `<file>.bak.<timestamp>`; có tùy chọn Restart sau khi lưu. Validate lỗi thì không ghi đè. Giá trị `.env` là write-only: để nguyên `********` thì giữ giá trị cũ. Mọi lần xem/sửa đều vào audit log. Đa số khóa chỉ có hiệu lực sau restart ([USAGE.md](USAGE.md) 8.1).
 
-Thẻ **Tuning** (tab Config) cho chỉnh các khóa tốc độ/an toàn snapshot bằng form thay vì sửa YAML: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.strand_query_p99.max_ratio`, `governor.breaker.replica_lag.max`, `resources.workers.max`. Form hiện giá trị hiện có trong file (khóa vắng ghi "default: ..."); ô để trống thì khóa bị xóa (về mặc định). Lưu đi qua đúng đường ở trên (validate, diff, sao lưu `.bak`, ghi nguyên tử, Restart tùy chọn) và vẫn giữ chú thích cùng các khóa khác; bấm **Validate & Preview Diff** để xem trước. API: `GET/POST /api/v1/pipelines/{name}/tuning` ([WEB-API.md](WEB-API.md)). Giá trị mới có hiệu lực sau restart; muốn đổi tốc độ đọc ngay thì dùng **Throttle** ở tab Graph (không ghi vào file).
+Thẻ **Tuning** (tab Config) cho chỉnh các khóa tốc độ/an toàn snapshot bằng form thay vì sửa YAML: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.max_parallel`, `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.strand_query_p99.max_ratio`, `governor.breaker.replica_lag.max`, `resources.workers.max`. Form hiện giá trị hiện có trong file (khóa vắng ghi "default: ..."); ô để trống thì khóa bị xóa (về mặc định). Lưu đi qua đúng đường ở trên (validate, diff, sao lưu `.bak`, ghi nguyên tử, Restart tùy chọn) và vẫn giữ chú thích cùng các khóa khác; bấm **Validate & Preview Diff** để xem trước. API: `GET/POST /api/v1/pipelines/{name}/tuning` ([WEB-API.md](WEB-API.md)). Giá trị mới có hiệu lực sau restart; muốn đổi tốc độ đọc ngay thì dùng **Throttle** ở tab Graph (không ghi vào file).
 
 ### 6.4 Thao tác
 
@@ -460,7 +460,7 @@ Mọi biến nằm trong `.env.example` (kèm giải thích). Các biến chính
 | `strand_config` (`/etc/strand`) | File cấu hình pipeline `<name>.yaml` (0640) và `<name>.env` (0600), được **dựng lại từ DB** trước khi validate/start nếu thiếu hoặc khác | thả thêm file YAML vào đây thì web tự quét (`scan`) và **đăng ký vào DB** ở lần quét đầu |
 | `strand_state` (`/var/lib/strand-web`) | Spool, state, checkpoint cục bộ của pipeline, spool output job đang chạy (`jobs/<id>.log`, chuyển vào bảng `job_output` của DB rồi xóa khi job xong), bản sao `audit.log` | mất thì pipeline phải dựng lại phần local (checkpoint chính ở target) |
 
-Pipeline chạy **trong container web** ở chế độ nền (không có systemd). Container dừng (`docker compose stop/restart`, `down`): web dừng êm các pipeline đang chạy (chờ ghi checkpoint, tối đa ~100 giây; `stop_grace_period: 120s`) mà **không đổi trạng thái mong muốn**; khi container chạy lại, web tự chạy lại mọi pipeline chế độ nền có trạng thái mong muốn `running` mà chưa chạy (audit `autostart`). Bấm Stop trên web đặt trạng thái `stopped` nên sẽ không tự chạy lại. Phiên đăng nhập nằm trong DB nên khởi động lại web không đăng xuất ai (hạn idle 30 phút / tối đa 12 giờ như cũ).
+Pipeline chạy **trong container web** ở chế độ nền (không có systemd). Container dừng (`docker compose stop/restart`, `down`): web dừng êm các pipeline đang chạy (chờ ghi checkpoint, tối đa ~100 giây; `stop_grace_period: 120s`) mà **không đổi trạng thái mong muốn**; khi container chạy lại, web tự chạy lại mọi pipeline chế độ nền có trạng thái mong muốn `running` mà chưa chạy (audit `autostart`). Bấm Stop trên web đặt trạng thái `stopped` nên sẽ không tự chạy lại. Dừng **ngoài web** cũng vậy: `strand stop` (hoặc SIGTERM) từ CLI làm pipeline thoát êm ("pipeline stopped cleanly"), web active nhận ra (kể cả khi lúc đó web không chạy: kiểm lúc khởi động), đặt trạng thái mong muốn `stopped` (audit `desired.observed_stop`, trang ghi "stopped outside the web") và không tự chạy lại. Pipeline **chết** (thoát lỗi, bị kill/OOM) vẫn giữ `running` và được chạy lại. Phiên đăng nhập nằm trong DB nên khởi động lại web không đăng xuất ai (hạn idle 30 phút / tối đa 12 giờ như cũ).
 
 Nguồn/đích ở máy khác: dùng IP/DNS của chúng trong cấu hình pipeline (container đi ra ngoài bình thường; MySQL nguồn phải cho phép kết nối từ host docker). Nguồn/đích là dịch vụ trên chính host docker: bỏ comment `extra_hosts: ["host.docker.internal:host-gateway"]` trong `compose.yaml` và dùng host `host.docker.internal`; hoặc `network_mode: host` cho `web` (khi đó bỏ `ports`, web nghe trực tiếp trên host, và `db` phải publish cổng 5432 cho web, DSN trỏ `127.0.0.1`). Nguồn/đích là container cùng máy: gắn `web` vào network của chúng (`networks:` ngoài) và dùng tên service.
 
@@ -529,3 +529,29 @@ sudo -E -u strand strand web db export --config /etc/strand/web.yaml --dir /var/
 ```
 
 Thư mục xuất ra có `web.yaml` (hash mật khẩu/token và cài đặt đã lưu trên trang Settings, không có mục `database`), `state/` (`pipelines.json`, `jobs/<id>.json|.log`, `wizards/`, `audit.log`) và `pipelines/<name>.yaml|.env` kèm `MANIFEST.json` (đường dẫn gốc; `.env` chỉ được giải mã khi có `STRAND_WEB_SECRET_KEY`). Quay lại: dừng web, chép `state/*` vào `state_dir`, chép cấu hình về đường dẫn trong `MANIFEST.json` nếu khác, dùng `web.yaml` vừa xuất (bỏ `STRAND_WEB_DATABASE_DSN`), khởi động web.
+
+## 12. Vận hành chế độ PostgreSQL: lưu giữ audit, nhiều instance web
+
+### 12.1 Lưu giữ audit
+
+Bảng `audit_log` chỉ-thêm nên không tự nhỏ lại. Đặt thời gian giữ trên trang Settings (`audit_retention_days`, mặc định 365 ngày; 0 = giữ mãi), rồi định kỳ:
+
+```bash
+sudo -E -u strand strand web db audit-archive --config /etc/strand/web.yaml --dry-run       # xem trước
+sudo -E -u strand strand web db audit-archive --config /etc/strand/web.yaml                 # mặc định: cũ hơn audit_retention_days
+sudo -E -u strand strand web db audit-archive --config /etc/strand/web.yaml --before 2025-01-01 --out /backup/audit-2024.jsonl.gz
+# compose: docker compose exec web strand web db audit-archive
+```
+
+Lệnh xuất các dòng cũ ra `.jsonl.gz` (mặc định trong `audit_archive_dir`, rỗng = `<state_dir>/audit-archive`), kiểm chứng file (số dòng, id, sha256), ghi `<file>.sha256` và `<file>.manifest.json`, rồi mới xóa đúng các dòng đó qua hàm `strand_audit_archive()`; dòng `audit.archive` (số dòng, khoảng thời gian, tên file, sha256) và bảng `audit_archives` giữ dấu vết vĩnh viễn. Có dòng mới chen vào khoảng đã xuất thì không xóa gì (chạy lại). Kiểm một file lưu trữ: `sha256sum -c audit-....jsonl.gz.sha256`; đọc: `zcat audit-....jsonl.gz | jq .`. Muốn web tự làm hằng ngày: bật `audit_archive_auto` (chỉ instance active chạy). Chép file lưu trữ ra nơi sao lưu: Strand không bao giờ xóa chúng.
+
+Chế độ file: `audit.log` tự xoay khi vượt `audit_rotate_mb` (mặc định 100 MiB) hoặc, nếu đặt, `audit_rotate_days` thành `audit-<thời điểm>.log.gz` + `.sha256` trong `state_dir`; `audit.log` mới bắt đầu bằng dòng `audit.rotate` chứa sha256 của file trước (WEB-API.md §5.1).
+
+### 12.2 Hai (hoặc nhiều) instance web trên một database
+
+Được hỗ trợ ở dạng **active / standby**: một instance giữ lease (bảng `web_lease`) và làm mọi việc ghi; instance khác chạy **standby chỉ đọc** (xem được, đăng nhập được, thao tác ghi trả 503 kèm địa chỉ instance active, có banner), và **tự tiếp quản** khi lease hết hạn (mặc định 30 s, `STRAND_WEB_LEASE_TTL`) hoặc ngay khi instance active dừng êm. Lý do chọn standby thay vì từ chối khởi động: nâng cấp không gián đoạn và có máy dự phòng nóng mà không bao giờ có hai instance cùng tự chạy lại pipeline, cùng ghi lịch sử số liệu hay đánh dấu job của nhau là `interrupted`. `/healthz` có `role` và `lease` (instance standby vẫn 200; load balancer nên gửi người dùng tới instance có `role: active`, hoặc dùng sticky session: đăng nhập dùng được ở cả hai).
+
+Lưu ý: pipeline chế độ nền là tiến trình con **của instance đã khởi động nó** (trong container của nó). Standby ở container/máy khác không thấy chúng (hiển thị là không chạy). Khi tiếp quản, nó chạy các pipeline có trạng thái mong muốn `running` trên máy của nó; nếu instance cũ vẫn sống nhưng mất DB, pipeline cũ vẫn chạy và bản thứ hai bị khóa pipeline chặn (`pipeline_locked`, exit 5). Pipeline systemd không phụ thuộc instance web nào.
+
+Kiểm tra nhanh: `curl -s http://web-a:8080/healthz | jq .role` và `... web-b ... | jq .role`; `SELECT holder, epoch, expires_at FROM web_lease; SELECT id, role, last_seen FROM web_instances;`.
+

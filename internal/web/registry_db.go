@@ -103,7 +103,7 @@ func (r *Registry) refreshDB(ctx context.Context) {
 	for _, row := range rows {
 		byRow[row.Name] = row
 	}
-	dbOK := err == nil
+	dbOK := err == nil && (r.writable == nil || r.writable()) // standby: chỉ đọc registry, không ghi
 	byName := map[string]*Pipeline{}
 	now := r.now().UTC()
 

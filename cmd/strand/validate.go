@@ -43,6 +43,9 @@ func newValidateCmd() *cobra.Command {
 			for _, k := range cfg.UnimplementedKeys() {
 				fmt.Fprintf(os.Stderr, "warning: %s\n", config.UnimplementedWarning(k))
 			}
+			if w := maxParallelWarning(cfg); w != "" {
+				fmt.Fprintln(os.Stderr, "warning: "+w)
+			}
 
 			if err := validate.Preflight(cmd.Context(), cfg); err != nil {
 				return err
@@ -242,4 +245,14 @@ func keylessOpts(cfg *config.Config) validate.KeylessOpts {
 			return false
 		},
 	}
+}
+
+// maxParallelWarning: bootstrap.logical.max_parallel > 1 với source PostgreSQL không có tác dụng (snapshot
+// logic của source PG luôn tuần tự từng bảng).
+func maxParallelWarning(cfg *config.Config) string {
+	if cfg.Bootstrap.Logical.MaxParallel > 1 && !strings.EqualFold(cfg.Source.Kind, "mysql") {
+		return fmt.Sprintf("bootstrap.logical.max_parallel = %d is ignored for PostgreSQL sources: tables are snapshotted one at a time",
+			cfg.Bootstrap.Logical.MaxParallel)
+	}
+	return ""
 }

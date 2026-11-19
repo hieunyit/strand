@@ -32,7 +32,7 @@ func runStrandCLI(t *testing.T, timeout time.Duration, args ...string) (string, 
 	return string(out), 0
 }
 
-func waitSynced(t *testing.T, cfg *strandCfg, p *strandProc, timeout time.Duration) {
+func waitSynced(t testing.TB, cfg *strandCfg, p *strandProc, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for !pipelineSynced(cfg.Socket) {

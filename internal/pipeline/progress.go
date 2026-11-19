@@ -56,6 +56,7 @@ func (p *Pipeline) progressLoop(ctx context.Context) {
 		if p.snap != nil {
 			now, rows := time.Now(), p.snap.RowsFlushed.Load()
 			p.snapRate.add(now, rows)
+			p.sampleSnapRuns(now)
 			if rows != lastRows {
 				lastRows, lastChange = rows, now
 			}
@@ -118,8 +119,8 @@ var snapStallAfter = 2 * time.Minute
 // pause/khung giờ, trạng thái range của bảng đang chạy, và (nguồn MySQL/MariaDB) giao dịch mở lâu nhất /
 // phiên đang chờ khóa — LOCK TABLES … READ của snapshot chờ giao dịch đang ghi bảng commit.
 func (p *Pipeline) logSnapshotStall(ctx context.Context, idle time.Duration) {
-	table, _ := p.snapCurTable.Load().(string)
-	attrs := []any{"idle", idle.Round(time.Second).String(), "table", table,
+	running := p.runningSnapshotNames()
+	attrs := []any{"idle", idle.Round(time.Second).String(), "table", strings.Join(running, ","),
 		"governor_rate", p.backgroundRate(), "paused", p.snapPaused.Load(), "gated_readers", p.snapGated.Load(),
 		"retention_risk", p.retentionRisk.Load()}
 	if p.breaker != nil && p.breaker.IsOpen() {
@@ -128,8 +129,15 @@ func (p *Pipeline) logSnapshotStall(ctx context.Context, idle time.Duration) {
 		attrs = append(attrs, "breaker", "closed")
 	}
 	if p.snap != nil {
-		if c, ok := p.snap.Manager.StateCounts()[table]; ok {
-			attrs = append(attrs, "ranges", fmt.Sprint(c))
+		counts := p.snap.Manager.StateCounts()
+		var ranges []string
+		for _, t := range running {
+			if c, ok := counts[t]; ok {
+				ranges = append(ranges, t+"="+fmt.Sprint(c))
+			}
+		}
+		if len(ranges) > 0 {
+			attrs = append(attrs, "ranges", strings.Join(ranges, " "))
 		}
 	}
 	if p.srcEngine != model.EnginePG && p.src != nil {

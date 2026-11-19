@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"strand/internal/backup"
 )
 
 // Admin is the single admin account.
@@ -95,6 +97,17 @@ const (
 	DesiredStopped = "stopped"
 )
 
+// ReasonObservedStop: the desired state was set to stopped because the active web observed a clean stop it
+// did not initiate (`strand stop`, SIGTERM from an operator): such a pipeline is not autostarted again.
+const ReasonObservedStop = "observed_stop"
+
+// DesiredState is one pipeline_desired row. Reason is "" when set by a web action, ReasonObservedStop otherwise.
+type DesiredState struct {
+	Desired string
+	Reason  string
+	Updated time.Time
+}
+
 // Store is the metadata store contract.
 type Store interface {
 	Ping(ctx context.Context) error
@@ -126,8 +139,13 @@ type Store interface {
 	// DeletePipeline removes the registry row and its desired state (files are left alone).
 	DeletePipeline(ctx context.Context, name string) error
 
+	// SetDesired records a desired state chosen from the web (clears Reason).
 	SetDesired(ctx context.Context, name, desired string) error
+	// ObserveStop flips desired running -> stopped with Reason=ReasonObservedStop, atomically (compare-and-set:
+	// a concurrent Start that set running again wins only if it commits later). Reports whether it changed.
+	ObserveStop(ctx context.Context, name string) (bool, error)
 	Desired(ctx context.Context) (map[string]string, error)
+	DesiredStates(ctx context.Context) (map[string]DesiredState, error)
 
 	UpsertJob(ctx context.Context, j Job) error
 	ListJobs(ctx context.Context) ([]Job, error)
@@ -156,7 +174,25 @@ type Store interface {
 
 	MetricsStore
 	SettingsStore
+	LeaseStore
+	AuditArchiveStore
 	ExportStore
+
+	// Central backup catalog metadata; payloads stay in object storage.
+	CreateBackup(ctx context.Context, r backup.Record) (backup.Record, bool, error)
+	GetBackup(ctx context.Context, id string) (backup.Record, bool, error)
+	ListBackups(ctx context.Context, f backup.Filter) ([]backup.Record, error)
+	UpdateBackupStatus(ctx context.Context, id string, expected, next backup.Status, verifiedAt *time.Time) (backup.Record, bool, error)
+	FinalizeBackup(ctx context.Context, id string, expected backup.Status, bytes int64, sha256, manifestURI string, verifiedAt time.Time) (backup.Record, bool, error)
+	CreateBackupJob(ctx context.Context, j backup.Job) error
+	GetBackupJob(ctx context.Context, id string) (backup.Job, bool, error)
+	ListBackupJobs(ctx context.Context) ([]backup.Job, error)
+	UpdateBackupJob(ctx context.Context, j backup.Job) (bool, error)
+	SetBackupJobNextRun(ctx context.Context, id string, expectedUpdatedAt time.Time, nextRunAt time.Time) (bool, error)
+	BeginBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (time.Time, bool, error)
+	FinishBackupJobRun(ctx context.Context, id string, startedAt time.Time, status backup.RunStatus) (bool, error)
+	RecoverBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (bool, error)
+	DeleteBackupJob(ctx context.Context, id string) (bool, error)
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error

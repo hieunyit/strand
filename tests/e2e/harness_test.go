@@ -132,7 +132,7 @@ type mysqlNode struct {
 	DB      *sql.DB
 }
 
-func startMySQL(t *testing.T, image, alias string, serverID int, nw *testcontainers.DockerNetwork, extra ...string) *mysqlNode {
+func startMySQL(t testing.TB, image, alias string, serverID int, nw *testcontainers.DockerNetwork, extra ...string) *mysqlNode {
 	t.Helper()
 	ctx := context.Background()
 	args := mysqlServerFlags(image, serverID)
@@ -177,7 +177,7 @@ func startMySQL(t *testing.T, image, alias string, serverID int, nw *testcontain
 	return n
 }
 
-func (n *mysqlNode) exec(t *testing.T, qs ...string) {
+func (n *mysqlNode) exec(t testing.TB, qs ...string) {
 	t.Helper()
 	for _, q := range qs {
 		if _, err := n.DB.Exec(q); err != nil {
@@ -233,7 +233,7 @@ func createSchema(t *testing.T, nodes ...*mysqlNode) {
 // --------------------------------------------------------------------------
 
 // socket: unix socket cần đường dẫn ngắn (< 108 byte), nên đặt trong t.TempDir() riêng.
-func (c *strandCfg) socket(t *testing.T) string { return c.Socket }
+func (c *strandCfg) socket(t testing.TB) string { return c.Socket }
 
 type strandCfg struct {
 	Socket       string
@@ -262,6 +262,8 @@ type strandCfg struct {
 	SourceExtra string
 	// ChunkRows: bootstrap.logical.chunk_rows (rỗng = auto).
 	ChunkRows string
+	// MaxParallel: bootstrap.logical.max_parallel (0 = không ghi khóa, mặc định 1).
+	MaxParallel int
 	// GovernorAlgo: governor.algorithm (rỗng = onoff); GovernorProbe: governor.probe (rỗng = mặc định on).
 	GovernorAlgo  string
 	GovernorProbe string
@@ -280,7 +282,14 @@ func (c *strandCfg) chunkRows() string {
 	return c.ChunkRows
 }
 
-func (c *strandCfg) write(t *testing.T) string {
+func (c *strandCfg) maxParallel() string {
+	if c.MaxParallel == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", max_parallel: %d", c.MaxParallel)
+}
+
+func (c *strandCfg) write(t testing.TB) string {
 	t.Helper()
 	if c.Socket == "" {
 		c.Socket = filepath.Join(t.TempDir(), "admin.sock")
@@ -348,7 +357,7 @@ target:
 tables:
   include: %s
   exclude: %s
-%sbootstrap: { default: %s, create_schema: %s, logical: { chunk_rows: %s } }
+%sbootstrap: { default: %s, create_schema: %s, logical: { chunk_rows: %s%s } }
 checkpoint: { store: target, flush_every: 200ms }
 resources:
   spool: { path: %q, soft: 1GiB, hard: 2GiB, overflow: %q }
@@ -358,7 +367,7 @@ governor: { algorithm: %s%s, tick: 1s, lag_slo: %s, breaker: { strand_query_p99:
 verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
 `, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude), c.TablesExtra,
-		c.Bootstrap, c.CreateSchema, c.chunkRows(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.GovernorAlgo, probe, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
+		c.Bootstrap, c.CreateSchema, c.chunkRows(), c.maxParallel(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.GovernorAlgo, probe, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	if c.SchemaOnlineDDL != "" {
 		add := c.SchemaAdditive
 		if add == "" {
@@ -407,7 +416,7 @@ func f11WitnessTest(name string) bool {
 	return root == "TestP2_E2E_PGSnapshotAddWhileStreaming" || root == "TestF11_E2E_WatermarkBoundaryCrashRestart"
 }
 
-func startStrand(t *testing.T, cfgPath string, extra ...string) *strandProc {
+func startStrand(t testing.TB, cfgPath string, extra ...string) *strandProc {
 	t.Helper()
 	args := append([]string{"sync", "-c", cfgPath}, extra...)
 	cmd := exec.Command(strandBin, args...)
@@ -468,7 +477,7 @@ func (p *strandProc) kill9() {
 	<-p.done
 }
 
-func (p *strandProc) stop(t *testing.T) int {
+func (p *strandProc) stop(t testing.TB) int {
 	_ = p.cmd.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-p.done:
@@ -480,7 +489,7 @@ func (p *strandProc) stop(t *testing.T) int {
 }
 
 // waitStrandLog chờ tới khi stderr của process chứa needle; fail nếu process thoát hoặc quá hạn.
-func waitStrandLog(t *testing.T, p *strandProc, needle string, timeout time.Duration) {
+func waitStrandLog(t testing.TB, p *strandProc, needle string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for !strings.Contains(p.output.String(), needle) {
@@ -850,7 +859,7 @@ func checkNoOrphans(t *testing.T, dst *mysqlNode) {
 }
 
 // testDir: thư mục làm việc của test; đặt STRAND_E2E_KEEP_DIR=1 để giữ lại log sau khi chạy.
-func testDir(t *testing.T) string {
+func testDir(t testing.TB) string {
 	keep := os.Getenv("STRAND_E2E_KEEP_DIR")
 	if keep == "" {
 		return t.TempDir()

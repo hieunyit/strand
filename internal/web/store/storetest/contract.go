@@ -3,12 +3,14 @@ package storetest
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"strand/internal/backup"
 	"strand/internal/web/store"
 )
 
@@ -119,6 +121,25 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if d["orders"] != "running" || d["bare"] != "stopped" || len(d) != 2 {
 			t.Fatalf("desired = %v", d)
 		}
+		// ObserveStop: running -> stopped (reason observed_stop) once; never touches a stopped/unknown row.
+		if ch, err := s.ObserveStop(ctx, "orders"); err != nil || !ch {
+			t.Fatalf("observe stop of a running pipeline: changed=%v err=%v", ch, err)
+		}
+		if ch, _ := s.ObserveStop(ctx, "orders"); ch {
+			t.Fatal("observe stop changed an already stopped pipeline")
+		}
+		if ch, _ := s.ObserveStop(ctx, "nobody"); ch {
+			t.Fatal("observe stop created a row")
+		}
+		ds, err := s.DesiredStates(ctx)
+		must(t, err)
+		if ds["orders"].Desired != "stopped" || ds["orders"].Reason != store.ReasonObservedStop || ds["orders"].Updated.IsZero() || ds["bare"].Reason != "" {
+			t.Fatalf("desired states = %+v", ds)
+		}
+		must(t, s.SetDesired(ctx, "orders", store.DesiredRunning)) // a web Start clears the reason
+		if ds, _ = s.DesiredStates(ctx); ds["orders"].Desired != "running" || ds["orders"].Reason != "" {
+			t.Fatalf("desired after web start = %+v", ds["orders"])
+		}
 		must(t, s.DeletePipeline(ctx, "orders"))
 		if _, ok, _ := s.GetPipeline(ctx, "orders"); ok {
 			t.Fatal("deleted pipeline still there")
@@ -194,6 +215,103 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		must(t, s.MetaSet(ctx, "k", "v2"))
 		if v, ok, _ := s.MetaGet(ctx, "k"); !ok || v != "v2" {
 			t.Fatalf("meta = %q", v)
+		}
+	})
+	t.Run("audit_archive", func(t *testing.T) {
+		s := mk(t)
+		old := time.Now().Add(-400 * 24 * time.Hour)
+		for i := 0; i < 5; i++ {
+			must(t, s.AppendAudit(ctx, store.AuditRow{Time: old.Add(time.Duration(i) * time.Hour), Action: "start", Pipeline: "p", Result: "ok", Data: []byte(`{"i":` + string(rune('0'+i)) + `}`)}))
+		}
+		must(t, s.AppendAudit(ctx, store.AuditRow{Time: time.Now(), Action: "login", Result: "ok", Data: []byte(`{}`)}))
+		before := time.Now().Add(-365 * 24 * time.Hour)
+		pl, err := s.PlanAuditArchive(ctx, before)
+		must(t, err)
+		if pl.Count != 5 || pl.MaxID <= pl.MinID || !pl.MinTS.Before(pl.MaxTS) {
+			t.Fatalf("plan = %+v", pl)
+		}
+		var ids []int64
+		must(t, s.ScanAudit(ctx, before, pl.MaxID, func(r store.AuditRow) error { ids = append(ids, r.ID); return nil }))
+		if len(ids) != 5 || ids[0] != pl.MinID || ids[4] != pl.MaxID {
+			t.Fatalf("scan ids = %v", ids)
+		}
+		// Count mismatch (rows changed since the export): nothing deleted.
+		if _, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: before, MaxID: pl.MaxID, Count: 4, File: "a.jsonl.gz", SHA256: strings.Repeat("a", 64)}); err == nil {
+			t.Fatal("archive with a wrong count accepted")
+		}
+		// Cutoff younger than a day: refused.
+		if _, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: time.Now(), MaxID: 1 << 40, Count: 6, File: "x", SHA256: strings.Repeat("a", 64)}); err == nil {
+			t.Fatal("archive of recent rows accepted")
+		}
+		n, err := s.ArchiveAudit(ctx, store.AuditArchive{Before: before, MaxID: pl.MaxID, Count: 5, File: "a.jsonl.gz", SHA256: strings.Repeat("b", 64),
+			Detail: map[string]any{"by": "test"}})
+		if err != nil || n != 5 {
+			t.Fatalf("archive: n=%d err=%v", n, err)
+		}
+		rows, _ := s.ListAudit(ctx, 10)
+		if len(rows) != 2 || rows[0].Action != store.AuditArchiveAction || rows[1].Action != "login" {
+			t.Fatalf("audit after archive = %+v", rows)
+		}
+		if !strings.Contains(string(rows[0].Data), strings.Repeat("b", 64)) || !strings.Contains(string(rows[0].Data), `"rows"`) {
+			t.Fatalf("archive entry = %s", rows[0].Data)
+		}
+		ar, err := s.ListAuditArchives(ctx, 5)
+		must(t, err)
+		if len(ar) != 1 || ar[0].Count != 5 || ar[0].MaxID != pl.MaxID || ar[0].SHA256 != strings.Repeat("b", 64) {
+			t.Fatalf("archives = %+v", ar)
+		}
+		// New rows get new ids; the archive entry itself is never archivable.
+		must(t, s.AppendAudit(ctx, store.AuditRow{Time: old, Action: "late-import", Data: []byte(`{}`)}))
+		rows, _ = s.ListAudit(ctx, 1)
+		if rows[0].ID <= ar[0].MaxID+1 {
+			t.Fatalf("audit id reused: %d", rows[0].ID)
+		}
+		if pl, _ = s.PlanAuditArchive(ctx, time.Now().Add(-25*time.Hour)); pl.Count != 1 {
+			t.Fatalf("plan after archive = %+v (audit.archive must not be archivable)", pl)
+		}
+	})
+	t.Run("lease", func(t *testing.T) {
+		s := mk(t)
+		a, err := s.TryLease(ctx, "A", `{"host":"a"}`, 400*time.Millisecond)
+		must(t, err)
+		if !a.Held || a.Holder != "A" || a.Epoch != 1 || a.Remaining <= 0 {
+			t.Fatalf("first acquire = %+v", a)
+		}
+		b, err := s.TryLease(ctx, "B", `{}`, time.Second)
+		must(t, err)
+		if b.Held || b.Holder != "A" || !strings.Contains(b.Info, `"a"`) {
+			t.Fatalf("B took a live lease: %+v", b)
+		}
+		if a, _ = s.TryLease(ctx, "A", `{}`, 400*time.Millisecond); !a.Held || a.Epoch != 1 {
+			t.Fatalf("renew = %+v", a)
+		}
+		time.Sleep(500 * time.Millisecond) // A stops renewing: the lease expires
+		b, _ = s.TryLease(ctx, "B", `{}`, time.Second)
+		if !b.Held || b.Holder != "B" || b.Epoch != 2 {
+			t.Fatalf("takeover after expiry = %+v", b)
+		}
+		if a, _ = s.TryLease(ctx, "A", `{}`, time.Second); a.Held {
+			t.Fatalf("old holder got the lease back while B holds it: %+v", a)
+		}
+		must(t, s.ReleaseLease(ctx, "A")) // not the holder: no effect
+		if b, _ = s.TryLease(ctx, "B", `{}`, time.Second); !b.Held || b.Epoch != 2 {
+			t.Fatalf("release by a non-holder changed the lease: %+v", b)
+		}
+		must(t, s.ReleaseLease(ctx, "B"))
+		if a, _ = s.TryLease(ctx, "A", `{}`, time.Second); !a.Held || a.Epoch != 3 {
+			t.Fatalf("acquire after release = %+v", a)
+		}
+		must(t, s.HeartbeatInstance(ctx, "A", `{"host":"a"}`, "active"))
+		must(t, s.HeartbeatInstance(ctx, "B", `{}`, "standby"))
+		must(t, s.HeartbeatInstance(ctx, "B", `{}`, "active"))
+		in, err := s.ListInstances(ctx)
+		must(t, err)
+		if len(in) != 2 || in[1].ID != "B" || in[1].Role != "active" || in[0].LastSeen.IsZero() {
+			t.Fatalf("instances = %+v", in)
+		}
+		must(t, s.RemoveInstance(ctx, "A"))
+		if in, _ = s.ListInstances(ctx); len(in) != 1 {
+			t.Fatalf("instances after remove = %+v", in)
 		}
 	})
 	t.Run("settings", func(t *testing.T) {
@@ -275,11 +393,241 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 			t.Fatalf("lock not exclusive: %d holders at once", maxInside)
 		}
 	})
+	t.Run("backups", func(t *testing.T) { runBackups(t, mk(t)) })
+	t.Run("backup_jobs", func(t *testing.T) { runBackupJobs(t, mk(t)) })
 }
 
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func runBackups(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	cat, err := backup.NewCatalog(s)
+	must(t, err)
+	base := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
+	rec := func(id, source string, at time.Time) backup.Record {
+		return backup.Record{ID: id, Source: source, Engine: "mysql", Tool: "mysqldump", ToolVersion: "8.4",
+			Bucket: "central-backups", ObjectKey: "prod/" + id + "/artifact", ManifestURI: "s3://central-backups/prod/" + id + "/manifest.json",
+			Position: backup.Position{GTIDSet: "uuid:1-10"}, Status: backup.StatusQueued, CreatedAt: at}
+	}
+	r1 := rec("b1", "db1", base)
+	got, inserted, err := cat.Create(ctx, r1)
+	if err != nil || !inserted || got.ID != "b1" {
+		t.Fatalf("create: %+v %v %v", got, inserted, err)
+	}
+	// Idempotent retry with the same identity; conflicting identity or object key is rejected.
+	if _, inserted, err := cat.Create(ctx, r1); err != nil || inserted {
+		t.Fatalf("retry create: inserted=%v err=%v", inserted, err)
+	}
+	other := r1
+	other.Source = "db2"
+	if _, _, err := cat.Create(ctx, other); !errors.Is(err, backup.ErrConflict) {
+		t.Fatalf("conflicting identity err = %v", err)
+	}
+	sameKey := rec("b9", "db1", base)
+	sameKey.ObjectKey = r1.ObjectKey
+	if _, _, err := cat.Create(ctx, sameKey); !errors.Is(err, backup.ErrConflict) {
+		t.Fatalf("duplicate object key err = %v", err)
+	}
+	// Records cannot be created already complete.
+	done := rec("b8", "db1", base)
+	done.Status = backup.StatusComplete
+	if _, _, err := cat.Create(ctx, done); !errors.Is(err, backup.ErrInvalid) {
+		t.Fatalf("create complete err = %v", err)
+	}
+
+	// Lifecycle: queued -> uploading -> verifying -> complete (finalize) -> expired.
+	if _, _, err := cat.UpdateStatus(ctx, "b1", backup.StatusComplete, nil); err == nil {
+		t.Fatal("queued -> complete must be rejected")
+	}
+	if _, changed, err := cat.UpdateStatus(ctx, "b1", backup.StatusUploading, nil); err != nil || !changed {
+		t.Fatalf("to uploading: %v %v", changed, err)
+	}
+	if _, _, err := cat.Finalize(ctx, "b1", backup.StatusVerifying, 10, strings.Repeat("a", 64), r1.ManifestURI, time.Now()); err == nil {
+		t.Fatal("finalize from uploading must fail")
+	}
+	if _, _, err := cat.UpdateStatus(ctx, "b1", backup.StatusVerifying, nil); err != nil {
+		t.Fatal(err)
+	}
+	sum := strings.Repeat("AB", 32)
+	fin, changed, err := cat.Finalize(ctx, "b1", backup.StatusVerifying, 1234, sum, r1.ManifestURI, time.Now())
+	if err != nil || !changed || fin.Status != backup.StatusComplete || fin.SHA256 != strings.ToLower(sum) || fin.Bytes != 1234 || fin.VerifiedAt == nil {
+		t.Fatalf("finalize: %+v %v %v", fin, changed, err)
+	}
+	if _, changed, err := cat.Finalize(ctx, "b1", backup.StatusVerifying, 1234, sum, r1.ManifestURI, time.Now()); err != nil || changed {
+		t.Fatalf("finalize retry must be an idempotent no-op: %v %v", changed, err)
+	}
+	if _, _, err := cat.Finalize(ctx, "b1", backup.StatusVerifying, 99, sum, r1.ManifestURI, time.Now()); !errors.Is(err, backup.ErrTransition) {
+		t.Fatalf("finalize with different metadata err = %v", err)
+	}
+	if _, _, err := cat.UpdateStatus(ctx, "b1", backup.StatusUploading, nil); !errors.Is(err, backup.ErrTransition) {
+		t.Fatalf("complete -> uploading err = %v", err)
+	}
+
+	// Legal hold blocks expiry.
+	held := rec("b2", "db1", base.Add(time.Minute))
+	held.LegalHold = true
+	_, _, err = cat.Create(ctx, held)
+	must(t, err)
+	for _, st := range []backup.Status{backup.StatusUploading, backup.StatusVerifying} {
+		_, _, err = cat.UpdateStatus(ctx, "b2", st, nil)
+		must(t, err)
+	}
+	_, _, err = cat.Finalize(ctx, "b2", backup.StatusVerifying, 1, sum, held.ManifestURI, time.Now())
+	must(t, err)
+	if _, _, err := cat.UpdateStatus(ctx, "b2", backup.StatusExpired, nil); !errors.Is(err, backup.ErrInvalid) {
+		t.Fatalf("expire legal hold err = %v", err)
+	}
+	if _, _, err := s.UpdateBackupStatus(ctx, "b2", backup.StatusComplete, backup.StatusExpired, nil); err == nil {
+		t.Fatal("store must refuse to expire a legal-hold backup even when called directly")
+	}
+	if _, _, err := cat.UpdateStatus(ctx, "b1", backup.StatusExpired, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Failed uploads can be retried.
+	f := rec("b3", "db2", base.Add(2*time.Minute))
+	f.Engine, f.Position = "postgres", backup.Position{LSN: "0/16B3748"}
+	_, _, err = cat.Create(ctx, f)
+	must(t, err)
+	_, _, err = cat.UpdateStatus(ctx, "b3", backup.StatusFailed, nil)
+	must(t, err)
+	if _, changed, err := cat.UpdateStatus(ctx, "b3", backup.StatusUploading, nil); err != nil || !changed {
+		t.Fatalf("retry failed: %v %v", changed, err)
+	}
+	// Stale expected status (another writer moved it) is a transition error, not a silent overwrite.
+	if _, _, err := s.UpdateBackupStatus(ctx, "b3", backup.StatusQueued, backup.StatusFailed, nil); !errors.Is(err, backup.ErrTransition) {
+		t.Fatalf("CAS with stale expected status err = %v", err)
+	}
+
+	// Listing: newest first, filters, limit.
+	all, err := cat.List(ctx, backup.Filter{})
+	if err != nil || len(all) != 3 || all[0].ID != "b3" || all[2].ID != "b1" {
+		t.Fatalf("list all = %v err %v", ids(all), err)
+	}
+	if l, _ := cat.List(ctx, backup.Filter{Source: "db1"}); len(l) != 2 {
+		t.Fatalf("source filter = %v", ids(l))
+	}
+	if l, _ := cat.List(ctx, backup.Filter{Engine: "postgres"}); len(l) != 1 || l[0].Position.LSN != "0/16B3748" {
+		t.Fatalf("engine filter = %v", ids(l))
+	}
+	if l, _ := cat.List(ctx, backup.Filter{Status: backup.StatusExpired}); len(l) != 1 || l[0].ID != "b1" {
+		t.Fatalf("status filter = %v", ids(l))
+	}
+	after := base.Add(30 * time.Second)
+	if l, _ := cat.List(ctx, backup.Filter{CreatedAfter: &after, Limit: 1}); len(l) != 1 || l[0].ID != "b3" {
+		t.Fatalf("created_after+limit = %v", ids(l))
+	}
+	// Keyset pagination walks every record exactly once, including records sharing created_at.
+	for _, id := range []string{"t1", "t2", "t3"} {
+		r := rec(id, "db3", base.Add(3*time.Minute))
+		_, _, err := cat.Create(ctx, r)
+		must(t, err)
+	}
+	var seen []string
+	var cur *backup.Cursor
+	for page := 0; page < 10; page++ {
+		l, err := cat.List(ctx, backup.Filter{Limit: 2, After: cur})
+		must(t, err)
+		seen = append(seen, ids(l)...)
+		next := backup.NextCursor(l, 2)
+		if next == "" {
+			break
+		}
+		c, err := backup.ParseCursor(next)
+		must(t, err)
+		cur = &c
+	}
+	if strings.Join(seen, ",") != "t3,t2,t1,b3,b2,b1" {
+		t.Fatalf("paged listing = %v", seen)
+	}
+	if _, err := backup.ParseCursor("not-a-cursor!"); !errors.Is(err, backup.ErrInvalid) {
+		t.Fatalf("bad cursor err = %v", err)
+	}
+	if _, err := cat.List(ctx, backup.Filter{Status: "bogus"}); !errors.Is(err, backup.ErrInvalid) {
+		t.Fatalf("bad status filter err = %v", err)
+	}
+	if r, ok, err := cat.Get(ctx, "nope"); err != nil || ok {
+		t.Fatalf("get missing = %+v %v %v", r, ok, err)
+	}
+	if _, _, err := cat.Get(ctx, "../etc"); !errors.Is(err, backup.ErrInvalid) {
+		t.Fatalf("get invalid id err = %v", err)
+	}
+}
+
+func ids(rs []backup.Record) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.ID
+	}
+	return out
+}
+
+func runBackupJobs(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	j := backup.Job{ID: "bjob-1", Name: "nightly", Command: "/opt/strand-backup.d/mysql", EverySeconds: 3600,
+		ArtifactTemplate: "/var/backups/{id}.sql", ManifestTemplate: "/var/backups/{id}.json", Bucket: "central-backups", Enabled: true}
+	must(t, s.CreateBackupJob(ctx, j))
+	if err := s.CreateBackupJob(ctx, j); err == nil {
+		t.Fatal("duplicate job id accepted")
+	}
+	got, ok, err := s.GetBackupJob(ctx, "bjob-1")
+	if err != nil || !ok || got.Name != "nightly" {
+		t.Fatalf("get = %+v %v %v", got, ok, err)
+	}
+	// next_run_at CAS on updated_at.
+	next := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+	if ok, err := s.SetBackupJobNextRun(ctx, j.ID, got.UpdatedAt, next); err != nil || !ok {
+		t.Fatalf("set next run: %v %v", ok, err)
+	}
+	got.Name = "nightly-2"
+	if ok, err := s.UpdateBackupJob(ctx, got); err != nil || !ok {
+		t.Fatalf("update: %v %v", ok, err)
+	}
+	upd, _, _ := s.GetBackupJob(ctx, j.ID)
+	if !upd.UpdatedAt.After(got.UpdatedAt) {
+		t.Fatal("update must advance updated_at (other schedulers detect the new revision)")
+	}
+	if ok, _ := s.SetBackupJobNextRun(ctx, j.ID, got.UpdatedAt, next); ok {
+		t.Fatal("stale revision must not move next_run_at")
+	}
+	if _, ok, _ := s.BeginBackupJobRun(ctx, j.ID, got.UpdatedAt); ok {
+		t.Fatal("stale revision must not start a run")
+	}
+	started, ok, err := s.BeginBackupJobRun(ctx, j.ID, upd.UpdatedAt)
+	if err != nil || !ok {
+		t.Fatalf("begin: %v %v", ok, err)
+	}
+	running, _, _ := s.GetBackupJob(ctx, j.ID)
+	if running.LastRunStatus != backup.RunStatusRunning || running.NextRunAt == nil || running.NextRunAt.Before(started.Add(59*time.Minute)) {
+		t.Fatalf("running job = %+v (next run must be one interval after start: no catch-up burst)", running)
+	}
+	// A crashed run is recovered as interrupted exactly once.
+	if ok, err := s.RecoverBackupJobRun(ctx, j.ID, running.UpdatedAt); err != nil || !ok {
+		t.Fatalf("recover: %v %v", ok, err)
+	}
+	if ok, _ := s.FinishBackupJobRun(ctx, j.ID, started, backup.RunStatusSucceeded); ok {
+		t.Fatal("finishing an already-recovered run must be a no-op")
+	}
+	rec, _, _ := s.GetBackupJob(ctx, j.ID)
+	if rec.LastRunStatus != backup.RunStatusInterrupted || rec.RunFinishedAt == nil {
+		t.Fatalf("recovered = %+v", rec)
+	}
+	started, _, _ = s.BeginBackupJobRun(ctx, j.ID, rec.UpdatedAt)
+	if ok, err := s.FinishBackupJobRun(ctx, j.ID, started, backup.RunStatusSucceeded); err != nil || !ok {
+		t.Fatalf("finish: %v %v", ok, err)
+	}
+	if l, _ := s.ListBackupJobs(ctx); len(l) != 1 {
+		t.Fatalf("list = %d", len(l))
+	}
+	if ok, err := s.DeleteBackupJob(ctx, j.ID); err != nil || !ok {
+		t.Fatalf("delete: %v %v", ok, err)
+	}
+	if _, ok, _ := s.GetBackupJob(ctx, j.ID); ok {
+		t.Fatal("deleted job still there")
 	}
 }

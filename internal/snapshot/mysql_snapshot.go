@@ -353,9 +353,13 @@ type MySQLSnapshotter struct {
 	// Khác nil thì readChunkWatermarked không chờ GTID.
 	Pos PosWatermarks
 
-	// Barrier (tùy chọn) bao quanh bước đọc biên + đăng ký range + dọn target. Pipeline
-	// truyền vào hàm dừng router và chờ mọi Txn đã nhận được apply xong, để không Txn cũ
+	// Barrier (tùy chọn) bao quanh bước đọc biên + đăng ký range + dọn target, và mỗi lần flush chunk.
+	// Pipeline truyền vào hàm dừng router và chờ mọi Txn đã nhận được apply xong, để không Txn cũ
 	// nào của bảng còn nằm trong hàng đợi khi range-state bắt đầu có hiệu lực.
+	// Hợp đồng: trong lúc fn chạy, router KHÔNG gọi range-state (HandleStreamEvent...) — FlushChunk dựa vào
+	// đó để ghi target ngoài RangeStateManager.mu (xem FlushChunk). Barrier có thể chạy đồng thời nhiều fn
+	// của các BẢNG KHÁC NHAU trong cùng một lần dừng router (snapshot song song, max_parallel); fn của cùng
+	// một bảng luôn tuần tự (mỗi bảng một reader).
 	Barrier func(ctx context.Context, fn func() error) error
 
 	// TargetName (tùy chọn) ánh xạ tên bảng nguồn sang tên bảng đích (tables.rename).
@@ -370,7 +374,8 @@ type MySQLSnapshotter struct {
 	// Pace (tùy chọn) được gọi giữa các chunk; governor dùng để giãn khoảng cách chunk. chunkBytes:
 	// số byte row thật của chunk vừa đọc (chi phí đọc dùng để giãn nhịp; ≤ 0 nếu không biết); readStart:
 	// lúc bắt đầu đọc chunk đó (thời gian đọc + flush được trừ vào khoảng giãn).
-	Pace func(ctx context.Context, chunkBytes int64, readStart time.Time) error
+	// table: bảng của chunk (nhiều bảng có thể giãn nhịp đồng thời, cùng chia một token bucket).
+	Pace func(ctx context.Context, table model.TableID, chunkBytes int64, readStart time.Time) error
 
 	// NextChunkRows (tùy chọn) chọn cỡ (số hàng) của chunk chính kế tiếp từ số liệu đọc của chunk chính
 	// vừa xong — luật 250 ms và trần chi phí R · 0,25 s của governor (02 §7). nil = cố định ChunkRows của plan.
@@ -401,6 +406,9 @@ type MySQLSnapshotter struct {
 	RereadKeysTotal atomic.Int64
 	// RowsFlushed: tổng số row snapshot đã ghi xuống target (strand top: tiến độ, tốc độ).
 	RowsFlushed atomic.Int64
+	// OnFlushed (tùy chọn): số row của một chunk vừa flush xong, theo bảng (tiến độ/tốc độ từng bảng khi
+	// nhiều bảng snapshot song song). Có thể được gọi đồng thời từ nhiều bảng.
+	OnFlushed func(table model.TableID, rows int64)
 
 	// FlushRange / FlushKeySet / ClearUnreadRange (việc C): như FlushRows / FlushKeys / ClearUnread cho
 	// bảng có PK tổng quát, với cận khóa thay vì int64. Bắt buộc khi target không phải MySQL.
@@ -623,7 +631,26 @@ func GetTableBounds(ctx context.Context, db *sql.DB, table model.TableID, pkCol 
 	return &b, nil
 }
 
+// unlockedFlush: FlushChunk ghi target mà không giữ RangeStateManager.mu. Chỉ khi (1) có Barrier — hợp
+// đồng của Barrier: fn chạy khi router đã dừng, nên không event stream nào chạm range-state trong lúc ghi —
+// và (2) source MySQL (Chunks == nil). Source PG giữ khóa suốt flush như trước: chunk re-read (TOAST, 02 §8)
+// và AddReread đi cùng router PG, và snapshot PG vẫn tuần tự (bootstrap.logical.max_parallel không áp dụng).
+func (s *MySQLSnapshotter) unlockedFlush() bool { return s.Barrier != nil && s.Chunks == nil }
+
 // FlushChunk thực hiện merge và ghi vào target DB trong một thao tác đồng bộ nguyên tử.
+//
+// Khóa (RangeStateManager.mu): trước đây giữ suốt cả lần ghi target (merge + DELETE range + upsert +
+// commit, ~giây), nên mọi việc cần range-state — router, và reader của BẢNG KHÁC (BeginReading,
+// StartReading, CarveChunk...) — đứng chờ: snapshot song song nhiều bảng sẽ bị tuần tự hóa ở đây. Nay
+// (unlockedFlush) khóa chỉ bao: merge (chuyển chunk sang "Flush", lấy ảnh buffer) và MarkDone. Phần ghi
+// target chạy ngoài khóa vẫn đúng RS-1/RS-2 vì:
+//   - Router dừng suốt Barrier (hợp đồng của Barrier), nên buffer của chunk không đổi giữa merge và MarkDone,
+//     và không event nào của range được apply thẳng trong lúc ghi; vi phạm (router chạy) bị bắt ở
+//     handleLocked (chunk.unlockedFlush → ActionReject), không mất event âm thầm.
+//   - DELETE range + upsert vẫn trong MỘT transaction ở target (flushRowsRangeTimed / FlushRows...).
+//   - Chunk chỉ thành "Xong" (event sau đó apply thẳng) SAU khi transaction đó commit.
+//
+// Mã hóa khóa row snapshot (WEIGHT_STRING có thể hỏi source) cũng chuyển ra trước khi lấy khóa.
 func (s *MySQLSnapshotter) FlushChunk(
 	ctx context.Context,
 	dstDB *sql.DB,
@@ -641,18 +668,34 @@ func (s *MySQLSnapshotter) FlushChunk(
 			}
 		}()
 	}
+	unlocked := s.unlockedFlush()
+	mergeStart := time.Now()
+	if unlocked {
+		chunk.precomputeKeys() // ngoài khóa: row snapshot bất biến sau FinishReading
+	}
+	encodeDur := time.Since(mergeStart)
 	managerLockStart := time.Now()
 	targetMeasured = s.OnTargetFlush != nil
 	s.Manager.mu.Lock()
-	defer s.Manager.mu.Unlock()
+	locked := true
+	unlock := func() {
+		if locked {
+			locked = false
+			s.Manager.mu.Unlock()
+		}
+	}
+	defer unlock()
 	targetDiag.ManagerLockWait = time.Since(managerLockStart)
 
-	mergeStart := time.Now()
+	mergeStart = time.Now()
 	mergedRows := s.Manager.MergeLocked(chunk)
-	targetDiag.Merge = time.Since(mergeStart)
+	targetDiag.Merge = encodeDur + time.Since(mergeStart)
 	defer func() {
 		if retErr == nil {
 			s.RowsFlushed.Add(int64(len(mergedRows)))
+			if s.OnFlushed != nil {
+				s.OnFlushed(table, int64(len(mergedRows)))
+			}
 		}
 	}()
 	if chunk.mergeErr != nil {
@@ -661,19 +704,37 @@ func (s *MySQLSnapshotter) FlushChunk(
 		// Dừng: chunk được đọc lại khi chạy tiếp (plan chưa qua chunk này).
 		return fmt.Errorf("snapshot flush of %s: %w", table, chunk.mergeErr)
 	}
+	// Tập tombstone của đường ExactKeys đọc buffer: lấy trong khóa, cùng lúc với merge.
+	exact := !codecOrInt(chunk.codec).IsSingleInt() && s.FlushRows != nil && chunk.KeySet == nil &&
+		s.ExactKeys != nil && s.ExactKeys(table)
+	var dels []Bound
+	var delsErr error
+	if exact && s.FlushExact != nil {
+		dels, delsErr = exactDeletes(chunk, codecOrInt(chunk.codec))
+	}
+	markDone := func() {
+		if locked {
+			s.Manager.MarkDoneLocked(chunk)
+			return
+		}
+		s.Manager.MarkDone(chunk)
+	}
+	if unlocked {
+		chunk.unlockedFlush = true
+		unlock()
+	}
 	if !codecOrInt(chunk.codec).IsSingleInt() && s.FlushRows != nil {
 		// Khóa tổng quát, target không phải MySQL (việc C).
 		var err error
 		switch {
 		case chunk.KeySet != nil:
 			err = s.FlushKeySet(ctx, s.target(table), columnNames, mergedRows, chunk.KeySet)
-		case s.ExactKeys != nil && s.ExactKeys(table):
+		case exact:
 			// Target sắp khóa khác thứ tự source: flush theo tập khóa (cross_order.go).
 			if s.FlushExact == nil {
 				return fmt.Errorf("snapshot flush of %s: the target orders the primary key differently and needs FlushExact", table)
 			}
-			var dels []Bound
-			if dels, err = exactDeletes(chunk, codecOrInt(chunk.codec)); err == nil {
+			if err = delsErr; err == nil {
 				err = s.FlushExact(ctx, s.target(table), columnNames, mergedRows, dels)
 			}
 		default:
@@ -682,7 +743,7 @@ func (s *MySQLSnapshotter) FlushChunk(
 		if err != nil {
 			return err
 		}
-		s.Manager.MarkDoneLocked(chunk)
+		markDone()
 		return nil
 	}
 	if chunk.KeySet != nil {
@@ -692,14 +753,14 @@ func (s *MySQLSnapshotter) FlushChunk(
 		if err := s.FlushKeys(ctx, s.target(table), pkCol, columnNames, mergedRows, chunk.Keys); err != nil {
 			return err
 		}
-		s.Manager.MarkDoneLocked(chunk)
+		markDone()
 		return nil
 	}
 	if s.FlushRows != nil {
 		if err := s.FlushRows(ctx, s.target(table), pkCol, columnNames, mergedRows, chunk.StartPK, chunk.EndPK); err != nil {
 			return err
 		}
-		s.Manager.MarkDoneLocked(chunk)
+		markDone()
 		return nil
 	}
 	codec := chunk.codec
@@ -733,7 +794,7 @@ func (s *MySQLSnapshotter) FlushChunk(
 		}
 		time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
 	}
-	s.Manager.MarkDoneLocked(chunk)
+	markDone()
 	return nil
 }
 
@@ -1070,7 +1131,7 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 		// Throttling nếu có
 		paceStart := time.Now()
 		if s.Pace != nil {
-			if err := s.Pace(ctx, read.Bytes, readStart); err != nil {
+			if err := s.Pace(ctx, table, read.Bytes, readStart); err != nil {
 				return nil, err
 			}
 		} else if s.opts.SleepBetweenChunks > 0 {

@@ -508,6 +508,7 @@ func (s *Server) bgStart(ctx context.Context, p *Pipeline, startAt ...string) (A
 
 // bgStop: `strand stop -c <cfg>` (SIGTERM, chờ ghi checkpoint; mặc định tối đa 150 s).
 func (s *Server) bgStop(ctx context.Context, p *Pipeline) (ActionResult, error) {
+	defer s.beginWebStop(p.Name)() // dừng do web: không bị coi là "dừng ngoài web" (observed_stop.go)
 	args := []string{"stop", "-c", p.ConfigPath}
 	if p.PidFile != "" {
 		args = append(args, "--pid-file="+p.PidFile)

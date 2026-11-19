@@ -58,24 +58,36 @@
     {{if gt .Tables.RowsEstimate 0}}<div class="bars" data-bind-bar="rows_pct">{{bigbar .Tables.RowsPct "Rows copied (estimate)"}}</div>{{end}}
     <div class="running" id="running-tables" aria-live="off">
       <h3>Copying now <span class="badge st-tbl-running c-num" data-bind="tables_running">{{.Tables.Running}}</span></h3>
-      <ul class="runlist" id="runlist">{{range .Tables.Tables}}{{if eq .State "running"}}<li data-run="{{.Table}}"><span class="mono wrap rl-name">{{.Table}}</span><span class="rl-bar">{{bar .ProgressPct}}</span><span class="c-num rl-pct">{{pct .ProgressPct}}</span><span class="c-num small muted rl-rows">{{tblRows .}}</span><span class="c-num small rl-eta">{{tblETA .}}</span></li>{{end}}{{end}}</ul>
+      <ul class="runlist" id="runlist"{{if .Tables.Paged}} data-paged="1"{{end}}>{{range .Tables.RunningRows}}{{if eq .State "running"}}<li data-run="{{.Table}}"><span class="mono wrap rl-name">{{.Table}}</span><span class="rl-bar">{{bar .ProgressPct}}</span><span class="c-num rl-pct">{{pct .ProgressPct}}</span><span class="c-num small muted rl-rows">{{tblRows .}}</span><span class="c-num small rl-eta">{{tblETA .}}</span></li>{{end}}{{end}}</ul>
+      {{if gt .Tables.RunningMore 0}}<p class="muted small" id="runlist-more">and {{.Tables.RunningMore}} more (filter the list below by Running).</p>{{end}}
       <p class="muted small" id="runlist-empty"{{if gt .Tables.Running 0}} hidden{{end}}>No table is being copied right now.</p>
     </div>
     <p class="muted small"><span data-bind="tables_done">{{.Tables.Done}}</span> done, <span data-bind="tables_running">{{.Tables.Running}}</span> running, <span data-bind="tables_pending">{{.Tables.Pending}}</span> pending. Row counts are estimates from the source statistics and can be off. Completion times per table are not reported by the pipeline, so none are shown.</p>
-    <div class="chips" role="group" aria-label="Filter tables by status">
+    {{if .Tables.Paged}}{{$q := .Tables.Query}}{{$b := .TablesBase}}<nav class="chips" aria-label="Filter tables by status">
+      <a class="chip c-all" href="{{tablesHref $b $q "tstate" "all"}}" aria-current="{{if eq $q.State "all"}}true{{else}}false{{end}}">All <b data-bind="tables_total">{{.Tables.Total}}</b></a>
+      <a class="chip c-running" href="{{tablesHref $b $q "tstate" (or (and (ne $q.State "running") "running") "all")}}" aria-current="{{if eq $q.State "running"}}true{{else}}false{{end}}"><span class="dot"></span>Running <b data-bind="tables_running">{{.Tables.Running}}</b></a>
+      <a class="chip c-pending" href="{{tablesHref $b $q "tstate" (or (and (ne $q.State "pending") "pending") "all")}}" aria-current="{{if eq $q.State "pending"}}true{{else}}false{{end}}"><span class="dot"></span>Pending <b data-bind="tables_pending">{{.Tables.Pending}}</b></a>
+      <a class="chip c-done" href="{{tablesHref $b $q "tstate" (or (and (ne $q.State "done") "done") "all")}}" aria-current="{{if eq $q.State "done"}}true{{else}}false{{end}}"><span class="dot"></span>Done <b data-bind="tables_done">{{.Tables.Done}}</b></a>
+    </nav>{{else}}    <div class="chips" role="group" aria-label="Filter tables by status">
       <button type="button" class="chip c-all" data-tfilter="all" aria-pressed="true">All <b data-bind="tables_total">{{.Tables.Total}}</b></button>
       <button type="button" class="chip c-running" data-tfilter="running" aria-pressed="false"><span class="dot"></span>Running <b data-bind="tables_running">{{.Tables.Running}}</b></button>
       <button type="button" class="chip c-pending" data-tfilter="pending" aria-pressed="false"><span class="dot"></span>Pending <b data-bind="tables_pending">{{.Tables.Pending}}</b></button>
       <button type="button" class="chip c-done" data-tfilter="done" aria-pressed="false"><span class="dot"></span>Done <b data-bind="tables_done">{{.Tables.Done}}</b></button>
-    </div>
+    </div>{{end}}
   </section>
   <section class="card"><h2>Tables</h2>
-    <div class="toolbar" role="search">
+    {{if .Tables.Paged}}{{$q := .Tables.Query}}<form class="toolbar" role="search" method="get" action="{{.TablesBase}}" id="tb-form">
+      {{if ne $q.State "all"}}<input type="hidden" name="tstate" value="{{$q.State}}">{{end}}
+      <span class="searchbox">{{icon "search"}}<input type="search" name="tq" id="tb-q" value="{{$q.Q}}" placeholder="Search tables (Enter)" aria-label="Search tables" autocomplete="off"></span>
+      <label for="tb-psort">Sort <select id="tb-psort" name="tsort"><option value="ord"{{if eq $q.Sort "ord"}} selected{{end}}>Status (running first)</option><option value="name"{{if eq $q.Sort "name"}} selected{{end}}>Name</option><option value="pct"{{if eq $q.Sort "pct"}} selected{{end}}>Progress</option><option value="rows"{{if eq $q.Sort "rows"}} selected{{end}}>Rows</option><option value="eta"{{if eq $q.Sort "eta"}} selected{{end}}>ETA</option></select></label>
+      <button class="btn" type="submit">Apply</button>
+      <span class="muted small" id="tb-count" aria-live="polite">{{if .Tables.Matching}}{{.Tables.First}}&ndash;{{.Tables.Last}} of {{.Tables.Matching}}{{if or $q.Q (ne $q.State "all")}} matching ({{.Tables.Total}} tables){{else}} tables{{end}}{{else}}No table matches{{end}}</span>
+    </form>{{else}}    <div class="toolbar" role="search">
       <span class="searchbox">{{icon "search"}}<input type="search" id="tb-filter" placeholder="Search tables" aria-label="Search tables" autocomplete="off"></span>
       <label for="tb-sort">Sort <select id="tb-sort"><option value="ord">Status (running first)</option><option value="name">Name</option><option value="pct">Progress</option><option value="rows">Rows</option><option value="eta">ETA</option></select></label>
       <span class="muted small" id="tb-count" aria-live="polite">{{.Tables.Total}} tables</span>
-    </div>
-    <div class="tablewrap tall"><table class="grid" id="tables-table">
+    </div>{{end}}
+    <div class="tablewrap tall"><table class="grid" id="tables-table"{{if .Tables.Paged}} data-paged="1"{{end}}>
       <caption class="sr-only">Snapshot status per table</caption>
       <thead><tr><th scope="col">Table</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col" class="r">Rows copied / estimate</th><th scope="col" class="r">ETA</th><th scope="col">Row key</th><th scope="col" class="hide-md">Ranges</th></tr></thead>
       <tbody>{{range $i, $t := .Tables.Tables}}{{$k := keyKind $t}}<tr class="trow{{if eq $t.State "running"}} is-running{{end}}" data-table="{{$t.Table}}" data-state="{{$t.State}}" data-ord="{{$i}}" data-pct="{{printf "%.2f" $t.ProgressPct}}" data-rows="{{tblEst $t}}" data-eta="{{if gt $t.ETASeconds 0.0}}{{printf "%.0f" $t.ETASeconds}}{{else}}-1{{end}}" data-key="{{$k.Kind}}">
@@ -90,6 +102,11 @@
       <tr class="nomatch" hidden><td colspan="7" class="muted">No table matches the filter. <button type="button" class="btn ghost" id="tb-clear">Clear filter</button></td></tr>
       </tbody>
     </table></div>
+    {{if and .Tables.Paged (gt .Tables.Pages 1)}}{{$q := .Tables.Query}}{{$b := .TablesBase}}<nav class="pager" aria-label="Table pages">
+      {{if gt $q.Page 1}}<a class="btn" href="{{tablesHref $b $q "tpage" "1"}}">First</a> <a class="btn" rel="prev" href="{{tablesHref $b $q "tpage" (printf "%d" (add $q.Page -1))}}">Previous</a>{{end}}
+      <span class="muted small">Page {{$q.Page}} of {{.Tables.Pages}}</span>
+      {{if lt $q.Page .Tables.Pages}}<a class="btn" rel="next" href="{{tablesHref $b $q "tpage" (printf "%d" (add $q.Page 1))}}">Next</a> <a class="btn" href="{{tablesHref $b $q "tpage" (printf "%d" .Tables.Pages)}}">Last</a>{{end}}
+    </nav>{{end}}
   </section>{{end}}
   {{if .Ctl.Reachable}}<section class="card"><h2>Snapshot control</h2>
     <div class="actions">

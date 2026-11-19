@@ -3,10 +3,13 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"strand/internal/backup"
 )
 
 // Mem is an in-memory Store for tests (several web Servers can share one Mem to model a restart).
@@ -15,24 +18,30 @@ type Mem struct {
 	admin    *Admin
 	sessions map[string]Session
 	pipes    map[string]Pipeline
-	desired  map[string]string
+	desired  map[string]DesiredState
 	jobs     map[string]Job
 	jobOut   map[string]map[int64][]byte
 	// metrics, metrics1m: pipeline -> UnixNano(ts) -> mẫu.
-	metrics   map[string]map[int64]MetricSample
-	metrics1m map[string]map[int64]MetricSample
-	settings  map[string]string
-	wizards   map[string][]byte
-	audit     []AuditRow
-	meta      map[string]string
-	locks     map[string]*sync.Mutex
+	metrics    map[string]map[int64]MetricSample
+	metrics1m  map[string]map[int64]MetricSample
+	settings   map[string]string
+	wizards    map[string][]byte
+	audit      []AuditRow
+	meta       map[string]string
+	backups    map[string]backup.Record
+	backupJobs map[string]backup.Job
+	locks      map[string]*sync.Mutex
+	lease      *Lease
+	auditSeq   int64
+	archives   []AuditArchiveRec
+	instances  map[string]Instance
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }
 
 func NewMem() *Mem {
-	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]string{},
-		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, locks: map[string]*sync.Mutex{}}
+	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]DesiredState{},
+		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, backups: map[string]backup.Record{}, backupJobs: map[string]backup.Job{}, locks: map[string]*sync.Mutex{}}
 }
 
 var errDown = errors.New("store: database is down")
@@ -246,8 +255,19 @@ func (m *Mem) SetDesired(_ context.Context, name, d string) error {
 		return err
 	}
 	defer m.mu.Unlock()
-	m.desired[name] = d
+	m.desired[name] = DesiredState{Desired: d, Updated: time.Now()}
 	return nil
+}
+func (m *Mem) ObserveStop(_ context.Context, name string) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	if m.desired[name].Desired != DesiredRunning {
+		return false, nil
+	}
+	m.desired[name] = DesiredState{Desired: DesiredStopped, Reason: ReasonObservedStop, Updated: time.Now()}
+	return true, nil
 }
 func (m *Mem) Desired(context.Context) (map[string]string, error) {
 	if err := m.enter(); err != nil {
@@ -255,6 +275,17 @@ func (m *Mem) Desired(context.Context) (map[string]string, error) {
 	}
 	defer m.mu.Unlock()
 	out := map[string]string{}
+	for k, v := range m.desired {
+		out[k] = v.Desired
+	}
+	return out, nil
+}
+func (m *Mem) DesiredStates(context.Context) (map[string]DesiredState, error) {
+	if err := m.enter(); err != nil {
+		return nil, err
+	}
+	defer m.mu.Unlock()
+	out := make(map[string]DesiredState, len(m.desired))
 	for k, v := range m.desired {
 		out[k] = v
 	}
@@ -386,7 +417,7 @@ func (m *Mem) AppendAudit(_ context.Context, r AuditRow) error {
 		return err
 	}
 	defer m.mu.Unlock()
-	r.ID = int64(len(m.audit) + 1)
+	r.ID = m.nextAuditID()
 	m.audit = append(m.audit, r)
 	return nil
 }
@@ -396,7 +427,7 @@ func (m *Mem) AppendAuditBatch(_ context.Context, rows []AuditRow, progress *Met
 	}
 	defer m.mu.Unlock()
 	for _, r := range rows {
-		r.ID = int64(len(m.audit) + 1)
+		r.ID = m.nextAuditID()
 		m.audit = append(m.audit, r)
 	}
 	if progress != nil {
@@ -433,6 +464,336 @@ func (m *Mem) MetaSet(_ context.Context, k, v string) error {
 	return nil
 }
 
+func cloneBackup(r backup.Record) backup.Record {
+	if r.VerifiedAt != nil {
+		t := *r.VerifiedAt
+		r.VerifiedAt = &t
+	}
+	if r.ExpiresAt != nil {
+		t := *r.ExpiresAt
+		r.ExpiresAt = &t
+	}
+	return r
+}
+
+func (m *Mem) CreateBackup(_ context.Context, r backup.Record) (backup.Record, bool, error) {
+	r.SHA256 = strings.ToLower(r.SHA256)
+	if err := backup.ValidateCreate(r); err != nil {
+		return backup.Record{}, false, err
+	}
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	if old, ok := m.backups[r.ID]; ok {
+		if !backup.SameIdentity(old, r) {
+			return backup.Record{}, false, backup.ErrConflict
+		}
+		return cloneBackup(old), false, nil
+	}
+	for _, old := range m.backups {
+		if old.Bucket == r.Bucket && old.ObjectKey == r.ObjectKey {
+			return backup.Record{}, false, backup.ErrConflict
+		}
+	}
+	r.SHA256 = strings.ToLower(r.SHA256)
+	m.backups[r.ID] = cloneBackup(r)
+	return cloneBackup(r), true, nil
+}
+
+func (m *Mem) GetBackup(_ context.Context, id string) (backup.Record, bool, error) {
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	return cloneBackup(r), ok, nil
+}
+
+func (m *Mem) ListBackups(_ context.Context, f backup.Filter) ([]backup.Record, error) {
+	if err := m.enter(); err != nil {
+		return nil, err
+	}
+	defer m.mu.Unlock()
+	limit := f.Limit
+	if limit <= 0 || limit > backup.MaxListLimit {
+		limit = backup.MaxListLimit
+	}
+	out := make([]backup.Record, 0)
+	for _, r := range m.backups {
+		if (f.Source != "" && r.Source != f.Source) || (f.Engine != "" && r.Engine != f.Engine) || (f.Status != "" && r.Status != f.Status) {
+			continue
+		}
+		if (f.CreatedAfter != nil && r.CreatedAt.Before(*f.CreatedAfter)) || (f.CreatedBefore != nil && r.CreatedAt.After(*f.CreatedBefore)) {
+			continue
+		}
+		if f.After != nil && (r.CreatedAt.After(f.After.CreatedAt) || (r.CreatedAt.Equal(f.After.CreatedAt) && r.ID >= f.After.ID)) {
+			continue
+		}
+		out = append(out, cloneBackup(r))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *Mem) UpdateBackupStatus(_ context.Context, id string, expected, next backup.Status, verifiedAt *time.Time) (backup.Record, bool, error) {
+	if next == backup.StatusComplete {
+		return backup.Record{}, false, fmt.Errorf("%w: use finalization to complete a backup", backup.ErrInvalid)
+	}
+	if !backup.CanTransition(expected, next) {
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	if verifiedAt != nil {
+		return backup.Record{}, false, fmt.Errorf("%w: verified_at is set by finalization", backup.ErrInvalid)
+	}
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	if !ok {
+		return backup.Record{}, false, nil
+	}
+	if r.Status != expected {
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	if r.LegalHold && next == backup.StatusExpired {
+		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
+	}
+	r.Status = next
+	if next == backup.StatusUploading {
+		r.VerifiedAt = nil
+	}
+	m.backups[id] = cloneBackup(r)
+	return cloneBackup(r), true, nil
+}
+
+func (m *Mem) FinalizeBackup(_ context.Context, id string, expected backup.Status, bytes int64, sha256, manifestURI string, verifiedAt time.Time) (backup.Record, bool, error) {
+	if expected != backup.StatusVerifying {
+		return backup.Record{}, false, fmt.Errorf("%w: invalid expected status", backup.ErrInvalid)
+	}
+	if err := backup.ValidateFinalization(bytes, sha256, manifestURI, verifiedAt); err != nil {
+		return backup.Record{}, false, err
+	}
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	if !ok {
+		return backup.Record{}, false, nil
+	}
+	sha256 = strings.ToLower(sha256)
+	if r.Status == backup.StatusComplete && r.Bytes == bytes && r.SHA256 == sha256 && r.ManifestURI == manifestURI {
+		return cloneBackup(r), false, nil
+	}
+	if r.Status != expected {
+		return backup.Record{}, false, backup.ErrTransition
+	}
+	if verifiedAt.Before(r.CreatedAt) {
+		return backup.Record{}, false, fmt.Errorf("%w: verified_at precedes created_at", backup.ErrInvalid)
+	}
+	r.Bytes = bytes
+	r.SHA256 = sha256
+	r.ManifestURI = manifestURI
+	r.Status = backup.StatusComplete
+	t := verifiedAt.UTC()
+	r.VerifiedAt = &t
+	m.backups[id] = cloneBackup(r)
+	return cloneBackup(r), true, nil
+}
+
+func (m *Mem) CreateBackupJob(_ context.Context, j backup.Job) error {
+	if err := backup.ValidateJob(j); err != nil {
+		return err
+	}
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	if _, ok := m.backupJobs[j.ID]; ok {
+		return backup.ErrConflict
+	}
+	for _, existing := range m.backupJobs {
+		if existing.Name == j.Name {
+			return backup.ErrConflict
+		}
+	}
+	j.UpdatedAt = nextBackupJobRevision(time.Time{})
+	m.backupJobs[j.ID] = cloneBackupJob(j)
+	return nil
+}
+
+func (m *Mem) GetBackupJob(_ context.Context, id string) (backup.Job, bool, error) {
+	if err := m.enter(); err != nil {
+		return backup.Job{}, false, err
+	}
+	defer m.mu.Unlock()
+	j, ok := m.backupJobs[id]
+	return cloneBackupJob(j), ok, nil
+}
+
+func (m *Mem) ListBackupJobs(_ context.Context) ([]backup.Job, error) {
+	if err := m.enter(); err != nil {
+		return nil, err
+	}
+	defer m.mu.Unlock()
+	out := make([]backup.Job, 0, len(m.backupJobs))
+	for _, j := range m.backupJobs {
+		out = append(out, cloneBackupJob(j))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (m *Mem) UpdateBackupJob(_ context.Context, j backup.Job) (bool, error) {
+	if err := backup.ValidateJob(j); err != nil {
+		return false, err
+	}
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	if _, ok := m.backupJobs[j.ID]; !ok {
+		return false, nil
+	}
+	for id, existing := range m.backupJobs {
+		if id != j.ID && existing.Name == j.Name {
+			return false, backup.ErrConflict
+		}
+	}
+	j.UpdatedAt = nextBackupJobRevision(m.backupJobs[j.ID].UpdatedAt)
+	m.backupJobs[j.ID] = cloneBackupJob(j)
+	return true, nil
+}
+
+func (m *Mem) SetBackupJobNextRun(_ context.Context, id string, expectedUpdatedAt, nextRunAt time.Time) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	j, ok := m.backupJobs[id]
+	if !ok || !j.UpdatedAt.Equal(expectedUpdatedAt) {
+		return false, nil
+	}
+	t := nextRunAt
+	j.NextRunAt = &t
+	m.backupJobs[id] = cloneBackupJob(j)
+	return true, nil
+}
+
+func cloneBackupJob(j backup.Job) backup.Job {
+	if j.NextRunAt != nil {
+		t := *j.NextRunAt
+		j.NextRunAt = &t
+	}
+	if j.RunStartedAt != nil {
+		t := *j.RunStartedAt
+		j.RunStartedAt = &t
+	}
+	if j.RunFinishedAt != nil {
+		t := *j.RunFinishedAt
+		j.RunFinishedAt = &t
+	}
+	return j
+}
+
+func (m *Mem) BeginBackupJobRun(_ context.Context, id string, expectedUpdatedAt time.Time) (time.Time, bool, error) {
+	if err := m.enter(); err != nil {
+		return time.Time{}, false, err
+	}
+	defer m.mu.Unlock()
+	j, ok := m.backupJobs[id]
+	if !ok || !j.UpdatedAt.Equal(expectedUpdatedAt) {
+		return time.Time{}, false, nil
+	}
+	startedAt := nextBackupJobRevision(time.Time{})
+	j.RunStartedAt = &startedAt
+	j.RunFinishedAt = nil
+	j.LastRunStatus = backup.RunStatusRunning
+	if j.Enabled {
+		next := startedAt.Add(time.Duration(j.EverySeconds) * time.Second)
+		j.NextRunAt = &next
+	}
+	m.backupJobs[id] = cloneBackupJob(j)
+	return startedAt, true, nil
+}
+
+func (m *Mem) FinishBackupJobRun(_ context.Context, id string, startedAt time.Time, status backup.RunStatus) (bool, error) {
+	if status != backup.RunStatusSucceeded && status != backup.RunStatusFailed && status != backup.RunStatusCancelled {
+		return false, fmt.Errorf("%w: invalid backup job run status", backup.ErrInvalid)
+	}
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	j, ok := m.backupJobs[id]
+	if !ok || j.RunStartedAt == nil || !j.RunStartedAt.Equal(startedAt) || j.RunFinishedAt != nil || j.LastRunStatus != backup.RunStatusRunning {
+		return false, nil
+	}
+	finished := nextBackupJobRevision(*j.RunStartedAt)
+	j.RunFinishedAt = &finished
+	j.LastRunStatus = status
+	if j.Enabled {
+		next := finished.Add(time.Duration(j.EverySeconds) * time.Second)
+		j.NextRunAt = &next
+	} else {
+		j.NextRunAt = nil
+	}
+	m.backupJobs[id] = cloneBackupJob(j)
+	return true, nil
+}
+
+func (m *Mem) RecoverBackupJobRun(_ context.Context, id string, expectedUpdatedAt time.Time) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	j, ok := m.backupJobs[id]
+	if !ok || !j.UpdatedAt.Equal(expectedUpdatedAt) || j.RunStartedAt == nil || j.RunFinishedAt != nil || j.LastRunStatus != backup.RunStatusRunning {
+		return false, nil
+	}
+	finished := nextBackupJobRevision(*j.RunStartedAt)
+	j.RunFinishedAt = &finished
+	j.LastRunStatus = backup.RunStatusInterrupted
+	if j.Enabled {
+		next := finished.Add(time.Duration(j.EverySeconds) * time.Second)
+		j.NextRunAt = &next
+	} else {
+		j.NextRunAt = nil
+	}
+	m.backupJobs[id] = cloneBackupJob(j)
+	return true, nil
+}
+
+func nextBackupJobRevision(previous time.Time) time.Time {
+	next := time.Now().UTC()
+	if !next.After(previous) {
+		return previous.Add(time.Microsecond)
+	}
+	return next
+}
+
+func (m *Mem) DeleteBackupJob(_ context.Context, id string) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	if _, ok := m.backupJobs[id]; !ok {
+		return false, nil
+	}
+	delete(m.backupJobs, id)
+	return true, nil
+}
+
 func (m *Mem) Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error {
 	m.mu.Lock()
 	l := m.locks[key]
@@ -444,4 +805,10 @@ func (m *Mem) Locked(ctx context.Context, key string, fn func(ctx context.Contex
 	l.Lock()
 	defer l.Unlock()
 	return fn(ctx)
+}
+
+// nextAuditID: bigserial of audit_log (never reused, also after an archive removed rows). Caller holds m.mu.
+func (m *Mem) nextAuditID() int64 {
+	m.auditSeq++
+	return m.auditSeq
 }

@@ -9,6 +9,7 @@
 <script src="/static/theme.js"></script>
 <script src="/static/app.js" defer></script>
 <script src="/static/live.js" defer></script>
+<script src="/static/backups.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#content">Skip to content</a>
@@ -19,6 +20,7 @@
     <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>{{icon "pipelines"}}Pipelines</a>
     <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>
     <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
+    <a href="/backups" class="{{if eq .Active "backups"}}active{{end}}"{{if eq .Active "backups"}} aria-current="page"{{end}}>{{icon "db"}}Backups</a>
     <a href="/settings" class="{{if eq .Active "settings"}}active{{end}}"{{if eq .Active "settings"}} aria-current="page"{{end}}>{{icon "config"}}Settings</a>
     <div class="navhead">Registered pipelines</div>
     {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"{{if eq $.Active .Name}} aria-current="page"{{end}} title="{{.Name}}: {{.State}}" data-live-nav="{{.Name}}"><span class="dot {{stateClass .State}}" role="img" aria-label="{{.State}}" data-bind-dot="state"></span>{{.Name}}</a>
@@ -42,6 +44,7 @@
       </details>
     </div>
   </header>
+  {{if .Standby}}<p class="warnbox standby" role="status" id="standby-banner">{{.Standby}}</p>{{end}}
   <main id="content" data-refresh="{{.Refresh}}"{{if .Live}} data-live="{{.Live}}" data-interval="{{.Interval}}"{{if .LiveLogs}} data-live-logs="1"{{end}}{{end}}><p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>{{template "content" .}}</main>
 </div>
 <dialog id="confirm" class="dlg" aria-labelledby="confirm-title" aria-describedby="confirm-msg">

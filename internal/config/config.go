@@ -148,8 +148,13 @@ type CatchUpConfig struct {
 	BinlogArchive string `yaml:"binlog_archive,omitempty" json:"binlog_archive,omitempty"`
 }
 
+// MaxSnapshotParallel: giới hạn trên của bootstrap.logical.max_parallel.
+const MaxSnapshotParallel = 32
+
 type LogicalBootstrapConfig struct {
-	ChunkRows   string   `yaml:"chunk_rows,omitempty" json:"chunk_rows,omitempty"` // auto | số dòng
+	ChunkRows string `yaml:"chunk_rows,omitempty" json:"chunk_rows,omitempty"` // auto | số dòng
+	// MaxParallel: số bảng snapshot logic cùng lúc (1..32; vắng = 1). Chunk của một bảng vẫn tuần tự; ngân
+	// sách đọc nguồn (token bucket) dùng chung. Source PostgreSQL: bỏ qua (luôn 1).
 	MaxParallel int      `yaml:"max_parallel,omitempty" json:"max_parallel,omitempty"`
 	Windows     []string `yaml:"windows,omitempty" json:"windows,omitempty"`
 }
@@ -418,6 +423,12 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 
 	if err := ValidateRename(cfg.Tables.Rename, TargetFoldsTableCase(cfg.Target.Kind)); err != nil {
 		return nil, err
+	}
+
+	// bootstrap.logical.max_parallel: số bảng snapshot đồng thời (0/vắng = 1, hành vi tuần tự cũ).
+	if n := cfg.Bootstrap.Logical.MaxParallel; n < 0 || n > MaxSnapshotParallel {
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("invalid bootstrap.logical.max_parallel %d (want 1..%d)", n, MaxSnapshotParallel), nil)
 	}
 
 	// Thiết lập giá trị mặc định theo spec nếu chưa có
