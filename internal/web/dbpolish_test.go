@@ -252,3 +252,27 @@ func TestHealthzDoesNotLeakDatabaseDetails(t *testing.T) {
 		}
 	}
 }
+
+// Creating a pipeline whose source/target never answer used to block in validate+plan for minutes; the
+// server's WriteTimeout (60 s) then dropped the response (client saw an empty reply) although the pipeline
+// had been created. validate and plan are now bounded and the response says why.
+func TestCreatePipelineBoundsValidateAndPlan(t *testing.T) {
+	old := newPipelineCheckTimeout
+	newPipelineCheckTimeout = 300 * time.Millisecond
+	defer func() { newPipelineCheckTimeout = old }()
+	cfgDir := t.TempDir()
+	e := newEnv(t, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir })
+	c, csrf := e.loginOK()
+	e.setExit(0)
+	hold := filepath.Join(filepath.Dir(e.bin), "hold")
+	must0(t, os.WriteFile(hold, nil, 0o600))
+	defer os.Remove(hold)
+	t0 := time.Now()
+	code, res, _, out := createNP(t, e, c, csrf, newOpts("slowpipe", "a", "b"))
+	if d := time.Since(t0); d > 5*time.Second {
+		t.Fatalf("create took %v", d)
+	}
+	if code != 200 || res.Validate.ExitCode == 0 || !strings.Contains(res.Validate.Output, "did not answer") {
+		t.Fatalf("create: %d %+v %s", code, res.Validate, out)
+	}
+}
