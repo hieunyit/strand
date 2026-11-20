@@ -1,6 +1,8 @@
 package web
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh/knownhosts"
+
+	"strand/internal/spool"
+	"strand/internal/tunnel"
 )
 
 // Validation helpers and action handlers for sensitive administrative operations
@@ -58,13 +65,20 @@ func validateTunnelParams(sshAddr, remoteAddr, listenAddr, identityFile, knownHo
 		return errors.New("listen: invalid port")
 	}
 	cleanLHost := strings.ToLower(strings.Trim(lHost, "[]"))
-	if cleanLHost != "127.0.0.1" && cleanLHost != "localhost" && cleanLHost != "::1" && cleanLHost != "" {
+	if cleanLHost != "127.0.0.1" && cleanLHost != "localhost" && cleanLHost != "::1" {
 		return errors.New("listen: local listen address must be on loopback (127.0.0.1)")
 	}
 
-	// known_hosts file is strictly required
 	if strings.TrimSpace(knownHosts) == "" {
 		return errors.New("known_hosts: known_hosts file is required")
+	}
+	knownHosts = filepath.Clean(knownHosts)
+	khInfo, err := os.Stat(knownHosts)
+	if err != nil || !khInfo.Mode().IsRegular() {
+		return errors.New("known_hosts: path must be an existing regular file")
+	}
+	if _, err := knownhosts.New(knownHosts); err != nil {
+		return fmt.Errorf("known_hosts: cannot load trusted host keys: %w", err)
 	}
 
 	// SSH identity file must be within allowlisted STRAND_WEB_SSH_KEY_DIR
@@ -73,13 +87,84 @@ func validateTunnelParams(sshAddr, remoteAddr, listenAddr, identityFile, knownHo
 		if keyDir == "" {
 			return errors.New("identity_file: SSH key directory not configured (STRAND_WEB_SSH_KEY_DIR is required)")
 		}
-		cleanKey := filepath.Clean(identityFile)
-		cleanKeyDir := filepath.Clean(keyDir)
+		cleanKey, err := filepath.EvalSymlinks(identityFile)
+		if err != nil {
+			return errors.New("identity_file: key file does not exist or cannot be resolved")
+		}
+		cleanKey, _ = filepath.Abs(cleanKey)
+		cleanKeyDir, err := filepath.EvalSymlinks(keyDir)
+		if err != nil {
+			return errors.New("identity_file: configured SSH key directory does not exist")
+		}
+		cleanKeyDir, _ = filepath.Abs(cleanKeyDir)
 		if cleanKey != cleanKeyDir && !strings.HasPrefix(cleanKey, cleanKeyDir+string(filepath.Separator)) {
 			return errors.New("identity_file: key path must be within allow-listed directory STRAND_WEB_SSH_KEY_DIR")
 		}
+		st, err := os.Stat(cleanKey)
+		if err != nil || !st.Mode().IsRegular() {
+			return errors.New("identity_file: key must be a regular file")
+		}
+		if st.Mode().Perm()&0o077 != 0 {
+			return errors.New("identity_file: permissions must not allow group or other access")
+		}
 	}
 	return nil
+}
+
+func withinCanonicalRoot(path, root string) (string, error) {
+	absRoot, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return "", err
+	}
+	rootInfo, err := os.Lstat(absRoot)
+	if err != nil {
+		return "", err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("allow-listed root must not be a symlink")
+	}
+	rootReal, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", err
+	}
+	rootReal, err = filepath.Abs(rootReal)
+	if err != nil {
+		return "", err
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	// Resolve existing paths fully. For not-yet-created leaves, resolve the nearest existing ancestor,
+	// then append the unresolved suffix so a symlinked parent cannot escape the allowlist.
+	probe, suffix := absPath, []string{}
+	for {
+		if _, statErr := os.Lstat(probe); statErr == nil {
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", errors.New("path has no existing parent")
+		}
+		suffix = append(suffix, filepath.Base(probe))
+		probe = parent
+	}
+	probeReal, err := filepath.EvalSymlinks(probe)
+	if err != nil {
+		return "", err
+	}
+	for i := len(suffix) - 1; i >= 0; i-- {
+		probeReal = filepath.Join(probeReal, suffix[i])
+	}
+	probeReal, err = filepath.Abs(filepath.Clean(probeReal))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(rootReal, probeReal)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path must resolve within %s", rootReal)
+	}
+	return probeReal, nil
 }
 
 func (s *Server) validateSpoolDir(dir string) error {
@@ -87,28 +172,89 @@ func (s *Server) validateSpoolDir(dir string) error {
 		return errors.New("spool_dir: directory is required")
 	}
 	clean := filepath.Clean(dir)
-	allowed := false
 	if s != nil && s.reg != nil {
 		for _, p := range s.reg.List() {
-			var sp string
-			if p.Cfg != nil && p.Cfg.Resources.Spool.Path != "" {
-				sp = p.Cfg.Resources.Spool.Path
-			} else {
-				stateDir := "/tmp"
-				if s.cfg != nil && s.cfg.StateDir != "" {
-					stateDir = s.cfg.StateDir
-				}
-				sp = filepath.Join(stateDir, "pipelines", p.Name, "spool")
-			}
-			cleanSp := filepath.Clean(sp)
-			if clean == cleanSp || strings.HasPrefix(clean, cleanSp+string(filepath.Separator)) {
-				allowed = true
-				break
+			sp, err := s.spoolPath(p)
+			if err == nil && clean == sp {
+				return nil
 			}
 		}
 	}
-	if !allowed {
-		return errors.New("spool_dir: path must be within a configured pipeline spool directory")
+	return errors.New("spool_dir: path must exactly match a configured pipeline spool directory")
+}
+
+func (s *Server) spoolPipelineNames() []string {
+	if s == nil || s.reg == nil {
+		return nil
+	}
+	ps := s.reg.List()
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		if p != nil {
+			out = append(out, p.Name)
+		}
+	}
+	return out
+}
+
+func (s *Server) spoolPath(p *Pipeline) (string, error) {
+	if p == nil {
+		return "", errors.New("pipeline is required")
+	}
+	dir := ""
+	if p.Cfg != nil {
+		dir = p.Cfg.Resources.Spool.Path
+	}
+	if dir == "" {
+		stateDir := "/tmp"
+		if s != nil && s.cfg != nil && s.cfg.StateDir != "" {
+			stateDir = s.cfg.StateDir
+		}
+		dir = filepath.Join(stateDir, "pipelines", p.Name, "spool")
+	}
+	abs, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("spool directory unavailable: %w", err)
+	}
+	return filepath.Clean(canonical), nil
+}
+
+func (s *Server) scanPipelineSpool(ctx context.Context, pipeline string) (*spool.InventoryReport, string, error) {
+	if s == nil || s.reg == nil {
+		return nil, "", errors.New("pipeline registry is unavailable")
+	}
+	if !ValidName(pipeline) {
+		return nil, "", errors.New("pipeline is required")
+	}
+	p := s.reg.Get(pipeline)
+	if p == nil {
+		return nil, "", errors.New("unknown pipeline")
+	}
+	if s.isRunning(p) {
+		return nil, "", errors.New("stop the pipeline before offline spool inspection")
+	}
+	dir, err := s.spoolPath(p)
+	if err != nil {
+		return nil, "", err
+	}
+	spill := filepath.Join(dir, "spill")
+	if _, err := os.Stat(spill); err != nil {
+		return nil, dir, fmt.Errorf("spool spill directory unavailable: %w", err)
+	}
+	report, err := spool.ScanInventoryOffline(dir, []string{spill})
+	return report, dir, err
+}
+
+func (s *Server) auditSensitive(r *http.Request, action string, detail map[string]any, result string) error {
+	if s == nil || s.audit == nil {
+		return errors.New("audit log unavailable")
+	}
+	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: action, Detail: detail, Result: result}); err != nil {
+		return fmt.Errorf("audit %s: %w", action, err)
 	}
 	return nil
 }
@@ -120,11 +266,20 @@ func (s *Server) validateExportDir(dir string) (string, error) {
 	}
 	allowedDir := filepath.Clean(filepath.Join(stateDir, "exports"))
 	if strings.TrimSpace(dir) == "" {
-		return allowedDir, nil
+		dir = allowedDir
 	}
-	clean := filepath.Clean(dir)
-	if clean != allowedDir && !strings.HasPrefix(clean, allowedDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("export directory must be within %s", allowedDir)
+	if !filepath.IsAbs(dir) {
+		return "", errors.New("export directory must be an absolute path")
+	}
+	if err := os.MkdirAll(allowedDir, 0o700); err != nil {
+		return "", fmt.Errorf("create export root: %w", err)
+	}
+	clean, err := withinCanonicalRoot(dir, allowedDir)
+	if err != nil {
+		return "", fmt.Errorf("export directory must resolve within %s: %w", allowedDir, err)
+	}
+	if st, err := os.Stat(clean); err == nil && !st.IsDir() {
+		return "", errors.New("export path exists and is not a directory")
 	}
 	return clean, nil
 }
@@ -136,16 +291,102 @@ func (s *Server) validateArchiveDir(dir string) (string, error) {
 	}
 	allowedDir := filepath.Clean(filepath.Join(stateDir, "archive"))
 	if strings.TrimSpace(dir) == "" {
-		return allowedDir, nil
+		dir = allowedDir
 	}
-	clean := filepath.Clean(dir)
-	if clean != allowedDir && !strings.HasPrefix(clean, allowedDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("archive directory must be within %s", allowedDir)
+	if !filepath.IsAbs(dir) {
+		return "", errors.New("archive directory must be an absolute path")
+	}
+	if err := os.MkdirAll(allowedDir, 0o700); err != nil {
+		return "", fmt.Errorf("create archive root: %w", err)
+	}
+	clean, err := withinCanonicalRoot(dir, allowedDir)
+	if err != nil {
+		return "", fmt.Errorf("archive directory must resolve within %s: %w", allowedDir, err)
+	}
+	if st, err := os.Stat(clean); err == nil && !st.IsDir() {
+		return "", errors.New("archive path exists and is not a directory")
 	}
 	return clean, nil
 }
 
 // ---- Tunnel HTTP Handlers ----
+
+func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user, remote, listen, identity, knownHosts string) (tunnelItem, error) {
+	_ = ctx // Tunnel lifetime is owned by the Server, not by the short-lived HTTP request.
+	if strings.TrimSpace(user) == "" {
+		return tunnelItem{}, errors.New("ssh user is required")
+	}
+	if strings.TrimSpace(listen) == "" {
+		listen = "127.0.0.1:0"
+	}
+	if err := validateTunnelParams(sshAddr, remote, listen, identity, knownHosts); err != nil {
+		return tunnelItem{}, err
+	}
+	parent := s.tunnelCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if err := s.auditSensitive(r, "tunnel.start", map[string]any{"ssh": sshAddr, "remote": remote, "listen": listen, "user": user}, "started"); err != nil {
+		cancel()
+		return tunnelItem{}, err
+	}
+	fwd, err := tunnel.Start(ctx, tunnel.Config{SSHAddress: sshAddr, SSHUser: user, Remote: remote, LocalAddress: listen, IdentityFile: identity, HostKeysFile: knownHosts})
+	if err != nil {
+		cancel()
+		_ = s.auditSensitive(r, "tunnel.start", map[string]any{"ssh": sshAddr, "remote": remote, "error": err.Error()}, "error")
+		return tunnelItem{}, err
+	}
+	id := fmt.Sprintf("tun-%d", s.now().UnixNano())
+	item := tunnelItem{ID: id, LocalAddress: fwd.Address(), Remote: remote, SSHAddress: sshAddr, SSHUser: user}
+	if err := s.auditSensitive(r, "tunnel.start", map[string]any{"id": id, "ssh": sshAddr, "remote": remote, "listen": item.LocalAddress, "user": user}, "ok"); err != nil {
+		cancel()
+		_ = fwd.Close()
+		return tunnelItem{}, fmt.Errorf("audit tunnel start: %w", err)
+	}
+	s.tunnelMu.Lock()
+	if s.tunnels == nil {
+		s.tunnels = make(map[string]activeTunnel)
+	}
+	s.tunnels[id] = activeTunnel{Item: item, Forward: fwd, Cancel: cancel}
+	s.tunnelMu.Unlock()
+	return item, nil
+}
+
+func (s *Server) stopTunnel(r *http.Request, id string) error {
+	s.tunnelMu.Lock()
+	active, ok := s.tunnels[id]
+	if ok {
+		delete(s.tunnels, id)
+	}
+	s.tunnelMu.Unlock()
+	if !ok {
+		return os.ErrNotExist
+	}
+	active.Cancel()
+	err := active.Forward.Close()
+	result := "ok"
+	detail := map[string]any{"id": id}
+	if err != nil {
+		result = "error"
+		detail["error"] = err.Error()
+	}
+	if auditErr := s.auditSensitive(r, "tunnel.stop", detail, result); auditErr != nil {
+		return errors.Join(err, fmt.Errorf("audit tunnel stop: %w", auditErr))
+	}
+	return err
+}
+
+func (s *Server) closeTunnels() {
+	s.tunnelMu.Lock()
+	active := s.tunnels
+	s.tunnels = make(map[string]activeTunnel)
+	s.tunnelMu.Unlock()
+	for _, t := range active {
+		t.Cancel()
+		_ = t.Forward.Close()
+	}
+}
 
 func (s *Server) apiTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Session) {
 	var req struct {
@@ -160,39 +401,11 @@ func (s *Server) apiTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Ses
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := validateTunnelParams(req.SSH, req.Remote, req.Listen, req.IdentityFile, req.KnownHosts); err != nil {
+	item, err := s.startTunnel(r.Context(), r, req.SSH, req.User, req.Remote, req.Listen, req.IdentityFile, req.KnownHosts)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	id := fmt.Sprintf("tun-%d", time.Now().UnixNano())
-	item := tunnelItem{
-		ID:           id,
-		LocalAddress: req.Listen,
-		Remote:       req.Remote,
-		SSHAddress:   req.SSH,
-		SSHUser:      req.User,
-	}
-	if item.LocalAddress == "" {
-		item.LocalAddress = "127.0.0.1:0"
-	}
-
-	s.tunnelMu.Lock()
-	if s.tunnels == nil {
-		s.tunnels = make(map[string]tunnelItem)
-	}
-	s.tunnels[id] = item
-	s.tunnelMu.Unlock()
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "tunnel.start",
-			Detail: map[string]any{"id": id, "ssh": req.SSH, "remote": req.Remote, "listen": item.LocalAddress},
-			Result: "ok",
-		})
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{"tunnel": item})
 }
 
@@ -210,19 +423,14 @@ func (s *Server) apiTunnelStop(w http.ResponseWriter, r *http.Request, sess *Ses
 		return
 	}
 
-	s.tunnelMu.Lock()
-	delete(s.tunnels, id)
-	s.tunnelMu.Unlock()
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "tunnel.stop",
-			Detail: map[string]any{"id": id},
-			Result: "ok",
-		})
+	if err := s.stopTunnel(r, id); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, status, err.Error())
+		return
 	}
-
 	writeJSON(w, http.StatusOK, map[string]any{"stopped": true})
 }
 
@@ -235,37 +443,9 @@ func (s *Server) pageTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Se
 	identity := r.FormValue("identity_file")
 	knownHosts := r.FormValue("known_hosts")
 
-	if err := validateTunnelParams(ssh, remote, listen, identity, knownHosts); err != nil {
+	if _, err := s.startTunnel(r.Context(), r, ssh, user, remote, listen, identity, knownHosts); err != nil {
 		s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
 		return
-	}
-
-	id := fmt.Sprintf("tun-%d", time.Now().UnixNano())
-	item := tunnelItem{
-		ID:           id,
-		LocalAddress: listen,
-		Remote:       remote,
-		SSHAddress:   ssh,
-		SSHUser:      user,
-	}
-	if item.LocalAddress == "" {
-		item.LocalAddress = "127.0.0.1:0"
-	}
-
-	s.tunnelMu.Lock()
-	if s.tunnels == nil {
-		s.tunnels = make(map[string]tunnelItem)
-	}
-	s.tunnels[id] = item
-	s.tunnelMu.Unlock()
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "tunnel.start",
-			Detail: map[string]any{"id": id, "ssh": ssh, "remote": remote, "listen": item.LocalAddress},
-			Result: "ok",
-		})
 	}
 	http.Redirect(w, r, "/tunnels", http.StatusSeeOther)
 }
@@ -274,17 +454,13 @@ func (s *Server) pageTunnelStop(w http.ResponseWriter, r *http.Request, sess *Se
 	_ = r.ParseForm()
 	id := r.FormValue("id")
 	if id != "" {
-		s.tunnelMu.Lock()
-		delete(s.tunnels, id)
-		s.tunnelMu.Unlock()
-
-		if s.audit != nil {
-			_ = s.audit.Log(AuditEntry{
-				IP:     s.clientIP(r),
-				Action: "tunnel.stop",
-				Detail: map[string]any{"id": id},
-				Result: "ok",
-			})
+		if err := s.stopTunnel(r, id); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, os.ErrNotExist) {
+				status = http.StatusNotFound
+			}
+			s.renderError(w, r, sess, status, err.Error())
+			return
 		}
 	}
 	http.Redirect(w, r, "/tunnels", http.StatusSeeOther)
@@ -294,35 +470,27 @@ func (s *Server) pageTunnelStop(w http.ResponseWriter, r *http.Request, sess *Se
 
 func (s *Server) apiSpoolInspect(w http.ResponseWriter, r *http.Request, sess *Session) {
 	var req struct {
-		SpoolDir     string `json:"spool_dir"`
-		TrustedRoots string `json:"trusted_roots"`
+		Pipeline string `json:"pipeline"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := s.validateSpoolDir(req.SpoolDir); err != nil {
+	if err := s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": req.Pipeline}, "started"); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	rep, dir, err := s.scanPipelineSpool(r.Context(), req.Pipeline)
+	if err != nil {
+		_ = s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": req.Pipeline, "error": err.Error()}, "error")
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "spool.inspect",
-			Detail: map[string]any{"spool_dir": req.SpoolDir},
-			Result: "ok",
-		})
+	if err := s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": req.Pipeline, "discovered_files": rep.DiscoveredFiles, "new_files": rep.NewFiles}, "ok"); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-
-	rep := &spoolInspectReport{
-		DiscoveredFiles: 0,
-		DiscoveredBytes: 0,
-		NewFiles:        0,
-		NewBytes:        0,
-		ExistingFiles:   0,
-		ExistingBytes:   0,
-	}
+	_ = dir
 	writeJSON(w, http.StatusOK, map[string]any{"report": rep})
 }
 
@@ -330,26 +498,53 @@ func (s *Server) apiSpoolInspect(w http.ResponseWriter, r *http.Request, sess *S
 
 func (s *Server) pageDBMigrate(w http.ResponseWriter, r *http.Request, sess *Session) {
 	_ = r.ParseForm()
-	dryRun := r.FormValue("dry_run") == "true"
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "db.migrate",
-			Detail: map[string]any{"dry_run": dryRun},
-			Result: "ok",
-		})
+	dryValue := r.FormValue("dry_run")
+	if dryValue != "true" && dryValue != "false" {
+		s.renderError(w, r, sess, http.StatusBadRequest, "dry_run must be true or false")
+		return
 	}
-
-	rep := &dbMigrateReport{
-		Verified: true,
+	dryRun := dryValue == "true"
+	if s.cfg.SourcePath == "" {
+		s.renderError(w, r, sess, http.StatusBadRequest, "web config file path is not available; migration requires the legacy file-mode web config")
+		return
+	}
+	detail := map[string]any{"dry_run": dryRun}
+	if err := s.auditSensitive(r, "db.migrate", detail, "started"); err != nil {
+		s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	rep, err := MigrateFilesFromStore(ctx, s.db.st, MigrateOptions{ConfigPath: s.cfg.SourcePath, SecretKey: os.Getenv(EnvSecretKey), DryRun: dryRun, Out: &out, Log: s.log})
+	if err != nil {
+		_ = s.auditSensitive(r, "db.migrate", map[string]any{"dry_run": dryRun, "error": err.Error()}, "error")
+		s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.auditSensitive(r, "db.migrate", map[string]any{"dry_run": dryRun, "verified": rep.Verified}, "ok"); err != nil {
+		s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+		return
+	}
+	view := &dbMigrateReport{Verified: rep.Verified, Problems: rep.Problems}
+	for _, item := range rep.Items {
+		view.Summary.Total++
+		switch item.Status {
+		case "new":
+			view.Summary.New++
+		case "present":
+			view.Summary.Present++
+		case "conflict":
+			view.Summary.Conflict++
+		}
 	}
 	s.render(w, "db_admin", sess, pageData{
 		Title:  "Database Admin",
 		Active: "settings",
 		Body: &dbAdminView{
 			DryRun:        dryRun,
-			MigrateReport: rep,
+			MigrateReport: view,
+			MigrateOutput: out.String(),
 		},
 	})
 }
@@ -363,106 +558,228 @@ func (s *Server) pageDBExport(w http.ResponseWriter, r *http.Request, sess *Sess
 		return
 	}
 
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "db.export",
-			Detail: map[string]any{"dir": cleanDir},
-			Result: "ok",
-		})
+	if err := s.auditSensitive(r, "db.export", map[string]any{"dir": cleanDir}, "started"); err != nil {
+		s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+		return
 	}
-
-	http.Redirect(w, r, "/settings/db", http.StatusSeeOther)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	err = ExportDBFromStore(ctx, s.db.st, ExportOptions{Dir: cleanDir, ConfigPath: s.cfg.SourcePath, SecretKey: os.Getenv(EnvSecretKey), Out: &out, Log: s.log})
+	if err != nil {
+		_ = s.auditSensitive(r, "db.export", map[string]any{"dir": cleanDir, "error": err.Error()}, "error")
+		s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.auditSensitive(r, "db.export", map[string]any{"dir": cleanDir}, "ok"); err != nil {
+		s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.render(w, "db_admin", sess, pageData{Title: "Database Admin", Active: "settings", Body: &dbAdminView{ExportOutput: out.String()}})
 }
 
 // ---- Archive Handlers ----
 
-func (s *Server) apiArchiveStart(w http.ResponseWriter, r *http.Request, sess *Session) {
+func (s *Server) archivePipelineNames() []string {
+	if s.reg == nil {
+		return nil
+	}
+	var names []string
+	for _, p := range s.reg.List() {
+		if p.Cfg != nil && strings.EqualFold(p.Cfg.Source.Kind, "mysql") {
+			names = append(names, p.Name)
+		}
+	}
+	return names
+}
+
+func (s *Server) activeArchiveJob() *JobStatus {
+	if s.jobs == nil {
+		return nil
+	}
+	s.archiverMu.Lock()
+	id := s.archiverJobID
+	s.archiverMu.Unlock()
+	return s.archiveJobByID(id)
+}
+
+func (s *Server) latestArchiveJob() *JobStatus {
+	if s.jobs == nil {
+		return nil
+	}
+	jobs := s.jobs.List("")
+	var latest *JobStatus
+	for i := range jobs {
+		j := &jobs[i]
+		if j.Kind == "archive" && (latest == nil || j.Started.After(latest.Started)) {
+			latest = j
+		}
+	}
+	return latest
+}
+
+func (s *Server) archiveJobByID(id string) *JobStatus {
+	if s.jobs == nil {
+		return nil
+	}
+	if id != "" {
+		if j, ok := s.jobs.Get(id); ok && j.Kind == "archive" && j.Running {
+			return &j
+		}
+	}
+	for _, j := range s.jobs.List("") {
+		if j.Kind == "archive" && j.Running {
+			return &j
+		}
+	}
+	return nil
+}
+
+func (s *Server) archiveOutputDir(j *JobStatus) string {
+	for i := 0; i+1 < len(j.Args); i++ {
+		if j.Args[i] == "--to" {
+			return j.Args[i+1]
+		}
+	}
+	return ""
+}
+
+func (s *Server) startArchive(r *http.Request, pipeline, dir string) (JobStatus, error) {
+	if s.jobs == nil {
+		return JobStatus{}, errors.New("job runner unavailable")
+	}
+	p := s.reg.Get(pipeline)
+	if p == nil || p.Cfg == nil || !strings.EqualFold(p.Cfg.Source.Kind, "mysql") {
+		return JobStatus{}, errors.New("select a pipeline with a MySQL source; MariaDB binlog archiving is not supported")
+	}
+	if p.ConfigPath == "" {
+		return JobStatus{}, errors.New("pipeline config is unavailable")
+	}
+	cleanDir, err := s.validateArchiveDir(dir)
+	if err != nil {
+		return JobStatus{}, err
+	}
+	s.archiverMu.Lock()
+	defer s.archiverMu.Unlock()
+	if current := s.archiveJobByID(s.archiverJobID); current != nil {
+		return JobStatus{}, fmt.Errorf("archive job %s is already running for pipeline %s", current.ID, current.Pipeline)
+	}
+	for _, current := range s.jobs.List("") {
+		if current.Kind == "archive" && current.Running {
+			return JobStatus{}, fmt.Errorf("archive job %s is already running for pipeline %s", current.ID, current.Pipeline)
+		}
+	}
+	if err := s.auditSensitive(r, "archive.start", map[string]any{"pipeline": pipeline, "dir": cleanDir}, "started"); err != nil {
+		return JobStatus{}, err
+	}
+	s.materialize(p.Name)
+	env, err := p.Env()
+	if err != nil {
+		_ = s.auditSensitive(r, "archive.start", map[string]any{"pipeline": pipeline, "error": err.Error()}, "error")
+		return JobStatus{}, fmt.Errorf("pipeline env: %w", err)
+	}
+	args := []string{"archive", "binlog", "--config", p.ConfigPath, "--to", cleanDir}
+	id, err := s.jobs.Start(r.Context(), JobSpec{Pipeline: p.Name, Kind: "archive", Args: args, Env: env})
+	if err != nil {
+		_ = s.auditSensitive(r, "archive.start", map[string]any{"pipeline": pipeline, "error": err.Error()}, "error")
+		return JobStatus{}, err
+	}
+	s.archiverRunning, s.archiverDir, s.archiverJobID = true, cleanDir, id
+	if err := s.auditSensitive(r, "archive.start", map[string]any{"pipeline": pipeline, "dir": cleanDir, "job_id": id}, "ok"); err != nil {
+		_ = s.jobs.Cancel(id)
+		return JobStatus{}, err
+	}
+	j, _ := s.jobs.Get(id)
+	return j, nil
+}
+
+func (s *Server) stopArchive(r *http.Request, id string) error {
+	if s.jobs == nil {
+		return errors.New("job runner unavailable")
+	}
+	if id == "" {
+		if j := s.activeArchiveJob(); j != nil {
+			id = j.ID
+		}
+	}
+	if id == "" {
+		return os.ErrNotExist
+	}
+	j, ok := s.jobs.Get(id)
+	if !ok || j.Kind != "archive" {
+		return os.ErrNotExist
+	}
+	if err := s.auditSensitive(r, "archive.stop", map[string]any{"pipeline": j.Pipeline, "job_id": id}, "started"); err != nil {
+		return err
+	}
+	if j.Running {
+		if err := s.jobs.Cancel(id); err != nil {
+			_ = s.auditSensitive(r, "archive.stop", map[string]any{"job_id": id, "error": err.Error()}, "error")
+			return err
+		}
+	}
+	s.archiverMu.Lock()
+	if s.archiverJobID == id {
+		s.archiverRunning = false
+		s.archiverJobID = ""
+	}
+	s.archiverMu.Unlock()
+	return s.auditSensitive(r, "archive.stop", map[string]any{"pipeline": j.Pipeline, "job_id": id}, "ok")
+}
+
+func (s *Server) apiArchiveStart(w http.ResponseWriter, r *http.Request, _ *Session) {
 	var req struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		Pipeline string `json:"pipeline"`
+		To       string `json:"to"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	cleanDir, err := s.validateArchiveDir(req.To)
+	j, err := s.startArchive(r, req.Pipeline, req.To)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	s.archiverMu.Lock()
-	s.archiverRunning = true
-	s.archiverDir = cleanDir
-	s.archiverMu.Unlock()
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "archive.start",
-			Detail: map[string]any{"dir": cleanDir},
-			Result: "ok",
-		})
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"running": true, "dir": cleanDir})
+	writeJSON(w, http.StatusAccepted, map[string]any{"running": true, "job_id": j.ID, "pipeline": j.Pipeline})
 }
 
-func (s *Server) apiArchiveStop(w http.ResponseWriter, r *http.Request, sess *Session) {
-	s.archiverMu.Lock()
-	s.archiverRunning = false
-	s.archiverMu.Unlock()
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "archive.stop",
-			Result: "ok",
-		})
+func (s *Server) apiArchiveStop(w http.ResponseWriter, r *http.Request, _ *Session) {
+	var req struct {
+		JobID string `json:"job_id"`
 	}
-
+	if r.Body != nil {
+		_ = readJSON(r, &req)
+	}
+	if err := s.stopArchive(r, req.JobID); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"running": false})
 }
 
 func (s *Server) pageArchiveStart(w http.ResponseWriter, r *http.Request, sess *Session) {
 	_ = r.ParseForm()
-	dir := r.FormValue("to")
-	cleanDir, err := s.validateArchiveDir(dir)
-	if err != nil {
+	if _, err := s.startArchive(r, r.FormValue("pipeline"), r.FormValue("to")); err != nil {
 		s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	s.archiverMu.Lock()
-	s.archiverRunning = true
-	s.archiverDir = cleanDir
-	s.archiverMu.Unlock()
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "archive.start",
-			Detail: map[string]any{"dir": cleanDir},
-			Result: "ok",
-		})
-	}
-
 	http.Redirect(w, r, "/archive", http.StatusSeeOther)
 }
 
 func (s *Server) pageArchiveStop(w http.ResponseWriter, r *http.Request, sess *Session) {
-	s.archiverMu.Lock()
-	s.archiverRunning = false
-	s.archiverMu.Unlock()
-
-	if s.audit != nil {
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "archive.stop",
-			Result: "ok",
-		})
+	_ = r.ParseForm()
+	if err := s.stopArchive(r, r.FormValue("job_id")); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		s.renderError(w, r, sess, status, err.Error())
+		return
 	}
-
 	http.Redirect(w, r, "/archive", http.StatusSeeOther)
 }

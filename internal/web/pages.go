@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html/template"
 	"math"
@@ -15,6 +16,8 @@ import (
 	"strand/internal/admin"
 	"strand/internal/backup"
 	"strand/internal/config"
+	"strand/internal/spool"
+	"strand/internal/tunnel"
 	"strand/internal/web/store"
 )
 
@@ -691,21 +694,13 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Active: p.Name, Live: live, LiveLogs: liveLogs, Body: b})
 }
 
-type spoolInspectReport struct {
-	DiscoveredFiles int
-	DiscoveredBytes int64
-	NewFiles        int
-	NewBytes        int64
-	ExistingFiles   int
-	ExistingBytes   int64
-	Warnings        []string
-	Errors          []string
-}
+type spoolInspectReport = spool.InventoryReport
 
 type spoolInspectView struct {
-	SpoolDir     string
-	TrustedRoots string
-	Report       *spoolInspectReport
+	Pipelines []string
+	Pipeline  string
+	SpoolDir  string
+	Report    *spoolInspectReport
 }
 
 type archiveFileItem struct {
@@ -717,17 +712,27 @@ type archiveFileItem struct {
 
 type archiveView struct {
 	Running   bool
+	JobID     string
+	Pipeline  string
+	Pipelines []string
+	Error     string
 	FileCount int
 	TotalSize string
 	Files     []archiveFileItem
 }
 
 type tunnelItem struct {
-	ID           string
-	LocalAddress string
-	Remote       string
-	SSHAddress   string
-	SSHUser      string
+	ID           string `json:"id"`
+	LocalAddress string `json:"local_address"`
+	Remote       string `json:"remote"`
+	SSHAddress   string `json:"ssh_address"`
+	SSHUser      string `json:"ssh_user"`
+}
+
+type activeTunnel struct {
+	Item    tunnelItem
+	Forward *tunnel.Forward
+	Cancel  context.CancelFunc
 }
 
 type tunnelView struct {
@@ -748,6 +753,9 @@ type dbMigrateReport struct {
 type dbAdminView struct {
 	DryRun        bool
 	MigrateReport *dbMigrateReport
+	MigrateOutput string
+	ExportOutput  string
+	Error         string
 }
 
 func (s *Server) pageSchemaHelp(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -764,28 +772,25 @@ func (s *Server) pageSchemaHelp(w http.ResponseWriter, r *http.Request, sess *Se
 
 func (s *Server) pageSpoolInspect(w http.ResponseWriter, r *http.Request, sess *Session) {
 	_ = r.ParseForm()
-	spoolDir := r.FormValue("spool_dir")
-	trustedRoots := r.FormValue("trusted_roots")
+	pipeline := r.FormValue("pipeline")
 	var rep *spoolInspectReport
+	spoolDir := ""
 
 	if r.Method == http.MethodPost {
-		if err := s.validateSpoolDir(spoolDir); err != nil {
+		if err := s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": pipeline}, "started"); err != nil {
+			s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+			return
+		}
+		var err error
+		rep, spoolDir, err = s.scanPipelineSpool(r.Context(), pipeline)
+		if err != nil {
+			_ = s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": pipeline, "error": err.Error()}, "error")
 			s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
 			return
 		}
-		_ = s.audit.Log(AuditEntry{
-			IP:     s.clientIP(r),
-			Action: "spool.inspect",
-			Detail: map[string]any{"spool_dir": spoolDir},
-			Result: "ok",
-		})
-		rep = &spoolInspectReport{
-			DiscoveredFiles: 0,
-			DiscoveredBytes: 0,
-			NewFiles:        0,
-			NewBytes:        0,
-			ExistingFiles:   0,
-			ExistingBytes:   0,
+		if err := s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": pipeline, "discovered_files": rep.DiscoveredFiles, "new_files": rep.NewFiles}, "ok"); err != nil {
+			s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+			return
 		}
 	}
 
@@ -793,34 +798,41 @@ func (s *Server) pageSpoolInspect(w http.ResponseWriter, r *http.Request, sess *
 		Title:  "Spool Inspect",
 		Active: "tools",
 		Body: &spoolInspectView{
-			SpoolDir:     spoolDir,
-			TrustedRoots: trustedRoots,
-			Report:       rep,
+			Pipelines: s.spoolPipelineNames(),
+			Pipeline:  pipeline,
+			SpoolDir:  spoolDir,
+			Report:    rep,
 		},
 	})
 }
 
 func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Session) {
-	s.archiverMu.Lock()
-	running := s.archiverRunning
-	dir := s.archiverDir
-	s.archiverMu.Unlock()
+	job := s.latestArchiveJob()
+	running, jobID, pipeline, dir := false, "", "", ""
+	if job != nil {
+		running, jobID, pipeline = job.Running, job.ID, job.Pipeline
+		if len(job.Args) > 0 {
+			dir = s.archiveOutputDir(job)
+		}
+	}
 
 	var files []archiveFileItem
 	var totalSize int64
 	if dir != "" {
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, e := range entries {
-				if !e.IsDir() {
-					info, err := e.Info()
-					if err == nil {
-						totalSize += info.Size()
-						files = append(files, archiveFileItem{
-							Name:      e.Name(),
-							Size:      fmtBytes(float64(info.Size())),
-							ModTime:   info.ModTime().Format("2006-01-02 15:04:05"),
-							IsPartial: strings.HasSuffix(e.Name(), ".partial"),
-						})
+		if safeDir, err := s.validateArchiveDir(dir); err == nil {
+			if entries, err := os.ReadDir(safeDir); err == nil {
+				for _, e := range entries {
+					if !e.IsDir() {
+						info, err := e.Info()
+						if err == nil {
+							totalSize += info.Size()
+							files = append(files, archiveFileItem{
+								Name:      e.Name(),
+								Size:      fmtBytes(float64(info.Size())),
+								ModTime:   info.ModTime().Format("2006-01-02 15:04:05"),
+								IsPartial: strings.HasPrefix(e.Name(), ".partial-"),
+							})
+						}
 					}
 				}
 			}
@@ -832,6 +844,9 @@ func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Sessi
 		Active: "tools",
 		Body: &archiveView{
 			Running:   running,
+			JobID:     jobID,
+			Pipeline:  pipeline,
+			Pipelines: s.archivePipelineNames(),
 			FileCount: len(files),
 			TotalSize: fmtBytes(float64(totalSize)),
 			Files:     files,
@@ -843,7 +858,14 @@ func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Sessio
 	s.tunnelMu.Lock()
 	list := make([]tunnelItem, 0, len(s.tunnels))
 	for _, t := range s.tunnels {
-		list = append(list, t)
+		if t.Forward == nil {
+			continue
+		}
+		select {
+		case <-t.Forward.Done():
+		default:
+			list = append(list, t.Item)
+		}
 	}
 	s.tunnelMu.Unlock()
 

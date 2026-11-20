@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 
+	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/reader/archive"
 )
@@ -27,7 +29,7 @@ import (
 // script mysqlbinlog --raw --stop-never. Thư mục đích dùng trực tiếp cho `seed apply --archive`.
 func newArchiveCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "archive", Short: "Lưu trữ log của source (binlog MySQL)"}
-	var from, to, startGTID string
+	var from, to, startGTID, pipelineConfig string
 	var serverID uint32
 	var heartbeat time.Duration
 	bin := &cobra.Command{
@@ -38,8 +40,18 @@ mang tên .partial-* và bị bỏ qua. Chạy lại tiếp tục theo GTID, kh�
 từ gtid_purged của source (mọi binlog còn trên server), hoặc --start-gtid.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if from == "" || to == "" {
-				return exitcode.New("missing_flag", exitcode.InvalidSyntax, "--from and --to are required", nil)
+			if (from == "") == (pipelineConfig == "") || to == "" {
+				return exitcode.New("missing_flag", exitcode.InvalidSyntax, "provide exactly one of --from or --config, and provide --to", nil)
+			}
+			if pipelineConfig != "" {
+				pcfg, err := config.LoadFile(pipelineConfig)
+				if err != nil {
+					return fmt.Errorf("load pipeline config: %w", err)
+				}
+				if !strings.EqualFold(pcfg.Source.Kind, "mysql") {
+					return errors.New("archive binlog requires a MySQL/MariaDB source in the pipeline config")
+				}
+				from = pcfg.Source.DSN
 			}
 			if strings.Contains(to, "://") {
 				return exitcode.New("invalid_flag", exitcode.InvalidSyntax,
@@ -86,6 +98,7 @@ từ gtid_purged của source (mọi binlog còn trên server), hoặc --start-g
 		},
 	}
 	bin.Flags().StringVar(&from, "from", "", "DSN của MySQL nguồn (nên là replica), mysql://… hoặc user:pass@tcp(host:3306)/")
+	bin.Flags().StringVar(&pipelineConfig, "config", "", "pipeline YAML; uses its MySQL source DSN and inherited env without exposing credentials in argv")
 	bin.Flags().StringVar(&to, "to", "", "Thư mục archive (dùng cho seed apply --archive)")
 	bin.Flags().Uint32Var(&serverID, "server-id", 0, "server_id khi đọc binlog; phải duy nhất trong cụm (mặc định suy từ --to)")
 	bin.Flags().StringVar(&startGTID, "start-gtid", "", "Lần chạy đầu: tập GTID không cần lưu (mặc định gtid_purged của source)")

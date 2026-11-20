@@ -6,14 +6,9 @@
 
 <section class="card">
   <div class="cardhead"><h2>PostgreSQL Metadata Store Migration (strand web db migrate)</h2></div>
-  <p class="muted small">Migrate configuration, pipelines, jobs, wizards, and audit log from file mode to PostgreSQL metadata database with full SHA-256 verification.</p>
+  <p class="muted small">Import legacy file-mode state from the configured web.yaml into this PostgreSQL metadata store, then verify it. This requires a legacy config file; it does not migrate database tables.</p>
   <form class="act form-grid" data-action="db-migrate" method="post" action="/settings/db/migrate">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="form-field full">
-      <label for="mig-dsn">PostgreSQL Database DSN (optional override)</label>
-      <input type="text" id="mig-dsn" name="dsn" class="mono wide" placeholder="postgres://user:pass@127.0.0.1:5432/strand_web?sslmode=disable">
-      <span class="help">Defaults to database.dsn from web.yaml or STRAND_WEB_DATABASE_DSN</span>
-    </div>
     <div class="toolbar">
       <button class="btn" type="submit" name="dry_run" value="true" data-action="db-migrate-dry">Dry-Run Migration (Preview)</button>
       <button class="btn primary" type="submit" name="dry_run" value="false" data-action="db-migrate" data-confirm="Execute migration to PostgreSQL metadata database?">Apply Migration</button>
@@ -39,6 +34,7 @@
     <ul>{{range .Body.MigrateReport.Problems}}<li>{{.}}</li>{{end}}</ul>
   </div>
   {{end}}
+  {{if .Body.MigrateOutput}}<pre class="job-output mono">{{.Body.MigrateOutput}}</pre>{{end}}
 </section>
 {{end}}
 
@@ -48,13 +44,16 @@
   <form class="act form-grid" data-action="db-export" method="post" action="/settings/db/export">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
     <div class="form-field full">
-      <label for="exp-dir">Export Target Directory <span class="req">*</span></label>
-      <input type="text" id="exp-dir" name="dir" class="mono wide" placeholder="/var/backups/strand-web-export" required>
-      <span class="help">Empty or new directory where exported state files will be written</span>
+      <label for="exp-dir">Export Target Directory</label>
+      <input type="text" id="exp-dir" name="dir" class="mono wide" placeholder="<state_dir>/exports/metadata-20261120">
+      <span class="help">Must be empty/new and resolve beneath state_dir/exports. Leave blank to use that root.</span>
     </div>
     <div class="toolbar">
       <button class="btn primary" type="submit" data-action="db-export" data-confirm="Export all database metadata to directory?">Export Database</button>
     </div>
   </form>
 </section>
+{{if .Body.ExportOutput}}
+<section class="card"><div class="cardhead"><h2>Export complete</h2></div><pre class="job-output mono">{{.Body.ExportOutput}}</pre></section>
+{{end}}
 {{end}}

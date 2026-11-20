@@ -103,6 +103,26 @@ func MigrateFiles(ctx context.Context, o MigrateOptions) (*MigrateReport, error)
 	})
 }
 
+// MigrateFilesFromStore runs the same verified migration against the Server's already-open metadata store.
+// The HTTP handler must not open a second connection to the same metadata DB while the web server is active.
+func MigrateFilesFromStore(ctx context.Context, st store.Store, o MigrateOptions) (*MigrateReport, error) {
+	if st == nil {
+		return nil, errors.New("metadata store is unavailable")
+	}
+	if o.ConfigPath == "" {
+		return nil, errors.New("--config <web.yaml> of the file-mode installation is required")
+	}
+	cfg, err := LoadConfig(o.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	box, err := boxFor(o.SecretKey)
+	if err != nil {
+		return nil, err
+	}
+	return migrateWith(ctx, st, cfg, box, o, nil)
+}
+
 func migrateWith(ctx context.Context, st store.Store, cfg *Config, box *store.Box, o MigrateOptions, schemaCheck func() (bool, string, error)) (*MigrateReport, error) {
 	if o.Out == nil {
 		o.Out = io.Discard
@@ -256,6 +276,29 @@ func ExportDB(ctx context.Context, o ExportOptions) error {
 	}
 	defer pg.Close()
 	return exportWith(ctx, pg, cfg, box, o)
+}
+
+// ExportDBFromStore exports from the already-open server metadata store, avoiding a second DB pool from HTTP.
+func ExportDBFromStore(ctx context.Context, st store.Store, o ExportOptions) error {
+	if st == nil {
+		return errors.New("metadata store is unavailable")
+	}
+	if o.Dir == "" {
+		return errors.New("--dir is required")
+	}
+	cfg := &Config{}
+	if o.ConfigPath != "" {
+		loaded, err := LoadConfig(o.ConfigPath)
+		if err != nil {
+			return err
+		}
+		cfg = loaded
+	}
+	box, err := boxFor(o.SecretKey)
+	if err != nil {
+		return err
+	}
+	return exportWith(ctx, st, cfg, box, o)
 }
 
 func exportWith(ctx context.Context, st store.Store, cfg *Config, box *store.Box, o ExportOptions) error {

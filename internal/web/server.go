@@ -71,10 +71,13 @@ type Server struct {
 	handler http.Handler
 
 	tunnelMu        sync.Mutex
-	tunnels         map[string]tunnelItem
+	tunnels         map[string]activeTunnel
+	tunnelCtx       context.Context
+	tunnelCancel    context.CancelFunc
 	archiverMu      sync.Mutex
 	archiverRunning bool
 	archiverDir     string
+	archiverJobID   string
 
 	// Luồng sống (stream.go): hub phát sự kiện của sampler; delta nhớ phần đã phát; streams đếm kết nối SSE.
 	hub          *liveHub
@@ -146,13 +149,14 @@ func New(o Options) (*Server, error) {
 	reg := NewRegistry(o.Config, o.Commander)
 	reg.now = o.Now
 	reg.db = db
+	tunnelCtx, tunnelCancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg: o.Config, reg: reg,
 		sourceTablesCache: make(map[string]sourceTablesCacheEntry),
 		sessions:          NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
 		actions: NewActionRegistry(), log: o.Logger, now: o.Now, version: o.Version,
 		tls:     o.Config.TLSCert != "",
-		tunnels: make(map[string]tunnelItem),
+		tunnels: make(map[string]activeTunnel), tunnelCtx: tunnelCtx, tunnelCancel: tunnelCancel,
 	}
 	s.db = db
 	s.backups, err = backup.NewCatalog(db.st)
@@ -267,6 +271,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 // Serve phục vụ trên ln.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	defer func() {
+		s.closeTunnels()
+		if s.tunnelCancel != nil {
+			s.tunnelCancel()
+		}
+	}()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go s.samp.Run(ctx)

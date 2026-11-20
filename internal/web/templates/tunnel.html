@@ -20,6 +20,16 @@
       <input type="text" id="tun-listen" name="listen" value="127.0.0.1:0" placeholder="127.0.0.1:0">
       <span class="help">Port 0 selects an ephemeral free local port</span>
     </div>
+    <div class="form-field full">
+      <label for="tun-known-hosts">Trusted known_hosts file <span class="req">*</span></label>
+      <input type="text" id="tun-known-hosts" name="known_hosts" class="mono wide" placeholder="/etc/strand/ssh/known_hosts" required>
+      <span class="help">Unknown or changed SSH host keys are rejected.</span>
+    </div>
+    <div class="form-field full">
+      <label for="tun-identity">SSH private key (optional)</label>
+      <input type="text" id="tun-identity" name="identity_file" class="mono wide" placeholder="/etc/strand/ssh/keys/bastion_ed25519">
+      <span class="help">Must be a regular file with restrictive permissions inside STRAND_WEB_SSH_KEY_DIR; otherwise SSH_AUTH_SOCK is used.</span>
+    </div>
     <div class="toolbar">
       <button class="btn primary" type="submit" data-action="tunnel-open">Open Tunnel</button>
     </div>

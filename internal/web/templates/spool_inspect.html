@@ -1,18 +1,16 @@
 {{define "content"}}
 <section class="card">
   <div class="cardhead"><h2>Scan Spool Inventory (Read-Only)</h2></div>
-  <p class="muted small">Offline inspection of Pebble spool database and external spill sidecars. Ensures sidecar accounting, detects orphans, and checks symlink safety.</p>
+  <p class="muted small">Read-only inspection of a stopped pipeline's Pebble spool. The scanner uses only that pipeline's configured spill directory and checks sidecar references and symlink escapes.</p>
   <form class="act form-grid" data-action="spool-inspect" method="post" action="/tools/spool-inspect">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="form-field full">
-      <label for="spool-dir">Spool Directory <span class="req">*</span></label>
-      <input type="text" id="spool-dir" name="spool_dir" class="mono wide" value="{{.Body.SpoolDir}}" placeholder="/var/lib/strand/orders/spool" required>
-      <span class="help">Path to the Pebble spool directory</span>
-    </div>
-    <div class="form-field full">
-      <label for="trusted-roots">Trusted Spill Roots <span class="req">*</span></label>
-      <input type="text" id="trusted-roots" name="trusted_roots" class="mono wide" value="{{.Body.TrustedRoots}}" placeholder="/var/lib/strand/spill" required>
-      <span class="help">Comma-separated operator-supplied trusted directories</span>
+    <div class="form-field">
+      <label for="spool-pipeline">Pipeline <span class="req">*</span></label>
+      <select id="spool-pipeline" name="pipeline" required>
+        <option value="">Select a stopped pipeline</option>
+        {{range .Body.Pipelines}}<option value="{{.}}" {{if eq . $.Body.Pipeline}}selected{{end}}>{{.}}</option>{{end}}
+      </select>
+      <span class="help">Only configured spool paths are scanned. Stop the pipeline before inspection.</span>
     </div>
     <div class="toolbar">
       <button class="btn primary" type="submit" data-action="spool-inspect">Scan Inventory</button>
@@ -23,6 +21,7 @@
 {{if .Body.Report}}
 <section class="card">
   <div class="cardhead"><h2>Scan Results</h2></div>
+  <p class="muted small mono">{{.Body.SpoolDir}}</p>
   <dl class="kv">
     <dt>Discovered Files</dt><dd class="mono">{{.Body.Report.DiscoveredFiles}} ({{.Body.Report.DiscoveredBytes}} bytes)</dd>
     <dt>New Sidecars</dt><dd class="mono">{{.Body.Report.NewFiles}} ({{.Body.Report.NewBytes}} bytes)</dd>

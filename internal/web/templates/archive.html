@@ -1,7 +1,7 @@
 {{define "content"}}
 <section class="card">
   <div class="cardhead"><h2>Continuous Binlog Archiver</h2></div>
-  <p class="muted small">Lưu trữ binlog liên tục từ MySQL replica vào thư mục archive để dùng cho seed apply (chế độ B) hoặc PITR.</p>
+  <p class="muted small">Chạy archiver nền từ source MySQL có GTID. MariaDB chưa được hỗ trợ cho binlog archive. Thông tin kết nối lấy từ cấu hình pipeline và env của nó; credential không được đưa vào argv hoặc form.</p>
   <div class="summary-strip">
     <div class="metric"><div class="m-label">Status</div><div class="m-value"><span class="badge {{if .Body.Running}}st-synced{{else}}st-stopped{{end}}">{{if .Body.Running}}running{{else}}stopped{{end}}</span></div></div>
     <div class="metric"><div class="m-label">Archive Files</div><div class="m-value c-num">{{.Body.FileCount}}</div></div>
@@ -9,17 +9,21 @@
   </div>
   <form class="act form-grid" data-action="archive-start">
     <div class="form-field full">
-      <label for="archive-from">Source MySQL DSN / Replica <span class="req">*</span></label>
-      <input type="text" id="archive-from" name="from" class="mono wide" placeholder="user:password@tcp(10.0.1.25:3306)/?readTimeout=30s" required>
-      <span class="help">DSN of MySQL replica server</span>
+      <label for="archive-pipeline">MySQL pipeline <span class="req">*</span></label>
+      <select id="archive-pipeline" name="pipeline" required>
+        <option value="">Select pipeline</option>
+        {{range .Body.Pipelines}}<option value="{{.}}" {{if eq . $.Body.Pipeline}}selected{{end}}>{{.}}</option>{{end}}
+      </select>
+      <span class="help">MySQL GTID must be enabled and the account must allow replication/binlog reads. MariaDB archiving is not supported yet.</span>
     </div>
     <div class="form-field full">
       <label for="archive-to">Archive Directory <span class="req">*</span></label>
-      <input type="text" id="archive-to" name="to" class="mono wide" placeholder="/var/lib/strand/binlog-archive" required>
-      <span class="help">Local directory where raw binlogs are synced</span>
+      <input type="text" id="archive-to" name="to" class="mono wide" placeholder="<state_dir>/archive/seabank" required>
+      <span class="help">Must resolve beneath state_dir/archive. Existing archive files are resumed.</span>
     </div>
     <div class="toolbar">
       {{if .Body.Running}}
+      <input type="hidden" name="job_id" value="{{.Body.JobID}}">
       <button class="btn danger" type="submit" data-action="archive-stop" data-confirm="Stop the binlog archiver?">Stop Archiver</button>
       {{else}}
       <button class="btn primary" type="submit" data-action="archive-start">Start Archiver</button>

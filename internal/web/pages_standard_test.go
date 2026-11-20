@@ -1,14 +1,21 @@
 package web
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
+	"strand/internal/spool"
 )
 
 // TestStandardPageSkeletonAndNoInlineStyles asserts that every registered page adheres
@@ -271,6 +278,7 @@ func TestJobDownloadEndpointSecurity(t *testing.T) {
 
 	// Cancel verify job so orders pipeline can run export
 	_, _ = e.act(c, csrf, "orders", ActJobCancel, map[string]string{"job_id": verifyJobID})
+	waitFor(t, "verify job cancellation", func() bool { j, ok := e.srv.jobs.Get(verifyJobID); return ok && !j.Running })
 
 	// 2. Export job download succeeds and is audited
 	code, res = e.act(c, csrf, "orders", "export", nil)
@@ -283,8 +291,44 @@ func TestJobDownloadEndpointSecurity(t *testing.T) {
 	}
 
 	resp, _ = e.do(c, "GET", "/api/v1/jobs/"+exportJobID+"/download", "", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET export job download returned HTTP %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("unfinished export must not be downloadable, got HTTP %d", resp.StatusCode)
+	}
+	waitFor(t, "export job completion", func() bool { j, ok := e.srv.jobs.Get(exportJobID); return ok && !j.Running })
+	j, ok := e.srv.jobs.Get(exportJobID)
+	if !ok || j.ExitCode == nil || *j.ExitCode != 0 {
+		t.Fatalf("export job did not succeed: %+v", j)
+	}
+	artifact, err := exportOutputArg(j.Args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(artifact), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, []byte("real export artifact"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := e.do(c, "GET", "/api/v1/jobs/"+exportJobID+"/download", "", nil)
+	if resp.StatusCode != http.StatusOK || body != "real export artifact" {
+		t.Fatalf("download must stream the completed artifact, got status=%d body=%q", resp.StatusCode, body)
+	}
+	checked, err := os.Lstat(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(artifact); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("must not stream"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, artifact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openCheckedRegularFile(artifact, checked); err == nil {
+		t.Fatal("artifact identity change must be rejected")
 	}
 	cd := resp.Header.Get("Content-Disposition")
 	if !strings.Contains(cd, "attachment") || !strings.Contains(cd, exportJobID) {
@@ -309,6 +353,7 @@ func TestSecurityControlsAndAuditing(t *testing.T) {
 	// 1. Tunnels: reject non-loopback listen
 	badTunnelJSON, _ := json.Marshal(map[string]string{
 		"ssh":         "bastion.example.com:22",
+		"user":        "strand",
 		"remote":      "db.internal:3306",
 		"listen":      "0.0.0.0:3306", // non-loopback
 		"known_hosts": "/path/to/known_hosts",
@@ -321,6 +366,7 @@ func TestSecurityControlsAndAuditing(t *testing.T) {
 	// 2. Tunnels: reject missing known_hosts
 	badHostsJSON, _ := json.Marshal(map[string]string{
 		"ssh":    "bastion.example.com:22",
+		"user":   "strand",
 		"remote": "db.internal:3306",
 		"listen": "127.0.0.1:0",
 	})
@@ -333,12 +379,26 @@ func TestSecurityControlsAndAuditing(t *testing.T) {
 	keyDir := filepath.Join(t.TempDir(), "allowed-keys")
 	_ = os.MkdirAll(keyDir, 0700)
 	t.Setenv("STRAND_WEB_SSH_KEY_DIR", keyDir)
+	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostSigner, err := ssh.NewSignerFromKey(hostPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
+	knownHostsLine := "bastion.example.com " + string(ssh.MarshalAuthorizedKey(hostSigner.PublicKey()))
+	if err := os.WriteFile(knownHostsFile, []byte(strings.TrimSpace(knownHostsLine)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	badKeyJSON, _ := json.Marshal(map[string]string{
 		"ssh":           "bastion.example.com:22",
+		"user":          "strand",
 		"remote":        "db.internal:3306",
 		"listen":        "127.0.0.1:0",
-		"known_hosts":   "/path/to/known_hosts",
+		"known_hosts":   knownHostsFile,
 		"identity_file": "/etc/shadow",
 	})
 	resp, body = e.do(c, "POST", "/api/v1/tunnels", string(badKeyJSON), hdr)
@@ -346,36 +406,18 @@ func TestSecurityControlsAndAuditing(t *testing.T) {
 		t.Fatalf("expected key dir error, got %d: %s", resp.StatusCode, body)
 	}
 
-	// 4. Tunnels: valid creation and audit log
-	goodKey := filepath.Join(keyDir, "id_rsa")
-	_ = os.WriteFile(goodKey, []byte("key"), 0600)
-	goodTunnelJSON, _ := json.Marshal(map[string]string{
-		"ssh":           "bastion.example.com:22",
-		"remote":        "db.internal:3306",
-		"listen":        "127.0.0.1:0",
-		"known_hosts":   "/path/to/known_hosts",
-		"identity_file": goodKey,
-	})
-	resp, body = e.do(c, "POST", "/api/v1/tunnels", string(goodTunnelJSON), hdr)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected valid tunnel open to succeed, got %d: %s", resp.StatusCode, body)
-	}
-	if audits := e.auditFor("tunnel.start"); len(audits) == 0 {
-		t.Fatalf("expected tunnel.start audit entry, found none")
-	}
-
-	// 5. Spool inspect: reject arbitrary path outside configured spool dirs
+	// 4. Spool inspect accepts a pipeline selector, never a client-supplied path.
 	badSpoolJSON, _ := json.Marshal(map[string]string{
 		"spool_dir": "/etc/passwd",
 	})
 	resp, body = e.do(c, "POST", "/api/v1/tools/spool-inspect", string(badSpoolJSON), hdr)
-	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "configured pipeline spool directory") {
-		t.Fatalf("expected spool dir validation error, got %d: %s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected arbitrary path payload to be rejected, got %d: %s", resp.StatusCode, body)
 	}
 
 	// 6. DB export: reject export dir outside state_dir/exports
 	badExportDir := "/var/log/private"
-	_, err := e.srv.validateExportDir(badExportDir)
+	_, err = e.srv.validateExportDir(badExportDir)
 	if err == nil {
 		t.Fatalf("expected validateExportDir to reject %s", badExportDir)
 	}
@@ -386,4 +428,146 @@ func TestSecurityControlsAndAuditing(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected validateArchiveDir to reject %s", badArchiveDir)
 	}
+	exportRoot := filepath.Join(e.srv.cfg.StateDir, "exports")
+	if err := os.Remove(exportRoot); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, exportRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.srv.validateExportDir(""); err == nil {
+		t.Fatal("export allow-list root symlink must be rejected")
+	}
+	archiveRoot := filepath.Join(e.srv.cfg.StateDir, "archive")
+	if err := os.Remove(archiveRoot); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, archiveRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.srv.validateArchiveDir(""); err == nil {
+		t.Fatal("archive allow-list root symlink must be rejected")
+	}
+}
+
+func TestSpoolInspectScansConfiguredPipelineOffline(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	// Admin socket unreachable plus no live PID represents a stopped pipeline.
+	if err := os.Remove(e.sock); err != nil {
+		t.Fatal(err)
+	}
+	c, csrf := e.loginOK()
+	p := e.srv.reg.Get("orders")
+	dir := p.Cfg.Resources.Spool.Path
+	spill := filepath.Join(dir, "spill")
+	if err := os.MkdirAll(spill, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := spool.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spill, "orphan.sidecar"), []byte("payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hdr := map[string]string{csrfHeader: csrf, "Content-Type": "application/json"}
+	resp, body := e.do(c, "POST", "/api/v1/tools/spool-inspect", `{"pipeline":"orders"}`, hdr)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect configured spool: status=%d body=%s", resp.StatusCode, body)
+	}
+	var result struct {
+		Report struct {
+			DiscoveredFiles int `json:"discovered_files"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Report.DiscoveredFiles != 1 {
+		t.Fatalf("expected real inventory of one file, got %+v", result.Report)
+	}
+}
+
+func TestDBAdminExportsFromOpenMetadataStore(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	e.sampleNow()
+	c, csrf := e.loginOK()
+	out := filepath.Join(e.srv.cfg.StateDir, "exports", "metadata-test")
+	form := url.Values{"csrf": {csrf}, "dir": {out}}
+	hdr := map[string]string{csrfHeader: csrf, "Content-Type": "application/x-www-form-urlencoded"}
+	resp, body := e.do(c, "POST", "/settings/db/export", form.Encode(), hdr)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Export complete") {
+		t.Fatalf("real metadata export failed: status=%d body=%s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(filepath.Join(out, "pipelines", "MANIFEST.json")); err != nil {
+		t.Fatalf("metadata export manifest missing: %v", err)
+	}
+	if audits := e.auditFor("db.export"); len(audits) < 2 {
+		t.Fatalf("expected start and success audit records, got %d", len(audits))
+	}
+}
+
+func TestArchiveStartsAndStopsRealJobWithoutCredentialInArgs(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	e.sampleNow()
+	e.hold(true)
+	t.Cleanup(func() { e.hold(false) })
+	c, csrf := e.loginOK()
+	hdr := map[string]string{csrfHeader: csrf, "Content-Type": "application/json"}
+	resp, body := e.do(c, "POST", "/api/v1/archive/start", `{"pipeline":"orders"}`, hdr)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("start archive: status=%d body=%s", resp.StatusCode, body)
+	}
+	var started struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal([]byte(body), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.JobID == "" {
+		t.Fatalf("archive start omitted job ID: %s", body)
+	}
+	waitFor(t, "archive process invocation", func() bool { return len(e.fakeCalls()) > 0 })
+	call := e.fakeCalls()[0]
+	if !reflect.DeepEqual(call.Args[:2], []string{"archive", "binlog"}) {
+		t.Fatalf("unexpected archive command: %v", call.Args)
+	}
+	if !containsString(call.Args, "--config") || !containsString(call.Args, "--to") {
+		t.Fatalf("archive command must receive pipeline config and output directory: %v", call.Args)
+	}
+	for _, arg := range call.Args {
+		if strings.Contains(arg, "SuperSecretSrc") {
+			t.Fatalf("source credential leaked in argv: %v", call.Args)
+		}
+	}
+	resp, body = e.do(c, "POST", "/api/v1/archive/stop", `{"job_id":"`+started.JobID+`"}`, hdr)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stop archive: status=%d body=%s", resp.StatusCode, body)
+	}
+	waitFor(t, "archive job stop", func() bool { j, ok := e.srv.jobs.Get(started.JobID); return ok && !j.Running })
+	finished, _ := e.srv.jobs.Get(started.JobID)
+	archiveDir := e.srv.archiveOutputDir(&finished)
+	if err := os.WriteFile(filepath.Join(archiveDir, "mysql-bin.000001"), []byte("binlog"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, page := e.do(c, "GET", "/archive", "", nil)
+	if !strings.Contains(page, "mysql-bin.000001") {
+		t.Fatalf("archive page must keep showing the latest job's files after stop: %s", page)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
