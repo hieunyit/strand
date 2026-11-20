@@ -1,9 +1,12 @@
 package web
 
 import (
+	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"strand/internal/backup"
 	"strand/internal/web/store"
@@ -50,5 +53,34 @@ func TestBackupReportsPage(t *testing.T) {
 	}
 	if _, body := e.do(c, "GET", "/backups/reports?from=2026-11-01&to=2026-10-01", "", nil); !strings.Contains(body, "showing the last 30 days") {
 		t.Error("an inverted range is not reported")
+	}
+}
+
+// A run still in progress (or cancelled) is neither a success nor a failure: it used to lower the 24-hour
+// success rate and appear as a failed bar in the 14-day chart.
+func TestBackupSuccessRateIgnoresUnfinishedRuns(t *testing.T) {
+	st := store.NewMem()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	job := backup.Job{ID: "j1", Name: "j1", Command: "/opt/b/run", EverySeconds: 3600, ArtifactTemplate: "/var/backups/{id}.sql",
+		ManifestTemplate: "/var/backups/{id}.json", Bucket: "central-backups"}
+	if err := st.CreateBackupJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	for i, status := range []string{backup.RunStatusSuccess, string(backup.RunStatusRunning), string(backup.RunStatusCancelled)} {
+		if err := st.CreateBackupRun(ctx, backup.Run{ID: fmt.Sprintf("brun-%d", i), JobID: "j1", Trigger: backup.TriggerSchedule,
+			StartedAt: now.Add(-time.Duration(i+1) * time.Minute), Status: status}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := dbEnv(t, st, nil, nil)
+	c, _ := e.loginOK()
+	_, body := e.do(c, "GET", "/backups", "", nil)
+	i := strings.Index(body, "24h success rate")
+	if i < 0 {
+		t.Fatal("success rate tile missing")
+	}
+	if tile := body[i : i+200]; !strings.Contains(tile, ">100%<") {
+		t.Fatalf("one success and two unfinished runs should be 100%%: %s", tile)
 	}
 }

@@ -164,31 +164,29 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 			b.Repos, _ = s.db.st.ListBackupRepos(r.Context())
 			b.Checks, _ = s.backups.Checks(r.Context(), "", 20)
 
-			totalSources := len(b.Sources)
-			protectedSources := 0
-			for _, src := range b.Sources {
-				if src.LastSuccess != nil && !src.Stale {
-					protectedSources++
-				}
-			}
-			b.StatProtectedSources = fmt.Sprintf("%d/%d", protectedSources, totalSources)
-			if totalSources == 0 {
-				b.StatProtectedSources = "0/0"
-			}
-
+			h := s.backupHealthFrom(r.Context(), b.Jobs, b.Sources, b.Checks, b.Repos)
+			b.StatProtectedSources = h.ProtectedText()
 			b.IsStandby = !s.isActive()
-			b.NoRepo = len(b.Repos) == 0
-			// Backup encryption keys (STRAND_BACKUP_ENCRYPTION_KEYS), not the web's own secret key.
-			kinfo, kerr := s.keysInfo(r.Context())
-			b.NoKey = kerr == nil && !kinfo.Configured
+			b.NoRepo, b.NoKey = h.NoRepo, h.NoKey
+			b.StatFailingJobs, b.NeedsAttention = h.Failing, h.Attention
+			b.StatLastTestRestore, b.LastTestRestoreOK = h.LastTestRestore, h.LastTestRestoreOK
+			b.RPOBreachCount = h.RPOBreaches
+			b.StatRPOBreaches = "-"
+			if h.RPOKnown {
+				b.StatRPOBreaches = fmt.Sprintf("%d", h.RPOBreaches)
+			}
 
 			now := time.Now().UTC()
 			since24h := now.Add(-24 * time.Hour)
 			allRuns, _ := s.db.st.ListBackupRuns(r.Context(), store.BackupRunFilter{Limit: 2000})
 			succ24h := 0
 			total24h := 0
+			// Only finished runs count: a running or cancelled run is neither a success nor a failure.
+			finishedBad := func(st string) bool {
+				return st == string(backup.RunStatusFailed) || st == backup.RunStatusPartial || st == string(backup.RunStatusMissed)
+			}
 			for _, run := range allRuns {
-				if run.StartedAt.After(since24h) {
+				if run.StartedAt.After(since24h) && (run.Status == backup.RunStatusSuccess || finishedBad(run.Status)) {
 					total24h++
 					if run.Status == backup.RunStatusSuccess {
 						succ24h++
@@ -210,62 +208,6 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 			}
 			b.StatStorageUsed = fmtBytes(float64(totalStorage))
 
-			failingCount := 0
-			for _, job := range b.Jobs {
-				if job.Job.ConsecutiveFailures > 0 {
-					failingCount++
-					b.NeedsAttention = append(b.NeedsAttention, AttentionItem{
-						JobID:    job.Job.ID,
-						JobName:  job.Job.Name,
-						Engine:   job.Job.Engine(),
-						Reason:   fmt.Sprintf("%d consecutive failures (%s)", job.Job.ConsecutiveFailures, job.Job.LastRunStatus),
-						Severity: "bad",
-						LogURL:   fmt.Sprintf("/backups/jobs/%s?tab=runs", job.Job.ID),
-						EditURL:  fmt.Sprintf("/backups/jobs/%s?tab=settings", job.Job.ID),
-					})
-				}
-			}
-			b.StatFailingJobs = failingCount
-
-			b.StatLastTestRestore = "never"
-			for _, c := range b.Checks { // newest first
-				if c.Kind == "test_restore" {
-					b.StatLastTestRestore = c.Status + ", " + fmtRel(c.FinishedAt, time.Now())
-					b.LastTestRestoreOK = c.Status == "ok" || c.Status == "success" || c.Status == "passed"
-					break
-				}
-			}
-
-			if st, _, err := s.rpoStatuses(r.Context()); err == nil {
-				breaches := 0
-				for _, x := range st {
-					if !x.Breach {
-						continue
-					}
-					breaches++
-					name := x.JobName
-					if name == "" {
-						name = x.Source
-					}
-					b.NeedsAttention = append(b.NeedsAttention, AttentionItem{
-						JobID: x.JobID, JobName: name, Engine: x.Engine, Severity: "bad",
-						Reason:  fmt.Sprintf("RPO breach: last restore point %s ago (target %d min)", fmtDur(float64(x.CurrentSecs)), x.TargetMinutes),
-						LogURL:  "/backups/jobs/" + x.JobID + "?tab=runs",
-						EditURL: "/backups/jobs/" + x.JobID + "?tab=settings",
-					})
-				}
-				b.StatRPOBreaches = fmt.Sprintf("%d", breaches)
-				b.RPOBreachCount = breaches
-			} else {
-				b.StatRPOBreaches = "-"
-			}
-			if kerr == nil {
-				for _, kw := range kinfo.Warnings {
-					b.NeedsAttention = append(b.NeedsAttention, AttentionItem{JobName: "Encryption key " + kw.KeyID, Engine: "-", Severity: "bad",
-						Reason: kw.Message, LogURL: "/backups/keys", EditURL: "/backups/keys"})
-				}
-			}
-
 			days := make([]BackupDayStat, 14)
 			for i := 0; i < 14; i++ {
 				d := now.AddDate(0, 0, -13+i).Truncate(24 * time.Hour)
@@ -277,7 +219,7 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 					if days[i].Date.Equal(runDate) {
 						if run.Status == backup.RunStatusSuccess {
 							days[i].Success++
-						} else {
+						} else if finishedBad(run.Status) {
 							days[i].Failed++
 						}
 						days[i].Bytes += run.BytesWritten
