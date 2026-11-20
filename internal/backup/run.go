@@ -30,7 +30,6 @@ const (
 // RunStatusRunning, RunStatusFailed, RunStatusCancelled are declared in job.go.
 const (
 	RunStatusSuccess = "success"
-	RunStatusMissed  = "missed"
 	RunStatusPartial = "partial"
 )
 

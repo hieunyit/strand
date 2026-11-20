@@ -41,6 +41,7 @@ type Mem struct {
 	tokens     map[int64]UserToken
 	tokenSeq   int64
 	pro        memBackupPro
+	cfg        memBackupCfg
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }
@@ -753,6 +754,12 @@ func cloneBackupJob(j backup.Job) backup.Job {
 		t := *j.RunFinishedAt
 		j.RunFinishedAt = &t
 	}
+	if j.Schedule != nil {
+		sc := *j.Schedule
+		sc.Days = append([]int(nil), sc.Days...)
+		j.Schedule = &sc
+	}
+	j.Overrides = append([]string(nil), j.Overrides...)
 	j.Conn.Databases = append([]string(nil), j.Conn.Databases...)
 	j.Scratch.Databases = append([]string(nil), j.Scratch.Databases...)
 	return j

@@ -270,6 +270,7 @@ type Store interface {
 	RecoverBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (bool, error)
 	DeleteBackupJob(ctx context.Context, id string) (bool, error)
 	BackupProStore
+	BackupConfigStore
 
 	CreateBackupRun(ctx context.Context, r backup.Run) error
 	UpdateBackupRun(ctx context.Context, r backup.Run) (bool, error)

@@ -43,13 +43,7 @@ func Migrations() ([]Migration, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	for i, m := range out {
-		expected := i + 1
-		// When migration 014 (backup pro) is concurrently developed on another branch,
-		// allow migration 015 before both branches land in main.
-		if i >= 13 && len(out) > 13 && out[13].Version == 15 {
-			expected = i + 2
-		}
-		if m.Version != expected && m.Version != i+1 {
+		if m.Version != i+1 {
 			return nil, fmt.Errorf("migrations must be numbered 001.. without gaps (got %03d at position %d)", m.Version, i+1)
 		}
 	}

@@ -405,6 +405,79 @@ the newest mysqldump/pg_dump backup into a scratch database
 stored per backup (`/api/v1/backups/{id}/checks`), shown on the dashboard and
 counted in metrics. `verify_every_seconds` schedules it on the active instance.
 
+### Connections, policies and schedules
+
+A job can keep its inline `conn` (unchanged) or reference reusable objects.
+
+**Connections** (`/api/v1/backup-connections`, migration 017) hold the source
+definition once: engine (`mysql|mariadb|postgres|mongodb`), host, port, user,
+TLS mode and CA, optional SSH tunnel reference and labels. The secret is either
+`env` (the name of a variable in the Web environment, as before) or `stored`:
+the password/URI typed in the console is sealed with the Web secret key
+(`STRAND_WEB_SECRET_KEY`, AES-256-GCM, the connection id as additional data, so
+a ciphertext cannot be moved to another row; `STRAND_WEB_SECRET_KEY_PREVIOUS`
+re-seals them on a key rotation). The secret is never returned: GET shows only
+`password_set` / `uri_set`. The Web process decrypts it only to start a backup
+process, passing it in that process's **environment** (`STRAND_BACKUP_CONN_PASSWORD`,
+`STRAND_BACKUP_CONN_URI`), never in argv or a file; the scheduler, Run now and the
+log archiver of a job on a stored connection are started this way, so a job on a
+stored connection must be run from the Web console (a bare CLI run fails with a
+clear message). A connection cannot be deleted while jobs use it (409 with the
+job list); editing one re-materializes its jobs and restarts their schedulers.
+
+**Test connection** (`POST /api/v1/backup-connections/test` for an unsaved body,
+`/{id}/test` for a saved one; role operator) connects and reports the server
+version, the privileges a backup lacks (MySQL/MariaDB: `SELECT, RELOAD, LOCK TABLES,
+REPLICATION CLIENT, SHOW VIEW, EVENT, TRIGGER`; PostgreSQL: the `REPLICATION`
+attribute), `gtid_mode`/`log_bin`, `wal_level`, the MongoDB replica set and the
+database list. It also returns `pitr_allowed`, `pitr_reason` and `pitr_methods`,
+computed with the same rules as `ValidatePITR` plus the server prerequisites it
+measured (MySQL: `gtid_mode=ON` and `log_bin=ON`; MariaDB: never; PostgreSQL:
+`wal_level` replica/logical and a REPLICATION role, base `pg_basebackup`;
+MongoDB: a replica set). The result of a saved connection is kept in
+`last_test_*`. The test makes the Web server open a connection to the given
+host, which is why creating connections is admin-only while testing is operator.
+
+**Policies** (`/api/v1/backup-policies`, migration 018) bundle schedule, window,
+jitter, retention, PITR/RPO (`log_archive`, `log_flush_seconds`, `rpo_minutes`,
+`rto_minutes`), storage and protection (`repository`, `replicate_to`, compression,
+encryption), verification (`verify_every_seconds`, `test_restore`) and retries.
+Gold, Silver and Bronze are created once on the first start (daily 01:00 with
+PITR and RPO 5 min / daily 01:00 / Sunday 02:00, retention 14d+8w+12m / 7d+4w /
+4w) and are editable and deletable; a restart never re-creates them. A job
+following a policy stores the effective values and the list of fields it
+`overrides`: a field the request carried with a value different from the policy
+becomes an override (or send `overrides` explicitly), everything else follows the
+policy. A policy a job's method cannot honour is applied as far as possible and
+reported in `warnings` (PITR on `mariadb-dump`, `pg_dump` or a multi-database
+`mysqldump` is switched off; test-restore needs a scratch connection), so a policy
+edit never makes a stored job unrunnable. Editing a policy re-materializes every
+job that follows it and restarts its scheduler; `PUT` returns `affects_jobs` and
+`POST /api/v1/backup-policies/{id}/preview` is the dry run (affected jobs and what
+changes for each, nothing written). A policy cannot be deleted while jobs use it.
+
+**Schedules.** `schedule` is `{kind, at, days, cron, timezone, every_seconds}`:
+`interval` (`every_seconds`, the legacy `every_seconds` of a job without
+`schedule`), `daily` (`at` `HH:MM`), `weekly` (`days` 0-6, 0 = Sunday),
+`monthly` (`days` 1-31, a day past the end of a short month runs on its last day),
+`cron` (5 fields: lists, ranges, steps, month/weekday names, weekday 7 = Sunday;
+day-of-month and day-of-week combine with OR like Vixie cron; no `@macros`).
+`timezone` is an IANA name (UTC when empty; zone data is embedded). For
+non-interval kinds `every_seconds` is kept as the typical gap between runs, for the
+retry back-off cap. `POST /api/v1/backup-schedules/preview` returns the next runs
+(default 5, up to 20) in UTC and in the zone.
+
+`window_minutes`: a run not started within this many minutes of its due time
+(scheduler down, standby, or no concurrency slot free) is recorded as status
+`missed`, not run late, and the next occurrence is scheduled; the `missed`
+notification is sent. 0 = run whenever possible (catch-up, as before).
+`jitter_seconds` delays each start by a random 0..N seconds (never past the
+window). `STRAND_BACKUP_MAX_CONCURRENT` (default 2, 0 = unlimited) and
+`STRAND_BACKUP_MAX_PER_HOST` (default 1, 0 = unlimited; host = connection
+host:port) are enforced across all scheduler processes of the active instance
+through slots in the metadata database (renewed while a run lasts, expiring 90 s
+after a crash); Run now is not queued behind them.
+
 ### Retries, bandwidth, staged parts
 
 `retry_max` and `retry_backoff_seconds`: after a failed run the next attempt is
@@ -428,7 +501,7 @@ STRAND_BACKUP_NOTIFY_ON=failure,missed,verify_failed               # default; ad
 ```
 
 Events: run `failure`/`success`, `missed` schedule (due more than max(5 min,
-10% of the interval) ago without a run), `verify_failed`. Each event is sent
+10% of the interval) ago without a run, or a run outside its `window_minutes`), `verify_failed`. Each event is sent
 once across instances and audited (`backup.notify`).
 
 ### Metrics and alerts

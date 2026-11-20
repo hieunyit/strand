@@ -208,6 +208,36 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 				}
 				n++
 			}
+			conns, err := m.st.ListBackupConnections(ctx)
+			if err != nil {
+				return err
+			}
+			for _, c := range conns {
+				changed := false
+				reseal := func(b []byte) ([]byte, error) {
+					if len(b) == 0 || opens(m.box, b, c.ID) {
+						return b, nil
+					}
+					pt, err := old.Open(b, c.ID)
+					if err != nil {
+						return nil, fmt.Errorf("backup connection %s: stored secret opens with neither %s nor %s", c.Name, EnvSecretKey, EnvSecretKeyPrevious)
+					}
+					changed = true
+					return m.box.Seal(pt, c.ID)
+				}
+				if c.PasswordSealed, err = reseal(c.PasswordSealed); err != nil {
+					return err
+				}
+				if c.URISealed, err = reseal(c.URISealed); err != nil {
+					return err
+				}
+				if changed {
+					if _, err := m.st.UpdateBackupConnection(ctx, c); err != nil {
+						return err
+					}
+					n++
+				}
+			}
 			if n > 0 {
 				m.log.Info("re-encrypted pipeline .env copies with the new secret key; remove "+EnvSecretKeyPrevious+" now", "pipelines", n)
 			}

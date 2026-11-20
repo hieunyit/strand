@@ -17,6 +17,8 @@ const (
 	RunStatusFailed      RunStatus = "failed"
 	RunStatusCancelled   RunStatus = "cancelled"
 	RunStatusInterrupted RunStatus = "interrupted"
+	// RunStatusMissed: the job was not started within its window_minutes of the due time.
+	RunStatusMissed RunStatus = "missed"
 )
 
 // Backup methods. "custom" runs an operator-provided wrapper script (artifact + seed manifest on disk);
@@ -111,6 +113,20 @@ type JobOptions struct {
 	// TestRestore restores the newest logical backup into a scratch database after each verification.
 	TestRestore bool     `json:"test_restore,omitempty"`
 	Scratch     ConnSpec `json:"scratch"`
+
+	// ConnectionID references a reusable backup connection (Conn is then filled from it); PolicyID a backup
+	// policy providing the fields not listed in Overrides. Both are optional: jobs with an inline conn and
+	// no policy keep working unchanged.
+	ConnectionID string   `json:"connection_id,omitempty"`
+	PolicyID     string   `json:"policy_id,omitempty"`
+	Overrides    []string `json:"overrides,omitempty"`
+	// Schedule (optional) replaces the plain every_seconds interval.
+	Schedule *Schedule `json:"schedule,omitempty"`
+	// WindowMinutes: a run not started within this many minutes of its due time is recorded as missed
+	// instead of running late (0 = run whenever possible).
+	WindowMinutes int `json:"window_minutes,omitempty"`
+	// JitterSeconds spreads the start of runs over [0, JitterSeconds) after the due time.
+	JitterSeconds int `json:"jitter_seconds,omitempty"`
 }
 
 // Job is a persisted recurring backup. Secrets are read from the Web process environment; SSH
@@ -215,6 +231,27 @@ func ValidateJob(j Job) error {
 	}
 	if j.EverySeconds < 60 || j.EverySeconds > 365*24*60*60 {
 		return bad("interval must be from 60 seconds to 365 days")
+	}
+	if j.Schedule != nil {
+		if err := j.Schedule.Validate(); err != nil {
+			return err
+		}
+	}
+	if j.WindowMinutes < 0 || j.WindowMinutes > 7*24*60 {
+		return bad("window_minutes must be between 0 and 10080")
+	}
+	if j.JitterSeconds < 0 || j.JitterSeconds > 3600 {
+		return bad("jitter_seconds must be between 0 and 3600")
+	}
+	for _, id := range []string{j.ConnectionID, j.PolicyID} {
+		if id != "" && !validID(id) {
+			return bad("invalid connection or policy id")
+		}
+	}
+	for _, o := range j.Overrides {
+		if !IsOverridable(o) {
+			return bad(fmt.Sprintf("unknown override field %q", o))
+		}
 	}
 	if j.RetryMax < 0 || j.RetryMax > 20 {
 		return bad("retry_max must be between 0 and 20")

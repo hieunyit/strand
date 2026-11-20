@@ -35,6 +35,8 @@ Hệ thống phân quyền trung tâm gồm 3 vai trò:
 | Xem và sửa biến môi trường pipeline (`/api/v1/pipelines/{name}/env`) | ❌ (403) | ❌ (403) | ✅ |
 | Tạo / xóa pipeline mới (`POST /api/v1/pipelines`, `DELETE /api/v1/pipelines/{name}`) | ❌ (403) | ❌ (403) | ✅ |
 | Thao tác sao lưu nâng cao (tạo/sửa job, restore, delete backup) | ❌ (403) | ❌ (403) | ✅ |
+| Tạo / sửa / xóa backup connection và policy, xem trước policy (`/api/v1/backup-connections`, `/api/v1/backup-policies`) | ❌ (403) | ❌ (403) | ✅ |
+| Test kết nối backup (`POST /api/v1/backup-connections/test`, `/{id}/test`) | ❌ (403) | ✅ | ✅ |
 | Cài đặt hệ thống (`/settings`, `/api/v1/settings`) | ❌ (403) | ❌ (403) | ✅ |
 | Quản lý người dùng (`/users`, `/api/v1/users/*`) | ❌ (403) | ❌ (403) | ✅ |
 | Xem / xuất Audit log (`/audit`, `/api/v1/audit/*`) | ❌ (403) | ❌ (403) | ✅ |
@@ -285,6 +287,37 @@ trang đầy). Xem `docs/CENTRAL-BACKUPS.md`.
 - `POST /api/v1/backup-jobs/{id}/resume`: Kích hoạt lại lịch chạy của job (`operator` / `admin`).
 - `GET /api/v1/backup-jobs/{id}/runs?cursor=&limit=`: Lịch sử các lần chạy phân trang bằng cursor. Trả về mảng các `Run` kèm `remediation_hint` cho các mã lỗi chuẩn hóa (`auth_failed`, `network`, `permission`, `disk_full`, `repo_unreachable`, `tool_missing`, `tool_failed`, `timeout`, `cancelled`).
 - `POST /api/v1/backup-runs/{id}/cancel`: Hủy một lượt chạy đang diễn ra (`operator` / `admin`). Chỉ cho phép hủy các tiến trình thuộc sở hữu của instance web hiện tại.
+
+### Backup connections, policies, schedules (`/backups`; xem `docs/CENTRAL-BACKUPS.md`)
+
+Chỉ thêm, không đổi API job cũ. Đọc: mọi vai trò. Ghi: admin, riêng test kết nối: operator. Mọi thao tác ghi vào audit
+kèm các trường đổi (secret không bao giờ xuất hiện: chỉ `"password": "set|changed|cleared"`).
+
+| Route | Ghi chú |
+| --- | --- |
+| `GET /api/v1/backup-connections` → `{"connections": [...]}` | Có `password_set`, `uri_set`; **không bao giờ** trả secret. |
+| `POST /api/v1/backup-connections` → 201 `{"connection"}` | Body: `name, engine (mysql\|mariadb\|postgres\|mongodb), host, port, user, secret_mode (env\|stored), password_env, uri_env, tls_mode, ca_cert_pem, ssh_tunnel{host,port,user,identity_ref,known_hosts_ref}, labels`; chỉ khi `secret_mode=stored`: `password`, `uri` (ghi-một-chiều, mã hóa bằng `STRAND_WEB_SECRET_KEY`, AAD = id). 400 nếu gửi `password` với `env`; 409 trùng tên/id. |
+| `GET /api/v1/backup-connections/{id}` → `{"connection", "used_by": [jobId]}` | |
+| `PUT /api/v1/backup-connections/{id}` → `{"connection", "affected_jobs", "refreshed_jobs", "refresh_failed"}` | Thiếu `password`/`uri` = giữ nguyên secret đã lưu. Cập nhật lại các job dùng nó và khởi động lại scheduler của chúng; 409 nếu đổi engine không còn khớp một job. |
+| `DELETE /api/v1/backup-connections/{id}` → 204 | **409** `{"error", "jobs": [id...]}` khi còn job dùng. |
+| `POST /api/v1/backup-connections/test` (operator) | Body như tạo (chưa lưu); thêm `id` của connection đang sửa để dùng lại secret đã lưu. |
+| `POST /api/v1/backup-connections/{id}/test` (operator) | Kiểm tra bản đã lưu, ghi `last_test_at/status/detail`. |
+
+Kết quả test (200, kể cả khi đăng nhập bị từ chối: `ok=false`, `error`): `ok, engine, version, latency_ms, granted_privileges, missing_privileges,
+gtid_mode, binlog_enabled, wal_level, replication_role, is_replica_set, replica_set, databases, checks[{name,status ok\|warn\|fail,detail}],
+pitr_allowed, pitr_reason, pitr_methods`. `pitr_*` tính bằng đúng luật `ValidatePITR` cộng điều kiện máy chủ đo được.
+
+| Route | Ghi chú |
+| --- | --- |
+| `GET /api/v1/backup-policies` → `{"policies": [... "job_count"], "overridable_fields": [...]}` | Gold/Silver/Bronze được tạo một lần khi khởi động đầu tiên (sửa/xóa được, không tự tạo lại). |
+| `POST /api/v1/backup-policies`, `GET/PUT/DELETE /api/v1/backup-policies/{id}` | Body: `name, description, schedule, window_minutes, jitter_seconds, retention, log_archive, log_flush_seconds, rpo_minutes, rto_minutes, repository, replicate_to, compress, compress_level, encrypt, verify_every_seconds, verify_sample_percent, test_restore, retry_max, retry_backoff_seconds`. `PUT` → `{"policy", "affects_jobs": N, "affected_jobs", "refreshed_jobs", "refresh_failed"}`. `DELETE` **409** `{"jobs": [...]}` khi còn job dùng. |
+| `POST /api/v1/backup-policies/{id}/preview` (dry run) | Body = policy đề xuất → `{"affects_jobs": N, "jobs": [{job, name, changes[], warnings[]}], "changes", "next_runs"}`; không ghi gì. |
+| `POST /api/v1/backup-schedules/preview` | Body: schedule `{kind, at, days, cron, timezone, every_seconds}` (+ `count` 1..20, mặc định 5; `after` RFC3339) → `{"timezone", "human", "runs": [{"utc", "local"}]}`. |
+
+Job (`POST/PUT /api/v1/backup-jobs`) nhận thêm, tùy chọn: `connection_id`, `policy_id`, `overrides` (tên trường giữ giá trị riêng của job; mặc định
+suy ra từ trường gửi khác policy), `schedule`, `window_minutes`, `jitter_seconds`. Job inline cũ chạy y như trước. Phản hồi có thêm `warnings`
+(ví dụ PITR bị tắt vì phương thức/số database không hỗ trợ). Job có `schedule` khác `interval` chạy lần đầu đúng lần kế tiếp của lịch (không phải ngay);
+`last_run_status` có thêm giá trị `missed`.
 
 ### Registry trong DB (chế độ PostgreSQL)
 
