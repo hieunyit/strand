@@ -60,6 +60,16 @@ type User struct {
 	LastFailedAt       *time.Time `json:"last_failed_at,omitempty"`
 }
 
+// BackupRun is an execution run of a backup job.
+type BackupRun = backup.Run
+
+// BackupRunFilter filters runs for listing.
+type BackupRunFilter struct {
+	JobID string
+	Limit int
+	After *backup.Cursor
+}
+
 // UserToken is a scoped API bearer token belonging to a user.
 type UserToken struct {
 	ID          int64      `json:"id"`
@@ -260,6 +270,12 @@ type Store interface {
 	RecoverBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (bool, error)
 	DeleteBackupJob(ctx context.Context, id string) (bool, error)
 	BackupProStore
+
+	CreateBackupRun(ctx context.Context, r backup.Run) error
+	UpdateBackupRun(ctx context.Context, r backup.Run) (bool, error)
+	GetBackupRun(ctx context.Context, id string) (backup.Run, bool, error)
+	ListBackupRuns(ctx context.Context, f BackupRunFilter) ([]backup.Run, error)
+	FinishBackupRun(ctx context.Context, id string, finishedAt time.Time, status string, bytesRead, bytesWritten int64, duration time.Duration, backupID, errorCode, errorMessage string) (backup.Run, bool, error)
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error

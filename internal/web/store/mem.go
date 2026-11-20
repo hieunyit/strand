@@ -30,6 +30,7 @@ type Mem struct {
 	meta       map[string]string
 	backups    map[string]backup.Record
 	backupJobs map[string]backup.Job
+	backupRuns map[string]backup.Run
 	locks      map[string]*sync.Mutex
 	lease      *Lease
 	auditSeq   int64
@@ -47,7 +48,7 @@ type Mem struct {
 func NewMem() *Mem {
 	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]DesiredState{},
 		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, backups: map[string]backup.Record{},
-		backupJobs: map[string]backup.Job{}, locks: map[string]*sync.Mutex{},
+		backupJobs: map[string]backup.Job{}, backupRuns: map[string]backup.Run{}, locks: map[string]*sync.Mutex{},
 		users: map[int64]User{}, tokens: map[int64]UserToken{}}
 }
 
@@ -854,6 +855,11 @@ func (m *Mem) DeleteBackupJob(_ context.Context, id string) (bool, error) {
 		return false, nil
 	}
 	delete(m.backupJobs, id)
+	for rid, r := range m.backupRuns {
+		if r.JobID == id {
+			delete(m.backupRuns, rid)
+		}
+	}
 	return true, nil
 }
 
