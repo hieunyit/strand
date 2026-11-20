@@ -303,6 +303,52 @@ func (f *Forward) Close() error {
 	return err
 }
 
+// ValidateSecurity checks identity and known_hosts paths according to Strand's SSH security policy:
+// knownHosts is required, must exist as a regular file, and must contain valid trusted host keys.
+// If identityFile is provided, STRAND_WEB_SSH_KEY_DIR must be configured, identityFile must resolve
+// within it without escaping, must be a regular file, and its permissions must not allow group or other access.
+func ValidateSecurity(identityFile, knownHosts string) error {
+	if strings.TrimSpace(knownHosts) == "" {
+		return errors.New("known_hosts: known_hosts file is required")
+	}
+	knownHosts = filepath.Clean(knownHosts)
+	khInfo, err := os.Stat(knownHosts)
+	if err != nil || !khInfo.Mode().IsRegular() {
+		return errors.New("known_hosts: path must be an existing regular file")
+	}
+	if _, err := knownhosts.New(knownHosts); err != nil {
+		return fmt.Errorf("known_hosts: cannot load trusted host keys: %w", err)
+	}
+
+	if strings.TrimSpace(identityFile) != "" {
+		keyDir := os.Getenv("STRAND_WEB_SSH_KEY_DIR")
+		if keyDir == "" {
+			return errors.New("identity_file: SSH key directory not configured (STRAND_WEB_SSH_KEY_DIR is required)")
+		}
+		cleanKey, err := filepath.EvalSymlinks(identityFile)
+		if err != nil {
+			return errors.New("identity_file: key file does not exist or cannot be resolved")
+		}
+		cleanKey, _ = filepath.Abs(cleanKey)
+		cleanKeyDir, err := filepath.EvalSymlinks(keyDir)
+		if err != nil {
+			return errors.New("identity_file: configured SSH key directory does not exist")
+		}
+		cleanKeyDir, _ = filepath.Abs(cleanKeyDir)
+		if cleanKey != cleanKeyDir && !strings.HasPrefix(cleanKey, cleanKeyDir+string(filepath.Separator)) {
+			return errors.New("identity_file: key path must be within allow-listed directory STRAND_WEB_SSH_KEY_DIR")
+		}
+		st, err := os.Stat(cleanKey)
+		if err != nil || !st.Mode().IsRegular() {
+			return errors.New("identity_file: key must be a regular file")
+		}
+		if st.Mode().Perm()&0o077 != 0 {
+			return errors.New("identity_file: permissions must not allow group or other access")
+		}
+	}
+	return nil
+}
+
 // DefaultKnownHosts returns ~/.ssh/known_hosts without creating the file.
 func DefaultKnownHosts() (string, error) {
 	home, err := os.UserHomeDir()

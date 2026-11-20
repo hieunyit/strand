@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strand/internal/web/store"
@@ -349,6 +350,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 	}
 
 	var extraEnv []string
+	var tunnelArgs []string
 	if req.ConnectionID != "" && s.db != nil && s.db.st != nil {
 		if req.Target.Host != "" || req.Target.Port != 0 || req.Target.User != "" || req.Target.PasswordEnv != "" || req.Target.URIEnv != "" {
 			writeErr(w, http.StatusBadRequest, "target fields are taken from the saved connection")
@@ -366,6 +368,22 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		req.Target.Host = conn.Host
 		req.Target.Port = conn.Port
 		req.Target.User = conn.User
+		if conn.SSHTunnel != nil {
+			sshAddr := conn.SSHTunnel.Host
+			if conn.SSHTunnel.Port > 0 {
+				sshAddr = net.JoinHostPort(conn.SSHTunnel.Host, strconv.Itoa(conn.SSHTunnel.Port))
+			} else {
+				sshAddr = net.JoinHostPort(conn.SSHTunnel.Host, "22")
+			}
+			tunnelArgs = append(tunnelArgs,
+				"--tunnel-ssh", sshAddr,
+				"--tunnel-user", conn.SSHTunnel.User,
+				"--tunnel-known-hosts", conn.SSHTunnel.KnownHostsRef,
+			)
+			if conn.SSHTunnel.IdentityRef != "" {
+				tunnelArgs = append(tunnelArgs, "--tunnel-identity-file", conn.SSHTunnel.IdentityRef)
+			}
+		}
 		if conn.SecretMode == backup.SecretStored {
 			pw, uri, err := s.connSecrets(conn)
 			if err != nil {
@@ -415,6 +433,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	args = append(args, tunnelArgs...)
 	if !s.auditBackupOp(w, r, "backup.restore", map[string]any{"backup_id": req.BackupID, "source": req.Source,
 		"target_time": req.TargetTime, "target_host": req.Target.Host, "target_database": req.TargetDB, "target_dir": req.TargetDir}) {
 		return

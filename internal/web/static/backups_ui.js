@@ -54,6 +54,7 @@
     return true;
   }
   var ERR_FIELDS = [
+    [/known_hosts/i, 'ssh_known_hosts_ref'], [/identity_file|identity_ref/i, 'ssh_identity_ref'],
     [/ssh_tunnel|ssh/i, 'ssh_host'], [/ca_cert/i, 'ca_cert_pem'], [/tls/i, 'tls_mode'], [/password|secret/i, 'password_env'],
     [/uri/i, 'uri_env'], [/port/i, 'port'], [/host/i, 'host'], [/engine/i, 'engine'], [/name/i, 'name']
   ];
@@ -251,7 +252,13 @@
       ul.appendChild(li);
     }
     if (!res.ok) {
-      item('fail', 'Connect', res.error || 'The server could not be reached.');
+      if ((res.checks || []).length) {
+        (res.checks || []).forEach(function (c) {
+          item(c.status === 'warn' || c.status === 'fail' ? c.status : 'ok', c.name.charAt(0).toUpperCase() + c.name.slice(1).replace(/_/g, ' '), c.detail || '');
+        });
+      } else {
+        item('fail', 'Connect', res.error || 'The server could not be reached.');
+      }
       box.appendChild(ul);
       return;
     }
@@ -319,6 +326,10 @@
     var hasURI = b.engine === 'mongodb' && (b.uri_env || b.uri || (f.getAttribute('data-conn-id') && b.secret_mode === 'stored'));
     if (!b.host && !hasURI) { errs.host = 'Host is required.'; }
     if (b.port && (b.port < 1 || b.port > 65535)) { errs.port = 'Port must be between 1 and 65535.'; }
+    if (b.ssh_tunnel && b.ssh_tunnel.host) {
+      if (!b.ssh_tunnel.user) { errs.ssh_user = 'SSH user is required.'; }
+      if (!b.ssh_tunnel.known_hosts_ref) { errs.ssh_known_hosts_ref = 'known_hosts file is required.'; }
+    }
     return errs;
   }
   function applyErrs(f, errs) {

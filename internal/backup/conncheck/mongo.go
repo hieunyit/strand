@@ -38,7 +38,11 @@ func checkMongo(ctx context.Context, t Target, res *Result) {
 	}
 	opts := options.Client().ApplyURI(uri).SetServerSelectionTimeout(8 * time.Second).SetConnectTimeout(8 * time.Second)
 	if t.TLSMode != "" && t.TLSMode != "disable" {
-		cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+		serverName := t.TLSServerName
+		if serverName == "" {
+			serverName = t.Host
+		}
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
 		if t.TLSMode == "require" {
 			cfg.InsecureSkipVerify = true
 		} else if t.CACertPEM != "" {

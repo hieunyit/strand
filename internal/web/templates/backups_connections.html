@@ -37,7 +37,7 @@
         <tr data-conn-id="{{.ID}}">
           <td><a href="/backups/connections/{{.ID}}"><b>{{.Name}}</b></a></td>
           <td>{{.Engine}}</td>
-          <td class="mono">{{.Host}}{{if .Port}}:{{.Port}}{{end}}</td>
+          <td class="mono">{{.Host}}{{if .Port}}:{{.Port}}{{end}}{{if .SSHTunnel}} <span class="badge small">via SSH bastion</span>{{end}}</td>
           <td>{{if eq .SecretMode "stored"}}<span class="badge small">stored{{if .PasswordSet}} &bull;&bull;&bull;&bull;{{end}}</span>{{else}}<span class="badge small">env{{if .PasswordEnv}} {{.PasswordEnv}}{{end}}</span>{{end}}</td>
           <td><span class="badge st-{{.StatusClass}}" title="{{.LastTestDetail}}">{{if eq .StatusClass "untested"}}never tested{{else if eq .StatusClass "ok"}}passed{{else if eq .StatusClass "warning"}}privileges missing{{else}}failed{{end}}</span>{{if .LastTestAt}} <span class="muted small">{{rel (deref2 .LastTestAt)}}</span>{{end}}</td>
           <td class="r">{{.Jobs}}</td>

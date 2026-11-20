@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh/knownhosts"
-
 	"strand/internal/spool"
 	"strand/internal/tunnel"
 )
@@ -69,44 +67,8 @@ func validateTunnelParams(sshAddr, remoteAddr, listenAddr, identityFile, knownHo
 		return errors.New("listen: local listen address must be on loopback (127.0.0.1)")
 	}
 
-	if strings.TrimSpace(knownHosts) == "" {
-		return errors.New("known_hosts: known_hosts file is required")
-	}
-	knownHosts = filepath.Clean(knownHosts)
-	khInfo, err := os.Stat(knownHosts)
-	if err != nil || !khInfo.Mode().IsRegular() {
-		return errors.New("known_hosts: path must be an existing regular file")
-	}
-	if _, err := knownhosts.New(knownHosts); err != nil {
-		return fmt.Errorf("known_hosts: cannot load trusted host keys: %w", err)
-	}
-
-	// SSH identity file must be within allowlisted STRAND_WEB_SSH_KEY_DIR
-	if strings.TrimSpace(identityFile) != "" {
-		keyDir := os.Getenv("STRAND_WEB_SSH_KEY_DIR")
-		if keyDir == "" {
-			return errors.New("identity_file: SSH key directory not configured (STRAND_WEB_SSH_KEY_DIR is required)")
-		}
-		cleanKey, err := filepath.EvalSymlinks(identityFile)
-		if err != nil {
-			return errors.New("identity_file: key file does not exist or cannot be resolved")
-		}
-		cleanKey, _ = filepath.Abs(cleanKey)
-		cleanKeyDir, err := filepath.EvalSymlinks(keyDir)
-		if err != nil {
-			return errors.New("identity_file: configured SSH key directory does not exist")
-		}
-		cleanKeyDir, _ = filepath.Abs(cleanKeyDir)
-		if cleanKey != cleanKeyDir && !strings.HasPrefix(cleanKey, cleanKeyDir+string(filepath.Separator)) {
-			return errors.New("identity_file: key path must be within allow-listed directory STRAND_WEB_SSH_KEY_DIR")
-		}
-		st, err := os.Stat(cleanKey)
-		if err != nil || !st.Mode().IsRegular() {
-			return errors.New("identity_file: key must be a regular file")
-		}
-		if st.Mode().Perm()&0o077 != 0 {
-			return errors.New("identity_file: permissions must not allow group or other access")
-		}
+	if err := tunnel.ValidateSecurity(identityFile, knownHosts); err != nil {
+		return err
 	}
 	return nil
 }

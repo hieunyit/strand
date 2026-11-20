@@ -14,6 +14,7 @@ import (
 
 	"strand/internal/backup"
 	"strand/internal/backup/conncheck"
+	"strand/internal/backup/sshtun"
 )
 
 // Reusable backup connections (data sources). Stored secrets are sealed with the Web secret key
@@ -236,6 +237,16 @@ func (s *Server) apiConnSave(update bool) authedHandler {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if c.SSHTunnel != nil {
+			if strings.TrimSpace(c.SSHTunnel.KnownHostsRef) == "" {
+				writeErr(w, http.StatusBadRequest, "ssh_tunnel needs known_hosts_ref")
+				return
+			}
+			if err := sshtun.ValidateSecurity(c.SSHTunnel.IdentityRef, c.SSHTunnel.KnownHostsRef); err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		if update {
 			// A change that makes the connection incompatible with a job's method is refused up front.
 			if err := s.checkJobsAccept(r.Context(), c); err != nil {
@@ -439,6 +450,58 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 			}
 		}
 		if !s.auditBackupOp(w, r, "backup_connection.test", map[string]any{"connection": c.ID, "saved": saved, "engine": c.Engine, "host": c.Host}) {
+			return
+		}
+		if c.SSHTunnel != nil {
+			addrHost, addrPort, closeTunnel, err := sshtun.OpenForConnection(r.Context(), c)
+			if err != nil {
+				res := conncheck.Result{
+					OK:                false,
+					Engine:            c.Engine,
+					MissingPrivileges: []string{},
+					Databases:         []string{},
+					Checks: []conncheck.Check{
+						{Name: "ssh_tunnel", Status: "fail", Detail: err.Error()},
+					},
+					Error: err.Error(),
+				}
+				if saved {
+					_, _ = s.db.st.SetBackupConnectionTest(r.Context(), c.ID, time.Now().UTC(), "failed", "ssh tunnel: "+err.Error())
+				}
+				writeJSON(w, http.StatusOK, res)
+				return
+			}
+			defer closeTunnel()
+			origHost := c.Host
+			c.Host = addrHost
+			c.Port = addrPort
+			res := s.connChecker().Check(r.Context(), conncheck.Target{
+				Engine:        c.Engine,
+				Host:          c.Host,
+				Port:          c.Port,
+				User:          c.User,
+				Password:      password,
+				URI:           uri,
+				TLSMode:       c.TLSMode,
+				CACertPEM:     c.CACertPEM,
+				TLSServerName: origHost,
+			})
+			res.Checks = append([]conncheck.Check{
+				{Name: "ssh_tunnel", Status: "ok", Detail: "connected via " + c.SSHTunnel.Host},
+			}, res.Checks...)
+			if saved {
+				status, detail := "ok", "connected"
+				if !res.OK {
+					status, detail = "failed", res.Error
+				} else if len(res.MissingPrivileges) > 0 {
+					status, detail = "warning", "missing privileges: "+strings.Join(res.MissingPrivileges, ", ")
+				}
+				if len(detail) > 500 {
+					detail = detail[:500]
+				}
+				_, _ = s.db.st.SetBackupConnectionTest(r.Context(), c.ID, time.Now().UTC(), status, detail)
+			}
+			writeJSON(w, http.StatusOK, res)
 			return
 		}
 		res := s.connChecker().Check(r.Context(), conncheck.Target{Engine: c.Engine, Host: c.Host, Port: c.Port, User: c.User,

@@ -12,14 +12,15 @@ import (
 
 // Target is what to connect to. Secrets are used for the connection only and never appear in a Result.
 type Target struct {
-	Engine    string // backup.ConnMySQL | ConnMariaDB | ConnPostgres | ConnMongoDB
-	Host      string
-	Port      int
-	User      string
-	Password  string
-	URI       string // mongodb:// URI with credentials (overrides host/port/user/password)
-	TLSMode   string
-	CACertPEM string
+	Engine        string // backup.ConnMySQL | ConnMariaDB | ConnPostgres | ConnMongoDB
+	Host          string
+	Port          int
+	User          string
+	Password      string
+	URI           string // mongodb:// URI with credentials (overrides host/port/user/password)
+	TLSMode       string
+	CACertPEM     string
+	TLSServerName string // when connected via tunnel, the original host for TLS hostname verification
 }
 
 // Check is one step of the test.

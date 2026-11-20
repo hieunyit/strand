@@ -34,7 +34,11 @@ func mysqlTLS(t Target) (name string, cleanup func(), err error) {
 	case "", "disable":
 		return "false", func() {}, nil
 	}
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: t.Host}
+	serverName := t.TLSServerName
+	if serverName == "" {
+		serverName = t.Host
+	}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
 	switch t.TLSMode {
 	case "require":
 		cfg.InsecureSkipVerify = true

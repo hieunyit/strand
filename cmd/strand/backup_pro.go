@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -17,8 +20,10 @@ import (
 
 	"strand/internal/backup"
 	"strand/internal/backup/runner"
+	"strand/internal/backup/sshtun"
 	"strand/internal/exitcode"
 	"strand/internal/objectstore"
+	"strand/internal/tunnel"
 	"strand/internal/web/store"
 )
 
@@ -74,6 +79,21 @@ func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Stor
 			return err
 		}
 		_, err = runTrackedBackupJob(lockCtx, st, current, func(runCtx context.Context) error {
+			if current.ConnectionID != "" {
+				c, ok, err := st.GetBackupConnection(runCtx, current.ConnectionID)
+				if err != nil {
+					return err
+				}
+				if ok && c.SSHTunnel != nil {
+					addrHost, addrPort, closeTunnel, err := sshtun.OpenForConnection(runCtx, c)
+					if err != nil {
+						return fmt.Errorf("open ssh tunnel: %w", err)
+					}
+					defer closeTunnel()
+					current.Conn.Host = addrHost
+					current.Conn.Port = addrPort
+				}
+			}
 			rec, err := env.RunJob(runCtx, current)
 			if err != nil {
 				return err
@@ -286,6 +306,7 @@ func addBackupProCommands(cmd *cobra.Command) {
 
 func newBackupRestoreCmd() *cobra.Command {
 	var id, source, toTime, targetDB, targetDir string
+	var tunnelSSH, tunnelUser, tunnelIdentity, tunnelKnownHosts string
 	var target backup.ConnSpec
 	var yes, dryRun bool
 	cmd := &cobra.Command{
@@ -354,6 +375,39 @@ Passwords come from the environment variable named by --target-password-env.`,
 			if !yes {
 				return backupUsageErr("restores need --yes (the target must be new; nothing is overwritten)")
 			}
+			if tunnelSSH != "" {
+				if err := tunnel.ValidateSecurity(tunnelIdentity, tunnelKnownHosts); err != nil {
+					return fmt.Errorf("tunnel security: %w", err)
+				}
+				remotePort := target.Port
+				if remotePort == 0 && chosen != nil {
+					remotePort = backup.DefaultPort(chosen.Engine)
+				}
+				if remotePort == 0 {
+					return backupUsageErr("restore with tunnel needs a target port or recognizable backup engine")
+				}
+				remoteAddr := net.JoinHostPort(target.Host, strconv.Itoa(remotePort))
+				forward, err := tunnel.Start(ctx, tunnel.Config{
+					SSHAddress:   tunnelSSH,
+					SSHUser:      tunnelUser,
+					IdentityFile: tunnelIdentity,
+					HostKeysFile: tunnelKnownHosts,
+					Remote:       remoteAddr,
+					LocalAddress: "127.0.0.1:0",
+				})
+				if err != nil {
+					return fmt.Errorf("start restore ssh tunnel: %w", err)
+				}
+				defer forward.Close()
+				slog.Info("restore ssh tunnel opened", "ssh", tunnelSSH, "remote", remoteAddr, "local", forward.Address())
+				h, pStr, err := net.SplitHostPort(forward.Address())
+				if err != nil {
+					return fmt.Errorf("parse restore tunnel address: %w", err)
+				}
+				p, _ := strconv.Atoi(pStr)
+				target.Host = h
+				target.Port = p
+			}
 			return env.Restore(ctx, plan, runner.RestoreTarget{Conn: target, Database: targetDB, Dir: targetDir})
 		},
 	}
@@ -367,6 +421,10 @@ Passwords come from the environment variable named by --target-password-env.`,
 	cmd.Flags().StringVar(&target.URIEnv, "target-uri-env", "", "MongoDB: environment variable holding the target URI")
 	cmd.Flags().StringVar(&targetDB, "target-database", "", "new database to create (logical restores)")
 	cmd.Flags().StringVar(&targetDir, "target-dir", "", "new data directory (physical restores)")
+	cmd.Flags().StringVar(&tunnelSSH, "tunnel-ssh", "", "optional SSH bastion host[:port]")
+	cmd.Flags().StringVar(&tunnelUser, "tunnel-user", "", "SSH username")
+	cmd.Flags().StringVar(&tunnelIdentity, "tunnel-identity-file", "", "SSH private key (or SSH_AUTH_SOCK)")
+	cmd.Flags().StringVar(&tunnelKnownHosts, "tunnel-known-hosts", "", "SSH known_hosts file")
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm the restore")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the restore plan (base, chain, logs) only")
 	return cmd
@@ -417,6 +475,21 @@ func newBackupLogArchiveCmd() *cobra.Command {
 						}
 					}
 				}()
+				if job.ConnectionID != "" {
+					c, ok, err := st.GetBackupConnection(actx, job.ConnectionID)
+					if err != nil {
+						return err
+					}
+					if ok && c.SSHTunnel != nil {
+						addrHost, addrPort, closeTunnel, err := sshtun.OpenForConnection(actx, c)
+						if err != nil {
+							return fmt.Errorf("open ssh tunnel: %w", err)
+						}
+						defer closeTunnel()
+						job.Conn.Host = addrHost
+						job.Conn.Port = addrPort
+					}
+				}
 				switch job.Engine() {
 				case backup.EnginePostgres:
 					return env.ArchiveWAL(actx, job)

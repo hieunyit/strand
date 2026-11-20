@@ -46,6 +46,9 @@ func checkPostgres(ctx context.Context, t Target, res *Result) {
 		res.fail("connect", fmt.Errorf("invalid connection settings"))
 		return
 	}
+	if cfg.TLSConfig != nil && t.TLSServerName != "" {
+		cfg.TLSConfig.ServerName = t.TLSServerName
+	}
 	start := time.Now()
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
