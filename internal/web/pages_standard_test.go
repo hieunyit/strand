@@ -607,4 +607,3 @@ func TestAccountPageWithSessions(t *testing.T) {
 		t.Errorf("/account missing 'Current session' badge: %s", page)
 	}
 }
-
