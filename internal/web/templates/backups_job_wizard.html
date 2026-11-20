@@ -1,0 +1,159 @@
+{{define "content"}}
+<div class="wiz-layout" id="job-wizard" data-wizard="{{.Body.Data}}"{{if .Body.Edit}} data-edit="1" data-job-id="{{.Body.JobID}}"{{end}}>
+  <div>
+    <ol class="stepper" id="wiz-stepper" aria-label="Backup job steps">
+      <li class="step current" data-step-li="1" aria-current="step"><button type="button" class="btn ghost step-btn" data-goto="1"><span class="step-index">1</span><span class="step-label">Source</span></button></li>
+      <li class="step" data-step-li="2"><button type="button" class="btn ghost step-btn" data-goto="2"><span class="step-index">2</span><span class="step-label">Schedule and retention</span></button></li>
+      <li class="step" data-step-li="3"><button type="button" class="btn ghost step-btn" data-goto="3"><span class="step-index">3</span><span class="step-label">Storage and protection</span></button></li>
+      <li class="step" data-step-li="4"><button type="button" class="btn ghost step-btn" data-goto="4"><span class="step-index">4</span><span class="step-label">Verify and review</span></button></li>
+    </ol>
+    <form id="job-wizard-form" novalidate autocomplete="off">
+      <div class="alert alert-error" id="wiz-error" role="alert" hidden></div>
+      <div id="wiz-legacy" class="alert alert-warn" hidden>
+        <b>Inline connection.</b> This job still carries its own host and password variable.
+        <div class="actions-row"><button type="button" class="btn small" id="wiz-convert-btn">Convert to connection</button></div>
+      </div>
+
+      <fieldset class="form-section wiz-step" data-step="1">
+        <legend class="form-section-title"><span class="step-no">1</span> Source</legend>
+        <p class="form-section-desc">Pick the database to protect and prove that Strand can reach it.</p>
+        <div class="field-grid" id="wiz-source-grid">
+          <label class="field"><span class="field-label">Job name <span class="req" aria-hidden="true">*</span></span>
+            <input type="text" name="name" required maxlength="96" placeholder="shop-nightly"><span class="field-error" hidden></span></label>
+          <div class="field" data-custom-off><span class="field-label" id="wiz-conn-label">Connection <span class="req" aria-hidden="true">*</span></span>
+            <div class="control-row">
+              <select name="connection_id" aria-labelledby="wiz-conn-label"><option value="">Choose a connection</option></select>
+              <button type="button" class="btn" id="wiz-new-conn-btn" data-open-drawer="conn-drawer">New connection</button>
+            </div>
+            <span class="field-error" hidden></span></div>
+        </div>
+        <div data-custom-off>
+          <div class="control-row mb8">
+            <button type="button" class="btn" id="wiz-test-btn" disabled>Test connection</button>
+            <span class="form-status" id="wiz-test-status">Choose a connection, then test it.</span>
+          </div>
+          <section class="test-result" id="wiz-test-result" aria-live="polite" hidden></section>
+        </div>
+        <div class="field" id="wiz-dbs-field" data-custom-off hidden><span class="field-label">Databases <span class="opt">optional</span></span>
+          <label class="check"><input type="checkbox" id="wiz-db-all" checked><span>All databases</span></label>
+          <div class="db-checklist" id="wiz-dbs" role="group" aria-label="Databases"></div>
+          <span class="field-hint" id="wiz-dbs-hint"></span><span class="field-error" hidden></span></div>
+        <div class="field" id="wiz-methods-field" data-custom-off hidden><span class="field-label">Method <span class="req" aria-hidden="true">*</span></span>
+          <div class="choice-cards" id="wiz-methods" role="radiogroup" aria-label="Backup method"></div>
+          <span class="field-error" hidden></span></div>
+        <details class="advanced" id="wiz-custom">
+          <summary>Advanced: custom script</summary>
+          <label class="check"><input type="checkbox" name="use_custom"><span>Use a wrapper script instead of a built-in method<small class="field-hint">Custom jobs have no connection, no PITR and no test restore.</small></span></label>
+          <div class="field-grid" data-show-custom hidden>
+            <label class="field span-all"><span class="field-label">Command <span class="req" aria-hidden="true">*</span></span><input type="text" name="command" placeholder="/opt/strand/backup/dump.sh" spellcheck="false"><span class="field-error" hidden></span></label>
+            <label class="field"><span class="field-label">Artifact path <span class="req" aria-hidden="true">*</span></span><input type="text" name="artifact_template" placeholder="/var/backup/{id}/dump.sbk" spellcheck="false"><span class="field-error" hidden></span></label>
+            <label class="field"><span class="field-label">Manifest path <span class="req" aria-hidden="true">*</span></span><input type="text" name="manifest_template" placeholder="/var/backup/{id}/manifest.json" spellcheck="false"><span class="field-error" hidden></span></label>
+            <label class="field"><span class="field-label">Bucket <span class="req" aria-hidden="true">*</span></span><input type="text" name="bucket" spellcheck="false"><span class="field-error" hidden></span></label>
+            <label class="field"><span class="field-label">Prefix <span class="opt">optional</span></span><input type="text" name="prefix" spellcheck="false"><span class="field-error" hidden></span></label>
+          </div>
+        </details>
+      </fieldset>
+
+      <fieldset class="form-section wiz-step" data-step="2" hidden>
+        <legend class="form-section-title"><span class="step-no">2</span> Schedule and retention</legend>
+        <p class="form-section-desc">Choose a policy, or define a custom schedule for this job.</p>
+        <div class="choice-cards policy-cards" id="wiz-policies" role="radiogroup" aria-label="Policy"></div>
+        <p class="field-hint" id="wiz-policy-note"></p>
+        <div class="control-row" id="wiz-customize-row" hidden>
+          <label class="check"><input type="checkbox" name="customize"><span>Customize schedule and retention for this job<small class="field-hint">Fields that differ from the policy are marked as overrides.</small></span></label>
+        </div>
+        <div id="wiz-sched-block" hidden>
+          {{template "schedule-fields"}}
+          <div class="field-grid">
+            <label class="field"><span class="field-label">Start window (minutes) <span class="opt">optional</span></span><input type="number" name="window_minutes" min="0" value="240"><span class="field-error" hidden></span></label>
+            <label class="field"><span class="field-label">Jitter (seconds) <span class="opt">optional</span></span><input type="number" name="jitter_seconds" min="0" value="0"><span class="field-error" hidden></span></label>
+          </div>
+          {{template "retention-fields"}}
+        </div>
+        <p class="words" id="wiz-policy-words" hidden></p>
+        <div class="switch-row" id="wiz-pitr-row">
+          <input type="checkbox" name="log_archive" id="wiz-pitr" aria-describedby="wiz-pitr-reason">
+          <div><label for="wiz-pitr"><b>Point-in-time recovery</b> <span class="badge override small" data-override="log_archive" hidden>overridden</span></label>
+            <div class="reason" id="wiz-pitr-reason">Test the connection first.</div></div>
+        </div>
+      </fieldset>
+
+      <fieldset class="form-section wiz-step" data-step="3" hidden>
+        <legend class="form-section-title"><span class="step-no">3</span> Storage and protection</legend>
+        <p class="form-section-desc">Where backups are written and how they are protected.</p>
+        <div class="field" id="wiz-repo-field" data-custom-off><span class="field-label">Repository <span class="req" aria-hidden="true">*</span> <span class="badge override small" data-override="repository" hidden>overridden</span></span>
+          <div class="choice-cards" id="wiz-repos" role="radiogroup" aria-label="Repository"></div>
+          <div class="alert alert-warn" id="wiz-no-repo" hidden>No repository exists yet. <a href="/backups">Create one on the Backups page</a>, then reload this wizard.</div>
+          <span class="field-error" hidden></span></div>
+        <div class="field-grid">
+          <label class="field" data-custom-off><span class="field-label">Second copy <span class="opt">optional</span> <span class="badge override small" data-override="replicate_to" hidden>overridden</span></span>
+            <select name="replicate_to"><option value="">None</option></select><span class="field-hint">A copy in another repository (the 3-2-1 rule).</span><span class="field-error" hidden></span></label>
+        </div>
+        <div class="switch-row" id="wiz-enc-row">
+          <input type="checkbox" name="encrypt" id="wiz-encrypt" aria-describedby="wiz-enc-reason">
+          <div><label for="wiz-encrypt"><b>Encrypt backups</b> <span class="badge override small" data-override="encrypt" hidden>overridden</span></label>
+            <div class="reason" id="wiz-enc-reason"></div></div>
+        </div>
+        <div class="alert alert-warn" id="wiz-enc-warning" role="status" hidden><b>No encryption keys.</b> Backups will be stored unencrypted. Set <code>STRAND_BACKUP_ENCRYPTION_KEYS</code> on the Web service to enable encryption.</div>
+        <div class="switch-row">
+          <input type="checkbox" name="compress" id="wiz-compress" checked>
+          <div><label for="wiz-compress"><b>Compress</b> <span class="badge override small" data-override="compress" hidden>overridden</span></label></div>
+        </div>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="field-grid">
+            <label class="field"><span class="field-label">Compression level (0-4) <span class="opt">optional</span></span><input type="number" name="compress_level" min="0" max="4" value="0"><span class="field-error" hidden></span></label>
+            <label class="field"><span class="field-label">Bandwidth limit (KB/s) <span class="opt">optional</span></span><input type="number" name="bandwidth_kbps" min="0" value="0"><span class="field-hint">0 = unlimited.</span><span class="field-error" hidden></span></label>
+            <label class="field"><span class="field-label">Object Lock days <span class="opt">optional</span></span><input type="number" name="lock_days" min="0" value="0"><span class="field-hint">Needs an Object Lock repository.</span><span class="field-error" hidden></span></label>
+          </div>
+        </details>
+      </fieldset>
+
+      <fieldset class="form-section wiz-step" data-step="4" hidden>
+        <legend class="form-section-title"><span class="step-no">4</span> Verify and review</legend>
+        <p class="form-section-desc">Prove the backups are readable, and decide what happens after a failure.</p>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Verify <span class="opt">optional</span> <span class="badge override small" data-override="verify_every_seconds" hidden>overridden</span></span>
+            <select name="verify_every"><option value="0">Never</option><option value="86400">Daily</option><option value="604800">Weekly</option><option value="2592000">Monthly</option></select><span class="field-error" hidden></span></label>
+          <label class="field" data-show-verify><span class="field-label">Sample (% of objects) <span class="opt">optional</span></span><input type="number" name="verify_sample" min="0" max="100" value="100"><span class="field-error" hidden></span></label>
+        </div>
+        <div class="switch-row" id="wiz-tr-row">
+          <input type="checkbox" name="test_restore" id="wiz-testrestore" aria-describedby="wiz-tr-reason">
+          <div><label for="wiz-testrestore"><b>Test restore</b> <span class="badge override small" data-override="test_restore" hidden>overridden</span></label>
+            <div class="reason" id="wiz-tr-reason"></div></div>
+        </div>
+        <div class="field" id="wiz-scratch-field" hidden><span class="field-label">Scratch connection <span class="req" aria-hidden="true">*</span></span>
+          <select name="scratch_connection_id"><option value="">Choose a connection</option></select>
+          <span class="field-hint">The newest dump is restored here after each verification. Only connections that read their password from an environment variable can be used.</span><span class="field-error" hidden></span></div>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Retries after a failure <span class="opt">optional</span> <span class="badge override small" data-override="retry_max" hidden>overridden</span></span><input type="number" name="retry_max" min="0" max="20" value="0"><span class="field-error" hidden></span></label>
+          <label class="field" data-show-retry><span class="field-label">Back-off (seconds) <span class="opt">optional</span></span><input type="number" name="retry_backoff" min="10" value="60"><span class="field-error" hidden></span></label>
+        </div>
+        <div class="field"><span class="field-label">Notifications <span class="opt">optional</span></span>
+          <select name="notify_channel" disabled aria-describedby="wiz-notify-hint"><option>Inherit the global rules</option></select>
+          <span class="field-hint" id="wiz-notify-hint">Events follow the global notification settings (STRAND_BACKUP_NOTIFY_*). Per-job channels arrive with the Notifications page.</span></div>
+        <h3>Review</h3>
+        <dl class="props" id="wiz-review"></dl>
+        <div class="alert alert-warn" id="wiz-warnings" role="status" hidden></div>
+        <div class="alert alert-success" id="wiz-done" role="status" hidden></div>
+      </fieldset>
+
+      <div class="wiz-nav">
+        <button type="button" class="btn" id="wiz-back" disabled>Back</button>
+        <div class="grp">
+          <button type="button" class="btn primary" id="wiz-next">Next</button>
+          <button type="button" class="btn" id="wiz-create-only" data-submit="only" hidden>{{if .Body.Edit}}Save changes{{else}}Create only{{end}}</button>
+          <button type="button" class="btn primary" id="wiz-create-run" data-submit="run" hidden>{{if .Body.Edit}}Save and run now{{else}}Create and run first backup{{end}}</button>
+        </div>
+      </div>
+    </form>
+  </div>
+  <aside class="wiz-summary">
+    <section class="card" aria-label="Summary">
+      <div class="cardhead"><h3>Summary</h3></div>
+      <dl class="props" id="wiz-summary"></dl>
+    </section>
+  </aside>
+</div>
+{{template "conn-drawer" .Body.Drawer}}
+{{end}}

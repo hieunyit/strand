@@ -27,6 +27,12 @@ type backupJobView struct {
 	Process    *JobStatus   `json:"process,omitempty"`
 	Warning    string       `json:"warning,omitempty"`
 	Last10Runs []backup.Run `json:"last_10_runs,omitempty"`
+	// Display fields filled by enrichJobViews (backups_ui_p23.go).
+	Warnings       []string `json:"warnings,omitempty"`
+	ScheduleText   string   `json:"schedule_text,omitempty"`
+	PolicyName     string   `json:"policy_name,omitempty"`
+	ConnectionName string   `json:"connection_name,omitempty"`
+	Legacy         bool     `json:"legacy_connection,omitempty"` // built-in job with an inline connection (convertible)
 }
 
 func backupJobPipeline(id string) string    { return "backup-" + id }
@@ -149,6 +155,7 @@ func (s *Server) backupJobViews(ctx context.Context) ([]backupJobView, error) {
 		}
 		out = append(out, backupJobView{Job: j, Process: s.backupJobProcess(j), Warning: warn})
 	}
+	s.enrichJobViews(ctx, out)
 	return out, nil
 }
 

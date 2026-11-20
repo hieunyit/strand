@@ -1,0 +1,207 @@
+{{define "conn-drawer"}}
+<dialog class="drawer" id="conn-drawer" aria-labelledby="conn-drawer-title">
+  <form id="conn-form" novalidate autocomplete="off" data-conn-id="{{if .Conn}}{{.Conn.ID}}{{end}}"{{if .Wizard}} data-wizard="1"{{end}}>
+    <div class="drawer-head">
+      <h2 id="conn-drawer-title">{{if .Conn}}Edit connection{{else}}New connection{{end}}</h2>
+      <button type="button" class="iconbtn" data-close-drawer aria-label="Close">&times;</button>
+    </div>
+    <div class="drawer-body">
+      <div class="alert alert-error" id="conn-form-error" role="alert" hidden></div>
+      <fieldset class="form-section">
+        <legend class="form-section-title">Source</legend>
+        <p class="form-section-desc">Where the database runs. The engine decides which fields apply.</p>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Name <span class="req" aria-hidden="true">*</span></span>
+            <input type="text" name="name" required maxlength="96" value="{{if .Conn}}{{.Conn.Name}}{{end}}" placeholder="shop-primary"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Engine <span class="req" aria-hidden="true">*</span></span>
+            <select name="engine">
+              {{$eng := ""}}{{if .Conn}}{{$eng = .Conn.Engine}}{{end}}
+              <option value="mysql"{{if eq $eng "mysql"}} selected{{end}}>MySQL</option>
+              <option value="mariadb"{{if eq $eng "mariadb"}} selected{{end}}>MariaDB</option>
+              <option value="postgres"{{if eq $eng "postgres"}} selected{{end}}>PostgreSQL</option>
+              <option value="mongodb"{{if eq $eng "mongodb"}} selected{{end}}>MongoDB</option>
+            </select><span class="field-error" hidden></span></label>
+          <label class="field" data-uri-optional><span class="field-label">Host <span class="req" aria-hidden="true" data-host-req>*</span></span>
+            <input type="text" name="host" required maxlength="253" value="{{if .Conn}}{{.Conn.Host}}{{end}}" placeholder="db.internal"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Port <span class="opt">optional</span></span>
+            <input type="number" name="port" min="1" max="65535" value="{{if .Conn}}{{if .Conn.Port}}{{.Conn.Port}}{{end}}{{end}}" placeholder="3306"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">User <span class="opt">optional</span></span>
+            <input type="text" name="user" maxlength="128" value="{{if .Conn}}{{.Conn.User}}{{end}}" placeholder="backup"><span class="field-error" hidden></span></label>
+        </div>
+      </fieldset>
+      <fieldset class="form-section">
+        <legend class="form-section-title">Credentials</legend>
+        <p class="form-section-desc">Passwords never come back from the API or appear on any page.</p>
+        <div class="choice-cards">
+          <label class="choice"><input type="radio" name="secret_mode" value="env"{{if or (not .Conn) (eq .Conn.SecretMode "env")}} checked{{end}}>
+            <span class="choice-title">Environment variable</span><span class="choice-desc">The Web service reads the password from a variable you set on the host.</span></label>
+          {{if .StoredAllowed}}<label class="choice"><input type="radio" name="secret_mode" value="stored"{{if and .Conn (eq .Conn.SecretMode "stored")}} checked{{end}}>
+            <span class="choice-title">Store encrypted</span><span class="choice-desc">Enter the password here; it is sealed with the Web secret key.</span></label>{{end}}
+        </div>
+        {{if not .StoredAllowed}}<p class="field-hint">Stored secrets need STRAND_WEB_SECRET_KEY on the Web service.</p>{{end}}
+        <div class="field-grid">
+          <label class="field" data-secret-mode="env"><span class="field-label">Password variable <span class="opt">optional</span></span>
+            <input type="text" name="password_env" maxlength="128" value="{{if .Conn}}{{.Conn.PasswordEnv}}{{end}}" placeholder="MYSQL_BACKUP_PASSWORD" spellcheck="false"><span class="field-error" hidden></span></label>
+          <label class="field" data-secret-mode="env" data-engines="mongodb"><span class="field-label">URI variable <span class="opt">optional</span></span>
+            <input type="text" name="uri_env" maxlength="128" value="{{if .Conn}}{{.Conn.URIEnv}}{{end}}" placeholder="MONGO_BACKUP_URI" spellcheck="false"><span class="field-error" hidden></span></label>
+          <label class="field" data-secret-mode="stored"><span class="field-label">Password <span class="opt">optional</span></span>
+            <input type="password" name="password" autocomplete="new-password" placeholder="{{if and .Conn .Conn.PasswordSet}}•••• set (leave empty to keep){{end}}"><span class="field-error" hidden></span></label>
+          <label class="field" data-secret-mode="stored" data-engines="mongodb"><span class="field-label">URI <span class="opt">optional</span></span>
+            <input type="password" name="uri" autocomplete="new-password" placeholder="{{if and .Conn .Conn.URISet}}•••• set (leave empty to keep){{else}}mongodb://user:pass@host/{{end}}"><span class="field-error" hidden></span></label>
+        </div>
+      </fieldset>
+      <details class="advanced">
+        <summary>Advanced: TLS and SSH tunnel</summary>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">TLS mode <span class="opt">optional</span></span>
+            <select name="tls_mode">
+              {{$tls := ""}}{{if .Conn}}{{$tls = .Conn.TLSMode}}{{end}}
+              <option value="">Server default</option>
+              <option value="disable"{{if eq $tls "disable"}} selected{{end}}>Disable</option>
+              <option value="require"{{if eq $tls "require"}} selected{{end}}>Require</option>
+              <option value="verify-ca"{{if eq $tls "verify-ca"}} selected{{end}}>Verify CA</option>
+              <option value="verify-full"{{if eq $tls "verify-full"}} selected{{end}}>Verify full</option>
+            </select><span class="field-error" hidden></span></label>
+          <label class="field span-all"><span class="field-label">CA certificate (PEM) <span class="opt">optional</span></span>
+            <textarea name="ca_cert_pem" rows="3" spellcheck="false">{{if .Conn}}{{.Conn.CACertPEM}}{{end}}</textarea><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">SSH host <span class="opt">optional</span></span>
+            <input type="text" name="ssh_host" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.Host}}{{end}}{{end}}"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">SSH port <span class="opt">optional</span></span>
+            <input type="number" name="ssh_port" min="1" max="65535" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{if .Conn.SSHTunnel.Port}}{{.Conn.SSHTunnel.Port}}{{end}}{{end}}{{end}}" placeholder="22"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">SSH user <span class="opt">optional</span></span>
+            <input type="text" name="ssh_user" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.User}}{{end}}{{end}}"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Identity file <span class="opt">optional</span></span>
+            <input type="text" name="ssh_identity_ref" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.IdentityRef}}{{end}}{{end}}" placeholder="/etc/strand/ssh/id_ed25519"><span class="field-error" hidden></span></label>
+          <label class="field span-all"><span class="field-label">known_hosts file <span class="opt">optional</span></span>
+            <input type="text" name="ssh_known_hosts_ref" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.KnownHostsRef}}{{end}}{{end}}"><span class="field-error" hidden></span></label>
+        </div>
+      </details>
+      <section class="test-result" id="conn-test-result" aria-live="polite" hidden></section>
+    </div>
+    <div class="drawer-foot">
+      <span class="form-status" id="conn-form-status"></span>
+      <button type="button" class="btn" id="conn-test-btn">Test connection</button>
+      <button type="button" class="btn ghost" data-close-drawer>Cancel</button>
+      <button type="submit" class="btn primary" id="conn-save-btn">{{if .Conn}}Save changes{{else}}Save connection{{end}}</button>
+    </div>
+  </form>
+</dialog>
+{{end}}
+
+{{define "schedule-fields"}}
+<div class="field-grid" data-schedule>
+  <label class="field"><span class="field-label">Frequency <span class="req" aria-hidden="true">*</span></span>
+    <select name="sch_kind">
+      <option value="daily">Daily</option>
+      <option value="weekly">Weekly</option>
+      <option value="monthly">Monthly</option>
+      <option value="interval">Interval</option>
+      <option value="cron">Cron expression</option>
+    </select><span class="field-error" hidden></span></label>
+  <label class="field" data-sched-kinds="daily weekly monthly"><span class="field-label">Time <span class="req" aria-hidden="true">*</span></span>
+    <input type="time" name="sch_at" value="01:00"><span class="field-error" hidden></span></label>
+  <label class="field" data-sched-kinds="interval"><span class="field-label">Every (minutes) <span class="req" aria-hidden="true">*</span></span>
+    <input type="number" name="sch_every_min" min="1" value="60"><span class="field-error" hidden></span></label>
+  <label class="field" data-sched-kinds="cron"><span class="field-label">Cron <span class="req" aria-hidden="true">*</span></span>
+    <input type="text" name="sch_cron" placeholder="0 1 * * *" spellcheck="false"><span class="field-hint">minute hour day-of-month month day-of-week</span><span class="field-error" hidden></span></label>
+  <label class="field" data-sched-kinds="weekly monthly" data-sched-days><span class="field-label">Days <span class="req" aria-hidden="true">*</span></span>
+    <input type="text" name="sch_days" placeholder="Weekly: 0-6 (0 = Sunday), monthly: 1-31" spellcheck="false"><span class="field-hint" data-sched-days-hint></span><span class="field-error" hidden></span></label>
+  <label class="field"><span class="field-label">Time zone <span class="opt">optional</span></span>
+    <input type="text" name="sch_tz" list="tz-list" placeholder="UTC" spellcheck="false"><span class="field-error" hidden></span></label>
+  <div class="field span-all"><span class="field-label">Next 5 runs</span>
+    <ol class="sched-preview" data-sched-preview aria-live="polite"><li class="muted">Set the schedule to preview it.</li></ol>
+  </div>
+</div>
+<datalist id="tz-list">
+  <option value="UTC"></option><option value="Asia/Ho_Chi_Minh"></option><option value="Asia/Singapore"></option><option value="Asia/Tokyo"></option>
+  <option value="Europe/London"></option><option value="Europe/Berlin"></option><option value="America/New_York"></option><option value="America/Los_Angeles"></option>
+</datalist>
+{{end}}
+
+{{define "retention-fields"}}
+<div class="field-grid cols-3" data-retention>
+  <label class="field"><span class="field-label">Daily <span class="opt">optional</span></span><input type="number" name="ret_daily" min="0" value="7"></label>
+  <label class="field"><span class="field-label">Weekly <span class="opt">optional</span></span><input type="number" name="ret_weekly" min="0" value="4"></label>
+  <label class="field"><span class="field-label">Monthly <span class="opt">optional</span></span><input type="number" name="ret_monthly" min="0" value="0"></label>
+</div>
+<details class="advanced">
+  <summary>More retention rules</summary>
+  <div class="field-grid cols-3">
+    <label class="field"><span class="field-label">Most recent <span class="opt">optional</span></span><input type="number" name="ret_last" min="0" value="0"></label>
+    <label class="field"><span class="field-label">Hourly <span class="opt">optional</span></span><input type="number" name="ret_hourly" min="0" value="0"></label>
+    <label class="field"><span class="field-label">Yearly <span class="opt">optional</span></span><input type="number" name="ret_yearly" min="0" value="0"></label>
+    <label class="field"><span class="field-label">Keep all for (days) <span class="opt">optional</span></span><input type="number" name="ret_within" min="0" value="0"></label>
+    <label class="field"><span class="field-label">Expire after (days) <span class="opt">optional</span></span><input type="number" name="ret_maxage" min="0" value="0"></label>
+  </div>
+</details>
+<p class="words" data-retention-words aria-live="polite"></p>
+{{end}}
+
+{{define "policy-drawer"}}
+{{$p := .Policy}}
+<dialog class="drawer" id="policy-drawer" aria-labelledby="policy-drawer-title">
+  <form id="policy-form" novalidate autocomplete="off" data-policy-id="{{if $p}}{{$p.ID}}{{end}}"{{if $p}} data-policy-json="{{.JSON}}"{{end}}>
+    <div class="drawer-head">
+      <h2 id="policy-drawer-title">{{if $p}}Edit policy{{else}}New policy{{end}}</h2>
+      <button type="button" class="iconbtn" data-close-drawer aria-label="Close">&times;</button>
+    </div>
+    <div class="drawer-body">
+      <div class="alert alert-error" id="policy-form-error" role="alert" hidden></div>
+      <fieldset class="form-section">
+        <legend class="form-section-title">General</legend>
+        <p class="form-section-desc">Jobs that follow this policy pick up every change you save here.</p>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Name <span class="req" aria-hidden="true">*</span></span>
+            <input type="text" name="name" required maxlength="96" value="{{if $p}}{{$p.Name}}{{end}}"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Description <span class="opt">optional</span></span>
+            <input type="text" name="description" maxlength="512" value="{{if $p}}{{$p.Description}}{{end}}"><span class="field-error" hidden></span></label>
+        </div>
+      </fieldset>
+      <fieldset class="form-section">
+        <legend class="form-section-title">Schedule</legend>
+        <p class="form-section-desc">When a backup starts, and how late it may start before it counts as missed.</p>
+        {{template "schedule-fields"}}
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Start window (minutes) <span class="opt">optional</span></span><input type="number" name="window_minutes" min="0" value="{{if $p}}{{$p.WindowMinutes}}{{else}}240{{end}}"><span class="field-hint">A run not started within the window is recorded as missed. 0 = no limit.</span><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Jitter (seconds) <span class="opt">optional</span></span><input type="number" name="jitter_seconds" min="0" value="{{if $p}}{{$p.JitterSeconds}}{{else}}0{{end}}"><span class="field-error" hidden></span></label>
+        </div>
+      </fieldset>
+      <fieldset class="form-section">
+        <legend class="form-section-title">Retention</legend>
+        <p class="form-section-desc">How many restore points are kept.</p>
+        {{template "retention-fields"}}
+      </fieldset>
+      <fieldset class="form-section">
+        <legend class="form-section-title">Protection</legend>
+        <p class="form-section-desc">Point-in-time recovery, storage and encryption.</p>
+        <div class="field-grid">
+          <label class="check"><input type="checkbox" name="log_archive"><span>Point-in-time recovery (continuous log archiving)<small class="field-hint">Applied only to jobs whose method and database support it.</small></span></label>
+          <label class="field" data-show-if="log_archive"><span class="field-label">RPO target (minutes) <span class="opt">optional</span></span><input type="number" name="rpo_minutes" min="0" value="0"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Repository <span class="opt">optional</span></span>
+            <select name="repository"><option value="">Chosen per job</option>{{range .Repos}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Second copy <span class="opt">optional</span></span>
+            <select name="replicate_to"><option value="">None</option>{{range .Repos}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select><span class="field-error" hidden></span></label>
+          <label class="check"><input type="checkbox" name="compress" checked><span>Compress</span></label>
+          <label class="check"><input type="checkbox" name="encrypt"><span>Encrypt<small class="field-hint">Needs STRAND_BACKUP_ENCRYPTION_KEYS on the Web service.</small></span></label>
+        </div>
+      </fieldset>
+      <fieldset class="form-section">
+        <legend class="form-section-title">Verification and retry</legend>
+        <p class="form-section-desc">Integrity checks, test restores and what happens after a failed run.</p>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Verify <span class="opt">optional</span></span>
+            <select name="verify_every"><option value="0">Never</option><option value="86400">Daily</option><option value="604800">Weekly</option><option value="2592000">Monthly</option></select><span class="field-error" hidden></span></label>
+          <label class="check"><input type="checkbox" name="test_restore"><span>Test restore after verification<small class="field-hint">mysqldump, mariadb-dump and pg_dump jobs with a scratch connection.</small></span></label>
+          <label class="field"><span class="field-label">Retries <span class="opt">optional</span></span><input type="number" name="retry_max" min="0" max="20" value="0"><span class="field-error" hidden></span></label>
+          <label class="field" data-show-if="retry_max"><span class="field-label">Back-off (seconds) <span class="opt">optional</span></span><input type="number" name="retry_backoff" min="10" value="60"><span class="field-error" hidden></span></label>
+        </div>
+      </fieldset>
+    </div>
+    <div class="drawer-foot">
+      <span class="form-status" id="policy-form-status"></span>
+      <button type="button" class="btn ghost" data-close-drawer>Cancel</button>
+      <button type="submit" class="btn primary" id="policy-save-btn">{{if $p}}Save changes{{else}}Create policy{{end}}</button>
+    </div>
+  </form>
+</dialog>
+{{end}}

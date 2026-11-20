@@ -115,6 +115,9 @@ var readRules = []routeRule{
 	{"GET", "/api/v1/backup-notify-rules/**", PermAdmin}, {"GET", "/api/v1/backup-notify-rules", PermAdmin},
 	{"GET", "/backups/notifications", PermAdmin},
 	{"GET", "/api/v1/backup-activity", PermAdmin}, {"GET", "/backups/activity", PermAdmin},
+	// The job wizard writes: viewers and operators get the 403 page instead of a form they cannot submit.
+	{"GET", "/backups/jobs/new", PermAdmin},
+	{"GET", "/backups/jobs/{id}/edit", PermAdmin},
 }
 
 // RoutePermissions is kept for documentation/tests: the effective rules.

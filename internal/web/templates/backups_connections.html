@@ -1,0 +1,54 @@
+{{define "content"}}
+<section class="card" id="backup-connections-list">
+  <div class="cardhead">
+    <h2>Connections</h2>
+    {{if .Body.IsAdmin}}<button type="button" class="btn primary small" id="new-connection-btn" data-open-drawer="conn-drawer">New connection</button>{{end}}
+  </div>
+  <p class="card-desc">A connection is a database source you define once and reuse in many backup jobs. Secrets are never shown.</p>
+  {{if .Body.Unavail}}<div class="error-state" role="alert">{{.Body.Unavail}}</div>{{end}}
+  <form method="get" action="/backups/connections" class="filterbar" id="connections-filter">
+    <div class="field-grid cols-3">
+      <label class="field"><span class="field-label sr-only">Search</span>
+        <input type="search" name="q" value="{{.Body.Q}}" placeholder="Search name or host..."></label>
+      <label class="field"><span class="field-label sr-only">Engine</span>
+        <select name="engine"><option value="">All engines</option>
+          <option value="mysql"{{if eq .Body.Engine "mysql"}} selected{{end}}>MySQL</option>
+          <option value="mariadb"{{if eq .Body.Engine "mariadb"}} selected{{end}}>MariaDB</option>
+          <option value="postgres"{{if eq .Body.Engine "postgres"}} selected{{end}}>PostgreSQL</option>
+          <option value="mongodb"{{if eq .Body.Engine "mongodb"}} selected{{end}}>MongoDB</option></select></label>
+      <label class="field"><span class="field-label sr-only">Last test</span>
+        <select name="status"><option value="">Any test status</option>
+          <option value="ok"{{if eq .Body.Status "ok"}} selected{{end}}>Passed</option>
+          <option value="warning"{{if eq .Body.Status "warning"}} selected{{end}}>Missing privileges</option>
+          <option value="failed"{{if eq .Body.Status "failed"}} selected{{end}}>Failed</option>
+          <option value="untested"{{if eq .Body.Status "untested"}} selected{{end}}>Never tested</option></select></label>
+    </div>
+    <div class="filterbar-actions">
+      <button type="submit" class="btn small">Apply filters</button>
+      <a href="/backups/connections" class="btn small ghost">Clear</a>
+    </div>
+  </form>
+  <div class="tablewrap">
+    <table class="data-table" id="connections-table">
+      <caption class="sr-only">Backup connections</caption>
+      <thead><tr><th scope="col">Name</th><th scope="col">Engine</th><th scope="col">Host</th><th scope="col">Secret</th><th scope="col">Last test</th><th scope="col" class="r">Jobs</th>{{if .Body.CanTest}}<th scope="col" class="r">Actions</th>{{end}}</tr></thead>
+      <tbody>
+        {{range .Body.Rows}}
+        <tr data-conn-id="{{.ID}}">
+          <td><a href="/backups/connections/{{.ID}}"><b>{{.Name}}</b></a></td>
+          <td>{{.Engine}}</td>
+          <td class="mono">{{.Host}}{{if .Port}}:{{.Port}}{{end}}</td>
+          <td>{{if eq .SecretMode "stored"}}<span class="badge small">stored{{if .PasswordSet}} &bull;&bull;&bull;&bull;{{end}}</span>{{else}}<span class="badge small">env{{if .PasswordEnv}} {{.PasswordEnv}}{{end}}</span>{{end}}</td>
+          <td><span class="badge st-{{.StatusClass}}" title="{{.LastTestDetail}}">{{if eq .StatusClass "untested"}}never tested{{else if eq .StatusClass "ok"}}passed{{else if eq .StatusClass "warning"}}privileges missing{{else}}failed{{end}}</span>{{if .LastTestAt}} <span class="muted small">{{rel (deref2 .LastTestAt)}}</span>{{end}}</td>
+          <td class="r">{{.Jobs}}</td>
+          {{if $.Body.CanTest}}<td class="r nowrap"><button type="button" class="btn small" data-conn-action="test" data-id="{{.ID}}">Test</button></td>{{end}}
+        </tr>
+        {{else}}
+        <tr><td colspan="{{if .Body.CanTest}}7{{else}}6{{end}}"><div class="empty-state">{{icon "empty"}}<b>No connections{{if or .Body.Q .Body.Engine .Body.Status}} match this filter{{else}} yet{{end}}</b><span>{{if .Body.IsAdmin}}Create one, test it, then use it in a backup job.{{else}}An administrator creates connections.{{end}}</span></div></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{if .Body.IsAdmin}}{{template "conn-drawer" .Body.Drawer}}{{end}}
+{{end}}

@@ -129,7 +129,7 @@ func templateFuncs() template.FuncMap {
 func parsePages() (map[string]*template.Template, error) {
 	out := map[string]*template.Template{}
 	for _, n := range pageNames {
-		t, err := template.New(n).Funcs(templateFuncs()).ParseFS(templateFS, "templates/base.html", "templates/"+n+".html")
+		t, err := template.New(n).Funcs(templateFuncs()).ParseFS(templateFS, append(append([]string{"templates/base.html"}, partialTemplates...), "templates/"+n+".html")...)
 		if err != nil {
 			return nil, fmt.Errorf("parse template %s: %w", n, err)
 		}

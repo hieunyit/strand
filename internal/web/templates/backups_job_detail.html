@@ -18,14 +18,17 @@
       <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Body.Job.Job.ID}}">Resume</button>
       {{end}}
       {{if .Body.IsAdmin}}
-      <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=settings&edit=1" class="btn small">Edit</a>
-      <button type="button" class="btn small danger ghost" data-job-action="delete" data-id="{{.Body.Job.Job.ID}}">Delete</button>
+      <a href="/backups/jobs/{{.Body.Job.Job.ID}}/edit" class="btn small">Edit</a>
+      {{if .Body.Job.Legacy}}<button type="button" class="btn small" data-convert-job="{{.Body.Job.Job.ID}}">Convert to connection</button>{{end}}
+      <button type="button" class="btn small danger ghost" data-job-action="delete" data-id="{{.Body.Job.Job.ID}}" data-name="{{.Body.Job.Job.Name}}">Delete</button>
       {{end}}
     </div>
     {{end}}
   </div>
 </section>
 
+{{range .Body.Job.Warnings}}<div class="alert alert-warn" role="status"><b>Warning.</b> {{.}}</div>{{end}}
+{{if eq (printf "%s" .Body.Job.Job.LastRunStatus) "missed"}}<div class="alert alert-warn" role="status"><b>Missed.</b> The last scheduled run did not start inside its window{{if .Body.Job.Job.WindowMinutes}} of {{.Body.Job.Job.WindowMinutes}} minutes{{end}}.</div>{{end}}
 <nav class="tabs" role="tablist" aria-label="Job detail tabs">
   <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=overview" role="tab" class="tab{{if eq .Body.ActiveTab "overview"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "overview"}}true{{else}}false{{end}}">Overview</a>
   <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs" role="tab" class="tab{{if eq .Body.ActiveTab "runs"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "runs"}}true{{else}}false{{end}}">Runs{{if .Body.Runs}} <span class="tab-count">{{len .Body.Runs}}</span>{{end}}</a>
@@ -42,7 +45,9 @@
       <caption>Configuration summary for backup job</caption>
       <tbody>
         <tr><th>ID</th><td><code>{{.Body.Job.Job.ID}}</code></td></tr>
-        <tr><th>Schedule</th><td>Every {{div .Body.Job.Job.EverySeconds 3600}} hours</td></tr>
+        <tr><th>Schedule</th><td>{{.Body.Job.ScheduleText}}{{if .Body.Job.Job.WindowMinutes}} <span class="muted small">(start window {{.Body.Job.Job.WindowMinutes}} min)</span>{{end}}</td></tr>
+        <tr><th>Policy</th><td>{{if .Body.Job.Job.PolicyID}}<a href="/backups/policies/{{.Body.Job.Job.PolicyID}}">{{if .Body.Job.PolicyName}}{{.Body.Job.PolicyName}}{{else}}{{.Body.Job.Job.PolicyID}}{{end}}</a>{{if .Body.Job.Job.Overrides}} <span class="badge override small">overrides: {{join .Body.Job.Job.Overrides ", "}}</span>{{end}}{{else}}<span class="muted">none (own settings)</span>{{end}}</td></tr>
+        <tr><th>Connection</th><td>{{if .Body.Job.Job.ConnectionID}}<a href="/backups/connections/{{.Body.Job.Job.ConnectionID}}">{{.Body.Job.ConnectionName}}</a>{{else if .Body.Job.Legacy}}<span class="muted">inline ({{.Body.Job.Job.Conn.Host}})</span>{{else}}<span class="muted">-</span>{{end}}</td></tr>
         <tr><th>Next run</th><td>{{if .Body.Job.Job.NextRunAt}}{{ts .Body.Job.Job.NextRunAt}}{{else}}-{{end}}</td></tr>
         <tr><th>Retention</th><td>{{if .Body.Job.Job.Retention.Enabled}}Keep daily: {{.Body.Job.Job.Retention.KeepDaily}}, weekly: {{.Body.Job.Job.Retention.KeepWeekly}}{{else}}Default policy{{end}}</td></tr>
         <tr><th>Compression</th><td>{{if .Body.Job.Job.Compress}}Enabled (sbk1){{else}}Raw / off{{end}}</td></tr>

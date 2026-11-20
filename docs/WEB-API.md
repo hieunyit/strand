@@ -316,6 +316,10 @@ pitr_allowed, pitr_reason, pitr_methods`. `pitr_*` tính bằng đúng luật `V
 | `POST /api/v1/backup-policies`, `GET/PUT/DELETE /api/v1/backup-policies/{id}` | Body: `name, description, schedule, window_minutes, jitter_seconds, retention, log_archive, log_flush_seconds, rpo_minutes, rto_minutes, repository, replicate_to, compress, compress_level, encrypt, verify_every_seconds, verify_sample_percent, test_restore, retry_max, retry_backoff_seconds`. `PUT` → `{"policy", "affects_jobs": N, "affected_jobs", "refreshed_jobs", "refresh_failed"}`. `DELETE` **409** `{"jobs": [...]}` khi còn job dùng. |
 | `POST /api/v1/backup-policies/{id}/preview` (dry run) | Body = policy đề xuất → `{"affects_jobs": N, "jobs": [{job, name, changes[], warnings[]}], "changes", "next_runs"}`; không ghi gì. |
 | `POST /api/v1/backup-schedules/preview` | Body: schedule `{kind, at, days, cron, timezone, every_seconds}` (+ `count` 1..20, mặc định 5; `after` RFC3339) → `{"timezone", "human", "runs": [{"utc", "local"}]}`. |
+| `POST /api/v1/backup-jobs/{id}/convert-connection` (admin) | Chuyển `conn` inline của job built-in thành connection chế độ `env` (dùng lại connection trùng host/port/user/biến) và gắn `connection_id` vào job. Body tùy chọn `{"name"}`. → `{"job_id", "connection", "reused"}`; 409 nếu job đã có connection; 400 với job `custom`. Ghi audit `backup_job.convert_connection`; không đọc/trả secret. |
+
+Trang console tương ứng: `/backups/connections[/{id}]`, `/backups/policies[/{id}]`, `/backups/jobs/new`, `/backups/jobs/{id}/edit` (hai trang cuối chỉ admin).
+Phản hồi job (`GET /api/v1/backup-jobs`) có thêm trường hiển thị `warnings`, `schedule_text`, `policy_name`, `connection_name`, `legacy_connection`.
 
 Job (`POST/PUT /api/v1/backup-jobs`) nhận thêm, tùy chọn: `connection_id`, `policy_id`, `overrides` (tên trường giữ giá trị riêng của job; mặc định
 suy ra từ trường gửi khác policy), `schedule`, `window_minutes`, `jitter_seconds`. Job inline cũ chạy y như trước. Phản hồi có thêm `warnings`

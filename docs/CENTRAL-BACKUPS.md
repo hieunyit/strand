@@ -678,6 +678,29 @@ Strand Web splits backup management across dedicated, fast-loading routes under 
 - `/backups/catalog` and `/backups/catalog/{id}`: Paged restore point browser and backup detail inspect view with position coordinates and verification history.
 - `/backups/restore`: Restore wizard.
 
+### Connections, policies and the job wizard (P2/P3 UI)
+
+- `/backups/connections` and `/backups/connections/{id}`: table with a filter bar (name/host, engine, last test status) and, for admins, a
+  `New connection` drawer (`dialog.drawer`) whose fields follow the engine (default port, URI variable for MongoDB, environment variable or
+  stored encrypted secret). `Test connection` shows a checklist (connect, version, privileges, log_bin/GTID or wal_level or replica set,
+  databases, point-in-time recovery verdict). The detail page has an Overview and a `Used by` tab. Operators can test; only admins create,
+  edit or delete. Secrets are never rendered.
+- `/backups/policies` and `/backups/policies/{id}`: policy table (schedule in words, retention in words, PITR, verify, job count). The
+  editor has a schedule field with a live "next 5 runs" preview in the chosen time zone and, on save of an existing policy, an
+  `Affects N jobs` confirmation fed by `POST /api/v1/backup-policies/{id}/preview`.
+- `/backups/jobs/new` and `/backups/jobs/{id}/edit` (admin only): 4-step wizard (`ol.stepper`, `aria-current="step"`) with a live Summary
+  column. Step 1 needs a successful connection test before continuing, lists the databases from the test, offers only the methods of the
+  connection's engine (Recommended badge; the custom script is under Advanced). Step 2 picks a policy (Gold/Silver/Bronze/custom) or a custom
+  schedule; the PITR switch is enabled only when the test result allows it for the chosen method and databases and otherwise shows the reason.
+  Step 3 chooses the repository (immutable badge), a second copy, encryption (on by default when keys exist, yellow warning when none) and
+  compression. Step 4 sets verification, test restore (mysqldump, mariadb-dump, pg_dump only), retries and shows the Review before
+  `Create and run first backup` / `Create only`. Fields that differ from the selected policy carry an `overridden` badge and are sent as
+  overrides; untouched fields are not sent, so the job keeps following the policy.
+- The jobs list and job page show the human schedule, the policy and connection, `missed` runs (filter `status=missed`) and the job
+  warnings (for example a policy PITR request that cannot apply to the job). Built-in jobs with an inline connection offer
+  `Convert to connection` (`POST /api/v1/backup-jobs/{id}/convert-connection`, admin, audited as `backup_job.convert_connection`): the
+  inline host/user/password-variable become an environment-mode connection (reused when an identical one exists) and the job points to it.
+
 ### PITR Constraints (P0)
 
 Validation rules enforced by `backup.ValidateJob` and UI:
