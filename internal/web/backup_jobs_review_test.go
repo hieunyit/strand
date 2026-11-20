@@ -153,3 +153,57 @@ func TestReconcileKeepsRetryingThroughOutage(t *testing.T) {
 		t.Fatalf("scheduler started %d times after the outage, want 1", runner.started.Load())
 	}
 }
+
+func TestAPICreateBackupJob_PITRValidation(t *testing.T) {
+	st := store.NewMem()
+	e := dbEnv(t, st, nil, nil)
+	c, csrf := e.loginOK()
+	post := func(body string) (int, string) {
+		resp, b := e.do(c, "POST", "/api/v1/backup-jobs", body, map[string]string{"X-CSRF-Token": csrf, "Content-Type": "application/json"})
+		return resp.StatusCode, b
+	}
+
+	makeJob := func(method string, dbs []string) string {
+		m := map[string]any{
+			"name":          "pitr-job",
+			"method":        method,
+			"every_seconds": 3600,
+			"bucket":        "central-backups",
+			"source":        "src",
+			"log_archive":   true,
+			"conn": map[string]any{
+				"host":         "127.0.0.1",
+				"port":         3306,
+				"user":         "root",
+				"password_env": "PW",
+				"databases":    dbs,
+			},
+		}
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+
+	// 1. mariadb-dump + log_archive rejected with 400
+	{
+		code, body := post(makeJob("mariadb-dump", []string{"db1"}))
+		if code != 400 || !strings.Contains(body, "MariaDB does not support binlog archiving") {
+			t.Fatalf("expected 400 MariaDB error, got: %d %s", code, body)
+		}
+	}
+
+	// 2. pg_dump + log_archive rejected with 400
+	{
+		code, body := post(makeJob("pg_dump", []string{"db1"}))
+		if code != 400 || !strings.Contains(body, "PITR needs pg_basebackup as the base backup") {
+			t.Fatalf("expected 400 pg_dump error, got: %d %s", code, body)
+		}
+	}
+
+	// 3. mysqldump + multi-db + log_archive rejected with 400
+	{
+		code, body := post(makeJob("mysqldump", []string{"db1", "db2"}))
+		if code != 400 || !strings.Contains(body, "PITR requires exactly one database") {
+			t.Fatalf("expected 400 multi-db error, got: %d %s", code, body)
+		}
+	}
+}

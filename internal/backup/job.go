@@ -263,6 +263,24 @@ func ValidateJob(j Job) error {
 		if j.LogFlushSeconds != 0 && (j.LogFlushSeconds < 10 || j.LogFlushSeconds > 86400) {
 			return bad("log_flush_seconds must be between 10 and 86400")
 		}
+		if j.LogArchive {
+			switch j.Method {
+			case MethodMariaDBDump:
+				return bad("MariaDB does not support binlog archiving")
+			case MethodMySQLDump:
+				if len(j.Conn.Databases) != 1 {
+					return bad("PITR requires exactly one database")
+				}
+			case MethodPGBaseBackup:
+				// ok
+			case MethodPGDump:
+				return bad("PITR needs pg_basebackup as the base backup")
+			case MethodMongodump:
+				// ok
+			default:
+				return bad(fmt.Sprintf("method %q does not support point-in-time recovery", j.Method))
+			}
+		}
 		if j.TestRestore {
 			if j.Method != MethodMySQLDump && j.Method != MethodMariaDBDump && j.Method != MethodPGDump {
 				return bad("test restores support mysqldump, mariadb-dump and pg_dump")

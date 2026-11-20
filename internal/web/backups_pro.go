@@ -536,6 +536,10 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 	n := &runner.Notifier{Getenv: os.Getenv}
 	for _, j := range jobs {
 		if j.Enabled && j.LogArchive && !j.IsCustom() && s.jobs != nil {
+			if err := backup.ValidateJob(j); err != nil {
+				s.log.Warn("skip log archiving: job validation failed", "job", j.ID, "reason", err)
+				continue
+			}
 			running := false
 			for _, p := range s.jobs.List("backup-logs-" + j.ID) {
 				if p.Kind == "backup-logs" && p.Running {

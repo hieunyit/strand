@@ -22,6 +22,7 @@ import (
 type backupJobView struct {
 	Job     backup.Job `json:"job"`
 	Process *JobStatus `json:"process,omitempty"`
+	Warning string     `json:"warning,omitempty"`
 }
 
 func backupJobPipeline(id string) string    { return "backup-" + id }
@@ -48,14 +49,18 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 			s.log.Warn("recheck scheduled backup job", "job", id, "attempt", attempt, "error", err)
 		} else if !found || !job.Enabled {
 			return
-		} else if verr := s.validateBackupJob(job); verr != nil {
-			// Permanent (configuration) problem: retrying cannot help; the job page shows it on Start.
-			s.log.Error("scheduled backup job refused", "job", id, "error", verr)
-			return
-		} else if _, err := s.startBackupJob(job); err == nil {
-			return
 		} else {
-			s.log.Warn("restart scheduled backup job", "job", id, "attempt", attempt, "error", err)
+			baseJob := job
+			baseJob.LogArchive = false
+			if verr := s.validateBackupJob(baseJob); verr != nil {
+				// Permanent (configuration) problem: retrying cannot help; the job page shows it on Start.
+				s.log.Error("scheduled backup job refused", "job", id, "error", verr)
+				return
+			} else if _, err := s.startBackupJob(job); err == nil {
+				return
+			} else {
+				s.log.Warn("restart scheduled backup job", "job", id, "attempt", attempt, "error", err)
+			}
 		}
 		time.Sleep(delay)
 		if delay *= 2; delay > reconcileDelay.max {
@@ -86,9 +91,14 @@ func (s *Server) resumeBackupJobs(ctx context.Context) error {
 	}
 	for _, j := range jobs {
 		if j.Enabled {
-			if err := s.validateBackupJob(j); err != nil {
+			baseJob := j
+			baseJob.LogArchive = false
+			if err := s.validateBackupJob(baseJob); err != nil {
 				s.log.Error("scheduled backup job refused", "job", j.ID, "error", err)
 				continue
+			}
+			if err := s.validateBackupJob(j); err != nil {
+				s.log.Warn("scheduled backup job validation warning", "job", j.ID, "error", err)
 			}
 			if _, err := s.startBackupJob(j); err != nil {
 				s.log.Error("start scheduled backup job", "job", j.ID, "error", err)
@@ -129,7 +139,11 @@ func (s *Server) backupJobViews(ctx context.Context) ([]backupJobView, error) {
 	}
 	out := make([]backupJobView, 0, len(jobs))
 	for _, j := range jobs {
-		out = append(out, backupJobView{Job: j, Process: s.backupJobProcess(j)})
+		var warn string
+		if err := backup.ValidateJob(j); err != nil {
+			warn = err.Error()
+		}
+		out = append(out, backupJobView{Job: j, Process: s.backupJobProcess(j), Warning: warn})
 	}
 	return out, nil
 }

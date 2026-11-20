@@ -105,7 +105,56 @@
     if (mh) { mh.textContent = METHOD_HINT[m] || ''; }
     var dh = document.getElementById('backup-databases-hint');
     if (dh) { dh.textContent = DATABASES_HINT[m] || 'Comma separated; empty backs up every database.'; }
+    syncPitr();
     syncConditions(f);
+  }
+  function pitrSupport() {
+    var e = engine(), m = method();
+    if (e === 'custom') {
+      return { ok: false, reason: 'Custom scripts do not support point-in-time recovery' };
+    }
+    if (m === 'mariadb-dump') {
+      return { ok: false, reason: 'MariaDB does not support binlog archiving' };
+    }
+    if (m === 'pg_dump') {
+      return { ok: false, reason: 'PITR needs pg_basebackup as the base backup' };
+    }
+    if (m === 'mydumper') {
+      return { ok: false, reason: 'mydumper does not support binlog archiving' };
+    }
+    if (m === 'mysqldump') {
+      var dbs = list(val('conn_databases'));
+      if (dbs.length !== 1) {
+        return { ok: false, reason: 'PITR requires exactly one database' };
+      }
+    }
+    if (m === 'pg_basebackup' || m === 'mongodump' || m === 'mysqldump') {
+      return { ok: true, reason: '' };
+    }
+    return { ok: false, reason: 'Method does not support point-in-time recovery' };
+  }
+  function syncPitr() {
+    var pitrBox = field('log_archive');
+    if (!pitrBox) { return; }
+    var sup = pitrSupport();
+    var hint = document.getElementById('backup-pitr-hint');
+    var reason = document.getElementById('backup-pitr-reason');
+    if (!sup.ok) {
+      pitrBox.disabled = true;
+      pitrBox.checked = false;
+      if (reason) {
+        reason.textContent = sup.reason;
+        reason.hidden = false;
+      }
+      if (hint) { hint.hidden = true; }
+    } else {
+      pitrBox.disabled = false;
+      if (reason) {
+        reason.textContent = '';
+        reason.hidden = true;
+      }
+      if (hint) { hint.hidden = false; }
+    }
   }
   function list(s) { return s.split(',').map(function (x) { return x.trim(); }).filter(Boolean); }
   function conn(prefix) {
@@ -146,7 +195,8 @@
       job.conn = conn('conn');
     }
     if (m !== 'pg_basebackup') { job.conn.databases = list(val('conn_databases')); }
-    job.log_archive = checked('log_archive');
+    var pitrField = field('log_archive');
+    job.log_archive = !!(pitrField && !pitrField.disabled && pitrField.checked);
     job.log_flush_seconds = job.log_archive ? num('log_flush_seconds') : 0;
     job.test_restore = (m === 'mysqldump' || m === 'mariadb-dump' || m === 'pg_dump') && checked('test_restore');
     if (job.test_restore) { job.scratch = conn('scratch'); }
@@ -269,7 +319,7 @@
     var t = event.target;
     if (!t.form) { return; }
     if (t.form.id === 'backup-job-form') {
-      if (t.name === 'engine' || t.name === 'method') { syncEngine(); } else { syncConditions(t.form); }
+      if (t.name === 'engine' || t.name === 'method' || t.name === 'conn_databases') { syncEngine(); } else { syncConditions(t.form); }
     } else if (t.form.id === 'restore-form' || t.form.id === 'repo-form') {
       syncConditions(t.form);
     }
@@ -428,6 +478,7 @@
     if (f && (f.id === 'restore-form' || f.id === 'repo-form' || f.id === 'backup-job-form')) {
       f.setAttribute('data-dirty', '1');
       if (event.target.type === 'number') { syncConditions(f); }
+      if (event.target.name === 'conn_databases') { syncPitr(); }
     }
   });
   if (form()) { syncEngine(); form().removeAttribute('data-dirty'); }

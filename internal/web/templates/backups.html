@@ -113,9 +113,9 @@
     <details class="advanced" id="backup-job-advanced">
       <summary>Advanced options <span class="summary-hint">PITR, retries, verification, more retention</span></summary>
       <div class="form-stack">
-        <fieldset class="form-section" data-engines="mysql postgres mongodb">
+        <fieldset class="form-section">
           <legend class="form-section-title">Point-in-time recovery</legend>
-          <label class="check"><input name="log_archive" type="checkbox"> <span id="backup-pitr-label">Archive binlogs continuously</span><small class="field-hint">Lets you restore to any moment between backups.</small></label>
+          <label class="check"><input name="log_archive" type="checkbox"> <span id="backup-pitr-label">Archive binlogs continuously</span><small class="field-hint" id="backup-pitr-hint">Lets you restore to any moment between backups.</small><small class="field-hint" id="backup-pitr-reason" hidden></small></label>
           <div class="field-grid" data-show-if="log_archive" hidden>
             <label class="field"><span class="field-label">Force a log switch every (seconds)</span><input name="log_flush_seconds" type="number" min="0" max="86400" value="0"><small class="field-hint">0 = off; otherwise 10 to 86400. Bounds data loss.</small></label>
           </div>
@@ -190,7 +190,7 @@
   <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Backup jobs</caption>
   <thead><tr><th>Name</th><th>Method</th><th>Every</th><th>Retention</th><th>Protection</th><th>Schedule</th><th>Last run</th><th>Actions</th></tr></thead>
   <tbody>{{range .Body.Jobs}}<tr data-backup-job-id="{{.Job.ID}}">
-    <td>{{.Job.Name}}{{if .Job.Source}}<div class="small muted">{{.Job.Source}}</div>{{end}}</td>
+    <td>{{.Job.Name}}{{if .Job.Source}}<div class="small muted">{{.Job.Source}}</div>{{end}}{{if .Warning}}<div class="small"><span class="badge st-warning">warning</span> <span class="muted">{{.Warning}}</span></div>{{end}}</td>
     <td>{{if isUnsupportedBackupMethod .Job.Method}}<span class="badge st-failed">unsupported method (removed)</span>{{else if .Job.Method}}{{.Job.Method}}{{else}}custom{{end}}{{if .Job.LogArchive}} <span class="badge st-synced">PITR</span>{{end}}</td>
     <td class="nowrap">{{$m := div .Job.EverySeconds 60}}{{if eq $m 60}}hour{{else if eq $m 360}}6 hours{{else if eq $m 1440}}day{{else if eq $m 10080}}week{{else}}{{$m}}m{{end}}</td>
     <td class="small nowrap">{{if .Job.Retention.Enabled}}{{with .Job.Retention}}<span title="{{if .KeepLast}}last {{.KeepLast}} {{end}}{{if .KeepHourly}}hourly {{.KeepHourly}} {{end}}{{if .KeepDaily}}daily {{.KeepDaily}} {{end}}{{if .KeepWeekly}}weekly {{.KeepWeekly}} {{end}}{{if .KeepMonthly}}monthly {{.KeepMonthly}} {{end}}{{if .KeepYearly}}yearly {{.KeepYearly}} {{end}}{{if .KeepWithinDays}}within {{.KeepWithinDays}}d {{end}}{{if .MaxAgeDays}}max {{.MaxAgeDays}}d{{end}}">{{if .KeepLast}}last {{.KeepLast}}{{end}}{{if and .KeepLast .KeepDaily}} · {{end}}{{if .KeepDaily}}daily {{.KeepDaily}}{{end}}{{if or .KeepHourly .KeepWeekly .KeepMonthly .KeepYearly .KeepWithinDays .MaxAgeDays}}{{if or .KeepLast .KeepDaily}} +{{else}}custom{{end}}{{end}}</span>{{end}}{{else}}keep all{{end}}</td>
