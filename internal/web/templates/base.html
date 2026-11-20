@@ -10,6 +10,8 @@
 <script src="/static/app.js" defer></script>
 <script src="/static/live.js" defer></script>
 <script src="/static/backups.js" defer></script>
+<script src="/static/backups_ui.js" defer></script>
+<script src="/static/jobwizard.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#content">Skip to content</a>
@@ -25,6 +27,8 @@
     <div class="navhead">Data protection</div>
     <a href="/backups" class="{{if or (eq .Active "backups") (eq .Active "backups-overview")}}active{{end}}"{{if or (eq .Active "backups") (eq .Active "backups-overview")}} aria-current="page"{{end}}>{{icon "db"}}Backups</a>
     <a href="/backups/jobs" class="{{if eq .Active "backups-jobs"}}active{{end}}"{{if eq .Active "backups-jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
+    <a href="/backups/connections" class="{{if eq .Active "backups-connections"}}active{{end}}"{{if eq .Active "backups-connections"}} aria-current="page"{{end}}>{{icon "server"}}Connections</a>
+    <a href="/backups/policies" class="{{if eq .Active "backups-policies"}}active{{end}}"{{if eq .Active "backups-policies"}} aria-current="page"{{end}}>{{icon "config"}}Policies</a>
     <a href="/backups/catalog" class="{{if eq .Active "backups-catalog"}}active{{end}}"{{if eq .Active "backups-catalog"}} aria-current="page"{{end}}>{{icon "table"}}Restore points</a>
     <a href="/backups/restore" class="{{if eq .Active "backups-restore"}}active{{end}}"{{if eq .Active "backups-restore"}} aria-current="page"{{end}}>{{icon "db"}}Restore</a>
     <div class="navhead">System</div>
@@ -87,7 +91,7 @@
   <form method="dialog" id="confirm-form">
     <h3 id="confirm-title">Confirm</h3>
     <p id="confirm-msg"></p>
-    <p id="confirm-retype" hidden>Type the pipeline name <b id="confirm-name"></b> to confirm:<input id="confirm-input" type="text" aria-label="Pipeline name" autocomplete="off" spellcheck="false"></p>
+    <p id="confirm-retype" hidden>Type <b id="confirm-name"></b> to confirm:<input id="confirm-input" type="text" aria-label="Confirmation text" autocomplete="off" spellcheck="false"></p>
     <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">Cancel</button><button class="btn primary" id="confirm-ok" type="submit" value="ok">Confirm</button></div>
   </form>
 </dialog>

@@ -872,3 +872,86 @@ table.grid th.c-num, table.grid td.c-num, table.data-table th.c-num, table.data-
   @keyframes rowflash { from { background: var(--warn-soft); } to { background: transparent; } }
   svg.pbar .fg { transition: width .6s ease; }
 }
+
+/* ---------- backup UI (P2/P3): statuses, filter bar, drawer, detail layout, wizard ---------- */
+/* Canonical run/job states (stateClass map): success->ok, running/pending->info, warning/partial/missed->warn, failed->bad, paused/expired->neutral. */
+.st-success, .st-succeeded, .st-ok, .st-complete { --b-fg: var(--ok); --b-bg: var(--ok-soft); --b-line: var(--ok-line); --b-dot: var(--ok-solid); }
+.st-running, .st-pending, .st-queued { --b-fg: var(--info); --b-bg: var(--info-soft); --b-line: var(--info-line); --b-dot: var(--info-solid); }
+.st-warning, .st-stale, .st-partial, .st-missed, .st-interrupted { --b-fg: var(--warn); --b-bg: var(--warn-soft); --b-line: var(--warn-line); --b-dot: var(--warn-solid); }
+.st-error, .st-rpo_breach { --b-fg: var(--bad); --b-bg: var(--bad-soft); --b-line: var(--bad-line); --b-dot: var(--bad-solid); }
+.st-disabled, .st-expired, .st-cancelled, .st-untested { --b-fg: var(--idle); --b-bg: var(--idle-soft); --b-line: var(--idle-line); --b-dot: var(--idle-solid); }
+.run-squares { display: inline-flex; gap: 3px; align-items: center; }
+.run-dot { width: 10px; height: 10px; border-radius: 2px; background: var(--idle-solid); display: inline-block; }
+.run-dot.st-success, .run-dot.st-succeeded { background: var(--ok-solid); }
+.run-dot.st-failed { background: var(--bad-solid); }
+.run-dot.st-missed, .run-dot.st-partial, .run-dot.st-interrupted { background: var(--warn-solid); }
+.run-dot.st-running { background: var(--info-solid); }
+
+.filterbar { display: flex; flex-wrap: wrap; align-items: end; gap: var(--sp-3); margin: 0 0 var(--sp-4); }
+.filterbar .field-grid { flex: 1 1 520px; margin: 0; }
+.filterbar-actions { display: flex; gap: var(--sp-2); }
+.bulkbar { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); margin: 0 0 var(--sp-3); border: 1px solid var(--accent); border-radius: var(--r-md); background: var(--accent-soft); }
+.bulkbar[hidden] { display: none; }
+.bulk-count { font-weight: 600; font-size: var(--fs-sm); margin-right: auto; }
+.error-state { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-5); border: 1px solid var(--bad-line); background: var(--bad-soft); border-radius: var(--r-lg); color: var(--bad); }
+.copyval { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: var(--fs-xs); }
+.chk { width: 32px; }
+.btn.small { height: 28px; padding: 0 10px; font-size: var(--fs-sm); }
+.btn.ghost { background: transparent; border-color: transparent; }
+.cardhead-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.badge.override { --b-fg: var(--warn); --b-bg: var(--warn-soft); --b-line: var(--warn-line); --b-dot: var(--warn-solid); }
+.badge.recommended { --b-fg: var(--ok); --b-bg: var(--ok-soft); --b-line: var(--ok-line); --b-dot: var(--ok-solid); }
+.badge.tone-immutable { --b-fg: var(--info); --b-bg: var(--info-soft); --b-line: var(--info-line); --b-dot: var(--info-solid); }
+
+/* slide-in drawer: <dialog class="drawer"> */
+dialog.drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(640px, 100vw); max-width: 100vw; height: 100vh; max-height: 100vh; padding: 0; border: 0; border-left: 1px solid var(--line); background: var(--surface); color: var(--ink); box-shadow: var(--tt-shadow-overlay); overflow: hidden; }
+dialog.drawer[open] { display: flex; flex-direction: column; }
+dialog.drawer::backdrop { background: var(--tt-overlay); }
+dialog.drawer > form { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--line); }
+.drawer-head h2 { margin: 0; font-size: var(--fs-md); font-weight: 600; }
+.drawer-body { flex: 1; overflow-y: auto; padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-4); }
+.drawer-foot { position: sticky; bottom: 0; display: flex; align-items: center; gap: var(--sp-2); justify-content: flex-end; padding: var(--sp-3) var(--sp-5); border-top: 1px solid var(--line); background: var(--surface); }
+.drawer-foot .form-status { margin-right: auto; }
+.drawer-body fieldset.form-section { margin: 0; padding: var(--sp-4); }
+
+/* detail layout: main column + 320px properties column */
+.detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: var(--sp-4); align-items: start; }
+.detail-layout > aside { min-width: 0; }
+dl.props { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-2) var(--sp-4); margin: 0; font-size: var(--fs-sm); }
+dl.props dt { color: var(--muted); }
+dl.props dd { margin: 0; overflow-wrap: anywhere; }
+
+/* connection test checklist */
+.test-checklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-sm); }
+.test-checklist li { display: flex; gap: 8px; align-items: baseline; }
+.test-checklist .tc-mark { flex: none; width: 16px; font-weight: 700; text-align: center; }
+.test-checklist li.ok .tc-mark { color: var(--ok); } .test-checklist li.warn .tc-mark { color: var(--warn); } .test-checklist li.fail .tc-mark { color: var(--bad); }
+.test-checklist .tc-detail { color: var(--muted); }
+.test-result { border: 1px solid var(--line); border-radius: var(--r-md); padding: var(--sp-3); background: var(--surface-2); }
+.test-result[hidden] { display: none; }
+.btn.is-busy { position: relative; color: transparent !important; pointer-events: none; }
+.btn.is-busy::after { content: ""; position: absolute; width: 14px; height: 14px; border: 2px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+.btn.primary.is-busy::after { border-color: rgba(255,255,255,.5); border-top-color: #fff; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .btn.is-busy::after { animation-duration: 2s; } }
+
+/* job wizard */
+.wiz-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: var(--sp-4); align-items: start; }
+.wiz-summary { position: sticky; top: var(--sp-4); }
+.wiz-summary dl.props { grid-template-columns: 1fr; gap: 2px; }
+.wiz-summary dl.props dt { margin-top: var(--sp-2); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .04em; }
+ol.stepper > li.step > .step-btn { display: flex; align-items: center; gap: var(--sp-2); background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+fieldset.wiz-step[hidden] { display: none; }
+.wiz-nav { display: flex; gap: var(--sp-2); justify-content: space-between; align-items: center; flex-wrap: wrap; margin-top: var(--sp-4); }
+.wiz-nav .grp { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.switch-row { display: flex; align-items: flex-start; gap: var(--sp-3); padding: var(--sp-2) 0; }
+.switch-row input[type=checkbox] { margin-top: 3px; }
+.switch-row.is-disabled { opacity: .75; }
+.reason { color: var(--muted); font-size: var(--fs-xs); }
+.db-checklist { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px var(--sp-4); max-height: 220px; overflow: auto; padding: var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.sched-preview { list-style: none; margin: var(--sp-2) 0 0; padding: 0; font-size: var(--fs-sm); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.words { font-size: var(--fs-sm); color: var(--ink-2); padding: var(--sp-2) var(--sp-3); border: 1px dashed var(--line-strong); border-radius: var(--r-md); background: var(--surface-2); margin: 0; }
+.policy-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--sp-3); }
+.days-pick { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
+@media (max-width: 960px) { .detail-layout, .wiz-layout { grid-template-columns: minmax(0, 1fr); } .wiz-summary { position: static; } }

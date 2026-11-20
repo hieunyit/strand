@@ -430,6 +430,7 @@ func (s *Server) routes() http.Handler {
 
 	s.backupConnectionRoutes(mux)
 	s.backupPolicyRoutes(mux)
+	s.backupUIRoutes(mux)
 	mux.Handle("GET /api/v1/backup-jobs", s.auth(true, s.apiBackupJobs))
 	mux.Handle("GET /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobGet))
 	mux.Handle("GET /api/v1/backup-jobs/{id}/runs", s.auth(true, s.apiBackupJobRuns))

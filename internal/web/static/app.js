@@ -437,6 +437,9 @@
     });
   }
 
+  window.strandConfirm = confirmDialog;
+  window.strandToast = toast;
+
   // Forms with class "act": data-action, data-pipeline, optional data-confirm and data-retype (pipeline name).
   function collect(form) {
     var body = {};

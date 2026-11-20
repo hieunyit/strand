@@ -3,12 +3,12 @@
   <div class="cardhead">
     <h2>Backup jobs</h2>
     {{if .Body.IsAdmin}}
-    <button type="button" class="btn primary small" id="new-backup-job-btn" data-action="new-job">New backup job</button>
+    <a class="btn primary small" id="new-backup-job-btn" href="/backups/jobs/new">New backup job</a>
     {{end}}
   </div>
 
   <form method="get" action="/backups/jobs" class="filterbar" id="backup-jobs-filter">
-    <div class="field-grid cols-4">
+    <div class="field-grid cols-3">
       <label class="field">
         <span class="field-label sr-only">Search</span>
         <input type="search" name="q" value="{{.Body.FilterQ}}" placeholder="Search jobs or sources...">
@@ -30,6 +30,16 @@
           <option value="enabled"{{if eq .Body.Status "enabled"}} selected{{end}}>Enabled</option>
           <option value="paused"{{if eq .Body.Status "paused"}} selected{{end}}>Paused</option>
           <option value="failing"{{if eq .Body.Status "failing"}} selected{{end}}>Failing</option>
+          <option value="missed"{{if eq .Body.Status "missed"}} selected{{end}}>Missed</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Policy</span>
+        <select name="policy">
+          <option value="">All policies</option>
+          {{range .Body.Policies}}
+          <option value="{{.ID}}"{{if eq $.Body.Policy .ID}} selected{{end}}>{{.Name}}</option>
+          {{end}}
         </select>
       </label>
       <label class="field">
@@ -82,18 +92,18 @@
           <td>
             <a href="/backups/jobs/{{.Job.ID}}"><b>{{.Job.Name}}</b></a>
             <div class="sub muted small">{{if .Job.Source}}{{.Job.Source}}{{else}}{{.Job.ID}}{{end}}</div>
-            {{if .Warning}}<span class="badge st-failed small" title="{{.Warning}}">warning</span>{{end}}
+            {{if .PolicyName}}<span class="badge small" title="Policy">{{.PolicyName}}</span>{{end}}
+            {{if .Job.Overrides}}<span class="badge override small" title="Overrides: {{join .Job.Overrides ", "}}">overrides</span>{{end}}
+            {{if .Legacy}}<span class="badge small" title="This job carries its own connection settings">inline connection</span>{{end}}
+            {{range .Warnings}}<div class="job-warning small"><span class="badge st-warning small">warning</span> {{.}}</div>{{end}}
           </td>
           <td>
             <div>{{.Job.Engine}}</div>
             <div class="sub muted small">{{.Job.Method}}</div>
           </td>
           <td class="nowrap">
-            {{if .Job.Enabled}}
-            <span>Every {{div .Job.EverySeconds 3600}}h</span>
-            {{else}}
-            <span class="badge small">paused</span>
-            {{end}}
+            <span>{{.ScheduleText}}</span>
+            {{if not .Job.Enabled}}<span class="badge small st-disabled">paused</span>{{end}}
           </td>
           <td class="nowrap">
             {{if and .Job.Enabled .Job.NextRunAt}}
@@ -104,7 +114,7 @@
           </td>
           <td class="nowrap">
             {{if .Job.LastRunStatus}}
-            <span class="badge small st-{{.Job.LastRunStatus}}">{{.Job.LastRunStatus}}</span>
+            <span class="badge small st-{{.Job.LastRunStatus}}"{{if eq (printf "%s" .Job.LastRunStatus) "missed"}} title="The run did not start inside its window"{{end}}>{{.Job.LastRunStatus}}</span>
             {{else}}
             <span class="muted">never</span>
             {{end}}
@@ -127,7 +137,9 @@
             <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Job.ID}}">Resume</button>
             {{end}}
             {{if $.Body.IsAdmin}}
-            <button type="button" class="btn small danger ghost" data-job-action="delete" data-id="{{.Job.ID}}">Delete</button>
+            <a class="btn small ghost" href="/backups/jobs/{{.Job.ID}}/edit">Edit</a>
+            {{if .Legacy}}<button type="button" class="btn small ghost" data-convert-job="{{.Job.ID}}">Convert to connection</button>{{end}}
+            <button type="button" class="btn small danger ghost" data-job-action="delete" data-id="{{.Job.ID}}" data-name="{{.Job.Name}}">Delete</button>
             {{end}}
           </td>
           {{end}}

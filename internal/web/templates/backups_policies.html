@@ -1,0 +1,31 @@
+{{define "content"}}
+<section class="card" id="backup-policies-list">
+  <div class="cardhead">
+    <h2>Policies</h2>
+    {{if .Body.IsAdmin}}<button type="button" class="btn primary small" id="new-policy-btn" data-open-drawer="policy-drawer">New policy</button>{{end}}
+  </div>
+  <p class="card-desc">A job is a connection plus a policy plus the databases to protect. Changing a policy changes every job that follows it.</p>
+  {{if .Body.Unavail}}<div class="error-state" role="alert">{{.Body.Unavail}}</div>{{end}}
+  <div class="tablewrap">
+    <table class="data-table" id="policies-table">
+      <caption class="sr-only">Backup policies</caption>
+      <thead><tr><th scope="col">Policy</th><th scope="col">Schedule</th><th scope="col">Retention</th><th scope="col">PITR</th><th scope="col">Verify</th><th scope="col" class="r">Jobs</th></tr></thead>
+      <tbody>
+        {{range .Body.Rows}}
+        <tr data-policy-id="{{.ID}}">
+          <td><a href="/backups/policies/{{.ID}}"><b>{{.Name}}</b></a>{{if .Builtin}} <span class="badge small">built-in</span>{{end}}{{if .Description}}<div class="sub muted small">{{.Description}}</div>{{end}}</td>
+          <td>{{.Human}}</td>
+          <td>{{.Words}}</td>
+          <td>{{if .LogArchive}}<span class="badge small st-ok">on</span>{{if .RPOMinutes}} <span class="muted small">RPO {{.RPOMinutes}} min</span>{{end}}{{else}}<span class="badge small st-disabled">off</span>{{end}}</td>
+          <td>{{.VerifyTxt}}{{if .TestRestore}} + test restore{{end}}</td>
+          <td class="r">{{.Jobs}}</td>
+        </tr>
+        {{else}}
+        <tr><td colspan="6"><div class="empty-state">{{icon "empty"}}<b>No policies yet</b><span>{{if .Body.IsAdmin}}Create a policy to share schedule and retention between jobs.{{else}}An administrator creates policies.{{end}}</span></div></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{if .Body.IsAdmin}}{{template "policy-drawer" .Body.Drawer}}{{end}}
+{{end}}

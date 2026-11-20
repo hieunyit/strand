@@ -1,0 +1,56 @@
+{{define "content"}}
+<div class="detail-layout" id="connection-detail" data-conn-id="{{.Body.Conn.ID}}">
+  <div>
+    <nav class="tabs" role="tablist" aria-label="Connection tabs">
+      <a href="/backups/connections/{{.Body.Conn.ID}}" role="tab" class="tab{{if eq .Body.Tab "overview"}} active{{end}}" aria-selected="{{if eq .Body.Tab "overview"}}true{{else}}false{{end}}">Overview</a>
+      <a href="/backups/connections/{{.Body.Conn.ID}}?tab=used-by" role="tab" class="tab{{if eq .Body.Tab "used-by"}} active{{end}}" aria-selected="{{if eq .Body.Tab "used-by"}}true{{else}}false{{end}}">Used by <span class="tab-count">{{.Body.Conn.Jobs}}</span></a>
+    </nav>
+    {{if eq .Body.Tab "overview"}}
+    <section class="card" id="connection-overview">
+      <div class="cardhead"><h2>Connection</h2>
+        <div class="cardhead-actions">
+          {{if .Body.CanTest}}<button type="button" class="btn small" data-conn-action="test" data-id="{{.Body.Conn.ID}}">Test connection</button>{{end}}
+          {{if .Body.IsAdmin}}<button type="button" class="btn small" data-open-drawer="conn-drawer">Edit</button>
+          <button type="button" class="btn small danger ghost" data-conn-action="delete" data-id="{{.Body.Conn.ID}}" data-name="{{.Body.Conn.Name}}">Delete</button>{{end}}
+        </div>
+      </div>
+      <dl class="props">
+        <dt>Engine</dt><dd>{{.Body.Conn.Engine}}</dd>
+        <dt>Host</dt><dd class="mono">{{.Body.Conn.Host}}{{if .Body.Conn.Port}}:{{.Body.Conn.Port}}{{end}}</dd>
+        <dt>User</dt><dd>{{if .Body.Conn.User}}{{.Body.Conn.User}}{{else}}-{{end}}</dd>
+        <dt>Secret</dt><dd>{{if eq .Body.Conn.SecretMode "stored"}}Stored encrypted {{if .Body.Conn.PasswordSet}}(password set){{else}}(no password){{end}}{{else}}Environment variable {{if .Body.Conn.PasswordEnv}}<code>{{.Body.Conn.PasswordEnv}}</code>{{end}}{{end}}</dd>
+        <dt>TLS</dt><dd>{{if .Body.Conn.TLSMode}}{{.Body.Conn.TLSMode}}{{else}}server default{{end}}</dd>
+        {{with .Body.Conn.SSHTunnel}}<dt>SSH tunnel</dt><dd>{{.User}}@{{.Host}}{{if .Port}}:{{.Port}}{{end}}</dd>{{end}}
+      </dl>
+    </section>
+    {{else}}
+    <section class="card" id="connection-used-by">
+      <div class="cardhead"><h2>Jobs using this connection</h2></div>
+      <div class="tablewrap">
+        <table class="data-table" id="used-by-table">
+          <caption class="sr-only">Backup jobs that use this connection</caption>
+          <thead><tr><th scope="col">Job</th><th scope="col">Method</th><th scope="col">Schedule</th><th scope="col">State</th></tr></thead>
+          <tbody>
+            {{range .Body.Used}}<tr><td><a href="/backups/jobs/{{.ID}}">{{.Name}}</a></td><td>{{.Method}}</td><td>{{.EffectiveSchedule.Human}}</td><td>{{if .Enabled}}<span class="badge small st-running">enabled</span>{{else}}<span class="badge small st-disabled">paused</span>{{end}}</td></tr>
+            {{else}}<tr><td colspan="4"><div class="empty-state">{{icon "empty"}}<b>No job uses this connection</b></div></td></tr>{{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {{end}}
+  </div>
+  <aside>
+    <section class="card" aria-label="Last test">
+      <div class="cardhead"><h3>Last test</h3></div>
+      <dl class="props">
+        <dt>Status</dt><dd><span class="badge st-{{.Body.Conn.StatusClass}}">{{if eq .Body.Conn.StatusClass "untested"}}never tested{{else if eq .Body.Conn.StatusClass "ok"}}passed{{else if eq .Body.Conn.StatusClass "warning"}}privileges missing{{else}}failed{{end}}</span></dd>
+        <dt>When</dt><dd>{{if .Body.Conn.LastTestAt}}{{ts (deref2 .Body.Conn.LastTestAt)}}{{else}}-{{end}}</dd>
+        {{if .Body.Conn.LastTestDetail}}<dt>Detail</dt><dd>{{.Body.Conn.LastTestDetail}}</dd>{{end}}
+        <dt>Jobs</dt><dd>{{.Body.Conn.Jobs}}</dd>
+      </dl>
+      <section class="test-result" id="conn-page-result" aria-live="polite" hidden></section>
+    </section>
+  </aside>
+</div>
+{{if .Body.IsAdmin}}{{template "conn-drawer" .Body.Drawer}}{{end}}
+{{end}}

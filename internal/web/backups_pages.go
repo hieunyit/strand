@@ -20,6 +20,8 @@ type backupsJobsPageBody struct {
 	Engine        string
 	Status        string
 	Repo          string
+	Policy        string
+	Policies      []backup.Policy
 	Repos         []backup.Repo
 	Methods       []string
 	MethodOptions []backupMethodOption
@@ -94,6 +96,7 @@ func (s *Server) pageBackupsJobs(w http.ResponseWriter, r *http.Request, sess *S
 	engine := r.URL.Query().Get("engine")
 	status := r.URL.Query().Get("status")
 	repo := r.URL.Query().Get("repo")
+	policyFilter := r.URL.Query().Get("policy")
 
 	var filtered []backupJobView
 	for _, j := range allJobs {
@@ -112,6 +115,12 @@ func (s *Server) pageBackupsJobs(w http.ResponseWriter, r *http.Request, sess *S
 		if status == "failing" && j.Job.ConsecutiveFailures == 0 {
 			continue
 		}
+		if status == "missed" && j.Job.LastRunStatus != backup.RunStatusMissed {
+			continue
+		}
+		if policyFilter != "" && j.Job.PolicyID != policyFilter {
+			continue
+		}
 		if repo != "" && j.Job.Bucket != repo {
 			continue
 		}
@@ -121,6 +130,7 @@ func (s *Server) pageBackupsJobs(w http.ResponseWriter, r *http.Request, sess *S
 	}
 
 	repos, _ := s.db.st.ListBackupRepos(r.Context())
+	policies, _ := s.db.st.ListBackupPolicies(r.Context())
 	methods := []string{backup.MethodCustom, backup.MethodMySQLDump, backup.MethodMariaDBDump, backup.MethodMydumper,
 		backup.MethodPGDump, backup.MethodPGBaseBackup, backup.MethodMongodump}
 	var methodOptions []backupMethodOption
@@ -139,6 +149,8 @@ func (s *Server) pageBackupsJobs(w http.ResponseWriter, r *http.Request, sess *S
 		Engine:        engine,
 		Status:        status,
 		Repo:          repo,
+		Policy:        policyFilter,
+		Policies:      policies,
 		Repos:         repos,
 		Methods:       methods,
 		MethodOptions: methodOptions,
@@ -173,6 +185,12 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 	if err := backup.ValidateJob(job); err != nil {
 		jobView.Warning = err.Error()
 	}
+	if err := backup.ValidatePITR(job); err != nil && jobView.Warning == "" {
+		jobView.Warning = err.Error()
+	}
+	one := []backupJobView{jobView}
+	s.enrichJobViews(r.Context(), one)
+	jobView = one[0]
 
 	tab := r.URL.Query().Get("tab")
 	if tab == "" {
