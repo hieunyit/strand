@@ -49,7 +49,9 @@ func TestContainer_FailoverThreeNode(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
-	event := func(format string, a ...any) { t.Logf("%s %s", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, a...)) }
+	event := func(format string, a ...any) {
+		t.Logf("%s %s", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, a...))
+	}
 
 	// During the snapshot.
 	waitFor("snapshot progress", func(s Snapshot) bool { return s.Phase == PhaseSnapshot && s.SnapshotDocs > 2000 })
