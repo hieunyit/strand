@@ -75,6 +75,11 @@ func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Stor
 			if err != nil {
 				return err
 			}
+			backup.SetRunReport(runCtx, &backup.RunReport{
+				BackupID:     rec.ID,
+				BytesRead:    rec.PlainBytes,
+				BytesWritten: rec.Bytes,
+			})
 			if current.ReplicateTo != "" {
 				if _, err := env.Copy(runCtx, rec, current.ReplicateTo); err != nil {
 					return fmt.Errorf("backup %s completed but replication to %s failed: %w", rec.ID, current.ReplicateTo, err)

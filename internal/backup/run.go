@@ -2,10 +2,21 @@ package backup
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
 )
+
+// NewRunID generates a random run ID with prefix "brun-".
+func NewRunID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return "brun-" + hex.EncodeToString(b[:]), nil
+}
 
 // Run triggers.
 const (
@@ -110,4 +121,37 @@ func NormalizeErrorCode(err error) string {
 	default:
 		return ErrCodeToolFailed
 	}
+}
+
+type runReportKey struct{}
+
+// RunReport carries runtime metrics collected during backup execution.
+type RunReport struct {
+	BackupID     string
+	BytesRead    int64
+	BytesWritten int64
+}
+
+// ContextWithRunReport returns a context carrying a mutable RunReport.
+func ContextWithRunReport(ctx context.Context) (context.Context, *RunReport) {
+	rep := &RunReport{}
+	return context.WithValue(ctx, runReportKey{}, rep), rep
+}
+
+// SetRunReport updates the RunReport stored in ctx if present.
+func SetRunReport(ctx context.Context, rep *RunReport) {
+	if rep == nil {
+		return
+	}
+	if existing, ok := ctx.Value(runReportKey{}).(*RunReport); ok && existing != nil {
+		*existing = *rep
+	}
+}
+
+// GetRunReport returns the RunReport stored in ctx, or nil if none.
+func GetRunReport(ctx context.Context) *RunReport {
+	if rep, ok := ctx.Value(runReportKey{}).(*RunReport); ok {
+		return rep
+	}
+	return nil
 }

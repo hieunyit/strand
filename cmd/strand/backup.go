@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -107,6 +108,7 @@ func newBackupScheduleCmd() *cobra.Command {
 	var jobID string
 	var sshAddress, sshUser, identityFile, knownHosts, remoteAddress string
 	var once, cleanupLocal bool
+	var trigger string
 	cmd := &cobra.Command{
 		Use:   "schedule -- command [args...]",
 		Short: "Run a native backup command repeatedly and publish each result",
@@ -117,6 +119,11 @@ paths for unique files. This process stays in the foreground; supervise it with
 systemd or another process manager.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if trigger != "" {
+				cmd.SetContext(context.WithValue(cmd.Context(), "strand_backup_trigger", trigger))
+			} else if once {
+				cmd.SetContext(context.WithValue(cmd.Context(), "strand_backup_trigger", backup.TriggerManual))
+			}
 			if len(args) == 0 {
 				// Built-in method job: everything comes from the job definition in the metadata database.
 				if jobID == "" || !backup.ValidID(jobID) {
@@ -195,6 +202,7 @@ systemd or another process manager.`,
 	}
 	cmd.Flags().DurationVar(&every, "every", 24*time.Hour, "backup interval (minimum 1m)")
 	cmd.Flags().BoolVar(&once, "once", false, "run exactly one backup and exit (used for Run now)")
+	cmd.Flags().StringVar(&trigger, "trigger", "", "trigger type (schedule|manual|retry|api)")
 	addPushEncodingFlags(cmd)
 	cmd.Flags().StringVar(&jobID, "job-id", "", "managed Web backup job ID (enables distributed scheduling locks)")
 	cmd.Flags().BoolVar(&cleanupLocal, "cleanup-local", false, "remove generated local artifact and manifest after successful upload")
@@ -362,6 +370,11 @@ func runManagedBackupSchedule(ctx context.Context, cmd *cobra.Command, st interf
 	}
 }
 
+type backupRunsStore interface {
+	CreateBackupRun(context.Context, backup.Run) error
+	FinishBackupRun(context.Context, string, time.Time, string, int64, int64, time.Duration, string, string, string) (backup.Run, bool, error)
+}
+
 func runTrackedBackupJob(ctx context.Context, st interface {
 	BeginBackupJobRun(context.Context, string, time.Time) (time.Time, bool, error)
 	FinishBackupJobRun(context.Context, string, time.Time, backup.RunStatus) (bool, error)
@@ -373,16 +386,61 @@ func runTrackedBackupJob(ctx context.Context, st interface {
 	if !began {
 		return false, errors.New("backup job changed before this run could start")
 	}
-	runErr := run(ctx)
+
+	runID, _ := backup.NewRunID()
+	var runStore backupRunsStore
+	if rs, ok := st.(backupRunsStore); ok {
+		runStore = rs
+		trig := backup.TriggerSchedule
+		if t, ok := ctx.Value("strand_backup_trigger").(string); ok && t != "" {
+			trig = t
+		} else if envTrig := os.Getenv("STRAND_BACKUP_TRIGGER"); envTrig != "" {
+			trig = envTrig
+		}
+		procID := os.Getenv("STRAND_RUNNER_ID")
+		if procID == "" {
+			procID = strconv.Itoa(os.Getpid())
+		}
+		_ = runStore.CreateBackupRun(ctx, backup.Run{
+			ID:        runID,
+			JobID:     job.ID,
+			Trigger:   trig,
+			StartedAt: startedAt,
+			Status:    string(backup.RunStatusRunning),
+			ProcessID: procID,
+			Attempt:   job.ConsecutiveFailures + 1,
+		})
+	}
+
+	runCtx, report := backup.ContextWithRunReport(ctx)
+	runErr := run(runCtx)
 	status := backup.RunStatusSucceeded
+	runStatusStr := backup.RunStatusSuccess
+	var errCode, errMsg string
 	if runErr != nil {
 		status = backup.RunStatusFailed
+		runStatusStr = string(backup.RunStatusFailed)
+		errCode = backup.NormalizeErrorCode(runErr)
+		errMsg = runErr.Error()
 		if ctx.Err() != nil {
 			status = backup.RunStatusCancelled
+			runStatusStr = string(backup.RunStatusCancelled)
+			errCode = backup.ErrCodeCancelled
 		}
 	}
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
+	dur := time.Since(startedAt)
+	if runStore != nil {
+		var bytesRead, bytesWritten int64
+		var backupID string
+		if report != nil {
+			bytesRead = report.BytesRead
+			bytesWritten = report.BytesWritten
+			backupID = report.BackupID
+		}
+		_, _, _ = runStore.FinishBackupRun(finishCtx, runID, time.Now().UTC(), runStatusStr, bytesRead, bytesWritten, dur, backupID, errCode, errMsg)
+	}
 	_, finishErr := st.FinishBackupJobRun(finishCtx, job.ID, startedAt, status)
 	return true, errors.Join(runErr, finishErr)
 }
@@ -425,6 +483,7 @@ func executeScheduledBackup(ctx context.Context, cmd *cobra.Command, args []stri
 	cleanupLocal bool) error {
 	artifactPath := strings.ReplaceAll(artifactTemplate, "{id}", id)
 	manifestPath := strings.ReplaceAll(manifestTemplate, "{id}", id)
+	backup.SetRunReport(ctx, &backup.RunReport{BackupID: id})
 	var forward *tunnel.Forward
 	var err error
 	if sshAddress != "" {
