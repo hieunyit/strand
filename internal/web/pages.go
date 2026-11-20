@@ -23,7 +23,11 @@ import (
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings", "mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error", "users", "account"}
+var pageNames = []string{
+	"overview", "pipelines", "detail", "jobs", "job", "backups", "backups_jobs", "backups_job_detail",
+	"backups_catalog", "backups_catalog_detail", "backups_restore", "wizard", "new_pipeline", "settings",
+	"mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error", "users", "account",
+}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -78,6 +82,23 @@ func templateFuncs() template.FuncMap {
 		"deref2":                    func(t *time.Time) time.Time { return *t },
 		"div":                       func(a, b int) int { return a / b },
 		"isUnsupportedBackupMethod": backup.IsUnsupportedMethod,
+		"backup14DayChart":          Backup14DayChart,
+		"jobRuns30Chart":            JobRuns30Chart,
+		"fmtDuration": func(d time.Duration) string {
+			if d <= 0 {
+				return "-"
+			}
+			if d < time.Second {
+				return fmt.Sprintf("%dms", d.Milliseconds())
+			}
+			if d < time.Minute {
+				return fmt.Sprintf("%.1fs", d.Seconds())
+			}
+			return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+		},
+		"remediationHint": func(code string) string {
+			return backup.RemediationHints[code]
+		},
 		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
 			Jobs         []JobStatus
 			ShowPipeline bool
@@ -375,6 +396,16 @@ func defaultBreadcrumbs(page, title, active string) []BreadcrumbItem {
 		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Jobs", URL: "/jobs"}, {Label: title, URL: ""}}
 	case "backups":
 		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: ""}}
+	case "backups_jobs":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: "/backups"}, {Label: "Jobs", URL: ""}}
+	case "backups_job_detail":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: "/backups"}, {Label: "Jobs", URL: "/backups/jobs"}, {Label: title, URL: ""}}
+	case "backups_catalog":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: "/backups"}, {Label: "Restore points", URL: ""}}
+	case "backups_catalog_detail":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: "/backups"}, {Label: "Restore points", URL: "/backups/catalog"}, {Label: title, URL: ""}}
+	case "backups_restore":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: "/backups"}, {Label: "Restore", URL: ""}}
 	case "mcp":
 		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "MCP", URL: ""}}
 	case "settings":

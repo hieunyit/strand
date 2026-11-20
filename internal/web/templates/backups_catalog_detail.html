@@ -1,0 +1,88 @@
+{{define "content"}}
+<section class="card mb" id="backup-detail-header">
+  <div class="cardhead">
+    <div>
+      <h2>Backup <code>{{.Body.Backup.ID}}</code></h2>
+      <div class="sub muted">
+        <span>Source: <b>{{.Body.Backup.Source}}</b></span> &middot;
+        <span>Engine: <b>{{.Body.Backup.Engine}}</b></span> &middot;
+        <span>Status: <b class="badge st-{{.Body.Backup.Status}}">{{.Body.Backup.Status}}</b></span>
+      </div>
+    </div>
+    <div class="cardhead-actions">
+      <a href="/backups/restore?backup={{.Body.Backup.ID}}" class="btn small primary">Restore from this backup</a>
+      {{if .Body.CanWrite}}
+      <button type="button" class="btn small" data-backup-action="verify" data-id="{{.Body.Backup.ID}}">Verify</button>
+      <button type="button" class="btn small ghost" data-backup-action="legal-hold" data-id="{{.Body.Backup.ID}}" data-hold="{{if .Body.Backup.LegalHold}}0{{else}}1{{end}}">
+        {{if .Body.Backup.LegalHold}}Release legal hold{{else}}Set legal hold{{end}}
+      </button>
+      {{end}}
+    </div>
+  </div>
+</section>
+
+<div class="field-grid cols-2">
+  <section class="card" id="backup-meta-card">
+    <div class="cardhead"><h3>Metadata</h3></div>
+    <div class="tablewrap"><table class="data-table">
+      <caption>Detailed backup metadata</caption>
+      <tbody>
+        <tr><th>Backup ID</th><td><code>{{.Body.Backup.ID}}</code></td></tr>
+        <tr><th>Source</th><td><b>{{.Body.Backup.Source}}</b></td></tr>
+        <tr><th>Engine</th><td>{{.Body.Backup.Engine}}</td></tr>
+        <tr><th>Tool</th><td>{{.Body.Backup.Tool}} {{if .Body.Backup.ToolVersion}}({{.Body.Backup.ToolVersion}}){{end}}</td></tr>
+        <tr><th>Kind</th><td><span class="badge small">{{.Body.Backup.Kind}}</span></td></tr>
+        <tr><th>Size</th><td>{{bytes64 .Body.Backup.Bytes}}</td></tr>
+        <tr><th>Format</th><td>{{if .Body.Backup.Format}}{{.Body.Backup.Format}}{{else}}raw{{end}}</td></tr>
+        <tr><th>Key ID</th><td>{{if .Body.Backup.KeyID}}<code>{{.Body.Backup.KeyID}}</code>{{else}}<span class="muted">none (unencrypted)</span>{{end}}</td></tr>
+        <tr><th>Repository / Bucket</th><td>{{if .Body.Backup.Repository}}{{.Body.Backup.Repository}}{{else}}{{.Body.Backup.Bucket}}{{end}}</td></tr>
+        <tr><th>Object key</th><td><code>{{.Body.Backup.ObjectKey}}</code></td></tr>
+        <tr><th>SHA256</th><td><span class="mono small">{{if .Body.Backup.SHA256}}{{.Body.Backup.SHA256}}{{else}}-{{end}}</span></td></tr>
+        <tr><th>Created at</th><td>{{ts .Body.Backup.CreatedAt}}</td></tr>
+        <tr><th>Legal hold</th><td>{{if .Body.Backup.LegalHold}}<span class="badge st-failed">Active legal hold</span>{{else}}No{{end}}</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="card" id="backup-position-card">
+    <div class="cardhead"><h3>Position & Consistency</h3></div>
+    <div class="tablewrap"><table class="data-table">
+      <caption>Database consistency position coordinates</caption>
+      <tbody>
+        <tr><th>GTID Executed</th><td><span class="mono small">{{if .Body.Backup.Position.GTIDSet}}{{.Body.Backup.Position.GTIDSet}}{{else}}-{{end}}</span></td></tr>
+        <tr><th>PostgreSQL LSN</th><td><span class="mono small">{{if .Body.Backup.Position.LSN}}{{.Body.Backup.Position.LSN}}{{else}}-{{end}}</span></td></tr>
+        <tr><th>MongoDB Oplog TS</th><td><span class="mono small">{{if .Body.Backup.Position.OplogTS}}{{.Body.Backup.Position.OplogTS}}{{else}}-{{end}}</span></td></tr>
+        <tr><th>Binlog File / Position</th><td><span class="mono small">{{if .Body.Backup.Position.BinlogFile}}{{.Body.Backup.Position.BinlogFile}}:{{.Body.Backup.Position.BinlogPos}}{{else}}-{{end}}</span></td></tr>
+        <tr><th>Verified at</th><td>{{if .Body.Backup.VerifiedAt}}{{ts .Body.Backup.VerifiedAt}}{{else}}<span class="muted">unverified</span>{{end}}</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+</div>
+
+<section class="card mt" id="backup-checks-card">
+  <div class="cardhead"><h3>Verification checks</h3></div>
+  <div class="tablewrap"><table class="data-table">
+    <caption>Verification check history for this backup</caption>
+    <thead>
+      <tr>
+        <th>Check time</th>
+        <th>Kind</th>
+        <th>Status</th>
+        <th>Detail</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Body.Checks}}
+      <tr>
+        <td class="nowrap">{{ts .CheckedAt}}</td>
+        <td>{{.Kind}}</td>
+        <td><span class="badge small st-{{.Status}}">{{.Status}}</span></td>
+        <td class="small">{{.Message}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="4" class="empty">No verification checks recorded for this backup.</td></tr>
+      {{end}}
+    </tbody>
+  </table></div>
+</section>
+{{end}}

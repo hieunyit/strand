@@ -454,7 +454,7 @@ groups:
     expr: strand_backup_recent_check_failures > 0
 ```
 
-### Catalog schema (migration 014)
+### Catalog schema (migrations 014 and 016)
 
 `backups` gains: `job_id`, `repository`, `method`, `kind` (full | incremental |
 log), `parent_id`, `copy_of`, `format`, `compression`, `key_id`, `plain_bytes`,
@@ -465,9 +465,30 @@ seq, server_file, databases, ...); engine `mongodb`. New tables
 `backup_checks` (verification history) and `backup_repositories`;
 `backup_jobs` gains `options` (JSON: method, connection, retention, encryption,
 log archiving, verification), retry columns and notification/claim timestamps.
+`backup_runs` (migration 016) stores execution history for every job run
+(`schedule`, `manual`, `retry`, `api`), with normalized `error_code` and
+remediation advice.
 Log segments are self-describing (their catalog row is the manifest); base
 backups get a `manifest.json` sidecar containing the catalog record so a
 repository can be re-indexed without the database.
+
+### Web UI and Route Architecture (P1)
+
+Strand Web splits backup management across dedicated, fast-loading routes under the "Data protection" sidebar group:
+- `/backups` (Overview dashboard): Stat tiles (protected sources, 24h success rate, failing jobs, storage used, test-restore status), standby/repo/key banners, needs-attention list, and 14-day stacked activity chart rendered server-side as CSP-safe SVG.
+- `/backups/jobs`: Filterbar (query, engine, status, repository) synced to the URL, bulk action bar (Run, Pause, Resume, Delete), last-10-runs indicators, and next run countdowns.
+- `/backups/jobs/{id}`: Detailed job view with header actions and tabs: Overview (30-day run sparkline), Runs (cursor-paged run history with live log stream and running execution cancellation), Restore points, Settings (read-only with edit mode), and Activity (audit entries filtered to this job).
+- `/backups/catalog` and `/backups/catalog/{id}`: Paged restore point browser and backup detail inspect view with position coordinates and verification history.
+- `/backups/restore`: Restore wizard.
+
+### PITR Constraints (P0)
+
+Validation rules enforced by `backup.ValidateJob` and UI:
+- **MySQL**: Method `mysqldump` with a GTID-capable connection and exactly one database. MariaDB / `mariadb-dump` is rejected with `"MariaDB does not support binlog archiving"`. Multi-database configurations are rejected with `"PITR requires exactly one database"`.
+- **PostgreSQL**: Only `pg_basebackup`. `pg_dump` is rejected with `"PITR needs pg_basebackup as the base backup"`.
+- **MongoDB**: `mongodump`.
+- **Custom**: Rejected.
+- Stored jobs from older versions that fail these constraints are still listed and presented with clear warning badges; the scheduler skips their log archiving with an explicit logged reason instead of failing silently. The web UI disables the PITR checkbox with explanatory help text when unsupported combinations are chosen.
 
 ## Current limits
 

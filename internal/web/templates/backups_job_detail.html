@@ -1,0 +1,218 @@
+{{define "content"}}
+<section class="card mb" id="job-detail-header">
+  <div class="cardhead">
+    <div>
+      <h2>{{.Body.Job.Job.Name}}</h2>
+      <div class="sub muted">
+        <span>Engine: <b>{{.Body.Job.Job.Engine}} ({{.Body.Job.Job.Method}})</b></span> &middot;
+        <span>Source: <b>{{if .Body.Job.Job.Source}}{{.Body.Job.Job.Source}}{{else}}{{.Body.Job.Job.ID}}{{end}}</b> &rarr; <b>{{if .Body.Job.Job.Bucket}}{{.Body.Job.Job.Bucket}}{{else}}default{{end}}</b></span> &middot;
+        <span>Status: <b class="badge st-{{if .Body.Job.Job.Enabled}}running{{else}}paused{{end}}">{{if .Body.Job.Job.Enabled}}enabled{{else}}paused{{end}}</b></span>
+      </div>
+    </div>
+    {{if .Body.CanWrite}}
+    <div class="cardhead-actions">
+      <button type="button" class="btn small" data-job-action="run" data-id="{{.Body.Job.Job.ID}}">Run now</button>
+      {{if .Body.Job.Job.Enabled}}
+      <button type="button" class="btn small ghost" data-job-action="pause" data-id="{{.Body.Job.Job.ID}}">Pause</button>
+      {{else}}
+      <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Body.Job.Job.ID}}">Resume</button>
+      {{end}}
+      {{if .Body.IsAdmin}}
+      <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=settings&edit=1" class="btn small">Edit</a>
+      <button type="button" class="btn small danger ghost" data-job-action="delete" data-id="{{.Body.Job.Job.ID}}">Delete</button>
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+</section>
+
+<nav class="tabs" role="tablist" aria-label="Job detail tabs">
+  <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=overview" role="tab" class="tab{{if eq .Body.ActiveTab "overview"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "overview"}}true{{else}}false{{end}}">Overview</a>
+  <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs" role="tab" class="tab{{if eq .Body.ActiveTab "runs"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "runs"}}true{{else}}false{{end}}">Runs{{if .Body.Runs}} <span class="tab-count">{{len .Body.Runs}}</span>{{end}}</a>
+  <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=catalog" role="tab" class="tab{{if eq .Body.ActiveTab "catalog"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "catalog"}}true{{else}}false{{end}}">Restore points{{if .Body.Backups}} <span class="tab-count">{{len .Body.Backups}}</span>{{end}}</a>
+  <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=settings" role="tab" class="tab{{if eq .Body.ActiveTab "settings"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "settings"}}true{{else}}false{{end}}">Settings</a>
+  <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=activity" role="tab" class="tab{{if eq .Body.ActiveTab "activity"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "activity"}}true{{else}}false{{end}}">Activity</a>
+</nav>
+
+{{if eq .Body.ActiveTab "overview"}}
+<div class="field-grid cols-2">
+  <section class="card" id="job-overview-card">
+    <div class="cardhead"><h3>Configuration</h3></div>
+    <div class="tablewrap"><table class="data-table">
+      <caption>Configuration summary for backup job</caption>
+      <tbody>
+        <tr><th>ID</th><td><code>{{.Body.Job.Job.ID}}</code></td></tr>
+        <tr><th>Schedule</th><td>Every {{div .Body.Job.Job.EverySeconds 3600}} hours</td></tr>
+        <tr><th>Next run</th><td>{{if .Body.Job.Job.NextRunAt}}{{ts .Body.Job.Job.NextRunAt}}{{else}}-{{end}}</td></tr>
+        <tr><th>Retention</th><td>{{if .Body.Job.Job.Retention.Enabled}}Keep daily: {{.Body.Job.Job.Retention.KeepDaily}}, weekly: {{.Body.Job.Job.Retention.KeepWeekly}}{{else}}Default policy{{end}}</td></tr>
+        <tr><th>Compression</th><td>{{if .Body.Job.Job.Compress}}Enabled (sbk1){{else}}Raw / off{{end}}</td></tr>
+        <tr><th>Encryption</th><td>{{if .Body.Job.Job.Encrypt}}Enabled{{else}}Disabled{{end}}</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="card" id="job-rpo-card">
+    <div class="cardhead"><h3>RPO Status</h3></div>
+    <p class="muted">Recovery Point Objective tracking is monitored against the job's schedule interval.</p>
+    <div class="alert alert-info"><b>Note:</b> Dedicated RPO SLA breach tracking will be enabled in Phase P6.</div>
+  </section>
+</div>
+
+{{if .Body.Chart30}}
+<section class="card" id="job-runs-chart">
+  <div class="cardhead"><h3>Execution history (duration & storage)</h3></div>
+  {{.Body.Chart30}}
+</section>
+{{end}}
+{{end}}
+
+{{if eq .Body.ActiveTab "runs"}}
+<section class="card" id="job-runs-list">
+  <div class="cardhead"><h3>Execution runs</h3></div>
+  <div class="tablewrap"><table class="data-table" id="runs-table">
+    <caption>Execution history for this backup job</caption>
+    <thead>
+      <tr>
+        <th>Trigger</th>
+        <th>Started at</th>
+        <th>Duration</th>
+        <th>Status</th>
+        <th class="r">Bytes read</th>
+        <th class="r">Bytes written</th>
+        <th>Backup ID</th>
+        <th>Error / Remediation</th>
+        {{if .Body.CanWrite}}<th class="r">Actions</th>{{end}}
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Body.Runs}}
+      <tr data-run-id="{{.ID}}">
+        <td><span class="badge small">{{.Trigger}}</span></td>
+        <td class="nowrap">{{ts .StartedAt}}</td>
+        <td class="nowrap">{{fmtDuration .Duration}}</td>
+        <td><span class="badge small st-{{.Status}}">{{.Status}}</span></td>
+        <td class="r nowrap">{{bytes64 .BytesRead}}</td>
+        <td class="r nowrap">{{bytes64 .BytesWritten}}</td>
+        <td>{{if .BackupID}}<a href="/backups/catalog/{{.BackupID}}"><code>{{.BackupID}}</code></a>{{else}}<span class="muted">-</span>{{end}}</td>
+        <td>
+          {{if .ErrorCode}}
+          <div class="text-bad"><b>{{.ErrorCode}}</b>: {{.ErrorMessage}}</div>
+          {{if .RemediationHint}}<div class="sub muted small">Hint: {{.RemediationHint}}</div>{{end}}
+          {{else}}
+          <span class="muted">-</span>
+          {{end}}
+        </td>
+        {{if $.Body.CanWrite}}
+        <td class="r nowrap">
+          {{if eq .Status "running"}}
+          <button type="button" class="btn small danger" data-run-action="cancel" data-id="{{.ID}}">Cancel</button>
+          {{end}}
+        </td>
+        {{end}}
+      </tr>
+      {{else}}
+      <tr><td colspan="{{if .Body.CanWrite}}9{{else}}8{{end}}" class="empty">No execution runs recorded yet.</td></tr>
+      {{end}}
+    </tbody>
+  </table></div>
+  {{if or .Body.RunsCursor .Body.RunsPaged}}
+  <nav class="pad" aria-label="Backup runs pages">
+    {{if .Body.RunsPaged}}<a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs" class="btn small ghost">Newest runs</a>{{end}}
+    {{if .Body.RunsCursor}}<a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs&cursor={{.Body.RunsCursor}}" rel="next" class="btn small ghost">Older runs</a>{{end}}
+  </nav>
+  {{end}}
+</section>
+{{end}}
+
+{{if eq .Body.ActiveTab "catalog"}}
+<section class="card" id="job-catalog-list">
+  <div class="cardhead"><h3>Restore points</h3></div>
+  <div class="tablewrap"><table class="data-table">
+    <caption>Restore points generated by this backup job</caption>
+    <thead>
+      <tr>
+        <th>Backup ID</th>
+        <th>Created</th>
+        <th>Kind</th>
+        <th class="r">Size</th>
+        <th>Status</th>
+        <th class="r">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Body.Backups}}
+      <tr>
+        <td><a href="/backups/catalog/{{.ID}}"><code>{{.ID}}</code></a></td>
+        <td class="nowrap">{{ts .CreatedAt}}</td>
+        <td><span class="badge small">{{.Kind}}</span></td>
+        <td class="r nowrap">{{bytes64 .Bytes}}</td>
+        <td><span class="badge small st-{{.Status}}">{{.Status}}</span></td>
+        <td class="r nowrap">
+          <a href="/backups/restore?backup={{.ID}}" class="btn small">Restore</a>
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="6" class="empty">No restore points available for this job.</td></tr>
+      {{end}}
+    </tbody>
+  </table></div>
+</section>
+{{end}}
+
+{{if eq .Body.ActiveTab "settings"}}
+<section class="card" id="job-settings-view">
+  <div class="cardhead">
+    <h3>Job settings</h3>
+    {{if .Body.IsAdmin}}
+    <button type="button" class="btn small" data-action="edit-settings">Edit configuration</button>
+    {{end}}
+  </div>
+  <div class="tablewrap"><table class="data-table">
+    <caption>Detailed backup job settings</caption>
+    <tbody>
+      <tr><th>Name</th><td>{{.Body.Job.Job.Name}}</td></tr>
+      <tr><th>Engine</th><td>{{.Body.Job.Job.Engine}}</td></tr>
+      <tr><th>Method</th><td>{{.Body.Job.Job.Method}}</td></tr>
+      <tr><th>Source</th><td>{{.Body.Job.Job.Source}}</td></tr>
+      <tr><th>Interval</th><td>{{.Body.Job.Job.EverySeconds}} seconds ({{div .Body.Job.Job.EverySeconds 3600}}h)</td></tr>
+      <tr><th>Destination bucket</th><td>{{.Body.Job.Job.Bucket}}</td></tr>
+      <tr><th>Prefix</th><td>{{.Body.Job.Job.Prefix}}</td></tr>
+      <tr><th>Compression</th><td>{{if .Body.Job.Job.Compress}}Yes{{else}}No{{end}}</td></tr>
+      <tr><th>Encryption</th><td>{{if .Body.Job.Job.Encrypt}}Yes{{else}}No{{end}}</td></tr>
+      <tr><th>Consecutive failures</th><td>{{.Body.Job.Job.ConsecutiveFailures}}</td></tr>
+      <tr><th>Retry max</th><td>{{.Body.Job.Job.RetryMax}}</td></tr>
+      <tr><th>Retry backoff</th><td>{{.Body.Job.Job.RetryBackoffSeconds}}s</td></tr>
+    </tbody>
+  </table></div>
+</section>
+{{end}}
+
+{{if eq .Body.ActiveTab "activity"}}
+<section class="card" id="job-activity-view">
+  <div class="cardhead"><h3>Audit log</h3></div>
+  <div class="tablewrap"><table class="data-table">
+    <caption>Audit log entries for this backup job</caption>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Action</th>
+        <th>Result</th>
+        <th>Detail</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Body.Audit}}
+      <tr>
+        <td class="nowrap">{{ts .Time}}</td>
+        <td><code>{{.Action}}</code></td>
+        <td><span class="badge small st-{{.Result}}">{{.Result}}</span></td>
+        <td class="small mono">{{printf "%s" .Data}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="4" class="empty">No audit activity recorded for this job.</td></tr>
+      {{end}}
+    </tbody>
+  </table></div>
+</section>
+{{end}}
+{{end}}

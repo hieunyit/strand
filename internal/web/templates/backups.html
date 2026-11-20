@@ -11,6 +11,71 @@
 
 {{if not .Body.Paged}}
 <div data-tab-content="dashboard">
+{{if .Body.IsStandby}}<div class="alert alert-warn mb" role="status"><b>Standby node:</b> This Strand instance is in standby mode. Backup jobs only run on the active leader instance.</div>{{end}}
+{{if .Body.NoRepo}}<div class="alert alert-warn mb" role="status"><b>No repository configured:</b> Central backups require an object store repository. Add a repository below or configure STRAND_BACKUP_S3_*.</div>{{end}}
+{{if .Body.NoKey}}<div class="alert alert-warn mb" role="status"><b>No encryption key configured:</b> Backups will be stored unencrypted unless a key is configured in settings.</div>{{end}}
+
+<section class="summary-strip" aria-label="Backup health summary">
+  <div class="kpis" aria-label="Backup summary">
+    <a href="/backups/jobs" class="kpi" title="Protected sources / total sources">
+      <div class="kpi-label">Protected sources</div>
+      <div class="kpi-value c-num">{{.Body.StatProtectedSources}}</div>
+      <div class="kpi-sub">configured sources</div>
+    </a>
+    <a href="/backups/jobs" class="kpi" title="24-hour backup success rate">
+      <div class="kpi-label">24h success rate</div>
+      <div class="kpi-value c-num">{{.Body.StatSuccessRate}}</div>
+      <div class="kpi-sub">all executions</div>
+    </a>
+    <a href="/backups/jobs?status=failing" class="kpi{{if ne .Body.StatFailingJobs 0}} bad{{end}}" title="Consecutively failing backup jobs">
+      <div class="kpi-label">Failing jobs</div>
+      <div class="kpi-value c-num">{{.Body.StatFailingJobs}}</div>
+      <div class="kpi-sub">consecutive failures</div>
+    </a>
+    <div class="kpi" title="Total backup catalog storage">
+      <div class="kpi-label">Storage used</div>
+      <div class="kpi-value c-num">{{.Body.StatStorageUsed}}</div>
+      <div class="kpi-sub">compressed catalog</div>
+    </div>
+    <div class="kpi" title="RPO SLA tracking placeholder">
+      <div class="kpi-label">RPO breaches</div>
+      <div class="kpi-value c-num">{{.Body.StatRPOBreaches}}</div>
+      <div class="kpi-sub">placeholder (P6)</div>
+    </div>
+    <div class="kpi" title="Last test-restore result">
+      <div class="kpi-label">Last test restore</div>
+      <div class="kpi-value c-num">{{.Body.StatLastTestRestore}}</div>
+      <div class="kpi-sub">verification status</div>
+    </div>
+  </div>
+</section>
+
+{{if .Body.NeedsAttention}}
+<section class="card" id="backup-attention">
+  <div class="cardhead"><h2>Needs attention</h2><span class="badge st-failed">{{len .Body.NeedsAttention}} issues</span></div>
+  <div class="tablewrap"><table class="data-table">
+    <caption class="sr-only">Backup jobs and components needing operator attention</caption>
+    <thead><tr><th>Job / Resource</th><th>Engine</th><th>Issue</th><th class="r">Actions</th></tr></thead>
+    <tbody>{{range .Body.NeedsAttention}}<tr>
+      <td><a href="{{.EditURL}}"><b>{{.JobName}}</b></a></td>
+      <td>{{.Engine}}</td>
+      <td><span class="badge st-failed">{{.Reason}}</span></td>
+      <td class="r nowrap">
+        <a href="{{.LogURL}}" class="btn small">View log</a>
+        <a href="{{.EditURL}}" class="btn small">Edit</a>
+      </td>
+    </tr>{{end}}</tbody>
+  </table></div>
+</section>
+{{end}}
+
+{{if .Body.Chart14Day}}
+<section class="card" id="backup-chart-card">
+  <div class="cardhead"><h2>14-day backup activity</h2></div>
+  {{.Body.Chart14Day}}
+</section>
+{{end}}
+
 <section class="card" id="backup-dashboard">
   <div class="cardhead"><h2>Backup dashboard</h2><a class="btn small" href="/metrics">Prometheus metrics</a></div>
   {{if .Body.Sources}}

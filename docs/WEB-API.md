@@ -273,6 +273,19 @@ Catalog backup tập trung (chỉ đọc). `GET /api/v1/backups` nhận
 `cursor`; trả `{"backups": [Record], "limit": N, "next_cursor": "..."}` (mới nhất trước; `next_cursor` chỉ có khi
 trang đầy). Xem `docs/CENTRAL-BACKUPS.md`.
 
+### Quản lý Backup Jobs & Runs (`/api/v1/backup-jobs`, `/api/v1/backup-runs`)
+
+- `GET /api/v1/backup-jobs`: Liệt kê các job sao lưu đã cấu hình.
+- `POST /api/v1/backup-jobs`: Tạo job mới (`admin`). Kiểm tra chặt chẽ điều kiện PITR (`log_archive`).
+- `GET /api/v1/backup-jobs/{id}`: Chi tiết cấu hình của job.
+- `PUT /api/v1/backup-jobs/{id}`: Cập nhật cấu hình job (`admin`).
+- `DELETE /api/v1/backup-jobs/{id}`: Xóa job (`admin`).
+- `POST /api/v1/backup-jobs/{id}/run`: Chạy job ngay lập tức (`operator` / `admin`).
+- `POST /api/v1/backup-jobs/{id}/pause`: Tạm dừng lịch chạy của job (`operator` / `admin`).
+- `POST /api/v1/backup-jobs/{id}/resume`: Kích hoạt lại lịch chạy của job (`operator` / `admin`).
+- `GET /api/v1/backup-jobs/{id}/runs?cursor=&limit=`: Lịch sử các lần chạy phân trang bằng cursor. Trả về mảng các `Run` kèm `remediation_hint` cho các mã lỗi chuẩn hóa (`auth_failed`, `network`, `permission`, `disk_full`, `repo_unreachable`, `tool_missing`, `tool_failed`, `timeout`, `cancelled`).
+- `POST /api/v1/backup-runs/{id}/cancel`: Hủy một lượt chạy đang diễn ra (`operator` / `admin`). Chỉ cho phép hủy các tiến trình thuộc sở hữu của instance web hiện tại.
+
 ### Registry trong DB (chế độ PostgreSQL)
 
 `PipelineView` có thêm `origin` (`created` | `web.yaml` | `scan`), `missing` (lý do, khi entry web.yaml/file scan đã mất) và `disk_conflicts` (`[{"file": "config|env", "path": "<bản cất>", "at"}]`). Action liên quan (§4): `registry-restore`, `registry-forget` (cần `confirm_name`; 409 khi pipeline đang chạy), `conflict-adopt` và `conflict-dismiss` (tham số `path` phải là một bản cất của pipeline đó). Chế độ file: 409.

@@ -1,0 +1,50 @@
+{{define "content"}}
+<section class="card" id="restore-section">
+  <div class="cardhead"><h2>Restore</h2></div>
+  <p class="muted">A restore always goes to a <strong>new</strong> target and never modifies the source. Progress and log appear on the job page.</p>
+  <form id="restore-form" class="form-stack" novalidate>
+    <fieldset class="form-section">
+      <legend class="form-section-title"><span class="step-no">1</span> What to restore</legend>
+      <div class="choice-cards" role="radiogroup" aria-label="Restore from">
+        <label class="choice"><input type="radio" name="restore_from" value="backup"{{if not .Body.SelectedSource}} checked{{end}}><span class="choice-title">From a backup ID</span><span class="choice-desc">Restore one backup from the catalog, optionally rolled forward to a time.</span></label>
+        <label class="choice"><input type="radio" name="restore_from" value="pitr"{{if .Body.SelectedSource}} checked{{end}}><span class="choice-title">Point in time from a source</span><span class="choice-desc">Strand picks the base backup and replays archived logs up to the time.</span></label>
+      </div>
+      <div class="field-grid">
+        <label class="field" data-show-if="restore_from=backup"><span class="field-label">Backup ID <span class="req">*</span></span><input name="backup_id" class="mono" value="{{.Body.SelectedBackup}}" placeholder="bkp-..." autocomplete="off"></label>
+        <label class="field" data-show-if="restore_from=pitr"><span class="field-label">Source <span class="req">*</span></span><input name="source" value="{{.Body.SelectedSource}}" placeholder="mysql-prod" autocomplete="off"></label>
+        <label class="field"><span class="field-label">Point in time (UTC)</span><input name="target_time" type="datetime-local" step="1"><small class="field-hint">Optional: roll forward with archived logs.</small></label>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <legend class="form-section-title"><span class="step-no">2</span> Target server</legend>
+      <div class="field-grid">
+        <label class="field"><span class="field-label">Host</span><input name="target_host" placeholder="db-restore.internal" autocomplete="off"></label>
+        <label class="field"><span class="field-label">Port</span><input name="target_port" type="number" min="0" max="65535"></label>
+        <label class="field"><span class="field-label">User</span><input name="target_user" autocomplete="off"></label>
+        <label class="field"><span class="field-label">Password environment variable</span><input name="target_password_env" class="mono" autocomplete="off"></label>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <legend class="form-section-title"><span class="step-no">3</span> Restore as</legend>
+      <div class="choice-cards" role="radiogroup" aria-label="Restore as">
+        <label class="choice"><input type="radio" name="restore_into" value="database" checked><span class="choice-title">New database</span><span class="choice-desc">Logical backups (mysqldump, mydumper, pg_dump, mongodump).</span></label>
+        <label class="choice"><input type="radio" name="restore_into" value="dir"><span class="choice-title">New data directory</span><span class="choice-desc">Physical backups (pg_basebackup) into an empty directory.</span></label>
+      </div>
+      <div class="field-grid">
+        <label class="field" data-show-if="restore_into=database"><span class="field-label">New database name <span class="req">*</span></span><input name="target_database" autocomplete="off"><small class="field-hint">Must not exist yet.</small></label>
+        <label class="field" data-show-if="restore_into=dir" hidden><span class="field-label">New data directory <span class="req">*</span></span><input name="target_dir" class="mono" placeholder="/var/lib/strand-restores/pg-2026-11-20" autocomplete="off"></label>
+        <label class="field"><span class="field-label">Confirm <span class="req">*</span></span><input name="confirm" autocomplete="off"><small class="field-hint">Type the new database name or directory again.</small></label>
+      </div>
+    </fieldset>
+
+    <div class="form-actions">
+      {{if .Body.CanWrite}}
+      <button class="btn primary" type="submit">Start restore</button>
+      {{end}}
+      <span class="form-status" id="restore-message" role="status"></span>
+    </div>
+  </form>
+</section>
+{{end}}

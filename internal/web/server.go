@@ -410,14 +410,24 @@ func (s *Server) routes() http.Handler {
 	// RBAC: admin-only read
 	mux.Handle("GET /api/v1/jobs/{id}/download", s.auth(true, s.apiJobDownload))
 	mux.Handle("GET /backups", s.auth(false, s.pageBackups))
+	mux.Handle("GET /backups/jobs", s.auth(false, s.pageBackupsJobs))
+	mux.Handle("GET /backups/jobs/{id}", s.auth(false, s.pageBackupsJobDetail))
+	mux.Handle("GET /backups/catalog", s.auth(false, s.pageBackupsCatalog))
+	mux.Handle("GET /backups/catalog/{id}", s.auth(false, s.pageBackupsCatalogDetail))
+	mux.Handle("GET /backups/restore", s.auth(false, s.pageBackupsRestore))
+
 	mux.Handle("GET /api/v1/backup-jobs", s.auth(true, s.apiBackupJobs))
 	mux.Handle("GET /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobGet))
+	mux.Handle("GET /api/v1/backup-jobs/{id}/runs", s.auth(true, s.apiBackupJobRuns))
 	mux.Handle("POST /api/v1/backup-jobs", s.auth(true, s.apiBackupJobCreate))
 	mux.Handle("PUT /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobUpdate))
 	mux.Handle("DELETE /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobDelete))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/start", s.auth(true, s.apiBackupJobStart))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/stop", s.auth(true, s.apiBackupJobStop))
+	mux.Handle("POST /api/v1/backup-jobs/{id}/pause", s.auth(true, s.apiBackupJobStop))
+	mux.Handle("POST /api/v1/backup-jobs/{id}/resume", s.auth(true, s.apiBackupJobStart))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/run", s.auth(true, s.apiBackupJobRun))
+	mux.Handle("POST /api/v1/backup-runs/{id}/cancel", s.auth(true, s.apiBackupRunCancel))
 	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs", "schema", "objects"} {
 		tab := tab
 		p := "GET /pipelines/{name}"

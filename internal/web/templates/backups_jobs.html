@@ -1,0 +1,144 @@
+{{define "content"}}
+<section class="card" id="backup-jobs-list">
+  <div class="cardhead">
+    <h2>Backup jobs</h2>
+    {{if .Body.IsAdmin}}
+    <button type="button" class="btn primary small" id="new-backup-job-btn" data-action="new-job">New backup job</button>
+    {{end}}
+  </div>
+
+  <form method="get" action="/backups/jobs" class="filterbar" id="backup-jobs-filter">
+    <div class="field-grid cols-4">
+      <label class="field">
+        <span class="field-label sr-only">Search</span>
+        <input type="search" name="q" value="{{.Body.FilterQ}}" placeholder="Search jobs or sources...">
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Engine</span>
+        <select name="engine">
+          <option value="">All engines</option>
+          <option value="mysql"{{if eq .Body.Engine "mysql"}} selected{{end}}>MySQL / MariaDB</option>
+          <option value="postgres"{{if eq .Body.Engine "postgres"}} selected{{end}}>PostgreSQL</option>
+          <option value="mongodb"{{if eq .Body.Engine "mongodb"}} selected{{end}}>MongoDB</option>
+          <option value="custom"{{if eq .Body.Engine "custom"}} selected{{end}}>Custom</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Status</span>
+        <select name="status">
+          <option value="">All statuses</option>
+          <option value="enabled"{{if eq .Body.Status "enabled"}} selected{{end}}>Enabled</option>
+          <option value="paused"{{if eq .Body.Status "paused"}} selected{{end}}>Paused</option>
+          <option value="failing"{{if eq .Body.Status "failing"}} selected{{end}}>Failing</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Repository</span>
+        <select name="repo">
+          <option value="">All repositories</option>
+          {{range .Body.Repos}}
+          <option value="{{.ID}}"{{if eq $.Body.Repo .ID}} selected{{end}}>{{.ID}}</option>
+          {{end}}
+        </select>
+      </label>
+    </div>
+    <div class="filterbar-actions">
+      <button type="submit" class="btn small">Apply filters</button>
+      <a href="/backups/jobs" class="btn small ghost">Reset</a>
+    </div>
+  </form>
+
+  {{if .Body.CanWrite}}
+  <div class="bulkbar" id="backup-jobs-bulk" hidden>
+    <span class="bulk-count" id="bulk-selected-count">0 selected</span>
+    <button type="button" class="btn small" data-bulk-action="run">Run</button>
+    <button type="button" class="btn small" data-bulk-action="pause">Pause</button>
+    <button type="button" class="btn small" data-bulk-action="resume">Resume</button>
+    {{if .Body.IsAdmin}}
+    <button type="button" class="btn small danger" data-bulk-action="delete">Delete</button>
+    {{end}}
+  </div>
+  {{end}}
+
+  <div class="tablewrap">
+    <table class="data-table" id="jobs-table">
+      <caption>Scheduled backup jobs and recent run statuses</caption>
+      <thead>
+        <tr>
+          {{if .Body.CanWrite}}<th class="chk"><input type="checkbox" id="select-all-jobs" aria-label="Select all jobs"></th>{{end}}
+          <th>Job / Source</th>
+          <th>Engine / Method</th>
+          <th>Schedule</th>
+          <th>Next run</th>
+          <th>Last run</th>
+          <th>Last 10 runs</th>
+          {{if .Body.CanWrite}}<th class="r">Actions</th>{{end}}
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Body.Jobs}}
+        <tr data-job-id="{{.Job.ID}}">
+          {{if $.Body.CanWrite}}<td class="chk"><input type="checkbox" name="job_select" value="{{.Job.ID}}" aria-label="Select {{.Job.Name}}"></td>{{end}}
+          <td>
+            <a href="/backups/jobs/{{.Job.ID}}"><b>{{.Job.Name}}</b></a>
+            <div class="sub muted small">{{if .Job.Source}}{{.Job.Source}}{{else}}{{.Job.ID}}{{end}}</div>
+            {{if .Warning}}<span class="badge st-failed small" title="{{.Warning}}">warning</span>{{end}}
+          </td>
+          <td>
+            <div>{{.Job.Engine}}</div>
+            <div class="sub muted small">{{.Job.Method}}</div>
+          </td>
+          <td class="nowrap">
+            {{if .Job.Enabled}}
+            <span>Every {{div .Job.EverySeconds 3600}}h</span>
+            {{else}}
+            <span class="badge small">paused</span>
+            {{end}}
+          </td>
+          <td class="nowrap">
+            {{if and .Job.Enabled .Job.NextRunAt}}
+            {{clock .Job.NextRunAt}}
+            {{else}}
+            <span class="muted">-</span>
+            {{end}}
+          </td>
+          <td class="nowrap">
+            {{if .Job.LastRunStatus}}
+            <span class="badge small st-{{.Job.LastRunStatus}}">{{.Job.LastRunStatus}}</span>
+            {{else}}
+            <span class="muted">never</span>
+            {{end}}
+          </td>
+          <td>
+            <div class="run-squares">
+              {{range .Last10Runs}}
+              <span class="run-dot st-{{.Status}}" title="{{.StartedAt.Format "2006-01-02 15:04"}}: {{.Status}} ({{fmtDuration .Duration}})"></span>
+              {{else}}
+              <span class="muted small">-</span>
+              {{end}}
+            </div>
+          </td>
+          {{if $.Body.CanWrite}}
+          <td class="r nowrap">
+            <button type="button" class="btn small" data-job-action="run" data-id="{{.Job.ID}}">Run now</button>
+            {{if .Job.Enabled}}
+            <button type="button" class="btn small ghost" data-job-action="pause" data-id="{{.Job.ID}}">Pause</button>
+            {{else}}
+            <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Job.ID}}">Resume</button>
+            {{end}}
+            {{if $.Body.IsAdmin}}
+            <button type="button" class="btn small danger ghost" data-job-action="delete" data-id="{{.Job.ID}}">Delete</button>
+            {{end}}
+          </td>
+          {{end}}
+        </tr>
+        {{else}}
+        <tr>
+          <td colspan="{{if .Body.CanWrite}}8{{else}}6{{end}}" class="empty">No backup jobs match the selected filter.</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}

@@ -4,13 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"strand/internal/backup"
+	"strand/internal/web/store"
 )
+
+// AttentionItem represents an issue on the Overview dashboard requiring operator attention.
+type AttentionItem struct {
+	JobID    string
+	JobName  string
+	Engine   string
+	Reason   string
+	Severity string // "warn", "bad"
+	LogURL   string
+	EditURL  string
+}
 
 type backupsPageBody struct {
 	Backups    []backup.Record
@@ -26,6 +39,19 @@ type backupsPageBody struct {
 	// MethodOptions are the built-in methods with their engine, so the job form lists only the methods
 	// of the engine the operator picked.
 	MethodOptions []backupMethodOption
+
+	// Overview stat tiles and banners (spec 4.1)
+	StatProtectedSources string
+	StatSuccessRate      string
+	StatFailingJobs      int
+	StatStorageUsed      string
+	StatLastTestRestore  string
+	StatRPOBreaches      string
+	Chart14Day           template.HTML
+	IsStandby            bool
+	NoRepo               bool
+	NoKey                bool
+	NeedsAttention       []AttentionItem
 }
 
 // backupMethodOption is one built-in backup method in the job form.
@@ -135,6 +161,87 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 			b.Sources = s.dashboardRows(r.Context())
 			b.Repos, _ = s.db.st.ListBackupRepos(r.Context())
 			b.Checks, _ = s.backups.Checks(r.Context(), "", 20)
+
+			totalSources := len(b.Sources)
+			protectedSources := 0
+			for _, src := range b.Sources {
+				if src.LastSuccess != nil && !src.Stale {
+					protectedSources++
+				}
+			}
+			b.StatProtectedSources = fmt.Sprintf("%d/%d", protectedSources, totalSources)
+			if totalSources == 0 {
+				b.StatProtectedSources = "0/0"
+			}
+
+			b.IsStandby = !s.isActive()
+			b.NoRepo = len(b.Repos) == 0
+			b.NoKey = s.db == nil || s.db.secret == ""
+
+			now := time.Now().UTC()
+			since24h := now.Add(-24 * time.Hour)
+			allRuns, _ := s.db.st.ListBackupRuns(r.Context(), store.BackupRunFilter{Limit: 2000})
+			succ24h := 0
+			total24h := 0
+			for _, run := range allRuns {
+				if run.StartedAt.After(since24h) {
+					total24h++
+					if run.Status == backup.RunStatusSuccess {
+						succ24h++
+					}
+				}
+			}
+			if total24h > 0 {
+				b.StatSuccessRate = fmt.Sprintf("%d%%", int(float64(succ24h)/float64(total24h)*100))
+			} else {
+				b.StatSuccessRate = "100%"
+			}
+
+			var totalStorage int64
+			for _, item := range b.Backups {
+				totalStorage += item.Bytes
+			}
+			b.StatStorageUsed = fmtBytes(float64(totalStorage))
+
+			failingCount := 0
+			for _, job := range b.Jobs {
+				if job.Job.ConsecutiveFailures > 0 {
+					failingCount++
+					b.NeedsAttention = append(b.NeedsAttention, AttentionItem{
+						JobID:    job.Job.ID,
+						JobName:  job.Job.Name,
+						Engine:   job.Job.Engine(),
+						Reason:   fmt.Sprintf("%d consecutive failures (%s)", job.Job.ConsecutiveFailures, job.Job.LastRunStatus),
+						Severity: "bad",
+						LogURL:   fmt.Sprintf("/backups/jobs/%s?tab=runs", job.Job.ID),
+						EditURL:  fmt.Sprintf("/backups/jobs/%s?tab=settings", job.Job.ID),
+					})
+				}
+			}
+			b.StatFailingJobs = failingCount
+			b.StatLastTestRestore = "None"
+			b.StatRPOBreaches = "0 (SLA tracking in P6)"
+
+			days := make([]BackupDayStat, 14)
+			for i := 0; i < 14; i++ {
+				d := now.AddDate(0, 0, -13+i).Truncate(24 * time.Hour)
+				days[i] = BackupDayStat{Date: d}
+			}
+			for _, run := range allRuns {
+				runDate := run.StartedAt.UTC().Truncate(24 * time.Hour)
+				for i := range days {
+					if days[i].Date.Equal(runDate) {
+						if run.Status == backup.RunStatusSuccess {
+							days[i].Success++
+						} else {
+							days[i].Failed++
+						}
+						days[i].Bytes += run.BytesWritten
+						break
+					}
+				}
+			}
+			b.Chart14Day = Backup14DayChart(days, 640, 180)
 		}
 		b.Methods = []string{backup.MethodCustom, backup.MethodMySQLDump, backup.MethodMariaDBDump, backup.MethodMydumper,
 			backup.MethodPGDump, backup.MethodPGBaseBackup, backup.MethodMongodump}

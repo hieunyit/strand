@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"strand/internal/backup"
 )
 
 // Biểu đồ SVG render phía server, không dùng JS hay thư viện ngoài. Màu và font nằm ở CSS (class),
@@ -282,4 +284,154 @@ func BigProgressBar(pct float64, label string) template.HTML {
 		cls += " done"
 	}
 	return template.HTML(fmt.Sprintf(`<svg class="%s" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="%s: %.1f%%"><rect class="bg" x="0" y="0" width="100" height="8"/><rect class="fg" x="0" y="0" width="%.2f" height="8"/></svg>`, cls, html.EscapeString(label), pct, pct))
+}
+
+// BackupDayStat is a 1-day summary of backup executions for the 14-day overview chart.
+type BackupDayStat struct {
+	Date    time.Time
+	Success int
+	Failed  int
+	Bytes   int64
+}
+
+// Backup14DayChart renders the 14-day stacked activity chart with SVG server-side.
+func Backup14DayChart(days []BackupDayStat, w, h int) template.HTML {
+	if w <= 0 {
+		w = 640
+	}
+	if h <= 0 {
+		h = 180
+	}
+	const padL, padR, padT, padB = 44, 44, 16, 28
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `<figure class="chart"><figcaption><span class="ctitle">14-day backup history</span> <span class="unit">runs & storage</span></figcaption>`)
+	fmt.Fprintf(&sb, `<svg class="linechart" viewBox="0 0 %d %d" role="img" aria-label="14-day backup history">`, w, h)
+	if len(days) == 0 {
+		fmt.Fprintf(&sb, `<text class="nodata" x="%d" y="%d" text-anchor="middle">no backup data</text></svg></figure>`, w/2, h/2)
+		return template.HTML(sb.String())
+	}
+	maxRuns := 0
+	var maxBytes int64
+	for _, d := range days {
+		total := d.Success + d.Failed
+		if total > maxRuns {
+			maxRuns = total
+		}
+		if d.Bytes > maxBytes {
+			maxBytes = d.Bytes
+		}
+	}
+	if maxRuns < 5 {
+		maxRuns = 5
+	}
+	if maxBytes <= 0 {
+		maxBytes = 1024 * 1024
+	}
+	pw, ph := float64(w-padL-padR), float64(h-padT-padB)
+	for _, f := range []float64{0, 0.5, 1.0} {
+		y := float64(padT) + ph*(1.0-f)
+		fmt.Fprintf(&sb, `<line class="grid" x1="%d" x2="%d" y1="%.1f" y2="%.1f"/>`, padL, w-padR, y, y)
+		fmt.Fprintf(&sb, `<text class="axis" x="%d" y="%.1f" text-anchor="end">%d</text>`, padL-4, y+3, int(float64(maxRuns)*f))
+		fmt.Fprintf(&sb, `<text class="axis" x="%d" y="%.1f" text-anchor="start">%s</text>`, w-padR+4, y+3, FormatValue(float64(maxBytes)*f))
+	}
+	n := len(days)
+	slotW := pw / float64(n)
+	barW := slotW * 0.55
+	var bytePts []string
+	for i, d := range days {
+		cx := float64(padL) + float64(i)*slotW + slotW/2
+		hSuccess := (float64(d.Success) / float64(maxRuns)) * ph
+		hFailed := (float64(d.Failed) / float64(maxRuns)) * ph
+		yBase := float64(padT) + ph
+		if d.Success > 0 {
+			yS := yBase - hSuccess
+			fmt.Fprintf(&sb, `<rect class="bar s2" x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="1"><title>%s: %d successful</title></rect>`, cx-barW/2, yS, barW, hSuccess, d.Date.Format("Jan 02"), d.Success)
+		}
+		if d.Failed > 0 {
+			yF := yBase - hSuccess - hFailed
+			fmt.Fprintf(&sb, `<rect class="bar s3" x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="1"><title>%s: %d failed</title></rect>`, cx-barW/2, yF, barW, hFailed, d.Date.Format("Jan 02"), d.Failed)
+		}
+		yB := float64(padT) + ph*(1.0-float64(d.Bytes)/float64(maxBytes))
+		bytePts = append(bytePts, fmt.Sprintf("%.1f,%.1f", cx, yB))
+		if i%2 == 0 || i == n-1 {
+			fmt.Fprintf(&sb, `<line class="tick" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, cx, cx, h-padB, h-padB+3)
+			fmt.Fprintf(&sb, `<text class="axis" x="%.1f" y="%d" text-anchor="middle">%s</text>`, cx, h-8, d.Date.Format("01/02"))
+		}
+	}
+	if len(bytePts) > 0 {
+		fmt.Fprintf(&sb, `<polyline class="line s1" points="%s"><title>Bytes written</title></polyline>`, strings.Join(bytePts, " "))
+		for _, pt := range bytePts {
+			xy := strings.Split(pt, ",")
+			fmt.Fprintf(&sb, `<circle class="pt s1" cx="%s" cy="%s" r="2"/>`, xy[0], xy[1])
+		}
+	}
+	sb.WriteString(`</svg>`)
+	sb.WriteString(`<div class="legend"><span class="key s2">Successful runs</span><span class="key s3">Failed runs</span><span class="key s1">Bytes written</span></div></figure>`)
+	return template.HTML(sb.String())
+}
+
+// JobRuns30Chart renders duration and bytes written for up to 30 recent runs of a job.
+func JobRuns30Chart(runs []backup.Run, w, h int) template.HTML {
+	if w <= 0 {
+		w = 600
+	}
+	if h <= 0 {
+		h = 160
+	}
+	const padL, padR, padT, padB = 44, 44, 16, 24
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `<figure class="chart"><figcaption><span class="ctitle">Recent runs history</span> <span class="unit">duration & size</span></figcaption>`)
+	fmt.Fprintf(&sb, `<svg class="linechart" viewBox="0 0 %d %d" role="img" aria-label="Recent runs history">`, w, h)
+	if len(runs) == 0 {
+		fmt.Fprintf(&sb, `<text class="nodata" x="%d" y="%d" text-anchor="middle">no runs recorded</text></svg></figure>`, w/2, h/2)
+		return template.HTML(sb.String())
+	}
+	if len(runs) > 30 {
+		runs = runs[:30]
+	}
+	n := len(runs)
+	chron := make([]backup.Run, n)
+	for i, r := range runs {
+		chron[n-1-i] = r
+	}
+	var maxSec float64
+	var maxBytes int64
+	for _, r := range chron {
+		sec := r.Duration.Seconds()
+		if sec > maxSec {
+			maxSec = sec
+		}
+		if r.BytesWritten > maxBytes {
+			maxBytes = r.BytesWritten
+		}
+	}
+	if maxSec < 1 {
+		maxSec = 1
+	}
+	if maxBytes <= 0 {
+		maxBytes = 1024
+	}
+	pw, ph := float64(w-padL-padR), float64(h-padT-padB)
+	for _, f := range []float64{0, 0.5, 1.0} {
+		y := float64(padT) + ph*(1.0-f)
+		fmt.Fprintf(&sb, `<line class="grid" x1="%d" x2="%d" y1="%.1f" y2="%.1f"/>`, padL, w-padR, y, y)
+		fmt.Fprintf(&sb, `<text class="axis" x="%d" y="%.1f" text-anchor="end">%.0fs</text>`, padL-4, y+3, maxSec*f)
+		fmt.Fprintf(&sb, `<text class="axis" x="%d" y="%.1f" text-anchor="start">%s</text>`, w-padR+4, y+3, FormatValue(float64(maxBytes)*f))
+	}
+	var durPts, sizePts []string
+	slotW := pw / float64(n)
+	for i, r := range chron {
+		cx := float64(padL) + float64(i)*slotW + slotW/2
+		yD := float64(padT) + ph*(1.0-r.Duration.Seconds()/maxSec)
+		yS := float64(padT) + ph*(1.0-float64(r.BytesWritten)/float64(maxBytes))
+		durPts = append(durPts, fmt.Sprintf("%.1f,%.1f", cx, yD))
+		sizePts = append(sizePts, fmt.Sprintf("%.1f,%.1f", cx, yS))
+	}
+	if len(durPts) > 0 {
+		fmt.Fprintf(&sb, `<polyline class="line s1" points="%s"><title>Duration (s)</title></polyline>`, strings.Join(durPts, " "))
+		fmt.Fprintf(&sb, `<polyline class="line s2" points="%s"><title>Bytes written</title></polyline>`, strings.Join(sizePts, " "))
+	}
+	sb.WriteString(`</svg>`)
+	sb.WriteString(`<div class="legend"><span class="key s1">Duration</span><span class="key s2">Bytes written</span></div></figure>`)
+	return template.HTML(sb.String())
 }

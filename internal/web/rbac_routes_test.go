@@ -35,6 +35,8 @@ func TestRBACEveryWriteRouteFailClosed(t *testing.T) {
 		"POST /api/v1/backup-jobs/{id}/run": true, "POST /api/v1/backup-jobs/{id}/start": true,
 		"POST /api/v1/backup-jobs/{id}/stop": true, "POST /api/v1/backup-jobs/{id}/verify": true,
 		"POST /api/v1/backup-jobs/{id}/retention-preview": true, "POST /api/v1/backups/{id}/verify": true,
+		"POST /api/v1/backup-jobs/{id}/pause": true, "POST /api/v1/backup-jobs/{id}/resume": true,
+		"POST /api/v1/backup-runs/{id}/cancel": true,
 	}
 	concrete := strings.NewReplacer("{id}", "42", "{name}", "orders", "{username}", "bob", "{action}", "start")
 	for _, rt := range routes {

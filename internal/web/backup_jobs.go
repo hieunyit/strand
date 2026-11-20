@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,9 +21,10 @@ import (
 )
 
 type backupJobView struct {
-	Job     backup.Job `json:"job"`
-	Process *JobStatus `json:"process,omitempty"`
-	Warning string     `json:"warning,omitempty"`
+	Job        backup.Job   `json:"job"`
+	Process    *JobStatus   `json:"process,omitempty"`
+	Warning    string       `json:"warning,omitempty"`
+	Last10Runs []backup.Run `json:"last_10_runs,omitempty"`
 }
 
 func backupJobPipeline(id string) string    { return "backup-" + id }
@@ -202,6 +204,10 @@ func (s *Server) startBackupJob(j backup.Job) (string, error) {
 }
 
 func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
+	return s.startBackupProcessWithTrigger(j, once, "")
+}
+
+func (s *Server) startBackupProcessWithTrigger(j backup.Job, once bool, trigger string) (string, error) {
 	if s.jobs == nil {
 		return "", errors.New("job runner unavailable")
 	}
@@ -223,6 +229,11 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 		args = append(args, "backup", "schedule", "--job-id", j.ID)
 		if once {
 			args = append(args, "--once")
+			if trigger != "" {
+				args = append(args, "--trigger", trigger)
+			} else {
+				args = append(args, "--trigger", "manual")
+			}
 		}
 		return s.startBackupJobProcess(j, once, args)
 	}
@@ -239,6 +250,11 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 	}
 	if once {
 		args = append(args, "--once")
+		if trigger != "" {
+			args = append(args, "--trigger", trigger)
+		} else {
+			args = append(args, "--trigger", "manual")
+		}
 	}
 	if j.Prefix != "" {
 		args = append(args, "--prefix", j.Prefix)
@@ -274,6 +290,7 @@ func (s *Server) startBackupJobProcess(j backup.Job, once bool, args []string) (
 	// tiến trình của instance cũ là "không chạy" (dù vẫn sống) và có tiến trình mới cùng pipeline.
 	if st, ok := s.jobs.Get(id); ok && st.PID > 0 {
 		s.ownedBackupProcs.Store(id, st.PID)
+		s.ownedBackupProcs.Store(strconv.Itoa(st.PID), st.PID)
 	}
 	return id, nil
 }
@@ -562,7 +579,7 @@ func (s *Server) apiBackupJobRun(w http.ResponseWriter, r *http.Request, _ *Sess
 	if !s.auditBackupJob(w, r, "backup_job.run", id) {
 		return
 	}
-	processID, err := s.startBackupProcess(j, true)
+	processID, err := s.startBackupProcessWithTrigger(j, true, "api")
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return

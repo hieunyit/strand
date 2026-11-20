@@ -77,9 +77,12 @@ var writeRules = []routeRule{
 	{"POST", "/api/v1/backup-jobs/{id}/run", PermOperator},
 	{"POST", "/api/v1/backup-jobs/{id}/start", PermOperator},
 	{"POST", "/api/v1/backup-jobs/{id}/stop", PermOperator},
+	{"POST", "/api/v1/backup-jobs/{id}/pause", PermOperator},
+	{"POST", "/api/v1/backup-jobs/{id}/resume", PermOperator},
 	{"POST", "/api/v1/backup-jobs/{id}/verify", PermOperator},
 	{"POST", "/api/v1/backup-jobs/{id}/retention-preview", PermOperator},
 	{"POST", "/api/v1/backups/{id}/verify", PermOperator},
+	{"POST", "/api/v1/backup-runs/{id}/cancel", PermOperator},
 }
 
 // readRules lists sensitive READ routes that need more than viewer.

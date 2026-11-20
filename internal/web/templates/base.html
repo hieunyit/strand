@@ -22,7 +22,11 @@
     <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
     <div class="navhead">Operate</div>
     <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>
-    <a href="/backups" class="{{if eq .Active "backups"}}active{{end}}"{{if eq .Active "backups"}} aria-current="page"{{end}}>{{icon "db"}}Backups</a>
+    <div class="navhead">Data protection</div>
+    <a href="/backups" class="{{if or (eq .Active "backups") (eq .Active "backups-overview")}}active{{end}}"{{if or (eq .Active "backups") (eq .Active "backups-overview")}} aria-current="page"{{end}}>{{icon "db"}}Backups</a>
+    <a href="/backups/jobs" class="{{if eq .Active "backups-jobs"}}active{{end}}"{{if eq .Active "backups-jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
+    <a href="/backups/catalog" class="{{if eq .Active "backups-catalog"}}active{{end}}"{{if eq .Active "backups-catalog"}} aria-current="page"{{end}}>{{icon "table"}}Restore points</a>
+    <a href="/backups/restore" class="{{if eq .Active "backups-restore"}}active{{end}}"{{if eq .Active "backups-restore"}} aria-current="page"{{end}}>{{icon "db"}}Restore</a>
     <div class="navhead">System</div>
     <a href="/mcp" class="{{if eq .Active "mcp"}}active{{end}}"{{if eq .Active "mcp"}} aria-current="page"{{end}}>{{icon "jobs"}}MCP</a>
     <a href="/settings" class="{{if eq .Active "settings"}}active{{end}}"{{if eq .Active "settings"}} aria-current="page"{{end}}>{{icon "config"}}Settings</a>

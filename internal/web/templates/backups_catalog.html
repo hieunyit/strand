@@ -1,0 +1,103 @@
+{{define "content"}}
+<section class="card" id="backup-catalog-card">
+  <div class="cardhead">
+    <h2>Restore points (catalog)</h2>
+  </div>
+
+  <form method="get" action="/backups/catalog" class="filterbar" id="backup-catalog-filter">
+    <div class="field-grid cols-5">
+      <label class="field">
+        <span class="field-label sr-only">Source</span>
+        <input type="search" name="source" value="{{.Body.Source}}" placeholder="Filter by source...">
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Engine</span>
+        <select name="engine">
+          <option value="">All engines</option>
+          <option value="mysql"{{if eq .Body.Engine "mysql"}} selected{{end}}>MySQL</option>
+          <option value="postgres"{{if eq .Body.Engine "postgres"}} selected{{end}}>PostgreSQL</option>
+          <option value="mongodb"{{if eq .Body.Engine "mongodb"}} selected{{end}}>MongoDB</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Kind</span>
+        <select name="kind">
+          <option value="">All kinds</option>
+          <option value="full"{{if eq .Body.Kind "full"}} selected{{end}}>Full</option>
+          <option value="incremental"{{if eq .Body.Kind "incremental"}} selected{{end}}>Incremental</option>
+          <option value="log"{{if eq .Body.Kind "log"}} selected{{end}}>Log</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Status</span>
+        <select name="status">
+          <option value="">All statuses</option>
+          <option value="complete"{{if eq .Body.Status "complete"}} selected{{end}}>Complete</option>
+          <option value="uploading"{{if eq .Body.Status "uploading"}} selected{{end}}>Uploading</option>
+          <option value="failed"{{if eq .Body.Status "failed"}} selected{{end}}>Failed</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Repository</span>
+        <select name="repo">
+          <option value="">All repositories</option>
+          {{range .Body.Repos}}
+          <option value="{{.ID}}"{{if eq $.Body.Repo .ID}} selected{{end}}>{{.ID}}</option>
+          {{end}}
+        </select>
+      </label>
+    </div>
+    <div class="filterbar-actions">
+      <button type="submit" class="btn small">Apply filters</button>
+      <a href="/backups/catalog" class="btn small ghost">Reset</a>
+    </div>
+  </form>
+
+  <div class="tablewrap"><table class="data-table" id="catalog-table">
+    <caption>Available restore points recorded in central catalog</caption>
+    <thead>
+      <tr>
+        <th>Backup ID</th>
+        <th>Source</th>
+        <th>Engine / Tool</th>
+        <th>Kind</th>
+        <th class="r">Size</th>
+        <th>Position</th>
+        <th>Created</th>
+        <th>Status</th>
+        <th class="r">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Body.Backups}}
+      <tr data-backup-id="{{.ID}}">
+        <td><a href="/backups/catalog/{{.ID}}"><code>{{.ID}}</code></a></td>
+        <td><b>{{.Source}}</b></td>
+        <td>
+          <div>{{.Engine}}</div>
+          <div class="sub muted small">{{.Tool}}</div>
+        </td>
+        <td><span class="badge small">{{.Kind}}</span></td>
+        <td class="r nowrap">{{bytes64 .Bytes}}</td>
+        <td class="small mono">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else if .Position.OplogTS}}{{.Position.OplogTS}}{{else}}-{{end}}</td>
+        <td class="nowrap">{{ts .CreatedAt}}</td>
+        <td><span class="badge small st-{{.Status}}">{{.Status}}</span></td>
+        <td class="r nowrap">
+          <a href="/backups/catalog/{{.ID}}" class="btn small ghost">Detail</a>
+          <a href="/backups/restore?backup={{.ID}}" class="btn small">Restore</a>
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="9" class="empty">No restore points found matching the selected filters.</td></tr>
+      {{end}}
+    </tbody>
+  </table></div>
+
+  {{if or .Body.NextCursor .Body.Paged}}
+  <nav class="pad" aria-label="Catalog pages">
+    {{if .Body.Paged}}<a href="/backups/catalog" class="btn small ghost">Newest restore points</a>{{end}}
+    {{if .Body.NextCursor}}<a href="/backups/catalog?cursor={{.Body.NextCursor}}" rel="next" class="btn small ghost">Older restore points</a>{{end}}
+  </nav>
+  {{end}}
+</section>
+{{end}}
