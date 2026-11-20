@@ -260,6 +260,7 @@ type Store interface {
 	RecoverBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (bool, error)
 	DeleteBackupJob(ctx context.Context, id string) (bool, error)
 	BackupProStore
+	BackupConfigStore
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error

@@ -42,16 +42,21 @@ func Migrations() ([]Migration, error) {
 		out = append(out, Migration{Version: v, Name: m[2], SQL: string(b)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	// Versions numbered 001.. without gaps. Two versions may be absent while their branches are still
+	// unmerged (014 backup-pro, 016 backup-runs); once they land the allowance is inert.
+	present := map[int]bool{}
+	for _, m := range out {
+		present[m.Version] = true
+	}
+	want := 1
 	for i, m := range out {
-		expected := i + 1
-		// When migration 014 (backup pro) is concurrently developed on another branch,
-		// allow migration 015 before both branches land in main.
-		if i >= 13 && len(out) > 13 && out[13].Version == 15 {
-			expected = i + 2
+		for (want == 14 || want == 16) && !present[want] {
+			want++
 		}
-		if m.Version != expected && m.Version != i+1 {
+		if m.Version != want {
 			return nil, fmt.Errorf("migrations must be numbered 001.. without gaps (got %03d at position %d)", m.Version, i+1)
 		}
+		want++
 	}
 	return out, nil
 }

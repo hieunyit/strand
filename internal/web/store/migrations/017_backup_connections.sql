@@ -1,0 +1,26 @@
+-- Reusable backup connections (data sources). Secrets are sealed with store.Box (AAD = connection id).
+CREATE TABLE backup_connections (
+    id               text        PRIMARY KEY CHECK (id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
+    name             text        NOT NULL UNIQUE,
+    engine           text        NOT NULL CHECK (engine IN ('mysql', 'mariadb', 'postgres', 'mongodb')),
+    host             text        NOT NULL DEFAULT '',
+    port             integer     NOT NULL DEFAULT 0 CHECK (port BETWEEN 0 AND 65535),
+    user_name        text        NOT NULL DEFAULT '',
+    secret_mode      text        NOT NULL DEFAULT 'env' CHECK (secret_mode IN ('env', 'stored')),
+    password_env     text        NOT NULL DEFAULT '',
+    password_sealed  bytea,
+    uri_env          text        NOT NULL DEFAULT '',
+    uri_sealed       bytea,
+    tls_mode         text        NOT NULL DEFAULT '' CHECK (tls_mode IN ('', 'disable', 'require', 'verify-ca', 'verify-full')),
+    ca_cert_pem      text        NOT NULL DEFAULT '',
+    ssh_tunnel       jsonb       NOT NULL DEFAULT '{}',
+    labels           jsonb       NOT NULL DEFAULT '{}',
+    created_by       text        NOT NULL DEFAULT '',
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    updated_at       timestamptz NOT NULL DEFAULT now(),
+    last_test_at     timestamptz,
+    last_test_status text        NOT NULL DEFAULT '',
+    last_test_detail text        NOT NULL DEFAULT '',
+    CHECK (secret_mode = 'stored' OR (password_sealed IS NULL AND uri_sealed IS NULL)),
+    CHECK (secret_mode = 'env' OR (password_env = '' AND uri_env = ''))
+);
