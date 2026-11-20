@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -115,13 +116,18 @@ func TestObservedStopOutsideWebIsNotAutostarted(t *testing.T) {
 			{slogLine(time.Now(), "INFO", "pipeline running")}, // SIGKILL / OOM: no clean line
 		} {
 			writePipelineLog(t, e2, "orders", tail...)
+			base := syncCallCount(e2)
 			e4 := e2.restart()
 			// Autostart is the active instance's job: wait until the restarted instance holds the lease
-			// (under load the lease loop can lag the restart by a moment).
+			// (under load the lease loop can lag the restart by a moment). Taking the lease already runs
+			// ResumeDesired in the background, so the explicit call below may find the pipeline started:
+			// what matters is that the crashed pipeline is started exactly once, by whichever path.
 			waitFor(t, "restarted instance becomes active", func() bool { return e4.srv.isActive() })
-			n := syncCallCount(e4)
-			if got := e4.srv.ResumeDesired(ctx); len(got) != 1 || syncCallCount(e4) != n+1 {
-				t.Fatalf("crashed pipeline not autostarted (%v): %v", tail, got)
+			_ = e4.srv.ResumeDesired(ctx)
+			waitFor(t, fmt.Sprintf("crashed pipeline autostarted (%v)", tail), func() bool { return syncCallCount(e4) >= base+1 })
+			time.Sleep(300 * time.Millisecond)
+			if got := syncCallCount(e4); got != base+1 {
+				t.Fatalf("crashed pipeline started %d times, want exactly once (%v)", got-base, tail)
 			}
 			if ds, _ = st.DesiredStates(ctx); ds["orders"].Desired != store.DesiredRunning {
 				t.Fatalf("crash changed desired: %+v", ds["orders"])
