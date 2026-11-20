@@ -70,6 +70,9 @@ func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Stor
 		if !found || !current.UpdatedAt.Equal(job.UpdatedAt) {
 			return errors.New("backup job is missing or its configuration changed")
 		}
+		if current, err = resolveJobConnection(lockCtx, st, current, os.Getenv); err != nil {
+			return err
+		}
 		_, err = runTrackedBackupJob(lockCtx, st, current, func(runCtx context.Context) error {
 			rec, err := env.RunJob(runCtx, current)
 			if err != nil {
@@ -90,6 +93,11 @@ func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Stor
 			}
 			return nil
 		})
+		// cron/daily/weekly/monthly jobs: the store only knows every_seconds, so move the due time to the
+		// schedule's next occurrence (also after Run now).
+		if aerr := advanceSchedule(context.WithoutCancel(lockCtx), st, current.ID, time.Now()); aerr != nil && err == nil {
+			err = aerr
+		}
 		return err
 	})
 }
@@ -110,60 +118,11 @@ func runManagedBuiltinSchedule(ctx context.Context, cmd *cobra.Command, st store
 	if once {
 		return runManagedBuiltinJob(ctx, cmd, st, job)
 	}
-	revision := job.UpdatedAt
-	same := func(j backup.Job, ok bool) bool { return ok && j.Enabled && j.UpdatedAt.Equal(revision) }
-	return st.Locked(ctx, "backup-job-scheduler:"+jobID, func(lockCtx context.Context) error {
-		for {
-			job, found, err := st.GetBackupJob(lockCtx, jobID)
-			if err != nil {
-				return err
-			}
-			if !same(job, found) {
-				return nil
-			}
-			err = st.Locked(lockCtx, "backup-job-execution:"+jobID, func(c context.Context) error {
-				_, err := st.RecoverBackupJobRun(c, jobID, revision)
-				return err
-			})
-			if err != nil {
-				return err
-			}
-			job, found, err = st.GetBackupJob(lockCtx, jobID)
-			if err != nil || !same(job, found) {
-				return err
-			}
-			next := time.Now().UTC()
-			if job.NextRunAt != nil {
-				next = *job.NextRunAt
-			} else if ok, err := st.SetBackupJobNextRun(lockCtx, jobID, revision, next); err != nil || !ok {
-				return err
-			}
-			keep, err := waitUntilBackupDue(lockCtx, next, func() (bool, error) {
-				j, ok, err := st.GetBackupJob(lockCtx, jobID)
-				return same(j, ok), err
-			})
-			if err != nil || !keep {
-				if lockCtx.Err() != nil {
-					return nil
-				}
-				return err
-			}
-			cur, ok, err := st.GetBackupJob(lockCtx, jobID)
-			if err != nil || !same(cur, ok) {
-				return err
-			}
-			if cur.NextRunAt != nil && cur.NextRunAt.After(time.Now()) {
-				continue // Run now moved the due time
-			}
-			if err := runManagedBuiltinJob(lockCtx, cmd, st, cur); err != nil {
-				if lockCtx.Err() != nil {
-					return nil
-				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "backup run failed: %v\n", err)
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "backup run completed")
-			}
-		}
+	return runScheduleLoop(ctx, cmd.ErrOrStderr(), cmd.OutOrStdout(), st, jobID, schedulerOptions{
+		limits: concurrencyFromEnv(os.Getenv),
+		run: func(c context.Context, j backup.Job) error {
+			return runManagedBuiltinJob(c, cmd, st, j)
+		},
 	})
 }
 
@@ -431,6 +390,9 @@ func newBackupLogArchiveCmd() *cobra.Command {
 			}
 			if err := backup.ValidatePITR(job); err != nil {
 				return fmt.Errorf("cannot archive logs for job %s: %w", jobID, err)
+			}
+			if job, err = resolveJobConnection(ctx, st, job, os.Getenv); err != nil {
+				return err
 			}
 			env, err := backupRunnerEnv(st, cmd.OutOrStdout())
 			if err != nil {
