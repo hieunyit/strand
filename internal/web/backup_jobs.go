@@ -283,7 +283,12 @@ func (s *Server) startBackupJobProcess(j backup.Job, once bool, args []string) (
 	if once {
 		pipeline = backupJobRunPipeline(j.ID)
 	}
-	id, err := s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: args, Env: s.jobSecretEnv(j)})
+	env := s.jobSecretEnv(j)
+	if !j.IsCustom() {
+		// Stored repository credentials travel in the child's environment only (never argv).
+		env = append(env, s.repoSecretEnv()...)
+	}
+	id, err := s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: args, Env: env})
 	if err != nil {
 		return "", err
 	}
@@ -370,7 +375,7 @@ func (s *Server) stopBackupJob(id string) error {
 // auditBackupJob records a mutating backup-job request before it takes effect; like pipeline actions, the
 // request is refused when the audit log cannot be written.
 func (s *Server) auditBackupJob(w http.ResponseWriter, r *http.Request, action, id string) bool {
-	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: action, Pipeline: id, Result: "started"}); err != nil {
+	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), User: auditUser(r), Action: action, Pipeline: id, Result: "started"}); err != nil {
 		s.log.Error("audit backup job", "action", action, "error", err)
 		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing to change backup jobs")
 		return false
@@ -381,7 +386,7 @@ func (s *Server) auditBackupJob(w http.ResponseWriter, r *http.Request, action, 
 // auditBackupJobDetail is auditBackupJob with the job's settings (secrets never appear: a job holds only
 // environment variable NAMES).
 func (s *Server) auditBackupJobDetail(w http.ResponseWriter, r *http.Request, action, id string, detail map[string]any) bool {
-	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: action, Pipeline: id, Result: "started", Detail: detail}); err != nil {
+	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), User: auditUser(r), Action: action, Pipeline: id, Result: "started", Detail: maskAuditSecrets(detail)}); err != nil {
 		s.log.Error("audit backup job", "action", action, "error", err)
 		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing to change backup jobs")
 		return false
@@ -581,7 +586,20 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditBackupJobDetail(w, r, "backup_job.update", j.ID, jobAuditDetail(j)) {
+	detail := jobAuditDetail(j)
+	if cur, found, err := s.db.st.GetBackupJob(r.Context(), j.ID); err == nil && found {
+		detail["changes"] = changedFields(cur.JobOptions, j.JobOptions)
+		if cur.EverySeconds != j.EverySeconds {
+			detail["changes"].(map[string]any)["every_seconds"] = map[string]any{"from": cur.EverySeconds, "to": j.EverySeconds}
+		}
+		if cur.Name != j.Name {
+			detail["changes"].(map[string]any)["name"] = map[string]any{"from": cur.Name, "to": j.Name}
+		}
+		if cur.Enabled != j.Enabled {
+			detail["changes"].(map[string]any)["enabled"] = map[string]any{"from": cur.Enabled, "to": j.Enabled}
+		}
+	}
+	if !s.auditBackupJobDetail(w, r, "backup_job.update", j.ID, detail) {
 		return
 	}
 	changed, err := s.db.st.UpdateBackupJob(r.Context(), j)

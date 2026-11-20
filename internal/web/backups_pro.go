@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sort"
+	"strand/internal/web/store"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,10 +33,10 @@ func (s *Server) backupProRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/backup-jobs/{id}/retention-preview", s.auth(true, s.apiBackupRetentionPreview))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/prune", s.auth(true, s.apiBackupJobOp("prune")))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/verify", s.auth(true, s.apiBackupJobOp("verify")))
-	mux.Handle("GET /api/v1/backup-repositories", s.auth(true, s.apiBackupRepos))
-	mux.Handle("POST /api/v1/backup-repositories", s.auth(true, s.apiBackupRepoSave(false)))
-	mux.Handle("PUT /api/v1/backup-repositories/{id}", s.auth(true, s.apiBackupRepoSave(true)))
-	mux.Handle("DELETE /api/v1/backup-repositories/{id}", s.auth(true, s.apiBackupRepoDelete))
+	s.backupRepoRoutes(mux)
+	s.backupNotifyRoutes(mux)
+	s.backupKeyRoutes(mux)
+	s.backupRPORoutes(mux)
 	mux.Handle("GET /metrics", s.auth(true, s.backupMetrics))
 }
 
@@ -50,7 +50,7 @@ func (s *Server) needDB(w http.ResponseWriter) bool {
 
 // auditBackupOp records a mutating backup request before it takes effect (fail-closed).
 func (s *Server) auditBackupOp(w http.ResponseWriter, r *http.Request, action string, detail map[string]any) bool {
-	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: action, Result: "started", Detail: detail}); err != nil {
+	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), User: auditUser(r), Action: action, Result: "started", Detail: maskAuditSecrets(detail)}); err != nil {
 		s.log.Error("audit backup operation", "action", action, "error", err)
 		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing the backup operation")
 		return false
@@ -71,7 +71,7 @@ func (s *Server) startBackupOp(kind, pipeline string, args ...string) (string, e
 		full = append(full, "--config", s.cfg.SourcePath)
 	}
 	full = append(append(full, "backup"), args...)
-	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full, Env: s.backupOpEnv(args)})
+	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full, Env: append(s.backupOpEnv(args), s.repoSecretEnv()...)})
 }
 
 // backupOpEnv: the log archiver reads the source database, so for a job on a stored-secret connection it
@@ -427,93 +427,6 @@ func (s *Server) apiBackupJobOp(op string) authedHandler {
 	}
 }
 
-func (s *Server) apiBackupRepos(w http.ResponseWriter, r *http.Request, _ *Session) {
-	if !s.needDB(w) {
-		return
-	}
-	rs, err := s.db.st.ListBackupRepos(r.Context())
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "could not read repositories")
-		return
-	}
-	type view struct {
-		backup.Repo
-		Configured bool `json:"configured"` // the environment has an endpoint and credentials for it
-	}
-	out := make([]view, 0, len(rs))
-	for _, rp := range rs {
-		out = append(out, view{Repo: rp, Configured: os.Getenv(rp.EnvPrefix+"ENDPOINT") != "" && os.Getenv(rp.EnvPrefix+"ACCESS_KEY") != ""})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"repositories": out})
-}
-
-func (s *Server) apiBackupRepoSave(update bool) authedHandler {
-	return func(w http.ResponseWriter, r *http.Request, _ *Session) {
-		if !s.needDB(w) {
-			return
-		}
-		var rp backup.Repo
-		if !decodeStrict(w, r, &rp) {
-			return
-		}
-		if update {
-			rp.ID = r.PathValue("id")
-		} else if rp.ID == "" {
-			rp.ID = strings.ToLower(strings.Map(func(c rune) rune {
-				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' {
-					return c
-				}
-				return '-'
-			}, rp.Name))
-		}
-		if err := backup.ValidateRepo(rp); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		action := "backup_repository.create"
-		if update {
-			action = "backup_repository.update"
-		}
-		if !s.auditBackupOp(w, r, action, map[string]any{"repository": rp.ID, "bucket": rp.Bucket, "lock_mode": rp.LockMode}) {
-			return
-		}
-		var err error
-		ok := true
-		if update {
-			ok, err = s.db.st.UpdateBackupRepo(r.Context(), rp)
-		} else {
-			err = s.db.st.CreateBackupRepo(r.Context(), rp)
-		}
-		switch {
-		case err != nil:
-			writeErr(w, http.StatusConflict, err.Error())
-		case !ok:
-			writeErr(w, http.StatusNotFound, "repository not found")
-		default:
-			writeJSON(w, http.StatusOK, map[string]any{"repository": rp})
-		}
-	}
-}
-
-func (s *Server) apiBackupRepoDelete(w http.ResponseWriter, r *http.Request, _ *Session) {
-	if !s.needDB(w) {
-		return
-	}
-	id := r.PathValue("id")
-	if !s.auditBackupOp(w, r, "backup_repository.delete", map[string]any{"repository": id}) {
-		return
-	}
-	ok, err := s.db.st.DeleteBackupRepo(r.Context(), id)
-	switch {
-	case err != nil:
-		writeErr(w, http.StatusConflict, err.Error())
-	case !ok:
-		writeErr(w, http.StatusNotFound, "repository not found")
-	default:
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
 // --- maintenance (active instance) ---
 
 var backupMaint struct {
@@ -551,7 +464,7 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 		return
 	}
 	now := s.now().UTC()
-	n := &runner.Notifier{Getenv: os.Getenv}
+	notifyOn := s.notifyConfigured(ctx)
 	for _, j := range jobs {
 		if j.Enabled && j.LogArchive && !j.IsCustom() && s.jobs != nil {
 			if err := backup.ValidatePITR(j); err != nil {
@@ -588,7 +501,7 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 				}
 			}
 		}
-		if !n.Configured() {
+		if !notifyOn {
 			continue
 		}
 		if j.RunFinishedAt != nil && j.LastRunStatus != "" && j.LastRunStatus != backup.RunStatusRunning {
@@ -600,11 +513,17 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 				case backup.RunStatusMissed:
 					kind = "missed" // not started within window_minutes (recorded by the scheduler)
 				}
+				if kind == "failure" {
+					// A run that could not reach its repository is its own event (rules can route it separately).
+					if runs, err := s.db.st.ListBackupRuns(ctx, store.BackupRunFilter{JobID: j.ID, Limit: 1}); err == nil && len(runs) == 1 && runs[0].ErrorCode == backup.ErrCodeRepoUnreachable {
+						kind = backup.EventRepoUnreachable
+					}
+				}
 				msg := fmt.Sprintf("backup job %q (%s) run %s at %s", j.Name, j.Source, j.LastRunStatus, j.RunFinishedAt.UTC().Format(time.RFC3339))
 				if j.ConsecutiveFailures > 0 {
 					msg += fmt.Sprintf("; %d consecutive failure(s)", j.ConsecutiveFailures)
 				}
-				go s.notify(n, runner.Event{Kind: kind, Job: j.ID, JobName: j.Name, Source: j.Source, Message: msg, At: now})
+				go s.notifyBackupEvent(runner.Event{Kind: kind, Job: j.ID, JobName: j.Name, Source: j.Source, Message: msg, At: now}, j.PolicyID)
 			}
 		}
 		if j.Enabled && j.NextRunAt != nil && j.LastRunStatus != backup.RunStatusRunning {
@@ -614,37 +533,31 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 			}
 			if now.Sub(*j.NextRunAt) > grace {
 				if ok, _ := s.db.st.MarkBackupJobMissed(ctx, j.ID, *j.NextRunAt); ok {
-					go s.notify(n, runner.Event{Kind: "missed", Job: j.ID, JobName: j.Name, Source: j.Source, At: now,
-						Message: fmt.Sprintf("backup job %q missed its schedule (due %s)", j.Name, j.NextRunAt.UTC().Format(time.RFC3339))})
+					go s.notifyBackupEvent(runner.Event{Kind: "missed", Job: j.ID, JobName: j.Name, Source: j.Source, At: now,
+						Message: fmt.Sprintf("backup job %q missed its schedule (due %s)", j.Name, j.NextRunAt.UTC().Format(time.RFC3339))}, j.PolicyID)
 				}
 			}
 		}
 	}
-	if n.Configured() {
+	s.rpoTick(ctx, now)
+	if notifyOn {
 		checks, _ := s.backups.Checks(ctx, "", 20)
 		for _, c := range checks {
 			if c.Status == backup.CheckFailed && c.FinishedAt.After(now.Add(-backupMaint.interval*2)) {
 				key := fmt.Sprintf("backup_check_notified:%d", c.ID)
 				if _, seen, _ := s.db.st.MetaGet(ctx, key); !seen {
 					_ = s.db.st.MetaSet(ctx, key, now.Format(time.RFC3339))
-					go s.notify(n, runner.Event{Kind: "verify_failed", Message: fmt.Sprintf("backup %s failed %s: %s", c.BackupID, c.Kind, c.Detail), At: now})
+					ev := runner.Event{Kind: "verify_failed", Message: fmt.Sprintf("backup %s failed %s: %s", c.BackupID, c.Kind, c.Detail), At: now}
+					policyID := ""
+					if rec, found, _ := s.backups.Get(ctx, c.BackupID); found {
+						ev.Job, ev.Source = rec.JobID, rec.Source
+						policyID = s.jobPolicy(ctx, rec.JobID)
+					}
+					go s.notifyBackupEvent(ev, policyID)
 				}
 			}
 		}
 	}
-}
-
-func (s *Server) notify(n *runner.Notifier, ev runner.Event) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	err := n.Send(ctx, ev)
-	result := "ok"
-	detail := map[string]any{"event": ev.Kind, "job": ev.Job}
-	if err != nil {
-		result, detail["error"] = "error", err.Error()
-		s.log.Warn("backup notification", "event", ev.Kind, "error", err)
-	}
-	_ = s.audit.Log(AuditEntry{Action: "backup.notify", Result: result, Detail: detail})
 }
 
 // --- Prometheus metrics ---
@@ -718,5 +631,6 @@ func (s *Server) backupMetrics(w http.ResponseWriter, r *http.Request, _ *Sessio
 	}
 	gauge("strand_backup_recent_check_failures", "Failed verification/test-restore results among the latest 200 checks.")
 	fmt.Fprintf(&b, "strand_backup_recent_check_failures %d\n", failed)
+	s.writeRPOMetrics(ctx, &b, gauge)
 	_, _ = io.WriteString(w, b.String())
 }

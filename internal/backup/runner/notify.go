@@ -18,17 +18,18 @@ import (
 const (
 	EnvNotifyWebhook  = "STRAND_BACKUP_NOTIFY_WEBHOOK"       // generic JSON POST
 	EnvNotifySlack    = "STRAND_BACKUP_NOTIFY_SLACK_WEBHOOK" // Slack/Mattermost/Teams-compatible {"text":...}
+	EnvNotifyTeams    = "STRAND_BACKUP_NOTIFY_TEAMS_WEBHOOK" // Microsoft Teams incoming webhook (MessageCard)
 	EnvNotifySMTPAddr = "STRAND_BACKUP_NOTIFY_SMTP_ADDR"     // host:port (STARTTLS required unless loopback)
 	EnvNotifySMTPFrom = "STRAND_BACKUP_NOTIFY_SMTP_FROM"
 	EnvNotifySMTPTo   = "STRAND_BACKUP_NOTIFY_SMTP_TO" // comma separated
 	EnvNotifySMTPUser = "STRAND_BACKUP_NOTIFY_SMTP_USER"
 	EnvNotifySMTPPass = "STRAND_BACKUP_NOTIFY_SMTP_PASSWORD"
-	EnvNotifyOn       = "STRAND_BACKUP_NOTIFY_ON" // events: failure,success,missed,verify_failed (default all but success)
+	EnvNotifyOn       = "STRAND_BACKUP_NOTIFY_ON" // events: failure,success,missed,verify_failed (default: failure,missed,verify_failed,rpo_breach,repo_unreachable)
 )
 
 // Event is one backup notification.
 type Event struct {
-	Kind    string    `json:"event"` // failure | success | missed | verify_failed
+	Kind    string    `json:"event"` // failure | success | missed | verify_failed | rpo_breach | repo_unreachable | test
 	Job     string    `json:"job,omitempty"`
 	JobName string    `json:"job_name,omitempty"`
 	Source  string    `json:"source,omitempty"`
@@ -42,13 +43,18 @@ type Notifier struct {
 	Client *http.Client
 	// SendMail is smtp.SendMail (replaceable in tests).
 	SendMail func(addr string, a smtp.Auth, from string, to []string, msg []byte) error
+	// Force delivers every event regardless of STRAND_BACKUP_NOTIFY_ON (a channel "send test").
+	Force bool
 }
 
 // Enabled reports whether events of kind are delivered.
 func (n *Notifier) Enabled(kind string) bool {
+	if n.Force {
+		return true
+	}
 	on := strings.TrimSpace(n.Getenv(EnvNotifyOn))
 	if on == "" {
-		on = "failure,missed,verify_failed"
+		on = "failure,missed,verify_failed,rpo_breach,repo_unreachable"
 	}
 	for _, k := range strings.Split(on, ",") {
 		if strings.TrimSpace(k) == kind || strings.TrimSpace(k) == "all" {
@@ -60,7 +66,7 @@ func (n *Notifier) Enabled(kind string) bool {
 
 // Configured reports whether any destination is set.
 func (n *Notifier) Configured() bool {
-	return n.Getenv(EnvNotifyWebhook) != "" || n.Getenv(EnvNotifySlack) != "" || n.Getenv(EnvNotifySMTPAddr) != ""
+	return n.Getenv(EnvNotifyWebhook) != "" || n.Getenv(EnvNotifySlack) != "" || n.Getenv(EnvNotifyTeams) != "" || n.Getenv(EnvNotifySMTPAddr) != ""
 }
 
 // Send delivers ev to every configured destination; errors never contain the destination URLs.
@@ -97,6 +103,10 @@ func (n *Notifier) Send(ctx context.Context, ev Event) error {
 	}
 	if u := n.Getenv(EnvNotifySlack); u != "" {
 		post("slack", u, map[string]string{"text": text})
+	}
+	if u := n.Getenv(EnvNotifyTeams); u != "" {
+		post("teams", u, map[string]string{"@type": "MessageCard", "@context": "https://schema.org/extensions", "summary": text,
+			"title": "Strand backup", "text": text})
 	}
 	if addr := n.Getenv(EnvNotifySMTPAddr); addr != "" {
 		if err := n.mail(addr, ev, text); err != nil {

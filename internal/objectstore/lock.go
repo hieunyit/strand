@@ -1,9 +1,11 @@
 package objectstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/base64"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -184,4 +186,33 @@ func CleanStaleParts(dir string) (int, error) {
 		}
 	}
 	return removed, nil
+}
+
+// ObjectLockEnabled reports whether the bucket has Object Lock enabled (GetObjectLockConfiguration). A
+// bucket without it answers 404 ObjectLockConfigurationNotFoundError, which is "false", not an error.
+func (s *S3) ObjectLockEnabled(ctx context.Context) (bool, error) {
+	resp, err := s.request(ctx, http.MethodGet, "", url.Values{"object-lock": {""}}, nil, nil, 0)
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		closeResponse(resp)
+		if bytes.Contains(body, []byte("ObjectLockConfigurationNotFoundError")) {
+			return false, nil
+		}
+		return false, fmt.Errorf("objectstore: get object lock configuration failed with HTTP %d", resp.StatusCode)
+	}
+	if !isSuccess(resp.StatusCode) {
+		return false, s.responseError("get object lock configuration", resp)
+	}
+	var cfg struct {
+		Enabled string `xml:"ObjectLockEnabled"`
+	}
+	err = xml.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&cfg)
+	closeResponse(resp)
+	if err != nil {
+		return false, fmt.Errorf("objectstore: decode object lock configuration: %w", err)
+	}
+	return cfg.Enabled == "Enabled", nil
 }

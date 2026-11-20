@@ -38,6 +38,8 @@ func TestRBACEveryWriteRouteFailClosed(t *testing.T) {
 		"POST /api/v1/backup-jobs/{id}/pause": true, "POST /api/v1/backup-jobs/{id}/resume": true,
 		"POST /api/v1/backup-runs/{id}/cancel": true,
 		"POST /api/v1/backup-connections/test": true, "POST /api/v1/backup-connections/{id}/test": true,
+		// A repository test is a probe (one tiny object written, read back and deleted), like a connection test.
+		"POST /api/v1/backup-repositories/{id}/test": true,
 	}
 	concrete := strings.NewReplacer("{id}", "42", "{name}", "orders", "{username}", "bob", "{action}", "start")
 	for _, rt := range routes {

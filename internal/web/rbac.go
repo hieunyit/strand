@@ -87,6 +87,11 @@ var writeRules = []routeRule{
 	// and policies stays admin through the fail-closed default).
 	{"POST", "/api/v1/backup-connections/test", PermOperator},
 	{"POST", "/api/v1/backup-connections/{id}/test", PermOperator},
+	// Operator: test a backup repository (list/put/get/delete of one tiny test object plus an Object Lock
+	// check: the same class of probe as a connection test, and operators run the backups that depend on it).
+	// Creating/editing/deleting repositories stays admin. Notification channel tests stay admin: they make
+	// the server contact an external destination the admin configured.
+	{"POST", "/api/v1/backup-repositories/{id}/test", PermOperator},
 }
 
 // readRules lists sensitive READ routes that need more than viewer.
@@ -103,6 +108,13 @@ var readRules = []routeRule{
 	{"GET", "/tools/spool-inspect", PermAdmin},
 	{"GET", "/archive", PermAdmin},
 	{"GET", "/tunnels", PermAdmin},
+	// Backup operations data that is not for every viewer: encryption key ids/fingerprints, where alerts go,
+	// and the backup activity feed (an audit view with users and addresses).
+	{"GET", "/api/v1/backup-keys", PermAdmin}, {"GET", "/backups/keys", PermAdmin},
+	{"GET", "/api/v1/backup-notify-channels/**", PermAdmin}, {"GET", "/api/v1/backup-notify-channels", PermAdmin},
+	{"GET", "/api/v1/backup-notify-rules/**", PermAdmin}, {"GET", "/api/v1/backup-notify-rules", PermAdmin},
+	{"GET", "/backups/notifications", PermAdmin},
+	{"GET", "/api/v1/backup-activity", PermAdmin}, {"GET", "/backups/activity", PermAdmin},
 }
 
 // RoutePermissions is kept for documentation/tests: the effective rules.

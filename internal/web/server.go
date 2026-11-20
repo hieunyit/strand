@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -67,7 +68,9 @@ type Server struct {
 	lease             *leaseMgr    // chế độ DB: lease instance active (lease.go)
 	desired           desiredCache
 	backups           *backup.Catalog
-	checker           conncheck.Checker // connection tests (nil: live)
+	checker           conncheck.Checker                                                          // connection tests (nil: live)
+	notifyHTTP        *http.Client                                                               // notification deliveries (nil: default client)
+	notifyMail        func(addr string, a smtp.Auth, from string, to []string, msg []byte) error // nil: smtp.SendMail
 
 	pages   map[string]*template.Template
 	handler http.Handler
@@ -107,6 +110,9 @@ type Options struct {
 	LeaseTTL time.Duration
 	// ConnChecker thay bộ kiểm tra kết nối backup (test dùng bản giả). nil: kiểm tra thật.
 	ConnChecker conncheck.Checker
+	// NotifyHTTPClient / NotifySendMail replace the notification transports (tests).
+	NotifyHTTPClient *http.Client
+	NotifySendMail   func(addr string, a smtp.Auth, from string, to []string, msg []byte) error
 }
 
 // New dựng Server (chưa lắng nghe, chưa chạy sampler). Trả lỗi nếu cấu hình không đủ điều kiện khởi động.
@@ -164,6 +170,7 @@ func New(o Options) (*Server, error) {
 	}
 	s.db = db
 	s.checker = o.ConnChecker
+	s.notifyHTTP, s.notifyMail = o.NotifyHTTPClient, o.NotifySendMail
 	s.backups, err = backup.NewCatalog(db.st)
 	if err != nil {
 		return nil, err
