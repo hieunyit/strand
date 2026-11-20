@@ -70,10 +70,10 @@ func TestMinIOIntegration(t *testing.T) {
 
 	// An uploader killed mid-transfer leaves an open multipart upload; it is reclaimed by key.
 	orphan := "prod/mysql/bkp-2/artifact"
-	if _, err := c.initiateMultipart(ctx, orphan, ""); err != nil {
+	if _, err := c.initiateMultipart(ctx, orphan, "", PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.initiateMultipart(ctx, "prod/mysql/bkp-3/artifact", ""); err != nil {
+	if _, err := c.initiateMultipart(ctx, "prod/mysql/bkp-3/artifact", "", PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	n, err := c.AbortStaleUploads(ctx, orphan)

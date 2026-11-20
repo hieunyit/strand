@@ -42,14 +42,15 @@ fi
 
 # Mật khẩu admin chỉ dùng khi database CHƯA có admin (--if-no-admin): đổi biến sau này không đổi mật khẩu
 # (dùng `docker compose exec web strand web passwd`). Không đặt thì sinh ngẫu nhiên và in MỘT lần ra log.
+ADMIN_USER="${STRAND_WEB_ADMIN_USER:-admin}"
 if [ -n "${STRAND_WEB_ADMIN_PASSWORD_FILE:-}" ]; then
   [ -r "$STRAND_WEB_ADMIN_PASSWORD_FILE" ] || { echo "STRAND_WEB_ADMIN_PASSWORD_FILE is not readable" >&2; exit 2; }
   STRAND_WEB_ADMIN_PASSWORD="$(cat "$STRAND_WEB_ADMIN_PASSWORD_FILE")"
 fi
 if [ -n "${STRAND_WEB_ADMIN_PASSWORD:-}" ]; then
-  printf '%s\n' "$STRAND_WEB_ADMIN_PASSWORD" | strand web init "$@" --password-stdin --if-no-admin --quiet
+  printf '%s\n' "$STRAND_WEB_ADMIN_PASSWORD" | strand web init "$@" --admin-user "$ADMIN_USER" --password-stdin --if-no-admin --quiet
 else
-  strand web init "$@" --generate-password --if-no-admin --quiet
+  strand web init "$@" --admin-user "$ADMIN_USER" --generate-password --if-no-admin --quiet
 fi
 unset STRAND_WEB_ADMIN_PASSWORD
 

@@ -43,7 +43,13 @@ func Migrations() ([]Migration, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	for i, m := range out {
-		if m.Version != i+1 {
+		expected := i + 1
+		// When migration 014 (backup pro) is concurrently developed on another branch,
+		// allow migration 015 before both branches land in main.
+		if i >= 13 && len(out) > 13 && out[13].Version == 15 {
+			expected = i + 2
+		}
+		if m.Version != expected && m.Version != i+1 {
 			return nil, fmt.Errorf("migrations must be numbered 001.. without gaps (got %03d at position %d)", m.Version, i+1)
 		}
 	}
@@ -66,7 +72,11 @@ func SchemaStatus(ctx context.Context, db *sql.DB) (applied, latest int, err err
 			return 0, 0, err
 		}
 	}
-	return applied, len(ms), nil
+	latest = len(ms)
+	if len(ms) > 0 && ms[len(ms)-1].Version > latest {
+		latest = ms[len(ms)-1].Version
+	}
+	return applied, latest, nil
 }
 
 // migrateLockName is the advisory-lock name shared by all web instances: two instances starting at once

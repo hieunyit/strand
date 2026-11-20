@@ -166,7 +166,7 @@ func TestAbortStaleUploadsOnlyExactKey(t *testing.T) {
 	c := newTestClient(t, srv.URL, nil)
 	ctx := context.Background()
 	for _, k := range []string{"p/id1/artifact", "p/id1/artifact", "p/id1/artifact.tar", "p/id2/artifact"} {
-		if _, err := c.initiateMultipart(ctx, k, ""); err != nil {
+		if _, err := c.initiateMultipart(ctx, k, "", PutOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}

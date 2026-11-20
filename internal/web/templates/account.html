@@ -1,0 +1,116 @@
+{{define "content"}}
+{{with .Body}}
+{{if .Message}}<p class="okbox" role="status">{{.Message}}</p>{{end}}
+{{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
+{{if .CreatedToken}}
+<div class="card">
+  <div class="cardhead"><h3>New API token</h3></div>
+  <p class="warnbox">Copy this token now. It will not be shown again.</p>
+  <pre class="box mono">{{.CreatedToken}}</pre>
+</div>
+{{end}}
+
+<div class="card">
+  <div class="cardhead"><h2>My account</h2></div>
+  <p class="muted small">Signed in as <b>{{.User.Username}}</b> ({{.User.DisplayName}}). Role: <span class="badge {{if eq .User.Role "admin"}}st-synced{{else if eq .User.Role "operator"}}st-bootstrapping{{else}}st-paused{{end}}">{{.User.Role}}</span></p>
+</div>
+
+<div class="card">
+  <div class="cardhead"><h3>Change password</h3></div>
+  <form method="post" action="/account/password" class="settings">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <div class="setrow">
+      <div class="sethead"><label for="cur-password"><b>Current password</b></label></div>
+      <div class="setinput"><input id="cur-password" type="password" name="current_password" class="wide mono" required autocomplete="current-password"></div>
+    </div>
+    <div class="setrow">
+      <div class="sethead"><label for="new-pw"><b>New password</b></label></div>
+      <div class="setinput"><input id="new-pw" type="password" name="new_password" class="wide mono" minlength="12" required autocomplete="new-password"></div>
+    </div>
+    <div class="setrow">
+      <div class="sethead"><label for="confirm-pw"><b>Confirm new password</b></label></div>
+      <div class="setinput"><input id="confirm-pw" type="password" name="confirm_password" class="wide mono" minlength="12" required autocomplete="new-password"></div>
+    </div>
+    <p><button class="btn primary" type="submit">Update password</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <div class="cardhead"><h3>My API tokens</h3></div>
+  <p class="muted small">API tokens are scoped to your <b>{{.User.Role}}</b> role. Use header <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="sr-only">API tokens</caption>
+      <thead>
+        <tr>
+          <th scope="col">Prefix</th>
+          <th scope="col">Name</th>
+          <th scope="col">Created</th>
+          <th scope="col">Last used</th>
+          <th scope="col">Status</th>
+          <th scope="col" class="r">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Tokens}}
+        <tr>
+          <td><code class="mono">{{.TokenPrefix}}...</code></td>
+          <td>{{.Name}}</td>
+          <td><time datetime="{{.CreatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .CreatedAt}}</time></td>
+          <td>{{if .LastUsedAt}}<time datetime="{{.LastUsedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .LastUsedAt}}</time>{{else}}<span class="muted">Never</span>{{end}}</td>
+          <td>{{if .RevokedAt}}<span class="badge st-failed">Revoked</span>{{else}}<span class="badge st-synced">Active</span>{{end}}</td>
+          <td class="r nowrap">
+            {{if not .RevokedAt}}
+            <form method="post" action="/account/tokens/revoke" class="inline">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="token_id" value="{{.ID}}">
+              <button class="btn danger small" type="submit">Revoke</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{else}}
+        <tr class="empty"><td colspan="6"><div class="empty-state"><span>No API tokens created yet.</span></div></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <form method="post" action="/account/tokens/create" class="inline pad">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <label>Token name <input type="text" name="name" placeholder="e.g. CI pipeline" required></label>
+    <button class="btn primary" type="submit">Generate new token</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="cardhead"><h3>Active sessions</h3></div>
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="sr-only">Active sessions</caption>
+      <thead>
+        <tr>
+          <th scope="col">IP address</th>
+          <th scope="col">Created</th>
+          <th scope="col">Last seen</th>
+          <th scope="col">Current</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Sessions}}
+        <tr>
+          <td><code>{{.IP}}</code></td>
+          <td><time datetime="{{.Created.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .Created}}</time></td>
+          <td><time datetime="{{.LastSeen.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .LastSeen}}</time></td>
+          <td>{{if eq .IDHash $.CurrentSessionHash}}<span class="badge st-synced">Current session</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <form method="post" action="/account/sessions/signout-others" class="pad">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <button class="btn danger" type="submit">Sign out other sessions</button>
+  </form>
+</div>
+{{end}}
+{{end}}

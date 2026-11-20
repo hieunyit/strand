@@ -200,7 +200,15 @@ func (r *MySQLReader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-
 	if posSet != nil {
 		streamer, err = syncer.StartSync(startPos)
 	} else {
-		streamer, err = syncer.StartSyncGTID(gset)
+		// Hand a clone to BinlogSyncer: go-mysql mutates its start GTID set in place
+		// (b.prevGset.AddGTID) inside onStream as events arrive. If we pass gset directly,
+		// any concurrent reader of gset (such as openSchemaHistory in the stream goroutine)
+		// races with syncer's background goroutine.
+		var syncGset mysql.GTIDSet
+		if gset != nil {
+			syncGset = gset.Clone()
+		}
+		streamer, err = syncer.StartSyncGTID(syncGset)
 	}
 	if err != nil {
 		syncer.Close()

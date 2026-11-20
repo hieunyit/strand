@@ -168,7 +168,13 @@ func (p *PG) Admin(ctx context.Context) (Admin, bool, error) {
 func (p *PG) SetPasswordHash(ctx context.Context, h string) error {
 	_, err := p.db.ExecContext(ctx, `INSERT INTO admin (id, password_hash) VALUES (1, $1)
 		ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`, h)
-	return p.wrap(err)
+	if err != nil {
+		return p.wrap(err)
+	}
+	_, _ = p.db.ExecContext(ctx, `INSERT INTO users (username, display_name, password_hash, role, must_change_password)
+		VALUES ('admin', 'Administrator', $1, 'admin', false)
+		ON CONFLICT ((lower(username))) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`, h)
+	return nil
 }
 
 func (p *PG) SetAPITokenHash(ctx context.Context, h string) error {
@@ -178,17 +184,27 @@ func (p *PG) SetAPITokenHash(ctx context.Context, h string) error {
 }
 
 func (p *PG) PutSession(ctx context.Context, s Session) error {
-	_, err := p.db.ExecContext(ctx, `INSERT INTO sessions (id_hash, csrf, ip, created_at, last_seen) VALUES ($1,$2,$3,$4,$5)
-		ON CONFLICT (id_hash) DO UPDATE SET csrf = EXCLUDED.csrf, ip = EXCLUDED.ip, created_at = EXCLUDED.created_at, last_seen = EXCLUDED.last_seen`,
-		s.IDHash, s.CSRF, s.IP, s.Created, s.LastSeen)
+	var uid any
+	if s.UserID > 0 {
+		uid = s.UserID
+	}
+	_, err := p.db.ExecContext(ctx, `INSERT INTO sessions (id_hash, csrf, ip, created_at, last_seen, user_id, username) VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (id_hash) DO UPDATE SET csrf = EXCLUDED.csrf, ip = EXCLUDED.ip, created_at = EXCLUDED.created_at, last_seen = EXCLUDED.last_seen,
+		user_id = EXCLUDED.user_id, username = EXCLUDED.username`,
+		s.IDHash, s.CSRF, s.IP, s.Created, s.LastSeen, uid, s.Username)
 	return p.wrap(err)
 }
 
 func (p *PG) GetSession(ctx context.Context, id string) (Session, bool, error) {
 	s := Session{IDHash: id}
-	err := p.db.QueryRowContext(ctx, `SELECT csrf, ip, created_at, last_seen FROM sessions WHERE id_hash = $1`, id).Scan(&s.CSRF, &s.IP, &s.Created, &s.LastSeen)
+	var uid sql.NullInt64
+	err := p.db.QueryRowContext(ctx, `SELECT csrf, ip, created_at, last_seen, user_id, username FROM sessions WHERE id_hash = $1`, id).
+		Scan(&s.CSRF, &s.IP, &s.Created, &s.LastSeen, &uid, &s.Username)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, false, nil
+	}
+	if uid.Valid {
+		s.UserID = uid.Int64
 	}
 	return s, err == nil, p.wrap(err)
 }
@@ -526,14 +542,15 @@ func (p *PG) MetaSet(ctx context.Context, key, value string) error {
 }
 
 const backupCols = `id, source, engine, tool, tool_version, bucket, object_key, bytes, sha256,
-	gtid_set, lsn, binlog_file, binlog_pos, manifest_uri, status, created_at, verified_at, expires_at, legal_hold`
+	gtid_set, lsn, binlog_file, binlog_pos, manifest_uri, status, created_at, verified_at, expires_at, legal_hold` + backupProCols
 
 func scanBackup(sc interface{ Scan(...any) error }) (backup.Record, error) {
 	var r backup.Record
 	var verified, expires sql.NullTime
-	err := sc.Scan(&r.ID, &r.Source, &r.Engine, &r.Tool, &r.ToolVersion, &r.Bucket, &r.ObjectKey, &r.Bytes,
+	ext := newBackupProScan(&r)
+	err := sc.Scan(append([]any{&r.ID, &r.Source, &r.Engine, &r.Tool, &r.ToolVersion, &r.Bucket, &r.ObjectKey, &r.Bytes,
 		&r.SHA256, &r.Position.GTIDSet, &r.Position.LSN, &r.Position.BinlogFile, &r.Position.BinlogPos,
-		&r.ManifestURI, &r.Status, &r.CreatedAt, &verified, &expires, &r.LegalHold)
+		&r.ManifestURI, &r.Status, &r.CreatedAt, &verified, &expires, &r.LegalHold}, ext.dest()...)...)
 	if verified.Valid {
 		t := verified.Time
 		r.VerifiedAt = &t
@@ -541,6 +558,9 @@ func scanBackup(sc interface{ Scan(...any) error }) (backup.Record, error) {
 	if expires.Valid {
 		t := expires.Time
 		r.ExpiresAt = &t
+	}
+	if err == nil {
+		err = ext.finish()
 	}
 	return r, err
 }
@@ -550,11 +570,15 @@ func (p *PG) CreateBackup(ctx context.Context, r backup.Record) (backup.Record, 
 	if err := backup.ValidateCreate(r); err != nil {
 		return backup.Record{}, false, err
 	}
+	args, err := backupProArgs(r)
+	if err != nil {
+		return backup.Record{}, false, err
+	}
 	res, err := p.db.ExecContext(ctx, `INSERT INTO backups (`+backupCols+`) VALUES
-		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-		ON CONFLICT DO NOTHING`, r.ID, r.Source, r.Engine, r.Tool, r.ToolVersion, r.Bucket, r.ObjectKey,
+		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,`+backupProPlaceholders(20)+`)
+		ON CONFLICT DO NOTHING`, append([]any{r.ID, r.Source, r.Engine, r.Tool, r.ToolVersion, r.Bucket, r.ObjectKey,
 		r.Bytes, strings.ToLower(r.SHA256), r.Position.GTIDSet, r.Position.LSN, r.Position.BinlogFile,
-		r.Position.BinlogPos, r.ManifestURI, r.Status, r.CreatedAt, r.VerifiedAt, r.ExpiresAt, r.LegalHold)
+		r.Position.BinlogPos, r.ManifestURI, r.Status, r.CreatedAt, r.VerifiedAt, r.ExpiresAt, r.LegalHold}, args...)...)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
@@ -601,6 +625,18 @@ func (p *PG) ListBackups(ctx context.Context, f backup.Filter) ([]backup.Record,
 	}
 	if f.Status != "" {
 		add("status =", f.Status)
+	}
+	if f.JobID != "" {
+		add("job_id =", f.JobID)
+	}
+	if f.Kind != "" {
+		add("kind =", f.Kind)
+	}
+	if f.NotKind != "" {
+		add("kind <>", f.NotKind)
+	}
+	if f.Repository != "" {
+		add("repository =", f.Repository)
 	}
 	if f.CreatedAfter != nil {
 		add("created_at >=", *f.CreatedAfter)
@@ -700,14 +736,19 @@ func (p *PG) FinalizeBackup(ctx context.Context, id string, expected backup.Stat
 
 const backupJobCols = `id, name, command, every_seconds, artifact_template, manifest_template, bucket, prefix,
 	enabled, tunnel_ssh, tunnel_user, tunnel_identity_file, tunnel_known_hosts, tunnel_remote, cleanup_local, next_run_at, updated_at,
-	run_started_at, run_finished_at, last_run_status`
+	run_started_at, run_finished_at, last_run_status, options, retry_max, retry_backoff_seconds, consecutive_failures`
 
 func scanBackupJob(sc interface{ Scan(...any) error }) (backup.Job, error) {
 	var j backup.Job
 	var nextRun, runStarted, runFinished sql.NullTime
+	var options []byte
 	err := sc.Scan(&j.ID, &j.Name, &j.Command, &j.EverySeconds, &j.ArtifactTemplate, &j.ManifestTemplate,
 		&j.Bucket, &j.Prefix, &j.Enabled, &j.TunnelSSH, &j.TunnelUser, &j.TunnelIdentity, &j.TunnelKnownHosts,
-		&j.TunnelRemote, &j.CleanupLocal, &nextRun, &j.UpdatedAt, &runStarted, &runFinished, &j.LastRunStatus)
+		&j.TunnelRemote, &j.CleanupLocal, &nextRun, &j.UpdatedAt, &runStarted, &runFinished, &j.LastRunStatus,
+		&options, &j.RetryMax, &j.RetryBackoffSeconds, &j.ConsecutiveFailures)
+	if err == nil {
+		err = decodeJobOptions(options, &j.JobOptions)
+	}
 	if nextRun.Valid {
 		t := nextRun.Time
 		j.NextRunAt = &t
@@ -727,12 +768,18 @@ func (p *PG) CreateBackupJob(ctx context.Context, j backup.Job) error {
 	if err := backup.ValidateJob(j); err != nil {
 		return err
 	}
-	_, err := p.db.ExecContext(ctx, `INSERT INTO backup_jobs
+	options, err := encodeJobOptions(j.JobOptions)
+	if err != nil {
+		return err
+	}
+	_, err = p.db.ExecContext(ctx, `INSERT INTO backup_jobs
 		(id, name, command, every_seconds, artifact_template, manifest_template, bucket, prefix, enabled,
-		tunnel_ssh, tunnel_user, tunnel_identity_file, tunnel_known_hosts, tunnel_remote, cleanup_local, next_run_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, j.ID, j.Name, j.Command, j.EverySeconds,
+		tunnel_ssh, tunnel_user, tunnel_identity_file, tunnel_known_hosts, tunnel_remote, cleanup_local, next_run_at,
+		options, retry_max, retry_backoff_seconds)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, j.ID, j.Name, j.Command, j.EverySeconds,
 		j.ArtifactTemplate, j.ManifestTemplate, j.Bucket, j.Prefix, j.Enabled, j.TunnelSSH, j.TunnelUser,
-		j.TunnelIdentity, j.TunnelKnownHosts, j.TunnelRemote, j.CleanupLocal, j.NextRunAt)
+		j.TunnelIdentity, j.TunnelKnownHosts, j.TunnelRemote, j.CleanupLocal, j.NextRunAt, options, j.RetryMax,
+		j.RetryBackoffSeconds)
 	return p.wrap(err)
 }
 
@@ -765,13 +812,18 @@ func (p *PG) UpdateBackupJob(ctx context.Context, j backup.Job) (bool, error) {
 	if err := backup.ValidateJob(j); err != nil {
 		return false, err
 	}
+	options, err := encodeJobOptions(j.JobOptions)
+	if err != nil {
+		return false, err
+	}
 	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET name=$2, command=$3, every_seconds=$4,
 		artifact_template=$5, manifest_template=$6, bucket=$7, prefix=$8, enabled=$9, tunnel_ssh=$10,
 		tunnel_user=$11, tunnel_identity_file=$12, tunnel_known_hosts=$13, tunnel_remote=$14, cleanup_local=$15,
-		next_run_at=$16, updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
+		next_run_at=$16, options=$17, retry_max=$18, retry_backoff_seconds=$19, consecutive_failures=0,
+		updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
 		WHERE id=$1`, j.ID, j.Name, j.Command, j.EverySeconds, j.ArtifactTemplate, j.ManifestTemplate,
 		j.Bucket, j.Prefix, j.Enabled, j.TunnelSSH, j.TunnelUser, j.TunnelIdentity, j.TunnelKnownHosts,
-		j.TunnelRemote, j.CleanupLocal, j.NextRunAt)
+		j.TunnelRemote, j.CleanupLocal, j.NextRunAt, options, j.RetryMax, j.RetryBackoffSeconds)
 	if err != nil {
 		return false, p.wrap(err)
 	}
@@ -804,8 +856,14 @@ func (p *PG) FinishBackupJobRun(ctx context.Context, id string, startedAt time.T
 	if status != backup.RunStatusSucceeded && status != backup.RunStatusFailed && status != backup.RunStatusCancelled {
 		return false, fmt.Errorf("%w: invalid backup job run status", backup.ErrInvalid)
 	}
+	// Retry policy: a failed run is retried after retry_backoff_seconds × 2^(failures so far), capped by the
+	// interval, until retry_max consecutive failures; then the regular interval applies again.
 	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET run_finished_at=clock_timestamp(), last_run_status=$3,
-		next_run_at=CASE WHEN enabled THEN clock_timestamp() + make_interval(secs => every_seconds) ELSE NULL END
+		consecutive_failures=CASE WHEN $3='failed' THEN consecutive_failures+1 WHEN $3='succeeded' THEN 0 ELSE consecutive_failures END,
+		next_run_at=CASE WHEN NOT enabled THEN NULL
+			WHEN $3='failed' AND consecutive_failures < retry_max THEN clock_timestamp() + LEAST(make_interval(secs => every_seconds),
+				make_interval(secs => retry_backoff_seconds * power(2, consecutive_failures)))
+			ELSE clock_timestamp() + make_interval(secs => every_seconds) END
 		WHERE id=$1 AND run_started_at=$2 AND run_finished_at IS NULL AND last_run_status='running'`, id, startedAt, status)
 	if err != nil {
 		return false, p.wrap(err)

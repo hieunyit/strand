@@ -151,7 +151,7 @@ func Conflict(format string, a ...any) error {
 const actionTimeout = 170 * time.Second
 
 // apiAction: POST /api/v1/pipelines/{name}/actions/{action}. Xác thực và CSRF đã xong ở middleware.
-func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
+func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, sess *Session) {
 	name, act := r.PathValue("name"), r.PathValue("action")
 	p := s.reg.Get(name)
 	if p == nil {
@@ -189,8 +189,12 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 		argv = append(argv, k+"="+v)
 	}
 	ip := s.clientIP(r)
+	u := ""
+	if sess != nil {
+		u = sess.Username
+	}
 	// Ghi audit TRƯỚC khi chạy: nếu không ghi được thì không chạy thao tác.
-	if err := s.audit.Log(AuditEntry{IP: ip, Action: act, Pipeline: name, Args: argv, Result: "started"}); err != nil {
+	if err := s.audit.Log(AuditEntry{IP: ip, User: u, Action: act, Pipeline: name, Args: argv, Result: "started"}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing to run")
 		return
 	}
@@ -200,7 +204,7 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request, _ *Session) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), actionTimeout)
 	defer cancel()
 	res, err := a.Run(rctx, s, ActionRequest{Pipeline: p, Args: args, IP: ip})
-	entry := AuditEntry{IP: ip, Action: act, Pipeline: name, Args: argv, Result: "ok", ExitCode: res.ExitCode}
+	entry := AuditEntry{IP: ip, User: u, Action: act, Pipeline: name, Args: argv, Result: "ok", ExitCode: res.ExitCode}
 	if err != nil {
 		entry.Result = "error"
 		entry.Detail = map[string]any{"error": err.Error()}

@@ -37,9 +37,13 @@
       <span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>
       <button type="button" class="iconbtn" id="theme-toggle" aria-label="Colour theme: follows the system. Click to change." title="Colour theme">{{icon "auto"}}<span class="tlabel">Auto</span></button>
       <details class="usermenu" id="usermenu">
-        <summary aria-label="User menu">{{icon "user"}}admin</summary>
+        <summary aria-label="User menu">{{icon "user"}}{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</summary>
         <div class="menu">
-          <div class="who">Signed in as admin</div>
+          <div class="who">Signed in as <b>{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</b> <span class="badge small">{{if .CurrentUser.Role}}{{.CurrentUser.Role}}{{else}}admin{{end}}</span></div>
+          <a class="menuitem" href="/account">{{icon "user"}}My account</a>
+          {{if eq .CurrentUser.Role "admin"}}
+          <a class="menuitem" href="/users">{{icon "users"}}Users</a>
+          {{end}}
           <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn ghost" type="submit">{{icon "logout"}}Log out</button></form>
         </div>
       </details>

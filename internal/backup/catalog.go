@@ -38,13 +38,38 @@ var (
 )
 
 // Position is the database recovery point captured by the backup.
-// MySQL may provide GTIDSet, BinlogFile/BinlogPos, or both; PostgreSQL uses LSN.
+// MySQL may provide GTIDSet, BinlogFile/BinlogPos, or both; PostgreSQL uses LSN; MongoDB uses the oplog
+// timestamp ("<seconds>.<increment>").
 type Position struct {
 	GTIDSet    string `json:"gtid_set,omitempty"`
 	LSN        string `json:"lsn,omitempty"`
 	BinlogFile string `json:"binlog_file,omitempty"`
 	BinlogPos  int64  `json:"binlog_pos,omitempty"`
+	OplogTS    string `json:"oplog_ts,omitempty"`
 }
+
+// Backup kinds. Full and incremental backups are restore points; log segments (MySQL binlog, PostgreSQL
+// WAL, MongoDB oplog slices) extend a restore point to any time inside the recoverable window.
+const (
+	KindFull        = "full"
+	KindIncremental = "incremental"
+	KindLog         = "log"
+)
+
+// Supported engines.
+const (
+	EngineMySQL    = "mysql"
+	EnginePostgres = "postgres"
+	EngineMongoDB  = "mongodb"
+)
+
+func validEngine(e string) bool { return e == EngineMySQL || e == EnginePostgres || e == EngineMongoDB }
+
+// Check statuses recorded by verification.
+const (
+	CheckOK     = "ok"
+	CheckFailed = "failed"
+)
 
 // Record is immutable backup identity plus its managed lifecycle state.
 type Record struct {
@@ -64,6 +89,85 @@ type Record struct {
 	VerifiedAt  *time.Time `json:"verified_at,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	LegalHold   bool       `json:"legal_hold"`
+
+	// Managed-backup metadata (all optional; zero values describe a plain `strand backup push`).
+	JobID       string `json:"job_id,omitempty"`
+	Repository  string `json:"repository,omitempty"` // repository id; "" = the environment-configured S3
+	Method      string `json:"method,omitempty"`     // built-in method (mysqldump, pg_basebackup, binlog, wal, oplog...)
+	Kind        string `json:"kind,omitempty"`       // full (default), incremental, log
+	ParentID    string `json:"parent_id,omitempty"`  // incremental: the backup it is based on
+	CopyOf      string `json:"copy_of,omitempty"`    // replica in another repository of this backup
+	Format      string `json:"format,omitempty"`     // raw (default) or sbk1 (compressed and/or encrypted)
+	Compression string `json:"compression,omitempty"`
+	KeyID       string `json:"key_id,omitempty"` // encryption key id (never the key)
+	PlainBytes  int64  `json:"plain_bytes,omitempty"`
+	PlainSHA256 string `json:"plain_sha256,omitempty"`
+	// EndPosition is where a log segment (or a physical backup) ends.
+	EndPosition Position `json:"end_position"`
+	// StartTime is the consistent point of a base backup or the first event of a log segment; EndTime is
+	// the last event of a log segment.
+	StartTime   *time.Time        `json:"start_time,omitempty"`
+	EndTime     *time.Time        `json:"end_time,omitempty"`
+	VersionID   string            `json:"version_id,omitempty"` // S3 object version (Object Lock buckets)
+	LockMode    string            `json:"lock_mode,omitempty"`  // GOVERNANCE or COMPLIANCE
+	RetainUntil *time.Time        `json:"retain_until,omitempty"`
+	CheckedAt   *time.Time        `json:"checked_at,omitempty"`
+	CheckStatus string            `json:"check_status,omitempty"`
+	CheckDetail string            `json:"check_detail,omitempty"`
+	ExpiredAt   *time.Time        `json:"expired_at,omitempty"`
+	Details     map[string]string `json:"details,omitempty"`
+}
+
+// KindOrFull returns Kind, defaulting to full.
+func (r Record) KindOrFull() string {
+	if r.Kind == "" {
+		return KindFull
+	}
+	return r.Kind
+}
+
+// Meta is the metadata a running backup learns while it is uploading (positions reported by the tool,
+// payload format and plaintext digest); see Repository.UpdateBackupMeta.
+type Meta struct {
+	Position    Position          `json:"position"`
+	EndPosition Position          `json:"end_position"`
+	StartTime   *time.Time        `json:"start_time,omitempty"`
+	EndTime     *time.Time        `json:"end_time,omitempty"`
+	Format      string            `json:"format,omitempty"`
+	Compression string            `json:"compression,omitempty"`
+	KeyID       string            `json:"key_id,omitempty"`
+	PlainBytes  int64             `json:"plain_bytes,omitempty"`
+	PlainSHA256 string            `json:"plain_sha256,omitempty"`
+	VersionID   string            `json:"version_id,omitempty"`
+	LockMode    string            `json:"lock_mode,omitempty"`
+	RetainUntil *time.Time        `json:"retain_until,omitempty"`
+	Details     map[string]string `json:"details,omitempty"`
+}
+
+// ApplyMeta copies m onto r.
+func (r *Record) ApplyMeta(m Meta) {
+	r.Position, r.EndPosition, r.StartTime, r.EndTime = m.Position, m.EndPosition, m.StartTime, m.EndTime
+	r.Format, r.Compression, r.KeyID, r.PlainBytes, r.PlainSHA256 = m.Format, m.Compression, m.KeyID, m.PlainBytes, strings.ToLower(m.PlainSHA256)
+	r.VersionID, r.LockMode, r.RetainUntil, r.Details = m.VersionID, m.LockMode, m.RetainUntil, m.Details
+}
+
+// MetaOf returns the mutable metadata of r.
+func MetaOf(r Record) Meta {
+	return Meta{Position: r.Position, EndPosition: r.EndPosition, StartTime: r.StartTime, EndTime: r.EndTime,
+		Format: r.Format, Compression: r.Compression, KeyID: r.KeyID, PlainBytes: r.PlainBytes, PlainSHA256: r.PlainSHA256,
+		VersionID: r.VersionID, LockMode: r.LockMode, RetainUntil: r.RetainUntil, Details: r.Details}
+}
+
+// CheckResult is one verification or test-restore result.
+type CheckResult struct {
+	ID         int64             `json:"id,omitempty"`
+	BackupID   string            `json:"backup_id"`
+	Kind       string            `json:"kind"` // verify | test_restore
+	Status     string            `json:"status"`
+	StartedAt  time.Time         `json:"started_at"`
+	FinishedAt time.Time         `json:"finished_at"`
+	Detail     string            `json:"detail,omitempty"`
+	Metrics    map[string]string `json:"metrics,omitempty"`
 }
 
 // Filter bounds catalog listing. Limit is clamped to MaxListLimit by the catalog service.
@@ -71,6 +175,10 @@ type Filter struct {
 	Source        string
 	Engine        string
 	Status        Status
+	JobID         string
+	Kind          string // full|incremental|log; "" = any
+	NotKind       string // exclude one kind (e.g. log segments from listings)
+	Repository    string
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
 	// After continues a listing: only records strictly older than the cursor in the listing order
@@ -122,6 +230,15 @@ type Repository interface {
 	ListBackups(context.Context, Filter) ([]Record, error)
 	UpdateBackupStatus(context.Context, string, Status, Status, *time.Time) (Record, bool, error)
 	FinalizeBackup(context.Context, string, Status, int64, string, string, time.Time) (Record, bool, error)
+	// UpdateBackupMeta replaces the mutable metadata of a backup that is uploading or verifying.
+	UpdateBackupMeta(ctx context.Context, id string, m Meta) (Record, bool, error)
+	// ExpireBackup moves a complete backup to expired (refused under legal hold or an unexpired lock).
+	ExpireBackup(ctx context.Context, id string, at time.Time) (Record, bool, error)
+	// SetBackupLegalHold sets or clears legal hold on a backup that is not expired.
+	SetBackupLegalHold(ctx context.Context, id string, hold bool) (Record, bool, error)
+	// AddBackupCheck records a verification result and updates the backup's last check columns.
+	AddBackupCheck(ctx context.Context, c CheckResult) (int64, error)
+	ListBackupChecks(ctx context.Context, backupID string, limit int) ([]CheckResult, error)
 }
 
 // Catalog validates callers and provides idempotent create/status-update operations.
@@ -139,6 +256,13 @@ func (c *Catalog) Create(ctx context.Context, r Record) (Record, bool, error) {
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now().UTC()
 	}
+	if r.Kind == "" {
+		r.Kind = KindFull
+	}
+	if r.Format == "" {
+		r.Format = FormatRaw
+	}
+	r.PlainSHA256 = strings.ToLower(r.PlainSHA256)
 	if err := ValidateCreate(r); err != nil {
 		return Record{}, false, err
 	}
@@ -169,8 +293,16 @@ func (c *Catalog) List(ctx context.Context, f Filter) ([]Record, error) {
 	if f.Source != "" && !safeText(f.Source, 256) {
 		return nil, fmt.Errorf("%w: invalid source filter", ErrInvalid)
 	}
-	if f.Engine != "" && f.Engine != "mysql" && f.Engine != "postgres" {
-		return nil, fmt.Errorf("%w: engine must be mysql or postgres", ErrInvalid)
+	if f.Engine != "" && !validEngine(f.Engine) {
+		return nil, fmt.Errorf("%w: engine must be mysql, postgres or mongodb", ErrInvalid)
+	}
+	for _, k := range []string{f.Kind, f.NotKind} {
+		if k != "" && k != KindFull && k != KindIncremental && k != KindLog {
+			return nil, fmt.Errorf("%w: kind must be full, incremental or log", ErrInvalid)
+		}
+	}
+	if (f.JobID != "" && !validID(f.JobID)) || (f.Repository != "" && !validID(f.Repository)) {
+		return nil, fmt.Errorf("%w: invalid job or repository filter", ErrInvalid)
 	}
 	if f.Status != "" && !validStatus(f.Status) {
 		return nil, fmt.Errorf("%w: unsupported status", ErrInvalid)
@@ -235,8 +367,8 @@ func Validate(r Record) error {
 	if !safeText(r.Source, 256) {
 		return bad("source is required and must be at most 256 characters")
 	}
-	if r.Engine != "mysql" && r.Engine != "postgres" {
-		return bad("engine must be mysql or postgres")
+	if !validEngine(r.Engine) {
+		return bad("engine must be mysql, postgres or mongodb")
 	}
 	if !slugRE.MatchString(r.Tool) {
 		return bad("tool must be a lowercase tool identifier")
@@ -256,19 +388,13 @@ func Validate(r Record) error {
 	if r.SHA256 != "" && !sha256RE.MatchString(r.SHA256) {
 		return bad("sha256 must be 64 hexadecimal characters")
 	}
-	if r.Position.BinlogPos < 0 {
-		return bad("binlog_pos cannot be negative")
-	}
-	if r.Engine == "postgres" && (r.Position.GTIDSet != "" || r.Position.BinlogFile != "" || r.Position.BinlogPos != 0) {
-		return bad("postgres position cannot contain MySQL coordinates")
-	}
-	if r.Engine == "mysql" && r.Position.LSN != "" {
-		return bad("mysql position cannot contain an LSN")
-	}
-	for _, p := range []string{r.Position.GTIDSet, r.Position.LSN, r.Position.BinlogFile} {
-		if hasControl(p) || len(p) > 4096 {
-			return bad("invalid recovery position")
+	for _, pos := range []Position{r.Position, r.EndPosition} {
+		if err := validatePosition(r.Engine, pos); err != nil {
+			return err
 		}
+	}
+	if err := validateManaged(r); err != nil {
+		return err
 	}
 	if r.ManifestURI != "" {
 		if err := validateManifestURI(r.ManifestURI); err != nil {
@@ -298,7 +424,109 @@ func SameIdentity(a, b Record) bool {
 	return a.ID == b.ID && a.Source == b.Source && a.Engine == b.Engine && a.Tool == b.Tool &&
 		a.ToolVersion == b.ToolVersion && a.Bucket == b.Bucket && a.ObjectKey == b.ObjectKey &&
 		a.Position == b.Position && a.ManifestURI == b.ManifestURI && a.LegalHold == b.LegalHold &&
-		equalOptionalTime(a.ExpiresAt, b.ExpiresAt)
+		equalOptionalTime(a.ExpiresAt, b.ExpiresAt) && a.JobID == b.JobID && a.Repository == b.Repository &&
+		a.Method == b.Method && a.KindOrFull() == b.KindOrFull() && a.ParentID == b.ParentID && a.CopyOf == b.CopyOf
+}
+
+func validatePosition(engine string, p Position) error {
+	bad := func(reason string) error { return fmt.Errorf("%w: %s", ErrInvalid, reason) }
+	if p.BinlogPos < 0 {
+		return bad("binlog_pos cannot be negative")
+	}
+	if engine != EngineMySQL && (p.GTIDSet != "" || p.BinlogFile != "" || p.BinlogPos != 0) {
+		return bad(engine + " position cannot contain MySQL coordinates")
+	}
+	if engine != EnginePostgres && p.LSN != "" {
+		return bad(engine + " position cannot contain an LSN")
+	}
+	if engine != EngineMongoDB && p.OplogTS != "" {
+		return bad(engine + " position cannot contain an oplog timestamp")
+	}
+	for _, s := range []string{p.GTIDSet, p.LSN, p.BinlogFile, p.OplogTS} {
+		if hasControl(s) || len(s) > 65536 {
+			return bad("invalid recovery position")
+		}
+	}
+	return nil
+}
+
+func validateManaged(r Record) error {
+	bad := func(reason string) error { return fmt.Errorf("%w: %s", ErrInvalid, reason) }
+	if r.JobID != "" && !validID(r.JobID) {
+		return bad("invalid job_id")
+	}
+	if r.Repository != "" && !validID(r.Repository) {
+		return bad("invalid repository id")
+	}
+	if r.Method != "" && !slugRE.MatchString(r.Method) {
+		return bad("invalid method")
+	}
+	switch r.Kind {
+	case "", KindFull, KindIncremental, KindLog:
+	default:
+		return bad("kind must be full, incremental or log")
+	}
+	if r.Kind == KindIncremental && r.ParentID == "" {
+		return bad("an incremental backup requires parent_id")
+	}
+	for _, id := range []string{r.ParentID, r.CopyOf} {
+		if id != "" && (!validID(id) || id == r.ID) {
+			return bad("invalid parent_id or copy_of")
+		}
+	}
+	return validateMeta(MetaOf(r))
+}
+
+func validateMeta(m Meta) error {
+	bad := func(reason string) error { return fmt.Errorf("%w: %s", ErrInvalid, reason) }
+	switch m.Format {
+	case "", FormatRaw, FormatSBK1:
+	default:
+		return bad("format must be raw or sbk1")
+	}
+	if m.Compression != "" && m.Compression != CompressionZstd {
+		return bad("compression must be zstd")
+	}
+	if m.KeyID != "" && !keyIDRE.MatchString(m.KeyID) {
+		return bad("invalid key_id")
+	}
+	if (m.Compression != "" || m.KeyID != "") && m.Format != FormatSBK1 {
+		return bad("compressed or encrypted payloads use format sbk1")
+	}
+	if m.PlainBytes < 0 || (m.PlainSHA256 != "" && !sha256RE.MatchString(m.PlainSHA256)) {
+		return bad("invalid plaintext size or digest")
+	}
+	if m.LockMode != "" && m.LockMode != "GOVERNANCE" && m.LockMode != "COMPLIANCE" {
+		return bad("lock_mode must be GOVERNANCE or COMPLIANCE")
+	}
+	if (m.LockMode == "") != (m.RetainUntil == nil) {
+		return bad("lock_mode and retain_until go together")
+	}
+	if len(m.VersionID) > 1024 || hasControl(m.VersionID) {
+		return bad("invalid version_id")
+	}
+	if m.StartTime != nil && m.EndTime != nil && m.EndTime.Before(*m.StartTime) {
+		return bad("end_time precedes start_time")
+	}
+	if len(m.Details) > 64 {
+		return bad("too many details")
+	}
+	for k, v := range m.Details {
+		if !slugRE.MatchString(k) || len(v) > 8192 || hasControl(v) {
+			return bad("invalid details entry")
+		}
+	}
+	return nil
+}
+
+// ValidateMeta validates metadata recorded while a backup is running.
+func ValidateMeta(engine string, m Meta) error {
+	for _, pos := range []Position{m.Position, m.EndPosition} {
+		if err := validatePosition(engine, pos); err != nil {
+			return err
+		}
+	}
+	return validateMeta(m)
 }
 
 func equalOptionalTime(a, b *time.Time) bool {

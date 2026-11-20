@@ -960,16 +960,44 @@ Tên pipeline chỉ gồm chữ, số, `_`, `.`, `-` (tối đa 63 ký tự, b�
 
 Đang chạy thì cả hai chế độ lấy số liệu như nhau: admin socket (`top`, và ba lệnh mới `status`, `tables`, `events`) và `/metrics`, mỗi 5 giây vào ring buffer 1 giờ trong RAM. Pipeline đã dừng: chỉ hiện trạng thái, exit code (systemd; chế độ nền suy ra từ đuôi log) và đuôi log, không đọc vị trí checkpoint từ target. Chế độ nền: nếu tiến trình đã dừng và lần chạy cuối kết thúc bằng lỗi (dòng `Error [code]: ...` hoặc `Error: ...` cuối của CLI, hoặc bản ghi ERROR `pipeline failed`, tính từ mốc khởi động gần nhất) thì trạng thái là `failed` và `last_exit` được điền: lỗi có `[code]` đổi sang exit code theo bảng 8.3 (ví dụ `[log_gap]` là 5); lỗi không gắn mã (ví dụ mất kết nối tới target) là exit 1, như CLI. Lỗi cũ đã được một lần chạy sau đó (chạy rồi dừng êm) thay thế thì không tính. Dừng êm (SIGTERM, `strand stop`) vẫn là `stopped`. Tab Errors giữ các thuộc tính của bản ghi log (`error`, `reason`, `hint`, `table`, ...) cùng khuôn với sự kiện live, và thêm dòng `Error: ...` cuối của CLI.
 
-**Mật khẩu và token** (làm tay; `strand web init` ở trên gộp tất cả):
+**Xác thực người dùng và phân quyền (RBAC):**
+
+Web UI sử dụng xác thực bằng tên đăng nhập / mật khẩu cùng hệ thống phân quyền 3 vai trò (RBAC):
+- **admin**: Toàn quyền trên toàn bộ hệ thống — quản lý người dùng (`/users`), cài đặt (`/settings`), cấu hình pipeline, xem và sửa biến môi trường `.env`, khôi phục/xóa bản sao lưu (backups restore/delete), promote failover.
+- **operator**: Vận hành pipeline — start/stop/restart/pause/resume/throttle, thêm snapshot table, chạy verify/repair, thực thi bản sao lưu (run backup job). Không có quyền quản lý người dùng, cài đặt hệ thống hoặc xem/sửa các bí mật.
+- **viewer**: Chỉ đọc (read-only) — theo dõi trạng thái, dashboard, số liệu và tiến độ pipeline. Không thực hiện được bất kỳ thao tác ghi nào, các nút điều khiển bị vô hiệu hóa với tooltip "requires operator", không bao giờ nhìn thấy chuỗi bí mật.
+
+Chính sách mật khẩu: tối thiểu 12 ký tự, tối đa 72 byte, không được trùng với tên đăng nhập; bcrypt cost ≥ 12. Khi tạo người dùng với `--generate-password` hoặc bật `must_change_password`, người dùng bắt buộc phải đổi mật khẩu ở lần đăng nhập đầu tiên. Đăng nhập thất bại quá 5 lần sẽ khóa tài khoản trong 15 phút. Khi người dùng bị vô hiệu hóa, bị xóa, hoặc đổi mật khẩu, toàn bộ các phiên đăng nhập đang hoạt động của người dùng đó sẽ bị thu hồi ngay lập tức.
+
+**Quản lý người dùng qua CLI:**
 
 ```bash
-strand web passwd --config /etc/strand/web.yaml     # hỏi hai lần, ghi bcrypt hash vào web.yaml, giữ nguyên chủ sở hữu/mode (root:strand 0640 vẫn đọc được; bỏ bit other và group-write; file mới 0600)
-strand web token  --config /etc/strand/web.yaml     # tùy chọn: token cho script, in một lần, lưu sha256
-sudo systemctl enable --now strand-web
-curl -H "Authorization: Bearer <token>" http://127.0.0.1:8080/api/v1/overview
+# Tạo người dùng mới (vai trò: admin, operator, hoặc viewer)
+strand web user add alice --role operator --display-name "Alice Operator"
+echo 'SecurePassword123!' | strand web user add bob --role viewer --password-stdin
+strand web user add charlie --role admin --generate-password  # in mật khẩu ngẫu nhiên một lần
+
+# Danh sách người dùng
+strand web user list
+
+# Vô hiệu hóa hoặc kích hoạt lại người dùng
+strand web user disable alice
+strand web user enable alice
+
+# Đổi vai trò
+strand web user set-role alice admin
+
+# Đặt lại mật khẩu (buộc đổi mật khẩu ở lần đăng nhập kế tiếp)
+strand web user reset-password alice --password-stdin
+
+# Đổi mật khẩu cho người dùng cụ thể
+strand web passwd --user alice
+
+# Tạo token API người dùng (trên trang My account) hoặc token admin kế thừa
+strand web token --config /etc/strand/web.yaml
 ```
 
-Chưa đặt mật khẩu thì `strand web` từ chối khởi động (exit 2). Một tài khoản admin duy nhất, không có mật khẩu mặc định. Mật khẩu 8–72 ký tự. Script không có TTY: `echo 'mật-khẩu' | strand web passwd --config web.yaml`.
+**Nâng cấp từ các bản cài cũ:** Khi nâng cấp lên phiên bản hỗ trợ RBAC, mật khẩu admin đơn lẻ có sẵn trong kho metadata PostgreSQL sẽ tự động chuyển thành tài khoản người dùng `admin` (vai trò `admin`, `must_change_password=false`) một cách an toàn và idempotent. Token API toàn cục cũ tiếp tục hoạt động như một token admin kèm header thông báo `Deprecation: true` cho đến khi bị thu hồi.
 
 **TLS.** Bind khác loopback (`0.0.0.0`, IP máy) cần `tls_cert` và `tls_key`, nếu không từ chối khởi động; ngoại lệ: `allow_plain_http: true` cho phép HTTP thường (mật khẩu, cookie phiên, token đi dạng rõ, web in cảnh báo khi khởi động; chỉ dùng trong mạng tin cậy). Cách thường dùng: để `listen: 127.0.0.1:8080` rồi đặt reverse proxy (nginx, Caddy) làm TLS phía trước, kèm `secure_cookies: true` (cookie có cờ `Secure`) và `trust_forwarded_for: true` (lấy IP client từ `X-Forwarded-For`, chỉ bật khi proxy tin cậy).
 

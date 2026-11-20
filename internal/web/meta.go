@@ -111,6 +111,12 @@ func (m *metaDB) adminHashes() (string, string) {
 	return a.PasswordHash, a.APITokenHash
 }
 
+func (m *metaDB) invalidateAdminCache() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.adminAt = time.Time{}
+}
+
 func (s *Server) passwordHash() string {
 	p, _ := s.db.adminHashes()
 	return p

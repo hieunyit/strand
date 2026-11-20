@@ -395,6 +395,201 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 	})
 	t.Run("backups", func(t *testing.T) { runBackups(t, mk(t)) })
 	t.Run("backup_jobs", func(t *testing.T) { runBackupJobs(t, mk(t)) })
+	t.Run("users_and_rbac", func(t *testing.T) { runUsersAndRBAC(t, mk(t)) })
+	t.Run("backup_pro", func(t *testing.T) { runBackupPro(t, mk(t)) })
+	t.Run("backup_retry", func(t *testing.T) { runBackupRetry(t, mk(t)) })
+}
+
+func runUsersAndRBAC(t *testing.T, s store.Store) {
+	ctx := context.Background()
+
+	// 1. CreateUser & GetUser
+	alice, err := s.CreateUser(ctx, store.User{
+		Username:           "alice",
+		DisplayName:        "Alice Wonderland",
+		PasswordHash:       "hash-alice-1",
+		Role:               store.RoleOperator,
+		MustChangePassword: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if alice.ID == 0 || alice.Username != "alice" || alice.Role != store.RoleOperator || !alice.MustChangePassword {
+		t.Fatalf("unexpected created user: %+v", alice)
+	}
+
+	// Case-insensitive lookup
+	u, ok, err := s.GetUser(ctx, "ALICE")
+	if err != nil || !ok || u.ID != alice.ID || u.DisplayName != "Alice Wonderland" {
+		t.Fatalf("GetUser ALICE: ok=%v err=%v user=%+v", ok, err, u)
+	}
+
+	// GetUserByID
+	uByID, ok, err := s.GetUserByID(ctx, alice.ID)
+	if err != nil || !ok || uByID.Username != "alice" {
+		t.Fatalf("GetUserByID: ok=%v err=%v user=%+v", ok, err, uByID)
+	}
+
+	// Case-insensitive uniqueness
+	if _, err := s.CreateUser(ctx, store.User{Username: "ALICE", Role: store.RoleViewer}); err == nil {
+		t.Fatal("expected duplicate username error for ALICE, got nil")
+	}
+
+	// 2. ListUsers
+	bob, err := s.CreateUser(ctx, store.User{Username: "bob", DisplayName: "Bob Builder", Role: store.RoleViewer})
+	if err != nil {
+		t.Fatalf("CreateUser bob: %v", err)
+	}
+	users, err := s.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(users) < 2 {
+		t.Fatalf("expected at least 2 users, got %d", len(users))
+	}
+
+	// 3. UpdateUser
+	alice.DisplayName = "Alice Updated"
+	alice.Role = store.RoleAdmin
+	alice.Disabled = true
+	if err := s.UpdateUser(ctx, alice); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	u, _, _ = s.GetUser(ctx, "alice")
+	if u.DisplayName != "Alice Updated" || u.Role != store.RoleAdmin || !u.Disabled {
+		t.Fatalf("user after update: %+v", u)
+	}
+
+	// 4. SetUserPassword
+	if err := s.SetUserPassword(ctx, alice.ID, "new-hash-2", false); err != nil {
+		t.Fatalf("SetUserPassword: %v", err)
+	}
+	u, _, _ = s.GetUser(ctx, "alice")
+	if u.PasswordHash != "new-hash-2" || u.MustChangePassword {
+		t.Fatalf("user after SetUserPassword: %+v", u)
+	}
+
+	// 5. Login counters & locking
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	lockedUntil := now.Add(15 * time.Minute)
+	if err := s.RecordLoginFailure(ctx, alice.ID, 3, &lockedUntil, now); err != nil {
+		t.Fatalf("RecordLoginFailure: %v", err)
+	}
+	u, _, _ = s.GetUser(ctx, "alice")
+	if u.FailedLoginCount != 3 || u.LockedUntil == nil || !u.LockedUntil.Equal(lockedUntil) {
+		t.Fatalf("user after failure: %+v", u)
+	}
+
+	if err := s.RecordLoginSuccess(ctx, alice.ID, now); err != nil {
+		t.Fatalf("RecordLoginSuccess: %v", err)
+	}
+	u, _, _ = s.GetUser(ctx, "alice")
+	if u.FailedLoginCount != 0 || u.LockedUntil != nil || u.LastLoginAt == nil || !u.LastLoginAt.Equal(now) {
+		t.Fatalf("user after success: %+v", u)
+	}
+
+	if err := s.RecordLoginFailure(ctx, alice.ID, 1, nil, now); err != nil {
+		t.Fatalf("RecordLoginFailure: %v", err)
+	}
+	if err := s.ResetLoginFailures(ctx, alice.ID); err != nil {
+		t.Fatalf("ResetLoginFailures: %v", err)
+	}
+	u, _, _ = s.GetUser(ctx, "alice")
+	if u.FailedLoginCount != 0 || u.LockedUntil != nil {
+		t.Fatalf("user after ResetLoginFailures: %+v", u)
+	}
+
+	// 6. User Sessions
+	must(t, s.PutSession(ctx, store.Session{
+		IDHash:   "sess-bob-1",
+		CSRF:     "csrf-1",
+		IP:       "10.0.0.1",
+		Created:  now,
+		LastSeen: now,
+		UserID:   bob.ID,
+		Username: "bob",
+	}))
+	must(t, s.PutSession(ctx, store.Session{
+		IDHash:   "sess-bob-2",
+		CSRF:     "csrf-2",
+		IP:       "10.0.0.2",
+		Created:  now,
+		LastSeen: now.Add(time.Second),
+		UserID:   bob.ID,
+		Username: "bob",
+	}))
+
+	sess, ok, err := s.GetSession(ctx, "sess-bob-1")
+	if err != nil || !ok || sess.UserID != bob.ID || sess.Username != "bob" {
+		t.Fatalf("GetSession with user: ok=%v err=%v sess=%+v", ok, err, sess)
+	}
+
+	bobSessions, err := s.ListUserSessions(ctx, bob.ID)
+	if err != nil || len(bobSessions) != 2 {
+		t.Fatalf("ListUserSessions: len=%d err=%v", len(bobSessions), err)
+	}
+
+	// PurgeOtherUserSessions
+	if err := s.PurgeOtherUserSessions(ctx, bob.ID, "sess-bob-2"); err != nil {
+		t.Fatalf("PurgeOtherUserSessions: %v", err)
+	}
+	bobSessions, _ = s.ListUserSessions(ctx, bob.ID)
+	if len(bobSessions) != 1 || bobSessions[0].IDHash != "sess-bob-2" {
+		t.Fatalf("sessions after PurgeOtherUserSessions: %+v", bobSessions)
+	}
+
+	// PurgeUserSessions
+	if err := s.PurgeUserSessions(ctx, bob.ID); err != nil {
+		t.Fatalf("PurgeUserSessions: %v", err)
+	}
+	bobSessions, _ = s.ListUserSessions(ctx, bob.ID)
+	if len(bobSessions) != 0 {
+		t.Fatalf("sessions after PurgeUserSessions: %+v", bobSessions)
+	}
+
+	// 7. User Tokens
+	tokenHash := "1111111111222222222233333333334444444444555555555566666666667777"
+	tok, err := s.CreateUserToken(ctx, store.UserToken{
+		UserID:      bob.ID,
+		Name:        "cli-token",
+		TokenHash:   tokenHash,
+		TokenPrefix: "strand_1111",
+	})
+	if err != nil {
+		t.Fatalf("CreateUserToken: %v", err)
+	}
+	if tok.ID == 0 || tok.UserID != bob.ID || tok.TokenPrefix != "strand_1111" {
+		t.Fatalf("unexpected tok: %+v", tok)
+	}
+
+	toks, err := s.ListUserTokens(ctx, bob.ID)
+	if err != nil || len(toks) != 1 {
+		t.Fatalf("ListUserTokens: len=%d err=%v", len(toks), err)
+	}
+
+	authU, authTok, ok, err := s.AuthenticateToken(ctx, tokenHash)
+	if err != nil || !ok || authU.ID != bob.ID || authTok.ID != tok.ID {
+		t.Fatalf("AuthenticateToken: ok=%v err=%v user=%+v tok=%+v", ok, err, authU, authTok)
+	}
+
+	// RevokeUserToken
+	if err := s.RevokeUserToken(ctx, tok.ID, bob.ID); err != nil {
+		t.Fatalf("RevokeUserToken: %v", err)
+	}
+	_, _, ok, err = s.AuthenticateToken(ctx, tokenHash)
+	if ok || err != nil {
+		t.Fatalf("AuthenticateToken after revoke: ok=%v err=%v", ok, err)
+	}
+
+	// 8. DeleteUser cascades
+	must(t, s.DeleteUser(ctx, bob.ID))
+	if _, ok, _ := s.GetUser(ctx, "bob"); ok {
+		t.Fatal("user bob still exists after DeleteUser")
+	}
+	toks, _ = s.ListUserTokens(ctx, bob.ID)
+	if len(toks) != 0 {
+		t.Fatalf("user tokens remain after DeleteUser: %+v", toks)
+	}
 }
 
 func must(t *testing.T, err error) {
