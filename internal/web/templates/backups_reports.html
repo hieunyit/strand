@@ -1,0 +1,46 @@
+{{define "content"}}
+{{if .Body.Message}}<div class="alert alert-warn mb" role="status">{{.Body.Message}}</div>{{end}}
+<section class="card" id="bk-report-range">
+  <div class="cardhead"><h2>Period</h2><a class="btn small" href="{{.Body.CSVURL}}" download>{{icon "download"}}Download CSV</a></div>
+  <form method="get" action="/backups/reports" class="filterbar">
+    <div class="field-grid cols-3">
+      <label class="field"><span class="field-label">From</span><input type="date" name="from" value="{{.Body.From}}" required></label>
+      <label class="field"><span class="field-label">To</span><input type="date" name="to" value="{{.Body.To}}" required></label>
+      <div class="field form-actions"><button class="btn primary" type="submit">Show</button></div>
+    </div>
+  </form>
+</section>
+{{with .Body.Report}}
+<section class="summary-strip" aria-label="Compliance summary">
+  <div class="kpis">
+    <div class="kpi"><div class="kpi-label">Sources</div><div class="kpi-value c-num">{{.Sources}}</div><div class="kpi-sub">with a backup job</div></div>
+    <div class="kpi{{if .RPOBreaching}} bad{{end}}"><div class="kpi-label">RPO breaches</div><div class="kpi-value c-num">{{.RPOBreaching}}</div><div class="kpi-sub">sources over target now</div></div>
+    <div class="kpi"><div class="kpi-label">Success, 7 days</div><div class="kpi-value c-num">{{if .SuccessRate7d}}{{pct (deref .SuccessRate7d)}}{{else}}-{{end}}</div><div class="kpi-sub">runs that finished</div></div>
+    <div class="kpi"><div class="kpi-label">Success, 30 days</div><div class="kpi-value c-num">{{if .SuccessRate30d}}{{pct (deref .SuccessRate30d)}}{{else}}-{{end}}</div><div class="kpi-sub">runs that finished</div></div>
+    <div class="kpi"><div class="kpi-label">Last test restore</div><div class="kpi-value">{{if .LastTestRestore}}{{rel (derefTime .LastTestRestore)}}{{else}}never{{end}}</div><div class="kpi-sub">into a scratch database</div></div>
+  </div>
+</section>
+<section class="card" id="bk-report-rows">
+  <div class="cardhead"><h2>By source</h2><span class="muted small">{{ts .From}} – {{ts .To}}</span></div>
+  {{if .Rows}}
+  <div class="tablewrap"><table class="data-table grid">
+    <caption class="sr-only">Backup compliance by source</caption>
+    <thead><tr><th scope="col">Source</th><th scope="col">Job</th><th scope="col">Engine</th><th scope="col">PITR</th><th scope="col" class="r c-num">Current RPO</th><th scope="col" class="r c-num">Target</th><th scope="col" class="r c-num">Runs</th><th scope="col" class="r c-num">Failed</th><th scope="col" class="r c-num">Success</th><th scope="col">Last restore point</th><th scope="col">Status</th></tr></thead>
+    <tbody>{{range .Rows}}<tr>
+      <td class="mono">{{.Source}}</td>
+      <td>{{if .JobID}}<a href="/backups/jobs/{{.JobID}}">{{if .JobName}}{{.JobName}}{{else}}{{.JobID}}{{end}}</a>{{else}}-{{end}}</td>
+      <td>{{if .Engine}}{{.Engine}}{{else}}-{{end}}</td>
+      <td>{{if .PITR}}<span class="badge st-info">on</span>{{else}}<span class="badge st-neutral">off</span>{{end}}</td>
+      <td class="r c-num nowrap">{{if lt .CurrentRPOSeconds 0}}-{{else}}{{dur (i64f .CurrentRPOSeconds)}}{{end}}</td>
+      <td class="r c-num nowrap">{{if .RPOTargetMinutes}}{{.RPOTargetMinutes}} min{{else}}-{{end}}</td>
+      <td class="r c-num">{{.Runs}}</td>
+      <td class="r c-num">{{.Failed}}</td>
+      <td class="r c-num">{{if .SuccessRate}}{{pct (deref .SuccessRate)}}{{else}}-{{end}}</td>
+      <td class="nowrap">{{if .LastRestorePoint}}{{rel (derefTime .LastRestorePoint)}}{{else}}none{{end}}</td>
+      <td>{{if .RPOBreach}}<span class="badge st-danger">RPO breach</span>{{else if lt .CurrentRPOSeconds 0}}<span class="badge st-neutral">no restore point</span>{{else}}<span class="badge st-success">on target</span>{{end}}</td>
+    </tr>{{end}}</tbody>
+  </table></div>
+  {{else}}<div class="empty-state">{{icon "empty"}}<b>No backup jobs yet</b><span>Sources appear here once a backup job exists.</span>{{if $.Body.IsAdmin}}<a class="btn primary" href="/backups/jobs/new">{{icon "plus"}}New backup job</a>{{end}}</div>{{end}}
+</section>
+{{end}}
+{{end}}

@@ -34,6 +34,7 @@
     <a href="/backups/catalog" class="{{if eq .Active "backups-catalog"}}active{{end}}"{{if eq .Active "backups-catalog"}} aria-current="page"{{end}}>{{icon "table"}}Restore points</a>
     <a href="/backups/restore" class="{{if eq .Active "backups-restore"}}active{{end}}"{{if eq .Active "backups-restore"}} aria-current="page"{{end}}>{{icon "db"}}Restore</a>
     <a href="/backups/repositories" class="{{if eq .Active "backups-repos"}}active{{end}}"{{if eq .Active "backups-repos"}} aria-current="page"{{end}}>{{icon "server"}}Repositories</a>
+    <a href="/backups/reports" class="{{if eq .Active "backups-reports"}}active{{end}}"{{if eq .Active "backups-reports"}} aria-current="page"{{end}}>{{icon "graph"}}Reports</a>
     {{if eq .CurrentUser.Role "admin"}}
     <a href="/backups/notifications" class="{{if eq .Active "backups-notify"}}active{{end}}"{{if eq .Active "backups-notify"}} aria-current="page"{{end}}>{{icon "jobs"}}Notifications</a>
     <a href="/backups/keys" class="{{if eq .Active "backups-keys"}}active{{end}}"{{if eq .Active "backups-keys"}} aria-current="page"{{end}}>{{icon "config"}}Keys</a>

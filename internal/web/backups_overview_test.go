@@ -33,3 +33,22 @@ func TestBackupOverviewWarnsWithoutBackupEncryptionKey(t *testing.T) {
 		t.Fatal("warning shown although a backup encryption key is configured")
 	}
 }
+
+// The compliance report had only a JSON API and a CSV export; the page shows the same range for every role.
+func TestBackupReportsPage(t *testing.T) {
+	e := dbEnv(t, store.NewMem(), nil, nil)
+	c, _ := e.loginOK()
+	resp, body := e.do(c, "GET", "/backups/reports?from=2026-10-01&to=2026-10-31", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("reports page: %d", resp.StatusCode)
+	}
+	for _, want := range []string{`class="pagehead"`, `class="breadcrumb"`, "Compliance report",
+		`href="/api/v1/backup-reports/compliance.csv?from=2026-10-01&amp;to=2026-10-31"`, `value="2026-10-01"`, `value="2026-10-31"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("reports page lacks %q", want)
+		}
+	}
+	if _, body := e.do(c, "GET", "/backups/reports?from=2026-11-01&to=2026-10-01", "", nil); !strings.Contains(body, "showing the last 30 days") {
+		t.Error("an inverted range is not reported")
+	}
+}

@@ -25,6 +25,7 @@ const rpoRenotify = 6 * time.Hour
 
 func (s *Server) backupRPORoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/backup-rpo", s.auth(true, s.apiBackupRPO))
+	mux.Handle("GET /backups/reports", s.auth(false, s.pageBackupsReports))
 	mux.Handle("GET /api/v1/backup-reports/compliance", s.auth(true, s.apiBackupCompliance))
 	mux.Handle("GET /api/v1/backup-reports/compliance.csv", s.auth(true, s.apiBackupComplianceCSV))
 	mux.Handle("GET /api/v1/backup-activity", s.auth(true, s.apiBackupActivity))

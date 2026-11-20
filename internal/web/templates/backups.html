@@ -37,7 +37,7 @@
       <div class="kpi-value c-num">{{.Body.StatStorageUsed}}</div>
       <div class="kpi-sub">compressed catalog</div>
     </div>
-    <a href="/api/v1/backup-rpo" class="kpi{{if .Body.RPOBreachCount}} bad{{end}}" title="Sources whose newest restore point is older than their policy's RPO target">
+    <a href="/backups/reports" class="kpi{{if .Body.RPOBreachCount}} bad{{end}}" title="Sources whose newest restore point is older than their policy's RPO target">
       <div class="kpi-label">RPO breaches</div>
       <div class="kpi-value c-num">{{.Body.StatRPOBreaches}}</div>
       <div class="kpi-sub">sources over their RPO target</div>

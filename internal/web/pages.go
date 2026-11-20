@@ -30,7 +30,7 @@ var pageNames = []string{
 	"overview", "pipelines", "detail", "jobs", "job", "backups", "backups_jobs", "backups_job_detail",
 	"backups_catalog", "backups_catalog_detail", "backups_restore", "wizard", "new_pipeline", "settings",
 	"mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error", "users", "account",
-	"backups_repositories", "backups_repository_detail", "backups_notifications", "backups_keys", "backups_activity",
+	"backups_repositories", "backups_repository_detail", "backups_notifications", "backups_keys", "backups_activity", "backups_reports",
 }
 
 func templateFuncs() template.FuncMap {
@@ -84,6 +84,7 @@ func templateFuncs() template.FuncMap {
 		"lower":                     strings.ToLower,
 		"ptrInt":                    func(p *int) int { return *p },
 		"deref":                     func(p *float64) float64 { return *p },
+		"i64f":                      func(v int64) float64 { return float64(v) },
 		"stateKey":                  func(s string) string { return s },
 		"icon":                      icon,
 		"tabIcon":                   tabIcon,
