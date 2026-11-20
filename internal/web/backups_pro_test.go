@@ -51,7 +51,7 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 		seedComplete(t, st, "bkp-w"+string(rune('a'+i)), job.ID, now.Add(-time.Duration(4-i)*time.Hour), backup.KindFull)
 	}
 	e := dbEnv(t, st, nil, nil)
-	waitIdle(t, e, "backup-prune-bjob-web", "backup-restore", "backup-bjob-web")
+	waitIdle(t, e, "backup-prune-bjob-web", "backup-bjob-web")
 	c, csrf := e.loginOK()
 	h := map[string]string{"X-CSRF-Token": csrf, "Content-Type": "application/json"}
 
@@ -159,6 +159,20 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	_ = json.Unmarshal([]byte(body), &pid)
 	waitFor(t, "restore process recorded", func() bool { _, ok := e.srv.jobs.Get(pid.ProcessID); return ok })
 	js, _ := e.srv.jobs.Get(pid.ProcessID)
+	waitIdle(t, e, js.Pipeline)
+	// A second restore runs concurrently (own pipeline), e.g. MySQL and PostgreSQL at the same time.
+	second := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","target":{"host":"db3"},"target_database":"shop_pitr2","confirm":"shop_pitr2"}`
+	resp2, body2 := e.do(c, "POST", "/api/v1/backup-restores", second, h)
+	if resp2.StatusCode != http.StatusAccepted {
+		t.Fatalf("concurrent restore refused: %d %s", resp2.StatusCode, body2)
+	}
+	var pid2 struct {
+		ProcessID string `json:"process_id"`
+	}
+	_ = json.Unmarshal([]byte(body2), &pid2)
+	if js2, ok := e.srv.jobs.Get(pid2.ProcessID); ok {
+		waitIdle(t, e, js2.Pipeline)
+	}
 	args := strings.Join(js.Args, " ")
 	if !strings.Contains(args, "backup restore --yes --source mysql-prod --to-time 2026-11-20T10:00:00Z") ||
 		!strings.Contains(args, "--target-database shop_pitr") || !strings.Contains(args, "--target-password-env RESTORE_PW") {

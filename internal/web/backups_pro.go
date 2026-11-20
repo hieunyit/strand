@@ -217,7 +217,7 @@ func (s *Server) apiBackupVerifyOne(w http.ResponseWriter, r *http.Request, _ *S
 	if !s.auditBackupOp(w, r, "backup.verify", map[string]any{"backup_id": id}) {
 		return
 	}
-	pid, err := s.startBackupOp("backup-verify", "backup-verify", "verify", "--id", id)
+	pid, err := s.startBackupOp("backup-verify", "backup-verify-"+id, "verify", "--id", id)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
@@ -247,7 +247,7 @@ func (s *Server) apiBackupCopy(w http.ResponseWriter, r *http.Request, _ *Sessio
 	if !s.auditBackupOp(w, r, "backup.copy", map[string]any{"backup_id": id, "repository": req.Repository}) {
 		return
 	}
-	pid, err := s.startBackupOp("backup-copy", "backup-copy", "copy", "--id", id, "--to-repository", req.Repository)
+	pid, err := s.startBackupOp("backup-copy", "backup-copy-"+id, "copy", "--id", id, "--to-repository", req.Repository)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
@@ -285,7 +285,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		"target_time": req.TargetTime, "target_host": req.Target.Host, "target_database": req.TargetDB, "target_dir": req.TargetDir}) {
 		return
 	}
-	pid, err := s.startBackupOp("backup-restore", "backup-restore", args...)
+	pid, err := s.startBackupOp("backup-restore", "backup-restore-"+runner.NewID("r"), args...)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
