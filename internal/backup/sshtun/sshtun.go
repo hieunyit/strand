@@ -27,6 +27,9 @@ func OpenForConnection(ctx context.Context, c backup.Connection) (addrHost strin
 	if c.SSHTunnel == nil {
 		return c.Host, c.Port, func() {}, nil
 	}
+	if c.URISet || c.URIEnv != "" || len(c.URISealed) > 0 {
+		return "", 0, nil, errors.New("ssh_tunnel cannot be used with a connection URI; use host/port/user")
+	}
 	tun := c.SSHTunnel
 	if strings.TrimSpace(tun.KnownHostsRef) == "" {
 		return "", 0, nil, errors.New("ssh_tunnel needs known_hosts_ref")

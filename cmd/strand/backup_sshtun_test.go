@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,66 @@ import (
 	"strand/internal/tunnel/tunneltest"
 	"strand/internal/web/store"
 )
+
+func TestJobRun_RefuseSSHTunnelWithURI(t *testing.T) {
+	st := store.NewMem()
+	ctx := context.Background()
+
+	srv := tunneltest.StartSSHServer(t, false)
+	conn := backup.Connection{
+		ID:         "conn-sshtun-uri",
+		Name:       "tunneled-mongo-uri",
+		Engine:     backup.ConnMongoDB,
+		Host:       "mongo.internal",
+		Port:       27017,
+		SecretMode: backup.SecretEnv,
+		URIEnv:     "MONGO_URI",
+		SSHTunnel: &backup.SSHTunnel{
+			Host:          "bastion.internal",
+			Port:          22,
+			User:          "ops",
+			KnownHostsRef: srv.KnownHostsFile(),
+		},
+	}
+	if _, err := st.CreateBackupConnection(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+
+	job := backup.Job{
+		ID:           "job-sshtun-uri",
+		Name:         "mongo tunneled uri",
+		EverySeconds: 3600,
+		Enabled:      true,
+		Bucket:       "bkt",
+		JobOptions: backup.JobOptions{
+			ConnectionID: conn.ID,
+			Method:       backup.MethodMongodump,
+			Source:       "test-src",
+			Conn:         backup.ConnSpec{Host: "mongo.internal", Port: 27017},
+		},
+	}
+	if err := st.CreateBackupJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. resolveJobConnection must fail
+	_, err := resolveJobConnection(ctx, st, job, func(k string) string { return "mongodb://mongo.internal:27017" })
+	if err == nil {
+		t.Fatal("expected resolveJobConnection to fail for connection with SSHTunnel and URIEnv")
+	}
+	if !strings.Contains(err.Error(), "ssh_tunnel cannot be used with a connection URI; use host/port/user") {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+
+	// 2. OpenForConnection must fail
+	_, _, _, err = sshtun.OpenForConnection(ctx, conn)
+	if err == nil {
+		t.Fatal("expected OpenForConnection to fail for connection with SSHTunnel and URI")
+	}
+	if !strings.Contains(err.Error(), "ssh_tunnel cannot be used with a connection URI; use host/port/user") {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+}
 
 func TestJobRun_TunneledConnection(t *testing.T) {
 	srv := tunneltest.StartSSHServer(t, false)

@@ -376,6 +376,9 @@ Passwords come from the environment variable named by --target-password-env.`,
 				return backupUsageErr("restores need --yes (the target must be new; nothing is overwritten)")
 			}
 			if tunnelSSH != "" {
+				if target.URIEnv != "" {
+					return backupUsageErr("ssh tunnel cannot be used with a connection URI; use host/port/user")
+				}
 				if err := tunnel.ValidateSecurity(tunnelIdentity, tunnelKnownHosts); err != nil {
 					return fmt.Errorf("tunnel security: %w", err)
 				}

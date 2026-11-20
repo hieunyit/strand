@@ -23,19 +23,30 @@ func passwordOfURI(raw string) string {
 	return ""
 }
 
-func checkMongo(ctx context.Context, t Target, res *Result) {
+// MongoURI builds the MongoDB connection URI for target t.
+func MongoURI(t Target) string {
 	uri := t.URI
 	if uri == "" {
 		port := t.Port
 		if port == 0 {
 			port = 27017
 		}
-		u := url.URL{Scheme: "mongodb", Host: hostPort(Target{Host: t.Host, Port: port, Engine: t.Engine}), Path: "/"}
+		u := url.URL{
+			Scheme:   "mongodb",
+			Host:     hostPort(Target{Host: t.Host, Port: port, Engine: t.Engine}),
+			Path:     "/",
+			RawQuery: "directConnection=true",
+		}
 		if t.User != "" {
 			u.User = url.UserPassword(t.User, t.Password)
 		}
 		uri = u.String()
 	}
+	return uri
+}
+
+func checkMongo(ctx context.Context, t Target, res *Result) {
+	uri := MongoURI(t)
 	opts := options.Client().ApplyURI(uri).SetServerSelectionTimeout(8 * time.Second).SetConnectTimeout(8 * time.Second)
 	if t.TLSMode != "" && t.TLSMode != "disable" {
 		serverName := t.TLSServerName

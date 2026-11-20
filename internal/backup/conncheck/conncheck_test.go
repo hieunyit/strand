@@ -74,6 +74,21 @@ func TestRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestMongoURI_TunneledDirectConnection(t *testing.T) {
+	target := Target{
+		Engine:        backup.ConnMongoDB,
+		Host:          "127.0.0.1",
+		Port:          27017,
+		User:          "backupuser",
+		Password:      "secret",
+		TLSServerName: "mongo-rs1.internal",
+	}
+	uri := MongoURI(target)
+	if !strings.Contains(uri, "directConnection=true") {
+		t.Fatalf("expected directConnection=true in MongoDB URI, got: %s", uri)
+	}
+}
+
 var ctSeq atomic.Int64
 
 func startContainer(t *testing.T, kind string, req testcontainers.ContainerRequest) (host, port string) {

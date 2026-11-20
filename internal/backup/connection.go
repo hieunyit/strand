@@ -174,6 +174,9 @@ func ApplyConnection(j Job, c Connection) (Job, error) {
 	if e := j.Engine(); e != c.CatalogEngine() {
 		return j, fmt.Errorf("%w: method %q needs a %s connection, %q is %s", ErrInvalid, j.Method, e, c.Name, c.Engine)
 	}
+	if c.SSHTunnel != nil && (c.URISet || c.URIEnv != "") {
+		return j, errors.New("ssh_tunnel cannot be used with a connection URI; use host/port/user")
+	}
 	dbs := j.Conn.Databases
 	j.Conn = ConnSpec{Host: c.Host, Port: c.Port, User: c.User, Databases: dbs}
 	if j.Conn.Port == 0 && c.Host != "" {

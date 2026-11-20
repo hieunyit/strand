@@ -125,7 +125,11 @@ func (s *SSHServer) serve(c net.Conn, cfg *ssh.ServerConfig) {
 			nc.Reject(ssh.ConnectionFailed, err.Error())
 			continue
 		}
-		ch, creqs, _ := nc.Accept()
+		ch, creqs, err := nc.Accept()
+		if err != nil {
+			up.Close()
+			continue
+		}
 		go ssh.DiscardRequests(creqs)
 		go func() { io.Copy(ch, up); ch.CloseWrite(); ch.Close() }()
 		go func() { io.Copy(up, ch); up.Close() }()

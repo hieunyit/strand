@@ -35,6 +35,64 @@ func TestOpenForConnection_NilTunnel(t *testing.T) {
 	closeFn() // should be no-op
 }
 
+func TestOpenForConnection_RefuseURISecret(t *testing.T) {
+	ctx := context.Background()
+	keyDir := t.TempDir()
+	t.Setenv("STRAND_WEB_SSH_KEY_DIR", keyDir)
+
+	srv := tunneltest.StartSSHServer(t, false)
+	identData, err := os.ReadFile(srv.IdentityFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identPath := filepath.Join(keyDir, "id_ed25519")
+	if err := os.WriteFile(identPath, identData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	connStored := backup.Connection{
+		Host:       "db.internal",
+		Port:       27017,
+		Engine:     backup.ConnMongoDB,
+		SecretMode: backup.SecretStored,
+		URISet:     true,
+		SSHTunnel: &backup.SSHTunnel{
+			Host:          "bastion.internal",
+			User:          "ops",
+			IdentityRef:   identPath,
+			KnownHostsRef: srv.KnownHostsFile(),
+		},
+	}
+	_, _, _, err = OpenForConnection(ctx, connStored)
+	if err == nil {
+		t.Fatal("expected error when connection has URISet and SSHTunnel, got nil")
+	}
+	if !strings.Contains(err.Error(), "ssh_tunnel cannot be used with a connection URI; use host/port/user") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	connEnv := backup.Connection{
+		Host:       "db.internal",
+		Port:       27017,
+		Engine:     backup.ConnMongoDB,
+		SecretMode: backup.SecretEnv,
+		URIEnv:     "MONGO_URI",
+		SSHTunnel: &backup.SSHTunnel{
+			Host:          "bastion.internal",
+			User:          "ops",
+			IdentityRef:   identPath,
+			KnownHostsRef: srv.KnownHostsFile(),
+		},
+	}
+	_, _, _, err = OpenForConnection(ctx, connEnv)
+	if err == nil {
+		t.Fatal("expected error when connection has URIEnv and SSHTunnel, got nil")
+	}
+	if !strings.Contains(err.Error(), "ssh_tunnel cannot be used with a connection URI; use host/port/user") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestOpenForConnection_MissingKnownHosts(t *testing.T) {
 	ctx := context.Background()
 	conn := backup.Connection{

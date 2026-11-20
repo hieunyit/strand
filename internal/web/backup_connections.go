@@ -233,6 +233,10 @@ func (s *Server) apiConnSave(update bool) authedHandler {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if c.SSHTunnel != nil && (c.URISet || c.URIEnv != "" || (req.URI != nil && *req.URI != "")) {
+			writeErr(w, http.StatusBadRequest, "ssh_tunnel cannot be used with a connection URI; use host/port/user")
+			return
+		}
 		if err := c.Validate(); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -453,6 +457,23 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 			return
 		}
 		if c.SSHTunnel != nil {
+			if c.URISet || c.URIEnv != "" || uri != "" {
+				res := conncheck.Result{
+					OK:                false,
+					Engine:            c.Engine,
+					MissingPrivileges: []string{},
+					Databases:         []string{},
+					Checks: []conncheck.Check{
+						{Name: "ssh_tunnel", Status: "fail", Detail: "ssh_tunnel cannot be used with a connection URI; use host/port/user"},
+					},
+					Error: "ssh_tunnel cannot be used with a connection URI; use host/port/user",
+				}
+				if saved {
+					_, _ = s.db.st.SetBackupConnectionTest(r.Context(), c.ID, time.Now().UTC(), "failed", "ssh tunnel: ssh_tunnel cannot be used with a connection URI; use host/port/user")
+				}
+				writeJSON(w, http.StatusOK, res)
+				return
+			}
 			addrHost, addrPort, closeTunnel, err := sshtun.OpenForConnection(r.Context(), c)
 			if err != nil {
 				res := conncheck.Result{

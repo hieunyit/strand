@@ -176,6 +176,96 @@ func TestConnSave_InvalidIdentityOrMissingKnownHosts(t *testing.T) {
 	if resp != 400 || !strings.Contains(body, "STRAND_WEB_SSH_KEY_DIR") {
 		t.Fatalf("expected 400 with STRAND_WEB_SSH_KEY_DIR error, got %d: %s", resp, body)
 	}
+
+	// 3. Stored URI with ssh_tunnel refused with 400
+	validKey := filepath.Join(keyDir, "id_rsa")
+	_ = os.WriteFile(validKey, []byte("valid-private-key"), 0o600)
+	resp, body = a.do("POST", "/api/v1/backup-connections", map[string]any{
+		"name": "conn-uri-tunnel", "engine": "mongodb", "host": "mongo.internal", "user": "root",
+		"secret_mode": "stored",
+		"uri":         "mongodb://mongo.internal:27017/admin",
+		"ssh_tunnel": map[string]any{
+			"host":            "bastion.internal",
+			"user":            "ops",
+			"identity_ref":    validKey,
+			"known_hosts_ref": khFile,
+		},
+	})
+	if resp != 400 || !strings.Contains(body, "ssh_tunnel cannot be used with a connection URI; use host/port/user") {
+		t.Fatalf("expected 400 with URI error, got %d: %s", resp, body)
+	}
+
+	// 4. Env URI (uri_env) with ssh_tunnel refused with 400
+	resp, body = a.do("POST", "/api/v1/backup-connections", map[string]any{
+		"name": "conn-urienv-tunnel", "engine": "mongodb", "host": "mongo.internal", "user": "root",
+		"secret_mode": "env",
+		"uri_env":     "MONGO_URI",
+		"ssh_tunnel": map[string]any{
+			"host":            "bastion.internal",
+			"user":            "ops",
+			"identity_ref":    validKey,
+			"known_hosts_ref": khFile,
+		},
+	})
+	if resp != 400 || !strings.Contains(body, "ssh_tunnel cannot be used with a connection URI; use host/port/user") {
+		t.Fatalf("expected 400 with URI error, got %d: %s", resp, body)
+	}
+}
+
+func TestConnTest_RefuseSSHTunnelWithURI(t *testing.T) {
+	e := newCPEnv(t)
+	a := e.admin()
+	khFile := createTestKnownHosts(t)
+
+	keyDir := filepath.Join(t.TempDir(), "allowed-keys")
+	_ = os.MkdirAll(keyDir, 0o700)
+	t.Setenv("STRAND_WEB_SSH_KEY_DIR", keyDir)
+	validKey := filepath.Join(keyDir, "id_rsa")
+	_ = os.WriteFile(validKey, []byte("valid-private-key"), 0o600)
+
+	body := a.must("POST", "/api/v1/backup-connections/test", map[string]any{
+		"engine":      "mongodb",
+		"host":        "mongo.internal",
+		"secret_mode": "stored",
+		"uri":         "mongodb://mongo.internal:27017/admin",
+		"ssh_tunnel": map[string]any{
+			"host":            "bastion.internal",
+			"user":            "ops",
+			"identity_ref":    validKey,
+			"known_hosts_ref": khFile,
+		},
+	}, 200)
+
+	var res struct {
+		OK     bool `json:"ok"`
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		t.Fatalf("decode test result: %v", err)
+	}
+	if res.OK {
+		t.Fatal("expected test to fail (ok:false) when uri is provided with ssh_tunnel")
+	}
+	var foundSSHTunnelCheck bool
+	for _, chk := range res.Checks {
+		if chk.Name == "ssh_tunnel" {
+			foundSSHTunnelCheck = true
+			if chk.Status != "fail" {
+				t.Fatalf("expected ssh_tunnel check status 'fail', got %q", chk.Status)
+			}
+			if !strings.Contains(chk.Detail, "ssh_tunnel cannot be used with a connection URI; use host/port/user") {
+				t.Fatalf("expected error message in detail, got %q", chk.Detail)
+			}
+		}
+	}
+	if !foundSSHTunnelCheck {
+		t.Fatalf("expected check named 'ssh_tunnel' in checks list, got: %+v", res.Checks)
+	}
 }
 
 func TestRestore_ChildGetsTunnelParamsNoSecretInArgv(t *testing.T) {
