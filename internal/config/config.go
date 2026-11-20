@@ -542,4 +542,3 @@ func LoadBytesForPaths(data []byte) (*Config, error) {
 
 // KindMongoDB là source.kind/target.kind của pipeline MongoDB -> MongoDB.
 const KindMongoDB = "mongodb"
-
