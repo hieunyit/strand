@@ -352,9 +352,9 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 	if sess != nil {
 		d.CSRF = sess.CSRF
 		d.CurrentUser = CurrentUserInfo{
-			ID:          sess.UserID,
-			Username:    sess.Username,
-			Role:        sess.Role,
+			ID:       sess.UserID,
+			Username: sess.Username,
+			Role:     sess.Role,
 		}
 	}
 	d.Nav, d.Version = s.navItems(), s.version

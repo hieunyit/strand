@@ -58,120 +58,109 @@ var ActionPermissions = map[string]Permission{
 	"config-validate": PermAdmin,
 }
 
-// RouteRule maps an HTTP method and path pattern to a required permission.
-type RouteRule struct {
-	Method string
-	Prefix string
-	Exact  string
-	Perm   Permission
+// routeRule: method ("" = any) + path pattern ("{x}" matches exactly one path segment; a trailing "/**"
+// matches the prefix and everything below it) → required permission.
+type routeRule struct {
+	Method  string
+	Pattern string
+	Perm    Permission
 }
 
-// Central permissions table checked by middleware.
-var RoutePermissions = []RouteRule{
-	// User management (admin only)
-	{Prefix: "/users", Perm: PermAdmin},
-	{Prefix: "/api/v1/users", Perm: PermAdmin},
-
-	// Settings (admin only: no settings for operator or viewer)
-	{Prefix: "/settings", Perm: PermAdmin},
-	{Prefix: "/api/v1/settings", Perm: PermAdmin},
-
-	// Audit log (admin only)
-	{Prefix: "/audit", Perm: PermAdmin},
-	{Prefix: "/api/v1/audit", Perm: PermAdmin},
-
-	// Sensitive reads/writes: env editor (admin only)
-	{Prefix: "/api/v1/pipelines/{name}/env", Perm: PermAdmin},
-
-	// Pipeline creation & deletion (admin only)
-	{Method: "POST", Prefix: "/pipelines/new", Perm: PermAdmin},
-	{Method: "GET", Prefix: "/pipelines/new", Perm: PermAdmin},
-	{Method: "POST", Exact: "/api/v1/pipelines", Perm: PermAdmin},
-	{Method: "POST", Prefix: "/api/v1/source/databases", Perm: PermAdmin},
-	{Method: "DELETE", Prefix: "/api/v1/pipelines/", Perm: PermAdmin},
-
-	// Configuration edits (admin only)
-	{Method: "POST", Prefix: "/api/v1/pipelines/", Exact: "/api/v1/pipelines/{name}/config", Perm: PermAdmin},
-	{Method: "POST", Prefix: "/api/v1/pipelines/", Exact: "/api/v1/pipelines/{name}/config/validate", Perm: PermAdmin},
-	{Method: "POST", Prefix: "/api/v1/pipelines/", Exact: "/api/v1/pipelines/{name}/tuning", Perm: PermAdmin},
-
-	// Backups: run/start/stop is operator; create/update/delete/restore is admin
-	{Method: "POST", Prefix: "/api/v1/backup-jobs/", Exact: "/api/v1/backup-jobs/{id}/run", Perm: PermOperator},
-	{Method: "POST", Prefix: "/api/v1/backup-jobs/", Exact: "/api/v1/backup-jobs/{id}/start", Perm: PermOperator},
-	{Method: "POST", Prefix: "/api/v1/backup-jobs/", Exact: "/api/v1/backup-jobs/{id}/stop", Perm: PermOperator},
-	{Method: "POST", Exact: "/api/v1/backup-jobs", Perm: PermAdmin},
-	{Method: "PUT", Prefix: "/api/v1/backup-jobs/", Perm: PermAdmin},
-	{Method: "DELETE", Prefix: "/api/v1/backup-jobs/", Perm: PermAdmin},
-	{Method: "POST", Prefix: "/api/v1/backups/", Exact: "/api/v1/backups/{id}/restore", Perm: PermAdmin},
-
-	// Account management: any authenticated user may manage their own account
-	{Prefix: "/account", Perm: PermRead},
-	{Prefix: "/api/v1/account", Perm: PermRead},
+// writeRules lists the write routes that do NOT need admin. Every other POST/PUT/PATCH/DELETE requires admin
+// (fail closed: a newly added write route is admin-only until it is listed here on purpose).
+var writeRules = []routeRule{
+	// Own session and account (every signed-in user).
+	{"POST", "/login", PermRead}, {"POST", "/logout", PermRead},
+	{"POST", "/api/v1/login", PermRead}, {"POST", "/api/v1/logout", PermRead},
+	{"", "/account/**", PermRead}, {"", "/api/v1/account/**", PermRead},
+	// Operator: run/verify backups, preview retention (no deletes, no restores, no edits).
+	{"POST", "/api/v1/backup-jobs/{id}/run", PermOperator},
+	{"POST", "/api/v1/backup-jobs/{id}/start", PermOperator},
+	{"POST", "/api/v1/backup-jobs/{id}/stop", PermOperator},
+	{"POST", "/api/v1/backup-jobs/{id}/verify", PermOperator},
+	{"POST", "/api/v1/backup-jobs/{id}/retention-preview", PermOperator},
+	{"POST", "/api/v1/backups/{id}/verify", PermOperator},
 }
 
-// RequiredPermissionForRequest inspects an HTTP request and returns its required permission.
+// readRules lists sensitive READ routes that need more than viewer.
+var readRules = []routeRule{
+	{"GET", "/users/**", PermAdmin}, {"GET", "/users", PermAdmin}, {"GET", "/api/v1/users/**", PermAdmin}, {"GET", "/api/v1/users", PermAdmin},
+	{"GET", "/settings", PermAdmin}, {"GET", "/api/v1/settings", PermAdmin},
+	{"GET", "/audit/**", PermAdmin}, {"GET", "/audit", PermAdmin}, {"GET", "/api/v1/audit/**", PermAdmin}, {"GET", "/api/v1/audit", PermAdmin},
+	{"GET", "/api/v1/pipelines/{name}/env", PermAdmin},
+	{"GET", "/api/v1/pipelines/{name}/config/download", PermAdmin},
+	{"GET", "/pipelines/new", PermAdmin},
+}
+
+// RoutePermissions is kept for documentation/tests: the effective rules.
+var RoutePermissions = append(append([]routeRule(nil), writeRules...), readRules...)
+
+func matchPattern(pattern, path string) bool {
+	if strings.HasSuffix(pattern, "/**") {
+		base := strings.TrimSuffix(pattern, "/**")
+		return path == base || strings.HasPrefix(path, base+"/")
+	}
+	ps, xs := strings.Split(strings.Trim(pattern, "/"), "/"), strings.Split(strings.Trim(path, "/"), "/")
+	if len(ps) != len(xs) {
+		return false
+	}
+	for i := range ps {
+		if strings.HasPrefix(ps[i], "{") && strings.HasSuffix(ps[i], "}") {
+			if xs[i] == "" {
+				return false
+			}
+			continue
+		}
+		if ps[i] != xs[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func lookupRule(rules []routeRule, method, path string) (Permission, bool) {
+	for _, r := range rules {
+		if r.Method != "" && r.Method != method {
+			continue
+		}
+		if matchPattern(r.Pattern, path) {
+			return r.Perm, true
+		}
+	}
+	return "", false
+}
+
+func isWrite(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
+}
+
+// RequiredPermissionForRequest returns the minimum permission for a request. Fail closed: any write route not
+// listed in writeRules (and not a pipeline action listed in ActionPermissions) requires admin.
 func RequiredPermissionForRequest(r *http.Request) Permission {
-	path := r.URL.Path
-	method := r.Method
-
-	// Pipeline actions: check specific action in URL
-	// e.g. /api/v1/pipelines/orders/actions/start
-	if strings.HasPrefix(path, "/api/v1/pipelines/") && strings.Contains(path, "/actions/") {
-		parts := strings.Split(path, "/")
-		if len(parts) >= 6 && parts[4] == "actions" {
-			act := parts[5]
+	path, method := r.URL.Path, r.Method
+	if isWrite(method) {
+		if matchPattern("/api/v1/pipelines/{name}/actions/{action}", path) {
+			act := strings.Split(strings.Trim(path, "/"), "/")[5]
 			if perm, ok := ActionPermissions[act]; ok {
 				return perm
 			}
 			return PermAdmin
 		}
-	}
-
-	// Sensitive reads/writes: env editor
-	if strings.HasPrefix(path, "/api/v1/pipelines/") && strings.HasSuffix(path, "/env") {
+		if perm, ok := lookupRule(writeRules, method, path); ok {
+			return perm
+		}
 		return PermAdmin
 	}
-
-	// Config and tuning POSTs
-	if (method == http.MethodPost || method == http.MethodPut) && strings.HasPrefix(path, "/api/v1/pipelines/") {
-		if strings.HasSuffix(path, "/config") || strings.HasSuffix(path, "/config/validate") || strings.HasSuffix(path, "/tuning") {
-			return PermAdmin
-		}
+	if perm, ok := lookupRule(readRules, method, path); ok {
+		return perm
 	}
-
-	// Backup job execution vs administration
-	if strings.HasPrefix(path, "/api/v1/backup-jobs/") {
-		if strings.HasSuffix(path, "/run") || strings.HasSuffix(path, "/start") || strings.HasSuffix(path, "/stop") {
-			return PermOperator
-		}
-		if method == http.MethodPut || method == http.MethodDelete || method == http.MethodPost {
-			return PermAdmin
-		}
-	}
-
-	// Check table rules
-	for _, rule := range RoutePermissions {
-		if rule.Method != "" && rule.Method != method {
-			continue
-		}
-		if rule.Exact != "" && rule.Exact == path {
-			return rule.Perm
-		}
-		if rule.Prefix != "" && (path == rule.Prefix || strings.HasPrefix(path, rule.Prefix+"/")) {
-			return rule.Perm
-		}
-	}
-
-	// Default for any write method (POST, PUT, DELETE, PATCH): at least operator
-	if method == http.MethodPost || method == http.MethodPut || method == http.MethodDelete || method == http.MethodPatch {
-		return PermOperator
-	}
-
-	// Default for reads (GET, HEAD, OPTIONS): viewer allowed
 	return PermRead
 }
 
-// RenderForbiddenHTML outputs a standard, professional 403 response for browser navigation.
 func RenderForbiddenHTML(w http.ResponseWriter, perm Permission) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)

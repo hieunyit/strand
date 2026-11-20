@@ -17,12 +17,12 @@ func TestPasswordPolicy(t *testing.T) {
 		password string
 		wantErr  bool
 	}{
-		{"alice", "short", true},                  // < 12 chars
-		{"alice", "alice", true},                  // equals username
-		{"Alice", "alice", true},                  // equals username case-insensitive
-		{"alice", "SecurePassword123!", false},    // >= 12, != username
-		{"bob", strings.Repeat("a", 73), true},   // > 72 bytes
-		{"bob", strings.Repeat("a", 72), false},  // 72 bytes OK
+		{"alice", "short", true},                // < 12 chars
+		{"alice", "alice", true},                // equals username
+		{"Alice", "alice", true},                // equals username case-insensitive
+		{"alice", "SecurePassword123!", false},  // >= 12, != username
+		{"bob", strings.Repeat("a", 73), true},  // > 72 bytes
+		{"bob", strings.Repeat("a", 72), false}, // 72 bytes OK
 	}
 
 	for _, tc := range tests {

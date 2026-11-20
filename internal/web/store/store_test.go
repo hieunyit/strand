@@ -347,4 +347,3 @@ func TestMigrateUpgradeAdminToUsersRBAC(t *testing.T) {
 		t.Fatalf("second migrate: %v err: %v", applied2, err)
 	}
 }
-
