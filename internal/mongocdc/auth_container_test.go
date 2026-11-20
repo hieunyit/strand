@@ -149,6 +149,19 @@ func waitIdenticalDBs(t *testing.T, p *pair, srcDB, dstDB string, timeout time.D
 			return
 		}
 		if time.Now().After(deadline) {
+			for coll, docs := range a {
+				shown := 0
+				for k, h := range docs {
+					if hb, ok := b[coll][k]; ok && hb == h || shown >= 3 {
+						continue
+					}
+					shown++
+					id := bson.RawValue{Type: bson.Type(k[0]), Value: []byte(k[1:])}
+					s, _ := p.srcC.Database(srcDB).Collection(coll).FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Raw()
+					d, _ := p.dstC.Database(dstDB).Collection(coll).FindOne(ctx, bson.D{{Key: "_id", Value: id}}).Raw()
+					t.Logf("%s %s\n source: %s\n target: %s", coll, id, s, d)
+				}
+			}
 			t.Fatalf("not converged: %s %v %v", last, errA, errB)
 		}
 		time.Sleep(300 * time.Millisecond)

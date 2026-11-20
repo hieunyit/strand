@@ -220,7 +220,24 @@ func (r *runner) copyCollection(ctx context.Context, slot int, prog *collProgres
 		findOpts.SetMin(bson.D{{Key: "_id", Value: prog.LastID}})
 	}
 	r.obs.setCollection(name, CollRunning, prog.Kind, prog.Copied, prog.Estimate)
-	cursor, err := r.source.Collection(name).Find(ctx, bson.D{}, findOpts)
+	// The copy must not read a state older than the stream position it is replayed
+	// from: a majority read may return a snapshot that lags behind the change-stream
+	// start token captured just before (observed on 4.4: changes between the two were
+	// neither copied nor replayed). Reading with afterClusterTime >= the source's
+	// latest applied time makes the server wait until the majority snapshot covers it.
+	at, err := r.sourceTime(ctx)
+	if err != nil {
+		return err
+	}
+	sess, err := r.srcClient.StartSession(options.Session().SetCausalConsistency(true))
+	if err != nil {
+		return err
+	}
+	defer sess.EndSession(context.Background())
+	if err := sess.AdvanceOperationTime(&at); err != nil {
+		return err
+	}
+	cursor, err := r.source.Collection(name).Find(mongo.NewSessionContext(ctx, sess), bson.D{}, findOpts)
 	if err != nil {
 		if verr := r.vanished(ctx, name, err); verr != nil {
 			return verr

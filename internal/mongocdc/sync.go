@@ -473,16 +473,20 @@ func (r *runner) run(ctx context.Context, operationTime bson.Timestamp) error {
 	return r.stream(ctx)
 }
 
-// sourceTime returns the source's current majority cluster time (>= every read so far).
+// sourceTime returns the source's latest applied cluster time: >= every change the
+// stream has returned and >= the start position of a stream opened before the call.
 func (r *runner) sourceTime(ctx context.Context) (bson.Timestamp, error) {
 	h, err := hello(ctx, r.srcClient)
 	if err != nil {
 		return bson.Timestamp{}, err
 	}
-	if h.LastWrite.MajorityOpTime.TS.T != 0 && h.LastWrite.MajorityOpTime.TS.After(h.OperationTime) {
-		return h.LastWrite.MajorityOpTime.TS, nil
+	at := h.OperationTime
+	for _, ts := range []bson.Timestamp{h.LastWrite.MajorityOpTime.TS, h.LastWrite.OpTime.TS} {
+		if ts.After(at) {
+			at = ts
+		}
 	}
-	return h.OperationTime, nil
+	return at, nil
 }
 
 // persist saves the state with a fenced transaction (slot 0).
@@ -626,6 +630,9 @@ type helloReply struct {
 		MajorityOpTime struct {
 			TS bson.Timestamp `bson:"ts"`
 		} `bson:"majorityOpTime"`
+		OpTime struct {
+			TS bson.Timestamp `bson:"ts"`
+		} `bson:"opTime"`
 	} `bson:"lastWrite"`
 }
 
