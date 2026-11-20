@@ -19,6 +19,69 @@
   var curStep = 1;
   var testOK = false;
   var existingDBs = [];
+  var lastTestError = '';
+
+  function normalizeTargetTime(tt) {
+    if (!tt) { return ''; }
+    var s = tt.trim();
+    if (!s) { return ''; }
+    if (s.endsWith('Z')) {
+      s = s.slice(0, -1);
+    }
+    if (s.indexOf('.') !== -1) {
+      s = s.split('.')[0];
+    }
+    if (s.length === 16) {
+      s += ':00';
+    }
+    return s + 'Z';
+  }
+
+  function getChosenEngine() {
+    var fromBackup = form.elements['restore_from'].value === 'backup';
+    if (fromBackup) {
+      var b = getChosenBackup();
+      return b ? (b.engine || '') : '';
+    }
+    var src = (form.elements['source'].value || '').trim();
+    var sInfo = sources.find(function (x) { return x.source === src; });
+    return sInfo ? (sInfo.engine || '') : '';
+  }
+
+  function resetTestStatus() {
+    testOK = false;
+    existingDBs = [];
+    lastTestError = '';
+    var testResult = document.getElementById('restore-test-result');
+    if (testResult) { testResult.hidden = true; testResult.textContent = ''; }
+    var status = document.getElementById('restore-test-status');
+    if (status) { status.textContent = ''; }
+  }
+
+  function filterConnectionsByEngine() {
+    var eng = getChosenEngine();
+    var sel = document.getElementById('restore-conn-select');
+    if (!sel) { return; }
+    var hadSelected = sel.value;
+    var selectedStillValid = false;
+    Array.prototype.forEach.call(sel.options, function (opt) {
+      if (!opt.value || opt.value === 'custom') {
+        opt.hidden = false;
+        if (opt.value === hadSelected) { selectedStillValid = true; }
+        return;
+      }
+      var optEng = opt.getAttribute('data-engine') || '';
+      var match = (!eng || optEng === eng);
+      opt.hidden = !match;
+      if (opt.value === hadSelected && match) {
+        selectedStillValid = true;
+      }
+    });
+    if (hadSelected && !selectedStillValid) {
+      sel.value = '';
+      syncConnection();
+    }
+  }
 
   var stepperLis = document.querySelectorAll('#restore-stepper li[data-step-li]');
   var stepPanels = document.querySelectorAll('#restore-form .wiz-step[data-step]');
@@ -60,6 +123,7 @@
       hint.textContent = fromBackup ? 'Optional: roll forward from backup snapshot with archived logs.' : 'Required for point-in-time recovery.';
     }
     syncPitrWindow();
+    filterConnectionsByEngine();
   }
 
   // Radio switching for restore_into
@@ -163,7 +227,8 @@
 
     // PITR preview
     if (preview && timeInput && timeInput.value) {
-      var tVal = new Date(timeInput.value + 'Z');
+      var normVal = normalizeTargetTime(timeInput.value);
+      var tVal = new Date(normVal);
       var base = (sInfo.base_backups || []).filter(function (bk) {
         return new Date(bk.created_at) <= tVal;
       }).pop();
@@ -200,6 +265,15 @@
       if (!src) {
         if (errSource) { errSource.textContent = 'Select a source to restore from.'; errSource.hidden = false; }
         valid = false;
+      } else {
+        var sInfoContinuous = sources.find(function (x) { return x.source === src; });
+        if (sInfoContinuous && sInfoContinuous.continuous === false) {
+          if (errSource) {
+            errSource.textContent = 'Source ' + src + ' has no continuous PITR window.';
+            errSource.hidden = false;
+          }
+          valid = false;
+        }
       }
       var tt = (form.elements['target_time'].value || '').trim();
       if (!tt) {
@@ -208,7 +282,7 @@
       } else {
         var sInfo = sources.find(function (x) { return x.source === src; });
         if (sInfo && sInfo.window_start && sInfo.window_end) {
-          var tSel = new Date(tt.indexOf('Z') === -1 ? tt + 'Z' : tt);
+          var tSel = new Date(normalizeTargetTime(tt));
           var tMin = new Date(sInfo.window_start);
           var tMax = new Date(sInfo.window_end);
           if (tSel < tMin || tSel > tMax) {
@@ -252,7 +326,7 @@
 
     if (!testOK) {
       if (errTest) {
-        errTest.textContent = 'Test the connection successfully before continuing.';
+        errTest.textContent = lastTestError || 'Test the connection successfully before continuing.';
         errTest.hidden = false;
       }
       return false;
@@ -303,7 +377,10 @@
       if (connSel !== 'custom') {
         p = window.strandApi('POST', '/api/v1/backup-connections/' + encodeURIComponent(connSel) + '/test');
       } else {
+        var chosenEng = getChosenEngine();
         var payload = {
+          name: 'Manual connection',
+          engine: chosenEng,
           host: (form.elements['target_host'].value || '').trim(),
           port: parseInt(form.elements['target_port'].value, 10) || 0,
           user: (form.elements['target_user'].value || '').trim(),
@@ -314,12 +391,37 @@
       }
 
       p.then(function (res) {
-        if (!res.ok) {
-          return res.json().then(function (err) { throw new Error(err.error || 'Connection test failed'); });
+        return res.json().then(function (data) {
+          return { ok: res.ok, status: res.status, data: data };
+        });
+      }).then(function (result) {
+        if (!result.ok || !result.data || result.data.ok !== true) {
+          testOK = false;
+          existingDBs = [];
+          if (status) { status.textContent = ''; }
+          var errMsg = (result.data && result.data.error) || 'Connection test failed';
+          if (result.data && result.data.checks && Array.isArray(result.data.checks)) {
+            for (var i = 0; i < result.data.checks.length; i++) {
+              if (result.data.checks[i].status === 'fail') {
+                errMsg = result.data.checks[i].detail || result.data.checks[i].name || errMsg;
+                break;
+              }
+            }
+          }
+          lastTestError = errMsg;
+          if (errTest) {
+            errTest.textContent = errMsg;
+            errTest.hidden = false;
+          }
+          if (testResult) {
+            testResult.hidden = true;
+            testResult.textContent = '';
+          }
+          return;
         }
-        return res.json();
-      }).then(function (data) {
+        var data = result.data;
         testOK = true;
+        lastTestError = '';
         existingDBs = data.databases || [];
         if (status) { status.textContent = 'Connection test successful'; }
         if (testResult) {
@@ -332,6 +434,7 @@
         existingDBs = [];
         if (status) { status.textContent = ''; }
         if (errTest) { errTest.textContent = err.message; errTest.hidden = false; }
+        if (testResult) { testResult.hidden = true; testResult.textContent = ''; }
       });
     });
   }
@@ -356,7 +459,7 @@
     }
 
     var tt = (form.elements['target_time'].value || '').trim();
-    if (timeEl) { timeEl.textContent = tt ? tt + ' UTC' : 'Original backup snapshot'; }
+    if (timeEl) { timeEl.textContent = tt ? normalizeTargetTime(tt) + ' (UTC)' : 'Original backup snapshot'; }
 
     var connSel = (form.elements['connection_id'].value || '').trim();
     if (srvEl) {
@@ -435,16 +538,24 @@
 
   // Event listeners for inputs
   form.addEventListener('change', function (ev) {
-    if (ev.target.name === 'restore_from') { syncRestoreFrom(); }
+    if (ev.target.name === 'restore_from') { syncRestoreFrom(); filterConnectionsByEngine(); }
     if (ev.target.name === 'restore_into') { syncRestoreInto(); }
     if (ev.target.name === 'connection_id') { syncConnection(); }
-    if (ev.target.name === 'source' || ev.target.name === 'backup_id') { syncPitrWindow(); }
+    if (ev.target.name === 'source' || ev.target.name === 'backup_id') { syncPitrWindow(); filterConnectionsByEngine(); }
   });
 
   form.addEventListener('input', function (ev) {
     if (ev.target.id === 'restore-confirm-input') { updateConfirm(); }
     if (ev.target.id === 'restore-target-database' || ev.target.id === 'restore-target-dir') { updateConfirm(); }
     if (ev.target.id === 'restore-target-time') { syncPitrWindow(); }
+  });
+
+  ['target_host', 'target_port', 'target_user', 'target_password_env'].forEach(function (name) {
+    var el = form.elements[name];
+    if (el) {
+      el.addEventListener('input', resetTestStatus);
+      el.addEventListener('change', resetTestStatus);
+    }
   });
 
   // Submit restore form
@@ -475,7 +586,7 @@
 
     var tt = (form.elements['target_time'].value || '').trim();
     if (tt) {
-      payload.target_time = tt.indexOf('Z') === -1 ? tt + ':00Z' : tt;
+      payload.target_time = normalizeTargetTime(tt);
     }
 
     if (connSel && connSel !== 'custom') {
@@ -493,15 +604,6 @@
       payload.target_dir = targetName;
     } else {
       payload.target_database = targetName;
-    }
-
-    var dbs = (form.elements['databases'].value || '').trim();
-    if (dbs) {
-      payload.databases = dbs.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-    }
-    var threads = parseInt(form.elements['threads'].value, 10);
-    if (threads > 0) {
-      payload.threads = threads;
     }
 
     if (status) { status.textContent = 'Starting restore...'; status.classList.remove('err'); }
@@ -524,11 +626,27 @@
     });
   });
 
+  // Mark non-continuous sources in source select
+  var srcSel = form.elements['source'];
+  if (srcSel) {
+    Array.prototype.forEach.call(srcSel.options, function (opt) {
+      if (!opt.value) { return; }
+      var sInfo = sources.find(function (x) { return x.source === opt.value; });
+      if (sInfo && sInfo.continuous === false) {
+        opt.disabled = true;
+        if (!opt.textContent.includes('no continuous PITR')) {
+          opt.textContent += ' (no continuous PITR)';
+        }
+      }
+    });
+  }
+
   // Initial synchronization
   syncRestoreFrom();
   syncRestoreInto();
   syncConnection();
   syncPitrWindow();
+  filterConnectionsByEngine();
   updateStepper(1);
 
   // Global handle for test harnesses

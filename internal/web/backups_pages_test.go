@@ -99,6 +99,7 @@ func TestBackupPagesAndAPIsP1(t *testing.T) {
 
 	// Create test server environment
 	e := dbEnv(t, st, nil, nil)
+	waitIdle(t, e, "backup-"+job.ID)
 	c, csrf := e.loginOK()
 	h := map[string]string{"X-CSRF-Token": csrf, "Content-Type": "application/json"}
 

@@ -314,8 +314,6 @@ type RestoreRequest struct {
 	Target       backup.ConnSpec `json:"target"`
 	TargetDB     string          `json:"target_database,omitempty"`
 	TargetDir    string          `json:"target_dir,omitempty"`
-	Databases    []string        `json:"databases,omitempty"`
-	Threads      int             `json:"threads,omitempty"`
 	Confirm      string          `json:"confirm"` // must equal the target database or directory
 }
 
@@ -328,22 +326,46 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		return
 	}
 
+	var backupEngine string
+	var src string
+	if req.BackupID != "" {
+		if s.backups != nil {
+			b, ok, err := s.backups.Get(r.Context(), req.BackupID)
+			if err != nil || !ok {
+				writeErr(w, http.StatusBadRequest, "backup not found")
+				return
+			}
+			backupEngine = b.Engine
+			src = b.Source
+		}
+	} else if req.Source != "" {
+		src = req.Source
+		if s.backups != nil {
+			recs, _ := s.backups.List(r.Context(), backup.Filter{Source: req.Source, Limit: 1})
+			if len(recs) > 0 {
+				backupEngine = recs[0].Engine
+			}
+		}
+	}
+
 	var extraEnv []string
 	if req.ConnectionID != "" && s.db != nil && s.db.st != nil {
+		if req.Target.Host != "" || req.Target.Port != 0 || req.Target.User != "" || req.Target.PasswordEnv != "" || req.Target.URIEnv != "" {
+			writeErr(w, http.StatusBadRequest, "target fields are taken from the saved connection")
+			return
+		}
 		conn, ok, err := s.db.st.GetBackupConnection(r.Context(), req.ConnectionID)
 		if err != nil || !ok {
 			writeErr(w, http.StatusBadRequest, "connection not found")
 			return
 		}
-		if req.Target.Host == "" {
-			req.Target.Host = conn.Host
+		if conn.Engine != "" && backupEngine != "" && conn.Engine != backupEngine {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("target connection engine %s does not match backup engine %s", conn.Engine, backupEngine))
+			return
 		}
-		if req.Target.Port == 0 {
-			req.Target.Port = conn.Port
-		}
-		if req.Target.User == "" {
-			req.Target.User = conn.User
-		}
+		req.Target.Host = conn.Host
+		req.Target.Port = conn.Port
+		req.Target.User = conn.User
 		if conn.SecretMode == backup.SecretStored {
 			pw, uri, err := s.connSecrets(conn)
 			if err != nil {
@@ -361,12 +383,8 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 				extraEnv = append(extraEnv, envName+"="+uri)
 			}
 		} else if conn.SecretMode == backup.SecretEnv {
-			if req.Target.PasswordEnv == "" && conn.PasswordEnv != "" {
-				req.Target.PasswordEnv = conn.PasswordEnv
-			}
-			if req.Target.URIEnv == "" && conn.URIEnv != "" {
-				req.Target.URIEnv = conn.URIEnv
-			}
+			req.Target.PasswordEnv = conn.PasswordEnv
+			req.Target.URIEnv = conn.URIEnv
 		}
 	}
 
@@ -376,20 +394,19 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 			writeErr(w, http.StatusBadRequest, "target_time must be RFC3339")
 			return
 		}
-		src := req.Source
-		if src == "" && req.BackupID != "" {
-			if b, ok, err := s.backups.Get(r.Context(), req.BackupID); err == nil && ok {
-				src = b.Source
-			}
+		if src == "" {
+			writeErr(w, http.StatusBadRequest, "source could not be resolved for PITR restore")
+			return
 		}
-		if src != "" {
-			if win, err := s.recoveryWindow(r.Context(), src); err == nil && win.Continuous && win.Start != nil && win.End != nil {
-				if tt.Before(*win.Start) || tt.After(*win.End) {
-					writeErr(w, http.StatusBadRequest, fmt.Sprintf("target time %s is outside PITR recovery window [%s, %s]",
-						tt.Format(time.RFC3339), win.Start.Format(time.RFC3339), win.End.Format(time.RFC3339)))
-					return
-				}
-			}
+		win, err := s.recoveryWindow(r.Context(), src)
+		if err != nil || !win.Continuous || win.Start == nil || win.End == nil {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("source %s has no continuous PITR window", src))
+			return
+		}
+		if tt.Before(*win.Start) || tt.After(*win.End) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("target time %s is outside PITR recovery window [%s, %s]",
+				tt.Format(time.RFC3339), win.Start.Format(time.RFC3339), win.End.Format(time.RFC3339)))
+			return
 		}
 	}
 

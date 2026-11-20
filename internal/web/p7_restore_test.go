@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -466,5 +467,163 @@ func TestRestoreTargetPasswordPassedViaEnvNotArgv(t *testing.T) {
 	}
 	if !foundEnv {
 		t.Fatalf("target password was not passed via process environment: %v", st.Env)
+	}
+}
+
+func TestRestoreRejectTargetOverridesWhenConnectionIDSet(t *testing.T) {
+	e := newCPEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	bkp := seedRichBackup(t, e.st, "bkp-b8-1", "mysql-app", "mysql", "mysqldump", backup.KindFull, now, backup.Position{}, false, nil, "", nil, nil, "", nil)
+
+	ctx := context.Background()
+	conn := backup.Connection{
+		ID:          "conn-b8",
+		Name:        "Target DB",
+		Engine:      "mysql",
+		Host:        "restore-host.internal",
+		Port:        3306,
+		User:        "restore_user",
+		SecretMode:  backup.SecretEnv,
+		PasswordEnv: "PASS",
+	}
+	if _, err := e.st.CreateBackupConnection(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+
+	adm := e.admin()
+	req := map[string]any{
+		"backup_id":       bkp.ID,
+		"connection_id":   conn.ID,
+		"target":          map[string]any{"host": "evil"},
+		"target_database": "restored_db",
+		"confirm":         "restored_db",
+	}
+	code, body := adm.do("POST", "/api/v1/backup-restores", req)
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for target override with connection_id, got %d: %s", code, body)
+	}
+	if !strings.Contains(body, "target fields are taken from the saved connection") {
+		t.Fatalf("expected error message to state target fields are taken from the saved connection, got %s", body)
+	}
+}
+
+func TestRestoreRejectThreadsOption(t *testing.T) {
+	e := newCPEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	bkp := seedRichBackup(t, e.st, "bkp-b4-1", "mysql-app", "mysql", "mysqldump", backup.KindFull, now, backup.Position{}, false, nil, "", nil, nil, "", nil)
+
+	adm := e.admin()
+	req := map[string]any{
+		"backup_id":       bkp.ID,
+		"threads":         4,
+		"target":          map[string]any{"host": "db2"},
+		"target_database": "restored_db",
+		"confirm":         "restored_db",
+	}
+	code, body := adm.do("POST", "/api/v1/backup-restores", req)
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for threads option, got %d: %s", code, body)
+	}
+}
+
+func TestRestoreRejectTargetTimeWhenNoContinuousPITRWindow(t *testing.T) {
+	e := newCPEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	// Only full backups, no continuous log window
+	seedRichBackup(t, e.st, "bkp-b5-full", "mysql-nocont", "mysql", "mysqldump", backup.KindFull, now.Add(-2*time.Hour), backup.Position{}, false, nil, "", nil, nil, "", nil)
+
+	adm := e.admin()
+	req := map[string]any{
+		"source":          "mysql-nocont",
+		"target_time":     now.Add(-1 * time.Hour).Format(time.RFC3339),
+		"target":          map[string]any{"host": "db2"},
+		"target_database": "restored_db",
+		"confirm":         "restored_db",
+	}
+	code, body := adm.do("POST", "/api/v1/backup-restores", req)
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when no continuous PITR window, got %d: %s", code, body)
+	}
+	if !strings.Contains(body, "has no continuous PITR window") {
+		t.Fatalf("expected error to mention no continuous PITR window, got %s", body)
+	}
+}
+
+func TestRestoreRejectConnectionEngineMismatch(t *testing.T) {
+	e := newCPEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	bkp := seedRichBackup(t, e.st, "bkp-b2-mysql", "mysql-app", "mysql", "mysqldump", backup.KindFull, now, backup.Position{}, false, nil, "", nil, nil, "", nil)
+
+	ctx := context.Background()
+	conn := backup.Connection{
+		ID:          "conn-pg",
+		Name:        "Postgres Target",
+		Engine:      "postgres",
+		Host:        "pg.internal",
+		Port:        5432,
+		User:        "postgres",
+		SecretMode:  backup.SecretEnv,
+		PasswordEnv: "PASS",
+	}
+	if _, err := e.st.CreateBackupConnection(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+
+	adm := e.admin()
+	req := map[string]any{
+		"backup_id":       bkp.ID,
+		"connection_id":   conn.ID,
+		"target_database": "restored_db",
+		"confirm":         "restored_db",
+	}
+	code, body := adm.do("POST", "/api/v1/backup-restores", req)
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for engine mismatch, got %d: %s", code, body)
+	}
+	if !strings.Contains(body, "target connection engine postgres does not match backup engine mysql") {
+		t.Fatalf("expected engine mismatch error message, got %s", body)
+	}
+}
+
+func TestCatalogLegalHoldPaging(t *testing.T) {
+	e := newCPEnv(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Seed 6 backups: 4 not held (newer), 2 held (older)
+	// With limit 2, page 1 and page 2 are not held, page 3 has the held ones.
+	for i := 1; i <= 4; i++ {
+		seedRichBackup(t, e.st, fmt.Sprintf("bkp-nh-%d", i), "mysql-app", "mysql", "mysqldump", backup.KindFull, now.Add(-time.Duration(i)*time.Hour), backup.Position{}, false, nil, "", nil, nil, "", nil)
+	}
+	for i := 1; i <= 2; i++ {
+		seedRichBackup(t, e.st, fmt.Sprintf("bkp-hold-%d", i), "mysql-app", "mysql", "mysqldump", backup.KindFull, now.Add(-time.Duration(4+i)*time.Hour), backup.Position{}, true, nil, "", nil, nil, "", nil)
+	}
+
+	// 1. Direct store query with limit 2 and LegalHold = true must return the 2 held backups immediately
+	holdTrue := true
+	res, err := e.st.ListBackups(context.Background(), backup.Filter{Limit: 2, LegalHold: &holdTrue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("expected 2 held backups in first page of legal_hold=true, got %d", len(res))
+	}
+
+	for _, r := range res {
+		if !r.LegalHold {
+			t.Fatalf("expected legal_hold=true, got record %s with legal_hold=false", r.ID)
+		}
+	}
+
+	// 2. HTTP page query /backups/catalog?legal_hold=1
+	adm := e.admin()
+	code, body := adm.do("GET", "/backups/catalog?legal_hold=1", nil)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 from catalog, got %d", code)
+	}
+	if !strings.Contains(body, "bkp-hold-1") || !strings.Contains(body, "bkp-hold-2") {
+		t.Fatalf("expected held backups in catalog response, got: %s", body)
+	}
+	if strings.Contains(body, "bkp-nh-1") {
+		t.Fatalf("expected non-held backups excluded when legal_hold=1, got: %s", body)
 	}
 }

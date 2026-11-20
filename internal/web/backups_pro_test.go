@@ -148,6 +148,14 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	if resp, _ := e.do(c, "POST", "/api/v1/backup-restores", reserved, h); resp.StatusCode != 400 {
 		t.Fatalf("reserved password env accepted: %d", resp.StatusCode)
 	}
+	// Seed a continuous PITR window for mysql-prod covering target_time 2026-11-20T10:00:00Z
+	tt, _ := time.Parse(time.RFC3339, "2026-11-20T10:00:00Z")
+	tBase := tt.Add(-2 * time.Hour)
+	tLogStart := tt.Add(-3 * time.Hour)
+	tLogEnd := tt.Add(2 * time.Hour)
+	seedRichBackup(t, st, "bkp-pitr-base", "mysql-prod", "mysql", "mysqldump", backup.KindFull, tBase, backup.Position{GTIDSet: "u:1-100"}, false, nil, "", &tBase, nil, "", nil)
+	seedRichBackup(t, st, "bkp-pitr-log", "mysql-prod", "mysql", "binlog", backup.KindLog, tLogEnd, backup.Position{}, false, nil, "", &tLogStart, &tLogEnd, "", map[string]string{"seq": "1"})
+
 	good := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","target":{"host":"db2","port":3307,"user":"restore","password_env":"RESTORE_PW"},"target_database":"shop_pitr","confirm":"shop_pitr"}`
 	resp, body = e.do(c, "POST", "/api/v1/backup-restores", good, h)
 	if resp.StatusCode != http.StatusAccepted || len(e.auditFor("backup.restore")) != 1 {
