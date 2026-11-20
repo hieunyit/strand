@@ -425,3 +425,74 @@ checkLoop:
 	t.Logf("AC3 (TestCP2) PASS: Đổi replica từ (%s:%d) sang (%s:%d) resume đúng, nhận %d Txn mới, 0 Txn trùng lặp",
 		host1, port1, host2, port2, resumedCount)
 }
+
+type testMemSchemaStore struct {
+	m map[string][]readermysql.SchemaVersion
+}
+
+func (s *testMemSchemaStore) LoadSchemaHistory() map[string][]readermysql.SchemaVersion {
+	return s.m
+}
+
+func (s *testMemSchemaStore) SaveSchemaHistory(m map[string][]readermysql.SchemaVersion) error {
+	s.m = m
+	return nil
+}
+
+// TestRegression_GTIDSetRaceWithBinlogSyncer verifies that the GTID set passed to
+// syncer.StartSyncGTID is not shared with the reader's schema history or other goroutines.
+// Without cloning before passing to StartSyncGTID, go-mysql's BinlogSyncer mutates
+// b.prevGset in onStream concurrently with the reader goroutine reading gset.
+func TestRegression_GTIDSetRaceWithBinlogSyncer(t *testing.T) {
+	db, host, port, cleanup := startMySQLServer(t, 2099)
+	defer cleanup()
+
+	queries := []string{
+		"CREATE DATABASE IF NOT EXISTS test_syncer_race;",
+		"CREATE TABLE test_syncer_race.t (id INT PRIMARY KEY, val VARCHAR(64));",
+		"INSERT INTO test_syncer_race.t VALUES (1, 'initial');",
+		"INSERT INTO test_syncer_race.t VALUES (2, 'second');",
+	}
+	for _, q := range queries {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("query %q failed: %v", q, err)
+		}
+	}
+
+	st := &testMemSchemaStore{m: make(map[string][]readermysql.SchemaVersion)}
+	r, err := readermysql.New(readermysql.Config{
+		Host:          host,
+		Port:          uint16(port),
+		User:          "root",
+		Password:      "dev",
+		ServerID:      3099,
+		TableInfo:     readermysql.NewInfoSchemaProvider(db),
+		SchemaHistory: st,
+	})
+	if err != nil {
+		t.Fatalf("readermysql.New failed: %v", err)
+	}
+	defer r.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	events, err := r.Start(ctx, nil)
+	if err != nil {
+		t.Fatalf("r.Start failed: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			if ev.Type == reader.EventError {
+				t.Fatalf("reader error: %v", ev.Err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
