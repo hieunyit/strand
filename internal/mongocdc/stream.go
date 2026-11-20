@@ -689,10 +689,10 @@ func fetchByID(ctx context.Context, coll *mongo.Collection, ops []*docOp) (map[s
 		for cur.Next(ctx) {
 			doc := append(bson.Raw(nil), cur.Current...)
 			id := doc.Lookup("_id")
-			k, ok := idKey(id)
-			if !ok {
-				out[exactKey(id)] = doc
-			}
+			// Both keys: slow-path (non-canonical) collections look up by exact bytes, others
+			// by idKey; for numeric _ids the two differ.
+			k, _ := idKey(id)
+			out[exactKey(id)] = doc
 			out[k] = doc
 		}
 		err = cur.Err()

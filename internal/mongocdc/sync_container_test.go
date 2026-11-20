@@ -436,3 +436,40 @@ func TestContainer_RefusesExistingTarget(t *testing.T) {
 		t.Fatalf("target modified: %d docs", n)
 	}
 }
+
+// Regression: in a batch with a non-canonical _id (Decimal128, document) the collection
+// takes the slow path and updates are looked up on the source; a numeric _id looked up
+// there must not be mistaken for a deleted document (keys differ for numbers).
+func TestContainer_SlowPathLookupKeepsNumericIDs(t *testing.T) {
+	p := newPair(t)
+	db := "slowlk"
+	ctx := context.Background()
+	dec, _ := bson.ParseDecimal128("7.5")
+	c := p.srcC.Database(db).Collection("m")
+	if _, err := c.InsertMany(ctx, []any{bson.D{{Key: "_id", Value: dec}, {Key: "v", Value: 0}},
+		bson.D{{Key: "_id", Value: int32(1)}, {Key: "v", Value: 0}}, bson.D{{Key: "_id", Value: int64(2)}, {Key: "v", Value: 0}}}); err != nil {
+		t.Fatal(err)
+	}
+	r := start(p.cfg(t, "slowlk", db))
+	p.waitIdentical(t, db, time.Minute, r)
+	for i := 0; i < 20; i++ {
+		sess, err := p.srcC.StartSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = sess.WithTransaction(ctx, func(tx context.Context) (any, error) {
+			for _, id := range []any{dec, int32(1), int64(2)} {
+				if _, err := c.UpdateOne(tx, bson.D{{Key: "_id", Value: id}}, bson.D{{Key: "$inc", Value: bson.D{{Key: "v", Value: 1}}}}); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		})
+		sess.EndSession(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.waitIdentical(t, db, time.Minute, r)
+	r.stop(t)
+}

@@ -26,7 +26,7 @@ type connFields struct {
 //   - dạng DSN của driver (`user:pass@tcp(host:port)/db`) vẫn nhận nguyên như cũ.
 func resolveConnections(cfg *Config) error {
 	for _, m := range []struct {
-		name string
+		name                                                 string
 		kind, dsn, uriEnv, host, user, password, passwordEnv *string
 		port                                                 *int
 	}{

@@ -189,9 +189,13 @@ func diffDigest(a, b map[string]map[string][32]byte) string {
 			continue
 		}
 		missing, extra, changed := 0, 0, 0
+		var sample []string
 		for k, h := range ca {
 			if hb, ok := cb[k]; !ok {
 				missing++
+				if len(sample) < 5 {
+					sample = append(sample, bson.RawValue{Type: bson.Type(k[0]), Value: []byte(k[1:])}.String())
+				}
 			} else if hb != h {
 				changed++
 			}
@@ -202,7 +206,7 @@ func diffDigest(a, b map[string]map[string][32]byte) string {
 			}
 		}
 		if missing+extra+changed > 0 {
-			diffs = append(diffs, fmt.Sprintf("%s: src=%d dst=%d missing=%d extra=%d changed=%d", n, len(ca), len(cb), missing, extra, changed))
+			diffs = append(diffs, fmt.Sprintf("%s: src=%d dst=%d missing=%d extra=%d changed=%d (missing e.g. %v)", n, len(ca), len(cb), missing, extra, changed, sample))
 		}
 	}
 	return strings.Join(diffs, "; ")

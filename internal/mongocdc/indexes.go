@@ -327,7 +327,8 @@ func (r *runner) monitorOplog(ctx context.Context) {
 	}
 }
 
-// oplogWindow returns the time span covered by the source oplog.
+// oplogWindow returns the time span the source oplog covers (projected to its maximum
+// size while it is still filling up).
 func oplogWindow(ctx context.Context, client *mongo.Client) (time.Duration, error) {
 	oplog := client.Database("local").Collection("oplog.rs")
 	var first, last struct {
@@ -340,5 +341,17 @@ func oplogWindow(ctx context.Context, client *mongo.Client) (time.Duration, erro
 	if err := oplog.FindOne(ctx, bson.D{}, options.FindOne().SetProjection(bson.D{{Key: "ts", Value: 1}}).SetSort(bson.D{{Key: "$natural", Value: -1}})).Decode(&last); err != nil {
 		return 0, err
 	}
-	return time.Duration(int64(last.TS.T)-int64(first.TS.T)) * time.Second, nil
+	age := time.Duration(int64(last.TS.T)-int64(first.TS.T)) * time.Second
+	// An oplog that has not filled up yet only shows its age: project the window it will
+	// cover when full at the current write rate.
+	var st struct {
+		Size    float64 `bson:"size"`
+		MaxSize float64 `bson:"maxSize"`
+	}
+	if err := client.Database("local").RunCommand(ctx, bson.D{{Key: "collStats", Value: "oplog.rs"}}).Decode(&st); err == nil &&
+		st.Size > 0 && st.MaxSize > 0 && st.Size < 0.9*st.MaxSize {
+		age = max(age, time.Second)
+		return time.Duration(float64(age) * st.MaxSize / st.Size), nil
+	}
+	return age, nil
 }
