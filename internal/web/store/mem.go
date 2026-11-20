@@ -96,7 +96,35 @@ func (m *Mem) setAdmin(f func(a *Admin)) error {
 	return nil
 }
 func (m *Mem) SetPasswordHash(_ context.Context, h string) error {
-	return m.setAdmin(func(a *Admin) { a.PasswordHash = h })
+	_ = m.setAdmin(func(a *Admin) { a.PasswordHash = h })
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	for id, u := range m.users {
+		if strings.EqualFold(u.Username, "admin") {
+			u.PasswordHash = h
+			u.UpdatedAt = time.Now()
+			m.users[id] = u
+			return nil
+		}
+	}
+	if m.users == nil {
+		m.users = make(map[int64]User)
+	}
+	m.userSeq++
+	now := time.Now()
+	m.users[m.userSeq] = User{
+		ID:                 m.userSeq,
+		Username:           "admin",
+		DisplayName:        "Administrator",
+		PasswordHash:       h,
+		Role:               RoleAdmin,
+		MustChangePassword: false,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	return nil
 }
 func (m *Mem) SetAPITokenHash(_ context.Context, h string) error {
 	return m.setAdmin(func(a *Admin) { a.APITokenHash = h })

@@ -168,7 +168,13 @@ func (p *PG) Admin(ctx context.Context) (Admin, bool, error) {
 func (p *PG) SetPasswordHash(ctx context.Context, h string) error {
 	_, err := p.db.ExecContext(ctx, `INSERT INTO admin (id, password_hash) VALUES (1, $1)
 		ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`, h)
-	return p.wrap(err)
+	if err != nil {
+		return p.wrap(err)
+	}
+	_, _ = p.db.ExecContext(ctx, `INSERT INTO users (username, display_name, password_hash, role, must_change_password)
+		VALUES ('admin', 'Administrator', $1, 'admin', false)
+		ON CONFLICT ((lower(username))) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`, h)
+	return nil
 }
 
 func (p *PG) SetAPITokenHash(ctx context.Context, h string) error {

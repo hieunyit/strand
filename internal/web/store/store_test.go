@@ -281,3 +281,70 @@ func TestMigrateReplacesSupersededWIPMigration(t *testing.T) {
 		t.Fatalf("unknown collision: err = %v", err)
 	}
 }
+
+// TestMigrateUpgradeAdminToUsersRBAC tests migrating an existing database with an admin password
+// in the admin table up to migration 015, ensuring the admin user is created idempotently.
+func TestMigrateUpgradeAdminToUsersRBAC(t *testing.T) {
+	ctx := context.Background()
+	dsn := testutil.NewPostgresDSN(t)
+	p, err := store.Open(ctx, dsn, store.OpenOptions{NoMigrate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	db := p.DB()
+
+	ms, err := store.Migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version int PRIMARY KEY, name text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Version >= 15 {
+			continue
+		}
+		if _, err := db.Exec(m.SQL); err != nil {
+			t.Fatalf("migration %03d: %v", m.Version, err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations (version, name) VALUES ($1,$2)`, m.Version, m.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Insert legacy admin password hash into admin table
+	legacyHash := "$2a$12$e80V6jQzF2bH4wE0YqLd2.9l6QWJ4e3X5fP8vM2rZ7kS1tU0vW9yO"
+	if _, err := db.Exec(`INSERT INTO admin (id, password_hash) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash`, legacyHash); err != nil {
+		t.Fatalf("insert admin: %v", err)
+	}
+
+	// Apply migration 015
+	applied, err := store.Migrate(ctx, db)
+	if err != nil {
+		t.Fatalf("migrate to 015: %v", err)
+	}
+	if len(applied) == 0 {
+		t.Fatalf("expected 015 to be applied")
+	}
+
+	// Verify users table exists and has user 'admin'
+	var username, role, pwh string
+	var mustChange, disabled bool
+	err = db.QueryRow(`SELECT username, role, password_hash, must_change_password, disabled FROM users WHERE username = 'admin'`).
+		Scan(&username, &role, &pwh, &mustChange, &disabled)
+	if err != nil {
+		t.Fatalf("query user admin: %v", err)
+	}
+	if username != "admin" || role != "admin" || pwh != legacyHash || mustChange || disabled {
+		t.Errorf("user admin data mismatch: username=%q role=%q pwh=%q mustChange=%v disabled=%v",
+			username, role, pwh, mustChange, disabled)
+	}
+
+	// Verify idempotency
+	applied2, err := store.Migrate(ctx, db)
+	if err != nil || len(applied2) != 0 {
+		t.Fatalf("second migrate: %v err: %v", applied2, err)
+	}
+}
+
