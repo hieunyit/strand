@@ -71,7 +71,25 @@ func (s *Server) startBackupOp(kind, pipeline string, args ...string) (string, e
 		full = append(full, "--config", s.cfg.SourcePath)
 	}
 	full = append(append(full, "backup"), args...)
-	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full})
+	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full, Env: s.backupOpEnv(args)})
+}
+
+// backupOpEnv: the log archiver reads the source database, so for a job on a stored-secret connection it
+// receives the decrypted secret in its environment (other operations never touch the source).
+func (s *Server) backupOpEnv(args []string) []string {
+	if len(args) < 3 || args[0] != "log-archive" || s.db == nil {
+		return nil
+	}
+	for i := 1; i+1 < len(args); i++ {
+		if args[i] == "--job-id" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if j, ok, err := s.db.st.GetBackupJob(ctx, args[i+1]); err == nil && ok {
+				return s.jobSecretEnv(j)
+			}
+		}
+	}
+	return nil
 }
 
 // startOwnedBackupOp starts a long-running backup process owned by this instance (stopped on step-down).
@@ -576,8 +594,11 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 		if j.RunFinishedAt != nil && j.LastRunStatus != "" && j.LastRunStatus != backup.RunStatusRunning {
 			if ok, _ := s.db.st.MarkBackupJobNotified(ctx, j.ID, *j.RunFinishedAt); ok {
 				kind := "failure"
-				if j.LastRunStatus == backup.RunStatusSucceeded {
+				switch j.LastRunStatus {
+				case backup.RunStatusSucceeded:
 					kind = "success"
+				case backup.RunStatusMissed:
+					kind = "missed" // not started within window_minutes (recorded by the scheduler)
 				}
 				msg := fmt.Sprintf("backup job %q (%s) run %s at %s", j.Name, j.Source, j.LastRunStatus, j.RunFinishedAt.UTC().Format(time.RFC3339))
 				if j.ConsecutiveFailures > 0 {

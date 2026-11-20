@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"strand/internal/backup"
+	"strand/internal/backup/conncheck"
 	"strand/internal/web/store"
 )
 
@@ -66,6 +67,7 @@ type Server struct {
 	lease             *leaseMgr    // chế độ DB: lease instance active (lease.go)
 	desired           desiredCache
 	backups           *backup.Catalog
+	checker           conncheck.Checker // connection tests (nil: live)
 
 	pages   map[string]*template.Template
 	handler http.Handler
@@ -103,6 +105,8 @@ type Options struct {
 	PreviousSecretKey string
 	// LeaseTTL thay thời hạn lease instance active (test; mặc định 30 s hoặc STRAND_WEB_LEASE_TTL).
 	LeaseTTL time.Duration
+	// ConnChecker thay bộ kiểm tra kết nối backup (test dùng bản giả). nil: kiểm tra thật.
+	ConnChecker conncheck.Checker
 }
 
 // New dựng Server (chưa lắng nghe, chưa chạy sampler). Trả lỗi nếu cấu hình không đủ điều kiện khởi động.
@@ -159,6 +163,7 @@ func New(o Options) (*Server, error) {
 		tunnels: make(map[string]activeTunnel), tunnelCtx: tunnelCtx, tunnelCancel: tunnelCancel,
 	}
 	s.db = db
+	s.checker = o.ConnChecker
 	s.backups, err = backup.NewCatalog(db.st)
 	if err != nil {
 		return nil, err
@@ -182,6 +187,13 @@ func New(o Options) (*Server, error) {
 	s.samp.OnRound = s.onRound
 	if err := s.initDB(); err != nil {
 		return nil, err
+	}
+	{
+		sctx, scancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := s.seedBackupPolicies(sctx); err != nil {
+			o.Logger.Warn("seed built-in backup policies failed (retried on the next start)", "error", err)
+		}
+		scancel()
 	}
 	// Nhiều instance trên một DB: chỉ instance giữ lease là active; không lấy được thì chạy standby (chỉ đọc).
 	s.lease = newLeaseMgr(o.Config.Listen, o.Version, leaseTTL(o))
@@ -410,6 +422,8 @@ func (s *Server) routes() http.Handler {
 	// RBAC: admin-only read
 	mux.Handle("GET /api/v1/jobs/{id}/download", s.auth(true, s.apiJobDownload))
 	mux.Handle("GET /backups", s.auth(false, s.pageBackups))
+	s.backupConnectionRoutes(mux)
+	s.backupPolicyRoutes(mux)
 	mux.Handle("GET /api/v1/backup-jobs", s.auth(true, s.apiBackupJobs))
 	mux.Handle("GET /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobGet))
 	mux.Handle("POST /api/v1/backup-jobs", s.auth(true, s.apiBackupJobCreate))

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"syscall"
@@ -265,7 +267,7 @@ func (s *Server) startBackupJobProcess(j backup.Job, once bool, args []string) (
 	if once {
 		pipeline = backupJobRunPipeline(j.ID)
 	}
-	id, err := s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: args})
+	id, err := s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: args, Env: s.jobSecretEnv(j)})
 	if err != nil {
 		return "", err
 	}
@@ -359,6 +361,35 @@ func (s *Server) auditBackupJob(w http.ResponseWriter, r *http.Request, action, 
 	return true
 }
 
+// auditBackupJobDetail is auditBackupJob with the job's settings (secrets never appear: a job holds only
+// environment variable NAMES).
+func (s *Server) auditBackupJobDetail(w http.ResponseWriter, r *http.Request, action, id string, detail map[string]any) bool {
+	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: action, Pipeline: id, Result: "started", Detail: detail}); err != nil {
+		s.log.Error("audit backup job", "action", action, "error", err)
+		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing to change backup jobs")
+		return false
+	}
+	return true
+}
+
+func jobAuditDetail(j backup.Job) map[string]any {
+	d := map[string]any{"name": j.Name, "method": j.Method, "enabled": j.Enabled, "schedule": j.EffectiveSchedule().Human()}
+	if j.ConnectionID != "" {
+		d["connection_id"] = j.ConnectionID
+	}
+	if j.PolicyID != "" {
+		d["policy_id"] = j.PolicyID
+		d["overrides"] = j.Overrides
+	}
+	if j.WindowMinutes > 0 {
+		d["window_minutes"] = j.WindowMinutes
+	}
+	if j.JitterSeconds > 0 {
+		d["jitter_seconds"] = j.JitterSeconds
+	}
+	return d
+}
+
 func (s *Server) apiBackupJobs(w http.ResponseWriter, r *http.Request, _ *Session) {
 	views, err := s.backupJobViews(r.Context())
 	if err != nil {
@@ -385,21 +416,78 @@ func (s *Server) apiBackupJobGet(w http.ResponseWriter, r *http.Request, _ *Sess
 	writeJSON(w, http.StatusOK, map[string]any{"job": j, "process": s.backupJobProcess(j)})
 }
 
-func (s *Server) decodeBackupJob(w http.ResponseWriter, r *http.Request) (backup.Job, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+// decodeBackupJob decodes a job body strictly and also reports which top-level fields the request carried
+// (a policy-managed field the client omitted keeps following the policy).
+func (s *Server) decodeBackupJob(w http.ResponseWriter, r *http.Request) (backup.Job, map[string]bool, bool) {
 	var j backup.Job
-	dec := json.NewDecoder(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid backup job JSON")
+		return j, nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&j); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid backup job JSON")
-		return j, false
+		return j, nil, false
 	}
 	var extra any
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		writeErr(w, http.StatusBadRequest, "backup job request must contain exactly one JSON object")
-		return j, false
+		return j, nil, false
 	}
-	return j, true
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(body, &raw)
+	present := make(map[string]bool, len(raw))
+	for k := range raw {
+		present[k] = true
+	}
+	return j, present, true
+}
+
+// resolveJobRefs materializes the connection and policy a job references into the job (host, secret
+// variable names, schedule, retention...) and normalizes its schedule. Policy fields the request carried
+// with a different value become overrides (unless the request lists "overrides" itself).
+func (s *Server) resolveJobRefs(ctx context.Context, j *backup.Job, present map[string]bool) (warnings []string, err error) {
+	if j.ConnectionID != "" {
+		c, ok, err := s.db.st.GetBackupConnection(ctx, j.ConnectionID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: connection %q does not exist", backup.ErrInvalid, j.ConnectionID)
+		}
+		if *j, err = backup.ApplyConnection(*j, c); err != nil {
+			return nil, err
+		}
+	}
+	if j.PolicyID != "" {
+		p, ok, err := s.db.st.GetBackupPolicy(ctx, j.PolicyID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: policy %q does not exist", backup.ErrInvalid, j.PolicyID)
+		}
+		if !present["overrides"] {
+			j.Overrides = backup.DeriveOverrides(*j, p, func(f string) bool { return present[f] })
+		}
+		*j, warnings = backup.ApplyPolicy(*j, p)
+	}
+	backup.NormalizeSchedule(j)
+	return warnings, nil
+}
+
+// initialNextRun is when a (re)started job first runs: right away for interval jobs (existing behaviour),
+// the schedule's next occurrence for daily/weekly/monthly/cron jobs.
+func initialNextRun(j backup.Job, now time.Time) time.Time {
+	now = now.UTC()
+	if j.Schedule != nil && j.Schedule.Kind != backup.ScheduleInterval {
+		if n, err := j.Schedule.Next(now, now); err == nil {
+			return n
+		}
+	}
+	return now
 }
 
 func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -407,8 +495,13 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusServiceUnavailable, "backup jobs require the metadata database")
 		return
 	}
-	j, ok := s.decodeBackupJob(w, r)
+	j, present, ok := s.decodeBackupJob(w, r)
 	if !ok {
+		return
+	}
+	warnings, err := s.resolveJobRefs(r.Context(), &j, present)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if j.ID == "" {
@@ -420,14 +513,14 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		j.ID = id
 	}
 	if j.Enabled {
-		next := s.now().UTC()
+		next := initialNextRun(j, s.now())
 		j.NextRunAt = &next
 	}
 	if err := s.validateBackupJob(j); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditBackupJob(w, r, "backup_job.create", j.ID) {
+	if !s.auditBackupJobDetail(w, r, "backup_job.create", j.ID, jobAuditDetail(j)) {
 		return
 	}
 	if err := s.db.st.CreateBackupJob(r.Context(), j); err != nil {
@@ -435,7 +528,6 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		return
 	}
 	var processID string
-	var err error
 	if j.Enabled {
 		processID, err = s.startBackupJob(j)
 		if err != nil {
@@ -444,7 +536,7 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 			return
 		}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"job": j, "process_id": processID})
+	writeJSON(w, http.StatusCreated, map[string]any{"job": j, "process_id": processID, "warnings": warnings})
 }
 
 func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -452,13 +544,18 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusServiceUnavailable, "backup jobs require the metadata database")
 		return
 	}
-	j, ok := s.decodeBackupJob(w, r)
+	j, present, ok := s.decodeBackupJob(w, r)
 	if !ok {
 		return
 	}
 	j.ID = r.PathValue("id")
+	warnings, err := s.resolveJobRefs(r.Context(), &j, present)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if j.Enabled {
-		next := s.now().UTC()
+		next := initialNextRun(j, s.now())
 		j.NextRunAt = &next
 	} else {
 		j.NextRunAt = nil
@@ -467,7 +564,7 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditBackupJob(w, r, "backup_job.update", j.ID) {
+	if !s.auditBackupJobDetail(w, r, "backup_job.update", j.ID, jobAuditDetail(j)) {
 		return
 	}
 	changed, err := s.db.st.UpdateBackupJob(r.Context(), j)
@@ -494,7 +591,7 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusBadGateway, "could not start backup job: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"job": j, "process_id": processID})
+	writeJSON(w, http.StatusOK, map[string]any{"job": j, "process_id": processID, "warnings": warnings})
 }
 
 func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -522,7 +619,7 @@ func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Se
 		return
 	}
 	j.Enabled = true
-	next := s.now().UTC()
+	next := initialNextRun(j, s.now())
 	j.NextRunAt = &next
 	changed, err := s.db.st.UpdateBackupJob(r.Context(), j)
 	if err != nil {
@@ -629,4 +726,86 @@ func (s *Server) apiBackupJobDelete(w http.ResponseWriter, r *http.Request, _ *S
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// jobSecretEnv hands the stored secret of the job's connection to the backup process through its
+// environment (never argv, never a file): STRAND_BACKUP_CONN_PASSWORD / STRAND_BACKUP_CONN_URI. Jobs
+// without a stored-secret connection get none (and the variables are blanked, so an inherited value cannot
+// leak into the wrong job).
+func (s *Server) jobSecretEnv(j backup.Job) []string {
+	if j.ConnectionID == "" || j.IsCustom() || s.db == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, ok, err := s.db.st.GetBackupConnection(ctx, j.ConnectionID)
+	env := []string{backup.EnvConnPassword + "=", backup.EnvConnURI + "="}
+	if err != nil || !ok || c.SecretMode != backup.SecretStored {
+		return env
+	}
+	pw, uri, err := s.connSecrets(c)
+	if err != nil {
+		s.log.Error("decrypt stored connection secret", "connection", c.ID, "error", err.Error())
+		return env
+	}
+	return []string{backup.EnvConnPassword + "=" + pw, backup.EnvConnURI + "=" + uri}
+}
+
+// refreshJobsUsing re-materializes every job that references the connection or policy `id` (after an edit
+// of it), stores the changed ones and restarts their schedulers. It returns the ids it updated and the
+// "id: reason" of those it could not.
+func (s *Server) refreshJobsUsing(ctx context.Context, kind, id string) (refreshed, failed []string) {
+	jobs, err := s.db.st.ListBackupJobs(ctx)
+	if err != nil {
+		return nil, []string{"list jobs: " + err.Error()}
+	}
+	for _, j := range jobs {
+		if (kind == "connection" && j.ConnectionID != id) || (kind == "policy" && j.PolicyID != id) {
+			continue
+		}
+		nj := j
+		if nj.ConnectionID != "" {
+			if c, ok, err := s.db.st.GetBackupConnection(ctx, nj.ConnectionID); err == nil && ok {
+				if nj, err = backup.ApplyConnection(nj, c); err != nil {
+					failed = append(failed, j.ID+": "+err.Error())
+					continue
+				}
+			}
+		}
+		if nj.PolicyID != "" {
+			if p, ok, err := s.db.st.GetBackupPolicy(ctx, nj.PolicyID); err == nil && ok {
+				nj, _ = backup.ApplyPolicy(nj, p)
+			}
+		}
+		if reflect.DeepEqual(j.JobOptions, nj.JobOptions) && j.EverySeconds == nj.EverySeconds {
+			continue // nothing the edit touches changes this job
+		}
+		if nj.Enabled {
+			if nj.Schedule != nil && nj.Schedule.Kind != backup.ScheduleInterval {
+				n := initialNextRun(nj, s.now())
+				nj.NextRunAt = &n
+			}
+		} else {
+			nj.NextRunAt = nil
+		}
+		if err := s.validateBackupJob(nj); err != nil {
+			failed = append(failed, j.ID+": "+err.Error())
+			continue
+		}
+		if changed, err := s.db.st.UpdateBackupJob(ctx, nj); err != nil || !changed {
+			failed = append(failed, j.ID+": could not store the refreshed job")
+			continue
+		}
+		refreshed = append(refreshed, j.ID)
+		if err := s.stopBackupJob(j.ID); err != nil {
+			failed = append(failed, j.ID+": "+err.Error())
+			continue
+		}
+		if nj.Enabled {
+			if _, err := s.startBackupJob(nj); err != nil {
+				go s.reconcileBackupSchedule(backupJobPipeline(j.ID))
+			}
+		}
+	}
+	return refreshed, failed
 }

@@ -80,6 +80,10 @@ var writeRules = []routeRule{
 	{"POST", "/api/v1/backup-jobs/{id}/verify", PermOperator},
 	{"POST", "/api/v1/backup-jobs/{id}/retention-preview", PermOperator},
 	{"POST", "/api/v1/backups/{id}/verify", PermOperator},
+	// Operator: test a backup connection (a read-only login probe; creating/editing/deleting connections
+	// and policies stays admin through the fail-closed default).
+	{"POST", "/api/v1/backup-connections/test", PermOperator},
+	{"POST", "/api/v1/backup-connections/{id}/test", PermOperator},
 }
 
 // readRules lists sensitive READ routes that need more than viewer.

@@ -2,7 +2,10 @@ package web
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"strand/internal/web/store"
 	"strings"
@@ -194,5 +197,63 @@ func TestEnvRejectsInvalidNames(t *testing.T) {
 		if _, err := formatEnvLine(key, "value"); err != nil {
 			t.Errorf("rejected valid key %q: %v", key, err)
 		}
+	}
+}
+
+// A stored backup-connection secret exists in plaintext only inside the Web process while it is handed to a
+// backup process through that process's environment: it must not appear in any API response, HTML page,
+// metrics output, audit entry, log line or process argv, and never in the clear in the database.
+func TestStoredConnectionSecretAppearsNowhere(t *testing.T) {
+	e := newCPEnv(t)
+	var logs strings.Builder
+	e.srv.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	a := e.admin()
+	var seen []string
+	rec := func(s string) string { seen = append(seen, s); return s }
+	id := connID(t, rec(a.must("POST", "/api/v1/backup-connections", storedConn("secret-conn"), 201)))
+	rec(a.must("GET", "/api/v1/backup-connections", nil, 200))
+	rec(a.must("GET", "/api/v1/backup-connections/"+id, nil, 200))
+	rec(a.must("POST", "/api/v1/backup-connections/"+id+"/test", nil, 200))
+	rec(a.must("POST", "/api/v1/backup-connections/test", storedConn("secret-conn"), 200))
+	upd := storedConn("secret-conn")
+	upd["password"] = canary + "-2"
+	rec(a.must("PUT", "/api/v1/backup-connections/"+id, upd, 200))
+	b := mysqlJobBody("secret-job", id)
+	b["enabled"] = true
+	rec(a.must("POST", "/api/v1/backup-jobs", b, 201))
+	rec(a.must("GET", "/api/v1/backup-jobs", nil, 200))
+	rec(a.must("GET", "/api/v1/backup-policies", nil, 200))
+	for _, page := range []string{"/backups", "/audit", "/", "/jobs"} {
+		_, body := a.e.testEnv.do(a.c, "GET", page, "", nil)
+		rec(body)
+	}
+	_, metrics := a.e.testEnv.do(a.c, "GET", "/metrics", "", nil)
+	rec(metrics)
+	sealed, _, _ := e.st.GetBackupConnection(context.Background(), id)
+	b64 := base64.StdEncoding.EncodeToString(sealed.PasswordSealed)
+	for i, s := range seen {
+		if strings.Contains(s, canary) || strings.Contains(s, b64) || strings.Contains(s, base64.RawStdEncoding.EncodeToString(sealed.PasswordSealed)) {
+			t.Fatalf("surface %d leaks the connection secret", i)
+		}
+	}
+	for _, sp := range e.rec.take() {
+		if strings.Contains(strings.Join(sp.Args, "\x00"), canary) || strings.Contains(strings.Join(sp.DisplayArgs, "\x00"), canary) {
+			t.Fatalf("secret in argv of %s", sp.Kind)
+		}
+	}
+	if strings.Contains(e.auditText(), canary) {
+		t.Fatal("secret in the audit log")
+	}
+	if strings.Contains(logs.String(), canary) {
+		t.Fatalf("secret in the log: %s", logs.String())
+	}
+	row, _, _ := e.st.GetBackupConnection(context.Background(), id)
+	if strings.Contains(string(row.PasswordSealed), canary) || len(row.PasswordSealed) == 0 {
+		t.Fatal("secret not sealed in the database row")
+	}
+	// The Go value serializes without any secret field, so no future handler can leak it by accident.
+	raw, _ := json.Marshal(row)
+	if strings.Contains(string(raw), "ealed") || strings.Contains(string(raw), canary) || !strings.Contains(string(raw), `"password_set":true`) {
+		t.Fatalf("connection JSON = %s", raw)
 	}
 }
