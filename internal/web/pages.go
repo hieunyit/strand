@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"strand/internal/admin"
+	"strand/internal/backup"
 	"strand/internal/config"
 )
 
@@ -71,6 +72,7 @@ func templateFuncs() template.FuncMap {
 		"jobDur":     jobDur,
 		"deref2":     func(t *time.Time) time.Time { return *t },
 		"div":        func(a, b int) int { return a / b },
+		"isUnsupportedBackupMethod": backup.IsUnsupportedMethod,
 		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
 			Jobs         []JobStatus
 			ShowPipeline bool

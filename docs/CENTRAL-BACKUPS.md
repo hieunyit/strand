@@ -245,7 +245,6 @@ Jobs page with its log.
 |---|---|---|---|---|
 | `mysqldump`, `mariadb-dump` | MySQL/MariaDB | full, logical (`--single-transaction`) | binlog file/pos + GTID set (from `--source-data`/`--master-data`) | yes (stdout) |
 | `mydumper` | MySQL | full, logical, parallel | `metadata` SHOW MASTER STATUS | tar of the dump dir |
-| `xtrabackup`, `mariabackup` | MySQL/MariaDB | full + incremental chains (`full_every`) | `to_lsn`, binlog position from `xtrabackup_info` | yes (`--stream=xbstream`) |
 | `pg_dump` | PostgreSQL | full, logical (`-Fc`) | consistent time | yes |
 | `pg_basebackup` | PostgreSQL | full, physical (`-Ft -X fetch`) | start/end LSN, timeline | yes (`-D -`) |
 | `mongodump` | MongoDB | full, logical (`--archive --oplog`) | oplog timestamp before/after | yes |
@@ -387,8 +386,6 @@ exist, the directory must be empty — and the source is never written:
 - MongoDB: `mongorestore --oplogReplay` of the base into a new deployment, then
   the archived oplog with `--oplogLimit`; single-database dumps restore under a
   new name (`--nsFrom/--nsTo`).
-- xtrabackup/mariabackup: the chain is unpacked (`xbstream`) and prepared
-  (`--apply-log-only` for all but the last) into the target directory.
 
 `--id <backup>` restores one backup as is. The Web restore wizard (Backups page)
 requires typing the target name to confirm and opens the job log.
@@ -474,13 +471,19 @@ repository can be re-indexed without the database.
 
 ## Current limits
 
+- Strand runs on its own host, never on the database host, so physical backup
+  methods that read the datadir locally (`xtrabackup`, `mariabackup`) and
+  incremental-chain creation paths are removed. Existing catalog records with
+  `kind=incremental` or method `xtrabackup` from older versions still list, are
+  retained and expired safely according to retention policies, and can be
+  restored using `strand backup fetch` and native tooling (they are just not
+  created anymore).
 - MySQL PITR needs GTID mode and a single-database `mysqldump` base; MariaDB
-  binlog archiving is not supported (MariaDB GTIDs). xtrabackup restores
-  prepare the data directory; replaying binlogs on top of it is manual.
+  binlog archiving is not supported (MariaDB GTIDs).
 - PostgreSQL PITR follows one timeline; tablespaces (symlinks) are refused on
   restore. pg_dump bases are not PITR anchors (use pg_basebackup).
-- No deduplication across backups (every run is a full stream; physical
-  incremental chains only for xtrabackup/mariabackup).
+- No deduplication across backups (every run is a full stream; incremental chain
+  creation is removed).
 - Test restores cover mysqldump/mariadb-dump/pg_dump; physical and MongoDB test
   restores are not automated.
 - Job output files are capped at 32 MiB each; output after the cap is discarded

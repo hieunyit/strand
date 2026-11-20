@@ -27,8 +27,6 @@ const (
 	MethodMySQLDump    = "mysqldump"
 	MethodMariaDBDump  = "mariadb-dump"
 	MethodMydumper     = "mydumper"
-	MethodXtrabackup   = "xtrabackup"
-	MethodMariabackup  = "mariabackup"
 	MethodPGDump       = "pg_dump"
 	MethodPGBaseBackup = "pg_basebackup"
 	MethodMongodump    = "mongodump"
@@ -38,10 +36,15 @@ const (
 	MethodOplog  = "oplog"
 )
 
+// IsUnsupportedMethod reports backup methods that were removed because they must run on the database host.
+func IsUnsupportedMethod(method string) bool {
+	return method == "xtrabackup" || method == "mariabackup"
+}
+
 // MethodEngine maps a built-in method to its engine ("" for custom/unknown).
 func MethodEngine(method string) string {
 	switch method {
-	case MethodMySQLDump, MethodMariaDBDump, MethodMydumper, MethodXtrabackup, MethodMariabackup, MethodBinlog:
+	case MethodMySQLDump, MethodMariaDBDump, MethodMydumper, MethodBinlog:
 		return EngineMySQL
 	case MethodPGDump, MethodPGBaseBackup, MethodWAL:
 		return EnginePostgres
@@ -52,8 +55,9 @@ func MethodEngine(method string) string {
 }
 
 // MethodSupportsIncremental reports physical methods that can take incremental backups.
+// Incremental chain creation is no longer supported (xtrabackup/mariabackup removed).
 func MethodSupportsIncremental(method string) bool {
-	return method == MethodXtrabackup || method == MethodMariabackup
+	return false
 }
 
 // MethodLogArchive returns the continuous log-archiving method paired with a base-backup method.
@@ -233,9 +237,12 @@ func ValidateJob(j Job) error {
 			}
 		}
 		if j.LogArchive || j.FullEvery > 1 || j.TestRestore {
-			return bad("log archiving, incremental chains and test restores need a built-in method")
+			return bad("log archiving and test restores need a built-in method")
 		}
 	} else {
+		if IsUnsupportedMethod(j.Method) {
+			return bad(fmt.Sprintf("method %q is unsupported (removed: physical backups reading the datadir on the DB host are not supported)", j.Method))
+		}
 		engine := MethodEngine(j.Method)
 		if engine == "" || j.Method == MethodBinlog || j.Method == MethodWAL || j.Method == MethodOplog {
 			return bad("unknown backup method " + fmt.Sprintf("%q", j.Method))
@@ -250,11 +257,8 @@ func ValidateJob(j Job) error {
 		if err := validateConn("connection", j.Conn, engine, needDB); err != nil {
 			return err
 		}
-		if (j.Method == MethodXtrabackup || j.Method == MethodMariabackup) && j.Conn.Datadir == "" {
-			return bad("xtrabackup/mariabackup need conn.datadir (they run on the database host)")
-		}
-		if j.FullEvery < 0 || j.FullEvery > 1000 || (j.FullEvery > 1 && !MethodSupportsIncremental(j.Method)) {
-			return bad("full_every (incremental chains) is supported by xtrabackup/mariabackup only, 0-1000")
+		if j.FullEvery < 0 || j.FullEvery > 1000 || j.FullEvery > 1 {
+			return bad("incremental backup chains (full_every) are no longer supported")
 		}
 		if j.LogFlushSeconds != 0 && (j.LogFlushSeconds < 10 || j.LogFlushSeconds > 86400) {
 			return bad("log_flush_seconds must be between 10 and 86400")

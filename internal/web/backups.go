@@ -127,7 +127,7 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 			b.Checks, _ = s.backups.Checks(r.Context(), "", 20)
 		}
 		b.Methods = []string{backup.MethodCustom, backup.MethodMySQLDump, backup.MethodMariaDBDump, backup.MethodMydumper,
-			backup.MethodXtrabackup, backup.MethodMariabackup, backup.MethodPGDump, backup.MethodPGBaseBackup, backup.MethodMongodump}
+			backup.MethodPGDump, backup.MethodPGBaseBackup, backup.MethodMongodump}
 	}
 	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Refresh: 10, Body: b})
 }

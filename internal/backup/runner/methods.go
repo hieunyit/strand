@@ -277,44 +277,6 @@ func MongodumpInvocation(uri string, c backup.ConnSpec) (Invocation, error) {
 	return Invocation{Tool: "mongodump", Args: args, Files: map[string]string{"mongo.yaml": "uri: " + strconv.Quote(uri) + "\n"}}, nil
 }
 
-// XtrabackupInvocation streams a physical (full or incremental) backup as xbstream. {dir} receives the
-// checkpoint metadata (--extra-lsndir) used for the chain and the binlog position.
-func XtrabackupInvocation(getenv Getenv, tool string, c backup.ConnSpec, incrementalLSN string) Invocation {
-	files := map[string]string{"client.cnf": "[client]\npassword=" + password(getenv, c) + "\n"}
-	args := []string{"--defaults-extra-file={dir}/client.cnf", "--backup", "--stream=xbstream", "--target-dir={dir}/tmp",
-		"--extra-lsndir={dir}/lsn", "--datadir=" + c.Datadir}
-	args = append(args, mysqlConnArgs(c)...)
-	if incrementalLSN != "" {
-		args = append(args, "--incremental-lsn="+incrementalLSN)
-	}
-	return Invocation{Tool: tool, Args: args, Files: files}
-}
-
-// ParseXtrabackupCheckpoints reads from_lsn/to_lsn/backup_type from xtrabackup_checkpoints.
-func ParseXtrabackupCheckpoints(text string) map[string]string {
-	out := map[string]string{}
-	for _, line := range strings.Split(text, "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if ok {
-			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
-		}
-	}
-	return out
-}
-
-var xbBinlogRE = regexp.MustCompile(`binlog_pos = filename '([^']+)', position '(\d+)'(?:, GTID of the last change '([^']*)')?`)
-
-// ParseXtrabackupInfo extracts the binlog position from xtrabackup_info.
-func ParseXtrabackupInfo(text string) backup.Position {
-	var p backup.Position
-	if m := xbBinlogRE.FindStringSubmatch(text); m != nil {
-		p.BinlogFile = m[1]
-		p.BinlogPos, _ = strconv.ParseInt(m[2], 10, 64)
-		p.GTIDSet = strings.Join(strings.Fields(m[3]), "")
-	}
-	return p
-}
-
 // MydumperInvocation writes a parallel logical dump into {dir}/out (streamed afterwards as tar).
 func MydumperInvocation(getenv Getenv, c backup.ConnSpec) Invocation {
 	args := []string{"--defaults-extra-file={dir}/client.cnf", "--outputdir={dir}/out", "--threads=4", "--triggers",

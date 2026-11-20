@@ -120,8 +120,7 @@ func safeSegment(s string) string {
 func payloadName(method, format string) string {
 	name := map[string]string{
 		backup.MethodMySQLDump: "dump.sql", backup.MethodMariaDBDump: "dump.sql", backup.MethodPGDump: "dump.pgdump",
-		backup.MethodPGBaseBackup: "base.tar", backup.MethodMongodump: "dump.archive", backup.MethodXtrabackup: "backup.xbstream",
-		backup.MethodMariabackup: "backup.xbstream", backup.MethodMydumper: "mydumper.tar",
+		backup.MethodPGBaseBackup: "base.tar", backup.MethodMongodump: "dump.archive", backup.MethodMydumper: "mydumper.tar",
 	}[method]
 	if name == "" {
 		name = "artifact"
@@ -137,6 +136,9 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 	if job.IsCustom() {
 		return backup.Record{}, errors.New("RunJob handles built-in methods; custom jobs run their wrapper")
 	}
+	if backup.IsUnsupportedMethod(job.Method) {
+		return backup.Record{}, fmt.Errorf("method %q is unsupported (removed: runs on the database host)", job.Method)
+	}
 	repo, err := e.OpenJobRepository(ctx, job.Repository, job.Bucket, job.Prefix)
 	if err != nil {
 		return backup.Record{}, err
@@ -146,10 +148,7 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 		return backup.Record{}, err
 	}
 	id := NewID("bkp")
-	kind, parent, incrLSN, err := e.chainFor(ctx, job)
-	if err != nil {
-		return backup.Record{}, err
-	}
+	kind, parent := backup.KindFull, ""
 	key := repo.Key(safeSegment(job.Source), id, payloadName(job.Method, enc.Format()))
 	rec = backup.Record{ID: id, Source: job.Source, Engine: job.Engine(), Tool: job.Method, Bucket: repo.Bucket,
 		ObjectKey: key, ManifestURI: repo.URI(repo.Key(safeSegment(job.Source), id, "manifest.json")),
@@ -175,7 +174,7 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	started := e.now()
-	meta, res, err := e.stream(runCtx, job, repo, key, enc, incrLSN)
+	meta, res, err := e.stream(runCtx, job, repo, key, enc)
 	if err != nil {
 		return fail(err)
 	}
@@ -260,31 +259,8 @@ func (e *Env) finalize(ctx context.Context, repo *Repository, rec backup.Record,
 	return out, nil
 }
 
-// chainFor decides full vs incremental for physical methods (FullEvery runs per chain).
-func (e *Env) chainFor(ctx context.Context, job backup.Job) (kind, parent, lsn string, err error) {
-	if !backup.MethodSupportsIncremental(job.Method) || job.FullEvery <= 1 {
-		return backup.KindFull, "", "", nil
-	}
-	rs, err := e.Catalog.List(ctx, backup.Filter{JobID: job.ID, Status: backup.StatusComplete, NotKind: backup.KindLog, Limit: 1000})
-	if err != nil || len(rs) == 0 {
-		return backup.KindFull, "", "", err
-	}
-	since := 0
-	for _, r := range rs {
-		if r.KindOrFull() == backup.KindFull {
-			break
-		}
-		since++
-	}
-	last := rs[0]
-	if since+1 >= job.FullEvery || last.Details["to_lsn"] == "" {
-		return backup.KindFull, "", "", nil
-	}
-	return backup.KindIncremental, last.ID, last.Details["to_lsn"], nil
-}
-
 // stream runs the method's tool and stores its output.
-func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions, incrLSN string) (backup.Meta, PayloadResult, error) {
+func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions) (backup.Meta, PayloadResult, error) {
 	var meta backup.Meta
 	var inv Invocation
 	var err error
@@ -313,8 +289,6 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 			}
 			meta.Position.OplogTS = FormatOplogTS(ts)
 		}
-	case backup.MethodXtrabackup, backup.MethodMariabackup:
-		inv = XtrabackupInvocation(e.Getenv, job.Method, job.Conn, incrLSN)
 	case backup.MethodMydumper:
 		return e.streamMydumper(ctx, job, repo, key, enc)
 	default:
@@ -360,15 +334,6 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 				meta.EndPosition.OplogTS = FormatOplogTS(ts)
 			}
 		}
-	case backup.MethodXtrabackup, backup.MethodMariabackup:
-		cp, _ := os.ReadFile(filepath.Join(proc.Dir(), "lsn", "xtrabackup_checkpoints"))
-		c := ParseXtrabackupCheckpoints(string(cp))
-		if c["to_lsn"] == "" {
-			return meta, res, errors.New("xtrabackup did not write xtrabackup_checkpoints (to_lsn unknown)")
-		}
-		meta.Details["from_lsn"], meta.Details["to_lsn"], meta.Details["backup_type"] = c["from_lsn"], c["to_lsn"], c["backup_type"]
-		info, _ := os.ReadFile(filepath.Join(proc.Dir(), "lsn", "xtrabackup_info"))
-		meta.Position = ParseXtrabackupInfo(string(info))
 	}
 	return meta, res, nil
 }

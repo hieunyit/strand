@@ -638,6 +638,14 @@ func (m *Mem) CreateBackupJob(_ context.Context, j backup.Job) error {
 	return nil
 }
 
+// SeedBackupJob inserts a job directly without validation (simulating jobs stored by an earlier version).
+func (m *Mem) SeedBackupJob(j backup.Job) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j.UpdatedAt = nextBackupJobRevision(time.Time{})
+	m.backupJobs[j.ID] = cloneBackupJob(j)
+}
+
 func (m *Mem) GetBackupJob(_ context.Context, id string) (backup.Job, bool, error) {
 	if err := m.enter(); err != nil {
 		return backup.Job{}, false, err

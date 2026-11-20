@@ -37,7 +37,7 @@ func pitrBase(r backup.Record) bool {
 	}
 	switch r.Engine {
 	case backup.EngineMySQL:
-		return r.Position.GTIDSet != "" && (r.Method == backup.MethodMySQLDump || r.Method == backup.MethodXtrabackup)
+		return r.Position.GTIDSet != "" && r.Method == backup.MethodMySQLDump
 	case backup.EnginePostgres:
 		return r.Method == backup.MethodPGBaseBackup && r.Position.LSN != ""
 	case backup.EngineMongoDB:

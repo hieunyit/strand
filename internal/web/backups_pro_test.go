@@ -280,3 +280,111 @@ func waitIdle(t *testing.T, e *testEnv, pipelines ...string) {
 		}
 	})
 }
+
+func TestStoredUnsupportedBackupJobBehaviour(t *testing.T) {
+	st := store.NewMem()
+	jobXtra := backup.Job{
+		ID:           "bjob-xtra",
+		Name:         "old physical job",
+		EverySeconds: 3600,
+		Bucket:       "central-backups",
+		Enabled:      true,
+		JobOptions: backup.JobOptions{
+			Method: "xtrabackup",
+			Source: "mysql-prod",
+			Conn: backup.ConnSpec{
+				Host:        "db1",
+				Port:        3306,
+				User:        "backup",
+				PasswordEnv: "MYSQL_PW",
+				Datadir:     "/var/lib/mysql",
+			},
+		},
+	}
+	st.SeedBackupJob(jobXtra)
+	jobMaria := backup.Job{
+		ID:           "bjob-maria",
+		Name:         "old mariabackup job",
+		EverySeconds: 3600,
+		Bucket:       "central-backups",
+		Enabled:      true,
+		JobOptions: backup.JobOptions{
+			Method: "mariabackup",
+			Source: "mariadb-prod",
+			Conn: backup.ConnSpec{
+				Host:        "db2",
+				Port:        3306,
+				User:        "backup",
+				PasswordEnv: "MARIA_PW",
+				Datadir:     "/var/lib/mysql",
+			},
+		},
+	}
+	st.SeedBackupJob(jobMaria)
+
+	// 1. Starting the web server and resuming schedulers does NOT crash.
+	e := dbEnv(t, st, nil, nil)
+	c, csrf := e.loginOK()
+	h := map[string]string{"X-CSRF-Token": csrf, "Content-Type": "application/json"}
+
+	// 2. The /backups UI shows it as "unsupported method (removed)".
+	resp, body := e.do(c, "GET", "/backups", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /backups status %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, "unsupported method (removed)") {
+		t.Fatalf("expected UI to show 'unsupported method (removed)', got:\n%s", body)
+	}
+
+	// 3. Triggering 'Run now' is refused with a clear error.
+	resp, body = e.do(c, "POST", "/api/v1/backup-jobs/"+jobXtra.ID+"/run", "", h)
+	if resp.StatusCode != 400 {
+		t.Fatalf("run status %d (expected 400)", resp.StatusCode)
+	}
+	if !strings.Contains(body, "unsupported") || !strings.Contains(body, "removed") {
+		t.Fatalf("expected clear unsupported error, got %s", body)
+	}
+
+	// 4. Triggering 'Start' is refused with a clear error.
+	resp, body = e.do(c, "POST", "/api/v1/backup-jobs/"+jobXtra.ID+"/start", "", h)
+	if resp.StatusCode != 400 {
+		t.Fatalf("start status %d (expected 400)", resp.StatusCode)
+	}
+	if !strings.Contains(body, "unsupported") || !strings.Contains(body, "removed") {
+		t.Fatalf("expected clear unsupported error, got %s", body)
+	}
+
+	// 5. Editing the job to a supported method (mysqldump) succeeds.
+	updateReq := `{
+		"name": "migrated job",
+		"method": "mysqldump",
+		"every_seconds": 3600,
+		"bucket": "central-backups",
+		"source": "mysql-prod",
+		"conn": {
+			"host": "db1",
+			"port": 3306,
+			"user": "backup",
+			"password_env": "MYSQL_PW",
+			"databases": ["shop"]
+		}
+	}`
+	resp, body = e.do(c, "PUT", "/api/v1/backup-jobs/"+jobXtra.ID, updateReq, h)
+	if resp.StatusCode != 200 {
+		t.Fatalf("update status %d %s", resp.StatusCode, body)
+	}
+	updated, found, err := st.GetBackupJob(context.Background(), jobXtra.ID)
+	if err != nil || !found || updated.Method != "mysqldump" {
+		t.Fatalf("expected method mysqldump, got %+v (err: %v)", updated, err)
+	}
+
+	// 6. Deleting the unsupported job succeeds.
+	resp, body = e.do(c, "DELETE", "/api/v1/backup-jobs/"+jobMaria.ID, "", h)
+	if resp.StatusCode != 204 {
+		t.Fatalf("delete status %d %s", resp.StatusCode, body)
+	}
+	_, found, err = st.GetBackupJob(context.Background(), jobMaria.ID)
+	if err != nil || found {
+		t.Fatalf("expected job to be deleted, found=%v err=%v", found, err)
+	}
+}

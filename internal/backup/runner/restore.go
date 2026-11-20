@@ -48,8 +48,6 @@ func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (e
 		return e.restorePGBase(ctx, plan, t)
 	case backup.MethodMongodump:
 		return e.restoreMongo(ctx, plan, t)
-	case backup.MethodXtrabackup, backup.MethodMariabackup:
-		return e.restoreXtrabackup(ctx, plan, t)
 	}
 	return fmt.Errorf("restore of method %q is not supported; use `strand backup fetch` and the native tool", base.Method)
 }
@@ -392,54 +390,4 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 		rargs = append(rargs, fmt.Sprintf("--oplogLimit=%d:0", plan.Target.Unix()+1))
 	}
 	return e.runTool(ctx, Invocation{Tool: "mongorestore", Args: rargs, Files: cfg}, nil)
-}
-
-func (e *Env) restoreXtrabackup(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
-	if err := newDir(t.Dir); err != nil {
-		return err
-	}
-	work, err := e.tmpDir()
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(work)
-	_ = os.Chmod(work, 0o777)
-	tool := plan.Base().Method
-	var dirs []string
-	for i, r := range plan.Chain {
-		d := filepath.Join(work, fmt.Sprintf("%02d", i))
-		if err := os.MkdirAll(d, 0o777); err != nil {
-			return err
-		}
-		body, err := e.openRecord(ctx, r)
-		if err != nil {
-			return err
-		}
-		err = e.runTool(ctx, Invocation{Tool: "xbstream", Args: []string{"-x", "-C", d}}, body)
-		body.Close()
-		if err != nil {
-			return fmt.Errorf("unpack %s: %w", r.ID, err)
-		}
-		dirs = append(dirs, d)
-	}
-	for i := range dirs {
-		args := []string{"--prepare", "--target-dir=" + dirs[0]}
-		if i < len(dirs)-1 {
-			args = append(args, "--apply-log-only")
-		}
-		if i > 0 {
-			args = append(args, "--incremental-dir="+dirs[i])
-		}
-		if err := e.runTool(ctx, Invocation{Tool: tool, Args: args}, nil); err != nil {
-			return fmt.Errorf("prepare: %w", err)
-		}
-	}
-	if err := os.Remove(t.Dir); err != nil {
-		return err
-	}
-	if err := os.Rename(dirs[0], t.Dir); err != nil {
-		return fmt.Errorf("move prepared data directory: %w", err)
-	}
-	e.logf("restore: prepared MySQL data directory at %s (%d backup(s) in the chain)", t.Dir, len(dirs))
-	return nil
 }

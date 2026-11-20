@@ -55,6 +55,9 @@ func printJSON(w io.Writer, v any) error {
 // runManagedBuiltinJob runs one built-in-method backup for a managed job (tracked run, execution lock),
 // then applies retention and replication.
 func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Store, job backup.Job) error {
+	if backup.IsUnsupportedMethod(job.Method) {
+		return fmt.Errorf("backup job %s: method %q is unsupported (removed: runs on the database host)", job.ID, job.Method)
+	}
 	env, err := backupRunnerEnv(st, cmd.OutOrStdout())
 	if err != nil {
 		return err
@@ -100,6 +103,9 @@ func runManagedBuiltinSchedule(ctx context.Context, cmd *cobra.Command, st store
 	}
 	if !found || job.IsCustom() {
 		return errors.New("backup job is missing or uses a custom wrapper (pass the wrapper command)")
+	}
+	if backup.IsUnsupportedMethod(job.Method) {
+		return fmt.Errorf("backup job %s: method %q is unsupported (removed: runs on the database host)", jobID, job.Method)
 	}
 	if once {
 		return runManagedBuiltinJob(ctx, cmd, st, job)
@@ -324,7 +330,7 @@ func newBackupRestoreCmd() *cobra.Command {
 		Long: `Restore --id <backup> as is, or --source <identity> --to-time <RFC3339> (point-in-time: the base
 backup is chosen automatically and archived logs are replayed up to the target time). The target is
 always new: --target-database must not exist on the target server (logical backups), --target-dir must
-not exist or be empty (physical backups: pg_basebackup, xtrabackup). The source is never written.
+not exist or be empty (physical backups: pg_basebackup). The source is never written.
 Passwords come from the environment variable named by --target-password-env.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {

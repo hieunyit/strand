@@ -51,8 +51,7 @@
       job.source = val('source');
       job.conn = conn('conn');
       job.conn.uri_env = val('conn_uri_env'); job.conn.databases = list(val('conn_databases'));
-      job.conn.datadir = val('conn_datadir');
-      job.full_every = num('full_every'); job.log_archive = checked('log_archive');
+      job.log_archive = checked('log_archive');
       job.log_flush_seconds = num('log_flush_seconds');
       job.test_restore = checked('test_restore');
       if (job.test_restore) { job.scratch = conn('scratch'); }
@@ -68,10 +67,10 @@
     setVal('interval_minutes', Math.max(1, Math.floor(job.every_seconds / 60)));
     setVal('conn_host', c.host); setVal('conn_port', c.port || ''); setVal('conn_user', c.user);
     setVal('conn_password_env', c.password_env); setVal('conn_uri_env', c.uri_env);
-    setVal('conn_databases', (c.databases || []).join(', ')); setVal('conn_datadir', c.datadir);
+    setVal('conn_databases', (c.databases || []).join(', '));
     setVal('scratch_host', s.host); setVal('scratch_port', s.port || ''); setVal('scratch_user', s.user); setVal('scratch_password_env', s.password_env);
     ['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly', 'keep_yearly', 'keep_within_days', 'max_age_days', 'lock_days'].forEach(function (n) { setVal(n, r[n] || 0); });
-    setVal('full_every', job.full_every || 0); setVal('log_flush_seconds', job.log_flush_seconds || 0);
+    setVal('log_flush_seconds', job.log_flush_seconds || 0);
     setVal('bandwidth_kbps', job.bandwidth_kbps || 0); setVal('retry_max', job.retry_max || 0);
     setVal('retry_backoff_seconds', job.retry_backoff_seconds || 300);
     setVal('verify_hours', Math.round((job.verify_every_seconds || 0) / 3600)); setVal('verify_sample_percent', job.verify_sample_percent || 100);

@@ -56,24 +56,11 @@ func TestPhysicalParsers(t *testing.T) {
 	if s.LSN != "0/2000028" || e.LSN != "0/2000100" || tl != "1" {
 		t.Fatal(s, e, tl)
 	}
-	cp := ParseXtrabackupCheckpoints("backup_type = incremental\nfrom_lsn = 19634545\nto_lsn = 19634900\nlast_lsn = 19634900\n")
-	if cp["to_lsn"] != "19634900" || cp["backup_type"] != "incremental" {
-		t.Fatal(cp)
-	}
-	p := ParseXtrabackupInfo("binlog_pos = filename 'binlog.000002', position '1234', GTID of the last change 'u:1-9'\n")
-	if p.BinlogFile != "binlog.000002" || p.BinlogPos != 1234 || p.GTIDSet != "u:1-9" {
-		t.Fatal(p)
-	}
 	m := ParseMydumperMetadata("Started dump at: 2026-11-20 10:00:00\nSHOW MASTER STATUS:\n\tLog: binlog.000004\n\tPos: 777\n\tGTID:u:1-12\n\nFinished\n")
 	if m.BinlogFile != "binlog.000004" || m.BinlogPos != 777 || m.GTIDSet != "u:1-12" {
 		t.Fatal(m)
 	}
 	get := func(k string) string { return map[string]string{"PW": "pa:ss"}[k] }
-	inv := XtrabackupInvocation(get, "xtrabackup", backup.ConnSpec{Host: "db", User: "root", PasswordEnv: "PW", Datadir: "/var/lib/mysql"}, "4242")
-	j := strings.Join(inv.Args, " ")
-	if !strings.HasPrefix(j, "--defaults-extra-file={dir}/client.cnf") || !strings.Contains(j, "--incremental-lsn=4242") || strings.Contains(j, "pa:ss") {
-		t.Fatal(j)
-	}
 	uri, _ := MongoURI(get, backup.ConnSpec{Host: "m1", Port: 27017, User: "u@x", PasswordEnv: "PW"})
 	if uri != "mongodb://u%40x:pa%3Ass@m1:27017/?directConnection=true" {
 		t.Fatal(uri)

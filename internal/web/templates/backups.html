@@ -23,13 +23,13 @@
 
 <section class="card">
   <div class="cardhead"><h2>Scheduled backup jobs</h2></div>
-  <p class="muted">Built-in methods (mysqldump, mydumper, xtrabackup/mariabackup, pg_dump, pg_basebackup, mongodump) stream the native tool's output to the repository, compressed and encrypted on the Strand host; <em>custom</em> runs a wrapper script from the allow-listed command directory. Database passwords are read from the Web service environment variable you name, never stored. Only the active Web instance runs schedules, retention and verification.</p>
+  <p class="muted">Built-in methods (mysqldump, mydumper, pg_dump, pg_basebackup, mongodump) stream the native tool's output to the repository, compressed and encrypted on the Strand host; <em>custom</em> runs a wrapper script from the allow-listed command directory. Database passwords are read from the Web service environment variable you name, never stored. Only the active Web instance runs schedules, retention and verification.</p>
   {{if .Body.Jobs}}
   <div class="tablewrap"><table class="grid"><caption class="sr-only">Backup jobs</caption>
   <thead><tr><th>Name</th><th>Method</th><th>Interval</th><th>Retention</th><th>Protection</th><th>Schedule</th><th>Last run</th><th>Actions</th></tr></thead>
   <tbody>{{range .Body.Jobs}}<tr data-backup-job-id="{{.Job.ID}}">
     <td>{{.Job.Name}}{{if .Job.Source}}<div class="small muted">{{.Job.Source}}</div>{{end}}</td>
-    <td>{{if .Job.Method}}{{.Job.Method}}{{else}}custom{{end}}{{if .Job.LogArchive}} <span class="badge st-synced">PITR</span>{{end}}{{if gt .Job.FullEvery 1}}<div class="small muted">full every {{.Job.FullEvery}}</div>{{end}}</td>
+    <td>{{if isUnsupportedBackupMethod .Job.Method}}<span class="badge st-failed">unsupported method (removed)</span>{{else if .Job.Method}}{{.Job.Method}}{{else}}custom{{end}}{{if .Job.LogArchive}} <span class="badge st-synced">PITR</span>{{end}}</td>
     <td>{{printf "%dm" (div .Job.EverySeconds 60)}}</td>
     <td class="small">{{with .Job.Retention}}{{if .KeepLast}}last {{.KeepLast}} {{end}}{{if .KeepHourly}}hourly {{.KeepHourly}} {{end}}{{if .KeepDaily}}daily {{.KeepDaily}} {{end}}{{if .KeepWeekly}}weekly {{.KeepWeekly}} {{end}}{{if .KeepMonthly}}monthly {{.KeepMonthly}} {{end}}{{if .KeepYearly}}yearly {{.KeepYearly}} {{end}}{{if .KeepWithinDays}}within {{.KeepWithinDays}}d {{end}}{{if .MaxAgeDays}}max {{.MaxAgeDays}}d{{end}}{{end}}{{if not .Job.Retention.Enabled}}keep all{{end}}</td>
     <td class="small">{{if .Job.Encrypt}}<span class="badge st-synced">encrypted</span> {{end}}{{if .Job.Compress}}zstd {{end}}{{if .Job.Repository}}repo {{.Job.Repository}}{{end}}{{if .Job.ReplicateTo}} → {{.Job.ReplicateTo}}{{end}}</td>
@@ -74,8 +74,6 @@
       <label>Password environment variable <input name="conn_password_env" class="mono" placeholder="MYSQL_BACKUP_PASSWORD"></label>
       <label>MongoDB URI environment variable <input name="conn_uri_env" class="mono" placeholder="MONGO_BACKUP_URI"></label>
       <label>Databases (comma separated) <input name="conn_databases"></label>
-      <label>Data directory (xtrabackup) <input name="conn_datadir" class="mono" placeholder="/var/lib/mysql"></label>
-      <label>Full backup every N runs (xtrabackup) <input name="full_every" type="number" min="0" max="1000" value="0"></label>
       <label class="check"><input name="log_archive" type="checkbox"> Continuous log archiving (binlog/WAL/oplog) for point-in-time recovery</label>
       <label>Force a log switch every (seconds, 0 = off) <input name="log_flush_seconds" type="number" min="0" max="86400" value="0"></label>
     </fieldset>
@@ -124,7 +122,7 @@
 
 <section class="card" id="restore-section">
   <div class="cardhead"><h2>Restore</h2></div>
-  <p class="muted">A restore always goes to a <strong>new</strong> target: a database that does not exist yet (logical backups) or an empty directory (pg_basebackup, xtrabackup). Choose a backup, or a source and a point in time: Strand picks the base backup and replays archived logs up to that time. Progress and log appear on the job page.</p>
+  <p class="muted">A restore always goes to a <strong>new</strong> target: a database that does not exist yet (logical backups) or an empty directory (pg_basebackup). Choose a backup, or a source and a point in time: Strand picks the base backup and replays archived logs up to that time. Progress and log appear on the job page.</p>
   <form id="restore-form" class="form-grid">
     <label>Backup ID <input name="backup_id" class="mono" placeholder="bkp-..."></label>
     <label>…or source <input name="source" placeholder="mysql-prod"></label>
