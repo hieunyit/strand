@@ -315,6 +315,8 @@ type RestoreRequest struct {
 	Target       backup.ConnSpec `json:"target"`
 	TargetDB     string          `json:"target_database,omitempty"`
 	TargetDir    string          `json:"target_dir,omitempty"`
+	Threads      int             `json:"threads,omitempty"`
+	Objects      []string        `json:"objects,omitempty"`
 	Confirm      string          `json:"confirm"` // must equal the target database or directory
 }
 
@@ -329,6 +331,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 
 	var backupEngine string
 	var src string
+	var backupRecord *backup.Record
 	if req.BackupID != "" {
 		if s.backups != nil {
 			b, ok, err := s.backups.Get(r.Context(), req.BackupID)
@@ -336,6 +339,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 				writeErr(w, http.StatusBadRequest, "backup not found")
 				return
 			}
+			backupRecord = &b
 			backupEngine = b.Engine
 			src = b.Source
 		}
@@ -344,8 +348,62 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		if s.backups != nil {
 			recs, _ := s.backups.List(r.Context(), backup.Filter{Source: req.Source, Limit: 1})
 			if len(recs) > 0 {
+				backupRecord = &recs[0]
 				backupEngine = recs[0].Engine
 			}
+		}
+	}
+
+	if backupRecord != nil {
+		method := backupRecord.Method
+		if method == "" {
+			method = backupRecord.Tool
+		}
+		switch method {
+		case backup.MethodMySQLDump, backup.MethodMariaDBDump:
+			if req.Threads > 1 {
+				writeErr(w, http.StatusBadRequest, "parallel restore is not available for mysqldump backups")
+				return
+			}
+			if len(req.Objects) > 0 && req.TargetTime != "" {
+				writeErr(w, http.StatusBadRequest, "partial restore with point-in-time recovery is not supported for MySQL")
+				return
+			}
+		case backup.MethodPGBaseBackup:
+			if req.Threads > 0 {
+				writeErr(w, http.StatusBadRequest, "parallel restore is not available for physical backups")
+				return
+			}
+			if len(req.Objects) > 0 {
+				writeErr(w, http.StatusBadRequest, "partial restore is not available for physical backups")
+				return
+			}
+		case backup.MethodMongodump:
+			if len(req.Objects) > 0 && (backupRecord.Details == nil || backupRecord.Details["databases"] == "") {
+				writeErr(w, http.StatusBadRequest, "partial restore is not available for whole-deployment MongoDB backups")
+				return
+			}
+		case backup.MethodPGDump:
+			// supported
+		default:
+			if req.Threads > 0 {
+				writeErr(w, http.StatusBadRequest, "parallel restore is not available for "+method+" backups")
+				return
+			}
+			if len(req.Objects) > 0 {
+				writeErr(w, http.StatusBadRequest, "partial restore is not available for "+method+" backups")
+				return
+			}
+		}
+	}
+	if req.TargetDir != "" {
+		if req.Threads > 0 {
+			writeErr(w, http.StatusBadRequest, "parallel restore is not available for physical backups")
+			return
+		}
+		if len(req.Objects) > 0 {
+			writeErr(w, http.StatusBadRequest, "partial restore is not available for physical backups")
+			return
 		}
 	}
 
@@ -438,8 +496,20 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		return
 	}
 	args = append(args, tunnelArgs...)
-	if !s.auditBackupOp(w, r, "backup.restore", map[string]any{"backup_id": req.BackupID, "source": req.Source,
-		"target_time": req.TargetTime, "target_host": req.Target.Host, "target_database": req.TargetDB, "target_dir": req.TargetDir}) {
+	auditDetail := map[string]any{
+		"backup_id":       req.BackupID,
+		"source":          req.Source,
+		"target_time":     req.TargetTime,
+		"target_host":     req.Target.Host,
+		"target_database": req.TargetDB,
+		"target_dir":      req.TargetDir,
+		"threads":         req.Threads,
+		"object_count":    len(req.Objects),
+	}
+	if len(req.Objects) > 0 && len(req.Objects) <= 20 {
+		auditDetail["objects"] = req.Objects
+	}
+	if !s.auditBackupOp(w, r, "backup.restore", auditDetail) {
 		return
 	}
 	pid, err := s.startBackupOpEnv("backup-restore", "backup-restore-"+runner.NewID("r"), extraEnv, args...)
@@ -468,6 +538,20 @@ func restoreArgs(req RestoreRequest) ([]string, error) {
 	if want := req.TargetDB + req.TargetDir; req.Confirm != want {
 		return nil, errors.New("type the target database or directory to confirm the restore")
 	}
+	if err := runner.ValidateRestoreThreads(req.Threads); err != nil {
+		return nil, err
+	}
+	if err := runner.ValidateRestoreObjects(req.Objects); err != nil {
+		return nil, err
+	}
+	if req.TargetDir != "" {
+		if req.Threads > 0 {
+			return nil, errors.New("parallel restore is not available for physical backups")
+		}
+		if len(req.Objects) > 0 {
+			return nil, errors.New("partial restore is not available for physical backups")
+		}
+	}
 	args := []string{"restore", "--yes"}
 	if req.BackupID != "" {
 		if !backup.ValidID(req.BackupID) {
@@ -479,6 +563,12 @@ func restoreArgs(req RestoreRequest) ([]string, error) {
 	}
 	if req.TargetTime != "" {
 		args = append(args, "--to-time", req.TargetTime)
+	}
+	if req.Threads > 0 {
+		args = append(args, "--threads", strconv.Itoa(req.Threads))
+	}
+	if len(req.Objects) > 0 {
+		args = append(args, "--objects", strings.Join(req.Objects, ","))
 	}
 	if req.TargetDir != "" {
 		args = append(args, "--target-dir", req.TargetDir)

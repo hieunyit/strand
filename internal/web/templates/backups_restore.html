@@ -168,7 +168,62 @@
     <!-- Step 3: Options -->
     <fieldset class="form-section wiz-step" data-step="3" hidden>
       <legend class="form-section-title"><span class="step-no">3</span> Restore options</legend>
-      <p class="muted">Parallelism and partial restore are not supported yet; the whole backup is restored into the new target.</p>
+
+      <div id="restore-opt-physical-notice" class="alert alert-info mt" hidden>
+        Physical backups restore the entire cluster directory; parallel workers and partial restore are not supported.
+      </div>
+      <div id="restore-opt-mysqldump-threads-notice" class="alert alert-info mt" hidden>
+        mysqldump backups replay a single SQL stream; parallel restore is not available.
+      </div>
+      <div id="restore-opt-mysql-pitr-notice" class="alert alert-info mt" hidden>
+        Partial restore with point-in-time recovery is not supported for MySQL; the full database is restored.
+      </div>
+
+      <div class="field-grid" id="restore-threads-grid">
+        <label class="field" id="field-restore-threads">
+          <span class="field-label">Parallel restore workers</span>
+          <input name="threads" id="restore-threads" type="number" min="1" max="16" placeholder="Default (single worker)" autocomplete="off">
+          <small class="field-hint" id="restore-threads-hint">1 to 16 workers. Supported for PostgreSQL (pg_dump) and MongoDB.</small>
+          <span class="field-error" id="err-threads" hidden></span>
+        </label>
+      </div>
+
+      <div class="choice-cards mt" id="restore-objects-cards" role="radiogroup" aria-label="Restore scope">
+        <label class="choice" id="choice-objects-all">
+          <input type="radio" name="restore_objects_mode" value="all" checked>
+          <span class="choice-title">All objects</span>
+          <span class="choice-desc">Restore the complete database or collection set.</span>
+        </label>
+        <label class="choice" id="choice-objects-partial">
+          <input type="radio" name="restore_objects_mode" value="partial">
+          <span class="choice-title">Selected objects</span>
+          <span class="choice-desc">Restore only specific tables or collections.</span>
+        </label>
+      </div>
+
+      <div id="restore-partial-panel" class="mt" hidden>
+        <!-- Picklist view (when object list is known) -->
+        <div id="restore-objects-checklist-wrap" hidden>
+          <div class="actions-row mb">
+            <input type="search" id="restore-objects-filter" placeholder="Filter tables or collections..." autocomplete="off">
+            <button type="button" class="btn small" id="restore-objects-select-all">Select all</button>
+            <button type="button" class="btn small" id="restore-objects-clear-all">Clear</button>
+            <span id="restore-objects-count" class="small muted">0 selected</span>
+          </div>
+          <div class="picklist" id="restore-objects-picklist" role="group" aria-label="Available objects"></div>
+        </div>
+
+        <!-- Textarea fallback (when object list is unknown) -->
+        <div id="restore-objects-textarea-wrap" hidden>
+          <label class="field" id="field-restore-objects-text">
+            <span class="field-label">Object names (comma-separated) <span class="req">*</span></span>
+            <textarea name="objects_text" id="restore-objects-text" rows="3" placeholder="table1, table2, table3"></textarea>
+            <small class="field-hint">Validated when restore starts. Use table or collection names (e.g. table1, schema.table2).</small>
+          </label>
+        </div>
+        <span class="field-error" id="err-objects" hidden></span>
+      </div>
+
       <div class="form-actions mt">
         <button type="button" class="btn ghost" data-prev-step="2">&larr; Back</button>
         <button type="button" class="btn primary" id="restore-step3-next" data-next-step="4">Next: Review &amp; confirm &rarr;</button>
@@ -188,6 +243,8 @@
             <tr><th>Point in time</th><td id="summary-time">Original backup snapshot</td></tr>
             <tr><th>Target server</th><td id="summary-target-server">-</td></tr>
             <tr><th>Target destination</th><td id="summary-target-dest">-</td></tr>
+            <tr><th>Parallel workers</th><td id="summary-threads">Default</td></tr>
+            <tr><th>Objects</th><td id="summary-objects">All objects</td></tr>
             <tr><th>Estimated size</th><td id="summary-size">-</td></tr>
           </tbody>
         </table></div>

@@ -3,14 +3,21 @@ package runner
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"strand/internal/backup"
 )
@@ -335,7 +342,93 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 			}
 		}
 	}
+	if meta.Details["objects"] == "" {
+		if objs := e.queryBackupObjects(ctx, job, mongoURI); len(objs) > 0 {
+			meta.Details["objects"] = strings.Join(objs, ",")
+		}
+	}
 	return meta, res, nil
+}
+
+func (e *Env) queryBackupObjects(ctx context.Context, job backup.Job, mongoURI string) []string {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	switch job.Method {
+	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
+		if len(job.Conn.Databases) != 1 {
+			return nil
+		}
+		db, err := sql.Open("mysql", mysqlDSN(e.Getenv, job.Conn))
+		if err != nil {
+			return nil
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(cctx, "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME", job.Conn.Databases[0])
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		var tables []string
+		for rows.Next() {
+			var t string
+			if err := rows.Scan(&t); err == nil && t != "" {
+				tables = append(tables, t)
+			}
+		}
+		return tables
+
+	case backup.MethodPGDump:
+		dbName := "postgres"
+		if len(job.Conn.Databases) > 0 && job.Conn.Databases[0] != "" {
+			dbName = job.Conn.Databases[0]
+		}
+		c, err := pgx.Connect(cctx, PGConnString(e.Getenv, job.Conn, dbName, false))
+		if err != nil {
+			return nil
+		}
+		defer c.Close(context.Background())
+		rows, err := c.Query(cctx, "SELECT CASE WHEN schemaname = 'public' THEN tablename ELSE schemaname || '.' || tablename END FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY schemaname, tablename")
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil
+		}
+		return tables
+
+	case backup.MethodMongodump:
+		if len(job.Conn.Databases) != 1 {
+			return nil
+		}
+		if mongoURI == "" {
+			var err error
+			mongoURI, err = MongoURI(e.Getenv, job.Conn)
+			if err != nil {
+				return nil
+			}
+		}
+		client, err := mongo.Connect(options.Client().ApplyURI(mongoURI))
+		if err != nil {
+			return nil
+		}
+		defer client.Disconnect(context.Background())
+		colls, err := client.Database(job.Conn.Databases[0]).ListCollectionNames(cctx, bson.M{})
+		if err != nil {
+			return nil
+		}
+		var filtered []string
+		for _, c := range colls {
+			if !strings.HasPrefix(c, "system.") {
+				filtered = append(filtered, c)
+			}
+		}
+		sort.Strings(filtered)
+		return filtered
+	}
+	return nil
 }
 
 func (e *Env) streamMydumper(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions) (backup.Meta, PayloadResult, error) {

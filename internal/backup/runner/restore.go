@@ -2,6 +2,8 @@ package runner
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -9,14 +11,40 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"strand/internal/backup"
 )
+
+var validRestoreObjectNameRE = regexp.MustCompile(`^[A-Za-z0-9_$.-]+$`)
+
+// ValidateRestoreObjects checks that restore object names are valid and count does not exceed 1000.
+func ValidateRestoreObjects(objects []string) error {
+	if len(objects) > 1000 {
+		return errors.New("too many objects: maximum is 1000")
+	}
+	for _, o := range objects {
+		o = strings.TrimSpace(o)
+		if o == "" || !validRestoreObjectNameRE.MatchString(o) {
+			return fmt.Errorf("invalid object name %q: must match [A-Za-z0-9_$.-]", o)
+		}
+	}
+	return nil
+}
+
+// ValidateRestoreThreads checks that threads is in range 0..16.
+func ValidateRestoreThreads(threads int) error {
+	if threads < 0 || threads > 16 {
+		return errors.New("threads must be between 1 and 16 (0 = default)")
+	}
+	return nil
+}
 
 // RestoreTarget is where a restore goes. It is always NEW: logical restores create Database (which must
 // not exist) on the target server; physical restores fill Dir (which must not exist or be empty). The
@@ -25,6 +53,8 @@ type RestoreTarget struct {
 	Conn     backup.ConnSpec
 	Database string
 	Dir      string
+	Threads  int
+	Objects  []string
 }
 
 // Restore executes plan into target.
@@ -36,8 +66,34 @@ func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (e
 		if plan.Target != nil {
 			detail["target_time"] = plan.Target.UTC().Format(time.RFC3339)
 		}
+		if t.Threads > 0 {
+			detail["threads"] = t.Threads
+		}
+		if len(t.Objects) > 0 {
+			detail["object_count"] = len(t.Objects)
+			if len(t.Objects) <= 20 {
+				detail["objects"] = t.Objects
+			}
+		}
 		err = e.audit(context.WithoutCancel(ctx), "backup.restore", err, detail)
 	}()
+
+	if err := ValidateRestoreThreads(t.Threads); err != nil {
+		return err
+	}
+	if err := ValidateRestoreObjects(t.Objects); err != nil {
+		return err
+	}
+
+	if t.Dir != "" || base.Method == backup.MethodPGBaseBackup {
+		if t.Threads > 0 {
+			return errors.New("parallel restore is not supported for physical backups")
+		}
+		if len(t.Objects) > 0 {
+			return errors.New("partial restore is not supported for physical backups")
+		}
+	}
+
 	e.logf("restore: base %s (%s, %s) + %d log segment(s)", base.ID, base.Method, ConsistentTime(base).Format(time.RFC3339), len(plan.Logs))
 	switch base.Method {
 	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
@@ -104,8 +160,14 @@ func (e *Env) stageLogs(ctx context.Context, logs []backup.Record, dir string, n
 	return out, nil
 }
 
-func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
+func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarget) (err error) {
 	base := plan.Base()
+	if t.Threads > 1 {
+		return errors.New("parallel restore is not available for mysqldump backups")
+	}
+	if len(t.Objects) > 0 && (plan.Target != nil || len(plan.Logs) > 0) {
+		return errors.New("partial restore with point-in-time recovery is not supported for MySQL backups")
+	}
 	dbs := strings.Split(base.Details["databases"], ",")
 	if t.Database == "" || len(dbs) != 1 || dbs[0] == "" {
 		return errors.New("a logical MySQL restore needs --target-database and a single-database dump")
@@ -126,17 +188,41 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	if _, err := db.ExecContext(ctx, "CREATE DATABASE `"+strings.ReplaceAll(t.Database, "`", "``")+"`"); err != nil {
 		return err
 	}
+	createdDB := true
+	defer func() {
+		if err != nil && createdDB {
+			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			_, _ = db.ExecContext(cctx, "DROP DATABASE IF EXISTS `"+strings.ReplaceAll(t.Database, "`", "``")+"`")
+		}
+	}()
+
 	body, err := e.openRecord(ctx, base)
 	if err != nil {
 		return err
 	}
+	defer body.Close()
+
 	client := mysqlClient(e.Getenv, t)
-	err = e.runTool(ctx, client, NewGTIDPurgedFilter(body))
-	body.Close()
+	var stream io.Reader
+	var partialFilter *mysqlPartialFilter
+	if len(t.Objects) > 0 {
+		partialFilter = NewMySQLPartialFilter(body, t.Objects)
+		stream = NewGTIDPurgedFilter(partialFilter)
+	} else {
+		stream = NewGTIDPurgedFilter(body)
+	}
+
+	err = e.runTool(ctx, client, stream)
 	if err != nil {
 		return fmt.Errorf("load dump: %w", err)
 	}
+	if partialFilter != nil && partialFilter.Err() != nil {
+		return partialFilter.Err()
+	}
+
 	if len(plan.Logs) == 0 {
+		createdDB = false
 		e.logf("restore: dump of %s loaded into %s", src, t.Database)
 		return nil
 	}
@@ -169,6 +255,7 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	if err := binlog.Wait(); err != nil {
 		return err
 	}
+	createdDB = false
 	e.logf("restore: %s restored into %s up to %v", src, t.Database, plan.Target)
 	return nil
 }
@@ -181,10 +268,82 @@ func mysqlClient(getenv Getenv, t RestoreTarget) Invocation {
 	return inv
 }
 
-func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTarget) error {
+func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTarget) (err error) {
 	if t.Database == "" {
 		return errors.New("a pg_dump restore needs --target-database")
 	}
+
+	var archiveFile string
+	var listFile string
+	dir, err := e.tmpDir()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	_ = os.Chmod(dir, 0o700)
+
+	needStage := t.Threads > 1 || len(t.Objects) > 0
+	if needStage {
+		archiveFile = filepath.Join(dir, "archive.dump")
+		f, err := os.OpenFile(archiveFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("stage pg_dump archive: %w", err)
+		}
+		body, err := e.openRecord(ctx, base)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		_, copyErr := io.Copy(f, body)
+		closeErr := f.Close()
+		body.Close()
+		if copyErr != nil {
+			if errors.Is(copyErr, syscall.ENOSPC) || strings.Contains(strings.ToLower(copyErr.Error()), "no space") {
+				return fmt.Errorf("stage pg_dump archive: disk full: %w", copyErr)
+			}
+			return fmt.Errorf("stage pg_dump archive: %w", copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("stage pg_dump archive: %w", closeErr)
+		}
+
+		if len(t.Objects) > 0 {
+			// Extract TOC before creating anything
+			var tocBuf bytes.Buffer
+			tocProc, err := Start(ctx, e.Getenv, Invocation{Tool: "pg_restore", Args: []string{"-l", archiveFile}}, nil, nil)
+			if err != nil {
+				return fmt.Errorf("read pg_dump TOC: %w", err)
+			}
+			_, _ = io.Copy(&tocBuf, tocProc)
+			tocProc.Close()
+			if err := tocProc.Wait(); err != nil {
+				return fmt.Errorf("read pg_dump TOC: %w", err)
+			}
+
+			// Extract schema metadata (sequence ownership, indexes, FK constraints)
+			var schemaBuf bytes.Buffer
+			schemaProc, err := Start(ctx, e.Getenv, Invocation{Tool: "pg_restore", Args: []string{"-s", "-f", "-", archiveFile}}, nil, nil)
+			if err == nil {
+				_, _ = io.Copy(&schemaBuf, schemaProc)
+				schemaProc.Close()
+				_ = schemaProc.Wait()
+			}
+			info := parsePGSchemaMetadata(schemaBuf.Bytes())
+
+			filteredTOC, warnings, err := FilterPGTOC(tocBuf.Bytes(), t.Objects, info)
+			if err != nil {
+				return err
+			}
+			for _, w := range warnings {
+				e.logf("warning: %s", w)
+			}
+			listFile = filepath.Join(dir, "filtered.list")
+			if err := os.WriteFile(listFile, filteredTOC, 0o600); err != nil {
+				return fmt.Errorf("write filtered TOC list: %w", err)
+			}
+		}
+	}
+
 	admin, err := pgconn.Connect(ctx, PGConnString(e.Getenv, t.Conn, "postgres", false))
 	if err != nil {
 		return fmt.Errorf("connect to the restore target: %v", redactAll(err.Error(), []string{password(e.Getenv, t.Conn)}))
@@ -200,11 +359,13 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	if _, err := admin.Exec(ctx, `CREATE DATABASE "`+strings.ReplaceAll(t.Database, `"`, `""`)+`"`).ReadAll(); err != nil {
 		return err
 	}
-	body, err := e.openRecord(ctx, base)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
+	createdDB := true
+	defer func() {
+		if err != nil && createdDB {
+			_, _ = admin.Exec(context.Background(), `DROP DATABASE IF EXISTS "`+strings.ReplaceAll(t.Database, `"`, `""`)+`" WITH (FORCE)`).ReadAll()
+		}
+	}()
+
 	args := []string{"--host=" + t.Conn.Host, "--dbname=" + t.Database, "--no-owner", "--no-privileges", "--exit-on-error", "--no-password"}
 	if t.Conn.Port > 0 {
 		args = append(args, "--port="+strconv.Itoa(t.Conn.Port))
@@ -212,11 +373,75 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	if t.Conn.User != "" {
 		args = append(args, "--username="+t.Conn.User)
 	}
+	if t.Threads > 1 {
+		args = append(args, fmt.Sprintf("-j%d", t.Threads))
+	}
+	if listFile != "" {
+		args = append(args, "-L", listFile)
+	}
+
+	var stdin io.Reader
+	if needStage {
+		args = append(args, archiveFile)
+	} else {
+		body, err := e.openRecord(ctx, base)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+		stdin = body
+	}
+
 	inv := Invocation{Tool: "pg_restore", Args: args}
 	if pw := password(e.Getenv, t.Conn); pw != "" {
 		inv.Env = []string{"PGPASSWORD=" + pw}
 	}
-	return e.runTool(ctx, inv, body)
+	if err := e.runTool(ctx, inv, stdin); err != nil {
+		return err
+	}
+	createdDB = false
+	return nil
+}
+
+func parsePGSchemaMetadata(schemaDDL []byte) PGTOCInfo {
+	info := PGTOCInfo{
+		FKReferences:   make(map[string]string),
+		SequenceOwners: make(map[string]string),
+		IndexTables:    make(map[string]string),
+	}
+	seqRE := regexp.MustCompile(`(?i)ALTER\s+SEQUENCE\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)\s+OWNED\s+BY\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)\.[A-Za-z0-9_]+`)
+	idxRE := regexp.MustCompile(`(?i)CREATE\s+(?:UNIQUE\s+)?INDEX\s+([A-Za-z0-9_]+)\s+ON\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)`)
+	fkRE := regexp.MustCompile(`(?i)ADD\s+CONSTRAINT\s+([A-Za-z0-9_]+)\s+FOREIGN\s+KEY\s*\(.*?\)\s*REFERENCES\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)`)
+
+	scanner := bufio.NewScanner(bytes.NewReader(schemaDDL))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if m := seqRE.FindStringSubmatch(line); len(m) > 4 {
+			seqName, schema, table := m[2], m[3], m[4]
+			if schema != "" {
+				info.SequenceOwners[seqName] = schema + "." + table
+			} else {
+				info.SequenceOwners[seqName] = table
+			}
+		}
+		if m := idxRE.FindStringSubmatch(line); len(m) > 3 {
+			idxName, schema, table := m[1], m[2], m[3]
+			if schema != "" {
+				info.IndexTables[idxName] = schema + "." + table
+			} else {
+				info.IndexTables[idxName] = table
+			}
+		}
+		if m := fkRE.FindStringSubmatch(line); len(m) > 3 {
+			fkName, schema, targetTable := m[1], m[2], m[3]
+			if schema != "" {
+				info.FKReferences[fkName] = schema + "." + targetTable
+			} else {
+				info.FKReferences[fkName] = targetTable
+			}
+		}
+	}
+	return info
 }
 
 // newDir checks that dir does not exist or is empty, and creates it 0700.
@@ -324,6 +549,25 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 
 func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
 	base := plan.Base()
+	dbs := base.Details["databases"]
+
+	if dbs == "" && len(t.Objects) > 0 {
+		return errors.New("partial restore is not supported for whole-deployment MongoDB backups")
+	}
+
+	if base.Details["objects"] != "" && len(t.Objects) > 0 {
+		knownColls := strings.Split(base.Details["objects"], ",")
+		knownMap := map[string]bool{}
+		for _, k := range knownColls {
+			knownMap[k] = true
+		}
+		for _, obj := range t.Objects {
+			if !knownMap[obj] {
+				return fmt.Errorf("collection %q not found in backup", obj)
+			}
+		}
+	}
+
 	uri, err := MongoURI(e.Getenv, t.Conn)
 	if err != nil {
 		return err
@@ -336,9 +580,23 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 	_ = os.Chmod(dir, 0o755)
 	cfg := map[string]string{"mongo.yaml": "uri: " + strconv.Quote(uri) + "\n"}
 	args := []string{"--config={dir}/mongo.yaml", "--archive"}
-	dbs := base.Details["databases"]
+
+	if t.Threads > 0 {
+		args = append(args, fmt.Sprintf("--numParallelCollections=%d", t.Threads))
+		workers := t.Threads / 2
+		if workers < 1 {
+			workers = 1
+		}
+		args = append(args, fmt.Sprintf("--numInsertionWorkersPerCollection=%d", workers))
+	}
+
 	switch {
 	case dbs != "" && t.Database != "":
+		if len(t.Objects) > 0 {
+			for _, obj := range t.Objects {
+				args = append(args, fmt.Sprintf("--nsInclude=%s.%s", dbs, obj))
+			}
+		}
 		args = append(args, "--nsFrom="+dbs+".*", "--nsTo="+t.Database+".*")
 	case dbs == "" && t.Database != "":
 		return errors.New("a whole-deployment dump (with oplog) restores into a NEW deployment: omit --target-database")

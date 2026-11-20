@@ -105,6 +105,10 @@
       panel.hidden = (s !== curStep);
     });
 
+    if (curStep === 3) {
+      syncRestoreOptions();
+    }
+
     if (curStep === 4) {
       populateSummary();
       updateConfirm();
@@ -124,6 +128,7 @@
     }
     syncPitrWindow();
     filterConnectionsByEngine();
+    syncRestoreOptions();
   }
 
   // Radio switching for restore_into
@@ -133,6 +138,7 @@
     var fDir = document.getElementById('field-target-dir');
     if (fDb) { fDb.hidden = !intoDb; }
     if (fDir) { fDir.hidden = intoDb; }
+    syncRestoreOptions();
   }
 
   // Target connection change
@@ -162,6 +168,7 @@
       if (choiceDb) { choiceDb.hidden = false; }
     }
     syncRestoreInto();
+    syncRestoreOptions();
   }
 
   function getChosenTool() {
@@ -169,7 +176,7 @@
     if (fromBackup) {
       var bid = (form.elements['backup_id'].value || '').trim();
       var b = backups.find(function (x) { return x.id === bid; });
-      return b ? b.tool : '';
+      return b ? (b.tool || '') : '';
     }
     return '';
   }
@@ -177,6 +184,45 @@
   function getChosenBackup() {
     var bid = (form.elements['backup_id'].value || '').trim();
     return backups.find(function (x) { return x.id === bid; });
+  }
+
+  function getChosenMethod() {
+    var fromBackup = form.elements['restore_from'].value === 'backup';
+    if (fromBackup) {
+      var b = getChosenBackup();
+      return b ? (b.method || b.tool || '') : '';
+    }
+    var src = (form.elements['source'].value || '').trim();
+    var sInfo = sources.find(function (x) { return x.source === src; });
+    if (sInfo && sInfo.base_backups && sInfo.base_backups.length > 0) {
+      var b = sInfo.base_backups[sInfo.base_backups.length - 1];
+      if (b && (b.method || b.tool)) {
+        return b.method || b.tool;
+      }
+    }
+    var eng = sInfo ? (sInfo.engine || '') : '';
+    if (eng === 'postgres') { return 'pg_dump'; }
+    if (eng === 'mysql' || eng === 'mariadb') { return 'mysqldump'; }
+    if (eng === 'mongodb') { return 'mongodump'; }
+    return '';
+  }
+
+  function getKnownBackupObjects() {
+    var fromBackup = form.elements['restore_from'].value === 'backup';
+    var b;
+    if (fromBackup) {
+      b = getChosenBackup();
+    } else {
+      var src = (form.elements['source'].value || '').trim();
+      var sInfo = sources.find(function (x) { return x.source === src; });
+      if (sInfo && sInfo.base_backups && sInfo.base_backups.length > 0) {
+        b = sInfo.base_backups[sInfo.base_backups.length - 1];
+      }
+    }
+    if (b && b.details && b.details.objects) {
+      return b.details.objects.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+    return null;
   }
 
   function syncPitrWindow() {
@@ -241,6 +287,194 @@
     } else if (preview) {
       preview.textContent = '';
     }
+    syncRestoreOptions();
+  }
+
+  var renderedObjectsKey = '';
+
+  function renderPicklist(objects) {
+    var key = objects.join(',');
+    if (renderedObjectsKey === key) { return; }
+    renderedObjectsKey = key;
+    var container = document.getElementById('restore-objects-picklist');
+    if (!container) { return; }
+    container.innerHTML = '';
+    objects.forEach(function (obj, idx) {
+      var label = document.createElement('label');
+      label.className = 'pick check';
+      var input = document.createElement('input');
+      input.type = 'checkbox';
+      input.name = 'restore_selected_object';
+      input.value = obj;
+      input.id = 'pick-obj-' + idx;
+      var span = document.createElement('span');
+      span.textContent = obj;
+      label.appendChild(input);
+      label.appendChild(span);
+      container.appendChild(label);
+    });
+    updateObjectCount();
+  }
+
+  function updateObjectCount() {
+    var countEl = document.getElementById('restore-objects-count');
+    if (!countEl) { return; }
+    var container = document.getElementById('restore-objects-picklist');
+    if (!container) { return; }
+    var checked = container.querySelectorAll('input[type=checkbox]:checked').length;
+    countEl.textContent = checked + ' selected';
+  }
+
+  function getSelectedObjects() {
+    var mode = (form.elements['restore_objects_mode'] && form.elements['restore_objects_mode'].value) || 'all';
+    if (mode !== 'partial') {
+      return [];
+    }
+    var checkWrap = document.getElementById('restore-objects-checklist-wrap');
+    if (checkWrap && !checkWrap.hidden) {
+      var container = document.getElementById('restore-objects-picklist');
+      if (!container) { return []; }
+      var checked = container.querySelectorAll('input[type=checkbox]:checked');
+      var list = [];
+      checked.forEach(function (cb) { list.push(cb.value); });
+      return list;
+    }
+    var textEl = document.getElementById('restore-objects-text');
+    if (textEl) {
+      var val = textEl.value.trim();
+      if (!val) { return []; }
+      return val.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+    return [];
+  }
+
+  function syncRestoreOptions() {
+    var method = getChosenMethod();
+    var intoDir = form.elements['restore_into'] && form.elements['restore_into'].value === 'dir';
+    var isPhysical = intoDir || method === 'pg_basebackup';
+
+    var physNotice = document.getElementById('restore-opt-physical-notice');
+    var mysqlNotice = document.getElementById('restore-opt-mysqldump-threads-notice');
+    var mysqlPitrNotice = document.getElementById('restore-opt-mysql-pitr-notice');
+    var threadsGrid = document.getElementById('restore-threads-grid');
+    var objectsCards = document.getElementById('restore-objects-cards');
+    var partialPanel = document.getElementById('restore-partial-panel');
+    var choicePartial = document.getElementById('choice-objects-partial');
+    var radAll = form.elements['restore_objects_mode'] && form.elements['restore_objects_mode'][0];
+    var radPartial = form.elements['restore_objects_mode'] && form.elements['restore_objects_mode'][1];
+
+    if (physNotice) { physNotice.hidden = !isPhysical; }
+
+    if (isPhysical) {
+      if (mysqlNotice) { mysqlNotice.hidden = true; }
+      if (mysqlPitrNotice) { mysqlPitrNotice.hidden = true; }
+      if (threadsGrid) { threadsGrid.hidden = true; }
+      if (objectsCards) { objectsCards.hidden = true; }
+      if (partialPanel) { partialPanel.hidden = true; }
+      if (radAll) { radAll.checked = true; }
+      return;
+    }
+
+    if (objectsCards) { objectsCards.hidden = false; }
+
+    var isMySQL = (method === 'mysqldump' || method === 'mariadb-dump');
+    var fromPITR = form.elements['restore_from'] && form.elements['restore_from'].value === 'pitr';
+    var hasTargetTime = (form.elements['target_time'] && form.elements['target_time'].value.trim() !== '');
+    var isMySQLPITR = isMySQL && (fromPITR || hasTargetTime);
+
+    if (isMySQL) {
+      if (mysqlNotice) { mysqlNotice.hidden = false; }
+      if (threadsGrid) { threadsGrid.hidden = true; }
+      var threadsInput = document.getElementById('restore-threads');
+      if (threadsInput) { threadsInput.value = ''; }
+    } else if (method === 'pg_dump' || method === 'mongodump') {
+      if (mysqlNotice) { mysqlNotice.hidden = true; }
+      if (threadsGrid) { threadsGrid.hidden = false; }
+    } else {
+      if (mysqlNotice) { mysqlNotice.hidden = true; }
+      if (threadsGrid) { threadsGrid.hidden = true; }
+    }
+
+    if (isMySQLPITR) {
+      if (mysqlPitrNotice) { mysqlPitrNotice.hidden = false; }
+      if (choicePartial) { choicePartial.hidden = true; }
+      if (radPartial && radPartial.checked) {
+        if (radAll) { radAll.checked = true; }
+      }
+    } else {
+      if (mysqlPitrNotice) { mysqlPitrNotice.hidden = true; }
+      if (choicePartial) { choicePartial.hidden = false; }
+    }
+
+    var mode = (form.elements['restore_objects_mode'] && form.elements['restore_objects_mode'].value) || 'all';
+    if (mode === 'partial' && !isMySQLPITR) {
+      if (partialPanel) { partialPanel.hidden = false; }
+      var knownObjects = getKnownBackupObjects();
+      var checkWrap = document.getElementById('restore-objects-checklist-wrap');
+      var textWrap = document.getElementById('restore-objects-textarea-wrap');
+      if (knownObjects && knownObjects.length > 0) {
+        if (checkWrap) { checkWrap.hidden = false; }
+        if (textWrap) { textWrap.hidden = true; }
+        renderPicklist(knownObjects);
+      } else {
+        if (checkWrap) { checkWrap.hidden = true; }
+        if (textWrap) { textWrap.hidden = false; }
+      }
+    } else {
+      if (partialPanel) { partialPanel.hidden = true; }
+    }
+  }
+
+  function validateStep3() {
+    var errThreads = document.getElementById('err-threads');
+    var errObjects = document.getElementById('err-objects');
+    if (errThreads) { errThreads.hidden = true; }
+    if (errObjects) { errObjects.hidden = true; }
+
+    var threadsGrid = document.getElementById('restore-threads-grid');
+    if (threadsGrid && !threadsGrid.hidden) {
+      var threadsInput = document.getElementById('restore-threads');
+      if (threadsInput && threadsInput.value.trim() !== '') {
+        var t = parseInt(threadsInput.value.trim(), 10);
+        if (isNaN(t) || t < 1 || t > 16) {
+          if (errThreads) {
+            errThreads.textContent = 'Threads must be between 1 and 16.';
+            errThreads.hidden = false;
+          }
+          return false;
+        }
+      }
+    }
+
+    var mode = (form.elements['restore_objects_mode'] && form.elements['restore_objects_mode'].value) || 'all';
+    if (mode === 'partial') {
+      var objs = getSelectedObjects();
+      if (objs.length === 0) {
+        if (errObjects) {
+          errObjects.textContent = 'Select or enter at least one object to restore, or choose "All objects".';
+          errObjects.hidden = false;
+        }
+        return false;
+      }
+      if (objs.length > 1000) {
+        if (errObjects) {
+          errObjects.textContent = 'Too many objects: maximum is 1000.';
+          errObjects.hidden = false;
+        }
+        return false;
+      }
+      var validRE = /^[A-Za-z0-9_$.-]+$/;
+      for (var i = 0; i < objs.length; i++) {
+        if (!validRE.test(objs[i])) {
+          if (errObjects) {
+            errObjects.textContent = 'Invalid object name "' + objs[i] + '": must match [A-Za-z0-9_$.-]';
+            errObjects.hidden = false;
+          }
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   // Validate step 1
@@ -481,6 +715,31 @@
         destEl.textContent = 'Database: ' + (form.elements['target_database'].value || '').trim();
       }
     }
+
+    var threadsInput = document.getElementById('restore-threads');
+    var threadsGrid = document.getElementById('restore-threads-grid');
+    var summaryThreads = document.getElementById('summary-threads');
+    if (summaryThreads) {
+      if (threadsGrid && !threadsGrid.hidden && threadsInput && threadsInput.value.trim() !== '') {
+        summaryThreads.textContent = threadsInput.value.trim() + ' workers';
+      } else {
+        summaryThreads.textContent = 'Default';
+      }
+    }
+
+    var summaryObjects = document.getElementById('summary-objects');
+    if (summaryObjects) {
+      var mode = (form.elements['restore_objects_mode'] && form.elements['restore_objects_mode'].value) || 'all';
+      if (mode === 'all') {
+        summaryObjects.textContent = 'All objects';
+      } else {
+        var objs = getSelectedObjects();
+        var cnt = objs.length;
+        var preview = objs.slice(0, 3).join(', ');
+        if (cnt > 3) { preview += ', ...'; }
+        summaryObjects.textContent = cnt + ' selected (' + preview + ')';
+      }
+    }
   }
 
   function updateConfirm() {
@@ -513,6 +772,7 @@
       var nextS = parseInt(nextBtn.getAttribute('data-next-step'), 10);
       if (curStep === 1 && !validateStep1()) { return; }
       if (curStep === 2 && !validateStep2()) { return; }
+      if (curStep === 3 && !validateStep3()) { return; }
       updateStepper(nextS);
       return;
     }
@@ -528,8 +788,9 @@
     if (gotoBtn) {
       var targetS = parseInt(gotoBtn.getAttribute('data-goto'), 10);
       if (targetS > curStep) {
-        if (curStep === 1 && !validateStep1()) { return; }
-        if (curStep === 2 && !validateStep2()) { return; }
+        if (curStep <= 1 && targetS > 1 && !validateStep1()) { return; }
+        if (curStep <= 2 && targetS > 2 && !validateStep2()) { return; }
+        if (curStep <= 3 && targetS > 3 && !validateStep3()) { return; }
       }
       updateStepper(targetS);
       return;
@@ -541,7 +802,8 @@
     if (ev.target.name === 'restore_from') { syncRestoreFrom(); filterConnectionsByEngine(); }
     if (ev.target.name === 'restore_into') { syncRestoreInto(); }
     if (ev.target.name === 'connection_id') { syncConnection(); }
-    if (ev.target.name === 'source' || ev.target.name === 'backup_id') { syncPitrWindow(); filterConnectionsByEngine(); }
+    if (ev.target.name === 'source' || ev.target.name === 'backup_id') { syncPitrWindow(); filterConnectionsByEngine(); syncRestoreOptions(); }
+    if (ev.target.name === 'restore_objects_mode') { syncRestoreOptions(); }
   });
 
   form.addEventListener('input', function (ev) {
@@ -549,6 +811,52 @@
     if (ev.target.id === 'restore-target-database' || ev.target.id === 'restore-target-dir') { updateConfirm(); }
     if (ev.target.id === 'restore-target-time') { syncPitrWindow(); }
   });
+
+  var filterInput = document.getElementById('restore-objects-filter');
+  if (filterInput) {
+    filterInput.addEventListener('input', function () {
+      var q = filterInput.value.toLowerCase().trim();
+      var container = document.getElementById('restore-objects-picklist');
+      if (!container) { return; }
+      var items = container.querySelectorAll('.pick');
+      items.forEach(function (it) {
+        var txt = (it.textContent || '').toLowerCase();
+        it.hidden = q !== '' && txt.indexOf(q) === -1;
+      });
+    });
+  }
+
+  var selectAllBtn = document.getElementById('restore-objects-select-all');
+  if (selectAllBtn) {
+    selectAllBtn.addEventListener('click', function () {
+      var container = document.getElementById('restore-objects-picklist');
+      if (!container) { return; }
+      var cbs = container.querySelectorAll('input[type=checkbox]');
+      cbs.forEach(function (cb) {
+        var parent = cb.closest('.pick');
+        if (!parent || !parent.hidden) {
+          cb.checked = true;
+        }
+      });
+      updateObjectCount();
+    });
+  }
+
+  var clearAllBtn = document.getElementById('restore-objects-clear-all');
+  if (clearAllBtn) {
+    clearAllBtn.addEventListener('click', function () {
+      var container = document.getElementById('restore-objects-picklist');
+      if (!container) { return; }
+      var cbs = container.querySelectorAll('input[type=checkbox]');
+      cbs.forEach(function (cb) { cb.checked = false; });
+      updateObjectCount();
+    });
+  }
+
+  var picklist = document.getElementById('restore-objects-picklist');
+  if (picklist) {
+    picklist.addEventListener('change', updateObjectCount);
+  }
 
   ['target_host', 'target_port', 'target_user', 'target_password_env'].forEach(function (name) {
     var el = form.elements[name];
@@ -606,6 +914,20 @@
       payload.target_database = targetName;
     }
 
+    var threadsGrid = document.getElementById('restore-threads-grid');
+    var threadsInput = document.getElementById('restore-threads');
+    if (threadsGrid && !threadsGrid.hidden && threadsInput && threadsInput.value.trim() !== '') {
+      var t = parseInt(threadsInput.value.trim(), 10);
+      if (t > 0) {
+        payload.threads = t;
+      }
+    }
+
+    var objs = getSelectedObjects();
+    if (objs.length > 0) {
+      payload.objects = objs;
+    }
+
     if (status) { status.textContent = 'Starting restore...'; status.classList.remove('err'); }
 
     window.strandApi('POST', '/api/v1/backup-restores', payload).then(function (res) {
@@ -647,6 +969,7 @@
   syncConnection();
   syncPitrWindow();
   filterConnectionsByEngine();
+  syncRestoreOptions();
   updateStepper(1);
 
   // Global handle for test harnesses
@@ -654,7 +977,10 @@
     setStep: updateStepper,
     validateStep1: validateStep1,
     validateStep2: validateStep2,
+    validateStep3: validateStep3,
+    syncRestoreOptions: syncRestoreOptions,
     syncPitrWindow: syncPitrWindow,
-    updateConfirm: updateConfirm
+    updateConfirm: updateConfirm,
+    getSelectedObjects: getSelectedObjects
   };
 })();

@@ -309,6 +309,8 @@ func newBackupRestoreCmd() *cobra.Command {
 	var tunnelSSH, tunnelUser, tunnelIdentity, tunnelKnownHosts string
 	var target backup.ConnSpec
 	var yes, dryRun bool
+	var threads int
+	var objects []string
 	cmd := &cobra.Command{
 		Use:   "restore",
 		Short: "Restore a backup (or a source to a point in time) into a NEW database or directory",
@@ -330,6 +332,12 @@ Passwords come from the environment variable named by --target-password-env.`,
 			}
 			if target.PasswordEnv != "" && !backup.ValidEnvName(target.PasswordEnv) || target.URIEnv != "" && !backup.ValidEnvName(target.URIEnv) {
 				return backupUsageErr("invalid or reserved environment variable name for the target secret")
+			}
+			if err := runner.ValidateRestoreThreads(threads); err != nil {
+				return backupUsageErr(err.Error())
+			}
+			if err := runner.ValidateRestoreObjects(objects); err != nil {
+				return backupUsageErr(err.Error())
 			}
 			var at *time.Time
 			if toTime != "" {
@@ -411,7 +419,47 @@ Passwords come from the environment variable named by --target-password-env.`,
 				target.Host = h
 				target.Port = p
 			}
-			return env.Restore(ctx, plan, runner.RestoreTarget{Conn: target, Database: targetDB, Dir: targetDir})
+			baseRec := plan.Base()
+			baseMethod := baseRec.Method
+			if baseMethod == "" {
+				baseMethod = baseRec.Tool
+			}
+			switch baseMethod {
+			case backup.MethodMySQLDump, backup.MethodMariaDBDump:
+				if threads > 1 {
+					return backupUsageErr("parallel restore is not available for mysqldump backups")
+				}
+				if len(objects) > 0 && at != nil {
+					return backupUsageErr("partial restore with point-in-time recovery is not supported for MySQL")
+				}
+			case backup.MethodPGBaseBackup:
+				if threads > 0 {
+					return backupUsageErr("parallel restore is not available for physical backups")
+				}
+				if len(objects) > 0 {
+					return backupUsageErr("partial restore is not available for physical backups")
+				}
+			case backup.MethodMongodump:
+				if len(objects) > 0 && (baseRec.Details == nil || baseRec.Details["databases"] == "") {
+					return backupUsageErr("partial restore is not available for whole-deployment MongoDB backups")
+				}
+			case backup.MethodPGDump:
+				// supported
+			default:
+				if threads > 0 {
+					return backupUsageErr("parallel restore is not available for " + baseMethod + " backups")
+				}
+				if len(objects) > 0 {
+					return backupUsageErr("partial restore is not available for " + baseMethod + " backups")
+				}
+			}
+			return env.Restore(ctx, plan, runner.RestoreTarget{
+				Conn:     target,
+				Database: targetDB,
+				Dir:      targetDir,
+				Threads:  threads,
+				Objects:  objects,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "backup to restore")
@@ -424,6 +472,8 @@ Passwords come from the environment variable named by --target-password-env.`,
 	cmd.Flags().StringVar(&target.URIEnv, "target-uri-env", "", "MongoDB: environment variable holding the target URI")
 	cmd.Flags().StringVar(&targetDB, "target-database", "", "new database to create (logical restores)")
 	cmd.Flags().StringVar(&targetDir, "target-dir", "", "new data directory (physical restores)")
+	cmd.Flags().IntVar(&threads, "threads", 0, "parallel restore workers (1..16, pg_dump/mongodump only)")
+	cmd.Flags().StringSliceVar(&objects, "objects", nil, "comma-separated or repeatable list of tables/collections to restore")
 	cmd.Flags().StringVar(&tunnelSSH, "tunnel-ssh", "", "optional SSH bastion host[:port]")
 	cmd.Flags().StringVar(&tunnelUser, "tunnel-user", "", "SSH username")
 	cmd.Flags().StringVar(&tunnelIdentity, "tunnel-identity-file", "", "SSH private key (or SSH_AUTH_SOCK)")
