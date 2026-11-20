@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -23,6 +24,7 @@ const (
 	ActSchemaInitDry    = "schema-init-dry"
 	ActObjectsList      = "objects-list"
 	ActObjectsApply     = "objects-apply"
+	ActExport           = "export"
 )
 
 var schemaChangeIDRE = regexp.MustCompile(`^[0-9]{1,18}$`)
@@ -81,6 +83,13 @@ func (s *Server) registerCLIOps() {
 		default:
 			return nil, BadRequest("phase must be pre, post or users")
 		}
+	})
+	reg(ActExport, false, func(p *Pipeline, a map[string]string) ([]string, error) {
+		out := strings.TrimSpace(a["out"])
+		if out == "" {
+			out = filepath.Join(s.cfg.StateDir, "exports", p.Name)
+		}
+		return []string{"export", "-c", p.ConfigPath, "--out", out}, nil
 	})
 }
 

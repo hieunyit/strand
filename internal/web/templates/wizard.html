@@ -1,9 +1,9 @@
 {{define "content"}}
 {{with .Body}}
 {{template "pipeline-head" .}}
-<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Kind .Key}}active{{end}}"{{if eq $.Body.Kind .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}{{.Label}}</a>{{end}}</nav>
+<nav class="tabs" role="tablist" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $.Body.Kind .Key}} active{{end}}" role="tab" aria-selected="{{if eq $.Body.Kind .Key}}true{{else}}false{{end}}"{{if eq $.Body.Kind .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
 
-<section class="card"><h2>{{if eq .Kind "repair"}}Repair wizard{{else}}Promote wizard{{end}}</h2>
+<section class="card"><h2>{{if eq .Kind "repair"}}Repair wizard{{else if eq .Kind "promote"}}Promote wizard{{else}}Seed wizard{{end}}</h2>
   <ol class="steps">{{range .Steps}}<li class="step-{{.Status}}"><b>{{.Title}}</b> <span class="badge {{if eq .Status "done"}}st-synced{{else if eq .Status "failed"}}st-failed{{else if eq .Status "current"}}st-bootstrapping{{else}}st-paused{{end}}">{{.Status}}</span>{{if .Note}}<br><span class="small err">{{.Note}}</span>{{end}}</li>{{end}}</ol>
   {{if .State}}<p class="muted small">Wizard state is saved on the server (step <b>{{.Step}}</b>, updated {{ts .State.Updated}}): reloading this page or restarting the web server resumes here.</p>{{end}}
   {{if .Job}}<p>Current job: <a href="/jobs/{{.Job.ID}}">{{.Job.Kind}}</a> <span class="badge {{jobClass .Job}}">{{jobState .Job}}</span> <span class="mono small wrap">strand {{join .Job.Args " "}}</span></p>{{end}}
@@ -37,7 +37,7 @@
   </section>{{end}}
   <section class="card"><form class="act inline" data-action="repair-abort" data-pipeline="{{.Name}}" data-stay data-confirm="Close the repair wizard? A pipeline stopped by this wizard stays stopped."><button class="btn" type="submit">Close the wizard</button></form></section>
   {{end}}
-{{else}}
+{{else if eq .Kind "promote"}}
   {{if .PlanInfo}}<section class="card"><h2>Promote state</h2><p>{{.PlanInfo}}</p></section>{{end}}
   {{if .Decision}}<section class="card"><h2>The CLI needs a decision (exit 10)</h2>
     <pre class="code wrapcode">{{.Decision}}</pre>
@@ -70,6 +70,75 @@
   </section>
   {{end}}
   {{if .Active}}<section class="card"><form class="act inline" data-action="promote-abort" data-pipeline="{{.Name}}" data-stay data-confirm="Close the promote wizard? Promote progress stays saved in _strand_promote; a later run resumes it."><button class="btn" type="submit">Close the wizard</button></form></section>{{end}}
+{{else if eq .Kind "seed"}}
+  <div class="alert alert-warn mb" role="alert">
+    <strong>Warning:</strong> Seed restores a physical backup directly to the target database and starts CDC replication from the backup's position. This operation is <strong>destructive on the target database</strong>.
+  </div>
+  {{if not .Active}}
+  <section class="card">
+    <h2>Start the seed wizard</h2>
+    {{if eq .Step "done"}}<p class="muted">The seed run completed successfully and CDC replication is active.</p>{{end}}
+    <p>Seed prepares the target database from an external backup (XtraBackup, mydumper, mysqldump for MySQL; pgBackRest, WAL-G, or <code>strand export</code> for PostgreSQL). Strand validates the backup position, applies it to the target, and resumes CDC streaming.</p>
+    <form class="act" data-action="seed-begin" data-pipeline="{{.Name}}" data-stay data-confirm="Start the seed wizard for {{.Name}}? Nothing on the target is changed yet." data-retype="{{.Name}}">
+      <div class="form-field">
+        <label for="seed-backup-dir">Backup directory or archive path <span class="req">*</span></label>
+        <input type="text" id="seed-backup-dir" name="backup_dir" required class="wide mono" placeholder="/var/backups/target-seed or /path/to/backup.xbstream">
+        <span class="help">Directory containing the extracted physical backup or archive file.</span>
+      </div>
+      <div class="form-field mt10">
+        <label for="seed-type">Backup type</label>
+        <select id="seed-type" name="seed_type">
+          <option value="xtrabackup">MySQL XtraBackup</option>
+          <option value="clone">MySQL CLONE</option>
+          <option value="mydumper">MySQL mydumper / mysqldump</option>
+          <option value="pg_dump">PostgreSQL pg_dump / strand export</option>
+          <option value="pgbackrest">PostgreSQL pgBackRest / WAL-G</option>
+        </select>
+      </div>
+      <div class="mt14">
+        <button class="btn primary" type="submit">Begin seed wizard...</button>
+      </div>
+    </form>
+  </section>
+  {{else}}
+  {{if eq .Step "plan"}}
+  <section class="card">
+    <h2>Step 1: Check backup and dry-run plan</h2>
+    <p>Backup path: <code class="mono">{{index .Opts "backup_dir"}}</code> (type: <b>{{index .Opts "seed_type"}}</b>)</p>
+    <p>Validate backup metadata, LSN / binlog position, and target compatibility without touching target data.</p>
+    <form class="act" data-action="seed-plan" data-pipeline="{{.Name}}" data-stay>
+      <button class="btn primary" type="submit">1. Check backup (dry-run plan)</button>
+    </form>
+  </section>
+  {{end}}
+  {{if eq .Step "apply"}}
+  <section class="card">
+    <h2>Step 2: Destructive restore on target</h2>
+    <div class="alert alert-error mb" role="alert">
+      <b>DANGER:</b> Applying seed will wipe existing target schemas and tables and restore from the backup at <code class="mono">{{index .Opts "backup_dir"}}</code>.
+    </div>
+    <form class="act" data-action="seed-apply" data-pipeline="{{.Name}}" data-stay data-confirm="DESTROY TARGET DATA AND APPLY SEED? All existing data in the target database for pipeline {{.Name}} will be replaced by the backup. Type the pipeline name to confirm." data-retype="{{.Name}}">
+      <input type="hidden" name="backup_dir" value="{{index .Opts "backup_dir"}}">
+      <input type="hidden" name="seed_type" value="{{index .Opts "seed_type"}}">
+      <button class="btn danger" type="submit">2. Apply seed to target database...</button>
+    </form>
+  </section>
+  {{end}}
+  {{if eq .Step "start"}}
+  <section class="card">
+    <h2>Step 3: Start CDC replication</h2>
+    <p>Backup was restored to target and verified. Start replication to catch up with subsequent source changes from the checkpoint.</p>
+    <form class="act inline" data-action="seed-start" data-pipeline="{{.Name}}" data-stay>
+      <button class="btn primary" type="submit">3. Start replication</button>
+    </form>
+  </section>
+  {{end}}
+  <section class="card">
+    <form class="act inline" data-action="seed-abort" data-pipeline="{{.Name}}" data-stay data-confirm="Close the seed wizard?">
+      <button class="btn ghost" type="submit">Close the wizard</button>
+    </form>
+  </section>
+  {{end}}
 {{end}}
 
 {{if .Output}}<section class="card"><h2>Job output (tail)</h2><pre class="code log wrapcode" tabindex="0" aria-label="Job output">{{.Output}}</pre></section>{{end}}

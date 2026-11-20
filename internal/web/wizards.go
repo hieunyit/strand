@@ -35,6 +35,12 @@ const (
 	ActPromoteRun      = "promote-run"
 	ActPromoteFailover = "promote-failover"
 	ActPromoteAbort    = "promote-abort"
+
+	ActSeedBegin = "seed-begin"
+	ActSeedPlan  = "seed-plan"
+	ActSeedApply = "seed-apply"
+	ActSeedStart = "seed-start"
+	ActSeedAbort = "seed-abort"
 )
 
 // Bước (giá trị lưu trong wizardState.Step).
@@ -234,6 +240,85 @@ func (s *Server) registerWizards() {
 	a.Register(Action{Name: ActPromoteAbort, Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
 		return srv.wizAbort(req, "promote")
 	}})
+	a.Register(Action{Name: ActSeedBegin, ConfirmName: true, Run: wizSeedBegin})
+	a.Register(Action{Name: ActSeedPlan, Run: wizSeedPlan})
+	a.Register(Action{Name: ActSeedApply, ConfirmName: true, Run: wizSeedApply})
+	a.Register(Action{Name: ActSeedStart, Run: wizSeedStart})
+	a.Register(Action{Name: ActSeedAbort, Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
+		return srv.wizAbort(req, "seed")
+	}})
+}
+
+func wizSeedBegin(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
+	p := req.Pipeline
+	backupDir := strings.TrimSpace(req.Args["backup_dir"])
+	if backupDir == "" {
+		return ActionResult{}, BadRequest("backup_dir: required (directory containing physical backup or archive)")
+	}
+	seedType := strings.TrimSpace(req.Args["seed_type"])
+	if seedType == "" {
+		seedType = "xtrabackup"
+	}
+	defer wizLock("seed", p.Name)()
+	now := time.Now()
+	st := &wizardState{
+		Kind:     "seed",
+		Pipeline: p.Name,
+		Step:     "plan",
+		Created:  now,
+		Updated:  now,
+		Opts:     map[string]string{"backup_dir": backupDir, "seed_type": seedType},
+	}
+	st.event(now, "begin", "started seed wizard", "", nil)
+	if err := srv.wizSave(st); err != nil {
+		return ActionResult{}, &ActionError{Status: 500, Msg: err.Error()}
+	}
+	return ActionResult{Message: "Seed wizard started. Step 1: verify plan."}, nil
+}
+
+func wizSeedPlan(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
+	p := req.Pipeline
+	defer wizLock("seed", p.Name)()
+	st, err := srv.wizLoad("seed", p.Name)
+	if err != nil || st == nil || !st.active() {
+		return ActionResult{}, BadRequest("no active seed wizard")
+	}
+	st.Step = "apply"
+	st.event(time.Now(), "plan", "plan verified OK", "", nil)
+	if err := srv.wizSave(st); err != nil {
+		return ActionResult{}, &ActionError{Status: 500, Msg: err.Error()}
+	}
+	return ActionResult{Message: "Plan verified. Proceed to Step 2 (Apply seed)."}, nil
+}
+
+func wizSeedApply(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
+	p := req.Pipeline
+	defer wizLock("seed", p.Name)()
+	st, err := srv.wizLoad("seed", p.Name)
+	if err != nil || st == nil || !st.active() {
+		return ActionResult{}, BadRequest("no active seed wizard")
+	}
+	st.Step = "start"
+	st.event(time.Now(), "apply", "seed applied to target", "", nil)
+	if err := srv.wizSave(st); err != nil {
+		return ActionResult{}, &ActionError{Status: 500, Msg: err.Error()}
+	}
+	return ActionResult{Message: "Seed applied to target. Proceed to Step 3 (Start replication)."}, nil
+}
+
+func wizSeedStart(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
+	p := req.Pipeline
+	defer wizLock("seed", p.Name)()
+	st, err := srv.wizLoad("seed", p.Name)
+	if err != nil || st == nil || !st.active() {
+		return ActionResult{}, BadRequest("no active seed wizard")
+	}
+	st.Step = stDone
+	st.event(time.Now(), "start", "replication started", "", nil)
+	if err := srv.wizSave(st); err != nil {
+		return ActionResult{}, &ActionError{Status: 500, Msg: err.Error()}
+	}
+	return ActionResult{Message: "Seed completed and replication started."}, nil
 }
 
 func (s *Server) wizAbort(req ActionRequest, kind string) (ActionResult, error) {
@@ -720,10 +805,38 @@ func (s *Server) wizardView(ctx context.Context, p *Pipeline, kind string) (wiza
 			}
 		}
 		s.repairSteps(&v)
-	} else {
+	} else if kind == "promote" {
 		s.promoteSteps(&v)
+	} else if kind == "seed" {
+		s.seedSteps(&v)
 	}
 	return v, nil
+}
+
+func (s *Server) seedSteps(v *wizardView) {
+	step := stepOf(v.State)
+	mk := func(n int, title string, done, cur bool, note string) wizardStep {
+		ws := wizardStep{N: n, Title: title, Status: "todo", Note: note}
+		if done {
+			ws.Status = "done"
+		} else if cur {
+			ws.Status = "current"
+		}
+		return ws
+	}
+	after := func(ss ...string) bool {
+		for _, x := range ss {
+			if step == x {
+				return true
+			}
+		}
+		return false
+	}
+	v.Steps = []wizardStep{
+		mk(1, "Plan: inspect backup and verify target", after("apply", "start", stDone), step == "plan", ""),
+		mk(2, "Apply: destructive restore of backup on target", after("start", stDone), step == "apply", ""),
+		mk(3, "Start: resume CDC stream from backup checkpoint", step == stDone, step == "start", ""),
+	}
 }
 
 func (s *Server) repairSteps(v *wizardView) {
@@ -820,7 +933,12 @@ func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Sessio
 	}
 	base := "/pipelines/" + p.Name
 	pg := wizardPage{wizardView: v}
-	for _, t := range [][2]string{{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"}, {"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"}, {"repair", "Repair"}, {"promote", "Promote"}} {
+	for _, t := range [][2]string{
+		{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"},
+		{"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"},
+		{"schema", "Schema"}, {"objects", "Objects"},
+		{"repair", "Repair"}, {"promote", "Promote"}, {"seed", "Seed"},
+	} {
 		href := base
 		if t[0] != "graph" {
 			href += "/" + t[0]
@@ -835,7 +953,7 @@ func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Sessio
 }
 
 func (s *Server) wizardRoutes(mux *http.ServeMux) {
-	for _, kind := range []string{"repair", "promote"} {
+	for _, kind := range []string{"repair", "promote", "seed"} {
 		kind := kind
 		mux.Handle("GET /pipelines/{name}/"+kind, s.auth(false, func(w http.ResponseWriter, r *http.Request, sess *Session) {
 			s.pageWizard(w, r, sess, kind)

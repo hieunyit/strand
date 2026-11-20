@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -135,6 +136,17 @@ func (s *Server) apiJobOutput(w http.ResponseWriter, r *http.Request, _ *Session
 	off, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
 	out, _ := s.jobs.Output(j.ID, off)
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) apiJobDownload(w http.ResponseWriter, r *http.Request, _ *Session) {
+	j, ok := s.lookupJob(w, r)
+	if !ok {
+		return
+	}
+	out, _ := s.jobs.Output(j.ID, 0)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="job-%s.log"`, j.ID))
+	_, _ = w.Write([]byte(out.Data))
 }
 
 // ---- trang ----
