@@ -35,13 +35,19 @@ type Mem struct {
 	auditSeq   int64
 	archives   []AuditArchiveRec
 	instances  map[string]Instance
+	users      map[int64]User
+	userSeq    int64
+	tokens     map[int64]UserToken
+	tokenSeq   int64
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }
 
 func NewMem() *Mem {
 	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]DesiredState{},
-		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, backups: map[string]backup.Record{}, backupJobs: map[string]backup.Job{}, locks: map[string]*sync.Mutex{}}
+		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, backups: map[string]backup.Record{},
+		backupJobs: map[string]backup.Job{}, locks: map[string]*sync.Mutex{},
+		users: map[int64]User{}, tokens: map[int64]UserToken{}}
 }
 
 var errDown = errors.New("store: database is down")
