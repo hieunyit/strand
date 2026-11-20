@@ -203,6 +203,7 @@ func pitrProbe(method string) Job {
 // PITRCaps are the server facts a connection test established.
 type PITRCaps struct {
 	GTIDOn          bool // mysql: gtid_mode=ON
+	BinlogOn        bool // mysql: log_bin=ON
 	WALLevelOK      bool // postgres: wal_level replica or logical
 	ReplicationRole bool // postgres: REPLICATION attribute (or superuser)
 	ReplicaSet      bool // mongodb: member of a replica set
@@ -242,6 +243,9 @@ func PITRAssessment(connEngine string, caps PITRCaps) (allowed bool, methods []s
 	case ConnMySQL:
 		if !caps.GTIDOn {
 			return false, nil, "MySQL PITR needs gtid_mode=ON on the server"
+		}
+		if !caps.BinlogOn {
+			return false, nil, "MySQL PITR needs binary logging (log_bin=ON) on the server"
 		}
 	case ConnPostgres:
 		if !caps.WALLevelOK {

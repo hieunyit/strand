@@ -129,9 +129,12 @@ func TestNominalSeconds(t *testing.T) {
 }
 
 func TestPITRAssessmentMatchesValidatePITR(t *testing.T) {
-	ok, methods, _ := PITRAssessment(ConnMySQL, PITRCaps{GTIDOn: true})
+	ok, methods, _ := PITRAssessment(ConnMySQL, PITRCaps{GTIDOn: true, BinlogOn: true})
 	if !ok || len(methods) != 1 || methods[0] != MethodMySQLDump {
 		t.Fatalf("mysql gtid: %v %v", ok, methods)
+	}
+	if ok, _, r := PITRAssessment(ConnMySQL, PITRCaps{GTIDOn: true}); ok || !strings.Contains(r, "log_bin") {
+		t.Fatalf("mysql no binlog: %v %q", ok, r)
 	}
 	if ok, _, r := PITRAssessment(ConnMySQL, PITRCaps{}); ok || !strings.Contains(r, "gtid_mode") {
 		t.Fatalf("mysql no gtid: %v %q", ok, r)
