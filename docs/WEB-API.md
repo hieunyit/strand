@@ -9,21 +9,72 @@
 - Header bảo mật trên mọi phản hồi: `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`.
 - Tên pipeline trong đường dẫn phải khớp `^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$` và đã được đăng ký; ngược lại **404**.
 
-## 2. Xác thực
+## 2. Xác thực và Phân quyền (RBAC)
 
-Hai cách:
+### 2.1 Phương thức xác thực
 
-1. **Session** (trình duyệt). `GET /login` đặt cookie `strand_login` (giá trị = token CSRF của lần đăng nhập). `POST /api/v1/login` với header `X-CSRF-Token: <giá trị cookie strand_login>` và body `{"password": "..."}`. Thành công: **200** `{"csrf": "<token>", "idle_timeout_s": 1800, "max_age_s": 43200}` và cookie `strand_session` (`HttpOnly`, `SameSite=Strict`, `Secure` khi có TLS). Mọi request `POST` sau đó mang header `X-CSRF-Token: <csrf>` (hoặc trường form `csrf`); thiếu/sai: **403**.
-2. **Token tĩnh** (script). Tạo bằng `strand web token --config web.yaml` (in một lần; `web.yaml` chỉ giữ sha256). Gửi `Authorization: Bearer <token>`. Không dùng cookie nên không cần CSRF.
+1. **Session** (trình duyệt). `GET /login` đặt cookie `strand_login` (giá trị = token CSRF của lần đăng nhập). `POST /api/v1/login` với header `X-CSRF-Token: <giá trị cookie strand_login>` và body `{"username": "...", "password": "..."}`. Thành công: **200** `{"csrf": "<token>", "idle_timeout_s": 1800, "max_age_s": 43200}` và cookie `strand_session` (`HttpOnly`, `SameSite=Strict`, `Secure` khi có TLS; ID phiên được xoay mới sau khi đăng nhập thành công). Mọi request `POST` sau đó mang header `X-CSRF-Token: <csrf>` (hoặc trường form `csrf`); thiếu/sai: **403**.
+   - **Đổi mật khẩu lần đầu (First login):** Tài khoản có cờ `must_change_password=true` khi đăng nhập thông thường sẽ nhận phản hồi **400** `{"error": "password change required on first login", "must_change_password": true}`. Client gửi thêm trường `"new_password": "..."` trong payload đăng nhập để cập nhật mật khẩu mới và hoàn tất đăng nhập.
+2. **API Token người dùng (Scoped Bearer Token):** Mỗi người dùng có thể tạo và quản lý token riêng trên trang My account (`/account`) hoặc API `/api/v1/account/tokens`. Gửi header `Authorization: Bearer <token>`. Quyền hạn của token tự động kế thừa theo vai trò của người dùng tạo ra nó. Khi người dùng bị vô hiệu hóa, bị xóa, hoặc token bị thu hồi: trả về **401 Unauthorized**.
+3. **Legacy Global API Token:** Token API toàn cục cũ (`strand web token`) được hỗ trợ kế thừa với quyền `admin`. Mọi phản hồi khi dùng token này có thêm header `Deprecation: true` và `Warning: 299 - "Legacy API token is deprecated; migrate to per-user API tokens"`.
 
-Giới hạn đăng nhập: 5 lần sai/phút/IP, lần thứ 6 trả **429** kèm `Retry-After`; khóa tăng gấp đôi mỗi lần tái phạm (tối đa 15 phút). Session hết hạn sau 30 phút không dùng hoặc 12 giờ.
+Giới hạn đăng nhập: Tối đa 5 lần sai/phút/IP hoặc per-user, lần thứ 6 trả **429 Too Many Requests** kèm `Retry-After`; thời gian khóa 15 phút. Phiên hết hạn sau 30 phút không dùng hoặc tối đa 12 giờ. Khi tài khoản bị vô hiệu hóa hoặc đổi mật khẩu, toàn bộ phiên đăng nhập của người dùng đó bị hủy lập tức.
 
-| Route | Mô tả |
-| --- | --- |
-| `POST /api/v1/login` | như trên. 401 sai mật khẩu, 403 thiếu CSRF, 429 bị chặn |
-| `POST /api/v1/logout` | hủy session. Cần CSRF. **200** `{"ok": true}` |
-| `GET /healthz` | **Không cần xác thực.** `200 {"status":"ok","version","database":{"mode":"file"` hoặc `"postgres","ok":true}}`; chế độ PostgreSQL mà DB không ping được: **503** `{"status":"degraded","database":{"ok":false,"error":"metadata database unreachable (details in the web log)"}}` (chi tiết lỗi chỉ ghi vào log của web, không lộ host/user cho người chưa đăng nhập). Chế độ PostgreSQL có thêm `"role": "active"|"standby"` và `"lease": {"role", "instance", "active_instance", "active": {host, listen, version, started}, "epoch", "expires_in_s"}` (§7). Standby vẫn trả 200. Dùng cho HEALTHCHECK/orchestrator |
-| `GET /api/v1/session` | `{"authenticated": true, "version", "csrf", "idle_timeout_s", "max_age_s"}` (`csrf` vắng khi dùng Bearer) |
+### 2.2 Bảng vai trò và quyền hạn (RBAC)
+
+Hệ thống phân quyền trung tâm gồm 3 vai trò:
+
+| Quyền / Route | `viewer` | `operator` | `admin` |
+| --- | :---: | :---: | :---: |
+| Xem trạng thái, dashboard, số liệu, tables, checkpoint | ✅ | ✅ | ✅ |
+| Xem cấu hình pipeline (`/api/v1/pipelines/{name}/config` — bí mật luôn che) | ✅ | ✅ | ✅ |
+| Vận hành pipeline (start, stop, restart, pause, resume, throttle, snapshot add) | ❌ (403) | ✅ | ✅ |
+| Chạy các tác vụ verify, repair, backup run (`/api/v1/backup-jobs/{id}/run`) | ❌ (403) | ✅ | ✅ |
+| Quản lý tài khoản cá nhân (`/account`, `/api/v1/account/*`) | ✅ | ✅ | ✅ |
+| Sửa cấu hình pipeline, lưu YAML (`/api/v1/pipelines/{name}/config`) | ❌ (403) | ❌ (403) | ✅ |
+| Xem và sửa biến môi trường pipeline (`/api/v1/pipelines/{name}/env`) | ❌ (403) | ❌ (403) | ✅ |
+| Tạo / xóa pipeline mới (`POST /api/v1/pipelines`, `DELETE /api/v1/pipelines/{name}`) | ❌ (403) | ❌ (403) | ✅ |
+| Thao tác sao lưu nâng cao (tạo/sửa job, restore, delete backup) | ❌ (403) | ❌ (403) | ✅ |
+| Cài đặt hệ thống (`/settings`, `/api/v1/settings`) | ❌ (403) | ❌ (403) | ✅ |
+| Quản lý người dùng (`/users`, `/api/v1/users/*`) | ❌ (403) | ❌ (403) | ✅ |
+| Xem / xuất Audit log (`/audit`, `/api/v1/audit/*`) | ❌ (403) | ❌ (403) | ✅ |
+
+Khi người dùng không đủ quyền truy cập, API trả về JSON nhất quán:
+```json
+{
+  "error": "forbidden: this action requires <role> role",
+  "code": "FORBIDDEN"
+}
+```
+Trên trình duyệt (HTML route), trả về trang 403 Forbidden với thông báo quyền hạn rõ ràng.
+
+### 2.3 Route xác thực & tài khoản
+
+| Route | Phương thức | Quyền | Mô tả |
+| --- | --- | --- | --- |
+| `/api/v1/login` | POST | Public | Đăng nhập bằng `username` và `password` (kèm `new_password` nếu đổi lần đầu). |
+| `/api/v1/logout` | POST | Auth | Đăng xuất, hủy phiên hiện tại. |
+| `/healthz` | GET | Public | Healthcheck và trạng thái cluster lease. |
+| `/api/v1/session` | GET | Auth | Thông tin phiên hiện tại, username, role, CSRF token. |
+| `/api/v1/account/password` | POST | Auth | Đổi mật khẩu tài khoản hiện tại (`current_password`, `new_password`). |
+| `/api/v1/account/tokens` | GET | Auth | Liệt kê danh sách API token của tài khoản. |
+| `/api/v1/account/tokens` | POST | Auth | Tạo API token mới (`name`). Trả token dạng rõ một lần duy nhất. |
+| `/api/v1/account/tokens/{id}` | DELETE | Auth | Thu hồi API token. |
+| `/api/v1/account/sessions` | GET | Auth | Danh sách các phiên đăng nhập đang hoạt động của tài khoản. |
+| `/api/v1/account/sessions/signout-others` | POST | Auth | Đăng xuất toàn bộ các phiên khác của tài khoản này. |
+
+### 2.4 Route quản lý người dùng (Admin only)
+
+| Route | Phương thức | Quyền | Mô tả |
+| --- | --- | --- | --- |
+| `/api/v1/users` | GET | Admin | Liệt kê tất cả người dùng, vai trò, trạng thái, last login. |
+| `/api/v1/users` | POST | Admin | Tạo người dùng mới (`username`, `role`, `display_name`, `password`, `must_change_password`). |
+| `/api/v1/users/{username}/role` | PUT | Admin | Cập nhật vai trò người dùng (`admin`, `operator`, `viewer`). |
+| `/api/v1/users/{username}/disable` | POST | Admin | Vô hiệu hóa người dùng (hủy mọi phiên đăng nhập). |
+| `/api/v1/users/{username}/enable` | POST | Admin | Kích hoạt lại người dùng. |
+| `/api/v1/users/{username}/reset-password` | POST | Admin | Đặt lại mật khẩu (`password`, hoặc sinh ngẫu nhiên). |
+| `/api/v1/users/{username}/tokens/revoke` | POST | Admin | Thu hồi toàn bộ API token của người dùng này. |
+| `/api/v1/users/{username}` | DELETE | Admin | Xóa người dùng và toàn bộ phiên/token liên quan. |
 
 ## 3. Tài nguyên
 
