@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -320,10 +321,55 @@ type jobsBody struct {
 	Tables   SourceTablesView
 	View     PipelineView
 	Pipeline string
+	// Filter bar of the process jobs page.
+	Pipelines []string
+	Kinds     []string
+	States    []string
+	Running   int
+}
+
+// jobFilterStates are the states of the Jobs filter (jobState values reduced to the filterable ones).
+var jobFilterStates = []string{"running", "ok", "failed", "cancelled", "interrupted"}
+
+// jobStateKey is the machine state of a job for filtering and styling: running | cancelling | cancelled |
+// interrupted | ok | failed | unknown.
+func jobStateKey(j JobStatus) string {
+	switch {
+	case j.Running && j.Cancelled:
+		return "cancelling"
+	case j.Running:
+		return "running"
+	case j.Cancelled:
+		return "cancelled"
+	case j.Interrupted:
+		return "interrupted"
+	case j.ExitCode == nil:
+		return "unknown"
+	case *j.ExitCode == 0:
+		return "ok"
+	}
+	return "failed"
 }
 
 func (s *Server) pageJobs(w http.ResponseWriter, r *http.Request, sess *Session) {
-	s.render(w, "jobs", sess, pageData{Title: "Jobs", Active: "jobs", Refresh: 5, Body: jobsBody{Jobs: s.listJobs("")}})
+	jobs := s.listJobs("")
+	b := jobsBody{Jobs: jobs, States: jobFilterStates}
+	pl, kd := map[string]bool{}, map[string]bool{}
+	for _, j := range jobs {
+		pl[j.Pipeline], kd[j.Kind] = true, true
+		if j.Running {
+			b.Running++
+		}
+	}
+	for k := range pl {
+		b.Pipelines = append(b.Pipelines, k)
+	}
+	for k := range kd {
+		b.Kinds = append(b.Kinds, k)
+	}
+	sort.Strings(b.Pipelines)
+	sort.Strings(b.Kinds)
+	s.render(w, "jobs", sess, pageData{Title: "Jobs", Active: "jobs", Refresh: 5, Body: b})
 }
 
 type jobBody struct {

@@ -10,6 +10,7 @@
 <script src="/static/app.js" defer></script>
 <script src="/static/live.js" defer></script>
 <script src="/static/backups.js" defer></script>
+<script src="/static/pipelines.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#content">Skip to content</a>
@@ -20,8 +21,8 @@
     <a href="/" class="{{if eq .Active "overview"}}active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>{{icon "overview"}}Overview</a>
     <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>{{icon "pipelines"}}Pipelines</a>
     <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
-    <div class="navhead">Operate</div>
-    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>
+    {{if .CanAdmin}}<div class="navhead">Operate</div>
+    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>{{end}}
     <div class="navhead">Data protection</div>
     <a href="/backups" class="{{if or (eq .Active "backups") (eq .Active "backups-overview")}}active{{end}}"{{if or (eq .Active "backups") (eq .Active "backups-overview")}} aria-current="page"{{end}}>{{icon "db"}}Backups</a>
     <a href="/backups/jobs" class="{{if eq .Active "backups-jobs"}}active{{end}}"{{if eq .Active "backups-jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
@@ -87,108 +88,10 @@
   <form method="dialog" id="confirm-form">
     <h3 id="confirm-title">Confirm</h3>
     <p id="confirm-msg"></p>
-    <p id="confirm-retype" hidden>Type the pipeline name <b id="confirm-name"></b> to confirm:<input id="confirm-input" type="text" aria-label="Pipeline name" autocomplete="off" spellcheck="false"></p>
+    <p id="confirm-retype" hidden>Type <b id="confirm-name"></b> to confirm:<input id="confirm-input" type="text" aria-label="Type the confirmation text" autocomplete="off" spellcheck="false"></p>
     <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">Cancel</button><button class="btn primary" id="confirm-ok" type="submit" value="ok">Confirm</button></div>
   </form>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>{{end}}
-
-{{define "pipeline-table"}}
-<div class="tablewrap">
-<table class="data-table grid" id="pipeline-table" data-sortable>
-  <caption class="sr-only">Pipelines</caption>
-  <thead><tr>
-    <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="name">Name</button></th>
-    <th scope="col" class="hide-md">Engines</th>
-    <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="sev">State</button></th>
-    <th scope="col" class="r c-num" aria-sort="none"><button type="button" class="sortbtn" data-sort="lag">Lag</button></th>
-    <th scope="col" class="hide-md">Lag, last 5 min</th>
-    <th scope="col" class="r c-num" aria-sort="none"><button type="button" class="sortbtn" data-sort="rate" title="Rows applied per second, averaged over 30 s">Rows/s</button></th>
-    <th scope="col">Tables</th>
-    <th scope="col" class="hide-md">Zone</th><th scope="col" class="hide-md">Managed by</th><th scope="col" class="hide-md">Last exit</th>
-    <th scope="col" class="r">Action</th></tr></thead>
-  <tbody>
-  {{range .Body.Views}}<tr data-name="{{.Name}}" data-live-row="{{.Name}}" data-state="{{.State}}" data-sev="{{stateSev .State}}" data-lag="{{lagSort .}}" data-rate="{{if .Top}}{{printf "%.3f" .Rates.Rows}}{{else}}-1{{end}}" class="{{if .Stale}}is-stale{{end}}">
-    <td><a class="mono" href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}{{template "stale-tag" .}}</td>
-    <td class="hide-md">{{.Pair}}</td>
-    <td><span class="badge {{stateClass .State}}" data-bind-badge="state">{{.State}}</span>{{$why := stateReason .}}<div class="reason small muted" title="{{$why}}" data-bind="reason"{{if not $why}} hidden{{end}}>{{$why}}</div></td>
-    <td class="r nowrap c-num {{lagClass .}}" data-bind="lag" data-bind-lag>{{if .Top}}{{lag .Top.LagSeconds}}{{else}}-{{end}}</td>
-    <td class="hide-md">{{index $.Body.Sparks .Name}}</td>
-    <td class="r nowrap c-num" data-bind="rows">{{if .Top}}{{num .Rates.Rows}}{{else}}-{{end}}</td>
-    <td class="nowrap">{{template "tables-mini" .}}</td>
-    <td class="hide-md" data-bind="zone">{{if .Top}}{{if .Top.Zone}}{{.Top.Zone}}{{else}}-{{end}}{{else}}-{{end}}</td>
-    <td class="hide-md">{{.Mode}} <span class="muted small">({{.Origin}})</span></td>
-    <td class="hide-md">{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
-    <td class="r nowrap">
-      <form class="act inline" data-action="delete" data-pipeline="{{.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.Name}}'?" data-retype="{{.Name}}">
-        <button class="btn danger small" type="submit">Delete</button>
-      </form>
-    </td>
-  </tr>{{else}}<tr class="empty"><td colspan="11"><div class="empty-state">{{icon "empty"}}<b>No pipelines registered yet</b><span>Create one, or add existing configs to web.yaml (<code>scan</code> or <code>pipelines</code>).</span><a class="btn primary" href="/pipelines/new">{{icon "plus"}}Create pipeline</a></div></td></tr>{{end}}
-  <tr class="nomatch" hidden><td colspan="11" class="muted">No pipeline matches the filter. <a href="/pipelines">Clear filter</a></td></tr>
-  </tbody>
-</table>
-</div>
-{{end}}
-
-{{define "tables-mini"}}{{with tablesOf .}}<span class="pcell" data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Pct}}</span><span class="small c-frac" data-bind="tables">{{.Done}} / {{.Total}}</span></span><span class="muted" data-bind-hide="tables" title="Snapshot progress is reported while the pipeline copies tables"{{if gt .Total 0}} hidden{{end}}>-</span>{{end}}{{end}}
-
-{{define "stale-tag"}}<span class="stale-tag" data-stale-tag{{if not .Stale}} hidden{{end}} title="The last poll of the admin socket failed{{if .PollErr}}: {{.PollErr}}{{end}}. Showing the last good values.">{{icon "alert"}}<span data-bind-age="{{if not .LastOK.IsZero}}{{.LastOK.Format "2006-01-02T15:04:05.000Z07:00"}}{{end}}">{{if not .LastOK.IsZero}}updated {{rel .LastOK}}{{else}}no data{{end}}</span></span>{{end}}
-
-{{define "jobs-table"}}
-<div class="tablewrap tall">
-<table class="data-table grid">
-  <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Pipeline</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Command</th></tr></thead>
-  <tbody>{{range .Jobs}}<tr>
-    <td class="small nowrap"><a href="/jobs/{{.ID}}">{{ts .Started}}</a></td>
-    {{if $.ShowPipeline}}<td><a href="/pipelines/{{.Pipeline}}/jobs">{{.Pipeline}}</a></td>{{end}}
-    <td class="mono">{{.Kind}}</td>
-    <td><span class="badge {{jobClass .}}">{{jobState .}}</span></td>
-    <td class="small r nowrap">{{jobDur .}}</td>
-    <td class="mono small wrap">strand {{join .Args " "}}</td>
-  </tr>{{else}}<tr class="empty"><td colspan="6"><div class="empty-state">{{icon "jobs"}}<b>No jobs yet</b><span>Verify runs started from a pipeline's Jobs tab appear here.</span></div></td></tr>{{end}}</tbody>
-</table>
-</div>
-{{end}}
-
-{{define "pipeline-head"}}
-{{$eng := engines .View.Pair}}
-<section class="card head{{if .View.Stale}} is-stale{{end}}" aria-label="Pipeline status" data-live-head="{{.View.Name}}" data-state="{{.View.State}}">
-  <div class="headrow">
-    <span class="engines pair" title="{{.View.Pair}}"><span class="eng {{(index $eng 0).Class}}">{{icon "db"}}{{(index $eng 0).Label}}</span>{{if (index $eng 1).Label}}{{icon "arrow"}}<span class="eng {{(index $eng 1).Class}}">{{icon "db"}}{{(index $eng 1).Label}}</span>{{end}}</span>
-    <span class="badge big {{stateClass .View.State}}" data-bind-badge="state">{{.View.State}}</span>
-    {{template "stale-tag" .View}}
-    <span class="muted small meta">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}} &middot; sampled <b class="c-time" data-bind="sampled">{{clock .View.SampledAt}}</b></span>
-  </div>
-  {{$why := stateReason .View}}<p class="reason-line {{stateClass $.View.State}}" data-bind-show="reason"{{if not $why}} hidden{{end}}><b>Why:</b> <span class="wrap" data-bind="reason">{{$why}}</span></p>
-  {{if .View.Top}}{{if .View.Top.BreakerOpen}}<div class="alert alert-error mb" role="alert" data-bind-show="breaker"><strong>Circuit Breaker Open:</strong> <span data-bind="breaker_reason">{{.View.Top.BreakerReason}}</span></div>{{end}}{{end}}
-  <div class="metrics" aria-label="Live metrics">
-    <div class="metric"><div class="m-label">Lag</div><div class="m-value c-num {{lagClass .View}}" data-bind="lag" data-bind-lag>{{if .View.Top}}{{lag .View.Top.LagSeconds}}{{else}}-{{end}}</div><div class="m-sub">source to target</div></div>
-    <div class="metric"><div class="m-label" title="Rows applied per second, averaged over the last 30 s">Rows/s <span class="m-hint">30 s avg</span></div><div class="m-value c-num" data-bind="rows">{{if .View.Top}}{{num .View.Rates.Rows}}{{else}}-{{end}}</div><div class="m-sub"><span class="c-num" data-bind="txn">{{if .View.Top}}{{num .View.Rates.Txn}}{{else}}-{{end}}</span> txn/s &middot; zone <span data-bind="zone">{{if .View.Top}}{{if .View.Top.Zone}}{{.View.Top.Zone}}{{else}}-{{end}}{{else}}-{{end}}</span></div></div>
-    {{with tablesOf .View}}<div class="metric"><div class="m-label">Snapshot</div><div class="m-value c-num" data-bind="tables">{{if gt .Total 0}}{{.Done}} / {{.Total}}{{else}}-{{end}}</div><div data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Pct}}</span></div><div class="m-sub" data-bind-hide="tables"{{if gt .Total 0}} hidden{{end}}>no snapshot running</div><div class="m-sub" data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span class="c-num" data-bind="snap_rows">{{num $.View.Rates.SnapRows}}</span> rows/s{{if $.View.Top}}{{if gt $.View.Top.Progress 0.0}} &middot; <span data-bind="progress">{{pct $.View.Top.Progress}}</span>{{end}}{{if gt $.View.Top.ETASeconds 0.0}} &middot; ETA <span data-bind="eta">{{secs $.View.Top.ETASeconds}}</span>{{end}}{{end}}</div></div>{{end}}
-    <div class="metric"><div class="m-label">Uptime</div><div class="m-value c-num" data-bind="uptime">{{if .Head.HasInfo}}{{secs .Head.Uptime}}{{else}}-{{end}}</div>{{if .View.Runtime.Since}}<div class="m-sub">since {{.View.Runtime.Since}}</div>{{end}}</div>
-    <div class="metric"><div class="m-label">Last checkpoint</div><div class="m-value c-num" data-bind="ckpt">{{if not .Head.CkptAt.IsZero}}{{rel .Head.CkptAt}}{{else}}-{{end}}</div><div class="m-sub" data-bind="ckpt_ts">{{if not .Head.CkptAt.IsZero}}{{ts .Head.CkptAt}}{{end}}</div></div>
-  </div>
-  <div class="actions" role="group" aria-label="Pipeline actions">
-    <span class="grp">
-    <form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}><button class="btn primary" type="submit"{{if or .Ctl.Running (not .Ctl.CfgOK)}} disabled{{end}}{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}>Start</button></form>
-    <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"{{if not .Ctl.Paused}} title="Not paused"{{end}}><button class="btn primary" type="submit"{{if not .Ctl.Paused}} disabled title="Not paused"{{end}}>Resume</button></form>
-    </span>
-    <span class="grp">
-    <form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}><button class="btn" type="submit"{{if or .Ctl.Paused (not .Ctl.Reachable)}} disabled{{end}}{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}>Pause</button></form>
-    <form class="act inline" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}}? It is stopped (checkpoint written) and started again."{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>Restart</button></form>
-    {{if .Ctl.Systemd}}<form class="act inline" data-action="enable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Enable at boot</button></form>
-    <form class="act inline" data-action="disable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Disable at boot</button></form>{{end}}
-    </span>
-    <span class="grp">
-    <form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start."{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn danger" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>Stop</button></form>
-    <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}"><button class="btn danger" type="submit" title="Permanently delete pipeline {{.View.Name}}">Delete</button></form>
-    </span>
-    {{if .Ctl.JobActive}}<a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
-  </div>
-  {{if .View.ConfigErr}}<div class="alert alert-error mt10" role="alert">Config error: {{.View.ConfigErr}}</div>{{end}}
-  {{if and .View.LastExit (not .View.Runtime.Running)}}<div class="alert alert-warn mt10" role="alert">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code class="wrap">{{.View.Runtime.LastError}}</code>{{end}}</div>{{end}}
-</section>
-{{end}}

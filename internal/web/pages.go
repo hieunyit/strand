@@ -3,6 +3,8 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"html/template"
 	"math"
@@ -31,7 +33,10 @@ var pageNames = []string{
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
-		"stateClass": func(s string) string { return "st-" + s },
+		"kindsOf":    kindsOf,
+		"dur":        fmtDur,
+		"stateClass": stateClass,
+		"stateTone":  stateTone,
 		"secs":       fmtSecs,
 		"lag":        fmtLag,
 		"governor":   fmtGovernor,
@@ -99,22 +104,38 @@ func templateFuncs() template.FuncMap {
 		"remediationHint": func(code string) string {
 			return backup.RemediationHints[code]
 		},
-		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
-			Jobs         []JobStatus
-			ShowPipeline bool
-		} {
-			return struct {
-				Jobs         []JobStatus
-				ShowPipeline bool
-			}{j, showPipeline}
+		"jobsCtx": func(j []JobStatus, showPipeline, canOperate bool) jobsTableCtx {
+			return jobsTableCtx{j, showPipeline, canOperate}
 		},
+		"jobStateKey": jobStateKey,
+		"tabsCtx":     func(tabs []tabLink, active string) tabsData { return tabsData{tabs, active} },
+		"rowCtx":      func(v PipelineView, op, adm bool) rowData { return rowData{v, op, adm} },
+		"errState":    func(title, detail string) errStateData { return errStateData{title, detail} },
 	}
 }
+
+// Small view structs passed to the shared partials of pipeline_parts.html.
+type (
+	jobsTableCtx struct {
+		Jobs         []JobStatus
+		ShowPipeline bool
+		CanOperate   bool
+	}
+	tabsData struct {
+		Tabs   []tabLink
+		Active string
+	}
+	rowData struct {
+		View                 PipelineView
+		CanOperate, CanAdmin bool
+	}
+	errStateData struct{ Title, Detail string }
+)
 
 func parsePages() (map[string]*template.Template, error) {
 	out := map[string]*template.Template{}
 	for _, n := range pageNames {
-		t, err := template.New(n).Funcs(templateFuncs()).ParseFS(templateFS, "templates/base.html", "templates/"+n+".html")
+		t, err := template.New(n).Funcs(templateFuncs()).ParseFS(templateFS, "templates/base.html", "templates/pipeline_parts.html", "templates/"+n+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse template %s: %w", n, err)
 		}
@@ -148,14 +169,20 @@ func jobState(j JobStatus) string {
 
 func jobClass(j JobStatus) string {
 	switch {
+	case j.Running && j.Cancelled:
+		return stateClass("cancelling")
 	case j.Running:
-		return "st-bootstrapping"
-	case j.ExitCode != nil && *j.ExitCode == 0 && !j.Cancelled:
-		return "st-synced"
-	case j.ExitCode == nil && !j.Cancelled:
-		return "st-paused"
+		return stateClass("running")
+	case j.Cancelled:
+		return stateClass("cancelled")
+	case j.Interrupted:
+		return stateClass("interrupted")
+	case j.ExitCode != nil && *j.ExitCode == 0:
+		return stateClass("success")
+	case j.ExitCode == nil:
+		return stateClass("unknown")
 	}
-	return "st-failed"
+	return stateClass("failed")
 }
 
 func jobDur(j JobStatus) string {
@@ -163,7 +190,42 @@ func jobDur(j JobStatus) string {
 	if j.Ended != nil {
 		end = *j.Ended
 	}
-	return fmtSecs(end.Sub(j.Started).Seconds())
+	return fmtDur(end.Sub(j.Started).Seconds())
+}
+
+// fmtDur is the duration format of tables (SPEC 3.1): "42 s", "4m 05s", "1h 05m", "2d 03h".
+func fmtDur(v float64) string {
+	switch {
+	case v <= 0 || math.IsNaN(v):
+		return "-"
+	case v < 1:
+		return fmt.Sprintf("%.0f ms", v*1000)
+	case v < 60:
+		return fmt.Sprintf("%.0f s", v)
+	}
+	d := time.Duration(v * float64(time.Second)).Round(time.Second)
+	days, h, m, sec := int(d/(24*time.Hour)), int(d/time.Hour)%24, int(d/time.Minute)%60, int(d/time.Second)%60
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd %02dh", days, h)
+	case h > 0:
+		return fmt.Sprintf("%dh %02dm", h, m)
+	}
+	return fmt.Sprintf("%dm %02ds", m, sec)
+}
+
+// configRevision is a short content hash of the stored pipeline config (the source of truth), so two
+// operators can tell at a glance whether they look at the same configuration.
+func configRevision(p *Pipeline) string {
+	data := p.dbYAML
+	if len(data) == 0 && p.ConfigPath != "" {
+		data, _ = os.ReadFile(p.ConfigPath)
+	}
+	if len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 func fmtSecs(v float64) string {
@@ -374,7 +436,11 @@ type pageData struct {
 	Live     string
 	LiveLogs bool
 	Interval int
-	Body     any
+	// CanOperate / CanAdmin: what the signed-in role may do. Templates hide write controls from roles that
+	// the API would refuse anyway (RBAC stays enforced server side in rbac.go).
+	CanOperate bool
+	CanAdmin   bool
+	Body       any
 }
 
 type BreadcrumbItem struct {
@@ -474,6 +540,7 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 			Username: sess.Username,
 			Role:     sess.Role,
 		}
+		d.CanOperate, d.CanAdmin = RoleAllows(sess.Role, PermOperator), RoleAllows(sess.Role, PermAdmin)
 	}
 	d.Nav, d.Version = s.navItems(), s.version
 	d.Standby = s.standbyMessage()
@@ -509,6 +576,8 @@ type overviewBody struct {
 	Views    []PipelineView
 	Sparks   map[string]template.HTML
 	Warnings []string
+	Kinds    []string // engines in use (source or target), for the filter bar of the list page
+	Bulk     bool     // list page: checkbox column, bulk bar and row menu
 }
 
 func (s *Server) sparkFor(name string) template.HTML {
@@ -571,6 +640,7 @@ func (s *Server) pageOverview(w http.ResponseWriter, r *http.Request, sess *Sess
 	}
 	sortViews(b.Views)
 	b.summarize()
+	b.Kinds = viewKinds(b.Views)
 	s.render(w, "overview", sess, pageData{Title: "Overview", Active: "overview", Live: "all", Body: b})
 }
 
@@ -581,7 +651,44 @@ func (s *Server) pagePipelines(w http.ResponseWriter, r *http.Request, sess *Ses
 		b.Sparks[p.Name] = s.sparkFor(p.Name)
 	}
 	sortViews(b.Views)
-	s.render(w, "pipelines", sess, pageData{Title: "Pipelines", Active: "pipelines", Live: "all", Body: b})
+	b.Kinds, b.Bulk = viewKinds(b.Views), true
+	d := pageData{Title: "Pipelines", Active: "pipelines", Live: "all", Body: b}
+	if sess != nil && RoleAllows(sess.Role, PermAdmin) { // creating a pipeline is an admin action
+		d.Actions = template.HTML(`<a class="btn primary" href="/pipelines/new">` + string(icon("plus")) + `New pipeline</a>`)
+	}
+	s.render(w, "pipelines", sess, d)
+}
+
+// viewKinds lists the engines (source or target kind) the registered pipelines use, sorted.
+func viewKinds(vs []PipelineView) []string {
+	seen := map[string]bool{}
+	for _, v := range vs {
+		for _, k := range []string{v.SourceKind, v.TargetKind} {
+			if k != "" {
+				seen[k] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// detailSubtitle: the one-line description under the pipeline name.
+func detailSubtitle(v PipelineView) string {
+	if v.SourceKind == "" {
+		return "Replication pipeline"
+	}
+	e := engines(v.Pair)
+	return e[0].Label + " to " + e[1].Label + " replication, managed by " + v.Mode
+}
+
+// kindsOf is the space separated engine list of a row (data-kinds), matched by the Engine filter.
+func kindsOf(v PipelineView) string {
+	return strings.TrimSpace(v.SourceKind + " " + v.TargetKind)
 }
 
 // detailBody là dữ liệu của trang chi tiết; chỉ trường của tab đang xem được điền.
@@ -608,6 +715,9 @@ type detailBody struct {
 	SrcLoaded  bool // Src có sẵn trong cache; không thì trình duyệt tải khi người dùng bấm (không gọi socket khi render)
 	Ctl        Controls
 	Head       HeadInfo
+	CanOperate bool   // operator or admin: start/stop/pause/... controls
+	CanAdmin   bool   // admin: delete, config edit, rewind
+	Revision   string // short content hash of the stored config (shown as "Config revision")
 }
 
 // Controls quyết định nút nào hiện ở trang chi tiết (chỉ là gợi ý UI: API vẫn kiểm lại).
@@ -666,7 +776,8 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		tab = "graph"
 	}
 	base := "/pipelines/" + p.Name
-	b := detailBody{Tab: tab, View: s.view(p)}
+	b := detailBody{Tab: tab, View: s.view(p), Revision: configRevision(p)}
+	b.CanOperate, b.CanAdmin = RoleAllows(sess.Role, PermOperator), RoleAllows(sess.Role, PermAdmin)
 	b.Ctl = s.controls(p, b.View)
 	for _, t := range [][2]string{
 		{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"},
@@ -722,7 +833,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		b.Follow = r.URL.Query().Get("follow") != "0" // theo dõi đuôi log trực tiếp, mặc định bật
 		liveLogs = true
 	}
-	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Active: p.Name, Live: live, LiveLogs: liveLogs, Body: b})
+	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Subtitle: detailSubtitle(b.View), Active: p.Name, Live: live, LiveLogs: liveLogs, Body: b})
 }
 
 type spoolInspectReport = spool.InventoryReport

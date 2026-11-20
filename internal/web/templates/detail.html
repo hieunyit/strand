@@ -3,19 +3,21 @@
 {{template "pipeline-head" .}}
 {{if .View.Missing}}<div class="alert alert-warn mb" role="alert" aria-label="Pipeline file missing">
   <b>This pipeline {{.View.Missing}}.</b> It is kept in the metadata database (with its config, desired state and history) and is not restored automatically.
-  <div class="actions-row mt10">
+  {{if $.CanAdmin}}<div class="actions-row mt10">
     <form class="act inline" data-action="registry-restore" data-pipeline="{{.View.Name}}" data-confirm="Write {{.View.ConfigPath}} (and its .env, when stored) from the database copy?"><button class="btn" type="submit">Restore file</button></form>
     <form class="act inline" data-action="registry-forget" data-pipeline="{{.View.Name}}" data-confirm="Remove {{.View.Name}} from the registry? Its database row, desired state and settings go; files on disk and job history stay." data-retype="{{.View.Name}}"><button class="btn danger" type="submit">Remove from registry</button></form>
-  </div>
+  </div>{{end}}
 </div>{{end}}
 {{range .View.Conflicts}}<div class="alert alert-warn mb" role="alert" aria-label="Disk edit set aside">
   <b>The {{if eq .File "env"}}.env file{{else}}config file{{end}} on disk differed from the database copy</b> (the source of truth) and was replaced by it on {{.At}}. The disk version was saved as <code>{{.Path}}</code>.
-  <div class="actions-row mt10">
+  {{if $.CanAdmin}}<div class="actions-row mt10">
     <form class="act inline" data-action="conflict-adopt" data-pipeline="{{$.Body.View.Name}}" data-confirm="Use the disk version from {{.Path}}?{{if ne .File "env"}} It is validated first; nothing changes if validation fails.{{end}}"><input type="hidden" name="path" value="{{.Path}}"><button class="btn" type="submit">Adopt disk version</button></form>
     <form class="act inline" data-action="conflict-dismiss" data-pipeline="{{$.Body.View.Name}}"><input type="hidden" name="path" value="{{.Path}}"><button class="btn" type="submit">Keep database version</button></form>
-  </div>
+  </div>{{end}}
 </div>{{end}}
-<nav class="tabs" role="tablist" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $.Body.Tab .Key}} active{{end}}" role="tab" aria-selected="{{if eq $.Body.Tab .Key}}true{{else}}false{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
+<div class="detail-layout">
+<div class="detail-main">
+{{template "pipeline-tabs" (tabsCtx .Tabs .Tab)}}
 
 {{if eq .Tab "graph"}}
   <section class="card"><div class="cardhead"><h2>Data path</h2></div><div class="graphwrap">{{.Graph}}</div>
@@ -31,7 +33,7 @@
       <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
     </dl>
   </section>{{end}}
-  {{if .Ctl.Reachable}}<section class="card" id="throttle"><div class="cardhead"><h2>Throttle</h2></div>
+  {{if and .CanOperate .Ctl.Reachable}}<section class="card" id="throttle"><div class="cardhead"><h2>Throttle</h2></div>
     <p class="card-desc hint">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</p>
     <form class="act" data-action="throttle" data-pipeline="{{.View.Name}}">
       <div class="field-grid cols-3">
@@ -47,7 +49,7 @@
 {{end}}
 
 {{if eq .Tab "tables"}}
-  {{if .Tables.Error}}<section class="card"><div class="cardhead"><h2>Tables</h2></div><p class="muted">{{.Tables.Error}}</p></section>{{else}}
+  {{if .Tables.Error}}<section class="card"><div class="cardhead"><h2>Tables</h2></div>{{template "error-state" (errState "Table status is not available" .Tables.Error)}}</section>{{else}}
   <section class="card snap" id="snapshot-summary" aria-label="Snapshot progress" data-live-row="{{.View.Name}}">
     <div class="snap-top">
       <div class="cardhead"><h2>Snapshot progress {{if and (gt .Tables.Total 0) (eq .Tables.Done .Tables.Total)}}<span class="badge st-synced">complete</span>{{else if gt .Tables.Running 0}}<span class="badge st-bootstrapping">copying</span>{{else if gt .Tables.Total 0}}<span class="badge st-tbl-pending">waiting</span>{{end}}</h2></div>
@@ -112,7 +114,7 @@
       {{if lt $q.Page .Tables.Pages}}<a class="btn" rel="next" href="{{tablesHref $b $q "tpage" (printf "%d" (add $q.Page 1))}}">Next</a> <a class="btn" href="{{tablesHref $b $q "tpage" (printf "%d" .Tables.Pages)}}">Last</a>{{end}}
     </nav>{{end}}
   </section>{{end}}
-  {{if .Ctl.Reachable}}<section class="card"><div class="cardhead"><h2>Snapshot control</h2></div>
+  {{if and .CanOperate .Ctl.Reachable}}<section class="card"><div class="cardhead"><h2>Snapshot control</h2></div>
     <p class="card-desc">Pause or resume the snapshot without stopping the change stream, or resume both together.</p>
     <div class="btngroup">
       <form class="act inline" data-action="pause-snapshot" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Pause snapshot</button></form>
@@ -120,9 +122,9 @@
       <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (normal)</button></form>
     </div>
   </section>{{end}}
-  {{if .Ctl.Running}}<section class="card">
+  {{if and .CanOperate .Ctl.Running}}<section class="card">
     <div class="cardhead"><h2>Add tables</h2></div>
-    {{if .Src.Error}}<p class="muted">{{.Src.Error}}</p>{{else}}
+    {{if .Src.Error}}{{template "error-state" (errState "Source tables are not available" .Src.Error)}}{{else}}
     <p class="card-desc">Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.</p>
     <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
       <div class="picklist" id="src-picklist"{{if not .SrcLoaded}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{if .SrcLoaded}}{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}" aria-label="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}{{else}}<button type="button" class="btn" data-load-src>List source tables</button> <span class="muted small">Asks the running pipeline for the tables of the source database (a query on the source).</span>{{end}}</div>
@@ -133,7 +135,7 @@
 
 {{if eq .Tab "checkpoint"}}
   <section class="card"><div class="cardhead"><h2>Checkpoint</h2></div>
-  {{if .Checkpoint.Error}}<p class="muted">{{.Checkpoint.Error}}</p>{{else}}{{with .Checkpoint.Checkpoint}}
+  {{if .Checkpoint.Error}}{{template "error-state" (errState "Checkpoint is not available" .Checkpoint.Error)}}{{else}}{{with .Checkpoint.Checkpoint}}
   <dl class="dl">
     <dt>Applied position</dt><dd class="mono wrap" data-bind="ckpt_applied">{{.Applied}}</dd>
     <dt>Epoch</dt><dd data-bind="epoch">{{.Epoch}}</dd>
@@ -142,7 +144,7 @@
     {{if $.Body.Checkpoint.CompactionLagSecs}}<dt>Compaction lag</dt><dd>{{secs (deref $.Body.Checkpoint.CompactionLagSecs)}}</dd>{{end}}
   </dl>{{end}}{{end}}
   </section>
-  {{if .Ctl.CanRewind}}<section class="card"><div class="cardhead"><h2>Rewind checkpoint</h2></div>
+  {{if and .CanAdmin .Ctl.CanRewind}}<section class="card"><div class="cardhead"><h2>Rewind checkpoint</h2></div>
     <p class="card-desc">MySQL to MySQL only. The pipeline checks the position against gtid_purged before it moves; rows after the new position are applied again.</p>
     <form class="act" data-action="checkpoint-rewind" data-pipeline="{{.View.Name}}" data-confirm="Rewind the checkpoint of {{.View.Name}}? Events after the new position are re-applied." data-retype="{{.View.Name}}">
       <div class="field-grid cols-1">
@@ -153,7 +155,7 @@
       </div>
       <div class="form-actions"><button class="btn danger" type="submit">Rewind...</button></div>
     </form></section>
-  {{else}}<p class="muted small">Rewind is available for running MySQL to MySQL pipelines only.</p>{{end}}
+  {{else if .CanAdmin}}<p class="muted small">Rewind is available for running MySQL to MySQL pipelines only.</p>{{end}}
 {{end}}
 
 {{if eq .Tab "errors"}}
@@ -163,10 +165,10 @@
     <p class="muted small">{{if .Errors.LastExit.AutoRestart}}systemd restarts this exit code automatically.{{else}}This exit code needs an operator: it is not restarted automatically.{{end}}</p>
   </section>{{end}}
   <section class="card"><div class="cardhead"><h2>Recent warnings and errors <span class="muted small">running process, last 200, newest last; new ones appear live</span></h2></div>
-    {{if .Errors.LiveErr}}<p class="muted">{{.Errors.LiveErr}}</p>{{end}}
-    <div class="tablewrap tall" id="live-events-wrap"><table class="data-table grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody id="live-events">
+    {{if .Errors.LiveErr}}{{template "error-state" (errState "Live events are not available" .Errors.LiveErr)}}{{end}}
+    <div class="tablewrap tall" id="live-events-wrap"><table class="data-table grid"><caption class="sr-only">Recent warnings and errors of the running process</caption><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody id="live-events">
     {{range .Errors.Live}}<tr data-ev="{{.Time}}|{{.Level}}|{{.Message}}"><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>
-    {{end}}<tr class="empty-row"{{if .Errors.Live}} hidden{{end}}><td colspan="3" class="muted">None.</td></tr>
+    {{end}}<tr class="empty-row"{{if .Errors.Live}} hidden{{end}}><td colspan="3"><div class="empty-state">{{icon "check"}}<b>No warnings or errors</b><span>The running process has logged nothing at warning level or above.</span></div></td></tr>
     </tbody></table></div>
   </section>
   <section class="card"><div class="cardhead"><h2>From the log tail</h2></div>{{template "events" .Errors.FromLog}}</section>
@@ -176,17 +178,17 @@
   <section class="card"><div class="cardhead"><h2>Configuration</h2>
     <div class="btngroup">
       <a class="btn ghost" href="/pipelines/{{.View.Name}}/config.yaml" download="{{.View.Name}}.yaml">Download YAML</a>
-      <button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>
+      {{if .CanAdmin}}<button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>{{end}}
     </div></div>
     <p class="muted small mono">{{.Config.Path}}</p>
-    {{if .Config.Error}}<p class="err">{{.Config.Error}}</p>{{end}}
+    {{if .Config.Error}}{{template "error-state" (errState "Configuration could not be read" .Config.Error)}}{{end}}
     {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
 
     <div id="cfg-view-mode">
       {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code wrapcode">{{.Config.YAML}}</pre>{{end}}
     </div>
 
-    <div id="cfg-edit-mode" hidden>
+    {{if .CanAdmin}}<div id="cfg-edit-mode" hidden>
       <form id="cfg-edit-form" data-pipeline="{{.View.Name}}">
         <p class="muted small">Edit YAML configuration below. Saving validates syntax via <code>strand validate</code>, shows diff, keeps a timestamped backup, and writes atomically.</p>
         <textarea name="yaml" id="cfg-yaml-textarea" class="code cfg-textarea" rows="22" aria-label="Pipeline configuration YAML" spellcheck="false">{{.Config.YAML}}</textarea>
@@ -212,11 +214,11 @@
         <div id="cfg-val-status" class="mb8"></div>
         <pre class="code wrapcode" id="cfg-diff-output" aria-label="Diff"></pre>
       </div>
-    </div>
+    </div>{{end}}
   </section>
 
-  <section class="card" id="tuning-card"><div class="cardhead"><h2>Tuning: snapshot speed &amp; safety</h2></div>
-    {{if .Tuning.Error}}<p class="err">{{.Tuning.Error}}</p>{{else}}
+  {{if .CanAdmin}}<section class="card" id="tuning-card"><div class="cardhead"><h2>Tuning: snapshot speed &amp; safety</h2></div>
+    {{if .Tuning.Error}}{{template "error-state" (errState "Tuning values are not available" .Tuning.Error)}}{{else}}
     <p class="card-desc">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Graph tab)</a>; it is not saved to the file.</p>
     <form id="tuning-form" class="tuning" data-pipeline="{{.View.Name}}">
       <div class="field-grid cols-3">
@@ -245,10 +247,11 @@
 
   <section class="card"><div class="cardhead"><h2>Credentials &amp; Environment (.env)</h2></div>
     <p class="muted small mono">{{.Env.Path}}</p>
-    {{if .Env.Error}}<p class="err">{{.Env.Error}}</p>{{end}}
+    {{if .Env.Error}}{{template "error-state" (errState "Environment file could not be read" .Env.Error)}}{{end}}
     <p class="card-desc">Environment variables used by the pipeline process. Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.</p>
     <form id="env-edit-form" data-pipeline="{{.View.Name}}">
       <div class="tablewrap env-wrap"><table class="data-table grid">
+        <caption class="sr-only">Environment variables of the pipeline process</caption>
         <thead><tr><th scope="col">Variable</th><th scope="col">Value</th></tr></thead>
         <tbody id="env-entries-body">
           {{range $k, $v := .Env.Entries}}
@@ -257,7 +260,7 @@
             <td><input type="password" aria-label="{{$k}}" name="env_{{$k}}" data-key="{{$k}}" value="********" placeholder="Leave unchanged (********)" class="mono wide" autocomplete="new-password"></td>
           </tr>
           {{else}}
-          <tr><td colspan="2" class="muted">No variables in .env yet.</td></tr>
+          <tr class="empty"><td colspan="2"><div class="empty-state"><b>No variables in .env yet</b><span>Add one below; passwords are stored write-only.</span></div></td></tr>
           {{end}}
           <tr id="env-new-row">
             <td><input type="text" id="env-new-key" placeholder="NEW_VAR" class="mono envkey" aria-label="New variable name"></td>
@@ -269,18 +272,18 @@
     </form>
   </section>
 
-  <section class="card danger-card"><div class="cardhead"><h2>Danger Zone</h2></div>
+  <section class="card danger-card"><div class="cardhead"><h2>Danger zone</h2></div>
     <div class="danger-row">
       <p class="muted small">Permanently delete this pipeline, stopping it if running and removing its configuration. This action cannot be undone.</p>
       <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}">
         <button class="btn danger" type="submit">Delete pipeline {{.View.Name}}</button>
       </form>
     </div>
-  </section>
+  </section>{{end}}
 {{end}}
 
 {{if eq .Tab "jobs"}}
-  <section class="card"><div class="cardhead"><h2>Verify</h2></div>
+  {{if .CanOperate}}<section class="card"><div class="cardhead"><h2>Verify</h2></div>
     {{if .Ctl.JobActive}}<p class="warnbox">A job is running ({{.Ctl.JobActive.Kind}}); one job at a time per pipeline. <a href="/jobs/{{.Ctl.JobActive.ID}}">Open it</a>.</p>{{end}}
     <p class="card-desc">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
     <form class="act" data-action="verify" data-pipeline="{{.View.Name}}">
@@ -302,8 +305,8 @@
       <label class="check"><input type="checkbox" name="resume" value="true"><span>Resume an interrupted full run</span></label>
       <div class="form-actions"><button class="btn primary" type="submit">Start verify</button></div>
     </form>
-  </section>
-  <section class="card"><div class="cardhead"><h2>Plan &amp; schema</h2></div>
+  </section>{{end}}
+  {{if .CanAdmin}}<section class="card"><div class="cardhead"><h2>Plan &amp; schema</h2></div>
     <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
       <p class="card-desc">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
       <div class="btngroup">
@@ -329,8 +332,8 @@
       </div>
       </fieldset>
     </form>
-  </section>
-  {{if eq .View.SourceKind "mysql"}}
+  </section>{{end}}
+  {{if and .CanAdmin (eq .View.SourceKind "mysql")}}
   <section class="card"><div class="cardhead"><h2>Database objects</h2></div>
     <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
       <p class="card-desc">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
@@ -349,10 +352,11 @@
     </form>
   </section>
   {{end}}
-  <section class="card"><div class="cardhead"><h2>Job history</h2></div>{{template "jobs-table" (jobsCtx .Jobs false)}}</section>
+  <section class="card"><div class="cardhead"><h2>Job history</h2></div>{{template "jobs-table" (jobsCtx .Jobs false $.CanOperate)}}</section>
 {{end}}
 
 {{if eq .Tab "schema"}}
+  {{if not .CanAdmin}}<section class="card"><div class="empty-state">{{icon "config"}}<b>Schema evolution needs the admin role</b><span>Plan, preview and approve actions change what runs on the target. Ask an administrator, or read the <a href="/help/schema">configuration schema guide</a>.</span></div></section>{{else}}
   <section class="card">
     <div class="cardhead">
       <h2>Plan &amp; schema evolution</h2>
@@ -383,10 +387,11 @@
       </div>
       </fieldset>
     </form>
-  </section>
+  </section>{{end}}
 {{end}}
 
 {{if eq .Tab "objects"}}
+  {{if not .CanAdmin}}<section class="card"><div class="empty-state">{{icon "table"}}<b>Database objects need the admin role</b><span>Listing and applying views, routines, triggers and grants is an administrator action.</span></div></section>{{else}}
   <section class="card">
     <div class="cardhead"><h2>Database objects</h2></div>
     <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
@@ -404,7 +409,7 @@
         {{if eq .View.TargetKind "mysql"}}<button class="btn danger" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>{{end}}
       </div>
     </form>
-  </section>
+  </section>{{end}}
 {{end}}
 
 {{if eq .Tab "logs"}}
@@ -415,17 +420,20 @@
       <button type="button" class="btn ghost" id="log-jump" hidden>Jump to latest</button>
       <a class="small push" href="?lines=1000{{if .Follow}}&amp;follow=1{{end}}">Show 1000 lines</a>
     </div>
-    {{if .Logs.Error}}<p class="err" id="log-error">{{.Logs.Error}}</p>{{end}}
+    {{if .Logs.Error}}<div id="log-error">{{template "error-state" (errState "Log is not available" .Logs.Error)}}</div>{{end}}
     <pre class="code log wrapcode" id="logtail" tabindex="0" aria-label="Log tail">{{range .Logs.Lines}}{{.}}
 {{else}}(no log lines){{end}}</pre>
   </section>
 {{end}}
+</div>
+{{template "pipeline-props" .}}
+</div>
 {{end}}
 {{end}}
 
 {{define "events"}}
-<div class="tablewrap tall"><table class="data-table grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody>
+<div class="tablewrap tall"><table class="data-table grid"><caption class="sr-only">Warnings and errors found in the log tail</caption><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody>
 {{range .}}<tr><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>
-{{else}}<tr><td colspan="3" class="muted">None.</td></tr>{{end}}
+{{else}}<tr class="empty"><td colspan="3"><div class="empty-state">{{icon "check"}}<b>Nothing in the log tail</b><span>No warning or error lines were found.</span></div></td></tr>{{end}}
 </tbody></table></div>
 {{end}}
