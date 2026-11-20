@@ -473,3 +473,25 @@ func TestContainer_SlowPathLookupKeepsNumericIDs(t *testing.T) {
 	p.waitIdentical(t, db, time.Minute, r)
 	r.stop(t)
 }
+
+// A lease left by a crashed process on another host (not refreshed any more) is taken
+// over once it expires, instead of exiting with "lease held".
+func TestContainer_WaitsForStaleForeignLease(t *testing.T) {
+	p := newPair(t)
+	db := "stale"
+	ctx := context.Background()
+	seedDocs(t, p.srcC.Database(db), "c", 100, 1, intID)
+	locks := p.dstC.Database(stateDatabase).Collection(lockCollection)
+	if _, err := locks.InsertOne(ctx, bson.D{{Key: "_id", Value: db}, {Key: "owner", Value: "dead"}, {Key: "pipeline", Value: "stale"},
+		{Key: "info", Value: ownerInfo{Host: "other-host", BootID: "b", PidNS: "n", PID: 1, PIDStart: "1"}},
+		{Key: "expires_at", Value: time.Now().Add(4 * time.Second)}}); err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	r := start(p.cfg(t, "stale", db))
+	p.waitIdentical(t, db, time.Minute, r)
+	r.stop(t)
+	if el := time.Since(began); el < 2*time.Second {
+		t.Fatalf("took over a live-looking foreign lease after %s", el)
+	}
+}

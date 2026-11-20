@@ -263,9 +263,24 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 
 	control := target.Database(stateDatabase, options.Database().SetReadConcern(readconcern.Majority()))
-	l, err := acquireLease(ctx, target, control.Collection(lockCollection), cfg.TargetDB, cfg.Pipeline, cfg.LeaseDuration, cfg.SnapshotParallel+1, cfg.Logger)
-	if err != nil {
-		return err
+	// A lease that is not refreshed expires within one TTL (e.g. the previous owner
+	// crashed on another host): wait for it instead of exiting, up to 2 TTLs.
+	var l *lease
+	waitUntil := time.Now().Add(2*cfg.LeaseDuration + 5*time.Second)
+	for {
+		l, err = acquireLease(ctx, target, control.Collection(lockCollection), cfg.TargetDB, cfg.Pipeline, cfg.LeaseDuration, cfg.SnapshotParallel+1, cfg.Logger)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrLeaseHeld) || time.Now().After(waitUntil) {
+			return err
+		}
+		obs.setPhase(PhaseStarting)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(min(time.Second, cfg.LeaseDuration/3)):
+		}
 	}
 	defer l.release()
 

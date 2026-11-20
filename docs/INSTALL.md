@@ -568,3 +568,11 @@ Lưu ý: pipeline chế độ nền là tiến trình con **của instance đã 
 
 Kiểm tra nhanh: `curl -s http://web-a:8080/healthz | jq .role` và `... web-b ... | jq .role`; `SELECT holder, epoch, expires_at FROM web_lease; SELECT id, role, last_seen FROM web_instances;`.
 
+
+## MongoDB pipelines
+
+No extra package is needed: the `strand` binary includes the MongoDB driver. Source and
+target must be replica sets (MongoDB 4.4–8.0). Create the least-privilege users, enlarge
+the source oplog if needed and run `strand validate -c <config>` first; see
+[mongodb-cdc.md](mongodb-cdc.md). The systemd unit `strand@<name>` runs MongoDB
+pipelines unchanged (`strand sync -c /etc/strand/<name>.yaml`).

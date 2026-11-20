@@ -1281,4 +1281,8 @@ Cố ý để lại CLI (lý do):
 - `seed plan/apply`: điều phối restore bản backup vật lý lên máy target (cần quyền và đường dẫn trên máy DB, thao tác phá hủy dữ liệu đích); không an toàn để bấm từ web.
 - `archive binlog`: tiến trình lưu trữ chạy liên tục, độc lập với pipeline (thường là một unit systemd riêng trên replica), không có trạng thái để web quan sát.
 - `tunnel open`: tiến trình SSH chạy liên tục; cấu hình pipeline chưa có khóa tunnel nên web chưa gắn được tunnel vào source/target (tunnel cho job backup thuộc phần backup).
-- `spool-inspect`, `top`, `export`, `config schema`, `mongodb sync` (lệnh thử nghiệm; pipeline MongoDB chạy qua `strand sync` khi engine hỗ trợ), `web db migrate|export|audit-archive` (công cụ quản trị chạy ngoài web: chuyển bản cài cũ, sao lưu/quay về).
+- `spool-inspect`, `top`, `export`, `config schema`, `mongodb sync` (bí danh của `strand sync -c` cho pipeline MongoDB; dạng cờ cũ vẫn nhận), `mongodb repair`, `web db migrate|export|audit-archive` (công cụ quản trị chạy ngoài web: chuyển bản cài cũ, sao lưu/quay về).
+
+## Pipeline MongoDB → MongoDB
+
+`source.kind` = `target.kind` = `mongodb` là pipeline bình thường: `strand validate|plan|sync|top|pause|resume|checkpoint show|verify|snapshot add|stop|status`, unit systemd `strand@<tên>`, admin socket, `/metrics` và Web UI như pipeline SQL. Cấu hình (`uri: "${SRC_URI}"`, `database`, `tables.include: ["db.*"]`, mục `mongodb:`), yêu cầu (replica set, MongoDB 4.4–8.0), quyền tối thiểu, cửa sổ oplog, hành vi failover, metric/cảnh báo và runbook: xem [docs/mongodb-cdc.md](mongodb-cdc.md).
