@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/theme.js"></script>
 <script src="/static/app.js" defer></script>
+<script src="/static/qsearch.js" defer></script>
 <script src="/static/live.js" defer></script>
 <script src="/static/backups.js" defer></script>
 <script src="/static/bkops.js" defer></script>
@@ -80,6 +81,7 @@
       <span class="topbrand">{{.Title}}</span>
     </div>
     <div class="topright">
+      <button type="button" class="iconbtn qsearch-btn" id="qsearch-open" aria-label="Search (Ctrl+K)" title="Search pipelines, backup jobs, pages and backup IDs">{{icon "search"}}<span class="tlabel">Search</span><kbd>Ctrl K</kbd></button>
       {{if .Live}}<span class="livepill" id="livepill" data-conn="connecting" role="status" aria-live="polite" title="Live data from the console's background sampler"><span class="livedot" aria-hidden="true"></span><span id="livetext">Connecting</span></span>{{end}}
       {{if .EnvName}}<span class="envchip env-{{.EnvTone}}" title="Environment (Settings &gt; General). Host: {{.Host}}">{{icon "server"}}{{.EnvName}}</span>{{else}}<span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>{{end}}
       <button type="button" class="iconbtn" id="theme-toggle" aria-label="Colour theme: follows the system. Click to change." title="Colour theme">{{icon "auto"}}<span class="tlabel">Auto</span></button>
@@ -130,5 +132,10 @@
   </form>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<dialog id="qsearch" class="qsearch" aria-label="Quick search">
+  <div class="qsearch-box">{{icon "search"}}<input id="qsearch-input" type="search" placeholder="Pipeline, backup job, page or backup ID" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="qsearch-results" aria-autocomplete="list"></div>
+  <ul id="qsearch-results" class="qsearch-results" role="listbox" aria-label="Results"></ul>
+  <p class="qsearch-hint muted small"><kbd>↑</kbd> <kbd>↓</kbd> to move, <kbd>Enter</kbd> to open, <kbd>Esc</kbd> to close</p>
+</dialog>
 </body>
 </html>{{end}}
