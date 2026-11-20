@@ -115,7 +115,7 @@
           <td><code>{{.IP}}</code></td>
           <td><time datetime="{{.Created.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .Created}}</time></td>
           <td><time datetime="{{.LastSeen.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .LastSeen}}</time></td>
-          <td>{{if eq .IDHash $.CurrentSessionHash}}<span class="badge st-synced">Current session</span>{{end}}</td>
+          <td>{{if eq .IDHash $.Body.CurrentSessionHash}}<span class="badge st-synced">Current session</span>{{end}}</td>
         </tr>
         {{end}}
       </tbody>

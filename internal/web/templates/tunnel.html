@@ -1,5 +1,6 @@
 {{define "content"}}
-<form class="act form-stack" data-action="tunnel-open">
+<form class="act form-stack" data-action="tunnel-open" method="post" action="/tunnels">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <fieldset class="form-section">
     <legend class="form-section-title">Open a verified SSH tunnel</legend>
     <p class="form-section-desc">Create loopback-only verified SSH local port forwards to reach private database endpoints through bastions.</p>
@@ -59,7 +60,11 @@
           <td>{{.SSHUser}}</td>
           <td><span class="badge st-synced">active</span></td>
           <td class="r">
-            <button class="btn danger sm" type="button" data-action="tunnel-stop" data-tunnel-id="{{.ID}}">Stop</button>
+            <form method="post" action="/tunnels/stop" class="inline">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <button class="btn danger sm" type="submit" data-action="tunnel-stop" data-tunnel-id="{{.ID}}">Stop</button>
+            </form>
           </td>
         </tr>
         {{end}}

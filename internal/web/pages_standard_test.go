@@ -571,3 +571,40 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestArchiveAndTunnelFormsHTML(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, _ := e.loginOK()
+
+	// 1. /archive form has method="post", action="/archive/start", and CSRF hidden field
+	_, page := e.do(c, "GET", "/archive", "", nil)
+	if !strings.Contains(page, `action="/archive/start"`) || !strings.Contains(page, `method="post"`) {
+		t.Errorf("archive form missing method=post or action=/archive/start: %s", page)
+	}
+	if !strings.Contains(page, `name="csrf"`) {
+		t.Errorf("archive form missing csrf input: %s", page)
+	}
+
+	// 2. /tunnels form has method="post", action="/tunnels", and CSRF hidden field
+	_, page = e.do(c, "GET", "/tunnels", "", nil)
+	if !strings.Contains(page, `action="/tunnels"`) || !strings.Contains(page, `method="post"`) {
+		t.Errorf("tunnel form missing method=post or action=/tunnels: %s", page)
+	}
+	if !strings.Contains(page, `name="csrf"`) {
+		t.Errorf("tunnel form missing csrf input: %s", page)
+	}
+}
+
+func TestAccountPageWithSessions(t *testing.T) {
+	e := newEnv(t, nil)
+	c, _ := e.loginOK()
+
+	resp, page := e.do(c, "GET", "/account", "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /account status = %d: %s", resp.StatusCode, page)
+	}
+	if !strings.Contains(page, "Current session") {
+		t.Errorf("/account missing 'Current session' badge: %s", page)
+	}
+}
+

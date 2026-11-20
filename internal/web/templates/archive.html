@@ -5,7 +5,8 @@
   <div class="kpi"><div class="kpi-label">Total Size</div><div class="kpi-value c-num">{{.Body.TotalSize}}</div><div class="kpi-sub">on disk</div></div>
 </div>
 
-<form class="act" data-action="archive-start">
+<form class="act" data-action="archive-start" method="post" action="/archive/start">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <fieldset class="form-section">
     <legend class="form-section-title">Continuous Binlog Archiver</legend>
     <p class="form-section-desc">Chạy archiver nền từ source MySQL có GTID. MariaDB chưa được hỗ trợ cho binlog archive. Thông tin kết nối lấy từ cấu hình pipeline và env của nó; credential không được đưa vào argv hoặc form.</p>
@@ -27,7 +28,7 @@
     <div class="form-actions flat">
       {{if .Body.Running}}
       <input type="hidden" name="job_id" value="{{.Body.JobID}}">
-      <button class="btn danger" type="submit" data-action="archive-stop" data-confirm="Stop the binlog archiver?">Stop Archiver</button>
+      <button class="btn danger" type="submit" formaction="/archive/stop" formnovalidate data-action="archive-stop" data-confirm="Stop the binlog archiver?">Stop Archiver</button>
       {{else}}
       <button class="btn primary" type="submit" data-action="archive-start">Start Archiver</button>
       {{end}}
