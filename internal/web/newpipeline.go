@@ -1018,7 +1018,7 @@ func (s *Server) apiPipelineCreate(w http.ResponseWriter, r *http.Request, sess 
 	if err != nil {
 		var ae *ActionError
 		if errors.As(err, &ae) {
-			writeErr(w, ae.Status, ae.Msg)
+			writeCreateErr(w, ae.Status, ae.Msg)
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err.Error())

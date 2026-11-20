@@ -925,7 +925,10 @@ func (s *Server) promoteSteps(v *wizardView) {
 
 type wizardPage struct {
 	wizardView
-	Tabs []tabLink
+	Tabs       []tabLink
+	CanOperate bool
+	CanAdmin   bool
+	Revision   string
 }
 
 func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Session, kind string) {
@@ -940,7 +943,8 @@ func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Sessio
 		return
 	}
 	base := "/pipelines/" + p.Name
-	pg := wizardPage{wizardView: v}
+	pg := wizardPage{wizardView: v, Revision: configRevision(p)}
+	pg.CanOperate, pg.CanAdmin = RoleAllows(sess.Role, PermOperator), RoleAllows(sess.Role, PermAdmin)
 	for _, t := range [][2]string{
 		{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"},
 		{"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"},
@@ -957,7 +961,7 @@ func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Sessio
 	if v.Job != nil && v.Job.Running {
 		refresh = 2
 	}
-	s.render(w, "wizard", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[pg.Kind], Active: p.Name, Refresh: refresh, Live: p.Name, Body: pg})
+	s.render(w, "wizard", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[pg.Kind], Subtitle: detailSubtitle(v.View), Active: p.Name, Refresh: refresh, Live: p.Name, Body: pg})
 }
 
 func (s *Server) wizardRoutes(mux *http.ServeMux) {

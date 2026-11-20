@@ -1,0 +1,172 @@
+{{/* Shared pipeline components: list table, status badge cells, filter bar, status strip, KPI tiles, property list,
+     tab bar, jobs table, error state. Used by overview, pipelines, detail, wizard, jobs. Badge colours come from
+     stateClass (state_map.go), the only state to colour map. */}}
+
+{{define "error-state"}}<div class="error-state" role="alert">{{icon "alert"}}<b>{{.Title}}</b>{{if .Detail}}<span class="wrap">{{.Detail}}</span>{{end}}</div>{{end}}
+
+{{define "pipeline-filterbar"}}
+<div class="filterbar" role="search" aria-label="Filter pipelines">
+  <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Search by name or engine" aria-label="Search pipelines by name or engine" autocomplete="off"></span>
+  <select class="chip-select" id="pl-kind" aria-label="Engine"><option value="">All engines</option>{{range .Body.Kinds}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+  <select class="chip-select" id="pl-state" aria-label="State"><option value="">All states</option>{{range .Body.States}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+  <button type="button" class="btn ghost small" id="pl-clear" hidden>Clear filters</button>
+  <span class="muted small push" id="pl-count" aria-live="polite"></span>
+</div>
+{{if .CanOperate}}<div class="bulkbar" id="pl-bulkbar" role="region" aria-label="Bulk actions" hidden>
+  <span class="bulk-count"><b id="pl-selcount">0</b> selected</span>
+  <button type="button" class="btn small" data-bulk="start">{{icon "play"}}Start</button>
+  <button type="button" class="btn small danger" data-bulk="stop">{{icon "stop"}}Stop</button>
+  <button type="button" class="btn small ghost" data-bulk="clear">Clear selection</button>
+</div>{{end}}
+{{end}}
+
+{{define "pipeline-table"}}
+{{$bulk := and .Body.Bulk .CanOperate}}{{$cols := 11}}{{if $bulk}}{{$cols = 12}}{{end}}
+<div class="tablewrap">
+<table class="data-table grid" id="pipeline-table" data-sortable>
+  <caption class="sr-only">Pipelines: state, lag and throughput</caption>
+  <thead><tr>
+    {{if $bulk}}<th scope="col" class="c-check"><input type="checkbox" id="pl-selall" aria-label="Select all pipelines shown"></th>{{end}}
+    <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="name">Name</button></th>
+    <th scope="col" class="hide-md">Engines</th>
+    <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="sev">State</button></th>
+    <th scope="col" class="r c-num" aria-sort="none"><button type="button" class="sortbtn" data-sort="lag">Lag</button></th>
+    <th scope="col" class="hide-md">Lag, last 5 min</th>
+    <th scope="col" class="r c-num" aria-sort="none"><button type="button" class="sortbtn" data-sort="rate" title="Rows applied per second, averaged over 30 s">Rows/s</button></th>
+    <th scope="col">Tables</th>
+    <th scope="col" class="hide-md">Zone</th><th scope="col" class="hide-md">Managed by</th><th scope="col" class="hide-md">Last exit</th>
+    <th scope="col" class="r"><span class="sr-only">Actions</span></th></tr></thead>
+  <tbody>
+  {{range .Body.Views}}<tr data-name="{{.Name}}" data-live-row="{{.Name}}" data-state="{{.State}}" data-sev="{{stateSev .State}}" data-lag="{{lagSort .}}" data-rate="{{if .Top}}{{printf "%.3f" .Rates.Rows}}{{else}}-1{{end}}" data-kinds="{{kindsOf .}}" class="{{if .Stale}}is-stale{{end}}">
+    {{if $bulk}}<td class="c-check"><input type="checkbox" class="rowcheck" data-name="{{.Name}}" aria-label="Select pipeline {{.Name}}"></td>{{end}}
+    <td><a class="mono" href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}{{template "stale-tag" .}}</td>
+    <td class="hide-md">{{.Pair}}</td>
+    <td><span class="badge {{stateClass .State}}" data-bind-badge="state">{{.State}}</span>{{$why := stateReason .}}<div class="reason small muted" title="{{$why}}" data-bind="reason"{{if not $why}} hidden{{end}}>{{$why}}</div></td>
+    <td class="r nowrap c-num {{lagClass .}}" data-bind="lag" data-bind-lag>{{if .Top}}{{lag .Top.LagSeconds}}{{else}}-{{end}}</td>
+    <td class="hide-md">{{index $.Body.Sparks .Name}}</td>
+    <td class="r nowrap c-num" data-bind="rows">{{if .Top}}{{num .Rates.Rows}}{{else}}-{{end}}</td>
+    <td class="nowrap">{{template "tables-mini" .}}</td>
+    <td class="hide-md" data-bind="zone">{{if .Top}}{{if .Top.Zone}}{{.Top.Zone}}{{else}}-{{end}}{{else}}-{{end}}</td>
+    <td class="hide-md">{{.Mode}} <span class="muted small">({{.Origin}})</span></td>
+    <td class="hide-md">{{if .LastExit}}<span title="{{.LastExit.Meaning}}">{{.LastExit.Code}}</span>{{else}}-{{end}}</td>
+    <td class="r nowrap">{{template "pipeline-rowmenu" (rowCtx . $.CanOperate $.CanAdmin)}}</td>
+  </tr>{{else}}<tr class="empty"><td colspan="{{$cols}}"><div class="empty-state">{{icon "empty"}}<b>No pipelines registered yet</b><span>Create one, or add existing configs to web.yaml (<code>scan</code> or <code>pipelines</code>).</span>{{if $.CanAdmin}}<a class="btn primary" href="/pipelines/new">{{icon "plus"}}Create pipeline</a>{{end}}</div></td></tr>{{end}}
+  <tr class="nomatch" hidden><td colspan="{{$cols}}" class="muted">No pipeline matches the filter. <a href="/pipelines">Clear filters</a></td></tr>
+  </tbody>
+</table>
+</div>
+{{end}}
+
+{{define "pipeline-rowmenu"}}
+<details class="rowmenu"><summary class="btn small" aria-label="Actions for {{.View.Name}}" aria-haspopup="true">{{icon "more"}}</summary>
+  <div class="rowmenu-list" role="group" aria-label="{{.View.Name}} actions">
+    <a class="btn" href="/pipelines/{{.View.Name}}">Open</a>
+    <a class="btn" href="/pipelines/{{.View.Name}}/tables">Tables</a>
+    <a class="btn" href="/pipelines/{{.View.Name}}/logs">Logs</a>
+    {{if .CanOperate}}<hr>
+    <form class="act" data-action="start" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">{{icon "play"}}Start</button></form>
+    <form class="act" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start." data-retype="{{.View.Name}}"><button class="btn" type="submit">{{icon "stop"}}Stop</button></form>{{end}}
+    {{if .CanAdmin}}<hr>
+    <form class="act" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}"><button class="btn danger" type="submit">Delete</button></form>{{end}}
+  </div>
+</details>
+{{end}}
+
+{{define "tables-mini"}}{{with tablesOf .}}<span class="pcell" data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Pct}}</span><span class="small c-frac" data-bind="tables">{{.Done}} / {{.Total}}</span></span><span class="muted" data-bind-hide="tables" title="Snapshot progress is reported while the pipeline copies tables"{{if gt .Total 0}} hidden{{end}}>-</span>{{end}}{{end}}
+
+{{define "stale-tag"}}<span class="stale-tag" data-stale-tag{{if not .Stale}} hidden{{end}} title="The last poll of the admin socket failed{{if .PollErr}}: {{.PollErr}}{{end}}. Showing the last good values.">{{icon "alert"}}<span data-bind-age="{{if not .LastOK.IsZero}}{{.LastOK.Format "2006-01-02T15:04:05.000Z07:00"}}{{end}}">{{if not .LastOK.IsZero}}updated {{rel .LastOK}}{{else}}no data{{end}}</span></span>{{end}}
+
+{{define "job-filterbar"}}
+<div class="filterbar" role="search" aria-label="Filter jobs">
+  <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Search jobs" aria-label="Search jobs by command, kind or pipeline" autocomplete="off"></span>
+  <select class="chip-select" id="pl-kind" aria-label="Kind"><option value="">All kinds</option>{{range .Body.Kinds}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+  <select class="chip-select" id="pl-state" aria-label="State"><option value="">All states</option>{{range .Body.States}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+  <select class="chip-select" id="pl-pipeline" aria-label="Pipeline"><option value="">All pipelines</option>{{range .Body.Pipelines}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+  <button type="button" class="btn ghost small" id="pl-clear" hidden>Clear filters</button>
+  <span class="muted small push" id="pl-count" aria-live="polite"></span>
+</div>
+{{end}}
+
+{{define "jobs-table"}}
+<div class="tablewrap tall">
+<table class="data-table grid"{{if .ShowPipeline}} id="jobs-table" data-filterable{{end}}>
+  <caption class="sr-only">{{if .ShowPipeline}}Process jobs of all pipelines{{else}}Process jobs of this pipeline{{end}}</caption>
+  <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Pipeline</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Command</th>{{if .CanOperate}}<th scope="col" class="r"><span class="sr-only">Actions</span></th>{{end}}</tr></thead>
+  <tbody>{{range .Jobs}}<tr data-name="{{.ID}}" data-state="{{jobStateKey .}}" data-kinds="{{.Kind}}" data-pipeline="{{.Pipeline}}">
+    <td class="small nowrap"><a href="/jobs/{{.ID}}">{{ts .Started}}</a></td>
+    {{if $.ShowPipeline}}<td><a href="/pipelines/{{.Pipeline}}/jobs">{{.Pipeline}}</a></td>{{end}}
+    <td class="mono">{{.Kind}}</td>
+    <td><span class="badge {{jobClass .}}">{{jobState .}}</span></td>
+    <td class="small r nowrap c-num">{{jobDur .}}</td>
+    <td class="mono small wrap">strand {{join .Args " "}}</td>
+    {{if $.CanOperate}}<td class="r nowrap">{{if .Running}}{{if not .Cancelled}}<form class="act inline" data-action="job-cancel" data-pipeline="{{.Pipeline}}" data-confirm="Cancel this {{.Kind}} job of {{.Pipeline}}? The child process receives SIGTERM." data-stay><input type="hidden" name="job_id" value="{{.ID}}"><button class="btn small danger" type="submit" aria-label="Cancel job {{.Kind}} of {{.Pipeline}}">Cancel</button></form>{{end}}{{end}}</td>{{end}}
+  </tr>{{else}}<tr class="empty"><td colspan="{{if $.ShowPipeline}}{{if $.CanOperate}}7{{else}}6{{end}}{{else}}{{if $.CanOperate}}6{{else}}5{{end}}{{end}}"><div class="empty-state">{{icon "jobs"}}<b>No jobs yet</b><span>Verify, plan and schema runs started from a pipeline's Jobs tab appear here.</span></div></td></tr>{{end}}
+  <tr class="nomatch" hidden><td colspan="7" class="muted">No job matches the filter. <a href="/jobs">Clear filters</a></td></tr></tbody>
+</table>
+</div>
+{{end}}
+
+{{define "pipeline-tabs"}}
+<nav class="tabs" role="tablist" aria-label="Pipeline sections">{{$act := .Active}}{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $act .Key}} active{{end}}" role="tab" aria-selected="{{if eq $act .Key}}true{{else}}false{{end}}"{{if eq $act .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
+{{end}}
+
+{{define "pipeline-props"}}
+{{$eng := engines .View.Pair}}
+<aside class="detail-side" aria-label="Pipeline properties">
+<section class="card">
+  <div class="cardhead"><h2>Properties</h2></div>
+  <dl class="props">
+    <dt>Kind</dt><dd>{{if .View.SourceKind}}{{.View.SourceKind}} &rarr; {{.View.TargetKind}}{{else}}-{{end}}</dd>
+    <dt>Source</dt><dd>{{(index $eng 0).Label}}</dd>
+    <dt>Target</dt><dd>{{if (index $eng 1).Label}}{{(index $eng 1).Label}}{{else}}-{{end}}</dd>
+    <dt>State</dt><dd><span class="badge {{stateClass .View.State}}" data-bind-badge="state">{{.View.State}}</span></dd>
+    <dt>Managed by</dt><dd>{{.View.Mode}} <span class="muted">({{.View.Origin}})</span></dd>
+    <dt>Started</dt><dd>{{if .View.Runtime.Since}}{{.View.Runtime.Since}}{{else}}-{{end}}</dd>
+    <dt>Process</dt><dd>{{if .View.Runtime.PID}}pid <span class="mono">{{.View.Runtime.PID}}</span>{{else}}not running{{end}}</dd>
+    <dt>Config revision</dt><dd>{{if .Revision}}<span class="copyval"><code class="mono">{{.Revision}}</code></span>{{else}}-{{end}}</dd>
+    <dt>Config file</dt><dd class="mono small wrap">{{if .View.ConfigPath}}{{.View.ConfigPath}}{{else}}-{{end}}</dd>
+    <dt>Last exit</dt><dd>{{if .View.LastExit}}<span title="{{.View.LastExit.Meaning}}">code {{.View.LastExit.Code}}</span>{{else}}-{{end}}</dd>
+  </dl>
+</section>
+</aside>
+{{end}}
+
+{{define "pipeline-head"}}
+{{$eng := engines .View.Pair}}
+<section class="card head{{if .View.Stale}} is-stale{{end}}" aria-label="Pipeline status" data-live-head="{{.View.Name}}" data-state="{{.View.State}}">
+  <div class="headrow">
+    <span class="engines pair" title="{{.View.Pair}}"><span class="eng {{(index $eng 0).Class}}">{{icon "db"}}{{(index $eng 0).Label}}</span>{{if (index $eng 1).Label}}{{icon "arrow"}}<span class="eng {{(index $eng 1).Class}}">{{icon "db"}}{{(index $eng 1).Label}}</span>{{end}}</span>
+    <span class="badge big {{stateClass .View.State}}" data-bind-badge="state">{{.View.State}}</span>
+    {{template "stale-tag" .View}}
+    <span class="muted small meta">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}} &middot; sampled <b class="c-time" data-bind="sampled">{{clock .View.SampledAt}}</b></span>
+  </div>
+  {{$why := stateReason .View}}<p class="reason-line {{stateClass $.View.State}}" data-bind-show="reason"{{if not $why}} hidden{{end}}><b>Why:</b> <span class="wrap" data-bind="reason">{{$why}}</span></p>
+  {{if .View.Top}}{{if .View.Top.BreakerOpen}}<div class="alert alert-error mb" role="alert" data-bind-show="breaker"><strong>Circuit Breaker Open:</strong> <span data-bind="breaker_reason">{{.View.Top.BreakerReason}}</span></div>{{end}}{{end}}
+  <div class="kpis" aria-label="Live metrics">
+    <div class="kpi"><div class="kpi-label">Lag</div><div class="kpi-value c-num {{lagClass .View}}" data-bind="lag" data-bind-lag>{{if .View.Top}}{{lag .View.Top.LagSeconds}}{{else}}-{{end}}</div><div class="kpi-sub">source to target</div></div>
+    <div class="kpi"><div class="kpi-label" title="Rows applied per second, averaged over the last 30 s">Rows/s <span class="m-hint">30 s avg</span></div><div class="kpi-value c-num" data-bind="rows">{{if .View.Top}}{{num .View.Rates.Rows}}{{else}}-{{end}}</div><div class="kpi-sub"><span class="c-num" data-bind="txn">{{if .View.Top}}{{num .View.Rates.Txn}}{{else}}-{{end}}</span> txn/s &middot; zone <span data-bind="zone">{{if .View.Top}}{{if .View.Top.Zone}}{{.View.Top.Zone}}{{else}}-{{end}}{{else}}-{{end}}</span></div></div>
+    {{with tablesOf .View}}<div class="kpi"><div class="kpi-label">Snapshot</div><div class="kpi-value c-num" data-bind="tables">{{if gt .Total 0}}{{.Done}} / {{.Total}}{{else}}-{{end}}</div><div data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Pct}}</span></div><div class="kpi-sub" data-bind-hide="tables"{{if gt .Total 0}} hidden{{end}}>no snapshot running</div><div class="kpi-sub" data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span class="c-num" data-bind="snap_rows">{{num $.View.Rates.SnapRows}}</span> rows/s{{if $.View.Top}}{{if gt $.View.Top.Progress 0.0}} &middot; <span data-bind="progress">{{pct $.View.Top.Progress}}</span>{{end}}{{if gt $.View.Top.ETASeconds 0.0}} &middot; ETA <span data-bind="eta">{{secs $.View.Top.ETASeconds}}</span>{{end}}{{end}}</div></div>{{end}}
+    <div class="kpi"><div class="kpi-label">Uptime</div><div class="kpi-value c-num" data-bind="uptime">{{if .Head.HasInfo}}{{secs .Head.Uptime}}{{else}}-{{end}}</div>{{if .View.Runtime.Since}}<div class="kpi-sub">since {{.View.Runtime.Since}}</div>{{end}}</div>
+    <div class="kpi"><div class="kpi-label">Last checkpoint</div><div class="kpi-value c-num" data-bind="ckpt">{{if not .Head.CkptAt.IsZero}}{{rel .Head.CkptAt}}{{else}}-{{end}}</div><div class="kpi-sub" data-bind="ckpt_ts">{{if not .Head.CkptAt.IsZero}}{{ts .Head.CkptAt}}{{end}}</div></div>
+  </div>
+  {{if or .CanOperate .Ctl.JobActive}}<div class="actions" role="group" aria-label="Pipeline actions">
+    {{if .CanOperate}}<span class="grp">
+    <form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}><button class="btn primary" type="submit"{{if or .Ctl.Running (not .Ctl.CfgOK)}} disabled{{end}}{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}>{{icon "play"}}Start</button></form>
+    <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"{{if not .Ctl.Paused}} title="Not paused"{{end}}><button class="btn" type="submit"{{if not .Ctl.Paused}} disabled title="Not paused"{{end}}>Resume</button></form>
+    </span>
+    <span class="grp">
+    <form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}><button class="btn" type="submit"{{if or .Ctl.Paused (not .Ctl.Reachable)}} disabled{{end}}{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}>{{icon "pause"}}Pause</button></form>
+    <form class="act inline" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}}? It is stopped (checkpoint written) and started again."{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>Restart</button></form>
+    {{if .Ctl.Systemd}}<form class="act inline" data-action="enable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Enable at boot</button></form>
+    <form class="act inline" data-action="disable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Disable at boot</button></form>{{end}}
+    </span>
+    <span class="grp">
+    <form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start." data-retype="{{.View.Name}}"{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn danger" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>{{icon "stop"}}Stop</button></form>
+    {{if .CanAdmin}}<form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}"><button class="btn danger" type="submit" title="Permanently delete pipeline {{.View.Name}}">Delete</button></form>{{end}}
+    </span>{{end}}
+    {{if .Ctl.JobActive}}<a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
+  </div>{{end}}
+  {{if .View.ConfigErr}}<div class="alert alert-error mt10" role="alert">Config error: {{.View.ConfigErr}}</div>{{end}}
+  {{if and .View.LastExit (not .View.Runtime.Running)}}<div class="alert alert-warn mt10" role="alert">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code class="wrap">{{.View.Runtime.LastError}}</code>{{end}}</div>{{end}}
+</section>
+{{end}}

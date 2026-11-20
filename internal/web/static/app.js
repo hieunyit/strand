@@ -131,24 +131,37 @@
       .then(function () { busy = false; });
   }
 
-  // ---- pipelines table: client-side sort and filter; survives the periodic refresh ----
-  var listState = { sort: '', dir: 1, q: '', state: '' };
+  // ---- list tables (pipelines, jobs): client-side search, engine/kind, state and pipeline filters, sort.
+  // The filters live in the query string (shareable links) and survive the periodic refresh. ----
+  var FILTERS = [['q', 'pl-filter'], ['kind', 'pl-kind'], ['state', 'pl-state'], ['pipeline', 'pl-pipeline']];
+  var listState = { sort: '', dir: 1, q: '', kind: '', state: '', pipeline: '' };
   (function () {
     var qs = new URLSearchParams(location.search);
-    if (qs.get('state')) { listState.state = qs.get('state'); }
-    if (qs.get('q')) { listState.q = qs.get('q'); }
+    FILTERS.forEach(function (f) { if (qs.get(f[0])) { listState[f[0]] = qs.get(f[0]); } });
     var s = qs.get('sort');
     if (s === 'lag' || s === 'rate') { listState.sort = s; listState.dir = -1; }
     else if (s === 'name' || s === 'sev') { listState.sort = s; listState.dir = 1; }
   })();
+  function listTable() { return document.querySelector('#pipeline-table, table[data-filterable]'); }
+  // Mirror the active filters into the address bar (no new history entry).
+  function syncListURL() {
+    if (!window.history || !history.replaceState) { return; }
+    var qs = new URLSearchParams();
+    FILTERS.forEach(function (f) { if (listState[f[0]]) { qs.set(f[0], listState[f[0]]); } });
+    if (listState.sort) { qs.set('sort', listState.sort); }
+    var str = qs.toString();
+    try { history.replaceState(null, '', location.pathname + (str ? '?' + str : '')); } catch (e) { /* sandboxed frame */ }
+  }
   function applyList() {
-    var table = document.getElementById('pipeline-table');
+    var table = listTable();
     if (!table) { return; }
     var body = table.tBodies[0];
     var rows = Array.prototype.slice.call(body.querySelectorAll('tr[data-name]'));
-    var qEl = document.getElementById('pl-filter'), sEl = document.getElementById('pl-state');
-    if (qEl && qEl.value !== listState.q) { qEl.value = listState.q; }
-    if (sEl && sEl.value !== listState.state) { sEl.value = listState.state; }
+    FILTERS.forEach(function (f) {
+      var el = document.getElementById(f[1]);
+      if (el && el.value !== listState[f[0]]) { el.value = listState[f[0]]; }
+      if (el && el.tagName === 'SELECT') { el.classList.toggle('is-set', !!listState[f[0]]); }
+    });
     if (listState.sort) {
       var key = listState.sort, dir = listState.dir;
       rows.sort(function (a, b) {
@@ -163,33 +176,48 @@
     }
     var q = listState.q.trim().toLowerCase(), shown = 0;
     rows.forEach(function (r) {
+      var kinds = (r.getAttribute('data-kinds') || '').split(/\s+/);
       var ok = (!listState.state || r.getAttribute('data-state') === listState.state) &&
+        (!listState.kind || kinds.indexOf(listState.kind) >= 0) &&
+        (!listState.pipeline || r.getAttribute('data-pipeline') === listState.pipeline) &&
         (!q || r.textContent.toLowerCase().indexOf(q) >= 0);
       r.hidden = !ok;
       if (ok) { shown++; }
     });
     var nm = body.querySelector('tr.nomatch');
     if (nm) { nm.hidden = !(rows.length > 0 && shown === 0); }
+    var active = !!(listState.q || listState.kind || listState.state || listState.pipeline);
     var cnt = document.getElementById('pl-count');
-    if (cnt) { cnt.textContent = (listState.q || listState.state) ? shown + ' of ' + rows.length + ' shown' : rows.length + ' pipelines'; }
+    var noun = table.id === 'jobs-table' ? ' jobs' : ' pipelines';
+    if (cnt) { cnt.textContent = active ? shown + ' of ' + rows.length + ' shown' : rows.length + noun; }
+    var clr = document.getElementById('pl-clear');
+    if (clr) { clr.hidden = !active; }
     Array.prototype.forEach.call(table.querySelectorAll('th[aria-sort]'), function (th) {
       var b = th.querySelector('.sortbtn');
       th.setAttribute('aria-sort', b && b.getAttribute('data-sort') === listState.sort ? (listState.dir > 0 ? 'ascending' : 'descending') : 'none');
     });
+    document.dispatchEvent(new CustomEvent('strand:list-applied'));
   }
   document.addEventListener('click', function (ev) {
+    var c = ev.target && ev.target.closest && ev.target.closest('#pl-clear');
+    if (c) {
+      FILTERS.forEach(function (f) { listState[f[0]] = ''; });
+      applyList(); syncListURL();
+      return;
+    }
     var b = ev.target && ev.target.closest && ev.target.closest('.sortbtn');
-    if (!b) { return; }
+    if (!b || !listTable() || !listTable().contains(b)) { return; }
     var k = b.getAttribute('data-sort');
     if (listState.sort === k) { listState.dir = -listState.dir; }
     else { listState.sort = k; listState.dir = (k === 'lag' || k === 'rate') ? -1 : 1; }
-    applyList();
+    applyList(); syncListURL();
   });
   document.addEventListener('input', function (ev) {
-    if (ev.target && ev.target.id === 'pl-filter') { listState.q = ev.target.value; applyList(); }
+    if (ev.target && ev.target.id === 'pl-filter') { listState.q = ev.target.value; applyList(); syncListURL(); }
   });
   document.addEventListener('change', function (ev) {
-    if (ev.target && ev.target.id === 'pl-state') { listState.state = ev.target.value; applyList(); }
+    var id = ev.target && ev.target.id;
+    FILTERS.forEach(function (f) { if (id === f[1] && id !== 'pl-filter') { listState[f[0]] = ev.target.value; applyList(); syncListURL(); } });
   });
   applyList();
 
@@ -345,7 +373,7 @@
 
   if (seconds > 0) { setInterval(refresh, seconds * 1000); }
   // Hooks for /static/live.js (the SSE client): structural refresh, re-attach after a swap, table filters.
-  window.strandConsole = { refresh: refresh, onSwap: onSwap, applyTables: applyTables, applyList: applyList, editing: editing, selecting: selecting };
+  window.strandConsole = { refresh: refresh, onSwap: onSwap, applyTables: applyTables, applyList: applyList, editing: editing, selecting: selecting, toast: toast, confirm: confirmDialog };
 
   // Helper that renders standard API {error, fields} into an inline alert + field errors.
   function renderApiErrors(container, res) {
@@ -389,20 +417,29 @@
   // ---- toast and confirmation dialog (no inline script: everything is wired here) ----
   var toastEl = document.getElementById('toast');
   var toastTimer = null;
+  // Success toasts hide after 4 s; an error stays until it is dismissed (button, click or Esc).
   function toast(msg, ok) {
     if (!toastEl) { return; }
     toastEl.textContent = msg;
     toastEl.className = 'toast ' + (ok ? 'ok' : 'bad');
     toastEl.setAttribute('role', ok ? 'status' : 'alert');
-    toastEl.title = 'Click to dismiss';
+    var x = document.createElement('button');
+    x.type = 'button'; x.className = 'iconbtn toast-close'; x.setAttribute('aria-label', 'Dismiss notification');
+    x.innerHTML = '<svg class="ic" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-close"/></svg>';
+    x.addEventListener('click', function (ev) { ev.stopPropagation(); toastEl.hidden = true; clearTimeout(toastTimer); });
+    toastEl.appendChild(x);
     toastEl.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.hidden = true; }, ok ? 8000 : 20000);
+    if (ok) { toastTimer = setTimeout(function () { toastEl.hidden = true; }, 4000); }
   }
 
-  if (toastEl) { toastEl.addEventListener('click', function () { toastEl.hidden = true; }); }
+  if (toastEl) { toastEl.addEventListener('click', function () { if (toastEl.classList.contains('ok')) { toastEl.hidden = true; } }); }
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && toastEl && !toastEl.hidden && !document.querySelector('dialog[open]')) { toastEl.hidden = true; }
+  });
   var dlg = document.getElementById('confirm');
-  function confirmDialog(message, retype) {
+  function confirmDialog(message, retype, opts) {
+    opts = opts || {};
     return new Promise(function (resolve) {
       if (!dlg || typeof dlg.showModal !== 'function') { resolve(window.confirm(message)); return; }
       var msg = document.getElementById('confirm-msg');
@@ -412,6 +449,11 @@
       var ok = document.getElementById('confirm-ok');
       var cancel = document.getElementById('confirm-cancel');
       var form = document.getElementById('confirm-form');
+      var opener = document.activeElement;
+      var titleEl = document.getElementById('confirm-title');
+      if (titleEl) { titleEl.textContent = opts.title || (retype ? 'Confirm: this cannot be undone' : 'Confirm'); }
+      ok.textContent = opts.ok || 'Confirm';
+      ok.classList.toggle('danger', !!retype || !!opts.danger);
       msg.textContent = message;
       input.value = '';
       box.hidden = !retype;
@@ -420,7 +462,18 @@
       function onInput() { ok.disabled = !!retype && input.value !== retype; }
       function onSubmit(e) { if (retype && input.value !== retype) { e.preventDefault(); } }
       function onCancel() { dlg.close('cancel'); }
+      // Keep Tab inside the dialog (showModal also makes the page inert; this covers browsers that let focus reach the UI).
+      function onKey(e) {
+        if (e.key !== 'Tab') { return; }
+        var f = Array.prototype.filter.call(dlg.querySelectorAll('button, input, [href], select, textarea'), function (x) { return !x.disabled && !x.hidden && !x.closest('[hidden]'); });
+        if (!f.length) { return; }
+        var first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
       function onClose() {
+        dlg.removeEventListener('keydown', onKey);
+        if (opener && opener.focus && document.contains(opener)) { try { opener.focus(); } catch (e) { /* element gone */ } }
         input.removeEventListener('input', onInput);
         form.removeEventListener('submit', onSubmit);
         cancel.removeEventListener('click', onCancel);
@@ -431,9 +484,10 @@
       form.addEventListener('submit', onSubmit);
       cancel.addEventListener('click', onCancel);
       dlg.addEventListener('close', onClose);
+      dlg.addEventListener('keydown', onKey);
       dlg.returnValue = '';
       dlg.showModal();
-      if (retype) { input.focus(); }
+      if (retype) { input.focus(); } else { ok.focus(); }
     });
   }
 
@@ -835,8 +889,11 @@
     });
     newPipeForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
+      if (newPipeForm.getAttribute('aria-busy') === 'true') { return; } // a create is already running
+      var wz = window.strandWizard;
+      if (wz && !wz.validateAll()) { return; }
       var btn = document.getElementById('btn-create-pipeline');
-      if (btn) btn.disabled = true;
+      if (wz) { wz.busy(true); } else if (btn) { btn.disabled = true; }
       toast('Creating and validating pipeline...', true);
       var payload = {};
       var fd = new FormData(newPipeForm);
@@ -897,6 +954,7 @@
               html += '<a href="/pipelines/' + encodeURIComponent(res.j.pipeline) + '" class="btn">' + (res.j.ok ? 'Go to pipeline' : 'Fix in Config tab') + '</a>';
               html += '</div>';
               resBody.innerHTML = html;
+              newPipeForm.dispatchEvent(new CustomEvent('pipeline-created'));
               if (res.j.ok) { toast('Pipeline created successfully!', true); }
               else { toast('Pipeline created but validation FAILED: fix it before Start', false); }
             } else {
@@ -905,6 +963,7 @@
                 errHtml += '<p class="mt10"><button type="button" class="btn warning" id="btn-force-overwrite">Overwrite &amp; recreate "' + escHtml(payload.name || '') + '"</button></p>';
               }
               resBody.innerHTML = errHtml;
+              if (wz) { wz.showApiError(res.j); }
               var forceBtn = document.getElementById('btn-force-overwrite');
               if (forceBtn) {
                 forceBtn.addEventListener('click', function () {
@@ -919,7 +978,22 @@
           }
         })
         .catch(function (err) { toast('Error: ' + err, false); })
-        .then(function () { if (btn) btn.disabled = false; });
+        .then(function () { if (wz) { wz.busy(false); } else if (btn) { btn.disabled = false; } });
+    });
+    // A successful create leaves nothing to lose: drop the dirty mark so leaving the page does not ask.
+    newPipeForm.addEventListener('pipeline-created', function () {
+      newPipeForm.removeAttribute('data-dirty');
+      newPipeForm.hidden = true;
+      var stp = document.getElementById('np-stepper');
+      if (stp) { stp.hidden = true; }
+      var box = document.getElementById('new-pipeline-result');
+      if (box && box.scrollIntoView) { box.scrollIntoView({ block: 'start' }); }
     });
   }
+
+  // Unsaved changes: leaving a page with a dirty form[data-guard] asks first. The periodic refresh never
+  // replaces such a form (editing() above).
+  window.addEventListener('beforeunload', function (ev) {
+    if (document.querySelector('form[data-guard][data-dirty]')) { ev.preventDefault(); ev.returnValue = ''; }
+  });
 })();

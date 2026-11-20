@@ -1,22 +1,28 @@
 {{define "content"}}
-<div class="alert alert-info" role="note">
-  <span>Fill in the source and target, choose what to copy, then <b>Create and validate</b>: Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</span>
-</div>
+<div class="wiz">
+<div class="wiz-main">
+<ol class="stepper" id="np-stepper" aria-label="New pipeline steps">
+  <li class="step current" data-step-ind="1" aria-current="step"><span class="step-index" aria-hidden="true">1</span><span class="step-label">Source</span></li>
+  <li class="step" data-step-ind="2"><span class="step-index" aria-hidden="true">2</span><span class="step-label">Target</span></li>
+  <li class="step" data-step-ind="3"><span class="step-index" aria-hidden="true">3</span><span class="step-label">Tables &amp; options</span></li>
+  <li class="step" data-step-ind="4"><span class="step-index" aria-hidden="true">4</span><span class="step-label">Review</span></li>
+</ol>
 
-<form id="new-pipeline-form" method="post" action="/pipelines/new" class="np form-stack">
+<form id="new-pipeline-form" method="post" action="/pipelines/new" class="np form-stack" data-guard novalidate>
   <input type="hidden" name="csrf" value="{{.CSRF}}">
 
+  <div class="wiz-step" data-step="1" role="group" aria-labelledby="np-h1">
   <fieldset class="form-section">
-    <legend class="form-section-title"><span class="step-no" aria-hidden="true">1</span>Pipeline</legend>
-    <p class="form-section-desc">Name the pipeline and pick the engine pair. Only supported pairs are offered as targets.</p>
-    <div class="field-grid cols-3">
+    <legend class="form-section-title" id="np-h1" tabindex="-1"><span class="step-no" aria-hidden="true">1</span>Pipeline and source</legend>
+    <p class="form-section-desc">Name the pipeline, pick where Strand reads from, and test the login. Passwords go to the pipeline's encrypted <code>.env</code>, never into the config file.</p>
+    <div class="field-grid">
       <label class="field">
         <span class="field-label">Name <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="name" id="np-name" required class="mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+        <input type="text" name="name" id="np-name" required class="mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$" autocomplete="off">
         <small class="field-hint">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
       </label>
       <label class="field">
-        <span class="field-label">Copy from (source)</span>
+        <span class="field-label">Copy from (source) <span class="req" aria-hidden="true">*</span></span>
         <select name="from" id="np-from">
           <option value="mysql" selected>MySQL 5.5 – 8.x</option>
           <option value="mariadb">MariaDB 10.6+</option>
@@ -24,8 +30,64 @@
           <option value="mongodb">MongoDB 6+ (replica set)</option>
         </select>
       </label>
+    </div>
+    <div class="field-grid cols-3" data-when="src:mongodb">
+      <label class="field span-2">
+        <span class="field-label">Source URI <span class="req" aria-hidden="true">*</span></span>
+        <input type="password" name="source_uri" required class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs0">
+        <small class="field-hint">Secret: stored only in the pipeline's encrypted .env (<code>SRC_URI</code>), never in the config. Needs a replica set (change streams).</small>
+      </label>
       <label class="field">
-        <span class="field-label">Copy to (target)</span>
+        <span class="field-label">Source database <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="source_database" required value="app" class="mono">
+      </label>
+    </div>
+    <div class="field-grid cols-4" data-when="src:mysql,mariadb,postgres">
+      <label class="field">
+        <span class="field-label">Host <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="source_host" required value="127.0.0.1" class="mono">
+      </label>
+      <label class="field">
+        <span class="field-label">Port <span class="req" aria-hidden="true">*</span></span>
+        <input type="number" name="source_port" required min="1" max="65535" value="3306" class="mono" id="np-src-port" data-mysql="3306" data-postgres="5432">
+      </label>
+      <label class="field">
+        <span class="field-label">User <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="source_user" required value="strand" class="mono">
+        <small class="field-hint" data-when="src:mysql,mariadb">Needs <code>REPLICATION SLAVE, REPLICATION CLIENT, SELECT</code>.</small>
+        <small class="field-hint" data-when="src:postgres">Needs <code>REPLICATION</code> and <code>SELECT</code> on the tables.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Password <span class="opt">optional</span></span>
+        <input type="password" name="source_password" class="mono" autocomplete="new-password">
+      </label>
+    </div>
+    <div class="field-grid" data-when="src:postgres">
+      <label class="field">
+        <span class="field-label">Database <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="database" required value="app" class="mono" data-when-input="src:postgres">
+        <small class="field-hint">The PostgreSQL database that holds your tables.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Schema</span>
+        <input type="text" name="schema" value="public" class="mono">
+        <small class="field-hint">Usually <code>public</code>. All tables in it are copied unless you narrow it in step 3.</small>
+      </label>
+    </div>
+    <div class="conn-test">
+      <button type="button" class="btn" id="np-test-source" data-test="source">Test source connection</button>
+      <div class="conn-result" id="np-test-source-result" aria-live="polite"></div>
+    </div>
+  </fieldset>
+  </div>
+
+  <div class="wiz-step" data-step="2" role="group" aria-labelledby="np-h2" hidden>
+  <fieldset class="form-section">
+    <legend class="form-section-title" id="np-h2" tabindex="-1"><span class="step-no" aria-hidden="true">2</span>Target</legend>
+    <p class="form-section-desc">Where Strand writes to. The account must be able to create tables and write data. Only supported pairs are offered.</p>
+    <div class="field-grid cols-1">
+      <label class="field">
+        <span class="field-label">Copy to (target) <span class="req" aria-hidden="true">*</span></span>
         <select name="to" id="np-to">
           <option value="postgres" data-from="mysql postgres" selected>PostgreSQL 16 – 18</option>
           <option value="mysql" data-from="mysql mariadb">MySQL 8.x</option>
@@ -34,90 +96,33 @@
         <small class="field-hint" id="np-pair-note"></small>
       </label>
     </div>
-    <label class="check">
-      <input type="checkbox" name="overwrite" id="np-overwrite" value="true">
-      <span>Overwrite if the pipeline already exists<small class="field-hint">Re-creates the config and .env of an existing pipeline with the same name.</small></span>
-    </label>
-  </fieldset>
-
-  <fieldset class="form-section">
-    <legend class="form-section-title"><span class="step-no" aria-hidden="true">2</span>Source connection</legend>
-    <p class="form-section-desc">Where Strand reads from. Passwords go to the pipeline's encrypted <code>.env</code>, never into the config file.</p>
-    <div class="field-grid cols-3" data-when="src:mongodb">
-      <label class="field span-2">
-        <span class="field-label">Source URI <span class="req" aria-hidden="true">*</span></span>
-        <input type="password" name="source_uri" class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs0">
-        <small class="field-hint">Secret: stored only in the pipeline's encrypted .env (<code>SRC_URI</code>), never in the config. Needs a replica set (change streams).</small>
-      </label>
-      <label class="field">
-        <span class="field-label">Source database <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="source_database" value="app" class="mono">
-      </label>
-    </div>
-    <div class="field-grid cols-4" data-when="src:mysql,mariadb,postgres">
-      <label class="field">
-        <span class="field-label">Host</span>
-        <input type="text" name="source_host" value="127.0.0.1" class="mono">
-      </label>
-      <label class="field">
-        <span class="field-label">Port</span>
-        <input type="number" name="source_port" value="3306" class="mono" id="np-src-port" data-mysql="3306" data-postgres="5432">
-      </label>
-      <label class="field">
-        <span class="field-label">User</span>
-        <input type="text" name="source_user" value="strand" class="mono">
-        <small class="field-hint" data-when="src:mysql,mariadb">Needs <code>REPLICATION SLAVE, REPLICATION CLIENT, SELECT</code>.</small>
-        <small class="field-hint" data-when="src:postgres">Needs <code>REPLICATION</code> and <code>SELECT</code> on the tables.</small>
-      </label>
-      <label class="field">
-        <span class="field-label">Password</span>
-        <input type="password" name="source_password" class="mono" autocomplete="new-password">
-      </label>
-    </div>
-    <div class="field-grid" data-when="src:postgres">
-      <label class="field">
-        <span class="field-label">Database <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="database" value="app" class="mono" data-when-input="src:postgres">
-        <small class="field-hint">The PostgreSQL database that holds your tables.</small>
-      </label>
-      <label class="field">
-        <span class="field-label">Schema</span>
-        <input type="text" name="schema" value="public" class="mono">
-        <small class="field-hint">Usually <code>public</code>. All tables in it are copied unless you narrow it in step 4.</small>
-      </label>
-    </div>
-  </fieldset>
-
-  <fieldset class="form-section">
-    <legend class="form-section-title"><span class="step-no" aria-hidden="true">3</span>Target connection</legend>
-    <p class="form-section-desc">Where Strand writes to. The account must be able to create tables and write data.</p>
     <div class="field-grid cols-3" data-when="dst:mongodb">
       <label class="field span-2">
         <span class="field-label">Target URI <span class="req" aria-hidden="true">*</span></span>
-        <input type="password" name="target_uri" class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs1">
+        <input type="password" name="target_uri" required class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs1">
         <small class="field-hint">Secret: stored only in the encrypted .env (<code>DST_URI</code>). The target must be a replica set too (transactions).</small>
       </label>
       <label class="field">
         <span class="field-label">Target database <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="target_mongo_database" value="app" class="mono">
+        <input type="text" name="target_mongo_database" required value="app" class="mono">
       </label>
     </div>
     <div class="field-grid cols-4" data-when="dst:mysql,postgres">
       <label class="field">
-        <span class="field-label">Host</span>
-        <input type="text" name="target_host" value="127.0.0.1" class="mono">
+        <span class="field-label">Host <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="target_host" required value="127.0.0.1" class="mono">
       </label>
       <label class="field">
-        <span class="field-label">Port</span>
-        <input type="number" name="target_port" value="5432" class="mono" id="np-dst-port" data-mysql="3306" data-postgres="5432">
+        <span class="field-label">Port <span class="req" aria-hidden="true">*</span></span>
+        <input type="number" name="target_port" required min="1" max="65535" value="5432" class="mono" id="np-dst-port" data-mysql="3306" data-postgres="5432">
       </label>
       <label class="field">
-        <span class="field-label">User</span>
-        <input type="text" name="target_user" value="strand" class="mono">
+        <span class="field-label">User <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="target_user" required value="strand" class="mono">
         <small class="field-hint">Must be able to create tables and write data.</small>
       </label>
       <label class="field">
-        <span class="field-label">Password</span>
+        <span class="field-label">Password <span class="opt">optional</span></span>
         <input type="password" name="target_password" class="mono" autocomplete="new-password">
       </label>
     </div>
@@ -130,21 +135,27 @@
     </div>
     <div class="field-grid" data-when="dst:mysql">
       <label class="field span-all">
-        <span class="field-label">Strand metadata database</span>
-        <input type="text" name="target_database" value="strand" class="mono">
+        <span class="field-label">Strand metadata database <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="target_database" required value="strand" class="mono">
         <small class="field-hint">Small database where Strand keeps its checkpoint (<code>_strand_*</code> tables), not your data. Create it once on the target: <code>CREATE DATABASE strand;</code></small>
       </label>
     </div>
+    <div class="conn-test">
+      <button type="button" class="btn" id="np-test-target" data-test="target">Test target connection</button>
+      <div class="conn-result" id="np-test-target-result" aria-live="polite"></div>
+    </div>
   </fieldset>
+  </div>
 
+  <div class="wiz-step" data-step="3" role="group" aria-labelledby="np-h3" hidden>
   <fieldset class="form-section">
-    <legend class="form-section-title"><span class="step-no" aria-hidden="true">4</span>What to copy</legend>
-    <p class="form-section-desc">Choose the databases, then optionally narrow or skip individual tables.</p>
+    <legend class="form-section-title" id="np-h3" tabindex="-1"><span class="step-no" aria-hidden="true">3</span>Tables &amp; options</legend>
+    <p class="form-section-desc">Choose the databases, then optionally narrow or skip individual tables. Defaults suit most pipelines.</p>
     <div class="field-grid cols-1" data-when="src:mysql,mariadb">
       <div class="field">
         <label class="field-label" for="np-database">Databases <span class="req" aria-hidden="true">*</span></label>
         <div class="control-row">
-          <input type="text" name="database" id="np-database" value="app" class="mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
+          <input type="text" name="database" id="np-database" required value="app" class="mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
           <button type="button" class="btn" id="np-list-databases" data-when="src:mysql,mariadb">List source databases</button>
         </div>
         <small class="field-hint">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>
@@ -171,7 +182,7 @@
   </fieldset>
 
   <details class="advanced" data-when="src:mongodb">
-    <summary>5. MongoDB tuning <span class="summary-hint">optional</span></summary>
+    <summary>MongoDB tuning <span class="summary-hint">optional</span></summary>
     <div class="field-grid cols-3">
       <label class="field">
         <span class="field-label">Snapshot batch</span>
@@ -193,7 +204,7 @@
   </details>
 
   <details class="advanced" data-when="src:mysql,mariadb,postgres">
-    <summary>5. Advanced <span class="summary-hint">optional</span></summary>
+    <summary>Advanced <span class="summary-hint">optional</span></summary>
     <div class="field-grid cols-3">
       <label class="field">
         <span class="field-label">Commit order</span>
@@ -222,7 +233,7 @@
   </details>
 
   <details class="advanced" id="np-tuning" data-when="src:mysql,mariadb,postgres">
-    <summary>6. Snapshot speed &amp; safety <span class="summary-hint">optional</span></summary>
+    <summary>Snapshot speed &amp; safety <span class="summary-hint">optional</span></summary>
     <p class="form-section-desc">Leave a field empty to use Strand's default. These can be changed later in the Config tab of the pipeline (Tuning card).</p>
     <div class="field-grid cols-3">
       <label class="field">
@@ -282,15 +293,46 @@
     </div>
   </details>
 
-  <div class="form-actions">
-    <span class="form-status">Validate and plan run right after the files are written.</span>
-    <a href="/pipelines" class="btn">Cancel</a>
-    <button class="btn primary" type="submit" id="btn-create-pipeline">Create and validate</button>
+  </div>
+
+  <div class="wiz-step" data-step="4" role="group" aria-labelledby="np-h4" hidden>
+  <fieldset class="form-section">
+    <legend class="form-section-title" id="np-h4" tabindex="-1"><span class="step-no" aria-hidden="true">4</span>Review</legend>
+    <p class="form-section-desc">Check the summary, then create. Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</p>
+    <dl class="props review-list" id="np-review" aria-label="Pipeline summary"></dl>
+    <label class="check">
+      <input type="checkbox" name="overwrite" id="np-overwrite" value="true">
+      <span>Overwrite if the pipeline already exists<small class="field-hint">Re-creates the config and .env of an existing pipeline with the same name.</small></span>
+    </label>
+  </fieldset>
+  </div>
+
+  <div class="wiz-nav form-actions" id="np-nav">
+    <span class="form-status" id="np-status" aria-live="polite">Step 1 of 4</span>
+    <a href="/pipelines" class="btn" id="np-cancel">Cancel</a>
+    <button type="button" class="btn" id="np-back" hidden>Back</button>
+    <button type="button" class="btn primary" id="np-next">Next</button>
+    <button class="btn primary" type="submit" id="btn-create-pipeline" hidden>Create and validate</button>
   </div>
 </form>
 
-<section id="new-pipeline-result" class="card" hidden>
+<section id="new-pipeline-result" class="card" hidden aria-live="polite">
   <div class="cardhead"><h2 id="result-title">Result</h2></div>
   <div id="result-body"></div>
 </section>
+</div>
+
+<aside class="wiz-summary" aria-label="Live summary">
+<section class="card">
+  <div class="cardhead"><h2>Summary</h2></div>
+  <dl class="props" id="np-summary">
+    <dt>Name</dt><dd id="sum-name" class="is-empty">not set</dd>
+    <dt>Source</dt><dd id="sum-source" class="is-empty">not set</dd>
+    <dt>Target</dt><dd id="sum-target" class="is-empty">not set</dd>
+    <dt>Copy</dt><dd id="sum-copy" class="is-empty">not set</dd>
+    <dt>Options</dt><dd id="sum-options">defaults</dd>
+  </dl>
+</section>
+</aside>
+</div>
 {{end}}

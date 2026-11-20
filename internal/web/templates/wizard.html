@@ -1,7 +1,9 @@
 {{define "content"}}
 {{with .Body}}
 {{template "pipeline-head" .}}
-<nav class="tabs" role="tablist" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $.Body.Kind .Key}} active{{end}}" role="tab" aria-selected="{{if eq $.Body.Kind .Key}}true{{else}}false{{end}}"{{if eq $.Body.Kind .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
+<div class="detail-layout">
+<div class="detail-main">
+{{template "pipeline-tabs" (tabsCtx .Tabs .Kind)}}
 
 <section class="card" aria-label="Wizard progress"><div class="cardhead"><h2>{{if eq .Kind "repair"}}Repair wizard{{else if eq .Kind "promote"}}Promote wizard{{else}}Seed wizard{{end}}</h2>{{if .Job}}<span class="badge {{jobClass .Job}}">job {{jobState .Job}}</span>{{end}}</div>
   <ol class="stepper">{{range $i, $s := .Steps}}<li class="step{{if eq $s.Status "done"}} done{{else if eq $s.Status "current"}} current{{else if eq $s.Status "failed"}} failed{{end}}"{{if eq $s.Status "current"}} aria-current="step"{{end}}><span class="step-index" aria-hidden="true">{{if eq $s.Status "done"}}&#10003;{{else}}{{add $i 1}}{{end}}</span><span class="step-label"><b>{{$s.Title}}</b> <span class="sr-only">({{$s.Status}})</span>{{if $s.Note}}<span class="step-note">{{$s.Note}}</span>{{end}}</span></li>{{end}}</ol>
@@ -9,7 +11,8 @@
   {{if .Job}}<p class="small">Current job: <a href="/jobs/{{.Job.ID}}">{{.Job.Kind}}</a> <span class="badge {{jobClass .Job}}">{{jobState .Job}}</span> <span class="mono small wrap">strand {{join .Job.Args " "}}</span></p>{{end}}
 </section>
 
-{{if eq .Kind "repair"}}
+{{if not .CanAdmin}}<section class="card"><div class="empty-state">{{icon "config"}}<b>The {{.Kind}} wizard needs the admin role</b><span>Its steps stop, repair, promote or restore data. You can follow progress and history on this page.</span></div></section>
+{{else if eq .Kind "repair"}}
   {{if not .Active}}
   <section class="card"><div class="cardhead"><h2>Start the repair wizard</h2></div>
     {{if eq .Step "done"}}<div class="alert alert-success"><span>The last repair finished and the pipeline was started again.</span></div>{{end}}
@@ -207,8 +210,11 @@
 {{end}}
 
 {{if .Output}}<section class="card"><div class="cardhead"><h2>Job output (tail)</h2></div><pre class="code log wrapcode" tabindex="0" aria-label="Job output">{{.Output}}</pre></section>{{end}}
-{{if .State}}<section class="card"><div class="cardhead"><h2>History</h2></div><div class="tablewrap tall"><table class="data-table grid"><thead><tr><th scope="col">Time</th><th scope="col">Step</th><th scope="col">Result</th><th scope="col" class="r">Exit</th></tr></thead><tbody>
+{{if .State}}<section class="card"><div class="cardhead"><h2>History</h2></div><div class="tablewrap tall"><table class="data-table grid"><caption class="sr-only">Wizard history</caption><thead><tr><th scope="col">Time</th><th scope="col">Step</th><th scope="col">Result</th><th scope="col" class="r">Exit</th></tr></thead><tbody>
 {{range .State.History}}<tr><td class="small nowrap">{{ts .Time}}</td><td>{{.Step}}</td><td class="wrap">{{.Result}}{{if .JobID}} <a href="/jobs/{{.JobID}}">job</a>{{end}}</td><td class="r">{{if .Exit}}{{ptrInt .Exit}}{{else}}-{{end}}</td></tr>{{end}}
 </tbody></table></div></section>{{end}}
+</div>
+{{template "pipeline-props" .}}
+</div>
 {{end}}
 {{end}}

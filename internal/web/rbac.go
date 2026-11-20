@@ -92,6 +92,8 @@ var writeRules = []routeRule{
 	// Creating/editing/deleting repositories stays admin. Notification channel tests stay admin: they make
 	// the server contact an external destination the admin configured.
 	{"POST", "/api/v1/backup-repositories/{id}/test", PermOperator},
+	// Operator: probe a source/target typed in the New pipeline wizard (nothing is saved or created).
+	{"POST", "/api/v1/pipeline-connections/test", PermOperator},
 }
 
 // readRules lists sensitive READ routes that need more than viewer.
