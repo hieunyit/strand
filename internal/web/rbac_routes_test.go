@@ -75,7 +75,10 @@ func TestRBACEveryWriteRouteFailClosed(t *testing.T) {
 	if p := RequiredPermissionForRequest(httptest.NewRequest("POST", "/api/v1/some-new-thing", nil)); p != PermAdmin {
 		t.Errorf("unlisted write route needs %s, want admin (fail closed)", p)
 	}
-	for _, p := range []string{"/api/v1/pipelines/orders/env", "/api/v1/pipelines/orders/config/download", "/api/v1/users", "/settings", "/audit"} {
+	for _, p := range []string{
+		"/api/v1/pipelines/orders/env", "/api/v1/pipelines/orders/config/download", "/api/v1/users", "/settings", "/audit",
+		"/api/v1/jobs/42/download", "/settings/db", "/tools/spool-inspect", "/archive", "/tunnels",
+	} {
 		if got := RequiredPermissionForRequest(httptest.NewRequest("GET", p, nil)); got != PermAdmin {
 			t.Errorf("GET %s needs %s, want admin", p, got)
 		}
