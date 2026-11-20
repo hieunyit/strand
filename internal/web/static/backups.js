@@ -152,6 +152,8 @@
       var act = bBtn.getAttribute('data-backup-action');
       var base = '/api/v1/backups/' + encodeURIComponent(bid);
       if (act === 'restore') {
+        var rTab = document.querySelector('[data-tab-target="restore"]');
+        if (rTab) rTab.click();
         var rf = document.getElementById('restore-form');
         rf.elements.namedItem('backup_id').value = bid; rf.elements.namedItem('source').value = '';
         rf.setAttribute('data-dirty', '1');

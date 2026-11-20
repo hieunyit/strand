@@ -1,0 +1,45 @@
+{{define "content"}}
+<section class="card">
+  <div class="cardhead"><h2>Scan Spool Inventory (Read-Only)</h2></div>
+  <p class="muted small">Offline inspection of Pebble spool database and external spill sidecars. Ensures sidecar accounting, detects orphans, and checks symlink safety.</p>
+  <form class="act form-grid" data-action="spool-inspect" method="post" action="/tools/spool-inspect">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <div class="form-field full">
+      <label for="spool-dir">Spool Directory <span class="req">*</span></label>
+      <input type="text" id="spool-dir" name="spool_dir" class="mono wide" value="{{.Body.SpoolDir}}" placeholder="/var/lib/strand/orders/spool" required>
+      <span class="help">Path to the Pebble spool directory</span>
+    </div>
+    <div class="form-field full">
+      <label for="trusted-roots">Trusted Spill Roots <span class="req">*</span></label>
+      <input type="text" id="trusted-roots" name="trusted_roots" class="mono wide" value="{{.Body.TrustedRoots}}" placeholder="/var/lib/strand/spill" required>
+      <span class="help">Comma-separated operator-supplied trusted directories</span>
+    </div>
+    <div class="toolbar">
+      <button class="btn primary" type="submit" data-action="spool-inspect">Scan Inventory</button>
+    </div>
+  </form>
+</section>
+
+{{if .Body.Report}}
+<section class="card">
+  <div class="cardhead"><h2>Scan Results</h2></div>
+  <dl class="kv">
+    <dt>Discovered Files</dt><dd class="mono">{{.Body.Report.DiscoveredFiles}} ({{.Body.Report.DiscoveredBytes}} bytes)</dd>
+    <dt>New Sidecars</dt><dd class="mono">{{.Body.Report.NewFiles}} ({{.Body.Report.NewBytes}} bytes)</dd>
+    <dt>Already Indexed</dt><dd class="mono">{{.Body.Report.ExistingFiles}} ({{.Body.Report.ExistingBytes}} bytes)</dd>
+  </dl>
+  {{if .Body.Report.Warnings}}
+  <div class="alert alert-warn" role="alert">
+    <b>Warnings ({{len .Body.Report.Warnings}}):</b>
+    <ul>{{range .Body.Report.Warnings}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+  {{if .Body.Report.Errors}}
+  <div class="alert alert-error" role="alert">
+    <b>Errors ({{len .Body.Report.Errors}}):</b>
+    <ul>{{range .Body.Report.Errors}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+</section>
+{{end}}
+{{end}}

@@ -290,20 +290,93 @@
 
   // Arrow keys / Home / End move between the page sections (tabs).
   document.addEventListener('keydown', function (ev) {
-    var a = ev.target;
-    if (!a || !a.closest || !a.closest('nav.tabs') || a.tagName !== 'A') { return; }
-    var links = Array.prototype.slice.call(a.closest('nav.tabs').querySelectorAll('a'));
-    var i = links.indexOf(a), n = -1;
+    var el = ev.target;
+    if (!el || !el.closest) { return; }
+    var tabNav = el.closest('nav.tabs, .tabs');
+    if (!tabNav) { return; }
+    if (el.tagName !== 'A' && el.getAttribute('role') !== 'tab' && !el.classList.contains('tab')) { return; }
+    var links = Array.prototype.slice.call(tabNav.querySelectorAll('a, button, [role="tab"], .tab'));
+    var i = links.indexOf(el), n = -1;
     if (ev.key === 'ArrowRight') { n = (i + 1) % links.length; }
     else if (ev.key === 'ArrowLeft') { n = (i - 1 + links.length) % links.length; }
     else if (ev.key === 'Home') { n = 0; }
     else if (ev.key === 'End') { n = links.length - 1; }
-    if (n >= 0) { ev.preventDefault(); links[n].focus(); }
+    if (n >= 0) {
+      ev.preventDefault();
+      links[n].focus();
+      if (links[n].tagName === 'BUTTON' || (links[n].hasAttribute('role') && links[n].getAttribute('role') === 'tab' && !links[n].href)) {
+        links[n].click();
+      }
+    }
+  });
+
+  // Client-side in-page tab switching for tabs specifying data-tab-target
+  document.addEventListener('click', function (ev) {
+    var tab = ev.target.closest('nav.tabs [data-tab-target]');
+    if (!tab) return;
+    var target = tab.getAttribute('data-tab-target');
+    if (!target) return;
+    ev.preventDefault();
+    var nav = tab.closest('nav.tabs');
+    if (nav) {
+      nav.querySelectorAll('[data-tab-target]').forEach(function (t) {
+        t.classList.remove('active');
+        t.setAttribute('aria-selected', 'false');
+      });
+      tab.classList.add('active');
+      tab.setAttribute('aria-selected', 'true');
+    }
+    document.querySelectorAll('[data-tab-content]').forEach(function (section) {
+      if (section.getAttribute('data-tab-content') === target) {
+        section.hidden = false;
+      } else {
+        section.hidden = true;
+      }
+    });
   });
 
   if (seconds > 0) { setInterval(refresh, seconds * 1000); }
   // Hooks for /static/live.js (the SSE client): structural refresh, re-attach after a swap, table filters.
   window.strandConsole = { refresh: refresh, onSwap: onSwap, applyTables: applyTables, applyList: applyList, editing: editing, selecting: selecting };
+
+  // Helper that renders standard API {error, fields} into an inline alert + field errors.
+  function renderApiErrors(container, res) {
+    if (!container) return;
+    var oldAlert = container.querySelector('.alert-error');
+    if (oldAlert) { oldAlert.remove(); }
+    container.querySelectorAll('.field-error').forEach(function (el) {
+      el.textContent = '';
+      el.hidden = true;
+    });
+    if (!res) return;
+    var errText = res.error || (typeof res === 'string' ? res : '');
+    if (errText) {
+      var alert = document.createElement('div');
+      alert.className = 'alert alert-error';
+      alert.setAttribute('role', 'alert');
+      alert.textContent = errText;
+      container.insertBefore(alert, container.firstChild);
+    }
+    if (res.fields && typeof res.fields === 'object') {
+      Object.keys(res.fields).forEach(function (field) {
+        var input = container.querySelector('[name="' + field + '"]');
+        if (input) {
+          var fieldWrap = input.closest('.form-field') || input.parentElement;
+          var errSpan = fieldWrap ? fieldWrap.querySelector('.field-error') : null;
+          if (!errSpan && fieldWrap) {
+            errSpan = document.createElement('span');
+            errSpan.className = 'field-error';
+            fieldWrap.appendChild(errSpan);
+          }
+          if (errSpan) {
+            errSpan.textContent = res.fields[field];
+            errSpan.hidden = false;
+          }
+        }
+      });
+    }
+  }
+  window.strandRenderApiErrors = renderApiErrors;
 
   // ---- toast and confirmation dialog (no inline script: everything is wired here) ----
   var toastEl = document.getElementById('toast');
@@ -392,6 +465,7 @@
         }
         setTimeout(function () { refresh(true); }, 1500);
       } else {
+        renderApiErrors(form, res.j);
         toast(action + ' failed (' + res.status + '): ' + (res.j.error || 'error'), false);
       }
     }).catch(function (e) {

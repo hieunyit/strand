@@ -1,0 +1,10 @@
+{{define "content"}}
+<section class="card">
+  <div class="cardhead">
+    <h2>Config JSON Schema Reference</h2>
+    <a class="btn small" href="/api/v1/config/schema" download="strand-schema.json">Download Schema</a>
+  </div>
+  <p class="muted small">Schema definition for Strand pipeline configuration files according to <code>spec/02-specs.md §10</code>. Use this JSON Schema for YAML validation, linting, and editor autocompletion.</p>
+  <pre class="code log wrapcode" id="schema-json" tabindex="0" aria-label="JSON Schema">{{.Body.JSONSchema}}</pre>
+</section>
+{{end}}

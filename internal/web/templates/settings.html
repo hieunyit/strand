@@ -1,7 +1,11 @@
 {{define "content"}}
 {{with .Body}}
-{{if .Message}}<p class="okbox" role="status">{{.Message}}</p>{{end}}
-{{if .Error}}<p class="warnbox" role="alert">{{.Error}}</p>{{end}}
+{{if .Message}}<div class="alert alert-success mb" role="status">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="alert alert-error mb" role="alert">{{.Error}}</div>{{end}}
+<nav class="tabs" role="tablist" aria-label="Settings sections">
+  <a href="/settings" class="tab active" role="tab" aria-selected="true" aria-current="page">{{icon "config"}}<span>General Settings</span></a>
+  <a href="/settings/db" class="tab" role="tab" aria-selected="false">{{icon "db"}}<span>Database Admin</span></a>
+</nav>
 <section class="card"><div class="cardhead"><h2>Settings</h2></div>
   <p class="muted small">Effective value of each setting and where it comes from. Precedence: <b>environment variable</b> &gt; <b>database</b> (saved here) &gt; <b>web.yaml</b> &gt; default. <b>Reset</b> removes the saved value so the web.yaml value (or the default) applies again. Every change is written to the audit log.</p>
   <form method="post" action="/settings" class="settings">

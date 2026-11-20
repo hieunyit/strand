@@ -18,7 +18,7 @@ import (
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings", "mcp"}
+var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings", "mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error"}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -321,22 +321,105 @@ func fmtRanges(m map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
+type BreadcrumbItem struct {
+	Label string
+	URL   string
+}
+
 type pageData struct {
-	Title    string
-	DocTitle string    // <title> text; defaults to Title
-	AsOf     time.Time // when the page was rendered (shown as "data as of")
-	Active   string    // overview | pipelines | tên pipeline
-	CSRF     string
-	Nav      []NavItem
-	Version  string
-	Host     string // host name shown in the top bar
-	Standby  string // non-empty on a standby instance (banner)
-	Refresh  int    // giây; 0 = không tự làm mới toàn trang
+	Title        string
+	DocTitle     string    // <title> text; defaults to Title
+	Subtitle     string    // Subtitle shown below Title in .pagehead
+	Breadcrumbs  []BreadcrumbItem
+	Actions      template.HTML
+	SummaryStrip template.HTML
+	AsOf         time.Time // when the page was rendered (shown as "data as of")
+	Active       string    // overview | pipelines | tên pipeline
+	CSRF         string
+	Nav          []NavItem
+	Version      string
+	Host         string // host name shown in the top bar
+	Standby      string // non-empty on a standby instance (banner)
+	Refresh      int    // giây; 0 = không tự làm mới toàn trang
 	// Live: trang nhận số liệu qua SSE ("all" hoặc tên pipeline); "" = trang tĩnh. Interval: chu kỳ của sampler.
-	Live     string
-	LiveLogs bool
-	Interval int
-	Body     any
+	Live         string
+	LiveLogs     bool
+	Interval     int
+	Body         any
+}
+
+func defaultBreadcrumbs(page, title, active string) []BreadcrumbItem {
+	switch page {
+	case "overview":
+		return []BreadcrumbItem{{Label: "Home", URL: ""}}
+	case "pipelines":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Pipelines", URL: ""}}
+	case "new_pipeline":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Pipelines", URL: "/pipelines"}, {Label: "New pipeline", URL: ""}}
+	case "jobs":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Jobs", URL: ""}}
+	case "job":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Jobs", URL: "/jobs"}, {Label: title, URL: ""}}
+	case "backups":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: ""}}
+	case "mcp":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "MCP", URL: ""}}
+	case "settings":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Settings", URL: ""}}
+	case "db_admin":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Settings", URL: "/settings"}, {Label: "Database Admin", URL: ""}}
+	case "schema":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Help", URL: ""}, {Label: "Configuration Schema", URL: ""}}
+	case "spool_inspect":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Tools", URL: ""}, {Label: "Spool Inspect", URL: ""}}
+	case "archive":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Tools", URL: ""}, {Label: "Archive Binlog", URL: ""}}
+	case "tunnel":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Tools", URL: ""}, {Label: "SSH Tunnels", URL: ""}}
+	case "error":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Error", URL: ""}}
+	case "detail":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Pipelines", URL: "/pipelines"}, {Label: active, URL: ""}}
+	case "wizard":
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Pipelines", URL: "/pipelines"}, {Label: active, URL: "/pipelines/" + active}, {Label: title, URL: ""}}
+	default:
+		return []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: title, URL: ""}}
+	}
+}
+
+func defaultSubtitle(page string) string {
+	switch page {
+	case "overview":
+		return "Real-time health, lag, and sync status across all pipelines"
+	case "pipelines":
+		return "Manage replication pipelines, review state and performance"
+	case "new_pipeline":
+		return "Configure and register a new change data capture pipeline"
+	case "jobs":
+		return "Task execution history, verification runs, and background jobs"
+	case "job":
+		return "Job execution log and real-time process output"
+	case "backups":
+		return "Database backups, restore verification, and disaster recovery"
+	case "mcp":
+		return "Model Context Protocol read-only tools and sidecar integration"
+	case "settings":
+		return "Server configuration, security parameters, and maintenance"
+	case "db_admin":
+		return "Web console metadata database migration and backup operations"
+	case "schema":
+		return "Configuration schema reference and YAML validation specification"
+	case "spool_inspect":
+		return "Read-only sidecar inspection of on-disk Pebble spool buffers"
+	case "archive":
+		return "Binlog archiver status, continuous log preservation, and contents"
+	case "tunnel":
+		return "Secure SSH port forwarding tunnels for database connections"
+	case "error":
+		return "Requested resource or operation encountered an issue"
+	default:
+		return ""
+	}
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pageData) {
@@ -346,6 +429,12 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 	d.Interval = int(s.samp.Interval().Seconds())
 	if d.AsOf.IsZero() {
 		d.AsOf = s.now()
+	}
+	if len(d.Breadcrumbs) == 0 {
+		d.Breadcrumbs = defaultBreadcrumbs(name, d.Title, d.Active)
+	}
+	if d.Subtitle == "" {
+		d.Subtitle = defaultSubtitle(name)
 	}
 	var buf bytes.Buffer
 	if err := s.pages[name].ExecuteTemplate(&buf, "base", d); err != nil {
@@ -496,10 +585,18 @@ func (s *Server) controls(p *Pipeline, v PipelineView) Controls {
 	return c
 }
 
-var tabLabels = map[string]string{"graph": "Graph", "tables": "Tables", "checkpoint": "Checkpoint", "errors": "Errors", "config": "Config", "logs": "Logs", "jobs": "Jobs", "repair": "Repair", "promote": "Promote"}
+var tabLabels = map[string]string{
+	"graph": "Graph", "tables": "Tables", "checkpoint": "Checkpoint", "errors": "Errors",
+	"config": "Config", "logs": "Logs", "jobs": "Jobs", "schema": "Schema", "objects": "Objects",
+	"repair": "Repair", "promote": "Promote", "seed": "Seed",
+}
 
 func tabIcon(key string) string {
-	if i, ok := map[string]string{"graph": "graph", "tables": "table", "checkpoint": "flag", "errors": "alert", "config": "config", "logs": "logs", "jobs": "jobs", "repair": "repair", "promote": "promote"}[key]; ok {
+	if i, ok := map[string]string{
+		"graph": "graph", "tables": "table", "checkpoint": "flag", "errors": "alert",
+		"config": "config", "logs": "logs", "jobs": "jobs", "schema": "config", "objects": "table",
+		"repair": "repair", "promote": "promote", "seed": "db",
+	}[key]; ok {
 		return i
 	}
 	return "pipelines"
@@ -519,7 +616,12 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	base := "/pipelines/" + p.Name
 	b := detailBody{Tab: tab, View: s.view(p)}
 	b.Ctl = s.controls(p, b.View)
-	for _, t := range [][2]string{{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"}, {"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"}, {"repair", "Repair"}, {"promote", "Promote"}} {
+	for _, t := range [][2]string{
+		{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"},
+		{"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"},
+		{"schema", "Schema"}, {"objects", "Objects"},
+		{"repair", "Repair"}, {"promote", "Promote"}, {"seed", "Seed"},
+	} {
 		href := base
 		if t[0] != "graph" {
 			href += "/" + t[0]
@@ -550,6 +652,8 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		if b.Ctl.Running {
 			b.Src, b.SrcLoaded = s.cachedSourceTables(p)
 		}
+	case "schema", "objects":
+		b.Status = s.statusView(ctx, p)
 	case "checkpoint":
 		b.Checkpoint = s.checkpointView(ctx, p)
 		b.Status = s.statusView(ctx, p)
@@ -567,6 +671,125 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		liveLogs = true
 	}
 	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Active: p.Name, Live: live, LiveLogs: liveLogs, Body: b})
+}
+
+type spoolInspectReport struct {
+	DiscoveredFiles int
+	DiscoveredBytes int64
+	NewFiles        int
+	NewBytes        int64
+	ExistingFiles   int
+	ExistingBytes   int64
+	Warnings        []string
+	Errors          []string
+}
+
+type spoolInspectView struct {
+	SpoolDir     string
+	TrustedRoots string
+	Report       *spoolInspectReport
+}
+
+type archiveFileItem struct {
+	Name      string
+	Size      string
+	ModTime   string
+	IsPartial bool
+}
+
+type archiveView struct {
+	Running   bool
+	FileCount int
+	TotalSize string
+	Files     []archiveFileItem
+}
+
+type tunnelItem struct {
+	ID           string
+	LocalAddress string
+	Remote       string
+	SSHAddress   string
+	SSHUser      string
+}
+
+type tunnelView struct {
+	Tunnels []tunnelItem
+}
+
+type dbMigrateReport struct {
+	Verified bool
+	Summary  struct {
+		Total    int
+		New      int
+		Present  int
+		Conflict int
+	}
+	Problems []string
+}
+
+type dbAdminView struct {
+	DryRun        bool
+	MigrateReport *dbMigrateReport
+}
+
+func (s *Server) pageSchemaHelp(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.render(w, "schema", sess, pageData{
+		Title:  "Configuration Schema",
+		Active: "settings",
+		Body: struct {
+			JSONSchema string
+		}{
+			JSONSchema: config.JSONSchema,
+		},
+	})
+}
+
+func (s *Server) pageSpoolInspect(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.render(w, "spool_inspect", sess, pageData{
+		Title:  "Spool Inspect",
+		Active: "tools",
+		Body:   &spoolInspectView{},
+	})
+}
+
+func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.render(w, "archive", sess, pageData{
+		Title:  "Archive Binlog",
+		Active: "tools",
+		Body: &archiveView{
+			Running:   false,
+			FileCount: 0,
+			TotalSize: "0 B",
+		},
+	})
+}
+
+func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.render(w, "tunnel", sess, pageData{
+		Title:  "SSH Tunnels",
+		Active: "tools",
+		Body:   &tunnelView{},
+	})
+}
+
+func (s *Server) pageDBAdmin(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.render(w, "db_admin", sess, pageData{
+		Title:  "Database Admin",
+		Active: "settings",
+		Body:   &dbAdminView{},
+	})
+}
+
+func (s *Server) renderError(w http.ResponseWriter, r *http.Request, sess *Session, code int, msg string) {
+	w.WriteHeader(code)
+	s.render(w, "error", sess, pageData{
+		Title:    fmt.Sprintf("Error %d", code),
+		Subtitle: "An error occurred while processing your request",
+		Body: struct {
+			Code    int
+			Message string
+		}{Code: code, Message: msg},
+	})
 }
 
 // chartCard is one chart of the Graph tab; Key names it for the live redraw in app.js.

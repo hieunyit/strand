@@ -1,21 +1,21 @@
 {{define "content"}}
 {{with .Body}}
 {{template "pipeline-head" .}}
-{{if .View.Missing}}<section class="warnbox" role="alert" aria-label="Pipeline file missing">
+{{if .View.Missing}}<div class="alert alert-warn mb" role="alert" aria-label="Pipeline file missing">
   <b>This pipeline {{.View.Missing}}.</b> It is kept in the metadata database (with its config, desired state and history) and is not restored automatically.
-  <div class="actions-row">
+  <div class="actions-row mt10">
     <form class="act inline" data-action="registry-restore" data-pipeline="{{.View.Name}}" data-confirm="Write {{.View.ConfigPath}} (and its .env, when stored) from the database copy?"><button class="btn" type="submit">Restore file</button></form>
     <form class="act inline" data-action="registry-forget" data-pipeline="{{.View.Name}}" data-confirm="Remove {{.View.Name}} from the registry? Its database row, desired state and settings go; files on disk and job history stay." data-retype="{{.View.Name}}"><button class="btn danger" type="submit">Remove from registry</button></form>
   </div>
-</section>{{end}}
-{{range .View.Conflicts}}<section class="warnbox" role="alert" aria-label="Disk edit set aside">
+</div>{{end}}
+{{range .View.Conflicts}}<div class="alert alert-warn mb" role="alert" aria-label="Disk edit set aside">
   <b>The {{if eq .File "env"}}.env file{{else}}config file{{end}} on disk differed from the database copy</b> (the source of truth) and was replaced by it on {{.At}}. The disk version was saved as <code>{{.Path}}</code>.
-  <div class="actions-row">
+  <div class="actions-row mt10">
     <form class="act inline" data-action="conflict-adopt" data-pipeline="{{$.Body.View.Name}}" data-confirm="Use the disk version from {{.Path}}?{{if ne .File "env"}} It is validated first; nothing changes if validation fails.{{end}}"><input type="hidden" name="path" value="{{.Path}}"><button class="btn" type="submit">Adopt disk version</button></form>
     <form class="act inline" data-action="conflict-dismiss" data-pipeline="{{$.Body.View.Name}}"><input type="hidden" name="path" value="{{.Path}}"><button class="btn" type="submit">Keep database version</button></form>
   </div>
-</section>{{end}}
-<nav class="tabs" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="{{if eq $.Body.Tab .Key}}active{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}{{.Label}}</a>{{end}}</nav>
+</div>{{end}}
+<nav class="tabs" role="tablist" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $.Body.Tab .Key}} active{{end}}" role="tab" aria-selected="{{if eq $.Body.Tab .Key}}true{{else}}false{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
 
 {{if eq .Tab "graph"}}
   <section class="card"><h2>Data path</h2><div class="graphwrap">{{.Graph}}</div>
@@ -277,31 +277,83 @@
     <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
       <p class="muted small">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
       <div class="rowgap">
-        <button class="btn" type="submit" data-do="plan">Plan (what will be copied)</button>
-        <button class="btn" type="submit" data-do="schema-init-dry">Preview DDL for missing target tables</button>
-        <button class="btn primary" type="submit" data-do="schema-diff">Show pending schema changes</button>
+        <button class="btn" type="submit" data-do="plan" data-action="plan">Plan (what will be copied)</button>
+        <button class="btn" type="submit" data-do="schema-init-dry" data-action="schema-init-dry">Preview DDL for missing target tables</button>
+        <button class="btn primary" type="submit" data-do="schema-diff" data-action="schema-diff">Show pending schema changes</button>
         <label class="small"><input type="checkbox" name="all" value="true"> include applied</label>
       </div>
     </form>
     <form class="act mt10" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
-      <label>Change id <input type="text" name="id" class="num mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list"></label>
-      <button class="btn" type="submit" data-do="schema-approve-dry">Preview DDL</button>
-      <button class="btn danger" type="submit" data-do="schema-approve" data-confirm="Apply the proposed DDL of this schema change on the target? The pipeline continues once the change is applied." data-retype="{{.View.Name}}">Approve &amp; apply</button>
+      <div class="form-field">
+        <label for="schema-change-id-jobs">Change id <span class="req">*</span></label>
+        <input type="text" id="schema-change-id-jobs" name="id" class="num mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list">
+        <span class="help">ID of the proposed schema change to inspect or approve.</span>
+      </div>
+      <div class="mt10">
+        <button class="btn" type="submit" data-do="schema-approve-dry" data-action="schema-approve-dry">Preview DDL</button>
+        <button class="btn danger" type="submit" data-do="schema-approve" data-action="schema-approve" data-confirm="Apply the proposed DDL of this schema change on the target? The pipeline continues once the change is applied." data-retype="{{.View.Name}}">Approve &amp; apply</button>
+      </div>
     </form>
   </section>
   {{if eq .View.SourceKind "mysql"}}
   <section class="card"><h2>Database objects</h2>
     <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
       <p class="muted small">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
-      <button class="btn" type="submit" data-do="objects-list">List objects</button>
+      <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
       {{if eq .View.TargetKind "mysql"}}
       <label>Phase <select name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select></label>
-      <button class="btn danger" type="submit" data-do="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>
+      <button class="btn danger" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>
       {{end}}
     </form>
   </section>
   {{end}}
   <section class="card"><h2>Job history</h2>{{template "jobs-table" (jobsCtx .Jobs false)}}</section>
+{{end}}
+
+{{if eq .Tab "schema"}}
+  <section class="card">
+    <div class="cardhead">
+      <h2>Plan &amp; schema evolution</h2>
+      <a class="btn ghost small" href="/help/schema">Config schema guide</a>
+    </div>
+    <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
+      <p class="muted small">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
+      <div class="rowgap">
+        <button class="btn" type="submit" data-do="plan" data-action="plan">Plan (what will be copied)</button>
+        <button class="btn" type="submit" data-do="schema-init-dry" data-action="schema-init-dry">Preview DDL for missing target tables</button>
+        <button class="btn primary" type="submit" data-do="schema-diff" data-action="schema-diff">Show pending schema changes</button>
+        <label class="small"><input type="checkbox" name="all" value="true"> include applied</label>
+      </div>
+    </form>
+    <form class="act mt10" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
+      <div class="form-field">
+        <label for="schema-change-id">Change id <span class="req">*</span></label>
+        <input type="text" id="schema-change-id" name="id" class="num mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list">
+        <span class="help">ID of the proposed schema change to inspect or approve.</span>
+      </div>
+      <div class="mt10">
+        <button class="btn" type="submit" data-do="schema-approve-dry" data-action="schema-approve-dry">Preview DDL</button>
+        <button class="btn danger" type="submit" data-do="schema-approve" data-action="schema-approve" data-confirm="Apply the proposed DDL of this schema change on the target? The pipeline continues once the change is applied." data-retype="{{.View.Name}}">Approve &amp; apply</button>
+      </div>
+    </form>
+  </section>
+{{end}}
+
+{{if eq .Tab "objects"}}
+  <section class="card">
+    <h2>Database objects</h2>
+    <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
+      <p class="muted small">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
+      <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
+      {{if eq .View.TargetKind "mysql"}}
+      <div class="form-field mt10">
+        <label for="objects-phase">Phase</label>
+        <select id="objects-phase" name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select>
+      </div>
+      <button class="btn danger mt10" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>
+      {{end}}
+    </form>
+  </section>
 {{end}}
 
 {{if eq .Tab "logs"}}

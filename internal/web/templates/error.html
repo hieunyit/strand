@@ -1,0 +1,10 @@
+{{define "content"}}
+<section class="card">
+  <div class="empty-state">
+    {{icon "alert"}}
+    <b>{{.Body.Code}} · {{.Body.Title}}</b>
+    <span>{{.Body.Message}}</span>
+    <a class="btn primary" href="/">Return to Overview</a>
+  </div>
+</section>
+{{end}}

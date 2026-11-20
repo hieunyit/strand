@@ -328,7 +328,13 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /settings", s.auth(false, s.pageSettings))
 	mux.Handle("GET /api/v1/settings", s.auth(true, s.apiSettingsGet))
 	mux.Handle("POST /api/v1/settings", s.auth(true, s.apiSettingsSave))
+	mux.Handle("GET /settings/db", s.auth(false, s.pageDBAdmin))
+	mux.Handle("GET /help/schema", s.auth(false, s.pageSchemaHelp))
+	mux.Handle("GET /tools/spool-inspect", s.auth(false, s.pageSpoolInspect))
+	mux.Handle("GET /archive", s.auth(false, s.pageArchive))
+	mux.Handle("GET /tunnels", s.auth(false, s.pageTunnel))
 	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
+	mux.Handle("GET /api/v1/jobs/{id}/download", s.auth(false, s.apiJobDownload))
 	mux.Handle("GET /backups", s.auth(false, s.pageBackups))
 	mux.Handle("GET /api/v1/backup-jobs", s.auth(true, s.apiBackupJobs))
 	mux.Handle("GET /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobGet))
@@ -338,7 +344,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/v1/backup-jobs/{id}/start", s.auth(true, s.apiBackupJobStart))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/stop", s.auth(true, s.apiBackupJobStop))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/run", s.auth(true, s.apiBackupJobRun))
-	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs"} {
+	for _, tab := range []string{"", "tables", "checkpoint", "errors", "config", "logs", "jobs", "schema", "objects"} {
 		tab := tab
 		p := "GET /pipelines/{name}"
 		if tab != "" {

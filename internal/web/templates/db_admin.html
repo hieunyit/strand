@@ -1,0 +1,60 @@
+{{define "content"}}
+<nav class="tabs" role="tablist" aria-label="Settings sections">
+  <a href="/settings" role="tab" class="tab" aria-selected="false">{{icon "config"}}General Settings</a>
+  <a href="/settings/db" role="tab" class="tab active" aria-selected="true" aria-current="page">{{icon "db"}}Database Admin</a>
+</nav>
+
+<section class="card">
+  <div class="cardhead"><h2>PostgreSQL Metadata Store Migration (strand web db migrate)</h2></div>
+  <p class="muted small">Migrate configuration, pipelines, jobs, wizards, and audit log from file mode to PostgreSQL metadata database with full SHA-256 verification.</p>
+  <form class="act form-grid" data-action="db-migrate" method="post" action="/settings/db/migrate">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <div class="form-field full">
+      <label for="mig-dsn">PostgreSQL Database DSN (optional override)</label>
+      <input type="text" id="mig-dsn" name="dsn" class="mono wide" placeholder="postgres://user:pass@127.0.0.1:5432/strand_web?sslmode=disable">
+      <span class="help">Defaults to database.dsn from web.yaml or STRAND_WEB_DATABASE_DSN</span>
+    </div>
+    <div class="toolbar">
+      <button class="btn" type="submit" name="dry_run" value="true" data-action="db-migrate-dry">Dry-Run Migration (Preview)</button>
+      <button class="btn primary" type="submit" name="dry_run" value="false" data-action="db-migrate" data-confirm="Execute migration to PostgreSQL metadata database?">Apply Migration</button>
+    </div>
+  </form>
+</section>
+
+{{if .Body.MigrateReport}}
+<section class="card">
+  <div class="cardhead"><h2>Migration Report ({{if .Body.DryRun}}Dry-Run{{else}}Applied{{end}})</h2></div>
+  {{if .Body.MigrateReport.Summary}}
+  <dl class="kv">
+    <dt>Total Items</dt><dd class="mono">{{.Body.MigrateReport.Summary.Total}}</dd>
+    <dt>New Items</dt><dd class="mono">{{.Body.MigrateReport.Summary.New}}</dd>
+    <dt>Present Items</dt><dd class="mono">{{.Body.MigrateReport.Summary.Present}}</dd>
+    <dt>Conflicts</dt><dd class="mono">{{.Body.MigrateReport.Summary.Conflict}}</dd>
+    <dt>Verified</dt><dd><span class="badge {{if .Body.MigrateReport.Verified}}st-synced{{else}}st-failed{{end}}">{{if .Body.MigrateReport.Verified}}verified{{else}}unverified{{end}}</span></dd>
+  </dl>
+  {{end}}
+  {{if .Body.MigrateReport.Problems}}
+  <div class="alert alert-warn" role="alert">
+    <b>Problems:</b>
+    <ul>{{range .Body.MigrateReport.Problems}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+</section>
+{{end}}
+
+<section class="card">
+  <div class="cardhead"><h2>Export Metadata Database to Files (strand web db export)</h2></div>
+  <p class="muted small">Export all pipelines, state, jobs, wizards, and audit log from PostgreSQL metadata store into a file directory layout for backup or reverting to file mode.</p>
+  <form class="act form-grid" data-action="db-export" method="post" action="/settings/db/export">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <div class="form-field full">
+      <label for="exp-dir">Export Target Directory <span class="req">*</span></label>
+      <input type="text" id="exp-dir" name="dir" class="mono wide" placeholder="/var/backups/strand-web-export" required>
+      <span class="help">Empty or new directory where exported state files will be written</span>
+    </div>
+    <div class="toolbar">
+      <button class="btn primary" type="submit" data-action="db-export" data-confirm="Export all database metadata to directory?">Export Database</button>
+    </div>
+  </form>
+</section>
+{{end}}

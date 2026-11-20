@@ -1,6 +1,16 @@
 {{define "content"}}
-{{if .Body.Message}}<p class="warnbox" role="status">{{.Body.Message}}</p>{{end}}
+{{if .Body.Message}}<div class="alert alert-warn mb" role="status">{{.Body.Message}}</div>{{end}}
+<nav class="tabs" role="tablist" aria-label="Backup sections">
+  <button type="button" class="tab{{if not .Body.Paged}} active{{end}}" role="tab" aria-selected="{{if not .Body.Paged}}true{{else}}false{{end}}" data-tab-target="dashboard">{{icon "overview"}}<span>Dashboard</span></button>
+  <button type="button" class="tab" role="tab" aria-selected="false" data-tab-target="jobs">{{icon "jobs"}}<span>Scheduled Jobs</span>{{if .Body.Jobs}}<span class="tab-count">{{len .Body.Jobs}}</span>{{end}}</button>
+  <button type="button" class="tab" role="tab" aria-selected="false" data-tab-target="restore">{{icon "db"}}<span>Restore Wizard</span></button>
+  <button type="button" class="tab" role="tab" aria-selected="false" data-tab-target="repos">{{icon "config"}}<span>Repositories</span>{{if .Body.Repos}}<span class="tab-count">{{len .Body.Repos}}</span>{{end}}</button>
+  <button type="button" class="tab" role="tab" aria-selected="false" data-tab-target="verify">{{icon "flag"}}<span>Verification</span>{{if .Body.Checks}}<span class="tab-count">{{len .Body.Checks}}</span>{{end}}</button>
+  <button type="button" class="tab{{if .Body.Paged}} active{{end}}" role="tab" aria-selected="{{if .Body.Paged}}true{{else}}false{{end}}" data-tab-target="catalog">{{icon "table"}}<span>Catalog</span>{{if .Body.Backups}}<span class="tab-count">{{len .Body.Backups}}</span>{{end}}</button>
+</nav>
+
 {{if not .Body.Paged}}
+<div data-tab-content="dashboard">
 <section class="card" id="backup-dashboard">
   <div class="cardhead"><h2>Backup dashboard</h2><a class="btn small" href="/metrics">Prometheus metrics</a></div>
   {{if .Body.Sources}}
@@ -20,7 +30,9 @@
   </table></div>
   {{else if not .Body.Message}}<div class="empty-state"><b>No backups yet</b><span>Create a backup job below.</span></div>{{end}}
 </section>
+</div>
 
+<div data-tab-content="jobs" hidden>
 <section class="card">
   <div class="cardhead"><h2>Scheduled backup jobs</h2></div>
   <p class="muted">Built-in methods (mysqldump, mydumper, pg_dump, pg_basebackup, mongodump) stream the native tool's output to the repository, compressed and encrypted on the Strand host; <em>custom</em> runs a wrapper script from the allow-listed command directory. Database passwords are read from the Web service environment variable you name, never stored. Only the active Web instance runs schedules, retention and verification.</p>
@@ -119,7 +131,9 @@
   </form>
   {{end}}
 </section>
+</div>
 
+<div data-tab-content="restore" hidden>
 <section class="card" id="restore-section">
   <div class="cardhead"><h2>Restore</h2></div>
   <p class="muted">A restore always goes to a <strong>new</strong> target: a database that does not exist yet (logical backups) or an empty directory (pg_basebackup). Choose a backup, or a source and a point in time: Strand picks the base backup and replays archived logs up to that time. Progress and log appear on the job page.</p>
@@ -137,7 +151,9 @@
     <div class="toolbar"><button class="btn primary" type="submit">Start restore</button><span class="muted" id="restore-message" role="status"></span></div>
   </form>
 </section>
+</div>
 
+<div data-tab-content="repos" hidden>
 <section class="card" id="repositories-section">
   <div class="cardhead"><h2>Repositories</h2></div>
   <p class="muted">Endpoints and credentials stay in the Web service environment: a repository names its variable prefix (<code>STRAND_BACKUP_REPO_&lt;NAME&gt;_ENDPOINT</code>, <code>_ACCESS_KEY</code>, <code>_SECRET_KEY</code>, ...). Object Lock repositories make every new object immutable for the given days (the bucket must be created with Object Lock).</p>
@@ -158,7 +174,9 @@
     <div class="toolbar"><button class="btn primary" type="submit">Add repository</button><span class="muted" id="repo-message" role="status"></span></div>
   </form>
 </section>
+</div>
 
+<div data-tab-content="verify" hidden>
 {{if .Body.Checks}}
 <section class="card">
   <div class="cardhead"><h2>Recent verification</h2></div>
@@ -166,9 +184,16 @@
     <thead><tr><th>Backup</th><th>Check</th><th>Result</th><th>Finished</th><th>Detail</th></tr></thead>
     <tbody>{{range .Body.Checks}}<tr><td class="mono small">{{.BackupID}}</td><td>{{.Kind}}</td><td><span class="badge {{if eq .Status "ok"}}st-synced{{else}}st-failed{{end}}">{{.Status}}</span></td><td class="nowrap">{{ts .FinishedAt}}</td><td class="small">{{.Detail}}</td></tr>{{end}}</tbody></table></div>
 </section>
+{{else}}
+<section class="card">
+  <div class="cardhead"><h2>Recent verification</h2></div>
+  <div class="empty-state"><b>No verification checks yet</b><span>Automated verification runs on scheduled backups will appear here.</span></div>
+</section>
 {{end}}
+</div>
 {{end}}
 
+<div data-tab-content="catalog"{{if not .Body.Paged}} hidden{{end}}>
 <section class="card">
   <div class="cardhead"><h2>Central backup catalog</h2></div>
   <p class="muted">Backup artifacts, log segments and their recovery metadata stored in the configured repositories.</p>
@@ -199,4 +224,5 @@
   {{if or .Body.NextCursor .Body.Paged}}<nav class="pad" aria-label="Backup catalog pages">{{if .Body.Paged}}<a href="/backups">Newest backups</a>{{end}}{{if .Body.NextCursor}} <a href="/backups?cursor={{.Body.NextCursor}}" rel="next">Older backups</a>{{end}}</nav>{{end}}
   {{else if .Body.Paged}}<div class="empty-state"><b>No older backups</b><span><a href="/backups">Back to the newest backups</a></span></div>{{else}}<div class="empty-state"><b>No backups registered</b><span>Create a backup job or upload a backup artifact to add it to this catalog.</span></div>{{end}}
 </section>
+</div>
 {{end}}

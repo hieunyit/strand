@@ -31,7 +31,9 @@
 </aside>
 <div class="main">
   <header class="top" role="banner">
-    <h1>{{.Title}}</h1>
+    <div class="topleft">
+      <span class="topbrand">{{.Title}}</span>
+    </div>
     <div class="topright">
       {{if .Live}}<span class="livepill" id="livepill" data-conn="connecting" role="status" aria-live="polite" title="Live data from the console's background sampler"><span class="livedot" aria-hidden="true"></span><span id="livetext">Connecting</span></span>{{end}}
       <span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>
@@ -40,13 +42,29 @@
         <summary aria-label="User menu">{{icon "user"}}admin</summary>
         <div class="menu">
           <div class="who">Signed in as admin</div>
-          <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn ghost" type="submit">{{icon "logout"}}Log out</button></form>
+          <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn ghost" type="submit" data-action="logout">{{icon "logout"}}Log out</button></form>
         </div>
       </details>
     </div>
   </header>
-  {{if .Standby}}<p class="warnbox standby" role="status" id="standby-banner">{{.Standby}}</p>{{end}}
-  <main id="content" data-refresh="{{.Refresh}}"{{if .Live}} data-live="{{.Live}}" data-interval="{{.Interval}}"{{if .LiveLogs}} data-live-logs="1"{{end}}{{end}}><p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>{{template "content" .}}</main>
+  {{if .Standby}}<div class="alert alert-warn standby" role="status" id="standby-banner">{{.Standby}}</div>{{end}}
+  <main id="content" data-refresh="{{.Refresh}}"{{if .Live}} data-live="{{.Live}}" data-interval="{{.Interval}}"{{if .LiveLogs}} data-live-logs="1"{{end}}{{end}}>
+    {{if .Breadcrumbs}}
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      {{range $i, $b := .Breadcrumbs}}{{if $i}} <span class="sep" aria-hidden="true">/</span> {{end}}{{if $b.URL}}<a href="{{$b.URL}}">{{$b.Label}}</a>{{else}}<span aria-current="page">{{$b.Label}}</span>{{end}}{{end}}
+    </nav>
+    {{end}}
+    <header class="pagehead">
+      <div class="pagehead-title">
+        <h1>{{.Title}}</h1>
+        {{if .Subtitle}}<p class="subtitle">{{.Subtitle}}</p>{{end}}
+      </div>
+      {{if .Actions}}<div class="pagehead-actions">{{.Actions}}</div>{{end}}
+    </header>
+    {{if .SummaryStrip}}<div class="summary-strip">{{.SummaryStrip}}</div>{{end}}
+    <p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>
+    {{template "content" .}}
+  </main>
 </div>
 <dialog id="confirm" class="dlg" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
   <form method="dialog" id="confirm-form">
@@ -128,10 +146,11 @@
     <span class="muted small meta">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}} &middot; sampled <b class="c-time" data-bind="sampled">{{clock .View.SampledAt}}</b></span>
   </div>
   {{$why := stateReason .View}}<p class="reason-line {{stateClass $.View.State}}" data-bind-show="reason"{{if not $why}} hidden{{end}}><b>Why:</b> <span class="wrap" data-bind="reason">{{$why}}</span></p>
+  {{if .View.Top}}{{if .View.Top.BreakerOpen}}<div class="alert alert-error mb" role="alert" data-bind-show="breaker"><strong>Circuit Breaker Open:</strong> <span data-bind="breaker_reason">{{.View.Top.BreakerReason}}</span></div>{{end}}{{end}}
   <div class="metrics" aria-label="Live metrics">
     <div class="metric"><div class="m-label">Lag</div><div class="m-value c-num {{lagClass .View}}" data-bind="lag" data-bind-lag>{{if .View.Top}}{{lag .View.Top.LagSeconds}}{{else}}-{{end}}</div><div class="m-sub">source to target</div></div>
     <div class="metric"><div class="m-label" title="Rows applied per second, averaged over the last 30 s">Rows/s <span class="m-hint">30 s avg</span></div><div class="m-value c-num" data-bind="rows">{{if .View.Top}}{{num .View.Rates.Rows}}{{else}}-{{end}}</div><div class="m-sub"><span class="c-num" data-bind="txn">{{if .View.Top}}{{num .View.Rates.Txn}}{{else}}-{{end}}</span> txn/s &middot; zone <span data-bind="zone">{{if .View.Top}}{{if .View.Top.Zone}}{{.View.Top.Zone}}{{else}}-{{end}}{{else}}-{{end}}</span></div></div>
-    {{with tablesOf .View}}<div class="metric"><div class="m-label">Snapshot</div><div class="m-value c-num" data-bind="tables">{{if gt .Total 0}}{{.Done}} / {{.Total}}{{else}}-{{end}}</div><div data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Pct}}</span></div><div class="m-sub" data-bind-hide="tables"{{if gt .Total 0}} hidden{{end}}>no snapshot running</div><div class="m-sub" data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span class="c-num" data-bind="snap_rows">{{num $.View.Rates.SnapRows}}</span> rows/s</div></div>{{end}}
+    {{with tablesOf .View}}<div class="metric"><div class="m-label">Snapshot</div><div class="m-value c-num" data-bind="tables">{{if gt .Total 0}}{{.Done}} / {{.Total}}{{else}}-{{end}}</div><div data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Pct}}</span></div><div class="m-sub" data-bind-hide="tables"{{if gt .Total 0}} hidden{{end}}>no snapshot running</div><div class="m-sub" data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span class="c-num" data-bind="snap_rows">{{num $.View.Rates.SnapRows}}</span> rows/s{{if $.View.Top}}{{if gt $.View.Top.Progress 0.0}} &middot; <span data-bind="progress">{{pct $.View.Top.Progress}}</span>{{end}}{{if gt $.View.Top.ETASeconds 0.0}} &middot; ETA <span data-bind="eta">{{secs $.View.Top.ETASeconds}}</span>{{end}}{{end}}</div></div>{{end}}
     <div class="metric"><div class="m-label">Uptime</div><div class="m-value c-num" data-bind="uptime">{{if .Head.HasInfo}}{{secs .Head.Uptime}}{{else}}-{{end}}</div>{{if .View.Runtime.Since}}<div class="m-sub">since {{.View.Runtime.Since}}</div>{{end}}</div>
     <div class="metric"><div class="m-label">Last checkpoint</div><div class="m-value c-num" data-bind="ckpt">{{if not .Head.CkptAt.IsZero}}{{rel .Head.CkptAt}}{{else}}-{{end}}</div><div class="m-sub" data-bind="ckpt_ts">{{if not .Head.CkptAt.IsZero}}{{ts .Head.CkptAt}}{{end}}</div></div>
   </div>
@@ -152,7 +171,7 @@
     </span>
     {{if .Ctl.JobActive}}<a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
   </div>
-  {{if .View.ConfigErr}}<p class="err wrap">Config error: {{.View.ConfigErr}}</p>{{end}}
-  {{if and .View.LastExit (not .View.Runtime.Running)}}<p class="warnbox">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code class="wrap">{{.View.Runtime.LastError}}</code>{{end}}</p>{{end}}
+  {{if .View.ConfigErr}}<div class="alert alert-error mt10" role="alert">Config error: {{.View.ConfigErr}}</div>{{end}}
+  {{if and .View.LastExit (not .View.Runtime.Running)}}<div class="alert alert-warn mt10" role="alert">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code class="wrap">{{.View.Runtime.LastError}}</code>{{end}}</div>{{end}}
 </section>
 {{end}}

@@ -1,0 +1,53 @@
+{{define "content"}}
+<section class="card">
+  <div class="cardhead"><h2>Verified SSH Tunnels</h2></div>
+  <p class="muted small">Create loopback-only verified SSH local port forwards to reach private database endpoints through bastions.</p>
+  <form class="act form-grid" data-action="tunnel-open">
+    <div class="form-field">
+      <label for="tun-ssh">SSH Bastion Host:Port <span class="req">*</span></label>
+      <input type="text" id="tun-ssh" name="ssh" placeholder="bastion.internal:22" required>
+    </div>
+    <div class="form-field">
+      <label for="tun-user">SSH Username <span class="req">*</span></label>
+      <input type="text" id="tun-user" name="user" placeholder="ops" required>
+    </div>
+    <div class="form-field">
+      <label for="tun-remote">Remote Target Host:Port <span class="req">*</span></label>
+      <input type="text" id="tun-remote" name="remote" placeholder="db-master.internal:3306" required>
+    </div>
+    <div class="form-field">
+      <label for="tun-listen">Local Listen Address</label>
+      <input type="text" id="tun-listen" name="listen" value="127.0.0.1:0" placeholder="127.0.0.1:0">
+      <span class="help">Port 0 selects an ephemeral free local port</span>
+    </div>
+    <div class="toolbar">
+      <button class="btn primary" type="submit" data-action="tunnel-open">Open Tunnel</button>
+    </div>
+  </form>
+</section>
+
+{{if .Body.Tunnels}}
+<section class="card">
+  <div class="cardhead"><h2>Active Tunnels</h2></div>
+  <div class="tablewrap">
+    <table class="grid">
+      <thead><tr><th>Local Listen</th><th>Remote</th><th>SSH Bastion</th><th>User</th><th>Status</th><th>Action</th></tr></thead>
+      <tbody>
+        {{range .Body.Tunnels}}
+        <tr>
+          <td class="mono"><b>{{.LocalAddress}}</b></td>
+          <td class="mono">{{.Remote}}</td>
+          <td class="mono">{{.SSHAddress}}</td>
+          <td>{{.SSHUser}}</td>
+          <td><span class="badge st-synced">active</span></td>
+          <td>
+            <button class="btn danger sm" type="button" data-action="tunnel-stop" data-tunnel-id="{{.ID}}">Stop</button>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}
+{{end}}
