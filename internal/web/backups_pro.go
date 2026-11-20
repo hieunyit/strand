@@ -400,7 +400,7 @@ func (s *Server) apiBackupJobOp(op string) authedHandler {
 		if !s.auditBackupOp(w, r, "backup_job."+op, map[string]any{"job": id}) {
 			return
 		}
-		pid, err := s.startBackupOp("backup-"+op, backupJobPipeline(id), op, "--job-id", id)
+		pid, err := s.startBackupOp("backup-"+op, "backup-"+op+"-"+id, op, "--job-id", id)
 		if err != nil {
 			writeErr(w, http.StatusConflict, err.Error())
 			return
@@ -537,20 +537,20 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 	for _, j := range jobs {
 		if j.Enabled && j.LogArchive && !j.IsCustom() && s.jobs != nil {
 			running := false
-			for _, p := range s.jobs.List(backupJobPipeline(j.ID)) {
+			for _, p := range s.jobs.List("backup-logs-" + j.ID) {
 				if p.Kind == "backup-logs" && p.Running {
 					running = true
 				}
 			}
 			if !running {
-				if _, err := s.startOwnedBackupOp("backup-logs", backupJobPipeline(j.ID), "log-archive", "--job-id", j.ID); err != nil {
+				if _, err := s.startOwnedBackupOp("backup-logs", "backup-logs-"+j.ID, "log-archive", "--job-id", j.ID); err != nil {
 					s.log.Warn("start log archiving", "job", j.ID, "error", err)
 				}
 			}
 		}
 		if j.Retention.Enabled() {
 			if ok, _ := s.db.st.ClaimBackupJobPrune(ctx, j.ID, now, time.Hour); ok {
-				if _, err := s.startBackupOp("backup-prune", backupJobPipeline(j.ID), "prune", "--job-id", j.ID); err != nil {
+				if _, err := s.startBackupOp("backup-prune", "backup-prune-"+j.ID, "prune", "--job-id", j.ID); err != nil {
 					s.log.Warn("scheduled retention", "job", j.ID, "error", err)
 				}
 			}
@@ -561,7 +561,7 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 				if j.TestRestore {
 					args = append(args, "--test-restore")
 				}
-				if _, err := s.startBackupOp("backup-verify", backupJobPipeline(j.ID), args...); err != nil {
+				if _, err := s.startBackupOp("backup-verify", "backup-verify-"+j.ID, args...); err != nil {
 					s.log.Warn("scheduled verification", "job", j.ID, "error", err)
 				}
 			}

@@ -1,9 +1,12 @@
 package web
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"strand/internal/backup"
@@ -15,6 +18,79 @@ type backupsPageBody struct {
 	NextCursor string
 	Paged      bool
 	Jobs       []backupJobView
+	Sources    []dashboardRow
+	Repos      []backup.Repo
+	Checks     []backup.CheckResult
+	Methods    []string
+}
+
+// dashboardRow is one source on the dashboard, preformatted for the template.
+type dashboardRow struct {
+	recoveryView
+	Age       string
+	Window    string
+	Spark     string // SVG polyline points of the recent sizes
+	LastSize  string
+	LastCheck string
+}
+
+func fmtAge(sec int64) string {
+	d := time.Duration(sec) * time.Second
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", sec)
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	}
+	return fmt.Sprintf("%.1fd", d.Hours()/24)
+}
+
+func backupSparkPoints(sizes []int64) string {
+	if len(sizes) < 2 {
+		return ""
+	}
+	var max int64 = 1
+	for _, s := range sizes {
+		if s > max {
+			max = s
+		}
+	}
+	pts := make([]string, len(sizes))
+	for i, s := range sizes {
+		x := float64(i) * 80 / float64(len(sizes)-1)
+		y := 18 - float64(s)*16/float64(max)
+		pts[i] = fmt.Sprintf("%.1f,%.1f", x, y)
+	}
+	return strings.Join(pts, " ")
+}
+
+func (s *Server) dashboardRows(ctx context.Context) []dashboardRow {
+	views, err := s.backupDashboard(ctx)
+	if err != nil {
+		return nil
+	}
+	out := make([]dashboardRow, 0, len(views))
+	for _, v := range views {
+		r := dashboardRow{recoveryView: v, Window: "-", Spark: backupSparkPoints(v.RecentSizes), LastSize: "-", LastCheck: "-"}
+		if v.LastSuccess != nil {
+			r.Age = fmtAge(v.AgeSeconds)
+			r.LastSize = fmtBytes(float64(v.LastSuccess.Bytes))
+			if v.LastSuccess.CheckedAt != nil {
+				r.LastCheck = v.LastSuccess.CheckStatus + " " + v.LastSuccess.CheckedAt.UTC().Format("2006-01-02 15:04")
+			}
+		}
+		if v.WindowStart != nil && v.WindowEnd != nil {
+			kind := "restore points"
+			if win, err := s.recoveryWindow(ctx, v.Source); err == nil && win.Continuous {
+				kind = "point-in-time"
+			}
+			r.Window = v.WindowStart.UTC().Format("2006-01-02 15:04") + " → " + v.WindowEnd.UTC().Format("2006-01-02 15:04:05") + " UTC (" + kind + ")"
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 const backupsPageSize = 200
@@ -45,6 +121,13 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 		if err != nil {
 			b.Message = "Could not read backup jobs."
 		}
+		if !b.Paged {
+			b.Sources = s.dashboardRows(r.Context())
+			b.Repos, _ = s.db.st.ListBackupRepos(r.Context())
+			b.Checks, _ = s.backups.Checks(r.Context(), "", 20)
+		}
+		b.Methods = []string{backup.MethodCustom, backup.MethodMySQLDump, backup.MethodMariaDBDump, backup.MethodMydumper,
+			backup.MethodXtrabackup, backup.MethodMariabackup, backup.MethodPGDump, backup.MethodPGBaseBackup, backup.MethodMongodump}
 	}
 	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Refresh: 10, Body: b})
 }

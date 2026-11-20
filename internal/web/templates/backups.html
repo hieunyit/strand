@@ -1,71 +1,204 @@
 {{define "content"}}
+{{if .Body.Message}}<p class="warnbox" role="status">{{.Body.Message}}</p>{{end}}
+{{if not .Body.Paged}}
+<section class="card" id="backup-dashboard">
+  <div class="cardhead"><h2>Backup dashboard</h2><a class="btn small" href="/metrics">Prometheus metrics</a></div>
+  {{if .Body.Sources}}
+  <div class="tablewrap"><table class="grid">
+    <caption class="sr-only">Last backup and recoverable window per source</caption>
+    <thead><tr><th>Source</th><th>Engine</th><th>Last success</th><th>Age</th><th class="r">Size</th><th>Size trend</th><th>Recoverable window</th><th class="r">Log segments</th><th>Last check</th></tr></thead>
+    <tbody>{{range .Body.Sources}}<tr data-source="{{.Source}}">
+      <td>{{.Source}}</td><td>{{.Engine}}</td>
+      <td class="nowrap">{{if .LastSuccess}}<span class="mono small">{{.LastSuccess.ID}}</span>{{else}}<span class="badge st-failed">none</span>{{end}}</td>
+      <td class="nowrap">{{if .Stale}}<span class="badge st-failed" title="older than two intervals">{{.Age}} stale</span>{{else}}{{.Age}}{{end}}</td>
+      <td class="r nowrap">{{.LastSize}}</td>
+      <td>{{if .Spark}}<svg class="spark" width="82" height="20" viewBox="0 0 82 20" role="img" aria-label="size of the last restore points"><polyline fill="none" stroke="currentColor" stroke-width="1.5" points="{{.Spark}}"/></svg>{{else}}-{{end}}</td>
+      <td class="small">{{.Window}}</td>
+      <td class="r">{{.LogSegments}}</td>
+      <td class="small nowrap">{{.LastCheck}}</td>
+    </tr>{{end}}</tbody>
+  </table></div>
+  {{else if not .Body.Message}}<div class="empty-state"><b>No backups yet</b><span>Create a backup job below.</span></div>{{end}}
+</section>
+
 <section class="card">
   <div class="cardhead"><h2>Scheduled backup jobs</h2></div>
-  <p class="muted">Jobs run a native backup wrapper on the Strand Web host, publish its artifact and seed manifest to S3, and can open a verified SSH tunnel for the database. Configure S3 credentials and database secrets in the Web service environment; do not put passwords in scripts' command-line arguments. Saving an enabled job schedules its first run immediately; its next run is persisted across Web restarts.</p>
-  {{if .Body.Message}}<p class="warnbox" role="status">{{.Body.Message}}</p>{{end}}
+  <p class="muted">Built-in methods (mysqldump, mydumper, xtrabackup/mariabackup, pg_dump, pg_basebackup, mongodump) stream the native tool's output to the repository, compressed and encrypted on the Strand host; <em>custom</em> runs a wrapper script from the allow-listed command directory. Database passwords are read from the Web service environment variable you name, never stored. Only the active Web instance runs schedules, retention and verification.</p>
   {{if .Body.Jobs}}
-  <div class="tablewrap"><table class="grid"><thead><tr><th>Name</th><th>Interval</th><th>Command</th><th>Schedule</th><th>Recent process</th><th>Actions</th></tr></thead>
+  <div class="tablewrap"><table class="grid"><caption class="sr-only">Backup jobs</caption>
+  <thead><tr><th>Name</th><th>Method</th><th>Interval</th><th>Retention</th><th>Protection</th><th>Schedule</th><th>Last run</th><th>Actions</th></tr></thead>
   <tbody>{{range .Body.Jobs}}<tr data-backup-job-id="{{.Job.ID}}">
-    <td>{{.Job.Name}}</td><td>{{printf "%dm" (div .Job.EverySeconds 60)}}</td><td class="mono">{{.Job.Command}}</td>
+    <td>{{.Job.Name}}{{if .Job.Source}}<div class="small muted">{{.Job.Source}}</div>{{end}}</td>
+    <td>{{if .Job.Method}}{{.Job.Method}}{{else}}custom{{end}}{{if .Job.LogArchive}} <span class="badge st-synced">PITR</span>{{end}}{{if gt .Job.FullEvery 1}}<div class="small muted">full every {{.Job.FullEvery}}</div>{{end}}</td>
+    <td>{{printf "%dm" (div .Job.EverySeconds 60)}}</td>
+    <td class="small">{{with .Job.Retention}}{{if .KeepLast}}last {{.KeepLast}} {{end}}{{if .KeepHourly}}hourly {{.KeepHourly}} {{end}}{{if .KeepDaily}}daily {{.KeepDaily}} {{end}}{{if .KeepWeekly}}weekly {{.KeepWeekly}} {{end}}{{if .KeepMonthly}}monthly {{.KeepMonthly}} {{end}}{{if .KeepYearly}}yearly {{.KeepYearly}} {{end}}{{if .KeepWithinDays}}within {{.KeepWithinDays}}d {{end}}{{if .MaxAgeDays}}max {{.MaxAgeDays}}d{{end}}{{end}}{{if not .Job.Retention.Enabled}}keep all{{end}}</td>
+    <td class="small">{{if .Job.Encrypt}}<span class="badge st-synced">encrypted</span> {{end}}{{if .Job.Compress}}zstd {{end}}{{if .Job.Repository}}repo {{.Job.Repository}}{{end}}{{if .Job.ReplicateTo}} → {{.Job.ReplicateTo}}{{end}}</td>
     <td>{{if .Job.Enabled}}<span class="badge st-synced">enabled</span>{{if .Job.NextRunAt}}<div class="small muted">next {{ts (deref2 .Job.NextRunAt)}}</div>{{end}}{{else}}<span class="badge st-paused">paused</span>{{end}}</td>
-    <td>{{if .Process}}<a href="/jobs/{{.Process.ID}}">{{if .Process.Running}}running{{else}}{{jobState .Process}}{{end}}</a>{{else}}not started{{end}}</td>
+    <td>{{if .Job.LastRunStatus}}<span class="badge {{stateClass (printf "%s" .Job.LastRunStatus)}}">{{.Job.LastRunStatus}}</span>{{end}}{{if .Job.ConsecutiveFailures}}<div class="small">{{.Job.ConsecutiveFailures}} failure(s) in a row</div>{{end}}{{if .Process}}<div class="small"><a href="/jobs/{{.Process.ID}}">{{if .Process.Running}}running{{else}}{{jobState .Process}}{{end}}</a></div>{{end}}</td>
     <td class="nowrap">
       <button class="btn small" type="button" data-backup-job-action="edit">Edit</button>
       <button class="btn small" type="button" data-backup-job-action="run">Run now</button>
       {{if .Job.Enabled}}<button class="btn small" type="button" data-backup-job-action="stop">Pause</button>{{else}}<button class="btn small" type="button" data-backup-job-action="start">Start</button>{{end}}
+      <button class="btn small" type="button" data-backup-job-action="preview">Retention</button>
+      <button class="btn small" type="button" data-backup-job-action="verify">Verify</button>
       <button class="btn small danger" type="button" data-backup-job-action="delete">Delete</button>
     </td>
   </tr>{{end}}</tbody></table></div>
-  {{else if not .Body.Message}}<div class="empty-state"><b>No scheduled backup jobs</b><span>Create a job below to run your native backup wrapper on a recurring interval.</span></div>{{end}}
+  {{else if not .Body.Message}}<div class="empty-state"><b>No scheduled backup jobs</b><span>Create a job below.</span></div>{{end}}
+
+  <section id="retention-preview" class="subcard" hidden aria-live="polite">
+    <h3>Retention preview <span id="retention-preview-job" class="muted small"></span></h3>
+    <p id="retention-preview-summary" class="small"></p>
+    <div class="tablewrap"><table class="grid"><caption class="sr-only">Retention decisions</caption>
+      <thead><tr><th>Backup</th><th>Kind</th><th>Created</th><th>Decision</th><th>Reasons</th></tr></thead><tbody id="retention-preview-rows"></tbody></table></div>
+    <div class="toolbar"><button class="btn danger" type="button" id="retention-apply">Apply retention now</button><button class="btn" type="button" id="retention-close">Close</button></div>
+  </section>
 
   {{if not .Body.Message}}
   <form id="backup-job-form" class="form-grid">
     <h3 id="backup-job-form-title">Create backup job</h3>
     <label>Name <input name="name" required maxlength="96"></label>
+    <label>Method <select name="method">{{range .Body.Methods}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
     <label>Interval (minutes) <input name="interval_minutes" type="number" min="1" max="525600" value="1440" required></label>
-    <label>Native backup wrapper path <input name="command" type="text" class="mono" placeholder="/usr/local/sbin/create-db-backup" required></label>
-    <label>Artifact path template <input name="artifact_template" type="text" class="mono" placeholder="/var/backups/db-{id}.dump" required><small class="muted">Absolute path; include <code>{id}</code> to keep each run separate.</small></label>
-    <label>Seed manifest template <input name="manifest_template" type="text" class="mono" placeholder="/var/backups/db-{id}.seed.json" required></label>
-    <label>S3 bucket <input name="bucket" required></label>
-    <label>S3 prefix <input name="prefix" placeholder="production/database"></label>
-    <fieldset><legend>Optional SSH tunnel</legend>
+    <fieldset data-method-group="custom"><legend>Custom wrapper</legend>
+      <label>Native backup wrapper path <input name="command" type="text" class="mono" placeholder="/usr/local/sbin/create-db-backup"></label>
+      <label>Artifact path template <input name="artifact_template" type="text" class="mono" placeholder="/var/backups/db-{id}.dump"><small class="muted">Absolute path; include <code>{id}</code>.</small></label>
+      <label>Seed manifest template <input name="manifest_template" type="text" class="mono" placeholder="/var/backups/db-{id}.seed.json"></label>
+      <label class="check"><input name="cleanup_local" type="checkbox" checked> Delete local artifact and manifest after successful upload</label>
+    </fieldset>
+    <fieldset data-method-group="builtin" hidden><legend>Source</legend>
+      <label>Source identity <input name="source" placeholder="mysql-prod"></label>
+      <label>Host <input name="conn_host" placeholder="db1.internal"></label>
+      <label>Port <input name="conn_port" type="number" min="0" max="65535"></label>
+      <label>User <input name="conn_user"></label>
+      <label>Password environment variable <input name="conn_password_env" class="mono" placeholder="MYSQL_BACKUP_PASSWORD"></label>
+      <label>MongoDB URI environment variable <input name="conn_uri_env" class="mono" placeholder="MONGO_BACKUP_URI"></label>
+      <label>Databases (comma separated) <input name="conn_databases"></label>
+      <label>Data directory (xtrabackup) <input name="conn_datadir" class="mono" placeholder="/var/lib/mysql"></label>
+      <label>Full backup every N runs (xtrabackup) <input name="full_every" type="number" min="0" max="1000" value="0"></label>
+      <label class="check"><input name="log_archive" type="checkbox"> Continuous log archiving (binlog/WAL/oplog) for point-in-time recovery</label>
+      <label>Force a log switch every (seconds, 0 = off) <input name="log_flush_seconds" type="number" min="0" max="86400" value="0"></label>
+    </fieldset>
+    <fieldset><legend>Storage</legend>
+      <label>Repository <select name="repository"><option value="">default (STRAND_BACKUP_S3_*)</option>{{range .Body.Repos}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+      <label>S3 bucket (default repository) <input name="bucket"></label>
+      <label>S3 prefix <input name="prefix" placeholder="production/database"></label>
+      <label>Replicate each backup to <select name="replicate_to"><option value="">no copy</option>{{range .Body.Repos}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+      <label class="check"><input name="compress" type="checkbox" checked> Compress (zstd)</label>
+      <label class="check"><input name="encrypt" type="checkbox"> Encrypt (AES-256-GCM, key from STRAND_BACKUP_ENCRYPTION_KEYS)</label>
+      <label>Upload bandwidth limit (KiB/s, 0 = unlimited) <input name="bandwidth_kbps" type="number" min="0" value="0"></label>
+    </fieldset>
+    <fieldset><legend>Retention</legend>
+      <label>Keep last <input name="keep_last" type="number" min="0" value="0"></label>
+      <label>Keep daily <input name="keep_daily" type="number" min="0" value="0"></label>
+      <label>Keep weekly <input name="keep_weekly" type="number" min="0" value="0"></label>
+      <label>Keep monthly <input name="keep_monthly" type="number" min="0" value="0"></label>
+      <label>Keep yearly <input name="keep_yearly" type="number" min="0" value="0"></label>
+      <label>Keep everything newer than (days) <input name="keep_within_days" type="number" min="0" value="0"></label>
+      <label>Maximum age (days) <input name="max_age_days" type="number" min="0" value="0"></label>
+      <label>Object Lock days (locked repositories) <input name="lock_days" type="number" min="0" value="0"></label>
+    </fieldset>
+    <fieldset><legend>Reliability</legend>
+      <label>Retries after a failure <input name="retry_max" type="number" min="0" max="20" value="0"></label>
+      <label>First retry after (seconds, doubles) <input name="retry_backoff_seconds" type="number" min="0" max="86400" value="300"></label>
+      <label>Verify every (hours, 0 = off) <input name="verify_hours" type="number" min="0" value="0"></label>
+      <label>Re-read sample (%) <input name="verify_sample_percent" type="number" min="0" max="100" value="100"></label>
+      <label class="check"><input name="test_restore" type="checkbox"> Test-restore the newest backup into a scratch database</label>
+      <label>Scratch host <input name="scratch_host"></label>
+      <label>Scratch port <input name="scratch_port" type="number" min="0" max="65535"></label>
+      <label>Scratch user <input name="scratch_user"></label>
+      <label>Scratch password environment variable <input name="scratch_password_env" class="mono"></label>
+    </fieldset>
+    <fieldset><legend>Optional SSH tunnel (custom wrappers)</legend>
       <label>Bastion host[:port] <input name="tunnel_ssh" placeholder="bastion.example.net"></label>
       <label>SSH user <input name="tunnel_user"></label>
       <label>Database host:port from bastion <input name="tunnel_remote" placeholder="mysql.internal:3306"></label>
-      <label>SSH identity file <input name="tunnel_identity_file" class="mono" placeholder="/var/lib/strand-web/keys/backup_ed25519"></label>
-      <label>known_hosts file <input name="tunnel_known_hosts" class="mono" placeholder="/var/lib/strand-web/known_hosts"></label>
+      <label>SSH identity file <input name="tunnel_identity_file" class="mono"></label>
+      <label>known_hosts file <input name="tunnel_known_hosts" class="mono"></label>
     </fieldset>
     <label class="check"><input name="enabled" type="checkbox" checked> Start this job after saving</label>
-    <label class="check"><input name="cleanup_local" type="checkbox" checked> Delete local artifact and manifest after successful S3 verification</label>
     <div class="toolbar"><button class="btn primary" type="submit" id="backup-job-save">Create job</button><button class="btn" type="button" id="backup-job-cancel" hidden>Cancel edit</button><span class="muted" id="backup-job-message" role="status"></span></div>
   </form>
   {{end}}
 </section>
 
+<section class="card" id="restore-section">
+  <div class="cardhead"><h2>Restore</h2></div>
+  <p class="muted">A restore always goes to a <strong>new</strong> target: a database that does not exist yet (logical backups) or an empty directory (pg_basebackup, xtrabackup). Choose a backup, or a source and a point in time: Strand picks the base backup and replays archived logs up to that time. Progress and log appear on the job page.</p>
+  <form id="restore-form" class="form-grid">
+    <label>Backup ID <input name="backup_id" class="mono" placeholder="bkp-..."></label>
+    <label>…or source <input name="source" placeholder="mysql-prod"></label>
+    <label>Point in time (UTC, optional for a backup ID) <input name="target_time" type="datetime-local" step="1"></label>
+    <label>Target host <input name="target_host"></label>
+    <label>Target port <input name="target_port" type="number" min="0" max="65535"></label>
+    <label>Target user <input name="target_user"></label>
+    <label>Target password environment variable <input name="target_password_env" class="mono"></label>
+    <label>New database name <input name="target_database"></label>
+    <label>…or new data directory <input name="target_dir" class="mono" placeholder="/var/lib/strand-restores/pg-2026-11-20"></label>
+    <label>Type the target database or directory to confirm <input name="confirm" autocomplete="off"></label>
+    <div class="toolbar"><button class="btn primary" type="submit">Start restore</button><span class="muted" id="restore-message" role="status"></span></div>
+  </form>
+</section>
+
+<section class="card" id="repositories-section">
+  <div class="cardhead"><h2>Repositories</h2></div>
+  <p class="muted">Endpoints and credentials stay in the Web service environment: a repository names its variable prefix (<code>STRAND_BACKUP_REPO_&lt;NAME&gt;_ENDPOINT</code>, <code>_ACCESS_KEY</code>, <code>_SECRET_KEY</code>, ...). Object Lock repositories make every new object immutable for the given days (the bucket must be created with Object Lock).</p>
+  {{if .Body.Repos}}<div class="tablewrap"><table class="grid"><caption class="sr-only">Backup repositories</caption>
+    <thead><tr><th>Name</th><th>Environment prefix</th><th>Bucket / prefix</th><th>Object Lock</th><th>Default retention</th><th>Actions</th></tr></thead>
+    <tbody>{{range .Body.Repos}}<tr data-repo-id="{{.ID}}"><td>{{.Name}}<div class="small mono">{{.ID}}</div></td><td class="mono small">{{.EnvPrefix}}</td><td class="mono small">{{.Bucket}}/{{.Prefix}}</td>
+      <td>{{if .LockMode}}{{.LockMode}} {{.LockDays}}d{{else}}-{{end}}</td><td class="small">{{if .Retention.Enabled}}{{with .Retention}}{{if .KeepLast}}last {{.KeepLast}} {{end}}{{if .KeepDaily}}daily {{.KeepDaily}} {{end}}{{if .MaxAgeDays}}max {{.MaxAgeDays}}d{{end}}{{end}}{{else}}keep all{{end}}</td>
+      <td><button class="btn small danger" type="button" data-repo-action="delete">Delete</button></td></tr>{{end}}</tbody></table></div>{{end}}
+  <form id="repo-form" class="form-grid">
+    <label>Name <input name="name" required maxlength="96"></label>
+    <label>Environment prefix <input name="env_prefix" class="mono" value="STRAND_BACKUP_REPO_OFFSITE_" required></label>
+    <label>Bucket <input name="bucket" required></label>
+    <label>Prefix <input name="prefix"></label>
+    <label>Object Lock mode <select name="lock_mode"><option value="">none</option><option value="GOVERNANCE">GOVERNANCE</option><option value="COMPLIANCE">COMPLIANCE</option></select></label>
+    <label>Object Lock days <input name="lock_days" type="number" min="0" value="0"></label>
+    <label>Default keep daily <input name="keep_daily" type="number" min="0" value="0"></label>
+    <label>Default max age (days) <input name="max_age_days" type="number" min="0" value="0"></label>
+    <div class="toolbar"><button class="btn primary" type="submit">Add repository</button><span class="muted" id="repo-message" role="status"></span></div>
+  </form>
+</section>
+
+{{if .Body.Checks}}
+<section class="card">
+  <div class="cardhead"><h2>Recent verification</h2></div>
+  <div class="tablewrap"><table class="grid"><caption class="sr-only">Recent verification and test-restore results</caption>
+    <thead><tr><th>Backup</th><th>Check</th><th>Result</th><th>Finished</th><th>Detail</th></tr></thead>
+    <tbody>{{range .Body.Checks}}<tr><td class="mono small">{{.BackupID}}</td><td>{{.Kind}}</td><td><span class="badge {{if eq .Status "ok"}}st-synced{{else}}st-failed{{end}}">{{.Status}}</span></td><td class="nowrap">{{ts .FinishedAt}}</td><td class="small">{{.Detail}}</td></tr>{{end}}</tbody></table></div>
+</section>
+{{end}}
+{{end}}
+
 <section class="card">
   <div class="cardhead"><h2>Central backup catalog</h2></div>
-  <p class="muted">Backup artifacts and their recovery metadata stored in the configured object store.</p>
+  <p class="muted">Backup artifacts, log segments and their recovery metadata stored in the configured repositories.</p>
   {{if .Body.Message}}<p class="warnbox" role="status">{{.Body.Message}}</p>{{else if .Body.Backups}}
   <div class="tablewrap">
     <table class="grid">
       <caption class="sr-only">Central backup catalog</caption>
-      <thead><tr><th>ID</th><th>Source</th><th>Engine / tool</th><th>Status</th><th class="r">Size</th><th>Recovery point</th><th>Created</th><th>Verified</th><th>Expires</th></tr></thead>
+      <thead><tr><th>ID</th><th>Source</th><th>Method / kind</th><th>Status</th><th class="r">Size</th><th>Recovery point</th><th>Storage</th><th>Created</th><th>Verified</th><th>Actions</th></tr></thead>
       <tbody>{{range .Body.Backups}}
-      <tr>
+      <tr data-backup-id="{{.ID}}">
         <td class="mono">{{.ID}}{{if .LegalHold}} <span class="badge st-paused">legal hold</span>{{end}}</td>
         <td>{{.Source}}</td>
-        <td>{{.Engine}} / {{.Tool}} {{.ToolVersion}}</td>
-        <td><span class="badge {{stateClass (printf "%s" .Status)}}">{{.Status}}</span></td>
+        <td>{{.Engine}} / {{.Tool}} {{.ToolVersion}}<div class="small muted">{{.Kind}}{{if .ParentID}} of {{.ParentID}}{{end}}{{if .CopyOf}} copy of {{.CopyOf}}{{end}}</div></td>
+        <td><span class="badge {{stateClass (printf "%s" .Status)}}">{{.Status}}</span>{{if .CheckStatus}}<div class="small">check {{.CheckStatus}}</div>{{end}}</td>
         <td class="r nowrap">{{bytes64 .Bytes}}</td>
-        <td class="mono small">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else}}-{{end}}</td>
+        <td class="mono small">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else if .Position.OplogTS}}{{.Position.OplogTS}}{{else}}-{{end}}</td>
+        <td class="small">{{if .KeyID}}encrypted ({{.KeyID}}) {{end}}{{if .Compression}}{{.Compression}} {{end}}{{if .LockMode}}locked until {{ts (deref2 .RetainUntil)}}{{end}}{{if .Repository}} repo {{.Repository}}{{end}}</td>
         <td class="nowrap">{{ts .CreatedAt}}</td>
         <td class="nowrap">{{if .VerifiedAt}}{{ts (deref2 .VerifiedAt)}}{{else}}-{{end}}</td>
-        <td class="nowrap">{{if .ExpiresAt}}{{ts (deref2 .ExpiresAt)}}{{else}}never{{end}}</td>
+        <td class="nowrap">{{if eq (printf "%s" .Status) "complete"}}{{if ne .Kind "log"}}<button class="btn small" type="button" data-backup-action="restore">Restore</button>{{end}}
+          <button class="btn small" type="button" data-backup-action="verify">Verify</button>
+          <button class="btn small" type="button" data-backup-action="hold" data-hold="{{if .LegalHold}}0{{else}}1{{end}}">{{if .LegalHold}}Release hold{{else}}Legal hold{{end}}</button>
+          {{if $.Body.Repos}}<button class="btn small" type="button" data-backup-action="copy">Copy</button>{{end}}{{end}}</td>
       </tr>
       {{end}}</tbody>
     </table>
   </div>
   {{if or .Body.NextCursor .Body.Paged}}<nav class="pad" aria-label="Backup catalog pages">{{if .Body.Paged}}<a href="/backups">Newest backups</a>{{end}}{{if .Body.NextCursor}} <a href="/backups?cursor={{.Body.NextCursor}}" rel="next">Older backups</a>{{end}}</nav>{{end}}
-  {{else if .Body.Paged}}<div class="empty-state"><b>No older backups</b><span><a href="/backups">Back to the newest backups</a></span></div>{{else}}<div class="empty-state"><b>No backups registered</b><span>Upload a backup artifact to the configured object store to add it to this catalog.</span></div>{{end}}
+  {{else if .Body.Paged}}<div class="empty-state"><b>No older backups</b><span><a href="/backups">Back to the newest backups</a></span></div>{{else}}<div class="empty-state"><b>No backups registered</b><span>Create a backup job or upload a backup artifact to add it to this catalog.</span></div>{{end}}
 </section>
 {{end}}
