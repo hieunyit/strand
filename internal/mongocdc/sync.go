@@ -262,7 +262,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		return errors.New("mongodb cdc: source and target resolve to the same MongoDB deployment and database; refusing a self-replicating pipeline")
 	}
 
-	control := target.Database(stateDatabase, options.Database().SetReadConcern(readconcern.Majority()))
+	control := target.Database(stateDatabase, targetDBOptions())
 	// A lease that is not refreshed expires within one TTL (e.g. the previous owner
 	// crashed on another host): wait for it instead of exiting, up to 2 TTLs.
 	var l *lease
@@ -301,7 +301,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		r := &runner{
 			cfg: cfg, obs: obs, srcClient: source, tgtClient: target,
 			source:   source.Database(cfg.SourceDB, options.Database().SetReadConcern(readconcern.Majority())),
-			target:   target.Database(cfg.TargetDB, options.Database().SetReadConcern(readconcern.Majority())),
+			target:   target.Database(cfg.TargetDB, targetDBOptions()),
 			states:   control.Collection(stateCollection),
 			progress: control.Collection(progressCollection),
 			indexes:  control.Collection(indexCollection),
@@ -335,6 +335,16 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		backoff = min(backoff*2, cfg.RetryBackoffMax)
 	}
+}
+
+// targetDBOptions: target reads use readConcern local on the primary. This process is
+// the only writer and every write it made was acknowledged w:majority (durable across
+// failover), so local reads see exactly the committed state. A majority read is NOT
+// enough: the majority snapshot visible to readers may lag the commit point just
+// acknowledged, and a stale pre-image (e.g. of a document deleted by the previous
+// batch) would then be updated and written back.
+func targetDBOptions() *options.DatabaseOptionsBuilder {
+	return options.Database().SetReadConcern(readconcern.Local()).SetReadPreference(readpref.Primary())
 }
 
 // resolveUpdateMode picks the update application for the source version.

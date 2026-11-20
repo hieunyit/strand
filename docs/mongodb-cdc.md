@@ -286,10 +286,27 @@ Suggested alerts:
 
 ## Tested matrix and performance
 
-See the "Test evidence" section of the final report in the change history
-(`git log`), reproduced here:
-
 TEST_MATRIX_PLACEHOLDER
+
+### Performance
+
+Local Docker containers on one 16-core host (shared with other workloads; numbers vary
+±20%), ~1 KiB documents, `w: majority, j: true`. Stream rates are the time to apply a
+backlog of 50 000 events produced while the pipeline was stopped
+(`TestContainer_Throughput*`, `STRAND_MONGO_PERF_UPDATES`, `STRAND_MONGO_PERF_PARALLEL`).
+
+| | before (experimental) single / 3-node | `updates: delta` single / 3-node | `updates: lookup` single / 3-node |
+|---|---|---|---|
+| snapshot, 1 worker (docs/s) | 12 234 / 11 360 | 11 759 / 11 257 | 10 347 / 12 166 |
+| snapshot, `max_parallel: 4`, 5 collections (docs/s) | sequential only | 33 628 / 36 227 | |
+| insert (events/s) | 7 551 / 7 465 | 7 977 / 9 704 | 8 974 / 7 292 |
+| update, `$set`+`$inc` on ~1 KiB docs (events/s) | 3 669 / 3 426 | 4 759 / 4 684 | 3 667 / 3 563 |
+| delete (events/s) | 9 010 / 9 461 | 8 931 / 9 027 | 11 543 / 10 166 |
+| mixed 30% upsert-replace / 50% update / 20% delete (events/s) | 5 723 / 4 626 | 6 282–6 645 / 3 575–4 712 | 5 133 / 4 751 |
+
+`delta` applies updates ~30% faster than `updateLookup` and replaces the per-event
+document read on the source (inside the change stream cursor) by one batched read on
+the target; the parallel snapshot scales ~3x with 4 workers.
 
 ## Limitations
 

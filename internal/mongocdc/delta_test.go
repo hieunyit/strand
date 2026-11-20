@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 func mustRaw(t *testing.T, d any) bson.Raw {
@@ -144,5 +146,17 @@ func TestProvablyGone(t *testing.T) {
 		if provablyGone(o, self) {
 			t.Errorf("%s: takeover allowed", name)
 		}
+	}
+}
+
+// Regression: target pre-images must be read with readConcern local on the primary; a
+// majority read could return the image from before the previous (acknowledged) batch.
+func TestTargetReadsAreLocal(t *testing.T) {
+	var opts options.DatabaseOptions
+	for _, f := range targetDBOptions().List() {
+		_ = f(&opts)
+	}
+	if opts.ReadConcern == nil || opts.ReadConcern.Level != "local" || opts.ReadPreference == nil || opts.ReadPreference.Mode() != readpref.PrimaryMode {
+		t.Fatalf("target reads: %+v %+v", opts.ReadConcern, opts.ReadPreference)
 	}
 }
