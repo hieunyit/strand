@@ -86,18 +86,19 @@ func Migrate(ctx context.Context, db *sql.DB) ([]string, error) {
 			version int PRIMARY KEY, name text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
 			return err
 		}
-		have := map[int]bool{}
-		rows, err := db.QueryContext(ctx, `SELECT version FROM schema_migrations`)
+		have := map[int]string{}
+		rows, err := db.QueryContext(ctx, `SELECT version, name FROM schema_migrations`)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var v int
-			if err := rows.Scan(&v); err != nil {
+			var name string
+			if err := rows.Scan(&v, &name); err != nil {
 				rows.Close()
 				return err
 			}
-			have[v] = true
+			have[v] = name
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -105,22 +106,27 @@ func Migrate(ctx context.Context, db *sql.DB) ([]string, error) {
 		}
 		rows.Close()
 		for _, m := range ms {
-			if have[m.Version] {
+			name, done := have[m.Version]
+			if done && name == m.Name {
 				continue
 			}
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return err
+			if done {
+				// The version was applied by a different migration (an unmerged branch reused the number).
+				// Only known, reversible collisions are healed; anything else must not be silently skipped,
+				// or the schema this binary expects would never be created.
+				undo, ok := supersededMigrations[supersededKey{m.Version, name}]
+				if !ok {
+					return fmt.Errorf("schema_migrations version %03d is %q but this binary's migration %03d is %q: "+
+						"the database was migrated by a different build; restore it from a backup or migrate with the build that created it",
+						m.Version, name, m.Version, m.Name)
+				}
+				if err := applyMigration(ctx, db, m, undo, true); err != nil {
+					return err
+				}
+				applied = append(applied, fmt.Sprintf("%03d_%s (replaced %03d_%s)", m.Version, m.Name, m.Version, name))
+				continue
 			}
-			if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
-				_ = tx.Rollback()
-				return fmt.Errorf("migration %03d_%s: %w", m.Version, m.Name, err)
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`, m.Version, m.Name); err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-			if err := tx.Commit(); err != nil {
+			if err := applyMigration(ctx, db, m, "", false); err != nil {
 				return err
 			}
 			applied = append(applied, fmt.Sprintf("%03d_%s", m.Version, m.Name))
@@ -128,4 +134,46 @@ func Migrate(ctx context.Context, db *sql.DB) ([]string, error) {
 		return nil
 	})
 	return applied, err
+}
+
+type supersededKey struct {
+	version int
+	name    string
+}
+
+// supersededMigrations: migrations that unmerged development builds applied under a version number main later
+// used for something else, with the SQL that undoes them. Migrate undoes the stray migration and applies the
+// real one in the same transaction.
+var supersededMigrations = map[supersededKey]string{
+	// feat/web-db-first (WIP) added pipelines.config_json as 010; main's 010 is backups. The column was never
+	// written by any released code path (its writer had no callers), so dropping it loses nothing.
+	{10, "pipeline_config_json"}: `DROP INDEX IF EXISTS pipelines_config_json_present_idx;
+ALTER TABLE pipelines DROP COLUMN IF EXISTS config_json;`,
+}
+
+// applyMigration runs undo (if any) and m.SQL, then records m, all in one transaction.
+func applyMigration(ctx context.Context, db *sql.DB, m Migration, undo string, replace bool) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if undo != "" {
+		if _, err := tx.ExecContext(ctx, undo); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("undo superseded migration %03d: %w", m.Version, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("migration %03d_%s: %w", m.Version, m.Name, err)
+	}
+	q := `INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`
+	if replace {
+		q = `UPDATE schema_migrations SET name = $2, applied_at = now() WHERE version = $1`
+	}
+	if _, err := tx.ExecContext(ctx, q, m.Version, m.Name); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

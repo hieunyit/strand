@@ -77,6 +77,10 @@ type Pipeline struct {
 	startedAt            time.Time // thời điểm Run bắt đầu (lệnh admin `status`)
 	// tableRowsEst: cache ước lượng row từng bảng cho lệnh admin `tables` (nguồn: thống kê source).
 	tableRowsEst sync.Map
+	// snapProgressPct giữ tiến độ cao nhất đã báo trong lần chạy hiện tại. Generic-key snapshots
+	// tạo thêm range khi keyset walk tiến lên, vì vậy Done/Total ranges có thể giảm dù không lùi dữ liệu.
+	snapProgressMu  sync.Mutex
+	snapProgressPct map[string]float64
 
 	store   checkpoint.CheckpointStore
 	release func() error
@@ -2135,6 +2139,9 @@ func (b *tokenBucket) reserve(start, now time.Time, d time.Duration) time.Durati
 
 func (p *Pipeline) snapshotTable(ctx context.Context, id model.TableID) error {
 	m := p.table(id)
+	p.snapProgressMu.Lock()
+	delete(p.snapProgressPct, id.String())
+	p.snapProgressMu.Unlock()
 	p.startSnapRun(id, m.AvgRow)
 	defer p.endSnapRun(id)
 	start := time.Now()

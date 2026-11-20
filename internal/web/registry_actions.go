@@ -15,9 +15,6 @@ import (
 // registry, nhận/bỏ qua bản sửa trên đĩa đã bị đặt sang bên. Đi qua ActionRegistry nên có audit trước/sau.
 func (s *Server) registerRegistryOps() {
 	needDB := func() error {
-		if s.db == nil {
-			return &ActionError{Status: http.StatusConflict, Msg: "only available with the PostgreSQL metadata store"}
-		}
 		return nil
 	}
 	s.actions.Register(Action{Name: "registry-restore", Run: func(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {

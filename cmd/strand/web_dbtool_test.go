@@ -23,7 +23,7 @@ func runWebDB(t *testing.T, args ...string) (string, error) {
 	return so.String(), err
 }
 
-// `strand web init` (file mode) -> `web db migrate --dry-run` (nothing written) -> migrate (verified) ->
+// legacy file-mode web.yaml -> `web db migrate --dry-run` (nothing written) -> migrate (verified) ->
 // re-run -> `web db export`, on a real PostgreSQL; then `init --database-dsn` writes database.dsn.
 func TestWebDBMigrateAndExportCLI(t *testing.T) {
 	dsn := testutil.NewPostgresDSN(t)
@@ -33,15 +33,18 @@ func TestWebDBMigrateAndExportCLI(t *testing.T) {
 	old := cfgPath
 	defer func() { cfgPath = old }()
 	cfgPath = filepath.Join(d, "web.yaml")
-	if _, _, err := runWebInit(t, "file-mode-pass-1\n", "--password-stdin", "--token", "--quiet", "--state-dir", filepath.Join(d, "st"), "--scan", d+"/p/*.yaml"); err != nil {
-		t.Fatal(err)
-	}
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
+	// web.yaml của một bản cài chế độ file cũ (trước khi web bắt buộc PostgreSQL).
+	h, err := web.HashPassword("file-mode-pass-1")
+	must(err)
+	must(os.MkdirAll(filepath.Join(d, "st"), 0o750))
+	must(os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:8080\nstate_dir: "+filepath.Join(d, "st")+"\nscan:\n  - "+d+"/p/*.yaml\n"+
+		"password_hash: \""+h+"\"\napi_token_hash: \""+web.HashAPIToken("strand_legacy")+"\"\n"), 0o600))
 	must(os.MkdirAll(filepath.Join(d, "p"), 0o750))
 	must(os.WriteFile(filepath.Join(d, "p", "scanned.yaml"), []byte("version: 1\n"), 0o640))
 	must(os.WriteFile(filepath.Join(d, "p", "scanned.env"), []byte("PW=topsecret\n"), 0o600))

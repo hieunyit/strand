@@ -26,11 +26,15 @@ type Config struct {
 	Governor      GovernorConfig      `yaml:"governor" json:"governor"`
 	Verify        VerifyConfig        `yaml:"verify" json:"verify"`
 	Observability ObservabilityConfig `yaml:"observability" json:"observability"`
+	// MongoDB: tinh chỉnh của pipeline kind mongodb -> mongodb (bỏ qua với kind khác).
+	MongoDB MongoDBConfig `yaml:"mongodb,omitempty" json:"mongodb,omitempty"`
 }
 
 type SourceConfig struct {
-	Kind     string `yaml:"kind" json:"kind"` // mysql | postgres
-	DSN      string `yaml:"dsn" json:"dsn"`
+	Kind string `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
+	DSN  string `yaml:"dsn" json:"dsn"`
+	// URI: chuỗi kết nối MongoDB (kind mongodb), thường "${SRC_URI}" từ .env; thay cho dsn.
+	URI      string `yaml:"uri,omitempty" json:"uri,omitempty"`
 	ServerID uint32 `yaml:"server_id" json:"server_id"`
 	// Kết nối dạng tách trường (thay cho dsn): host, port (mặc định 3306), user, password hoặc
 	// password_env (tên biến môi trường chứa mật khẩu), database. dsn còn nhận dạng URL mysql://.
@@ -58,8 +62,10 @@ type SourceConfig struct {
 }
 
 type TargetConfig struct {
-	Kind string `yaml:"kind" json:"kind"` // mysql | postgres
+	Kind string `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
 	DSN  string `yaml:"dsn" json:"dsn"`
+	// URI: chuỗi kết nối MongoDB (kind mongodb), thường "${DST_URI}" từ .env; thay cho dsn.
+	URI string `yaml:"uri,omitempty" json:"uri,omitempty"`
 	// Kết nối dạng tách trường (thay cho dsn): host, port (mặc định 3306), user, password hoặc
 	// password_env (tên biến môi trường chứa mật khẩu), database. dsn còn nhận dạng URL mysql://.
 	Host        string      `yaml:"host,omitempty" json:"host,omitempty"`
@@ -322,6 +328,23 @@ func LoadFile(path string) (*Config, error) {
 
 // LoadYAMLStrict giải mã YAML nghiêm ngặt, từ chối mọi trường không xác định (exit code 2)
 func LoadYAMLStrict(data []byte) (*Config, error) {
+	return loadYAMLStrict(data, nil)
+}
+
+// LoadYAMLStrictWithEnv expands environment references using per-pipeline values
+// first and the process environment as fallback. It lets database-managed pipelines
+// resolve encrypted secrets without mutating process-global environment variables.
+func LoadYAMLStrictWithEnv(data []byte, env map[string]string) (*Config, error) {
+	expanded := os.Expand(string(data), func(key string) string {
+		if value, ok := env[key]; ok {
+			return value
+		}
+		return os.Getenv(key)
+	})
+	return loadYAMLStrict([]byte(expanded), env)
+}
+
+func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true) // Bắt buộc: từ chối key lạ
 
@@ -335,8 +358,16 @@ func LoadYAMLStrict(data []byte) (*Config, error) {
 		return nil, err
 	}
 
+	// MongoDB: uri là chuỗi kết nối (dsn vẫn nhận).
+	if strings.EqualFold(cfg.Source.Kind, KindMongoDB) && cfg.Source.DSN == "" {
+		cfg.Source.DSN = cfg.Source.URI
+	}
+	if strings.EqualFold(cfg.Target.Kind, KindMongoDB) && cfg.Target.DSN == "" {
+		cfg.Target.DSN = cfg.Target.URI
+	}
+
 	// DSN dạng URL (mysql://) hoặc tách trường (host/port/user/...) → DSN của driver.
-	if err := resolveConnections(&cfg); err != nil {
+	if err := resolveConnectionsWithEnv(&cfg, secretEnv); err != nil {
 		return nil, err
 	}
 
@@ -491,6 +522,11 @@ func LoadFileForPaths(path string) (*Config, error) {
 	if err != nil {
 		return nil, exitcode.New("config_read_error", exitcode.InvalidSyntax, fmt.Sprintf("cannot read config file: %s", path), err)
 	}
+	return LoadBytesForPaths(data)
+}
+
+// LoadBytesForPaths như LoadFileForPaths nhưng từ nội dung đã có (bản cấu hình lưu trong kho metadata của web).
+func LoadBytesForPaths(data []byte) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader([]byte(os.ExpandEnv(string(data)))))
 	dec.KnownFields(true)
 	var cfg Config
@@ -501,4 +537,17 @@ func LoadFileForPaths(path string) (*Config, error) {
 		return nil, exitcode.New("missing_name", exitcode.InvalidSyntax, "missing required field: name", nil)
 	}
 	return &cfg, nil
+}
+
+// KindMongoDB là source.kind/target.kind của pipeline MongoDB -> MongoDB.
+const KindMongoDB = "mongodb"
+
+// MongoDBConfig là mục `mongodb:` (pipeline kind mongodb). 0/rỗng = mặc định của engine
+// (snapshot_batch 1000, stream_batch 2000, lease_ttl 45s). Phạm vi: tables.include/exclude dạng "db.collection";
+// source.database/target.database: database nguồn và database đích.
+type MongoDBConfig struct {
+	SnapshotBatch   int    `yaml:"snapshot_batch,omitempty" json:"snapshot_batch,omitempty"`
+	StreamBatch     int    `yaml:"stream_batch,omitempty" json:"stream_batch,omitempty"`
+	LeaseTTL        string `yaml:"lease_ttl,omitempty" json:"lease_ttl,omitempty"`
+	OverwriteTarget bool   `yaml:"overwrite_target,omitempty" json:"overwrite_target,omitempty"`
 }

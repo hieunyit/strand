@@ -82,36 +82,6 @@ func TestConfigEditFailsClosedWhenDatabaseWriteFails(t *testing.T) {
 	}
 }
 
-// .env edited while STRAND_WEB_SECRET_KEY is unset: the sealed copy from when the key was set is stale and
-// must be dropped, otherwise setting the key again would materialise the old .env over the newer one.
-func TestEnvEditWithoutKeyDropsStaleSealedCopy(t *testing.T) {
-	st := store.NewMem()
-	cfgDir := t.TempDir()
-	e := dbEnv(t, st, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir; c.Scan = nil },
-		func(o *Options) { o.SecretKey = dbKey })
-	c, csrf := e.loginOK()
-	e.setExit(0)
-	if code, _, _, out := createNP(t, e, c, csrf, newOpts("rekey", "SrcSecretPw", "DstSecretPw")); code != 200 {
-		t.Fatalf("create: %d %s", code, out)
-	}
-	if row, _, _ := st.GetPipeline(context.Background(), "rekey"); len(row.EnvEnc) == 0 {
-		t.Fatal("precondition: env not sealed")
-	}
-	t.Setenv(EnvSecretKey, "")
-	e.srv.db.secret = ""
-	e2 := e.restart() // same store, no key
-	e2.srv.db.box = nil
-	c2, csrf2 := e2.loginOK()
-	eb, _ := json.Marshal(map[string]any{"entries": map[string]string{"NEWVAR": "fresh"}})
-	resp, out := e2.do(c2, "POST", "/api/v1/pipelines/rekey/env", string(eb), map[string]string{csrfHeader: csrf2, "Content-Type": "application/json"})
-	if resp.StatusCode != 200 {
-		t.Fatalf("env save: %d %s", resp.StatusCode, out)
-	}
-	if row, _, _ := st.GetPipeline(context.Background(), "rekey"); len(row.EnvEnc) != 0 {
-		t.Fatal("stale sealed .env kept in the database after an edit without the key")
-	}
-}
-
 func (f *flakyStore) AppendAuditBatch(ctx context.Context, rows []store.AuditRow, prog *store.MetaKV) error {
 	n := f.auditBatchCalls.Add(1)
 	if from := f.failAuditBatchFrom.Load(); from > 0 && n >= from {

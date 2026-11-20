@@ -20,6 +20,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Web chỉ chạy khi có STRAND_WEB_SECRET_KEY: mặc định cho mọi test gọi New trực tiếp.
+	if os.Getenv(EnvSecretKey) == "" {
+		os.Setenv(EnvSecretKey, testSecretKey)
+	}
 	code := m.Run()
 	testutil.TerminatePostgres()
 	os.Exit(code)
@@ -143,31 +147,6 @@ func TestDBSessionIdleAndMaxAgeRules(t *testing.T) {
 	}
 	if resp, _ := e.do(c, "GET", "/api/v1/session", "", nil); resp.StatusCode != 401 {
 		t.Fatalf("session older than max age still valid: %d", resp.StatusCode)
-	}
-}
-
-// Contrast: chế độ file (hành vi cũ) mất phiên khi web khởi động lại.
-func TestFileModeSessionDoesNotSurviveRestart(t *testing.T) {
-	e := newEnv(t, nil)
-	c, _ := e.loginOK()
-	c2 := *e.srv.cfg
-	srv, err := New(Options{Config: &c2, Version: "test", Commander: e.cmd, Now: e.clock.Now})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/session", nil)
-	for _, ck := range c.Jar.Cookies(nil) {
-		req.AddCookie(ck)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatalf("file mode unexpectedly kept the session: %d", resp.StatusCode)
 	}
 }
 
@@ -451,35 +430,6 @@ func TestCreatedPipelineSourceOfTruthIsDatabase(t *testing.T) {
 	})
 }
 
-func TestEnvStaysOnDiskWithoutSecretKey(t *testing.T) {
-	st := store.NewMem()
-	cfgDir := t.TempDir()
-	t.Setenv(EnvSecretKey, "")
-	e := dbEnv(t, st, func(e *testEnv, c *Config) { c.ConfigDir = cfgDir; c.Scan = nil }, nil)
-	c, csrf := e.loginOK()
-	e.setExit(0)
-	if code, _, _, out := createNP(t, e, c, csrf, newOpts("nokey", "SrcSecretPw", "DstSecretPw")); code != 200 {
-		t.Fatalf("create: %d %s", code, out)
-	}
-	row, ok, _ := st.GetPipeline(context.Background(), "nokey")
-	if !ok || !row.HasConfig {
-		t.Fatalf("pipeline row missing: %+v", row)
-	}
-	if len(row.EnvEnc) != 0 {
-		t.Fatal("env stored in the database although STRAND_WEB_SECRET_KEY is not set")
-	}
-	if b, err := os.ReadFile(filepath.Join(cfgDir, "nokey.env")); err != nil || !strings.Contains(string(b), "SrcSecretPw") {
-		t.Fatalf("env must stay on disk: %v", err)
-	}
-	// Mật khẩu không bao giờ nằm trong bất kỳ giá trị nào của kho (config yaml, audit).
-	rows, _ := st.ListAudit(context.Background(), 100)
-	for _, r := range rows {
-		if strings.Contains(string(r.Data), "SrcSecretPw") {
-			t.Fatalf("secret in audit row: %s", r.Data)
-		}
-	}
-}
-
 func TestAuditSinkModes(t *testing.T) {
 	for _, mode := range []string{AuditDB, AuditFile, AuditBoth} {
 		t.Run(mode, func(t *testing.T) {
@@ -522,12 +472,6 @@ func TestHealthz(t *testing.T) {
 	resp, body = e.do(e.client(), "GET", "/healthz", "", nil)
 	if resp.StatusCode != 503 || !strings.Contains(body, `"ok": false`) {
 		t.Fatalf("healthz with DB down: %d %s", resp.StatusCode, body)
-	}
-	// File mode: 200, không có DB.
-	f := newEnv(t, nil)
-	resp, body = f.do(f.client(), "GET", "/healthz", "", nil)
-	if resp.StatusCode != 200 || !strings.Contains(body, `"file"`) {
-		t.Fatalf("healthz file mode: %d %s", resp.StatusCode, body)
 	}
 }
 

@@ -83,11 +83,7 @@ func writeTuningBase(t *testing.T, e *testEnv, extra string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := "# keep me: header comment\n" + string(b) + extra
-	if err := os.WriteFile(p, []byte(s), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	e.srv.reg.Refresh(t.Context())
+	e.writePipelineFile("orders", p, "# keep me: header comment\n"+string(b)+extra, 0o640)
 	return p
 }
 
@@ -117,8 +113,14 @@ func TestTuningGetCurrentAndDefaults(t *testing.T) {
 			t.Errorf("%s: got %+v, want unset with default %q", key, got[key], def)
 		}
 	}
-	if len(v.Fields) != len(tuningDefs) {
-		t.Errorf("fields = %d", len(v.Fields))
+	sql := 0
+	for _, d := range tuningDefs {
+		if !d.Mongo {
+			sql++
+		}
+	}
+	if len(v.Fields) != sql {
+		t.Errorf("fields = %d, want the %d SQL-pipeline fields", len(v.Fields), sql)
 	}
 }
 

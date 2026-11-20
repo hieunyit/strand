@@ -1,9 +1,17 @@
-# /etc/strand/web.yaml — cấu hình Web UI (strand web --config /etc/strand/web.yaml).
-# Quyền file: root:strand 0640 (strand-web chạy bằng user strand phải đọc được). `strand web passwd/token` giữ nguyên chủ sở hữu và mode
-# của file có sẵn (chạy bằng sudo để giữ root:strand); bit "other" và quyền ghi của group luôn bị bỏ vì file chứa hash. File mới: 0600.
+# /etc/strand/web.yaml — cấu hình KHỞI ĐỘNG của Web UI (strand web --config /etc/strand/web.yaml).
+# Web UI chỉ chạy với kho metadata PostgreSQL: pipeline (cấu hình + .env mã hóa), mật khẩu admin, token,
+# job, audit, cài đặt đều nằm trong DB. File này chỉ giữ: listen/TLS, database.dsn, state_dir (và danh sách
+# import cũ). Quyền file: root:strand 0640 (chứa DSN).
 #
-# Bước đầu: strand web passwd --config /etc/strand/web.yaml     (ghi password_hash)
-# Token cho script (tùy chọn): strand web token --config /etc/strand/web.yaml
+# Bắt buộc trong môi trường dịch vụ (/etc/strand/web.env): STRAND_WEB_SECRET_KEY (openssl rand -hex 32).
+# Bước đầu: strand web init --database-dsn postgres://strand:...@127.0.0.1:5432/strand_web
+# Đổi mật khẩu: strand web passwd --config /etc/strand/web.yaml ; token: strand web token --config ...
+# Bản cài cũ chạy không có DB: strand web db migrate --config /etc/strand/web.yaml --dsn postgres://...
+
+# Kho metadata PostgreSQL (BẮT BUỘC). STRAND_WEB_DATABASE_DSN trong môi trường thắng giá trị này.
+database:
+  dsn: postgres://strand:CHANGE_ME@127.0.0.1:5432/strand_web?sslmode=disable
+  # audit: both    # db | file | both (mặc định both: DB + bản sao audit.log trong state_dir)
 
 # Địa chỉ bind. Không phải loopback (127.0.0.1, ::1, localhost) thì phải đặt tls_cert và tls_key,
 # hoặc allow_plain_http: true (HTTP thường, không mã hoá: chỉ dùng trong mạng tin cậy), ví dụ listen: 0.0.0.0:8080.
@@ -17,15 +25,12 @@ listen: 127.0.0.1:8080
 # secure_cookies: true
 # trust_forwarded_for: true
 
-# Do `strand web passwd` ghi. Chưa có thì strand web không khởi động.
-# password_hash: "$2a$10$..."
-# Do `strand web token` ghi (sha256 của token).
-# api_token_hash: ""
-
 # Thư mục ghi audit.log (JSON lines). Mặc định /var/lib/strand-web.
 state_dir: /var/lib/strand-web
 
-# Pipeline: quét các file cấu hình theo glob (tên pipeline = tên file bỏ .yaml; <name>.env cùng thư mục
+# NHẬP pipeline từ file có sẵn vào DB (một lần, khi thấy lần đầu); sau đó bản trong DB là nguồn sự thật,
+# file trên đĩa chỉ là bản vật chất hóa cho tiến trình strand. Pipeline mới tạo từ Web UI không cần mục này.
+# Quét các file cấu hình theo glob (tên pipeline = tên file bỏ .yaml; <name>.env cùng thư mục
 # được nhận làm env_file; unit strand@<name> tồn tại thì dùng systemd)...
 scan:
   - /etc/strand/*.yaml

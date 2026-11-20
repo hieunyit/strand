@@ -294,7 +294,7 @@ func (s *Server) auditMaintenance(ctx context.Context) {
 			s.log.Warn("rotate audit.log failed", "err", err)
 		}
 	}
-	if s.db == nil || !s.isActive() || !s.settingBool("audit_archive_auto") {
+	if !s.isActive() || !s.settingBool("audit_archive_auto") {
 		return
 	}
 	days := s.settingInt("audit_retention_days")

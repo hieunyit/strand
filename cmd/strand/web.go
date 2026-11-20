@@ -22,8 +22,9 @@ func newWebCmd() *cobra.Command {
 		Use:   "web",
 		Short: "Web UI: xem trạng thái các pipeline (strand web --config web.yaml)",
 		Long: `Chạy Web UI trên cùng máy với các pipeline, dưới cùng user chạy strand (không cần root).
-Chỉ quản lý được pipeline mà user này có quyền: đọc file cấu hình, kết nối admin socket, đọc log.
-Chưa đặt mật khẩu (strand web passwd) thì không khởi động.`,
+Cần kho metadata PostgreSQL (database.dsn trong web.yaml hoặc STRAND_WEB_DATABASE_DSN) và
+STRAND_WEB_SECRET_KEY: pipeline, mật khẩu admin, job, audit và cài đặt đều nằm trong DB; file cấu hình trên đĩa
+chỉ là bản vật chất hóa cho tiến trình strand. Bản cài cũ không có DB: chạy strand web db migrate trước.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfgPath == "" {
 				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml)", nil)
@@ -56,7 +57,7 @@ Chưa đặt mật khẩu (strand web passwd) thì không khởi động.`,
 func newWebPasswdCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "passwd",
-		Short: "Đặt mật khẩu admin của Web UI (bcrypt hash vào web.yaml, quyền 0600)",
+		Short: "Đặt mật khẩu admin của Web UI (bcrypt hash trong kho metadata PostgreSQL)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfgPath == "" && os.Getenv(web.EnvDatabaseDSN) == "" {
 				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml, or set "+web.EnvDatabaseDSN+")", nil)
@@ -71,20 +72,13 @@ func newWebPasswdCmd() *cobra.Command {
 			}
 			st, err := web.CLIStore(cmd.Context(), cfgPath, nil)
 			if err != nil {
+				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, err.Error(), err)
+			}
+			defer st.Close()
+			if err := web.SetStorePassword(cmd.Context(), st, h); err != nil {
 				return err
 			}
-			if st != nil {
-				defer st.Close()
-				if err := web.SetStorePassword(cmd.Context(), st, h); err != nil {
-					return err
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), "password hash written to the metadata database (takes effect immediately; all sessions were signed out)")
-				return nil
-			}
-			if err := web.SetConfigKey(cfgPath, "password_hash", h); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "password hash written to %s\n", cfgPath)
+			fmt.Fprintln(cmd.OutOrStdout(), "password hash written to the metadata database (takes effect immediately; all sessions were signed out)")
 			return nil
 		},
 	}
@@ -93,7 +87,7 @@ func newWebPasswdCmd() *cobra.Command {
 func newWebTokenCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "token",
-		Short: "Sinh token API tĩnh cho script (in ra một lần, ghi sha256 vào web.yaml)",
+		Short: "Sinh token API tĩnh cho script (in ra một lần, lưu sha256 trong kho metadata)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfgPath == "" && os.Getenv(web.EnvDatabaseDSN) == "" {
 				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml, or set "+web.EnvDatabaseDSN+")", nil)
@@ -101,22 +95,14 @@ func newWebTokenCmd() *cobra.Command {
 			tok := web.NewAPIToken()
 			st, err := web.CLIStore(cmd.Context(), cfgPath, nil)
 			if err != nil {
-				return err
+				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, err.Error(), err)
 			}
-			if st != nil {
-				defer st.Close()
-				if err := st.SetAPITokenHash(cmd.Context(), web.HashAPIToken(tok)); err != nil {
-					return err
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\n", tok)
-				fmt.Fprintln(cmd.ErrOrStderr(), "token printed once; only its sha256 is stored in the metadata database. Use: Authorization: Bearer <token>")
-				return nil
-			}
-			if err := web.SetConfigKey(cfgPath, "api_token_hash", web.HashAPIToken(tok)); err != nil {
+			defer st.Close()
+			if err := st.SetAPITokenHash(cmd.Context(), web.HashAPIToken(tok)); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", tok)
-			fmt.Fprintf(cmd.ErrOrStderr(), "token printed once; only its sha256 is stored in %s. Use: Authorization: Bearer <token>\n", cfgPath)
+			fmt.Fprintln(cmd.ErrOrStderr(), "token printed once; only its sha256 is stored in the metadata database. Use: Authorization: Bearer <token>")
 			return nil
 		},
 	}
@@ -209,25 +195,30 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 				}
 				o.Password = strings.TrimRight(line, "\r\n")
 			case term.IsTerminal(int(os.Stdin.Fd())):
-				// Đã có mật khẩu thì không hỏi lại (chạy lại phải idempotent); đổi bằng `strand web passwd`.
-				if c, err := web.LoadConfig(o.ConfigPath); err != nil || (c.PasswordHash == "" && !c.DBEnabled()) {
-					pw, err := readNewPassword(cmd)
-					if err != nil {
-						return fail(err)
+				// Đã có admin trong DB thì không hỏi lại (chạy lại phải idempotent); đổi bằng `strand web passwd`.
+				if st, err := web.CLIStore(cmd.Context(), o.ConfigPath, nil); err == nil {
+					_, has, _ := st.Admin(cmd.Context())
+					st.Close()
+					if has {
+						break
 					}
-					o.Password = pw
 				}
+				pw, err := readNewPassword(cmd)
+				if err != nil {
+					return fail(err)
+				}
+				o.Password = pw
 			}
 			if o.DatabaseDSN != "" {
 				// Bootstrap admin vào DB này (CLIStore đọc biến môi trường) và ghi database.dsn vào web.yaml.
 				_ = os.Setenv(web.EnvDatabaseDSN, o.DatabaseDSN)
 			}
-			if st, err := web.CLIStore(cmd.Context(), o.ConfigPath, nil); err != nil {
+			st, err := web.CLIStore(cmd.Context(), o.ConfigPath, nil)
+			if err != nil {
 				return fail(err)
-			} else if st != nil {
-				defer st.Close()
-				o.Store = st
 			}
+			defer st.Close()
+			o.Store = st
 			if _, err := web.RunInit(o); err != nil {
 				return fail(err)
 			}
@@ -247,9 +238,9 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 	f.BoolVar(&genPw, "generate-password", false, "sinh mật khẩu ngẫu nhiên mạnh và in MỘT lần ra stdout")
 	f.BoolVar(&o.NewToken, "token", false, "tạo thêm token API (in một lần, lưu sha256)")
 	f.BoolVar(&wantEnbl, "enable", false, "chạy `systemctl enable --now strand-web` rồi chờ /login trả 200 (tối đa 30 giây)")
-	f.BoolVar(&o.IfNoAdmin, "if-no-admin", false, "chế độ DB (STRAND_WEB_DATABASE_DSN): chỉ đặt mật khẩu/token khi database chưa có admin (bootstrap container, chạy lại an toàn)")
+	f.BoolVar(&o.IfNoAdmin, "if-no-admin", false, "chỉ đặt mật khẩu/token khi database chưa có admin (bootstrap container, chạy lại an toàn)")
 	f.BoolVar(&o.Quiet, "quiet", false, "không in phần tóm tắt các bước tiếp theo")
-	f.StringVar(&o.DatabaseDSN, "database-dsn", "", "chế độ PostgreSQL (khuyến nghị): ghi database.dsn vào web.yaml (0600/0640) và đặt admin trong DB. Không muốn DSN nằm trong file: đặt "+web.EnvDatabaseDSN+" cho dịch vụ thay vì cờ này")
+	f.StringVar(&o.DatabaseDSN, "database-dsn", "", "BẮT BUỘC (hoặc "+web.EnvDatabaseDSN+", hoặc database.dsn có sẵn trong web.yaml): kho metadata PostgreSQL; ghi database.dsn vào web.yaml (0600/0640) và đặt admin trong DB")
 	f.BoolVar(&o.Force, "force", false, "ghi đè listen/state_dir/scan của web.yaml có sẵn")
 	return cmd
 }

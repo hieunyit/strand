@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"strand/internal/web/store"
 )
 
 var pagePaths = []string{"/", "/pipelines", "/pipelines/orders", "/pipelines/orders/tables", "/pipelines/orders/checkpoint",
@@ -246,7 +250,7 @@ func TestSessionExpiry(t *testing.T) {
 
 func TestSessionMaxAge(t *testing.T) {
 	now := time.Now()
-	s := NewSessionStore(func() time.Time { return now })
+	s := memSessionStore(func() time.Time { return now })
 	tok, _ := s.Create("1.2.3.4")
 	for i := 0; i < 25; i++ { // hoạt động liên tục mỗi 29 phút
 		now = now.Add(29 * time.Minute)
@@ -261,13 +265,16 @@ func TestSessionMaxAge(t *testing.T) {
 }
 
 func TestSessionTokenIs256BitAndHashedInMemory(t *testing.T) {
-	s := NewSessionStore(nil)
+	s := memSessionStore(nil)
 	tok, sess := s.Create("x")
 	if len(tok) < 43 || len(sess.CSRF) < 43 { // 32 byte base64url = 43 ký tự
 		t.Fatalf("token too short: %d / %d", len(tok), len(sess.CSRF))
 	}
-	if _, ok := s.m[tok]; ok {
-		t.Fatal("raw token must not be a map key")
+	if _, ok, _ := s.db.st.GetSession(context.Background(), tok); ok {
+		t.Fatal("raw token must not be a store key")
+	}
+	if _, ok, _ := s.db.st.GetSession(context.Background(), hashKey(tok)); !ok {
+		t.Fatal("session must be stored under the token's sha256")
 	}
 	t2, _ := s.Create("x")
 	if t2 == tok {
@@ -417,9 +424,16 @@ func TestAuditLogFormatAndMode(t *testing.T) {
 		t.Fatalf("audit mode %v, want 0600", st.Mode().Perm())
 	}
 	var actions []string
+	var first map[string]any
 	for _, l := range e.auditLines() {
 		if l["time"] == nil || l["ip"] == nil || l["action"] == nil || l["result"] == nil {
 			t.Errorf("audit line lacks required fields: %v", l)
+		}
+		if a := l["action"].(string); strings.HasPrefix(a, "state.") || strings.HasPrefix(a, "web.lease") {
+			continue // dòng của lần khởi động (nhập trạng thái, lease), không do request
+		}
+		if first == nil {
+			first = l
 		}
 		actions = append(actions, l["action"].(string)+":"+l["result"].(string))
 	}
@@ -427,7 +441,6 @@ func TestAuditLogFormatAndMode(t *testing.T) {
 	if strings.Join(actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("audit actions %v, want %v", actions, want)
 	}
-	first := e.auditLines()[0]
 	if first["ip"] != "127.0.0.1" {
 		t.Errorf("ip %v", first["ip"])
 	}
@@ -586,7 +599,7 @@ func TestDiscoveryFromWebYAMLAndScan(t *testing.T) {
 		{Name: "custom", Config: explicit, EnvFile: "/etc/x.env", SystemdUnit: "my-custom"},
 		{Name: "zeta", Config: filepath.Join(dir, "zeta.yaml")}, // khai báo tường minh thắng scan: không systemd => nền
 	}}
-	r := NewRegistry(cfg, cmd)
+	r := testRegistry(cfg, cmd)
 	r.Refresh(t.Context())
 	var names []string
 	for _, p := range r.List() {
@@ -636,7 +649,7 @@ func TestBackgroundPathsAndRuntime(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("name: x\nsource: {kind: mysql}\ntarget: {kind: mysql}\nresources: {spool: {path: "+dir+"/sp}}\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	r := NewRegistry(&Config{Pipelines: []PipelineEntry{{Name: "x", Config: cfgPath}}}, &fakeCmd{})
+	r := testRegistry(&Config{Pipelines: []PipelineEntry{{Name: "x", Config: cfgPath}}}, &fakeCmd{})
 	r.Refresh(t.Context())
 	x := r.Get("x")
 	l, pid := x.BgPaths()
@@ -677,7 +690,7 @@ func TestSystemdRuntimeAndLogs(t *testing.T) {
 		"systemctl show strand@o.service":                             "ActiveState=failed\nSubState=failed\nExecMainStatus=5\nExecMainPID=0\nActiveEnterTimestamp=\n",
 		"journalctl -u strand@o.service -n 3 --no-pager -o short-iso": "line1\nline2\nline3\n",
 	}}
-	r := NewRegistry(&Config{}, cmd)
+	r := testRegistry(&Config{}, cmd)
 	p := &Pipeline{Name: "o", SystemdUnit: "strand@o.service"}
 	rt := r.Runtime(t.Context(), p)
 	if rt.Running || rt.ActiveState != "failed" || rt.ExitCode == nil || *rt.ExitCode != 5 || rt.Mode != ModeSystemd {
@@ -729,21 +742,16 @@ func TestPackagedExampleWebYAMLLoads(t *testing.T) {
 	if c.Listen != "127.0.0.1:8080" || len(c.Scan) != 1 || c.Scan[0] != "/etc/strand/*.yaml" {
 		t.Fatalf("example content: %+v", c)
 	}
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "password") {
-		t.Fatalf("example without a password must not start: %v", err)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("example must validate: %v", err)
+	}
+	if c.Database.DSN == "" {
+		t.Fatal("example must carry a database.dsn (the web needs PostgreSQL)")
 	}
 }
 
 func TestConfigValidateStartConditions(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:8080"}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "password") {
-		t.Fatalf("must refuse without a password: %v", err)
-	}
-	cfg.PasswordHash = "plaintext-not-a-hash"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("must reject a non-bcrypt value")
-	}
-	cfg.PasswordHash = mustHash(t)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("loopback without TLS is fine: %v", err)
 	}
@@ -768,9 +776,37 @@ func TestConfigValidateStartConditions(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Error("cert without key must be refused")
 	}
-	// New() refuses too.
-	if _, err := New(Options{Config: &Config{Listen: "127.0.0.1:1", StateDir: t.TempDir()}}); err == nil {
-		t.Error("New must refuse without a password")
+}
+
+// PostgreSQL-only: New refuses to start without a metadata database (no file mode), without
+// STRAND_WEB_SECRET_KEY, and without an admin password in the database; each error says what to run.
+func TestNewRequiresDatabaseSecretKeyAndAdmin(t *testing.T) {
+	t.Setenv(EnvDatabaseDSN, "")
+	t.Setenv(EnvSecretKey, "")
+	cfg := func() *Config {
+		return &Config{Listen: "127.0.0.1:1", StateDir: t.TempDir(), PasswordHash: mustHash(t)}
+	}
+	_, err := New(Options{Config: cfg()})
+	if err == nil || !strings.Contains(err.Error(), "PostgreSQL metadata database") || !strings.Contains(err.Error(), "strand web db migrate") {
+		t.Fatalf("no database: %v", err)
+	}
+	_, err = New(Options{Config: cfg(), Store: store.NewMem()})
+	if err == nil || !strings.Contains(err.Error(), EnvSecretKey+" is required") || !strings.Contains(err.Error(), "openssl rand") {
+		t.Fatalf("no secret key: %v", err)
+	}
+	c := cfg()
+	c.PasswordHash = ""
+	_, err = New(Options{Config: c, Store: store.NewMem(), SecretKey: testSecretKey})
+	if err == nil || !strings.Contains(err.Error(), "no admin password in the database") {
+		t.Fatalf("no admin: %v", err)
+	}
+	// A file-mode web.yaml with a password hash is imported into the database on the first start.
+	st := store.NewMem()
+	if _, err := New(Options{Config: cfg(), Store: st, SecretKey: testSecretKey}); err != nil {
+		t.Fatalf("legacy web.yaml + database: %v", err)
+	}
+	if a, ok, _ := st.Admin(context.Background()); !ok || a.PasswordHash == "" {
+		t.Fatal("password hash from web.yaml was not imported into the database")
 	}
 }
 
@@ -883,4 +919,11 @@ func TestFormLoginSameOriginWithoutLoginCookie(t *testing.T) {
 			t.Errorf("audit missing %s", want)
 		}
 	}
+}
+
+// memSessionStore: SessionStore trên kho Mem (session luôn nằm trong kho metadata).
+func memSessionStore(now func() time.Time) *SessionStore {
+	s := NewSessionStore(now)
+	s.db = &metaDB{st: store.NewMem(), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	return s
 }

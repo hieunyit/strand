@@ -9,7 +9,19 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"strand/internal/web/store"
 )
+
+// adminOf: tài khoản admin mà init đã ghi vào kho metadata.
+func adminOf(t *testing.T, o InitOptions) store.Admin {
+	t.Helper()
+	a, _, err := o.Store.Admin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
 
 func initOpts(t *testing.T) (InitOptions, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
@@ -21,6 +33,7 @@ func initOpts(t *testing.T) (InitOptions, *bytes.Buffer, *bytes.Buffer) {
 		StateDir:   filepath.Join(d, "state"),
 		Scan:       []string{"/etc/strand/*.yaml"},
 		Password:   "correct-horse-1",
+		Store:      store.NewMem(), // kho metadata bắt buộc
 		Stdout:     &so, Stderr: &se,
 		Runner: func(string, ...string) error { t.Fatal("unexpected command"); return nil },
 	}, &so, &se
@@ -49,14 +62,14 @@ func TestInitCreatesWithDefaultsAndPerms(t *testing.T) {
 	if c.Listen != "127.0.0.1:8080" || c.StateDir != o.StateDir || len(c.Scan) != 1 {
 		t.Fatalf("cfg %+v", c)
 	}
-	if bcrypt.CompareHashAndPassword([]byte(c.PasswordHash), []byte("correct-horse-1")) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(adminOf(t, o).PasswordHash), []byte("correct-horse-1")) != nil {
 		t.Fatal("hash does not verify")
 	}
 	b, _ := os.ReadFile(o.ConfigPath)
 	if !strings.Contains(string(b), "# ") {
 		t.Fatal("expected comments in generated file")
 	}
-	if strings.Contains(so.String(), c.PasswordHash) || strings.Contains(so.String(), "correct-horse-1") {
+	if strings.Contains(so.String(), adminOf(t, o).PasswordHash) || strings.Contains(so.String(), "correct-horse-1") {
 		t.Fatalf("summary leaks secrets: %s", so.String())
 	}
 	if !strings.Contains(so.String(), "ssh -L") {
@@ -112,7 +125,7 @@ func TestInitExistingKeptWithoutForce(t *testing.T) {
 	if c.Listen != "127.0.0.1:8080" || c.StateDir != o.StateDir || c.Scan[0] != "/etc/strand/*.yaml" {
 		t.Fatalf("settings changed without --force: %+v", c)
 	}
-	if bcrypt.CompareHashAndPassword([]byte(c.PasswordHash), []byte("another-pass-2")) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(adminOf(t, o).PasswordHash), []byte("another-pass-2")) != nil {
 		t.Fatal("password not updated")
 	}
 	if !strings.Contains(se.String(), "keeping") {
@@ -145,13 +158,12 @@ func TestInitKeepsPasswordWhenNoneGiven(t *testing.T) {
 	if _, err := RunInit(o); err != nil {
 		t.Fatal(err)
 	}
-	c1, _ := LoadConfig(o.ConfigPath)
+	h1 := adminOf(t, o).PasswordHash
 	o.Password = ""
 	if _, err := RunInit(o); err != nil {
 		t.Fatal(err)
 	}
-	c2, _ := LoadConfig(o.ConfigPath)
-	if c1.PasswordHash != c2.PasswordHash {
+	if h1 != adminOf(t, o).PasswordHash {
 		t.Fatal("hash changed")
 	}
 	// file mới + không có mật khẩu: lỗi, không ghi gì
@@ -185,11 +197,10 @@ func TestInitGeneratedPasswordPrintedOnceAndVerifies(t *testing.T) {
 	if !strings.Contains(so.String(), "GENERATED ADMIN PASSWORD") {
 		t.Fatal("must be labelled")
 	}
-	c, _ := LoadConfig(o.ConfigPath)
-	if bcrypt.CompareHashAndPassword([]byte(c.PasswordHash), []byte(pw)) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(adminOf(t, o).PasswordHash), []byte(pw)) != nil {
 		t.Fatal("hash does not verify")
 	}
-	if strings.Contains(so.String(), c.PasswordHash) {
+	if strings.Contains(so.String(), adminOf(t, o).PasswordHash) {
 		t.Fatal("hash printed")
 	}
 }
@@ -201,11 +212,10 @@ func TestInitToken(t *testing.T) {
 	if err != nil || res.Token == "" {
 		t.Fatalf("%+v %v", res, err)
 	}
-	c, _ := LoadConfig(o.ConfigPath)
-	if c.APITokenHash != HashAPIToken(res.Token) {
+	if adminOf(t, o).APITokenHash != HashAPIToken(res.Token) {
 		t.Fatal("token hash mismatch")
 	}
-	if strings.Count(so.String(), res.Token) != 1 || strings.Contains(so.String(), c.APITokenHash) {
+	if strings.Count(so.String(), res.Token) != 1 || strings.Contains(so.String(), adminOf(t, o).APITokenHash) {
 		t.Fatalf("token output: %s", so.String())
 	}
 }
@@ -356,5 +366,17 @@ func TestInitAllowPlainHTTPOnAllInterfaces(t *testing.T) {
 	c2, _ := LoadConfig(o2.ConfigPath)
 	if !c2.AllowPlainHTTP || c2.Listen != "0.0.0.0:8080" || c2.Validate() != nil {
 		t.Fatalf("force: %+v", c2)
+	}
+}
+
+// PostgreSQL-only: init without a metadata store refuses before writing anything.
+func TestInitRequiresDatabase(t *testing.T) {
+	o, _, _ := initOpts(t)
+	o.Store = nil
+	if _, err := RunInit(o); err == nil || !strings.Contains(err.Error(), "PostgreSQL metadata database") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(o.ConfigPath); err == nil {
+		t.Fatal("web.yaml written without a database")
 	}
 }

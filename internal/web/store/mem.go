@@ -219,6 +219,7 @@ func (m *Mem) GetPipeline(_ context.Context, name string) (Pipeline, bool, error
 	}
 	defer m.mu.Unlock()
 	p, ok := m.pipes[name]
+	p.EnvEnc = append([]byte(nil), p.EnvEnc...)
 	return p, ok, nil
 }
 func (m *Mem) ListPipelines(context.Context) ([]Pipeline, error) {
@@ -228,6 +229,7 @@ func (m *Mem) ListPipelines(context.Context) ([]Pipeline, error) {
 	defer m.mu.Unlock()
 	var out []Pipeline
 	for _, p := range m.pipes {
+		p.EnvEnc = append([]byte(nil), p.EnvEnc...)
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

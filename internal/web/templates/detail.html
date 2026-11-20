@@ -170,6 +170,7 @@
     
     <div class="mb">
       <button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>
+      <a class="btn ghost" href="/pipelines/{{.View.Name}}/config.yaml" download="{{.View.Name}}.yaml">Download YAML</a>
     </div>
 
     <div id="cfg-view-mode">
@@ -186,7 +187,9 @@
           <label><input type="checkbox" name="force" id="cfg-force-check" value="true"> Save anyway (force save if validation has warnings)</label>
           <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
           <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
+          <label class="small">Upload YAML <input type="file" id="cfg-upload" accept=".yaml,.yml,text/yaml,text/plain"></label>
         </div>
+        <p class="muted small">Upload replaces the text above (nothing is saved until you press Save). A file downloaded here keeps secrets as <code>********</code>; they are restored from the stored copy on save.</p>
       </form>
       <div id="cfg-diff-box" class="mt14" hidden>
         <h3>Validation &amp; Diff</h3>
@@ -270,6 +273,34 @@
       <p class="muted small">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
     </form>
   </section>
+  <section class="card"><h2>Plan &amp; schema</h2>
+    <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
+      <p class="muted small">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
+      <div class="rowgap">
+        <button class="btn" type="submit" data-do="plan">Plan (what will be copied)</button>
+        <button class="btn" type="submit" data-do="schema-init-dry">Preview DDL for missing target tables</button>
+        <button class="btn primary" type="submit" data-do="schema-diff">Show pending schema changes</button>
+        <label class="small"><input type="checkbox" name="all" value="true"> include applied</label>
+      </div>
+    </form>
+    <form class="act mt10" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
+      <label>Change id <input type="text" name="id" class="num mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list"></label>
+      <button class="btn" type="submit" data-do="schema-approve-dry">Preview DDL</button>
+      <button class="btn danger" type="submit" data-do="schema-approve" data-confirm="Apply the proposed DDL of this schema change on the target? The pipeline continues once the change is applied." data-retype="{{.View.Name}}">Approve &amp; apply</button>
+    </form>
+  </section>
+  {{if eq .View.SourceKind "mysql"}}
+  <section class="card"><h2>Database objects</h2>
+    <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
+      <p class="muted small">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
+      <button class="btn" type="submit" data-do="objects-list">List objects</button>
+      {{if eq .View.TargetKind "mysql"}}
+      <label>Phase <select name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select></label>
+      <button class="btn danger" type="submit" data-do="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>
+      {{end}}
+    </form>
+  </section>
+  {{end}}
   <section class="card"><h2>Job history</h2>{{template "jobs-table" (jobsCtx .Jobs false)}}</section>
 {{end}}
 

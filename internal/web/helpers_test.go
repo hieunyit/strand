@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,9 +19,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"strand/internal/admin"
+	"strand/internal/web/store"
 )
 
 const testPassword = "correct horse battery"
+
+// testSecretKey là STRAND_WEB_SECRET_KEY của các test (bắt buộc với web PostgreSQL-only).
+const testSecretKey = "0123456789abcdef0123456789abcdef"
 
 // fakeCmd là Commander giả: khớp theo chuỗi "name arg arg" (tiền tố).
 type fakeCmd struct {
@@ -209,6 +214,14 @@ func newEnvWith(t *testing.T, mutate func(e *testEnv, c *Config), opt func(o *Op
 	if opt != nil {
 		opt(&o)
 	}
+	// Web chỉ chạy với kho metadata: test mặc định dùng kho Mem (admin nhập từ password_hash của Config
+	// ở lần khởi động đầu, như bản cài cũ chuyển sang DB) và một khóa bí mật cố định.
+	if o.Store == nil && !cfg.DBEnabled() {
+		o.Store = store.NewMem()
+	}
+	if o.SecretKey == "" && os.Getenv(EnvSecretKey) == "" {
+		o.SecretKey = testSecretKey
+	}
 	srv, err := New(o)
 	if err != nil {
 		t.Fatal(err)
@@ -309,4 +322,36 @@ func (e *testEnv) auditLines() []map[string]any {
 		out = append(out, m)
 	}
 	return out
+}
+
+// writePipelineFile ghi file cấu hình/.env của pipeline rồi lưu vào DB (như thao tác "Adopt disk version"):
+// DB là nguồn sự thật, sửa file trên đĩa mà không đưa vào DB thì lần vật chất hóa sau đặt nó sang bên.
+func (e *testEnv) writePipelineFile(name, path, data string, perm os.FileMode) {
+	e.t.Helper()
+	if err := os.WriteFile(path, []byte(data), perm); err != nil {
+		e.t.Fatal(err)
+	}
+	e.srv.reg.Refresh(context.Background())
+	p := e.srv.reg.Get(name)
+	if p == nil {
+		e.t.Fatalf("pipeline %s not registered", name)
+	}
+	if strings.HasSuffix(path, ".env") {
+		p.EnvFile = path
+	}
+	if err := e.srv.persistPipelineFiles(p); err != nil {
+		e.t.Fatal(err)
+	}
+	e.srv.reg.Refresh(context.Background())
+}
+
+// testRegistry: Registry trên kho Mem riêng (danh sách pipeline luôn nằm trong kho metadata).
+func testRegistry(c *Config, cmd Commander) *Registry {
+	r := NewRegistry(c, cmd)
+	db, err := newMetaDB(store.NewMem(), testSecretKey, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		panic(err)
+	}
+	r.db = db
+	return r
 }

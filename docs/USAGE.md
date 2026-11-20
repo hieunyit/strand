@@ -895,7 +895,7 @@ shutdown_stop_pipelines: true   # web thoát (SIGTERM) thì dừng êm pipeline 
 | --- | --- | --- |
 | Hash mật khẩu admin, hash token | `web.yaml` (`password_hash`, `api_token_hash`) | bảng `admin`; `strand web passwd/token/init` ghi vào DB khi có DSN, có hiệu lực ngay (không cần restart) |
 | Phiên đăng nhập | RAM (restart là đăng xuất) | bảng `sessions` (chỉ sha256 của id cookie); luật idle 30 phút / tối đa 12 giờ giữ nguyên; restart không đăng xuất |
-| Danh sách pipeline (tạo từ web, khai báo `pipelines:` trong web.yaml, tìm thấy bởi `scan`) | `<state_dir>/pipelines.json` + web.yaml + glob | bảng `pipelines` cho **mọi** pipeline (cột `origin`: `created`, `web.yaml`, `scan`). YAML là nguồn sự thật; `.env` mã hóa AES-GCM (chỉ khi có `STRAND_WEB_SECRET_KEY`); file được dựng lại từ DB trước validate/start/job (0640/0600) vì CLI `strand` chỉ đọc file. Xem "Registry trong DB" bên dưới |
+| Danh sách pipeline (tạo từ web, khai báo `pipelines:` trong web.yaml, tìm thấy bởi `scan`) | (bản cũ) `<state_dir>/pipelines.json` + web.yaml + glob | bảng `pipelines` cho **mọi** pipeline (cột `origin`: `created`, `web.yaml`, `scan`). YAML trong DB là nguồn sự thật (web hiển thị và sửa bản này); `.env` mã hóa AES-GCM bằng `STRAND_WEB_SECRET_KEY` (bắt buộc); file được dựng lại từ DB trước validate/start/job (0640/0600) vì CLI `strand` chỉ đọc file. Xem "Registry trong DB" bên dưới |
 | Trạng thái mong muốn running/stopped | không có | bảng `pipeline_desired`; Start/Restart đặt `running`, Stop đặt `stopped` (chế độ nền); web khởi động thì chạy lại pipeline `running` đang không chạy. Pipeline dừng êm ngoài web (`strand stop`, SIGTERM) được ghi `stopped` (cột `reason` = `observed_stop`, audit `desired.observed_stop`, trang ghi "stopped outside the web") và không tự chạy lại; pipeline chết (lỗi, kill) vẫn `running` |
 | Lịch sử job | `<state_dir>/jobs/<id>.json` + `<id>.log` | bảng `jobs` + `job_output` (10 MB đầu mỗi job; `<id>.log` chỉ là spool khi job chạy) |
 | Cài đặt web (`scan`, `config_dir`, cookie, X-Forwarded-For, dừng pipeline khi thoát, chu kỳ lấy mẫu) | `web.yaml` | trang **Settings** / bảng `web_settings`; ưu tiên: env > DB > web.yaml > mặc định |
@@ -908,11 +908,11 @@ shutdown_stop_pipelines: true   # web thoát (SIGTERM) thì dừng êm pipeline 
 
 - **Sửa tay file trên đĩa**: trước validate/start/job, nếu file khác bản DB thì bản DB được ghi lại, bản trên đĩa được **cất** thành `<file>.conflict-<thời gian UTC>` (quyền không rộng hơn file gốc), audit `config.conflict`, và trang pipeline có banner với hai nút: **Adopt disk version** (đi qua đường sửa cấu hình thường: validate, `.bak`, ghi DB + file; validate lỗi thì không đổi gì) hoặc **Keep database version**. Không có ghi đè lặng lẽ.
 - **Entry `web.yaml` bị xóa hoặc file scan biến mất**: pipeline **được giữ** trong DB, đánh dấu (`missing_since`), có cảnh báo ở Overview và banner với **Restore file** (dựng lại file từ DB) hoặc **Remove from registry** (gõ lại tên; xóa dòng DB và trạng thái mong muốn, giữ file và lịch sử job). Pipeline bị đánh dấu không được tự dựng lại file.
-- Chế độ file giữ nguyên hành vi cũ (không có DB, không có cất bản xung đột).
+- Không còn chế độ file: thiếu DSN hoặc `STRAND_WEB_SECRET_KEY` thì web từ chối khởi động (thông báo chỉ tới `strand web init --database-dsn` / `strand web db migrate`).
 
 `.env` không có khóa mã hóa thì chỉ nằm trên đĩa.
 
-Lược đồ do migration nhúng sẵn (`internal/web/store/migrations/NNN_*.sql`) tạo lúc khởi động: mỗi file một transaction, bảng `schema_migrations`, `pg_advisory_lock` nên nhiều instance khởi động cùng lúc không đạp nhau; chạy lại là no-op. Web thử kết nối lại với backoff (0,5 s tới 5 s, tối đa 60 s) rồi mới lỗi; lỗi và log luôn che mật khẩu DSN. `GET /healthz` (không cần đăng nhập) trả `200 {"status":"ok","database":{"mode":"postgres","ok":true}}` hoặc `503` khi DB hỏng; chế độ file trả `"database":{"mode":"file"}`.
+Lược đồ do migration nhúng sẵn (`internal/web/store/migrations/NNN_*.sql`) tạo lúc khởi động: mỗi file một transaction, bảng `schema_migrations`, `pg_advisory_lock` nên nhiều instance khởi động cùng lúc không đạp nhau; chạy lại là no-op. Web thử kết nối lại với backoff (0,5 s tới 5 s, tối đa 60 s) rồi mới lỗi; lỗi và log luôn che mật khẩu DSN. `GET /healthz` (không cần đăng nhập) trả `200 {"status":"ok","database":{"mode":"postgres","ok":true}}` hoặc `503` khi DB hỏng.
 
 Lần khởi động đầu có DSN, web **nhập đúng một lần** trạng thái file hiện có: hash mật khẩu/token trong `web.yaml` (chỉ khi DB chưa có admin), `pipelines.json` (kèm đọc YAML và `.env` hiện tại), `jobs/*.json`, `wizards/*.json`, `audit.log` (giữ thời gian gốc), rồi log `imported existing file state into the database ...` kèm số lượng và ghi dòng audit `state.import`. Cờ `files_imported` trong `web_meta` làm các lần sau (và instance song song, qua advisory lock) không nhập lại; file gốc được giữ nguyên. Cài bằng docker compose: INSTALL.md mục 10. `strand web init --if-no-admin --quiet` dành cho bootstrap: chỉ đặt mật khẩu khi DB chưa có admin.
 
@@ -1270,3 +1270,15 @@ Chi tiết nằm trong `questions/DECISIONS-2026-11-02.md` và `docs/HANDOFF-COD
 | 14 | Soak trước Gate 1: 12 giờ thay vì 72 giờ | 04 §1 |
 | 17 | `bootstrap.create_schema: auto` mặc định | 02 §10 |
 | — | `verify --repair fix` yêu cầu pipeline dừng và target đã bắt kịp (review R04); runbook spec cần cập nhật | 05 |
+
+
+## Web UI: tính năng và phần chỉ có ở CLI
+
+Web UI (PostgreSQL bắt buộc) làm được: tạo pipeline cho mọi cặp được hỗ trợ (MySQL/MariaDB/PostgreSQL → MySQL/PostgreSQL, MongoDB → MongoDB) kèm tuning; sửa cấu hình, `.env`, tuning; tải về/tải lên YAML; start/stop/restart/enable/disable, pause/resume, throttle, `snapshot add`, checkpoint show/rewind; `verify`; wizard Repair và Promote; `plan`; duyệt thay đổi schema (`schema diff`/`approve`, xem trước DDL); `schema init --dry-run`; database objects (`objects list`/`apply`); backup (catalog, job); trang MCP; Settings; audit.
+
+Cố ý để lại CLI (lý do):
+
+- `seed plan/apply`: điều phối restore bản backup vật lý lên máy target (cần quyền và đường dẫn trên máy DB, thao tác phá hủy dữ liệu đích); không an toàn để bấm từ web.
+- `archive binlog`: tiến trình lưu trữ chạy liên tục, độc lập với pipeline (thường là một unit systemd riêng trên replica), không có trạng thái để web quan sát.
+- `tunnel open`: tiến trình SSH chạy liên tục; cấu hình pipeline chưa có khóa tunnel nên web chưa gắn được tunnel vào source/target (tunnel cho job backup thuộc phần backup).
+- `spool-inspect`, `top`, `export`, `config schema`, `mongodb sync` (lệnh thử nghiệm; pipeline MongoDB chạy qua `strand sync` khi engine hỗ trợ), `web db migrate|export|audit-archive` (công cụ quản trị chạy ngoài web: chuyển bản cài cũ, sao lưu/quay về).

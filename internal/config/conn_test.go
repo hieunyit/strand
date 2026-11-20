@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -36,6 +37,33 @@ tables: { include: ["app.*"] }
 	d := mustDSN(t, cfg.Target.DSN)
 	if d.User != "strand" || d.Passwd != "t@p/w" || d.Addr != "10.0.0.21:3306" || d.DBName != "strand" || d.TLSConfig != "skip-verify" || d.Timeout.String() != "5s" {
 		t.Fatalf("target: %+v", d)
+	}
+}
+
+func TestLoadYAMLStrictWithEnvDoesNotMutateProcessEnvironment(t *testing.T) {
+	t.Setenv("STRAND_TEST_DB_SECRET", "")
+	yml := `
+version: 1
+name: db-config
+source: { kind: mysql, host: 10.0.0.11, user: strand, password_env: STRAND_TEST_DB_SECRET }
+target: { kind: mysql, dsn: "${TARGET_DSN}" }
+tables: { include: ["app.*"] }
+`
+	cfg, err := LoadYAMLStrictWithEnv([]byte(yml), map[string]string{
+		"STRAND_TEST_DB_SECRET": "p@ss",
+		"TARGET_DSN":            "root:target@tcp(10.0.0.21:3306)/strand",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustDSN(t, cfg.Source.DSN).Passwd; got != "p@ss" {
+		t.Fatalf("source password = %q", got)
+	}
+	if cfg.Target.DSN != "root:target@tcp(10.0.0.21:3306)/strand" {
+		t.Fatalf("target DSN = %q", cfg.Target.DSN)
+	}
+	if got := os.Getenv("STRAND_TEST_DB_SECRET"); got != "" {
+		t.Fatalf("process environment was mutated: %q", got)
 	}
 }
 

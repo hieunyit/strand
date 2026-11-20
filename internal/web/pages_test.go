@@ -58,7 +58,10 @@ func TestSamplerSamplesAndBuildsOverview(t *testing.T) {
 		t.Fatalf("overview %+v", ov)
 	}
 	// Pipeline bị gỡ khỏi cấu hình thì dữ liệu cũng bị dọn (không rò bộ nhớ).
-	e.srv.reg.cfg.Pipelines = nil
+	if err := e.srv.reg.RemovePipeline("orders"); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.reg.Refresh(context.Background())
 	s.SampleOnce(context.Background())
 	if s.Latest("orders") != nil || len(s.Series("orders")) != 0 {
 		t.Fatal("removed pipeline must be dropped from the sampler")
@@ -74,9 +77,7 @@ func TestSamplerApplyRateFromMetrics(t *testing.T) {
 	// Ghi lại cấu hình pipeline có metrics.
 	cfgPath := e.srv.reg.cfg.Pipelines[0].Config
 	b, _ := os.ReadFile(cfgPath)
-	if err := os.WriteFile(cfgPath, append(b, []byte("  metrics: \""+ms+"\"\n")...), 0o640); err != nil {
-		t.Fatal(err)
-	}
+	e.writePipelineFile("orders", cfgPath, string(b)+"  metrics: \""+ms+"\"\n", 0o640)
 	s := e.srv.Sampler()
 	s.SampleOnce(context.Background())
 	e.clock.Advance(5 * time.Second)

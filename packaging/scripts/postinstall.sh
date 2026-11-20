@@ -15,5 +15,16 @@ if [ -n "$running" ]; then
 	echo "strand: các pipeline sau vẫn chạy binary cũ; restart khi thuận tiện:"
 	for u in $running; do echo "  systemctl restart $u"; done
 fi
-echo "strand: Web UI: sudo strand web init --enable"
+# Web UI: khóa mã hóa bí mật pipeline trong DB (bắt buộc), sinh một lần; nâng cấp giữ nguyên file có sẵn.
+if [ ! -f /etc/strand/web.env ]; then
+	(
+		umask 027
+		key=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+		printf '# strand-web environment (EnvironmentFile of strand-web.service). Back up this key OUTSIDE the database backup.\nSTRAND_WEB_SECRET_KEY=%s\n' "$key" >/etc/strand/web.env
+	)
+	chown root:strand /etc/strand/web.env
+	chmod 0640 /etc/strand/web.env
+fi
+echo "strand: Web UI needs PostgreSQL: sudo strand web init --database-dsn postgres://user:pass@host:5432/strand_web --enable"
+echo "strand: (STRAND_WEB_SECRET_KEY is in /etc/strand/web.env: keep a copy outside the database backup)"
 exit 0

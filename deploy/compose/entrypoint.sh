@@ -13,6 +13,7 @@ fi
 case "$STRAND_WEB_DATABASE_DSN" in
   *change-me*) echo "POSTGRES_PASSWORD is still the placeholder from .env.example: set a real one (openssl rand -hex 24) in .env" >&2; exit 2 ;;
 esac
+: "${STRAND_WEB_SECRET_KEY:?STRAND_WEB_SECRET_KEY is required (pipeline secrets are encrypted in the database): set it in .env, e.g. openssl rand -hex 32}"
 LISTEN="${STRAND_WEB_LISTEN:-0.0.0.0:8080}"
 STATE_DIR="${STRAND_WEB_STATE_DIR:-/var/lib/strand-web}"
 CONFIG_DIR="${STRAND_CONFIG_DIR:-/etc/strand}"
