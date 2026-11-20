@@ -81,7 +81,7 @@
     </div>
     <div class="topright">
       {{if .Live}}<span class="livepill" id="livepill" data-conn="connecting" role="status" aria-live="polite" title="Live data from the console's background sampler"><span class="livedot" aria-hidden="true"></span><span id="livetext">Connecting</span></span>{{end}}
-      <span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>
+      {{if .EnvName}}<span class="envchip env-{{.EnvTone}}" title="Environment (Settings &gt; General). Host: {{.Host}}">{{icon "server"}}{{.EnvName}}</span>{{else}}<span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>{{end}}
       <button type="button" class="iconbtn" id="theme-toggle" aria-label="Colour theme: follows the system. Click to change." title="Colour theme">{{icon "auto"}}<span class="tlabel">Auto</span></button>
       <details class="usermenu" id="usermenu">
         <summary aria-label="User menu">{{icon "user"}}{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</summary>
@@ -89,7 +89,7 @@
           <div class="who">Signed in as <b>{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</b> <span class="badge small">{{if .CurrentUser.Role}}{{.CurrentUser.Role}}{{else}}admin{{end}}</span></div>
           <a class="menuitem" href="/account">{{icon "user"}}My account</a>
           {{if eq .CurrentUser.Role "admin"}}
-          <a class="menuitem" href="/users">{{icon "users"}}Users</a>
+          <a class="menuitem" href="/users">{{icon "user"}}Users</a>
           {{end}}
           <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn ghost" type="submit" data-action="logout">{{icon "logout"}}Log out</button></form>
         </div>

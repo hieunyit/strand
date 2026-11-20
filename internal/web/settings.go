@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // Cài đặt web chỉnh được trên trang Settings (chế độ DB). Thứ tự ưu tiên (giá trị hiệu lực):
@@ -39,42 +40,51 @@ type settingDef struct {
 	Env     string // biến môi trường ghi đè (rỗng: không có)
 	// Min, Max: khoảng hợp lệ của khóa int (Max 0: 1..300).
 	Min, Max int
-	file     func(c *Config) any
-	def      any
+	// Section groups the setting on the Settings page; Choices are the allowed values of a "choice" setting.
+	Section string
+	Choices []string
+	file    func(c *Config) any
+	def     any
 }
 
 var settingDefs = []settingDef{
-	{Key: "scan", Label: "Scan globs", Kind: "list",
+	{Key: "environment_name", Label: "Environment name", Kind: "text", Section: "general",
+		Help: "Shown as a chip in the top bar on every page (for example production, staging), so nobody mistakes one console for another. Empty: the host name.",
+		file: func(c *Config) any { return c.EnvironmentName }, def: ""},
+	{Key: "environment_tone", Label: "Environment colour", Kind: "choice", Section: "general", Choices: []string{"neutral", "info", "success", "warning", "danger"},
+		Help: "Colour of the environment chip: danger (red) is a common choice for production.",
+		file: func(c *Config) any { return c.EnvironmentTone }, def: "neutral"},
+	{Key: "scan", Section: "general", Label: "Scan globs", Kind: "list",
 		Help: "Pipeline config files discovered automatically, one absolute glob per line (for example /etc/strand/*.yaml). Applies at the next refresh (5 s).",
 		file: func(c *Config) any { return append([]string{}, c.Scan...) }, def: []string{}},
-	{Key: "config_dir", Label: "Directory for new pipelines", Kind: "string",
+	{Key: "config_dir", Section: "general", Label: "Directory for new pipelines", Kind: "string",
 		Help: "Where the New pipeline form writes <name>.yaml and <name>.env. Empty: /etc/strand if writable, else <state_dir>/pipelines.",
 		file: func(c *Config) any { return c.ConfigDir }, def: ""},
-	{Key: "secure_cookies", Label: "Secure cookies", Kind: "bool", Env: "STRAND_WEB_SECURE_COOKIES",
+	{Key: "secure_cookies", Section: "security", Label: "Secure cookies", Kind: "bool", Env: "STRAND_WEB_SECURE_COOKIES",
 		Help: "Mark cookies Secure (behind a TLS reverse proxy). Always on when the web serves TLS itself. Applies to new cookies.",
 		file: func(c *Config) any { return c.SecureCookies }, def: false},
-	{Key: "trust_forwarded_for", Label: "Trust X-Forwarded-For", Kind: "bool", Env: "STRAND_WEB_TRUST_FORWARDED_FOR",
+	{Key: "trust_forwarded_for", Section: "security", Label: "Trust X-Forwarded-For", Kind: "bool", Env: "STRAND_WEB_TRUST_FORWARDED_FOR",
 		Help: "Take the client IP (audit log, login rate limit) from X-Forwarded-For. Only behind a trusted proxy.",
 		file: func(c *Config) any { return c.TrustForwardedFor }, def: false},
-	{Key: "shutdown_stop_pipelines", Label: "Stop pipelines on web shutdown", Kind: "bool",
+	{Key: "shutdown_stop_pipelines", Section: "general", Label: "Stop pipelines on web shutdown", Kind: "bool",
 		Help: "When the web exits (container stop), gracefully stop the background pipelines it runs; they are restarted from their desired state on the next start.",
 		file: func(c *Config) any { return c.ShutdownStopPipelines }, def: false},
-	{Key: "sample_interval_sec", Label: "Sample interval (seconds)", Kind: "int", Restart: true,
+	{Key: "sample_interval_sec", Section: "general", Label: "Sample interval (seconds)", Kind: "int", Restart: true,
 		Help: "How often pipelines are sampled for the dashboard and metrics history (1 to 300). Needs a web restart.",
 		file: func(c *Config) any { return c.SampleIntervalSec }, def: 5},
-	{Key: "audit_retention_days", Label: "Audit retention (days)", Kind: "int", Min: 0, Max: 36500,
+	{Key: "audit_retention_days", Section: "audit", Label: "Audit retention (days)", Kind: "int", Min: 0, Max: 36500,
 		Help: "PostgreSQL mode: audit rows older than this are archived (exported to a verified, compressed JSONL file with a sha256 manifest, then removed; an audit.archive entry records it) by `strand web db audit-archive`, or automatically when enabled below. 0 = keep forever.",
 		file: func(c *Config) any { return c.AuditRetentionDays }, def: 365},
-	{Key: "audit_archive_auto", Label: "Archive old audit rows automatically", Kind: "bool",
+	{Key: "audit_archive_auto", Section: "audit", Label: "Archive old audit rows automatically", Kind: "bool",
 		Help: "PostgreSQL mode: once a day the active web instance archives the audit rows older than the retention into the archive directory. Off: run `strand web db audit-archive` yourself.",
 		file: func(c *Config) any { return c.AuditArchiveAuto }, def: false},
-	{Key: "audit_archive_dir", Label: "Audit archive directory", Kind: "string",
+	{Key: "audit_archive_dir", Section: "audit", Label: "Audit archive directory", Kind: "string",
 		Help: "Where archive files (.jsonl.gz, .sha256, .manifest.json) are written. Empty: <state_dir>/audit-archive. Files are never deleted by Strand.",
 		file: func(c *Config) any { return c.AuditArchiveDir }, def: ""},
-	{Key: "audit_rotate_mb", Label: "Rotate audit.log at (MiB)", Kind: "int", Min: 0, Max: 102400,
+	{Key: "audit_rotate_mb", Section: "audit", Label: "Rotate audit.log at (MiB)", Kind: "int", Min: 0, Max: 102400,
 		Help: "The audit.log file copy (database.audit: file or both) is rotated to audit-<time>.log.gz (with a .sha256; the new file starts with an audit.rotate line naming it) when it reaches this size. 0 = never.",
 		file: func(c *Config) any { return c.AuditRotateMB }, def: 100},
-	{Key: "audit_rotate_days", Label: "Rotate audit.log after (days)", Kind: "int", Min: 0, Max: 36500,
+	{Key: "audit_rotate_days", Section: "audit", Label: "Rotate audit.log after (days)", Kind: "int", Min: 0, Max: 36500,
 		Help: "Also rotate audit.log when its first line is older than this (checked daily). 0 = never.",
 		file: func(c *Config) any { return c.AuditRotateDays }, def: 0},
 }
@@ -162,6 +172,30 @@ func parseSetting(d *settingDef, raw any) (any, error) {
 			return nil, fmt.Errorf("%s: must be an absolute, clean path (got %q)", d.Key, v)
 		}
 		return v, nil
+	case "text":
+		v, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s: expected text", d.Key)
+		}
+		v = strings.TrimSpace(v)
+		if len([]rune(v)) > 40 {
+			return nil, fmt.Errorf("%s: at most 40 characters", d.Key)
+		}
+		for _, r := range v {
+			if !unicode.IsPrint(r) {
+				return nil, fmt.Errorf("%s: contains a control character", d.Key)
+			}
+		}
+		return v, nil
+	case "choice":
+		v, _ := raw.(string)
+		v = strings.TrimSpace(v)
+		for _, c := range d.Choices {
+			if v == c {
+				return v, nil
+			}
+		}
+		return nil, fmt.Errorf("%s: must be one of %s", d.Key, strings.Join(d.Choices, ", "))
 	case "list":
 		var items []string
 		switch v := raw.(type) {
@@ -270,20 +304,22 @@ func (s *Server) loadSettings(initial bool) error {
 
 // SettingView là một dòng của trang/API Settings.
 type SettingView struct {
-	Key            string `json:"key"`
-	Label          string `json:"label"`
-	Help           string `json:"help"`
-	Kind           string `json:"kind"`
-	Value          any    `json:"value"`
-	Source         string `json:"source"`
-	FileValue      any    `json:"file_value"`
-	Env            string `json:"env,omitempty"`
-	Editable       bool   `json:"editable"`
-	RestartNeeded  bool   `json:"restart_required"`
-	PendingRestart bool   `json:"pending_restart,omitempty"`
-	Text           string `json:"-"` // giá trị dạng text cho form
-	Min            int    `json:"min,omitempty"`
-	Max            int    `json:"max,omitempty"`
+	Key            string   `json:"key"`
+	Label          string   `json:"label"`
+	Help           string   `json:"help"`
+	Kind           string   `json:"kind"`
+	Value          any      `json:"value"`
+	Source         string   `json:"source"`
+	FileValue      any      `json:"file_value"`
+	Env            string   `json:"env,omitempty"`
+	Editable       bool     `json:"editable"`
+	RestartNeeded  bool     `json:"restart_required"`
+	PendingRestart bool     `json:"pending_restart,omitempty"`
+	Text           string   `json:"-"` // giá trị dạng text cho form
+	Min            int      `json:"min,omitempty"`
+	Max            int      `json:"max,omitempty"`
+	Section        string   `json:"section,omitempty"`
+	Choices        []string `json:"choices,omitempty"`
 }
 
 type settingsBody struct {
@@ -304,6 +340,7 @@ func (s *Server) settingsView() []SettingView {
 			FileValue: d.file(s.cfg), Env: d.Env, RestartNeeded: d.Restart, PendingRestart: pending}
 		v.Editable = v.Source != SrcEnv
 		v.Text = settingText(v.Value)
+		v.Section, v.Choices = d.Section, d.Choices
 		if d.Kind == "int" {
 			v.Min, v.Max = 1, 300
 			if d.Max != 0 {

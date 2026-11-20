@@ -202,6 +202,10 @@ header.top { position: sticky; top: 0; z-index: 15; display: flex; justify-conte
 .topbrand { font-size: var(--fs-base); font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topright { display: flex; align-items: center; gap: var(--sp-2); }
 .envchip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface-2); color: var(--ink-2); font-size: var(--fs-xs); font-weight: 500; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.envchip.env-info { background: var(--info-soft, #e8f0fe); color: var(--info, #1849a9); border-color: transparent; }
+.envchip.env-success { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.envchip.env-warning { background: var(--warn-soft); color: var(--warn); border-color: transparent; font-weight: 600; }
+.envchip.env-danger { background: var(--bad-soft); color: var(--bad); border-color: transparent; font-weight: 600; }
 .iconbtn { display: inline-flex; align-items: center; gap: 6px; height: 32px; font: inherit; font-size: var(--fs-sm); color: var(--ink-2); background: transparent; border: 1px solid transparent; border-radius: var(--r-sm); padding: 0 8px; cursor: pointer; }
 .iconbtn:hover { background: var(--tt-hover); color: var(--ink); }
 .usermenu { position: relative; }
@@ -1027,3 +1031,11 @@ fieldset.wiz-step[hidden] { display: none; }
 .policy-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--sp-3); }
 .days-pick { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
 @media (max-width: 960px) { .detail-layout, .wiz-layout { grid-template-columns: minmax(0, 1fr); } .wiz-summary { position: static; } }
+
+/* Settings: section index on the left, one form per section */
+.settings-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: var(--sp-5); align-items: start; }
+.settings-nav { position: sticky; top: var(--sp-4); display: flex; flex-direction: column; gap: 2px; }
+.settings-nav a { padding: 8px 12px; border-radius: var(--r-sm); color: var(--ink-2); }
+.settings-nav a:hover { background: var(--surface-2); text-decoration: none; }
+.settings-sections > * + * { margin-top: var(--sp-4); }
+@media (max-width: 900px) { .settings-layout { grid-template-columns: minmax(0, 1fr); } .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; } }

@@ -445,6 +445,8 @@ type pageData struct {
 	Nav          []NavItem
 	Version      string
 	Host         string // host name shown in the top bar
+	EnvName      string // environment chip label (setting environment_name); empty: the host name
+	EnvTone      string // neutral | info | success | warning | danger
 	Standby      string // non-empty on a standby instance (banner)
 	Refresh      int    // giây; 0 = không tự làm mới toàn trang
 	CurrentUser  CurrentUserInfo
@@ -561,6 +563,16 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 	d.Nav, d.Version = s.navItems(), s.version
 	d.Standby = s.standbyMessage()
 	d.Host = hostName()
+	d.EnvName, d.EnvTone = s.settingStr("environment_name"), "neutral"
+	if t := s.settingStr("environment_tone"); t != "" {
+		if def := settingDefOf("environment_tone"); def != nil {
+			for _, c := range def.Choices { // web.yaml values are not validated on load: only known tones become a class
+				if c == t {
+					d.EnvTone = t
+				}
+			}
+		}
+	}
 	d.Interval = int(s.samp.Interval().Seconds())
 	if d.AsOf.IsZero() {
 		d.AsOf = s.now()

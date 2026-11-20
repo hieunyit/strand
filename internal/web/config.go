@@ -73,6 +73,9 @@ type Config struct {
 	AuditArchiveDir    string `yaml:"audit_archive_dir,omitempty"`
 	AuditRotateMB      int    `yaml:"audit_rotate_mb,omitempty"`
 	AuditRotateDays    int    `yaml:"audit_rotate_days,omitempty"`
+	// EnvironmentName / EnvironmentTone: label and colour of the environment chip in the top bar.
+	EnvironmentName string `yaml:"environment_name,omitempty"`
+	EnvironmentTone string `yaml:"environment_tone,omitempty"`
 
 	// SourcePath: đường dẫn tuyệt đối của chính web.yaml (không đọc từ file); scan bỏ qua file này.
 	SourcePath string `yaml:"-"`
