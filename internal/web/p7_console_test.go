@@ -172,3 +172,86 @@ func TestOverviewDataProtectionAndAttention(t *testing.T) {
 		t.Error("plain env without backups should hide Data protection strip")
 	}
 }
+
+func TestUsersDrawerAndRoleBadges(t *testing.T) {
+	e := newCPEnv(t)
+	// Admin access to /users
+	code, body := e.admin().do("GET", "/users", nil)
+	if code != 200 {
+		t.Fatalf("GET /users returned %d", code)
+	}
+	for _, want := range []string{
+		`<dialog class="drawer" id="user-drawer"`,
+		`data-open-drawer="user-drawer"`,
+		`data-confirm-user="`,
+		`class="data-table grid"`,
+		`<caption class="sr-only">Users</caption>`,
+		`st-synced`, // admin badge
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/users missing %s", want)
+		}
+	}
+
+	// Viewer and operator receive 403
+	for _, role := range []store.Role{store.RoleViewer, store.RoleOperator} {
+		c, _ := e.roleClient(role).do("GET", "/users", nil)
+		if c != 403 {
+			t.Errorf("expected 403 for %s on /users, got %d", role, c)
+		}
+	}
+}
+
+func TestLoginExpiredNotice(t *testing.T) {
+	e := newEnv(t, nil)
+	c := e.client()
+
+	// 1. Fresh visit without cookie redirects to /login without expired=1
+	resp, _ := e.do(c, "GET", "/pipelines", "", nil)
+	if resp.StatusCode != 302 {
+		t.Fatalf("expected 302, got %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if strings.Contains(loc, "expired=1") {
+		t.Errorf("fresh visit redirect should not have expired=1: %s", loc)
+	}
+
+	// 2. Direct visit to /login has no session expired notice
+	resp, body := e.do(c, "GET", "/login", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if strings.Contains(body, "Your session expired. Sign in again.") {
+		t.Error("clean /login should not show session expired message")
+	}
+
+	// 3. Visit with invalid/expired cookie redirects to /login with expired=1
+	resp, _ = e.do(c, "GET", "/pipelines", "", map[string]string{
+		"Cookie": sessionCookie + "=invalid-token-12345",
+	})
+	if resp.StatusCode != 302 {
+		t.Fatalf("expected 302, got %d", resp.StatusCode)
+	}
+	loc = resp.Header.Get("Location")
+	if !strings.Contains(loc, "expired=1") {
+		t.Errorf("expired cookie redirect missing expired=1: %s", loc)
+	}
+	if !strings.Contains(loc, "next=%2Fpipelines") {
+		t.Errorf("expired cookie redirect missing next: %s", loc)
+	}
+
+	// 4. Visiting /login?expired=1 renders the notice
+	resp, body = e.do(c, "GET", "/login?expired=1", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, "Your session expired. Sign in again.") {
+		t.Error("login page with ?expired=1 missing expired session message")
+	}
+
+	// 5. Open redirect prevention
+	resp, body = e.do(c, "GET", "/login?next=//evil.com", "", nil)
+	if strings.Contains(body, `value="//evil.com"`) {
+		t.Error("open redirect not prevented in login next value")
+	}
+}

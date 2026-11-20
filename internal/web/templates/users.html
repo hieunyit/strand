@@ -17,44 +17,51 @@
 </section>
 {{end}}
 
-<details class="advanced drawer-toggle" id="user-create"{{if .Error}} open{{end}}>
-  <summary>{{icon "plus"}}Create new user <span class="summary-hint">admin, operator or viewer</span></summary>
+<dialog class="drawer" id="user-drawer" aria-labelledby="user-drawer-title"{{if and .Error (not .CreatedToken) (not .GeneratedPassword)}} open{{end}}>
   <form method="post" action="/users/create" class="settings">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="field-grid">
-      <div class="field">
-        <label class="field-label" for="new-username">Username <span class="req" aria-hidden="true">*</span></label>
-        <input id="new-username" type="text" name="username" class="mono" required pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
-        <small class="field-hint">Letters, digits, <code>- _ .</code> (max 63).</small>
-      </div>
-      <div class="field">
-        <label class="field-label" for="new-display-name">Display name</label>
-        <input id="new-display-name" type="text" name="display_name">
-      </div>
-      <div class="field">
-        <label class="field-label" for="new-role">Role</label>
-        <select id="new-role" name="role">
-          <option value="viewer">viewer (read-only)</option>
-          <option value="operator" selected>operator (start/stop/pause/resume/throttle, backups, verify)</option>
-          <option value="admin">admin (full control)</option>
-        </select>
-      </div>
-      <div class="field">
-        <label class="field-label" for="new-password">Initial password</label>
-        <input id="new-password" type="password" name="password" class="mono" minlength="12" placeholder="Leave blank to generate random password">
-        <small class="field-hint">At least 12 characters. Blank = a random password is generated and shown once.</small>
-      </div>
+    <div class="drawer-head">
+      <h2 id="user-drawer-title">New user</h2>
+      <button type="button" class="iconbtn" data-close-drawer aria-label="Close">&times;</button>
     </div>
-    <label class="check"><input type="checkbox" name="must_change_password" value="1" checked><span>Must change password on first login</span></label>
-    <div class="form-actions">
+    <div class="drawer-body">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <div class="field-grid">
+        <div class="field">
+          <label class="field-label" for="new-username">Username <span class="req" aria-hidden="true">*</span></label>
+          <input id="new-username" type="text" name="username" class="mono" required pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+          <small class="field-hint">Letters, digits, <code>- _ .</code> (max 63).</small>
+        </div>
+        <div class="field">
+          <label class="field-label" for="new-display-name">Display name</label>
+          <input id="new-display-name" type="text" name="display_name">
+        </div>
+        <div class="field">
+          <label class="field-label" for="new-role">Role</label>
+          <select id="new-role" name="role">
+            <option value="viewer">viewer (read-only)</option>
+            <option value="operator" selected>operator (start/stop/pause/resume/throttle, backups, verify)</option>
+            <option value="admin">admin (full control)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="new-password">Initial password</label>
+          <input id="new-password" type="password" name="password" class="mono" minlength="12" placeholder="Leave blank to generate random password">
+          <small class="field-hint">At least 12 characters. Blank = a random password is generated and shown once.</small>
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" name="must_change_password" value="1" checked><span>Must change password on first login</span></label>
+    </div>
+    <div class="drawer-foot">
+      <button type="button" class="btn ghost" data-close-drawer>Cancel</button>
       <button class="btn primary" type="submit">Create user</button>
     </div>
   </form>
-</details>
+</dialog>
 
 <section class="card">
   <div class="cardhead">
     <h2>Users <span class="muted small">{{len .Users}}</span></h2>
+    <button type="button" class="btn primary small" data-open-drawer="user-drawer">{{icon "plus"}}New user</button>
   </div>
   <p class="card-desc">Manage users and assign RBAC roles: <b>admin</b> (full control), <b>operator</b> (run and verify pipelines and backups), or <b>viewer</b> (read-only).</p>
   <div class="tablewrap">
@@ -116,7 +123,7 @@
                   <button class="btn ghost small" type="submit" title="Revoke all tokens for this user">Revoke tokens</button>
                 </form>
                 <hr>
-                <form method="post" action="/users/delete" class="inline">
+                <form method="post" action="/users/delete" class="inline" data-confirm-user="{{.Username}}">
                   <input type="hidden" name="csrf" value="{{$.CSRF}}">
                   <input type="hidden" name="username" value="{{.Username}}">
                   <button class="btn ghost danger small" type="submit">Delete</button>

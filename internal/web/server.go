@@ -683,8 +683,15 @@ func (s *Server) deny(w http.ResponseWriter, r *http.Request, api bool) {
 	}
 	next := r.URL.RequestURI()
 	target := "/login"
+	q := url.Values{}
 	if r.Method == http.MethodGet && safeNext(next) && next != "/" {
-		target += "?next=" + url.QueryEscape(next)
+		q.Set("next", next)
+	}
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		q.Set("expired", "1")
+	}
+	if len(q) > 0 {
+		target += "?" + q.Encode()
 	}
 	http.Redirect(w, r, target, http.StatusFound)
 }
@@ -726,7 +733,11 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	s.renderLogin(w, r, http.StatusOK, "", "", false, "")
+	msg := ""
+	if r.URL.Query().Get("expired") == "1" {
+		msg = "Your session expired. Sign in again."
+	}
+	s.renderLogin(w, r, http.StatusOK, msg, "", false, "")
 }
 
 func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int, msg, username string, mustChange bool, currentPassword string) {
