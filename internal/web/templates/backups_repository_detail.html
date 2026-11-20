@@ -2,7 +2,7 @@
 <section class="card" id="bk-repo-detail" data-bkops="repo-detail" data-repo-id="{{.Body.Repo.ID}}">
   <div class="cardhead"><h2>Overview</h2>
     <span>{{if .Body.CanWrite}}<button class="btn small primary" type="button" id="bk-repo-test">Test repository</button>{{end}}
-    {{if .Body.IsAdmin}} <button class="btn small danger" type="button" id="bk-repo-delete">Delete</button>{{end}}</span></div>
+    {{if .Body.IsAdmin}} <a class="btn small" href="/backups/repositories?edit={{.Body.Repo.ID}}">Edit</a> <button class="btn small danger" type="button" id="bk-repo-delete">Delete</button>{{end}}</span></div>
   <dl class="kv">
     <dt>Type</dt><dd>{{.Body.Repo.KindOrS3}}</dd>
     <dt>Bucket</dt><dd class="mono">{{.Body.Repo.Bucket}}{{if .Body.Repo.Prefix}}/{{.Body.Repo.Prefix}}{{end}}</dd>

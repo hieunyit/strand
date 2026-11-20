@@ -25,7 +25,7 @@
       <td>{{if .ReadOnly}}{{range .Destinations}}<span class="badge">{{.}}</span> {{end}}{{else}}{{.Kind}}{{end}}</td>
       <td>{{if .ReadOnly}}<span class="badge">from environment</span> <span class="small">read-only{{if .Events}}; events: {{range $i, $e := .Events}}{{if $i}}, {{end}}{{$e}}{{end}}{{end}}</span>{{else}}stored{{if not .Enabled}} <span class="badge">disabled</span>{{end}}{{end}}</td>
       <td>{{if .LastTestAt}}<span class="badge {{if eq .LastTestStatus "ok"}}st-synced{{else}}st-failed{{end}}">{{.LastTestStatus}}</span> <span class="small">{{.LastTestDetail}}</span>{{else}}-{{end}}</td>
-      <td><button class="btn small" type="button" data-bk-chan-test="{{.ID}}">Send test</button>{{if not .ReadOnly}} <button class="btn small danger" type="button" data-bk-chan-delete="{{.ID}}">Delete</button>{{end}}</td>
+      <td><button class="btn small" type="button" data-bk-chan-test="{{.ID}}">Send test</button>{{if not .ReadOnly}} <button class="btn small" type="button" data-bk-chan-edit="{{.ID}}">Edit</button> <button class="btn small danger" type="button" data-bk-chan-delete="{{.ID}}">Delete</button>{{end}}</td>
     </tr>{{end}}</tbody></table></div>
   <p class="form-status" id="bk-chan-result" role="status"></p>
   {{else}}<div class="empty-state"><b>No channels</b><span>Add a channel, or set STRAND_BACKUP_NOTIFY_* in the environment of the Web service.</span></div>{{end}}
