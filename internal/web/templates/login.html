@@ -9,27 +9,57 @@
 </head>
 <body class="loginpage">
 <main>
-<form class="login card" method="post" action="/login">
-  <div class="logobig"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><div><h1>Strand</h1><p class="tag">Change data capture console</p></div></div>
-  <p class="muted">Sign in to manage your replication pipelines.</p>
-  {{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
-  <input type="hidden" name="csrf" value="{{.CSRF}}">
-  <input type="hidden" name="next" value="{{.Next}}">
-  {{if .MustChange}}
-    <input type="hidden" name="must_change" value="1">
-    <input type="hidden" name="username" value="{{.Username}}">
-    <input type="hidden" name="current_password" value="{{.CurrentPassword}}">
-    <p class="warnbox" role="status">First login: please set a new password. Must be at least 12 characters and not equal to your username.</p>
-    <label for="login-new-password">New password <input id="login-new-password" type="password" name="new_password" autocomplete="new-password" minlength="12" autofocus required></label>
-    <label for="login-confirm-password">Confirm new password <input id="login-confirm-password" type="password" name="confirm_password" autocomplete="new-password" minlength="12" required></label>
-    <button class="btn primary" type="submit">Set new password &amp; sign in</button>
-  {{else}}
-    <label for="login-username">Username <input id="login-username" type="text" name="username" value="{{if .Username}}{{.Username}}{{else}}admin{{end}}" autocomplete="username" autofocus required></label>
-    <label for="login-password">Password <input id="login-password" type="password" name="password" autocomplete="current-password" required></label>
-    <button class="btn primary" type="submit">Sign in</button>
-  {{end}}
-  <p class="muted small">strand {{.Version}}</p>
-</form>
+<div class="login-shell">
+  <aside class="login-brand" aria-label="About Strand">
+    <div class="logobig"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand</span></div>
+    <div class="login-pitch">
+      <h2>Change data capture, accounted for.</h2>
+      <p>Replicate MySQL, MariaDB, PostgreSQL and MongoDB with checkpoints you can see, and run every pipeline from one console.</p>
+      <ul>
+        <li>Snapshot and stream with live lag and progress</li>
+        <li>Verify, repair, promote and seed wizards</li>
+        <li>Role-based access and an audit log of every change</li>
+      </ul>
+    </div>
+    <div class="login-foot">strand {{.Version}}</div>
+  </aside>
+  <div class="login-panel">
+    <form class="login card" method="post" action="/login">
+      <div class="logobig compact"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand</span></div>
+      <h1>Sign in</h1>
+      <p class="tag">Sign in to manage your replication pipelines.</p>
+      {{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="next" value="{{.Next}}">
+      {{if .MustChange}}
+        <input type="hidden" name="must_change" value="1">
+        <input type="hidden" name="username" value="{{.Username}}">
+        <input type="hidden" name="current_password" value="{{.CurrentPassword}}">
+        <p class="warnbox" role="status">First login: please set a new password. Must be at least 12 characters and not equal to your username.</p>
+        <div class="field">
+          <label class="field-label" for="login-new-password">New password</label>
+          <input id="login-new-password" type="password" name="new_password" autocomplete="new-password" minlength="12" autofocus required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="login-confirm-password">Confirm new password</label>
+          <input id="login-confirm-password" type="password" name="confirm_password" autocomplete="new-password" minlength="12" required>
+        </div>
+        <button class="btn primary" type="submit">Set new password &amp; sign in</button>
+      {{else}}
+        <div class="field">
+          <label class="field-label" for="login-username">Username</label>
+          <input id="login-username" type="text" name="username" value="{{if .Username}}{{.Username}}{{else}}admin{{end}}" autocomplete="username" autofocus required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="login-password">Password</label>
+          <input id="login-password" type="password" name="password" autocomplete="current-password" required>
+        </div>
+        <button class="btn primary" type="submit">Sign in</button>
+      {{end}}
+      <p class="login-version">Forgot your password? Ask an administrator to reset it. &middot; strand {{.Version}}</p>
+    </form>
+  </div>
+</div>
 </main>
 </body>
 </html>{{end}}

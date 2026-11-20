@@ -16,11 +16,14 @@
 <aside class="nav" aria-label="Sidebar">
   <a class="brand" href="/" aria-label="Strand home"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand<small>CDC console</small></span></a>
   <nav aria-label="Main">
+    <div class="navhead">Monitor</div>
     <a href="/" class="{{if eq .Active "overview"}}active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>{{icon "overview"}}Overview</a>
     <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>{{icon "pipelines"}}Pipelines</a>
-    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>
     <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
+    <div class="navhead">Operate</div>
+    <a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>
     <a href="/backups" class="{{if eq .Active "backups"}}active{{end}}"{{if eq .Active "backups"}} aria-current="page"{{end}}>{{icon "db"}}Backups</a>
+    <div class="navhead">System</div>
     <a href="/mcp" class="{{if eq .Active "mcp"}}active{{end}}"{{if eq .Active "mcp"}} aria-current="page"{{end}}>{{icon "jobs"}}MCP</a>
     <a href="/settings" class="{{if eq .Active "settings"}}active{{end}}"{{if eq .Active "settings"}} aria-current="page"{{end}}>{{icon "config"}}Settings</a>
     <div class="navhead">Registered pipelines</div>
@@ -80,8 +83,8 @@
   <form method="dialog" id="confirm-form">
     <h3 id="confirm-title">Confirm</h3>
     <p id="confirm-msg"></p>
-    <p id="confirm-retype" hidden>Type the pipeline name <b id="confirm-name"></b> to confirm:<br><input id="confirm-input" type="text" aria-label="Pipeline name" autocomplete="off" spellcheck="false"></p>
-    <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">Cancel</button> <button class="btn primary" id="confirm-ok" type="submit" value="ok">Confirm</button></div>
+    <p id="confirm-retype" hidden>Type the pipeline name <b id="confirm-name"></b> to confirm:<input id="confirm-input" type="text" aria-label="Pipeline name" autocomplete="off" spellcheck="false"></p>
+    <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">Cancel</button><button class="btn primary" id="confirm-ok" type="submit" value="ok">Confirm</button></div>
   </form>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

@@ -1,47 +1,55 @@
 {{define "content"}}
-<section class="card">
-  <div class="cardhead"><h2>Verified SSH Tunnels</h2></div>
-  <p class="muted small">Create loopback-only verified SSH local port forwards to reach private database endpoints through bastions.</p>
-  <form class="act form-grid" data-action="tunnel-open">
-    <div class="form-field">
-      <label for="tun-ssh">SSH Bastion Host:Port <span class="req">*</span></label>
-      <input type="text" id="tun-ssh" name="ssh" placeholder="bastion.internal:22" required>
+<form class="act form-stack" data-action="tunnel-open">
+  <fieldset class="form-section">
+    <legend class="form-section-title">Open a verified SSH tunnel</legend>
+    <p class="form-section-desc">Create loopback-only verified SSH local port forwards to reach private database endpoints through bastions.</p>
+    <div class="field-grid">
+      <div class="field">
+        <label class="field-label" for="tun-ssh">SSH Bastion Host:Port <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="tun-ssh" name="ssh" class="mono" placeholder="bastion.internal:22" required>
+      </div>
+      <div class="field">
+        <label class="field-label" for="tun-user">SSH Username <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="tun-user" name="user" placeholder="ops" required>
+      </div>
+      <div class="field">
+        <label class="field-label" for="tun-remote">Remote Target Host:Port <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="tun-remote" name="remote" class="mono" placeholder="db-master.internal:3306" required>
+      </div>
+      <div class="field">
+        <label class="field-label" for="tun-listen">Local Listen Address</label>
+        <input type="text" id="tun-listen" name="listen" class="mono" value="127.0.0.1:0" placeholder="127.0.0.1:0">
+        <small class="field-hint">Port 0 selects an ephemeral free local port</small>
+      </div>
     </div>
-    <div class="form-field">
-      <label for="tun-user">SSH Username <span class="req">*</span></label>
-      <input type="text" id="tun-user" name="user" placeholder="ops" required>
+  </fieldset>
+  <fieldset class="form-section">
+    <legend class="form-section-title">Host keys &amp; identity</legend>
+    <div class="field-grid cols-1">
+      <div class="field">
+        <label class="field-label" for="tun-known-hosts">Trusted known_hosts file <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="tun-known-hosts" name="known_hosts" class="mono" placeholder="/etc/strand/ssh/known_hosts" required>
+        <small class="field-hint">Unknown or changed SSH host keys are rejected.</small>
+      </div>
+      <div class="field">
+        <label class="field-label" for="tun-identity">SSH private key <span class="opt">optional</span></label>
+        <input type="text" id="tun-identity" name="identity_file" class="mono" placeholder="/etc/strand/ssh/keys/bastion_ed25519">
+        <small class="field-hint">Must be a regular file with restrictive permissions inside STRAND_WEB_SSH_KEY_DIR; otherwise SSH_AUTH_SOCK is used.</small>
+      </div>
     </div>
-    <div class="form-field">
-      <label for="tun-remote">Remote Target Host:Port <span class="req">*</span></label>
-      <input type="text" id="tun-remote" name="remote" placeholder="db-master.internal:3306" required>
-    </div>
-    <div class="form-field">
-      <label for="tun-listen">Local Listen Address</label>
-      <input type="text" id="tun-listen" name="listen" value="127.0.0.1:0" placeholder="127.0.0.1:0">
-      <span class="help">Port 0 selects an ephemeral free local port</span>
-    </div>
-    <div class="form-field full">
-      <label for="tun-known-hosts">Trusted known_hosts file <span class="req">*</span></label>
-      <input type="text" id="tun-known-hosts" name="known_hosts" class="mono wide" placeholder="/etc/strand/ssh/known_hosts" required>
-      <span class="help">Unknown or changed SSH host keys are rejected.</span>
-    </div>
-    <div class="form-field full">
-      <label for="tun-identity">SSH private key (optional)</label>
-      <input type="text" id="tun-identity" name="identity_file" class="mono wide" placeholder="/etc/strand/ssh/keys/bastion_ed25519">
-      <span class="help">Must be a regular file with restrictive permissions inside STRAND_WEB_SSH_KEY_DIR; otherwise SSH_AUTH_SOCK is used.</span>
-    </div>
-    <div class="toolbar">
+    <div class="form-actions flat">
+      <span class="form-status">The tunnel listens on loopback only.</span>
       <button class="btn primary" type="submit" data-action="tunnel-open">Open Tunnel</button>
     </div>
-  </form>
-</section>
+  </fieldset>
+</form>
 
-{{if .Body.Tunnels}}
 <section class="card">
-  <div class="cardhead"><h2>Active Tunnels</h2></div>
+  <div class="cardhead"><h2>Active Tunnels{{if .Body.Tunnels}} <span class="muted small">{{len .Body.Tunnels}}</span>{{end}}</h2></div>
+  {{if .Body.Tunnels}}
   <div class="tablewrap">
     <table class="data-table grid">
-      <thead><tr><th>Local Listen</th><th>Remote</th><th>SSH Bastion</th><th>User</th><th>Status</th><th>Action</th></tr></thead>
+      <thead><tr><th scope="col">Local Listen</th><th scope="col">Remote</th><th scope="col">SSH Bastion</th><th scope="col">User</th><th scope="col">Status</th><th scope="col" class="r">Action</th></tr></thead>
       <tbody>
         {{range .Body.Tunnels}}
         <tr>
@@ -50,7 +58,7 @@
           <td class="mono">{{.SSHAddress}}</td>
           <td>{{.SSHUser}}</td>
           <td><span class="badge st-synced">active</span></td>
-          <td>
+          <td class="r">
             <button class="btn danger sm" type="button" data-action="tunnel-stop" data-tunnel-id="{{.ID}}">Stop</button>
           </td>
         </tr>
@@ -58,6 +66,8 @@
       </tbody>
     </table>
   </div>
+  {{else}}
+  <div class="empty-state">{{icon "server"}}<b>No active tunnels</b><span>Open one above; it appears here while it is running.</span></div>
+  {{end}}
 </section>
-{{end}}
 {{end}}

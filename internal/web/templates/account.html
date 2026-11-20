@@ -1,45 +1,58 @@
 {{define "content"}}
 {{with .Body}}
-{{if .Message}}<p class="okbox" role="status">{{.Message}}</p>{{end}}
-{{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
+{{if .Message}}<div class="alert alert-success" role="status">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="alert alert-error" role="alert">{{.Error}}</div>{{end}}
 {{if .CreatedToken}}
-<div class="card">
-  <div class="cardhead"><h3>New API token</h3></div>
-  <p class="warnbox">Copy this token now. It will not be shown again.</p>
+<section class="card">
+  <div class="cardhead"><h2>New API token</h2></div>
+  <div class="alert alert-warn"><span>Copy this token now. It will not be shown again.</span></div>
   <pre class="box mono">{{.CreatedToken}}</pre>
-</div>
+</section>
 {{end}}
 
-<div class="card">
-  <div class="cardhead"><h2>My account</h2></div>
-  <p class="muted small">Signed in as <b>{{.User.Username}}</b> ({{.User.DisplayName}}). Role: <span class="badge {{if eq .User.Role "admin"}}st-synced{{else if eq .User.Role "operator"}}st-bootstrapping{{else}}st-paused{{end}}">{{.User.Role}}</span></p>
-</div>
+<section class="card">
+  <div class="cardhead"><h2>My account</h2><span class="badge {{if eq .User.Role "admin"}}st-synced{{else if eq .User.Role "operator"}}st-bootstrapping{{else}}st-paused{{end}}">{{.User.Role}}</span></div>
+  <dl class="kv">
+    <dt>Username</dt><dd><b>{{.User.Username}}</b></dd>
+    <dt>Display name</dt><dd>{{if .User.DisplayName}}{{.User.DisplayName}}{{else}}<span class="muted">-</span>{{end}}</dd>
+    <dt>Role</dt><dd>{{.User.Role}}</dd>
+  </dl>
+</section>
 
-<div class="card">
-  <div class="cardhead"><h3>Change password</h3></div>
-  <form method="post" action="/account/password" class="settings">
+<form method="post" action="/account/password" class="settings">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <fieldset class="form-section">
+    <legend class="form-section-title">Change password</legend>
+    <p class="form-section-desc">At least 12 characters and not equal to your username. Other sessions stay signed in until you sign them out below.</p>
+    <div class="field-grid cols-3">
+      <div class="field">
+        <label class="field-label" for="cur-password">Current password <span class="req" aria-hidden="true">*</span></label>
+        <input id="cur-password" type="password" name="current_password" class="mono" required autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label class="field-label" for="new-pw">New password <span class="req" aria-hidden="true">*</span></label>
+        <input id="new-pw" type="password" name="new_password" class="mono" minlength="12" required autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label class="field-label" for="confirm-pw">Confirm new password <span class="req" aria-hidden="true">*</span></label>
+        <input id="confirm-pw" type="password" name="confirm_password" class="mono" minlength="12" required autocomplete="new-password">
+      </div>
+    </div>
+    <div class="form-actions flat"><button class="btn primary" type="submit">Update password</button></div>
+  </fieldset>
+</form>
+
+<section class="card">
+  <div class="cardhead"><h2>My API tokens</h2></div>
+  <p class="card-desc">API tokens are scoped to your <b>{{.User.Role}}</b> role. Use header <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+  <form method="post" action="/account/tokens/create" class="toolbar">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="setrow">
-      <div class="sethead"><label for="cur-password"><b>Current password</b></label></div>
-      <div class="setinput"><input id="cur-password" type="password" name="current_password" class="wide mono" required autocomplete="current-password"></div>
-    </div>
-    <div class="setrow">
-      <div class="sethead"><label for="new-pw"><b>New password</b></label></div>
-      <div class="setinput"><input id="new-pw" type="password" name="new_password" class="wide mono" minlength="12" required autocomplete="new-password"></div>
-    </div>
-    <div class="setrow">
-      <div class="sethead"><label for="confirm-pw"><b>Confirm new password</b></label></div>
-      <div class="setinput"><input id="confirm-pw" type="password" name="confirm_password" class="wide mono" minlength="12" required autocomplete="new-password"></div>
-    </div>
-    <p><button class="btn primary" type="submit">Update password</button></p>
+    <label for="token-name">Token name</label>
+    <input id="token-name" type="text" name="name" placeholder="e.g. CI pipeline" required>
+    <button class="btn primary" type="submit">Generate new token</button>
   </form>
-</div>
-
-<div class="card">
-  <div class="cardhead"><h3>My API tokens</h3></div>
-  <p class="muted small">API tokens are scoped to your <b>{{.User.Role}}</b> role. Use header <code>Authorization: Bearer &lt;token&gt;</code>.</p>
   <div class="tablewrap">
-    <table class="grid">
+    <table class="data-table grid">
       <caption class="sr-only">API tokens</caption>
       <thead>
         <tr>
@@ -70,22 +83,23 @@
           </td>
         </tr>
         {{else}}
-        <tr class="empty"><td colspan="6"><div class="empty-state"><span>No API tokens created yet.</span></div></td></tr>
+        <tr class="empty"><td colspan="6"><div class="empty-state"><b>No API tokens yet</b><span>No API tokens created yet.</span></div></td></tr>
         {{end}}
       </tbody>
     </table>
   </div>
-  <form method="post" action="/account/tokens/create" class="inline pad">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <label>Token name <input type="text" name="name" placeholder="e.g. CI pipeline" required></label>
-    <button class="btn primary" type="submit">Generate new token</button>
-  </form>
-</div>
+</section>
 
-<div class="card">
-  <div class="cardhead"><h3>Active sessions</h3></div>
+<section class="card">
+  <div class="cardhead">
+    <h2>Active sessions</h2>
+    <form method="post" action="/account/sessions/signout-others" class="inline">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <button class="btn danger small" type="submit">Sign out other sessions</button>
+    </form>
+  </div>
   <div class="tablewrap">
-    <table class="grid">
+    <table class="data-table grid">
       <caption class="sr-only">Active sessions</caption>
       <thead>
         <tr>
@@ -107,10 +121,6 @@
       </tbody>
     </table>
   </div>
-  <form method="post" action="/account/sessions/signout-others" class="pad">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <button class="btn danger" type="submit">Sign out other sessions</button>
-  </form>
-</div>
+</section>
 {{end}}
 {{end}}

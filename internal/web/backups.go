@@ -22,6 +22,16 @@ type backupsPageBody struct {
 	Repos      []backup.Repo
 	Checks     []backup.CheckResult
 	Methods    []string
+
+	// MethodOptions are the built-in methods with their engine, so the job form lists only the methods
+	// of the engine the operator picked.
+	MethodOptions []backupMethodOption
+}
+
+// backupMethodOption is one built-in backup method in the job form.
+type backupMethodOption struct {
+	Value  string
+	Engine string
 }
 
 // dashboardRow is one source on the dashboard, preformatted for the template.
@@ -128,6 +138,11 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 		}
 		b.Methods = []string{backup.MethodCustom, backup.MethodMySQLDump, backup.MethodMariaDBDump, backup.MethodMydumper,
 			backup.MethodPGDump, backup.MethodPGBaseBackup, backup.MethodMongodump}
+		for _, m := range b.Methods {
+			if engine := backup.MethodEngine(m); engine != "" {
+				b.MethodOptions = append(b.MethodOptions, backupMethodOption{Value: m, Engine: engine})
+			}
+		}
 	}
 	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Refresh: 10, Body: b})
 }

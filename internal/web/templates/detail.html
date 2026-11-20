@@ -32,10 +32,14 @@
     </dl>
   </section>{{end}}
   {{if .Ctl.Reachable}}<section class="card" id="throttle"><div class="cardhead"><h2>Throttle</h2></div>
+    <p class="card-desc hint">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</p>
     <form class="act" data-action="throttle" data-pipeline="{{.View.Name}}">
-      <label>Soft source IOPS (tokens/s) <input type="number" name="source_iops" min="1" max="10000000" required class="num"></label>
-      <button class="btn" type="submit">Apply</button>
-      <span class="muted small hint">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</span>
+      <div class="field-grid cols-3">
+        <div class="field">
+          <label class="field-label" for="throttle-iops">Soft source IOPS (tokens/s) <span class="req" aria-hidden="true">*</span></label>
+          <div class="control-row"><input type="number" id="throttle-iops" name="source_iops" min="1" max="10000000" required class="mono"><button class="btn" type="submit">Apply</button></div>
+        </div>
+      </div>
     </form></section>{{end}}
   <section class="card chartbar" aria-label="Chart range"><div class="cardhead"><h2>{{icon "graph"}}History <span class="muted small">sampled every {{$.Interval}} s, {{if .HasHistory}}1 h in memory, up to 7 d from the database (longer ranges: averages per bucket, lag as the maximum){{else}}kept 1 h in memory{{end}}; new points arrive live</span></h2>
     <div class="seg" role="group" aria-label="Time range" id="chart-range"><button type="button" class="segbtn" data-range="300" aria-pressed="false">5 min</button><button type="button" class="segbtn" data-range="900" aria-pressed="true">15 min</button><button type="button" class="segbtn" data-range="3600" aria-pressed="false">1 h</button>{{if .HasHistory}}<button type="button" class="segbtn" data-range="21600" aria-pressed="false">6 h</button><button type="button" class="segbtn" data-range="86400" aria-pressed="false">24 h</button><button type="button" class="segbtn" data-range="604800" aria-pressed="false">7 d</button>{{end}}</div></div></section>
@@ -109,19 +113,20 @@
     </nav>{{end}}
   </section>{{end}}
   {{if .Ctl.Reachable}}<section class="card"><div class="cardhead"><h2>Snapshot control</h2></div>
-    <div class="actions">
+    <p class="card-desc">Pause or resume the snapshot without stopping the change stream, or resume both together.</p>
+    <div class="btngroup">
       <form class="act inline" data-action="pause-snapshot" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Pause snapshot</button></form>
       <form class="act inline" data-action="resume-snapshot-only" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (snapshot only, defer stream)</button></form>
       <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (normal)</button></form>
     </div>
   </section>{{end}}
   {{if .Ctl.Running}}<section class="card">
-    <div class="cardhead"><h3>Add tables</h3></div>
+    <div class="cardhead"><h2>Add tables</h2></div>
     {{if .Src.Error}}<p class="muted">{{.Src.Error}}</p>{{else}}
+    <p class="card-desc">Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.</p>
     <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
       <div class="picklist" id="src-picklist"{{if not .SrcLoaded}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{if .SrcLoaded}}{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}" aria-label="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}{{else}}<button type="button" class="btn" data-load-src>List source tables</button> <span class="muted small">Asks the running pipeline for the tables of the source database (a query on the source).</span>{{end}}</div>
-      <p class="muted small">Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.</p>
-      <button class="btn primary" type="submit">Snapshot selected tables</button>
+      <div class="form-actions"><button class="btn primary" type="submit">Snapshot selected tables</button></div>
     </form>{{end}}
   </section>{{end}}
 {{end}}
@@ -138,10 +143,15 @@
   </dl>{{end}}{{end}}
   </section>
   {{if .Ctl.CanRewind}}<section class="card"><div class="cardhead"><h2>Rewind checkpoint</h2></div>
-    <p class="muted">MySQL to MySQL only. The pipeline checks the position against gtid_purged before it moves; rows after the new position are applied again.</p>
+    <p class="card-desc">MySQL to MySQL only. The pipeline checks the position against gtid_purged before it moves; rows after the new position are applied again.</p>
     <form class="act" data-action="checkpoint-rewind" data-pipeline="{{.View.Name}}" data-confirm="Rewind the checkpoint of {{.View.Name}}? Events after the new position are re-applied." data-retype="{{.View.Name}}">
-      <label>Rewind to (GTID set) <input type="text" name="to" required class="wide mono" placeholder="uuid:1-12345"></label>
-      <button class="btn danger" type="submit">Rewind...</button>
+      <div class="field-grid cols-1">
+        <label class="field">
+          <span class="field-label">Rewind to (GTID set) <span class="req" aria-hidden="true">*</span></span>
+          <input type="text" name="to" required class="mono" placeholder="uuid:1-12345">
+        </label>
+      </div>
+      <div class="form-actions"><button class="btn danger" type="submit">Rewind...</button></div>
     </form></section>
   {{else}}<p class="muted small">Rewind is available for running MySQL to MySQL pipelines only.</p>{{end}}
 {{end}}
@@ -163,15 +173,14 @@
 {{end}}
 
 {{if eq .Tab "config"}}
-  <section class="card"><div class="cardhead"><h2>Configuration</h2></div>
+  <section class="card"><div class="cardhead"><h2>Configuration</h2>
+    <div class="btngroup">
+      <a class="btn ghost" href="/pipelines/{{.View.Name}}/config.yaml" download="{{.View.Name}}.yaml">Download YAML</a>
+      <button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>
+    </div></div>
     <p class="muted small mono">{{.Config.Path}}</p>
     {{if .Config.Error}}<p class="err">{{.Config.Error}}</p>{{end}}
     {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
-    
-    <div class="mb">
-      <button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>
-      <a class="btn ghost" href="/pipelines/{{.View.Name}}/config.yaml" download="{{.View.Name}}.yaml">Download YAML</a>
-    </div>
 
     <div id="cfg-view-mode">
       {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code wrapcode">{{.Config.YAML}}</pre>{{end}}
@@ -181,15 +190,22 @@
       <form id="cfg-edit-form" data-pipeline="{{.View.Name}}">
         <p class="muted small">Edit YAML configuration below. Saving validates syntax via <code>strand validate</code>, shows diff, keeps a timestamped backup, and writes atomically.</p>
         <textarea name="yaml" id="cfg-yaml-textarea" class="code cfg-textarea" rows="22" aria-label="Pipeline configuration YAML" spellcheck="false">{{.Config.YAML}}</textarea>
-        <div class="rowgap mt10">
-          <button class="btn" type="button" id="cfg-btn-diff">Validate &amp; Preview Diff</button>
-          <label><input type="checkbox" name="restart" id="cfg-restart-check" value="true"> Restart pipeline after saving</label>
-          <label><input type="checkbox" name="force" id="cfg-force-check" value="true"> Save anyway (force save if validation has warnings)</label>
-          <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
-          <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
-          <label class="small">Upload YAML <input type="file" id="cfg-upload" accept=".yaml,.yml,text/yaml,text/plain"></label>
+        <div class="field-grid mt14">
+          <div class="field">
+            <label class="field-label" for="cfg-upload">Upload YAML <span class="opt">optional</span></label>
+            <input type="file" id="cfg-upload" accept=".yaml,.yml,text/yaml,text/plain">
+            <small class="field-hint">Upload replaces the text above (nothing is saved until you press Save). A file downloaded here keeps secrets as <code>********</code>; they are restored from the stored copy on save.</small>
+          </div>
+          <div class="check-list">
+            <label class="check"><input type="checkbox" name="restart" id="cfg-restart-check" value="true"><span>Restart pipeline after saving</span></label>
+            <label class="check"><input type="checkbox" name="force" id="cfg-force-check" value="true"><span>Save anyway<small class="field-hint">Force save if validation has warnings.</small></span></label>
+          </div>
         </div>
-        <p class="muted small">Upload replaces the text above (nothing is saved until you press Save). A file downloaded here keeps secrets as <code>********</code>; they are restored from the stored copy on save.</p>
+        <div class="form-actions">
+          <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
+          <button class="btn" type="button" id="cfg-btn-diff">Validate &amp; Preview Diff</button>
+          <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
+        </div>
       </form>
       <div id="cfg-diff-box" class="mt14" hidden>
         <h3>Validation &amp; Diff</h3>
@@ -201,24 +217,25 @@
 
   <section class="card" id="tuning-card"><div class="cardhead"><h2>Tuning: snapshot speed &amp; safety</h2></div>
     {{if .Tuning.Error}}<p class="err">{{.Tuning.Error}}</p>{{else}}
-    <p class="muted small">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Graph tab)</a>; it is not saved to the file.</p>
-    <form id="tuning-form" class="np" data-pipeline="{{.View.Name}}">
-      <div class="np-row">
+    <p class="card-desc">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Graph tab)</a>; it is not saved to the file.</p>
+    <form id="tuning-form" class="tuning" data-pipeline="{{.View.Name}}">
+      <div class="field-grid cols-3">
         {{range .Tuning.Fields}}
-        <label>{{.Label}} <span class="muted small mono">({{.YAMLKey}})</span>
+        <label class="field">
+          <span class="field-label">{{.Label}} <span class="muted small mono">({{.YAMLKey}})</span></span>
           {{if .Options}}<select name="{{.Key}}" data-tuning="{{.Key}}">
             <option value=""{{if not .Set}} selected{{end}}>default: {{.Default}}</option>
             {{$cur := .Value}}{{range .Options}}<option value="{{.}}"{{if eq . $cur}} selected{{end}}>{{.}}</option>{{end}}
           </select>
           {{else}}<input type="text" name="{{.Key}}" data-tuning="{{.Key}}" value="{{.Value}}" placeholder="default: {{.Default}}" class="mono">{{end}}
-          <small class="muted">{{if .Set}}Current: <b>{{.Value}}</b>{{else}}Current: default ({{.Default}}){{end}}. {{.Help}}</small>
+          <small class="field-hint">{{if .Set}}Current: <b>{{.Value}}</b>{{else}}Current: default ({{.Default}}){{end}}. {{.Help}}</small>
         </label>
         {{end}}
       </div>
-      <div class="np-actions">
+      <div class="form-actions">
+        <label class="check push-left"><input type="checkbox" id="tuning-restart"><span>Restart pipeline after saving</span></label>
+        <label class="check"><input type="checkbox" id="tuning-force" value="true"><span>Save anyway (force save if validation has warnings)</span></label>
         <button class="btn" type="button" id="tuning-btn-diff">Validate &amp; Preview Diff</button>
-        <label><input type="checkbox" id="tuning-restart"> Restart pipeline after saving</label>
-        <label><input type="checkbox" id="tuning-force" value="true"> Save anyway (force save if validation has warnings)</label>
         <button class="btn primary" type="button" id="tuning-btn-save">Save tuning</button>
       </div>
     </form>
@@ -229,7 +246,7 @@
   <section class="card"><div class="cardhead"><h2>Credentials &amp; Environment (.env)</h2></div>
     <p class="muted small mono">{{.Env.Path}}</p>
     {{if .Env.Error}}<p class="err">{{.Env.Error}}</p>{{end}}
-    <p class="muted small">Environment variables used by the pipeline process. Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.</p>
+    <p class="card-desc">Environment variables used by the pipeline process. Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.</p>
     <form id="env-edit-form" data-pipeline="{{.View.Name}}">
       <div class="tablewrap env-wrap"><table class="data-table grid">
         <thead><tr><th scope="col">Variable</th><th scope="col">Value</th></tr></thead>
@@ -248,62 +265,87 @@
           </tr>
         </tbody>
       </table></div>
-      <button class="btn primary" type="button" id="env-btn-save">Save .env</button>
+      <div class="form-actions"><button class="btn primary" type="button" id="env-btn-save">Save .env</button></div>
     </form>
   </section>
 
   <section class="card danger-card"><div class="cardhead"><h2>Danger Zone</h2></div>
-    <p class="muted small">Permanently delete this pipeline, stopping it if running and removing its configuration. This action cannot be undone.</p>
-    <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}">
-      <button class="btn danger" type="submit">Delete pipeline {{.View.Name}}</button>
-    </form>
+    <div class="danger-row">
+      <p class="muted small">Permanently delete this pipeline, stopping it if running and removing its configuration. This action cannot be undone.</p>
+      <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}">
+        <button class="btn danger" type="submit">Delete pipeline {{.View.Name}}</button>
+      </form>
+    </div>
   </section>
 {{end}}
 
 {{if eq .Tab "jobs"}}
   <section class="card"><div class="cardhead"><h2>Verify</h2></div>
     {{if .Ctl.JobActive}}<p class="warnbox">A job is running ({{.Ctl.JobActive.Kind}}); one job at a time per pipeline. <a href="/jobs/{{.Ctl.JobActive.ID}}">Open it</a>.</p>{{end}}
+    <p class="card-desc">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
     <form class="act" data-action="verify" data-pipeline="{{.View.Name}}">
-      <label>Mode <select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select></label>
-      <label>Table (schema.table) <input type="text" name="table" list="verify-tables" class="wide mono" placeholder="schema.table" autocomplete="off"></label>
+      <div class="field-grid cols-3">
+        <label class="field">
+          <span class="field-label">Mode</span>
+          <select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select>
+        </label>
+        <label class="field">
+          <span class="field-label">Table (schema.table)</span>
+          <input type="text" name="table" list="verify-tables" class="mono" placeholder="schema.table" autocomplete="off">
+        </label>
+        <label class="field">
+          <span class="field-label">Rate (sample fraction or chunks/s)</span>
+          <input type="text" name="rate" class="mono" placeholder="default">
+        </label>
+      </div>
       <datalist id="verify-tables"{{if and .Ctl.Running (not .SrcLoaded)}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{range .Src.Tables}}<option value="{{.Table}}">{{end}}</datalist>
-      <label>Rate (sample fraction or chunks/s) <input type="text" name="rate" class="num" placeholder="default"></label>
-      <label><input type="checkbox" name="resume" value="true"> resume an interrupted full run</label>
-      <button class="btn primary" type="submit">Start verify</button>
-      <p class="muted small">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
+      <label class="check"><input type="checkbox" name="resume" value="true"><span>Resume an interrupted full run</span></label>
+      <div class="form-actions"><button class="btn primary" type="submit">Start verify</button></div>
     </form>
   </section>
   <section class="card"><div class="cardhead"><h2>Plan &amp; schema</h2></div>
     <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
-      <p class="muted small">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
-      <div class="rowgap">
+      <p class="card-desc">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
+      <div class="btngroup">
         <button class="btn" type="submit" data-do="plan" data-action="plan">Plan (what will be copied)</button>
         <button class="btn" type="submit" data-do="schema-init-dry" data-action="schema-init-dry">Preview DDL for missing target tables</button>
         <button class="btn primary" type="submit" data-do="schema-diff" data-action="schema-diff">Show pending schema changes</button>
-        <label class="small"><input type="checkbox" name="all" value="true"> include applied</label>
+        <label class="check"><input type="checkbox" name="all" value="true"><span>include applied</span></label>
       </div>
     </form>
-    <form class="act mt10" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
-      <div class="form-field">
-        <label for="schema-change-id-jobs">Change id <span class="req">*</span></label>
-        <input type="text" id="schema-change-id-jobs" name="id" class="num mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list">
-        <span class="help">ID of the proposed schema change to inspect or approve.</span>
-      </div>
-      <div class="mt10">
+    <form class="act mt20" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
+      <fieldset class="form-section subtle">
+        <legend class="form-section-title">Approve a schema change</legend>
+        <div class="field-grid cols-3">
+          <div class="field">
+            <label class="field-label" for="schema-change-id-jobs">Change id <span class="req" aria-hidden="true">*</span></label>
+            <input type="text" id="schema-change-id-jobs" name="id" class="mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list">
+            <small class="field-hint">ID of the proposed schema change to inspect or approve.</small>
+          </div>
+        </div>
+      <div class="form-actions flat start">
         <button class="btn" type="submit" data-do="schema-approve-dry" data-action="schema-approve-dry">Preview DDL</button>
         <button class="btn danger" type="submit" data-do="schema-approve" data-action="schema-approve" data-confirm="Apply the proposed DDL of this schema change on the target? The pipeline continues once the change is applied." data-retype="{{.View.Name}}">Approve &amp; apply</button>
       </div>
+      </fieldset>
     </form>
   </section>
   {{if eq .View.SourceKind "mysql"}}
   <section class="card"><div class="cardhead"><h2>Database objects</h2></div>
     <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
-      <p class="muted small">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
-      <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
+      <p class="card-desc">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
       {{if eq .View.TargetKind "mysql"}}
-      <label>Phase <select name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select></label>
-      <button class="btn danger" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>
+      <div class="field-grid cols-3">
+        <label class="field">
+          <span class="field-label">Phase</span>
+          <select name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select>
+        </label>
+      </div>
       {{end}}
+      <div class="form-actions start">
+        <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
+        {{if eq .View.TargetKind "mysql"}}<button class="btn danger" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>{{end}}
+      </div>
     </form>
   </section>
   {{end}}
@@ -317,24 +359,29 @@
       <a class="btn ghost small" href="/help/schema">Config schema guide</a>
     </div>
     <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
-      <p class="muted small">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
-      <div class="rowgap">
+      <p class="card-desc">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
+      <div class="btngroup">
         <button class="btn" type="submit" data-do="plan" data-action="plan">Plan (what will be copied)</button>
         <button class="btn" type="submit" data-do="schema-init-dry" data-action="schema-init-dry">Preview DDL for missing target tables</button>
         <button class="btn primary" type="submit" data-do="schema-diff" data-action="schema-diff">Show pending schema changes</button>
-        <label class="small"><input type="checkbox" name="all" value="true"> include applied</label>
+        <label class="check"><input type="checkbox" name="all" value="true"><span>include applied</span></label>
       </div>
     </form>
-    <form class="act mt10" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
-      <div class="form-field">
-        <label for="schema-change-id">Change id <span class="req">*</span></label>
-        <input type="text" id="schema-change-id" name="id" class="num mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list">
-        <span class="help">ID of the proposed schema change to inspect or approve.</span>
-      </div>
-      <div class="mt10">
+    <form class="act mt20" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
+      <fieldset class="form-section subtle">
+        <legend class="form-section-title">Approve a schema change</legend>
+        <div class="field-grid cols-3">
+          <div class="field">
+            <label class="field-label" for="schema-change-id">Change id <span class="req" aria-hidden="true">*</span></label>
+            <input type="text" id="schema-change-id" name="id" class="mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list">
+            <small class="field-hint">ID of the proposed schema change to inspect or approve.</small>
+          </div>
+        </div>
+      <div class="form-actions flat start">
         <button class="btn" type="submit" data-do="schema-approve-dry" data-action="schema-approve-dry">Preview DDL</button>
         <button class="btn danger" type="submit" data-do="schema-approve" data-action="schema-approve" data-confirm="Apply the proposed DDL of this schema change on the target? The pipeline continues once the change is applied." data-retype="{{.View.Name}}">Approve &amp; apply</button>
       </div>
+      </fieldset>
     </form>
   </section>
 {{end}}
@@ -343,15 +390,19 @@
   <section class="card">
     <div class="cardhead"><h2>Database objects</h2></div>
     <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
-      <p class="muted small">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
-      <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
+      <p class="card-desc">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
       {{if eq .View.TargetKind "mysql"}}
-      <div class="form-field mt10">
-        <label for="objects-phase">Phase</label>
-        <select id="objects-phase" name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select>
+      <div class="field-grid cols-3">
+        <div class="field">
+          <label class="field-label" for="objects-phase">Phase</label>
+          <select id="objects-phase" name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select>
+        </div>
       </div>
-      <button class="btn danger mt10" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>
       {{end}}
+      <div class="form-actions start">
+        <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
+        {{if eq .View.TargetKind "mysql"}}<button class="btn danger" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>{{end}}
+      </div>
     </form>
   </section>
 {{end}}

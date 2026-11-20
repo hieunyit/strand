@@ -1,28 +1,64 @@
 {{define "content"}}
 {{with .Body}}
-{{if .Message}}<p class="okbox" role="status">{{.Message}}</p>{{end}}
-{{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
+{{if .Message}}<div class="alert alert-success" role="status">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="alert alert-error" role="alert">{{.Error}}</div>{{end}}
 {{if .CreatedToken}}
-<div class="card">
-  <div class="cardhead"><h3>Generated API token</h3></div>
-  <p class="warnbox">Copy this token now. It will not be shown again.</p>
+<section class="card">
+  <div class="cardhead"><h2>Generated API token</h2></div>
+  <div class="alert alert-warn"><span>Copy this token now. It will not be shown again.</span></div>
   <pre class="box mono">{{.CreatedToken}}</pre>
-</div>
+</section>
 {{end}}
 {{if .GeneratedPassword}}
-<div class="card">
-  <div class="cardhead"><h3>Generated password for {{.PasswordUser}}</h3></div>
-  <p class="warnbox">Password set. Store it now; it is not displayed again.</p>
+<section class="card">
+  <div class="cardhead"><h2>Generated password for {{.PasswordUser}}</h2></div>
+  <div class="alert alert-warn"><span>Password set. Store it now; it is not displayed again.</span></div>
   <pre class="box mono">{{.GeneratedPassword}}</pre>
-</div>
+</section>
 {{end}}
-<div class="card">
+
+<details class="advanced drawer-toggle" id="user-create"{{if .Error}} open{{end}}>
+  <summary>{{icon "plus"}}Create new user <span class="summary-hint">admin, operator or viewer</span></summary>
+  <form method="post" action="/users/create" class="settings">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <div class="field-grid">
+      <div class="field">
+        <label class="field-label" for="new-username">Username <span class="req" aria-hidden="true">*</span></label>
+        <input id="new-username" type="text" name="username" class="mono" required pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+        <small class="field-hint">Letters, digits, <code>- _ .</code> (max 63).</small>
+      </div>
+      <div class="field">
+        <label class="field-label" for="new-display-name">Display name</label>
+        <input id="new-display-name" type="text" name="display_name">
+      </div>
+      <div class="field">
+        <label class="field-label" for="new-role">Role</label>
+        <select id="new-role" name="role">
+          <option value="viewer">viewer (read-only)</option>
+          <option value="operator" selected>operator (start/stop/pause/resume/throttle, backups, verify)</option>
+          <option value="admin">admin (full control)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label" for="new-password">Initial password</label>
+        <input id="new-password" type="password" name="password" class="mono" minlength="12" placeholder="Leave blank to generate random password">
+        <small class="field-hint">At least 12 characters. Blank = a random password is generated and shown once.</small>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="must_change_password" value="1" checked><span>Must change password on first login</span></label>
+    <div class="form-actions">
+      <button class="btn primary" type="submit">Create user</button>
+    </div>
+  </form>
+</details>
+
+<section class="card">
   <div class="cardhead">
-    <h2>Users</h2>
+    <h2>Users <span class="muted small">{{len .Users}}</span></h2>
   </div>
-  <p class="muted small">Manage users and assign RBAC roles: <b>admin</b> (full control), <b>operator</b> (run and verify pipelines and backups), or <b>viewer</b> (read-only).</p>
+  <p class="card-desc">Manage users and assign RBAC roles: <b>admin</b> (full control), <b>operator</b> (run and verify pipelines and backups), or <b>viewer</b> (read-only).</p>
   <div class="tablewrap">
-    <table class="grid">
+    <table class="data-table grid">
       <caption class="sr-only">Users</caption>
       <thead>
         <tr>
@@ -53,73 +89,46 @@
           <td>{{if .LastLoginAt}}<time datetime="{{.LastLoginAt.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .LastLoginAt}}</time>{{else}}<span class="muted">Never</span>{{end}}</td>
           <td><time datetime="{{.CreatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .CreatedAt}}</time></td>
           <td class="r nowrap">
-            {{if .Disabled}}
-            <form method="post" action="/users/enable" class="inline">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="username" value="{{.Username}}">
-              <button class="btn small" type="submit">Enable</button>
-            </form>
-            {{else}}
-            <form method="post" action="/users/disable" class="inline">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="username" value="{{.Username}}">
-              <button class="btn small" type="submit">Disable</button>
-            </form>
-            {{end}}
-            <form method="post" action="/users/reset-password" class="inline">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="username" value="{{.Username}}">
-              <button class="btn small" type="submit" title="Reset password and require change on next login">Reset password</button>
-            </form>
-            <form method="post" action="/users/tokens/revoke" class="inline">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="username" value="{{.Username}}">
-              <button class="btn small" type="submit" title="Revoke all tokens for this user">Revoke tokens</button>
-            </form>
-            <form method="post" action="/users/delete" class="inline">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="username" value="{{.Username}}">
-              <button class="btn danger small" type="submit">Delete</button>
-            </form>
+            <details class="rowmenu">
+              <summary class="btn small" aria-label="Actions for {{.Username}}">&#8943;</summary>
+              <div class="rowmenu-list">
+                {{if .Disabled}}
+                <form method="post" action="/users/enable" class="inline">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <input type="hidden" name="username" value="{{.Username}}">
+                  <button class="btn ghost small" type="submit">Enable</button>
+                </form>
+                {{else}}
+                <form method="post" action="/users/disable" class="inline">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <input type="hidden" name="username" value="{{.Username}}">
+                  <button class="btn ghost small" type="submit">Disable</button>
+                </form>
+                {{end}}
+                <form method="post" action="/users/reset-password" class="inline">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <input type="hidden" name="username" value="{{.Username}}">
+                  <button class="btn ghost small" type="submit" title="Reset password and require change on next login">Reset password</button>
+                </form>
+                <form method="post" action="/users/tokens/revoke" class="inline">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <input type="hidden" name="username" value="{{.Username}}">
+                  <button class="btn ghost small" type="submit" title="Revoke all tokens for this user">Revoke tokens</button>
+                </form>
+                <hr>
+                <form method="post" action="/users/delete" class="inline">
+                  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                  <input type="hidden" name="username" value="{{.Username}}">
+                  <button class="btn ghost danger small" type="submit">Delete</button>
+                </form>
+              </div>
+            </details>
           </td>
         </tr>
         {{end}}
       </tbody>
     </table>
   </div>
-</div>
-
-<div class="card">
-  <div class="cardhead"><h3>Create new user</h3></div>
-  <form method="post" action="/users/create" class="settings">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="setrow">
-      <div class="sethead"><label for="new-username"><b>Username</b></label></div>
-      <div class="setinput"><input id="new-username" type="text" name="username" class="wide mono" required pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$"></div>
-    </div>
-    <div class="setrow">
-      <div class="sethead"><label for="new-display-name"><b>Display name</b></label></div>
-      <div class="setinput"><input id="new-display-name" type="text" name="display_name" class="wide"></div>
-    </div>
-    <div class="setrow">
-      <div class="sethead"><label for="new-role"><b>Role</b></label></div>
-      <div class="setinput">
-        <select id="new-role" name="role">
-          <option value="viewer">viewer (read-only)</option>
-          <option value="operator" selected>operator (start/stop/pause/resume/throttle, backups, verify)</option>
-          <option value="admin">admin (full control)</option>
-        </select>
-      </div>
-    </div>
-    <div class="setrow">
-      <div class="sethead"><label for="new-password"><b>Initial password</b></label></div>
-      <div class="setinput">
-        <input id="new-password" type="password" name="password" class="wide mono" minlength="12" placeholder="Leave blank to generate random password">
-        <label class="small"><input type="checkbox" name="must_change_password" value="1" checked> Must change password on first login</label>
-      </div>
-    </div>
-    <p><button class="btn primary" type="submit">Create user</button></p>
-  </form>
-</div>
+</section>
 {{end}}
 {{end}}

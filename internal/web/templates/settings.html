@@ -1,24 +1,28 @@
 {{define "content"}}
 {{with .Body}}
-{{if .Message}}<div class="alert alert-success mb" role="status">{{.Message}}</div>{{end}}
-{{if .Error}}<div class="alert alert-error mb" role="alert">{{.Error}}</div>{{end}}
+{{if .Message}}<div class="alert alert-success" role="status">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="alert alert-error" role="alert">{{.Error}}</div>{{end}}
 <nav class="tabs" role="tablist" aria-label="Settings sections">
   <a href="/settings" class="tab active" role="tab" aria-selected="true" aria-current="page">{{icon "config"}}<span>General Settings</span></a>
   <a href="/settings/db" class="tab" role="tab" aria-selected="false">{{icon "db"}}<span>Database Admin</span></a>
 </nav>
-<section class="card"><div class="cardhead"><h2>Settings</h2></div>
-  <p class="muted small">Effective value of each setting and where it comes from. Precedence: <b>environment variable</b> &gt; <b>database</b> (saved here) &gt; <b>web.yaml</b> &gt; default. <b>Reset</b> removes the saved value so the web.yaml value (or the default) applies again. Every change is written to the audit log.</p>
-  <form method="post" action="/settings" class="settings">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+<form method="post" action="/settings" class="settings form-stack">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <section class="card"><div class="cardhead"><h2>Settings</h2></div>
+    <p class="card-desc">Effective value of each setting and where it comes from. Precedence: <b>environment variable</b> &gt; <b>database</b> (saved here) &gt; <b>web.yaml</b> &gt; default. <b>Reset</b> removes the saved value so the web.yaml value (or the default) applies again. Every change is written to the audit log.</p>
+    <div class="setlist">
     {{range .Items}}
     <div class="setrow">
-      <div class="sethead">
-        <label for="set-{{.Key}}"><b>{{.Label}}</b> <code class="muted">{{.Key}}</code></label>
-        <span class="badge src-{{.Source}}" title="source of the effective value">{{.Source}}</span>
-        {{if .RestartNeeded}}<span class="badge st-tbl-pending">restart required</span>{{end}}
-        {{if .PendingRestart}}<span class="badge st-bootstrapping">saved, applies after a web restart</span>{{end}}
+      <div class="set-meta">
+        <div class="sethead">
+          <label for="set-{{.Key}}">{{.Label}}</label>
+          <span class="badge src-{{.Source}}" title="source of the effective value">{{.Source}}</span>
+          {{if .RestartNeeded}}<span class="badge st-tbl-pending">restart required</span>{{end}}
+          {{if .PendingRestart}}<span class="badge st-bootstrapping">saved, applies after a web restart</span>{{end}}
+        </div>
+        <code class="muted">{{.Key}}</code>
+        <p class="muted small">{{.Help}}{{if eq .Source "env"}} Set by <code>{{.Env}}</code>; change it in the environment.{{else if .Env}} Environment override: <code>{{.Env}}</code>.{{end}}</p>
       </div>
-      <p class="muted small">{{.Help}}{{if eq .Source "env"}} Set by <code>{{.Env}}</code>; change it in the environment.{{else if .Env}} Environment override: <code>{{.Env}}</code>.{{end}}</p>
       <div class="setinput">
       {{if eq .Kind "bool"}}
         <select id="set-{{.Key}}" name="{{.Key}}"{{if not .Editable}} disabled{{end}}>
@@ -26,21 +30,25 @@
           <option value="false"{{if eq .Text "false"}} selected{{end}}>off</option>
         </select>
       {{else if eq .Kind "list"}}
-        <textarea id="set-{{.Key}}" name="{{.Key}}" rows="3" class="wide mono"{{if not .Editable}} disabled{{end}}>{{.Text}}</textarea>
+        <textarea id="set-{{.Key}}" name="{{.Key}}" rows="3" class="mono"{{if not .Editable}} disabled{{end}}>{{.Text}}</textarea>
       {{else if eq .Kind "int"}}
         <input id="set-{{.Key}}" type="number" min="{{.Min}}" max="{{.Max}}" name="{{.Key}}" value="{{.Text}}" class="num mono"{{if not .Editable}} disabled{{end}}>
       {{else}}
-        <input id="set-{{.Key}}" type="text" name="{{.Key}}" value="{{.Text}}" class="wide mono"{{if not .Editable}} disabled{{end}}>
+        <input id="set-{{.Key}}" type="text" name="{{.Key}}" value="{{.Text}}" class="mono"{{if not .Editable}} disabled{{end}}>
       {{end}}
-      {{if eq .Source "database"}}<label class="small"><input type="checkbox" name="reset_{{.Key}}" value="1"> Reset to web.yaml / default</label>{{end}}
+      {{if eq .Source "database"}}<label class="check"><input type="checkbox" name="reset_{{.Key}}" value="1"><span>Reset to web.yaml / default</span></label>{{end}}
       </div>
     </div>
     {{end}}
-    <p><button class="btn primary" type="submit">Save settings</button></p>
-  </form>
-</section>
+    </div>
+    <div class="form-actions">
+      <span class="form-status">Changes are written to the audit log.</span>
+      <button class="btn primary" type="submit">Save settings</button>
+    </div>
+  </section>
+</form>
 <section class="card"><div class="cardhead"><h2>Startup settings</h2></div>
-  <p class="muted small">Read from web.yaml and the environment at start; change them there and restart the web.</p>
+  <p class="card-desc">Read from web.yaml and the environment at start; change them there and restart the web.</p>
   <dl class="kv">{{range .Bootstap}}<dt>{{.Label}}</dt><dd class="mono">{{.Text}}</dd>{{end}}</dl>
 </section>
 {{end}}

@@ -283,6 +283,14 @@
     var um = document.getElementById('usermenu');
     if (um && um.open && !um.contains(ev.target)) { um.open = false; }
   });
+  // Row overflow menus (<details class="rowmenu">): one open at a time; close on outside click or Escape.
+  document.addEventListener('click', function (ev) {
+    document.querySelectorAll('details.rowmenu[open]').forEach(function (d) { if (!d.contains(ev.target)) { d.open = false; } });
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Escape') { return; }
+    document.querySelectorAll('details.rowmenu[open]').forEach(function (d) { d.open = false; var s = d.querySelector('summary'); if (s && d.contains(document.activeElement)) { s.focus(); } });
+  });
   document.addEventListener('keydown', function (ev) {
     var um = document.getElementById('usermenu');
     if (ev.key === 'Escape' && um && um.open) { um.open = false; var s = um.querySelector('summary'); if (s) { s.focus(); } }
@@ -361,7 +369,7 @@
       Object.keys(res.fields).forEach(function (field) {
         var input = container.querySelector('[name="' + field + '"]');
         if (input) {
-          var fieldWrap = input.closest('.form-field') || input.parentElement;
+          var fieldWrap = input.closest('.field, .form-field') || input.parentElement;
           var errSpan = fieldWrap ? fieldWrap.querySelector('.field-error') : null;
           if (!errSpan && fieldWrap) {
             errSpan = document.createElement('span');
@@ -807,7 +815,8 @@
             cb.checked = field.value.split(',').map(function (x) { return x.trim(); }).indexOf(name) >= 0;
             var text = document.createElement('span'); text.textContent = name;
             label.htmlFor = cb.id;
-            box.appendChild(cb); box.appendChild(label);
+            label.appendChild(cb); label.appendChild(text);
+            box.appendChild(label);
           });
           var actions = document.createElement('button'); actions.type = 'button'; actions.className = 'btn'; actions.textContent = 'Use selected databases';
           actions.addEventListener('click', function () {

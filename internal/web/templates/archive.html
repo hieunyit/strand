@@ -1,27 +1,30 @@
 {{define "content"}}
-<section class="card">
-  <div class="cardhead"><h2>Continuous Binlog Archiver</h2></div>
-  <p class="muted small">Chạy archiver nền từ source MySQL có GTID. MariaDB chưa được hỗ trợ cho binlog archive. Thông tin kết nối lấy từ cấu hình pipeline và env của nó; credential không được đưa vào argv hoặc form.</p>
-  <div class="summary-strip">
-    <div class="metric"><div class="m-label">Status</div><div class="m-value"><span class="badge {{if .Body.Running}}st-synced{{else}}st-stopped{{end}}">{{if .Body.Running}}running{{else}}stopped{{end}}</span></div></div>
-    <div class="metric"><div class="m-label">Archive Files</div><div class="m-value c-num">{{.Body.FileCount}}</div></div>
-    <div class="metric"><div class="m-label">Total Size</div><div class="m-value c-num">{{.Body.TotalSize}}</div></div>
-  </div>
-  <form class="act form-grid" data-action="archive-start">
-    <div class="form-field full">
-      <label for="archive-pipeline">MySQL pipeline <span class="req">*</span></label>
-      <select id="archive-pipeline" name="pipeline" required>
-        <option value="">Select pipeline</option>
-        {{range .Body.Pipelines}}<option value="{{.}}" {{if eq . $.Body.Pipeline}}selected{{end}}>{{.}}</option>{{end}}
-      </select>
-      <span class="help">MySQL GTID must be enabled and the account must allow replication/binlog reads. MariaDB archiving is not supported yet.</span>
+<div class="kpis" aria-label="Archiver summary">
+  <div class="kpi {{if .Body.Running}}ok{{end}}"><div class="kpi-label">Status</div><div class="kpi-value"><span class="badge big {{if .Body.Running}}st-synced{{else}}st-stopped{{end}}">{{if .Body.Running}}running{{else}}stopped{{end}}</span></div><div class="kpi-sub">continuous binlog archiver</div></div>
+  <div class="kpi"><div class="kpi-label">Archive Files</div><div class="kpi-value c-num">{{.Body.FileCount}}</div><div class="kpi-sub">in the archive directory</div></div>
+  <div class="kpi"><div class="kpi-label">Total Size</div><div class="kpi-value c-num">{{.Body.TotalSize}}</div><div class="kpi-sub">on disk</div></div>
+</div>
+
+<form class="act" data-action="archive-start">
+  <fieldset class="form-section">
+    <legend class="form-section-title">Continuous Binlog Archiver</legend>
+    <p class="form-section-desc">Chạy archiver nền từ source MySQL có GTID. MariaDB chưa được hỗ trợ cho binlog archive. Thông tin kết nối lấy từ cấu hình pipeline và env của nó; credential không được đưa vào argv hoặc form.</p>
+    <div class="field-grid">
+      <div class="field">
+        <label class="field-label" for="archive-pipeline">MySQL pipeline <span class="req" aria-hidden="true">*</span></label>
+        <select id="archive-pipeline" name="pipeline" required>
+          <option value="">Select pipeline</option>
+          {{range .Body.Pipelines}}<option value="{{.}}" {{if eq . $.Body.Pipeline}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+        <small class="field-hint">MySQL GTID must be enabled and the account must allow replication/binlog reads. MariaDB archiving is not supported yet.</small>
+      </div>
+      <div class="field">
+        <label class="field-label" for="archive-to">Archive Directory <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="archive-to" name="to" class="mono" placeholder="<state_dir>/archive/seabank" required>
+        <small class="field-hint">Must resolve beneath state_dir/archive. Existing archive files are resumed.</small>
+      </div>
     </div>
-    <div class="form-field full">
-      <label for="archive-to">Archive Directory <span class="req">*</span></label>
-      <input type="text" id="archive-to" name="to" class="mono wide" placeholder="<state_dir>/archive/seabank" required>
-      <span class="help">Must resolve beneath state_dir/archive. Existing archive files are resumed.</span>
-    </div>
-    <div class="toolbar">
+    <div class="form-actions flat">
       {{if .Body.Running}}
       <input type="hidden" name="job_id" value="{{.Body.JobID}}">
       <button class="btn danger" type="submit" data-action="archive-stop" data-confirm="Stop the binlog archiver?">Stop Archiver</button>
@@ -29,15 +32,15 @@
       <button class="btn primary" type="submit" data-action="archive-start">Start Archiver</button>
       {{end}}
     </div>
-  </form>
-</section>
+  </fieldset>
+</form>
 
-{{if .Body.Files}}
 <section class="card">
   <div class="cardhead"><h2>Archived Binlog Files</h2></div>
+  {{if .Body.Files}}
   <div class="tablewrap tall">
     <table class="data-table grid">
-      <thead><tr><th>File</th><th class="r">Size</th><th>Modified</th><th>Status</th></tr></thead>
+      <thead><tr><th scope="col">File</th><th scope="col" class="r">Size</th><th scope="col">Modified</th><th scope="col">Status</th></tr></thead>
       <tbody>
         {{range .Body.Files}}
         <tr>
@@ -50,6 +53,8 @@
       </tbody>
     </table>
   </div>
+  {{else}}
+  <div class="empty-state">{{icon "db"}}<b>No archived files yet</b><span>Start the archiver; binlog files appear here as they are written.</span></div>
+  {{end}}
 </section>
-{{end}}
 {{end}}

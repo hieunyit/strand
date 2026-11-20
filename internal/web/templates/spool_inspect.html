@@ -1,32 +1,34 @@
 {{define "content"}}
-<section class="card">
-  <div class="cardhead"><h2>Scan Spool Inventory (Read-Only)</h2></div>
-  <p class="muted small">Read-only inspection of a stopped pipeline's Pebble spool. The scanner uses only that pipeline's configured spill directory and checks sidecar references and symlink escapes.</p>
-  <form class="act form-grid" data-action="spool-inspect" method="post" action="/tools/spool-inspect">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="form-field">
-      <label for="spool-pipeline">Pipeline <span class="req">*</span></label>
-      <select id="spool-pipeline" name="pipeline" required>
-        <option value="">Select a stopped pipeline</option>
-        {{range .Body.Pipelines}}<option value="{{.}}" {{if eq . $.Body.Pipeline}}selected{{end}}>{{.}}</option>{{end}}
-      </select>
-      <span class="help">Only configured spool paths are scanned. Stop the pipeline before inspection.</span>
+<form class="act" data-action="spool-inspect" method="post" action="/tools/spool-inspect">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <fieldset class="form-section">
+    <legend class="form-section-title">Scan Spool Inventory (Read-Only)</legend>
+    <p class="form-section-desc">Read-only inspection of a stopped pipeline's Pebble spool. The scanner uses only that pipeline's configured spill directory and checks sidecar references and symlink escapes.</p>
+    <div class="field-grid">
+      <div class="field">
+        <label class="field-label" for="spool-pipeline">Pipeline <span class="req" aria-hidden="true">*</span></label>
+        <select id="spool-pipeline" name="pipeline" required>
+          <option value="">Select a stopped pipeline</option>
+          {{range .Body.Pipelines}}<option value="{{.}}" {{if eq . $.Body.Pipeline}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+        <small class="field-hint">Only configured spool paths are scanned. Stop the pipeline before inspection.</small>
+      </div>
     </div>
-    <div class="toolbar">
+    <div class="form-actions flat">
       <button class="btn primary" type="submit" data-action="spool-inspect">Scan Inventory</button>
     </div>
-  </form>
-</section>
+  </fieldset>
+</form>
 
-{{if .Body.Report}}
 <section class="card">
-  <div class="cardhead"><h2>Scan Results</h2></div>
+  <div class="cardhead"><h2>Scan Results</h2>{{if .Body.Report}}{{if .Body.Report.Errors}}<span class="badge st-failed">{{len .Body.Report.Errors}} errors</span>{{else if .Body.Report.Warnings}}<span class="badge st-warn">{{len .Body.Report.Warnings}} warnings</span>{{else}}<span class="badge st-synced">clean</span>{{end}}{{end}}</div>
+  {{if .Body.Report}}
   <p class="muted small mono">{{.Body.SpoolDir}}</p>
-  <dl class="kv">
-    <dt>Discovered Files</dt><dd class="mono">{{.Body.Report.DiscoveredFiles}} ({{.Body.Report.DiscoveredBytes}} bytes)</dd>
-    <dt>New Sidecars</dt><dd class="mono">{{.Body.Report.NewFiles}} ({{.Body.Report.NewBytes}} bytes)</dd>
-    <dt>Already Indexed</dt><dd class="mono">{{.Body.Report.ExistingFiles}} ({{.Body.Report.ExistingBytes}} bytes)</dd>
-  </dl>
+  <div class="statgrid">
+    <div class="metric"><div class="m-label">Discovered Files</div><div class="m-value c-num">{{.Body.Report.DiscoveredFiles}}</div><div class="m-sub">{{.Body.Report.DiscoveredBytes}} bytes</div></div>
+    <div class="metric"><div class="m-label">New Sidecars</div><div class="m-value c-num">{{.Body.Report.NewFiles}}</div><div class="m-sub">{{.Body.Report.NewBytes}} bytes</div></div>
+    <div class="metric"><div class="m-label">Already Indexed</div><div class="m-value c-num">{{.Body.Report.ExistingFiles}}</div><div class="m-sub">{{.Body.Report.ExistingBytes}} bytes</div></div>
+  </div>
   {{if .Body.Report.Warnings}}
   <div class="alert alert-warn" role="alert">
     <b>Warnings ({{len .Body.Report.Warnings}}):</b>
@@ -39,6 +41,8 @@
     <ul>{{range .Body.Report.Errors}}<li>{{.}}</li>{{end}}</ul>
   </div>
   {{end}}
+  {{else}}
+  <div class="empty-state">{{icon "table"}}<b>No scan yet</b><span>Pick a stopped pipeline and run a scan; the inventory appears here.</span></div>
+  {{end}}
 </section>
-{{end}}
 {{end}}

@@ -1,221 +1,296 @@
 {{define "content"}}
-<section class="card">
-  <div class="cardhead"><h2>Create new pipeline</h2></div>
-  <p class="muted small">Fill in the source and target, choose what to copy, then <b>Create and validate</b>: Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</p>
-  <form id="new-pipeline-form" method="post" action="/pipelines/new" class="np">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
+<div class="alert alert-info" role="note">
+  <span>Fill in the source and target, choose what to copy, then <b>Create and validate</b>: Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</span>
+</div>
 
-    <fieldset class="np-step">
-      <legend>1. Pipeline</legend>
-      <div class="np-row">
-        <label>Name <span class="req">*</span>
-          <input type="text" name="name" id="np-name" required class="wide mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
-          <small class="muted">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
-          <span class="block mt4"><label class="small muted"><input type="checkbox" name="overwrite" id="np-overwrite" value="true"> Overwrite if pipeline already exists (re-create/update)</label></span>
-        </label>
-        <label>Copy from (source)
-          <select name="from" id="np-from">
-            <option value="mysql" selected>MySQL 5.5 – 8.x</option>
-            <option value="mariadb">MariaDB 10.6+</option>
-            <option value="postgres">PostgreSQL 14 – 18</option>
-            <option value="mongodb">MongoDB 6+ (replica set)</option>
-          </select>
-        </label>
-        <label>Copy to (target)
-          <select name="to" id="np-to">
-            <option value="postgres" data-from="mysql postgres" selected>PostgreSQL 16 – 18</option>
-            <option value="mysql" data-from="mysql mariadb">MySQL 8.x</option>
-            <option value="mongodb" data-from="mongodb">MongoDB 6+ (replica set)</option>
-          </select>
-          <small class="muted" id="np-pair-note"></small>
-        </label>
-      </div>
-    </fieldset>
+<form id="new-pipeline-form" method="post" action="/pipelines/new" class="np form-stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
 
-    <fieldset class="np-step">
-      <legend>2. Source connection</legend>
-      <div class="np-row" data-when="src:mongodb">
-        <label>Source URI <span class="req">*</span>
-          <input type="password" name="source_uri" class="wide mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs0">
-          <small class="muted">Secret: stored only in the pipeline's encrypted .env (<code>SRC_URI</code>), never in the config. Needs a replica set (change streams).</small>
-        </label>
-        <label>Source database <span class="req">*</span>
-          <input type="text" name="source_database" value="app" class="mono">
-        </label>
-      </div>
-      <div class="np-row" data-when="src:mysql,mariadb,postgres">
-        <label>Host <input type="text" name="source_host" value="127.0.0.1" class="wide mono"></label>
-        <label>Port <input type="number" name="source_port" value="3306" class="num mono" id="np-src-port" data-mysql="3306" data-postgres="5432"></label>
-        <label>User <input type="text" name="source_user" value="strand" class="mono">
-          <small class="muted" data-when="src:mysql,mariadb">Needs <code>REPLICATION SLAVE, REPLICATION CLIENT, SELECT</code>.</small>
-          <small class="muted" data-when="src:postgres">Needs <code>REPLICATION</code> and <code>SELECT</code> on the tables.</small>
-        </label>
-        <label>Password <input type="password" name="source_password" class="mono" autocomplete="new-password"></label>
-      </div>
-      <div class="np-row" data-when="src:postgres">
-        <label>Database <span class="req">*</span>
-          <input type="text" name="database" value="app" class="mono" data-when-input="src:postgres">
-          <small class="muted">The PostgreSQL database that holds your tables.</small>
-        </label>
-        <label>Schema
-          <input type="text" name="schema" value="public" class="mono">
-          <small class="muted">Usually <code>public</code>. All tables in it are copied unless you narrow it in step 4.</small>
-        </label>
-      </div>
-    </fieldset>
-
-    <fieldset class="np-step">
-      <legend>3. Target connection</legend>
-      <div class="np-row" data-when="dst:mongodb">
-        <label>Target URI <span class="req">*</span>
-          <input type="password" name="target_uri" class="wide mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs1">
-          <small class="muted">Secret: stored only in the encrypted .env (<code>DST_URI</code>). The target must be a replica set too (transactions).</small>
-        </label>
-        <label>Target database <span class="req">*</span>
-          <input type="text" name="target_mongo_database" value="app" class="mono">
-        </label>
-      </div>
-      <div class="np-row" data-when="dst:mysql,postgres">
-        <label>Host <input type="text" name="target_host" value="127.0.0.1" class="wide mono"></label>
-        <label>Port <input type="number" name="target_port" value="5432" class="num mono" id="np-dst-port" data-mysql="3306" data-postgres="5432"></label>
-        <label>User <input type="text" name="target_user" value="strand" class="mono">
-          <small class="muted">Must be able to create tables and write data.</small>
-        </label>
-        <label>Password <input type="password" name="target_password" class="mono" autocomplete="new-password"></label>
-      </div>
-      <div class="np-row" data-when="dst:postgres">
-        <label>Target database
-          <input type="text" name="target_pg_database" class="mono" placeholder="same name as the source database">
-          <small class="muted">PostgreSQL database to copy into; it must already exist (<code>CREATE DATABASE …;</code>). Empty = same name as the source database (required when copying <code>*</code> from MySQL).</small>
-        </label>
-      </div>
-      <div class="np-row" data-when="dst:mysql">
-        <label>Strand metadata database
-          <input type="text" name="target_database" value="strand" class="mono">
-          <small class="muted">Small database where Strand keeps its checkpoint (<code>_strand_*</code> tables), not your data. Create it once on the target: <code>CREATE DATABASE strand;</code></small>
-        </label>
-      </div>
-    </fieldset>
-
-    <fieldset class="np-step">
-      <legend>4. What to copy</legend>
-      <div class="np-row" data-when="src:mysql,mariadb">
-        <div class="np-database-picker">
-          <label for="np-database">Databases <span class="req">*</span></label>
-          <input type="text" name="database" id="np-database" value="app" class="wide mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
-          <small class="muted">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>
-          <button type="button" class="btn mt4" id="np-list-databases" data-when="src:mysql,mariadb">List source databases</button>
-          <small class="muted" id="np-database-list-status" aria-live="polite"></small>
-          <div id="np-database-list" class="np-db-list" hidden></div>
-        </div>
-      </div>
-      <details class="np-adv" id="np-tables">
-        <summary>Only some tables? (optional)</summary>
-        <div class="np-row">
-          <label>Include only
-            <input type="text" name="include" class="wide mono" id="np-include">
-            <small class="muted">Empty = every table above. Patterns <code><span class="np-ns">db</span>.table</code>, comma-separated; <code>*</code> matches anything. Example: <code id="np-include-ex">shop.orders, shop.customers</code></small>
-          </label>
-          <label>Skip
-            <input type="text" name="exclude" class="wide mono" id="np-exclude">
-            <small class="muted">Tables never copied (wins over Include). Example: <code id="np-exclude-ex">shop.log_*, shop.tmp_*</code></small>
-          </label>
-        </div>
-      </details>
-      <p class="np-preview small">Will copy: <code id="np-preview">…</code></p>
-    </fieldset>
-
-    <details class="np-adv" data-when="src:mongodb">
-      <summary>5. MongoDB tuning (optional)</summary>
-      <div class="np-row">
-        <label>Snapshot batch <input type="number" name="snapshot_batch" min="1" max="100000" class="num mono" placeholder="1000">
-          <small class="muted">Documents per snapshot write transaction.</small></label>
-        <label>Stream batch <input type="number" name="stream_batch" min="1" max="100000" class="num mono" placeholder="2000">
-          <small class="muted">Change events per apply transaction.</small></label>
-        <label>Lease TTL <input type="text" name="lease_ttl" class="num mono" placeholder="45s">
-          <small class="muted">How long a stopped instance holds the pipeline lease (5s – 1h).</small></label>
-        <label><input type="checkbox" name="overwrite_target" value="true"> Drop and recreate matching target collections on the initial snapshot</label>
-      </div>
-    </details>
-
-    <details class="np-adv" data-when="src:mysql,mariadb,postgres">
-      <summary>5. Advanced (optional)</summary>
-      <div class="np-row">
-        <label>Commit order
-          <select name="commit_order">
-            <option value="relaxed" selected>relaxed: parallel by row key (faster)</option>
-            <option value="strict">strict: exact source commit order</option>
-          </select>
-        </label>
-        <label>Target workers <input type="number" name="workers" value="8" class="num mono" min="1"></label>
-        <label>Spool directory
-          <input type="text" name="spool_dir" class="wide mono" placeholder="default: &lt;state_dir&gt;/pipelines/&lt;name&gt;/spool">
-        </label>
-        <label>Source password variable <input type="text" name="source_password_env" value="SRC_PW" class="mono"></label>
-        <label>Target password variable <input type="text" name="target_password_env" value="DST_PW" class="mono"></label>
-      </div>
-    </details>
-
-    <details class="np-adv" id="np-tuning" data-when="src:mysql,mariadb,postgres">
-      <summary>6. Snapshot speed &amp; safety (optional)</summary>
-      <p class="muted small">Leave a field empty to use Strand's default. These can be changed later in the Config tab of the pipeline (Tuning card).</p>
-      <div class="np-row">
-        <label>Source read limit, soft (tokens/s)
-          <input type="number" name="iops_soft" class="num mono" min="1" placeholder="default: 600">
-          <small class="muted">How fast the snapshot reads the source. Lower = gentler on the source, slower snapshot.</small>
-        </label>
-        <label>Source read limit, hard (tokens/s)
-          <input type="number" name="iops_hard" class="num mono" min="1" placeholder="default: none">
-          <small class="muted">Ceiling for the adaptive governor; at least the soft limit.</small>
-        </label>
-        <label>Chunk rows
-          <input type="number" name="chunk_rows" class="num mono" min="1" placeholder="default: auto (5000)">
-          <small class="muted">Rows per snapshot chunk. Empty = auto-tuned.</small>
-        </label>
-        <label>Tables in parallel
-          <input type="number" name="max_parallel" class="num mono" min="1" max="32" placeholder="default: 1">
-          <small class="muted">How many tables the snapshot copies at the same time (1-32). They share the source read limit; memory and target connections grow with this number. Ignored for PostgreSQL sources.</small>
-        </label>
-        <label>Start position (--start-at)
-          <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678 or GTID (skips snapshot)">
-          <small class="muted">Tùy chọn: Nhập vị trí binlog hoặc GTID sau khi đã tự import DB sang Target để bỏ qua bước snapshot.</small>
-        </label>
-        <label>Snapshot windows
-          <input type="text" name="windows" class="mono" placeholder="default: any time, e.g. 22:00-06:00">
-          <small class="muted">Hours the snapshot may run (local time of the process), comma-separated; may cross midnight.</small>
-        </label>
-        <label>Governor algorithm
-          <select name="governor_algorithm">
-            <option value="" selected>default: onoff</option>
-            <option value="static">static: fixed rate, no breaker</option>
-            <option value="onoff">onoff: pause/resume by lag</option>
-            <option value="grace-v2">grace-v2: adaptive rate with breaker</option>
-          </select>
-        </label>
-        <label>Lag target (SLO)
-          <input type="text" name="lag_slo" class="num mono" placeholder="default: 5s">
-          <small class="muted">The snapshot slows or pauses when replication lag exceeds this.</small>
-        </label>
-        <label>Breaker: query latency ratio
-          <input type="number" name="breaker_max_ratio" class="num mono" min="1.1" step="any" placeholder="default: off, e.g. 3">
-          <small class="muted">Pause the snapshot when Strand's query latency is this many times its baseline. Must be greater than 1.</small>
-        </label>
-        <label>Breaker: replica lag max
-          <input type="text" name="replica_lag_max" class="num mono" placeholder="default: off, e.g. 30s">
-          <small class="muted">Pause the snapshot when a source replica lags more than this.</small>
-        </label>
-      </div>
-    </details>
-
-    <div class="np-actions">
-      <button class="btn primary" type="submit" id="btn-create-pipeline">Create and validate</button>
-      <a href="/pipelines" class="btn">Cancel</a>
+  <fieldset class="form-section">
+    <legend class="form-section-title"><span class="step-no" aria-hidden="true">1</span>Pipeline</legend>
+    <p class="form-section-desc">Name the pipeline and pick the engine pair. Only supported pairs are offered as targets.</p>
+    <div class="field-grid cols-3">
+      <label class="field">
+        <span class="field-label">Name <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="name" id="np-name" required class="mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
+        <small class="field-hint">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Copy from (source)</span>
+        <select name="from" id="np-from">
+          <option value="mysql" selected>MySQL 5.5 – 8.x</option>
+          <option value="mariadb">MariaDB 10.6+</option>
+          <option value="postgres">PostgreSQL 14 – 18</option>
+          <option value="mongodb">MongoDB 6+ (replica set)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Copy to (target)</span>
+        <select name="to" id="np-to">
+          <option value="postgres" data-from="mysql postgres" selected>PostgreSQL 16 – 18</option>
+          <option value="mysql" data-from="mysql mariadb">MySQL 8.x</option>
+          <option value="mongodb" data-from="mongodb">MongoDB 6+ (replica set)</option>
+        </select>
+        <small class="field-hint" id="np-pair-note"></small>
+      </label>
     </div>
-  </form>
+    <label class="check">
+      <input type="checkbox" name="overwrite" id="np-overwrite" value="true">
+      <span>Overwrite if the pipeline already exists<small class="field-hint">Re-creates the config and .env of an existing pipeline with the same name.</small></span>
+    </label>
+  </fieldset>
 
-  <section id="new-pipeline-result" class="card mt20" hidden>
-    <div class="cardhead"><h3 id="result-title">Result</h3></div>
-    <div id="result-body"></div>
-  </section>
+  <fieldset class="form-section">
+    <legend class="form-section-title"><span class="step-no" aria-hidden="true">2</span>Source connection</legend>
+    <p class="form-section-desc">Where Strand reads from. Passwords go to the pipeline's encrypted <code>.env</code>, never into the config file.</p>
+    <div class="field-grid cols-3" data-when="src:mongodb">
+      <label class="field span-2">
+        <span class="field-label">Source URI <span class="req" aria-hidden="true">*</span></span>
+        <input type="password" name="source_uri" class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs0">
+        <small class="field-hint">Secret: stored only in the pipeline's encrypted .env (<code>SRC_URI</code>), never in the config. Needs a replica set (change streams).</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Source database <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="source_database" value="app" class="mono">
+      </label>
+    </div>
+    <div class="field-grid cols-4" data-when="src:mysql,mariadb,postgres">
+      <label class="field">
+        <span class="field-label">Host</span>
+        <input type="text" name="source_host" value="127.0.0.1" class="mono">
+      </label>
+      <label class="field">
+        <span class="field-label">Port</span>
+        <input type="number" name="source_port" value="3306" class="mono" id="np-src-port" data-mysql="3306" data-postgres="5432">
+      </label>
+      <label class="field">
+        <span class="field-label">User</span>
+        <input type="text" name="source_user" value="strand" class="mono">
+        <small class="field-hint" data-when="src:mysql,mariadb">Needs <code>REPLICATION SLAVE, REPLICATION CLIENT, SELECT</code>.</small>
+        <small class="field-hint" data-when="src:postgres">Needs <code>REPLICATION</code> and <code>SELECT</code> on the tables.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input type="password" name="source_password" class="mono" autocomplete="new-password">
+      </label>
+    </div>
+    <div class="field-grid" data-when="src:postgres">
+      <label class="field">
+        <span class="field-label">Database <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="database" value="app" class="mono" data-when-input="src:postgres">
+        <small class="field-hint">The PostgreSQL database that holds your tables.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Schema</span>
+        <input type="text" name="schema" value="public" class="mono">
+        <small class="field-hint">Usually <code>public</code>. All tables in it are copied unless you narrow it in step 4.</small>
+      </label>
+    </div>
+  </fieldset>
+
+  <fieldset class="form-section">
+    <legend class="form-section-title"><span class="step-no" aria-hidden="true">3</span>Target connection</legend>
+    <p class="form-section-desc">Where Strand writes to. The account must be able to create tables and write data.</p>
+    <div class="field-grid cols-3" data-when="dst:mongodb">
+      <label class="field span-2">
+        <span class="field-label">Target URI <span class="req" aria-hidden="true">*</span></span>
+        <input type="password" name="target_uri" class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs1">
+        <small class="field-hint">Secret: stored only in the encrypted .env (<code>DST_URI</code>). The target must be a replica set too (transactions).</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Target database <span class="req" aria-hidden="true">*</span></span>
+        <input type="text" name="target_mongo_database" value="app" class="mono">
+      </label>
+    </div>
+    <div class="field-grid cols-4" data-when="dst:mysql,postgres">
+      <label class="field">
+        <span class="field-label">Host</span>
+        <input type="text" name="target_host" value="127.0.0.1" class="mono">
+      </label>
+      <label class="field">
+        <span class="field-label">Port</span>
+        <input type="number" name="target_port" value="5432" class="mono" id="np-dst-port" data-mysql="3306" data-postgres="5432">
+      </label>
+      <label class="field">
+        <span class="field-label">User</span>
+        <input type="text" name="target_user" value="strand" class="mono">
+        <small class="field-hint">Must be able to create tables and write data.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input type="password" name="target_password" class="mono" autocomplete="new-password">
+      </label>
+    </div>
+    <div class="field-grid" data-when="dst:postgres">
+      <label class="field span-all">
+        <span class="field-label">Target database <span class="opt">optional</span></span>
+        <input type="text" name="target_pg_database" class="mono" placeholder="same name as the source database">
+        <small class="field-hint">PostgreSQL database to copy into; it must already exist (<code>CREATE DATABASE …;</code>). Empty = same name as the source database (required when copying <code>*</code> from MySQL).</small>
+      </label>
+    </div>
+    <div class="field-grid" data-when="dst:mysql">
+      <label class="field span-all">
+        <span class="field-label">Strand metadata database</span>
+        <input type="text" name="target_database" value="strand" class="mono">
+        <small class="field-hint">Small database where Strand keeps its checkpoint (<code>_strand_*</code> tables), not your data. Create it once on the target: <code>CREATE DATABASE strand;</code></small>
+      </label>
+    </div>
+  </fieldset>
+
+  <fieldset class="form-section">
+    <legend class="form-section-title"><span class="step-no" aria-hidden="true">4</span>What to copy</legend>
+    <p class="form-section-desc">Choose the databases, then optionally narrow or skip individual tables.</p>
+    <div class="field-grid cols-1" data-when="src:mysql,mariadb">
+      <div class="field">
+        <label class="field-label" for="np-database">Databases <span class="req" aria-hidden="true">*</span></label>
+        <div class="control-row">
+          <input type="text" name="database" id="np-database" value="app" class="mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
+          <button type="button" class="btn" id="np-list-databases" data-when="src:mysql,mariadb">List source databases</button>
+        </div>
+        <small class="field-hint">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>
+        <small class="field-hint" id="np-database-list-status" aria-live="polite"></small>
+        <div id="np-database-list" class="np-db-list" hidden></div>
+      </div>
+    </div>
+    <details class="advanced" id="np-tables">
+      <summary>Only some tables? <span class="summary-hint">optional</span></summary>
+      <div class="field-grid">
+        <label class="field">
+          <span class="field-label">Include only</span>
+          <input type="text" name="include" class="mono" id="np-include">
+          <small class="field-hint">Empty = every table above. Patterns <code><span class="np-ns">db</span>.table</code>, comma-separated; <code>*</code> matches anything. Example: <code id="np-include-ex">shop.orders, shop.customers</code></small>
+        </label>
+        <label class="field">
+          <span class="field-label">Skip</span>
+          <input type="text" name="exclude" class="mono" id="np-exclude">
+          <small class="field-hint">Tables never copied (wins over Include). Example: <code id="np-exclude-ex">shop.log_*, shop.tmp_*</code></small>
+        </label>
+      </div>
+    </details>
+    <p class="np-preview">Will copy: <code id="np-preview">…</code></p>
+  </fieldset>
+
+  <details class="advanced" data-when="src:mongodb">
+    <summary>5. MongoDB tuning <span class="summary-hint">optional</span></summary>
+    <div class="field-grid cols-3">
+      <label class="field">
+        <span class="field-label">Snapshot batch</span>
+        <input type="number" name="snapshot_batch" min="1" max="100000" class="mono" placeholder="1000">
+        <small class="field-hint">Documents per snapshot write transaction.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Stream batch</span>
+        <input type="number" name="stream_batch" min="1" max="100000" class="mono" placeholder="2000">
+        <small class="field-hint">Change events per apply transaction.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Lease TTL</span>
+        <input type="text" name="lease_ttl" class="mono" placeholder="45s">
+        <small class="field-hint">How long a stopped instance holds the pipeline lease (5s – 1h).</small>
+      </label>
+    </div>
+    <label class="check"><input type="checkbox" name="overwrite_target" value="true"><span>Drop and recreate matching target collections on the initial snapshot</span></label>
+  </details>
+
+  <details class="advanced" data-when="src:mysql,mariadb,postgres">
+    <summary>5. Advanced <span class="summary-hint">optional</span></summary>
+    <div class="field-grid cols-3">
+      <label class="field">
+        <span class="field-label">Commit order</span>
+        <select name="commit_order">
+          <option value="relaxed" selected>relaxed: parallel by row key (faster)</option>
+          <option value="strict">strict: exact source commit order</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Target workers</span>
+        <input type="number" name="workers" value="8" class="mono" min="1">
+      </label>
+      <label class="field">
+        <span class="field-label">Spool directory</span>
+        <input type="text" name="spool_dir" class="mono" placeholder="default: &lt;state_dir&gt;/pipelines/&lt;name&gt;/spool">
+      </label>
+      <label class="field">
+        <span class="field-label">Source password variable</span>
+        <input type="text" name="source_password_env" value="SRC_PW" class="mono">
+      </label>
+      <label class="field">
+        <span class="field-label">Target password variable</span>
+        <input type="text" name="target_password_env" value="DST_PW" class="mono">
+      </label>
+    </div>
+  </details>
+
+  <details class="advanced" id="np-tuning" data-when="src:mysql,mariadb,postgres">
+    <summary>6. Snapshot speed &amp; safety <span class="summary-hint">optional</span></summary>
+    <p class="form-section-desc">Leave a field empty to use Strand's default. These can be changed later in the Config tab of the pipeline (Tuning card).</p>
+    <div class="field-grid cols-3">
+      <label class="field">
+        <span class="field-label">Source read limit, soft (tokens/s)</span>
+        <input type="number" name="iops_soft" class="mono" min="1" placeholder="default: 600">
+        <small class="field-hint">How fast the snapshot reads the source. Lower = gentler on the source, slower snapshot.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Source read limit, hard (tokens/s)</span>
+        <input type="number" name="iops_hard" class="mono" min="1" placeholder="default: none">
+        <small class="field-hint">Ceiling for the adaptive governor; at least the soft limit.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Chunk rows</span>
+        <input type="number" name="chunk_rows" class="mono" min="1" placeholder="default: auto (5000)">
+        <small class="field-hint">Rows per snapshot chunk. Empty = auto-tuned.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Tables in parallel</span>
+        <input type="number" name="max_parallel" class="mono" min="1" max="32" placeholder="default: 1">
+        <small class="field-hint">How many tables the snapshot copies at the same time (1-32). They share the source read limit; memory and target connections grow with this number. Ignored for PostgreSQL sources.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Start position (--start-at)</span>
+        <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678 or GTID (skips snapshot)">
+        <small class="field-hint">Tùy chọn: Nhập vị trí binlog hoặc GTID sau khi đã tự import DB sang Target để bỏ qua bước snapshot.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Snapshot windows</span>
+        <input type="text" name="windows" class="mono" placeholder="default: any time, e.g. 22:00-06:00">
+        <small class="field-hint">Hours the snapshot may run (local time of the process), comma-separated; may cross midnight.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Governor algorithm</span>
+        <select name="governor_algorithm">
+          <option value="" selected>default: onoff</option>
+          <option value="static">static: fixed rate, no breaker</option>
+          <option value="onoff">onoff: pause/resume by lag</option>
+          <option value="grace-v2">grace-v2: adaptive rate with breaker</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Lag target (SLO)</span>
+        <input type="text" name="lag_slo" class="mono" placeholder="default: 5s">
+        <small class="field-hint">The snapshot slows or pauses when replication lag exceeds this.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Breaker: query latency ratio</span>
+        <input type="number" name="breaker_max_ratio" class="mono" min="1.1" step="any" placeholder="default: off, e.g. 3">
+        <small class="field-hint">Pause the snapshot when Strand's query latency is this many times its baseline. Must be greater than 1.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Breaker: replica lag max</span>
+        <input type="text" name="replica_lag_max" class="mono" placeholder="default: off, e.g. 30s">
+        <small class="field-hint">Pause the snapshot when a source replica lags more than this.</small>
+      </label>
+    </div>
+  </details>
+
+  <div class="form-actions">
+    <span class="form-status">Validate and plan run right after the files are written.</span>
+    <a href="/pipelines" class="btn">Cancel</a>
+    <button class="btn primary" type="submit" id="btn-create-pipeline">Create and validate</button>
+  </div>
+</form>
+
+<section id="new-pipeline-result" class="card" hidden>
+  <div class="cardhead"><h2 id="result-title">Result</h2></div>
+  <div id="result-body"></div>
 </section>
 {{end}}

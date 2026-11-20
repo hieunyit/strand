@@ -6,10 +6,11 @@
 
 <section class="card">
   <div class="cardhead"><h2>PostgreSQL Metadata Store Migration (strand web db migrate)</h2></div>
-  <p class="muted small">Import legacy file-mode state from the configured web.yaml into this PostgreSQL metadata store, then verify it. This requires a legacy config file; it does not migrate database tables.</p>
-  <form class="act form-grid" data-action="db-migrate" method="post" action="/settings/db/migrate">
+  <p class="card-desc">Import legacy file-mode state from the configured web.yaml into this PostgreSQL metadata store, then verify it. This requires a legacy config file; it does not migrate database tables.</p>
+  <form class="act" data-action="db-migrate" method="post" action="/settings/db/migrate">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="toolbar">
+    <div class="form-actions">
+      <span class="form-status">Preview first: the dry-run reports new, present and conflicting items without writing.</span>
       <button class="btn" type="submit" name="dry_run" value="true" data-action="db-migrate-dry">Dry-Run Migration (Preview)</button>
       <button class="btn primary" type="submit" name="dry_run" value="false" data-action="db-migrate" data-confirm="Execute migration to PostgreSQL metadata database?">Apply Migration</button>
     </div>
@@ -18,15 +19,14 @@
 
 {{if .Body.MigrateReport}}
 <section class="card">
-  <div class="cardhead"><h2>Migration Report ({{if .Body.DryRun}}Dry-Run{{else}}Applied{{end}})</h2></div>
+  <div class="cardhead"><h2>Migration Report ({{if .Body.DryRun}}Dry-Run{{else}}Applied{{end}})</h2>{{if .Body.MigrateReport.Summary}}<span class="badge {{if .Body.MigrateReport.Verified}}st-synced{{else}}st-failed{{end}}">{{if .Body.MigrateReport.Verified}}verified{{else}}unverified{{end}}</span>{{end}}</div>
   {{if .Body.MigrateReport.Summary}}
-  <dl class="kv">
-    <dt>Total Items</dt><dd class="mono">{{.Body.MigrateReport.Summary.Total}}</dd>
-    <dt>New Items</dt><dd class="mono">{{.Body.MigrateReport.Summary.New}}</dd>
-    <dt>Present Items</dt><dd class="mono">{{.Body.MigrateReport.Summary.Present}}</dd>
-    <dt>Conflicts</dt><dd class="mono">{{.Body.MigrateReport.Summary.Conflict}}</dd>
-    <dt>Verified</dt><dd><span class="badge {{if .Body.MigrateReport.Verified}}st-synced{{else}}st-failed{{end}}">{{if .Body.MigrateReport.Verified}}verified{{else}}unverified{{end}}</span></dd>
-  </dl>
+  <div class="statgrid">
+    <div class="metric"><div class="m-label">Total Items</div><div class="m-value c-num">{{.Body.MigrateReport.Summary.Total}}</div></div>
+    <div class="metric"><div class="m-label">New Items</div><div class="m-value c-num">{{.Body.MigrateReport.Summary.New}}</div></div>
+    <div class="metric"><div class="m-label">Present Items</div><div class="m-value c-num">{{.Body.MigrateReport.Summary.Present}}</div></div>
+    <div class="metric"><div class="m-label">Conflicts</div><div class="m-value c-num">{{.Body.MigrateReport.Summary.Conflict}}</div></div>
+  </div>
   {{end}}
   {{if .Body.MigrateReport.Problems}}
   <div class="alert alert-warn" role="alert">
@@ -38,22 +38,24 @@
 </section>
 {{end}}
 
-<section class="card">
-  <div class="cardhead"><h2>Export Metadata Database to Files (strand web db export)</h2></div>
-  <p class="muted small">Export all pipelines, state, jobs, wizards, and audit log from PostgreSQL metadata store into a file directory layout for backup or reverting to file mode.</p>
-  <form class="act form-grid" data-action="db-export" method="post" action="/settings/db/export">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <div class="form-field full">
-      <label for="exp-dir">Export Target Directory</label>
-      <input type="text" id="exp-dir" name="dir" class="mono wide" placeholder="<state_dir>/exports/metadata-20261120">
-      <span class="help">Must be empty/new and resolve beneath state_dir/exports. Leave blank to use that root.</span>
+<form class="act" data-action="db-export" method="post" action="/settings/db/export">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <fieldset class="form-section">
+    <legend class="form-section-title">Export Metadata Database to Files (strand web db export)</legend>
+    <p class="form-section-desc">Export all pipelines, state, jobs, wizards, and audit log from PostgreSQL metadata store into a file directory layout for backup or reverting to file mode.</p>
+    <div class="field-grid cols-1">
+      <div class="field">
+        <label class="field-label" for="exp-dir">Export Target Directory</label>
+        <input type="text" id="exp-dir" name="dir" class="mono" placeholder="<state_dir>/exports/metadata-20261120">
+        <small class="field-hint">Must be empty/new and resolve beneath state_dir/exports. Leave blank to use that root.</small>
+      </div>
     </div>
-    <div class="toolbar">
+    <div class="form-actions flat">
       <button class="btn primary" type="submit" data-action="db-export" data-confirm="Export all database metadata to directory?">Export Database</button>
     </div>
-  </form>
-</section>
+  </fieldset>
+</form>
 {{if .Body.ExportOutput}}
-<section class="card"><div class="cardhead"><h2>Export complete</h2></div><pre class="job-output mono">{{.Body.ExportOutput}}</pre></section>
+<section class="card"><div class="cardhead"><h2>Export complete</h2><span class="badge st-synced">done</span></div><pre class="job-output mono">{{.Body.ExportOutput}}</pre></section>
 {{end}}
 {{end}}
