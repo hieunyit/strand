@@ -433,6 +433,22 @@ func (s *Server) apiBackupRunCancel(w http.ResponseWriter, r *http.Request, sess
 		writeErr(w, http.StatusConflict, "backup run is owned by another instance or not running on this host")
 		return
 	}
+	// Cancelling kills the job's scheduler process, which the reconciler restarts while the job is
+	// enabled. Move the due time to the next slot first, or the restarted scheduler would see the run
+	// still due and start the same backup again at once.
+	if job, ok, err := s.db.st.GetBackupJob(r.Context(), run.JobID); err == nil && ok && job.Enabled {
+		now := s.now().UTC()
+		next := now.Add(time.Duration(job.EverySeconds) * time.Second)
+		if job.Schedule != nil && job.Schedule.Kind != backup.ScheduleInterval {
+			if n, err := job.Schedule.Next(now, now); err == nil {
+				next = n
+			}
+		}
+		if moved, err := s.db.st.SetBackupJobNextRun(r.Context(), job.ID, job.UpdatedAt, next); err != nil || !moved {
+			writeErr(w, http.StatusConflict, "backup job changed concurrently; retry the cancel")
+			return
+		}
+	}
 	if syscall.Kill(ownedPID, 0) == nil {
 		if err := syscall.Kill(-ownedPID, syscall.SIGTERM); err != nil {
 			_ = syscall.Kill(ownedPID, syscall.SIGTERM)

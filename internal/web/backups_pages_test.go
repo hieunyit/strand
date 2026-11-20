@@ -282,6 +282,10 @@ func TestBackupPagesAndAPIsP1(t *testing.T) {
 	if run3Cancelled.ErrorCode != backup.ErrCodeCancelled {
 		t.Fatalf("expected error code %s, got %s", backup.ErrCodeCancelled, run3Cancelled.ErrorCode)
 	}
+	// The reconciler restarts the killed scheduler; the cancelled run must not be immediately due again.
+	if jc, _, _ := st.GetBackupJob(ctx, job.ID); jc.NextRunAt == nil || !jc.NextRunAt.After(e.srv.now()) {
+		t.Fatalf("cancel left the job due now (next_run_at=%v): the restarted scheduler would rerun it", jc.NextRunAt)
+	}
 }
 
 func TestBackupRBACViewerDenied(t *testing.T) {
