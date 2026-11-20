@@ -227,8 +227,45 @@ func (m *Mem) CreateBackupRepo(_ context.Context, r backup.Repo) error {
 	}
 	r.CreatedAt = time.Now().UTC()
 	r.UpdatedAt = r.CreatedAt
-	m.pro.repos[r.ID] = r
+	r.LastTestAt, r.LastTestStatus, r.LastTestDetail, r.LastTestSteps = nil, "", "", nil
+	m.pro.repos[r.ID] = cloneRepo(r)
 	return nil
+}
+
+func cloneRepo(r backup.Repo) backup.Repo {
+	r.AccessKeySealed = append([]byte(nil), r.AccessKeySealed...)
+	r.SecretKeySealed = append([]byte(nil), r.SecretKeySealed...)
+	r.AccessKeySet, r.SecretKeySet = len(r.AccessKeySealed) > 0, len(r.SecretKeySealed) > 0
+	if !r.AccessKeySet {
+		r.AccessKeySealed = nil
+	}
+	if !r.SecretKeySet {
+		r.SecretKeySealed = nil
+	}
+	r.LastTestAt = optTime(r.LastTestAt)
+	r.LastTestSteps = append([]byte(nil), r.LastTestSteps...)
+	if r.Kind == "" {
+		r.Kind = backup.RepoKindS3
+	}
+	if r.SecretMode == "" {
+		r.SecretMode = backup.RepoSecretEnv
+	}
+	return r
+}
+
+func (m *Mem) SetBackupRepoTest(_ context.Context, id string, at time.Time, status, detail string, steps []byte) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	m.pro.init()
+	r, ok := m.pro.repos[id]
+	if !ok {
+		return false, nil
+	}
+	r.LastTestAt, r.LastTestStatus, r.LastTestDetail, r.LastTestSteps = &at, status, detail, append([]byte(nil), steps...)
+	m.pro.repos[id] = r
+	return true, nil
 }
 
 func (m *Mem) GetBackupRepo(_ context.Context, id string) (backup.Repo, bool, error) {
@@ -238,7 +275,7 @@ func (m *Mem) GetBackupRepo(_ context.Context, id string) (backup.Repo, bool, er
 	defer m.mu.Unlock()
 	m.pro.init()
 	r, ok := m.pro.repos[id]
-	return r, ok, nil
+	return cloneRepo(r), ok, nil
 }
 
 func (m *Mem) ListBackupRepos(_ context.Context) ([]backup.Repo, error) {
@@ -249,7 +286,7 @@ func (m *Mem) ListBackupRepos(_ context.Context) ([]backup.Repo, error) {
 	m.pro.init()
 	out := []backup.Repo{}
 	for _, r := range m.pro.repos {
-		out = append(out, r)
+		out = append(out, cloneRepo(r))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -274,7 +311,8 @@ func (m *Mem) UpdateBackupRepo(_ context.Context, r backup.Repo) (bool, error) {
 		}
 	}
 	r.CreatedAt, r.UpdatedAt = old.CreatedAt, time.Now().UTC()
-	m.pro.repos[r.ID] = r
+	r.LastTestAt, r.LastTestStatus, r.LastTestDetail, r.LastTestSteps = old.LastTestAt, old.LastTestStatus, old.LastTestDetail, old.LastTestSteps
+	m.pro.repos[r.ID] = cloneRepo(r)
 	return true, nil
 }
 

@@ -42,6 +42,7 @@ type Mem struct {
 	tokenSeq   int64
 	pro        memBackupPro
 	cfg        memBackupCfg
+	ops        memBackupOps
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }

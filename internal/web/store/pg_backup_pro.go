@@ -27,6 +27,8 @@ type BackupProStore interface {
 	ListBackupRepos(ctx context.Context) ([]backup.Repo, error)
 	UpdateBackupRepo(ctx context.Context, r backup.Repo) (bool, error)
 	DeleteBackupRepo(ctx context.Context, id string) (bool, error)
+	// SetBackupRepoTest records the last connectivity test (status ok|warning|failed, JSON checklist).
+	SetBackupRepoTest(ctx context.Context, id string, at time.Time, status, detail string, steps []byte) (bool, error)
 
 	// MarkBackupJobNotified claims the notification of the run that finished at runFinishedAt (true once).
 	MarkBackupJobNotified(ctx context.Context, id string, runFinishedAt time.Time) (bool, error)
@@ -323,14 +325,29 @@ func (p *PG) BackupSummaries(ctx context.Context) ([]backup.SourceSummary, error
 	return out, p.wrap(rows.Err())
 }
 
-const repoCols = `id, name, env_prefix, bucket, prefix, lock_mode, lock_days, retention, created_at, updated_at`
+const repoCols = `id, name, kind, secret_mode, env_prefix, endpoint, region, allow_insecure_local, access_key_sealed, secret_key_sealed,
+	bucket, prefix, lock_mode, lock_days, retention, created_at, updated_at, last_test_at, last_test_status, last_test_detail, last_test_steps`
 
 func scanRepo(sc interface{ Scan(...any) error }) (backup.Repo, error) {
 	var r backup.Repo
 	var ret []byte
-	err := sc.Scan(&r.ID, &r.Name, &r.EnvPrefix, &r.Bucket, &r.Prefix, &r.LockMode, &r.LockDays, &ret, &r.CreatedAt, &r.UpdatedAt)
+	var testAt sql.NullTime
+	err := sc.Scan(&r.ID, &r.Name, &r.Kind, &r.SecretMode, &r.EnvPrefix, &r.Endpoint, &r.Region, &r.AllowInsecureLocal,
+		&r.AccessKeySealed, &r.SecretKeySealed, &r.Bucket, &r.Prefix, &r.LockMode, &r.LockDays, &ret, &r.CreatedAt, &r.UpdatedAt,
+		&testAt, &r.LastTestStatus, &r.LastTestDetail, &r.LastTestSteps)
 	if err == nil && len(ret) > 0 {
 		err = json.Unmarshal(ret, &r.Retention)
+	}
+	if testAt.Valid {
+		t := testAt.Time
+		r.LastTestAt = &t
+	}
+	r.AccessKeySet, r.SecretKeySet = len(r.AccessKeySealed) > 0, len(r.SecretKeySealed) > 0
+	if len(r.AccessKeySealed) == 0 {
+		r.AccessKeySealed = nil
+	}
+	if len(r.SecretKeySealed) == 0 {
+		r.SecretKeySealed = nil
 	}
 	return r, err
 }
@@ -340,12 +357,22 @@ func (p *PG) CreateBackupRepo(ctx context.Context, r backup.Repo) error {
 		return err
 	}
 	ret, _ := json.Marshal(r.Retention)
-	_, err := p.db.ExecContext(ctx, `INSERT INTO backup_repositories (id, name, env_prefix, bucket, prefix, lock_mode, lock_days, retention)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, r.ID, r.Name, r.EnvPrefix, r.Bucket, r.Prefix, r.LockMode, r.LockDays, ret)
+	_, err := p.db.ExecContext(ctx, `INSERT INTO backup_repositories (id, name, kind, secret_mode, env_prefix, endpoint, region,
+		allow_insecure_local, access_key_sealed, secret_key_sealed, bucket, prefix, lock_mode, lock_days, retention)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, r.ID, r.Name, r.KindOrS3(), secretModeOrEnv(r.SecretMode),
+		r.EnvPrefix, r.Endpoint, r.Region, r.AllowInsecureLocal, r.AccessKeySealed, r.SecretKeySealed, r.Bucket, r.Prefix,
+		r.LockMode, r.LockDays, ret)
 	if err != nil && strings.Contains(err.Error(), "duplicate key") {
 		return backup.ErrConflict
 	}
 	return p.wrap(err)
+}
+
+func secretModeOrEnv(m string) string {
+	if m == "" {
+		return backup.RepoSecretEnv
+	}
+	return m
 }
 
 func (p *PG) GetBackupRepo(ctx context.Context, id string) (backup.Repo, bool, error) {
@@ -378,13 +405,28 @@ func (p *PG) UpdateBackupRepo(ctx context.Context, r backup.Repo) (bool, error) 
 		return false, err
 	}
 	ret, _ := json.Marshal(r.Retention)
-	res, err := p.db.ExecContext(ctx, `UPDATE backup_repositories SET name=$2, env_prefix=$3, bucket=$4, prefix=$5,
-		lock_mode=$6, lock_days=$7, retention=$8, updated_at=now() WHERE id=$1`, r.ID, r.Name, r.EnvPrefix, r.Bucket, r.Prefix,
-		r.LockMode, r.LockDays, ret)
+	res, err := p.db.ExecContext(ctx, `UPDATE backup_repositories SET name=$2, kind=$3, secret_mode=$4, env_prefix=$5, endpoint=$6,
+		region=$7, allow_insecure_local=$8, access_key_sealed=$9, secret_key_sealed=$10, bucket=$11, prefix=$12,
+		lock_mode=$13, lock_days=$14, retention=$15, updated_at=now() WHERE id=$1`, r.ID, r.Name, r.KindOrS3(),
+		secretModeOrEnv(r.SecretMode), r.EnvPrefix, r.Endpoint, r.Region, r.AllowInsecureLocal, r.AccessKeySealed,
+		r.SecretKeySealed, r.Bucket, r.Prefix, r.LockMode, r.LockDays, ret)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
 			return false, backup.ErrConflict
 		}
+		return false, p.wrap(err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (p *PG) SetBackupRepoTest(ctx context.Context, id string, at time.Time, status, detail string, steps []byte) (bool, error) {
+	if len(steps) == 0 {
+		steps = []byte("[]")
+	}
+	res, err := p.db.ExecContext(ctx, `UPDATE backup_repositories SET last_test_at=$2, last_test_status=$3, last_test_detail=$4,
+		last_test_steps=$5::jsonb WHERE id=$1`, id, at, status, detail, string(steps))
+	if err != nil {
 		return false, p.wrap(err)
 	}
 	n, _ := res.RowsAffected()

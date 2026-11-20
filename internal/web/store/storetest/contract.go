@@ -403,6 +403,12 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 	t.Run("backup_slots", func(t *testing.T) { runBackupSlots(t, mk(t)) })
 	t.Run("backup_retry", func(t *testing.T) { runBackupRetry(t, mk(t)) })
 	t.Run("backup_runs", func(t *testing.T) { runBackupRuns(t, mk(t)) })
+	t.Run("backup_repo_stored", func(t *testing.T) { runBackupRepoStored(t, mk(t)) })
+	t.Run("backup_notify", func(t *testing.T) { runBackupNotify(t, mk(t)) })
+	t.Run("backup_rpo_state", func(t *testing.T) { runBackupRPOState(t, mk(t)) })
+	t.Run("backup_usage", func(t *testing.T) { runBackupUsage(t, mk(t)) })
+	t.Run("backup_run_counts", func(t *testing.T) { runBackupRunCounts(t, mk(t)) })
+	t.Run("audit_filtered", func(t *testing.T) { runAuditFiltered(t, mk(t)) })
 }
 
 func runUsersAndRBAC(t *testing.T, s store.Store) {

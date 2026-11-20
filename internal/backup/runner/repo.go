@@ -36,7 +36,7 @@ func OpenRepository(getenv Getenv, repo *backup.Repo, bucket, prefix string, par
 	envPrefix := backup.DefaultEnvPrefix
 	r := &Repository{Bucket: bucket, Prefix: strings.Trim(prefix, "/")}
 	if repo != nil {
-		envPrefix, r.ID, r.Bucket, r.LockMode, r.LockDays = repo.EnvPrefix, repo.ID, repo.Bucket, repo.LockMode, repo.LockDays
+		envPrefix, r.ID, r.Bucket, r.LockMode, r.LockDays = repo.EffectivePrefix(), repo.ID, repo.Bucket, repo.LockMode, repo.LockDays
 		if repo.Prefix != "" {
 			r.Prefix = strings.Trim(strings.Trim(repo.Prefix, "/")+"/"+r.Prefix, "/")
 		}

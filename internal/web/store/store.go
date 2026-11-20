@@ -271,6 +271,7 @@ type Store interface {
 	DeleteBackupJob(ctx context.Context, id string) (bool, error)
 	BackupProStore
 	BackupConfigStore
+	BackupOpsStore
 
 	CreateBackupRun(ctx context.Context, r backup.Run) error
 	UpdateBackupRun(ctx context.Context, r backup.Run) (bool, error)
