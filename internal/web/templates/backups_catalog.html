@@ -1,11 +1,22 @@
 {{define "content"}}
+{{if .Body.TimelineSVG}}
+<section class="card mb" id="catalog-timeline-card">
+  <div class="cardhead">
+    <h2>Timeline by source</h2>
+  </div>
+  <div class="timeline-wrap">
+    {{.Body.TimelineSVG}}
+  </div>
+</section>
+{{end}}
+
 <section class="card" id="backup-catalog-card">
   <div class="cardhead">
     <h2>Restore points (catalog)</h2>
   </div>
 
   <form method="get" action="/backups/catalog" class="filterbar" id="backup-catalog-filter">
-    <div class="field-grid cols-5">
+    <div class="field-grid cols-4">
       <label class="field">
         <span class="field-label sr-only">Source</span>
         <input type="search" name="source" value="{{.Body.Source}}" placeholder="Filter by source...">
@@ -38,12 +49,28 @@
         </select>
       </label>
       <label class="field">
+        <span class="field-label sr-only">From date</span>
+        <input type="date" name="from" value="{{.Body.From}}" placeholder="From date">
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">To date</span>
+        <input type="date" name="to" value="{{.Body.To}}" placeholder="To date">
+      </label>
+      <label class="field">
         <span class="field-label sr-only">Repository</span>
         <select name="repo">
           <option value="">All repositories</option>
           {{range .Body.Repos}}
           <option value="{{.ID}}"{{if eq $.Body.Repo .ID}} selected{{end}}>{{.ID}}</option>
           {{end}}
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label sr-only">Legal hold</span>
+        <select name="legal_hold">
+          <option value="">All holds</option>
+          <option value="1"{{if eq .Body.LegalHold "1"}} selected{{end}}>Legal hold active</option>
+          <option value="0"{{if eq .Body.LegalHold "0"}} selected{{end}}>No legal hold</option>
         </select>
       </label>
     </div>

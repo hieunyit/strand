@@ -10,13 +10,19 @@
       </div>
     </div>
     <div class="cardhead-actions">
+      {{if .Body.IsAdmin}}
       <a href="/backups/restore?backup={{.Body.Backup.ID}}" class="btn small primary">Restore from this backup</a>
+      {{end}}
       {{if .Body.CanWrite}}
       <button type="button" class="btn small" data-backup-action="verify" data-id="{{.Body.Backup.ID}}">Verify</button>
+      {{end}}
+      {{if .Body.IsAdmin}}
+      <button type="button" class="btn small ghost" data-open-drawer="copy-drawer">Copy to…</button>
       <button type="button" class="btn small ghost" data-backup-action="legal-hold" data-id="{{.Body.Backup.ID}}" data-hold="{{if .Body.Backup.LegalHold}}0{{else}}1{{end}}">
         {{if .Body.Backup.LegalHold}}Release legal hold{{else}}Set legal hold{{end}}
       </button>
       {{end}}
+      <a href="/api/v1/backups/{{.Body.Backup.ID}}/manifest" class="btn small ghost" download>Download manifest</a>
     </div>
   </div>
 </section>
@@ -27,7 +33,7 @@
     <div class="tablewrap"><table class="data-table">
       <caption>Detailed backup metadata</caption>
       <tbody>
-        <tr><th>Backup ID</th><td><code>{{.Body.Backup.ID}}</code></td></tr>
+        <tr><th>Backup ID</th><td><code>{{.Body.Backup.ID}}</code> <button type="button" class="iconbtn small" data-copy="{{.Body.Backup.ID}}" title="Copy Backup ID" aria-label="Copy Backup ID">{{icon "copy"}}</button></td></tr>
         <tr><th>Source</th><td><b>{{.Body.Backup.Source}}</b></td></tr>
         <tr><th>Engine</th><td>{{.Body.Backup.Engine}}</td></tr>
         <tr><th>Tool</th><td>{{.Body.Backup.Tool}} {{if .Body.Backup.ToolVersion}}({{.Body.Backup.ToolVersion}}){{end}}</td></tr>
@@ -37,8 +43,10 @@
         <tr><th>Key ID</th><td>{{if .Body.Backup.KeyID}}<code>{{.Body.Backup.KeyID}}</code>{{else}}<span class="muted">none (unencrypted)</span>{{end}}</td></tr>
         <tr><th>Repository / Bucket</th><td>{{if .Body.Backup.Repository}}{{.Body.Backup.Repository}}{{else}}{{.Body.Backup.Bucket}}{{end}}</td></tr>
         <tr><th>Object key</th><td><code>{{.Body.Backup.ObjectKey}}</code></td></tr>
-        <tr><th>SHA256</th><td><span class="mono small">{{if .Body.Backup.SHA256}}{{.Body.Backup.SHA256}}{{else}}-{{end}}</span></td></tr>
+        <tr><th>SHA256</th><td><span class="mono small">{{if .Body.Backup.SHA256}}{{.Body.Backup.SHA256}} <button type="button" class="iconbtn small" data-copy="{{.Body.Backup.SHA256}}" title="Copy SHA256" aria-label="Copy SHA256">{{icon "copy"}}</button>{{else}}-{{end}}</span></td></tr>
         <tr><th>Created at</th><td>{{ts .Body.Backup.CreatedAt}}</td></tr>
+        <tr><th>Lock until</th><td>{{if .Body.Backup.RetainUntil}}{{ts .Body.Backup.RetainUntil}} {{if .Body.Backup.LockMode}}<span class="badge small">{{.Body.Backup.LockMode}}</span>{{end}}{{else}}<span class="muted">none</span>{{end}}</td></tr>
+        <tr><th>Copies</th><td>{{len .Body.Copies}}{{if .Body.Backup.CopyOf}} <span class="muted">(replica of <code>{{.Body.Backup.CopyOf}}</code>)</span>{{end}}</td></tr>
         <tr><th>Legal hold</th><td>{{if .Body.Backup.LegalHold}}<span class="badge st-failed">Active legal hold</span>{{else}}No{{end}}</td></tr>
       </tbody>
     </table></div>
@@ -49,10 +57,10 @@
     <div class="tablewrap"><table class="data-table">
       <caption>Database consistency position coordinates</caption>
       <tbody>
-        <tr><th>GTID Executed</th><td><span class="mono small">{{if .Body.Backup.Position.GTIDSet}}{{.Body.Backup.Position.GTIDSet}}{{else}}-{{end}}</span></td></tr>
-        <tr><th>PostgreSQL LSN</th><td><span class="mono small">{{if .Body.Backup.Position.LSN}}{{.Body.Backup.Position.LSN}}{{else}}-{{end}}</span></td></tr>
-        <tr><th>MongoDB Oplog TS</th><td><span class="mono small">{{if .Body.Backup.Position.OplogTS}}{{.Body.Backup.Position.OplogTS}}{{else}}-{{end}}</span></td></tr>
-        <tr><th>Binlog File / Position</th><td><span class="mono small">{{if .Body.Backup.Position.BinlogFile}}{{.Body.Backup.Position.BinlogFile}}:{{.Body.Backup.Position.BinlogPos}}{{else}}-{{end}}</span></td></tr>
+        <tr><th>GTID Executed</th><td><span class="mono small">{{if .Body.Backup.Position.GTIDSet}}{{.Body.Backup.Position.GTIDSet}} <button type="button" class="iconbtn small" data-copy="{{.Body.Backup.Position.GTIDSet}}" title="Copy GTID" aria-label="Copy GTID">{{icon "copy"}}</button>{{else}}-{{end}}</span></td></tr>
+        <tr><th>PostgreSQL LSN</th><td><span class="mono small">{{if .Body.Backup.Position.LSN}}{{.Body.Backup.Position.LSN}} <button type="button" class="iconbtn small" data-copy="{{.Body.Backup.Position.LSN}}" title="Copy LSN" aria-label="Copy LSN">{{icon "copy"}}</button>{{else}}-{{end}}</span></td></tr>
+        <tr><th>MongoDB Oplog TS</th><td><span class="mono small">{{if .Body.Backup.Position.OplogTS}}{{.Body.Backup.Position.OplogTS}} <button type="button" class="iconbtn small" data-copy="{{.Body.Backup.Position.OplogTS}}" title="Copy Oplog TS" aria-label="Copy Oplog TS">{{icon "copy"}}</button>{{else}}-{{end}}</span></td></tr>
+        <tr><th>Binlog File / Position</th><td><span class="mono small">{{if .Body.Backup.Position.BinlogFile}}{{.Body.Backup.Position.BinlogFile}}:{{.Body.Backup.Position.BinlogPos}} <button type="button" class="iconbtn small" data-copy="{{.Body.Backup.Position.BinlogFile}}:{{.Body.Backup.Position.BinlogPos}}" title="Copy Binlog Position" aria-label="Copy Binlog Position">{{icon "copy"}}</button>{{else}}-{{end}}</span></td></tr>
         <tr><th>Verified at</th><td>{{if .Body.Backup.VerifiedAt}}{{ts .Body.Backup.VerifiedAt}}{{else}}<span class="muted">unverified</span>{{end}}</td></tr>
       </tbody>
     </table></div>
@@ -85,4 +93,34 @@
     </tbody>
   </table></div>
 </section>
+
+{{if .Body.IsAdmin}}
+<dialog class="drawer" id="copy-drawer">
+  <form id="backup-copy-form" method="dialog" class="drawer-panel form-stack">
+    <header class="drawer-header">
+      <h3>Copy backup to repository</h3>
+      <button type="button" class="iconbtn drawer-close" data-close-drawer="copy-drawer" aria-label="Close">{{icon "close"}}</button>
+    </header>
+    <div class="drawer-body">
+      <input type="hidden" name="backup_id" value="{{.Body.Backup.ID}}">
+      <p class="small muted">Create a replica of backup <code>{{.Body.Backup.ID}}</code> in another storage repository.</p>
+      <label class="field">
+        <span class="field-label">Target repository <span class="req">*</span></span>
+        <select name="repository" required>
+          <option value="">Select target repository...</option>
+          {{range .Body.Repos}}
+          {{if ne .ID $.Body.Backup.Repository}}
+          <option value="{{.ID}}">{{.Name}} ({{.ID}})</option>
+          {{end}}
+          {{end}}
+        </select>
+      </label>
+    </div>
+    <footer class="drawer-footer">
+      <button type="button" class="btn ghost" data-close-drawer="copy-drawer">Cancel</button>
+      <button type="submit" class="btn primary">Start copy</button>
+    </footer>
+  </form>
+</dialog>
+{{end}}
 {{end}}

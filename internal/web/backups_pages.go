@@ -1,9 +1,11 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,26 +53,51 @@ type backupRunView struct {
 
 // backupsCatalogPageBody is the template body for /backups/catalog.
 type backupsCatalogPageBody struct {
-	Backups    []backup.Record
-	NextCursor string
-	Paged      bool
-	Source     string
-	Engine     string
-	Kind       string
-	Status     string
-	Repo       string
-	Repos      []backup.Repo
-	Sources    []string
-	CanWrite   bool
-	IsAdmin    bool
+	Backups     []backup.Record
+	NextCursor  string
+	Paged       bool
+	Source      string
+	Engine      string
+	Kind        string
+	Status      string
+	Repo        string
+	Repos       []backup.Repo
+	Sources     []string
+	From        string
+	To          string
+	LegalHold   string
+	TimelineSVG template.HTML
+	CanWrite    bool
+	IsAdmin     bool
 }
 
 // backupsCatalogDetailPageBody is the template body for /backups/catalog/{id}.
 type backupsCatalogDetailPageBody struct {
 	Backup   backup.Record
 	Checks   []backup.CheckResult
+	Repos    []backup.Repo
+	Copies   []backup.Record
 	CanWrite bool
 	IsAdmin  bool
+}
+
+type restoreSourceInfo struct {
+	Source      string          `json:"source"`
+	Engine      string          `json:"engine"`
+	WindowStart *time.Time      `json:"window_start,omitempty"`
+	WindowEnd   *time.Time      `json:"window_end,omitempty"`
+	Continuous  bool            `json:"continuous"`
+	BaseBackups []backup.Record `json:"base_backups"`
+	LogsCount   int             `json:"logs_count"`
+}
+
+type restoreConnView struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Engine string `json:"engine"`
+	Host   string `json:"host"`
+	Port   int    `json:"port"`
+	User   string `json:"user"`
 }
 
 // backupsRestorePageBody is the template body for /backups/restore.
@@ -79,6 +106,9 @@ type backupsRestorePageBody struct {
 	SelectedSource string
 	Backups        []backup.Record
 	Sources        []string
+	Connections    []restoreConnView
+	SourceInfos    []restoreSourceInfo
+	WizardJSON     template.JS
 	CanWrite       bool
 	IsAdmin        bool
 }
@@ -261,12 +291,38 @@ func (s *Server) pageBackupsCatalog(w http.ResponseWriter, r *http.Request, sess
 	kind := r.URL.Query().Get("kind")
 	status := r.URL.Query().Get("status")
 	repo := r.URL.Query().Get("repo")
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	legalHold := r.URL.Query().Get("legal_hold")
 
 	f.Source = source
 	f.Engine = engine
 	f.Kind = kind
 	f.Status = backup.Status(status)
 	f.Repository = repo
+
+	parseDate := func(str string, endOfDay bool) *time.Time {
+		str = strings.TrimSpace(str)
+		if str == "" {
+			return nil
+		}
+		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02"} {
+			if t, err := time.Parse(layout, str); err == nil {
+				if endOfDay && layout == "2006-01-02" {
+					t = t.Add(24*time.Hour - time.Nanosecond)
+				}
+				return &t
+			}
+		}
+		return nil
+	}
+
+	if t := parseDate(from, false); t != nil {
+		f.CreatedAfter = t
+	}
+	if t := parseDate(to, true); t != nil {
+		f.CreatedBefore = t
+	}
 
 	var paged bool
 	if v := r.URL.Query().Get("cursor"); v != "" {
@@ -280,24 +336,87 @@ func (s *Server) pageBackupsCatalog(w http.ResponseWriter, r *http.Request, sess
 	if err != nil {
 		s.log.Error("list backup catalog", "error", err)
 	}
+
+	if legalHold == "1" {
+		var filtered []backup.Record
+		for _, it := range items {
+			if it.LegalHold {
+				filtered = append(filtered, it)
+			}
+		}
+		items = filtered
+	} else if legalHold == "0" {
+		var filtered []backup.Record
+		for _, it := range items {
+			if !it.LegalHold {
+				filtered = append(filtered, it)
+			}
+		}
+		items = filtered
+	}
+
 	nextCursor := backup.NextCursor(items, f.Limit)
-	repos, _ := s.db.st.ListBackupRepos(r.Context())
+	var repos []backup.Repo
+	if s.db != nil && s.db.st != nil {
+		repos, _ = s.db.st.ListBackupRepos(r.Context())
+	}
+
+	// Sources for timeline
+	srcMap := make(map[string]bool)
+	var sources []string
+	if source != "" {
+		sources = append(sources, source)
+		srcMap[source] = true
+	}
+	for _, it := range items {
+		if it.Source != "" && !srcMap[it.Source] {
+			srcMap[it.Source] = true
+			sources = append(sources, it.Source)
+		}
+	}
+	if s.db != nil && s.db.st != nil {
+		if jobs, err := s.db.st.ListBackupJobs(r.Context()); err == nil {
+			for _, j := range jobs {
+				if j.Source != "" && !srcMap[j.Source] {
+					srcMap[j.Source] = true
+					sources = append(sources, j.Source)
+				}
+			}
+		}
+	}
+	sort.Strings(sources)
+
+	// Fetch some recent log segments for the sources to show PITR bands on timeline if items only has full
+	timelineRecs := append([]backup.Record(nil), items...)
+	if f.Kind != backup.KindLog && len(sources) > 0 {
+		for _, src := range sources {
+			if logs, err := s.backups.List(r.Context(), backup.Filter{Source: src, Kind: backup.KindLog, Limit: 50}); err == nil {
+				timelineRecs = append(timelineRecs, logs...)
+			}
+		}
+	}
+	timelineSVG := CatalogTimelineSVG(sources, timelineRecs, 900, 0)
 
 	canWrite := sess != nil && (sess.Role == store.RoleAdmin || sess.Role == store.RoleOperator)
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
 
 	body := backupsCatalogPageBody{
-		Backups:    items,
-		NextCursor: nextCursor,
-		Paged:      paged,
-		Source:     source,
-		Engine:     engine,
-		Kind:       kind,
-		Status:     status,
-		Repo:       repo,
-		Repos:      repos,
-		CanWrite:   canWrite,
-		IsAdmin:    isAdmin,
+		Backups:     items,
+		NextCursor:  nextCursor,
+		Paged:       paged,
+		Source:      source,
+		Engine:      engine,
+		Kind:        kind,
+		Status:      status,
+		Repo:        repo,
+		Repos:       repos,
+		Sources:     sources,
+		From:        from,
+		To:          to,
+		LegalHold:   legalHold,
+		TimelineSVG: timelineSVG,
+		CanWrite:    canWrite,
+		IsAdmin:     isAdmin,
 	}
 	s.render(w, "backups_catalog", sess, pageData{Title: "Restore Points", Active: "backups-catalog", Refresh: 10, Body: body})
 }
@@ -318,6 +437,18 @@ func (s *Server) pageBackupsCatalogDetail(w http.ResponseWriter, r *http.Request
 		return
 	}
 	checks, _ := s.backups.Checks(r.Context(), id, 20)
+	var repos []backup.Repo
+	if s.db != nil && s.db.st != nil {
+		repos, _ = s.db.st.ListBackupRepos(r.Context())
+	}
+	var copies []backup.Record
+	if all, err := s.backups.List(r.Context(), backup.Filter{Limit: 100}); err == nil {
+		for _, b := range all {
+			if b.CopyOf == id || (b.ParentID == id && b.Kind == backup.KindIncremental) {
+				copies = append(copies, b)
+			}
+		}
+	}
 
 	canWrite := sess != nil && (sess.Role == store.RoleAdmin || sess.Role == store.RoleOperator)
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
@@ -325,6 +456,8 @@ func (s *Server) pageBackupsCatalogDetail(w http.ResponseWriter, r *http.Request
 	body := backupsCatalogDetailPageBody{
 		Backup:   rec,
 		Checks:   checks,
+		Repos:    repos,
+		Copies:   copies,
 		CanWrite: canWrite,
 		IsAdmin:  isAdmin,
 	}
@@ -338,7 +471,7 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	}
 	selectedBackup := r.URL.Query().Get("backup")
 	selectedSource := r.URL.Query().Get("source")
-	backups, _ := s.backups.List(r.Context(), backup.Filter{Limit: 100})
+	backups, _ := s.backups.ListAll(r.Context(), backup.Filter{Status: backup.StatusComplete}, 1000)
 
 	sourcesMap := map[string]bool{}
 	var sources []string
@@ -348,6 +481,70 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 			sources = append(sources, b.Source)
 		}
 	}
+	if s.db != nil && s.db.st != nil {
+		if jobs, err := s.db.st.ListBackupJobs(r.Context()); err == nil {
+			for _, j := range jobs {
+				if j.Source != "" && !sourcesMap[j.Source] {
+					sourcesMap[j.Source] = true
+					sources = append(sources, j.Source)
+				}
+			}
+		}
+	}
+	sort.Strings(sources)
+
+	var sourceInfos []restoreSourceInfo
+	for _, src := range sources {
+		win, _ := s.recoveryWindow(r.Context(), src)
+		var baseBackups []backup.Record
+		logsCount := 0
+		var engine string
+		for _, b := range backups {
+			if b.Source == src {
+				if engine == "" && b.Engine != "" {
+					engine = b.Engine
+				}
+				if b.Kind == backup.KindLog {
+					logsCount++
+				} else {
+					baseBackups = append(baseBackups, b)
+				}
+			}
+		}
+		sourceInfos = append(sourceInfos, restoreSourceInfo{
+			Source:      src,
+			Engine:      engine,
+			WindowStart: win.Start,
+			WindowEnd:   win.End,
+			Continuous:  win.Continuous,
+			BaseBackups: baseBackups,
+			LogsCount:   logsCount,
+		})
+	}
+
+	var conns []restoreConnView
+	if s.db != nil && s.db.st != nil {
+		dbConns, _ := s.db.st.ListBackupConnections(r.Context())
+		for _, c := range dbConns {
+			conns = append(conns, restoreConnView{
+				ID:     c.ID,
+				Name:   c.Name,
+				Engine: c.Engine,
+				Host:   c.Host,
+				Port:   c.Port,
+				User:   c.User,
+			})
+		}
+	}
+
+	wizData := map[string]any{
+		"sources":         sourceInfos,
+		"connections":     conns,
+		"backups":         backups,
+		"selected_backup": selectedBackup,
+		"selected_source": selectedSource,
+	}
+	wizBytes, _ := json.Marshal(wizData)
 
 	canWrite := sess != nil && (sess.Role == store.RoleAdmin || sess.Role == store.RoleOperator)
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
@@ -357,6 +554,9 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 		SelectedSource: selectedSource,
 		Backups:        backups,
 		Sources:        sources,
+		Connections:    conns,
+		SourceInfos:    sourceInfos,
+		WizardJSON:     template.JS(wizBytes),
 		CanWrite:       canWrite,
 		IsAdmin:        isAdmin,
 	}

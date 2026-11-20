@@ -380,7 +380,7 @@
       if (act === 'verify') {
         if (!window.confirm('Re-read and verify backup ' + bid + '?')) { return; }
         req = window.strandApi('POST', base + '/verify');
-      } else if (act === 'hold') {
+      } else if (act === 'hold' || act === 'legal-hold') {
         var hold = bBtn.getAttribute('data-hold') === '1';
         if (!window.confirm((hold ? 'Put ' : 'Release ') + bid + (hold ? ' on legal hold? Retention will never delete it.' : ' from legal hold?'))) { return; }
         req = window.strandApi('POST', base + '/legal-hold', { hold: hold });
@@ -442,7 +442,22 @@
         .then(function () { form().removeAttribute('data-dirty'); location.reload(); }).catch(function (err) { showError(err.message); });
       return;
     }
-    if (event.target.matches('#restore-form')) {
+    if (event.target.matches('#backup-copy-form')) {
+      event.preventDefault();
+      var cf = event.target.elements;
+      var cbid = String(cf.namedItem('backup_id').value || '').trim();
+      var crepo = String(cf.namedItem('repository').value || '').trim();
+      if (!crepo) { return; }
+      window.strandApi('POST', '/api/v1/backups/' + encodeURIComponent(cbid) + '/copy', { repository: crepo })
+        .then(function (resp) { return json(resp, 'Could not start copy'); })
+        .then(function () {
+          var d = document.getElementById('copy-drawer');
+          if (d && d.close) { d.close(); }
+          location.reload();
+        }).catch(function (err) { window.alert(err.message); });
+      return;
+    }
+    if (event.target.matches('#restore-form') && !document.getElementById('restore-stepper')) {
       event.preventDefault();
       var f = event.target.elements;
       var get = function (n) { return String(f.namedItem(n).value || '').trim(); };

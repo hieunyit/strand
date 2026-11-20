@@ -1022,6 +1022,20 @@
     });
   }
 
+  // Click to copy data attributes
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('[data-copy]');
+    if (btn) {
+      ev.preventDefault();
+      var val = btn.getAttribute('data-copy');
+      if (val && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(val).then(function () {
+          toast('Copied to clipboard', true);
+        });
+      }
+    }
+  });
+
   // Unsaved changes: leaving a page with a dirty form[data-guard] asks first. The periodic refresh never
   // replaces such a form (editing() above).
   window.addEventListener('beforeunload', function (ev) {

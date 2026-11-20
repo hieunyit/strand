@@ -739,6 +739,21 @@ svg.spark { width: 96px; height: 24px; vertical-align: middle; }
 .segbtn:hover { background: var(--surface-2); color: var(--ink); }
 .segbtn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
+/* timeline chart */
+.timeline-wrap { width: 100%; overflow-x: auto; }
+svg.timeline-svg { width: 100%; min-width: 600px; height: auto; display: block; font-family: var(--font); }
+.timeline-axis { stroke: var(--line-strong); stroke-width: 1.5; }
+.timeline-track { stroke: var(--line-subtle); stroke-width: 1; stroke-dasharray: 4 4; }
+.timeline-label { fill: var(--ink); font-size: var(--fs-xs); font-weight: 500; }
+.timeline-tick-text { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.timeline-pitr-band { fill: var(--ok-subtle); stroke: var(--ok); stroke-width: 1; cursor: pointer; transition: opacity .15s; }
+.timeline-pitr-band:hover { fill: var(--ok); opacity: .8; }
+.timeline-gap { fill: var(--bad-subtle); stroke: var(--bad); stroke-width: 1; }
+.timeline-dot-full { fill: var(--s1); stroke: var(--surface); stroke-width: 1.5; cursor: pointer; transition: r .15s; }
+.timeline-dot-full:hover { r: 8; }
+.timeline-dot-inc { fill: var(--s2); stroke: var(--surface); stroke-width: 1; cursor: pointer; transition: r .15s; }
+.timeline-dot-inc:hover { r: 6.5; }
+
 /* pipeline graph */
 .graphwrap { overflow-x: auto; }
 svg.graph { width: 100%; min-width: 860px; height: auto; }

@@ -2,49 +2,232 @@
 <section class="card" id="restore-section">
   <div class="cardhead"><h2>Restore</h2></div>
   <p class="muted">A restore always goes to a <strong>new</strong> target and never modifies the source. Progress and log appear on the job page.</p>
-  <form id="restore-form" class="form-stack" novalidate>
-    <fieldset class="form-section">
+
+  <ol class="stepper" id="restore-stepper" aria-label="Restore steps">
+    <li class="step current" data-step-li="1" aria-current="step">
+      <button type="button" class="btn ghost step-btn" data-goto="1">
+        <span class="step-index">1</span>
+        <span class="step-label">Restore point</span>
+      </button>
+    </li>
+    <li class="step" data-step-li="2">
+      <button type="button" class="btn ghost step-btn" data-goto="2">
+        <span class="step-index">2</span>
+        <span class="step-label">Target</span>
+      </button>
+    </li>
+    <li class="step" data-step-li="3">
+      <button type="button" class="btn ghost step-btn" data-goto="3">
+        <span class="step-index">3</span>
+        <span class="step-label">Options</span>
+      </button>
+    </li>
+    <li class="step" data-step-li="4">
+      <button type="button" class="btn ghost step-btn" data-goto="4">
+        <span class="step-index">4</span>
+        <span class="step-label">Confirm</span>
+      </button>
+    </li>
+  </ol>
+
+  <form id="restore-form" class="form-stack" data-wizard="{{.Body.WizardJSON}}" novalidate autocomplete="off">
+    <!-- Step 1: Restore point -->
+    <fieldset class="form-section wiz-step" data-step="1">
       <legend class="form-section-title"><span class="step-no">1</span> What to restore</legend>
       <div class="choice-cards" role="radiogroup" aria-label="Restore from">
-        <label class="choice"><input type="radio" name="restore_from" value="backup"{{if not .Body.SelectedSource}} checked{{end}}><span class="choice-title">From a backup ID</span><span class="choice-desc">Restore one backup from the catalog, optionally rolled forward to a time.</span></label>
-        <label class="choice"><input type="radio" name="restore_from" value="pitr"{{if .Body.SelectedSource}} checked{{end}}><span class="choice-title">Point in time from a source</span><span class="choice-desc">Strand picks the base backup and replays archived logs up to the time.</span></label>
+        <label class="choice">
+          <input type="radio" name="restore_from" value="backup"{{if not .Body.SelectedSource}} checked{{end}}>
+          <span class="choice-title">From a backup ID</span>
+          <span class="choice-desc">Restore one backup from the catalog, optionally rolled forward to a time.</span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="restore_from" value="pitr"{{if .Body.SelectedSource}} checked{{end}}>
+          <span class="choice-title">Point in time from a source (PITR)</span>
+          <span class="choice-desc">Strand picks the base backup and replays archived logs up to the time.</span>
+        </label>
       </div>
+
       <div class="field-grid">
-        <label class="field" data-show-if="restore_from=backup"><span class="field-label">Backup ID <span class="req">*</span></span><input name="backup_id" class="mono" value="{{.Body.SelectedBackup}}" placeholder="bkp-..." autocomplete="off"></label>
-        <label class="field" data-show-if="restore_from=pitr"><span class="field-label">Source <span class="req">*</span></span><input name="source" value="{{.Body.SelectedSource}}" placeholder="mysql-prod" autocomplete="off"></label>
-        <label class="field"><span class="field-label">Point in time (UTC)</span><input name="target_time" type="datetime-local" step="1"><small class="field-hint">Optional: roll forward with archived logs.</small></label>
+        <label class="field" data-show-if="restore_from=backup">
+          <span class="field-label">Backup ID <span class="req">*</span></span>
+          <input name="backup_id" id="restore-backup-id" class="mono" value="{{.Body.SelectedBackup}}" placeholder="bkp-..." list="backups-datalist" autocomplete="off">
+          <datalist id="backups-datalist">
+            {{range .Body.Backups}}
+            <option value="{{.ID}}">{{.Source}} ({{.Kind}}, {{.CreatedAt.Format "2006-01-02 15:04"}})</option>
+            {{end}}
+          </datalist>
+          <span class="field-error" id="err-backup-id" hidden></span>
+        </label>
+
+        <label class="field" data-show-if="restore_from=pitr">
+          <span class="field-label">Source <span class="req">*</span></span>
+          <select name="source" id="restore-source-select">
+            <option value="">-- Choose source --</option>
+            {{range .Body.Sources}}
+            <option value="{{.}}"{{if eq $.Body.SelectedSource .}} selected{{end}}>{{.}}</option>
+            {{end}}
+          </select>
+          <span class="field-error" id="err-source" hidden></span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Point in time (UTC)</span>
+          <input name="target_time" id="restore-target-time" type="datetime-local" step="1">
+          <small class="field-hint" id="restore-time-hint">Required for PITR; optional for backup roll-forward.</small>
+          <span class="field-error" id="err-target-time" hidden></span>
+        </label>
+      </div>
+
+      <div id="restore-source-window" class="alert alert-info mt" hidden>
+        <div id="restore-window-text"></div>
+        <div id="restore-pitr-preview" class="small muted mt"></div>
+      </div>
+
+      <div class="form-actions mt">
+        <button type="button" class="btn primary" id="restore-step1-next" data-next-step="2">Next: Target &rarr;</button>
       </div>
     </fieldset>
 
-    <fieldset class="form-section">
+    <!-- Step 2: Target server -->
+    <fieldset class="form-section wiz-step" data-step="2" hidden>
       <legend class="form-section-title"><span class="step-no">2</span> Target server</legend>
       <div class="field-grid">
-        <label class="field"><span class="field-label">Host</span><input name="target_host" placeholder="db-restore.internal" autocomplete="off"></label>
-        <label class="field"><span class="field-label">Port</span><input name="target_port" type="number" min="0" max="65535"></label>
-        <label class="field"><span class="field-label">User</span><input name="target_user" autocomplete="off"></label>
-        <label class="field"><span class="field-label">Password environment variable</span><input name="target_password_env" class="mono" autocomplete="off"></label>
+        <label class="field">
+          <span class="field-label">Target connection</span>
+          <select name="connection_id" id="restore-conn-select">
+            <option value="">-- Select a saved connection --</option>
+            {{range .Body.Connections}}
+            <option value="{{.ID}}" data-engine="{{.Engine}}" data-host="{{.Host}}" data-port="{{.Port}}" data-user="{{.User}}">{{.Name}} ({{.Engine}} - {{.Host}}:{{.Port}})</option>
+            {{end}}
+            <option value="custom">Manual connection settings</option>
+          </select>
+          <span class="field-error" id="err-connection" hidden></span>
+        </label>
       </div>
-    </fieldset>
 
-    <fieldset class="form-section">
-      <legend class="form-section-title"><span class="step-no">3</span> Restore as</legend>
-      <div class="choice-cards" role="radiogroup" aria-label="Restore as">
-        <label class="choice"><input type="radio" name="restore_into" value="database" checked><span class="choice-title">New database</span><span class="choice-desc">Logical backups (mysqldump, mydumper, pg_dump, mongodump).</span></label>
-        <label class="choice"><input type="radio" name="restore_into" value="dir"><span class="choice-title">New data directory</span><span class="choice-desc">Physical backups (pg_basebackup) into an empty directory.</span></label>
+      <div class="field-grid" id="restore-custom-conn" hidden>
+        <label class="field">
+          <span class="field-label">Host <span class="req">*</span></span>
+          <input name="target_host" id="restore-target-host" placeholder="db-restore.internal" autocomplete="off">
+        </label>
+        <label class="field">
+          <span class="field-label">Port</span>
+          <input name="target_port" id="restore-target-port" type="number" min="0" max="65535">
+        </label>
+        <label class="field">
+          <span class="field-label">User</span>
+          <input name="target_user" id="restore-target-user" autocomplete="off">
+        </label>
+        <label class="field">
+          <span class="field-label">Password environment variable</span>
+          <input name="target_password_env" id="restore-target-pw-env" class="mono" autocomplete="off">
+        </label>
       </div>
+
+      <div class="actions-row mt">
+        <button type="button" class="btn small" id="restore-test-btn">Test connection</button>
+        <span id="restore-test-status" class="small muted"></span>
+      </div>
+      <div id="restore-test-result" class="alert alert-info mt" hidden></div>
+      <span class="field-error" id="err-test-connection" hidden></span>
+
+      <div class="choice-cards mt" role="radiogroup" aria-label="Restore into">
+        <label class="choice" id="choice-restore-db">
+          <input type="radio" name="restore_into" value="database" checked>
+          <span class="choice-title">New database</span>
+          <span class="choice-desc">Logical backups (mysqldump, mydumper, pg_dump, mongodump).</span>
+        </label>
+        <label class="choice" id="choice-restore-dir">
+          <input type="radio" name="restore_into" value="dir">
+          <span class="choice-title">New data directory</span>
+          <span class="choice-desc">Physical backups (pg_basebackup) into an empty directory.</span>
+        </label>
+      </div>
+
       <div class="field-grid">
-        <label class="field" data-show-if="restore_into=database"><span class="field-label">New database name <span class="req">*</span></span><input name="target_database" autocomplete="off"><small class="field-hint">Must not exist yet.</small></label>
-        <label class="field" data-show-if="restore_into=dir" hidden><span class="field-label">New data directory <span class="req">*</span></span><input name="target_dir" class="mono" placeholder="/var/lib/strand-restores/pg-2026-11-20" autocomplete="off"></label>
-        <label class="field"><span class="field-label">Confirm <span class="req">*</span></span><input name="confirm" autocomplete="off"><small class="field-hint">Type the new database name or directory again.</small></label>
+        <label class="field" data-show-if="restore_into=database" id="field-target-db">
+          <span class="field-label">New database name <span class="req">*</span></span>
+          <input name="target_database" id="restore-target-database" autocomplete="off">
+          <small class="field-hint">Must not exist yet on target server.</small>
+          <span class="field-error" id="err-target-database" hidden></span>
+        </label>
+        <label class="field" data-show-if="restore_into=dir" id="field-target-dir" hidden>
+          <span class="field-label">New data directory <span class="req">*</span></span>
+          <input name="target_dir" id="restore-target-dir" class="mono" placeholder="/var/lib/strand-restores/db-01" autocomplete="off">
+          <small class="field-hint">Must be empty or not exist yet.</small>
+          <span class="field-error" id="err-target-dir" hidden></span>
+        </label>
+      </div>
+
+      <div class="form-actions mt">
+        <button type="button" class="btn ghost" data-prev-step="1">&larr; Back</button>
+        <button type="button" class="btn primary" id="restore-step2-next" data-next-step="3">Next: Options &rarr;</button>
       </div>
     </fieldset>
 
-    <div class="form-actions">
-      {{if .Body.CanWrite}}
-      <button class="btn primary" type="submit">Start restore</button>
-      {{end}}
-      <span class="form-status" id="restore-message" role="status"></span>
-    </div>
+    <!-- Step 3: Options -->
+    <fieldset class="form-section wiz-step" data-step="3" hidden>
+      <legend class="form-section-title"><span class="step-no">3</span> Restore options</legend>
+      <div class="field-grid">
+        <label class="field">
+          <span class="field-label">Subset of databases/collections</span>
+          <input name="databases" id="restore-databases-subset" placeholder="All databases in backup (or comma separated)">
+          <small class="field-hint">Optional: restore only specific databases/collections if supported by tool.</small>
+        </label>
+        <label class="field" id="field-restore-threads">
+          <span class="field-label">Parallel threads</span>
+          <input name="threads" id="restore-threads" type="number" min="1" max="32" value="4">
+          <small class="field-hint">Concurrency for parallel restore tools (mydumper, pg_restore).</small>
+        </label>
+      </div>
+
+      <div class="form-actions mt">
+        <button type="button" class="btn ghost" data-prev-step="2">&larr; Back</button>
+        <button type="button" class="btn primary" id="restore-step3-next" data-next-step="4">Next: Review &amp; confirm &rarr;</button>
+      </div>
+    </fieldset>
+
+    <!-- Step 4: Confirm -->
+    <fieldset class="form-section wiz-step" data-step="4" hidden>
+      <legend class="form-section-title"><span class="step-no">4</span> Review and confirm</legend>
+
+      <section class="card mb" id="restore-summary-card">
+        <div class="cardhead"><h3>Restore plan summary</h3></div>
+        <div class="tablewrap"><table class="data-table" id="restore-summary-table">
+          <caption>Summary of restore operation configuration</caption>
+          <tbody>
+            <tr><th>Restore item</th><td id="summary-item">-</td></tr>
+            <tr><th>Point in time</th><td id="summary-time">Original backup snapshot</td></tr>
+            <tr><th>Target server</th><td id="summary-target-server">-</td></tr>
+            <tr><th>Target destination</th><td id="summary-target-dest">-</td></tr>
+            <tr><th>Estimated size</th><td id="summary-size">-</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <div class="alert alert-warn">
+        <b>Important:</b> A restore creates a new target and does not alter the source database.
+        Ensure target storage has sufficient capacity for restored data.
+      </div>
+
+      <div class="field-grid mt">
+        <label class="field">
+          <span class="field-label">Confirm target name <span class="req">*</span></span>
+          <input name="confirm" id="restore-confirm-input" placeholder="Type target database or directory name" autocomplete="off">
+          <small class="field-hint" id="restore-confirm-hint">Type the target name to enable the Start restore button.</small>
+        </label>
+      </div>
+
+      <div class="form-actions mt">
+        <button type="button" class="btn ghost" data-prev-step="3">&larr; Back</button>
+        {{if .Body.IsAdmin}}
+        <button class="btn danger" type="submit" id="start-restore-btn" disabled>Start restore</button>
+        {{else}}
+        <p class="muted">Starting a restore requires admin permissions.</p>
+        {{end}}
+        <span class="form-status" id="restore-message" role="status"></span>
+      </div>
+    </fieldset>
   </form>
 </section>
 {{end}}

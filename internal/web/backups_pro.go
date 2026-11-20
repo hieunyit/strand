@@ -26,6 +26,7 @@ import (
 func (s *Server) backupProRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/backups/summary", s.auth(true, s.apiBackupSummary))
 	mux.Handle("GET /api/v1/backups/{id}/checks", s.auth(true, s.apiBackupChecks))
+	mux.Handle("GET /api/v1/backups/{id}/manifest", s.auth(true, s.apiBackupManifest))
 	mux.Handle("POST /api/v1/backups/{id}/legal-hold", s.auth(true, s.apiBackupLegalHold))
 	mux.Handle("POST /api/v1/backups/{id}/verify", s.auth(true, s.apiBackupVerifyOne))
 	mux.Handle("POST /api/v1/backups/{id}/copy", s.auth(true, s.apiBackupCopy))
@@ -59,8 +60,8 @@ func (s *Server) auditBackupOp(w http.ResponseWriter, r *http.Request, action st
 	return true
 }
 
-// startBackupOp starts `strand backup <args>` as a job process (active instance only).
-func (s *Server) startBackupOp(kind, pipeline string, args ...string) (string, error) {
+// startBackupOpEnv starts `strand backup <args>` as a job process with extra environment variables (active instance only).
+func (s *Server) startBackupOpEnv(kind, pipeline string, extraEnv []string, args ...string) (string, error) {
 	if s.jobs == nil {
 		return "", errors.New("job runner unavailable")
 	}
@@ -72,7 +73,14 @@ func (s *Server) startBackupOp(kind, pipeline string, args ...string) (string, e
 		full = append(full, "--config", s.cfg.SourcePath)
 	}
 	full = append(append(full, "backup"), args...)
-	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full, Env: append(s.backupOpEnv(args), s.repoSecretEnv()...)})
+	env := append(s.backupOpEnv(args), s.repoSecretEnv()...)
+	env = append(env, extraEnv...)
+	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full, Env: env})
+}
+
+// startBackupOp starts `strand backup <args>` as a job process (active instance only).
+func (s *Server) startBackupOp(kind, pipeline string, args ...string) (string, error) {
+	return s.startBackupOpEnv(kind, pipeline, nil, args...)
 }
 
 // backupOpEnv: the log archiver reads the source database, so for a job on a stored-secret connection it
@@ -224,6 +232,27 @@ func (s *Server) apiBackupLegalHold(w http.ResponseWriter, r *http.Request, _ *S
 	}
 }
 
+func (s *Server) apiBackupManifest(w http.ResponseWriter, r *http.Request, _ *Session) {
+	if !s.needDB(w) {
+		return
+	}
+	id := r.PathValue("id")
+	rec, found, err := s.backups.Get(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		writeErr(w, http.StatusNotFound, "backup not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="manifest-%s.json"`, id))
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(rec)
+}
+
 func (s *Server) apiBackupVerifyOne(w http.ResponseWriter, r *http.Request, _ *Session) {
 	if !s.needDB(w) {
 		return
@@ -280,11 +309,14 @@ type RestoreRequest struct {
 	BackupID string `json:"backup_id,omitempty"`
 	Source   string `json:"source,omitempty"`
 	// TargetTime (RFC3339): point-in-time restore; the base backup is chosen automatically.
-	TargetTime string          `json:"target_time,omitempty"`
-	Target     backup.ConnSpec `json:"target"`
-	TargetDB   string          `json:"target_database,omitempty"`
-	TargetDir  string          `json:"target_dir,omitempty"`
-	Confirm    string          `json:"confirm"` // must equal the target database or directory
+	TargetTime   string          `json:"target_time,omitempty"`
+	ConnectionID string          `json:"connection_id,omitempty"`
+	Target       backup.ConnSpec `json:"target"`
+	TargetDB     string          `json:"target_database,omitempty"`
+	TargetDir    string          `json:"target_dir,omitempty"`
+	Databases    []string        `json:"databases,omitempty"`
+	Threads      int             `json:"threads,omitempty"`
+	Confirm      string          `json:"confirm"` // must equal the target database or directory
 }
 
 func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -295,6 +327,72 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 	if !decodeStrict(w, r, &req) {
 		return
 	}
+
+	var extraEnv []string
+	if req.ConnectionID != "" && s.db != nil && s.db.st != nil {
+		conn, ok, err := s.db.st.GetBackupConnection(r.Context(), req.ConnectionID)
+		if err != nil || !ok {
+			writeErr(w, http.StatusBadRequest, "connection not found")
+			return
+		}
+		if req.Target.Host == "" {
+			req.Target.Host = conn.Host
+		}
+		if req.Target.Port == 0 {
+			req.Target.Port = conn.Port
+		}
+		if req.Target.User == "" {
+			req.Target.User = conn.User
+		}
+		if conn.SecretMode == backup.SecretStored {
+			pw, uri, err := s.connSecrets(conn)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if pw != "" {
+				envName := "STRAND_RESTORE_TARGET_PASSWORD"
+				req.Target.PasswordEnv = envName
+				extraEnv = append(extraEnv, envName+"="+pw, "MYSQL_PWD="+pw, "PGPASSWORD="+pw)
+			}
+			if uri != "" {
+				envName := "STRAND_RESTORE_TARGET_URI"
+				req.Target.URIEnv = envName
+				extraEnv = append(extraEnv, envName+"="+uri)
+			}
+		} else if conn.SecretMode == backup.SecretEnv {
+			if req.Target.PasswordEnv == "" && conn.PasswordEnv != "" {
+				req.Target.PasswordEnv = conn.PasswordEnv
+			}
+			if req.Target.URIEnv == "" && conn.URIEnv != "" {
+				req.Target.URIEnv = conn.URIEnv
+			}
+		}
+	}
+
+	if req.TargetTime != "" {
+		tt, err := time.Parse(time.RFC3339, req.TargetTime)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "target_time must be RFC3339")
+			return
+		}
+		src := req.Source
+		if src == "" && req.BackupID != "" {
+			if b, ok, err := s.backups.Get(r.Context(), req.BackupID); err == nil && ok {
+				src = b.Source
+			}
+		}
+		if src != "" {
+			if win, err := s.recoveryWindow(r.Context(), src); err == nil && win.Continuous && win.Start != nil && win.End != nil {
+				if tt.Before(*win.Start) || tt.After(*win.End) {
+					writeErr(w, http.StatusBadRequest, fmt.Sprintf("target time %s is outside PITR recovery window [%s, %s]",
+						tt.Format(time.RFC3339), win.Start.Format(time.RFC3339), win.End.Format(time.RFC3339)))
+					return
+				}
+			}
+		}
+	}
+
 	args, err := restoreArgs(req)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -304,7 +402,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		"target_time": req.TargetTime, "target_host": req.Target.Host, "target_database": req.TargetDB, "target_dir": req.TargetDir}) {
 		return
 	}
-	pid, err := s.startBackupOp("backup-restore", "backup-restore-"+runner.NewID("r"), args...)
+	pid, err := s.startBackupOpEnv("backup-restore", "backup-restore-"+runner.NewID("r"), extraEnv, args...)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return

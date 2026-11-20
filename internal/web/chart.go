@@ -5,11 +5,13 @@ import (
 	"html"
 	"html/template"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"strand/internal/backup"
+	"strand/internal/backup/runner"
 )
 
 // Biểu đồ SVG render phía server, không dùng JS hay thư viện ngoài. Màu và font nằm ở CSS (class),
@@ -433,5 +435,189 @@ func JobRuns30Chart(runs []backup.Run, w, h int) template.HTML {
 	}
 	sb.WriteString(`</svg>`)
 	sb.WriteString(`<div class="legend"><span class="key s1">Duration</span><span class="key s2">Bytes written</span></div></figure>`)
+	return template.HTML(sb.String())
+}
+
+// CatalogTimelineSVG renders a horizontal timeline by source:
+// - horizontal time axis
+// - dots = full/incremental backups (linking to /backups/restore?backup={id})
+// - bands = continuous PITR coverage (log segments) (linking to /backups/restore?source={source})
+// - gaps = gaps in log coverage in red
+func CatalogTimelineSVG(sources []string, records []backup.Record, w, h int) template.HTML {
+	if w <= 0 {
+		w = 900
+	}
+	if len(sources) == 0 {
+		seen := make(map[string]bool)
+		for _, r := range records {
+			if r.Source != "" && !seen[r.Source] {
+				seen[r.Source] = true
+				sources = append(sources, r.Source)
+			}
+		}
+		sort.Strings(sources)
+	}
+
+	const padL, padR, padT, padB = 140, 24, 32, 36
+	rowH := 46
+	if len(sources) > 0 {
+		h = padT + padB + len(sources)*rowH
+	} else {
+		h = 120
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `<figure class="chart timeline-chart"><figcaption><span class="ctitle">Timeline by source</span> <span class="unit">Restore points &amp; PITR coverage</span></figcaption>`)
+	fmt.Fprintf(&sb, `<svg class="timeline-svg" viewBox="0 0 %d %d" role="img" aria-label="Restore points timeline by source">`, w, h)
+
+	if len(sources) == 0 || len(records) == 0 {
+		fmt.Fprintf(&sb, `<text class="nodata" x="%d" y="%d" text-anchor="middle">No restore points to display</text></svg></figure>`, w/2, h/2)
+		return template.HTML(sb.String())
+	}
+
+	var tmin, tmax time.Time
+	for _, r := range records {
+		if tmin.IsZero() || r.CreatedAt.Before(tmin) {
+			tmin = r.CreatedAt
+		}
+		if tmax.IsZero() || r.CreatedAt.After(tmax) {
+			tmax = r.CreatedAt
+		}
+	}
+	span := tmax.Sub(tmin).Seconds()
+	if span <= 0 {
+		span = 86400
+		tmin = tmax.Add(-24 * time.Hour)
+	}
+	pw := float64(w - padL - padR)
+	xOf := func(t time.Time) float64 {
+		return float64(padL) + pw*t.Sub(tmin).Seconds()/span
+	}
+
+	yAxis := float64(h - padB + 6)
+	fmt.Fprintf(&sb, `<line class="timeline-axis" x1="%d" x2="%d" y1="%.1f" y2="%.1f"/>`, padL, w-padR, yAxis, yAxis)
+	for i, f := range []float64{0, 0.25, 0.5, 0.75, 1.0} {
+		x := float64(padL) + pw*f
+		tTick := tmin.Add(time.Duration(span * f * float64(time.Second)))
+		fmt.Fprintf(&sb, `<line class="tick" x1="%.1f" x2="%.1f" y1="%.1f" y2="%.1f"/>`, x, x, yAxis, yAxis+4)
+		anchor := "middle"
+		if i == 0 {
+			anchor = "start"
+		} else if i == 4 {
+			anchor = "end"
+		}
+		fmt.Fprintf(&sb, `<text class="timeline-tick-text" x="%.1f" y="%.1f" text-anchor="%s">%s</text>`, x, yAxis+16, anchor, tTick.Format("01-02 15:04"))
+	}
+
+	bySource := make(map[string][]backup.Record)
+	for _, r := range records {
+		bySource[r.Source] = append(bySource[r.Source], r)
+	}
+
+	for idx, src := range sources {
+		y := float64(padT + idx*rowH + rowH/2)
+		fmt.Fprintf(&sb, `<text class="timeline-label" x="%d" y="%.1f" text-anchor="end">%s</text>`, padL-12, y+4, html.EscapeString(src))
+		fmt.Fprintf(&sb, `<line class="timeline-track" x1="%d" x2="%d" y1="%.1f" y2="%.1f"/>`, padL, w-padR, y, y)
+
+		srcRecs := bySource[src]
+		var logs, dots []backup.Record
+		for _, r := range srcRecs {
+			if r.Kind == backup.KindLog {
+				logs = append(logs, r)
+			} else {
+				dots = append(dots, r)
+			}
+		}
+
+		sort.Slice(logs, func(i, j int) bool {
+			ti := logs[i].CreatedAt
+			if logs[i].StartTime != nil {
+				ti = *logs[i].StartTime
+			}
+			tj := logs[j].CreatedAt
+			if logs[j].StartTime != nil {
+				tj = *logs[j].StartTime
+			}
+			return ti.Before(tj)
+		})
+
+		logStart := func(r backup.Record) time.Time {
+			if r.StartTime != nil {
+				return *r.StartTime
+			}
+			return r.CreatedAt
+		}
+		logEnd := func(r backup.Record) time.Time {
+			if r.EndTime != nil {
+				return *r.EndTime
+			}
+			return r.CreatedAt
+		}
+
+		if len(logs) > 0 {
+			bandStart := logStart(logs[0])
+			bandEnd := logEnd(logs[0])
+			if !bandEnd.After(bandStart) {
+				bandEnd = bandStart.Add(10 * time.Minute)
+			}
+
+			renderBand := func(bStart, bEnd time.Time) {
+				x1 := xOf(bStart)
+				x2 := xOf(bEnd)
+				if x2 <= x1 {
+					x2 = x1 + 6
+				}
+				fmt.Fprintf(&sb, `<a href="/backups/restore?source=%s" aria-label="Restore PITR for %s"><rect class="timeline-pitr-band" x="%.1f" y="%.1f" width="%.1f" height="12" rx="2"><title>PITR coverage: %s to %s</title></rect></a>`,
+					html.EscapeString(src), html.EscapeString(src), x1, y-6, x2-x1, bStart.Format("2006-01-02 15:04"), bEnd.Format("2006-01-02 15:04"))
+			}
+
+			renderGap := func(gStart, gEnd time.Time) {
+				x1 := xOf(gStart)
+				x2 := xOf(gEnd)
+				if x2-x1 > 1 {
+					fmt.Fprintf(&sb, `<rect class="timeline-gap" x="%.1f" y="%.1f" width="%.1f" height="12" rx="2"><title>Log gap: %s to %s</title></rect>`,
+						x1, y-6, x2-x1, gStart.Format("2006-01-02 15:04"), gEnd.Format("2006-01-02 15:04"))
+				}
+			}
+
+			for i := 1; i < len(logs); i++ {
+				nextStart := logStart(logs[i])
+				nextEnd := logEnd(logs[i])
+				if !nextEnd.After(nextStart) {
+					nextEnd = nextStart.Add(10 * time.Minute)
+				}
+
+				if !runner.Contiguous(logs[i-1], logs[i]) || nextStart.Sub(bandEnd) > 30*time.Minute {
+					renderBand(bandStart, bandEnd)
+					if nextStart.After(bandEnd) {
+						renderGap(bandEnd, nextStart)
+					}
+					bandStart = nextStart
+					bandEnd = nextEnd
+				} else {
+					if nextEnd.After(bandEnd) {
+						bandEnd = nextEnd
+					}
+				}
+			}
+			renderBand(bandStart, bandEnd)
+		}
+
+		for _, b := range dots {
+			cx := xOf(b.CreatedAt)
+			cls := "timeline-dot-full"
+			r := 6.0
+			if b.Kind == backup.KindIncremental {
+				cls = "timeline-dot-inc"
+				r = 4.5
+			}
+			fmt.Fprintf(&sb, `<a href="/backups/restore?backup=%s" aria-label="Restore backup %s"><circle class="%s" cx="%.1f" cy="%.1f" r="%.1f"><title>%s (%s at %s, %s)</title></circle></a>`,
+				html.EscapeString(b.ID), html.EscapeString(b.ID), cls, cx, y, r,
+				html.EscapeString(b.ID), b.Kind, b.CreatedAt.Format("2006-01-02 15:04"), fmtBytes(float64(b.Bytes)))
+		}
+	}
+
+	sb.WriteString(`</svg>`)
+	sb.WriteString(`<div class="legend"><span class="key s1">Full backup</span><span class="key ok">PITR log coverage</span><span class="key bad">Log gap</span></div></figure>`)
 	return template.HTML(sb.String())
 }
