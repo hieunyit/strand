@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"strand/internal/admin"
+	"strand/internal/config"
 	"strand/internal/mongocdc"
 )
 
@@ -29,17 +32,33 @@ func newMongoDBCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Snapshot MongoDB collections and follow change streams to MongoDB",
 		Long: `Copies selected collections, then continuously applies MongoDB change streams.
-EXPERIMENTAL. Source and target must be replica sets (a single-node replica set is
-fine); sharded clusters are refused. Checkpoints and the process lease are stored in
-the target database _strand_cdc and committed in the same target transaction as the
-data they cover. URI values should be supplied through
+
+With -c <config> this is an alias of "strand sync -c <config>" (source.kind and
+target.kind mongodb; admin socket, metrics, validate/plan/verify like SQL pipelines).
+Without -c the flags below describe the pipeline. Source and target must be replica
+sets (a single-node replica set is fine); sharded clusters are refused. Checkpoints and
+the process lease are stored in the target database _strand_cdc and committed in the
+same target transaction as the data they cover. URI values should be supplied through
 environment variables to avoid exposing credentials in shell history or process lists.`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cfgPath != "" {
+				cfg, err := config.LoadFileForPaths(cfgPath)
+				if err != nil {
+					return err
+				}
+				if !config.IsMongoKind(cfg.Source.Kind) {
+					return fmt.Errorf("%s is not a MongoDB pipeline (source.kind %q)", cfgPath, cfg.Source.Kind)
+				}
+				return newSyncCmd().RunE(cmd, args)
+			}
 			missing := make([]string, 0, 5)
 			for name, value := range map[string]string{"pipeline": pipeline, "source-uri-env": sourceURIEnv, "source-database": sourceDB, "target-uri-env": targetURIEnv, "target-database": targetDB} {
 				if strings.TrimSpace(value) == "" {
 					missing = append(missing, "--"+name)
 				}
+			}
+			if len(include) == 0 {
+				missing = append(missing, "--include")
 			}
 			if len(missing) != 0 {
 				return fmt.Errorf("required flags missing: %s", strings.Join(missing, ", "))
@@ -76,10 +95,24 @@ environment variables to avoid exposing credentials in shell history or process 
 	syncCmd.Flags().IntVar(&snapshotBatch, "snapshot-batch", 0, "Documents per snapshot write transaction (default 1000)")
 	syncCmd.Flags().IntVar(&streamBatch, "stream-batch", 0, "Change events per apply transaction (default 2000)")
 	_ = syncCmd.Flags().MarkHidden("lease-ttl")
-	_ = syncCmd.MarkFlagRequired("pipeline")
-	_ = syncCmd.MarkFlagRequired("source-database")
-	_ = syncCmd.MarkFlagRequired("target-database")
-	_ = syncCmd.MarkFlagRequired("include")
 	root.AddCommand(syncCmd)
+	var collection string
+	repairCmd := &cobra.Command{
+		Use:   "repair",
+		Short: "Re-copy one collection from the source in the running pipeline (-c <config>)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if collection == "" {
+				return errors.New("--collection is required")
+			}
+			if err := admin.NewClient(getAdminSocketPath()).SnapshotAdd(cmd.Context(), collection); err != nil {
+				return fmt.Errorf("re-copy %s: %w", collection, err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "re-copy of %s started; follow it with strand top -c %s\n", collection, cfgPath)
+			return nil
+		},
+	}
+	repairCmd.Flags().StringVar(&collection, "collection", "", "Collection to re-copy (collection or database.collection)")
+	repairCmd.Flags().StringVar(&adminSocketPath, "socket", "", "Admin socket path (default: observability.admin_socket of -c)")
+	root.AddCommand(repairCmd)
 	return root
 }

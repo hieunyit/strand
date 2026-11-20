@@ -221,6 +221,7 @@ func (s *Server) initDB() error {
 	if err != nil {
 		return fmt.Errorf("import file state into database: %w", err)
 	}
+	s.db.invalidateAdminCache()
 	if sum != nil {
 		s.log.Info("imported existing file state into the database (first start with a database)",
 			"admin_password", sum.Admin, "api_token", sum.Token, "pipelines", sum.Pipelines, "jobs", sum.Jobs,
@@ -232,6 +233,7 @@ func (s *Server) initDB() error {
 	if pw == "" {
 		return errors.New("no admin password in the database: run `strand web passwd --config <web.yaml>` (or `strand web init`) first")
 	}
+	s.ensureAdminUser()
 	s.materializeAll()
 	return nil
 }
@@ -362,6 +364,37 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/v1/tunnels", s.auth(true, s.apiTunnelOpen))
 	mux.Handle("POST /api/v1/tunnels/{id}/stop", s.auth(true, s.apiTunnelStop))
 
+	// Users management (admin only)
+	mux.Handle("GET /users", s.auth(false, s.pageUsers))
+	mux.Handle("POST /users/create", s.auth(false, s.handleUserCreateForm))
+	mux.Handle("POST /users/disable", s.auth(false, s.handleUserDisableForm))
+	mux.Handle("POST /users/enable", s.auth(false, s.handleUserEnableForm))
+	mux.Handle("POST /users/reset-password", s.auth(false, s.handleUserResetPasswordForm))
+	mux.Handle("POST /users/tokens/revoke", s.auth(false, s.handleUserRevokeTokensForm))
+	mux.Handle("POST /users/delete", s.auth(false, s.handleUserDeleteForm))
+	mux.Handle("GET /api/v1/users", s.auth(true, s.apiUsersList))
+	mux.Handle("POST /api/v1/users", s.auth(true, s.apiUserCreate))
+	mux.Handle("GET /api/v1/users/{username}", s.auth(true, s.apiUserGet))
+	mux.Handle("POST /api/v1/users/{username}/role", s.auth(true, s.apiUserSetRole))
+	mux.Handle("POST /api/v1/users/{username}/disable", s.auth(true, s.apiUserDisable))
+	mux.Handle("POST /api/v1/users/{username}/enable", s.auth(true, s.apiUserEnable))
+	mux.Handle("POST /api/v1/users/{username}/reset-password", s.auth(true, s.apiUserResetPassword))
+	mux.Handle("POST /api/v1/users/{username}/tokens/revoke", s.auth(true, s.apiUserRevokeTokens))
+	mux.Handle("DELETE /api/v1/users/{username}", s.auth(true, s.apiUserDelete))
+
+	// My account (all authenticated users)
+	mux.Handle("GET /account", s.auth(false, s.pageAccount))
+	mux.Handle("POST /account/password", s.auth(false, s.handleAccountPasswordForm))
+	mux.Handle("POST /account/tokens/create", s.auth(false, s.handleAccountTokenCreateForm))
+	mux.Handle("POST /account/tokens/revoke", s.auth(false, s.handleAccountTokenRevokeForm))
+	mux.Handle("POST /account/sessions/signout-others", s.auth(false, s.handleAccountSignoutOthersForm))
+	mux.Handle("GET /api/v1/account", s.auth(true, s.apiAccountGet))
+	mux.Handle("POST /api/v1/account/password", s.auth(true, s.apiAccountChangePassword))
+	mux.Handle("GET /api/v1/account/tokens", s.auth(true, s.apiAccountTokensList))
+	mux.Handle("POST /api/v1/account/tokens", s.auth(true, s.apiAccountTokenCreate))
+	mux.Handle("DELETE /api/v1/account/tokens/{id}", s.auth(true, s.apiAccountTokenRevoke))
+	mux.Handle("GET /api/v1/account/sessions", s.auth(true, s.apiAccountSessionsList))
+	mux.Handle("POST /api/v1/account/sessions/signout-others", s.auth(true, s.apiAccountSignoutOthers))
 	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
 
 	// RBAC: admin-only read
@@ -460,17 +493,88 @@ func (s *Server) secureHeaders(next http.Handler) http.Handler {
 
 type authedHandler func(w http.ResponseWriter, r *http.Request, sess *Session)
 
+type contextKey string
+
+const userCtxKey contextKey = "strand_user"
+
+func (s *Server) ensureAdminUser() {
+	if s.db == nil || s.db.st == nil {
+		return
+	}
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, found, err := s.db.st.GetUser(ctx, "admin")
+	if err == nil && !found {
+		if pwHash := s.passwordHash(); pwHash != "" {
+			_, _ = s.db.st.CreateUser(ctx, store.User{
+				Username:           "admin",
+				DisplayName:        "Administrator",
+				PasswordHash:       pwHash,
+				Role:               store.RoleAdmin,
+				MustChangePassword: false,
+			})
+		}
+	}
+}
+
 // auth đòi xác thực: session cookie (kèm CSRF cho phương thức ghi) hoặc Bearer token tĩnh.
 // api=true: trả 401 JSON; ngược lại chuyển về /login (302).
 func (s *Server) auth(api bool, next authedHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if tok := bearer(r); tok != "" {
-			if s.apiTokenHash() != "" && constEq(hashKey(tok), s.apiTokenHash()) {
-				// Token tĩnh không dùng cookie nên không cần CSRF.
+			// First, check scoped user API tokens
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			u, _, ok, err := s.db.st.AuthenticateToken(ctx, hashKey(tok))
+			cancel()
+			if err == nil && ok {
+				if u.Disabled {
+					s.deny(w, r, api)
+					return
+				}
+				sess := &Session{
+					UserID:   u.ID,
+					Username: u.Username,
+					Role:     u.Role,
+					CSRF:     "",
+					IP:       s.clientIP(r),
+				}
+				required := RequiredPermissionForRequest(r)
+				if !RoleAllows(sess.Role, required) {
+					s.auditDenied(r, sess.Username, "forbidden_insufficient_role")
+					s.denyForbidden(w, r, api, required)
+					return
+				}
 				if s.standbyGuard(w, r) {
 					return
 				}
-				next(w, r, &Session{CSRF: "", IP: s.clientIP(r)})
+				r = r.WithContext(context.WithValue(r.Context(), userCtxKey, sess.Username))
+				next(w, r, sess)
+				return
+			}
+
+			// Fallback: legacy global token (treated as admin with deprecation note)
+			if s.apiTokenHash() != "" && constEq(hashKey(tok), s.apiTokenHash()) {
+				s.log.Warn("legacy global API token used; deprecation notice: migrate to per-user API tokens")
+				w.Header().Set("Deprecation", "true")
+				w.Header().Set("Warning", `299 - "Legacy API token is deprecated; migrate to per-user API tokens"`)
+				sess := &Session{
+					UserID:   0,
+					Username: "admin",
+					Role:     store.RoleAdmin,
+					CSRF:     "",
+					IP:       s.clientIP(r),
+				}
+				required := RequiredPermissionForRequest(r)
+				if !RoleAllows(sess.Role, required) {
+					s.auditDenied(r, sess.Username, "forbidden_insufficient_role")
+					s.denyForbidden(w, r, api, required)
+					return
+				}
+				if s.standbyGuard(w, r) {
+					return
+				}
+				r = r.WithContext(context.WithValue(r.Context(), userCtxKey, sess.Username))
+				next(w, r, sess)
 				return
 			}
 			s.deny(w, r, api)
@@ -491,16 +595,33 @@ func (s *Server) auth(api bool, next authedHandler) http.Handler {
 				got = r.PostForm.Get(csrfField)
 			}
 			if got == "" || !constEq(got, sess.CSRF) {
-				s.auditDenied(r, "csrf_rejected")
+				s.auditDenied(r, sess.Username, "csrf_rejected")
 				writeErr(w, http.StatusForbidden, "missing or invalid CSRF token")
 				return
 			}
 		}
+		required := RequiredPermissionForRequest(r)
+		if !RoleAllows(sess.Role, required) {
+			s.auditDenied(r, sess.Username, "forbidden_insufficient_role")
+			s.denyForbidden(w, r, api, required)
+			return
+		}
 		if s.standbyGuard(w, r) {
 			return
 		}
+		r = r.WithContext(context.WithValue(r.Context(), userCtxKey, sess.Username))
 		next(w, r, sess)
 	})
+}
+
+func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, api bool, perm Permission) {
+	if api {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden: requires " + string(perm) + " role"})
+		return
+	}
+	RenderForbiddenHTML(w, perm)
 }
 
 func bearer(r *http.Request) string {
@@ -545,8 +666,8 @@ func (s *Server) clientIP(r *http.Request) string {
 	return host
 }
 
-func (s *Server) auditDenied(r *http.Request, action string) {
-	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: action, Result: "denied",
+func (s *Server) auditDenied(r *http.Request, user, action string) {
+	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), User: user, Action: action, Result: "denied",
 		Args: []string{r.Method, r.URL.Path}})
 }
 
@@ -562,10 +683,10 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	s.renderLogin(w, r, http.StatusOK, "")
+	s.renderLogin(w, r, http.StatusOK, "", "", false, "")
 }
 
-func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int, msg string) {
+func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int, msg, username string, mustChange bool, currentPassword string) {
 	tok := randToken(24)
 	s.setCookie(w, loginCookie, tok, loginCookieMaxAge)
 	next := r.URL.Query().Get("next")
@@ -577,24 +698,21 @@ func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_ = s.pages["login"].ExecuteTemplate(w, "login", map[string]any{"CSRF": tok, "Error": msg, "Next": next, "Version": s.version})
+	_ = s.pages["login"].ExecuteTemplate(w, "login", map[string]any{
+		"CSRF":            tok,
+		"Error":           msg,
+		"Next":            next,
+		"Version":         s.version,
+		"Username":        username,
+		"MustChange":      mustChange,
+		"CurrentPassword": currentPassword,
+	})
 }
 
 // loginCookieMaxAge: thời hạn cookie CSRF của trang đăng nhập (giây). Để trang đăng nhập mở lâu vẫn dùng được.
 const loginCookieMaxAge = 3600
 
 // loginCSRFReason trả "" nếu request đăng nhập qua kiểm CSRF, ngược lại lý do (ghi audit).
-// Hai cách được chấp nhận:
-//  1. double-submit: token trong form/header khớp cookie strand_login (cách cũ; client không phải trình duyệt
-//     như curl dùng cách này);
-//  2. trình duyệt xác nhận cùng origin: Sec-Fetch-Site: same-origin, hoặc Origin trùng host của request.
-//     Trình duyệt luôn gửi các header này với POST và trang khác không giả được, nên đây là kiểm CSRF chuẩn
-//     (OWASP "verifying origin with standard headers"). Cách này cứu trường hợp cookie strand_login không về
-//     tới server hoặc là cookie cũ: mở trang đăng nhập ở tab khác, trang để quá lâu, trình duyệt giữ cookie
-//     Secure cùng tên từ lần vào qua HTTPS (HTTP không ghi đè được), chặn cookie theo IP...
-//
-// Request cross-site (Sec-Fetch-Site: cross-site / same-site, hoặc Origin khác host) luôn bị từ chối nếu
-// không có double-submit hợp lệ.
 func loginCSRFReason(r *http.Request) string {
 	got := r.Header.Get(csrfHeader)
 	if got == "" {
@@ -627,36 +745,91 @@ func loginCSRFReason(r *http.Request) string {
 	}
 }
 
-// checkLogin kiểm CSRF của form đăng nhập (cookie ↔ trường/ header), giới hạn tốc độ rồi mật khẩu.
-// Trả (status, thông báo); status 0 = thành công.
-func (s *Server) checkLogin(r *http.Request, password string) (int, string) {
+// checkLogin kiểm CSRF của form đăng nhập (cookie ↔ trường/ header), giới hạn tốc độ (IP + user), và mật khẩu.
+// Trả (status, thông báo, user, retryAfterSec); status 0 = thành công.
+func (s *Server) checkLogin(r *http.Request, username, password string) (int, string, *store.User, int) {
 	ip := s.clientIP(r)
 	if reason := loginCSRFReason(r); reason != "" {
-		_ = s.audit.Log(AuditEntry{IP: ip, Action: "login_csrf_rejected", Result: "denied",
+		_ = s.audit.Log(AuditEntry{IP: ip, User: username, Action: "login_csrf_rejected", Result: "denied",
 			Args: []string{r.Method, r.URL.Path}, Detail: map[string]any{"reason": reason}})
-		return http.StatusForbidden, "missing or invalid CSRF token; reload the page and try again"
+		return http.StatusForbidden, "missing or invalid CSRF token; reload the page and try again", nil, 0
 	}
 	if ok, wait := s.limiter.Allow(ip); !ok {
-		_ = s.audit.Log(AuditEntry{IP: ip, Action: "login", Result: "denied", Detail: map[string]any{"reason": "rate_limited", "retry_after_s": int(wait.Seconds()) + 1}})
-		return http.StatusTooManyRequests, "too many failed attempts; try again in " + strconv.Itoa(int(wait.Seconds())+1) + " s"
+		retrySec := int(wait.Seconds()) + 1
+		_ = s.audit.Log(AuditEntry{IP: ip, User: username, Action: "login", Result: "denied", Detail: map[string]any{"reason": "rate_limited", "retry_after_s": retrySec}})
+		return http.StatusTooManyRequests, fmt.Sprintf("too many failed attempts; try again in %d s", retrySec), nil, retrySec
 	}
-	if bcrypt.CompareHashAndPassword([]byte(s.passwordHash()), []byte(password)) != nil {
+
+	ctx, cancel := dbCtx()
+	defer cancel()
+	now := s.now()
+
+	u, ok, err := s.db.st.GetUser(ctx, username)
+	if err != nil || !ok {
+		// Timing mitigation: run dummy bcrypt compare so execution time is indistinguishable
+		_ = bcrypt.CompareHashAndPassword(getDummyHash(), []byte(password))
 		s.limiter.Fail(ip)
-		_ = s.audit.Log(AuditEntry{IP: ip, Action: "login", Result: "denied", Detail: map[string]any{"reason": "bad_password"}})
-		return http.StatusUnauthorized, "wrong password"
+		_ = s.audit.Log(AuditEntry{IP: ip, User: username, Action: "login", Result: "denied", Detail: map[string]any{"reason": "bad_credentials"}})
+		return http.StatusUnauthorized, "invalid username or password", nil, 0
 	}
+
+	// Check if account lockout has expired: reset failure count for new window
+	if u.LockedUntil != nil {
+		if u.LockedUntil.After(now) {
+			retrySec := int(u.LockedUntil.Sub(now).Seconds()) + 1
+			_ = bcrypt.CompareHashAndPassword(getDummyHash(), []byte(password))
+			_ = s.audit.Log(AuditEntry{IP: ip, User: u.Username, Action: "login", Result: "denied", Detail: map[string]any{"reason": "account_locked", "retry_after_s": retrySec}})
+			return http.StatusTooManyRequests, fmt.Sprintf("account is temporarily locked; try again in %d s", retrySec), nil, retrySec
+		}
+		u.FailedLoginCount = 0
+	}
+
+	// Check if account is disabled
+	if u.Disabled {
+		_ = bcrypt.CompareHashAndPassword(getDummyHash(), []byte(password))
+		s.limiter.Fail(ip)
+		_ = s.audit.Log(AuditEntry{IP: ip, User: u.Username, Action: "login", Result: "denied", Detail: map[string]any{"reason": "account_disabled"}})
+		return http.StatusUnauthorized, "invalid username or password", nil, 0
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
+		s.limiter.Fail(ip)
+		newCount := u.FailedLoginCount + 1
+		var lockedUntil *time.Time
+		if newCount >= MaxFailedLogins {
+			strikes := (newCount - MaxFailedLogins) / MaxFailedLogins
+			if strikes > 4 {
+				strikes = 4
+			}
+			d := loginWindow << strikes
+			if d > maxLockout || d <= 0 {
+				d = maxLockout
+			}
+			t := now.Add(d)
+			lockedUntil = &t
+		}
+		_ = s.db.st.RecordLoginFailure(ctx, u.ID, newCount, lockedUntil, now)
+		_ = s.audit.Log(AuditEntry{IP: ip, User: u.Username, Action: "login", Result: "denied", Detail: map[string]any{"reason": "bad_password"}})
+		return http.StatusUnauthorized, "invalid username or password", nil, 0
+	}
+
 	s.limiter.Success(ip)
-	return 0, ""
+	_ = s.db.st.RecordLoginSuccess(ctx, u.ID, now)
+	return 0, "", &u, 0
 }
 
-func (s *Server) startSession(w http.ResponseWriter, r *http.Request) *Session {
-	tok, sess := s.sessions.Create(s.clientIP(r))
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *store.User) *Session {
+	// Session rotation: clear old session if any
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		s.sessions.Delete(c.Value)
+	}
+	tok, sess := s.sessions.CreateUserSession(s.clientIP(r), u.ID, u.Username, u.Role)
 	if sess == nil {
 		return nil
 	}
 	s.setCookie(w, sessionCookie, tok, int(SessionMaxAge.Seconds()))
 	s.setCookie(w, loginCookie, "", -1)
-	_ = s.audit.Log(AuditEntry{IP: sess.IP, Action: "login", Result: "ok"})
+	_ = s.audit.Log(AuditEntry{IP: sess.IP, User: u.Username, Action: "login", Result: "ok"})
 	return sess
 }
 
@@ -666,16 +839,70 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad form")
 		return
 	}
-	status, msg := s.checkLogin(r, r.PostForm.Get("password"))
-	if status != 0 {
-		if status == http.StatusTooManyRequests {
-			w.Header().Set("Retry-After", "60")
+	username := strings.TrimSpace(r.PostForm.Get("username"))
+	if username == "" {
+		username = "admin"
+	}
+	if r.PostForm.Get("must_change") == "1" {
+		currentPassword := r.PostForm.Get("current_password")
+		newPassword := r.PostForm.Get("new_password")
+		confirmPassword := r.PostForm.Get("confirm_password")
+
+		status, msg, u, retrySec := s.checkLogin(r, username, currentPassword)
+		if status != 0 {
+			if retrySec > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(retrySec))
+			}
+			s.renderLogin(w, r, status, msg, username, false, "")
+			return
 		}
-		s.renderLogin(w, r, status, msg)
+		if newPassword != confirmPassword {
+			s.renderLogin(w, r, http.StatusBadRequest, "New passwords do not match", username, true, currentPassword)
+			return
+		}
+		if err := ValidatePassword(username, newPassword); err != nil {
+			s.renderLogin(w, r, http.StatusBadRequest, err.Error(), username, true, currentPassword)
+			return
+		}
+		h, err := HashPassword(newPassword)
+		if err != nil {
+			s.renderLogin(w, r, http.StatusInternalServerError, err.Error(), username, true, currentPassword)
+			return
+		}
+		ctx, cancel := dbCtx()
+		defer cancel()
+		if err := s.db.st.SetUserPassword(ctx, u.ID, h, false); err != nil {
+			s.renderLogin(w, r, http.StatusInternalServerError, "Failed to update password", username, true, currentPassword)
+			return
+		}
+		_ = s.db.st.PurgeUserSessions(ctx, u.ID)
+		if s.startSession(w, r, u) == nil {
+			s.renderLogin(w, r, http.StatusServiceUnavailable, "session store unavailable; try again shortly", username, false, "")
+			return
+		}
+		next := r.PostForm.Get("next")
+		if !safeNext(next) {
+			next = "/"
+		}
+		http.Redirect(w, r, next, http.StatusSeeOther)
 		return
 	}
-	if s.startSession(w, r) == nil {
-		s.renderLogin(w, r, http.StatusServiceUnavailable, "session store unavailable; try again shortly")
+
+	password := r.PostForm.Get("password")
+	status, msg, u, retrySec := s.checkLogin(r, username, password)
+	if status != 0 {
+		if retrySec > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retrySec))
+		}
+		s.renderLogin(w, r, status, msg, username, false, "")
+		return
+	}
+	if u.MustChangePassword {
+		s.renderLogin(w, r, http.StatusOK, "", username, true, password)
+		return
+	}
+	if s.startSession(w, r, u) == nil {
+		s.renderLogin(w, r, http.StatusServiceUnavailable, "session store unavailable; try again shortly", username, false, "")
 		return
 	}
 	next := r.PostForm.Get("next")
@@ -688,34 +915,76 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLoginAPI(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var body struct {
-		Password string `json:"password"`
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		NewPassword string `json:"new_password,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "expected JSON {\"password\": \"...\"}")
+		writeErr(w, http.StatusBadRequest, "expected JSON {\"username\": \"...\", \"password\": \"...\"}")
 		return
 	}
-	status, msg := s.checkLogin(r, body.Password)
+	username := strings.TrimSpace(body.Username)
+	if username == "" {
+		username = "admin"
+	}
+	status, msg, u, retrySec := s.checkLogin(r, username, body.Password)
 	if status != 0 {
-		if status == http.StatusTooManyRequests {
-			w.Header().Set("Retry-After", "60")
+		if retrySec > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retrySec))
 		}
 		writeErr(w, status, msg)
 		return
 	}
-	sess := s.startSession(w, r)
+	if u.MustChangePassword {
+		if body.NewPassword == "" {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":                "password change required on first login",
+				"must_change_password": true,
+			})
+			return
+		}
+		if err := ValidatePassword(username, body.NewPassword); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h, err := HashPassword(body.NewPassword)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		ctx, cancel := dbCtx()
+		defer cancel()
+		if err := s.db.st.SetUserPassword(ctx, u.ID, h, false); err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to update password")
+			return
+		}
+		_ = s.db.st.PurgeUserSessions(ctx, u.ID)
+	}
+
+	sess := s.startSession(w, r, u)
 	if sess == nil {
 		writeErr(w, http.StatusServiceUnavailable, "session store unavailable; try again shortly")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"csrf": sess.CSRF, "idle_timeout_s": int(SessionIdleTimeout.Seconds()), "max_age_s": int(SessionMaxAge.Seconds())})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"csrf":           sess.CSRF,
+		"username":       u.Username,
+		"role":           string(u.Role),
+		"idle_timeout_s": int(SessionIdleTimeout.Seconds()),
+		"max_age_s":      int(SessionMaxAge.Seconds()),
+	})
 }
 
 func (s *Server) doLogout(w http.ResponseWriter, r *http.Request) {
+	username := ""
 	if c, err := r.Cookie(sessionCookie); err == nil {
+		if sess := s.sessions.Get(c.Value); sess != nil {
+			username = sess.Username
+		}
 		s.sessions.Delete(c.Value)
 	}
 	s.setCookie(w, sessionCookie, "", -1)
-	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "logout"})
+	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), User: username, Action: "logout", Result: "ok"})
 }
 
 func (s *Server) handleLogoutForm(w http.ResponseWriter, r *http.Request, _ *Session) {

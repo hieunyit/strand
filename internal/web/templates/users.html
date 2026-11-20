@@ -1,0 +1,125 @@
+{{define "content"}}
+{{with .Body}}
+{{if .Message}}<p class="okbox" role="status">{{.Message}}</p>{{end}}
+{{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
+{{if .CreatedToken}}
+<div class="card">
+  <div class="cardhead"><h3>Generated API token</h3></div>
+  <p class="warnbox">Copy this token now. It will not be shown again.</p>
+  <pre class="box mono">{{.CreatedToken}}</pre>
+</div>
+{{end}}
+{{if .GeneratedPassword}}
+<div class="card">
+  <div class="cardhead"><h3>Generated password for {{.PasswordUser}}</h3></div>
+  <p class="warnbox">Password set. Store it now; it is not displayed again.</p>
+  <pre class="box mono">{{.GeneratedPassword}}</pre>
+</div>
+{{end}}
+<div class="card">
+  <div class="cardhead">
+    <h2>Users</h2>
+  </div>
+  <p class="muted small">Manage users and assign RBAC roles: <b>admin</b> (full control), <b>operator</b> (run and verify pipelines and backups), or <b>viewer</b> (read-only).</p>
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="sr-only">Users</caption>
+      <thead>
+        <tr>
+          <th scope="col">Username</th>
+          <th scope="col">Display name</th>
+          <th scope="col">Role</th>
+          <th scope="col">Status</th>
+          <th scope="col">Last login</th>
+          <th scope="col">Created</th>
+          <th scope="col" class="r">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Users}}
+        <tr data-username="{{.Username}}">
+          <td><b>{{.Username}}</b>{{if .MustChangePassword}} <span class="badge st-tbl-pending" title="Must change password on next login">pwd reset</span>{{end}}</td>
+          <td>{{.DisplayName}}</td>
+          <td><span class="badge {{if eq .Role "admin"}}st-synced{{else if eq .Role "operator"}}st-bootstrapping{{else}}st-paused{{end}}">{{.Role}}</span></td>
+          <td>
+            {{if .Disabled}}
+              <span class="badge st-failed">Disabled</span>
+            {{else if .LockedUntil}}
+              <span class="badge st-failed" title="Temporarily locked">Locked</span>
+            {{else}}
+              <span class="badge st-synced">Active</span>
+            {{end}}
+          </td>
+          <td>{{if .LastLoginAt}}<time datetime="{{.LastLoginAt.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .LastLoginAt}}</time>{{else}}<span class="muted">Never</span>{{end}}</td>
+          <td><time datetime="{{.CreatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .CreatedAt}}</time></td>
+          <td class="r nowrap">
+            {{if .Disabled}}
+            <form method="post" action="/users/enable" class="inline">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <button class="btn small" type="submit">Enable</button>
+            </form>
+            {{else}}
+            <form method="post" action="/users/disable" class="inline">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <button class="btn small" type="submit">Disable</button>
+            </form>
+            {{end}}
+            <form method="post" action="/users/reset-password" class="inline">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <button class="btn small" type="submit" title="Reset password and require change on next login">Reset password</button>
+            </form>
+            <form method="post" action="/users/tokens/revoke" class="inline">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <button class="btn small" type="submit" title="Revoke all tokens for this user">Revoke tokens</button>
+            </form>
+            <form method="post" action="/users/delete" class="inline">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <button class="btn danger small" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="cardhead"><h3>Create new user</h3></div>
+  <form method="post" action="/users/create" class="settings">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <div class="setrow">
+      <div class="sethead"><label for="new-username"><b>Username</b></label></div>
+      <div class="setinput"><input id="new-username" type="text" name="username" class="wide mono" required pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$"></div>
+    </div>
+    <div class="setrow">
+      <div class="sethead"><label for="new-display-name"><b>Display name</b></label></div>
+      <div class="setinput"><input id="new-display-name" type="text" name="display_name" class="wide"></div>
+    </div>
+    <div class="setrow">
+      <div class="sethead"><label for="new-role"><b>Role</b></label></div>
+      <div class="setinput">
+        <select id="new-role" name="role">
+          <option value="viewer">viewer (read-only)</option>
+          <option value="operator" selected>operator (start/stop/pause/resume/throttle, backups, verify)</option>
+          <option value="admin">admin (full control)</option>
+        </select>
+      </div>
+    </div>
+    <div class="setrow">
+      <div class="sethead"><label for="new-password"><b>Initial password</b></label></div>
+      <div class="setinput">
+        <input id="new-password" type="password" name="password" class="wide mono" minlength="12" placeholder="Leave blank to generate random password">
+        <label class="small"><input type="checkbox" name="must_change_password" value="1" checked> Must change password on first login</label>
+      </div>
+    </div>
+    <p><button class="btn primary" type="submit">Create user</button></p>
+  </form>
+</div>
+{{end}}
+{{end}}

@@ -27,6 +27,49 @@ type Session struct {
 	IP       string
 	Created  time.Time
 	LastSeen time.Time
+	UserID   int64
+	Username string
+}
+
+type Role string
+
+const (
+	RoleAdmin    Role = "admin"
+	RoleOperator Role = "operator"
+	RoleViewer   Role = "viewer"
+)
+
+func (r Role) Valid() bool {
+	return r == RoleAdmin || r == RoleOperator || r == RoleViewer
+}
+
+// User is a web console user with an RBAC role.
+type User struct {
+	ID                 int64      `json:"id"`
+	Username           string     `json:"username"`
+	DisplayName        string     `json:"display_name"`
+	PasswordHash       string     `json:"-"`
+	Role               Role       `json:"role"`
+	Disabled           bool       `json:"disabled"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	LastLoginAt        *time.Time `json:"last_login_at,omitempty"`
+	MustChangePassword bool       `json:"must_change_password"`
+	FailedLoginCount   int        `json:"failed_login_count"`
+	LockedUntil        *time.Time `json:"locked_until,omitempty"`
+	LastFailedAt       *time.Time `json:"last_failed_at,omitempty"`
+}
+
+// UserToken is a scoped API bearer token belonging to a user.
+type UserToken struct {
+	ID          int64      `json:"id"`
+	UserID      int64      `json:"user_id"`
+	Name        string     `json:"name"`
+	TokenHash   string     `json:"-"`
+	TokenPrefix string     `json:"token_prefix"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
 }
 
 // Pipeline is a registry row of a pipeline created from the web.
@@ -116,6 +159,29 @@ type Store interface {
 	Admin(ctx context.Context) (Admin, bool, error)
 	SetPasswordHash(ctx context.Context, hash string) error
 	SetAPITokenHash(ctx context.Context, hash string) error
+
+	// User management & RBAC
+	GetUser(ctx context.Context, username string) (User, bool, error)
+	GetUserByID(ctx context.Context, id int64) (User, bool, error)
+	ListUsers(ctx context.Context) ([]User, error)
+	CreateUser(ctx context.Context, u User) (User, error)
+	UpdateUser(ctx context.Context, u User) error
+	SetUserPassword(ctx context.Context, id int64, passwordHash string, mustChange bool) error
+	RecordLoginSuccess(ctx context.Context, id int64, at time.Time) error
+	RecordLoginFailure(ctx context.Context, id int64, count int, lockedUntil *time.Time, at time.Time) error
+	ResetLoginFailures(ctx context.Context, id int64) error
+	DeleteUser(ctx context.Context, id int64) error
+
+	// User sessions
+	PurgeUserSessions(ctx context.Context, userID int64) error
+	PurgeOtherUserSessions(ctx context.Context, userID int64, keepIDHash string) error
+	ListUserSessions(ctx context.Context, userID int64) ([]Session, error)
+
+	// User tokens
+	CreateUserToken(ctx context.Context, tok UserToken) (UserToken, error)
+	ListUserTokens(ctx context.Context, userID int64) ([]UserToken, error)
+	RevokeUserToken(ctx context.Context, id int64, userID int64) error
+	AuthenticateToken(ctx context.Context, tokenHash string) (User, UserToken, bool, error)
 
 	PutSession(ctx context.Context, s Session) error
 	GetSession(ctx context.Context, idHash string) (Session, bool, error)

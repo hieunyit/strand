@@ -366,6 +366,10 @@ func TestContainer_FencedAfterLeaseTakeover(t *testing.T) {
 	if err != nil || res.ModifiedCount != 1 {
 		t.Fatalf("steal lease: %v %+v", err, res)
 	}
+	// A new owner rewrites every fence document of the database (claimFences).
+	if res, err := locks.UpdateMany(ctx, bson.D{{Key: "_id", Value: bson.Regex{Pattern: "^" + db + "#"}}}, bson.D{{Key: "$set", Value: bson.D{{Key: "owner", Value: "intruder"}}}}); err != nil || res.ModifiedCount == 0 {
+		t.Fatalf("steal fences: %v %+v", err, res)
+	}
 	if _, err := p.srcC.Database(db).Collection("c").InsertOne(ctx, bson.D{{Key: "_id", Value: "after-takeover"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -399,21 +403,20 @@ func TestContainer_SnapshotResumeMixedIDs(t *testing.T) {
 		if err := <-r.done; err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
-		var st syncState
-		_ = p.dstC.Database(stateDatabase).Collection(stateCollection).FindOne(ctx, bson.D{{Key: "_id", Value: "resume"}}).Decode(&st)
-		if len(st.Collections) > 0 {
-			t.Logf("after stop %d: copied=%d done=%v", i, st.Collections[0].Copied, st.Collections[0].Done)
+		var pr collProgress
+		if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"resume", "m"}}}).Decode(&pr); err == nil {
+			t.Logf("after stop %d: copied=%d done=%v", i, pr.Copied, pr.Done)
 		}
 	}
 	r := start(cfg)
 	p.waitIdentical(t, db, time.Minute, r)
 	r.stop(t)
-	var st syncState
-	if err := p.dstC.Database(stateDatabase).Collection(stateCollection).FindOne(ctx, bson.D{{Key: "_id", Value: "resume"}}).Decode(&st); err != nil {
+	var pr collProgress
+	if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"resume", "m"}}}).Decode(&pr); err != nil {
 		t.Fatal(err)
 	}
-	if st.Collections[0].Copied != 7000 {
-		t.Fatalf("snapshot copied %d documents in total across restarts, want exactly 7000 (no re-copy, no skip)", st.Collections[0].Copied)
+	if pr.Copied != 7000 || !pr.Done {
+		t.Fatalf("snapshot copied %d documents in total across restarts (done=%v), want exactly 7000 (no re-copy, no skip)", pr.Copied, pr.Done)
 	}
 }
 
@@ -431,5 +434,64 @@ func TestContainer_RefusesExistingTarget(t *testing.T) {
 	}
 	if n, _ := p.dstC.Database("ex").Collection("c").CountDocuments(ctx, bson.D{}); n != 1 {
 		t.Fatalf("target modified: %d docs", n)
+	}
+}
+
+// Regression: in a batch with a non-canonical _id (Decimal128, document) the collection
+// takes the slow path and updates are looked up on the source; a numeric _id looked up
+// there must not be mistaken for a deleted document (keys differ for numbers).
+func TestContainer_SlowPathLookupKeepsNumericIDs(t *testing.T) {
+	p := newPair(t)
+	db := "slowlk"
+	ctx := context.Background()
+	dec, _ := bson.ParseDecimal128("7.5")
+	c := p.srcC.Database(db).Collection("m")
+	if _, err := c.InsertMany(ctx, []any{bson.D{{Key: "_id", Value: dec}, {Key: "v", Value: 0}},
+		bson.D{{Key: "_id", Value: int32(1)}, {Key: "v", Value: 0}}, bson.D{{Key: "_id", Value: int64(2)}, {Key: "v", Value: 0}}}); err != nil {
+		t.Fatal(err)
+	}
+	r := start(p.cfg(t, "slowlk", db))
+	p.waitIdentical(t, db, time.Minute, r)
+	for i := 0; i < 20; i++ {
+		sess, err := p.srcC.StartSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = sess.WithTransaction(ctx, func(tx context.Context) (any, error) {
+			for _, id := range []any{dec, int32(1), int64(2)} {
+				if _, err := c.UpdateOne(tx, bson.D{{Key: "_id", Value: id}}, bson.D{{Key: "$inc", Value: bson.D{{Key: "v", Value: 1}}}}); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		})
+		sess.EndSession(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.waitIdentical(t, db, time.Minute, r)
+	r.stop(t)
+}
+
+// A lease left by a crashed process on another host (not refreshed any more) is taken
+// over once it expires, instead of exiting with "lease held".
+func TestContainer_WaitsForStaleForeignLease(t *testing.T) {
+	p := newPair(t)
+	db := "stale"
+	ctx := context.Background()
+	seedDocs(t, p.srcC.Database(db), "c", 100, 1, intID)
+	locks := p.dstC.Database(stateDatabase).Collection(lockCollection)
+	if _, err := locks.InsertOne(ctx, bson.D{{Key: "_id", Value: db}, {Key: "owner", Value: "dead"}, {Key: "pipeline", Value: "stale"},
+		{Key: "info", Value: ownerInfo{Host: "other-host", BootID: "b", PidNS: "n", PID: 1, PIDStart: "1"}},
+		{Key: "expires_at", Value: time.Now().Add(4 * time.Second)}}); err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	r := start(p.cfg(t, "stale", db))
+	p.waitIdentical(t, db, time.Minute, r)
+	r.stop(t)
+	if el := time.Since(began); el < 2*time.Second {
+		t.Fatalf("took over a live-looking foreign lease after %s", el)
 	}
 }

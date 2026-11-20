@@ -29,6 +29,22 @@ func resolveConnections(cfg *Config) error {
 }
 
 func resolveConnectionsWithEnv(cfg *Config, env map[string]string) error {
+	for _, m := range []struct {
+		name                                                      string
+		kind, dsn, uri, uriEnv, host, user, password, passwordEnv *string
+		port                                                      *int
+	}{
+		{"source", &cfg.Source.Kind, &cfg.Source.DSN, &cfg.Source.URI, &cfg.Source.URIEnv, &cfg.Source.Host, &cfg.Source.User, &cfg.Source.Password, &cfg.Source.PasswordEnv, &cfg.Source.Port},
+		{"target", &cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.URI, &cfg.Target.URIEnv, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password, &cfg.Target.PasswordEnv, &cfg.Target.Port},
+	} {
+		if IsMongoKind(*m.kind) {
+			if err := resolveMongoConn(m.name, m.kind, m.dsn, m.uri, m.uriEnv, m.host, m.user, m.password, m.passwordEnv, m.port, env); err != nil {
+				return exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)
+			}
+		} else if *m.uriEnv != "" || *m.uri != "" {
+			return exitcode.New("invalid_connection", exitcode.InvalidSyntax, m.name+": uri / uri_env are supported for kind mongodb only", nil)
+		}
+	}
 	for _, c := range []struct {
 		name string
 		f    connFields
@@ -50,14 +66,10 @@ func resolveConn(name string, f connFields) error {
 }
 
 func resolveConnWithEnv(name string, f connFields, env map[string]string) error {
-	split := *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 || *f.database != ""
-	if strings.EqualFold(*f.kind, KindMongoDB) {
-		// MongoDB: kết nối qua uri/dsn; database chỉ chọn database dữ liệu.
-		if *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 {
-			return fmt.Errorf("%s: kind mongodb takes uri (or dsn) and database only", name)
-		}
-		return nil
+	if IsMongoKind(*f.kind) {
+		return nil // resolveMongoConn (resolveConnectionsWithEnv)
 	}
+	split := *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 || *f.database != ""
 	if !strings.EqualFold(*f.kind, "mysql") {
 		if split {
 			return fmt.Errorf("%s: host/port/user/password fields are supported for kind mysql only; use dsn", name)

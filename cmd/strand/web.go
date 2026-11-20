@@ -13,6 +13,7 @@ import (
 
 	"strand/internal/exitcode"
 	"strand/internal/web"
+	"strand/internal/web/store"
 )
 
 // newWebCmd: `strand web --config web.yaml` (Web UI, docs/PLAN-WEB-UI.md) và các lệnh con passwd, token.
@@ -50,20 +51,24 @@ chỉ là bản vật chất hóa cho tiến trình strand. Bản cài cũ khôn
 			return srv.ListenAndServe(ctx)
 		},
 	}
-	cmd.AddCommand(newWebPasswdCmd(), newWebTokenCmd(), newWebInitCmd(), newWebDBCmd())
+	cmd.AddCommand(newWebPasswdCmd(), newWebTokenCmd(), newWebInitCmd(), newWebDBCmd(), newWebUserCmd())
 	return cmd
 }
 
 func newWebPasswdCmd() *cobra.Command {
-	return &cobra.Command{
+	var user string
+	cmd := &cobra.Command{
 		Use:   "passwd",
-		Short: "Đặt mật khẩu admin của Web UI (bcrypt hash trong kho metadata PostgreSQL)",
+		Short: "Đặt mật khẩu người dùng Web UI (bcrypt hash trong kho metadata PostgreSQL)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfgPath == "" && os.Getenv(web.EnvDatabaseDSN) == "" {
 				return exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing web config path (use --config web.yaml, or set "+web.EnvDatabaseDSN+")", nil)
 			}
 			pw, err := readNewPassword(cmd)
 			if err != nil {
+				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, err.Error(), err)
+			}
+			if err := web.ValidatePassword(user, pw); err != nil {
 				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, err.Error(), err)
 			}
 			h, err := web.HashPassword(pw)
@@ -75,13 +80,32 @@ func newWebPasswdCmd() *cobra.Command {
 				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, err.Error(), err)
 			}
 			defer st.Close()
-			if err := web.SetStorePassword(cmd.Context(), st, h); err != nil {
-				return err
+			if u, ok, err := st.GetUser(cmd.Context(), user); ok && err == nil {
+				if err := st.SetUserPassword(cmd.Context(), u.ID, h, false); err != nil {
+					return err
+				}
+				_ = st.PurgeUserSessions(cmd.Context(), u.ID)
+			} else if strings.EqualFold(user, "admin") {
+				_, _ = st.CreateUser(cmd.Context(), store.User{
+					Username:     "admin",
+					DisplayName:  "Administrator",
+					PasswordHash: h,
+					Role:         store.RoleAdmin,
+				})
+			} else {
+				return exitcode.New("user_not_found", exitcode.InvalidSyntax, fmt.Sprintf("user %q not found", user), nil)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "password hash written to the metadata database (takes effect immediately; all sessions were signed out)")
+			if strings.EqualFold(user, "admin") {
+				if err := web.SetStorePassword(cmd.Context(), st, h); err != nil {
+					return err
+				}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "password hash written to the metadata database for user %q (takes effect immediately; all sessions were signed out)\n", user)
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&user, "user", "admin", "tên tài khoản người dùng cần đổi mật khẩu (mặc định admin)")
+	return cmd
 }
 
 func newWebTokenCmd() *cobra.Command {
@@ -129,7 +153,7 @@ func readNewPassword(cmd *cobra.Command) (string, error) {
 		}
 		return string(a), nil
 	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if err != nil && line == "" {
 		return "", fmt.Errorf("read password from stdin: %w", err)
 	}
@@ -227,6 +251,7 @@ Chạy bằng root và có group strand thì file là root:strand 0640 và state
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.Listen, "listen", "127.0.0.1:8080", "địa chỉ bind của Web UI, ví dụ 0.0.0.0:8080 (không phải loopback thì cần --tls-cert/--tls-key hoặc --allow-plain-http)")
+	f.StringVar(&o.AdminUser, "admin-user", "admin", "tên tài khoản admin khởi tạo (mặc định admin)")
 	f.StringVar(&o.StateDir, "state-dir", web.DefaultStateDir, "thư mục audit log và trạng thái web")
 	f.StringArrayVar(&scan, "scan", nil, "glob file pipeline cần quét (lặp lại được; mặc định /etc/strand/*.yaml)")
 	f.StringVar(&tlsCert, "tls-cert", "", "file chứng chỉ TLS")

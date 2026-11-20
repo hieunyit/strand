@@ -35,6 +35,10 @@ type Mem struct {
 	auditSeq   int64
 	archives   []AuditArchiveRec
 	instances  map[string]Instance
+	users      map[int64]User
+	userSeq    int64
+	tokens     map[int64]UserToken
+	tokenSeq   int64
 	pro        memBackupPro
 	// Down makes every call fail (simulates a database outage).
 	down bool
@@ -42,7 +46,9 @@ type Mem struct {
 
 func NewMem() *Mem {
 	return &Mem{sessions: map[string]Session{}, pipes: map[string]Pipeline{}, desired: map[string]DesiredState{},
-		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, backups: map[string]backup.Record{}, backupJobs: map[string]backup.Job{}, locks: map[string]*sync.Mutex{}}
+		jobs: map[string]Job{}, wizards: map[string][]byte{}, meta: map[string]string{}, backups: map[string]backup.Record{},
+		backupJobs: map[string]backup.Job{}, locks: map[string]*sync.Mutex{},
+		users: map[int64]User{}, tokens: map[int64]UserToken{}}
 }
 
 var errDown = errors.New("store: database is down")
@@ -91,7 +97,35 @@ func (m *Mem) setAdmin(f func(a *Admin)) error {
 	return nil
 }
 func (m *Mem) SetPasswordHash(_ context.Context, h string) error {
-	return m.setAdmin(func(a *Admin) { a.PasswordHash = h })
+	_ = m.setAdmin(func(a *Admin) { a.PasswordHash = h })
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	for id, u := range m.users {
+		if strings.EqualFold(u.Username, "admin") {
+			u.PasswordHash = h
+			u.UpdatedAt = time.Now()
+			m.users[id] = u
+			return nil
+		}
+	}
+	if m.users == nil {
+		m.users = make(map[int64]User)
+	}
+	m.userSeq++
+	now := time.Now()
+	m.users[m.userSeq] = User{
+		ID:                 m.userSeq,
+		Username:           "admin",
+		DisplayName:        "Administrator",
+		PasswordHash:       h,
+		Role:               RoleAdmin,
+		MustChangePassword: false,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	return nil
 }
 func (m *Mem) SetAPITokenHash(_ context.Context, h string) error {
 	return m.setAdmin(func(a *Admin) { a.APITokenHash = h })

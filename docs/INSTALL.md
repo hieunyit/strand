@@ -33,7 +33,7 @@ sudo strand web init --database-dsn 'postgres://strand_web:PASS@127.0.0.1:5432/s
 sudo scripts/install.sh --binary ./strand --with-web --with-postgres --generate-password
 ```
 
-- `strand web init` tạo `/etc/strand/web.yaml` (root:strand 0640) và `/var/lib/strand-web` (strand:strand 0750), đặt mật khẩu admin, rồi với `--enable` chạy `systemctl enable --now strand-web`. Mật khẩu: hỏi trên terminal, `--password-stdin` (một dòng), hoặc `--generate-password` (in MỘT lần ra stdout, ghi lại ngay). `--token` tạo thêm token API (cũng in một lần).
+- `strand web init` tạo `/etc/strand/web.yaml` (root:strand 0640) và `/var/lib/strand-web` (strand:strand 0750), đặt tài khoản admin (`--admin-user <tên>`, mặc định `admin`) và mật khẩu admin, rồi với `--enable` chạy `systemctl enable --now strand-web`. Mật khẩu: hỏi trên terminal, `--password-stdin` (một dòng), hoặc `--generate-password` (in MỘT lần ra stdout, ghi lại ngay; yêu cầu đổi mật khẩu ở lần đăng nhập đầu). `--token` tạo thêm token API (cũng in một lần).
 - Chạy lại an toàn: `web.yaml` có sẵn giữ nguyên `listen`/`state_dir`/`scan` (lệnh nói rõ điều này; thêm `--force` để ghi đè), chỉ mật khẩu/token được đặt lại; không đưa mật khẩu thì giữ hash cũ. Đổi mật khẩu sau này: `strand web passwd`.
 - Các cờ khác: `--listen`, `--state-dir`, `--scan` (lặp lại được; mặc định `/etc/strand/*.yaml`), `--tls-cert`/`--tls-key`, `--secure-cookies`, `--trust-forwarded-for`. `--listen` không phải loopback mà thiếu TLS thì lệnh báo lỗi và không ghi gì.
 - `scripts/install.sh` (chạy bằng root, idempotent) cài binary vào `--prefix` (mặc định `/usr/local/bin`), tạo user/group `strand`, `/etc/strand`, unit systemd (ExecStart trỏ đúng binary), quy tắc polkit và ví dụ; `--with-web` gọi tiếp `strand web init --enable` và chuyển nguyên `--listen`, `--generate-password`, `--token`, `--tls-cert`... Thêm `--no-start` để không bật dịch vụ.
@@ -452,7 +452,8 @@ Mọi biến nằm trong `.env.example` (kèm giải thích). Các biến chính
 | `STRAND_WEB_DATABASE_DSN` | DSN metadata (compose tự dựng từ `POSTGRES_PASSWORD`). Thắng khóa `database.dsn` của `web.yaml`. Không bao giờ được ghi vào log; lỗi kết nối đã che mật khẩu. |
 | `STRAND_WEB_SECRET_KEY` | **Bắt buộc.** Khóa AES-256-GCM (64 ký tự hex, hoặc base64 32 byte, hoặc passphrase từ 16 ký tự) để lưu `.env` của pipeline (mật khẩu nguồn/đích) **mã hóa** trong DB. Không đặt: compose báo lỗi ngay, web từ chối khởi động. Mất khóa thì `.env` trong DB không giải mã được: giữ khóa ngoài bản sao lưu DB. Khởi động với khóa **khác** khóa đã mã hóa các `.env` trong DB: web từ chối khởi động với lỗi nói rõ (không chạy tiếp với bản sao không giải mã được). |
 | `STRAND_WEB_SECRET_KEY_PREVIOUS` | Chỉ khi **đổi khóa**: đặt khóa mới vào `STRAND_WEB_SECRET_KEY`, khóa cũ vào biến này, khởi động lại; web mã hóa lại mọi `.env` trong DB bằng khóa mới (log `re-encrypted ...`), sau đó xóa biến này. |
-| `STRAND_WEB_ADMIN_PASSWORD` hoặc `STRAND_WEB_ADMIN_PASSWORD_FILE` | Mật khẩu admin, chỉ dùng khi database chưa có admin (tối thiểu 8 ký tự). `_FILE` dành cho docker secrets (`/run/secrets/...`), tránh để mật khẩu lộ qua `docker inspect`. Đổi sau này: `docker compose exec web strand web passwd`; token script: `docker compose exec web strand web token`. |
+| `STRAND_WEB_ADMIN_USER` | Tên tài khoản admin khởi tạo (mặc định `admin`). |
+| `STRAND_WEB_ADMIN_PASSWORD` hoặc `STRAND_WEB_ADMIN_PASSWORD_FILE` | Mật khẩu admin, chỉ dùng khi database chưa có admin (tối thiểu 12 ký tự, khác username). `_FILE` dành cho docker secrets (`/run/secrets/...`), tránh để mật khẩu lộ qua `docker inspect`. Đổi sau này: `docker compose exec web strand web passwd --user admin`; quản lý người dùng: `docker compose exec web strand web user add|list|disable|enable|set-role|reset-password`; token script: trang My account hoặc `strand web token`. |
 | `STRAND_WEB_BIND`, `STRAND_WEB_PORT` | Địa chỉ/cổng publish trên host (mặc định `0.0.0.0:8080`). |
 | `STRAND_WEB_ALLOW_PLAIN_HTTP`, `STRAND_WEB_TLS_CERT`, `STRAND_WEB_TLS_KEY`, `STRAND_WEB_SECURE_COOKIES`, `STRAND_WEB_TRUST_FORWARDED_FOR` | Mạng và TLS, xem 10.5. |
 | `WEB_CPUS`, `WEB_MEMORY`, `DB_CPUS`, `DB_MEMORY` | Giới hạn tài nguyên (mặc định web 2 CPU/2 GB, db 1 CPU/1 GB). Log container giới hạn 10 MB x 5 file. |
@@ -568,3 +569,11 @@ Lưu ý: pipeline chế độ nền là tiến trình con **của instance đã 
 
 Kiểm tra nhanh: `curl -s http://web-a:8080/healthz | jq .role` và `... web-b ... | jq .role`; `SELECT holder, epoch, expires_at FROM web_lease; SELECT id, role, last_seen FROM web_instances;`.
 
+
+## MongoDB pipelines
+
+No extra package is needed: the `strand` binary includes the MongoDB driver. Source and
+target must be replica sets (MongoDB 4.4–8.0). Create the least-privilege users, enlarge
+the source oplog if needed and run `strand validate -c <config>` first; see
+[mongodb-cdc.md](mongodb-cdc.md). The systemd unit `strand@<name>` runs MongoDB
+pipelines unchanged (`strand sync -c /etc/strand/<name>.yaml`).

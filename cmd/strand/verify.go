@@ -41,6 +41,16 @@ func newVerifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if cfg.IsMongoDB() {
+				if repair != "report" && repair != "fix" {
+					return exitcode.New("invalid_repair", exitcode.InvalidSyntax, "--repair must be report|fix", nil)
+				}
+				n := int(rate)
+				if n <= 0 {
+					n = 1000
+				}
+				return mongoVerify(cmd.Context(), cmd.OutOrStdout(), cfg, table, mode, repair, n)
+			}
 			switch mode {
 			case "delta":
 				ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Minute)

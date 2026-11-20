@@ -9,6 +9,7 @@ import (
 
 func (s *Server) apiSession(w http.ResponseWriter, r *http.Request, sess *Session) {
 	out := map[string]any{"authenticated": true, "version": s.version,
+		"username": sess.Username, "role": string(sess.Role),
 		"idle_timeout_s": int(SessionIdleTimeout.Seconds()), "max_age_s": int(SessionMaxAge.Seconds())}
 	if sess.CSRF != "" {
 		out["csrf"] = sess.CSRF

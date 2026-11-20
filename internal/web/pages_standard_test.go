@@ -114,7 +114,8 @@ func TestStandardPageSkeletonAndNoInlineStyles(t *testing.T) {
 	}
 }
 
-// TestTemplateComponentVocabulary checks every template file (excluding login.html)
+// TestTemplateComponentVocabulary checks every standardised template file. Login,
+// users, and account are owned by the RBAC change and intentionally excluded.
 // to verify all tables, buttons, cards, and styles follow the standard design system vocabulary.
 func TestTemplateComponentVocabulary(t *testing.T) {
 	entries, err := fs.ReadDir(templateFS, "templates")
@@ -128,8 +129,8 @@ func TestTemplateComponentVocabulary(t *testing.T) {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == "login.html" {
-			// Explicitly left alone per requirement (feat/web-rbac owns it)
+		if name == "login.html" || name == "users.html" || name == "account.html" {
+			// Explicitly left alone per requirement (feat/web-rbac owns these pages).
 			continue
 		}
 

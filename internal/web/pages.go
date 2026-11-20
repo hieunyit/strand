@@ -15,11 +15,12 @@ import (
 	"strand/internal/admin"
 	"strand/internal/backup"
 	"strand/internal/config"
+	"strand/internal/web/store"
 )
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings", "mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error"}
+var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings", "mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error", "users", "account"}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -322,15 +323,17 @@ func fmtRanges(m map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
-type BreadcrumbItem struct {
-	Label string
-	URL   string
+type CurrentUserInfo struct {
+	ID          int64
+	Username    string
+	DisplayName string
+	Role        store.Role
 }
 
 type pageData struct {
 	Title        string
-	DocTitle     string    // <title> text; defaults to Title
-	Subtitle     string    // Subtitle shown below Title in .pagehead
+	DocTitle     string // <title> text; defaults to Title
+	Subtitle     string // Subtitle shown below Title in .pagehead
 	Breadcrumbs  []BreadcrumbItem
 	Actions      template.HTML
 	SummaryStrip template.HTML
@@ -342,11 +345,17 @@ type pageData struct {
 	Host         string // host name shown in the top bar
 	Standby      string // non-empty on a standby instance (banner)
 	Refresh      int    // giây; 0 = không tự làm mới toàn trang
+	CurrentUser  CurrentUserInfo
 	// Live: trang nhận số liệu qua SSE ("all" hoặc tên pipeline); "" = trang tĩnh. Interval: chu kỳ của sampler.
-	Live         string
-	LiveLogs     bool
-	Interval     int
-	Body         any
+	Live     string
+	LiveLogs bool
+	Interval int
+	Body     any
+}
+
+type BreadcrumbItem struct {
+	Label string
+	URL   string
 }
 
 func defaultBreadcrumbs(page, title, active string) []BreadcrumbItem {
@@ -424,7 +433,15 @@ func defaultSubtitle(page string) string {
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pageData) {
-	d.CSRF, d.Nav, d.Version = sess.CSRF, s.navItems(), s.version
+	if sess != nil {
+		d.CSRF = sess.CSRF
+		d.CurrentUser = CurrentUserInfo{
+			ID:       sess.UserID,
+			Username: sess.Username,
+			Role:     sess.Role,
+		}
+	}
+	d.Nav, d.Version = s.navItems(), s.version
 	d.Standby = s.standbyMessage()
 	d.Host = hostName()
 	d.Interval = int(s.samp.Interval().Seconds())

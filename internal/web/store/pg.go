@@ -168,7 +168,13 @@ func (p *PG) Admin(ctx context.Context) (Admin, bool, error) {
 func (p *PG) SetPasswordHash(ctx context.Context, h string) error {
 	_, err := p.db.ExecContext(ctx, `INSERT INTO admin (id, password_hash) VALUES (1, $1)
 		ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`, h)
-	return p.wrap(err)
+	if err != nil {
+		return p.wrap(err)
+	}
+	_, _ = p.db.ExecContext(ctx, `INSERT INTO users (username, display_name, password_hash, role, must_change_password)
+		VALUES ('admin', 'Administrator', $1, 'admin', false)
+		ON CONFLICT ((lower(username))) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`, h)
+	return nil
 }
 
 func (p *PG) SetAPITokenHash(ctx context.Context, h string) error {
@@ -178,17 +184,27 @@ func (p *PG) SetAPITokenHash(ctx context.Context, h string) error {
 }
 
 func (p *PG) PutSession(ctx context.Context, s Session) error {
-	_, err := p.db.ExecContext(ctx, `INSERT INTO sessions (id_hash, csrf, ip, created_at, last_seen) VALUES ($1,$2,$3,$4,$5)
-		ON CONFLICT (id_hash) DO UPDATE SET csrf = EXCLUDED.csrf, ip = EXCLUDED.ip, created_at = EXCLUDED.created_at, last_seen = EXCLUDED.last_seen`,
-		s.IDHash, s.CSRF, s.IP, s.Created, s.LastSeen)
+	var uid any
+	if s.UserID > 0 {
+		uid = s.UserID
+	}
+	_, err := p.db.ExecContext(ctx, `INSERT INTO sessions (id_hash, csrf, ip, created_at, last_seen, user_id, username) VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (id_hash) DO UPDATE SET csrf = EXCLUDED.csrf, ip = EXCLUDED.ip, created_at = EXCLUDED.created_at, last_seen = EXCLUDED.last_seen,
+		user_id = EXCLUDED.user_id, username = EXCLUDED.username`,
+		s.IDHash, s.CSRF, s.IP, s.Created, s.LastSeen, uid, s.Username)
 	return p.wrap(err)
 }
 
 func (p *PG) GetSession(ctx context.Context, id string) (Session, bool, error) {
 	s := Session{IDHash: id}
-	err := p.db.QueryRowContext(ctx, `SELECT csrf, ip, created_at, last_seen FROM sessions WHERE id_hash = $1`, id).Scan(&s.CSRF, &s.IP, &s.Created, &s.LastSeen)
+	var uid sql.NullInt64
+	err := p.db.QueryRowContext(ctx, `SELECT csrf, ip, created_at, last_seen, user_id, username FROM sessions WHERE id_hash = $1`, id).
+		Scan(&s.CSRF, &s.IP, &s.Created, &s.LastSeen, &uid, &s.Username)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, false, nil
+	}
+	if uid.Valid {
+		s.UserID = uid.Int64
 	}
 	return s, err == nil, p.wrap(err)
 }
