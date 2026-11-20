@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"strand/internal/web/store"
 )
 
@@ -40,6 +42,17 @@ func HashAPIToken(tok string) string { return hashKey(tok) }
 // NewAPIToken sinh token tĩnh ngẫu nhiên 256 bit.
 func NewAPIToken() string { return "strand_" + randToken(32) }
 
+var dummyHash []byte
+var dummyHashOnce sync.Once
+
+func getDummyHash() []byte {
+	dummyHashOnce.Do(func() {
+		h, _ := bcrypt.GenerateFromPassword([]byte("strand-timing-safe-dummy-hash-pad"), BcryptCost)
+		dummyHash = h
+	})
+	return dummyHash
+}
+
 func constEq(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 
 // Session là một phiên đăng nhập.
@@ -48,6 +61,9 @@ type Session struct {
 	Created  time.Time
 	LastSeen time.Time
 	IP       string
+	UserID   int64
+	Username string
+	Role     store.Role
 }
 
 // SessionStore giữ session trong PostgreSQL (khóa là sha256 của token trong cookie).
@@ -65,15 +81,28 @@ func NewSessionStore(now func() time.Time) *SessionStore {
 	return &SessionStore{now: now}
 }
 
-// Create tạo session mới, trả token cookie (256 bit) và session.
+// Create tạo session mới (mặc định admin).
 func (s *SessionStore) Create(ip string) (string, *Session) {
+	return s.CreateUserSession(ip, 0, "admin", store.RoleAdmin)
+}
+
+// CreateUserSession tạo session mới gắn với user id và role.
+func (s *SessionStore) CreateUserSession(ip string, userID int64, username string, role store.Role) (string, *Session) {
 	tok := randToken(32)
 	t := s.now()
-	sess := &Session{CSRF: randToken(32), Created: t, LastSeen: t, IP: ip}
+	sess := &Session{CSRF: randToken(32), Created: t, LastSeen: t, IP: ip, UserID: userID, Username: username, Role: role}
 	ctx, cancel := dbCtx()
 	defer cancel()
 	_ = s.db.st.PurgeSessions(ctx, t.Add(-SessionIdleTimeout), t.Add(-SessionMaxAge))
-	if err := s.db.st.PutSession(ctx, store.Session{IDHash: hashKey(tok), CSRF: sess.CSRF, IP: ip, Created: t, LastSeen: t}); err != nil {
+	if err := s.db.st.PutSession(ctx, store.Session{
+		IDHash:   hashKey(tok),
+		CSRF:     sess.CSRF,
+		IP:       ip,
+		Created:  t,
+		LastSeen: t,
+		UserID:   userID,
+		Username: username,
+	}); err != nil {
 		s.db.log.Error("store session failed", "err", err)
 		return "", nil
 	}
@@ -81,6 +110,7 @@ func (s *SessionStore) Create(ip string) (string, *Session) {
 }
 
 // Get trả session còn hạn (và gia hạn idle), hoặc nil. Quá 30 phút không dùng hoặc quá 12 giờ: xóa.
+// Nếu tài khoản bị vô hiệu hóa hoặc xóa, session bị hủy ngay.
 func (s *SessionStore) Get(tok string) *Session {
 	if tok == "" {
 		return nil
@@ -100,10 +130,32 @@ func (s *SessionStore) Get(tok string) *Session {
 		_ = s.db.st.DeleteSession(ctx, k)
 		return nil
 	}
+
+	role := store.RoleAdmin
+	username := row.Username
+	if username == "" {
+		username = "admin"
+	}
+	if row.UserID > 0 {
+		u, uok, err := s.db.st.GetUserByID(ctx, row.UserID)
+		if err == nil && uok {
+			if u.Disabled {
+				_ = s.db.st.DeleteSession(ctx, k)
+				return nil
+			}
+			role = u.Role
+			username = u.Username
+		} else if !uok && err == nil {
+			// User deleted: purge session
+			_ = s.db.st.DeleteSession(ctx, k)
+			return nil
+		}
+	}
+
 	if t.Sub(row.LastSeen) >= time.Second { // gia hạn idle; bỏ qua ghi dày đặc
 		_ = s.db.st.TouchSession(ctx, k, t)
 	}
-	return &Session{CSRF: row.CSRF, Created: row.Created, LastSeen: t, IP: row.IP}
+	return &Session{CSRF: row.CSRF, Created: row.Created, LastSeen: t, IP: row.IP, UserID: row.UserID, Username: username, Role: role}
 }
 
 // Delete hủy session (đăng xuất).

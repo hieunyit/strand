@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -193,7 +194,30 @@ func IsLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// HashPassword băm mật khẩu bằng bcrypt.
+const (
+	BcryptCost      = 12
+	MaxFailedLogins = 5
+	LockoutDuration = 15 * time.Minute
+)
+
+// ValidatePassword checks password policy:
+// - at least 12 characters
+// - at most 72 bytes (bcrypt limit)
+// - not equal to username (case-insensitive)
+func ValidatePassword(username, pw string) error {
+	if len(pw) < 12 {
+		return errors.New("password must be at least 12 characters")
+	}
+	if len(pw) > 72 {
+		return errors.New("password must be at most 72 bytes (bcrypt limit)")
+	}
+	if username != "" && strings.EqualFold(strings.TrimSpace(pw), strings.TrimSpace(username)) {
+		return errors.New("password must not be equal to username")
+	}
+	return nil
+}
+
+// HashPassword băm mật khẩu bằng bcrypt (cost 12).
 func HashPassword(pw string) (string, error) {
 	if len(pw) < 8 {
 		return "", errors.New("password must be at least 8 characters")
@@ -201,7 +225,7 @@ func HashPassword(pw string) (string, error) {
 	if len(pw) > 72 {
 		return "", errors.New("password must be at most 72 bytes (bcrypt limit)")
 	}
-	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	h, err := bcrypt.GenerateFromPassword([]byte(pw), BcryptCost)
 	return string(h), err
 }
 

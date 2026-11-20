@@ -18,6 +18,7 @@ import (
 type AuditEntry struct {
 	Time     time.Time      `json:"time"`
 	IP       string         `json:"ip"`
+	User     string         `json:"user,omitempty"`
 	Action   string         `json:"action"`
 	Pipeline string         `json:"pipeline,omitempty"`
 	Args     []string       `json:"args,omitempty"`

@@ -68,6 +68,8 @@ type InitOptions struct {
 
 	// Password: mật khẩu đã chọn (rỗng = giữ hash hiện có; không có hash thì lỗi).
 	Password string
+	// AdminUser: tên tài khoản admin khởi tạo (mặc định "admin").
+	AdminUser string
 	// PrintPassword: in Password ra stdout (mật khẩu do máy sinh, hiện một lần).
 	PrintPassword bool
 	// NewToken: tạo (hoặc đổi) token API và in ra một lần.
@@ -221,11 +223,20 @@ func RunInit(o InitOptions) (*InitResult, error) {
 	if o.Store == nil {
 		return nil, errors.New(ErrNoDatabase)
 	}
+	adminUser := o.AdminUser
+	if adminUser == "" {
+		adminUser = "admin"
+	}
 	adm, ok, err := o.Store.Admin(context.Background())
 	if err != nil {
 		return nil, err
 	}
 	haveAdmin := ok && adm.PasswordHash != ""
+	if !haveAdmin {
+		if u, uok, _ := o.Store.GetUser(context.Background(), adminUser); uok && u.PasswordHash != "" {
+			haveAdmin = true
+		}
+	}
 	if o.IfNoAdmin && haveAdmin {
 		// Admin đã có: không đổi mật khẩu/token, không in mật khẩu sinh ra.
 		o.Password, o.PrintPassword, o.NewToken = "", false, false
@@ -303,6 +314,18 @@ func RunInit(o InitOptions) (*InitResult, error) {
 	if hash != "" {
 		if err := SetStorePassword(context.Background(), o.Store, hash); err != nil {
 			return nil, err
+		}
+		if u, uok, _ := o.Store.GetUser(context.Background(), adminUser); uok {
+			_ = o.Store.SetUserPassword(context.Background(), u.ID, hash, false)
+			_ = o.Store.PurgeUserSessions(context.Background(), u.ID)
+		} else {
+			_, _ = o.Store.CreateUser(context.Background(), store.User{
+				Username:           adminUser,
+				DisplayName:        "Administrator",
+				PasswordHash:       hash,
+				Role:               store.RoleAdmin,
+				MustChangePassword: false,
+			})
 		}
 	}
 	if o.NewToken {
