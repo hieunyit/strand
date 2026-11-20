@@ -1,9 +1,9 @@
 {{define "login"}}<!doctype html>
-<html lang="en">
+<html lang="{{if .Lang}}{{.Lang}}{{else}}en{{end}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in - Strand</title>
+<title>{{t "login.title"}} - Strand</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/theme.js"></script>
 </head>
@@ -13,12 +13,12 @@
   <aside class="login-brand" aria-label="About Strand">
     <div class="logobig"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand</span></div>
     <div class="login-pitch">
-      <h2>Change data capture, accounted for.</h2>
-      <p>Replicate MySQL, MariaDB, PostgreSQL and MongoDB with checkpoints you can see, and run every pipeline from one console.</p>
+      <h2>{{t "login.pitch_title"}}</h2>
+      <p>{{t "login.pitch_sub"}}</p>
       <ul>
-        <li>Snapshot and stream with live lag and progress</li>
-        <li>Verify, repair, promote and seed wizards</li>
-        <li>Role-based access and an audit log of every change</li>
+        <li>{{t "login.bullet1"}}</li>
+        <li>{{t "login.bullet2"}}</li>
+        <li>{{t "login.bullet3"}}</li>
       </ul>
     </div>
     <div class="login-foot">strand {{.Version}}</div>
@@ -26,37 +26,37 @@
   <div class="login-panel">
     <form class="login card" method="post" action="/login">
       <div class="logobig compact"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand</span></div>
-      <h1>Sign in</h1>
-      <p class="tag">Sign in to manage your replication pipelines.</p>
-      {{if .Error}}<p class="warnbox err" role="alert">{{.Error}}</p>{{end}}
+      <h1>{{t "login.title"}}</h1>
+      <p class="tag">{{t "login.tagline"}}</p>
+      {{if .Error}}<p class="warnbox err" role="alert">{{t .Error}}</p>{{end}}
       <input type="hidden" name="csrf" value="{{.CSRF}}">
       <input type="hidden" name="next" value="{{.Next}}">
       {{if .MustChange}}
         <input type="hidden" name="must_change" value="1">
         <input type="hidden" name="username" value="{{.Username}}">
         <input type="hidden" name="current_password" value="{{.CurrentPassword}}">
-        <p class="warnbox" role="status">First login: please set a new password. Must be at least 12 characters and not equal to your username.</p>
+        <p class="warnbox" role="status">{{t "login.first_login_prompt"}}</p>
         <div class="field">
-          <label class="field-label" for="login-new-password">New password</label>
+          <label class="field-label" for="login-new-password">{{t "login.new_password"}}</label>
           <input id="login-new-password" type="password" name="new_password" autocomplete="new-password" minlength="12" autofocus required>
         </div>
         <div class="field">
-          <label class="field-label" for="login-confirm-password">Confirm new password</label>
+          <label class="field-label" for="login-confirm-password">{{t "login.confirm_new_password"}}</label>
           <input id="login-confirm-password" type="password" name="confirm_password" autocomplete="new-password" minlength="12" required>
         </div>
-        <button class="btn primary" type="submit">Set new password &amp; sign in</button>
+        <button class="btn primary" type="submit">{{t "login.set_password_button"}}</button>
       {{else}}
         <div class="field">
-          <label class="field-label" for="login-username">Username</label>
+          <label class="field-label" for="login-username">{{t "login.username"}}</label>
           <input id="login-username" type="text" name="username" value="{{if .Username}}{{.Username}}{{else}}admin{{end}}" autocomplete="username" autofocus required>
         </div>
         <div class="field">
-          <label class="field-label" for="login-password">Password</label>
+          <label class="field-label" for="login-password">{{t "login.password"}}</label>
           <input id="login-password" type="password" name="password" autocomplete="current-password" required>
         </div>
-        <button class="btn primary" type="submit">Sign in</button>
+        <button class="btn primary" type="submit">{{t "login.sign_in"}}</button>
       {{end}}
-      <p class="login-version">Forgot your password? Ask an administrator to reset it. &middot; strand {{.Version}}</p>
+      <p class="login-version">{{t "login.forgot_hint"}} &middot; strand {{.Version}}</p>
     </form>
   </div>
 </div>

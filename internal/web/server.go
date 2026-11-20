@@ -72,8 +72,12 @@ type Server struct {
 	notifyHTTP        *http.Client                                                               // notification deliveries (nil: default client)
 	notifyMail        func(addr string, a smtp.Auth, from string, to []string, msg []byte) error // nil: smtp.SendMail
 
-	pages   map[string]*template.Template
-	handler http.Handler
+	pages     map[string]*template.Template
+	pagesLang map[string]map[string]*template.Template
+	handler   http.Handler
+
+	userLangMu sync.RWMutex
+	userLangs  map[string]string
 
 	tunnelMu        sync.Mutex
 	tunnels         map[string]activeTunnel
@@ -223,9 +227,14 @@ func New(o Options) (*Server, error) {
 	s.registerConfigEditOps()
 	s.registerRegistryOps()
 	s.registerCLIOps()
-	if s.pages, err = parsePages(); err != nil {
-		return nil, err
+	s.pagesLang = make(map[string]map[string]*template.Template)
+	if s.pagesLang[LangEN], err = parsePagesForLang(LangEN); err != nil {
+		return nil, fmt.Errorf("templates (en): %w", err)
 	}
+	if s.pagesLang[LangVI], err = parsePagesForLang(LangVI); err != nil {
+		return nil, fmt.Errorf("templates (vi): %w", err)
+	}
+	s.pages = s.pagesLang[LangEN]
 	reg.Refresh(context.Background())
 	s.preloadSeries()
 	s.refreshDesired()
@@ -413,6 +422,7 @@ func (s *Server) routes() http.Handler {
 
 	// My account (all authenticated users)
 	mux.Handle("GET /account", s.auth(false, s.pageAccount))
+	mux.Handle("POST /account/preferences", s.auth(false, s.handleAccountPreferencesForm))
 	mux.Handle("POST /account/password", s.auth(false, s.handleAccountPasswordForm))
 	mux.Handle("POST /account/tokens/create", s.auth(false, s.handleAccountTokenCreateForm))
 	mux.Handle("POST /account/tokens/revoke", s.auth(false, s.handleAccountTokenRevokeForm))
@@ -752,7 +762,13 @@ func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_ = s.pages["login"].ExecuteTemplate(w, "login", map[string]any{
+	lang := s.loginLanguage(r)
+	tmpl := s.pages["login"]
+	if s.pagesLang != nil && s.pagesLang[lang] != nil && s.pagesLang[lang]["login"] != nil {
+		tmpl = s.pagesLang[lang]["login"]
+	}
+	_ = tmpl.ExecuteTemplate(w, "login", map[string]any{
+		"Lang":            lang,
 		"CSRF":            tok,
 		"Error":           msg,
 		"Next":            next,

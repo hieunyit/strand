@@ -19,6 +19,24 @@
   </dl>
 </section>
 
+<form method="post" action="/account/preferences" class="settings">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <fieldset class="form-section">
+    <legend class="form-section-title">Display language / Ngôn ngữ hiển thị</legend>
+    <p class="form-section-desc">Choose your preferred display language for the Strand console.</p>
+    <div class="field-grid cols-3">
+      <div class="field">
+        <label class="field-label" for="pref-language">Language</label>
+        <select id="pref-language" name="language">
+          <option value="en"{{if eq $.Lang "en"}} selected{{end}}>English</option>
+          <option value="vi"{{if eq $.Lang "vi"}} selected{{end}}>Tiếng Việt</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-actions flat"><button class="btn primary" type="submit">{{t "btn.save"}}</button></div>
+  </fieldset>
+</form>
+
 <form method="post" action="/account/password" class="settings">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <fieldset class="form-section">

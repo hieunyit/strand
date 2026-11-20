@@ -1,10 +1,10 @@
 {{define "base"}}<!doctype html>
-<html lang="en">
+<html lang="{{if .Lang}}{{.Lang}}{{else}}en{{end}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="csrf-token" content="{{.CSRF}}">
-<title>{{if .DocTitle}}{{.DocTitle}}{{else}}{{.Title}}{{end}} · Strand</title>
+<title>{{if .DocTitle}}{{.DocTitle}}{{else}}{{t .Title}}{{end}} · Strand</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/theme.js"></script>
 <script src="/static/app.js" defer></script>
@@ -17,59 +17,59 @@
 <script src="/static/pipelines.js" defer></script>
 </head>
 <body>
-<a class="skip" href="#content">Skip to content</a>
+<a class="skip" href="#content">{{t "nav.skip"}}</a>
 <aside class="nav" aria-label="Sidebar">
   <a class="brand" href="/" aria-label="Strand home"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand<small>CDC console</small></span></a>
   <nav aria-label="Main">
     <div class="navgroup" data-navgroup="monitor">
-      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-monitor">Monitor</button>
+      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-monitor">{{t "nav.monitor"}}</button>
       <div class="navitems" id="navg-monitor">
-      <a href="/" class="{{if eq .Active "overview"}}active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>{{icon "overview"}}Overview</a>
-      <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
+      <a href="/" class="{{if eq .Active "overview"}}active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>{{icon "overview"}}{{t "nav.overview"}}</a>
+      <a href="/jobs" class="{{if eq .Active "jobs"}}active{{end}}"{{if eq .Active "jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}{{t "nav.jobs"}}</a>
       </div>
     </div>
     <div class="navgroup" data-navgroup="movement">
-      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-movement">Data movement</button>
+      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-movement">{{t "nav.data_movement"}}</button>
       <div class="navitems" id="navg-movement">
-      <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>{{icon "pipelines"}}Pipelines</a>
-      {{if .CanAdmin}}<a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}New pipeline</a>{{end}}
-      {{if .CanAdmin}}<a href="/archive" class="{{if eq .Active "archive"}}active{{end}}"{{if eq .Active "archive"}} aria-current="page"{{end}}>{{icon "logs"}}Binlog archive</a>{{end}}
-      {{if .CanAdmin}}<a href="/tunnels" class="{{if eq .Active "tunnels"}}active{{end}}"{{if eq .Active "tunnels"}} aria-current="page"{{end}}>{{icon "server"}}SSH tunnels</a>{{end}}
-      {{if .CanAdmin}}<a href="/tools/spool-inspect" class="{{if eq .Active "spool"}}active{{end}}"{{if eq .Active "spool"}} aria-current="page"{{end}}>{{icon "search"}}Spool inspect</a>{{end}}
+      <a href="/pipelines" class="{{if eq .Active "pipelines"}}active{{end}}"{{if eq .Active "pipelines"}} aria-current="page"{{end}}>{{icon "pipelines"}}{{t "nav.pipelines"}}</a>
+      {{if .CanAdmin}}<a href="/pipelines/new" class="{{if eq .Active "new-pipeline"}}active{{end}}"{{if eq .Active "new-pipeline"}} aria-current="page"{{end}}>{{icon "plus"}}{{t "nav.new_pipeline"}}</a>{{end}}
+      {{if .CanAdmin}}<a href="/archive" class="{{if eq .Active "archive"}}active{{end}}"{{if eq .Active "archive"}} aria-current="page"{{end}}>{{icon "logs"}}{{t "nav.binlog_archive"}}</a>{{end}}
+      {{if .CanAdmin}}<a href="/tunnels" class="{{if eq .Active "tunnels"}}active{{end}}"{{if eq .Active "tunnels"}} aria-current="page"{{end}}>{{icon "server"}}{{t "nav.ssh_tunnels"}}</a>{{end}}
+      {{if .CanAdmin}}<a href="/tools/spool-inspect" class="{{if eq .Active "spool"}}active{{end}}"{{if eq .Active "spool"}} aria-current="page"{{end}}>{{icon "search"}}{{t "nav.spool_inspect"}}</a>{{end}}
       </div>
     </div>
     <div class="navgroup" data-navgroup="protection">
-      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-protection">Data protection</button>
+      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-protection">{{t "nav.data_protection"}}</button>
       <div class="navitems" id="navg-protection">
-      <a href="/backups" class="{{if or (eq .Active "backups") (eq .Active "backups-overview")}}active{{end}}"{{if or (eq .Active "backups") (eq .Active "backups-overview")}} aria-current="page"{{end}}>{{icon "overview"}}Backups</a>
-      <a href="/backups/jobs" class="{{if eq .Active "backups-jobs"}}active{{end}}"{{if eq .Active "backups-jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Backup jobs</a>
-      <a href="/backups/catalog" class="{{if eq .Active "backups-catalog"}}active{{end}}"{{if eq .Active "backups-catalog"}} aria-current="page"{{end}}>{{icon "table"}}Restore points</a>
-      <a href="/backups/restore" class="{{if eq .Active "backups-restore"}}active{{end}}"{{if eq .Active "backups-restore"}} aria-current="page"{{end}}>{{icon "db"}}Restore</a>
-      <a href="/backups/connections" class="{{if eq .Active "backups-connections"}}active{{end}}"{{if eq .Active "backups-connections"}} aria-current="page"{{end}}>{{icon "server"}}Connections</a>
-      <a href="/backups/policies" class="{{if eq .Active "backups-policies"}}active{{end}}"{{if eq .Active "backups-policies"}} aria-current="page"{{end}}>{{icon "config"}}Policies</a>
-      <a href="/backups/repositories" class="{{if eq .Active "backups-repos"}}active{{end}}"{{if eq .Active "backups-repos"}} aria-current="page"{{end}}>{{icon "db"}}Repositories</a>
-      <a href="/backups/reports" class="{{if eq .Active "backups-reports"}}active{{end}}"{{if eq .Active "backups-reports"}} aria-current="page"{{end}}>{{icon "graph"}}Reports</a>
-      {{if .CanAdmin}}<a href="/backups/notifications" class="{{if eq .Active "backups-notify"}}active{{end}}"{{if eq .Active "backups-notify"}} aria-current="page"{{end}}>{{icon "bolt"}}Notifications</a>{{end}}
-      {{if .CanAdmin}}<a href="/backups/keys" class="{{if eq .Active "backups-keys"}}active{{end}}"{{if eq .Active "backups-keys"}} aria-current="page"{{end}}>{{icon "flag"}}Encryption keys</a>{{end}}
-      {{if .CanAdmin}}<a href="/backups/activity" class="{{if eq .Active "backups-activity"}}active{{end}}"{{if eq .Active "backups-activity"}} aria-current="page"{{end}}>{{icon "logs"}}Activity</a>{{end}}
+      <a href="/backups" class="{{if or (eq .Active "backups") (eq .Active "backups-overview")}}active{{end}}"{{if or (eq .Active "backups") (eq .Active "backups-overview")}} aria-current="page"{{end}}>{{icon "overview"}}{{t "nav.backups"}}</a>
+      <a href="/backups/jobs" class="{{if eq .Active "backups-jobs"}}active{{end}}"{{if eq .Active "backups-jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}{{t "nav.backup_jobs"}}</a>
+      <a href="/backups/catalog" class="{{if eq .Active "backups-catalog"}}active{{end}}"{{if eq .Active "backups-catalog"}} aria-current="page"{{end}}>{{icon "table"}}{{t "nav.restore_points"}}</a>
+      <a href="/backups/restore" class="{{if eq .Active "backups-restore"}}active{{end}}"{{if eq .Active "backups-restore"}} aria-current="page"{{end}}>{{icon "db"}}{{t "nav.restore"}}</a>
+      <a href="/backups/connections" class="{{if eq .Active "backups-connections"}}active{{end}}"{{if eq .Active "backups-connections"}} aria-current="page"{{end}}>{{icon "server"}}{{t "nav.connections"}}</a>
+      <a href="/backups/policies" class="{{if eq .Active "backups-policies"}}active{{end}}"{{if eq .Active "backups-policies"}} aria-current="page"{{end}}>{{icon "config"}}{{t "nav.policies"}}</a>
+      <a href="/backups/repositories" class="{{if eq .Active "backups-repos"}}active{{end}}"{{if eq .Active "backups-repos"}} aria-current="page"{{end}}>{{icon "db"}}{{t "nav.repositories"}}</a>
+      <a href="/backups/reports" class="{{if eq .Active "backups-reports"}}active{{end}}"{{if eq .Active "backups-reports"}} aria-current="page"{{end}}>{{icon "graph"}}{{t "nav.reports"}}</a>
+      {{if .CanAdmin}}<a href="/backups/notifications" class="{{if eq .Active "backups-notify"}}active{{end}}"{{if eq .Active "backups-notify"}} aria-current="page"{{end}}>{{icon "bolt"}}{{t "nav.notifications"}}</a>{{end}}
+      {{if .CanAdmin}}<a href="/backups/keys" class="{{if eq .Active "backups-keys"}}active{{end}}"{{if eq .Active "backups-keys"}} aria-current="page"{{end}}>{{icon "flag"}}{{t "nav.encryption_keys"}}</a>{{end}}
+      {{if .CanAdmin}}<a href="/backups/activity" class="{{if eq .Active "backups-activity"}}active{{end}}"{{if eq .Active "backups-activity"}} aria-current="page"{{end}}>{{icon "logs"}}{{t "nav.activity"}}</a>{{end}}
       </div>
     </div>
     <div class="navgroup" data-navgroup="system">
-      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-system">System</button>
+      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-system">{{t "nav.system"}}</button>
       <div class="navitems" id="navg-system">
-      {{if .CanAdmin}}<a href="/users" class="{{if eq .Active "users"}}active{{end}}"{{if eq .Active "users"}} aria-current="page"{{end}}>{{icon "user"}}Users</a>{{end}}
-      {{if .CanAdmin}}<a href="/settings" class="{{if eq .Active "settings"}}active{{end}}"{{if eq .Active "settings"}} aria-current="page"{{end}}>{{icon "config"}}Settings</a>{{end}}
-      {{if .CanAdmin}}<a href="/settings/db" class="{{if eq .Active "db-admin"}}active{{end}}"{{if eq .Active "db-admin"}} aria-current="page"{{end}}>{{icon "db"}}Metadata database</a>{{end}}
-      <a href="/mcp" class="{{if eq .Active "mcp"}}active{{end}}"{{if eq .Active "mcp"}} aria-current="page"{{end}}>{{icon "bolt"}}MCP</a>
-      <a href="/help/schema" class="{{if eq .Active "schema-help"}}active{{end}}"{{if eq .Active "schema-help"}} aria-current="page"{{end}}>{{icon "table"}}Config reference</a>
-      <a href="/account" class="{{if eq .Active "account"}}active{{end}}"{{if eq .Active "account"}} aria-current="page"{{end}}>{{icon "user"}}My account</a>
+      {{if .CanAdmin}}<a href="/users" class="{{if eq .Active "users"}}active{{end}}"{{if eq .Active "users"}} aria-current="page"{{end}}>{{icon "user"}}{{t "nav.users"}}</a>{{end}}
+      {{if .CanAdmin}}<a href="/settings" class="{{if eq .Active "settings"}}active{{end}}"{{if eq .Active "settings"}} aria-current="page"{{end}}>{{icon "config"}}{{t "nav.settings"}}</a>{{end}}
+      {{if .CanAdmin}}<a href="/settings/db" class="{{if eq .Active "db-admin"}}active{{end}}"{{if eq .Active "db-admin"}} aria-current="page"{{end}}>{{icon "db"}}{{t "nav.metadata_database"}}</a>{{end}}
+      <a href="/mcp" class="{{if eq .Active "mcp"}}active{{end}}"{{if eq .Active "mcp"}} aria-current="page"{{end}}>{{icon "bolt"}}{{t "nav.mcp"}}</a>
+      <a href="/help/schema" class="{{if eq .Active "schema-help"}}active{{end}}"{{if eq .Active "schema-help"}} aria-current="page"{{end}}>{{icon "table"}}{{t "nav.config_reference"}}</a>
+      <a href="/account" class="{{if eq .Active "account"}}active{{end}}"{{if eq .Active "account"}} aria-current="page"{{end}}>{{icon "user"}}{{t "nav.my_account"}}</a>
       </div>
     </div>
     <div class="navgroup" data-navgroup="registered">
-      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-registered">Registered pipelines</button>
+      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-registered">{{t "nav.registered_pipelines"}}</button>
       <div class="navitems" id="navg-registered">
       {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"{{if eq $.Active .Name}} aria-current="page"{{end}} title="{{.Name}}: {{.State}}" data-live-nav="{{.Name}}"><span class="dot {{stateClass .State}}" role="img" aria-label="{{.State}}" data-bind-dot="state"></span>{{.Name}}</a>
-      {{else}}<span class="muted pad small">none registered</span>{{end}}
+      {{else}}<span class="muted pad small">{{t "nav.none_registered"}}</span>{{end}}
       </div>
     </div>
   </nav>
@@ -78,22 +78,22 @@
 <div class="main">
   <header class="top" role="banner">
     <div class="topleft">
-      <span class="topbrand">{{.Title}}</span>
+      <span class="topbrand">{{t .Title}}</span>
     </div>
     <div class="topright">
-      <button type="button" class="iconbtn qsearch-btn" id="qsearch-open" aria-label="Search (Ctrl+K)" title="Search pipelines, backup jobs, pages and backup IDs">{{icon "search"}}<span class="tlabel">Search</span><kbd>Ctrl K</kbd></button>
-      {{if .Live}}<span class="livepill" id="livepill" data-conn="connecting" role="status" aria-live="polite" title="Live data from the console's background sampler"><span class="livedot" aria-hidden="true"></span><span id="livetext">Connecting</span></span>{{end}}
+      <button type="button" class="iconbtn qsearch-btn" id="qsearch-open" aria-label="{{t "top.search"}} (Ctrl+K)" title="{{t "top.search_hint"}}">{{icon "search"}}<span class="tlabel">{{t "top.search"}}</span><kbd>Ctrl K</kbd></button>
+      {{if .Live}}<span class="livepill" id="livepill" data-conn="connecting" role="status" aria-live="polite" title="Live data from the console's background sampler"><span class="livedot" aria-hidden="true"></span><span id="livetext">{{t "top.connecting"}}</span></span>{{end}}
       {{if .EnvName}}<span class="envchip env-{{.EnvTone}}" title="Environment (Settings &gt; General). Host: {{.Host}}">{{icon "server"}}{{.EnvName}}</span>{{else}}<span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>{{end}}
       <button type="button" class="iconbtn" id="theme-toggle" aria-label="Colour theme: follows the system. Click to change." title="Colour theme">{{icon "auto"}}<span class="tlabel">Auto</span></button>
       <details class="usermenu" id="usermenu">
-        <summary aria-label="User menu">{{icon "user"}}{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</summary>
+        <summary aria-label="{{t "top.user_menu"}}">{{icon "user"}}{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</summary>
         <div class="menu">
-          <div class="who">Signed in as <b>{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</b> <span class="badge small">{{if .CurrentUser.Role}}{{.CurrentUser.Role}}{{else}}admin{{end}}</span></div>
-          <a class="menuitem" href="/account">{{icon "user"}}My account</a>
+          <div class="who">{{t "top.signed_in_as"}} <b>{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</b> <span class="badge small">{{if .CurrentUser.Role}}{{.CurrentUser.Role}}{{else}}admin{{end}}</span></div>
+          <a class="menuitem" href="/account">{{icon "user"}}{{t "nav.my_account"}}</a>
           {{if eq .CurrentUser.Role "admin"}}
-          <a class="menuitem" href="/users">{{icon "user"}}Users</a>
+          <a class="menuitem" href="/users">{{icon "user"}}{{t "nav.users"}}</a>
           {{end}}
-          <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn ghost" type="submit" data-action="logout">{{icon "logout"}}Log out</button></form>
+          <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn ghost" type="submit" data-action="logout">{{icon "logout"}}{{t "top.log_out"}}</button></form>
         </div>
       </details>
     </div>
@@ -104,15 +104,15 @@
     <nav class="breadcrumb" aria-label="Breadcrumb">
       <ol>
         {{range $i, $b := .Breadcrumbs}}
-        <li>{{if $b.URL}}<a href="{{$b.URL}}">{{$b.Label}}</a>{{else}}<span aria-current="page">{{$b.Label}}</span>{{end}}</li>
+        <li>{{if $b.URL}}<a href="{{$b.URL}}">{{t $b.Label}}</a>{{else}}<span aria-current="page">{{t $b.Label}}</span>{{end}}</li>
         {{end}}
       </ol>
     </nav>
     {{end}}
     <header class="pagehead">
       <div class="pagehead-title">
-        <h1>{{.Title}}</h1>
-        {{if .Subtitle}}<p class="pagehead-sub">{{.Subtitle}}</p>{{end}}
+        <h1>{{t .Title}}</h1>
+        {{if .Subtitle}}<p class="pagehead-sub">{{t .Subtitle}}</p>{{end}}
       </div>
       {{if .Actions}}<div class="pagehead-actions" role="toolbar" aria-label="Page actions">{{.Actions}}</div>{{end}}
     </header>
@@ -125,10 +125,10 @@
 </div>
 <dialog id="confirm" class="dlg" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
   <form method="dialog" id="confirm-form">
-    <h3 id="confirm-title">Confirm</h3>
+    <h3 id="confirm-title">{{t "confirm.title"}}</h3>
     <p id="confirm-msg"></p>
-    <p id="confirm-retype" hidden>Type <b id="confirm-name"></b> to confirm:<input id="confirm-input" type="text" aria-label="Confirmation text" autocomplete="off" spellcheck="false"></p>
-    <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">Cancel</button><button class="btn primary" id="confirm-ok" type="submit" value="ok">Confirm</button></div>
+    <p id="confirm-retype" hidden>{{t "confirm.type"}} <b id="confirm-name"></b> {{t "confirm.to_confirm"}}:<input id="confirm-input" type="text" aria-label="{{t "confirm.type_to_confirm"}}" autocomplete="off" spellcheck="false"></p>
+    <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">{{t "btn.cancel"}}</button><button class="btn primary" id="confirm-ok" type="submit" value="ok">{{t "confirm.title"}}</button></div>
   </form>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

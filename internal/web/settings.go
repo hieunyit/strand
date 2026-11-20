@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +55,9 @@ var settingDefs = []settingDef{
 	{Key: "environment_tone", Label: "Environment colour", Kind: "choice", Section: "general", Choices: []string{"neutral", "info", "success", "warning", "danger"},
 		Help: "Colour of the environment chip: danger (red) is a common choice for production.",
 		file: func(c *Config) any { return c.EnvironmentTone }, def: "neutral"},
+	{Key: "default_language", Label: "Default language", Kind: "choice", Section: "general", Choices: []string{"en", "vi"},
+		Help: "Default language for new visitors and pages before sign-in (English or Tiếng Việt). Users can choose their own language in My account.",
+		file: func(c *Config) any { return "en" }, def: "en"},
 	{Key: "scan", Section: "general", Label: "Scan globs", Kind: "list",
 		Help: "Pipeline config files discovered automatically, one absolute glob per line (for example /etc/strand/*.yaml). Applies at the next refresh (5 s).",
 		file: func(c *Config) any { return append([]string{}, c.Scan...) }, def: []string{}},
@@ -446,6 +450,17 @@ func (s *Server) applySettings(changes map[string]any, ip string) ([]string, err
 		s.reg.Refresh(ctx) // scan đổi: áp dụng ngay
 	}
 	return changed, nil
+}
+
+func (s *Server) setSetting(ctx context.Context, key string, val string) error {
+	if s.db == nil || s.db.st == nil {
+		return nil
+	}
+	b, _ := json.Marshal(val)
+	if err := s.db.st.PutSetting(ctx, key, string(b)); err != nil {
+		return err
+	}
+	return s.loadSettings(false)
 }
 
 // ---- HTTP ----

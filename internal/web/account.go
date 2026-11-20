@@ -50,6 +50,29 @@ func (s *Server) pageAccount(w http.ResponseWriter, r *http.Request, sess *Sessi
 	})
 }
 
+func (s *Server) handleAccountPreferencesForm(w http.ResponseWriter, r *http.Request, sess *Session) {
+	_ = r.ParseForm()
+	lang := strings.TrimSpace(r.PostForm.Get("language"))
+	if lang != LangVI && lang != LangEN {
+		lang = LangEN
+	}
+	s.userLangMu.Lock()
+	if s.userLangs == nil {
+		s.userLangs = make(map[string]string)
+	}
+	s.userLangs[sess.Username] = lang
+	s.userLangMu.Unlock()
+
+	ctx, cancel := dbCtx()
+	defer cancel()
+	if s.db != nil && s.db.st != nil {
+		_ = s.setSetting(ctx, "user_lang:"+sess.Username, lang)
+	}
+	s.setCookie(w, "strand_lang", lang, 365*86400)
+	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), User: sess.Username, Action: "user.preference", Result: "ok", Detail: map[string]any{"language": lang}})
+	http.Redirect(w, r, "/account", http.StatusFound)
+}
+
 func (s *Server) handleAccountPasswordForm(w http.ResponseWriter, r *http.Request, sess *Session) {
 	_ = r.ParseForm()
 	curPw := r.PostForm.Get("current_password")

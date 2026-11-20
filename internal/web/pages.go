@@ -34,7 +34,18 @@ var pageNames = []string{
 }
 
 func templateFuncs() template.FuncMap {
+	return templateFuncsForLang(LangEN)
+}
+
+func templateFuncsForLang(lang string) template.FuncMap {
 	return template.FuncMap{
+		"t": func(key string, optLang ...string) string {
+			l := lang
+			if len(optLang) > 0 && optLang[0] != "" {
+				l = optLang[0]
+			}
+			return T(l, key)
+		},
 		"kindsOf":    kindsOf,
 		"dur":        fmtDur,
 		"stateClass": stateClass,
@@ -149,15 +160,20 @@ type (
 )
 
 func parsePages() (map[string]*template.Template, error) {
+	return parsePagesForLang(LangEN)
+}
+
+func parsePagesForLang(lang string) (map[string]*template.Template, error) {
 	out := map[string]*template.Template{}
+	funcs := templateFuncsForLang(lang)
 	for _, n := range pageNames {
-		t, err := template.New(n).Funcs(templateFuncs()).ParseFS(templateFS, append(append([]string{"templates/base.html"}, partialTemplates...), "templates/pipeline_parts.html", "templates/"+n+".html")...)
+		t, err := template.New(n).Funcs(funcs).ParseFS(templateFS, append(append([]string{"templates/base.html"}, partialTemplates...), "templates/pipeline_parts.html", "templates/"+n+".html")...)
 		if err != nil {
-			return nil, fmt.Errorf("parse template %s: %w", n, err)
+			return nil, fmt.Errorf("parse template %s (%s): %w", n, lang, err)
 		}
 		out[n] = t
 	}
-	t, err := template.New("login").Funcs(templateFuncs()).ParseFS(templateFS, "templates/login.html")
+	t, err := template.New("login").Funcs(funcs).ParseFS(templateFS, "templates/login.html")
 	if err != nil {
 		return nil, err
 	}
@@ -433,6 +449,7 @@ type CurrentUserInfo struct {
 }
 
 type pageData struct {
+	Lang         string // en | vi
 	Title        string
 	DocTitle     string // <title> text; defaults to Title
 	Subtitle     string // Subtitle shown below Title in .pagehead
@@ -577,6 +594,8 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 	if d.AsOf.IsZero() {
 		d.AsOf = s.now()
 	}
+	lang := s.userLanguage(sess, nil)
+	d.Lang = lang
 	if len(d.Breadcrumbs) == 0 {
 		d.Breadcrumbs = defaultBreadcrumbs(name, d.Title, d.Active)
 	}
@@ -584,7 +603,11 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 		d.Subtitle = defaultSubtitle(name)
 	}
 	var buf bytes.Buffer
-	if err := s.pages[name].ExecuteTemplate(&buf, "base", d); err != nil {
+	tmpl := s.pages[name]
+	if s.pagesLang != nil && s.pagesLang[lang] != nil && s.pagesLang[lang][name] != nil {
+		tmpl = s.pagesLang[lang][name]
+	}
+	if err := tmpl.ExecuteTemplate(&buf, "base", d); err != nil {
 		s.log.Error("render page", "page", name, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1153,4 +1176,47 @@ func fmtBytesOrDash(m map[string]float64, k string) string {
 		return fmtBytes(v)
 	}
 	return "-"
+}
+
+func (s *Server) userLanguage(sess *Session, r *http.Request) string {
+	if r != nil {
+		if q := r.URL.Query().Get("lang"); q == LangVI || q == LangEN {
+			return q
+		}
+	}
+	if sess != nil && sess.Username != "" {
+		s.userLangMu.RLock()
+		uLang := s.userLangs[sess.Username]
+		s.userLangMu.RUnlock()
+		if uLang == LangVI || uLang == LangEN {
+			return uLang
+		}
+		if uLang := s.settingStr("user_lang:" + sess.Username); uLang == LangVI || uLang == LangEN {
+			return uLang
+		}
+	}
+	if r != nil {
+		if c, err := r.Cookie("strand_lang"); err == nil && (c.Value == LangVI || c.Value == LangEN) {
+			return c.Value
+		}
+	}
+	if def := s.settingStr("default_language"); def == LangVI || def == LangEN {
+		return def
+	}
+	return LangEN
+}
+
+func (s *Server) loginLanguage(r *http.Request) string {
+	if r != nil {
+		if q := r.URL.Query().Get("lang"); q == LangVI || q == LangEN {
+			return q
+		}
+		if c, err := r.Cookie("strand_lang"); err == nil && (c.Value == LangVI || c.Value == LangEN) {
+			return c.Value
+		}
+	}
+	if def := s.settingStr("default_language"); def == LangVI || def == LangEN {
+		return def
+	}
+	return LangEN
 }

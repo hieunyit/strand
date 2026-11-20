@@ -255,3 +255,58 @@ func TestLoginExpiredNotice(t *testing.T) {
 		t.Error("open redirect not prevented in login next value")
 	}
 }
+
+func TestI18nLanguageSwitching(t *testing.T) {
+	e := newEnv(t, nil)
+	c, csrf := e.loginOK()
+
+	// 1. Initial overview in English
+	resp, body := e.do(c, "GET", "/", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, `<html lang="en">`) || !strings.Contains(body, ">Monitor</button>") || !strings.Contains(body, ">Overview</a>") {
+		t.Error("default overview is not in English")
+	}
+
+	// 2. Change preference to Vietnamese via POST /account/preferences
+	resp, _ = e.do(c, "POST", "/account/preferences", "csrf="+csrf+"&language=vi", map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if resp.StatusCode != 302 {
+		t.Fatalf("expected 302, got %d", resp.StatusCode)
+	}
+
+	// 3. Overview now renders in Vietnamese
+	resp, body = e.do(c, "GET", "/", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	for _, want := range []string{
+		`<html lang="vi">`,
+		">Giám sát</button>",
+		">Tổng quan</a>",
+		">Bảo vệ dữ liệu</button>",
+		">Hệ thống</button>",
+		">Tác vụ</a>",
+		">Đăng xuất</button>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Vietnamese overview missing %s", want)
+		}
+	}
+
+	// 4. Default language in Settings affects unauthenticated pages
+	ctx := context.Background()
+	if err := e.srv.setSetting(ctx, "default_language", "vi"); err != nil {
+		t.Fatalf("set default_language: %v", err)
+	}
+	plainClient := e.client()
+	resp, body = e.do(plainClient, "GET", "/login", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, `<html lang="vi">`) || !strings.Contains(body, "Tên đăng nhập") {
+		t.Error("login page did not respect default_language vi")
+	}
+}
