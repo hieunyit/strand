@@ -51,19 +51,25 @@
   <main id="content" data-refresh="{{.Refresh}}"{{if .Live}} data-live="{{.Live}}" data-interval="{{.Interval}}"{{if .LiveLogs}} data-live-logs="1"{{end}}{{end}}>
     {{if .Breadcrumbs}}
     <nav class="breadcrumb" aria-label="Breadcrumb">
-      {{range $i, $b := .Breadcrumbs}}{{if $i}} <span class="sep" aria-hidden="true">/</span> {{end}}{{if $b.URL}}<a href="{{$b.URL}}">{{$b.Label}}</a>{{else}}<span aria-current="page">{{$b.Label}}</span>{{end}}{{end}}
+      <ol>
+        {{range $i, $b := .Breadcrumbs}}
+        <li>{{if $b.URL}}<a href="{{$b.URL}}">{{$b.Label}}</a>{{else}}<span aria-current="page">{{$b.Label}}</span>{{end}}</li>
+        {{end}}
+      </ol>
     </nav>
     {{end}}
     <header class="pagehead">
       <div class="pagehead-title">
         <h1>{{.Title}}</h1>
-        {{if .Subtitle}}<p class="subtitle">{{.Subtitle}}</p>{{end}}
+        {{if .Subtitle}}<p class="pagehead-sub">{{.Subtitle}}</p>{{end}}
       </div>
-      {{if .Actions}}<div class="pagehead-actions">{{.Actions}}</div>{{end}}
+      {{if .Actions}}<div class="pagehead-actions" role="toolbar" aria-label="Page actions">{{.Actions}}</div>{{end}}
     </header>
-    {{if .SummaryStrip}}<div class="summary-strip">{{.SummaryStrip}}</div>{{end}}
+    {{if .SummaryStrip}}<section class="summary-strip" aria-label="Status summary">{{.SummaryStrip}}</section>{{end}}
     <p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>
-    {{template "content" .}}
+    <div class="page-content">
+      {{template "content" .}}
+    </div>
   </main>
 </div>
 <dialog id="confirm" class="dlg" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
@@ -80,7 +86,7 @@
 
 {{define "pipeline-table"}}
 <div class="tablewrap">
-<table class="grid" id="pipeline-table" data-sortable>
+<table class="data-table grid" id="pipeline-table" data-sortable>
   <caption class="sr-only">Pipelines</caption>
   <thead><tr>
     <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-sort="name">Name</button></th>
@@ -122,7 +128,7 @@
 
 {{define "jobs-table"}}
 <div class="tablewrap tall">
-<table class="grid">
+<table class="data-table grid">
   <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Pipeline</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Command</th></tr></thead>
   <tbody>{{range .Jobs}}<tr>
     <td class="small nowrap"><a href="/jobs/{{.ID}}">{{ts .Started}}</a></td>

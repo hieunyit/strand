@@ -1,15 +1,17 @@
 {{define "content"}}
-{{range .Body.Warnings}}<p class="warnbox" role="alert">{{.}}</p>{{end}}
-<section class="kpis" aria-label="Summary" data-live-overview>
-  <a class="kpi" href="/pipelines"><div class="kpi-label">{{icon "pipelines"}}Pipelines</div><div class="kpi-value c-num" data-bind="total">{{.Body.Overview.Total}}</div><div class="kpi-sub" data-bind="healthy_sub">{{.Body.Healthy}} healthy{{if .Body.Attn}}, {{len .Body.Attn}} need attention{{end}}</div></a>
-  <a class="kpi {{if .Body.Attn}}bad{{else}}ok{{end}}" href="/pipelines?sort=sev" data-attn-kpi><div class="kpi-label">{{icon "alert"}}Needs attention</div><div class="kpi-value c-num" data-bind="attn">{{len .Body.Attn}}</div><div class="kpi-sub">failed, paused, unreachable or breaker open</div></a>
-  <a class="kpi" href="/pipelines?sort=lag"><div class="kpi-label">{{icon "clock"}}Max lag</div><div class="kpi-value c-num" data-bind="max_lag">{{if .Body.Overview.MaxLagPipeline}}{{lag .Body.Overview.MaxLagSeconds}}{{else}}0.00 s{{end}}</div><div class="kpi-sub mono" data-bind="max_lag_pipeline">{{if .Body.Overview.MaxLagPipeline}}{{.Body.Overview.MaxLagPipeline}}{{else}}no lag{{end}}</div></a>
-  <div class="kpi"><div class="kpi-label" title="Rows applied per second over all pipelines, averaged over 30 s">{{icon "bolt"}}Rows/s <span class="m-hint">30 s avg</span></div><div class="kpi-value c-num" data-bind="rows">{{num .Body.Overview.RowsPerSec}}</div><div class="kpi-sub">across all pipelines</div></div>
-  <div class="kpi"><div class="kpi-label">{{icon "table"}}Snapshot tables</div><div class="kpi-value c-num"><span data-bind="tables_done">{{if gt .Body.TblTotal 0}}{{.Body.TblDone}}{{else}}-{{end}}</span> <small data-bind="tables_total">{{if gt .Body.TblTotal 0}}/ {{.Body.TblTotal}}{{end}}</small></div><div data-bind-show="tables"{{if not (gt .Body.TblTotal 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Body.TblPct}}</span></div><div class="kpi-sub" data-bind-hide="tables"{{if gt .Body.TblTotal 0}} hidden{{end}}>no snapshot running</div></div>
+{{range .Body.Warnings}}<div class="alert alert-warn mb" role="alert">{{.}}</div>{{end}}
+<section class="summary-strip" aria-label="Cluster health summary" data-live-overview>
+  <div class="kpis" aria-label="Summary">
+    <a class="kpi" href="/pipelines"><div class="kpi-label">{{icon "pipelines"}}Pipelines</div><div class="kpi-value c-num" data-bind="total">{{.Body.Overview.Total}}</div><div class="kpi-sub" data-bind="healthy_sub">{{.Body.Healthy}} healthy{{if .Body.Attn}}, {{len .Body.Attn}} need attention{{end}}</div></a>
+    <a class="kpi {{if .Body.Attn}}bad{{else}}ok{{end}}" href="/pipelines?sort=sev" data-attn-kpi><div class="kpi-label">{{icon "alert"}}Needs attention</div><div class="kpi-value c-num" data-bind="attn">{{len .Body.Attn}}</div><div class="kpi-sub">failed, paused, unreachable or breaker open</div></a>
+    <a class="kpi" href="/pipelines?sort=lag"><div class="kpi-label">{{icon "clock"}}Max lag</div><div class="kpi-value c-num" data-bind="max_lag">{{if .Body.Overview.MaxLagPipeline}}{{lag .Body.Overview.MaxLagSeconds}}{{else}}0.00 s{{end}}</div><div class="kpi-sub mono" data-bind="max_lag_pipeline">{{if .Body.Overview.MaxLagPipeline}}{{.Body.Overview.MaxLagPipeline}}{{else}}no lag{{end}}</div></a>
+    <div class="kpi"><div class="kpi-label" title="Rows applied per second over all pipelines, averaged over 30 s">{{icon "bolt"}}Rows/s <span class="m-hint">30 s avg</span></div><div class="kpi-value c-num" data-bind="rows">{{num .Body.Overview.RowsPerSec}}</div><div class="kpi-sub">across all pipelines</div></div>
+    <div class="kpi"><div class="kpi-label">{{icon "table"}}Snapshot tables</div><div class="kpi-value c-num"><span data-bind="tables_done">{{if gt .Body.TblTotal 0}}{{.Body.TblDone}}{{else}}-{{end}}</span> <small data-bind="tables_total">{{if gt .Body.TblTotal 0}}/ {{.Body.TblTotal}}{{end}}</small></div><div data-bind-show="tables"{{if not (gt .Body.TblTotal 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Body.TblPct}}</span></div><div class="kpi-sub" data-bind-hide="tables"{{if gt .Body.TblTotal 0}} hidden{{end}}>no snapshot running</div></div>
+  </div>
+  <div class="statechips" aria-label="Pipelines by state">
+    {{range $s := .Body.States}}{{$n := index $.Body.Overview.Counts $s}}<a class="statechip" href="/pipelines?state={{$s}}" title="Show {{$s}} pipelines" data-state-chip="{{$s}}"{{if not (or $n (eq $s "synced") (eq $s "failed") (eq $s "stopped"))}} hidden{{end}}><span class="dot {{stateClass $s}}"></span>{{$s}} <b class="c-num" data-bind="count_{{$s}}">{{$n}}</b></a>{{end}}
+  </div>
 </section>
-<div class="statechips" aria-label="Pipelines by state" data-live-overview>
-  {{range $s := .Body.States}}{{$n := index $.Body.Overview.Counts $s}}<a class="statechip" href="/pipelines?state={{$s}}" title="Show {{$s}} pipelines" data-state-chip="{{$s}}"{{if not (or $n (eq $s "synced") (eq $s "failed") (eq $s "stopped"))}} hidden{{end}}><span class="dot {{stateClass $s}}"></span>{{$s}} <b class="c-num" data-bind="count_{{$s}}">{{$n}}</b></a>{{end}}
-</div>
 <section class="card attncard" aria-label="Needs attention" data-attn="{{range $i, $v := .Body.Attn}}{{if $i}},{{end}}{{$v.Name}}{{end}}">
   <div class="cardhead"><h2>{{icon "alert"}}Needs attention</h2>{{if .Body.Attn}}<span class="badge st-failed">{{len .Body.Attn}}</span>{{end}}</div>
   {{if .Body.Attn}}<ul class="attn">{{range .Body.Attn}}<li data-live-row="{{.Name}}" class="{{if .Stale}}is-stale{{end}}">

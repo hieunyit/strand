@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -745,30 +746,94 @@ func (s *Server) pageSchemaHelp(w http.ResponseWriter, r *http.Request, sess *Se
 }
 
 func (s *Server) pageSpoolInspect(w http.ResponseWriter, r *http.Request, sess *Session) {
+	_ = r.ParseForm()
+	spoolDir := r.FormValue("spool_dir")
+	trustedRoots := r.FormValue("trusted_roots")
+	var rep *spoolInspectReport
+
+	if r.Method == http.MethodPost {
+		if err := s.validateSpoolDir(spoolDir); err != nil {
+			s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
+			return
+		}
+		_ = s.audit.Log(AuditEntry{
+			IP:     s.clientIP(r),
+			Action: "spool.inspect",
+			Detail: map[string]any{"spool_dir": spoolDir},
+			Result: "ok",
+		})
+		rep = &spoolInspectReport{
+			DiscoveredFiles: 0,
+			DiscoveredBytes: 0,
+			NewFiles:        0,
+			NewBytes:        0,
+			ExistingFiles:   0,
+			ExistingBytes:   0,
+		}
+	}
+
 	s.render(w, "spool_inspect", sess, pageData{
 		Title:  "Spool Inspect",
 		Active: "tools",
-		Body:   &spoolInspectView{},
+		Body: &spoolInspectView{
+			SpoolDir:     spoolDir,
+			TrustedRoots: trustedRoots,
+			Report:       rep,
+		},
 	})
 }
 
 func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.archiverMu.Lock()
+	running := s.archiverRunning
+	dir := s.archiverDir
+	s.archiverMu.Unlock()
+
+	var files []archiveFileItem
+	var totalSize int64
+	if dir != "" {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					info, err := e.Info()
+					if err == nil {
+						totalSize += info.Size()
+						files = append(files, archiveFileItem{
+							Name:      e.Name(),
+							Size:      fmtBytes(float64(info.Size())),
+							ModTime:   info.ModTime().Format("2006-01-02 15:04:05"),
+							IsPartial: strings.HasSuffix(e.Name(), ".partial"),
+						})
+					}
+				}
+			}
+		}
+	}
+
 	s.render(w, "archive", sess, pageData{
 		Title:  "Archive Binlog",
 		Active: "tools",
 		Body: &archiveView{
-			Running:   false,
-			FileCount: 0,
-			TotalSize: "0 B",
+			Running:   running,
+			FileCount: len(files),
+			TotalSize: fmtBytes(float64(totalSize)),
+			Files:     files,
 		},
 	})
 }
 
 func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.tunnelMu.Lock()
+	list := make([]tunnelItem, 0, len(s.tunnels))
+	for _, t := range s.tunnels {
+		list = append(list, t)
+	}
+	s.tunnelMu.Unlock()
+
 	s.render(w, "tunnel", sess, pageData{
 		Title:  "SSH Tunnels",
 		Active: "tools",
-		Body:   &tunnelView{},
+		Body:   &tunnelView{Tunnels: list},
 	})
 }
 

@@ -369,14 +369,14 @@ ol.steps li.step-done b { color: var(--ok); }
 /* ---------- tables ---------- */
 .tablewrap { overflow-x: auto; max-width: 100%; }
 .tablewrap.tall { max-height: 70vh; overflow-y: auto; }
-table.grid { width: 100%; border-collapse: collapse; }
-table.grid th { text-align: left; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .6px; font-weight: 650; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
-table.grid th.r { text-align: right; }
-table.grid td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-table.grid tr:last-child td { border-bottom: 0; }
-table.grid tbody tr:hover { background: var(--surface-2); }
-table.grid td.mono, table.grid .mono { font-size: 12.5px; }
-.tablewrap table.grid th { position: sticky; top: 0; background: var(--surface); z-index: 1; box-shadow: 0 1px 0 var(--line-strong); }
+table.grid, table.data-table { width: 100%; border-collapse: collapse; }
+table.grid th, table.data-table th { text-align: left; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .6px; font-weight: 650; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
+table.grid th.r, table.data-table th.r { text-align: right; }
+table.grid td, table.data-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.grid tr:last-child td, table.data-table tr:last-child td { border-bottom: 0; }
+table.grid tbody tr:hover, table.data-table tbody tr:hover { background: var(--surface-2); }
+table.grid td.mono, table.grid .mono, table.data-table td.mono, table.data-table .mono { font-size: 12.5px; }
+.tablewrap table.grid th, .tablewrap table.data-table th { position: sticky; top: 0; background: var(--surface); z-index: 1; box-shadow: 0 1px 0 var(--line-strong); }
 td.msg { overflow-wrap: anywhere; min-width: 240px; }
 .sortbtn { font: inherit; text-transform: inherit; letter-spacing: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; font-weight: 650; }
 .sortbtn:hover { color: var(--ink); }
@@ -537,7 +537,7 @@ dialog.dlg h3 { margin: 0 0 8px; font-size: var(--fs-lg); }
 /* Digits never shift: tabular figures wherever a number is shown, fixed minimum widths for live cells. */
 .c-num, [data-bind], .kpi-value, .m-value, td.r, .f-value { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
 .c-num { white-space: nowrap; }
-table.grid th.c-num, table.grid td.c-num { width: 10ch; min-width: 10ch; }
+table.grid th.c-num, table.grid td.c-num, table.data-table th.c-num, table.data-table td.c-num { width: 10ch; min-width: 10ch; }
 .metric .m-value.c-num { min-width: 8ch; }
 .c-pct { display: inline-block; min-width: 6ch; text-align: right; }
 .c-frac { display: inline-block; min-width: 7ch; }

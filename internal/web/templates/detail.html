@@ -18,10 +18,10 @@
 <nav class="tabs" role="tablist" aria-label="Pipeline sections">{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $.Body.Tab .Key}} active{{end}}" role="tab" aria-selected="{{if eq $.Body.Tab .Key}}true{{else}}false{{end}}"{{if eq $.Body.Tab .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
 
 {{if eq .Tab "graph"}}
-  <section class="card"><h2>Data path</h2><div class="graphwrap">{{.Graph}}</div>
+  <section class="card"><div class="cardhead"><h2>Data path</h2></div><div class="graphwrap">{{.Graph}}</div>
   {{if .Status.Error}}<p class="muted">{{.Status.Error}}</p>{{end}}</section>
   {{with .Status.Status}}
-  <section class="card"><h2>Run</h2>
+  <section class="card"><div class="cardhead"><h2>Run</h2></div>
     <dl class="dl">
       <dt>Epoch</dt><dd>{{.Epoch}}</dd>
       <dt>Uptime</dt><dd><span class="c-num" data-bind="uptime">{{secs .UptimeSeconds}}</span> (since {{ts .StartedAt}})</dd>
@@ -31,7 +31,7 @@
       <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
     </dl>
   </section>{{end}}
-  {{if .Ctl.Reachable}}<section class="card" id="throttle"><h2>Throttle</h2>
+  {{if .Ctl.Reachable}}<section class="card" id="throttle"><div class="cardhead"><h2>Throttle</h2></div>
     <form class="act" data-action="throttle" data-pipeline="{{.View.Name}}">
       <label>Soft source IOPS (tokens/s) <input type="number" name="source_iops" min="1" max="10000000" required class="num"></label>
       <button class="btn" type="submit">Apply</button>
@@ -39,14 +39,14 @@
     </form></section>{{end}}
   <section class="card chartbar" aria-label="Chart range"><div class="cardhead"><h2>{{icon "graph"}}History <span class="muted small">sampled every {{$.Interval}} s, {{if .HasHistory}}1 h in memory, up to 7 d from the database (longer ranges: averages per bucket, lag as the maximum){{else}}kept 1 h in memory{{end}}; new points arrive live</span></h2>
     <div class="seg" role="group" aria-label="Time range" id="chart-range"><button type="button" class="segbtn" data-range="300" aria-pressed="false">5 min</button><button type="button" class="segbtn" data-range="900" aria-pressed="true">15 min</button><button type="button" class="segbtn" data-range="3600" aria-pressed="false">1 h</button>{{if .HasHistory}}<button type="button" class="segbtn" data-range="21600" aria-pressed="false">6 h</button><button type="button" class="segbtn" data-range="86400" aria-pressed="false">24 h</button><button type="button" class="segbtn" data-range="604800" aria-pressed="false">7 d</button>{{end}}</div></div></section>
-  <section class="charts" id="charts" data-pipeline="{{.View.Name}}">{{range .Charts}}<div class="card" data-chart="{{.Key}}">{{.HTML}}</div>{{end}}</section>
+  <section class="charts" id="charts" data-pipeline="{{.View.Name}}">{{range .Charts}}<section class="card" data-chart="{{.Key}}">{{.HTML}}</section>{{end}}</section>
 {{end}}
 
 {{if eq .Tab "tables"}}
-  {{if .Tables.Error}}<section class="card"><h2>Tables</h2><p class="muted">{{.Tables.Error}}</p></section>{{else}}
+  {{if .Tables.Error}}<section class="card"><div class="cardhead"><h2>Tables</h2></div><p class="muted">{{.Tables.Error}}</p></section>{{else}}
   <section class="card snap" id="snapshot-summary" aria-label="Snapshot progress" data-live-row="{{.View.Name}}">
     <div class="snap-top">
-      <h2>Snapshot progress {{if and (gt .Tables.Total 0) (eq .Tables.Done .Tables.Total)}}<span class="badge st-synced">complete</span>{{else if gt .Tables.Running 0}}<span class="badge st-bootstrapping">copying</span>{{else if gt .Tables.Total 0}}<span class="badge st-tbl-pending">waiting</span>{{end}}</h2>
+      <div class="cardhead"><h2>Snapshot progress {{if and (gt .Tables.Total 0) (eq .Tables.Done .Tables.Total)}}<span class="badge st-synced">complete</span>{{else if gt .Tables.Running 0}}<span class="badge st-bootstrapping">copying</span>{{else if gt .Tables.Total 0}}<span class="badge st-tbl-pending">waiting</span>{{end}}</h2></div>
       <div class="snap-figs">
         <div class="snap-fig"><div class="f-label">Tables</div><div class="f-value c-num" id="snap-tables"><span data-bind="tables_done">{{.Tables.Done}}</span> <small>of <span data-bind="tables_total">{{.Tables.Total}}</span> done (<span data-bind="tables_pct">{{pct .Tables.TablesPct}}</span>)</small></div></div>
         <div class="snap-fig"><div class="f-label">Rows (estimate)</div><div class="f-value c-num" id="snap-rows"><span data-bind="snap_rows_copied">{{int64 .Tables.RowsCopied}}</span> <small>of <span data-bind="snap_rows_est">~{{int64 .Tables.RowsEstimate}}</span>{{if gt .Tables.RowsEstimate 0}} (<span data-bind="rows_pct">{{pct .Tables.RowsPct}}</span>){{end}}</small></div></div>
@@ -75,7 +75,7 @@
       <button type="button" class="chip c-done" data-tfilter="done" aria-pressed="false"><span class="dot"></span>Done <b data-bind="tables_done">{{.Tables.Done}}</b></button>
     </div>{{end}}
   </section>
-  <section class="card"><h2>Tables</h2>
+  <section class="card"><div class="cardhead"><h2>Tables</h2></div>
     {{if .Tables.Paged}}{{$q := .Tables.Query}}<form class="toolbar" role="search" method="get" action="{{.TablesBase}}" id="tb-form">
       {{if ne $q.State "all"}}<input type="hidden" name="tstate" value="{{$q.State}}">{{end}}
       <span class="searchbox">{{icon "search"}}<input type="search" name="tq" id="tb-q" value="{{$q.Q}}" placeholder="Search tables (Enter)" aria-label="Search tables" autocomplete="off"></span>
@@ -87,7 +87,7 @@
       <label for="tb-sort">Sort <select id="tb-sort"><option value="ord">Status (running first)</option><option value="name">Name</option><option value="pct">Progress</option><option value="rows">Rows</option><option value="eta">ETA</option></select></label>
       <span class="muted small" id="tb-count" aria-live="polite">{{.Tables.Total}} tables</span>
     </div>{{end}}
-    <div class="tablewrap tall"><table class="grid" id="tables-table"{{if .Tables.Paged}} data-paged="1"{{end}}>
+    <div class="tablewrap tall"><table class="data-table grid" id="tables-table"{{if .Tables.Paged}} data-paged="1"{{end}}>
       <caption class="sr-only">Snapshot status per table</caption>
       <thead><tr><th scope="col">Table</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col" class="r">Rows copied / estimate</th><th scope="col" class="r">ETA</th><th scope="col">Row key</th><th scope="col" class="hide-md">Ranges</th></tr></thead>
       <tbody>{{range $i, $t := .Tables.Tables}}{{$k := keyKind $t}}<tr class="trow{{if eq $t.State "running"}} is-running{{end}}" data-table="{{$t.Table}}" data-state="{{$t.State}}" data-ord="{{$i}}" data-pct="{{printf "%.2f" $t.ProgressPct}}" data-rows="{{tblEst $t}}" data-eta="{{if gt $t.ETASeconds 0.0}}{{printf "%.0f" $t.ETASeconds}}{{else}}-1{{end}}" data-key="{{$k.Kind}}">
@@ -108,7 +108,7 @@
       {{if lt $q.Page .Tables.Pages}}<a class="btn" rel="next" href="{{tablesHref $b $q "tpage" (printf "%d" (add $q.Page 1))}}">Next</a> <a class="btn" href="{{tablesHref $b $q "tpage" (printf "%d" .Tables.Pages)}}">Last</a>{{end}}
     </nav>{{end}}
   </section>{{end}}
-  {{if .Ctl.Reachable}}<section class="card"><h2>Snapshot control</h2>
+  {{if .Ctl.Reachable}}<section class="card"><div class="cardhead"><h2>Snapshot control</h2></div>
     <div class="actions">
       <form class="act inline" data-action="pause-snapshot" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Pause snapshot</button></form>
       <form class="act inline" data-action="resume-snapshot-only" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Resume (snapshot only, defer stream)</button></form>
@@ -116,7 +116,7 @@
     </div>
   </section>{{end}}
   {{if .Ctl.Running}}<section class="card">
-    <h3>Add tables</h3>
+    <div class="cardhead"><h3>Add tables</h3></div>
     {{if .Src.Error}}<p class="muted">{{.Src.Error}}</p>{{else}}
     <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
       <div class="picklist" id="src-picklist"{{if not .SrcLoaded}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{if .SrcLoaded}}{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}" aria-label="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}{{else}}<button type="button" class="btn" data-load-src>List source tables</button> <span class="muted small">Asks the running pipeline for the tables of the source database (a query on the source).</span>{{end}}</div>
@@ -127,7 +127,7 @@
 {{end}}
 
 {{if eq .Tab "checkpoint"}}
-  <section class="card"><h2>Checkpoint</h2>
+  <section class="card"><div class="cardhead"><h2>Checkpoint</h2></div>
   {{if .Checkpoint.Error}}<p class="muted">{{.Checkpoint.Error}}</p>{{else}}{{with .Checkpoint.Checkpoint}}
   <dl class="dl">
     <dt>Applied position</dt><dd class="mono wrap" data-bind="ckpt_applied">{{.Applied}}</dd>
@@ -137,7 +137,7 @@
     {{if $.Body.Checkpoint.CompactionLagSecs}}<dt>Compaction lag</dt><dd>{{secs (deref $.Body.Checkpoint.CompactionLagSecs)}}</dd>{{end}}
   </dl>{{end}}{{end}}
   </section>
-  {{if .Ctl.CanRewind}}<section class="card"><h2>Rewind checkpoint</h2>
+  {{if .Ctl.CanRewind}}<section class="card"><div class="cardhead"><h2>Rewind checkpoint</h2></div>
     <p class="muted">MySQL to MySQL only. The pipeline checks the position against gtid_purged before it moves; rows after the new position are applied again.</p>
     <form class="act" data-action="checkpoint-rewind" data-pipeline="{{.View.Name}}" data-confirm="Rewind the checkpoint of {{.View.Name}}? Events after the new position are re-applied." data-retype="{{.View.Name}}">
       <label>Rewind to (GTID set) <input type="text" name="to" required class="wide mono" placeholder="uuid:1-12345"></label>
@@ -147,23 +147,23 @@
 {{end}}
 
 {{if eq .Tab "errors"}}
-  {{if .Errors.LastExit}}<section class="card"><h2>Last exit</h2>
+  {{if .Errors.LastExit}}<section class="card"><div class="cardhead"><h2>Last exit</h2></div>
     <p><b>Exit code {{.Errors.LastExit.Code}}</b> ({{.Errors.ExitFrom}}){{if .Errors.ErrorCode}}, error <code>{{.Errors.ErrorCode}}</code>{{end}}</p>
     <p>{{.Errors.LastExit.Meaning}}</p><p><b>What to do:</b> {{.Errors.LastExit.Action}}</p>
     <p class="muted small">{{if .Errors.LastExit.AutoRestart}}systemd restarts this exit code automatically.{{else}}This exit code needs an operator: it is not restarted automatically.{{end}}</p>
   </section>{{end}}
-  <section class="card"><h2>Recent warnings and errors <span class="muted small">running process, last 200, newest last; new ones appear live</span></h2>
+  <section class="card"><div class="cardhead"><h2>Recent warnings and errors <span class="muted small">running process, last 200, newest last; new ones appear live</span></h2></div>
     {{if .Errors.LiveErr}}<p class="muted">{{.Errors.LiveErr}}</p>{{end}}
-    <div class="tablewrap tall" id="live-events-wrap"><table class="grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody id="live-events">
+    <div class="tablewrap tall" id="live-events-wrap"><table class="data-table grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody id="live-events">
     {{range .Errors.Live}}<tr data-ev="{{.Time}}|{{.Level}}|{{.Message}}"><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>
     {{end}}<tr class="empty-row"{{if .Errors.Live}} hidden{{end}}><td colspan="3" class="muted">None.</td></tr>
     </tbody></table></div>
   </section>
-  <section class="card"><h2>From the log tail</h2>{{template "events" .Errors.FromLog}}</section>
+  <section class="card"><div class="cardhead"><h2>From the log tail</h2></div>{{template "events" .Errors.FromLog}}</section>
 {{end}}
 
 {{if eq .Tab "config"}}
-  <section class="card"><h2>Configuration</h2>
+  <section class="card"><div class="cardhead"><h2>Configuration</h2></div>
     <p class="muted small mono">{{.Config.Path}}</p>
     {{if .Config.Error}}<p class="err">{{.Config.Error}}</p>{{end}}
     {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
@@ -199,7 +199,7 @@
     </div>
   </section>
 
-  <section class="card" id="tuning-card"><h2>Tuning: snapshot speed &amp; safety</h2>
+  <section class="card" id="tuning-card"><div class="cardhead"><h2>Tuning: snapshot speed &amp; safety</h2></div>
     {{if .Tuning.Error}}<p class="err">{{.Tuning.Error}}</p>{{else}}
     <p class="muted small">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Graph tab)</a>; it is not saved to the file.</p>
     <form id="tuning-form" class="np" data-pipeline="{{.View.Name}}">
@@ -226,12 +226,12 @@
     {{end}}
   </section>
 
-  <section class="card"><h2>Credentials &amp; Environment (.env)</h2>
+  <section class="card"><div class="cardhead"><h2>Credentials &amp; Environment (.env)</h2></div>
     <p class="muted small mono">{{.Env.Path}}</p>
     {{if .Env.Error}}<p class="err">{{.Env.Error}}</p>{{end}}
     <p class="muted small">Environment variables used by the pipeline process. Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.</p>
     <form id="env-edit-form" data-pipeline="{{.View.Name}}">
-      <div class="tablewrap env-wrap"><table class="grid">
+      <div class="tablewrap env-wrap"><table class="data-table grid">
         <thead><tr><th scope="col">Variable</th><th scope="col">Value</th></tr></thead>
         <tbody id="env-entries-body">
           {{range $k, $v := .Env.Entries}}
@@ -252,7 +252,7 @@
     </form>
   </section>
 
-  <section class="card danger-card"><h2>Danger Zone</h2>
+  <section class="card danger-card"><div class="cardhead"><h2>Danger Zone</h2></div>
     <p class="muted small">Permanently delete this pipeline, stopping it if running and removing its configuration. This action cannot be undone.</p>
     <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}">
       <button class="btn danger" type="submit">Delete pipeline {{.View.Name}}</button>
@@ -261,7 +261,7 @@
 {{end}}
 
 {{if eq .Tab "jobs"}}
-  <section class="card"><h2>Verify</h2>
+  <section class="card"><div class="cardhead"><h2>Verify</h2></div>
     {{if .Ctl.JobActive}}<p class="warnbox">A job is running ({{.Ctl.JobActive.Kind}}); one job at a time per pipeline. <a href="/jobs/{{.Ctl.JobActive.ID}}">Open it</a>.</p>{{end}}
     <form class="act" data-action="verify" data-pipeline="{{.View.Name}}">
       <label>Mode <select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select></label>
@@ -273,7 +273,7 @@
       <p class="muted small">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
     </form>
   </section>
-  <section class="card"><h2>Plan &amp; schema</h2>
+  <section class="card"><div class="cardhead"><h2>Plan &amp; schema</h2></div>
     <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
       <p class="muted small">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
       <div class="rowgap">
@@ -296,7 +296,7 @@
     </form>
   </section>
   {{if eq .View.SourceKind "mysql"}}
-  <section class="card"><h2>Database objects</h2>
+  <section class="card"><div class="cardhead"><h2>Database objects</h2></div>
     <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
       <p class="muted small">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
       <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
@@ -307,7 +307,7 @@
     </form>
   </section>
   {{end}}
-  <section class="card"><h2>Job history</h2>{{template "jobs-table" (jobsCtx .Jobs false)}}</section>
+  <section class="card"><div class="cardhead"><h2>Job history</h2></div>{{template "jobs-table" (jobsCtx .Jobs false)}}</section>
 {{end}}
 
 {{if eq .Tab "schema"}}
@@ -341,7 +341,7 @@
 
 {{if eq .Tab "objects"}}
   <section class="card">
-    <h2>Database objects</h2>
+    <div class="cardhead"><h2>Database objects</h2></div>
     <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
       <p class="muted small">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
       <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
@@ -357,7 +357,7 @@
 {{end}}
 
 {{if eq .Tab "logs"}}
-  <section class="card"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2>
+  <section class="card"><div class="cardhead"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2></div>
     <div class="toolbar logbar">
       <label class="switch"><input type="checkbox" id="log-follow"{{if .Follow}} checked{{end}}> Follow live tail</label>
       <span class="muted small" id="log-status" aria-live="polite">{{if .Follow}}Following{{else}}Not following: new lines are not added (reload for the latest){{end}}</span>
@@ -373,7 +373,7 @@
 {{end}}
 
 {{define "events"}}
-<div class="tablewrap tall"><table class="grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody>
+<div class="tablewrap tall"><table class="data-table grid"><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody>
 {{range .}}<tr><td class="small nowrap">{{.Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>
 {{else}}<tr><td colspan="3" class="muted">None.</td></tr>{{end}}
 </tbody></table></div>

@@ -17,7 +17,6 @@ import (
 	"strand/internal/admin"
 	"strand/internal/config"
 	"strand/internal/exitcode"
-	"strand/internal/mongocdc"
 	"strand/internal/pipeline"
 )
 
@@ -185,9 +184,6 @@ func newSyncCmd() *cobra.Command {
 			if startAt == "" && cfg.Bootstrap.StartAt != "" {
 				startAt = cfg.Bootstrap.StartAt
 			}
-			if strings.EqualFold(cfg.Source.Kind, config.KindMongoDB) {
-				return runMongoDBSync(ctx, cfg, logger, events)
-			}
 			return pipeline.Run(ctx, pipeline.Options{
 				Config:       cfg,
 				StartAt:      startAt,
@@ -234,156 +230,4 @@ func newSnapshotCmd() *cobra.Command {
 	add.Flags().StringVar(&adminSocketPath, "socket", "", "Đường dẫn admin socket UNIX")
 	cmd.AddCommand(add)
 	return cmd
-}
-
-func runMongoDBSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, events *admin.EventRing) error {
-	srcURI := cfg.Source.URI
-	if strings.HasPrefix(srcURI, "${") && strings.HasSuffix(srcURI, "}") {
-		srcURI = os.Getenv(strings.TrimSuffix(strings.TrimPrefix(srcURI, "${"), "}"))
-	}
-	dstURI := cfg.Target.URI
-	if strings.HasPrefix(dstURI, "${") && strings.HasSuffix(dstURI, "}") {
-		dstURI = os.Getenv(strings.TrimSuffix(strings.TrimPrefix(dstURI, "${"), "}"))
-	}
-	var leaseTTL time.Duration
-	if cfg.MongoDB.LeaseTTL != "" {
-		leaseTTL, _ = time.ParseDuration(cfg.MongoDB.LeaseTTL)
-	}
-
-	mcfg := mongocdc.Config{
-		Pipeline:        cfg.Name,
-		SourceURI:       srcURI,
-		TargetURI:       dstURI,
-		SourceDB:        cfg.Source.Database,
-		TargetDB:        cfg.Target.Database,
-		Include:         cfg.Tables.Include,
-		Exclude:         cfg.Tables.Exclude,
-		OverwriteTarget: cfg.MongoDB.OverwriteTarget,
-		Logger:          logger,
-		LeaseDuration:   leaseTTL,
-		SnapshotBatch:   cfg.MongoDB.SnapshotBatch,
-		StreamBatch:     cfg.MongoDB.StreamBatch,
-	}
-
-	sockPath := cfg.Observability.AdminSocket
-	if sockPath != "" {
-		ah := &mongoAdminHandler{
-			cfg:       mcfg,
-			startedAt: time.Now(),
-			events:    events,
-		}
-		asrv := admin.NewServer(sockPath, ah, logger)
-		go func() {
-			_ = asrv.Start()
-		}()
-		go func() {
-			<-ctx.Done()
-			_ = asrv.Close()
-		}()
-	}
-
-	return mongocdc.Run(ctx, mcfg)
-}
-
-type mongoAdminHandler struct {
-	cfg       mongocdc.Config
-	startedAt time.Time
-	events    *admin.EventRing
-	mu        sync.Mutex
-	paused    bool
-}
-
-func (h *mongoAdminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
-	h.mu.Lock()
-	paused := h.paused
-	h.mu.Unlock()
-	state := "synced"
-	if paused {
-		state = "paused"
-	}
-	return &admin.TopInfo{
-		PipelineID:  h.cfg.Pipeline,
-		State:       state,
-		LagSeconds:  0.0,
-		Throughput:  0.0,
-		Zone:        "green",
-		TablesDone:  int64(len(h.cfg.Include)),
-		TablesTotal: int64(len(h.cfg.Include)),
-	}, nil
-}
-
-func (h *mongoAdminHandler) Pause(ctx context.Context) (*admin.PauseResult, error) {
-	h.mu.Lock()
-	h.paused = true
-	h.mu.Unlock()
-	return &admin.PauseResult{State: "paused", Paused: true}, nil
-}
-
-func (h *mongoAdminHandler) Resume(ctx context.Context, snapshotOnly bool) (*admin.ResumeResult, error) {
-	h.mu.Lock()
-	h.paused = false
-	h.mu.Unlock()
-	return &admin.ResumeResult{State: "synced", Resumed: true}, nil
-}
-
-func (h *mongoAdminHandler) ThrottleSet(ctx context.Context, req admin.Request) (*admin.ThrottleResult, error) {
-	return &admin.ThrottleResult{SourceIOPSSoft: req.SourceIOPS}, nil
-}
-
-func (h *mongoAdminHandler) CheckpointShow(ctx context.Context) (*admin.CheckpointResult, error) {
-	return &admin.CheckpointResult{Applied: "mongodb-stream-active", Epoch: 1, UpdatedAt: time.Now()}, nil
-}
-
-func (h *mongoAdminHandler) CheckpointRewind(ctx context.Context, to string) (*admin.CheckpointResult, error) {
-	return nil, errors.New("checkpoint rewind is not supported for MongoDB")
-}
-
-func (h *mongoAdminHandler) Status(ctx context.Context) (*admin.StatusInfo, error) {
-	h.mu.Lock()
-	paused := h.paused
-	h.mu.Unlock()
-	state := "synced"
-	if paused {
-		state = "paused"
-	}
-	return &admin.StatusInfo{
-		PipelineID:    h.cfg.Pipeline,
-		State:         state,
-		Epoch:         1,
-		UptimeSeconds: time.Since(h.startedAt).Seconds(),
-		StartedAt:     h.startedAt,
-		CommitOrder:   "relaxed",
-		Governor:      admin.GovernorInfo{Algorithm: "none", Zone: "green"},
-		Paused:        paused,
-	}, nil
-}
-
-func (h *mongoAdminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
-	res := make([]admin.TableInfo, len(h.cfg.Include))
-	for i, name := range h.cfg.Include {
-		res[i] = admin.TableInfo{
-			Table:       name,
-			State:       "done",
-			ProgressPct: 100.0,
-		}
-	}
-	return res, nil
-}
-
-func (h *mongoAdminHandler) Events(ctx context.Context) ([]admin.EventRecord, error) {
-	if h.events != nil {
-		return h.events.Snapshot(), nil
-	}
-	return nil, nil
-}
-
-func (h *mongoAdminHandler) SourceTables(ctx context.Context) ([]admin.SourceTable, error) {
-	res := make([]admin.SourceTable, len(h.cfg.Include))
-	for i, name := range h.cfg.Include {
-		res[i] = admin.SourceTable{
-			Table:      name,
-			InPipeline: true,
-		}
-	}
-	return res, nil
 }

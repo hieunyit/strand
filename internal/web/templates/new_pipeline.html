@@ -1,6 +1,6 @@
 {{define "content"}}
-<div class="card">
-  <h2>Create new pipeline</h2>
+<section class="card">
+  <div class="cardhead"><h2>Create new pipeline</h2></div>
   <p class="muted small">Fill in the source and target, choose what to copy, then <b>Create and validate</b>: Strand writes the pipeline config and a <code>.env</code> file with the passwords (mode 0600), runs <code>validate</code> and <code>plan</code>, and shows the result. Nothing is copied until you press Start.</p>
   <form id="new-pipeline-form" method="post" action="/pipelines/new" class="np">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -8,7 +8,7 @@
     <fieldset class="np-step">
       <legend>1. Pipeline</legend>
       <div class="np-row">
-        <label>Name <span class="err">*</span>
+        <label>Name <span class="req">*</span>
           <input type="text" name="name" id="np-name" required class="wide mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$">
           <small class="muted">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
           <span class="block mt4"><label class="small muted"><input type="checkbox" name="overwrite" id="np-overwrite" value="true"> Overwrite if pipeline already exists (re-create/update)</label></span>
@@ -35,11 +35,11 @@
     <fieldset class="np-step">
       <legend>2. Source connection</legend>
       <div class="np-row" data-when="src:mongodb">
-        <label>Source URI <span class="err">*</span>
+        <label>Source URI <span class="req">*</span>
           <input type="password" name="source_uri" class="wide mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs0">
           <small class="muted">Secret: stored only in the pipeline's encrypted .env (<code>SRC_URI</code>), never in the config. Needs a replica set (change streams).</small>
         </label>
-        <label>Source database <span class="err">*</span>
+        <label>Source database <span class="req">*</span>
           <input type="text" name="source_database" value="app" class="mono">
         </label>
       </div>
@@ -53,7 +53,7 @@
         <label>Password <input type="password" name="source_password" class="mono" autocomplete="new-password"></label>
       </div>
       <div class="np-row" data-when="src:postgres">
-        <label>Database <span class="err">*</span>
+        <label>Database <span class="req">*</span>
           <input type="text" name="database" value="app" class="mono" data-when-input="src:postgres">
           <small class="muted">The PostgreSQL database that holds your tables.</small>
         </label>
@@ -67,11 +67,11 @@
     <fieldset class="np-step">
       <legend>3. Target connection</legend>
       <div class="np-row" data-when="dst:mongodb">
-        <label>Target URI <span class="err">*</span>
+        <label>Target URI <span class="req">*</span>
           <input type="password" name="target_uri" class="wide mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs1">
           <small class="muted">Secret: stored only in the encrypted .env (<code>DST_URI</code>). The target must be a replica set too (transactions).</small>
         </label>
-        <label>Target database <span class="err">*</span>
+        <label>Target database <span class="req">*</span>
           <input type="text" name="target_mongo_database" value="app" class="mono">
         </label>
       </div>
@@ -101,7 +101,7 @@
       <legend>4. What to copy</legend>
       <div class="np-row" data-when="src:mysql,mariadb">
         <div class="np-database-picker">
-          <label for="np-database">Databases <span class="err">*</span></label>
+          <label for="np-database">Databases <span class="req">*</span></label>
           <input type="text" name="database" id="np-database" value="app" class="wide mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
           <small class="muted">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>
           <button type="button" class="btn mt4" id="np-list-databases" data-when="src:mysql,mariadb">List source databases</button>
@@ -213,9 +213,9 @@
     </div>
   </form>
 
-  <div id="new-pipeline-result" class="card mt20" hidden>
-    <h3 id="result-title">Result</h3>
+  <section id="new-pipeline-result" class="card mt20" hidden>
+    <div class="cardhead"><h3 id="result-title">Result</h3></div>
     <div id="result-body"></div>
-  </div>
-</div>
+  </section>
+</section>
 {{end}}

@@ -9,16 +9,20 @@
 <pre class="code wrapcode">{{.Body.ClientJSON}}</pre>
 <p class="muted small">The process needs read access to <code>{{.Body.ConfigPath}}</code> (for <code>database.dsn</code>), or set <code>STRAND_WEB_DATABASE_DSN</code> in the client's environment for the server. Run it as a user that may read the backup catalog.</p>
 </section>
-<section class="card"><h2>Tools (allowlist, read-only)</h2>
-<table class="tbl"><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>
+<section class="card"><div class="cardhead"><h2>Tools (allowlist, read-only)</h2></div>
+<div class="tablewrap">
+<table class="data-table grid"><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>
 {{range .Body.Tools}}<tr><td class="mono">{{.Name}}</td><td>{{.Description}}</td></tr>{{end}}
 </tbody></table>
+</div>
 </section>
-<section class="card"><h2>Recent calls</h2>
+<section class="card"><div class="cardhead"><h2>Recent calls</h2></div>
 {{if .Body.RecentCalls}}
-<table class="tbl"><thead><tr><th>Time</th><th>Tool</th><th>Result</th></tr></thead><tbody>
+<div class="tablewrap">
+<table class="data-table grid"><thead><tr><th>Time</th><th>Tool</th><th>Result</th></tr></thead><tbody>
 {{range .Body.RecentCalls}}<tr><td class="mono small">{{.Time.UTC.Format "2006-01-02 15:04:05"}}</td><td class="mono">{{.Tool}}</td><td>{{.Result}}</td></tr>{{end}}
 </tbody></table>
-{{else}}<p class="muted">No MCP tool calls recorded yet.</p>{{end}}
+</div>
+{{else}}<div class="empty-state">{{icon "jobs"}}<b>No MCP calls yet</b><span>No MCP tool calls recorded yet.</span></div>{{end}}
 </section>
 {{end}}

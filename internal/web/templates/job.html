@@ -1,6 +1,7 @@
 {{define "content"}}
 {{with .Body}}
 <section class="card head">
+  <div class="cardhead"><h2>Job Details</h2></div>
   <div class="headrow">
     <span class="badge big {{jobClass .Job}}">{{jobState .Job}}</span>
     <span class="pair"><b>{{.Job.Kind}}</b></span>

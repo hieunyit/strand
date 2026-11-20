@@ -257,7 +257,15 @@ func wizSeedBegin(ctx context.Context, srv *Server, req ActionRequest) (ActionRe
 	}
 	seedType := strings.TrimSpace(req.Args["seed_type"])
 	if seedType == "" {
-		seedType = "xtrabackup"
+		seedType = "clone"
+	}
+	switch seedType {
+	case "clone", "mydumper", "pg_dump":
+		// Allowed network methods
+	case "xtrabackup", "pgbackrest":
+		return ActionResult{}, BadRequest("seed_type: %s requires running on the database host and is not supported in the web wizard; use a network method (clone, mydumper, pg_dump)", seedType)
+	default:
+		return ActionResult{}, BadRequest("seed_type: unsupported method %q; must be clone, mydumper, or pg_dump", seedType)
 	}
 	defer wizLock("seed", p.Name)()
 	now := time.Now()

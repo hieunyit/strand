@@ -14,7 +14,7 @@
 <section class="card" id="backup-dashboard">
   <div class="cardhead"><h2>Backup dashboard</h2><a class="btn small" href="/metrics">Prometheus metrics</a></div>
   {{if .Body.Sources}}
-  <div class="tablewrap"><table class="grid">
+  <div class="tablewrap"><table class="data-table grid">
     <caption class="sr-only">Last backup and recoverable window per source</caption>
     <thead><tr><th>Source</th><th>Engine</th><th>Last success</th><th>Age</th><th class="r">Size</th><th>Size trend</th><th>Recoverable window</th><th class="r">Log segments</th><th>Last check</th></tr></thead>
     <tbody>{{range .Body.Sources}}<tr data-source="{{.Source}}">
@@ -37,7 +37,7 @@
   <div class="cardhead"><h2>Scheduled backup jobs</h2></div>
   <p class="muted">Built-in methods (mysqldump, mydumper, pg_dump, pg_basebackup, mongodump) stream the native tool's output to the repository, compressed and encrypted on the Strand host; <em>custom</em> runs a wrapper script from the allow-listed command directory. Database passwords are read from the Web service environment variable you name, never stored. Only the active Web instance runs schedules, retention and verification.</p>
   {{if .Body.Jobs}}
-  <div class="tablewrap"><table class="grid"><caption class="sr-only">Backup jobs</caption>
+  <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Backup jobs</caption>
   <thead><tr><th>Name</th><th>Method</th><th>Interval</th><th>Retention</th><th>Protection</th><th>Schedule</th><th>Last run</th><th>Actions</th></tr></thead>
   <tbody>{{range .Body.Jobs}}<tr data-backup-job-id="{{.Job.ID}}">
     <td>{{.Job.Name}}{{if .Job.Source}}<div class="small muted">{{.Job.Source}}</div>{{end}}</td>
@@ -61,7 +61,7 @@
   <section id="retention-preview" class="subcard" hidden aria-live="polite">
     <h3>Retention preview <span id="retention-preview-job" class="muted small"></span></h3>
     <p id="retention-preview-summary" class="small"></p>
-    <div class="tablewrap"><table class="grid"><caption class="sr-only">Retention decisions</caption>
+    <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Retention decisions</caption>
       <thead><tr><th>Backup</th><th>Kind</th><th>Created</th><th>Decision</th><th>Reasons</th></tr></thead><tbody id="retention-preview-rows"></tbody></table></div>
     <div class="toolbar"><button class="btn danger" type="button" id="retention-apply">Apply retention now</button><button class="btn" type="button" id="retention-close">Close</button></div>
   </section>
@@ -157,7 +157,7 @@
 <section class="card" id="repositories-section">
   <div class="cardhead"><h2>Repositories</h2></div>
   <p class="muted">Endpoints and credentials stay in the Web service environment: a repository names its variable prefix (<code>STRAND_BACKUP_REPO_&lt;NAME&gt;_ENDPOINT</code>, <code>_ACCESS_KEY</code>, <code>_SECRET_KEY</code>, ...). Object Lock repositories make every new object immutable for the given days (the bucket must be created with Object Lock).</p>
-  {{if .Body.Repos}}<div class="tablewrap"><table class="grid"><caption class="sr-only">Backup repositories</caption>
+  {{if .Body.Repos}}<div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Backup repositories</caption>
     <thead><tr><th>Name</th><th>Environment prefix</th><th>Bucket / prefix</th><th>Object Lock</th><th>Default retention</th><th>Actions</th></tr></thead>
     <tbody>{{range .Body.Repos}}<tr data-repo-id="{{.ID}}"><td>{{.Name}}<div class="small mono">{{.ID}}</div></td><td class="mono small">{{.EnvPrefix}}</td><td class="mono small">{{.Bucket}}/{{.Prefix}}</td>
       <td>{{if .LockMode}}{{.LockMode}} {{.LockDays}}d{{else}}-{{end}}</td><td class="small">{{if .Retention.Enabled}}{{with .Retention}}{{if .KeepLast}}last {{.KeepLast}} {{end}}{{if .KeepDaily}}daily {{.KeepDaily}} {{end}}{{if .MaxAgeDays}}max {{.MaxAgeDays}}d{{end}}{{end}}{{else}}keep all{{end}}</td>
@@ -180,7 +180,7 @@
 {{if .Body.Checks}}
 <section class="card">
   <div class="cardhead"><h2>Recent verification</h2></div>
-  <div class="tablewrap"><table class="grid"><caption class="sr-only">Recent verification and test-restore results</caption>
+  <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Recent verification and test-restore results</caption>
     <thead><tr><th>Backup</th><th>Check</th><th>Result</th><th>Finished</th><th>Detail</th></tr></thead>
     <tbody>{{range .Body.Checks}}<tr><td class="mono small">{{.BackupID}}</td><td>{{.Kind}}</td><td><span class="badge {{if eq .Status "ok"}}st-synced{{else}}st-failed{{end}}">{{.Status}}</span></td><td class="nowrap">{{ts .FinishedAt}}</td><td class="small">{{.Detail}}</td></tr>{{end}}</tbody></table></div>
 </section>
@@ -199,7 +199,7 @@
   <p class="muted">Backup artifacts, log segments and their recovery metadata stored in the configured repositories.</p>
   {{if .Body.Message}}<p class="warnbox" role="status">{{.Body.Message}}</p>{{else if .Body.Backups}}
   <div class="tablewrap">
-    <table class="grid">
+    <table class="data-table grid">
       <caption class="sr-only">Central backup catalog</caption>
       <thead><tr><th>ID</th><th>Source</th><th>Method / kind</th><th>Status</th><th class="r">Size</th><th>Recovery point</th><th>Storage</th><th>Created</th><th>Verified</th><th>Actions</th></tr></thead>
       <tbody>{{range .Body.Backups}}

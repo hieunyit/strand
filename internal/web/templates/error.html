@@ -1,5 +1,6 @@
 {{define "content"}}
 <section class="card">
+  <div class="cardhead"><h2>{{if .Body.Code}}Error {{.Body.Code}}{{else}}Error{{end}}</h2></div>
   <div class="empty-state">
     {{icon "alert"}}
     <b>{{.Body.Code}} · {{.Body.Title}}</b>

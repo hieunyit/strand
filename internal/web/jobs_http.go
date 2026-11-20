@@ -3,7 +3,10 @@ package web
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -143,9 +146,34 @@ func (s *Server) apiJobDownload(w http.ResponseWriter, r *http.Request, _ *Sessi
 	if !ok {
 		return
 	}
+	if j.Kind != "export" {
+		writeErr(w, http.StatusBadRequest, "only export jobs can be downloaded")
+		return
+	}
+
+	_ = s.audit.Log(AuditEntry{
+		IP:       s.clientIP(r),
+		Action:   "job.download",
+		Pipeline: j.Pipeline,
+		Detail:   map[string]any{"job_id": j.ID},
+		Result:   "ok",
+	})
+
+	filename := fmt.Sprintf("export-%s.dump", j.ID)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filename))
+
+	exportPath := filepath.Join(s.cfg.StateDir, "exports", j.Pipeline)
+	if stat, err := os.Stat(exportPath); err == nil && !stat.IsDir() {
+		f, err := os.Open(exportPath)
+		if err == nil {
+			defer f.Close()
+			_, _ = io.Copy(w, f)
+			return
+		}
+	}
+
 	out, _ := s.jobs.Output(j.ID, 0)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="job-%s.log"`, j.ID))
 	_, _ = w.Write([]byte(out.Data))
 }
 

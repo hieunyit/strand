@@ -70,6 +70,12 @@ type Server struct {
 	pages   map[string]*template.Template
 	handler http.Handler
 
+	tunnelMu        sync.Mutex
+	tunnels         map[string]tunnelItem
+	archiverMu      sync.Mutex
+	archiverRunning bool
+	archiverDir     string
+
 	// Luồng sống (stream.go): hub phát sự kiện của sampler; delta nhớ phần đã phát; streams đếm kết nối SSE.
 	hub          *liveHub
 	delta        liveDelta
@@ -145,7 +151,8 @@ func New(o Options) (*Server, error) {
 		sourceTablesCache: make(map[string]sourceTablesCacheEntry),
 		sessions:          NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
 		actions: NewActionRegistry(), log: o.Logger, now: o.Now, version: o.Version,
-		tls: o.Config.TLSCert != "",
+		tls:     o.Config.TLSCert != "",
+		tunnels: make(map[string]tunnelItem),
 	}
 	s.db = db
 	s.backups, err = backup.NewCatalog(db.st)
@@ -328,13 +335,37 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /settings", s.auth(false, s.pageSettings))
 	mux.Handle("GET /api/v1/settings", s.auth(true, s.apiSettingsGet))
 	mux.Handle("POST /api/v1/settings", s.auth(true, s.apiSettingsSave))
+
+	// RBAC: admin-only read
 	mux.Handle("GET /settings/db", s.auth(false, s.pageDBAdmin))
+	mux.Handle("POST /settings/db/migrate", s.auth(false, s.pageDBMigrate))
+	mux.Handle("POST /settings/db/export", s.auth(false, s.pageDBExport))
+
 	mux.Handle("GET /help/schema", s.auth(false, s.pageSchemaHelp))
+
+	// RBAC: admin-only read
 	mux.Handle("GET /tools/spool-inspect", s.auth(false, s.pageSpoolInspect))
+	mux.Handle("POST /tools/spool-inspect", s.auth(false, s.pageSpoolInspect))
+	mux.Handle("POST /api/v1/tools/spool-inspect", s.auth(true, s.apiSpoolInspect))
+
+	// RBAC: admin-only read
 	mux.Handle("GET /archive", s.auth(false, s.pageArchive))
+	mux.Handle("POST /archive/start", s.auth(false, s.pageArchiveStart))
+	mux.Handle("POST /archive/stop", s.auth(false, s.pageArchiveStop))
+	mux.Handle("POST /api/v1/archive/start", s.auth(true, s.apiArchiveStart))
+	mux.Handle("POST /api/v1/archive/stop", s.auth(true, s.apiArchiveStop))
+
+	// RBAC: admin-only read
 	mux.Handle("GET /tunnels", s.auth(false, s.pageTunnel))
+	mux.Handle("POST /tunnels", s.auth(false, s.pageTunnelOpen))
+	mux.Handle("POST /tunnels/stop", s.auth(false, s.pageTunnelStop))
+	mux.Handle("POST /api/v1/tunnels", s.auth(true, s.apiTunnelOpen))
+	mux.Handle("POST /api/v1/tunnels/{id}/stop", s.auth(true, s.apiTunnelStop))
+
 	mux.Handle("GET /jobs/{id}", s.auth(false, s.pageJob))
-	mux.Handle("GET /api/v1/jobs/{id}/download", s.auth(false, s.apiJobDownload))
+
+	// RBAC: admin-only read
+	mux.Handle("GET /api/v1/jobs/{id}/download", s.auth(true, s.apiJobDownload))
 	mux.Handle("GET /backups", s.auth(false, s.pageBackups))
 	mux.Handle("GET /api/v1/backup-jobs", s.auth(true, s.apiBackupJobs))
 	mux.Handle("GET /api/v1/backup-jobs/{id}", s.auth(true, s.apiBackupJobGet))

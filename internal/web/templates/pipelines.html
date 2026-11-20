@@ -1,11 +1,14 @@
 {{define "content"}}
-{{range .Body.Warnings}}<p class="warnbox" role="alert">{{.}}</p>{{end}}
+{{range .Body.Warnings}}<div class="alert alert-warn mb" role="alert">{{.}}</div>{{end}}
 <section class="card">
+  <div class="cardhead">
+    <h2>Pipelines Directory</h2>
+    <a class="btn primary" href="/pipelines/new">{{icon "plus"}}New pipeline</a>
+  </div>
   <div class="toolbar" role="search">
     <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Filter by name or engine" aria-label="Filter pipelines by name or engine" autocomplete="off"></span>
     <label for="pl-state">State <select id="pl-state"><option value="">all</option>{{range .Body.States}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
     <span class="muted small" id="pl-count" aria-live="polite"></span>
-    <a class="btn primary push" href="/pipelines/new">{{icon "plus"}}New pipeline</a>
   </div>
   {{template "pipeline-table" .}}
 </section>

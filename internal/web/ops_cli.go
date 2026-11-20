@@ -86,8 +86,15 @@ func (s *Server) registerCLIOps() {
 	})
 	reg(ActExport, false, func(p *Pipeline, a map[string]string) ([]string, error) {
 		out := strings.TrimSpace(a["out"])
+		allowedDir := filepath.Clean(filepath.Join(s.cfg.StateDir, "exports"))
 		if out == "" {
-			out = filepath.Join(s.cfg.StateDir, "exports", p.Name)
+			out = filepath.Join(allowedDir, p.Name)
+		} else {
+			cleanOut := filepath.Clean(out)
+			if cleanOut != allowedDir && !strings.HasPrefix(cleanOut, allowedDir+string(filepath.Separator)) {
+				return nil, BadRequest("out: export directory must be within %s", allowedDir)
+			}
+			out = cleanOut
 		}
 		return []string{"export", "-c", p.ConfigPath, "--out", out}, nil
 	})
