@@ -207,3 +207,30 @@ func TestAPICreateBackupJob_PITRValidation(t *testing.T) {
 		}
 	}
 }
+
+// Jobs saved before the PITR rules existed (e.g. mariadb-dump with log_archive) must stay manageable: they
+// are listed with a warning and can still be stopped, instead of every write failing validation.
+func TestLegacyPITRJobStillStoppable(t *testing.T) {
+	st := store.NewMem()
+	legacy := backup.Job{ID: "legacy1", Name: "legacy", EverySeconds: 3600, Bucket: "central-backups", Enabled: true}
+	legacy.Method, legacy.Source = backup.MethodMariaDBDump, "src"
+	legacy.LogArchive = true
+	legacy.Conn = backup.ConnSpec{Host: "127.0.0.1", Port: 3306, User: "root", PasswordEnv: "PW", Databases: []string{"db1"}}
+	if err := st.CreateBackupJob(context.Background(), legacy); err != nil {
+		t.Fatalf("stored legacy job unreadable/unwritable by the store: %v", err)
+	}
+	e := dbEnv(t, st, nil, nil)
+	c, csrf := e.loginOK()
+	resp, body := e.do(c, "GET", "/api/v1/backup-jobs", "", nil)
+	if resp.StatusCode != 200 || !strings.Contains(body, "MariaDB does not support binlog archiving") {
+		t.Fatalf("list should flag the legacy job: %d %s", resp.StatusCode, body)
+	}
+	resp, body = e.do(c, "POST", "/api/v1/backup-jobs/legacy1/stop", "", map[string]string{"X-CSRF-Token": csrf})
+	if resp.StatusCode >= 500 {
+		t.Fatalf("stop of legacy PITR job failed: %d %s", resp.StatusCode, body)
+	}
+	j, _, _ := st.GetBackupJob(context.Background(), "legacy1")
+	if j.Enabled {
+		t.Fatal("legacy job still enabled after stop")
+	}
+}
