@@ -919,7 +919,7 @@ type dbAdminView struct {
 func (s *Server) pageSchemaHelp(w http.ResponseWriter, r *http.Request, sess *Session) {
 	s.render(w, "schema", sess, pageData{
 		Title:  "Configuration Schema",
-		Active: "settings",
+		Active: "schema-help",
 		Body: struct {
 			JSONSchema string
 		}{
@@ -954,7 +954,7 @@ func (s *Server) pageSpoolInspect(w http.ResponseWriter, r *http.Request, sess *
 
 	s.render(w, "spool_inspect", sess, pageData{
 		Title:  "Spool Inspect",
-		Active: "tools",
+		Active: "spool",
 		Body: &spoolInspectView{
 			Pipelines: s.spoolPipelineNames(),
 			Pipeline:  pipeline,
@@ -999,7 +999,7 @@ func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Sessi
 
 	s.render(w, "archive", sess, pageData{
 		Title:  "Archive Binlog",
-		Active: "tools",
+		Active: "archive",
 		Body: &archiveView{
 			Running:   running,
 			JobID:     jobID,
@@ -1029,7 +1029,7 @@ func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Sessio
 
 	s.render(w, "tunnel", sess, pageData{
 		Title:  "SSH Tunnels",
-		Active: "tools",
+		Active: "tunnels",
 		Body:   &tunnelView{Tunnels: list},
 	})
 }
@@ -1037,7 +1037,7 @@ func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Sessio
 func (s *Server) pageDBAdmin(w http.ResponseWriter, r *http.Request, sess *Session) {
 	s.render(w, "db_admin", sess, pageData{
 		Title:  "Database Admin",
-		Active: "settings",
+		Active: "db-admin",
 		Body:   &dbAdminView{},
 	})
 }

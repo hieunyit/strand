@@ -540,7 +540,7 @@ func (s *Server) pageDBMigrate(w http.ResponseWriter, r *http.Request, sess *Ses
 	}
 	s.render(w, "db_admin", sess, pageData{
 		Title:  "Database Admin",
-		Active: "settings",
+		Active: "db-admin",
 		Body: &dbAdminView{
 			DryRun:        dryRun,
 			MigrateReport: view,
@@ -575,7 +575,7 @@ func (s *Server) pageDBExport(w http.ResponseWriter, r *http.Request, sess *Sess
 		s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.render(w, "db_admin", sess, pageData{Title: "Database Admin", Active: "settings", Body: &dbAdminView{ExportOutput: out.String()}})
+	s.render(w, "db_admin", sess, pageData{Title: "Database Admin", Active: "db-admin", Body: &dbAdminView{ExportOutput: out.String()}})
 }
 
 // ---- Archive Handlers ----

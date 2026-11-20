@@ -21,6 +21,26 @@
   }
   window.strandApi = api;
 
+  // Sidebar groups collapse; the state is remembered per browser (storage may be unavailable: ignore).
+  (function () {
+    var KEY = 'strand.nav.collapsed';
+    var collapsed = {};
+    try { collapsed = JSON.parse(window.localStorage.getItem(KEY) || '{}') || {}; } catch (e) { collapsed = {}; }
+    Array.prototype.forEach.call(document.querySelectorAll('.navgroup'), function (g) {
+      var id = g.getAttribute('data-navgroup'), btn = g.querySelector('.navbtn'), items = g.querySelector('.navitems');
+      if (!btn || !items) { return; }
+      function set(open) { btn.setAttribute('aria-expanded', open ? 'true' : 'false'); items.hidden = !open; }
+      // A group holding the current page always starts open.
+      set(!collapsed[id] || !!items.querySelector('[aria-current="page"]'));
+      btn.addEventListener('click', function () {
+        var open = btn.getAttribute('aria-expanded') !== 'true';
+        set(open);
+        if (open) { delete collapsed[id]; } else { collapsed[id] = true; }
+        try { window.localStorage.setItem(KEY, JSON.stringify(collapsed)); } catch (e) { /* private mode */ }
+      });
+    });
+  })();
+
   // A refresh must not wipe a form the operator is typing in or a dialog that is open.
   function editing() {
     var a = document.activeElement;
