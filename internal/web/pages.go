@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"strand/internal/admin"
+	"strand/internal/backup"
 	"strand/internal/config"
 	"strand/internal/web/store"
 )
@@ -48,30 +49,31 @@ func templateFuncs() template.FuncMap {
 			}
 			return t.Local().Format("2006-01-02 15:04:05 MST")
 		},
-		"pct":        func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
-		"bar":        ProgressBar,
-		"bigbar":     BigProgressBar,
-		"ranges":     fmtRanges,
-		"lower":      strings.ToLower,
-		"ptrInt":     func(p *int) int { return *p },
-		"deref":      func(p *float64) float64 { return *p },
-		"stateKey":   func(s string) string { return s },
-		"icon":       icon,
-		"tabIcon":    tabIcon,
-		"engines":    engines,
-		"keyKind":    keyKind,
-		"tblCopied":  tblCopied,
-		"tblEst":     tblEst,
-		"tablesOf":   tablesOf,
-		"tablesHref": tablesHref,
-		"add":        func(a, b int) int { return a + b },
-		"rel":        func(t time.Time) string { return fmtRel(t, time.Now()) },
-		"join":       strings.Join,
-		"jobState":   jobState,
-		"jobClass":   jobClass,
-		"jobDur":     jobDur,
-		"deref2":     func(t *time.Time) time.Time { return *t },
-		"div":        func(a, b int) int { return a / b },
+		"pct":                       func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
+		"bar":                       ProgressBar,
+		"bigbar":                    BigProgressBar,
+		"ranges":                    fmtRanges,
+		"lower":                     strings.ToLower,
+		"ptrInt":                    func(p *int) int { return *p },
+		"deref":                     func(p *float64) float64 { return *p },
+		"stateKey":                  func(s string) string { return s },
+		"icon":                      icon,
+		"tabIcon":                   tabIcon,
+		"engines":                   engines,
+		"keyKind":                   keyKind,
+		"tblCopied":                 tblCopied,
+		"tblEst":                    tblEst,
+		"tablesOf":                  tablesOf,
+		"tablesHref":                tablesHref,
+		"add":                       func(a, b int) int { return a + b },
+		"rel":                       func(t time.Time) string { return fmtRel(t, time.Now()) },
+		"join":                      strings.Join,
+		"jobState":                  jobState,
+		"jobClass":                  jobClass,
+		"jobDur":                    jobDur,
+		"deref2":                    func(t *time.Time) time.Time { return *t },
+		"div":                       func(a, b int) int { return a / b },
+		"isUnsupportedBackupMethod": backup.IsUnsupportedMethod,
 		"jobsCtx": func(j []JobStatus, showPipeline bool) struct {
 			Jobs         []JobStatus
 			ShowPipeline bool

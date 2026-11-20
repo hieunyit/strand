@@ -39,6 +39,7 @@ type Mem struct {
 	userSeq    int64
 	tokens     map[int64]UserToken
 	tokenSeq   int64
+	pro        memBackupPro
 	// Down makes every call fail (simulates a database outage).
 	down bool
 }
@@ -509,7 +510,7 @@ func cloneBackup(r backup.Record) backup.Record {
 		t := *r.ExpiresAt
 		r.ExpiresAt = &t
 	}
-	return r
+	return cloneBackupPro(r)
 }
 
 func (m *Mem) CreateBackup(_ context.Context, r backup.Record) (backup.Record, bool, error) {
@@ -558,6 +559,9 @@ func (m *Mem) ListBackups(_ context.Context, f backup.Filter) ([]backup.Record, 
 	out := make([]backup.Record, 0)
 	for _, r := range m.backups {
 		if (f.Source != "" && r.Source != f.Source) || (f.Engine != "" && r.Engine != f.Engine) || (f.Status != "" && r.Status != f.Status) {
+			continue
+		}
+		if !memBackupProFilter(r, f) {
 			continue
 		}
 		if (f.CreatedAfter != nil && r.CreatedAt.Before(*f.CreatedAfter)) || (f.CreatedBefore != nil && r.CreatedAt.After(*f.CreatedBefore)) {
@@ -668,6 +672,14 @@ func (m *Mem) CreateBackupJob(_ context.Context, j backup.Job) error {
 	return nil
 }
 
+// SeedBackupJob inserts a job directly without validation (simulating jobs stored by an earlier version).
+func (m *Mem) SeedBackupJob(j backup.Job) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j.UpdatedAt = nextBackupJobRevision(time.Time{})
+	m.backupJobs[j.ID] = cloneBackupJob(j)
+}
+
 func (m *Mem) GetBackupJob(_ context.Context, id string) (backup.Job, bool, error) {
 	if err := m.enter(); err != nil {
 		return backup.Job{}, false, err
@@ -707,6 +719,7 @@ func (m *Mem) UpdateBackupJob(_ context.Context, j backup.Job) (bool, error) {
 		}
 	}
 	j.UpdatedAt = nextBackupJobRevision(m.backupJobs[j.ID].UpdatedAt)
+	j.ConsecutiveFailures = 0
 	m.backupJobs[j.ID] = cloneBackupJob(j)
 	return true, nil
 }
@@ -739,6 +752,8 @@ func cloneBackupJob(j backup.Job) backup.Job {
 		t := *j.RunFinishedAt
 		j.RunFinishedAt = &t
 	}
+	j.Conn.Databases = append([]string(nil), j.Conn.Databases...)
+	j.Scratch.Databases = append([]string(nil), j.Scratch.Databases...)
 	return j
 }
 
@@ -778,8 +793,20 @@ func (m *Mem) FinishBackupJobRun(_ context.Context, id string, startedAt time.Ti
 	finished := nextBackupJobRevision(*j.RunStartedAt)
 	j.RunFinishedAt = &finished
 	j.LastRunStatus = status
+	failuresBefore := j.ConsecutiveFailures
+	switch status {
+	case backup.RunStatusFailed:
+		j.ConsecutiveFailures++
+	case backup.RunStatusSucceeded:
+		j.ConsecutiveFailures = 0
+	}
 	if j.Enabled {
 		next := finished.Add(time.Duration(j.EverySeconds) * time.Second)
+		if status == backup.RunStatusFailed {
+			if d := j.RetryDelay(failuresBefore + 1); d > 0 {
+				next = finished.Add(d)
+			}
+		}
 		j.NextRunAt = &next
 	} else {
 		j.NextRunAt = nil

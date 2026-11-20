@@ -231,27 +231,260 @@ keepalives (every 30 s) close the forward when the bastion stops answering. The 
 process receives SIGINT or SIGTERM. Scheduled backup jobs can manage this tunnel
 for each run using the `--tunnel-*` options.
 
-## Current scope
+## Managed backups
 
-This schedules trusted native wrappers and centralizes their output, catalog,
-verified download (`strand backup fetch`), and MCP discovery. It does not itself
-implement every database vendor's native backup procedure, restore into
-databases, automatically expire objects, or delete S3 data; use bucket lifecycle
-rules for retention until a managed retention job exists. Backups are not
-encrypted by Strand: use bucket default encryption (SSE-S3/SSE-KMS) and TLS.
+Besides uploading artifacts produced elsewhere, Strand runs backups itself.
+Every feature below works from the CLI and from the Web UI (Backups page); the
+Web runs schedules, retention, verification and log archiving on the **active**
+instance only (lease), each as a `strand backup ...` process visible on the
+Jobs page with its log.
 
-Retention and restore workflows intentionally remain explicit. Mature tools
-often separate snapshot expiration from physical pruning, because pruning can
-hold repository locks and should be followed by integrity checks ([restic
-forget/prune guidance](https://restic.readthedocs.io/en/stable/060_forget.html)).
-For database-native incremental chains, a base or intermediate backup may be a
-dependency of later artifacts; deleting it without dependency-aware retention
-can make the chain unrestorable ([Percona XtraBackup incremental prepare
-guidance](https://docs.percona.com/percona-xtrabackup/8.4/prepare-incremental-backup.html)).
-Likewise, point-in-time recovery depends on retaining the required WAL alongside
-base backups ([pgBackRest user guide](https://pgbackrest.org/user-guide.html)).
-Before adding automated expiry or prune, Strand needs format-aware dependency
-metadata, a restore/drill state, and a policy that preserves required logs.
-Job output files are capped at 32 MiB each; output after the cap is discarded
-and a truncation marker is written, while process status and exit code remain
-available.
+### Built-in methods
+
+| Method | Engine | Kind | Recovery position recorded | Streams to S3 |
+|---|---|---|---|---|
+| `mysqldump`, `mariadb-dump` | MySQL/MariaDB | full, logical (`--single-transaction`) | binlog file/pos + GTID set (from `--source-data`/`--master-data`) | yes (stdout) |
+| `mydumper` | MySQL | full, logical, parallel | `metadata` SHOW MASTER STATUS | tar of the dump dir |
+| `pg_dump` | PostgreSQL | full, logical (`-Fc`) | consistent time | yes |
+| `pg_basebackup` | PostgreSQL | full, physical (`-Ft -X fetch`) | start/end LSN, timeline | yes (`-D -`) |
+| `mongodump` | MongoDB | full, logical (`--archive --oplog`) | oplog timestamp before/after | yes |
+| `custom` | any | whatever the wrapper produces | from the v1 seed manifest | file/dir upload |
+
+Strand builds the native tool's argv itself (no shell). Tools are taken from
+`STRAND_BACKUP_TOOLS_DIR` when set (only there), else from
+`STRAND_WEB_BACKUP_COMMAND_DIR`, else `PATH`. Passwords are never in argv or
+in the catalog: a job names an environment variable of the Web service
+(`conn.password_env`, MongoDB `conn.uri_env`) and Strand passes the value as
+`MYSQL_PWD`/`PGPASSWORD` or in a 0600 option file in a private temp directory.
+Names reserved for Strand's own secrets (`STRAND_WEB_*`, `STRAND_BACKUP_S3_*`,
+`STRAND_BACKUP_REPO_*`, `STRAND_BACKUP_ENCRYPTION*`, `STRAND_BACKUP_NOTIFY*`,
+`AWS_*`) are refused. A failing tool aborts the upload and marks the record
+`failed`. Each stored payload is read back (and decrypted/decompressed with its
+plaintext SHA-256 checked) before the record becomes `complete`; set
+`STRAND_BACKUP_VERIFY_READBACK=false` to skip.
+
+```sh
+strand backup schedule --job-id bjob-...        # scheduler of a built-in job (started by the Web)
+strand backup schedule --job-id bjob-... --once # one run ("Run now")
+```
+
+### Compression and client-side encryption
+
+Payloads can be compressed (zstd, levels 1-4, multi-threaded) and encrypted
+(AES-256-GCM) on the Strand host before upload (`compress`/`encrypt` job
+options, `strand backup push --compress --encrypt`). Format "SBK1":
+
+```
+header = "STRNDBK1" | flags | chunk size | key id | salt(32) | key check(8)
+body   = zstd stream, then (if encrypted) 1 MiB frames: len | AES-256-GCM(frame)
+```
+
+Each stream gets its own key: HKDF-SHA256(master key, random salt); frame nonces
+are a counter plus a last-frame flag (STREAM construction), and the header is the
+AAD of every frame, so truncation, reordering, header edits and bit flips are
+detected. The catalog records `format`, `compression`, `key_id`, the stored
+size/SHA-256 and the plaintext size/SHA-256. `strand backup fetch` and restores
+decode transparently (`fetch --raw` keeps the stored bytes).
+
+Keys (32 random bytes; `strand backup keygen`):
+
+```sh
+STRAND_BACKUP_ENCRYPTION_KEYS="2026q1:<base64>,2025q4:<base64>"   # first = active
+STRAND_BACKUP_ENCRYPTION_KEYS_FILE=/etc/strand/backup-keys          # "id:key" lines, chmod 600
+STRAND_BACKUP_ENCRYPTION_KEY=<base64>  (+ STRAND_BACKUP_ENCRYPTION_KEY_ID, default "default")
+```
+
+Rotation: put the new key first and keep old keys listed until every backup
+encrypted with them has expired; restoring needs the key id recorded in the
+catalog, and a wrong key fails with "wrong encryption key" before any data is
+decoded. Losing a key loses its backups: keep keys in your secret manager.
+
+### Repositories, Object Lock and copies (3-2-1)
+
+Without repositories, backups go to `STRAND_BACKUP_S3_*` + the job's bucket.
+Named repositories (Web: Repositories; API `/api/v1/backup-repositories`) hold
+only an id, bucket, prefix, Object Lock settings and a default retention policy;
+endpoint and credentials stay in the environment under the repository's prefix:
+
+```sh
+STRAND_BACKUP_REPO_OFFSITE_ENDPOINT=https://s3.eu-central-1.amazonaws.com
+STRAND_BACKUP_REPO_OFFSITE_REGION=eu-central-1
+STRAND_BACKUP_REPO_OFFSITE_ACCESS_KEY=... / _SECRET_KEY=... / _SESSION_TOKEN=...
+```
+
+With `lock_mode` GOVERNANCE or COMPLIANCE and `lock_days`, every object is
+written with S3 Object Lock retention (the bucket must be created with Object
+Lock; Strand sends Content-MD5 as required) and the catalog records the version
+id and retain-until date. `replicate_to` copies each new backup to a second
+repository (`strand backup copy --id ... --to-repository ...`): bytes are copied
+unchanged (still encrypted), verified on download and after upload, and
+cataloged as a new record with `copy_of`.
+
+### Retention
+
+GFS policy per job (and a default per repository for backups without a job):
+`keep_last`, `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`,
+`keep_yearly`, `keep_within_days`, `max_age_days`, plus `lock_days`. A backup is
+kept when any rule selects it; `max_age_days` is a hard cap. Guarantees: the
+newest full backup is never expired; a kept incremental keeps its whole chain;
+log segments are kept from the oldest kept base onward (PITR stays possible for
+every kept base); legal hold and an unexpired Object Lock always block expiry.
+
+```sh
+strand backup prune --job-id bjob-... --dry-run   # decision and reason per backup
+strand backup prune --job-id bjob-...             # delete objects (versions), then mark expired
+```
+
+The Web previews a policy (also an unsaved one) and the active instance applies
+each job's policy hourly. Objects are deleted before the record is marked
+`expired`, every expiry is audited (`backup.expire`), and a failed deletion is
+retried on the next run.
+
+### Point-in-time recovery
+
+Enable `log_archive` on a built-in job; the active Web keeps one
+`strand backup log-archive --job-id ...` process per job:
+
+- **MySQL** (GTID mode): Strand's binlog archiver (the one behind
+  `strand archive binlog`: GTID auto-position, crash-safe, gap detection)
+  writes to a local staging directory; each finalized binlog file is uploaded
+  with its first/last event time and GTIDs, then removed locally.
+  `log_flush_seconds` issues `FLUSH BINARY LOGS` that often (needs RELOAD) to
+  bound the RPO.
+- **PostgreSQL**: Strand is a physical replication client on its own slot
+  (`strand_<job>`; needs REPLICATION) — no `archive_command`, nothing installed
+  on the database host. Each completed WAL segment is uploaded with its start/end
+  LSN. `log_flush_seconds` calls `pg_switch_wal()` on quiet databases. Drop the
+  slot when you delete the job, or WAL accumulates on the server.
+- **MongoDB** (replica set): tailable cursor on `local.oplog.rs`; slices of up to
+  `log_flush_seconds` (default 60 s) or 64 MiB, contiguous by timestamp. An
+  oplog rollover is reported as a gap.
+
+The dashboard shows the recoverable window per source; `strand backup verify`
+checks log continuity. Restore to a time:
+
+```sh
+strand backup restore --source mysql-prod --to-time 2026-11-20T10:15:00Z --dry-run   # plan: base + logs
+strand backup restore --source mysql-prod --to-time 2026-11-20T10:15:00Z \
+  --target-host db-restore --target-user restore --target-password-env RESTORE_PW \
+  --target-database shop_20261120 --yes
+strand backup restore --source pg-prod --to-time 2026-11-20T10:15:00Z --target-dir /srv/restore/pg --yes
+```
+
+Strand chooses the newest base backup consistent before the target and the
+contiguous logs up to it. The target is always new — the database must not
+exist, the directory must be empty — and the source is never written:
+
+- MySQL: the dump is loaded into the new database (its `GTID_PURGED` statement
+  is commented out), then `mysqlbinlog --exclude-gtids=<dump GTIDs>
+  --skip-gtids --rewrite-db=<src>-><new> --stop-datetime=<target>` is replayed
+  into it. Requires a single-database dump.
+- PostgreSQL: the base backup is extracted, the needed WAL is staged in
+  `strand_wal/`, and `restore_command`, `recovery_target_time` and
+  `recovery_target_action=promote` are set with `recovery.signal`; start
+  PostgreSQL on the directory to recover and promote.
+- MongoDB: `mongorestore --oplogReplay` of the base into a new deployment, then
+  the archived oplog with `--oplogLimit`; single-database dumps restore under a
+  new name (`--nsFrom/--nsTo`).
+
+`--id <backup>` restores one backup as is. The Web restore wizard (Backups page)
+requires typing the target name to confirm and opens the job log.
+
+### Verification and test restores
+
+```sh
+strand backup verify --id bkp-...                  # HEAD + full re-read: stored and plaintext SHA-256
+strand backup verify --job-id bjob-... --sample 10 # 10% of payloads fully re-read (newest always), the rest HEAD-checked,
+                                                    # incremental chains complete, log continuity
+strand backup verify --job-id bjob-... --test-restore
+```
+
+`--test-restore` (job option `test_restore` + a `scratch` connection) restores
+the newest mysqldump/pg_dump backup into a scratch database
+`strand_verify_<time>`, records per-table row counts, and drops it. Results are
+stored per backup (`/api/v1/backups/{id}/checks`), shown on the dashboard and
+counted in metrics. `verify_every_seconds` schedules it on the active instance.
+
+### Retries, bandwidth, staged parts
+
+`retry_max` and `retry_backoff_seconds`: after a failed run the next attempt is
+due after backoff × 2^(failures-1), capped by the interval, until retry_max
+consecutive failures; success resets the counter. `bandwidth_kbps` limits the
+upload rate of a job. Multipart staging files are named with the owner PID and
+files of dead processes are removed whenever a repository is opened.
+
+### Notifications
+
+Configured in the Web service environment only (destinations are secrets):
+
+```sh
+STRAND_BACKUP_NOTIFY_WEBHOOK=https://hooks.example.com/strand      # JSON event
+STRAND_BACKUP_NOTIFY_SLACK_WEBHOOK=https://hooks.slack.com/...     # {"text": ...} (Slack/Mattermost)
+STRAND_BACKUP_NOTIFY_SMTP_ADDR=smtp.example.com:587                # STARTTLS required except loopback
+STRAND_BACKUP_NOTIFY_SMTP_FROM=strand@example.com
+STRAND_BACKUP_NOTIFY_SMTP_TO=dba@example.com,ops@example.com
+STRAND_BACKUP_NOTIFY_SMTP_USER=... / STRAND_BACKUP_NOTIFY_SMTP_PASSWORD=...
+STRAND_BACKUP_NOTIFY_ON=failure,missed,verify_failed               # default; add success or use all
+```
+
+Events: run `failure`/`success`, `missed` schedule (due more than max(5 min,
+10% of the interval) ago without a run), `verify_failed`. Each event is sent
+once across instances and audited (`backup.notify`).
+
+### Metrics and alerts
+
+`GET /metrics` (Web session or API token) exposes Prometheus gauges:
+`strand_backup_last_success_timestamp_seconds{source,engine}`,
+`strand_backup_last_size_bytes`, `strand_backup_last_duration_seconds`,
+`strand_backup_stored_bytes`, `strand_backup_recovery_window_end_timestamp_seconds`,
+`strand_backup_job_consecutive_failures{job,name}`,
+`strand_backup_job_last_run_success`, `strand_backup_recent_check_failures`.
+
+```yaml
+groups:
+- name: strand-backups
+  rules:
+  - alert: StrandBackupTooOld        # RPO breach (daily jobs)
+    expr: time() - strand_backup_last_success_timestamp_seconds > 26*3600
+  - alert: StrandBackupFailing
+    expr: strand_backup_job_consecutive_failures >= 2
+  - alert: StrandPITRLagging         # log archiving stalled
+    expr: time() - strand_backup_recovery_window_end_timestamp_seconds > 900
+  - alert: StrandBackupVerifyFailed
+    expr: strand_backup_recent_check_failures > 0
+```
+
+### Catalog schema (migration 014)
+
+`backups` gains: `job_id`, `repository`, `method`, `kind` (full | incremental |
+log), `parent_id`, `copy_of`, `format`, `compression`, `key_id`, `plain_bytes`,
+`plain_sha256`, `oplog_ts`, `end_position` (JSON), `start_time`, `end_time`,
+`version_id`, `lock_mode`, `retain_until`, `checked_at`, `check_status`,
+`check_detail`, `expired_at`, `details` (JSON: tool version, timeline, to_lsn,
+seq, server_file, databases, ...); engine `mongodb`. New tables
+`backup_checks` (verification history) and `backup_repositories`;
+`backup_jobs` gains `options` (JSON: method, connection, retention, encryption,
+log archiving, verification), retry columns and notification/claim timestamps.
+Log segments are self-describing (their catalog row is the manifest); base
+backups get a `manifest.json` sidecar containing the catalog record so a
+repository can be re-indexed without the database.
+
+## Current limits
+
+- Strand runs on its own host, never on the database host, so physical backup
+  methods that read the datadir locally (`xtrabackup`, `mariabackup`) and
+  incremental-chain creation paths are removed. Existing catalog records with
+  `kind=incremental` or method `xtrabackup` from older versions still list, are
+  retained and expired safely according to retention policies, and can be
+  restored using `strand backup fetch` and native tooling (they are just not
+  created anymore).
+- MySQL PITR needs GTID mode and a single-database `mysqldump` base; MariaDB
+  binlog archiving is not supported (MariaDB GTIDs).
+- PostgreSQL PITR follows one timeline; tablespaces (symlinks) are refused on
+  restore. pg_dump bases are not PITR anchors (use pg_basebackup).
+- No deduplication across backups (every run is a full stream; incremental chain
+  creation is removed).
+- Test restores cover mysqldump/mariadb-dump/pg_dump; physical and MongoDB test
+  restores are not automated.
+- Job output files are capped at 32 MiB each; output after the cap is discarded
+  and a truncation marker is written.

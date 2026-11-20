@@ -34,6 +34,7 @@ import (
 func newBackupCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "backup", Short: "Manage centralized database backups"}
 	cmd.AddCommand(newBackupPushCmd(), newBackupListCmd(), newBackupFetchCmd(), newBackupScheduleCmd())
+	addBackupProCommands(cmd)
 	return cmd
 }
 
@@ -114,8 +115,25 @@ must create the artifact and v1 seed manifest at the paths supplied in the
 STRAND_BACKUP_* environment variables. Use {id} in --artifact and --manifest
 paths for unique files. This process stays in the foreground; supervise it with
 systemd or another process manager.`,
-		Args: cobra.MinimumNArgs(1),
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				// Built-in method job: everything comes from the job definition in the metadata database.
+				if jobID == "" || !backup.ValidID(jobID) {
+					return errors.New("pass the wrapper command, or --job-id of a built-in-method job")
+				}
+				ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+				defer stop()
+				st, err := web.CLIStore(ctx, cfgPath, nil)
+				if err != nil {
+					return fmt.Errorf("open backup job metadata store: %w", err)
+				}
+				if st == nil {
+					return errors.New("managed backup jobs require the metadata database")
+				}
+				defer st.Close()
+				return runManagedBuiltinSchedule(ctx, cmd, st, jobID, once)
+			}
 			if every < time.Minute {
 				return errors.New("--every must be at least 1m")
 			}
@@ -177,6 +195,7 @@ systemd or another process manager.`,
 	}
 	cmd.Flags().DurationVar(&every, "every", 24*time.Hour, "backup interval (minimum 1m)")
 	cmd.Flags().BoolVar(&once, "once", false, "run exactly one backup and exit (used for Run now)")
+	addPushEncodingFlags(cmd)
 	cmd.Flags().StringVar(&jobID, "job-id", "", "managed Web backup job ID (enables distributed scheduling locks)")
 	cmd.Flags().BoolVar(&cleanupLocal, "cleanup-local", false, "remove generated local artifact and manifest after successful upload")
 	cmd.Flags().StringVar(&artifactTemplate, "artifact", "", "artifact path template; {id} is replaced with a unique backup ID")
@@ -452,6 +471,8 @@ func wrapperEnv(environ []string) []string {
 	for _, kv := range environ {
 		name, _, _ := strings.Cut(kv, "=")
 		if strings.HasPrefix(name, "STRAND_WEB_") || strings.HasPrefix(name, "STRAND_BACKUP_S3_") ||
+			strings.HasPrefix(name, "STRAND_BACKUP_REPO_") || strings.HasPrefix(name, "STRAND_BACKUP_ENCRYPTION") ||
+			strings.HasPrefix(name, "STRAND_BACKUP_NOTIFY") ||
 			strings.HasPrefix(name, "STRAND_SECRET") || name == "AWS_SECRET_ACCESS_KEY" || name == "AWS_SESSION_TOKEN" {
 			continue
 		}
@@ -666,6 +687,7 @@ func newBackupPushCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&partSizeMiB, "part-size-mib", 64, "multipart part size in MiB (5-1024); temporary disk use is part size × concurrency")
 	cmd.Flags().IntVar(&concurrency, "upload-concurrency", 4, "parts uploaded in parallel (1-32)")
+	addPushEncodingFlags(cmd)
 	cmd.Flags().StringVar(&manifestPath, "manifest", "", "seed manifest JSON path")
 	cmd.Flags().StringVar(&artifactPath, "artifact", "", "backup artifact file or directory")
 	cmd.Flags().StringVar(&bucket, "bucket", "", "destination S3 bucket")
@@ -735,8 +757,13 @@ func pushBackupArtifact(ctx context.Context, cmd *cobra.Command, obj *objectstor
 	if err != nil {
 		return fail(fmt.Errorf("open backup artifact: %w", err))
 	}
-	artifactInfo, uploadErr := obj.Upload(ctx, artifactKey, reader, size, "")
+	artifactInfo, meta, uploadErr := uploadPushPayload(ctx, obj, artifactKey, reader, size)
 	closeErr := reader.Close()
+	if uploadErr == nil && meta != nil {
+		if _, _, err := catalog.UpdateMeta(ctx, record.ID, record.Engine, *meta); err != nil {
+			return fail(fmt.Errorf("record payload metadata: %w", err))
+		}
+	}
 	if uploadErr != nil {
 		return fail(fmt.Errorf("upload backup artifact: %w", uploadErr))
 	}
@@ -924,6 +951,9 @@ func backupObjectKeys(prefix, id string, directory bool) (string, string) {
 	if directory {
 		artifact += ".tar"
 	}
+	if pushEncoding.compress || pushEncoding.encrypt {
+		artifact += ".sbk"
+	}
 	return artifact, base + "/manifest.json"
 }
 
@@ -990,7 +1020,7 @@ func newBackupListCmd() *cobra.Command {
 // never touches a database: restoring is done with the native tool on the verified file.
 func newBackupFetchCmd() *cobra.Command {
 	var id, outPath string
-	var withManifest bool
+	var withManifest, raw bool
 	cmd := &cobra.Command{
 		Use:   "fetch",
 		Short: "Download a cataloged backup artifact and verify it against the catalog SHA-256",
@@ -1022,13 +1052,20 @@ func newBackupFetchCmd() *cobra.Command {
 			if rec.Status != backup.StatusComplete {
 				return exitcode.New("backup_not_complete", exitcode.Rejected, fmt.Sprintf("backup %s is %s, only complete backups can be fetched", id, rec.Status), nil)
 			}
-			obj, err := backupObjectStore(rec.Bucket, 64, 4)
-			if err != nil {
-				return err
-			}
-			fetchErr := fetchVerified(ctx, obj, rec.ObjectKey, rec.Bytes, rec.SHA256, outPath)
-			if fetchErr == nil && withManifest {
-				fetchErr = fetchManifest(ctx, obj, rec, outPath+".manifest.json")
+			var fetchErr error
+			if rec.Repository != "" || (rec.Format == backup.FormatSBK1 && !raw) {
+				// Managed repository and/or compressed/encrypted payload: decoded transparently (plaintext
+				// SHA-256 verified) unless --raw asks for the stored bytes.
+				fetchErr = fetchManaged(ctx, st, rec, raw, withManifest, outPath)
+			} else {
+				obj, err := backupObjectStore(rec.Bucket, 64, 4)
+				if err != nil {
+					return err
+				}
+				fetchErr = fetchVerified(ctx, obj, rec.ObjectKey, rec.Bytes, rec.SHA256, outPath)
+				if fetchErr == nil && withManifest {
+					fetchErr = fetchManifest(ctx, obj, rec, outPath+".manifest.json")
+				}
 			}
 			result, detail := "ok", map[string]any{"backup_id": id, "out": outPath}
 			if fetchErr != nil {
@@ -1050,6 +1087,7 @@ func newBackupFetchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "backup ID")
 	cmd.Flags().StringVar(&outPath, "out", "", "destination file (must not exist)")
 	cmd.Flags().BoolVar(&withManifest, "with-manifest", false, "also fetch the manifest sidecar to <out>.manifest.json")
+	cmd.Flags().BoolVar(&raw, "raw", false, "write the stored bytes (still compressed/encrypted) instead of decoding")
 	return cmd
 }
 
@@ -1059,6 +1097,12 @@ func fetchVerified(ctx context.Context, obj *objectstore.S3, key string, size in
 		return verifyErr(fmt.Errorf("download backup artifact: %w", err))
 	}
 	defer body.Close()
+	return writeVerifiedFile(body, outPath)
+}
+
+// writeVerifiedFile copies a verifying reader to a temporary file and links it to outPath only when the
+// reader reached EOF without a verification error.
+func writeVerifiedFile(body io.Reader, outPath string) error {
 	tmp, err := os.CreateTemp(filepathDir(outPath), ".strand-fetch-*")
 	if err != nil {
 		return fmt.Errorf("create temporary download file: %w", err)

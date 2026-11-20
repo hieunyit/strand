@@ -396,6 +396,8 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 	t.Run("backups", func(t *testing.T) { runBackups(t, mk(t)) })
 	t.Run("backup_jobs", func(t *testing.T) { runBackupJobs(t, mk(t)) })
 	t.Run("users_and_rbac", func(t *testing.T) { runUsersAndRBAC(t, mk(t)) })
+	t.Run("backup_pro", func(t *testing.T) { runBackupPro(t, mk(t)) })
+	t.Run("backup_retry", func(t *testing.T) { runBackupRetry(t, mk(t)) })
 }
 
 func runUsersAndRBAC(t *testing.T, s store.Store) {

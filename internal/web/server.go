@@ -414,6 +414,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/jobs", s.auth(true, s.apiJobs))
 	mux.Handle("GET /api/v1/jobs/{id}", s.auth(true, s.apiJob))
 	mux.Handle("GET /api/v1/jobs/{id}/output", s.auth(true, s.apiJobOutput))
+	s.backupProRoutes(mux)
 	mux.Handle("GET /api/v1/backups", s.auth(true, s.apiBackups))
 	mux.Handle("GET /api/v1/backups/{id}", s.auth(true, s.apiBackup))
 	mux.Handle("GET /api/v1/backups/{id}/status", s.auth(true, s.apiBackupStatus))
