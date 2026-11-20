@@ -4,7 +4,6 @@
 {{if .Error}}<p class="warnbox" role="alert">{{.Error}}</p>{{end}}
 <section class="card"><div class="cardhead"><h2>Settings</h2></div>
   <p class="muted small">Effective value of each setting and where it comes from. Precedence: <b>environment variable</b> &gt; <b>database</b> (saved here) &gt; <b>web.yaml</b> &gt; default. <b>Reset</b> removes the saved value so the web.yaml value (or the default) applies again. Every change is written to the audit log.</p>
-  {{if not .DBMode}}<p class="warnbox">File mode: settings are read from web.yaml and are read-only here. Edit web.yaml and restart the web, or use the PostgreSQL metadata store to edit them on this page.</p>{{end}}
   <form method="post" action="/settings" class="settings">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
     {{range .Items}}
@@ -33,7 +32,7 @@
       </div>
     </div>
     {{end}}
-    {{if .DBMode}}<p><button class="btn primary" type="submit">Save settings</button></p>{{end}}
+    <p><button class="btn primary" type="submit">Save settings</button></p>
   </form>
 </section>
 <section class="card"><div class="cardhead"><h2>Startup settings</h2></div>

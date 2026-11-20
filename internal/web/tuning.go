@@ -43,6 +43,8 @@ type tuningDef struct {
 	Options []string
 	Min     int
 	Max     int
+	// Mongo: khóa của pipeline kind mongodb (mục mongodb:); khóa khác chỉ dành cho pipeline SQL.
+	Mongo bool
 }
 
 var tuningDefs = []tuningDef{
@@ -76,6 +78,24 @@ var tuningDefs = []tuningDef{
 	{Key: "workers", Path: []string{"resources", "workers", "max"}, Kind: kInt, Min: 1, Max: 1024, Default: "8",
 		Label: "Target workers",
 		Help:  "Apply threads on the target (relaxed commit order; strict always uses 1). Takes effect after a restart."},
+	{Key: "snapshot_batch", Path: []string{"mongodb", "snapshot_batch"}, Kind: kInt, Min: 1, Max: 100000, Default: "1000", Mongo: true,
+		Label: "Snapshot batch (documents)",
+		Help:  "Documents per snapshot write transaction on the target. Takes effect after a restart."},
+	{Key: "stream_batch", Path: []string{"mongodb", "stream_batch"}, Kind: kInt, Min: 1, Max: 100000, Default: "2000", Mongo: true,
+		Label: "Stream batch (change events)",
+		Help:  "Change events per apply transaction on the target. Takes effect after a restart."},
+	{Key: "lease_ttl", Path: []string{"mongodb", "lease_ttl"}, Kind: kDuration, Default: "45s", Mongo: true,
+		Label: "Lease TTL",
+		Help:  "How long the pipeline lease survives a crashed instance before another may take over, for example 45s. Takes effect after a restart."},
+}
+
+// mongoConfig: cấu hình (đã parse) là pipeline MongoDB (source.kind mongodb).
+func mongoConfig(root *yaml.Node) bool {
+	if root == nil {
+		return false
+	}
+	n := lookupPath(root, []string{"source", "kind"})
+	return n != nil && isMongo(nodeText(n))
 }
 
 func tuningDefByKey(k string) *tuningDef {
@@ -348,9 +368,7 @@ type TuningView struct {
 
 func (s *Server) tuningView(p *Pipeline) TuningView {
 	v := TuningView{Path: p.ConfigPath, Fields: []TuningField{}}
-	if s.db != nil {
-		s.materialize(p.Name)
-	}
+	s.materialize(p.Name)
 	raw := s.getOriginalConfig(p)
 	if len(raw) == 0 {
 		var err error
@@ -368,7 +386,11 @@ func (s *Server) tuningView(p *Pipeline) TuningView {
 		v.Error = err.Error()
 		root = nil
 	}
+	mongo := mongoConfig(root)
 	for _, d := range tuningDefs {
+		if d.Mongo != mongo {
+			continue // khóa của loại pipeline khác
+		}
 		f := TuningField{Key: d.Key, Label: d.Label, Help: d.Help, Default: d.Default,
 			YAMLKey: strings.Join(d.Path, "."), Options: d.Options}
 		if root != nil {
@@ -444,6 +466,12 @@ func applyTuning(orig []byte, req map[string]any) ([]byte, []string, error) {
 	if (hasSoft || hasHard) && errs["iops_soft"] == "" && errs["iops_hard"] == "" {
 		if err := validateIOPSPair(eff("iops_soft"), eff("iops_hard")); err != nil {
 			errs["iops_hard"] = err.Error()
+		}
+	}
+	mongo := mongoConfig(root)
+	for k := range vals {
+		if d := tuningDefByKey(k); d != nil && d.Mongo != mongo {
+			errs[k] = "not a setting of this pipeline kind"
 		}
 	}
 	if len(errs) > 0 {
@@ -556,9 +584,7 @@ func (s *Server) saveTuning(ctx context.Context, p *Pipeline, req map[string]any
 	if p == nil || p.ConfigPath == "" {
 		return nil, errors.New("pipeline has no config path")
 	}
-	if s.db != nil {
-		s.materialize(p.Name)
-	}
+	s.materialize(p.Name)
 	orig := s.getOriginalConfig(p)
 	if len(orig) == 0 {
 		var err error

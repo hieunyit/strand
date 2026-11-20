@@ -387,7 +387,7 @@ func (s *Server) snapshotFor(pipeline string, lastID uint64) LiveSnapshot {
 
 // onSample (móc của sampler): phát bản ghi của pipeline vừa lấy mẫu.
 func (s *Server) onSample(name string, sn *Snap, smp Sample) {
-	if s.db != nil && s.isActive() {
+	if s.isActive() {
 		s.db.metrics.add(name, smp) // lịch sử số liệu trong DB (ghi theo lô; chỉ instance active)
 	}
 	p := s.reg.Get(name)

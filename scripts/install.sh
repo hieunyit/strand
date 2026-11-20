@@ -1,7 +1,8 @@
 #!/bin/sh
 # Cài Strand lên máy không dùng .deb/.rpm (chạy bằng root). Chạy lại an toàn (idempotent).
 #
-#   sudo scripts/install.sh --binary ./strand [--prefix /usr/local/bin] [--with-web [web-init options]] [--no-start]
+#   sudo scripts/install.sh --binary ./strand [--prefix /usr/local/bin] [--with-web [--with-postgres | --database-dsn DSN]
+#        [web-init options]] [--no-start]
 #
 # Việc làm: cài binary 0755; tạo group/user strand; /etc/strand (root:strand 0750); chép strand@.service và
 # strand-web.service vào /etc/systemd/system (ExecStart trỏ binary đã cài); chép quy tắc polkit nếu có
@@ -12,17 +13,23 @@
 # nghe loopback mà không đưa --listen thì được chuyển sang 0.0.0.0:8080. Các tùy chọn sau đây
 # được chuyển nguyên cho nó: --listen X, --state-dir X, --scan X, --tls-cert X, --tls-key X, --secure-cookies,
 # --trust-forwarded-for, --allow-plain-http, --generate-password, --password-stdin, --token, --force,
-# --database-dsn X (chế độ PostgreSQL, khuyến nghị; DSN được ghi vào /etc/strand/web.yaml 0640 root:strand).
+# Web UI cần PostgreSQL (kho metadata, bắt buộc): --database-dsn postgres://user:pass@host:5432/db (ghi vào
+# /etc/strand/web.yaml 0640 root:strand), hoặc --with-postgres: cài PostgreSQL cục bộ bằng apt/dnf, tạo role
+# strand_web + database strand_web với mật khẩu ngẫu nhiên. web.yaml có sẵn database.dsn thì giữ nguyên.
+# Khóa STRAND_WEB_SECRET_KEY (bắt buộc) được sinh một lần vào /etc/strand/web.env (root:strand 0640), nạp qua
+# EnvironmentFile của strand-web.service. Giữ một bản khóa ngoài máy: mất khóa = mất bí mật pipeline trong DB.
 set -eu
 
 usage() {
-	sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
 binary=""
 prefix=/usr/local/bin
 with_web=0
+with_pg=0
+dsn_set=0
 no_start=0
 webargs=""
 listen_set=0
@@ -50,6 +57,10 @@ while [ $# -gt 0 ]; do
 		with_web=1
 		shift
 		;;
+	--with-postgres)
+		with_pg=1
+		shift
+		;;
 	--no-start)
 		no_start=1
 		shift
@@ -59,6 +70,7 @@ while [ $# -gt 0 ]; do
 		case "$1" in
 		--listen) listen_set=1 ;;
 		--tls-cert | --tls-key) tls_set=1 ;;
+		--database-dsn) dsn_set=1 ;;
 		esac
 		add_webarg "$1"
 		add_webarg "$2"
@@ -171,14 +183,68 @@ for pair in pipeline.yaml.example:pipeline.yaml pipeline.env.example:pipeline.en
 	fi
 done
 
+# setup_local_postgres: cài PostgreSQL bằng trình quản lý gói, tạo role/database strand_web (chạy lại an toàn:
+# role có sẵn thì đặt lại mật khẩu), in DSN ra stdout.
+setup_local_postgres() {
+	if ! command -v psql >/dev/null 2>&1; then
+		if command -v apt-get >/dev/null 2>&1; then
+			DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql >&2
+		elif command -v dnf >/dev/null 2>&1; then
+			dnf install -y postgresql-server >&2
+			[ -f /var/lib/pgsql/data/PG_VERSION ] || postgresql-setup --initdb >&2
+		else
+			echo "install.sh: --with-postgres needs apt-get or dnf; install PostgreSQL yourself and pass --database-dsn" >&2
+			return 1
+		fi
+	fi
+	systemctl enable --now postgresql >&2 2>/dev/null || true
+	pw=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')
+	su postgres -c "psql -v ON_ERROR_STOP=1 -q" >&2 <<SQL
+DO \$\$ BEGIN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'strand_web') THEN
+    ALTER ROLE strand_web WITH LOGIN PASSWORD '$pw';
+  ELSE
+    CREATE ROLE strand_web WITH LOGIN PASSWORD '$pw';
+  END IF;
+END \$\$;
+SQL
+	if ! su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname = 'strand_web'\"" | grep -q 1; then
+		su postgres -c "createdb -O strand_web strand_web" >&2
+	fi
+	printf 'postgres://strand_web:%s@127.0.0.1:5432/strand_web?sslmode=disable\n' "$pw"
+}
+
 if [ "$with_web" -eq 1 ]; then
+	echo "==> web: PostgreSQL metadata database"
+	wy=/etc/strand/web.yaml
+	if [ "$with_pg" -eq 1 ] && [ "$dsn_set" -eq 0 ]; then
+		dsn=$(setup_local_postgres)
+		add_webarg --database-dsn
+		add_webarg "$dsn"
+		dsn_set=1
+		echo "    local PostgreSQL ready: database strand_web, role strand_web"
+	fi
+	if [ "$dsn_set" -eq 0 ] && ! { [ -f "$wy" ] && grep -q '^[[:space:]]*dsn:' "$wy"; } && [ -z "${STRAND_WEB_DATABASE_DSN:-}" ]; then
+		echo "install.sh: the web UI needs a PostgreSQL database: pass --database-dsn postgres://user:pass@host:5432/db," >&2
+		echo "  or --with-postgres to install one locally (apt/dnf). Create one by hand with:" >&2
+		echo "    sudo -u postgres psql -c \"CREATE ROLE strand_web LOGIN PASSWORD '<pw>'\" -c \"CREATE DATABASE strand_web OWNER strand_web\"" >&2
+		exit 1
+	fi
+	echo "==> web: secret key /etc/strand/web.env"
+	if ! grep -q '^STRAND_WEB_SECRET_KEY=..*' /etc/strand/web.env 2>/dev/null; then
+		umask 027
+		key=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+		printf '# strand-web environment (EnvironmentFile of strand-web.service). Back up this key OUTSIDE the database backup:\n# losing it makes the pipeline secrets stored in the database unreadable.\nSTRAND_WEB_SECRET_KEY=%s\n' "$key" >>/etc/strand/web.env
+		chown root:strand /etc/strand/web.env
+		chmod 0640 /etc/strand/web.env
+		echo "    generated STRAND_WEB_SECRET_KEY (copy /etc/strand/web.env somewhere safe)"
+	fi
 	echo "==> strand web init"
 	if [ "$listen_set" -eq 0 ]; then
 		# Mặc định mở cho mạng: 0.0.0.0:8080 (HTTPS nếu có --tls-cert, không thì HTTP thường).
 		add_webarg --listen
 		add_webarg 0.0.0.0:8080
 		[ "$tls_set" -eq 1 ] || add_webarg --allow-plain-http
-		wy=/etc/strand/web.yaml
 		if [ -f "$wy" ] && cur=$(sed -n 's/^listen:[[:space:]]*["'\'']\{0,1\}\([^"'\''[:space:]#]*\).*/\1/p' "$wy" | head -n 1) &&
 			case "$cur" in 127.*:* | localhost:* | \[::1\]:*) true ;; *) false ;; esac; then
 			# web.yaml có sẵn nghe loopback: chuyển sang 0.0.0.0:8080 (web init không --force sẽ giữ listen cũ).
@@ -200,7 +266,7 @@ if [ "$with_web" -eq 1 ]; then
 	fi
 else
 	echo
-	echo "Done. Web UI: sudo $bin web init --enable"
+	echo "Done. Web UI (needs PostgreSQL): sudo scripts/install.sh --binary $bin --with-web --with-postgres   (or --database-dsn postgres://...)"
 	echo "Pipeline: copy /usr/local/share/doc/strand/examples/pipeline.yaml to /etc/strand/<name>.yaml, then"
 	[ "$no_start" -eq 1 ] || echo "  sudo systemctl enable --now strand@<name>"
 fi

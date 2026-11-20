@@ -25,20 +25,24 @@ type connFields struct {
 //   - hoặc host/port/user/password|password_env/database tách riêng;
 //   - dạng DSN của driver (`user:pass@tcp(host:port)/db`) vẫn nhận nguyên như cũ.
 func resolveConnections(cfg *Config) error {
+	return resolveConnectionsWithEnv(cfg, nil)
+}
+
+func resolveConnectionsWithEnv(cfg *Config, env map[string]string) error {
 	for _, m := range []struct {
-		name                                                 string
-		kind, dsn, uriEnv, host, user, password, passwordEnv *string
-		port                                                 *int
+		name                                                      string
+		kind, dsn, uri, uriEnv, host, user, password, passwordEnv *string
+		port                                                      *int
 	}{
-		{"source", &cfg.Source.Kind, &cfg.Source.DSN, &cfg.Source.URIEnv, &cfg.Source.Host, &cfg.Source.User, &cfg.Source.Password, &cfg.Source.PasswordEnv, &cfg.Source.Port},
-		{"target", &cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.URIEnv, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password, &cfg.Target.PasswordEnv, &cfg.Target.Port},
+		{"source", &cfg.Source.Kind, &cfg.Source.DSN, &cfg.Source.URI, &cfg.Source.URIEnv, &cfg.Source.Host, &cfg.Source.User, &cfg.Source.Password, &cfg.Source.PasswordEnv, &cfg.Source.Port},
+		{"target", &cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.URI, &cfg.Target.URIEnv, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password, &cfg.Target.PasswordEnv, &cfg.Target.Port},
 	} {
 		if IsMongoKind(*m.kind) {
-			if err := resolveMongoConn(m.name, m.kind, m.dsn, m.uriEnv, m.host, m.user, m.password, m.passwordEnv, m.port); err != nil {
+			if err := resolveMongoConn(m.name, m.kind, m.dsn, m.uri, m.uriEnv, m.host, m.user, m.password, m.passwordEnv, m.port, env); err != nil {
 				return exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)
 			}
-		} else if *m.uriEnv != "" {
-			return exitcode.New("invalid_connection", exitcode.InvalidSyntax, m.name+": uri_env is supported for kind mongodb only", nil)
+		} else if *m.uriEnv != "" || *m.uri != "" {
+			return exitcode.New("invalid_connection", exitcode.InvalidSyntax, m.name+": uri / uri_env are supported for kind mongodb only", nil)
 		}
 	}
 	for _, c := range []struct {
@@ -50,7 +54,7 @@ func resolveConnections(cfg *Config) error {
 		{"target", connFields{&cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password,
 			&cfg.Target.PasswordEnv, &cfg.Target.Database, &cfg.Target.Port}},
 	} {
-		if err := resolveConn(c.name, c.f); err != nil {
+		if err := resolveConnWithEnv(c.name, c.f, env); err != nil {
 			return exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)
 		}
 	}
@@ -58,8 +62,12 @@ func resolveConnections(cfg *Config) error {
 }
 
 func resolveConn(name string, f connFields) error {
+	return resolveConnWithEnv(name, f, nil)
+}
+
+func resolveConnWithEnv(name string, f connFields, env map[string]string) error {
 	if IsMongoKind(*f.kind) {
-		return nil // resolveMongoConn
+		return nil // resolveMongoConn (resolveConnectionsWithEnv)
 	}
 	split := *f.host != "" || *f.user != "" || *f.password != "" || *f.passwordEnv != "" || *f.port != 0 || *f.database != ""
 	if !strings.EqualFold(*f.kind, "mysql") {
@@ -80,7 +88,10 @@ func resolveConn(name string, f connFields) error {
 			if pass != "" {
 				return fmt.Errorf("%s: set either password or password_env, not both", name)
 			}
-			v, ok := os.LookupEnv(*f.passwordEnv)
+			v, ok := env[*f.passwordEnv]
+			if !ok {
+				v, ok = os.LookupEnv(*f.passwordEnv)
+			}
 			if !ok {
 				return fmt.Errorf("%s: password_env %s is not set in the environment", name, *f.passwordEnv)
 			}

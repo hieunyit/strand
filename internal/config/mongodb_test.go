@@ -68,3 +68,26 @@ func TestMongoDBConfig(t *testing.T) {
 		}
 	}
 }
+
+// The Web UI stores MongoDB pipelines with uri: "${SRC_URI}" and mongodb.snapshot_batch /
+// stream_batch; secrets may come from the per-pipeline environment.
+func TestMongoDBConfigWebKeys(t *testing.T) {
+	y := `
+version: 1
+name: web-m
+source: { kind: mongodb, uri: "${SRC_URI}", database: app }
+target: { kind: mongodb, uri: "${DST_URI}", database: app_copy }
+tables: { include: ["app.*"], exclude: ["app.tmp_*"] }
+mongodb: { snapshot_batch: 500, stream_batch: 1000, lease_ttl: 30s, overwrite_target: true }
+`
+	cfg, err := LoadYAMLStrictWithEnv([]byte(y), map[string]string{"SRC_URI": "mongodb://u:p@s1/?replicaSet=a", "DST_URI": "mongodb://t1/?replicaSet=b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Source.DSN != "mongodb://u:p@s1/?replicaSet=a" || cfg.Target.Database != "app_copy" || cfg.MongoDB.SnapshotBatch != 500 || !cfg.MongoDB.OverwriteTarget {
+		t.Fatalf("unexpected: %+v", cfg)
+	}
+	if _, err := LoadYAMLStrict([]byte(strings.Replace(y, `uri: "${SRC_URI}"`, `uri: "${SRC_URI}", dsn: "mongodb://x"`, 1))); err == nil {
+		t.Fatal("uri and dsn together accepted")
+	}
+}

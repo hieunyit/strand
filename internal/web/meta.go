@@ -19,8 +19,8 @@ import (
 	"strand/internal/web/store"
 )
 
-// DatabaseConfig là mục `database:` của web.yaml. Không có DSN (cả trong file lẫn STRAND_WEB_DATABASE_DSN)
-// thì Web UI chạy chế độ file như trước.
+// DatabaseConfig là mục `database:` của web.yaml. DSN là BẮT BUỘC (trong file hoặc STRAND_WEB_DATABASE_DSN):
+// Web UI chỉ chạy với kho metadata PostgreSQL (không còn chế độ file).
 type DatabaseConfig struct {
 	// DSN: postgres://user:pass@host:5432/db. Biến môi trường STRAND_WEB_DATABASE_DSN thắng giá trị này.
 	DSN string `yaml:"dsn,omitempty"`
@@ -42,13 +42,23 @@ const (
 	AuditBoth = "both"
 )
 
-// DBEnabled: có DSN nên dùng PostgreSQL.
+// Lỗi khởi động khi thiếu điều kiện bắt buộc của chế độ PostgreSQL-only.
+const (
+	ErrNoDatabase = "strand web needs a PostgreSQL metadata database: set database.dsn in web.yaml or " + EnvDatabaseDSN +
+		" (new install: `strand web init --database-dsn postgres://...`; an install that ran without a database (file mode): " +
+		"run `strand web db migrate --config <web.yaml> --dsn postgres://...` first to import its pipelines, jobs and audit log)"
+	ErrNoSecretKey = EnvSecretKey + " is required: pipeline secrets (.env) are stored encrypted in the metadata database. " +
+		"Generate one with `openssl rand -hex 32`, keep it safe (it cannot be recovered), and set it in the service environment " +
+		"(/etc/strand/web.env for the systemd unit, .env for docker compose)"
+)
+
+// DBEnabled: có DSN.
 func (c *Config) DBEnabled() bool { return c.Database.DSN != "" }
 
 // metaDB là kho metadata PostgreSQL (hoặc Mem trong test) gắn với một Server.
 type metaDB struct {
 	st       store.Store
-	box      *store.Box // nil: không có STRAND_WEB_SECRET_KEY, .env chỉ nằm trên đĩa
+	box      *store.Box // STRAND_WEB_SECRET_KEY (bắt buộc): mã hóa .env của pipeline trong DB
 	log      *slog.Logger
 	secret   string
 	previous string // STRAND_WEB_SECRET_KEY_PREVIOUS (xoay khóa)
@@ -56,8 +66,6 @@ type metaDB struct {
 	mu      sync.Mutex
 	admin   store.Admin
 	adminAt time.Time
-
-	warnedKey sync.Once
 
 	metrics metricsBuf // mẫu số liệu chờ ghi theo lô
 }
@@ -77,15 +85,11 @@ func OpenStore(ctx context.Context, c *Config, log *slog.Logger) (store.Store, e
 }
 
 func newMetaDB(st store.Store, secret string, log *slog.Logger) (*metaDB, error) {
-	m := &metaDB{st: st, log: log, secret: secret}
-	if secret != "" {
-		b, err := store.NewBox(secret)
-		if err != nil {
-			return nil, err
-		}
-		m.box = b
+	b, err := store.NewBox(secret)
+	if err != nil {
+		return nil, err
 	}
-	return m, nil
+	return &metaDB{st: st, log: log, secret: secret, box: b}, nil
 }
 
 // adminHashes trả (password_hash, api_token_hash) từ DB, cache vài giây (đổi mật khẩu bằng CLI có hiệu lực
@@ -108,19 +112,13 @@ func (m *metaDB) adminHashes() (string, string) {
 }
 
 func (s *Server) passwordHash() string {
-	if s.db != nil {
-		p, _ := s.db.adminHashes()
-		return p
-	}
-	return s.cfg.PasswordHash
+	p, _ := s.db.adminHashes()
+	return p
 }
 
 func (s *Server) apiTokenHash() string {
-	if s.db != nil {
-		_, t := s.db.adminHashes()
-		return t
-	}
-	return s.cfg.APITokenHash
+	_, t := s.db.adminHashes()
+	return t
 }
 
 // SetStorePassword đặt mật khẩu admin trong DB và hủy MỌI session đang có. Chế độ file đổi mật khẩu cần khởi
@@ -148,9 +146,6 @@ const (
 // ràng khi khởi động (trước đây: mỗi lần start chỉ có cảnh báo "decrypt failed" và .env trong DB lặng lẽ bị
 // mã hóa lại bằng khóa khác khi sửa). Có STRAND_WEB_SECRET_KEY_PREVIOUS: mã hóa lại mọi .env sang khóa mới.
 func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
-	if m.box == nil {
-		return nil
-	}
 	return m.st.Locked(ctx, "secret-key", func(ctx context.Context) error {
 		var old *store.Box
 		if previous != "" {
@@ -242,9 +237,6 @@ func (s *Server) materialize(name string) { s.materializeOpt(name, false) }
 
 // materializeOpt: force = dựng lại cả pipeline đang bị đánh dấu missing (thao tác Restore file).
 func (s *Server) materializeOpt(name string, force bool) {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := dbCtx()
 	defer cancel()
 	row, ok, err := s.db.st.GetPipeline(ctx, name)
@@ -279,12 +271,6 @@ func (s *Server) materializeOpt(name string, force bool) {
 		}
 	}()
 	if len(row.EnvEnc) > 0 && row.EnvPath != "" {
-		if s.db.box == nil {
-			s.db.warnedKey.Do(func() {
-				s.log.Warn("pipeline .env is stored encrypted in the database but " + EnvSecretKey + " is not set: leaving .env files on disk as they are")
-			})
-			return
-		}
 		pt, err := s.db.box.Open(row.EnvEnc, name)
 		if err != nil {
 			s.log.Warn("materialize env failed", "pipeline", name, "err", err)
@@ -334,9 +320,6 @@ func (m *metaDB) writeIfDiffers(path string, data []byte, newPerm os.FileMode, s
 
 // materializeAll chạy lúc khởi động: khôi phục file của mọi pipeline do web tạo (ví dụ volume cấu hình mới).
 func (s *Server) materializeAll() {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := dbCtx()
 	defer cancel()
 	rows, err := s.db.st.ListPipelines(ctx)
@@ -352,7 +335,7 @@ func (s *Server) materializeAll() {
 // persistPipelineFiles đọc lại file cấu hình/.env của pipeline do web tạo và lưu vào DB (sau khi tạo hoặc sửa).
 // Chỉ áp dụng khi pipeline đã có dòng trong DB. .env chỉ vào DB khi có STRAND_WEB_SECRET_KEY.
 func (s *Server) persistPipelineFiles(p *Pipeline) error {
-	if s.db == nil || p == nil {
+	if p == nil {
 		return nil
 	}
 	ctx, cancel := dbCtx()
@@ -389,33 +372,18 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 	}
 	if row.EnvPath != "" {
 		if envB, err := os.ReadFile(row.EnvPath); err == nil {
-			if s.db.box != nil {
-				if row.EnvEnc, err = s.db.box.Seal(envB, p.Name); err != nil {
-					return err
-				}
-			} else {
-				// Không có khóa: bản mã hóa cũ (nếu có, từ lúc còn khóa) đã lỗi thời; giữ lại thì khi đặt khóa
-				// trở lại nó sẽ ghi đè .env mới hơn trên đĩa.
-				row.EnvEnc = nil
-				s.db.warnedNoKey(s.log)
+			if row.EnvEnc, err = s.db.box.Seal(envB, p.Name); err != nil {
+				return err
 			}
 		}
 	}
 	return s.db.st.UpsertPipeline(ctx, row)
 }
 
-var noKeyOnce sync.Once
-
-func (m *metaDB) warnedNoKey(log *slog.Logger) {
-	noKeyOnce.Do(func() {
-		log.Info(EnvSecretKey + " is not set: pipeline .env files stay on disk only (not stored in the database); set it to keep them encrypted in the database")
-	})
-}
-
 // ---- desired state, autostart ----
 
 func (s *Server) setDesired(p *Pipeline, desired string) {
-	if s.db == nil || p.Mode() != ModeBackground {
+	if p.Mode() != ModeBackground {
 		return
 	}
 	ctx, cancel := dbCtx()
@@ -428,7 +396,7 @@ func (s *Server) setDesired(p *Pipeline, desired string) {
 // ResumeDesired khởi động lại các pipeline chế độ nền có trạng thái mong muốn "running" mà đang không chạy
 // (container/web khởi động lại). Trả tên các pipeline đã thử khởi động.
 func (s *Server) ResumeDesired(ctx context.Context) []string {
-	if s.db == nil || !s.isActive() {
+	if !s.isActive() {
 		return nil // standby: instance active làm việc này (tiếp quản thì chạy lại)
 	}
 	dctx, cancel := dbCtx()
@@ -487,7 +455,7 @@ func (s *Server) stopForShutdown() {
 }
 
 // CLIStore dùng cho `strand web passwd|token|init`: nếu có DSN (STRAND_WEB_DATABASE_DSN hoặc database.dsn trong
-// web.yaml đã tồn tại) thì mở kho (thử lại, migrate) và trả về; không thì (nil, nil) = chế độ file.
+// web.yaml đã tồn tại) thì mở kho (thử lại, migrate) và trả về; không có DSN thì lỗi ErrNoDatabase.
 func CLIStore(ctx context.Context, cfgPath string, log *slog.Logger) (store.Store, error) {
 	c := &Config{}
 	if cfgPath != "" {
@@ -503,7 +471,7 @@ func CLIStore(ctx context.Context, cfgPath string, log *slog.Logger) (store.Stor
 		c.Database.DSN = v
 	}
 	if !c.DBEnabled() {
-		return nil, nil
+		return nil, errors.New(ErrNoDatabase)
 	}
 	return OpenStore(ctx, c, log)
 }
@@ -517,20 +485,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		out["lease"] = lv
 	}
 	code := http.StatusOK
-	if s.db == nil {
-		out["database"] = map[string]any{"mode": "file"}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := s.db.st.Ping(ctx); err != nil {
+		// /healthz không cần đăng nhập: chi tiết lỗi (host, cổng, user, tên DB) chỉ vào log của web.
+		s.log.Warn("healthz: metadata database unreachable", "err", store.Redact(err.Error()))
+		out["status"] = "degraded"
+		out["database"] = map[string]any{"mode": "postgres", "ok": false, "error": "metadata database unreachable (details in the web log)"}
+		code = http.StatusServiceUnavailable
 	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		if err := s.db.st.Ping(ctx); err != nil {
-			// /healthz không cần đăng nhập: chi tiết lỗi (host, cổng, user, tên DB) chỉ vào log của web.
-			s.log.Warn("healthz: metadata database unreachable", "err", store.Redact(err.Error()))
-			out["status"] = "degraded"
-			out["database"] = map[string]any{"mode": "postgres", "ok": false, "error": "metadata database unreachable (details in the web log)"}
-			code = http.StatusServiceUnavailable
-		} else {
-			out["database"] = map[string]any{"mode": "postgres", "ok": true}
-		}
+		out["database"] = map[string]any{"mode": "postgres", "ok": true}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, code, out)

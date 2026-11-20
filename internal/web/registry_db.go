@@ -109,6 +109,9 @@ func (r *Registry) refreshDB(ctx context.Context) {
 
 	add := func(row store.Pipeline, p *Pipeline) {
 		p.Conflicts = parseConflicts(row.Conflicts)
+		if row.HasConfig {
+			p.dbYAML = []byte(row.ConfigYAML) // bản DB là nguồn sự thật, không phụ thuộc file vật chất hóa
+		}
 		byName[p.Name] = p
 	}
 	for name, e := range declared {
@@ -202,7 +205,7 @@ func (r *Registry) discover(ctx context.Context, e PipelineEntry, origin string,
 	}
 	row := store.Pipeline{Name: e.Name, ConfigPath: e.Config, EnvPath: e.EnvFile, SystemdUnit: e.SystemdUnit, LogFile: e.LogFile,
 		PidFile: e.PidFile, ConfigYAML: string(b), HasConfig: true, Origin: origin}
-	if e.EnvFile != "" && r.db.box != nil {
+	if e.EnvFile != "" {
 		if eb, err := os.ReadFile(e.EnvFile); err == nil {
 			if row.EnvEnc, err = r.db.box.Seal(eb, e.Name); err != nil {
 				*warns = append(*warns, fmt.Sprintf("pipeline %q: seal .env: %v", e.Name, err))

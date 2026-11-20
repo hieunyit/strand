@@ -72,7 +72,7 @@ var settingDefs = []settingDef{
 		Help: "Where archive files (.jsonl.gz, .sha256, .manifest.json) are written. Empty: <state_dir>/audit-archive. Files are never deleted by Strand.",
 		file: func(c *Config) any { return c.AuditArchiveDir }, def: ""},
 	{Key: "audit_rotate_mb", Label: "Rotate audit.log at (MiB)", Kind: "int", Min: 0, Max: 102400,
-		Help: "The audit.log file (file mode, and the file copy in PostgreSQL mode) is rotated to audit-<time>.log.gz (with a .sha256; the new file starts with an audit.rotate line naming it) when it reaches this size. 0 = never.",
+		Help: "The audit.log file copy (database.audit: file or both) is rotated to audit-<time>.log.gz (with a .sha256; the new file starts with an audit.rotate line naming it) when it reaches this size. 0 = never.",
 		file: func(c *Config) any { return c.AuditRotateMB }, def: 100},
 	{Key: "audit_rotate_days", Label: "Rotate audit.log after (days)", Kind: "int", Min: 0, Max: 36500,
 		Help: "Also rotate audit.log when its first line is older than this (checked daily). 0 = never.",
@@ -251,15 +251,13 @@ func resolveSettings(c *Config, db map[string]string) (map[string]any, map[strin
 // kể cả khóa cần khởi động lại, đều được áp dụng).
 func (s *Server) loadSettings(initial bool) error {
 	db := map[string]string{}
-	if s.db != nil {
-		ctx, cancel := dbCtx()
-		m, err := s.db.st.Settings(ctx)
-		cancel()
-		if err != nil {
-			return err
-		}
-		db = m
+	ctx, cancel := dbCtx()
+	m, err := s.db.st.Settings(ctx)
+	cancel()
+	if err != nil {
+		return err
 	}
+	db = m
 	vals, srcs := resolveSettings(s.cfg, db)
 	s.live.mu.Lock()
 	defer s.live.mu.Unlock()
@@ -290,7 +288,6 @@ type SettingView struct {
 
 type settingsBody struct {
 	Items    []SettingView
-	DBMode   bool
 	Message  string
 	Error    string
 	Bootstap []SettingView
@@ -305,7 +302,7 @@ func (s *Server) settingsView() []SettingView {
 		pending := d.Restart && !reflect.DeepEqual(s.live.vals[d.Key], s.live.start[d.Key])
 		v := SettingView{Key: d.Key, Label: d.Label, Help: d.Help, Kind: d.Kind, Value: s.live.vals[d.Key], Source: s.live.srcs[d.Key],
 			FileValue: d.file(s.cfg), Env: d.Env, RestartNeeded: d.Restart, PendingRestart: pending}
-		v.Editable = s.db != nil && v.Source != SrcEnv
+		v.Editable = v.Source != SrcEnv
 		v.Text = settingText(v.Value)
 		if d.Kind == "int" {
 			v.Min, v.Max = 1, 300
@@ -334,9 +331,6 @@ func settingText(v any) string {
 
 // applySettings lưu các thay đổi (giá trị nil = reset về web.yaml/mặc định). Trả các khóa đã đổi.
 func (s *Server) applySettings(changes map[string]any, ip string) ([]string, error) {
-	if s.db == nil {
-		return nil, &ActionError{Status: http.StatusConflict, Msg: "settings are edited in web.yaml in file mode (restart the web after editing); the Settings page edits them with the PostgreSQL metadata store"}
-	}
 	keys := make([]string, 0, len(changes))
 	for k := range changes {
 		keys = append(keys, k)
@@ -420,7 +414,7 @@ func (s *Server) applySettings(changes map[string]any, ip string) ([]string, err
 // ---- HTTP ----
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Session) {
-	b := settingsBody{Items: s.settingsView(), DBMode: s.db != nil, Bootstap: s.bootstrapSettings()}
+	b := settingsBody{Items: s.settingsView(), Bootstap: s.bootstrapSettings()}
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		_ = r.ParseForm()
@@ -464,10 +458,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Sess
 
 // bootstrapSettings: các giá trị chỉ đọc (web.yaml/env), hiện để tham khảo.
 func (s *Server) bootstrapSettings() []SettingView {
-	dbv := "file mode (no database)"
-	if s.db != nil {
-		dbv = "PostgreSQL (" + EnvDatabaseDSN + " or database.dsn)"
-	}
+	dbv := "PostgreSQL (" + EnvDatabaseDSN + " or database.dsn)"
 	tlsv := "off"
 	if s.cfg.TLSCert != "" {
 		tlsv = s.cfg.TLSCert
@@ -482,7 +473,7 @@ func (s *Server) bootstrapSettings() []SettingView {
 }
 
 func (s *Server) apiSettingsGet(w http.ResponseWriter, r *http.Request, _ *Session) {
-	writeJSON(w, http.StatusOK, map[string]any{"database_mode": s.db != nil, "settings": s.settingsView()})
+	writeJSON(w, http.StatusOK, map[string]any{"database_mode": true, "settings": s.settingsView()})
 }
 
 func (s *Server) apiSettingsSave(w http.ResponseWriter, r *http.Request, _ *Session) {

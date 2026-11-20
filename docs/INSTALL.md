@@ -6,27 +6,31 @@ Mục lục: Cài nhanh, 1 Yêu cầu và thành phần, 2 Cài đặt, 3 DB ngu
 
 ## Cài nhanh
 
-**Chọn chế độ lưu trạng thái của Web UI.** Khuyến nghị: **PostgreSQL** (kho metadata). Mọi trạng thái của web (tài khoản admin, phiên đăng nhập, danh sách pipeline kể cả pipeline khai báo/quét, nội dung cấu hình và `.env` mã hóa, trạng thái mong muốn, lịch sử và output job, wizard, cài đặt trên trang Settings, lịch sử số liệu 7 ngày, audit log chỉ-thêm) nằm trong DB: khởi động lại hay dựng lại máy không mất gì, sao lưu bằng `pg_dump`. **Chế độ file** (không có DB) vẫn được hỗ trợ cho cài đặt nhỏ: trạng thái nằm trong `web.yaml` và `state_dir`, biểu đồ chỉ 1 giờ trong RAM, phiên mất khi khởi động lại.
+**Web UI chỉ chạy với PostgreSQL** (kho metadata, bắt buộc; không còn "chế độ file"). Mọi trạng thái của web (tài khoản admin, phiên đăng nhập, danh sách pipeline, nội dung cấu hình và `.env` mã hóa, trạng thái mong muốn, lịch sử và output job, wizard, cài đặt trên trang Settings, lịch sử số liệu 7 ngày, audit log chỉ-thêm) nằm trong DB: khởi động lại hay dựng lại máy không mất gì, sao lưu bằng `pg_dump` + khóa. File cấu hình pipeline trên đĩa chỉ là **bản vật chất hóa** cho tiến trình `strand` (web dựng lại từ DB lúc khởi động và trước mỗi lần chạy). Hai điều kiện bắt buộc: DSN (`database.dsn` trong `web.yaml` hoặc `STRAND_WEB_DATABASE_DSN`) và `STRAND_WEB_SECRET_KEY` (`openssl rand -hex 32`; bí mật của pipeline được mã hóa bằng khóa này). Thiếu một trong hai thì `strand web` từ chối khởi động và nói rõ phải làm gì. `web.yaml` chỉ còn giữ cấu hình khởi động: `listen`/TLS, `database`, `state_dir` (và `scan`/`pipelines:` như nguồn NHẬP một lần các file có sẵn vào DB).
 
 ```bash
-# Chế độ PostgreSQL (khuyến nghị): container, xem mục 10
-cp .env.example .env && docker compose up -d --build
-# hoặc cài trên máy, DB có sẵn (DSN ghi vào web.yaml 0640; muốn giữ DSN ngoài file: đặt STRAND_WEB_DATABASE_DSN cho dịch vụ)
-sudo strand web init --database-dsn 'postgres://strand_web:PASS@db-host:5432/strand_web' --enable
-sudo scripts/install.sh --binary ./strand --with-web --database-dsn 'postgres://...' --generate-password
+# Container (PostgreSQL đi kèm), xem mục 10
+cp .env.example .env    # đặt POSTGRES_PASSWORD và STRAND_WEB_SECRET_KEY (openssl rand -hex 32)
+docker compose up -d --build
+# Cài trên máy, PostgreSQL cục bộ do script cài (apt/dnf), khóa sinh vào /etc/strand/web.env
+sudo scripts/install.sh --binary ./strand --with-web --with-postgres --generate-password
+# Cài trên máy, DB có sẵn (DSN ghi vào web.yaml 0640; muốn giữ DSN ngoài file: đặt STRAND_WEB_DATABASE_DSN trong /etc/strand/web.env)
+sudo scripts/install.sh --binary ./strand --with-web --database-dsn 'postgres://strand_web:PASS@db-host:5432/strand_web' --generate-password
 ```
 
-Đang chạy chế độ file và muốn chuyển sang PostgreSQL: mục 11.
+Bản cài cũ đang chạy chế độ file (không có DB): bản này không khởi động được nữa cho tới khi chuyển sang PostgreSQL: mục 11.
 
-Hai lệnh là có Web UI (chế độ file). `strand web init` mặc định nghe `127.0.0.1:8080` (chỉ máy chủ); `scripts/install.sh --with-web` mặc định mở `0.0.0.0:8080` bằng HTTP thường cho cả mạng (xem dưới):
+Tạo DB bằng tay (nếu không dùng `--with-postgres`): `sudo -u postgres psql -c "CREATE ROLE strand_web LOGIN PASSWORD '<pw>'" -c "CREATE DATABASE strand_web OWNER strand_web"`.
+
+`strand web init` mặc định nghe `127.0.0.1:8080` (chỉ máy chủ); `scripts/install.sh --with-web` mặc định mở `0.0.0.0:8080` bằng HTTP thường cho cả mạng (xem dưới):
 
 ```bash
 # Gói .deb / .rpm
 sudo dpkg -i strand_<ver>_amd64.deb          # hoặc: sudo rpm -i strand-<ver>.x86_64.rpm
-sudo strand web init --enable                # hỏi mật khẩu hai lần, bật strand-web, chờ /login trả 200
+sudo strand web init --database-dsn 'postgres://strand_web:PASS@127.0.0.1:5432/strand_web' --enable   # gói đã sinh /etc/strand/web.env (khóa)
 
 # Cài tay (không có gói): cần binary và repo/tarball phát hành
-sudo scripts/install.sh --binary ./strand --with-web --generate-password
+sudo scripts/install.sh --binary ./strand --with-web --with-postgres --generate-password
 ```
 
 - `strand web init` tạo `/etc/strand/web.yaml` (root:strand 0640) và `/var/lib/strand-web` (strand:strand 0750), đặt mật khẩu admin, rồi với `--enable` chạy `systemctl enable --now strand-web`. Mật khẩu: hỏi trên terminal, `--password-stdin` (một dòng), hoặc `--generate-password` (in MỘT lần ra stdout, ghi lại ngay). `--token` tạo thêm token API (cũng in một lần).
@@ -56,7 +60,8 @@ Phần dưới là cài từng bước (khi cần kiểm soát từng việc).
 | Cấu hình | `/etc/strand/` | `<name>.yaml`, `<name>.env`, `web.yaml` |
 | State pipeline | `/var/lib/strand/<name>/` | systemd tạo (`StateDirectory`); spool, log chế độ nền |
 | Socket quản trị | `/run/strand/<name>/admin.sock` | systemd tạo (`RuntimeDirectory`) |
-| State Web UI | `/var/lib/strand-web/` | `audit.log`, `jobs/`, `wizards/`, `pipelines.json` (danh sách pipeline tạo từ web), `pipelines/` (file của chúng nếu không ghi được `/etc/strand`) |
+| State Web UI | `/var/lib/strand-web/` | bản sao `audit.log`, file tạm của job đang chạy, `pipelines/` (bản vật chất hóa của pipeline tạo từ web nếu không ghi được `/etc/strand`). Trạng thái thật nằm trong PostgreSQL |
+| Khóa Web UI | `/etc/strand/web.env` | `STRAND_WEB_SECRET_KEY` (root:strand 0640), nạp qua `EnvironmentFile` của `strand-web.service`; sao lưu riêng |
 
 Checkpoint của pipeline nằm ở **target** (bảng `_strand_*`), nên mất `/var/lib/strand/<name>` không mất vị trí đồng bộ nhưng buộc snapshot lại phần local (xem mục 8).
 
@@ -445,7 +450,7 @@ Mọi biến nằm trong `.env.example` (kèm giải thích). Các biến chính
 | --- | --- |
 | `POSTGRES_PASSWORD` | Bắt buộc. Mật khẩu của `db`; nằm trong DSN dạng URL nên dùng chữ-số (`openssl rand -hex 24`). |
 | `STRAND_WEB_DATABASE_DSN` | DSN metadata (compose tự dựng từ `POSTGRES_PASSWORD`). Thắng khóa `database.dsn` của `web.yaml`. Không bao giờ được ghi vào log; lỗi kết nối đã che mật khẩu. |
-| `STRAND_WEB_SECRET_KEY` | Khóa AES-256-GCM (64 ký tự hex, hoặc base64 32 byte, hoặc passphrase từ 16 ký tự) để lưu `.env` của pipeline (mật khẩu nguồn/đích) **mã hóa** trong DB. Không đặt: `.env` chỉ nằm trên volume `/etc/strand`, DB không giữ bí mật nào của pipeline (web ghi một dòng log nói rõ). Mất khóa thì `.env` trong DB không giải mã được: giữ khóa ngoài bản sao lưu DB. Khởi động với khóa **khác** khóa đã mã hóa các `.env` trong DB: web từ chối khởi động với lỗi nói rõ (không chạy tiếp với bản sao không giải mã được). |
+| `STRAND_WEB_SECRET_KEY` | **Bắt buộc.** Khóa AES-256-GCM (64 ký tự hex, hoặc base64 32 byte, hoặc passphrase từ 16 ký tự) để lưu `.env` của pipeline (mật khẩu nguồn/đích) **mã hóa** trong DB. Không đặt: compose báo lỗi ngay, web từ chối khởi động. Mất khóa thì `.env` trong DB không giải mã được: giữ khóa ngoài bản sao lưu DB. Khởi động với khóa **khác** khóa đã mã hóa các `.env` trong DB: web từ chối khởi động với lỗi nói rõ (không chạy tiếp với bản sao không giải mã được). |
 | `STRAND_WEB_SECRET_KEY_PREVIOUS` | Chỉ khi **đổi khóa**: đặt khóa mới vào `STRAND_WEB_SECRET_KEY`, khóa cũ vào biến này, khởi động lại; web mã hóa lại mọi `.env` trong DB bằng khóa mới (log `re-encrypted ...`), sau đó xóa biến này. |
 | `STRAND_WEB_ADMIN_PASSWORD` hoặc `STRAND_WEB_ADMIN_PASSWORD_FILE` | Mật khẩu admin, chỉ dùng khi database chưa có admin (tối thiểu 8 ký tự). `_FILE` dành cho docker secrets (`/run/secrets/...`), tránh để mật khẩu lộ qua `docker inspect`. Đổi sau này: `docker compose exec web strand web passwd`; token script: `docker compose exec web strand web token`. |
 | `STRAND_WEB_BIND`, `STRAND_WEB_PORT` | Địa chỉ/cổng publish trên host (mặc định `0.0.0.0:8080`). |
@@ -495,10 +500,18 @@ Nếu cần `web.yaml` riêng (ví dụ `pipelines:` khai báo tường minh), m
 | `web` khởi động lại liên tục, log `connect to metadata database` | `db` chưa sẵn sàng hoặc sai `POSTGRES_PASSWORD` (đổi mật khẩu sau khi `pg_data` đã tạo thì không có hiệu lực: `ALTER USER strand PASSWORD '...'`, hoặc `docker compose down -v` nếu chưa có dữ liệu). Web tự thử lại tối đa 60 giây với backoff. |
 | `/healthz` trả 503 | Mất kết nối DB; web vẫn chạy nhưng đăng nhập/thao tác ghi sẽ lỗi (audit từ chối thao tác ghi khi không ghi được). Pipeline đang chạy không bị ảnh hưởng. |
 | `web` không khởi động, log `STRAND_WEB_SECRET_KEY does not match the key ...` | Khóa đã đổi so với lúc mã hóa `.env` trong DB. Dùng lại khóa cũ, hoặc đổi khóa đúng cách với `STRAND_WEB_SECRET_KEY_PREVIOUS` (10.2). |
-| `.env` của pipeline không còn sau khi tạo lại container | Chưa đặt `STRAND_WEB_SECRET_KEY` nên DB không giữ `.env`; đặt khóa rồi mở tab Config > Env và lưu lại để đưa vào DB. |
+| `web` không khởi động, log `STRAND_WEB_SECRET_KEY is required` | Đặt khóa trong `.env` (`openssl rand -hex 32`). Bản cài cũ chưa từng có khóa: đặt khóa mới, mọi `.env` trên volume được mã hóa vào DB ở lần lưu/nhập đầu tiên. |
 | Sửa tay `/etc/strand/<name>.yaml`, bị thay bằng bản DB | DB là nguồn sự thật (mọi pipeline đã đăng ký, kể cả từ `scan`): bản sửa tay được cất thành `<name>.yaml.conflict-<thời gian>`, trang pipeline có banner **Adopt disk version** để dùng bản đó (USAGE.md 7.15 "Registry trong DB"). Nên sửa qua web (Config) hoặc API. |
 
-## 11. Chuyển từ chế độ file sang PostgreSQL (và quay lại)
+## 11. Nâng cấp bản cài chế độ file lên PostgreSQL (bắt buộc từ bản này)
+
+Từ bản này `strand web` không còn chế độ file: bản cài cũ (web.yaml không có `database`) khởi động sẽ báo
+`strand web needs a PostgreSQL metadata database ...`. Chuyển một lần như dưới; pipeline đang chạy không bị ảnh
+hưởng (chúng không phụ thuộc web). Cách nhanh nhất: chỉ cần đặt DSN + khóa rồi khởi động web: lần khởi động đầu
+web tự nhập `web.yaml` (hash mật khẩu, token, `pipelines:`/`scan`), `<state_dir>/pipelines.json`, job, wizard và
+`audit.log` vào DB (idempotent). `strand web db migrate` làm cùng việc đó nhưng có `--dry-run`, báo cáo và kiểm
+tra lại, nên dùng cho máy production. Nếu DB từng được migrate bởi bản dựng thử nghiệm `feat/web-db-first`
+(migration 010 = `pipeline_config_json`), migration của bản này tự thay nó (cột `config_json` chưa từng được ghi).
 
 Không xóa hay sửa file nào của bản cài file; chạy lại an toàn (dừng giữa chừng thì chạy lại sẽ tiếp tục).
 
@@ -522,7 +535,7 @@ sudo systemctl start strand-web
 
 Kế hoạch in theo loại (`admin`, `api_token`, `pipeline` gồm `pipelines.json`, `pipelines:` của web.yaml và file `scan`, `job`, `job_output`, `wizard`, `audit`) với số `new` / `present` / `conflict` / `skipped`; các dòng `conflict` (DB đã có giá trị khác; bản DB được giữ) và `skipped` (file không đọc được) được liệt kê. Sau khi nhập, lệnh lập lại kế hoạch trên DB để **kiểm chứng**: mọi mục `new` phải thành `present` (cấu hình so bằng sha256, job/wizard theo id, audit theo số dòng); có mục chưa đạt thì in `PROBLEM:` và thoát với mã khác 0. Cài đặt trong `web.yaml` (scan, config_dir, ...) không bị chép: chúng vẫn là giá trị của `web.yaml` cho tới khi được đổi trên trang Settings.
 
-**Quay lại chế độ file** (hoặc sao lưu dạng file):
+**Sao lưu dạng file / quay về bản cũ** (chỉ với binary bản trước, vẫn còn chế độ file):
 
 ```bash
 sudo -E -u strand strand web db export --config /etc/strand/web.yaml --dir /var/backups/strand-web-$(date +%F)

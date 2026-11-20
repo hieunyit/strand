@@ -235,9 +235,7 @@ func TestConfigSecretsNeverLeakedAndWriteOnly(t *testing.T) {
 
 	// 2. Check .env editing and masking
 	envPath := filepath.Join(e.dir, "orders.env")
-	if err := os.WriteFile(envPath, []byte("export SRC_PW=\"original-secret\"\nexport OTHER_FLAG=\"enabled\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	e.writePipelineFile("orders", envPath, "export SRC_PW=\"original-secret\"\nexport OTHER_FLAG=\"enabled\"\n", 0o600)
 
 	resp, out = e.do(c, "GET", "/api/v1/pipelines/orders/env", "", nil)
 	if resp.StatusCode != 200 {
@@ -343,9 +341,7 @@ observability: { metrics: "127.0.0.1:9464" }
 func writeFmtYAML(t *testing.T, e *testEnv) string {
 	t.Helper()
 	cfgPath := filepath.Join(e.dir, "orders.yaml")
-	if err := os.WriteFile(cfgPath, []byte(fmtYAML), 0o640); err != nil {
-		t.Fatal(err)
-	}
+	e.writePipelineFile("orders", cfgPath, fmtYAML, 0o640)
 	return cfgPath
 }
 

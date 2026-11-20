@@ -98,15 +98,15 @@ func monoNow() int64 { return int64(time.Since(monoBase)) }
 
 // isActive: this instance runs the singleton work. File mode: always (single instance by construction).
 func (s *Server) isActive() bool {
-	if s.db == nil || s.lease == nil {
+	if s.lease == nil {
 		return true
 	}
 	return s.lease.active.Load() && monoNow() < s.lease.until.Load()
 }
 
-// role: "active" | "standby" (DB mode), "" in file mode.
+// role: "active" | "standby".
 func (s *Server) role() string {
-	if s.db == nil || s.lease == nil {
+	if s.lease == nil {
 		return ""
 	}
 	if s.isActive() {
@@ -161,7 +161,7 @@ func (s *Server) leaseTick() (gained, lost bool) {
 // runLease renews (active) or watches (standby) the lease until ctx ends, takes over when it can, and keeps
 // the heartbeat row of this instance.
 func (s *Server) runLease(ctx context.Context) {
-	if s.db == nil || s.lease == nil {
+	if s.lease == nil {
 		return
 	}
 	every := s.lease.ttl / 3
@@ -223,7 +223,7 @@ func (s *Server) heartbeat() {
 
 // releaseLease (clean shutdown): give the lease up at once so a standby takes over without waiting for the TTL.
 func (s *Server) releaseLease() {
-	if s.db == nil || s.lease == nil {
+	if s.lease == nil {
 		return
 	}
 	s.lease.active.Store(false)
@@ -246,7 +246,7 @@ type leaseView struct {
 }
 
 func (s *Server) leaseInfo() *leaseView {
-	if s.db == nil || s.lease == nil {
+	if s.lease == nil {
 		return nil
 	}
 	l := s.lease

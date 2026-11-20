@@ -222,3 +222,62 @@ func TestSecretBox(t *testing.T) {
 		t.Fatal("ciphertext opened under another key")
 	}
 }
+
+// A database migrated by the feat/web-db-first WIP build has version 010 = pipeline_config_json. Version-only
+// bookkeeping skipped main's 010_backups forever (then 011 failed on the missing table); Migrate must replace
+// the stray migration instead, and must refuse unknown collisions rather than skip them.
+func TestMigrateReplacesSupersededWIPMigration(t *testing.T) {
+	ctx := context.Background()
+	dsn := testutil.NewPostgresDSN(t)
+	p, err := store.Open(ctx, dsn, store.OpenOptions{NoMigrate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ms, err := store.Migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := p.DB()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version int PRIMARY KEY, name text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms[:9] {
+		if _, err := db.Exec(m.SQL); err != nil {
+			t.Fatalf("%03d: %v", m.Version, err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations (version, name) VALUES ($1,$2)`, m.Version, m.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`ALTER TABLE pipelines ADD COLUMN config_json jsonb;
+		CREATE INDEX pipelines_config_json_present_idx ON pipelines (name) WHERE config_json IS NOT NULL;
+		INSERT INTO schema_migrations (version, name) VALUES (10, 'pipeline_config_json')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Migrate(ctx, db)
+	if err != nil {
+		t.Fatalf("migrate WIP database: %v", err)
+	}
+	if len(got) != len(ms)-9 {
+		t.Fatalf("applied %v, want versions 010..%03d", got, len(ms))
+	}
+	var name string
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = 10`).Scan(&name); err != nil || name != "backups" {
+		t.Fatalf("version 10 = %q, %v", name, err)
+	}
+	var exists bool
+	if err := db.QueryRow(`SELECT to_regclass('backups') IS NOT NULL`).Scan(&exists); err != nil || !exists {
+		t.Fatalf("backups table missing after heal: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) > 0 FROM information_schema.columns WHERE table_name='pipelines' AND column_name='config_json'`).Scan(&exists); err != nil || exists {
+		t.Fatalf("stray config_json column kept: %v", err)
+	}
+	// Unknown collision: refuse with a clear error instead of skipping.
+	if _, err := db.Exec(`UPDATE schema_migrations SET name = 'something_else' WHERE version = 11`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Migrate(ctx, db); err == nil || !strings.Contains(err.Error(), "different build") {
+		t.Fatalf("unknown collision: err = %v", err)
+	}
+}

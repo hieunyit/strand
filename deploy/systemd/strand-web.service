@@ -2,7 +2,8 @@
 # Web UI của Strand (docs/PLAN-WEB-UI.md, questions/DECISIONS-WEB-UI-2026-11-15.md).
 # Chạy cùng user với strand@<name> (KHÔNG root): chỉ quản lý được pipeline mà user này có quyền
 # (đọc /etc/strand/<name>.yaml, kết nối admin socket 0700 của chính user, đọc log).
-# Trước khi bật: strand web passwd --config /etc/strand/web.yaml
+# Cần kho metadata PostgreSQL (database.dsn trong /etc/strand/web.yaml) và STRAND_WEB_SECRET_KEY trong
+# /etc/strand/web.env (scripts/install.sh --with-web tạo cả hai). Trước khi bật: strand web init --database-dsn ...
 [Unit]
 Description=Strand CDC web UI
 After=network-online.target
@@ -12,6 +13,8 @@ Wants=network-online.target
 Type=simple
 User=strand
 Group=strand
+# STRAND_WEB_SECRET_KEY (bắt buộc), tùy chọn STRAND_WEB_DATABASE_DSN thay cho database.dsn trong web.yaml.
+EnvironmentFile=/etc/strand/web.env
 ExecStart=/usr/local/bin/strand web --config /etc/strand/web.yaml
 Restart=on-failure
 RestartSec=5

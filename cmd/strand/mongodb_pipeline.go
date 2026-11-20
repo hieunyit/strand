@@ -21,12 +21,12 @@ import (
 
 // mongoConfig maps the normal pipeline configuration to a MongoDB replication:
 //
-//	source/target.dsn | uri_env      MongoDB URIs (user + password | password_env optional)
+//	source/target.uri | dsn | uri_env MongoDB URIs (user + password | password_env optional)
 //	source.database / target.database
 //	tables.include / exclude         "db.collection" globs
 //	bootstrap.logical.max_parallel   collections copied concurrently
-//	bootstrap.logical.chunk_rows     documents per snapshot batch
-//	target.batch.max_rows            change events per apply transaction
+//	mongodb.snapshot_batch           documents per snapshot batch (or bootstrap.logical.chunk_rows)
+//	mongodb.stream_batch             change events per apply transaction (or target.batch.max_rows)
 //	checkpoint.flush_every           idle checkpoint interval
 //	mongodb.*                        overwrite_target, updates, indexes, lease_ttl
 func mongoConfig(cfg *config.Config, logger *slog.Logger) mongocdc.Config {
@@ -43,6 +43,12 @@ func mongoConfig(cfg *config.Config, logger *slog.Logger) mongocdc.Config {
 	}
 	if n, err := strconv.Atoi(cfg.Bootstrap.Logical.ChunkRows); err == nil {
 		mc.SnapshotBatch = n
+	}
+	if cfg.MongoDB.SnapshotBatch > 0 {
+		mc.SnapshotBatch = cfg.MongoDB.SnapshotBatch
+	}
+	if cfg.MongoDB.StreamBatch > 0 {
+		mc.StreamBatch = cfg.MongoDB.StreamBatch
 	}
 	if d, err := time.ParseDuration(cfg.Checkpoint.FlushEvery); err == nil {
 		mc.CheckpointEvery = d

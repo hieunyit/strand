@@ -52,13 +52,11 @@ func (s *Server) beginWebStop(name string) func() {
 			delete(t.stopping, name)
 		}
 		t.mu.Unlock()
-		if s.db != nil {
-			// Persisted so that the next web (restart, or a standby taking over) also knows this stop was ours.
-			ctx, cancel := dbCtx()
-			defer cancel()
-			if err := s.db.st.MetaSet(ctx, webStopMetaPrefix+name, end.UTC().Format(time.RFC3339Nano)); err != nil {
-				s.log.Warn("record web stop time failed (the stop may later be taken for an outside stop)", "pipeline", name, "err", err)
-			}
+		// Persisted so that the next web (restart, or a standby taking over) also knows this stop was ours.
+		ctx, cancel := dbCtx()
+		defer cancel()
+		if err := s.db.st.MetaSet(ctx, webStopMetaPrefix+name, end.UTC().Format(time.RFC3339Nano)); err != nil {
+			s.log.Warn("record web stop time failed (the stop may later be taken for an outside stop)", "pipeline", name, "err", err)
 		}
 	}
 }
@@ -69,7 +67,7 @@ func (s *Server) lastWebStop(name string) time.Time {
 	t.mu.Lock()
 	ws, ok := t.webStop[name]
 	t.mu.Unlock()
-	if ok || s.db == nil {
+	if ok {
 		return ws
 	}
 	ctx, cancel := dbCtx()
@@ -90,7 +88,7 @@ func (s *Server) lastWebStop(name string) time.Time {
 // observeStop applies the rule above to one sample of a pipeline. Reports whether the pipeline is known to
 // have been stopped outside the web (desired is, or has just been set to, stopped for that reason).
 func (s *Server) observeStop(p *Pipeline, rt Runtime) bool {
-	if s.db == nil || !s.isActive() || p.Mode() != ModeBackground || rt.Running || !rt.StoppedCleanly || rt.StoppedAt == nil {
+	if !s.isActive() || p.Mode() != ModeBackground || rt.Running || !rt.StoppedCleanly || rt.StoppedAt == nil {
 		return false
 	}
 	at := *rt.StoppedAt
@@ -137,9 +135,6 @@ type desiredCache struct {
 
 // refreshDesired reloads the desired states (once per sampler round, and after a change).
 func (s *Server) refreshDesired() {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := dbCtx()
 	defer cancel()
 	m, err := s.db.st.DesiredStates(ctx)
@@ -158,7 +153,7 @@ func (s *Server) desiredState(name string) store.DesiredState {
 
 // stoppedOutside: the UI note "stopped outside the web".
 func (s *Server) stoppedOutside(p *Pipeline) bool {
-	if s.db == nil || p.Mode() != ModeBackground {
+	if p.Mode() != ModeBackground {
 		return false
 	}
 	d := s.desiredState(p.Name)

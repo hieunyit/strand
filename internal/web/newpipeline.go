@@ -86,6 +86,16 @@ type NewPipelineOpts struct {
 
 	Metrics   string `json:"metrics,omitempty"`
 	LogFormat string `json:"log_format,omitempty"`
+
+	// MongoDB -> MongoDB (from = to = mongodb): URI là bí mật (chỉ vào .env: SRC_URI / DST_URI).
+	SourceURI            string `json:"source_uri,omitempty"`
+	TargetURI            string `json:"target_uri,omitempty"`
+	MongoSourceDB        string `json:"source_database,omitempty"`
+	MongoTargetDB        string `json:"target_mongo_database,omitempty"`
+	MongoSnapshotBatch   int    `json:"snapshot_batch,omitempty"`
+	MongoStreamBatch     int    `json:"stream_batch,omitempty"`
+	MongoLeaseTTL        string `json:"lease_ttl,omitempty"`
+	MongoOverwriteTarget bool   `json:"overwrite_target,omitempty"`
 }
 
 // CreatePipelineResult chứa kết quả sau khi tạo pipeline và chạy validate + plan.
@@ -276,6 +286,9 @@ func logicalYAML(td tmplData) string {
 
 // buildNewPipelineYAML sinh chuỗi YAML từ NewPipelineOpts.
 func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (string, error) {
+	if isMongo(opts.From) || isMongo(opts.To) {
+		return buildMongoPipelineYAML(opts, spoolDir, socketPath)
+	}
 	from := strings.ToLower(strings.TrimSpace(opts.From))
 	to := strings.ToLower(strings.TrimSpace(opts.To))
 	td := tmplData{
@@ -481,6 +494,11 @@ var plainDBNameRE = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
 
 // checkOpts từ chối giá trị làm hỏng YAML sinh ra (dấu nháy, xuống dòng, ...) và tên database metadata lạ.
 func checkOpts(opts NewPipelineOpts) error {
+	if isMongo(opts.From) || isMongo(opts.To) {
+		if err := checkMongoOpts(opts); err != nil {
+			return err
+		}
+	}
 	bad := func(field, v string) error {
 		if strings.ContainsAny(v, "\"\\\r\n") {
 			return fmt.Errorf("%s: value %q contains a quote, backslash or newline", field, v)
@@ -719,7 +737,11 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	}
 	var envBuf bytes.Buffer
 	envBuf.WriteString(fmt.Sprintf("# Environment variables for pipeline %s\n", opts.Name))
-	for _, kv := range [][2]string{{srcEnv, opts.SourcePassword}, {dstEnv, opts.TargetPassword}} {
+	secrets := [][2]string{{srcEnv, opts.SourcePassword}, {dstEnv, opts.TargetPassword}}
+	if isMongo(opts.From) {
+		secrets = [][2]string{{mongoSrcURIEnv, strings.TrimSpace(opts.SourceURI)}, {mongoDstURIEnv, strings.TrimSpace(opts.TargetURI)}}
+	}
+	for _, kv := range secrets {
 		line, err := formatEnvLine(kv[0], kv[1])
 		if err != nil {
 			return nil, err
@@ -778,33 +800,18 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		return nil, fmt.Errorf("write %s: %w", yamlPath, err)
 	}
 
-	// Đăng ký pipeline vào registry:
-	// Nếu configDir không khớp bất kỳ mẫu scan nào, ghi vào <state_dir>/pipelines.json
-	coveredByScan := false
-	for _, pat := range s.settingList("scan") {
-		if matched, _ := filepath.Match(pat, yamlPath); matched {
-			coveredByScan = true
-			break
-		}
-	}
+	// Đăng ký pipeline vào registry (DB).
 	entry := PipelineEntry{
 		Name:    opts.Name,
 		Config:  yamlPath,
 		EnvFile: envPath,
 	}
-	if s.db != nil {
-		// Chế độ DB: DB là nguồn sự thật (dòng pipeline + YAML + .env mã hóa nếu có khóa); file chỉ là bản vật chất hóa.
-		if err := s.reg.AddCreated(entry); err != nil {
-			return nil, fmt.Errorf("pipeline files written but registering in the database failed: %w", err)
-		}
-		if err := s.persistPipelineFiles(&Pipeline{Name: opts.Name}); err != nil {
-			return nil, fmt.Errorf("pipeline files written but storing them in the database failed: %w", err)
-		}
-	} else if !coveredByScan {
-		// Nguồn sự thật duy nhất: <state_dir>/pipelines.json (luôn ghi được, kể cả khi /etc/strand read-only).
-		if err := s.reg.AddCreated(entry); err != nil {
-			return nil, fmt.Errorf("pipeline files written but registering in %s failed: %w", s.reg.createdPath(), err)
-		}
+	// DB là nguồn sự thật (dòng pipeline + YAML + .env mã hóa); file chỉ là bản vật chất hóa cho tiến trình strand.
+	if err := s.reg.AddCreated(entry); err != nil {
+		return nil, fmt.Errorf("pipeline files written but registering in the database failed: %w", err)
+	}
+	if err := s.persistPipelineFiles(&Pipeline{Name: opts.Name}); err != nil {
+		return nil, fmt.Errorf("pipeline files written but storing them in the database failed: %w", err)
 	}
 	s.reg.Refresh(ctx)
 
@@ -939,6 +946,12 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.Metrics = f.Get("metrics")
 	opts.LogFormat = f.Get("log_format")
 	opts.StartAt = strings.TrimSpace(f.Get("start_at"))
+	opts.SourceURI = f.Get("source_uri")
+	opts.TargetURI = f.Get("target_uri")
+	opts.MongoSourceDB = strings.TrimSpace(f.Get("source_database"))
+	opts.MongoTargetDB = strings.TrimSpace(f.Get("target_mongo_database"))
+	opts.MongoLeaseTTL = strings.TrimSpace(f.Get("lease_ttl"))
+	opts.MongoOverwriteTarget = f.Get("overwrite_target") == "true" || f.Get("overwrite_target") == "on"
 	opts.Databases = splitList(f.Get("databases"))
 	opts.Includes = splitList(f.Get("include"))
 	opts.Excludes = splitList(f.Get("exclude"))
@@ -947,6 +960,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 		"source_port": &opts.SourcePort, "target_port": &opts.TargetPort, "workers": &opts.Workers,
 		"server_id": &opts.ServerID, "iops_soft": &opts.IOPSSoft, "iops_hard": &opts.IOPSHard,
 		"chunk_rows": &opts.ChunkRows, "max_parallel": &opts.MaxParallel,
+		"snapshot_batch": &opts.MongoSnapshotBatch, "stream_batch": &opts.MongoStreamBatch,
 	} {
 		n, err := atoiField(r, field)
 		if err != nil {

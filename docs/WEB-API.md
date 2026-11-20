@@ -217,7 +217,7 @@ Thứ tự ưu tiên của giá trị hiệu lực: **biến môi trường** (k
 
 ### `GET /api/v1/backups`, `GET /api/v1/backups/{id}`, `GET /api/v1/backups/{id}/status` (trang `/backups`)
 
-Catalog backup tập trung (chỉ đọc, cần chế độ PostgreSQL; chế độ file trả 503). `GET /api/v1/backups` nhận
+Catalog backup tập trung (chỉ đọc). `GET /api/v1/backups` nhận
 `source`, `engine`, `status`, `limit` (1..500, mặc định 200), `created_after`, `created_before` (RFC3339) và
 `cursor`; trả `{"backups": [Record], "limit": N, "next_cursor": "..."}` (mới nhất trước; `next_cursor` chỉ có khi
 trang đầy). Xem `docs/CENTRAL-BACKUPS.md`.
@@ -258,6 +258,29 @@ Phản hồi **200**: `{"message", "job_id", "exit_code", "data"}`. Lỗi: **400
 ### 4.2 `verify` (job)
 
 `POST .../actions/verify` với `mode` (`sample`|`full`|`delta`) và tùy chọn `table` (`schema.table`, bắt buộc với `sample`, không dùng với `delta`), `rate` (số; sample: (0,1], full: (0,100000]; không dùng với delta), `resume` (`true`, chỉ `full`). Chạy tiến trình con `<strand_binary> verify -c <cfg> --mode <mode> [--table=<t>] [--rate=<r>] [--resume] [--socket=<sock> khi delta]` (luôn `--repair report`; sửa dữ liệu là việc của wizard Repair, §4.4). Trả **200** `{"message", "job_id"}` ngay; **409** nếu pipeline đã có job đang chạy. Mọi điều kiện an toàn và mã thoát là của CLI (`verify` thoát 5 khi lệch).
+
+### 4.2b Plan, schema evolution, database objects (job)
+
+Cùng cách chạy như `verify` (một job mỗi pipeline, output trực tiếp ở `/jobs/{id}`, lịch sử trong DB; file cấu hình/.env được dựng lại từ DB trước khi chạy). Nút ở tab **Jobs** của pipeline.
+
+| Action | Tham số | Lệnh |
+| --- | --- | --- |
+| `plan` | | `plan -c <cfg>` |
+| `schema-diff` | `all` (`true`: gồm cả thay đổi đã áp) | `schema diff -c <cfg> [--all]`: thay đổi schema chờ duyệt + DDL đề xuất |
+| `schema-approve-dry` | `id` (số) | `schema approve <id> -c <cfg> --dry-run` |
+| `schema-approve` | `id`, `confirm_name` | `schema approve <id> -c <cfg>` (áp DDL lên target) |
+| `schema-init-dry` | | `schema init -c <cfg> --dry-run` (DDL của bảng còn thiếu ở target) |
+| `objects-list` | | `objects list -c <cfg>` (nguồn MySQL/MariaDB; khác: **400**) |
+| `objects-apply` | `phase` (`pre`\|`users`\|`post`), `confirm_name` | `objects apply -c <cfg> --phase <p>` (cần target MySQL; khác: **400**) |
+
+### Tải về / tải lên cấu hình, MCP
+
+- `GET /pipelines/{name}/config.yaml` (hoặc `GET /api/v1/pipelines/{name}/config/download`): bản cấu hình trong DB, bí mật che `********`, `Content-Disposition: attachment`; audit `config.download`. Tải lên: ô **Upload YAML** của trình sửa (tab Config) nạp file vào ô soạn thảo rồi xem diff; chỉ ghi khi bấm Save (đi qua `POST .../config` như sửa tay; `********` được khôi phục từ bản lưu).
+- `GET /mcp` (trang) và `GET /api/v1/mcp` → `{"command", "config_path", "client_json", "claude_code", "tools": [{name, description}], "recent_calls": [{time, tool, result}]}`: cách kết nối `strand mcp` (server MCP stdio, chỉ đọc, do client tự chạy), allowlist tool, các lần gọi gần đây (audit `mcp.<tool>`).
+
+### Pipeline MongoDB
+
+`POST /api/v1/pipelines` với `from` = `to` = `mongodb`: `source_uri`, `target_uri` (bí mật: chỉ vào `.env` mã hóa dưới tên `SRC_URI`/`DST_URI`, YAML ghi `uri: "${SRC_URI}"`), `source_database`, `target_mongo_database`, `include`/`exclude` dạng `db.collection`, tùy chọn `snapshot_batch`, `stream_batch` (1..100000), `lease_ttl` (5s..1h), `overwrite_target`. Tab Config > Tuning của pipeline MongoDB chỉ có `snapshot_batch`, `stream_batch`, `lease_ttl` (mục `mongodb:`); khóa SQL bị từ chối (**400** "not a setting of this pipeline kind") và ngược lại.
 
 ### 4.4 Wizard Repair và Promote (M4)
 

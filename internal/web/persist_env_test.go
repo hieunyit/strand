@@ -1,12 +1,15 @@
 package web
 
 import (
-	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"strand/internal/web/store"
 )
 
 func newOpts(name, srcPw, dstPw string) NewPipelineOpts {
@@ -16,7 +19,7 @@ func newOpts(name, srcPw, dstPw string) NewPipelineOpts {
 }
 
 // Pipeline tạo từ web phải còn sau khi strand-web khởi động lại, kể cả khi thư mục chứa web.yaml không ghi được
-// (unit systemd ProtectSystem=strict: chỉ state_dir ghi được). Thư mục không tồn tại => không ghi được với mọi uid.
+// (unit systemd ProtectSystem=strict). Nguồn sự thật là DB: không có <state_dir>/pipelines.json.
 func TestCreatedPipelineSurvivesRestartReadOnlyWebYAML(t *testing.T) {
 	webYAML := filepath.Join(t.TempDir(), "no-such-dir", "web.yaml")
 	cfgDir := t.TempDir()
@@ -33,19 +36,21 @@ func TestCreatedPipelineSurvivesRestartReadOnlyWebYAML(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("create: %d %s", code, out)
 	}
-	fi, err := os.Stat(filepath.Join(stateDir, CreatedFile))
-	if err != nil {
-		t.Fatalf("registry file missing: %v", err)
+	if _, err := os.Stat(filepath.Join(stateDir, CreatedFile)); err == nil {
+		t.Error("pipelines.json written: the database is the registry")
 	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("registry mode = %v, want 0600", fi.Mode().Perm())
+	row, ok, _ := e.srv.db.st.GetPipeline(t.Context(), "persist1")
+	if !ok || !row.HasConfig || len(row.EnvEnc) == 0 || row.Origin != "created" {
+		t.Fatalf("pipeline row: %+v", row)
 	}
-
-	// "Khởi động lại": server mới từ cấu hình nạp lại (không mang theo thay đổi trong bộ nhớ).
-	cfg2 := &Config{StrandBinary: e.bin, Listen: "127.0.0.1:0", PasswordHash: e.srv.cfg.PasswordHash,
+	// Mất cả file cấu hình lẫn .env (ví dụ volume mới): khởi động lại dựng lại từ DB.
+	_ = os.Remove(row.ConfigPath)
+	_ = os.Remove(row.EnvPath)
+	cfg2 := &Config{StrandBinary: e.bin, Listen: "127.0.0.1:0",
 		StateDir: stateDir, SourcePath: webYAML, ConfigDir: cfgDir,
 		Pipelines: []PipelineEntry{e.srv.cfg.Pipelines[0]}}
-	srv2, err := New(Options{Config: cfg2, Version: "test", Commander: e.cmd, Now: time.Now})
+	e.srv.releaseLease()
+	srv2, err := New(Options{Config: cfg2, Version: "test", Commander: e.cmd, Now: time.Now, Store: e.srv.db.st})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,20 +61,25 @@ func TestCreatedPipelineSurvivesRestartReadOnlyWebYAML(t *testing.T) {
 	if p.Origin != "created" || p.CfgErr != "" || p.EnvFile == "" {
 		t.Errorf("unexpected pipeline after restart: %+v", p)
 	}
+	if !fileExists(row.ConfigPath) || !fileExists(row.EnvPath) {
+		t.Error("config/.env not materialised from the database on start")
+	}
 }
 
 func TestCreatedRegistryPrecedenceAndMissingConfig(t *testing.T) {
 	state := t.TempDir()
-	reg := []PipelineEntry{
-		{Name: "dup", Config: "/created/dup.yaml"},
-		{Name: "gone", Config: filepath.Join(state, "missing.yaml")},
-	}
-	b, _ := json.Marshal(createdFileDoc{Version: 1, Pipelines: reg})
-	if err := os.WriteFile(filepath.Join(state, CreatedFile), b, 0o600); err != nil {
-		t.Fatal(err)
+	st := store.NewMem()
+	for _, r := range []store.Pipeline{
+		{Name: "dup", ConfigPath: "/created/dup.yaml", ConfigYAML: "version: 1\nname: dup\n", HasConfig: true, Origin: store.OriginCreated},
+		{Name: "gone", ConfigPath: filepath.Join(state, "missing.yaml"), Origin: store.OriginCreated},
+	} {
+		if err := st.UpsertPipeline(t.Context(), r); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg := &Config{StateDir: state, Pipelines: []PipelineEntry{{Name: "dup", Config: "/explicit/dup.yaml"}}}
 	r := NewRegistry(cfg, &fakeCmd{out: map[string]string{}})
+	r.db = &metaDB{st: st, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	r.Refresh(t.Context())
 	if p := r.Get("dup"); p == nil || p.ConfigPath != "/explicit/dup.yaml" || p.Origin != "web.yaml" {
 		t.Errorf("explicit web.yaml entry must win: %+v", p)

@@ -17,7 +17,7 @@ import (
 
 func unimplementedWarn(k string) string { return config.UnimplementedWarning(k) }
 
-var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings"}
+var pageNames = []string{"overview", "pipelines", "detail", "jobs", "job", "backups", "wizard", "new_pipeline", "settings", "mcp"}
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -535,7 +535,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 			b.Metrics = sn.Metrics
 		}
 		b.Graph = PipelineGraph(s.graphNodes(b.View, b.Status.Status, b.Metrics))
-		b.HasHistory = s.db != nil
+		b.HasHistory = true
 		b.Charts = s.charts(p.Name)
 	case "tables":
 		b.Tables = s.tablesPageView(p, r)

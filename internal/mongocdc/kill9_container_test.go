@@ -85,9 +85,18 @@ func TestContainer_Kill9SnapshotAndStream(t *testing.T) {
 		}
 		ops := load.halt(t) + loadMixed.halt(t)
 		pr := startOwning(t, bin, p, "kill-"+db, db)
-		docs := p.waitIdentical(t, db, 3*time.Minute)
+		// The final process must stay up until convergence: an exit (not slowness) would
+		// otherwise only show up as a convergence timeout.
+		alive := &running{done: make(chan error, 1)}
+		procDone := make(chan error, 1)
+		go func() {
+			err := <-pr.done
+			procDone <- err
+			alive.done <- fmt.Errorf("strand exited: %v\n%s", err, pr.stderr.String())
+		}()
+		docs := p.waitIdentical(t, db, 3*time.Minute, alive)
 		_ = pr.cmd.Process.Signal(syscall.SIGTERM)
-		if err := <-pr.done; err != nil {
+		if err := <-procDone; err != nil {
 			t.Fatalf("graceful stop: %v\n%s", err, pr.stderr.String())
 		}
 		t.Logf("round %d: %d kill -9, %d concurrent ops, %d documents identical", round, kills, ops, docs)

@@ -18,12 +18,14 @@
             <option value="mysql" selected>MySQL 5.5 – 8.x</option>
             <option value="mariadb">MariaDB 10.6+</option>
             <option value="postgres">PostgreSQL 14 – 18</option>
+            <option value="mongodb">MongoDB 6+ (replica set)</option>
           </select>
         </label>
         <label>Copy to (target)
           <select name="to" id="np-to">
             <option value="postgres" data-from="mysql postgres" selected>PostgreSQL 16 – 18</option>
             <option value="mysql" data-from="mysql mariadb">MySQL 8.x</option>
+            <option value="mongodb" data-from="mongodb">MongoDB 6+ (replica set)</option>
           </select>
           <small class="muted" id="np-pair-note"></small>
         </label>
@@ -32,7 +34,16 @@
 
     <fieldset class="np-step">
       <legend>2. Source connection</legend>
-      <div class="np-row">
+      <div class="np-row" data-when="src:mongodb">
+        <label>Source URI <span class="err">*</span>
+          <input type="password" name="source_uri" class="wide mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs0">
+          <small class="muted">Secret: stored only in the pipeline's encrypted .env (<code>SRC_URI</code>), never in the config. Needs a replica set (change streams).</small>
+        </label>
+        <label>Source database <span class="err">*</span>
+          <input type="text" name="source_database" value="app" class="mono">
+        </label>
+      </div>
+      <div class="np-row" data-when="src:mysql,mariadb,postgres">
         <label>Host <input type="text" name="source_host" value="127.0.0.1" class="wide mono"></label>
         <label>Port <input type="number" name="source_port" value="3306" class="num mono" id="np-src-port" data-mysql="3306" data-postgres="5432"></label>
         <label>User <input type="text" name="source_user" value="strand" class="mono">
@@ -55,7 +66,16 @@
 
     <fieldset class="np-step">
       <legend>3. Target connection</legend>
-      <div class="np-row">
+      <div class="np-row" data-when="dst:mongodb">
+        <label>Target URI <span class="err">*</span>
+          <input type="password" name="target_uri" class="wide mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs1">
+          <small class="muted">Secret: stored only in the encrypted .env (<code>DST_URI</code>). The target must be a replica set too (transactions).</small>
+        </label>
+        <label>Target database <span class="err">*</span>
+          <input type="text" name="target_mongo_database" value="app" class="mono">
+        </label>
+      </div>
+      <div class="np-row" data-when="dst:mysql,postgres">
         <label>Host <input type="text" name="target_host" value="127.0.0.1" class="wide mono"></label>
         <label>Port <input type="number" name="target_port" value="5432" class="num mono" id="np-dst-port" data-mysql="3306" data-postgres="5432"></label>
         <label>User <input type="text" name="target_user" value="strand" class="mono">
@@ -105,7 +125,20 @@
       <p class="np-preview small">Will copy: <code id="np-preview">…</code></p>
     </fieldset>
 
-    <details class="np-adv">
+    <details class="np-adv" data-when="src:mongodb">
+      <summary>5. MongoDB tuning (optional)</summary>
+      <div class="np-row">
+        <label>Snapshot batch <input type="number" name="snapshot_batch" min="1" max="100000" class="num mono" placeholder="1000">
+          <small class="muted">Documents per snapshot write transaction.</small></label>
+        <label>Stream batch <input type="number" name="stream_batch" min="1" max="100000" class="num mono" placeholder="2000">
+          <small class="muted">Change events per apply transaction.</small></label>
+        <label>Lease TTL <input type="text" name="lease_ttl" class="num mono" placeholder="45s">
+          <small class="muted">How long a stopped instance holds the pipeline lease (5s – 1h).</small></label>
+        <label><input type="checkbox" name="overwrite_target" value="true"> Drop and recreate matching target collections on the initial snapshot</label>
+      </div>
+    </details>
+
+    <details class="np-adv" data-when="src:mysql,mariadb,postgres">
       <summary>5. Advanced (optional)</summary>
       <div class="np-row">
         <label>Commit order
@@ -123,7 +156,7 @@
       </div>
     </details>
 
-    <details class="np-adv" id="np-tuning">
+    <details class="np-adv" id="np-tuning" data-when="src:mysql,mariadb,postgres">
       <summary>6. Snapshot speed &amp; safety (optional)</summary>
       <p class="muted small">Leave a field empty to use Strand's default. These can be changed later in the Config tab of the pipeline (Tuning card).</p>
       <div class="np-row">

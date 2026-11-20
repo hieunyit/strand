@@ -10,8 +10,15 @@ import (
 	"strand/internal/exitcode"
 )
 
-// MongoDBConfig: options of a MongoDB → MongoDB pipeline (source.kind = target.kind = mongodb).
+// MongoDBConfig is the `mongodb:` section of a MongoDB → MongoDB pipeline
+// (source.kind = target.kind = mongodb); zero values mean engine defaults.
 type MongoDBConfig struct {
+	// SnapshotBatch: documents per snapshot write transaction (default 1000; falls back
+	// to bootstrap.logical.chunk_rows).
+	SnapshotBatch int `yaml:"snapshot_batch,omitempty" json:"snapshot_batch,omitempty"`
+	// StreamBatch: change events per apply transaction (default 2000; falls back to
+	// target.batch.max_rows).
+	StreamBatch int `yaml:"stream_batch,omitempty" json:"stream_batch,omitempty"`
 	// OverwriteTarget: the first snapshot may drop and recreate existing selected target
 	// collections (default false: refuse).
 	OverwriteTarget bool `yaml:"overwrite_target,omitempty" json:"overwrite_target,omitempty"`
@@ -36,17 +43,33 @@ func IsMongoKind(kind string) bool {
 // IsMongoDB: the pipeline replicates MongoDB to MongoDB.
 func (c *Config) IsMongoDB() bool { return IsMongoKind(c.Source.Kind) || IsMongoKind(c.Target.Kind) }
 
-// resolveMongoConn turns dsn | uri_env (+ user, password | password_env) into the URI in dsn.
-func resolveMongoConn(name string, kind, dsn, uriEnv, host, user, password, passwordEnv *string, port *int) error {
-	*kind = "mongodb"
-	if *host != "" || *port != 0 {
-		return fmt.Errorf("%s: host/port are not used for kind mongodb; put every replica set member in the URI (dsn or uri_env)", name)
+// resolveMongoConn turns uri | dsn | uri_env (+ user, password | password_env) into the
+// URI in dsn. env (per-pipeline secrets) is consulted before the process environment.
+func resolveMongoConn(name string, kind, dsn, uri, uriEnv, host, user, password, passwordEnv *string, port *int, env map[string]string) error {
+	*kind = KindMongoDB
+	lookup := func(k string) (string, bool) {
+		if v, ok := env[k]; ok {
+			return v, true
+		}
+		return os.LookupEnv(k)
 	}
-	if (*dsn == "") == (*uriEnv == "") {
-		return fmt.Errorf("%s: set exactly one of dsn (mongodb:// URI) or uri_env (environment variable holding it)", name)
+	if *host != "" || *port != 0 {
+		return fmt.Errorf("%s: host/port are not used for kind mongodb; put every replica set member in the URI (uri, dsn or uri_env)", name)
+	}
+	set := 0
+	for _, v := range []string{*dsn, *uri, *uriEnv} {
+		if v != "" {
+			set++
+		}
+	}
+	if set != 1 {
+		return fmt.Errorf("%s: set exactly one of uri (mongodb:// URI, e.g. \"${SRC_URI}\"), dsn, or uri_env (environment variable holding it)", name)
+	}
+	if *uri != "" {
+		*dsn = *uri
 	}
 	if *uriEnv != "" {
-		v, ok := os.LookupEnv(*uriEnv)
+		v, ok := lookup(*uriEnv)
 		if !ok || strings.TrimSpace(v) == "" {
 			return fmt.Errorf("%s: uri_env %s is not set in the environment", name, *uriEnv)
 		}
@@ -61,7 +84,7 @@ func resolveMongoConn(name string, kind, dsn, uriEnv, host, user, password, pass
 		if pass != "" {
 			return fmt.Errorf("%s: set either password or password_env, not both", name)
 		}
-		v, ok := os.LookupEnv(*passwordEnv)
+		v, ok := lookup(*passwordEnv)
 		if !ok {
 			return fmt.Errorf("%s: password_env %s is not set in the environment", name, *passwordEnv)
 		}
