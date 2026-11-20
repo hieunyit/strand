@@ -255,14 +255,19 @@
       box.appendChild(ul);
       return;
     }
-    item('ok', 'Connect', (res.version ? 'Server ' + res.version : '') + (res.latency_ms ? ' in ' + res.latency_ms + ' ms' : ''));
-    (res.checks || []).forEach(function (c) { item(c.status === 'warn' || c.status === 'fail' ? c.status : 'ok', c.name, c.detail || ''); });
+    var seen = {};
+    (res.checks || []).forEach(function (c) {
+      seen[String(c.name).toLowerCase()] = true;
+      item(c.status === 'warn' || c.status === 'fail' ? c.status : 'ok', c.name.charAt(0).toUpperCase() + c.name.slice(1).replace(/_/g, ' '), c.detail || '');
+    });
     var miss = res.missing_privileges || [];
-    item(miss.length ? 'warn' : 'ok', 'Privileges', miss.length ? 'Missing: ' + miss.join(', ') : 'All required privileges are granted');
-    if (res.gtid_mode) { item(String(res.gtid_mode).toUpperCase() === 'ON' ? 'ok' : 'warn', 'GTID mode', res.gtid_mode); }
-    if (res.wal_level) { item(res.wal_level === 'replica' || res.wal_level === 'logical' ? 'ok' : 'warn', 'wal_level', res.wal_level); }
-    if (res.replica_set !== undefined && res.replica_set !== '') { item('ok', 'Replica set', res.replica_set); }
-    item('ok', 'Databases', (res.databases || []).length + ' found');
+    if (!seen.connect) { item('ok', 'Connect', (res.version ? 'Server ' + res.version : '') + (res.latency_ms ? ' in ' + res.latency_ms + ' ms' : '')); }
+    if (!seen.privileges) { item(miss.length ? 'warn' : 'ok', 'Privileges', miss.length ? 'Missing: ' + miss.join(', ') : 'All required privileges are granted'); }
+    else if (miss.length && !(res.checks || []).some(function (c) { return /privileges/i.test(c.name) && c.detail && c.detail.indexOf(miss[0]) >= 0; })) { item('warn', 'Missing privileges', miss.join(', ')); }
+    if (res.gtid_mode && !seen.gtid_mode) { item(String(res.gtid_mode).toUpperCase() === 'ON' ? 'ok' : 'warn', 'GTID mode', res.gtid_mode); }
+    if (res.wal_level && !seen.wal_level) { item(res.wal_level === 'replica' || res.wal_level === 'logical' ? 'ok' : 'warn', 'wal_level', res.wal_level); }
+    if (res.replica_set && !seen.replica_set) { item('ok', 'Replica set', res.replica_set); }
+    if (!seen.databases) { item('ok', 'Databases', (res.databases || []).length + ' found'); }
     item(res.pitr_allowed ? 'ok' : 'warn', 'Point-in-time recovery', res.pitr_allowed ? 'Available' + ((res.pitr_methods || []).length ? ' with ' + res.pitr_methods.join(', ') : '') : (res.pitr_reason || 'Not available'));
     box.appendChild(ul);
   }
