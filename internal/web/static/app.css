@@ -515,6 +515,11 @@ p.form-section-desc { margin: calc(var(--sp-2) * -1) 0 0; max-width: var(--measu
 .field-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .field-grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .field-grid.cols-1 { grid-template-columns: minmax(0, 1fr); }
+.field-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.field-grid.cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.card.mt { margin-top: var(--sp-4); }
+.text-bad { color: var(--bad); }
+.job-warning { color: var(--warn); margin-top: var(--sp-1); }
 .field-grid > [hidden] { display: none !important; }
 .form-grid > .toolbar, .form-grid > .form-actions, .form-grid > h3, .form-grid > fieldset { grid-column: 1 / -1; }
 
@@ -864,14 +869,14 @@ body.loginpage { display: block; background: var(--bg); }
   .hide-md { display: none; }
   .setrow { grid-template-columns: 1fr; }
   .grid-2 { grid-template-columns: 1fr; }
-  .field-grid.cols-3, .field-grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-grid.cols-3, .field-grid.cols-4, .field-grid.cols-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .login-shell { grid-template-columns: 1fr; }
   .login-brand { display: none; }
   .loginpage .logobig.compact { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: var(--fs-md); }
   .loginpage .logobig.compact .logo { width: 32px; height: 32px; padding: 6px; border-radius: 8px; background: var(--tt-nav-logo); color: #fff; }
 }
 @media (max-width: 720px) {
-  .field-grid, .form-grid, .field-grid.cols-3, .field-grid.cols-4 { grid-template-columns: minmax(0, 1fr); }
+  .field-grid, .form-grid, .field-grid.cols-2, .field-grid.cols-3, .field-grid.cols-4, .field-grid.cols-5 { grid-template-columns: minmax(0, 1fr); }
   .field.span-2, .field-grid > .span-2 { grid-column: auto; }
   .runlist li { grid-template-columns: 1fr 7ch; } .runlist .rl-bar { grid-column: 1 / -1; grid-row: 2; } .runlist .rl-rows, .runlist .rl-eta { display: none; }
   .metric { border-left: 0; border-top: 1px solid var(--line); }
