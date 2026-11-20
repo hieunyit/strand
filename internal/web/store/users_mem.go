@@ -85,8 +85,25 @@ func (m *Mem) UpdateUser(ctx context.Context, u User) error {
 	cur.DisplayName = u.DisplayName
 	cur.Role = u.Role
 	cur.Disabled = u.Disabled
+	cur.Language = u.Language
 	cur.UpdatedAt = time.Now()
 	m.users[u.ID] = cur
+	return nil
+}
+
+func (m *Mem) SetUserLanguage(ctx context.Context, id int64, lang string) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+
+	cur, ok := m.users[id]
+	if !ok {
+		return errors.New("user not found")
+	}
+	cur.Language = lang
+	cur.UpdatedAt = time.Now()
+	m.users[id] = cur
 	return nil
 }
 

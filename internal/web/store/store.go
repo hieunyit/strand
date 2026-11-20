@@ -50,6 +50,7 @@ type User struct {
 	DisplayName        string     `json:"display_name"`
 	PasswordHash       string     `json:"-"`
 	Role               Role       `json:"role"`
+	Language           string     `json:"language"`
 	Disabled           bool       `json:"disabled"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
@@ -176,6 +177,7 @@ type Store interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	CreateUser(ctx context.Context, u User) (User, error)
 	UpdateUser(ctx context.Context, u User) error
+	SetUserLanguage(ctx context.Context, id int64, lang string) error
 	SetUserPassword(ctx context.Context, id int64, passwordHash string, mustChange bool) error
 	RecordLoginSuccess(ctx context.Context, id int64, at time.Time) error
 	RecordLoginFailure(ctx context.Context, id int64, count int, lockedUntil *time.Time, at time.Time) error

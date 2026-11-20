@@ -66,7 +66,13 @@ func (s *Server) handleAccountPreferencesForm(w http.ResponseWriter, r *http.Req
 	ctx, cancel := dbCtx()
 	defer cancel()
 	if s.db != nil && s.db.st != nil {
-		_ = s.setSetting(ctx, "user_lang:"+sess.Username, lang)
+		if sess.UserID != 0 {
+			_ = s.db.st.SetUserLanguage(ctx, sess.UserID, lang)
+		} else if sess.Username != "" {
+			if u, ok, err := s.db.st.GetUser(ctx, sess.Username); err == nil && ok {
+				_ = s.db.st.SetUserLanguage(ctx, u.ID, lang)
+			}
+		}
 	}
 	s.setCookie(w, "strand_lang", lang, 365*86400)
 	_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), User: sess.Username, Action: "user.preference", Result: "ok", Detail: map[string]any{"language": lang}})

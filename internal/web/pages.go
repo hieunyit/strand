@@ -1191,8 +1191,26 @@ func (s *Server) userLanguage(sess *Session, r *http.Request) string {
 		if uLang == LangVI || uLang == LangEN {
 			return uLang
 		}
-		if uLang := s.settingStr("user_lang:" + sess.Username); uLang == LangVI || uLang == LangEN {
-			return uLang
+		if s.db != nil && s.db.st != nil {
+			ctx, cancel := dbCtx()
+			var u store.User
+			var ok bool
+			var err error
+			if sess.UserID != 0 {
+				u, ok, err = s.db.st.GetUserByID(ctx, sess.UserID)
+			} else {
+				u, ok, err = s.db.st.GetUser(ctx, sess.Username)
+			}
+			cancel()
+			if err == nil && ok && (u.Language == LangVI || u.Language == LangEN) {
+				s.userLangMu.Lock()
+				if s.userLangs == nil {
+					s.userLangs = make(map[string]string)
+				}
+				s.userLangs[sess.Username] = u.Language
+				s.userLangMu.Unlock()
+				return u.Language
+			}
 		}
 	}
 	if r != nil {

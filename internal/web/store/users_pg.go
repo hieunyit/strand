@@ -26,6 +26,7 @@ func scanUser(row interface {
 		&u.FailedLoginCount,
 		&u.LockedUntil,
 		&u.LastFailedAt,
+		&u.Language,
 	)
 	if err != nil {
 		return User{}, err
@@ -36,7 +37,7 @@ func scanUser(row interface {
 
 func (p *PG) GetUser(ctx context.Context, username string) (User, bool, error) {
 	row := p.db.QueryRowContext(ctx, `SELECT id, username, display_name, password_hash, role, disabled, created_at, updated_at,
-		last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at
+		last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at, language
 		FROM users WHERE lower(username) = lower($1)`, username)
 	u, err := scanUser(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -47,7 +48,7 @@ func (p *PG) GetUser(ctx context.Context, username string) (User, bool, error) {
 
 func (p *PG) GetUserByID(ctx context.Context, id int64) (User, bool, error) {
 	row := p.db.QueryRowContext(ctx, `SELECT id, username, display_name, password_hash, role, disabled, created_at, updated_at,
-		last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at
+		last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at, language
 		FROM users WHERE id = $1`, id)
 	u, err := scanUser(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -58,7 +59,7 @@ func (p *PG) GetUserByID(ctx context.Context, id int64) (User, bool, error) {
 
 func (p *PG) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := p.db.QueryContext(ctx, `SELECT id, username, display_name, password_hash, role, disabled, created_at, updated_at,
-		last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at
+		last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at, language
 		FROM users ORDER BY lower(username) ASC`)
 	if err != nil {
 		return nil, p.wrap(err)
@@ -80,19 +81,24 @@ func (p *PG) CreateUser(ctx context.Context, u User) (User, error) {
 	if u.Role == "" {
 		u.Role = RoleViewer
 	}
-	row := p.db.QueryRowContext(ctx, `INSERT INTO users (username, display_name, password_hash, role, disabled, must_change_password)
-		VALUES ($1, $2, $3, $4, $5, $6)
+	row := p.db.QueryRowContext(ctx, `INSERT INTO users (username, display_name, password_hash, role, disabled, must_change_password, language)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, username, display_name, password_hash, role, disabled, created_at, updated_at,
-		          last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at`,
-		u.Username, u.DisplayName, u.PasswordHash, string(u.Role), u.Disabled, u.MustChangePassword)
+		          last_login_at, must_change_password, failed_login_count, locked_until, last_failed_at, language`,
+		u.Username, u.DisplayName, u.PasswordHash, string(u.Role), u.Disabled, u.MustChangePassword, u.Language)
 	created, err := scanUser(row)
 	return created, p.wrap(err)
 }
 
 func (p *PG) UpdateUser(ctx context.Context, u User) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE users
-		SET display_name = $2, role = $3, disabled = $4, updated_at = now()
-		WHERE id = $1`, u.ID, u.DisplayName, string(u.Role), u.Disabled)
+		SET display_name = $2, role = $3, disabled = $4, language = $5, updated_at = now()
+		WHERE id = $1`, u.ID, u.DisplayName, string(u.Role), u.Disabled, u.Language)
+	return p.wrap(err)
+}
+
+func (p *PG) SetUserLanguage(ctx context.Context, id int64, lang string) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE users SET language = $2, updated_at = now() WHERE id = $1`, id, lang)
 	return p.wrap(err)
 }
 
