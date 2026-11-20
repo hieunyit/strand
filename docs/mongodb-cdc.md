@@ -286,7 +286,25 @@ Suggested alerts:
 
 ## Tested matrix and performance
 
-TEST_MATRIX_PLACEHOLDER
+Container tests (`internal/mongocdc`, `STRAND_TEST_MONGO_IMAGE=mongo:<v>`), run on
+MongoDB 4.4, 5.0, 6.0, 7.0 and 8.0 (source and target of the same version):
+
+| Test | What it proves |
+|---|---|
+| `FirstClassPipeline` | `strand validate/plan/sync --background/status/stop/verify/verify --repair fix`, admin socket (top, status, tables, events, checkpoint, source_tables, pause/resume), `/metrics` |
+| `SnapshotUnderConcurrentLoad` | snapshot handoff under insert/update/replace/delete load, byte-identical result |
+| `Kill9SnapshotAndStream` | `kill -9` of strand at random points of snapshot and streaming (8 per round), no loss/duplicates |
+| `FailoverThreeNode` | 3-member source and target: `replSetStepDown` and `kill -9` of the primary on each side during snapshot and streaming, under load; no restart of strand, byte-identical |
+| `AuthTLSLeastPrivilege` | requireTLS with a self-signed CA, SCRAM-SHA-256 and x.509, least-privilege roles, validate privilege check (granted and missing) |
+| `UpdateDescriptionsExact` | 3000 random updates of 24 kinds: update description applied to the pre-image equals the real post-image byte for byte |
+| `TransactionsAtomicOnTarget` | source transactions never observed partially on the target |
+| `DropRenameDropDatabase`, `RecopyResumesAndRenameInPlace` | DDL; resumable re-copy after a crash; O(1) rename past the overlap |
+| `ReplicateIndexesAndOptions` | `indexes: replicate` (validator, unique/TTL/partial/text/hidden indexes, later changes) |
+| `SlowPathLookupKeepsNumericIDs` | regression: lookups in collections with Decimal128/document `_id`s |
+
+Also on 8.0: oplog rollover fails closed, lease race and fencing, takeover of a stale
+foreign lease, large (15 MiB) documents, mixed-type `_id` paging, refusal of existing
+target collections.
 
 ### Performance
 
