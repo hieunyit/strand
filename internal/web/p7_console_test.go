@@ -1,10 +1,12 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"strand/internal/backup"
 	"strand/internal/web/store"
 )
 
@@ -104,5 +106,69 @@ func TestEnvironmentChipAndSectionedSettings(t *testing.T) {
 	}
 	if !seen {
 		t.Fatalf("trust_forwarded_for not in %.200s", body)
+	}
+}
+
+func TestOverviewDataProtectionAndAttention(t *testing.T) {
+	e := newCPEnv(t)
+	// 1. Initial overview with backup catalog configured
+	code, body := e.admin().do("GET", "/", nil)
+	if code != 200 {
+		t.Fatalf("GET / returned %d", code)
+	}
+	for _, want := range []string{
+		`id="overview-backup-strip"`,
+		`Protected sources`,
+		`href="/backups/jobs"`,
+		`Failing jobs`,
+		`href="/backups/jobs?status=failing"`,
+		`RPO breaches`,
+		`href="/backups/reports"`,
+		`Last test restore`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("overview lacks %s", want)
+		}
+	}
+
+	// 2. Add a failing job and verify it merges into the Needs attention card
+	ctx := context.Background()
+	job := backup.Job{
+		ID:                  "job-fail-1",
+		Name:                "shop-critical",
+		EverySeconds:        3600,
+		JobOptions:          backup.JobOptions{Method: backup.MethodMySQLDump, Source: "shop", Conn: backup.ConnSpec{Host: "127.0.0.1"}},
+		Bucket:              "central-backups",
+		ConsecutiveFailures: 2,
+		LastRunStatus:       "failed",
+	}
+	if err := e.st.CreateBackupJob(ctx, job); err != nil {
+		t.Fatalf("create backup job: %v", err)
+	}
+
+	code, body = e.admin().do("GET", "/", nil)
+	if code != 200 {
+		t.Fatalf("GET / after failing job: %d", code)
+	}
+	if !strings.Contains(body, "shop-critical") {
+		t.Error("failing backup job not shown in Needs attention")
+	}
+	if !strings.Contains(body, `href="/backups/jobs/job-fail-1?tab=runs">View log</a>`) {
+		t.Error("Needs attention missing View log link for backup job")
+	}
+	if !strings.Contains(body, `href="/backups/jobs/job-fail-1?tab=settings">Edit</a>`) {
+		t.Error("Needs attention missing Edit link for backup job")
+	}
+
+	// 3. Env without backup catalog hides the data protection row
+	plainEnv := newEnv(t, nil)
+	plainEnv.srv.backups = nil
+	c, _ := plainEnv.loginOK()
+	resp, body := plainEnv.do(c, "GET", "/", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("plain env GET / returned %d", resp.StatusCode)
+	}
+	if strings.Contains(body, "overview-backup-strip") {
+		t.Error("plain env without backups should hide Data protection strip")
 	}
 }

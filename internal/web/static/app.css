@@ -308,6 +308,7 @@ a.kpi:hover { text-decoration: none; color: var(--ink); border-color: var(--line
 .attn .attn-name { font-weight: 600; }
 .attn .attn-why { color: var(--ink-2); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .attn .attn-lag { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-size: var(--fs-sm); }
+.attn .attn-actions { display: inline-flex; gap: var(--sp-2); align-items: center; white-space: nowrap; margin-left: auto; }
 .attncard .cardhead h2 .ic { color: var(--bad); }
 
 /* ---------- empty state ---------- */

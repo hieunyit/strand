@@ -12,13 +12,49 @@
     {{range $s := .Body.States}}{{$n := index $.Body.Overview.Counts $s}}<a class="statechip" href="/pipelines?state={{$s}}" title="Show {{$s}} pipelines" data-state-chip="{{$s}}"{{if not (or $n (eq $s "synced") (eq $s "failed") (eq $s "stopped"))}} hidden{{end}}><span class="dot {{stateClass $s}}"></span>{{$s}} <b class="c-num" data-bind="count_{{$s}}">{{$n}}</b></a>{{end}}
   </div>
 </section>
+{{if .Body.Backup.Available}}
+<section class="summary-strip" aria-label="Data protection summary" id="overview-backup-strip">
+  <div class="cardhead"><h3>Data protection</h3><a class="btn ghost small" href="/backups">Backup overview {{icon "arrow"}}</a></div>
+  <div class="kpis" aria-label="Data protection summary">
+    <a class="kpi" href="/backups/jobs" title="Protected sources / total configured sources">
+      <div class="kpi-label">{{icon "db"}}Protected sources</div>
+      <div class="kpi-value c-num">{{.Body.Backup.ProtectedText}}</div>
+      <div class="kpi-sub">configured sources</div>
+    </a>
+    <a class="kpi{{if ne .Body.Backup.Failing 0}} bad{{end}}" href="/backups/jobs?status=failing" title="Consecutively failing backup jobs">
+      <div class="kpi-label">{{icon "alert"}}Failing jobs</div>
+      <div class="kpi-value c-num">{{.Body.Backup.Failing}}</div>
+      <div class="kpi-sub">consecutive failures</div>
+    </a>
+    <a class="kpi{{if .Body.Backup.RPOBreaches}} bad{{end}}" href="/backups/reports" title="Sources exceeding their policy RPO target">
+      <div class="kpi-label">{{icon "clock"}}RPO breaches</div>
+      <div class="kpi-value c-num">{{.Body.Backup.RPOBreaches}}</div>
+      <div class="kpi-sub">over target window</div>
+    </a>
+    <a class="kpi{{if and (ne .Body.Backup.LastTestRestore "never") (not .Body.Backup.LastTestRestoreOK)}} bad{{end}}" href="/backups/reports" title="Newest automated test restore">
+      <div class="kpi-label">{{icon "flag"}}Last test restore</div>
+      <div class="kpi-value">{{.Body.Backup.LastTestRestore}}</div>
+      <div class="kpi-sub">into scratch target</div>
+    </a>
+  </div>
+</section>
+{{end}}
 <section class="card attncard" aria-label="Needs attention" data-attn="{{range $i, $v := .Body.Attn}}{{if $i}},{{end}}{{$v.Name}}{{end}}">
-  <div class="cardhead"><h2>{{icon "alert"}}Needs attention</h2>{{if .Body.Attn}}<span class="badge st-failed">{{len .Body.Attn}}</span>{{end}}</div>
-  {{if .Body.Attn}}<ul class="attn">{{range .Body.Attn}}<li data-live-row="{{.Name}}" class="{{if .Stale}}is-stale{{end}}">
+  <div class="cardhead"><h2>{{icon "alert"}}Needs attention</h2>{{if or .Body.Attn .Body.Backup.Attention}}<span class="badge st-failed">{{add (len .Body.Attn) (len .Body.Backup.Attention)}}</span>{{end}}</div>
+  {{if or .Body.Attn .Body.Backup.Attention}}<ul class="attn">{{range .Body.Attn}}<li data-live-row="{{.Name}}" class="{{if .Stale}}is-stale{{end}}">
     <span class="badge {{stateClass .State}}" data-bind-badge="state">{{.State}}</span>
     <div class="attn-main"><a class="attn-name mono" href="/pipelines/{{.Name}}">{{.Name}}</a> <span class="muted small">{{.Pair}}</span>{{template "stale-tag" .}}
       <div class="attn-why" data-bind="reason">{{with stateReason .}}{{.}}{{else}}needs a look{{end}}</div></div>
     <span class="attn-lag">{{if .Top}}lag <b class="c-num" data-bind="lag" data-bind-lag>{{lag .Top.LagSeconds}}</b>{{end}}</span>
+  </li>{{end}}
+  {{range .Body.Backup.Attention}}<li>
+    <span class="badge st-failed">backup</span>
+    <div class="attn-main"><a class="attn-name" href="{{.EditURL}}">{{.JobName}}</a> <span class="muted small">{{.Engine}}</span>
+      <div class="attn-why">{{.Reason}}</div></div>
+    <div class="attn-actions">
+      {{if .LogURL}}<a class="btn ghost small" href="{{.LogURL}}">View log</a>{{end}}
+      {{if .EditURL}}<a class="btn ghost small" href="{{.EditURL}}">Edit</a>{{end}}
+    </div>
   </li>{{end}}</ul>
   {{else}}<div class="empty-state ok">{{icon "check"}}<b>Everything is running normally</b><span>No pipeline is failed, paused, unreachable or has an open breaker.</span></div>{{end}}
 </section>

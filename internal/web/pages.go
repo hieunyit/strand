@@ -606,6 +606,7 @@ type overviewBody struct {
 	Warnings []string
 	Kinds    []string // engines in use (source or target), for the filter bar of the list page
 	Bulk     bool     // list page: checkbox column, bulk bar and row menu
+	Backup   backupHealth
 }
 
 func (s *Server) sparkFor(name string) template.HTML {
@@ -661,7 +662,13 @@ func needsAttention(v PipelineView) bool {
 }
 
 func (s *Server) pageOverview(w http.ResponseWriter, r *http.Request, sess *Session) {
-	b := overviewBody{Overview: s.samp.BuildOverview(), States: AllStates, Sparks: map[string]template.HTML{}, Warnings: s.reg.Warnings()}
+	b := overviewBody{
+		Overview: s.samp.BuildOverview(),
+		States:   AllStates,
+		Sparks:   map[string]template.HTML{},
+		Warnings: s.reg.Warnings(),
+		Backup:   s.backupHealth(r.Context()),
+	}
 	for _, p := range s.reg.List() {
 		b.Views = append(b.Views, s.view(p))
 		b.Sparks[p.Name] = s.sparkFor(p.Name)
