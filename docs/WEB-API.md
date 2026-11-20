@@ -37,6 +37,9 @@ Hệ thống phân quyền trung tâm gồm 3 vai trò:
 | Thao tác sao lưu nâng cao (tạo/sửa job, restore, delete backup) | ❌ (403) | ❌ (403) | ✅ |
 | Tạo / sửa / xóa backup connection và policy, xem trước policy (`/api/v1/backup-connections`, `/api/v1/backup-policies`) | ❌ (403) | ❌ (403) | ✅ |
 | Test kết nối backup (`POST /api/v1/backup-connections/test`, `/{id}/test`) | ❌ (403) | ✅ | ✅ |
+| Test repository (`POST /api/v1/backup-repositories/{id}/test`: ghi/đọc/xóa một object nhỏ) | ❌ (403) | ✅ | ✅ |
+| Tạo / sửa / xóa repository, kênh thông báo, luật thông báo (`/api/v1/backup-repositories`, `/api/v1/backup-notify-channels`, `/api/v1/backup-notify-rules`), "Send test" của kênh | ❌ (403) | ❌ (403) | ✅ |
+| Xem khóa mã hóa backup, kênh/luật thông báo, backup activity (`/api/v1/backup-keys`, `/api/v1/backup-notify-*`, `/api/v1/backup-activity`, trang `/backups/keys`, `/backups/notifications`, `/backups/activity`) | ❌ (403) | ❌ (403) | ✅ |
 | Cài đặt hệ thống (`/settings`, `/api/v1/settings`) | ❌ (403) | ❌ (403) | ✅ |
 | Quản lý người dùng (`/users`, `/api/v1/users/*`) | ❌ (403) | ❌ (403) | ✅ |
 | Xem / xuất Audit log (`/audit`, `/api/v1/audit/*`) | ❌ (403) | ❌ (403) | ✅ |
@@ -319,6 +322,33 @@ suy ra từ trường gửi khác policy), `schedule`, `window_minutes`, `jitter
 (ví dụ PITR bị tắt vì phương thức/số database không hỗ trợ). Job có `schedule` khác `interval` chạy lần đầu đúng lần kế tiếp của lịch (không phải ngay);
 `last_run_status` có thêm giá trị `missed`.
 
+### Repository, thông báo, khóa, RPO, báo cáo, activity (P5/P6; xem `docs/CENTRAL-BACKUPS.md`)
+
+Chỉ thêm. Secret (access key, secret key, URL webhook, mật khẩu SMTP) mã hóa bằng `STRAND_WEB_SECRET_KEY` (AAD = id), ghi-một-chiều: mọi
+phản hồi chỉ có `access_key_set`, `secret_key_set`, `secret_set`; không bao giờ có trong HTML, audit, log, argv, metrics hay CSV. Tiến trình
+`strand backup ...` do web khởi động nhận khóa repository qua **biến môi trường** của nó, không bao giờ qua argv.
+
+| Route | Ghi chú |
+| --- | --- |
+| `GET /api/v1/backup-repositories` → `{"repositories": [...], "secret_storage": bool}` | Mỗi repo: `kind` (`s3`), `secret_mode` (`env\|stored`), `env_prefix`, `endpoint`, `region`, `bucket`, `prefix`, `lock_mode`, `lock_days`, `immutable` (COMPLIANCE), `configured`, `used_bytes`, `backup_count`, `copy_count`, `last_test_*`, `last_test_steps`. |
+| `POST /api/v1/backup-repositories` → 200 `{"repository"}` | Body: `name, kind, secret_mode, env_prefix` (env) hoặc `endpoint, region, allow_insecure_local, access_key, secret_key` (stored), `bucket, prefix, lock_mode, lock_days, retention`. 400: `kind` khác `s3`, `env_prefix` ngoài `STRAND_BACKUP_S3_`/`STRAND_BACKUP_REPO_<NAME>_`, gửi khóa với `env`, thiếu khóa với `stored`; 409 trùng tên. |
+| `GET /api/v1/backup-repositories/{id}` | `{"repository", "usage_by_source": [{source, count, bytes, copies}], "used_by": {"jobs", "policies"}}`. |
+| `PUT /api/v1/backup-repositories/{id}` | Thiếu `access_key`/`secret_key` = giữ khóa đã lưu. Đổi khóa/endpoint/bucket khởi động lại scheduler của job đang bật dùng nó (`restarted_jobs`). |
+| `DELETE /api/v1/backup-repositories/{id}` → 204 | **409** khi repo còn backup chưa hết hạn (`repository still holds N backups`) hoặc còn job/policy dùng (`{"jobs","policies"}`). |
+| `POST /api/v1/backup-repositories/{id}/test` (**operator**) | 200 kể cả khi hỏng: `{"ok","status","steps":[{name: list\|put\|get\|delete\|object_lock, status ok\|failed\|skipped, detail, latency_ms}],"object_lock_enabled","immutable_configured","latency_ms","at"}`. Repo `lock_mode` mà bucket không có Object Lock → bước `object_lock` failed. |
+| `GET/POST /api/v1/backup-notify-channels`, `GET/PUT/DELETE .../{id}` (GET: admin) | Kênh `kind`: `webhook\|slack\|teams\|email`. Body: `name, kind, enabled`, `url` (webhook/slack/teams), hoặc `smtp_addr, from, to[], user, password` (email). Danh sách luôn có kênh chỉ-đọc `id: "env"` ("From environment": `STRAND_BACKUP_NOTIFY_*`, `destinations`, `events`); sửa/xóa nó → 409. Thiếu `url`/`password` khi PUT = giữ nguyên. |
+| `POST /api/v1/backup-notify-channels/{id}/test` (admin) | "Gửi thử" (kể cả `env`): `{"ok","status","detail","at"}`, ghi `last_test_*` của kênh. |
+| `GET/POST /api/v1/backup-notify-rules`, `PUT /{id}` `{"enabled"}`, `DELETE /{id}` | Luật `{event, scope_kind: all\|policy\|job, scope_id, channel_id, enabled}`. Sự kiện: `failure, missed, verify_failed, success, rpo_breach, repo_unreachable`. 400 khi kênh/policy/job không tồn tại hoặc kênh là `env`; 409 trùng. Xóa kênh xóa luôn luật của nó. |
+| `GET /api/v1/backup-keys` (admin) | `{"configured","error","active_key_id","keys":[{id, fingerprint, active, backups, bytes, sample_backup_ids}],"warnings":[{key_id, backups, sample_backup_ids, message}],"unencrypted":{backups, bytes},"notice"}`. Không bao giờ có giá trị khóa. |
+| `GET /api/v1/backup-rpo` | `{"sources":[{source, job_id, pitr, basis: log\|backup\|none, last_restore_point, current_rpo_seconds (-1: chưa có điểm), rpo_target_minutes, rto_minutes, breach}]}`. |
+| `GET /api/v1/backup-reports/compliance?from=&to=` | `from`/`to`: RFC 3339 hoặc `YYYY-MM-DD`; mặc định 30 ngày đến hiện tại, tối đa 366 ngày. `{"sources","sources_breaching_rpo","success_rate_7d_pct","success_rate_30d_pct","last_test_restore_at","rows":[...]}`; mỗi dòng có số run/thành công/thất bại trong khoảng, tỉ lệ 7/30 ngày (tính đến `to`), RPO hiện tại và lần test-restore gần nhất. |
+| `GET /api/v1/backup-reports/compliance.csv?from=&to=` | CSV tải về (`Content-Disposition: attachment`), UTF-8 có BOM, CRLF; ô văn bản bắt đầu bằng `=`, `+`, `-`, `@` (hoặc tab/CR) được thêm `'` phía trước. Ghi audit `backup.report_export`. |
+| `GET /api/v1/backup-activity?cursor=&limit=&action=&user=&from=&to=` (admin) | Audit lọc theo tiền tố `backup` (mọi action `backup.*`, `backup_job.*`, `backup_connection.*`, `backup_policy.*`, `backup_repository.*`, `backup_notify_*`, `backup_run.*`), mới nhất trước. `limit` 1..200 (mặc định 50); `action` phải bắt đầu bằng `backup`. → `{"activity":[{id,time,user,ip,action,target,result,detail}],"next_cursor"}`; cursor = `id` của dòng cuối; trang cuối `""`. `detail.changes` = `{field: {from, to}}` (secret chỉ là `set\|cleared\|changed`). |
+
+Metric `strand_backup_rpo_seconds{source}` (cùng `strand_backup_rpo_target_seconds`, `strand_backup_rpo_breach`) có trong `GET /metrics`.
+Mọi thao tác ghi của backup (job, policy, connection, repository, kênh, luật, run, hủy, restore, legal hold, prune, verify, copy) ghi audit **trước** khi
+thực hiện (từ chối nếu audit lỗi), kèm người dùng và các trường đã đổi.
+
 ### Registry trong DB (chế độ PostgreSQL)
 
 `PipelineView` có thêm `origin` (`created` | `web.yaml` | `scan`), `missing` (lý do, khi entry web.yaml/file scan đã mất) và `disk_conflicts` (`[{"file": "config|env", "path": "<bản cất>", "at"}]`). Action liên quan (§4): `registry-restore`, `registry-forget` (cần `confirm_name`; 409 khi pipeline đang chạy), `conflict-adopt` và `conflict-dismiss` (tham số `path` phải là một bản cất của pipeline đó). Chế độ file: 409.
@@ -427,7 +457,7 @@ Chế độ file (và bản sao file ở chế độ DB `database.audit: both|fi
 
 ## 6. Trang HTML
 
-`/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs|repair|promote}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/settings` (GET; POST form có `csrf`), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Overview, Pipelines và mọi tab của trang pipeline nhận số liệu qua SSE (§3.3) và cập nhật **tại chỗ** (phần tử có `data-bind*`: số, huy hiệu, thanh tiến độ, sparkline, biểu đồ, danh sách bảng đang chép, Errors, đuôi Logs), không tải lại cả trang; trang chỉ tải lại khi cấu trúc đổi (danh sách pipeline, tập "Needs attention", trạng thái của pipeline đang xem, bảng mới) và không bao giờ khi người dùng đang gõ, đang mở hộp thoại hoặc đang bôi đen chữ. Logs: bám đuôi trực tiếp (mặc định bật, `?follow=0` để tắt; cuộn lên thì tạm dừng và hiện số dòng mới). Trang Jobs vẫn tự làm mới 5 giây.
+`/` (Overview), `/pipelines`, `/pipelines/new` (Tạo pipeline mới), `/pipelines/{name}` (Graph), `/pipelines/{name}/{tables|checkpoint|errors|config|logs|jobs|repair|promote}`, `/jobs` (mọi job), `/jobs/{id}` (output trực tiếp), `/settings` (GET; POST form có `csrf`), `/login`, `POST /login`, `POST /logout`, `/static/*` (công khai). Trang backup bổ sung: `/backups/repositories`, `/backups/repositories/{id}` (mọi vai trò xem; nút ghi chỉ cho admin, nút Test cho operator), `/backups/notifications`, `/backups/keys`, `/backups/activity` (admin). Overview, Pipelines và mọi tab của trang pipeline nhận số liệu qua SSE (§3.3) và cập nhật **tại chỗ** (phần tử có `data-bind*`: số, huy hiệu, thanh tiến độ, sparkline, biểu đồ, danh sách bảng đang chép, Errors, đuôi Logs), không tải lại cả trang; trang chỉ tải lại khi cấu trúc đổi (danh sách pipeline, tập "Needs attention", trạng thái của pipeline đang xem, bảng mới) và không bao giờ khi người dùng đang gõ, đang mở hộp thoại hoặc đang bôi đen chữ. Logs: bám đuôi trực tiếp (mặc định bật, `?follow=0` để tắt; cuộn lên thì tạm dừng và hiện số dòng mới). Trang Jobs vẫn tự làm mới 5 giây.
 
 Tab Tables với hơn 200 bảng được **phân trang ở server** (100 dòng/trang): tìm kiếm (`?tq=`), lọc trạng thái (`tstate=running|pending|done`, các chip là liên kết), sắp xếp (`tsort=name|pct|rows|eta`), trang (`tpage=`); phần tổng hợp, bộ đếm và "Copying now" (tối đa 50 bảng đang chép) luôn hiện. Dòng của trang được cập nhật tại chỗ; trang dựng lại khi một dòng đang hiện đổi trạng thái hoặc danh sách bảng đổi. 2.000 bảng: ~120 KiB, 10.000 bảng: ~130 KiB mỗi trang. Tối đa 200 bảng: như cũ (mọi dòng, lọc/sắp xếp ở trình duyệt).
 

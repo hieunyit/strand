@@ -302,15 +302,48 @@ decoded. Losing a key loses its backups: keep keys in your secret manager.
 ### Repositories, Object Lock and copies (3-2-1)
 
 Without repositories, backups go to `STRAND_BACKUP_S3_*` + the job's bucket.
-Named repositories (Web: Repositories; API `/api/v1/backup-repositories`) hold
-only an id, bucket, prefix, Object Lock settings and a default retention policy;
-endpoint and credentials stay in the environment under the repository's prefix:
+Named repositories (Web: **Repositories**, `/backups/repositories`; API
+`/api/v1/backup-repositories`) come in two credential modes:
+
+* **env** (the original mode): the repository holds only an id, bucket, prefix,
+  Object Lock settings and a default retention policy; endpoint and credentials
+  stay in the environment of the Web service under the repository's prefix:
 
 ```sh
 STRAND_BACKUP_REPO_OFFSITE_ENDPOINT=https://s3.eu-central-1.amazonaws.com
 STRAND_BACKUP_REPO_OFFSITE_REGION=eu-central-1
 STRAND_BACKUP_REPO_OFFSITE_ACCESS_KEY=... / _SECRET_KEY=... / _SESSION_TOKEN=...
 ```
+
+* **stored** (migration 019): endpoint, region, access key and secret key are
+  entered in the console. The keys are sealed with the Web secret key
+  (`STRAND_WEB_SECRET_KEY`, AES-256-GCM, the repository id as additional data) and
+  are write-only: no response, page, audit entry, log or metric carries them (only
+  `access_key_set`/`secret_key_set`). The Web service opens them only to put them in
+  the **environment** of the `strand backup ...` processes it starts (schedulers,
+  log archivers, verify, prune, copy, restore), under a prefix derived from the
+  repository id; they never appear in argv. Editing a repository's credentials
+  restarts the schedulers of the enabled jobs that use it (their environment is
+  fixed when they start). Running `strand backup` by hand from a shell cannot use a
+  stored repository (the keys are not in your environment); use env mode for that.
+
+`kind` is `s3` (AWS, MinIO, Ceph); `azure` and `gcs` are reserved in the schema
+and rejected until implemented. A repository with `lock_mode: COMPLIANCE` is shown
+with an **immutable** badge. The list shows, per repository, the bytes and number
+of backups in the catalog (non-expired records, log segments included) and the
+copies it holds; the detail page shows the space per source and the jobs and
+policies that use it. Deleting a repository is refused (409) while it holds
+non-expired backups or while a job or policy names it.
+
+**Test** (`POST /api/v1/backup-repositories/{id}/test`, operator): a checklist of
+`list` the test prefix, `put` a 60-byte object under `<prefix>/.strand-repo-test/`,
+`get` it back and compare, `delete` it, and `object_lock` (does the bucket have
+Object Lock? failed when the repository requires GOVERNANCE/COMPLIANCE but the
+bucket has none: Object Lock can only be enabled when a bucket is created), each
+with its latency. A step that fails makes the later dependent ones `skipped`. The
+outcome is stored on the repository (`last_test_*`). The test object is written
+without retention; a bucket default retention would block its deletion and is
+reported on the `delete` step.
 
 With `lock_mode` GOVERNANCE or COMPLIANCE and `lock_days`, every object is
 written with S3 Object Lock retention (the bucket must be created with Object
@@ -488,21 +521,45 @@ files of dead processes are removed whenever a repository is opened.
 
 ### Notifications
 
-Configured in the Web service environment only (destinations are secrets):
+Two sources, both delivered by the Web service (active instance):
+
+1. **From environment** (read-only channel `env`): the destinations are secrets,
+   so they can be set in the environment of the Web service:
 
 ```sh
 STRAND_BACKUP_NOTIFY_WEBHOOK=https://hooks.example.com/strand      # JSON event
 STRAND_BACKUP_NOTIFY_SLACK_WEBHOOK=https://hooks.slack.com/...     # {"text": ...} (Slack/Mattermost)
+STRAND_BACKUP_NOTIFY_TEAMS_WEBHOOK=https://...                     # Microsoft Teams (MessageCard)
 STRAND_BACKUP_NOTIFY_SMTP_ADDR=smtp.example.com:587                # STARTTLS required except loopback
 STRAND_BACKUP_NOTIFY_SMTP_FROM=strand@example.com
 STRAND_BACKUP_NOTIFY_SMTP_TO=dba@example.com,ops@example.com
 STRAND_BACKUP_NOTIFY_SMTP_USER=... / STRAND_BACKUP_NOTIFY_SMTP_PASSWORD=...
-STRAND_BACKUP_NOTIFY_ON=failure,missed,verify_failed               # default; add success or use all
+STRAND_BACKUP_NOTIFY_ON=failure,missed,verify_failed,rpo_breach,repo_unreachable   # default; add success or use all
 ```
 
+   It appears on the Notifications page as "From environment" with the kinds of
+   destination and the events it follows, never the destinations; it cannot be
+   edited, deleted or used as a rule target.
+
+2. **Stored channels** (migration 019; Web: **Notifications**,
+   `/backups/notifications`, admin; API `/api/v1/backup-notify-channels`):
+   `webhook`, `slack`, `teams` or `email` (SMTP server, from, recipients, optional
+   user/password). The destination URL or SMTP password is sealed like repository
+   keys and write-only. A stored channel receives nothing until a **rule**
+   (`/api/v1/backup-notify-rules`) routes an event to it: *event* (`failure`,
+   `missed`, `verify_failed`, `success`, `rpo_breach`, `repo_unreachable`) x *scope*
+   (all jobs, one policy, one job) -> channel. **Send test**
+   (`POST .../{id}/test`, admin; also for `env`) delivers a `test` event and records
+   the result on the channel; a failure reports the HTTP status without the URL.
+   Destinations are contacted from the Web service, so an admin can point a channel
+   at any URL the service can reach: keep channel administration to trusted admins.
+
 Events: run `failure`/`success`, `missed` schedule (due more than max(5 min,
-10% of the interval) ago without a run, or a run outside its `window_minutes`), `verify_failed`. Each event is sent
-once across instances and audited (`backup.notify`).
+10% of the interval) ago without a run, or a run outside its `window_minutes`),
+`verify_failed`, `rpo_breach` (see below) and `repo_unreachable` (a run that failed
+with the normalized error code `repo_unreachable`; it replaces `failure` for that
+run). Each event is sent once across instances and every delivery is audited
+(`backup.notify`, channel id, no destination).
 
 ### Metrics and alerts
 
@@ -511,7 +568,9 @@ once across instances and audited (`backup.notify`).
 `strand_backup_last_size_bytes`, `strand_backup_last_duration_seconds`,
 `strand_backup_stored_bytes`, `strand_backup_recovery_window_end_timestamp_seconds`,
 `strand_backup_job_consecutive_failures{job,name}`,
-`strand_backup_job_last_run_success`, `strand_backup_recent_check_failures`.
+`strand_backup_job_last_run_success`, `strand_backup_recent_check_failures`,
+`strand_backup_rpo_seconds{source}`, `strand_backup_rpo_target_seconds{source}`,
+`strand_backup_rpo_breach{source}`.
 
 ```yaml
 groups:
@@ -527,6 +586,66 @@ groups:
     expr: strand_backup_recent_check_failures > 0
 ```
 
+### Encryption keys page (admin)
+
+`/backups/keys` and `GET /api/v1/backup-keys` list the key ids from
+`STRAND_BACKUP_ENCRYPTION_KEYS` (or the file/single-key variants) with a short
+non-reversible fingerprint, which key is the active **write** key (the first one
+listed), and how many backups (and bytes) were written with each. A catalog backup
+whose `key_id` is no longer configured is reported as a warning (with sample
+backup ids): it cannot be restored until the key is added back. Unencrypted
+backups are counted separately. Key material is never returned or rendered, and a
+malformed key variable is reported without echoing it. With no key configured a
+notice says new backups cannot be encrypted.
+
+### RPO/SLA and compliance
+
+Each policy has `rpo_minutes` (the target) and `rto_minutes` (informational). For
+every source the **current RPO** is `now - latest restore point`: the end of the
+last archived log segment when the job archives logs (PITR; a newer base backup
+wins), otherwise the point of the last complete backup (its consistent point, i.e.
+`start_time`, else creation time). A PITR source that has no segment yet falls back
+to its last backup; a source with no restore point has no RPO (`-1`) and is never
+flagged, so a new job does not alarm before its first run. A source over its target
+is a **breach**:
+
+* `GET /api/v1/backup-rpo` and the metrics `strand_backup_rpo_seconds{source}`,
+  `strand_backup_rpo_target_seconds{source}`, `strand_backup_rpo_breach{source}`;
+* an `rpo_breach` notification (rules or the environment channel), once per breach
+  episode and again every 6 h while it lasts (state in `backup_rpo_breaches`,
+  migration 020, so instances do not repeat it); a paused (disabled) job is reported
+  but does not page. The episode ends when the source is back under its target.
+
+**Compliance report**: `GET /api/v1/backup-reports/compliance?from=&to=` and the
+CSV `GET /api/v1/backup-reports/compliance.csv?from=&to=` (default: last 30 days,
+at most 366). Per source: policy, RPO target/RTO, current RPO and breach, runs /
+succeeded / failed in the window (failed = failed, partial and missed; cancelled
+and running runs are not counted), success rate in the window and over the 7 and 30
+days before `to`, the last restore point and the last test-restore (time and
+status); the summary adds the overall 7/30-day success rate, the number of sources
+over their RPO and the newest test-restore. The CSV starts with a UTF-8 BOM and uses
+CRLF so Excel opens it correctly; text cells starting with `=`, `+`, `-` or `@`
+(or a tab/CR) are prefixed with `'` so a hostile job or source name cannot become a
+spreadsheet formula. Each export is audited (`backup.report_export`).
+
+### Audit and the Activity feed
+
+Every backup write is recorded in the audit log **before** it takes effect (the
+request is refused when the audit cannot be written), with the acting user:
+`backup_job.*` (create, update, delete, start, stop, run, prune, verify),
+`backup_policy.*`, `backup_connection.*` (create, update, delete, test),
+`backup_repository.*` (create, update, delete, test), `backup_notify_channel.*`,
+`backup_notify_rule.*`, `backup_run.cancel`, `backup.restore`, `backup.legal_hold`,
+`backup.verify`, `backup.copy`, `backup.report_export`, and `backup.notify` for
+deliveries. Updates carry `detail.changes`, `{field: {from, to}}`; secret fields are
+never recorded, only `set`, `cleared` or `changed`, and detail maps pass through a
+mask for secret-named keys as a second line of defence.
+
+`/backups/activity` and `GET /api/v1/backup-activity` (admin) show the audit
+entries whose action starts with `backup`, newest first, cursor-paged
+(`next_cursor` = id of the last row), filterable by `user`, `action` prefix and
+time.
+
 ### Catalog schema (migrations 014 and 016)
 
 `backups` gains: `job_id`, `repository`, `method`, `kind` (full | incremental |
@@ -541,6 +660,11 @@ log archiving, verification), retry columns and notification/claim timestamps.
 `backup_runs` (migration 016) stores execution history for every job run
 (`schedule`, `manual`, `retry`, `api`), with normalized `error_code` and
 remediation advice.
+Migration 019 adds the stored-credential columns of `backup_repositories`
+(`kind`, `secret_mode`, `endpoint`, `region`, `allow_insecure_local`, sealed
+`access_key_sealed`/`secret_key_sealed`, last test and its checklist) and the tables
+`backup_notify_channels` and `backup_notify_rules`; migration 020 adds
+`backup_rpo_breaches`.
 Log segments are self-describing (their catalog row is the manifest); base
 backups get a `manifest.json` sidecar containing the catalog record so a
 repository can be re-indexed without the database.
