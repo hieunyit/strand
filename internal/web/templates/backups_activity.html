@@ -1,0 +1,18 @@
+{{define "content"}}
+<section class="card" id="bk-activity-card" data-bkops="activity">
+  <div class="cardhead"><h2>Activity</h2></div>
+  <form method="get" action="/backups/activity" class="filterbar">
+    <div class="field-grid cols-5">
+      <label class="field"><span class="field-label sr-only">User</span><input type="search" name="user" value="{{.Body.User}}" placeholder="Filter by user..."></label>
+      <label class="field"><span class="field-label sr-only">Action prefix</span><input type="search" name="action" value="{{.Body.Action}}" placeholder="backup_job."></label>
+      <button class="btn" type="submit">Filter</button>
+    </div>
+  </form>
+  {{if .Body.Items}}
+  <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Backup activity</caption>
+    <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Target</th><th>Result</th><th>Changes</th></tr></thead>
+    <tbody>{{range .Body.Items}}<tr><td class="nowrap">{{ts .Time}}</td><td>{{if .User}}{{.User}}{{else}}system{{end}}<div class="small mono">{{.IP}}</div></td><td class="mono small">{{.Action}}</td><td class="mono small">{{.Target}}</td><td><span class="badge {{if eq .Result "error"}}st-failed{{else if eq .Result "denied"}}st-failed{{end}}">{{.Result}}</span></td><td class="small mono">{{auditDetail .Detail}}</td></tr>{{end}}</tbody></table></div>
+  {{if .Body.Next}}<p><a class="btn" href="/backups/activity?cursor={{.Body.Next}}{{if .Body.User}}&amp;user={{.Body.User}}{{end}}{{if .Body.Action}}&amp;action={{.Body.Action}}{{end}}">Older entries</a></p>{{end}}
+  {{else}}<div class="empty-state"><b>No activity</b></div>{{end}}
+</section>
+{{end}}

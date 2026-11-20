@@ -299,9 +299,44 @@ func (s *Server) apiBackupRepoSave(update bool) authedHandler {
 		default:
 			got, _, _ := s.db.st.GetBackupRepo(r.Context(), rp.ID)
 			usage, _ := s.db.st.BackupRepoUsage(r.Context())
-			writeJSON(w, http.StatusOK, map[string]any{"repository": s.repoView(got, usage)})
+			resp := map[string]any{"repository": s.repoView(got, usage)}
+			if update && cur != nil && repoAccessChanged(*cur, rp) {
+				resp["restarted_jobs"] = s.restartJobsUsingRepo(r.Context(), rp.ID)
+			}
+			writeJSON(w, http.StatusOK, resp)
 		}
 	}
+}
+
+// repoAccessChanged: the edit changes how a process reaches the repository (its environment is fixed when the
+// process starts).
+func repoAccessChanged(old, nw backup.Repo) bool {
+	return old.SecretMode != nw.SecretMode || old.EnvPrefix != nw.EnvPrefix || old.Endpoint != nw.Endpoint || old.Region != nw.Region ||
+		old.AllowInsecureLocal != nw.AllowInsecureLocal || old.Bucket != nw.Bucket || string(old.AccessKeySealed) != string(nw.AccessKeySealed) ||
+		string(old.SecretKeySealed) != string(nw.SecretKeySealed)
+}
+
+// restartJobsUsingRepo restarts the schedulers of the enabled jobs that store to or replicate to the repository,
+// so they pick up its new credentials (a scheduler's environment is fixed when it starts). It returns the ids
+// restarted.
+func (s *Server) restartJobsUsingRepo(ctx context.Context, id string) []string {
+	jobs, _ := s.repoUsedBy(ctx, id)
+	var restarted []string
+	for _, jid := range jobs {
+		j, ok, err := s.db.st.GetBackupJob(ctx, jid)
+		if err != nil || !ok || !j.Enabled {
+			continue
+		}
+		if err := s.stopBackupJob(jid); err != nil {
+			s.log.Warn("restart scheduler after a repository edit", "job", jid, "error", err)
+			continue
+		}
+		if _, err := s.startBackupJob(j); err != nil {
+			go s.reconcileBackupSchedule(backupJobPipeline(jid))
+		}
+		restarted = append(restarted, jid)
+	}
+	return restarted
 }
 
 func (s *Server) apiBackupRepoDelete(w http.ResponseWriter, r *http.Request, _ *Session) {

@@ -1,0 +1,15 @@
+{{define "content"}}
+{{if .Body.Info.Error}}<div class="alert alert-warn" role="alert">The key configuration is invalid: {{.Body.Info.Error}}</div>{{end}}
+{{if .Body.Info.Notice}}<div class="alert alert-warn" role="status">{{.Body.Info.Notice}}</div>{{end}}
+{{range .Body.Info.Warnings}}<div class="alert alert-warn" role="alert"><b>Key {{.KeyID}} is not configured.</b> {{.Backups}} backup(s) were written with it and cannot be restored{{if .SampleIDs}} (for example {{range $i, $id := .SampleIDs}}{{if $i}}, {{end}}<a href="/backups/catalog/{{$id}}">{{$id}}</a>{{end}}){{end}}. Add the key back to STRAND_BACKUP_ENCRYPTION_KEYS.</div>{{end}}
+<section class="card" id="bk-keys-card" data-bkops="keys">
+  <div class="cardhead"><h2>Keys</h2></div>
+  {{if .Body.Info.Keys}}
+  <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Encryption keys</caption>
+    <thead><tr><th>Key id</th><th>Fingerprint</th><th>Role</th><th>Backups</th><th>Stored</th></tr></thead>
+    <tbody>{{range .Body.Info.Keys}}<tr><td class="mono">{{.ID}}</td><td class="mono small">{{.Fingerprint}}</td><td>{{if .Active}}<span class="badge st-synced">write key</span>{{else}}read only{{end}}</td><td>{{.Backups}}</td><td>{{bytes64 .Bytes}}</td></tr>{{end}}</tbody></table></div>
+  <p class="muted">The first key listed in STRAND_BACKUP_ENCRYPTION_KEYS encrypts new backups; every key stays usable for reading. To rotate, put the new key first and keep the old ones until their backups expire. Key values are never shown.</p>
+  {{else}}<div class="empty-state"><b>No keys configured</b><span>Set STRAND_BACKUP_ENCRYPTION_KEYS in the environment of the Web service (<code>id:key,id2:key2</code>).</span></div>{{end}}
+  <p class="small">Unencrypted backups in the catalog: {{.Body.Info.Unencrypted.Backups}} ({{bytes64 .Body.Info.Unencrypted.Bytes}}).</p>
+</section>
+{{end}}

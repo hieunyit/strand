@@ -1,0 +1,52 @@
+{{define "content"}}
+<section class="drawer-panel" id="bk-chan-drawer" aria-labelledby="bk-chan-title" hidden data-bkops="notify">
+  <div class="cardhead"><h2 id="bk-chan-title">New channel</h2><button class="btn small ghost" type="button" id="bk-chan-close">Close</button></div>
+  <form id="bk-chan-form" class="form-stack" novalidate>
+    <div class="field-grid">
+      <label class="field"><span class="field-label">Name <span class="req">*</span></span><input name="name" required maxlength="96" autocomplete="off"></label>
+      <label class="field"><span class="field-label">Type</span><select name="kind"><option value="slack">Slack / Mattermost</option><option value="teams">Microsoft Teams</option><option value="webhook">Webhook (JSON)</option><option value="email">Email (SMTP)</option></select></label>
+      <label class="field" data-bk-show="kind=slack|teams|webhook"><span class="field-label">Webhook URL <span class="req">*</span></span><input name="url" type="password" class="mono" autocomplete="off"><small class="field-hint">Stored encrypted on save; never shown again.</small></label>
+      <label class="field" data-bk-show="kind=email" hidden><span class="field-label">SMTP server <span class="req">*</span></span><input name="smtp_addr" class="mono" placeholder="smtp.example.com:587" autocomplete="off"></label>
+      <label class="field" data-bk-show="kind=email" hidden><span class="field-label">From <span class="req">*</span></span><input name="from" type="email" autocomplete="off"></label>
+      <label class="field" data-bk-show="kind=email" hidden><span class="field-label">To <span class="req">*</span></span><input name="to" placeholder="dba@example.com, ops@example.com" autocomplete="off"></label>
+      <label class="field" data-bk-show="kind=email" hidden><span class="field-label">SMTP user</span><input name="user" autocomplete="off"></label>
+      <label class="field" data-bk-show="kind=email" hidden><span class="field-label">SMTP password</span><input name="password" type="password" autocomplete="off"></label>
+    </div>
+    <div class="form-actions"><button class="btn primary" type="submit">Add channel</button><button class="btn" type="button" id="bk-chan-cancel">Cancel</button><span class="form-status" id="bk-chan-message" role="status"></span></div>
+  </form>
+</section>
+<section class="card" id="bk-channels-card">
+  <div class="cardhead"><h2>Channels</h2>{{if .Body.IsAdmin}}<button class="btn primary small" type="button" id="bk-chan-new">{{icon "plus"}}<span>New channel</span></button>{{end}}</div>
+  {{if .Body.Channels}}
+  <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Notification channels</caption>
+    <thead><tr><th>Name</th><th>Type</th><th>Source</th><th>Last test</th><th>Actions</th></tr></thead>
+    <tbody>{{range .Body.Channels}}<tr data-bk-chan="{{.ID}}">
+      <td>{{.Name}}<div class="small mono">{{.ID}}</div></td>
+      <td>{{if .ReadOnly}}{{range .Destinations}}<span class="badge">{{.}}</span> {{end}}{{else}}{{.Kind}}{{end}}</td>
+      <td>{{if .ReadOnly}}<span class="badge">from environment</span> <span class="small">read-only{{if .Events}}; events: {{range $i, $e := .Events}}{{if $i}}, {{end}}{{$e}}{{end}}{{end}}</span>{{else}}stored{{if not .Enabled}} <span class="badge">disabled</span>{{end}}{{end}}</td>
+      <td>{{if .LastTestAt}}<span class="badge {{if eq .LastTestStatus "ok"}}st-synced{{else}}st-failed{{end}}">{{.LastTestStatus}}</span> <span class="small">{{.LastTestDetail}}</span>{{else}}-{{end}}</td>
+      <td><button class="btn small" type="button" data-bk-chan-test="{{.ID}}">Send test</button>{{if not .ReadOnly}} <button class="btn small danger" type="button" data-bk-chan-delete="{{.ID}}">Delete</button>{{end}}</td>
+    </tr>{{end}}</tbody></table></div>
+  <p class="form-status" id="bk-chan-result" role="status"></p>
+  {{else}}<div class="empty-state"><b>No channels</b><span>Add a channel, or set STRAND_BACKUP_NOTIFY_* in the environment of the Web service.</span></div>{{end}}
+</section>
+<section class="card" id="bk-rules-card">
+  <div class="cardhead"><h2>Rules</h2></div>
+  <p class="muted">A rule sends one event, for everything or for one policy or job, to one stored channel. The environment channel follows STRAND_BACKUP_NOTIFY_ON.</p>
+  <form id="bk-rule-form" class="form-stack" novalidate>
+    <div class="field-grid">
+      <label class="field"><span class="field-label">Event</span><select name="event">{{range .Body.Events}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+      <label class="field"><span class="field-label">Scope</span><select name="scope"><option value="all:">All jobs</option>{{range .Body.Policies}}<option value="policy:{{.ID}}">Policy {{.Name}}</option>{{end}}{{range .Body.Jobs}}<option value="job:{{.ID}}">Job {{.Name}}</option>{{end}}</select></label>
+      <label class="field"><span class="field-label">Channel</span><select name="channel_id">{{range .Body.Channels}}{{if not .ReadOnly}}<option value="{{.ID}}">{{.Name}}</option>{{end}}{{end}}</select></label>
+    </div>
+    <div class="form-actions"><button class="btn primary" type="submit">Add rule</button><span class="form-status" id="bk-rule-message" role="status"></span></div>
+  </form>
+  {{if .Body.Rules}}
+  <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Notification rules</caption>
+    <thead><tr><th>Event</th><th>Scope</th><th>Channel</th><th>State</th><th>Actions</th></tr></thead>
+    <tbody>{{range .Body.Rules}}<tr data-bk-rule="{{.ID}}"><td>{{.Event}}</td><td>{{.ScopeKind}}{{if .ScopeID}} <span class="mono small">{{.ScopeID}}</span>{{end}}</td><td>{{index $.Body.Names .ChannelID}}</td>
+      <td>{{if .Enabled}}enabled{{else}}<span class="badge">disabled</span>{{end}}</td>
+      <td><button class="btn small" type="button" data-bk-rule-toggle="{{.ID}}" data-enabled="{{if .Enabled}}1{{else}}0{{end}}">{{if .Enabled}}Disable{{else}}Enable{{end}}</button> <button class="btn small danger" type="button" data-bk-rule-delete="{{.ID}}">Delete</button></td></tr>{{end}}</tbody></table></div>
+  {{else}}<p class="muted">No rules: stored channels receive nothing until a rule routes an event to them.</p>{{end}}
+</section>
+{{end}}

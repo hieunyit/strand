@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"math"
@@ -27,6 +28,7 @@ var pageNames = []string{
 	"overview", "pipelines", "detail", "jobs", "job", "backups", "backups_jobs", "backups_job_detail",
 	"backups_catalog", "backups_catalog_detail", "backups_restore", "wizard", "new_pipeline", "settings",
 	"mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error", "users", "account",
+	"backups_repositories", "backups_repository_detail", "backups_notifications", "backups_keys", "backups_activity",
 }
 
 func templateFuncs() template.FuncMap {
@@ -44,6 +46,19 @@ func templateFuncs() template.FuncMap {
 				return "-"
 			}
 			return t.Local().Format("15:04:05 MST")
+		},
+		"derefTime": func(t *time.Time) time.Time {
+			if t == nil {
+				return time.Time{}
+			}
+			return *t
+		},
+		"auditDetail": func(m map[string]any) string {
+			if len(m) == 0 {
+				return ""
+			}
+			b, _ := json.Marshal(maskAuditSecrets(m))
+			return string(b)
 		},
 		"stateReason": stateReason,
 		"lagSort":     lagSort,

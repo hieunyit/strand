@@ -70,3 +70,36 @@ func TestNotifierDestinations(t *testing.T) {
 		t.Fatalf("injection: %v", err)
 	}
 }
+
+func TestNotifierTeamsForceAndDefaultEvents(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+	}))
+	defer srv.Close()
+	env := map[string]string{EnvNotifyTeams: srv.URL + "/teams"}
+	n := &Notifier{Getenv: func(k string) string { return env[k] }}
+	if !n.Configured() {
+		t.Fatal("a Teams webhook alone is a destination")
+	}
+	// Default events include the new rpo_breach and repo_unreachable, but not success or the test event.
+	for kind, want := range map[string]bool{"failure": true, "missed": true, "verify_failed": true, "rpo_breach": true, "repo_unreachable": true, "success": false, "test": false} {
+		if n.Enabled(kind) != want {
+			t.Errorf("Enabled(%q) = %v, want %v", kind, !want, want)
+		}
+	}
+	if err := n.Send(context.Background(), Event{Kind: "success", Message: "ok", At: time.Now()}); err != nil || len(bodies) != 0 {
+		t.Fatalf("a disabled event was delivered: %v %v", err, bodies)
+	}
+	n.Force = true
+	if err := n.Send(context.Background(), Event{Kind: "test", Message: "hello", At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 1 || !strings.Contains(bodies[0], `"@type":"MessageCard"`) || !strings.Contains(bodies[0], "TEST: hello") {
+		t.Fatalf("teams body = %v", bodies)
+	}
+}

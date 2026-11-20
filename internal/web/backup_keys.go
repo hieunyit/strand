@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"sort"
@@ -33,26 +34,37 @@ type keyWarning struct {
 	Message   string   `json:"message"`
 }
 
-func (s *Server) apiBackupKeys(w http.ResponseWriter, r *http.Request, _ *Session) {
-	if !s.needDB(w) {
-		return
-	}
-	usage, err := s.db.st.BackupKeyUsage(r.Context())
+type unencryptedUsage struct {
+	Backups int   `json:"backups"`
+	Bytes   int64 `json:"bytes"`
+}
+
+// keysInfo is the response of GET /api/v1/backup-keys (and the data of the Keys page).
+type keysInfo struct {
+	Configured  bool             `json:"configured"`
+	Error       string           `json:"error,omitempty"`
+	ActiveKeyID string           `json:"active_key_id,omitempty"`
+	Keys        []keyView        `json:"keys"`
+	Warnings    []keyWarning     `json:"warnings"`
+	Unencrypted unencryptedUsage `json:"unencrypted"`
+	Notice      string           `json:"notice,omitempty"`
+}
+
+func (s *Server) keysInfo(ctx context.Context) (keysInfo, error) {
+	info := keysInfo{Keys: []keyView{}, Warnings: []keyWarning{}}
+	usage, err := s.db.st.BackupKeyUsage(ctx)
 	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "could not read the backup catalog")
-		return
+		return info, err
 	}
 	byID := map[string]int{}
 	for i, u := range usage {
 		byID[u.KeyID] = i
 	}
 	kr, kerr := backup.LoadKeyring(os.Getenv)
-	resp := map[string]any{"configured": kr != nil, "keys": []keyView{}, "warnings": []keyWarning{}}
+	info.Configured = kr != nil
 	if kerr != nil {
-		// The message never contains key material (LoadKeyring guarantees it).
-		resp["error"] = kerr.Error()
+		info.Error = kerr.Error() // never contains key material (LoadKeyring guarantees it)
 	}
-	var keys []keyView
 	known := map[string]bool{}
 	if kr != nil {
 		for _, id := range kr.IDs() {
@@ -62,33 +74,36 @@ func (s *Server) apiBackupKeys(w http.ResponseWriter, r *http.Request, _ *Sessio
 				u := usage[i]
 				v.Backups, v.Bytes, v.SampleIDs = u.Count, u.Bytes, u.SampleIDs
 			}
-			keys = append(keys, v)
+			info.Keys = append(info.Keys, v)
 			known[id] = true
 		}
-		resp["active_key_id"] = kr.Active.ID
+		info.ActiveKeyID = kr.Active.ID
 	}
-	sort.SliceStable(keys, func(i, j int) bool { return keys[i].Active && !keys[j].Active })
-	if keys != nil {
-		resp["keys"] = keys
-	}
-	var warns []keyWarning
-	unenc := map[string]any{"backups": 0, "bytes": int64(0)}
+	sort.SliceStable(info.Keys, func(i, j int) bool { return info.Keys[i].Active && !info.Keys[j].Active })
 	for _, u := range usage {
 		if u.KeyID == "" {
-			unenc = map[string]any{"backups": u.Count, "bytes": u.Bytes}
+			info.Unencrypted = unencryptedUsage{Backups: u.Count, Bytes: u.Bytes}
 			continue
 		}
 		if !known[u.KeyID] {
-			warns = append(warns, keyWarning{KeyID: u.KeyID, Backups: u.Count, SampleIDs: u.SampleIDs,
+			info.Warnings = append(info.Warnings, keyWarning{KeyID: u.KeyID, Backups: u.Count, SampleIDs: u.SampleIDs,
 				Message: "these backups were written with a key that is no longer configured; they cannot be restored until it is added back to STRAND_BACKUP_ENCRYPTION_KEYS"})
 		}
 	}
-	if warns != nil {
-		resp["warnings"] = warns
-	}
-	resp["unencrypted"] = unenc
 	if kr == nil && kerr == nil {
-		resp["notice"] = "no encryption key is configured (STRAND_BACKUP_ENCRYPTION_KEYS): new backups cannot be encrypted"
+		info.Notice = "no encryption key is configured (STRAND_BACKUP_ENCRYPTION_KEYS): new backups cannot be encrypted"
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return info, nil
+}
+
+func (s *Server) apiBackupKeys(w http.ResponseWriter, r *http.Request, _ *Session) {
+	if !s.needDB(w) {
+		return
+	}
+	info, err := s.keysInfo(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "could not read the backup catalog")
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
 }

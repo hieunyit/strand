@@ -33,6 +33,7 @@ func (s *Server) backupProRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/backup-jobs/{id}/retention-preview", s.auth(true, s.apiBackupRetentionPreview))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/prune", s.auth(true, s.apiBackupJobOp("prune")))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/verify", s.auth(true, s.apiBackupJobOp("verify")))
+	s.backupOpsRoutes(mux)
 	s.backupRepoRoutes(mux)
 	s.backupNotifyRoutes(mux)
 	s.backupKeyRoutes(mux)

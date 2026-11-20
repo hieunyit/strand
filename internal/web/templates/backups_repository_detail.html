@@ -1,0 +1,39 @@
+{{define "content"}}
+<section class="card" id="bk-repo-detail" data-bkops="repo-detail" data-repo-id="{{.Body.Repo.ID}}">
+  <div class="cardhead"><h2>Overview</h2>
+    <span>{{if .Body.CanWrite}}<button class="btn small primary" type="button" id="bk-repo-test">Test repository</button>{{end}}
+    {{if .Body.IsAdmin}} <button class="btn small danger" type="button" id="bk-repo-delete">Delete</button>{{end}}</span></div>
+  <dl class="kv">
+    <dt>Type</dt><dd>{{.Body.Repo.KindOrS3}}</dd>
+    <dt>Bucket</dt><dd class="mono">{{.Body.Repo.Bucket}}{{if .Body.Repo.Prefix}}/{{.Body.Repo.Prefix}}{{end}}</dd>
+    {{if .Body.Repo.Endpoint}}<dt>Endpoint</dt><dd class="mono">{{.Body.Repo.Endpoint}}</dd>{{end}}
+    <dt>Credentials</dt><dd>{{if .Body.Repo.Stored}}stored (sealed; access key {{if .Body.Repo.AccessKeySet}}set{{else}}missing{{end}}, secret key {{if .Body.Repo.SecretKeySet}}set{{else}}missing{{end}}){{else}}environment <span class="mono small">{{.Body.Repo.EnvPrefix}}</span>{{end}}</dd>
+    <dt>Protection</dt><dd>{{if .Body.Repo.Immutable}}<span class="badge st-synced">immutable</span> Object Lock COMPLIANCE, {{.Body.Repo.LockDays}} days{{else if .Body.Repo.LockMode}}Object Lock {{.Body.Repo.LockMode}}, {{.Body.Repo.LockDays}} days{{else}}none{{end}}</dd>
+    <dt>Backups</dt><dd>{{.Body.Repo.Backups}} ({{bytes64 .Body.Repo.UsedBytes}}{{if .Body.Repo.Copies}}, {{.Body.Repo.Copies}} copies{{end}})</dd>
+  </dl>
+</section>
+<section class="card" id="bk-repo-checklist">
+  <div class="cardhead"><h2>Connection test</h2><span class="form-status" id="bk-repo-test-status" role="status"></span></div>
+  {{if .Body.Steps}}
+  <table class="data-table grid" id="bk-repo-steps"><caption class="sr-only">Repository test checklist</caption>
+    <thead><tr><th>Step</th><th>Result</th><th>Detail</th><th>Latency</th></tr></thead>
+    <tbody>{{range .Body.Steps}}<tr><td>{{.Name}}</td><td><span class="badge {{if eq .Status "ok"}}st-synced{{else if eq .Status "failed"}}st-failed{{end}}">{{.Status}}</span></td><td class="small">{{.Detail}}</td><td class="nowrap">{{.LatencyMS}} ms</td></tr>{{end}}</tbody></table>
+  {{else}}<p class="muted" id="bk-repo-nosteps">Not tested yet. The test lists the bucket, writes, reads back and deletes one small object, and checks whether Object Lock is enabled.</p>
+  <table class="data-table grid" id="bk-repo-steps" hidden><caption class="sr-only">Repository test checklist</caption>
+    <thead><tr><th>Step</th><th>Result</th><th>Detail</th><th>Latency</th></tr></thead><tbody></tbody></table>{{end}}
+</section>
+<section class="card">
+  <div class="cardhead"><h2>Space by source</h2></div>
+  {{if .Body.Sources}}
+  <table class="data-table grid"><caption class="sr-only">Space used per source</caption>
+    <thead><tr><th>Source</th><th>Backups</th><th>Used</th><th>Share</th></tr></thead>
+    <tbody>{{range .Body.Sources}}<tr><td>{{.Source}}</td><td>{{.Count}}{{if .Copies}} <span class="small">({{.Copies}} copies)</span>{{end}}</td><td>{{bytes64 .Bytes}}</td><td><progress value="{{.Bytes}}" max="{{$.Body.MaxBytes}}" aria-label="{{.Source}} share of the largest source"></progress></td></tr>{{end}}</tbody></table>
+  {{else}}<div class="empty-state"><b>No backups in this repository</b></div>{{end}}
+</section>
+<section class="card">
+  <div class="cardhead"><h2>Used by</h2></div>
+  {{if or .Body.Jobs .Body.Policies}}
+  <ul>{{range .Body.Jobs}}<li>job <a href="/backups/jobs/{{.}}">{{.}}</a></li>{{end}}{{range .Body.Policies}}<li>policy <span class="mono">{{.}}</span></li>{{end}}</ul>
+  {{else}}<p class="muted">No job or policy names this repository.</p>{{end}}
+</section>
+{{end}}

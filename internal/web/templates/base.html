@@ -10,6 +10,7 @@
 <script src="/static/app.js" defer></script>
 <script src="/static/live.js" defer></script>
 <script src="/static/backups.js" defer></script>
+<script src="/static/bkops.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#content">Skip to content</a>
@@ -27,6 +28,12 @@
     <a href="/backups/jobs" class="{{if eq .Active "backups-jobs"}}active{{end}}"{{if eq .Active "backups-jobs"}} aria-current="page"{{end}}>{{icon "jobs"}}Jobs</a>
     <a href="/backups/catalog" class="{{if eq .Active "backups-catalog"}}active{{end}}"{{if eq .Active "backups-catalog"}} aria-current="page"{{end}}>{{icon "table"}}Restore points</a>
     <a href="/backups/restore" class="{{if eq .Active "backups-restore"}}active{{end}}"{{if eq .Active "backups-restore"}} aria-current="page"{{end}}>{{icon "db"}}Restore</a>
+    <a href="/backups/repositories" class="{{if eq .Active "backups-repos"}}active{{end}}"{{if eq .Active "backups-repos"}} aria-current="page"{{end}}>{{icon "server"}}Repositories</a>
+    {{if eq .CurrentUser.Role "admin"}}
+    <a href="/backups/notifications" class="{{if eq .Active "backups-notify"}}active{{end}}"{{if eq .Active "backups-notify"}} aria-current="page"{{end}}>{{icon "jobs"}}Notifications</a>
+    <a href="/backups/keys" class="{{if eq .Active "backups-keys"}}active{{end}}"{{if eq .Active "backups-keys"}} aria-current="page"{{end}}>{{icon "config"}}Keys</a>
+    <a href="/backups/activity" class="{{if eq .Active "backups-activity"}}active{{end}}"{{if eq .Active "backups-activity"}} aria-current="page"{{end}}>{{icon "jobs"}}Activity</a>
+    {{end}}
     <div class="navhead">System</div>
     <a href="/mcp" class="{{if eq .Active "mcp"}}active{{end}}"{{if eq .Active "mcp"}} aria-current="page"{{end}}>{{icon "jobs"}}MCP</a>
     <a href="/settings" class="{{if eq .Active "settings"}}active{{end}}"{{if eq .Active "settings"}} aria-current="page"{{end}}>{{icon "config"}}Settings</a>
