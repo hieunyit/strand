@@ -3,9 +3,9 @@ package web
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"math"
