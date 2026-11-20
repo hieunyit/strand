@@ -179,6 +179,7 @@ type Filter struct {
 	Kind          string // full|incremental|log; "" = any
 	NotKind       string // exclude one kind (e.g. log segments from listings)
 	Repository    string
+	LegalHold     *bool
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
 	// After continues a listing: only records strictly older than the cursor in the listing order

@@ -300,6 +300,13 @@ func (s *Server) pageBackupsCatalog(w http.ResponseWriter, r *http.Request, sess
 	f.Kind = kind
 	f.Status = backup.Status(status)
 	f.Repository = repo
+	if legalHold == "1" {
+		t := true
+		f.LegalHold = &t
+	} else if legalHold == "0" {
+		fVal := false
+		f.LegalHold = &fVal
+	}
 
 	parseDate := func(str string, endOfDay bool) *time.Time {
 		str = strings.TrimSpace(str)
@@ -335,24 +342,6 @@ func (s *Server) pageBackupsCatalog(w http.ResponseWriter, r *http.Request, sess
 	items, err := s.backups.List(r.Context(), f)
 	if err != nil {
 		s.log.Error("list backup catalog", "error", err)
-	}
-
-	if legalHold == "1" {
-		var filtered []backup.Record
-		for _, it := range items {
-			if it.LegalHold {
-				filtered = append(filtered, it)
-			}
-		}
-		items = filtered
-	} else if legalHold == "0" {
-		var filtered []backup.Record
-		for _, it := range items {
-			if !it.LegalHold {
-				filtered = append(filtered, it)
-			}
-		}
-		items = filtered
 	}
 
 	nextCursor := backup.NextCursor(items, f.Limit)

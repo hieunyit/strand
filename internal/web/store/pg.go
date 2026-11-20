@@ -638,6 +638,9 @@ func (p *PG) ListBackups(ctx context.Context, f backup.Filter) ([]backup.Record,
 	if f.Repository != "" {
 		add("repository =", f.Repository)
 	}
+	if f.LegalHold != nil {
+		add("legal_hold =", *f.LegalHold)
+	}
 	if f.CreatedAfter != nil {
 		add("created_at >=", *f.CreatedAfter)
 	}

@@ -564,6 +564,9 @@ func (m *Mem) ListBackups(_ context.Context, f backup.Filter) ([]backup.Record, 
 		if (f.Source != "" && r.Source != f.Source) || (f.Engine != "" && r.Engine != f.Engine) || (f.Status != "" && r.Status != f.Status) {
 			continue
 		}
+		if f.LegalHold != nil && r.LegalHold != *f.LegalHold {
+			continue
+		}
 		if !memBackupProFilter(r, f) {
 			continue
 		}
