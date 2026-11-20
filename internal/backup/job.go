@@ -263,24 +263,6 @@ func ValidateJob(j Job) error {
 		if j.LogFlushSeconds != 0 && (j.LogFlushSeconds < 10 || j.LogFlushSeconds > 86400) {
 			return bad("log_flush_seconds must be between 10 and 86400")
 		}
-		if j.LogArchive {
-			switch j.Method {
-			case MethodMariaDBDump:
-				return bad("MariaDB does not support binlog archiving")
-			case MethodMySQLDump:
-				if len(j.Conn.Databases) != 1 {
-					return bad("PITR requires exactly one database")
-				}
-			case MethodPGBaseBackup:
-				// ok
-			case MethodPGDump:
-				return bad("PITR needs pg_basebackup as the base backup")
-			case MethodMongodump:
-				// ok
-			default:
-				return bad(fmt.Sprintf("method %q does not support point-in-time recovery", j.Method))
-			}
-		}
 		if j.TestRestore {
 			if j.Method != MethodMySQLDump && j.Method != MethodMariaDBDump && j.Method != MethodPGDump {
 				return bad("test restores support mysqldump, mariadb-dump and pg_dump")
@@ -359,4 +341,42 @@ func (j Job) RetryDelay(attempt int) time.Duration {
 		d = max
 	}
 	return d
+}
+
+// ValidatePITR checks that continuous log archiving (log_archive) is possible for the job's method. It is
+// separate from ValidateJob so that jobs stored before these rules existed can still be read, listed,
+// stopped and run as plain base backups; only saving and starting the log archiver enforce it.
+func ValidatePITR(j Job) error {
+	bad := func(s string) error { return fmt.Errorf("%w: %s", ErrInvalid, s) }
+	if !j.LogArchive || j.IsCustom() {
+		return nil
+	}
+	if j.LogArchive {
+		switch j.Method {
+		case MethodMariaDBDump:
+			return bad("MariaDB does not support binlog archiving")
+		case MethodMySQLDump:
+			if len(j.Conn.Databases) != 1 {
+				return bad("PITR requires exactly one database")
+			}
+		case MethodPGBaseBackup:
+			// ok
+		case MethodPGDump:
+			return bad("PITR needs pg_basebackup as the base backup")
+		case MethodMongodump:
+			// ok
+		default:
+			return bad(fmt.Sprintf("method %q does not support point-in-time recovery", j.Method))
+		}
+	}
+	return nil
+}
+
+// ValidateJobForSave is ValidateJob plus the point-in-time-recovery rules; use it when a job is created
+// or edited.
+func ValidateJobForSave(j Job) error {
+	if err := ValidateJob(j); err != nil {
+		return err
+	}
+	return ValidatePITR(j)
 }

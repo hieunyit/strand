@@ -142,7 +142,7 @@ func (s *Server) backupJobViews(ctx context.Context) ([]backupJobView, error) {
 	out := make([]backupJobView, 0, len(jobs))
 	for _, j := range jobs {
 		var warn string
-		if err := backup.ValidateJob(j); err != nil {
+		if err := backup.ValidatePITR(j); err != nil {
 			warn = err.Error()
 		}
 		out = append(out, backupJobView{Job: j, Process: s.backupJobProcess(j), Warning: warn})
@@ -180,7 +180,7 @@ func backupCommandAllowed(command string) error {
 }
 
 func (s *Server) validateBackupJob(j backup.Job) error {
-	if err := backup.ValidateJob(j); err != nil {
+	if err := backup.ValidateJobForSave(j); err != nil {
 		return err
 	}
 	if !j.IsCustom() {
@@ -529,7 +529,9 @@ func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Se
 		writeErr(w, http.StatusNotFound, "backup job not found")
 		return
 	}
-	if err := s.validateBackupJob(j); err != nil {
+	base := j
+	base.LogArchive = false // stored jobs with an unsupported PITR setting still take base backups
+	if err := s.validateBackupJob(base); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -572,7 +574,9 @@ func (s *Server) apiBackupJobRun(w http.ResponseWriter, r *http.Request, _ *Sess
 		writeErr(w, http.StatusNotFound, "backup job not found")
 		return
 	}
-	if err := s.validateBackupJob(j); err != nil {
+	base := j
+	base.LogArchive = false // stored jobs with an unsupported PITR setting still take base backups
+	if err := s.validateBackupJob(base); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

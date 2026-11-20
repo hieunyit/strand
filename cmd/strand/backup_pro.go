@@ -434,7 +434,7 @@ func newBackupLogArchiveCmd() *cobra.Command {
 			if err != nil || !ok || job.IsCustom() || !job.LogArchive {
 				return backupUsageErr("backup job not found or log archiving is off")
 			}
-			if err := backup.ValidateJob(job); err != nil {
+			if err := backup.ValidatePITR(job); err != nil {
 				return fmt.Errorf("cannot archive logs for job %s: %w", jobID, err)
 			}
 			env, err := backupRunnerEnv(st, cmd.OutOrStdout())
