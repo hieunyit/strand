@@ -47,6 +47,8 @@ type backupsPageBody struct {
 	StatStorageUsed      string
 	StatLastTestRestore  string
 	StatRPOBreaches      string
+	RPOBreachCount       int
+	LastTestRestoreOK    bool
 	Chart14Day           template.HTML
 	IsStandby            bool
 	NoRepo               bool
@@ -176,7 +178,9 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 
 			b.IsStandby = !s.isActive()
 			b.NoRepo = len(b.Repos) == 0
-			b.NoKey = s.db == nil || s.db.secret == ""
+			// Backup encryption keys (STRAND_BACKUP_ENCRYPTION_KEYS), not the web's own secret key.
+			kinfo, kerr := s.keysInfo(r.Context())
+			b.NoKey = kerr == nil && !kinfo.Configured
 
 			now := time.Now().UTC()
 			since24h := now.Add(-24 * time.Hour)
@@ -194,12 +198,15 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 			if total24h > 0 {
 				b.StatSuccessRate = fmt.Sprintf("%d%%", int(float64(succ24h)/float64(total24h)*100))
 			} else {
-				b.StatSuccessRate = "100%"
+				b.StatSuccessRate = "-" // no run in 24 h is not a 100% success rate
 			}
 
+			// Total over the whole catalog (per repository), not just the page of backups shown below.
 			var totalStorage int64
-			for _, item := range b.Backups {
-				totalStorage += item.Bytes
+			if usage, err := s.db.st.BackupRepoUsage(r.Context()); err == nil {
+				for _, u := range usage {
+					totalStorage += u.Bytes
+				}
 			}
 			b.StatStorageUsed = fmtBytes(float64(totalStorage))
 
@@ -219,8 +226,45 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 				}
 			}
 			b.StatFailingJobs = failingCount
-			b.StatLastTestRestore = "None"
-			b.StatRPOBreaches = "0 (SLA tracking in P6)"
+
+			b.StatLastTestRestore = "never"
+			for _, c := range b.Checks { // newest first
+				if c.Kind == "test_restore" {
+					b.StatLastTestRestore = c.Status + ", " + fmtRel(c.FinishedAt, time.Now())
+					b.LastTestRestoreOK = c.Status == "ok" || c.Status == "success" || c.Status == "passed"
+					break
+				}
+			}
+
+			if st, _, err := s.rpoStatuses(r.Context()); err == nil {
+				breaches := 0
+				for _, x := range st {
+					if !x.Breach {
+						continue
+					}
+					breaches++
+					name := x.JobName
+					if name == "" {
+						name = x.Source
+					}
+					b.NeedsAttention = append(b.NeedsAttention, AttentionItem{
+						JobID: x.JobID, JobName: name, Engine: x.Engine, Severity: "bad",
+						Reason:  fmt.Sprintf("RPO breach: last restore point %s ago (target %d min)", fmtDur(float64(x.CurrentSecs)), x.TargetMinutes),
+						LogURL:  "/backups/jobs/" + x.JobID + "?tab=runs",
+						EditURL: "/backups/jobs/" + x.JobID + "?tab=settings",
+					})
+				}
+				b.StatRPOBreaches = fmt.Sprintf("%d", breaches)
+				b.RPOBreachCount = breaches
+			} else {
+				b.StatRPOBreaches = "-"
+			}
+			if kerr == nil {
+				for _, kw := range kinfo.Warnings {
+					b.NeedsAttention = append(b.NeedsAttention, AttentionItem{JobName: "Encryption key " + kw.KeyID, Engine: "-", Severity: "bad",
+						Reason: kw.Message, LogURL: "/backups/keys", EditURL: "/backups/keys"})
+				}
+			}
 
 			days := make([]BackupDayStat, 14)
 			for i := 0; i < 14; i++ {
