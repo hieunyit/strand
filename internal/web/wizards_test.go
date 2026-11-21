@@ -322,7 +322,7 @@ func TestRepairWizardFailureAndRetry(t *testing.T) {
 func TestRepairWizardSystemdAndStoppedPipeline(t *testing.T) {
 	e := opsEnv(t, true, nil)
 	wizFake(t, e)
-	e.cmd.out["systemctl "] = ""
+	e.cmd.setOut("systemctl ", "")
 	e.sampleNow()
 	c, csrf := e.loginOK()
 	e.act(c, csrf, "orders", ActRepairBegin, map[string]string{"confirm_name": "orders"})
@@ -335,7 +335,7 @@ func TestRepairWizardSystemdAndStoppedPipeline(t *testing.T) {
 	// systemctl failure surfaces the exit code and keeps the wizard at step 2.
 	e.act(c, csrf, "orders", ActRepairAbort, nil)
 	e.act(c, csrf, "orders", ActRepairBegin, map[string]string{"confirm_name": "orders"})
-	e.cmd.fail = map[string]int{"systemctl stop": 5}
+	e.cmd.setFail(map[string]int{"systemctl stop": 5})
 	code, _ := e.act(c, csrf, "orders", ActRepairStop, nil)
 	if code != 502 {
 		t.Fatalf("failed stop: %d", code)
@@ -347,7 +347,7 @@ func TestRepairWizardSystemdAndStoppedPipeline(t *testing.T) {
 	if !stepIs(e.wizState(c, "repair"), "wait") {
 		t.Errorf("state after failed stop: %v", e.wizState(c, "repair"))
 	}
-	e.cmd.fail = nil
+	e.cmd.setFail(nil)
 	// Repair job then start via systemctl.
 	e.act(c, csrf, "orders", ActRepairStop, nil)
 	e.act(c, csrf, "orders", ActRepairRun, map[string]string{"confirm_name": "orders"})

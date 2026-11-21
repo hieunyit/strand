@@ -42,6 +42,22 @@ type fakeExit struct{ code int }
 func (e fakeExit) Error() string { return fmt.Sprintf("exit status %d", e.code) }
 func (e fakeExit) ExitCode() int { return e.code }
 
+// setFail / setOut change the fake's answers while background goroutines (sampler, reconcile) may be running it.
+func (f *fakeCmd) setFail(m map[string]int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = m
+}
+
+func (f *fakeCmd) setOut(prefix, out string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.out == nil {
+		f.out = map[string]string{}
+	}
+	f.out[prefix] = out
+}
+
 // callsWith trả các lệnh đã chạy bắt đầu bằng prefix.
 func (f *fakeCmd) callsWith(prefix string) []string {
 	f.mu.Lock()
@@ -59,13 +75,20 @@ func (f *fakeCmd) Run(ctx context.Context, name string, args ...string) ([]byte,
 	line := name + " " + strings.Join(args, " ")
 	f.mu.Lock()
 	f.calls = append(f.calls, line)
+	fail, outs := make(map[string]int, len(f.fail)), make(map[string]string, len(f.out))
+	for k, v := range f.fail {
+		fail[k] = v
+	}
+	for k, v := range f.out {
+		outs[k] = v
+	}
 	f.mu.Unlock()
-	for prefix, code := range f.fail {
+	for prefix, code := range fail {
 		if strings.HasPrefix(line, prefix) {
 			return []byte("Failed: Access denied"), fakeExit{code}
 		}
 	}
-	for prefix, out := range f.out {
+	for prefix, out := range outs {
 		if strings.HasPrefix(line, prefix) {
 			return []byte(out), nil
 		}

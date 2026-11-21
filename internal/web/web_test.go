@@ -703,7 +703,7 @@ func TestSystemdRuntimeAndLogs(t *testing.T) {
 	if err != nil || len(lines) != 3 || lines[2] != "line3" {
 		t.Fatalf("logs %v %v", lines, err)
 	}
-	cmd.out["systemctl show strand@o.service"] = "ActiveState=active\nSubState=running\nExecMainStatus=0\nExecMainPID=4242\nActiveEnterTimestamp=Sun 2026-11-15 10:00:00 UTC\n"
+	cmd.setOut("systemctl show strand@o.service", "ActiveState=active\nSubState=running\nExecMainStatus=0\nExecMainPID=4242\nActiveEnterTimestamp=Sun 2026-11-15 10:00:00 UTC\n")
 	rt = r.Runtime(t.Context(), p)
 	if !rt.Running || rt.PID != 4242 || rt.ExitCode != nil {
 		t.Fatalf("running %+v", rt)

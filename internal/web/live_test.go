@@ -252,7 +252,7 @@ func countedEnv(t *testing.T) (*testEnv, *countingPipeline) {
 			t.Fatal(err)
 		}
 		c.Pipelines[0].SystemdUnit = "strand@orders.service"
-		e.cmd.out["systemctl show strand@orders.service"] = "ActiveState=active\nSubState=running\nExecMainPID=4242\n"
+		e.cmd.setOut("systemctl show strand@orders.service", "ActiveState=active\nSubState=running\nExecMainPID=4242\n")
 		c.SampleIntervalSec = 1
 	})
 	return e, cp

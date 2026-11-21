@@ -214,8 +214,8 @@ func TestStoppedPipelineSystemdShowsExitCode(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.Pipelines = append(c.Pipelines, PipelineEntry{Name: "dead", Config: p, SystemdUnit: "strand@dead"})
-		e.cmd.out["systemctl show strand@dead.service"] = "ActiveState=failed\nSubState=failed\nExecMainStatus=5\nExecMainPID=0\n"
-		e.cmd.out["journalctl -u strand@dead.service"] = `{"time":"2026-11-15T10:00:00Z","level":"ERROR","msg":"[log_gap] source purged the log: dsn postgres://u:Zz9@h/d"}` + "\n" + `{"time":"2026-11-15T10:00:01Z","level":"INFO","msg":"bye"}` + "\n"
+		e.cmd.setOut("systemctl show strand@dead.service", "ActiveState=failed\nSubState=failed\nExecMainStatus=5\nExecMainPID=0\n")
+		e.cmd.setOut("journalctl -u strand@dead.service", `{"time":"2026-11-15T10:00:00Z","level":"ERROR","msg":"[log_gap] source purged the log: dsn postgres://u:Zz9@h/d"}`+"\n"+`{"time":"2026-11-15T10:00:01Z","level":"INFO","msg":"bye"}`+"\n")
 	})
 	e.sampleNow()
 	c := e.client()

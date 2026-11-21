@@ -52,7 +52,7 @@ func TestOpsActionsRequireAuthAndCSRF(t *testing.T) {
 
 func TestOpsSystemdLifecycle(t *testing.T) {
 	e := opsEnv(t, true, nil)
-	e.cmd.out["systemctl "] = ""
+	e.cmd.setOut("systemctl ", "")
 	c, csrf := e.loginOK()
 	for _, verb := range []string{"start", "stop", "restart", "enable", "disable"} {
 		code, body := e.act(c, csrf, "orders", verb, nil)
@@ -76,7 +76,7 @@ func TestOpsSystemdLifecycle(t *testing.T) {
 		t.Errorf("systemd mode must not exec strand: %v", e.fakeCalls())
 	}
 	// Failure: exit code is relayed and audited as error.
-	e.cmd.fail = map[string]int{"systemctl stop": 5}
+	e.cmd.setFail(map[string]int{"systemctl stop": 5})
 	code, body := e.act(c, csrf, "orders", "stop", nil)
 	if code != 502 || !strings.Contains(body["error"].(string), "Access denied") {
 		t.Fatalf("stop failure: %d %v", code, body)
@@ -368,9 +368,9 @@ func toJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 // Bị polkit từ chối: enable/disable chỉ dẫn chạy sudo systemctl trên máy chủ; start/stop/restart chỉ dẫn cài quy tắc polkit.
 func TestOpsSystemdDeniedHints(t *testing.T) {
 	e := opsEnv(t, true, nil)
-	e.cmd.out["systemctl "] = ""
+	e.cmd.setOut("systemctl ", "")
 	c, csrf := e.loginOK()
-	e.cmd.fail = map[string]int{"systemctl enable": 1, "systemctl disable": 1, "systemctl start": 1}
+	e.cmd.setFail(map[string]int{"systemctl enable": 1, "systemctl disable": 1, "systemctl start": 1})
 	for verb, want := range map[string]string{
 		"enable":  "sudo systemctl enable strand@orders.service",
 		"disable": "sudo systemctl disable strand@orders.service",
