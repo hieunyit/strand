@@ -211,7 +211,9 @@ func newEnvWith(t *testing.T, mutate func(e *testEnv, c *Config), opt func(o *Op
 	if mutate != nil {
 		mutate(e, cfg)
 	}
-	o := Options{Config: cfg, Version: "test", Commander: e.cmd, Now: e.clock.Now}
+	// Tests do not run Serve, so nothing renews the lease: with the 30 s default a test that runs longer (common
+	// under -race) loses it and every write gets 503 "standby". Lease tests set their own TTL through opt.
+	o := Options{Config: cfg, Version: "test", Commander: e.cmd, Now: e.clock.Now, LeaseTTL: testLeaseTTL}
 	if opt != nil {
 		opt(&o)
 	}
@@ -387,3 +389,6 @@ func testRegistry(c *Config, cmd Commander) *Registry {
 	r.db = db
 	return r
 }
+
+// testLeaseTTL is the lease of test servers (see newEnvWith).
+const testLeaseTTL = time.Hour

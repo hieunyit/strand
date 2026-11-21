@@ -89,7 +89,8 @@ func (e *testEnv) restart() *testEnv {
 	e.t.Helper()
 	c2 := *e.srv.cfg
 	e.srv.releaseLease() // tiến trình cũ thoát (Serve nhả lease khi dừng)
-	srv, err := New(Options{Config: &c2, Version: "test", Commander: e.cmd, Now: e.clock.Now, Store: e.srv.db.st, SecretKey: e.srv.db.secret})
+	srv, err := New(Options{Config: &c2, Version: "test", Commander: e.cmd, Now: e.clock.Now, Store: e.srv.db.st, SecretKey: e.srv.db.secret,
+		LeaseTTL: testLeaseTTL})
 	if err != nil {
 		e.t.Fatal(err)
 	}
