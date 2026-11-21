@@ -18,7 +18,7 @@
     <div class="field-grid">
       <label class="field">
         <span class="field-label">Name <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="name" id="np-name" required class="mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$" autocomplete="off">
+        <input type="text" name="name" id="np-name" required class="mono" placeholder="e.g. shop-to-pg" pattern="^[A-Za-z0-9][A-Za-z0-9_.\-]{0,62}$" autocomplete="off">
         <small class="field-hint">Letters, digits, <code>- _ .</code> (max 63). Used for file names and the service name.</small>
       </label>
       <label class="field">
@@ -27,46 +27,69 @@
           <option value="mysql" selected>MySQL 5.5 – 8.x</option>
           <option value="mariadb">MariaDB 10.6+</option>
           <option value="postgres">PostgreSQL 14 – 18</option>
-          <option value="mongodb">MongoDB 6+ (replica set)</option>
+          <option value="mongodb">MongoDB 4.4 – 8.0 (replica set)</option>
         </select>
       </label>
     </div>
-    <div class="field-grid cols-3" data-when="src:mongodb">
-      <label class="field span-2">
-        <span class="field-label">Source URI <span class="req" aria-hidden="true">*</span></span>
-        <input type="password" name="source_uri" required class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs0">
-        <small class="field-hint">Secret: stored only in the pipeline's encrypted .env (<code>SRC_URI</code>), never in the config. Needs a replica set (change streams).</small>
-      </label>
-      <label class="field">
-        <span class="field-label">Source database <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="source_database" required value="app" class="mono">
-      </label>
-    </div>
-    <div class="field-grid cols-4" data-when="src:mysql,mariadb,postgres">
+    <div class="field-grid cols-4">
       <label class="field">
         <span class="field-label">Host <span class="req" aria-hidden="true">*</span></span>
         <input type="text" name="source_host" required value="127.0.0.1" class="mono">
+        <small class="field-hint" data-when="src:mongodb">One host, or the replica set members as <code>host:port</code> separated by commas.</small>
       </label>
       <label class="field">
         <span class="field-label">Port <span class="req" aria-hidden="true">*</span></span>
-        <input type="number" name="source_port" required min="1" max="65535" value="3306" class="mono" id="np-src-port" data-mysql="3306" data-postgres="5432">
+        <input type="number" name="source_port" required min="1" max="65535" value="3306" class="mono" id="np-src-port" data-mysql="3306" data-postgres="5432" data-mongodb="27017">
       </label>
       <label class="field">
         <span class="field-label">User <span class="req" aria-hidden="true">*</span></span>
         <input type="text" name="source_user" required value="strand" class="mono">
         <small class="field-hint" data-when="src:mysql,mariadb">Needs <code>REPLICATION SLAVE, REPLICATION CLIENT, SELECT</code>.</small>
         <small class="field-hint" data-when="src:postgres">Needs <code>REPLICATION</code> and <code>SELECT</code> on the tables.</small>
+        <small class="field-hint" data-when="src:mongodb">Needs <code>read</code> on the database and the change stream privileges (see the MongoDB guide).</small>
       </label>
       <label class="field">
         <span class="field-label">Password <span class="opt">optional</span></span>
         <input type="password" name="source_password" class="mono" autocomplete="new-password">
       </label>
     </div>
+    <div class="field-grid cols-4" data-when="src:mongodb">
+      <label class="field">
+        <span class="field-label">Replica set <span class="opt">optional</span></span>
+        <input type="text" name="source_replica_set" class="mono" placeholder="rs0" autocomplete="off">
+        <small class="field-hint">Name of the replica set (change streams need one). Empty = discovered from the host.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Auth database</span>
+        <input type="text" name="source_auth_db" value="admin" class="mono" autocomplete="off">
+        <small class="field-hint">Where the user is defined (<code>authSource</code>).</small>
+      </label>
+      <div class="field">
+        <span class="field-label">TLS</span>
+        <label class="check"><input type="checkbox" name="source_tls" value="true"><span>Use TLS</span></label>
+      </div>
+    </div>
+    <div class="field-grid cols-1" data-when="src:mongodb">
+      <div class="field">
+        <label class="field-label" for="np-mongo-src-db">Source database <span class="req" aria-hidden="true">*</span></label>
+        <div class="control-row">
+          <input type="text" name="source_database" id="np-mongo-src-db" required class="mono" placeholder="choose a database" autocomplete="off">
+          <button type="button" class="btn" data-list-databases="np-mongo-src-db" data-list-engine="mongodb">List source databases</button>
+        </div>
+        <small class="field-hint" data-list-status="np-mongo-src-db" aria-live="polite"></small>
+        <div class="np-db-list" data-list-box="np-mongo-src-db" hidden></div>
+      </div>
+    </div>
     <div class="field-grid" data-when="src:postgres">
       <label class="field">
         <span class="field-label">Database <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="database" required value="app" class="mono" data-when-input="src:postgres">
+        <div class="control-row">
+          <input type="text" name="database" id="np-pg-database" required class="mono" placeholder="choose a database" autocomplete="off" data-when-input="src:postgres">
+          <button type="button" class="btn" data-list-databases="np-pg-database" data-list-engine="postgres">List source databases</button>
+        </div>
         <small class="field-hint">The PostgreSQL database that holds your tables.</small>
+        <small class="field-hint" data-list-status="np-pg-database" aria-live="polite"></small>
+        <div class="np-db-list" data-list-box="np-pg-database" hidden></div>
       </label>
       <label class="field">
         <span class="field-label">Schema</span>
@@ -91,30 +114,20 @@
         <select name="to" id="np-to">
           <option value="postgres" data-from="mysql postgres" selected>PostgreSQL 16 – 18</option>
           <option value="mysql" data-from="mysql mariadb">MySQL 8.x</option>
-          <option value="mongodb" data-from="mongodb">MongoDB 6+ (replica set)</option>
+          <option value="mongodb" data-from="mongodb">MongoDB 4.4 – 8.0 (replica set)</option>
         </select>
         <small class="field-hint" id="np-pair-note"></small>
       </label>
     </div>
-    <div class="field-grid cols-3" data-when="dst:mongodb">
-      <label class="field span-2">
-        <span class="field-label">Target URI <span class="req" aria-hidden="true">*</span></span>
-        <input type="password" name="target_uri" required class="mono" autocomplete="off" placeholder="mongodb://user:pass@host:27017/?replicaSet=rs1">
-        <small class="field-hint">Secret: stored only in the encrypted .env (<code>DST_URI</code>). The target must be a replica set too (transactions).</small>
-      </label>
-      <label class="field">
-        <span class="field-label">Target database <span class="req" aria-hidden="true">*</span></span>
-        <input type="text" name="target_mongo_database" required value="app" class="mono">
-      </label>
-    </div>
-    <div class="field-grid cols-4" data-when="dst:mysql,postgres">
+    <div class="field-grid cols-4">
       <label class="field">
         <span class="field-label">Host <span class="req" aria-hidden="true">*</span></span>
         <input type="text" name="target_host" required value="127.0.0.1" class="mono">
+        <small class="field-hint" data-when="dst:mongodb">One host, or the replica set members as <code>host:port</code> separated by commas.</small>
       </label>
       <label class="field">
         <span class="field-label">Port <span class="req" aria-hidden="true">*</span></span>
-        <input type="number" name="target_port" required min="1" max="65535" value="5432" class="mono" id="np-dst-port" data-mysql="3306" data-postgres="5432">
+        <input type="number" name="target_port" required min="1" max="65535" value="5432" class="mono" id="np-dst-port" data-mysql="3306" data-postgres="5432" data-mongodb="27017">
       </label>
       <label class="field">
         <span class="field-label">User <span class="req" aria-hidden="true">*</span></span>
@@ -124,6 +137,25 @@
       <label class="field">
         <span class="field-label">Password <span class="opt">optional</span></span>
         <input type="password" name="target_password" class="mono" autocomplete="new-password">
+      </label>
+    </div>
+    <div class="field-grid cols-4" data-when="dst:mongodb">
+      <label class="field">
+        <span class="field-label">Replica set <span class="opt">optional</span></span>
+        <input type="text" name="target_replica_set" class="mono" placeholder="rs1" autocomplete="off">
+        <small class="field-hint">The target must be a replica set too (transactions). Empty = discovered from the host.</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Auth database</span>
+        <input type="text" name="target_auth_db" value="admin" class="mono" autocomplete="off">
+      </label>
+      <div class="field">
+        <span class="field-label">TLS</span>
+        <label class="check"><input type="checkbox" name="target_tls" value="true"><span>Use TLS</span></label>
+      </div>
+      <label class="field">
+        <span class="field-label">Target database <span class="opt">optional</span></span>
+        <input type="text" name="target_mongo_database" class="mono" placeholder="same name as the source database" autocomplete="off">
       </label>
     </div>
     <div class="field-grid" data-when="dst:postgres">
@@ -155,7 +187,7 @@
       <div class="field">
         <label class="field-label" for="np-database">Databases <span class="req" aria-hidden="true">*</span></label>
         <div class="control-row">
-          <input type="text" name="database" id="np-database" required value="app" class="mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
+          <input type="text" name="database" id="np-database" required class="mono" data-when-input="src:mysql,mariadb" placeholder="shop  or  shop, crm  or  *">
           <button type="button" class="btn" id="np-list-databases" data-when="src:mysql,mariadb">List source databases</button>
         </div>
         <small class="field-hint">Source databases to copy, comma-separated; <code>*</code> = all (system databases are skipped). Each is created on the target with the same name<span data-when="dst:postgres"> as a schema in the target database</span>.</small>

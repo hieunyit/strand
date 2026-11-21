@@ -24,7 +24,11 @@ type pipelineConnRequest struct {
 	Port     int    `json:"port"`
 	User     string `json:"user"`
 	Password string `json:"password"`
-	URI      string `json:"uri"` // mongodb://... (secret)
+	URI      string `json:"uri"` // mongodb://... (secret); API clients only, the console sends the fields below
+	// MongoDB without a URI: Host may list several host:port (replica set members).
+	AuthDB     string `json:"auth_db"`
+	ReplicaSet string `json:"replica_set"`
+	TLS        bool   `json:"tls"`
 }
 
 func (s *Server) pipelineConnRoutes(mux *http.ServeMux) {
@@ -50,8 +54,13 @@ func (s *Server) apiPipelineConnTest(w http.ResponseWriter, r *http.Request, ses
 		}
 	case backup.ConnMongoDB:
 		if strings.TrimSpace(req.URI) == "" {
-			writeErr(w, http.StatusBadRequest, "uri is required")
-			return
+			uri, err := buildMongoURI(req.Role, mongoEndpoint{Hosts: req.Host, Port: req.Port, User: req.User, Password: req.Password,
+				AuthDB: req.AuthDB, ReplicaSet: req.ReplicaSet, TLS: req.TLS})
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			req.URI = uri
 		}
 	default:
 		writeErr(w, http.StatusBadRequest, "unsupported engine")
@@ -66,7 +75,7 @@ func (s *Server) apiPipelineConnTest(w http.ResponseWriter, r *http.Request, ses
 		user = sess.Username
 	}
 	detail := map[string]any{"role": req.Role, "engine": req.Engine}
-	if req.Engine != backup.ConnMongoDB {
+	if req.Host != "" {
 		detail["host"], detail["port"] = req.Host, req.Port
 	}
 	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), User: user, Action: "pipeline.test_connection", Result: "started", Detail: detail}); err != nil {
@@ -89,7 +98,8 @@ var createFormFields = map[string]bool{
 	"workers": true, "iops_soft": true, "iops_hard": true, "chunk_rows": true, "max_parallel": true, "start_at": true,
 	"windows": true, "breaker_max_ratio": true, "replica_lag_max": true, "governor_algorithm": true, "lag_slo": true,
 	"source_uri": true, "target_uri": true, "source_database": true, "target_mongo_database": true, "snapshot_batch": true,
-	"stream_batch": true, "lease_ttl": true,
+	"stream_batch": true, "lease_ttl": true, "source_auth_db": true, "target_auth_db": true, "source_replica_set": true,
+	"target_replica_set": true,
 }
 
 var createErrFieldRE = regexp.MustCompile(`^([a-z_]+)(?::| ")`)

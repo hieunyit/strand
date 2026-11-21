@@ -19,6 +19,15 @@ Strand pipeline: `strand sync -c <config>` (also `--background`, `stop`, `status
 
 ## Configuration
 
+From the Web console (**Pipelines → New pipeline**, source and target "MongoDB 4.4 – 8.0"), each side
+is entered as host(s), port, user, password, replica set name (optional), authentication database
+(default `admin`) and TLS. Several replica set members go in the host field as `host:port` separated
+by commas. The source database has no default: type it or press **List source databases** (it
+connects with the entered credentials and lists the user databases). An empty target database means
+the same name as the source. The console builds the connection URI (user and password escaped) and
+stores it only in the pipeline's encrypted `.env` as `SRC_URI` / `DST_URI`; the YAML below is what it
+generates.
+
 ```yaml
 version: 1
 name: orders-replica

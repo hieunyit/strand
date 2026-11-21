@@ -17,6 +17,7 @@ import (
 	texttmpl "text/template"
 	"time"
 
+	"strand/internal/backup/conncheck"
 	"strand/internal/config"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -87,9 +88,17 @@ type NewPipelineOpts struct {
 	Metrics   string `json:"metrics,omitempty"`
 	LogFormat string `json:"log_format,omitempty"`
 
-	// MongoDB -> MongoDB (from = to = mongodb): URI là bí mật (chỉ vào .env: SRC_URI / DST_URI).
+	// MongoDB -> MongoDB (from = to = mongodb). The console sends host(s)/port/user/password (the source_* /
+	// target_* fields above) plus the options below and the server builds the URI; source_uri / target_uri are
+	// still accepted from the API. Either way the URI is a secret: only in the encrypted .env (SRC_URI / DST_URI).
 	SourceURI            string `json:"source_uri,omitempty"`
 	TargetURI            string `json:"target_uri,omitempty"`
+	SourceAuthDB         string `json:"source_auth_db,omitempty"`
+	TargetAuthDB         string `json:"target_auth_db,omitempty"`
+	SourceReplicaSet     string `json:"source_replica_set,omitempty"`
+	TargetReplicaSet     string `json:"target_replica_set,omitempty"`
+	SourceTLS            bool   `json:"source_tls,omitempty"`
+	TargetTLS            bool   `json:"target_tls,omitempty"`
 	MongoSourceDB        string `json:"source_database,omitempty"`
 	MongoTargetDB        string `json:"target_mongo_database,omitempty"`
 	MongoSnapshotBatch   int    `json:"snapshot_batch,omitempty"`
@@ -739,7 +748,15 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	envBuf.WriteString(fmt.Sprintf("# Environment variables for pipeline %s\n", opts.Name))
 	secrets := [][2]string{{srcEnv, opts.SourcePassword}, {dstEnv, opts.TargetPassword}}
 	if isMongo(opts.From) {
-		secrets = [][2]string{{mongoSrcURIEnv, strings.TrimSpace(opts.SourceURI)}, {mongoDstURIEnv, strings.TrimSpace(opts.TargetURI)}}
+		srcURI, err := mongoURIOf(opts, "source")
+		if err != nil {
+			return nil, err
+		}
+		dstURI, err := mongoURIOf(opts, "target")
+		if err != nil {
+			return nil, err
+		}
+		secrets = [][2]string{{mongoSrcURIEnv, srcURI}, {mongoDstURIEnv, dstURI}}
 	}
 	for _, kv := range secrets {
 		line, err := formatEnvLine(kv[0], kv[1])
@@ -948,6 +965,12 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.StartAt = strings.TrimSpace(f.Get("start_at"))
 	opts.SourceURI = f.Get("source_uri")
 	opts.TargetURI = f.Get("target_uri")
+	opts.SourceAuthDB = strings.TrimSpace(f.Get("source_auth_db"))
+	opts.TargetAuthDB = strings.TrimSpace(f.Get("target_auth_db"))
+	opts.SourceReplicaSet = strings.TrimSpace(f.Get("source_replica_set"))
+	opts.TargetReplicaSet = strings.TrimSpace(f.Get("target_replica_set"))
+	opts.SourceTLS = f.Get("source_tls") == "true" || f.Get("source_tls") == "on"
+	opts.TargetTLS = f.Get("target_tls") == "true" || f.Get("target_tls") == "on"
 	opts.MongoSourceDB = strings.TrimSpace(f.Get("source_database"))
 	opts.MongoTargetDB = strings.TrimSpace(f.Get("target_mongo_database"))
 	opts.MongoLeaseTTL = strings.TrimSpace(f.Get("lease_ttl"))
@@ -1033,10 +1056,14 @@ type sourceDatabaseRequest struct {
 	Port     int    `json:"port"`
 	User     string `json:"user"`
 	Password string `json:"password"`
+	// MongoDB only (Host may list several host:port).
+	AuthDB     string `json:"auth_db"`
+	ReplicaSet string `json:"replica_set"`
+	TLS        bool   `json:"tls"`
 }
 
 // apiSourceDatabases lists databases reachable by the credentials currently entered in the new-pipeline form.
-// The password is used only for this request and is never logged or persisted by this handler.
+// MySQL/MariaDB run SHOW DATABASES; PostgreSQL and MongoDB use the connection checker (system databases left out).
 func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, _ *Session) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	var req sourceDatabaseRequest
@@ -1044,11 +1071,12 @@ func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.From == "postgres" {
-		writeErr(w, http.StatusNotImplemented, "database discovery is currently supported for MySQL and MariaDB sources")
+	switch req.From {
+	case "mysql", "mariadb":
+	case "postgres", "mongodb":
+		s.sourceDatabasesByCheck(w, r, req)
 		return
-	}
-	if req.From != "mysql" && req.From != "mariadb" {
+	default:
 		writeErr(w, http.StatusBadRequest, "unsupported source engine")
 		return
 	}
@@ -1092,4 +1120,40 @@ func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, _ *S
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"databases": databases})
+}
+
+// sourceDatabasesByCheck lists the databases of a PostgreSQL or MongoDB source with the connection checker.
+func (s *Server) sourceDatabasesByCheck(w http.ResponseWriter, r *http.Request, req sourceDatabaseRequest) {
+	t := conncheck.Target{Engine: req.From, Host: strings.TrimSpace(req.Host), Port: req.Port, User: strings.TrimSpace(req.User), Password: req.Password}
+	if req.From == "mongodb" {
+		uri, err := buildMongoURI("source", mongoEndpoint{Hosts: req.Host, Port: req.Port, User: req.User, Password: req.Password,
+			AuthDB: req.AuthDB, ReplicaSet: req.ReplicaSet, TLS: req.TLS})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		t.URI = uri
+	} else if t.Host == "" || t.User == "" || req.Port < 1 || req.Port > 65535 {
+		writeErr(w, http.StatusBadRequest, "source host, user, and valid port are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	res := s.connChecker().Check(ctx, t)
+	if !res.OK {
+		msg := "source connection failed"
+		if res.Error != "" {
+			msg += ": " + res.Error
+		}
+		writeErr(w, http.StatusBadGateway, msg)
+		return
+	}
+	dbs := make([]string, 0, len(res.Databases))
+	for _, d := range res.Databases {
+		if req.From == "postgres" && d == "postgres" {
+			continue
+		}
+		dbs = append(dbs, d)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"databases": dbs})
 }

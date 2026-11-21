@@ -823,7 +823,7 @@
       var inc = val('include'), exc = val('exclude'), what;
       if (src === 'mongodb') {
         what = (inc || ((val('source_database') || '?') + '.* (every collection)')) + (exc ? '  except ' + exc : '') +
-          '  ->  MongoDB database ' + (val('target_mongo_database') || '?');
+          '  ->  MongoDB database ' + (val('target_mongo_database') || val('source_database') || '?');
         out.textContent = what;
         return;
       }
@@ -869,7 +869,7 @@
       if (src === 'mongodb') ns = 'db';
       form.querySelectorAll('.np-ns').forEach(function (e) { e.textContent = ns; });
       var exInc = document.getElementById('np-include-ex'), exExc = document.getElementById('np-exclude-ex');
-      var pre = src === 'postgres' ? (val('schema') || 'public') : (src === 'mongodb' ? (val('source_database') || 'app') : ((val('database').split(',')[0] || 'shop').trim().replace('*', 'shop')));
+      var pre = src === 'postgres' ? (val('schema') || 'public') : (src === 'mongodb' ? (val('source_database') || 'db') : ((val('database').split(',')[0] || 'shop').trim().replace('*', 'shop')));
       if (exInc) exInc.textContent = pre + '.orders, ' + pre + '.customers';
       if (exExc) exExc.textContent = pre + '.log_*, ' + pre + '.tmp_*';
       preview();
@@ -918,6 +918,51 @@
         .catch(function (err) { if (status) status.textContent = ' ' + err.message; })
         .finally(function () { listDBButton.disabled = false; });
     });
+    // "List source databases" for PostgreSQL and MongoDB: pick one database (the MySQL list above picks several).
+    Array.prototype.forEach.call(newPipeForm.querySelectorAll('[data-list-databases]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-list-databases'), eng = btn.getAttribute('data-list-engine');
+        var field = document.getElementById(id);
+        var status = newPipeForm.querySelector('[data-list-status="' + id + '"]');
+        var box = newPipeForm.querySelector('[data-list-box="' + id + '"]');
+        var value = function (name) { var el = newPipeForm.querySelector('[name="' + name + '"]:not([disabled])'); return el ? el.value.trim() : ''; };
+        var body = {from: eng, host: value('source_host'), port: Number(value('source_port')), user: value('source_user')};
+        var pw = newPipeForm.querySelector('[name="source_password"]');
+        body.password = pw ? pw.value : '';
+        if (eng === 'mongodb') {
+          body.auth_db = value('source_auth_db'); body.replica_set = value('source_replica_set');
+          var tls = newPipeForm.querySelector('[name="source_tls"]');
+          body.tls = !!(tls && tls.checked);
+        }
+        btn.disabled = true;
+        if (status) status.textContent = 'Connecting to source…';
+        api('POST', '/api/v1/source/databases', body)
+          .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Could not list databases'); return j; }); })
+          .then(function (data) {
+            if (!box || !field) return;
+            box.textContent = '';
+            var dbs = data.databases || [];
+            if (!dbs.length) { box.hidden = true; if (status) status.textContent = 'No user databases found on the source.'; return; }
+            dbs.forEach(function (name) {
+              var b = document.createElement('button');
+              b.type = 'button'; b.className = 'chip' + (field.value.trim() === name ? ' active' : ''); b.textContent = name;
+              b.setAttribute('aria-pressed', field.value.trim() === name ? 'true' : 'false');
+              b.addEventListener('click', function () {
+                field.value = name; field.dispatchEvent(new Event('input', {bubbles: true}));
+                Array.prototype.forEach.call(box.querySelectorAll('.chip'), function (c) {
+                  var on = c === b; c.classList.toggle('active', on); c.setAttribute('aria-pressed', on ? 'true' : 'false');
+                });
+                if (status) status.textContent = 'Selected ' + name + '.';
+              });
+              box.appendChild(b);
+            });
+            box.hidden = false;
+            if (status) status.textContent = dbs.length + ' database(s) on the source: pick one.';
+          })
+          .catch(function (err) { if (status) status.textContent = err.message; })
+          .finally(function () { btn.disabled = false; });
+      });
+    });
     newPipeForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
       if (newPipeForm.getAttribute('aria-busy') === 'true') { return; } // a create is already running
@@ -939,7 +984,7 @@
           } else if (k === 'include' || k === 'exclude' || k === 'databases' || k === 'windows') {
             // API nhận mảng chuỗi: tách theo dấu phẩy
             payload[k] = str.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
-          } else if (k === 'overwrite') {
+          } else if (k === 'overwrite' || k === 'overwrite_target' || k === 'source_tls' || k === 'target_tls') {
             payload[k] = v === 'true' || v === '1' || v === 'on';
           } else {
             payload[k] = str;
