@@ -138,15 +138,15 @@
       var src = from.value, dst = to.value, rows = [];
       rows.push(['Name', val('name')]);
       if (src === 'mongodb') {
-        rows.push(['Source', 'MongoDB, database ' + (val('source_database') || '?')]);
-        rows.push(['Source login', val('source_uri') ? 'URI set (hidden)' : '']);
+        rows.push(['Source', 'MongoDB, ' + addr('source', val('source_database') || '?') + (val('source_replica_set') ? ' (replica set ' + val('source_replica_set') + ')' : '')]);
+        rows.push(['Source password', val('source_password') ? 'set (hidden)' : 'none']);
       } else {
         rows.push(['Source', ENGINES[src] + ', ' + addr('source', src === 'postgres' ? val('database') : '')]);
         rows.push(['Source password', val('source_password') ? 'set (hidden)' : 'none']);
       }
       if (dst === 'mongodb') {
-        rows.push(['Target', 'MongoDB, database ' + (val('target_mongo_database') || '?')]);
-        rows.push(['Target login', val('target_uri') ? 'URI set (hidden)' : '']);
+        rows.push(['Target', 'MongoDB, ' + addr('target', val('target_mongo_database') || val('source_database') || '?') + (val('target_replica_set') ? ' (replica set ' + val('target_replica_set') + ')' : '')]);
+        rows.push(['Target password', val('target_password') ? 'set (hidden)' : 'none']);
       } else {
         rows.push(['Target', ENGINES[dst] + ', ' + addr('target', dst === 'postgres' ? val('target_pg_database') : '')]);
         rows.push(['Target password', val('target_password') ? 'set (hidden)' : 'none']);
@@ -185,7 +185,7 @@
       var eng = role === 'source' ? from.value : to.value, pre = role === 'source' ? 'source' : 'target';
       var box = btn.closest('fieldset');
       // only the connection fields of this side are checked here
-      var names = eng === 'mongodb' ? [pre + '_uri'] : [pre + '_host', pre + '_port', pre + '_user'];
+      var names = eng === 'mongodb' ? [pre + '_host', pre + '_port'] : [pre + '_host', pre + '_port', pre + '_user'];
       var bad = null;
       names.forEach(function (n) {
         var f = field(n);
@@ -195,8 +195,11 @@
       });
       if (bad) { bad.focus(); return; }
       var body = { role: role, engine: eng };
-      if (eng === 'mongodb') { body.uri = val(pre + '_uri'); }
-      else { body.host = val(pre + '_host'); body.port = Number(val(pre + '_port')); body.user = val(pre + '_user'); body.password = field(pre + '_password') ? field(pre + '_password').value : ''; }
+      body.host = val(pre + '_host'); body.port = Number(val(pre + '_port')); body.user = val(pre + '_user'); body.password = field(pre + '_password') ? field(pre + '_password').value : '';
+      if (eng === 'mongodb') {
+        body.auth_db = val(pre + '_auth_db'); body.replica_set = val(pre + '_replica_set');
+        body.tls = !!(field(pre + '_tls') && field(pre + '_tls').checked);
+      }
       out.textContent = '';
       var sk = make('div', 'skeleton-rows'); sk.appendChild(make('div', 'skeleton')); sk.appendChild(make('div', 'skeleton'));
       sk.setAttribute('aria-label', 'Testing connection'); out.appendChild(sk);
