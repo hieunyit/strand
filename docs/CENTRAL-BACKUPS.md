@@ -253,9 +253,13 @@ Jobs page with its log.
 Strand builds the native tool's argv itself (no shell). Tools are taken from
 `STRAND_BACKUP_TOOLS_DIR` when set (only there), else from
 `STRAND_WEB_BACKUP_COMMAND_DIR`, else `PATH`. Passwords are never in argv or
-in the catalog: a job names an environment variable of the Web service
-(`conn.password_env`, MongoDB `conn.uri_env`) and Strand passes the value as
+in the catalog: the password (or MongoDB URI) of a connection is entered in the
+console and stored sealed in the metadata database; the Web service hands it to
+the backup process in its environment and Strand passes it to the tool as
 `MYSQL_PWD`/`PGPASSWORD` or in a 0600 option file in a private temp directory.
+(Older jobs and connections that name a variable of the Web service in
+`conn.password_env` / `conn.uri_env` keep working; the console no longer creates
+them and shows them as legacy.)
 Names reserved for Strand's own secrets (`STRAND_WEB_*`, `STRAND_BACKUP_S3_*`,
 `STRAND_BACKUP_REPO_*`, `STRAND_BACKUP_ENCRYPTION*`, `STRAND_BACKUP_NOTIFY*`,
 `AWS_*`) are refused. A failing tool aborts the upload and marks the record
@@ -301,31 +305,41 @@ decoded. Losing a key loses its backups: keep keys in your secret manager.
 
 ### Repositories, Object Lock and copies (3-2-1)
 
-Without repositories, backups go to `STRAND_BACKUP_S3_*` + the job's bucket.
-Named repositories (Web: **Repositories**, `/backups/repositories`; API
-`/api/v1/backup-repositories`) come in two credential modes:
+Repositories are defined in the console (Web: **Backup resources → Repositories**,
+`/backups/repositories`; API `/api/v1/backup-repositories`). The form has:
 
-* **env** (the original mode): the repository holds only an id, bucket, prefix,
-  Object Lock settings and a default retention policy; endpoint and credentials
-  stay in the environment of the Web service under the repository's prefix:
+* **General**: name, storage type (S3-compatible), provider (Amazon S3, MinIO,
+  Ceph RGW, Wasabi, other; it only fills the endpoint format).
+* **Connection**: endpoint URL (https, without the bucket), region, and
+  "allow plain HTTP to a local endpoint" (loopback only, for testing).
+* **Credentials**: access key ID and secret access key.
+* **Storage location**: bucket and path (prefix); the page previews
+  `s3://bucket/path/<source>/...`.
+* **Retention (automatic deletion)**: delete backups older than N days, always
+  keep the newest N, keep every backup of the last N days, daily / weekly /
+  monthly / yearly backups to keep. It applies to backups in the repository that
+  belong to no job (manual and imported ones); scheduled jobs use the retention of
+  their policy.
+* **Immutability**: Object Lock mode (GOVERNANCE / COMPLIANCE) and lock period.
+* **Test connection** runs the checklist (list, put, get and compare, delete one
+  small object, Object Lock status) on the settings of the form before they are
+  saved (`POST /api/v1/backup-repositories/test`, admin; nothing is stored).
 
-```sh
-STRAND_BACKUP_REPO_OFFSITE_ENDPOINT=https://s3.eu-central-1.amazonaws.com
-STRAND_BACKUP_REPO_OFFSITE_REGION=eu-central-1
-STRAND_BACKUP_REPO_OFFSITE_ACCESS_KEY=... / _SECRET_KEY=... / _SESSION_TOKEN=...
-```
+The keys are sealed with the Web secret key (`STRAND_WEB_SECRET_KEY`, AES-256-GCM,
+the repository id as additional data) and are write-only: no response, page, audit
+entry, log or metric carries them (only `access_key_set`/`secret_key_set`). The Web
+service opens them only to put them in the **environment** of the
+`strand backup ...` processes it starts (schedulers, log archivers, verify, prune,
+copy, restore), under a prefix derived from the repository id; they never appear in
+argv. Editing a repository's credentials restarts the schedulers of the enabled jobs
+that use it (their environment is fixed when they start).
 
-* **stored** (migration 019): endpoint, region, access key and secret key are
-  entered in the console. The keys are sealed with the Web secret key
-  (`STRAND_WEB_SECRET_KEY`, AES-256-GCM, the repository id as additional data) and
-  are write-only: no response, page, audit entry, log or metric carries them (only
-  `access_key_set`/`secret_key_set`). The Web service opens them only to put them in
-  the **environment** of the `strand backup ...` processes it starts (schedulers,
-  log archivers, verify, prune, copy, restore), under a prefix derived from the
-  repository id; they never appear in argv. Editing a repository's credentials
-  restarts the schedulers of the enabled jobs that use it (their environment is
-  fixed when they start). Running `strand backup` by hand from a shell cannot use a
-  stored repository (the keys are not in your environment); use env mode for that.
+Repositories read from environment variables of the Web service
+(`STRAND_BACKUP_REPO_<NAME>_ENDPOINT`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`) are a
+legacy mode: existing ones keep working and are labelled legacy; editing one in the
+console and entering the endpoint and keys converts it. New ones cannot be created.
+Jobs created before repositories existed keep using `STRAND_BACKUP_S3_*` and their
+own bucket; the job wizard always picks a repository.
 
 `kind` is `s3` (AWS, MinIO, Ceph); `azure` and `gcs` are reserved in the schema
 and rejected until implemented. A repository with `lock_mode: COMPLIANCE` is shown
@@ -671,18 +685,22 @@ repository can be re-indexed without the database.
 
 ### Web UI and Route Architecture (P1)
 
-Strand Web splits backup management across dedicated, fast-loading routes under the "Data protection" sidebar group:
-- `/backups` (Overview dashboard): Stat tiles (protected sources, 24h success rate, failing jobs, storage used, test-restore status), standby/repo/key banners, needs-attention list, and 14-day stacked activity chart rendered server-side as CSP-safe SVG.
+Strand Web splits backup management across dedicated, fast-loading routes under the "Data protection" sidebar group
+(Backup dashboard, Backup jobs, Restore points, Restore, Backup resources, Reports). Backup resources groups Connections,
+Repositories, Policies, Encryption keys and Notifications; Reports groups Reports and Activity; each page of a group shows the
+group's pages as a tab strip (admin-only pages are listed to admins only).
+- `/backups` (Backup dashboard): Stat tiles (protected sources, 24h success rate, failing jobs, storage used, test-restore status), standby/repo/key banners, needs-attention list, and 14-day stacked activity chart rendered server-side as CSP-safe SVG.
 - `/backups/jobs`: Filterbar (query, engine, status, repository) synced to the URL, bulk action bar (Run, Pause, Resume, Delete), last-10-runs indicators, and next run countdowns.
 - `/backups/jobs/{id}`: Detailed job view with header actions and tabs: Overview (30-day run sparkline), Runs (cursor-paged run history with live log stream and running execution cancellation), Restore points, Settings (read-only with edit mode), and Activity (audit entries filtered to this job).
 - `/backups/catalog` and `/backups/catalog/{id}`: Paged restore point browser and backup detail inspect view with position coordinates and verification history.
-- `/backups/restore`: Restore wizard.
+- `/backups/restore`: Restore wizard. A restore into a database goes to a saved connection (its password stored encrypted,
+  its TLS and SSH tunnel settings applied); a physical restore goes to a new directory.
 
 ### Connections, policies and the job wizard (P2/P3 UI)
 
 - `/backups/connections` and `/backups/connections/{id}`: table with a filter bar (name/host, engine, last test status) and, for admins, a
-  `New connection` drawer (`dialog.drawer`) whose fields follow the engine (default port, URI variable for MongoDB, environment variable or
-  stored encrypted secret). `Test connection` shows a checklist (connect, version, privileges, log_bin/GTID or wal_level or replica set,
+  `New connection` drawer (`dialog.drawer`) whose fields follow the engine (default port, connection URI for MongoDB); the password is
+  entered there and stored encrypted (there is no environment-variable option). `Test connection` shows a checklist (connect, version, privileges, log_bin/GTID or wal_level or replica set,
   databases, point-in-time recovery verdict). The detail page has an Overview and a `Used by` tab. Operators can test; only admins create,
   edit or delete. Secrets are never rendered.
 - `/backups/policies` and `/backups/policies/{id}`: policy table (schedule in words, retention in words, PITR, verify, job count). The
@@ -693,7 +711,8 @@ Strand Web splits backup management across dedicated, fast-loading routes under 
   connection's engine (Recommended badge; the custom script is under Advanced). Step 2 picks a policy (Gold/Silver/Bronze/custom) or a custom
   schedule; the PITR switch is enabled only when the test result allows it for the chosen method and databases and otherwise shows the reason.
   Step 3 chooses the repository (immutable badge), a second copy, encryption (on by default when keys exist, yellow warning when none) and
-  compression. Step 4 sets verification, test restore (mysqldump, mariadb-dump, pg_dump only), retries and shows the Review before
+  compression. Step 4 sets verification, test restore (mysqldump, mariadb-dump, pg_dump only; the scratch server is a saved connection of the
+  same engine, `scratch_connection_id`, whose stored password reaches only the verify process in `STRAND_BACKUP_SCRATCH_PASSWORD`), retries and shows the Review before
   `Create and run first backup` / `Create only`. Fields that differ from the selected policy carry an `overridden` badge and are sent as
   overrides; untouched fields are not sent, so the job keeps following the policy.
 - The jobs list and job page show the human schedule, the policy and connection, `missed` runs (filter `status=missed`) and the job

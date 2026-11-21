@@ -26,16 +26,18 @@ Strand Web UI is an operational dashboard for high-throughput distributed CDC re
 | ↳ `?tab=seed` | Seed Wizard | Mode B backup seeding plan and execution | SD-1..SD-4 validation status | Plan seed, Apply seed (destructive) |
 | `/jobs` | Global Jobs Directory | History and status of all background jobs | Total jobs, running count, success/fail counts | Kind filter, Search |
 | `/jobs/{id}` | Job Execution Detail | Real-time console output and exit code for a single job | Job status badge, duration, exit code | Cancel job, Download output |
-| `/backups` | Centralized Backups | Backup repository management and verification | Catalog summary, repository health | New backup job, Repository settings |
-| ↳ `?tab=dashboard` | Backup Dashboard | Overview of backups, recovery points, recent runs | Backup KPIs, repository storage summary | Quick backup action |
-| ↳ `?tab=jobs` | Backup Jobs | Scheduled and on-demand backup schedules | Job schedule table | Create backup job |
-| ↳ `?tab=restore` | Restore Wizard | Guided point-in-time and snapshot restore | Target host & safety confirmation | Execute restore |
-| ↳ `?tab=repositories`| Backup Repositories | S3, GCS, NFS, and local directory targets | Repository status, reachability, encryption | Add repository |
-| ↳ `?tab=verification`| Backup Verification | Integrity verification jobs and checksum audit | Pass/fail rates, last verification run | Run verification job |
+| `/backups` | Backup Dashboard | Protected sources, success rate, needs attention, 14-day activity, recent verification | Backup KPIs, standby/repository/key banners | Open jobs, restore points |
+| `/backups/jobs`, `/backups/jobs/{id}` | Backup Jobs | Job list with filters, job detail (overview, runs, restore points, settings, activity) | Last 10 runs, next run | New backup job (wizard), Run, Pause, Resume |
+| `/backups/catalog`, `/backups/catalog/{id}` | Restore Points | Paged catalog, timeline by source, backup detail | Recovery window | Restore, Verify, Legal hold, Copy to repository |
+| `/backups/restore` | Restore Wizard | 4 steps: restore point, target (saved connection), options, review | Recovery window | Start restore |
+| Backup resources | Section (tab strip) | `/backups/connections`, `/backups/repositories`, `/backups/policies`, `/backups/keys` (admin), `/backups/notifications` (admin) | Last test status | New connection / repository / policy, Test connection |
+| Reports | Section (tab strip) | `/backups/reports`, `/backups/activity` (admin) | Period summary | Export |
+| Tools | Section (tab strip, admin) | `/archive`, `/tunnels`, `/tools/spool-inspect` | Running archivers / tunnels | Start, Stop, Scan |
 | `/mcp` | Model Context Protocol | Strand MCP server status, declared tools, call audit | MCP connection status, socket path | Refresh tool definitions |
+| Settings | Section (tab strip) | `/settings` (admin), `/settings/db` (admin), `/mcp`, `/help/schema` | | |
 | `/settings` | System Settings | Console configuration, theme, security policies | Active session info, token manager | Save settings, Generate token |
 | ↳ `?tab=general` | Console Settings | Refresh interval, session timeouts, TLS policies | Setting key-value inputs | Save settings |
-| ↳ `?tab=database` | Metadata DB Admin | PostgreSQL metadata migration & export tools | Migration plan summary, schema version | Dry-run migration, Apply migration, Export DB |
+| `/settings/db` | Metadata DB Admin | PostgreSQL metadata migration & export tools | Migration plan summary, schema version | Dry-run migration, Apply migration, Export DB |
 | `/help/schema` | Config Reference | Complete JSON schema reference for pipeline configs | Interactive schema browser, required fields | Copy JSON schema |
 | `/tools/spool-inspect`| Spool Sidecar Inspector| Read-only Pebble spool database offline inventory | Discovered sidecars, orphan files, total bytes | Scan spool inventory |
 
