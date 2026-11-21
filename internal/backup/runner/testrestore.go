@@ -19,6 +19,10 @@ import (
 // job's scratch server, counts the rows of every table, records the result (kind test_restore) and drops
 // the scratch database. It proves the backup is restorable, not just intact.
 func (e *Env) TestRestore(ctx context.Context, job backup.Job) (backup.CheckResult, error) {
+	// A missing restore tool is a setup problem, not a failed backup: refuse before recording a failed check.
+	if err := CheckTools(e.Getenv, TestRestoreToolNeeds(job.Method)); err != nil {
+		return backup.CheckResult{}, err
+	}
 	rs, err := e.Catalog.List(ctx, backup.Filter{JobID: job.ID, Status: backup.StatusComplete, NotKind: backup.KindLog, Limit: 1})
 	if err != nil {
 		return backup.CheckResult{}, err

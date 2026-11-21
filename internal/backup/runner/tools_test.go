@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"strand/internal/backup"
 	"strand/internal/web/store"
@@ -173,5 +174,39 @@ func TestRunJobMissingToolCreatesNoRecord(t *testing.T) {
 	}
 	if len(rs) != 0 {
 		t.Fatalf("catalog records created: %+v", rs)
+	}
+}
+
+// verify --test-restore without the restore tool: refused before any check is recorded (it used to record a
+// failed test_restore check against a good backup).
+func TestTestRestoreMissingToolRecordsNoCheck(t *testing.T) {
+	st := store.NewMem()
+	e := testEnv(t, map[string]string{EnvToolsDir: t.TempDir()}, st)
+	ctx := context.Background()
+	rec, _, err := e.Catalog.Create(ctx, backup.Record{ID: "bk-t1", Source: "src", Engine: "mysql", Tool: backup.MethodMySQLDump, JobID: "bjob-t", Bucket: "bkt-one", ObjectKey: "src/bk-t1/dump.sql.zst",
+		ManifestURI: "s3://bkt-one/src/bk-t1/manifest.json", Method: backup.MethodMySQLDump, Kind: backup.KindFull, Status: backup.StatusQueued, CreatedAt: time.Now().Add(-time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range []backup.Status{backup.StatusUploading, backup.StatusVerifying} {
+		if _, _, err := e.Catalog.UpdateStatus(ctx, rec.ID, st, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := e.Catalog.Finalize(ctx, rec.ID, backup.StatusVerifying, 10, strings.Repeat("a", 64), rec.ManifestURI, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	job := backup.Job{ID: "bjob-t", Name: "t", JobOptions: backup.JobOptions{Method: backup.MethodMySQLDump, Source: "src", TestRestore: true}}
+	_, err = e.TestRestore(ctx, job)
+	var tm *ToolMissingError
+	if !errors.As(err, &tm) {
+		t.Fatalf("err = %v, want ToolMissingError", err)
+	}
+	checks, err := e.Catalog.Checks(ctx, rec.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 0 {
+		t.Fatalf("checks recorded: %+v", checks)
 	}
 }
