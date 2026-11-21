@@ -60,9 +60,28 @@ func TestPhysicalParsers(t *testing.T) {
 	if m.BinlogFile != "binlog.000004" || m.BinlogPos != 777 || m.GTIDSet != "u:1-12" {
 		t.Fatal(m)
 	}
+	// mydumper >= 0.16 (INI, keys commented out), output of mydumper 1.0.19 against MySQL 8.4 with GTIDs;
+	// the [replica] section of a dump taken from a replica must not be picked.
+	m = ParseMydumperMetadata("# Started dump at: 2026-11-21 12:18:06\n[config]\nquote-character = BACKTICK\n\n" +
+		"[replica]\n# SOURCE_LOG_FILE = \"other.000009\"\n# SOURCE_LOG_POS = 1\n\n" +
+		"[source]\n# Channel_Name = '' # It can be use to setup replication FOR CHANNEL\n" +
+		"# executed_gtid_set = \"b23a0985-e5a5-11f1-9794-5ae360c73d26:1-8\"\n# SOURCE_LOG_FILE = \"binlog.000002\"\n# SOURCE_LOG_POS = 873\n\n" +
+		"[`app`.`t`]\nreal_table_name=t\nrows = 1\n")
+	if m.BinlogFile != "binlog.000002" || m.BinlogPos != 873 || m.GTIDSet != "b23a0985-e5a5-11f1-9794-5ae360c73d26:1-8" {
+		t.Fatal(m)
+	}
+	// mydumper 0.12-0.15 ([master], uncommented keys).
+	m = ParseMydumperMetadata("[master]\nFile = mysql-bin.000003\nPosition = 797\nExecuted_Gtid_Set = 0-1-11\n")
+	if m.BinlogFile != "mysql-bin.000003" || m.BinlogPos != 797 || m.GTIDSet != "0-1-11" {
+		t.Fatal(m)
+	}
+	m = ParseMydumperMetadata("[source]\n# executed_gtid_set = \"a:1-5,\n# b:1-7\"\n# SOURCE_LOG_FILE = \"binlog.000007\"\n# SOURCE_LOG_POS = 4\n")
+	if m.BinlogFile != "binlog.000007" || m.BinlogPos != 4 || m.GTIDSet != "a:1-5,b:1-7" {
+		t.Fatal(m)
+	}
 	get := func(k string) string { return map[string]string{"PW": "pa:ss"}[k] }
 	uri, _ := MongoURI(get, backup.ConnSpec{Host: "m1", Port: 27017, User: "u@x", PasswordEnv: "PW"})
-	if uri != "mongodb://u%40x:pa%3Ass@m1:27017/?directConnection=true" {
+	if uri != "mongodb://u%40x:pa%3Ass@m1:27017/?directConnection=true&authSource=admin" {
 		t.Fatal(uri)
 	}
 	mi, _ := MongodumpInvocation(uri, backup.ConnSpec{})

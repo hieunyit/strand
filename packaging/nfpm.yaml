@@ -59,7 +59,28 @@ scripts:
   preremove: packaging/scripts/preremove.sh
   postremove: packaging/scripts/postremove.sh
 
+# Công cụ native cho backup/restore do Strand quản lý (docs/CENTRAL-BACKUPS.md "Native tools").
+# Gói KHÔNG bắt buộc chúng (pipeline CDC không cần). Strand tìm công cụ ở STRAND_BACKUP_TOOLS_DIR nếu đặt
+# (chỉ ở đó; đặt trong /etc/strand/web.env cho strand-web.service), nếu không thì STRAND_WEB_BACKUP_COMMAND_DIR,
+# rồi PATH. Không khuyến nghị client MySQL mặc định của Debian (default-mysql-client = MariaDB): mysqldump của
+# MariaDB không dùng được cho server MySQL 8; cài mysql-client của Oracle (repo.mysql.com) cho method mysqldump.
+# pg_dump phải cùng hoặc mới hơn major của server: client của distro có thể quá cũ, dùng gói PGDG.
 # useradd/groupadd: gói passwd (Debian/Ubuntu, có sẵn) hoặc shadow-utils (RHEL/Rocky).
 overrides:
+  deb:
+    recommends:
+      - postgresql-client
+    suggests:
+      - mysql-client | mysql-community-client
+      - mariadb-client
+      - mongodb-database-tools
+      - mydumper
   rpm:
     depends: [shadow-utils]
+    recommends:
+      - postgresql
+    suggests:
+      - (mysql-community-client or mysql)
+      - mariadb
+      - mongodb-database-tools
+      - mydumper
