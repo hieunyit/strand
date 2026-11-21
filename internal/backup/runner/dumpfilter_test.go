@@ -1,9 +1,13 @@
 package runner
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+
+	"strand/internal/backup"
 )
 
 func TestMySQLPartialFilterGolden(t *testing.T) {
@@ -263,5 +267,300 @@ func TestPGTOCFilterGolden(t *testing.T) {
 	_, _, badErr := FilterPGTOC([]byte(goldenTOC), []string{"unknown_table"}, info)
 	if badErr == nil || !strings.Contains(badErr.Error(), "not found in backup") {
 		t.Fatalf("expected missing table error, got: %v", badErr)
+	}
+}
+
+func TestPGTOCFilterP1UnqualifiedSchemaSeparation(t *testing.T) {
+	// P1: an unqualified name 'orders' must select ONLY public.orders, NOT sales.orders
+	toc := `;
+; Selected TOC Entries:
+;
+6; 2615 16384 SCHEMA - public postgres
+7; 2615 16385 SCHEMA - sales postgres
+218; 1259 16394 TABLE public orders postgres
+219; 1259 16395 TABLE sales orders postgres
+3465; 0 16394 TABLE DATA public orders postgres
+3466; 0 16395 TABLE DATA sales orders postgres
+3316; 2606 16399 CONSTRAINT public orders orders_pkey postgres
+3317; 2606 16400 CONSTRAINT sales orders sales_orders_pkey postgres
+3318; 2606 16401 TRIGGER public orders tr_orders postgres
+3319; 2606 16402 TRIGGER sales orders sales_tr_orders postgres
+`
+	filteredBytes, _, err := FilterPGTOC([]byte(toc), []string{"orders"}, PGTOCInfo{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	filtered := string(filteredBytes)
+	if !strings.Contains(filtered, "TABLE public orders") {
+		t.Errorf("expected public.orders kept")
+	}
+	if !strings.Contains(filtered, "SCHEMA - public") {
+		t.Errorf("expected SCHEMA - public kept")
+	}
+	// Verify sales.* is NOT kept
+	if strings.Contains(filtered, "sales") {
+		t.Errorf("expected no sales.* lines kept, but got:\n%s", filtered)
+	}
+}
+
+func TestPGTOCFilterP2NameGuessingAndQuotedIdentifiers(t *testing.T) {
+	goldenDDL := `
+--
+-- Name: orders; Type: TABLE; Schema: public; Owner: postgres
+--
+CREATE TABLE public.orders (
+    id integer NOT NULL,
+    customer_id integer,
+    created_at timestamp
+);
+
+--
+-- Name: orders_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+CREATE SEQUENCE public.orders_id_seq;
+
+--
+-- Name: orders_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;
+
+--
+-- Name: idx_orders_created; Type: INDEX; Schema: public; Owner: postgres
+--
+CREATE INDEX idx_orders_created ON public.orders USING btree (created_at);
+
+--
+-- Name: orders_archive; Type: TABLE; Schema: public; Owner: postgres
+--
+CREATE TABLE public.orders_archive (
+    id integer NOT NULL,
+    created_at timestamp
+);
+
+--
+-- Name: orders_archive_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+CREATE SEQUENCE public.orders_archive_id_seq;
+
+--
+-- Name: orders_archive_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+ALTER SEQUENCE public.orders_archive_id_seq OWNED BY public.orders_archive.id;
+
+--
+-- Name: idx_orders_archive_created; Type: INDEX; Schema: public; Owner: postgres
+--
+CREATE INDEX idx_orders_archive_created ON public.orders_archive USING btree (created_at);
+
+--
+-- Name: Customers; Type: TABLE; Schema: public; Owner: postgres
+--
+CREATE TABLE public."Customers" (
+    "id" integer NOT NULL,
+    "email" text
+);
+
+--
+-- Name: Customers_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+CREATE SEQUENCE public."Customers_id_seq";
+
+--
+-- Name: Customers_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+ALTER SEQUENCE public."Customers_id_seq" OWNED BY public."Customers"."id";
+
+--
+-- Name: idx_Customers_email; Type: INDEX; Schema: public; Owner: postgres
+--
+CREATE INDEX "idx_Customers_email" ON public."Customers" USING btree ("email");
+
+--
+-- Name: invoices; Type: TABLE; Schema: public; Owner: postgres
+--
+CREATE TABLE public.invoices (
+    id integer NOT NULL,
+    other_id integer
+);
+
+--
+-- Name: other_table; Type: TABLE; Schema: public; Owner: postgres
+--
+CREATE TABLE public.other_table (
+    id integer NOT NULL
+);
+
+--
+-- Name: orders fk_account; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT fk_account FOREIGN KEY (customer_id) REFERENCES public."Customers"(id);
+
+--
+-- Name: invoices fk_account; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+ALTER TABLE ONLY public.invoices
+    ADD CONSTRAINT fk_account FOREIGN KEY (other_id) REFERENCES public.other_table(id);
+`
+
+	goldenTOC := `;
+; Selected TOC Entries:
+;
+6; 2615 16384 SCHEMA - public postgres
+218; 1259 16394 TABLE public orders postgres
+217; 1259 16393 SEQUENCE public orders_id_seq postgres
+3473; 0 0 SEQUENCE OWNED BY public orders_id_seq postgres
+3314; 1259 16405 INDEX public idx_orders_created postgres
+3465; 0 16394 TABLE DATA public orders postgres
+
+220; 1259 16410 TABLE public orders_archive postgres
+221; 1259 16411 SEQUENCE public orders_archive_id_seq postgres
+3474; 0 0 SEQUENCE OWNED BY public orders_archive_id_seq postgres
+3315; 1259 16412 INDEX public idx_orders_archive_created postgres
+3466; 0 16410 TABLE DATA public orders_archive postgres
+
+222; 1259 16420 TABLE public Customers postgres
+223; 1259 16421 SEQUENCE public Customers_id_seq postgres
+3475; 0 0 SEQUENCE OWNED BY public Customers_id_seq postgres
+3316; 1259 16422 INDEX public idx_Customers_email postgres
+3467; 0 16420 TABLE DATA public Customers postgres
+
+224; 1259 16430 TABLE public invoices postgres
+225; 1259 16431 TABLE public other_table postgres
+
+3317; 2606 16440 FK CONSTRAINT public orders fk_account postgres
+3318; 2606 16441 FK CONSTRAINT public invoices fk_account postgres
+`
+	info, err := parsePGSchemaMetadata([]byte(goldenDDL))
+	if err != nil {
+		t.Fatalf("parsePGSchemaMetadata error: %v", err)
+	}
+
+	// Selecting orders only:
+	// - must keep orders, orders_id_seq, idx_orders_created, orders TABLE DATA
+	// - must NOT keep idx_orders_archive_created or orders_archive_id_seq
+	// - must NOT keep Customers or invoices or other_table
+	filteredBytes, _, err := FilterPGTOC([]byte(goldenTOC), []string{"orders"}, info)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	filtered := string(filteredBytes)
+	if !strings.Contains(filtered, "TABLE public orders") {
+		t.Errorf("expected TABLE public orders kept")
+	}
+	if !strings.Contains(filtered, "SEQUENCE public orders_id_seq") {
+		t.Errorf("expected SEQUENCE public orders_id_seq kept")
+	}
+	if !strings.Contains(filtered, "INDEX public idx_orders_created") {
+		t.Errorf("expected INDEX public idx_orders_created kept")
+	}
+
+	// Crucial P2 check 1: when info is empty (metadata has no entry for an object),
+	// fallback guessing must NOT keep orders_archive objects when restoring orders!
+	filteredNoInfoBytes, _, err := FilterPGTOC([]byte(goldenTOC), []string{"orders"}, PGTOCInfo{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	filteredNoInfo := string(filteredNoInfoBytes)
+	if strings.Contains(filteredNoInfo, "idx_orders_archive_created") {
+		t.Errorf("P2 violation: fallback guessing kept idx_orders_archive_created when info was empty")
+	}
+	if strings.Contains(filteredNoInfo, "orders_archive_id_seq") {
+		t.Errorf("P2 violation: fallback guessing kept orders_archive_id_seq when info was empty")
+	}
+
+	// Crucial P2 check 2: orders_archive objects must NOT be kept with parsed info either!
+	if strings.Contains(filtered, "idx_orders_archive_created") {
+		t.Errorf("P2 violation: idx_orders_archive_created was kept when restoring orders")
+	}
+	if strings.Contains(filtered, "orders_archive_id_seq") {
+		t.Errorf("P2 violation: orders_archive_id_seq was kept when restoring orders")
+	}
+
+	// Selecting orders and Customers:
+	// orders fk_account references Customers -> must be kept!
+	// invoices fk_account references other_table -> must be dropped!
+	filteredBoth, _, err := FilterPGTOC([]byte(goldenTOC), []string{"orders", "Customers"}, info)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	filteredBothStr := string(filteredBoth)
+	if !strings.Contains(filteredBothStr, "FK CONSTRAINT public orders fk_account") {
+		t.Errorf("expected orders fk_account kept when Customers is selected")
+	}
+	if strings.Contains(filteredBothStr, "FK CONSTRAINT public invoices fk_account") {
+		t.Errorf("expected invoices fk_account dropped")
+	}
+
+	// Test unresolved PK index error: if orders has an unresolved PK index, fail clearly
+	tocWithUnresolvedPK := `;
+218; 1259 16394 TABLE public orders postgres
+3314; 1259 16405 INDEX public orders_pkey postgres
+`
+	_, _, pkErr := FilterPGTOC([]byte(tocWithUnresolvedPK), []string{"orders"}, PGTOCInfo{})
+	if pkErr == nil || !strings.Contains(pkErr.Error(), "primary key index") {
+		t.Fatalf("expected unresolved PK index error, got: %v", pkErr)
+	}
+}
+
+func TestP3StoreObjectsCap(t *testing.T) {
+	// P3: store object list only if <= 1000 names and <= 64 KiB, else store objects_truncated=1
+	// Case 1: 1500 names -> not stored, flag set
+	details := map[string]string{}
+	names1500 := make([]string, 1500)
+	for i := range names1500 {
+		names1500[i] = fmt.Sprintf("tbl_%d", i)
+	}
+	storeBackupObjects(details, names1500)
+	if details["objects"] != "" {
+		t.Errorf("expected objects not stored for 1500 names, got: %s", details["objects"][:50]+"...")
+	}
+	if details["objects_truncated"] != "1" {
+		t.Errorf("expected objects_truncated='1' for 1500 names, got: %q", details["objects_truncated"])
+	}
+
+	// Case 2: 500 names exceeding 64 KiB
+	details2 := map[string]string{}
+	namesBig := make([]string, 500)
+	longName := strings.Repeat("a", 200)
+	for i := range namesBig {
+		namesBig[i] = fmt.Sprintf("%s_%d", longName, i)
+	}
+	storeBackupObjects(details2, namesBig)
+	if details2["objects"] != "" {
+		t.Errorf("expected objects not stored for >64KiB list, got len %d", len(details2["objects"]))
+	}
+	if details2["objects_truncated"] != "1" {
+		t.Errorf("expected objects_truncated='1' for >64KiB list, got: %q", details2["objects_truncated"])
+	}
+
+	// Case 3: 3 names under limits -> stored normally
+	details3 := map[string]string{}
+	namesNormal := []string{"users", "orders", "products"}
+	storeBackupObjects(details3, namesNormal)
+	if details3["objects"] != "users,orders,products" {
+		t.Errorf("expected objects stored normally, got: %q", details3["objects"])
+	}
+	if details3["objects_truncated"] != "" {
+		t.Errorf("expected objects_truncated empty, got: %q", details3["objects_truncated"])
+	}
+}
+
+func TestMySQLRestoreUnknownTableWithKnownListPreValidation(t *testing.T) {
+	e := &Env{}
+	base := backup.Record{
+		Details: map[string]string{
+			"databases": "shop",
+			"objects":   "tbl1,tbl2",
+		},
+	}
+	plan := RestorePlan{Chain: []backup.Record{base}}
+	target := RestoreTarget{
+		Database: "shop_restored",
+		Objects:  []string{"unknown_tbl"},
+	}
+	err := e.restoreMySQL(context.Background(), plan, target)
+	if err == nil || !strings.Contains(err.Error(), `table "unknown_tbl" not found in backup`) {
+		t.Fatalf("expected table not found error before DB creation, got: %v", err)
 	}
 }

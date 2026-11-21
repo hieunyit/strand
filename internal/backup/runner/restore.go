@@ -2,7 +2,6 @@ package runner
 
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -172,6 +171,18 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	if t.Database == "" || len(dbs) != 1 || dbs[0] == "" {
 		return errors.New("a logical MySQL restore needs --target-database and a single-database dump")
 	}
+	if base.Details["objects"] != "" && len(t.Objects) > 0 {
+		knownTables := strings.Split(base.Details["objects"], ",")
+		knownMap := make(map[string]bool, len(knownTables))
+		for _, k := range knownTables {
+			knownMap[strings.TrimSpace(k)] = true
+		}
+		for _, obj := range t.Objects {
+			if !knownMap[strings.TrimSpace(obj)] {
+				return fmt.Errorf("table %q not found in backup", obj)
+			}
+		}
+	}
 	src := dbs[0]
 	db, err := sql.Open("mysql", mysqlDSN(e.Getenv, t.Conn))
 	if err != nil {
@@ -323,12 +334,18 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 			// Extract schema metadata (sequence ownership, indexes, FK constraints)
 			var schemaBuf bytes.Buffer
 			schemaProc, err := Start(ctx, e.Getenv, Invocation{Tool: "pg_restore", Args: []string{"-s", "-f", "-", archiveFile}}, nil, nil)
-			if err == nil {
-				_, _ = io.Copy(&schemaBuf, schemaProc)
-				schemaProc.Close()
-				_ = schemaProc.Wait()
+			if err != nil {
+				return fmt.Errorf("read pg_dump schema metadata: %w", err)
 			}
-			info := parsePGSchemaMetadata(schemaBuf.Bytes())
+			_, _ = io.Copy(&schemaBuf, schemaProc)
+			schemaProc.Close()
+			if err := schemaProc.Wait(); err != nil {
+				return fmt.Errorf("read pg_dump schema metadata: %w", err)
+			}
+			info, err := parsePGSchemaMetadata(schemaBuf.Bytes())
+			if err != nil {
+				return fmt.Errorf("parse pg_dump schema metadata: %w", err)
+			}
 
 			filteredTOC, warnings, err := FilterPGTOC(tocBuf.Bytes(), t.Objects, info)
 			if err != nil {
@@ -401,47 +418,6 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	}
 	createdDB = false
 	return nil
-}
-
-func parsePGSchemaMetadata(schemaDDL []byte) PGTOCInfo {
-	info := PGTOCInfo{
-		FKReferences:   make(map[string]string),
-		SequenceOwners: make(map[string]string),
-		IndexTables:    make(map[string]string),
-	}
-	seqRE := regexp.MustCompile(`(?i)ALTER\s+SEQUENCE\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)\s+OWNED\s+BY\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)\.[A-Za-z0-9_]+`)
-	idxRE := regexp.MustCompile(`(?i)CREATE\s+(?:UNIQUE\s+)?INDEX\s+([A-Za-z0-9_]+)\s+ON\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)`)
-	fkRE := regexp.MustCompile(`(?i)ADD\s+CONSTRAINT\s+([A-Za-z0-9_]+)\s+FOREIGN\s+KEY\s*\(.*?\)\s*REFERENCES\s+(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)`)
-
-	scanner := bufio.NewScanner(bytes.NewReader(schemaDDL))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if m := seqRE.FindStringSubmatch(line); len(m) > 4 {
-			seqName, schema, table := m[2], m[3], m[4]
-			if schema != "" {
-				info.SequenceOwners[seqName] = schema + "." + table
-			} else {
-				info.SequenceOwners[seqName] = table
-			}
-		}
-		if m := idxRE.FindStringSubmatch(line); len(m) > 3 {
-			idxName, schema, table := m[1], m[2], m[3]
-			if schema != "" {
-				info.IndexTables[idxName] = schema + "." + table
-			} else {
-				info.IndexTables[idxName] = table
-			}
-		}
-		if m := fkRE.FindStringSubmatch(line); len(m) > 3 {
-			fkName, schema, targetTable := m[1], m[2], m[3]
-			if schema != "" {
-				info.FKReferences[fkName] = schema + "." + targetTable
-			} else {
-				info.FKReferences[fkName] = targetTable
-			}
-		}
-	}
-	return info
 }
 
 // newDir checks that dir does not exist or is empty, and creates it 0700.

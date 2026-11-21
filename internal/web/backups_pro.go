@@ -346,10 +346,30 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 	} else if req.Source != "" {
 		src = req.Source
 		if s.backups != nil {
-			recs, _ := s.backups.List(r.Context(), backup.Filter{Source: req.Source, Limit: 1})
-			if len(recs) > 0 {
-				backupRecord = &recs[0]
-				backupEngine = recs[0].Engine
+			all, _ := s.backups.ListAll(r.Context(), backup.Filter{Source: req.Source, Status: backup.StatusComplete}, 0)
+			if len(all) > 0 {
+				var at *time.Time
+				if req.TargetTime != "" {
+					if t, err := time.Parse(time.RFC3339, req.TargetTime); err == nil {
+						at = &t
+					}
+				}
+				if plan, err := runner.PlanRestore(all, nil, at); err == nil {
+					base := plan.Base()
+					backupRecord = &base
+					backupEngine = base.Engine
+				} else {
+					for _, r := range all {
+						if r.KindOrFull() != backup.KindLog {
+							if at == nil || !r.CreatedAt.After(*at) {
+								rr := r
+								backupRecord = &rr
+								backupEngine = rr.Engine
+								break
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -404,6 +424,41 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		if len(req.Objects) > 0 {
 			writeErr(w, http.StatusBadRequest, "partial restore is not available for physical backups")
 			return
+		}
+	}
+
+	if backupRecord != nil && backupRecord.Details != nil && backupRecord.Details["objects"] != "" && len(req.Objects) > 0 {
+		knownRaw := strings.Split(backupRecord.Details["objects"], ",")
+		known := make(map[string]bool, len(knownRaw))
+		for _, k := range knownRaw {
+			k = strings.TrimSpace(k)
+			if k != "" {
+				known[k] = true
+				if backupEngine == "postgres" || backupRecord.Method == backup.MethodPGDump {
+					if !strings.Contains(k, ".") {
+						known["public."+k] = true
+					}
+				}
+			}
+		}
+		isPG := backupEngine == "postgres" || backupRecord.Method == backup.MethodPGDump
+		isMongo := backupEngine == "mongodb" || backupRecord.Method == backup.MethodMongodump
+		for _, obj := range req.Objects {
+			target := strings.TrimSpace(obj)
+			match := known[target]
+			if !match && isPG {
+				if !strings.Contains(target, ".") {
+					match = known["public."+target]
+				}
+			}
+			if !match {
+				term := "table"
+				if isMongo {
+					term = "collection"
+				}
+				writeErr(w, http.StatusBadRequest, fmt.Sprintf("%s %q not found in backup", term, obj))
+				return
+			}
 		}
 	}
 

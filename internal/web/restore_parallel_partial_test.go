@@ -254,3 +254,53 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 		t.Errorf("expected 403 for operator, got %d", code)
 	}
 }
+
+func TestAPIUnknownTableWithKnownListRejected(t *testing.T) {
+	e := newCPEnv(t)
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	adm := e.admin()
+
+	// Seed backup with known objects
+	seedRichBackup(t, e.st, "bkp-my-known", "my-known", "mysql", "mysqldump", backup.KindFull, now, backup.Position{}, false, nil, "", nil, nil, "", map[string]string{"objects": "tbl1,tbl2", "databases": "shop"})
+
+	code, body := adm.do("POST", "/api/v1/backup-restores", map[string]any{
+		"backup_id":       "bkp-my-known",
+		"target":          map[string]any{"host": "mysql.internal", "port": 3306},
+		"target_database": "shop_restored",
+		"confirm":         "shop_restored",
+		"objects":         []string{"unknown_tbl"},
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown table with known list, got %d: %s", code, body)
+	}
+	if !strings.Contains(body, `unknown_tbl`) || !strings.Contains(body, `not found in backup`) {
+		t.Errorf("expected table not found error, got: %s", body)
+	}
+}
+
+func TestAPIRestoreSourceBaseWithLogAccepted(t *testing.T) {
+	e := newCPEnv(t)
+	tt := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	adm := e.admin()
+
+	tBase := tt.Add(-2 * time.Hour)
+	tLogStart := tt.Add(-3 * time.Hour)
+	tLogEnd := tt.Add(2 * time.Hour)
+
+	// Seed base mongodump backup followed by a newer oplog log segment covering target_time
+	posBase := backup.Position{OplogTS: "7000000000:1"}
+	seedRichBackup(t, e.st, "bkp-mongo-base", "mongo-src", "mongodb", "mongodump", backup.KindFull, tBase, posBase, false, nil, "", &tBase, nil, "", map[string]string{"databases": "app"})
+	seedRichBackup(t, e.st, "bkp-mongo-oplog", "mongo-src", "mongodb", "oplog", backup.KindLog, tLogEnd, backup.Position{OplogTS: "7000000010:1"}, false, nil, "", &tLogStart, &tLogEnd, "", map[string]string{"seq": "1"})
+
+	code, body := adm.do("POST", "/api/v1/backup-restores", map[string]any{
+		"source":          "mongo-src",
+		"target_time":     tt.Format(time.RFC3339),
+		"threads":         4,
+		"target":          map[string]any{"host": "mongo.internal", "port": 27017},
+		"target_database": "mongo_restored",
+		"confirm":         "mongo_restored",
+	})
+	if code != http.StatusAccepted {
+		t.Fatalf("expected 202 for source restore with mongodump base followed by oplog, got %d: %s", code, body)
+	}
+}

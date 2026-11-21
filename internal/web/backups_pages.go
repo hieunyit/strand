@@ -482,13 +482,32 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	}
 	sort.Strings(sources)
 
+	// Embed objects only for the first N backups (N=10) so the embedded wizard JSON does not blow up.
+	// Subsequent backups fetch details on demand via GET /api/v1/backups/{id}.
+	const maxEmbedObjects = 10
+	embedBackups := make([]backup.Record, len(backups))
+	for i, b := range backups {
+		if i >= maxEmbedObjects && b.Details != nil && b.Details["objects"] != "" {
+			bCopy := b
+			bCopy.Details = make(map[string]string, len(b.Details))
+			for k, v := range b.Details {
+				if k != "objects" {
+					bCopy.Details[k] = v
+				}
+			}
+			embedBackups[i] = bCopy
+		} else {
+			embedBackups[i] = b
+		}
+	}
+
 	var sourceInfos []restoreSourceInfo
 	for _, src := range sources {
 		win, _ := s.recoveryWindow(r.Context(), src)
 		var baseBackups []backup.Record
 		logsCount := 0
 		var engine string
-		for _, b := range backups {
+		for _, b := range embedBackups {
 			if b.Source == src {
 				if engine == "" && b.Engine != "" {
 					engine = b.Engine
@@ -529,7 +548,7 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	wizData := map[string]any{
 		"sources":         sourceInfos,
 		"connections":     conns,
-		"backups":         backups,
+		"backups":         embedBackups,
 		"selected_backup": selectedBackup,
 		"selected_source": selectedSource,
 	}

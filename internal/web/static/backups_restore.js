@@ -219,8 +219,26 @@
         b = sInfo.base_backups[sInfo.base_backups.length - 1];
       }
     }
-    if (b && b.details && b.details.objects) {
-      return b.details.objects.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    if (b) {
+      if (b.details && b.details.objects_truncated === '1') {
+        return null;
+      }
+      if (b.details && b.details.objects) {
+        return b.details.objects.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      }
+      if (b.id && !b._fetchingObjects && window.strandApi) {
+        b._fetchingObjects = true;
+        window.strandApi('GET', '/api/v1/backups/' + encodeURIComponent(b.id)).then(function (res) {
+          if (res.ok) { return res.json(); }
+        }).then(function (data) {
+          if (data && data.details) {
+            b.details = b.details || {};
+            if (data.details.objects) { b.details.objects = data.details.objects; }
+            if (data.details.objects_truncated) { b.details.objects_truncated = data.details.objects_truncated; }
+            syncRestoreOptions();
+          }
+        }).catch(function () {});
+      }
     }
     return null;
   }

@@ -229,9 +229,273 @@ func (f *mysqlPartialFilter) flushTrigger() {
 
 // PGTOCInfo holds foreign key, sequence ownership, and index mappings extracted from a pg_dump archive.
 type PGTOCInfo struct {
-	FKReferences   map[string]string // constraint_name -> referenced table (e.g. "public.users" or "users")
-	SequenceOwners map[string]string // sequence_name -> owning table (e.g. "public.orders" or "orders")
-	IndexTables    map[string]string // index_name -> table (e.g. "public.orders" or "orders")
+	FKReferences   map[string]string // schema.table.constraint -> schema.reftable
+	SequenceOwners map[string]string // schema.seq -> schema.table
+	IndexTables    map[string]string // schema.index -> schema.table
+}
+
+// unquotePGIdent removes wrapping quotes and unescapes double quotes ("" -> ").
+func unquotePGIdent(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+	}
+	return s
+}
+
+// splitPGQualifiedIdent splits a qualified PostgreSQL identifier into its unquoted components.
+// e.g. `"my schema"."Customers"` -> ["my schema", "Customers"]
+// e.g. `public.orders` -> ["public", "orders"]
+func splitPGQualifiedIdent(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var parts []string
+	var current strings.Builder
+	inQuotes := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inQuotes {
+			if ch == '"' {
+				if i+1 < len(s) && s[i+1] == '"' {
+					current.WriteByte('"')
+					i++
+				} else {
+					inQuotes = false
+				}
+			} else {
+				current.WriteByte(ch)
+			}
+		} else {
+			if ch == '"' {
+				inQuotes = true
+			} else if ch == '.' {
+				parts = append(parts, current.String())
+				current.Reset()
+			} else if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '(' || ch == ')' || ch == ',' || ch == ';' {
+				break
+			} else {
+				current.WriteByte(ch)
+			}
+		}
+	}
+	if current.Len() > 0 || len(parts) > 0 {
+		parts = append(parts, current.String())
+	}
+	return parts
+}
+
+type pgCommentHeader struct {
+	Name   string
+	Type   string
+	Schema string
+	Owner  string
+}
+
+func parsePGCommentHeader(line string) (pgCommentHeader, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "-- Name:") {
+		return pgCommentHeader{}, false
+	}
+	content := strings.TrimPrefix(line, "-- Name:")
+	parts := strings.Split(content, ";")
+	var h pgCommentHeader
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if i == 0 {
+			h.Name = unquotePGIdent(p)
+			continue
+		}
+		idx := strings.Index(p, ":")
+		if idx == -1 {
+			continue
+		}
+		key := strings.TrimSpace(p[:idx])
+		val := strings.TrimSpace(p[idx+1:])
+		switch strings.ToUpper(key) {
+		case "TYPE":
+			h.Type = strings.ToUpper(val)
+		case "SCHEMA":
+			h.Schema = unquotePGIdent(val)
+		case "OWNER":
+			h.Owner = unquotePGIdent(val)
+		}
+	}
+	if h.Schema == "" || h.Schema == "-" {
+		h.Schema = "public"
+	}
+	return h, true
+}
+
+var (
+	pgIndexOnRE       = regexp.MustCompile(`(?i)\bON\s+(?:ONLY\s+)?([^\s(]+)`)
+	pgSeqOwnedByRE    = regexp.MustCompile(`(?i)\bOWNED\s+BY\s+([^\s;]+)`)
+	pgAlterTableRE    = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?([^\s]+)`)
+	pgNextvalRE       = regexp.MustCompile(`(?i)nextval\('([^']+)'::regclass\)`)
+	pgAddConstraintRE = regexp.MustCompile(`(?i)ADD\s+CONSTRAINT\s+([^\s(]+)`)
+	pgReferencesRE    = regexp.MustCompile(`(?i)REFERENCES\s+([^\s(]+)`)
+)
+
+// parsePGSchemaMetadata parses the DDL schema stream of pg_restore -s -f - into PGTOCInfo.
+func parsePGSchemaMetadata(schemaDDL []byte) (PGTOCInfo, error) {
+	info := PGTOCInfo{
+		FKReferences:   make(map[string]string),
+		SequenceOwners: make(map[string]string),
+		IndexTables:    make(map[string]string),
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(schemaDDL))
+	var currentHeader *pgCommentHeader
+	var stmtLines []string
+
+	processBlock := func(h pgCommentHeader, block string) {
+		switch h.Type {
+		case "INDEX":
+			if m := pgIndexOnRE.FindStringSubmatch(block); len(m) > 1 {
+				tblParts := splitPGQualifiedIdent(m[1])
+				tableSchema, tableName := h.Schema, ""
+				if len(tblParts) >= 2 {
+					tableSchema = tblParts[0]
+					tableName = tblParts[1]
+				} else if len(tblParts) == 1 {
+					tableName = tblParts[0]
+				}
+				if tableSchema == "" || tableSchema == "-" {
+					tableSchema = "public"
+				}
+				if tableName != "" {
+					info.IndexTables[h.Schema+"."+h.Name] = tableSchema + "." + tableName
+					info.IndexTables[h.Name] = tableSchema + "." + tableName
+				}
+			}
+		case "SEQUENCE", "SEQUENCE OWNED BY":
+			if m := pgSeqOwnedByRE.FindStringSubmatch(block); len(m) > 1 {
+				target := m[1]
+				if !strings.EqualFold(target, "NONE") {
+					parts := splitPGQualifiedIdent(target)
+					tableSchema, tableName := h.Schema, ""
+					if len(parts) >= 3 {
+						tableSchema = parts[len(parts)-3]
+						tableName = parts[len(parts)-2]
+					} else if len(parts) == 2 {
+						tableName = parts[0]
+					}
+					if tableSchema == "" || tableSchema == "-" {
+						tableSchema = "public"
+					}
+					if tableName != "" {
+						info.SequenceOwners[h.Schema+"."+h.Name] = tableSchema + "." + tableName
+						info.SequenceOwners[h.Name] = tableSchema + "." + tableName
+					}
+				}
+			}
+		case "DEFAULT":
+			mAlt := pgAlterTableRE.FindStringSubmatch(block)
+			mNext := pgNextvalRE.FindStringSubmatch(block)
+			if len(mAlt) > 1 && len(mNext) > 1 {
+				tblParts := splitPGQualifiedIdent(mAlt[1])
+				tableSchema, tableName := h.Schema, ""
+				if len(tblParts) >= 2 {
+					tableSchema = tblParts[0]
+					tableName = tblParts[1]
+				} else if len(tblParts) == 1 {
+					tableName = tblParts[0]
+				}
+				if tableSchema == "" || tableSchema == "-" {
+					tableSchema = "public"
+				}
+
+				seqParts := splitPGQualifiedIdent(mNext[1])
+				seqSchema, seqName := h.Schema, ""
+				if len(seqParts) >= 2 {
+					seqSchema = seqParts[0]
+					seqName = seqParts[1]
+				} else if len(seqParts) == 1 {
+					seqName = seqParts[0]
+				}
+				if seqSchema == "" || seqSchema == "-" {
+					seqSchema = "public"
+				}
+				if seqName != "" && tableName != "" {
+					key := seqSchema + "." + seqName
+					if info.SequenceOwners[key] == "" {
+						info.SequenceOwners[key] = tableSchema + "." + tableName
+						info.SequenceOwners[seqName] = tableSchema + "." + tableName
+					}
+				}
+			}
+		case "FK CONSTRAINT":
+			mAlt := pgAlterTableRE.FindStringSubmatch(block)
+			mConst := pgAddConstraintRE.FindStringSubmatch(block)
+			mRef := pgReferencesRE.FindStringSubmatch(block)
+			if len(mAlt) > 1 && len(mRef) > 1 {
+				srcParts := splitPGQualifiedIdent(mAlt[1])
+				srcSchema, srcTable := h.Schema, ""
+				if len(srcParts) >= 2 {
+					srcSchema = srcParts[0]
+					srcTable = srcParts[1]
+				} else if len(srcParts) == 1 {
+					srcTable = srcParts[0]
+				}
+				if srcSchema == "" || srcSchema == "-" {
+					srcSchema = "public"
+				}
+
+				refParts := splitPGQualifiedIdent(mRef[1])
+				refSchema, refTable := h.Schema, ""
+				if len(refParts) >= 2 {
+					refSchema = refParts[0]
+					refTable = refParts[1]
+				} else if len(refParts) == 1 {
+					refTable = refParts[0]
+				}
+				if refSchema == "" || refSchema == "-" {
+					refSchema = "public"
+				}
+
+				constName := ""
+				if len(mConst) > 1 {
+					constName = unquotePGIdent(mConst[1])
+				} else {
+					// Fallback to name in header
+					fields := strings.Fields(h.Name)
+					if len(fields) > 1 {
+						constName = fields[len(fields)-1]
+					} else {
+						constName = h.Name
+					}
+				}
+
+				if srcTable != "" && constName != "" && refTable != "" {
+					fkKey := srcSchema + "." + srcTable + "." + constName
+					refKey := refSchema + "." + refTable
+					info.FKReferences[fkKey] = refKey
+					info.FKReferences[srcTable+"."+constName] = refKey
+					info.FKReferences[constName] = refKey
+				}
+			}
+		}
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if h, ok := parsePGCommentHeader(line); ok {
+			if currentHeader != nil {
+				processBlock(*currentHeader, strings.Join(stmtLines, "\n"))
+			}
+			hh := h
+			currentHeader = &hh
+			stmtLines = nil
+		} else if currentHeader != nil {
+			stmtLines = append(stmtLines, line)
+		}
+	}
+	if currentHeader != nil {
+		processBlock(*currentHeader, strings.Join(stmtLines, "\n"))
+	}
+	return info, scanner.Err()
 }
 
 // FilterPGTOC filters the raw output of `pg_restore -l` to keep only the selected tables and their
@@ -249,25 +513,40 @@ func FilterPGTOC(toc []byte, selectedObjects []string, info PGTOCInfo) ([]byte, 
 		info.IndexTables = make(map[string]string)
 	}
 
-	selectedMap := make(map[string]bool, len(selectedObjects)*2)
-	for _, obj := range selectedObjects {
+	normalizeTable := func(schema, table string) string {
+		schema = unquotePGIdent(schema)
+		table = unquotePGIdent(table)
+		if schema == "" || schema == "-" {
+			schema = "public"
+		}
+		return schema + "." + table
+	}
+
+	normalizeObj := func(obj string) string {
 		obj = strings.TrimSpace(obj)
 		if obj == "" {
-			continue
+			return ""
 		}
-		selectedMap[obj] = true
-		if !strings.Contains(obj, ".") {
-			selectedMap["public."+obj] = true
-		} else if strings.HasPrefix(obj, "public.") {
-			selectedMap[strings.TrimPrefix(obj, "public.")] = true
+		parts := splitPGQualifiedIdent(obj)
+		if len(parts) == 0 {
+			return ""
+		}
+		if len(parts) == 1 {
+			return "public." + parts[0]
+		}
+		return parts[0] + "." + parts[1]
+	}
+
+	selectedSet := make(map[string]bool, len(selectedObjects))
+	for _, obj := range selectedObjects {
+		norm := normalizeObj(obj)
+		if norm != "" {
+			selectedSet[norm] = true
 		}
 	}
 
 	isTableSelected := func(schema, table string) bool {
-		if schema == "" || schema == "-" {
-			return selectedMap[table] || selectedMap["public."+table]
-		}
-		return selectedMap[table] || selectedMap[schema+"."+table]
+		return selectedSet[normalizeTable(schema, table)]
 	}
 
 	neededSchemas := make(map[string]bool)
@@ -294,12 +573,14 @@ func FilterPGTOC(toc []byte, selectedObjects []string, info PGTOCInfo) ([]byte, 
 		case "TABLE", "VIEW":
 			if len(fields) >= 5 {
 				schema, table := fields[3], fields[4]
-				seenTables[table] = true
-				if schema != "-" && schema != "" {
-					seenTables[schema+"."+table] = true
-				}
-				if isTableSelected(schema, table) && schema != "-" && schema != "" {
-					neededSchemas[schema] = true
+				normKey := normalizeTable(schema, table)
+				seenTables[normKey] = true
+				if isTableSelected(schema, table) {
+					normSchema := unquotePGIdent(schema)
+					if normSchema == "" || normSchema == "-" {
+						normSchema = "public"
+					}
+					neededSchemas[normSchema] = true
 				}
 			}
 		}
@@ -307,11 +588,11 @@ func FilterPGTOC(toc []byte, selectedObjects []string, info PGTOCInfo) ([]byte, 
 
 	// Verify all selected objects exist
 	for _, obj := range selectedObjects {
-		obj = strings.TrimSpace(obj)
-		if obj == "" {
+		norm := normalizeObj(obj)
+		if norm == "" {
 			continue
 		}
-		if !seenTables[obj] && !seenTables["public."+obj] && !seenTables[strings.TrimPrefix(obj, "public.")] {
+		if !seenTables[norm] {
 			return nil, nil, fmt.Errorf("table %q not found in backup", obj)
 		}
 	}
@@ -346,7 +627,7 @@ func FilterPGTOC(toc []byte, selectedObjects []string, info PGTOCInfo) ([]byte, 
 		case "SCHEMA":
 			// fields: [catId, objId, "SCHEMA", "-", schemaName, owner]
 			if len(fields) >= 5 {
-				schemaName := fields[4]
+				schemaName := unquotePGIdent(fields[4])
 				keep = neededSchemas[schemaName]
 			}
 
@@ -369,74 +650,58 @@ func FilterPGTOC(toc []byte, selectedObjects []string, info PGTOCInfo) ([]byte, 
 			descCombined = "SEQUENCE OWNED BY"
 			// fields: [catId, objId, "SEQUENCE", "OWNED", "BY", schema, seqName, owner]
 			if len(fields) >= 7 {
-				schema, seqName := fields[5], fields[6]
-				ownerTable := info.SequenceOwners[seqName]
+				schema, seqName := unquotePGIdent(fields[5]), unquotePGIdent(fields[6])
+				seqKey := normalizeTable(schema, seqName)
+				ownerTable := info.SequenceOwners[seqKey]
 				if ownerTable == "" {
-					ownerTable = info.SequenceOwners[schema+"."+seqName]
-				}
-				if ownerTable == "" {
-					// Fallback: infer if seqName has table prefix
-					for t := range selectedMap {
-						base := t
-						if idx := strings.Index(t, "."); idx != -1 {
-							base = t[idx+1:]
-						}
-						if strings.HasPrefix(seqName, base+"_") {
-							ownerTable = t
-							break
-						}
-					}
+					ownerTable = info.SequenceOwners[seqName]
 				}
 				if ownerTable != "" {
-					keep = selectedMap[ownerTable]
+					if !strings.Contains(ownerTable, ".") {
+						ownerTable = "public." + ownerTable
+					}
+					keep = selectedSet[ownerTable]
+				} else {
+					warnings = append(warnings, fmt.Sprintf("sequence %s.%s dropped: owning table could not be resolved", schema, seqName))
+					keep = false
 				}
 			}
 		} else if desc == "SEQUENCE" && len(fields) >= 4 && fields[3] == "SET" {
 			descCombined = "SEQUENCE SET"
 			// fields: [catId, objId, "SEQUENCE", "SET", schema, seqName, owner]
 			if len(fields) >= 6 {
-				schema, seqName := fields[4], fields[5]
-				ownerTable := info.SequenceOwners[seqName]
+				schema, seqName := unquotePGIdent(fields[4]), unquotePGIdent(fields[5])
+				seqKey := normalizeTable(schema, seqName)
+				ownerTable := info.SequenceOwners[seqKey]
 				if ownerTable == "" {
-					ownerTable = info.SequenceOwners[schema+"."+seqName]
-				}
-				if ownerTable == "" {
-					for t := range selectedMap {
-						base := t
-						if idx := strings.Index(t, "."); idx != -1 {
-							base = t[idx+1:]
-						}
-						if strings.HasPrefix(seqName, base+"_") {
-							ownerTable = t
-							break
-						}
-					}
+					ownerTable = info.SequenceOwners[seqName]
 				}
 				if ownerTable != "" {
-					keep = selectedMap[ownerTable]
+					if !strings.Contains(ownerTable, ".") {
+						ownerTable = "public." + ownerTable
+					}
+					keep = selectedSet[ownerTable]
+				} else {
+					warnings = append(warnings, fmt.Sprintf("sequence %s.%s dropped: owning table could not be resolved", schema, seqName))
+					keep = false
 				}
 			}
 		} else if desc == "SEQUENCE" && len(fields) >= 5 {
 			// fields: [catId, objId, "SEQUENCE", schema, seqName, owner]
-			schema, seqName := fields[3], fields[4]
-			ownerTable := info.SequenceOwners[seqName]
+			schema, seqName := unquotePGIdent(fields[3]), unquotePGIdent(fields[4])
+			seqKey := normalizeTable(schema, seqName)
+			ownerTable := info.SequenceOwners[seqKey]
 			if ownerTable == "" {
-				ownerTable = info.SequenceOwners[schema+"."+seqName]
-			}
-			if ownerTable == "" {
-				for t := range selectedMap {
-					base := t
-					if idx := strings.Index(t, "."); idx != -1 {
-						base = t[idx+1:]
-					}
-					if strings.HasPrefix(seqName, base+"_") {
-						ownerTable = t
-						break
-					}
-				}
+				ownerTable = info.SequenceOwners[seqName]
 			}
 			if ownerTable != "" {
-				keep = selectedMap[ownerTable]
+				if !strings.Contains(ownerTable, ".") {
+					ownerTable = "public." + ownerTable
+				}
+				keep = selectedSet[ownerTable]
+			} else {
+				warnings = append(warnings, fmt.Sprintf("sequence %s.%s dropped: owning table could not be resolved", schema, seqName))
+				keep = false
 			}
 		} else if desc == "DEFAULT" {
 			// fields: [catId, objId, "DEFAULT", schema, tableName, colName, owner]
@@ -450,42 +715,58 @@ func FilterPGTOC(toc []byte, selectedObjects []string, info PGTOCInfo) ([]byte, 
 			descCombined = "FK CONSTRAINT"
 			// fields: [catId, objId, "FK", "CONSTRAINT", schema, tableName, constraintName, owner]
 			if len(fields) >= 7 {
-				schema, table, constraintName := fields[4], fields[5], fields[6]
+				schema, table, constraintName := unquotePGIdent(fields[4]), unquotePGIdent(fields[5]), unquotePGIdent(fields[6])
 				if isTableSelected(schema, table) {
-					refTable := info.FKReferences[constraintName]
+					fkKey := normalizeTable(schema, table) + "." + constraintName
+					refTable := info.FKReferences[fkKey]
 					if refTable == "" {
-						refTable = info.FKReferences[schema+"."+table+"."+constraintName]
+						refTable = info.FKReferences[table+"."+constraintName]
 					}
-					if refTable != "" && isTableSelected("", refTable) {
-						keep = true
-					} else {
-						warnings = append(warnings, fmt.Sprintf("foreign key constraint %s on %s.%s dropped: referenced table %s is not selected", constraintName, schema, table, refTable))
+					if refTable == "" {
+						refTable = info.FKReferences[constraintName]
+					}
+					if refTable == "" {
+						warnings = append(warnings, fmt.Sprintf("foreign key constraint %s on %s.%s dropped: referenced table could not be resolved", constraintName, schema, table))
 						keep = false
+					} else {
+						if !strings.Contains(refTable, ".") {
+							refTable = "public." + refTable
+						}
+						if selectedSet[refTable] {
+							keep = true
+						} else {
+							warnings = append(warnings, fmt.Sprintf("foreign key constraint %s on %s.%s dropped: referenced table %s is not selected", constraintName, schema, table, refTable))
+							keep = false
+						}
 					}
 				}
 			}
 		} else if desc == "INDEX" && len(fields) >= 5 {
 			// fields: [catId, objId, "INDEX", schema, indexName, owner]
-			schema, indexName := fields[3], fields[4]
-			table := info.IndexTables[indexName]
+			schema, indexName := unquotePGIdent(fields[3]), unquotePGIdent(fields[4])
+			idxKey := normalizeTable(schema, indexName)
+			table := info.IndexTables[idxKey]
 			if table == "" {
-				table = info.IndexTables[schema+"."+indexName]
-			}
-			if table == "" {
-				// Fallback: check if index name has table prefix
-				for t := range selectedMap {
-					base := t
-					if idx := strings.Index(t, "."); idx != -1 {
-						base = t[idx+1:]
-					}
-					if strings.Contains(indexName, base) {
-						table = t
-						break
-					}
-				}
+				table = info.IndexTables[indexName]
 			}
 			if table != "" {
-				keep = selectedMap[table]
+				if !strings.Contains(table, ".") {
+					table = "public." + table
+				}
+				keep = selectedSet[table]
+			} else {
+				// If index cannot be resolved, check if it's a primary key index on a selected table
+				for sel := range selectedSet {
+					tName := sel
+					if idx := strings.Index(sel, "."); idx != -1 {
+						tName = sel[idx+1:]
+					}
+					if indexName == tName+"_pkey" || indexName == sel+"_pkey" {
+						return nil, nil, fmt.Errorf("cannot restore table %q: primary key index %q could not be resolved", sel, indexName)
+					}
+				}
+				warnings = append(warnings, fmt.Sprintf("index %s.%s dropped: owning table could not be resolved", schema, indexName))
+				keep = false
 			}
 		} else if desc == "TRIGGER" && len(fields) >= 5 {
 			// fields: [catId, objId, "TRIGGER", schema, tableName, triggerName, owner]
@@ -503,13 +784,14 @@ func FilterPGTOC(toc []byte, selectedObjects []string, info PGTOCInfo) ([]byte, 
 			// fields: [catId, objId, "COMMENT", schema, "TABLE", tableName, owner]
 			// or:     [catId, objId, "COMMENT", schema, "COLUMN", tableName.col, owner]
 			if len(fields) >= 6 {
-				schema := fields[3]
+				schema := unquotePGIdent(fields[3])
 				kind := fields[4]
 				target := fields[5]
-				tableName := target
+				tableName := unquotePGIdent(target)
 				if kind == "COLUMN" {
-					if idx := strings.Index(target, "."); idx != -1 {
-						tableName = target[:idx]
+					parts := splitPGQualifiedIdent(target)
+					if len(parts) >= 2 {
+						tableName = parts[0]
 					}
 				}
 				keep = isTableSelected(schema, tableName)

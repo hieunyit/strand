@@ -342,12 +342,28 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 			}
 		}
 	}
-	if meta.Details["objects"] == "" {
+	if meta.Details["objects"] == "" && meta.Details["objects_truncated"] == "" {
 		if objs := e.queryBackupObjects(ctx, job, mongoURI); len(objs) > 0 {
-			meta.Details["objects"] = strings.Join(objs, ",")
+			storeBackupObjects(meta.Details, objs)
 		}
 	}
 	return meta, res, nil
+}
+
+func storeBackupObjects(details map[string]string, objs []string) {
+	if len(objs) == 0 {
+		return
+	}
+	if len(objs) > 1000 {
+		details["objects_truncated"] = "1"
+		return
+	}
+	joined := strings.Join(objs, ",")
+	if len(joined) > 64*1024 {
+		details["objects_truncated"] = "1"
+		return
+	}
+	details["objects"] = joined
 }
 
 func (e *Env) queryBackupObjects(ctx context.Context, job backup.Job, mongoURI string) []string {

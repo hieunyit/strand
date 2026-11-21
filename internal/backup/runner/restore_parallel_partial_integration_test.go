@@ -165,6 +165,14 @@ func TestPGDumpParallelAndPartialRestore(t *testing.T) {
 	mustExec(t, pgApp, "CREATE TABLE t3 (id serial primary key, val text)")
 	mustExec(t, pgApp, "INSERT INTO t3 (val) SELECT 'val ' || g FROM generate_series(1, 200) g")
 
+	mustExec(t, pgApp, "CREATE TABLE orders (id serial primary key, info text, created_at timestamp default now())")
+	mustExec(t, pgApp, "CREATE INDEX idx_orders_created ON orders(created_at)")
+	mustExec(t, pgApp, "INSERT INTO orders (info) SELECT 'order ' || g FROM generate_series(1, 30) g")
+
+	mustExec(t, pgApp, "CREATE TABLE orders_archive (id serial primary key, info text, created_at timestamp default now())")
+	mustExec(t, pgApp, "CREATE INDEX idx_orders_archive_created ON orders_archive(created_at)")
+	mustExec(t, pgApp, "INSERT INTO orders_archive (info) SELECT 'archive ' || g FROM generate_series(1, 40) g")
+
 	st := store.NewMem()
 	e := testEnv(t, vars, st)
 	ctx := context.Background()
@@ -239,7 +247,40 @@ func TestPGDumpParallelAndPartialRestore(t *testing.T) {
 		t.Fatalf("expected index idx_t1_created, got %d (err: %v)", indexCount, err)
 	}
 
-	// 2. Full restore with threads=4 into NEW database "app_full"
+	// 2. Partial restore of "orders" table only (regression test for P2: orders vs orders_archive)
+	// Must succeed without trying to restore idx_orders_archive_created or orders_archive_id_seq
+	ordersTarget := RestoreTarget{
+		Conn: backup.ConnSpec{
+			Host:        "127.0.0.1",
+			Port:        pg.Port,
+			User:        "postgres",
+			PasswordEnv: "PG_BACKUP_PW",
+		},
+		Database: "app_orders_only",
+		Threads:  4,
+		Objects:  []string{"orders"},
+	}
+	if err := e.Restore(ctx, plan, ordersTarget); err != nil {
+		t.Fatalf("Restore orders only failed (P2 regression): %v", err)
+	}
+
+	ordersDB := waitSQL(t, "pgx", fmt.Sprintf("postgres://postgres:pgpw@127.0.0.1:%d/app_orders_only?sslmode=disable", pg.Port))
+	var ordersCount int
+	if err := ordersDB.QueryRow("SELECT count(*) FROM orders").Scan(&ordersCount); err != nil || ordersCount != 30 {
+		t.Fatalf("orders row count want 30, got %d (err: %v)", ordersCount, err)
+	}
+	// Verify orders_archive does NOT exist
+	var archiveCount int
+	if err := ordersDB.QueryRow("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'orders_archive'").Scan(&archiveCount); err != nil || archiveCount != 0 {
+		t.Fatalf("expected orders_archive to not exist, got %d (err: %v)", archiveCount, err)
+	}
+	// Verify idx_orders_archive_created does NOT exist
+	var archiveIdxCount int
+	if err := ordersDB.QueryRow("SELECT count(*) FROM pg_indexes WHERE indexname = 'idx_orders_archive_created'").Scan(&archiveIdxCount); err != nil || archiveIdxCount != 0 {
+		t.Fatalf("expected idx_orders_archive_created to not exist, got %d (err: %v)", archiveIdxCount, err)
+	}
+
+	// 3. Full restore with threads=4 into NEW database "app_full"
 	fullTarget := RestoreTarget{
 		Conn: backup.ConnSpec{
 			Host:        "127.0.0.1",
@@ -264,6 +305,13 @@ func TestPGDumpParallelAndPartialRestore(t *testing.T) {
 	}
 	if err := fullDB.QueryRow("SELECT count(*) FROM t3").Scan(&c3); err != nil || c3 != 200 {
 		t.Fatalf("full restore t3 want 200, got %d (%v)", c3, err)
+	}
+	var co, ca int
+	if err := fullDB.QueryRow("SELECT count(*) FROM orders").Scan(&co); err != nil || co != 30 {
+		t.Fatalf("full restore orders want 30, got %d (%v)", co, err)
+	}
+	if err := fullDB.QueryRow("SELECT count(*) FROM orders_archive").Scan(&ca); err != nil || ca != 40 {
+		t.Fatalf("full restore orders_archive want 40, got %d (%v)", ca, err)
 	}
 }
 
