@@ -1,4 +1,6 @@
-.PHONY: up down fault
+.PHONY: up down fault image image-tools-test image-tools-smoke
+
+IMAGE ?= strand:local
 
 up:
 	docker compose -p strand-dev -f dev/compose.yaml up -d --wait --wait-timeout 300
@@ -8,3 +10,16 @@ down:
 
 fault:
 	go test -v -timeout 60m -run "TestG1_E2E_NetworkFaultsSourceAndTarget|TestG1_E2E_Kill9RandomCrashes|TestG1_E2E_TwoInstancesSamePipeline" ./tests/e2e
+
+# Image Web kèm công cụ backup native (Dockerfile); test: công cụ tìm được, quyền đúng, --version chạy.
+image:
+	docker build -t $(IMAGE) .
+
+image-tools-test:
+	scripts/image-tools-test.sh $(IMAGE)
+
+# Như trên + dump/nạp lại với server thật (MySQL 8.4/8.0/5.7, MariaDB, PostgreSQL 15-18, MongoDB) trong container tạm,
+# rồi backup/restore PostgreSQL 15/16 -> 15/16/17 qua chính runner của Strand với công cụ của image (cần Go).
+image-tools-smoke:
+	LIVE=1 scripts/image-tools-test.sh $(IMAGE)
+	STRAND_TEST_TOOLS_IMAGE=$(IMAGE) go test -count=1 -run 'TestPGDumpRestoreOlderServers' ./internal/backup/runner/

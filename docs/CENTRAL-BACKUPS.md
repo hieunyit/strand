@@ -244,7 +244,7 @@ Jobs page with its log.
 | Method | Engine | Kind | Recovery position recorded | Streams to S3 |
 |---|---|---|---|---|
 | `mysqldump`, `mariadb-dump` | MySQL/MariaDB | full, logical (`--single-transaction`) | binlog file/pos + GTID set (from `--source-data`/`--master-data`) | yes (stdout) |
-| `mydumper` | MySQL | full, logical, parallel | `metadata` SHOW MASTER STATUS | tar of the dump dir |
+| `mydumper` | MySQL | full, logical, parallel | `metadata` source position (`[source]` of mydumper 0.16+, `[master]`, or legacy SHOW MASTER STATUS text) | tar of the dump dir |
 | `pg_dump` | PostgreSQL | full, logical (`-Fc`) | consistent time | yes |
 | `pg_basebackup` | PostgreSQL | full, physical (`-Ft -X fetch`) | start/end LSN, timeline | yes (`-D -`) |
 | `mongodump` | MongoDB | full, logical (`--archive --oplog`) | oplog timestamp before/after | yes |
@@ -286,6 +286,106 @@ Strand Web host/image or set `STRAND_BACKUP_TOOLS_DIR`. The log methods
 ```sh
 strand backup schedule --job-id bjob-...        # scheduler of a built-in job (started by the Web)
 strand backup schedule --job-id bjob-... --once # one run ("Run now")
+```
+
+### Native tools
+
+Built-in methods and restores run the database vendors' own tools. A job whose
+tool cannot be found fails with `tool_missing: native tool <name> not found`.
+
+**Container image.** The Web image (`Dockerfile`) ships every tool, from the
+vendors' official distributions, pinned by `ARG` (apt repositories verified
+with pinned signing-key fingerprints, downloads with pinned SHA-256; the MySQL
+tarballs also with Oracle's GPG signature):
+
+| Method / operation | Tools | In the image | Servers |
+|---|---|---|---|
+| `mysqldump` backup | `mysqldump` | Oracle MySQL 8.4.13 (LTS) | MySQL 5.7, 8.2+ incl. 8.4 (`--source-data=2`) |
+| `mysqldump` backup, MySQL 8.0/8.1 server | `mysqldump-8.0` | Oracle MySQL 8.0.46 (`mysqldump` only) | MySQL 8.0/8.1 (picked automatically, see below) |
+| `mariadb-dump` backup | `mariadb-dump` | MariaDB 12.3.4 (LTS) | MariaDB 10.6, 10.11, 11.4 tested (`--master-data=2 --gtid`) |
+| restore of `mysqldump`/`mariadb-dump`, test restores | `mysql` | Oracle MySQL 8.4.13 | MySQL 5.7-8.4, MariaDB (MariaDB dumps load with it, tested on 10.6-11.4) |
+| MySQL point-in-time restore | `mysqlbinlog` | Oracle MySQL 8.4.13 | MySQL 5.7/8.0/8.4 binlogs |
+| `mydumper` backup (restore: `myloader` by hand) | `mydumper`, `myloader` | mydumper 1.0.19-1 (built against MySQL 8.4 client) | MySQL 5.7/8.0/8.4, MariaDB |
+| `pg_dump` backup, restore, test restores | `pg_dump`, `pg_restore`, `psql` | PostgreSQL 19.0 (PGDG) | servers 17+ (dump and restore target) |
+| `pg_dump` backup / restore, PostgreSQL <= 16 | `pg_dump-16`, `pg_restore-16` | PostgreSQL 16.16 (PGDG) | servers 13-16 tested (picked automatically, see below) |
+| `pg_basebackup` backup | `pg_basebackup` | PostgreSQL 19.0 (PGDG) | 13-18 tested (`-Ft -X fetch`, needs a `replication` pg_hba entry) |
+| `mongodump` backup, restore | `mongodump`, `mongorestore` | MongoDB Database Tools 100.20.1 | MongoDB 4.4-8.x (7.0 and 8.0 tested) |
+
+Both architectures (amd64, arm64) get the same versions. On arm64 Oracle
+publishes no `.deb` and no "minimal" tarball: the build downloads the full
+generic aarch64 tarballs (about 850 MB each, only the client binaries are
+kept), and MongoDB tools come from the `ubuntu2204-arm64` package (static Go
+binaries) because there is no Debian 12 arm64 build.
+
+Why two MySQL clients: every Oracle `mysqldump` from 8.2 on (8.4, 9.x) asks an
+8.x server for its binlog position with `SHOW BINARY LOG STATUS`, which exists
+only from MySQL 8.2, so `--source-data` fails on MySQL 8.0/8.1 (error 1064);
+the 8.0 client cannot dump 8.4 (it sends `SHOW MASTER STATUS`, removed in 8.4).
+For a `mysqldump` job Strand asks the server for `VERSION()` and uses
+`mysqldump-8.0` when the server is MySQL 8.0/8.1 and the default `mysqldump` is
+8.2 or newer (`mysqldump: MySQL 8.0.x server, using mysqldump-8.0` in the job
+log); without a `mysqldump-8.0` such a job fails with an error saying so.
+MySQL 5.7 is dumped by the 8.4 client (it sends `SHOW MASTER STATUS` there and
+skips column statistics). Oracle's and MariaDB's clients cannot be installed
+together as packages (`mariadb-client` conflicts with `mysql-community-client`),
+so the image installs MariaDB's packages (without `mariadb-client-compat`: no
+MariaDB binaries named `mysql*`) and puts Oracle's binaries in `/opt/mysql`
+and `/opt/mysql-8.0`, linked from `/usr/local/bin`; PostgreSQL's binaries are
+linked from `/usr/lib/postgresql/19/bin` (bypassing `pg_wrapper`), the 16
+client's as `pg_dump-16`/`pg_restore-16`.
+
+Why two PostgreSQL clients: `pg_restore` 17 or newer always sends
+`SET transaction_timeout = 0`, which PostgreSQL 16 and older reject, and
+restores run with `--exit-on-error`; `pg_restore` 16 cannot read archives
+written by `pg_dump` 17+ (archive format 1.16). So for a PostgreSQL <= 16
+source Strand dumps with `pg_dump-16` (job log: `pg_dump: PostgreSQL 16.x
+server, using pg_dump-16`), and for a restore or test restore into a
+PostgreSQL <= 16 server it reads the target's `server_version` and uses
+`pg_restore-16` (`restore: PostgreSQL 15.x target, using pg_restore-16`).
+`pg_restore-<N>` / `pg_dump-<N>` for N from the server's major to 16 are
+accepted too (exact major first). Without `pg_dump-16` the backup still runs,
+with a warning that it will only restore into PostgreSQL 17+; restoring such
+an archive (or any `pg_dump` 17+ archive) into PostgreSQL <= 16 fails with an
+error saying so, and without `pg_restore-16` with an error naming the tool.
+`runner.OptionalTools()` lists these versioned tools for status pages.
+
+Known limits:
+
+- Backups taken before this change from PostgreSQL <= 16 servers by
+  `pg_dump` 17+ restore only into PostgreSQL 17 or newer (or by hand:
+  `strand backup fetch`, then `pg_restore` 19 without `--exit-on-error`).
+- The MariaDB 11.4+ client requires TLS when it cannot rule out an insecure
+  login. Jobs always pass the port, which works against servers without TLS;
+  `mariadb` by hand against a MariaDB server without TLS needs `--skip-ssl`.
+
+Check an image with `make image-tools-test IMAGE=<image>` (every tool found
+on `PATH`, root-owned, not group/world-writable, `--version` runs as user
+`strand`) and `make image-tools-smoke IMAGE=<image>` (dumps and restores against
+throw-away MySQL 8.4/8.0/5.7, MariaDB, PostgreSQL 15-18, MongoDB containers, then
+`TestPGDumpRestoreOlderServers`: Strand's own backup and restore of PostgreSQL
+15/16 into 15/16/17 with the image's tools).
+
+**Packages (`.deb`/`.rpm`).** The packages do not depend on the tools (CDC
+pipelines need none); they recommend the distribution's PostgreSQL client and
+suggest the others. Install the vendors' clients (repo.mysql.com,
+apt.postgresql.org / yum.postgresql.org, MariaDB, MongoDB, mydumper releases):
+the Debian `default-mysql-client` is MariaDB's and is not suitable for the
+`mysqldump` method on MySQL 8, and `pg_dump` must be at least the server's
+major version. To pin exactly which binaries the Web service runs, put them
+(or symlinks) in one directory and set `STRAND_BACKUP_TOOLS_DIR`; Strand then
+looks only there (no `PATH` fallback), and each file must be executable and not
+group/world-writable:
+
+```sh
+sudo install -d -m 0755 -o root -g root /opt/strand-tools
+sudo ln -s /usr/bin/mysqldump /usr/bin/mysql /usr/bin/mysqlbinlog /opt/strand-tools/
+sudo ln -s /usr/lib/postgresql/17/bin/pg_dump /usr/lib/postgresql/17/bin/pg_restore \
+  /usr/lib/postgresql/17/bin/pg_basebackup /usr/lib/postgresql/17/bin/psql /opt/strand-tools/
+# MySQL 8.0 servers with a mysqldump >= 8.2: also provide MySQL 8.0's mysqldump as mysqldump-8.0;
+# PostgreSQL <= 16 servers with a client >= 17: also /usr/lib/postgresql/16/bin/pg_dump as pg_dump-16
+# and .../pg_restore as pg_restore-16
+echo 'STRAND_BACKUP_TOOLS_DIR=/opt/strand-tools' | sudo tee -a /etc/strand/web.env
+sudo systemctl restart strand-web
 ```
 
 ### Compression and client-side encryption

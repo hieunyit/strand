@@ -279,15 +279,17 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 	var mongoURI string
 	switch job.Method {
 	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
-		ver, _ := RunCapture(ctx, e.Getenv, job.Method, "--version")
-		flavor := ParseDumpVersion(ver)
-		if job.Method == backup.MethodMariaDBDump {
-			flavor.MariaDB = true
+		tool, ver, flavor, terr := e.mysqlDumpTool(ctx, job)
+		if terr != nil {
+			return meta, PayloadResult{}, terr
 		}
-		inv = MySQLDumpInvocation(e.Getenv, job.Method, job.Conn, flavor)
+		inv = MySQLDumpInvocation(e.Getenv, tool, job.Conn, flavor)
 		meta.Details = map[string]string{"tool_version": strings.TrimSpace(ver)}
 	case backup.MethodPGDump:
 		inv, err = PGDumpInvocation(e.Getenv, job.Conn, enc.Compress)
+		if err == nil {
+			inv.Tool = e.pgDumpTool(ctx, job.Conn)
+		}
 	case backup.MethodPGBaseBackup:
 		inv = PGBaseBackupInvocation(e.Getenv, job.Conn)
 	case backup.MethodMongodump:

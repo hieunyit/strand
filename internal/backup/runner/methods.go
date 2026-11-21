@@ -238,15 +238,18 @@ func MongoURI(getenv Getenv, c backup.ConnSpec) (string, error) {
 	if c.Port > 0 {
 		host += ":" + strconv.Itoa(c.Port)
 	}
-	auth := ""
+	auth, opts := "", "directConnection=true"
 	if c.User != "" {
 		auth = urlEscape(c.User)
 		if pw := password(getenv, c); pw != "" {
 			auth += ":" + urlEscape(pw)
 		}
 		auth += "@"
+		// Explicit: mongodump/mongorestore otherwise authenticate against the --db being dumped/restored
+		// (the Go driver already defaults to admin), and an admin-defined user fails with --db=app.
+		opts += "&authSource=admin"
 	}
-	return "mongodb://" + auth + host + "/?directConnection=true", nil
+	return "mongodb://" + auth + host + "/?" + opts, nil
 }
 
 func urlEscape(s string) string {
@@ -295,13 +298,52 @@ func MydumperInvocation(getenv Getenv, c backup.ConnSpec) Invocation {
 
 var mydumperPosRE = regexp.MustCompile(`(?m)^\s*(?:Log|File): ?(\S+)\s*\n\s*Pos: ?(\d+)[ \t]*(?:\n\s*GTID: ?(.*))?`)
 
-// ParseMydumperMetadata extracts SHOW MASTER STATUS from mydumper's metadata file.
+// ParseMydumperMetadata extracts the source binlog position from mydumper's metadata file: the
+// "SHOW MASTER STATUS: Log/Pos/GTID" text of mydumper < 0.12, or the INI [source] ([master] in
+// 0.12-0.15) section of newer releases, whose keys may be commented out ("# SOURCE_LOG_FILE = ...").
 func ParseMydumperMetadata(text string) backup.Position {
 	var p backup.Position
 	if m := mydumperPosRE.FindStringSubmatch(text); m != nil {
 		p.BinlogFile = m[1]
 		p.BinlogPos, _ = strconv.ParseInt(m[2], 10, 64)
 		p.GTIDSet = strings.Join(strings.Fields(m[3]), "")
+		return p
+	}
+	section, gtidOpen := "", false
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		// A GTID set with several UUIDs may continue on the next lines (each "uuid:1-N," per line).
+		if gtidOpen {
+			part := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			gtidOpen = strings.HasSuffix(strings.Trim(part, `"'`), ",")
+			p.GTIDSet += strings.Join(strings.Fields(strings.Trim(part, `"'`)), "")
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.ToLower(strings.Trim(line, "[]"))
+			continue
+		}
+		if section != "source" && section != "master" {
+			continue
+		}
+		key, val, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(line, "#")), "=")
+		if !ok {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		if i := strings.Index(val, " #"); i >= 0 {
+			val = strings.TrimSpace(val[:i])
+		}
+		val = strings.Trim(val, `"'`)
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "source_log_file", "master_log_file", "file":
+			p.BinlogFile = val
+		case "source_log_pos", "master_log_pos", "position":
+			p.BinlogPos, _ = strconv.ParseInt(val, 10, 64)
+		case "executed_gtid_set":
+			p.GTIDSet = strings.Join(strings.Fields(val), "")
+			gtidOpen = strings.HasSuffix(val, ",")
+		}
 	}
 	return p
 }

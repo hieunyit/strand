@@ -85,6 +85,31 @@ Gói làm các việc sau (đối chiếu `packaging/scripts/*.sh`, `packaging/n
 - Cài quy tắc polkit `/usr/share/polkit-1/rules.d/50-strand.rules`: user `strand` (Web UI) được start/stop/restart đúng các unit `strand@<name>.service`, không gì khác (mục 5.3).
 - Chép tài liệu và ví dụ vào `/usr/share/doc/strand/`: `INSTALL.md`, `USAGE.md`, `examples/pipeline.yaml`, `examples/pipeline.env`, `examples/web.yaml`.
 - **Không** bật pipeline hay Web UI nào.
+- **Không** kéo theo công cụ backup native (mysqldump, pg_dump, ...): gói chỉ *Recommends* `postgresql-client` (deb) / `postgresql` (rpm) và *Suggests* các client khác. Backup/restore do Strand quản lý cần chúng, xem mục "Công cụ backup native" dưới đây.
+
+#### Công cụ backup native (cài bằng gói)
+
+Backup và restore quản lý (Web UI, `strand backup ...`) gọi công cụ của nhà cung cấp DB; thiếu thì job lỗi `tool_missing: native tool <tên> not found`. Cài client chính hãng, không dùng client mặc định của distro khi nó sai loại hoặc quá cũ:
+
+| Method | Công cụ | Nguồn nên cài |
+| --- | --- | --- |
+| `mysqldump` (+ restore, PITR) | `mysqldump`, `mysql`, `mysqlbinlog` | Oracle MySQL client 8.4 LTS (repo.mysql.com). `default-mysql-client` của Debian là MariaDB, không dùng được cho MySQL 8. Server MySQL 8.0/8.1: thêm `mysqldump` của MySQL 8.0 dưới tên `mysqldump-8.0` |
+| `mariadb-dump` | `mariadb-dump` (restore dùng `mysql`) | Gói `mariadb-client` của MariaDB |
+| `mydumper` | `mydumper` (`myloader` để restore tay) | Bản phát hành GitHub của mydumper |
+| `pg_dump`, `pg_basebackup` | `pg_dump`, `pg_restore`, `psql`, `pg_basebackup` | PGDG (apt.postgresql.org / yum.postgresql.org), major >= major của server. Server <= 16 với client 17+: thêm client 16 dưới tên `pg_dump-16`, `pg_restore-16` (pg_restore 17+ không restore được vào server <= 16) |
+| `mongodump` | `mongodump`, `mongorestore` | MongoDB Database Tools |
+
+Mặc định Strand tìm công cụ theo `PATH` của `strand-web.service`. Muốn chỉ định chính xác binary nào được chạy (ví dụ hai bản MySQL client, hoặc PostgreSQL major cụ thể thay cho `pg_wrapper`), gom chúng (file hoặc symlink) vào một thư mục và đặt `STRAND_BACKUP_TOOLS_DIR`; khi đã đặt, Strand **chỉ** tìm ở đó. File phải có quyền chạy và không được group/other ghi:
+
+```bash
+sudo install -d -m 0755 -o root -g root /opt/strand-tools
+sudo ln -s /usr/bin/mysqldump /usr/bin/mysql /usr/bin/mysqlbinlog /opt/strand-tools/
+sudo ln -s /usr/lib/postgresql/17/bin/{pg_dump,pg_restore,pg_basebackup,psql} /opt/strand-tools/
+echo 'STRAND_BACKUP_TOOLS_DIR=/opt/strand-tools' | sudo tee -a /etc/strand/web.env
+sudo systemctl restart strand-web
+```
+
+Bảng tương thích server và giới hạn đã biết (server MySQL 8.0 cần `mysqldump-8.0`; server PostgreSQL <= 16 cần `pg_dump-16` và `pg_restore-16` khi client mặc định là 17+): docs/CENTRAL-BACKUPS.md mục "Native tools". Image container (mục 10.7) có sẵn tất cả.
 
 ### 2b. Cài tay (binary hoặc build từ source)
 
@@ -503,6 +528,22 @@ Nếu cần `web.yaml` riêng (ví dụ `pipelines:` khai báo tường minh), m
 | `web` không khởi động, log `STRAND_WEB_SECRET_KEY does not match the key ...` | Khóa đã đổi so với lúc mã hóa `.env` trong DB. Dùng lại khóa cũ, hoặc đổi khóa đúng cách với `STRAND_WEB_SECRET_KEY_PREVIOUS` (10.2). |
 | `web` không khởi động, log `STRAND_WEB_SECRET_KEY is required` | Đặt khóa trong `.env` (`openssl rand -hex 32`). Bản cài cũ chưa từng có khóa: đặt khóa mới, mọi `.env` trên volume được mã hóa vào DB ở lần lưu/nhập đầu tiên. |
 | Sửa tay `/etc/strand/<name>.yaml`, bị thay bằng bản DB | DB là nguồn sự thật (mọi pipeline đã đăng ký, kể cả từ `scan`): bản sửa tay được cất thành `<name>.yaml.conflict-<thời gian>`, trang pipeline có banner **Adopt disk version** để dùng bản đó (USAGE.md 7.15 "Registry trong DB"). Nên sửa qua web (Config) hoặc API. |
+
+### 10.7 Công cụ backup native trong image
+
+Image `web` có sẵn mọi công cụ mà backup/restore quản lý gọi, lấy từ nguồn chính hãng, ghim phiên bản bằng `ARG` trong `Dockerfile` (repo apt xác thực bằng keyring có fingerprint ghim; file tải về kiểm SHA-256 ghim; tarball MySQL kiểm thêm chữ ký GPG của Oracle), cho cả amd64 và arm64:
+
+| Công cụ | Phiên bản | Vị trí |
+| --- | --- | --- |
+| `mysqldump`, `mysql`, `mysqlbinlog` | Oracle MySQL 8.4.13 LTS | `/opt/mysql/bin`, symlink trong `/usr/local/bin` |
+| `mysqldump-8.0` | Oracle MySQL 8.0.46 (chỉ mysqldump, Strand tự dùng cho server MySQL 8.0/8.1) | `/opt/mysql-8.0/bin` |
+| `mariadb-dump`, `mariadb`, `mariadb-binlog` | MariaDB 12.3.4 LTS (repo MariaDB) | `/usr/bin` |
+| `pg_dump`, `pg_restore`, `pg_basebackup`, `psql` | PostgreSQL 19.0 (PGDG) | `/usr/lib/postgresql/19/bin`, symlink trong `/usr/local/bin` |
+| `pg_dump-16`, `pg_restore-16` | PostgreSQL 16.16 (PGDG; Strand tự dùng cho server PostgreSQL <= 16, kể cả restore/test restore) | `/usr/lib/postgresql/16/bin` |
+| `mongodump`, `mongorestore` | MongoDB Database Tools 100.20.1 | `/usr/bin` |
+| `mydumper`, `myloader` | mydumper 1.0.19-1 | `/usr/bin` |
+
+Image không đặt `STRAND_BACKUP_TOOLS_DIR` (tìm theo `PATH`). Phiên bản nằm trong label `io.strand.tools.*` (`docker image inspect`). Kiểm tra image: `make image IMAGE=strand:local && make image-tools-test IMAGE=strand:local`; thêm dump/restore thật với MySQL 8.4/8.0/5.7, MariaDB, PostgreSQL, MongoDB trong container tạm: `make image-tools-smoke IMAGE=strand:local`. Nâng phiên bản: sửa `ARG` (và checksum) trong `Dockerfile` rồi chạy lại hai lệnh trên. Bảng tương thích server và giới hạn đã biết: docs/CENTRAL-BACKUPS.md mục "Native tools".
 
 ## 11. Nâng cấp bản cài chế độ file lên PostgreSQL (bắt buộc từ bản này)
 
