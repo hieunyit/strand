@@ -18,6 +18,8 @@ type BackupProStore interface {
 	UpdateBackupMeta(ctx context.Context, id string, m backup.Meta) (backup.Record, bool, error)
 	ExpireBackup(ctx context.Context, id string, at time.Time) (backup.Record, bool, error)
 	SetBackupLegalHold(ctx context.Context, id string, hold bool) (backup.Record, bool, error)
+	// DeleteBackup removes a record that is not complete (see backup.Repository.DeleteBackup).
+	DeleteBackup(ctx context.Context, id string, now time.Time) (backup.Record, bool, error)
 	AddBackupCheck(ctx context.Context, c backup.CheckResult) (int64, error)
 	ListBackupChecks(ctx context.Context, backupID string, limit int) ([]backup.CheckResult, error)
 	BackupSummaries(ctx context.Context) ([]backup.SourceSummary, error)
@@ -200,6 +202,33 @@ func (p *PG) SetBackupLegalHold(ctx context.Context, id string, hold bool) (back
 		return backup.Record{}, false, fmt.Errorf("%w: an expired backup cannot be put on hold", backup.ErrInvalid)
 	}
 	return cur, n == 1, nil
+}
+
+func (p *PG) DeleteBackup(ctx context.Context, id string, now time.Time) (backup.Record, bool, error) {
+	cur, ok, err := p.GetBackup(ctx, id)
+	if err != nil || !ok {
+		return backup.Record{}, false, err
+	}
+	if err := backup.DeletableErr(cur, now); err != nil {
+		return backup.Record{}, false, err
+	}
+	// The same guards in the statement: a concurrent finalize, hold or lock wins (checks cascade).
+	res, err := p.db.ExecContext(ctx, `DELETE FROM backups WHERE id=$1 AND status <> 'complete' AND NOT legal_hold
+		AND (retain_until IS NULL OR retain_until <= $2)`, id, now)
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		again, ok, err := p.GetBackup(ctx, id)
+		if err != nil || !ok {
+			return backup.Record{}, false, err
+		}
+		if err := backup.DeletableErr(again, now); err != nil {
+			return backup.Record{}, false, err
+		}
+		return backup.Record{}, false, fmt.Errorf("%w: restore point %s changed while it was being deleted", backup.ErrConflict, id)
+	}
+	return cur, true, nil
 }
 
 func (p *PG) AddBackupCheck(ctx context.Context, c backup.CheckResult) (int64, error) {

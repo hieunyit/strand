@@ -237,6 +237,11 @@ type Repository interface {
 	ExpireBackup(ctx context.Context, id string, at time.Time) (Record, bool, error)
 	// SetBackupLegalHold sets or clears legal hold on a backup that is not expired.
 	SetBackupLegalHold(ctx context.Context, id string, hold bool) (Record, bool, error)
+	// DeleteBackup removes the catalog record of a backup that is not complete (failed, expired or an
+	// abandoned in-progress record) together with its checks. It is refused (ErrInvalid) for a complete
+	// backup, under legal hold, or while the recorded Object Lock retention (retain_until) is after now.
+	// It returns the removed record; found is false when the id does not exist.
+	DeleteBackup(ctx context.Context, id string, now time.Time) (Record, bool, error)
 	// AddBackupCheck records a verification result and updates the backup's last check columns.
 	AddBackupCheck(ctx context.Context, c CheckResult) (int64, error)
 	ListBackupChecks(ctx context.Context, backupID string, limit int) ([]CheckResult, error)

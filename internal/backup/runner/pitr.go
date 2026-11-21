@@ -154,10 +154,19 @@ func (p RestorePlan) Base() backup.Record { return p.Chain[len(p.Chain)-1] }
 // target time, the newest PITR base consistent at or before the target is chosen automatically, then the
 // contiguous log segments from that base up to the first segment ending at or after the target.
 func PlanRestore(rs []backup.Record, chosen *backup.Record, target *time.Time) (RestorePlan, error) {
+	// A failed, expired or unfinished record is never a restore point (its payload is partial or gone).
+	if chosen != nil {
+		if err := backup.RequireComplete(*chosen, "restored"); err != nil {
+			return RestorePlan{}, err
+		}
+	}
 	byID := map[string]backup.Record{}
+	notComplete := map[string]backup.Status{}
 	for _, r := range rs {
 		if r.Status == backup.StatusComplete {
 			byID[r.ID] = r
+		} else {
+			notComplete[r.ID] = r.Status
 		}
 	}
 	chainOf := func(b backup.Record) ([]backup.Record, error) {
@@ -165,6 +174,9 @@ func PlanRestore(rs []backup.Record, chosen *backup.Record, target *time.Time) (
 		for p := b.ParentID; p != ""; {
 			pr, ok := byID[p]
 			if !ok {
+				if other, known := notComplete[p]; known {
+					return nil, fmt.Errorf("incremental chain of %s is broken: %s is %s (only complete restore points can be restored)", b.ID, p, other)
+				}
 				return nil, fmt.Errorf("incremental chain of %s is broken: %s is missing", b.ID, p)
 			}
 			chain = append([]backup.Record{pr}, chain...)

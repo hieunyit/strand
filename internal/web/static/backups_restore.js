@@ -497,6 +497,14 @@
       if (!bid) {
         if (errBackup) { errBackup.textContent = 'Enter or select a backup ID.'; errBackup.hidden = false; }
         valid = false;
+      } else if (!getChosenBackup() && backups.length < 1000) {
+        // The page lists every complete restore point (up to 1000): anything else is failed, expired,
+        // unfinished or unknown, and the server refuses it with 409.
+        if (errBackup) {
+          errBackup.textContent = (errBackup.getAttribute('data-msg-not-complete') || 'Not a complete restore point:') + ' ' + bid;
+          errBackup.hidden = false;
+        }
+        valid = false;
       }
     } else {
       var src = (form.elements['source'].value || '').trim();

@@ -82,6 +82,10 @@ var writeRules = []routeRule{
 	{"POST", "/api/v1/backup-jobs/{id}/verify", PermOperator},
 	{"POST", "/api/v1/backup-jobs/{id}/retention-preview", PermOperator},
 	{"POST", "/api/v1/backups/{id}/verify", PermOperator},
+	// Operator: delete a restore point that is NOT complete (failed, expired, abandoned upload) and its partial
+	// objects. Complete restore points are refused by the handler (retention removes them), so an operator
+	// cannot remove a usable backup; legal hold and Object Lock still win.
+	{"DELETE", "/api/v1/backups/{id}", PermOperator},
 	{"POST", "/api/v1/backup-runs/{id}/cancel", PermOperator},
 	// Operator: test a backup connection (a read-only login probe; creating/editing/deleting connections
 	// and policies stays admin through the fail-closed default).

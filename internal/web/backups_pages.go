@@ -79,6 +79,12 @@ type backupsCatalogDetailPageBody struct {
 	Copies   []backup.Record
 	CanWrite bool
 	IsAdmin  bool
+	// Run is the job run that produced the record (its error for a failed record), when it can be found.
+	Run *backup.Run
+	// CanDelete: the record is not complete, the user may delete it and nothing blocks it (hold, lock,
+	// a still running writer); DeleteBlocked explains a block to an operator.
+	CanDelete     bool
+	DeleteBlocked string
 }
 
 type restoreSourceInfo struct {
@@ -102,6 +108,8 @@ type restoreConnView struct {
 
 // backupsRestorePageBody is the template body for /backups/restore.
 type backupsRestorePageBody struct {
+	// SelectedError: the backup in ?backup= cannot be restored (unknown or not complete); it is not preselected.
+	SelectedError  string
 	SelectedBackup string
 	SelectedSource string
 	Backups        []backup.Record
@@ -452,6 +460,23 @@ func (s *Server) pageBackupsCatalogDetail(w http.ResponseWriter, r *http.Request
 		CanWrite: canWrite,
 		IsAdmin:  isAdmin,
 	}
+	if rec.Status == backup.StatusFailed {
+		body.Run = s.recordRun(r.Context(), rec)
+	}
+	if rec.Status != backup.StatusComplete && canWrite && s.db != nil {
+		var alive bool
+		var why string
+		if backup.InProgress(rec.Status) {
+			alive, why = s.backupWriterRunning(r.Context(), rec)
+		}
+		if err := backup.DeletableErr(rec, s.now()); err != nil {
+			body.DeleteBlocked = catalogMsg(err)
+		} else if alive {
+			body.DeleteBlocked = why
+		} else {
+			body.CanDelete = true
+		}
+	}
 	s.render(w, "backups_catalog_detail", sess, pageData{Title: rec.ID, Active: "backups-catalog", Body: body})
 }
 
@@ -462,6 +487,14 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	}
 	selectedBackup := r.URL.Query().Get("backup")
 	selectedSource := r.URL.Query().Get("source")
+	var selectedError string
+	if selectedBackup != "" {
+		if rec, found, err := s.backups.Get(r.Context(), selectedBackup); err != nil || !found {
+			selectedError, selectedBackup = "restore point "+selectedBackup+" was not found in the catalog", ""
+		} else if err := backup.RequireComplete(rec, "restored"); err != nil {
+			selectedError, selectedBackup = catalogMsg(err), ""
+		}
+	}
 	backups, _ := s.backups.ListAll(r.Context(), backup.Filter{Status: backup.StatusComplete}, 1000)
 
 	sourcesMap := map[string]bool{}
@@ -560,6 +593,7 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
 
 	body := backupsRestorePageBody{
+		SelectedError:  selectedError,
 		SelectedBackup: selectedBackup,
 		SelectedSource: selectedSource,
 		Backups:        backups,

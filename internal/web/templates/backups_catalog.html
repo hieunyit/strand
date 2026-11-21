@@ -44,8 +44,11 @@
         <select name="status">
           <option value="">All statuses</option>
           <option value="complete"{{if eq .Body.Status "complete"}} selected{{end}}>Complete</option>
+          <option value="queued"{{if eq .Body.Status "queued"}} selected{{end}}>{{t "rp.status.queued"}}</option>
           <option value="uploading"{{if eq .Body.Status "uploading"}} selected{{end}}>Uploading</option>
+          <option value="verifying"{{if eq .Body.Status "verifying"}} selected{{end}}>{{t "rp.status.verifying"}}</option>
           <option value="failed"{{if eq .Body.Status "failed"}} selected{{end}}>Failed</option>
+          <option value="expired"{{if eq .Body.Status "expired"}} selected{{end}}>{{t "rp.status.expired"}}</option>
         </select>
       </label>
       <label class="field">
@@ -108,10 +111,17 @@
         <td class="r nowrap">{{bytes64 .Bytes}}</td>
         <td class="small mono">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else if .Position.OplogTS}}{{.Position.OplogTS}}{{else}}-{{end}}</td>
         <td class="nowrap">{{ts .CreatedAt}}</td>
-        <td><span class="badge small st-{{.Status}}">{{.Status}}</span></td>
-        <td class="r nowrap">
+        <td><span class="badge small st-{{.Status}}"{{if or (eq .Status "queued") (eq .Status "uploading") (eq .Status "verifying")}} title="{{t "rp.in_progress"}}"{{end}}>{{.Status}}</span></td>
+        <td class="r nowrap" data-rp-status="{{.Status}}">
           <a href="/backups/catalog/{{.ID}}" class="btn small ghost">Detail</a>
+          {{if eq .Status "complete"}}
           <a href="/backups/restore?backup={{.ID}}" class="btn small">Restore</a>
+          {{else if eq .Status "failed"}}
+          <a href="/backups/catalog/{{.ID}}#backup-error-card" class="btn small ghost" data-rp-action="view-error">{{t "rp.action.view_error"}}</a>
+          {{if and $.Body.CanWrite (not .LegalHold)}}<button type="button" class="btn small danger" data-backup-action="delete" data-id="{{.ID}}" data-confirm="{{printf (t "rp.delete_confirm") .ID}}" data-ok="{{t "rp.action.delete"}}">{{t "rp.action.delete"}}</button>{{end}}
+          {{else if eq .Status "expired"}}
+          {{if and $.Body.CanWrite (not .LegalHold)}}<button type="button" class="btn small danger" data-backup-action="delete" data-id="{{.ID}}" data-confirm="{{printf (t "rp.delete_expired_confirm") .ID}}" data-ok="{{t "rp.action.delete"}}">{{t "rp.action.delete"}}</button>{{end}}
+          {{end}}
         </td>
       </tr>
       {{else}}
