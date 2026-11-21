@@ -2,6 +2,12 @@
 <section class="card" id="restore-section">
   <div class="cardhead"><h2>Restore</h2></div>
   <p class="muted">A restore always goes to a <strong>new</strong> target and never modifies the source. Progress and log appear on the job page.</p>
+  {{if .Body.SelectedError}}
+  <div class="alert alert-error" id="restore-selected-error" role="alert">
+    <p><b>{{t "rp.not_restorable"}}</b> {{.Body.SelectedError}}</p>
+    <p>{{t "rp.not_restorable_hint"}} <a href="/backups/catalog?status=complete">{{t "rp.complete_list_link"}}</a></p>
+  </div>
+  {{end}}
 
   <ol class="stepper" id="restore-stepper" aria-label="Restore steps">
     <li class="step current" data-step-li="1" aria-current="step">
@@ -56,7 +62,7 @@
             <option value="{{.ID}}">{{.Source}} ({{.Kind}}, {{.CreatedAt.Format "2006-01-02 15:04"}})</option>
             {{end}}
           </datalist>
-          <span class="field-error" id="err-backup-id" hidden></span>
+          <span class="field-error" id="err-backup-id" data-msg-not-complete="{{t "rp.wizard_not_complete"}}" hidden></span>
         </label>
 
         <label class="field" data-show-if="restore_from=pitr">

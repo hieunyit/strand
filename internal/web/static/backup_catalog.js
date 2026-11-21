@@ -1,4 +1,5 @@
-// Restore point (catalog) actions: verify, legal hold and copy to another repository, on /backups/catalog and
+// Restore point (catalog) actions: verify, legal hold, copy to another repository and delete (restore points
+// that are not complete only), on /backups/catalog and
 // /backups/catalog/{id}. Every write goes through window.strandApi (session cookie + CSRF header); the server
 // enforces RBAC. Restores open the restore wizard (/backups/restore?backup=<id>).
 (function () {
@@ -35,6 +36,17 @@
       ask('Re-read backup ' + id + ' from the repository and check its checksums?', 'Verify').then(function (yes) {
         if (!yes) { return; }
         api('POST', base + '/verify').then(function (r) { return result(r, 'Could not start the verification'); }).then(follow).catch(fail);
+      });
+    } else if (act === 'delete') {
+      // Restore points that are not complete (failed, expired): the confirm text comes translated from the page.
+      var text = btn.getAttribute('data-confirm') || ('Delete restore point ' + id + '?');
+      var asked = window.strandConfirm ? window.strandConfirm(text, '', { ok: btn.getAttribute('data-ok') || 'Delete', danger: true })
+        : Promise.resolve(window.confirm(text));
+      asked.then(function (yes) {
+        if (!yes) { return; }
+        btn.disabled = true;
+        api('DELETE', base).then(function (r) { return result(r, 'Could not delete the restore point'); }).then(follow)
+          .catch(function (err) { btn.disabled = false; fail(err); });
       });
     } else if (act === 'legal-hold' || act === 'hold') {
       var hold = btn.getAttribute('data-hold') === '1';

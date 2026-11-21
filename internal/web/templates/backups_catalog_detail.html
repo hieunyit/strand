@@ -9,7 +9,8 @@
         <span>Status: <b class="badge st-{{.Body.Backup.Status}}">{{.Body.Backup.Status}}</b></span>
       </div>
     </div>
-    <div class="cardhead-actions">
+    <div class="cardhead-actions" data-rp-status="{{.Body.Backup.Status}}">
+      {{if eq .Body.Backup.Status "complete"}}
       {{if .Body.IsAdmin}}
       <a href="/backups/restore?backup={{.Body.Backup.ID}}" class="btn small primary">Restore from this backup</a>
       {{end}}
@@ -22,10 +23,48 @@
         {{if .Body.Backup.LegalHold}}Release legal hold{{else}}Set legal hold{{end}}
       </button>
       {{end}}
+      {{else}}
+      {{if eq .Body.Backup.Status "failed"}}
+      <a href="#backup-error-card" class="btn small ghost" data-rp-action="view-error">{{t "rp.action.view_error"}}</a>
+      {{end}}
+      {{if and .Body.IsAdmin .Body.Backup.LegalHold}}
+      <button type="button" class="btn small ghost" data-backup-action="legal-hold" data-id="{{.Body.Backup.ID}}" data-hold="0">Release legal hold</button>
+      {{end}}
+      {{if .Body.CanDelete}}
+      <button type="button" class="btn small danger" data-backup-action="delete" data-id="{{.Body.Backup.ID}}" data-confirm="{{if eq .Body.Backup.Status "expired"}}{{printf (t "rp.delete_expired_confirm") .Body.Backup.ID}}{{else}}{{printf (t "rp.delete_confirm") .Body.Backup.ID}}{{end}}" data-ok="{{t "rp.action.delete"}}">{{t "rp.action.delete"}}</button>
+      {{end}}
+      {{end}}
       <a href="/api/v1/backups/{{.Body.Backup.ID}}/manifest" class="btn small ghost" download>Download manifest</a>
     </div>
   </div>
+  {{if ne .Body.Backup.Status "complete"}}
+  <div class="pad">
+    {{if eq .Body.Backup.Status "failed"}}<p class="alert alert-error" id="rp-status-note">{{t "rp.note.failed"}}</p>
+    {{else if eq .Body.Backup.Status "expired"}}<p class="alert alert-warn" id="rp-status-note">{{t "rp.note.expired"}}</p>
+    {{else}}<p class="alert alert-info" id="rp-status-note"><span class="badge small st-{{.Body.Backup.Status}}">{{t "rp.in_progress"}}</span> {{t "rp.note.in_progress"}}</p>{{end}}
+    {{if .Body.DeleteBlocked}}<p class="small muted">{{.Body.DeleteBlocked}}</p>{{end}}
+  </div>
+  {{end}}
 </section>
+
+{{if eq .Body.Backup.Status "failed"}}
+<section class="card mb" id="backup-error-card">
+  <div class="cardhead"><h3>{{t "rp.error_title"}}</h3></div>
+  <div class="pad">
+    {{if and .Body.Run .Body.Run.ErrorMessage}}
+    <p class="st-failed"><b>{{.Body.Run.ErrorCode}}</b>{{if .Body.Run.ErrorCode}}: {{end}}{{.Body.Run.ErrorMessage}}</p>
+    {{if .Body.Run.Remediation}}<p class="small muted">{{.Body.Run.Remediation}}</p>{{end}}
+    <p class="small muted">{{t "rp.error_run"}} <code>{{.Body.Run.ID}}</code> &middot; {{ts .Body.Run.StartedAt}}</p>
+    {{else if .Body.Backup.CheckDetail}}
+    <p class="st-failed">{{.Body.Backup.CheckDetail}}</p>
+    {{else}}
+    <p class="muted">{{t "rp.error_none"}}</p>
+    {{end}}
+    {{if .Body.Backup.JobID}}<a href="/backups/jobs/{{.Body.Backup.JobID}}?tab=runs" class="btn small ghost">{{t "rp.error_run_link"}}</a>{{end}}
+    <a href="/jobs" class="btn small ghost">{{t "rp.error_jobs_link"}}</a>
+  </div>
+</section>
+{{end}}
 
 <div class="field-grid cols-2">
   <section class="card" id="backup-meta-card">
@@ -94,7 +133,7 @@
   </table></div>
 </section>
 
-{{if .Body.IsAdmin}}
+{{if and .Body.IsAdmin (eq .Body.Backup.Status "complete")}}
 <dialog class="drawer" id="copy-drawer">
   <form id="backup-copy-form" method="dialog" class="drawer-panel form-stack">
     <header class="drawer-header">

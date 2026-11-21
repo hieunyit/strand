@@ -523,7 +523,9 @@ func CatalogTimelineSVG(sources []string, records []backup.Record, w, h int) tem
 		var logs, dots []backup.Record
 		for _, r := range srcRecs {
 			if r.Kind == backup.KindLog {
-				logs = append(logs, r)
+				if r.Status == "" || r.Status == backup.StatusComplete { // PITR bands: archived segments only
+					logs = append(logs, r)
+				}
 			} else {
 				dots = append(dots, r)
 			}
@@ -610,6 +612,17 @@ func CatalogTimelineSVG(sources []string, records []backup.Record, w, h int) tem
 			if b.Kind == backup.KindIncremental {
 				cls = "timeline-dot-inc"
 				r = 4.5
+			}
+			if b.Status != "" && b.Status != backup.StatusComplete {
+				// Not a restore point (failed, expired, unfinished): the dot opens the record, never the wizard.
+				cls = "timeline-dot-failed"
+				if backup.InProgress(b.Status) {
+					cls = "timeline-dot-pending"
+				}
+				fmt.Fprintf(&sb, `<a href="/backups/catalog/%s" aria-label="Backup %s (%s)"><circle class="%s" cx="%.1f" cy="%.1f" r="%.1f"><title>%s (%s, %s at %s)</title></circle></a>`,
+					html.EscapeString(b.ID), html.EscapeString(b.ID), b.Status, cls, cx, y, r,
+					html.EscapeString(b.ID), b.Status, b.Kind, b.CreatedAt.Format("2006-01-02 15:04"))
+				continue
 			}
 			fmt.Fprintf(&sb, `<a href="/backups/restore?backup=%s" aria-label="Restore backup %s"><circle class="%s" cx="%.1f" cy="%.1f" r="%.1f"><title>%s (%s at %s, %s)</title></circle></a>`,
 				html.EscapeString(b.ID), html.EscapeString(b.ID), cls, cx, y, r,

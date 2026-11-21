@@ -306,7 +306,79 @@ func uploadPushPayload(ctx context.Context, obj interface {
 
 func addBackupProCommands(cmd *cobra.Command) {
 	cmd.AddCommand(newBackupPruneCmd(), newBackupKeygenCmd(), newBackupCopyCmd(), newBackupVerifyCmd(),
-		newBackupRestoreCmd(), newBackupLogArchiveCmd())
+		newBackupRestoreCmd(), newBackupLogArchiveCmd(), newBackupDeleteCmd())
+}
+
+// backupRejected is the exit-3 error of an operation refused because of the record's state.
+func backupRejected(err error) error {
+	return exitcode.New("backup_rejected", exitcode.Rejected, err.Error(), err)
+}
+
+func newBackupDeleteCmd() *cobra.Command {
+	var id string
+	var abandoned, asJSON bool
+	cmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a restore point that is not complete (failed, expired) and the objects it uploaded",
+		Long: `Delete a failed or expired restore point: its partial objects in the repository (payload, an
+unfinished multipart upload, the manifest) and then its catalog record. Complete restore points are never
+deleted by hand: the retention policy (strand backup prune) removes them. Legal hold and S3 Object Lock
+retention refuse the delete. A record still queued/uploading/verifying is refused unless --abandoned says its
+backup process is gone (the Web checks that before it passes the flag); it is marked failed first.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !backup.ValidID(id) {
+				return backupUsageErr("--id is required")
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+			defer stop()
+			st, err := openBackupStoreOnly(ctx)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			env, err := backupRunnerEnv(st, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			rec, ok, err := env.Catalog.Get(ctx, id)
+			if err != nil || !ok {
+				return backupUsageErr("backup not found")
+			}
+			if backup.InProgress(rec.Status) {
+				if !abandoned {
+					return backupRejected(fmt.Errorf("restore point %s is %s: it is still in progress (pass --abandoned only when its backup process is gone)", id, rec.Status))
+				}
+				if rec.JobID != "" {
+					if j, ok, err := st.GetBackupJob(ctx, rec.JobID); err == nil && ok && j.LastRunStatus == backup.RunStatusRunning {
+						return backupRejected(fmt.Errorf("restore point %s is %s and job %s is running: wait for the run to finish", id, rec.Status, rec.JobID))
+					}
+				}
+				if err := backup.DeletableErr(rec, time.Now()); err != nil {
+					return backupRejected(err)
+				}
+				if rec, _, err = env.Catalog.UpdateStatus(ctx, id, backup.StatusFailed, nil); err != nil {
+					return fmt.Errorf("mark %s failed: %w", id, err)
+				}
+			}
+			res, err := env.DeleteRecord(ctx, rec) // audited, also when refused
+			if errors.Is(err, backup.ErrInvalid) {
+				return backupRejected(err)
+			}
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return printJSON(cmd.OutOrStdout(), res)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "restore point %s (%s) deleted; %d object(s) removed\n", id, res.Status, len(res.DeletedObjects))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&id, "id", "", "restore point (backup) ID")
+	cmd.Flags().BoolVar(&abandoned, "abandoned", false, "the record is queued/uploading/verifying but its backup process is gone: mark it failed, then delete it")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
 }
 
 func newBackupRestoreCmd() *cobra.Command {
@@ -369,8 +441,8 @@ Passwords come from the environment variable named by --target-password-env.`,
 				if err != nil || !ok {
 					return backupUsageErr("backup not found")
 				}
-				if rec.Status != backup.StatusComplete {
-					return backupUsageErr("only complete backups can be restored")
+				if err := backup.RequireComplete(rec, "restored"); err != nil {
+					return backupRejected(err)
 				}
 				chosen, source = &rec, rec.Source
 			}
@@ -600,6 +672,9 @@ func newBackupVerifyCmd() *cobra.Command {
 				if err != nil || !ok {
 					return backupUsageErr("backup not found")
 				}
+				if err := backup.RequireComplete(rec, "verified"); err != nil {
+					return backupRejected(err)
+				}
 				verr := env.VerifyBackup(ctx, rec, !head)
 				if err := env.Audit(ctx, "backup.verify", map[bool]string{true: "ok", false: "error"}[verr == nil], map[string]any{"backup_id": id}); err != nil {
 					return errors.Join(verr, err)
@@ -736,6 +811,9 @@ func newBackupCopyCmd() *cobra.Command {
 			rec, ok, err := env.Catalog.Get(ctx, id)
 			if err != nil || !ok {
 				return backupUsageErr("backup not found")
+			}
+			if err := backup.RequireComplete(rec, "copied"); err != nil {
+				return backupRejected(err)
 			}
 			cp, err := env.Copy(ctx, rec, to)
 			if err != nil {

@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -85,4 +86,45 @@ func SortOldestFirst(rs []Record) {
 		}
 		return rs[i].ID < rs[j].ID
 	})
+}
+
+// ErrNotComplete reports an operation that needs a complete restore point (restore, verify, copy).
+var ErrNotComplete = errors.New("backup catalog: restore point is not complete")
+
+// RequireComplete returns nil for a complete record, else an error wrapping ErrNotComplete that names the
+// record and its status, e.g. "restore point bkp-1 is failed: only complete restore points can be restored".
+func RequireComplete(r Record, verb string) error {
+	if r.Status == StatusComplete {
+		return nil
+	}
+	return fmt.Errorf("%w: restore point %s is %s: only complete restore points can be %s", ErrNotComplete, r.ID, r.Status, verb)
+}
+
+// InProgress reports a record whose backup (or copy, or log segment upload) has not finished yet.
+func InProgress(s Status) bool {
+	return s == StatusQueued || s == StatusUploading || s == StatusVerifying
+}
+
+// DeletableErr explains why a record cannot be deleted by hand (nil = it can). Complete restore points are
+// removed only by retention (prune), which honors keep counts and incremental chains; legal hold and an
+// unexpired Object Lock retention always win.
+func DeletableErr(r Record, now time.Time) error {
+	switch {
+	case r.Status == StatusComplete:
+		return fmt.Errorf("%w: restore point %s is complete: complete restore points are removed by the retention policy (prune), not deleted by hand", ErrInvalid, r.ID)
+	case r.LegalHold:
+		return fmt.Errorf("%w: restore point %s is under legal hold: release the hold first", ErrInvalid, r.ID)
+	case r.RetainUntil != nil && r.RetainUntil.After(now):
+		return fmt.Errorf("%w: restore point %s is object-locked until %s", ErrInvalid, r.ID, r.RetainUntil.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// Delete removes the catalog record of a backup that is not complete (see Repository.DeleteBackup). The
+// caller deletes the record's objects first.
+func (c *Catalog) Delete(ctx context.Context, id string, now time.Time) (Record, bool, error) {
+	if !validID(id) || now.IsZero() {
+		return Record{}, false, fmt.Errorf("%w: invalid id or time", ErrInvalid)
+	}
+	return c.repo.DeleteBackup(ctx, id, now.UTC())
 }

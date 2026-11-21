@@ -736,6 +736,32 @@ group's pages as a tab strip (admin-only pages are listed to admins only).
   `Convert to connection` (`POST /api/v1/backup-jobs/{id}/convert-connection`, admin, audited as `backup_job.convert_connection`): the
   inline host/user/password-variable become an environment-mode connection (reused when an identical one exists) and the job points to it.
 
+### Restore point statuses and actions
+
+A catalog record moves `queued` -> `uploading` -> `verifying` -> `complete`; any step can end in `failed`, and
+retention turns `complete` into `expired` after deleting its objects. Only a `complete` record is a restore point:
+
+| Status | Catalog list / detail actions | Restore, verify, copy, legal hold | Delete |
+| --- | --- | --- | --- |
+| `complete` | Restore, Verify, Copy to..., Set/Release legal hold | allowed | no: retention (prune) removes it, honoring keep counts, incremental chains, legal hold and Object Lock |
+| `failed` | View error (the failed run's error code and message, links to the job's runs and the process logs), Delete | 409 (API) / exit 3 (CLI) | yes (operator+) |
+| `expired` | Delete (removes the record; its objects are already gone) | 409 / exit 3 | yes (operator+) |
+| `queued`, `uploading`, `verifying` | none (in-progress badge, Detail only) | 409 / exit 3 | only when its writer is gone (see below) |
+
+`DELETE /api/v1/backups/{id}` (operator and admin; audited `backup.delete`) runs `strand backup delete --id <id>` as a job:
+the process gets the repository credentials in its environment (like verify, copy and prune; the Web holds no S3 client),
+aborts an unfinished multipart upload of the payload, deletes the payload and the `manifest.json` sidecar, then the catalog
+record and its checks. Objects go first, as for retention: a crash in between leaves a record without objects, and deleting it
+again finishes the job. Refused (409, nothing deleted): a complete record, legal hold (release it first; a hold can be released
+on any record but set only on a complete one), an Object Lock retention (`retain_until`) still in the future, and a record whose
+writer may still run: its job has a run in progress, its job's log archiver or its copy process is running, or (no job and no
+copy to check, e.g. `strand backup push`) it started less than 24 hours ago. An abandoned in-progress record is marked
+`failed` by the process before it is deleted (`--abandoned`). From a shell: `strand backup delete --id <id> [--abandoned] [--json]`.
+
+The restore wizard lists complete restore points only; `/backups/restore?backup=<id>` with a record that is not complete shows
+the reason and does not preselect it. Timeline dots of records that are not complete open the record, not the wizard. The
+status filter of `/backups/catalog` covers every status (`status=failed` lists the records to clean up).
+
 ### PITR Constraints (P0)
 
 Validation rules enforced by `backup.ValidateJob` and UI:

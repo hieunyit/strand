@@ -1074,3 +1074,8 @@ dialog.qsearch::backdrop { background: rgba(11, 18, 32, .45); }
 /* Native backup tool status in the job wizard (jobwizard.js). */
 .tool-status { margin-top: var(--sp-2); display: grid; gap: 4px; }
 .tool-status .field-hint { color: var(--bad); }
+
+/* restore points that are not complete: in-progress badges (info tone) and timeline dots that open the detail */
+.st-uploading, .st-verifying { --b-fg: var(--info); --b-bg: var(--info-soft); --b-line: var(--info-line); --b-dot: var(--info-solid); }
+.timeline-dot-failed { fill: var(--surface); stroke: var(--bad-solid); stroke-width: 1.5; cursor: pointer; }
+.timeline-dot-pending { fill: var(--surface); stroke: var(--info-solid); stroke-width: 1.5; cursor: pointer; }

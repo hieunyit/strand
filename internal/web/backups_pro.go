@@ -31,6 +31,7 @@ func (s *Server) backupProRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/backups/{id}/legal-hold", s.auth(true, s.apiBackupLegalHold))
 	mux.Handle("POST /api/v1/backups/{id}/verify", s.auth(true, s.apiBackupVerifyOne))
 	mux.Handle("POST /api/v1/backups/{id}/copy", s.auth(true, s.apiBackupCopy))
+	mux.Handle("DELETE /api/v1/backups/{id}", s.auth(true, s.apiBackupDelete))
 	mux.Handle("POST /api/v1/backup-restores", s.auth(true, s.apiBackupRestore))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/retention-preview", s.auth(true, s.apiBackupRetentionPreview))
 	mux.Handle("POST /api/v1/backup-jobs/{id}/prune", s.auth(true, s.apiBackupJobOp("prune")))
@@ -233,6 +234,10 @@ func (s *Server) apiBackupLegalHold(w http.ResponseWriter, r *http.Request, _ *S
 		return
 	}
 	id := r.PathValue("id")
+	// A hold protects a restore point; a failed or unfinished record is not one (releasing stays possible).
+	if req.Hold && !s.requireCompleteRecord(w, r, id, "put on legal hold") {
+		return
+	}
 	if !s.auditBackupOp(w, r, "backup.legal_hold", map[string]any{"backup_id": id, "hold": req.Hold}) {
 		return
 	}
@@ -273,8 +278,7 @@ func (s *Server) apiBackupVerifyOne(w http.ResponseWriter, r *http.Request, _ *S
 		return
 	}
 	id := r.PathValue("id")
-	if _, found, err := s.backups.Get(r.Context(), id); err != nil || !found {
-		writeErr(w, http.StatusNotFound, "backup not found")
+	if !s.requireCompleteRecord(w, r, id, "verified") {
 		return
 	}
 	if !s.auditBackupOp(w, r, "backup.verify", map[string]any{"backup_id": id}) {
@@ -305,6 +309,9 @@ func (s *Server) apiBackupCopy(w http.ResponseWriter, r *http.Request, _ *Sessio
 	}
 	if _, ok, err := s.db.st.GetBackupRepo(r.Context(), req.Repository); err != nil || !ok {
 		writeErr(w, http.StatusBadRequest, "repository not found")
+		return
+	}
+	if !s.requireCompleteRecord(w, r, id, "copied") {
 		return
 	}
 	if !s.auditBackupOp(w, r, "backup.copy", map[string]any{"backup_id": id, "repository": req.Repository}) {
@@ -352,6 +359,10 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 			b, ok, err := s.backups.Get(r.Context(), req.BackupID)
 			if err != nil || !ok {
 				writeErr(w, http.StatusBadRequest, "backup not found")
+				return
+			}
+			if err := backup.RequireComplete(b, "restored"); err != nil {
+				writeErr(w, http.StatusConflict, catalogMsg(err))
 				return
 			}
 			backupRecord = &b

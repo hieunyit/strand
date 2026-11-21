@@ -30,6 +30,7 @@ Hệ thống phân quyền trung tâm gồm 3 vai trò:
 | Xem cấu hình pipeline (`/api/v1/pipelines/{name}/config` — bí mật luôn che) | ✅ | ✅ | ✅ |
 | Vận hành pipeline (start, stop, restart, pause, resume, throttle, snapshot add) | ❌ (403) | ✅ | ✅ |
 | Chạy các tác vụ verify, repair, backup run (`/api/v1/backup-jobs/{id}/run`) | ❌ (403) | ✅ | ✅ |
+| Xóa điểm khôi phục **chưa hoàn tất** (failed/expired/upload bị bỏ dở) và object dở dang của nó (`DELETE /api/v1/backups/{id}`) | ❌ (403) | ✅ | ✅ |
 | Quản lý tài khoản cá nhân (`/account`, `/api/v1/account/*`) | ✅ | ✅ | ✅ |
 | Sửa cấu hình pipeline, lưu YAML (`/api/v1/pipelines/{name}/config`) | ❌ (403) | ❌ (403) | ✅ |
 | Xem và sửa biến môi trường pipeline (`/api/v1/pipelines/{name}/env`) | ❌ (403) | ❌ (403) | ✅ |
@@ -370,6 +371,24 @@ công cụ không được khởi động và không retry (log lỗi `scheduled
 trước khi ghi run hay bản ghi catalog.
 Mọi thao tác ghi của backup (job, policy, connection, repository, kênh, luật, run, hủy, restore, legal hold, prune, verify, copy) ghi audit **trước** khi
 thực hiện (từ chối nếu audit lỗi), kèm người dùng và các trường đã đổi.
+
+### Điểm khôi phục theo trạng thái: 409 và `DELETE /api/v1/backups/{id}`
+
+Chỉ điểm khôi phục `complete` mới khôi phục, kiểm chứng, sao chép hoặc đặt legal hold được. Với bản ghi `queued`, `uploading`,
+`verifying`, `failed` hoặc `expired`, các route sau trả **409** `{"error": "restore point <id> is <status>: only complete restore points can be <restored|verified|copied|put on legal hold>"}`, không ghi audit `started` và không khởi động tiến trình nào:
+`POST /api/v1/backup-restores` (với `backup_id`; PITR theo `source` vốn chỉ chọn bản ghi complete, chuỗi incremental có cha không
+complete bị từ chối), `POST /api/v1/backups/{id}/verify`, `POST /api/v1/backups/{id}/copy`, `POST /api/v1/backups/{id}/legal-hold`
+với `{"hold": true}` (gỡ hold `{"hold": false}` luôn được phép). CLI `strand backup restore|verify|copy --id` từ chối tương tự (exit 3).
+
+`DELETE /api/v1/backups/{id}` (**operator**, admin) → **202** `{"process_id"}`: chạy `strand backup delete --id <id>` thành job (log ở
+`/jobs/{process_id}`); tiến trình con nhận khóa repository qua biến môi trường (như verify/prune/copy), hủy multipart upload dở của
+payload, xóa payload và manifest (`s3://…/manifest.json`) trong repository của bản ghi, rồi xóa bản ghi catalog (kèm các check). Bản
+ghi `expired` (object đã bị retention xóa) chỉ bị gỡ khỏi catalog. Ghi audit `backup.delete` trước khi chạy (từ web) và kết quả
+`ok|error` (từ tiến trình). Lỗi: 404 không có bản ghi; **409** khi bản ghi `complete` ("complete restore points are removed by the
+retention policy (prune), not deleted by hand"), đang legal hold, còn Object Lock (`retain_until` sau hiện tại), hoặc đang
+`queued|uploading|verifying` mà tiến trình ghi có thể còn chạy (run của job đang `running`, log archiver hoặc tiến trình copy trên
+instance này đang chạy; bản ghi không có job/copy để kiểm: chỉ xóa được sau 24 giờ). Bản ghi dở dang được coi là bỏ dở thì web
+truyền `--abandoned`: tiến trình chuyển nó sang `failed` trước khi xóa.
 
 ### Registry trong DB (chế độ PostgreSQL)
 

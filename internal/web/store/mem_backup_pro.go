@@ -118,6 +118,29 @@ func (m *Mem) SetBackupLegalHold(_ context.Context, id string, hold bool) (backu
 	return cloneBackup(r), changed, nil
 }
 
+func (m *Mem) DeleteBackup(_ context.Context, id string, now time.Time) (backup.Record, bool, error) {
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	if !ok {
+		return backup.Record{}, false, nil
+	}
+	if err := backup.DeletableErr(r, now); err != nil {
+		return backup.Record{}, false, err
+	}
+	delete(m.backups, id)
+	kept := m.pro.checks[:0]
+	for _, c := range m.pro.checks {
+		if c.BackupID != id {
+			kept = append(kept, c)
+		}
+	}
+	m.pro.checks = kept
+	return cloneBackup(r), true, nil
+}
+
 func (m *Mem) AddBackupCheck(_ context.Context, c backup.CheckResult) (int64, error) {
 	if err := m.enter(); err != nil {
 		return 0, err

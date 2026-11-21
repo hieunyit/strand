@@ -166,6 +166,28 @@ var messagesEn = map[string]string{
 	"Metadata database": "Metadata database",
 	"My account":        "My account",
 	"New pipeline":      "New pipeline",
+
+	// Restore points by status (catalog list, detail, restore wizard)
+	"rp.action.view_error":      "View error",
+	"rp.action.delete":          "Delete",
+	"rp.in_progress":            "In progress",
+	"rp.status.queued":          "Queued",
+	"rp.status.verifying":       "Verifying",
+	"rp.status.expired":         "Expired",
+	"rp.delete_confirm":         "Delete restore point %s and the partial objects it uploaded to its repository? This cannot be undone.",
+	"rp.delete_expired_confirm": "Remove expired restore point %s from the catalog? Retention already deleted its objects.",
+	"rp.note.failed":            "This backup failed: its payload is partial or missing, so it cannot be restored, verified or copied. Check the error below, then delete it.",
+	"rp.note.expired":           "Retention deleted the objects of this backup; only its catalog record remains. It cannot be restored.",
+	"rp.note.in_progress":       "This backup is still running. Restore, verification and copies become available when it completes.",
+	"rp.error_title":            "Why this backup failed",
+	"rp.error_run":              "Run",
+	"rp.error_none":             "No error message was recorded for this restore point. Check the runs of its job and the job log.",
+	"rp.error_run_link":         "Open the job runs",
+	"rp.error_jobs_link":        "Open the process logs",
+	"rp.not_restorable":         "This restore point cannot be restored.",
+	"rp.not_restorable_hint":    "Only complete restore points can be restored. Choose one below or in the catalog.",
+	"rp.complete_list_link":     "Complete restore points",
+	"rp.wizard_not_complete":    "Not a complete restore point:",
 }
 
 // messagesVi holds all Vietnamese UI strings. Must be natural Vietnamese for operators.
@@ -323,6 +345,28 @@ var messagesVi = map[string]string{
 	"Metadata database": "Cơ sở dữ liệu metadata",
 	"My account":        "Tài khoản của tôi",
 	"New pipeline":      "Tạo pipeline",
+
+	// Restore points by status (catalog list, detail, restore wizard)
+	"rp.action.view_error":      "Xem lỗi",
+	"rp.action.delete":          "Xóa",
+	"rp.in_progress":            "Đang thực hiện",
+	"rp.status.queued":          "Đang chờ",
+	"rp.status.verifying":       "Đang kiểm tra",
+	"rp.status.expired":         "Đã hết hạn",
+	"rp.delete_confirm":         "Xóa điểm khôi phục %s và các đối tượng dở dang mà nó đã tải lên kho lưu trữ? Không thể hoàn tác.",
+	"rp.delete_expired_confirm": "Gỡ điểm khôi phục đã hết hạn %s khỏi danh mục? Chính sách lưu giữ đã xóa các đối tượng của nó.",
+	"rp.note.failed":            "Bản sao lưu này thất bại: dữ liệu bị thiếu hoặc dở dang nên không thể khôi phục, kiểm chứng hay sao chép. Xem lỗi bên dưới rồi xóa nó.",
+	"rp.note.expired":           "Chính sách lưu giữ đã xóa các đối tượng của bản sao lưu này; chỉ còn bản ghi trong danh mục. Không thể khôi phục.",
+	"rp.note.in_progress":       "Bản sao lưu này vẫn đang chạy. Khôi phục, kiểm chứng và sao chép sẽ khả dụng khi nó hoàn tất.",
+	"rp.error_title":            "Lý do sao lưu thất bại",
+	"rp.error_run":              "Lần chạy",
+	"rp.error_none":             "Không có thông báo lỗi nào được ghi cho điểm khôi phục này. Xem các lần chạy của job và log của job.",
+	"rp.error_run_link":         "Mở các lần chạy của job",
+	"rp.error_jobs_link":        "Mở log tiến trình",
+	"rp.not_restorable":         "Không thể khôi phục từ điểm khôi phục này.",
+	"rp.not_restorable_hint":    "Chỉ có thể khôi phục từ điểm khôi phục hoàn tất. Hãy chọn một điểm bên dưới hoặc trong danh mục.",
+	"rp.complete_list_link":     "Các điểm khôi phục hoàn tất",
+	"rp.wizard_not_complete":    "Không phải điểm khôi phục hoàn tất:",
 }
 
 // T translates a key into the target language.
