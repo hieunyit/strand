@@ -284,6 +284,8 @@ func TestJobDownloadEndpointSecurity(t *testing.T) {
 	waitFor(t, "verify job cancellation", func() bool { j, ok := e.srv.jobs.Get(verifyJobID); return ok && !j.Running })
 
 	// 2. Export job download succeeds and is audited
+	e.hold(true)
+	defer e.hold(false)
 	code, res = e.act(c, csrf, "orders", "export", nil)
 	if code != 200 {
 		t.Fatalf("start export failed: %d %v", code, res)
@@ -297,6 +299,7 @@ func TestJobDownloadEndpointSecurity(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("unfinished export must not be downloadable, got HTTP %d", resp.StatusCode)
 	}
+	e.hold(false)
 	waitFor(t, "export job completion", func() bool { j, ok := e.srv.jobs.Get(exportJobID); return ok && !j.Running })
 	j, ok := e.srv.jobs.Get(exportJobID)
 	if !ok || j.ExitCode == nil || *j.ExitCode != 0 {

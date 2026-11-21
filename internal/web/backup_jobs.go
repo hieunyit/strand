@@ -46,13 +46,24 @@ var reconcileDelay = struct{ first, max time.Duration }{time.Second, 5 * time.Mi
 // the job is disabled/deleted: giving up after a short metadata-database outage would silently stop the
 // job's backups until the next Web restart.
 func (s *Server) reconcileBackupSchedule(pipeline string) {
+	if s.closed.Load() || !s.isActive() {
+		return
+	}
+	if _, loaded := s.reconciling.LoadOrStore(pipeline, struct{}{}); loaded {
+		return
+	}
+	defer s.reconciling.Delete(pipeline)
 	id := strings.TrimPrefix(pipeline, "backup-")
 	delay := reconcileDelay.first
 	for attempt := 1; ; attempt++ {
-		if !s.isActive() {
+		if s.closed.Load() || !s.isActive() {
 			return // a standby runs no schedulers; the active instance (or a takeover) does
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		baseCtx := context.Background()
+		if s.closeCtx != nil {
+			baseCtx = s.closeCtx
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 		job, found, err := s.db.st.GetBackupJob(ctx, id)
 		cancel()
 		if err != nil {
@@ -72,7 +83,15 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 				s.log.Warn("restart scheduled backup job", "job", id, "attempt", attempt, "error", err)
 			}
 		}
-		time.Sleep(delay)
+		var closeDone <-chan struct{}
+		if s.closeCtx != nil {
+			closeDone = s.closeCtx.Done()
+		}
+		select {
+		case <-closeDone:
+			return
+		case <-time.After(delay):
+		}
 		if delay *= 2; delay > reconcileDelay.max {
 			delay = reconcileDelay.max
 		}
@@ -318,29 +337,41 @@ func (s *Server) stopBackupSchedulers() {
 	if jr, ok := s.jobs.(*FileJobRunner); ok && jr.KillGrace > 0 {
 		grace = jr.KillGrace
 	}
+	var pids []int
 	s.ownedBackupProcs.Range(func(k, v any) bool {
 		id, pid := k.(string), v.(int)
 		s.ownedBackupProcs.Delete(id)
-		if syscall.Kill(pid, 0) != nil {
-			return true // đã thoát
-		}
-		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-		}
-		go func() {
-			deadline := time.Now().Add(grace)
-			for time.Now().Before(deadline) {
-				if syscall.Kill(pid, 0) != nil {
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
+		if syscall.Kill(pid, 0) == nil {
+			if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
 			}
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}()
+			pids = append(pids, pid)
+		}
 		s.log.Info("step-down: stopped backup process started by this instance", "job", id, "pid", pid)
 		return true
 	})
+	if len(pids) > 0 {
+		deadline := time.Now().Add(grace)
+		for time.Now().Before(deadline) {
+			alive := false
+			for _, pid := range pids {
+				if syscall.Kill(pid, 0) == nil {
+					alive = true
+					break
+				}
+			}
+			if !alive {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		for _, pid := range pids {
+			if syscall.Kill(pid, 0) == nil {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	}
 }
 
 func (s *Server) stopBackupJob(id string) error {
@@ -357,6 +388,10 @@ func (s *Server) stopBackupJob(id string) error {
 			continue
 		}
 		if err := s.jobs.Cancel(j.ID); err != nil {
+			if strings.Contains(err.Error(), "job is not running") || strings.Contains(err.Error(), "unknown job") ||
+				strings.Contains(err.Error(), "no such process") || errors.Is(err, syscall.ESRCH) {
+				continue
+			}
 			return err
 		}
 		deadline := time.NewTimer(15 * time.Second)

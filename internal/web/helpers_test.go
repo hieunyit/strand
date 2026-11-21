@@ -227,6 +227,9 @@ func newEnvWith(t *testing.T, mutate func(e *testEnv, c *Config), opt func(o *Op
 		t.Fatal(err)
 	}
 	e.srv = srv
+	t.Cleanup(func() {
+		_ = e.srv.Close()
+	})
 	e.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(e.ts.Close)
 	return e

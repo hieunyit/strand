@@ -408,7 +408,9 @@ func (r *FileJobRunner) Cancel(id string) error {
 	}
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		if err2 := syscall.Kill(pid, syscall.SIGTERM); err2 != nil {
-			return err
+			if !errors.Is(err2, syscall.ESRCH) {
+				return err
+			}
 		}
 	}
 	grace := r.KillGrace

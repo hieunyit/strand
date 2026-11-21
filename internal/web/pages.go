@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"strand/internal/admin"
@@ -165,7 +166,17 @@ func parsePages() (map[string]*template.Template, error) {
 	return parsePagesForLang(LangEN)
 }
 
+var (
+	cachedPagesLang   = make(map[string]map[string]*template.Template)
+	cachedPagesLangMu sync.Mutex
+)
+
 func parsePagesForLang(lang string) (map[string]*template.Template, error) {
+	cachedPagesLangMu.Lock()
+	defer cachedPagesLangMu.Unlock()
+	if m, ok := cachedPagesLang[lang]; ok {
+		return m, nil
+	}
 	out := map[string]*template.Template{}
 	funcs := templateFuncsForLang(lang)
 	for _, n := range pageNames {
@@ -180,6 +191,7 @@ func parsePagesForLang(lang string) (map[string]*template.Template, error) {
 		return nil, err
 	}
 	out["login"] = t
+	cachedPagesLang[lang] = out
 	return out, nil
 }
 

@@ -83,6 +83,10 @@ type Server struct {
 	tunnels         map[string]activeTunnel
 	tunnelCtx       context.Context
 	tunnelCancel    context.CancelFunc
+	closeCtx        context.Context
+	closeCancel     context.CancelFunc
+	closed          atomic.Bool
+	reconciling     sync.Map // pipeline -> struct{}
 	archiverMu      sync.Mutex
 	archiverRunning bool
 	archiverDir     string
@@ -164,13 +168,18 @@ func New(o Options) (*Server, error) {
 	reg.now = o.Now
 	reg.db = db
 	tunnelCtx, tunnelCancel := context.WithCancel(context.Background())
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg: o.Config, reg: reg,
 		sourceTablesCache: make(map[string]sourceTablesCacheEntry),
 		sessions:          NewSessionStore(o.Now), limiter: NewLoginLimiter(o.Now), audit: audit,
 		actions: NewActionRegistry(), log: o.Logger, now: o.Now, version: o.Version,
-		tls:     o.Config.TLSCert != "",
-		tunnels: make(map[string]activeTunnel), tunnelCtx: tunnelCtx, tunnelCancel: tunnelCancel,
+		tls:          o.Config.TLSCert != "",
+		tunnels:      make(map[string]activeTunnel),
+		tunnelCtx:    tunnelCtx,
+		tunnelCancel: tunnelCancel,
+		closeCtx:     closeCtx,
+		closeCancel:  closeCancel,
 	}
 	s.db = db
 	s.checker = o.ConnChecker
@@ -239,6 +248,9 @@ func New(o Options) (*Server, error) {
 	s.preloadSeries()
 	s.refreshDesired()
 	s.handler = s.routes()
+	if s.lease != nil && s.lease.active.Load() {
+		s.leaseTick()
+	}
 	return s, nil
 }
 
@@ -340,9 +352,10 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			s.stopForShutdown()
 		}
 		s.flushMetrics()
-		s.releaseLease() // standby tiếp quản ngay, không chờ hết TTL
-		_ = s.audit.Close()
-		_ = s.db.st.Close()
+		_ = s.Close()
+		if s.db != nil && s.db.st != nil {
+			_ = s.db.st.Close()
+		}
 		return nil
 	case err := <-errc:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -1085,6 +1098,26 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// Close stops background tasks (reconcilers, tunnels, backup schedulers) and releases the lease.
+func (s *Server) Close() error {
+	if s == nil || s.closed.Swap(true) {
+		return nil
+	}
+	if s.closeCancel != nil {
+		s.closeCancel()
+	}
+	s.closeTunnels()
+	if s.tunnelCancel != nil {
+		s.tunnelCancel()
+	}
+	s.stopBackupSchedulers()
+	s.releaseLease()
+	if s.audit != nil {
+		_ = s.audit.Close()
+	}
+	return nil
+}
+
 func (s *Server) String() string { return fmt.Sprintf("strand web on %s", s.cfg.Listen) }
 
 // auditJobEnd ghi dòng audit khi job kết thúc: result ok khi exit 0, error khi khác 0 hoặc không quan sát được.
@@ -1101,7 +1134,7 @@ func (s *Server) auditJobEnd(j JobStatus) {
 		detail["error"] = j.Error
 	}
 	_ = s.audit.Log(AuditEntry{Action: "job.end", Pipeline: j.Pipeline, Args: append([]string{j.Kind}, j.Args...), Result: res, ExitCode: j.ExitCode, Detail: detail})
-	if j.Kind == "backup-schedule" && !j.Cancelled {
+	if j.Kind == "backup-schedule" && !j.Cancelled && !s.closed.Load() {
 		go s.reconcileBackupSchedule(j.Pipeline)
 	}
 }
