@@ -46,17 +46,18 @@ func templateFuncsForLang(lang string) template.FuncMap {
 			}
 			return T(l, key)
 		},
-		"kindsOf":    kindsOf,
-		"dur":        fmtDur,
-		"stateClass": stateClass,
-		"stateTone":  stateTone,
-		"secs":       fmtSecs,
-		"lag":        fmtLag,
-		"governor":   fmtGovernor,
-		"tblRows":    tblRowsText,
-		"tblETA":     tblETAText,
-		"num":        fmtNum,
-		"int64":      func(v int64) string { return fmtInt(v) },
+		"kindsOf":       kindsOf,
+		"retentionText": retentionWords,
+		"dur":           fmtDur,
+		"stateClass":    stateClass,
+		"stateTone":     stateTone,
+		"secs":          fmtSecs,
+		"lag":           fmtLag,
+		"governor":      fmtGovernor,
+		"tblRows":       tblRowsText,
+		"tblETA":        tblETAText,
+		"num":           fmtNum,
+		"int64":         func(v int64) string { return fmtInt(v) },
 		"clock": func(t time.Time) string {
 			if t.IsZero() {
 				return "-"
@@ -98,6 +99,7 @@ func templateFuncsForLang(lang string) template.FuncMap {
 		"i64f":                      func(v int64) float64 { return float64(v) },
 		"stateKey":                  func(s string) string { return s },
 		"icon":                      icon,
+		"sectionHome":               sectionHome,
 		"tabIcon":                   tabIcon,
 		"engines":                   engines,
 		"keyKind":                   keyKind,
@@ -476,6 +478,82 @@ type pageData struct {
 	CanOperate bool
 	CanAdmin   bool
 	Body       any
+	// Section groups related pages under one sidebar entry; SectionTabs are its pages the role may open,
+	// shown as a tab strip above the content (set by render from Active).
+	Section     string
+	SectionTabs []SectionTab
+}
+
+// SectionTab is one page of a section (a link, not an in-page tab).
+type SectionTab struct {
+	Label  string // i18n key
+	URL    string
+	Icon   string
+	Active bool
+}
+
+// sectionPage is a page that belongs to a section; Admin pages are listed for administrators only.
+type sectionPage struct {
+	Active, Label, URL, Icon string
+	Admin                    bool
+}
+
+// sections groups the pages that share one sidebar entry. The first page a role may open is the entry's link.
+var sections = map[string][]sectionPage{
+	"tools": {
+		{"archive", "nav.binlog_archive", "/archive", "logs", true},
+		{"tunnels", "nav.ssh_tunnels", "/tunnels", "server", true},
+		{"spool", "nav.spool_inspect", "/tools/spool-inspect", "search", true},
+	},
+	"backup-resources": {
+		{"backups-connections", "nav.connections", "/backups/connections", "server", false},
+		{"backups-repos", "nav.repositories", "/backups/repositories", "db", false},
+		{"backups-policies", "nav.policies", "/backups/policies", "config", false},
+		{"backups-keys", "nav.encryption_keys", "/backups/keys", "flag", true},
+		{"backups-notify", "nav.notifications", "/backups/notifications", "bolt", true},
+	},
+	"backup-reports": {
+		{"backups-reports", "nav.reports", "/backups/reports", "graph", false},
+		{"backups-activity", "nav.activity", "/backups/activity", "logs", true},
+	},
+	"system-settings": {
+		{"settings", "nav.settings", "/settings", "config", true},
+		{"db-admin", "nav.metadata_database", "/settings/db", "db", true},
+		{"mcp", "nav.mcp", "/mcp", "bolt", false},
+		{"schema-help", "nav.config_reference", "/help/schema", "table", false},
+	},
+}
+
+// sectionOf returns the section of an Active page key.
+func sectionOf(active string) string {
+	for name, pages := range sections {
+		for _, p := range pages {
+			if p.Active == active {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// sectionTabs lists the pages of a section a role may open, marking the active one.
+func sectionTabs(section, active string, admin bool) []SectionTab {
+	var out []SectionTab
+	for _, p := range sections[section] {
+		if p.Admin && !admin {
+			continue
+		}
+		out = append(out, SectionTab{Label: p.Label, URL: p.URL, Icon: p.Icon, Active: p.Active == active})
+	}
+	return out
+}
+
+// sectionHome is the sidebar link of a section for a role: its first page the role may open ("" = none).
+func sectionHome(section string, admin bool) string {
+	if t := sectionTabs(section, "", admin); len(t) > 0 {
+		return t[0].URL
+	}
+	return ""
 }
 
 type BreadcrumbItem struct {
@@ -593,6 +671,11 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 	d.Interval = int(s.samp.Interval().Seconds())
 	if d.AsOf.IsZero() {
 		d.AsOf = s.now()
+	}
+	if d.Section = sectionOf(d.Active); d.Section != "" {
+		if tabs := sectionTabs(d.Section, d.Active, d.CanAdmin); len(tabs) > 1 {
+			d.SectionTabs = tabs
+		}
 	}
 	lang := s.userLanguage(sess, nil)
 	d.Lang = lang

@@ -99,30 +99,12 @@
             {{range .Body.Connections}}
             <option value="{{.ID}}" data-engine="{{.Engine}}" data-host="{{.Host}}" data-port="{{.Port}}" data-user="{{.User}}">{{.Name}} ({{.Engine}} - {{.Host}}:{{.Port}})</option>
             {{end}}
-            <option value="custom">Manual connection settings</option>
           </select>
+          <span class="field-hint">The server to restore into, with its password stored encrypted. Missing? <a href="/backups/connections" target="_blank" rel="noopener">Add a connection</a>, then reload this page.</span>
           <span class="field-error" id="err-connection" hidden></span>
         </label>
       </div>
 
-      <div class="field-grid" id="restore-custom-conn" hidden>
-        <label class="field">
-          <span class="field-label">Host <span class="req">*</span></span>
-          <input name="target_host" id="restore-target-host" placeholder="db-restore.internal" autocomplete="off">
-        </label>
-        <label class="field">
-          <span class="field-label">Port</span>
-          <input name="target_port" id="restore-target-port" type="number" min="0" max="65535">
-        </label>
-        <label class="field">
-          <span class="field-label">User</span>
-          <input name="target_user" id="restore-target-user" autocomplete="off">
-        </label>
-        <label class="field">
-          <span class="field-label">Password environment variable</span>
-          <input name="target_password_env" id="restore-target-pw-env" class="mono" autocomplete="off">
-        </label>
-      </div>
 
       <div class="actions-row mt">
         <button type="button" class="btn small" id="restore-test-btn">Test connection</button>

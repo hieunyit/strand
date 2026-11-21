@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"strings"
 	"sync"
@@ -46,7 +47,11 @@ func TestBackupsPageAndAPI(t *testing.T) {
 	}
 
 	c, _ := e.loginOK()
-	resp, body := e.do(c, "GET", "/backups", "", nil)
+	// /backups is the dashboard; old catalog paging links land on the restore points page.
+	if resp, _ := e.do(c, "GET", "/backups?cursor=zzzz", "", nil); resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/backups/catalog" {
+		t.Fatalf("old paging link = %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp, body := e.do(c, "GET", "/backups/catalog", "", nil)
 	if resp.StatusCode != 200 || !strings.Contains(body, "bkp-204") || strings.Contains(body, "bkp-004") {
 		t.Fatalf("page 1: %d", resp.StatusCode)
 	}
@@ -56,16 +61,25 @@ func TestBackupsPageAndAPI(t *testing.T) {
 	if !strings.Contains(body, `aria-current="page"`) || !strings.Contains(body, "<caption") {
 		t.Fatal("backups page lacks nav state / table caption")
 	}
-	i := strings.Index(body, `/backups?cursor=`)
-	if i < 0 {
-		t.Fatal("full first page must link to older backups")
+	// Following the "older" links walks the whole catalog once; the last page links no further.
+	pagesSeen := 1
+	for {
+		i := strings.Index(body, `/backups/catalog?cursor=`)
+		if i < 0 {
+			break
+		}
+		link := html.UnescapeString(body[i : i+strings.Index(body[i:], `"`)])
+		if resp, body = e.do(c, "GET", link, "", nil); resp.StatusCode != 200 || strings.Contains(body, "bkp-204") {
+			t.Fatalf("page %d: %d", pagesSeen+1, resp.StatusCode)
+		}
+		if pagesSeen++; pagesSeen > 10 {
+			t.Fatal("catalog paging does not end")
+		}
 	}
-	link := body[i : i+strings.Index(body[i:], `"`)]
-	resp, body = e.do(c, "GET", link, "", nil)
-	if resp.StatusCode != 200 || !strings.Contains(body, "bkp-000") || strings.Contains(body, "bkp-204") || strings.Contains(body, "?cursor=") {
-		t.Fatalf("page 2: %d", resp.StatusCode)
+	if pagesSeen < 2 || !strings.Contains(body, "bkp-000") {
+		t.Fatalf("catalog paging stopped after %d pages without the oldest backup", pagesSeen)
 	}
-	if resp, _ := e.do(c, "GET", "/backups?cursor=zzzz", "", nil); resp.StatusCode != 400 {
+	if resp, _ := e.do(c, "GET", "/backups/catalog?cursor=zzzz", "", nil); resp.StatusCode != 400 {
 		t.Fatalf("bad cursor page = %d", resp.StatusCode)
 	}
 
@@ -120,18 +134,18 @@ func TestBackupsPageRendersManagedJob(t *testing.T) {
 	}
 	next := time.Now().UTC().Add(time.Hour)
 	data := pageData{
-		Title: "Backups",
-		Body: backupsPageBody{Jobs: []backupJobView{{
+		Title: "Backup Jobs",
+		Body: backupsJobsPageBody{Jobs: []backupJobView{{
 			Job: backup.Job{ID: "job-1", Name: "nightly", Command: "/usr/local/bin/backup",
 				EverySeconds: 3600, Enabled: true, NextRunAt: &next},
 			Process: &JobStatus{ID: "process-1", Running: false, ExitCode: intPtr(0)},
 		}}},
 	}
 	var rendered bytes.Buffer
-	if err := pages["backups"].ExecuteTemplate(&rendered, "base", data); err != nil {
+	if err := pages["backups_jobs"].ExecuteTemplate(&rendered, "base", data); err != nil {
 		t.Fatalf("render backup page: %v", err)
 	}
-	if !bytes.Contains(rendered.Bytes(), []byte("nightly")) || !bytes.Contains(rendered.Bytes(), []byte("next")) {
+	if !bytes.Contains(rendered.Bytes(), []byte("nightly")) || !bytes.Contains(rendered.Bytes(), []byte(next.Local().Format("15:04:05"))) {
 		t.Fatalf("backup job state not present in rendered page: %s", rendered.String())
 	}
 }

@@ -48,16 +48,6 @@
     return sInfo ? (sInfo.engine || '') : '';
   }
 
-  function resetTestStatus() {
-    testOK = false;
-    existingDBs = [];
-    lastTestError = '';
-    var testResult = document.getElementById('restore-test-result');
-    if (testResult) { testResult.hidden = true; testResult.textContent = ''; }
-    var status = document.getElementById('restore-test-status');
-    if (status) { status.textContent = ''; }
-  }
-
   function filterConnectionsByEngine() {
     var eng = getChosenEngine();
     var sel = document.getElementById('restore-conn-select');
@@ -65,7 +55,7 @@
     var hadSelected = sel.value;
     var selectedStillValid = false;
     Array.prototype.forEach.call(sel.options, function (opt) {
-      if (!opt.value || opt.value === 'custom') {
+      if (!opt.value) {
         opt.hidden = false;
         if (opt.value === hadSelected) { selectedStillValid = true; }
         return;
@@ -143,10 +133,6 @@
 
   // Target connection change
   function syncConnection() {
-    var sel = document.getElementById('restore-conn-select');
-    var customDiv = document.getElementById('restore-custom-conn');
-    var isCustom = sel && sel.value === 'custom';
-    if (customDiv) { customDiv.hidden = !isCustom; }
     testOK = false;
     existingDBs = [];
     var testResult = document.getElementById('restore-test-result');
@@ -565,15 +551,8 @@
 
     var connSel = (form.elements['connection_id'].value || '').trim();
     if (!connSel) {
-      if (errConn) { errConn.textContent = 'Choose a target connection or select manual settings.'; errConn.hidden = false; }
+      if (errConn) { errConn.textContent = 'Choose the target connection.'; errConn.hidden = false; }
       return false;
-    }
-    if (connSel === 'custom') {
-      var host = (form.elements['target_host'].value || '').trim();
-      if (!host) {
-        if (errConn) { errConn.textContent = 'Target host is required for manual connection.'; errConn.hidden = false; }
-        return false;
-      }
     }
 
     if (!testOK) {
@@ -625,22 +604,7 @@
 
       if (status) { status.textContent = 'Testing connection...'; }
 
-      var p;
-      if (connSel !== 'custom') {
-        p = window.strandApi('POST', '/api/v1/backup-connections/' + encodeURIComponent(connSel) + '/test');
-      } else {
-        var chosenEng = getChosenEngine();
-        var payload = {
-          name: 'Manual connection',
-          engine: chosenEng,
-          host: (form.elements['target_host'].value || '').trim(),
-          port: parseInt(form.elements['target_port'].value, 10) || 0,
-          user: (form.elements['target_user'].value || '').trim(),
-          secret_mode: 'env',
-          password_env: (form.elements['target_password_env'].value || '').trim()
-        };
-        p = window.strandApi('POST', '/api/v1/backup-connections/test', payload);
-      }
+      var p = window.strandApi('POST', '/api/v1/backup-connections/' + encodeURIComponent(connSel) + '/test');
 
       p.then(function (res) {
         return res.json().then(function (data) {
@@ -715,14 +679,8 @@
 
     var connSel = (form.elements['connection_id'].value || '').trim();
     if (srvEl) {
-      if (connSel !== 'custom') {
-        var c = connections.find(function (x) { return x.id === connSel; });
-        srvEl.textContent = c ? c.name + ' (' + c.host + ':' + c.port + ')' : connSel;
-      } else {
-        var host = (form.elements['target_host'].value || '').trim();
-        var port = (form.elements['target_port'].value || '').trim();
-        srvEl.textContent = host + (port ? ':' + port : '');
-      }
+      var c = connections.find(function (x) { return x.id === connSel; });
+      srvEl.textContent = c ? c.name + ' (' + c.host + ':' + c.port + ')' : connSel;
     }
 
     var intoDir = form.elements['restore_into'].value === 'dir';
@@ -876,14 +834,6 @@
     picklist.addEventListener('change', updateObjectCount);
   }
 
-  ['target_host', 'target_port', 'target_user', 'target_password_env'].forEach(function (name) {
-    var el = form.elements[name];
-    if (el) {
-      el.addEventListener('input', resetTestStatus);
-      el.addEventListener('change', resetTestStatus);
-    }
-  });
-
   // Submit restore form
   form.addEventListener('submit', function (ev) {
     ev.preventDefault();
@@ -915,15 +865,8 @@
       payload.target_time = normalizeTargetTime(tt);
     }
 
-    if (connSel && connSel !== 'custom') {
+    if (connSel) {
       payload.connection_id = connSel;
-    } else {
-      payload.target = {
-        host: (form.elements['target_host'].value || '').trim(),
-        port: parseInt(form.elements['target_port'].value, 10) || 0,
-        user: (form.elements['target_user'].value || '').trim(),
-        password_env: (form.elements['target_password_env'].value || '').trim()
-      };
     }
 
     if (intoDir) {

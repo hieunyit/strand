@@ -18,7 +18,7 @@
         <dt>Engine</dt><dd>{{.Body.Conn.Engine}}</dd>
         <dt>Host</dt><dd class="mono">{{.Body.Conn.Host}}{{if .Body.Conn.Port}}:{{.Body.Conn.Port}}{{end}}{{if .Body.Conn.SSHTunnel}} <span class="badge small">via SSH bastion</span>{{end}}</dd>
         <dt>User</dt><dd>{{if .Body.Conn.User}}{{.Body.Conn.User}}{{else}}-{{end}}</dd>
-        <dt>Secret</dt><dd>{{if eq .Body.Conn.SecretMode "stored"}}Stored encrypted {{if .Body.Conn.PasswordSet}}(password set){{else}}(no password){{end}}{{else}}Environment variable {{if .Body.Conn.PasswordEnv}}<code>{{.Body.Conn.PasswordEnv}}</code>{{end}}{{end}}</dd>
+        <dt>Password</dt><dd>{{if eq .Body.Conn.SecretMode "stored"}}{{if .Body.Conn.PasswordSet}}stored encrypted{{else if .Body.Conn.URISet}}in the stored URI{{else}}none{{end}}{{else}}<span class="badge small st-warn">legacy</span> environment variable <code>{{.Body.Conn.PasswordEnv}}{{.Body.Conn.URIEnv}}</code> - edit the connection and enter the password to store it encrypted{{end}}</dd>
         <dt>TLS</dt><dd>{{if .Body.Conn.TLSMode}}{{.Body.Conn.TLSMode}}{{else}}server default{{end}}</dd>
         {{with .Body.Conn.SSHTunnel}}<dt>SSH tunnel</dt><dd>{{.User}}@{{.Host}}{{if .Port}}:{{.Port}}{{end}} <span class="badge small">via SSH bastion</span></dd>{{end}}
       </dl>

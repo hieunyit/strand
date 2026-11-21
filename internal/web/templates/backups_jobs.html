@@ -99,7 +99,7 @@
           </td>
           <td>
             <div>{{.Job.Engine}}</div>
-            <div class="sub muted small">{{.Job.Method}}</div>
+            <div class="sub muted small">{{if isUnsupportedBackupMethod .Job.Method}}<span class="badge st-failed small">unsupported method (removed)</span>{{else}}{{.Job.Method}}{{end}}{{if .Job.LogArchive}} <span class="badge st-synced small">PITR</span>{{end}}</div>
           </td>
           <td class="nowrap">
             <span>{{.ScheduleText}}</span>

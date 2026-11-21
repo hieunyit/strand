@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"strand/internal/backup"
 )
@@ -80,7 +81,7 @@ func TestBackupConnectionsAndPoliciesPagesRender(t *testing.T) {
 
 	det := a.must("GET", "/backups/connections/"+id, nil, 200)
 	pageChecks(t, "connection detail", det)
-	for _, want := range []string{`class="detail-layout"`, `class="tabs"`, "Used by", "Stored encrypted", "Edit connection"} {
+	for _, want := range []string{`class="detail-layout"`, `class="tabs"`, "Used by", "stored encrypted", "Edit connection"} {
 		if !strings.Contains(det, want) {
 			t.Errorf("connection detail lacks %q", want)
 		}
@@ -281,10 +282,10 @@ func TestDumpUIPagesForHarness(t *testing.T) {
 	_ = e.st.CreateBackupRepo(ctx, backup.Repo{ID: "vault", Name: "Vault", Bucket: "vault-backups", EnvPrefix: "STRAND_BACKUP_REPO_VAULT_", LockMode: "COMPLIANCE", LockDays: 30})
 	ids := map[string]string{}
 	for _, c := range []map[string]any{
-		{"name": "shop-mysql", "engine": "mysql", "host": "mysql.internal", "secret_mode": "env", "password_env": "SHOP_PW"},
-		{"name": "legacy-mariadb", "engine": "mariadb", "host": "maria.internal", "secret_mode": "env", "password_env": "MARIA_PW"},
-		{"name": "ledger-pg", "engine": "postgres", "host": "pg.internal", "secret_mode": "env", "password_env": "PG_PW"},
-		{"name": "events-mongo", "engine": "mongodb", "host": "mongo.internal", "secret_mode": "env"},
+		{"name": "shop-mysql", "engine": "mysql", "host": "mysql.internal", "secret_mode": "stored", "password": "shop-pw"},
+		{"name": "legacy-mariadb", "engine": "mariadb", "host": "maria.internal", "secret_mode": "stored", "password": "maria-pw"},
+		{"name": "ledger-pg", "engine": "postgres", "host": "pg.internal", "secret_mode": "stored", "password": "pg-pw"},
+		{"name": "events-mongo", "engine": "mongodb", "host": "mongo.internal", "secret_mode": "stored"},
 		{"name": "stored-mysql", "engine": "mysql", "host": "stored.internal", "secret_mode": "stored", "password": canary},
 	} {
 		ids[c["name"].(string)] = connID(t, a.must("POST", "/api/v1/backup-connections", c, 201))
@@ -301,4 +302,8 @@ func TestDumpUIPagesForHarness(t *testing.T) {
 	t.Setenv(backup.EnvEncryptionKeys, "k1:"+key)
 	dumpPage(t, "wizard_keys.html", a.must("GET", "/backups/jobs/new", nil, 200))
 	dumpPage(t, "jobs.html", a.must("GET", "/backups/jobs", nil, 200))
+	dumpPage(t, "repositories.html", a.must("GET", "/backups/repositories", nil, 200))
+	seedRichBackup(t, e.st, "bkp-dump-1", "shop", "mysql", "mysqldump", backup.KindFull, e.srv.now().UTC().Add(-time.Hour), backup.Position{}, false, nil, "", nil, nil, "", nil)
+	dumpPage(t, "catalog_detail.html", a.must("GET", "/backups/catalog/bkp-dump-1", nil, 200))
+	dumpPage(t, "catalog.html", a.must("GET", "/backups/catalog", nil, 200))
 }

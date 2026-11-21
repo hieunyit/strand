@@ -28,6 +28,7 @@ import (
 func (s *Server) backupRepoRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/backup-repositories", s.auth(true, s.apiBackupRepos))
 	mux.Handle("POST /api/v1/backup-repositories", s.auth(true, s.apiBackupRepoSave(false)))
+	mux.Handle("POST /api/v1/backup-repositories/test", s.auth(true, s.apiBackupRepoTestDraft))
 	mux.Handle("GET /api/v1/backup-repositories/{id}", s.auth(true, s.apiBackupRepoGet))
 	mux.Handle("PUT /api/v1/backup-repositories/{id}", s.auth(true, s.apiBackupRepoSave(true)))
 	mux.Handle("DELETE /api/v1/backup-repositories/{id}", s.auth(true, s.apiBackupRepoDelete))
@@ -169,15 +170,23 @@ func (s *Server) repoFromRequest(req repoRequest, cur *backup.Repo) (backup.Repo
 	if cur != nil {
 		rp.ID = cur.ID
 	}
+	if rp.SecretMode == "" && req.EnvPrefix != "" && (cur == nil || cur.SecretMode != backup.RepoSecretEnv) {
+		rp.SecretMode = backup.RepoSecretEnv // refused just below with the explanation
+	}
 	if rp.SecretMode == "" {
-		switch {
-		case req.EnvPrefix != "":
-			rp.SecretMode = backup.RepoSecretEnv
-		case req.Endpoint != "" || req.AccessKey != nil || req.SecretKey != nil:
-			rp.SecretMode = backup.RepoSecretStored
-		default:
+		rp.SecretMode = backup.RepoSecretStored
+		if cur != nil && cur.SecretMode == backup.RepoSecretEnv && req.EnvPrefix != "" {
 			rp.SecretMode = backup.RepoSecretEnv
 		}
+	}
+	// Repositories are defined in the console: endpoint, region and keys are entered here and stored in the
+	// metadata database (keys sealed). Environment-variable repositories (STRAND_BACKUP_REPO_<NAME>_*) are a
+	// legacy mode: existing ones keep working and stay editable, but none can be created or switched to.
+	if rp.SecretMode == backup.RepoSecretEnv && (cur == nil || cur.SecretMode != backup.RepoSecretEnv) {
+		return rp, errors.New("repositories read from environment variables are no longer supported: enter the endpoint, access key and secret key (they are stored encrypted)")
+	}
+	if rp.SecretMode == backup.RepoSecretStored && s.db.box == nil {
+		return rp, errors.New(ErrNoSecretKey)
 	}
 	if rp.SecretMode != backup.RepoSecretStored && (req.AccessKey != nil || req.SecretKey != nil) {
 		return rp, errors.New("access_key and secret_key are only accepted with secret_mode stored (secret_mode env reads them from the Web environment)")
@@ -611,4 +620,50 @@ func (s *Server) apiBackupRepoTest(w http.ResponseWriter, r *http.Request, _ *Se
 	steps, _ := json.Marshal(res.Steps)
 	_, _ = s.db.st.SetBackupRepoTest(r.Context(), rp.ID, res.At, res.Status, detail, steps)
 	writeJSON(w, http.StatusOK, res)
+}
+
+// apiBackupRepoTestDraft runs the connectivity checklist on the repository settings of the form before they are
+// saved (POST /api/v1/backup-repositories/test, admin: it reaches an endpoint the caller typed). With an id of an
+// existing repository, blank keys mean "keep the stored ones". Nothing is stored; the keys typed are only held in
+// memory for the duration of the test.
+func (s *Server) apiBackupRepoTestDraft(w http.ResponseWriter, r *http.Request, _ *Session) {
+	if !s.needDB(w) {
+		return
+	}
+	var req repoRequest
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	var cur *backup.Repo
+	if req.ID != "" {
+		c, ok, err := s.db.st.GetBackupRepo(r.Context(), req.ID)
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "could not read the repository")
+			return
+		}
+		if ok {
+			cur = &c
+		}
+	}
+	if cur == nil {
+		req.ID = "draft-test"
+	}
+	rp, err := s.repoFromRequest(req, cur)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if rp.Name == "" {
+		rp.Name = "draft"
+	}
+	if err := backup.ValidateRepo(rp); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditBackupOp(w, r, "backup_repository.test", map[string]any{"repository": req.ID, "bucket": rp.Bucket, "endpoint": rp.Endpoint, "draft": true}) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.testRepository(ctx, rp))
 }

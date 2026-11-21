@@ -77,8 +77,8 @@
     var sc = f('scratch_connection_id');
     while (sc.options.length > 1) { sc.remove(1); }
     D.connections.forEach(function (c) {
-      var o = el('option', '', c.name + ' (' + c.host + ')' + (c.secret_mode === 'stored' ? ' - uses a stored secret, not usable here' : ''));
-      o.value = c.id; o.disabled = c.secret_mode === 'stored'; sc.appendChild(o);
+      var o = el('option', '', '[' + c.engine + '] ' + c.name + ' (' + c.host + (c.port ? ':' + c.port : '') + ')');
+      o.value = c.id; sc.appendChild(o);
     });
   }
   function renderDbs() {
@@ -317,10 +317,7 @@
     if (n('lock_days') > 0) { r.lock_days = n('lock_days'); }
     return r;
   }
-  function scratchSpec() {
-    var c = connById(v('scratch_connection_id'));
-    return c && c.secret_mode !== 'stored' ? { host: c.host, port: c.port, user: '', password_env: '' } : null;
-  }
+  function scratchID() { var c = connById(v('scratch_connection_id')); return c ? c.id : ''; }
   var SERVER_FIELDS = ['id', 'next_run_at', 'updated_at', 'run_started_at', 'run_finished_at', 'last_run_status', 'consecutive_failures', 'overrides'];
   function buildPayload() {
     var p = policy(), send = {}, body = {};
@@ -343,7 +340,8 @@
       if (!p || !p.repository || S.touched.repository) { body.repository = repo; }
       if (!p || !p.replicate_to || S.touched.replicate_to) { body.replicate_to = v('replicate_to'); }
       if (!p || S.touched.test_restore) { body.test_restore = chk('test_restore'); }
-      if (chk('test_restore')) { body.scratch = scratchSpec() || {}; } else { delete body.scratch; }
+      // The server fills scratch (host, port, user, password reference) from the saved connection.
+      if (chk('test_restore')) { body.scratch_connection_id = scratchID(); delete body.scratch; } else { delete body.scratch; delete body.scratch_connection_id; }
     }
     if (p) { body.policy_id = p.id; } else { delete body.policy_id; }
     if (customSchedule()) {
@@ -390,7 +388,7 @@
       }
       if (n('compress_level') < 0 || n('compress_level') > 4) { e.compress_level = 'Use 0 to 4.'; }
     } else if (step === 4) {
-      if (chk('test_restore') && !scratchSpec()) { e.scratch_connection_id = 'Choose a scratch connection that reads its password from an environment variable.'; }
+      if (chk('test_restore') && !scratchID()) { e.scratch_connection_id = 'Choose the connection of the scratch server.'; }
       if (n('retry_max') > 0 && n('retry_backoff') < 10) { e.retry_backoff = 'Use at least 10 seconds.'; }
       if (n('retry_max') > 20) { e.retry_max = 'At most 20 retries.'; }
     }
@@ -661,8 +659,9 @@
     }
     setv('verify_sample', JOB.verify_sample_percent || 100); setc('test_restore', JOB.test_restore);
     setv('retry_max', JOB.retry_max || 0); setv('retry_backoff', JOB.retry_backoff_seconds || 60);
-    if (JOB.test_restore && JOB.scratch) {
-      var sc = D.connections.filter(function (c) { return c.host === JOB.scratch.host && c.secret_mode !== 'stored'; })[0];
+    if (JOB.test_restore) {
+      var sc = JOB.scratch_connection_id ? connById(JOB.scratch_connection_id)
+        : (JOB.scratch ? D.connections.filter(function (c) { return c.host === JOB.scratch.host; })[0] : null);
       if (sc) { setv('scratch_connection_id', sc.id); }
     }
     for (var i = 1; i <= STEPS; i++) { S.done[i] = true; }

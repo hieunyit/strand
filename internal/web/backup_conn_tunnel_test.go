@@ -44,7 +44,7 @@ func TestConnTest_UnreachableBastion(t *testing.T) {
 	// Test unsaved connection with unreachable bastion
 	body := a.must("POST", "/api/v1/backup-connections/test", map[string]any{
 		"engine": "mysql", "host": "10.255.255.1", "port": 3306, "user": "root",
-		"secret_mode": "env",
+		"secret_mode": "stored",
 		"ssh_tunnel": map[string]any{
 			"host":            "127.0.0.1",
 			"port":            1, // unreachable port
@@ -105,7 +105,7 @@ func TestConnTest_SuccessWithTunnel(t *testing.T) {
 
 	body := a.must("POST", "/api/v1/backup-connections/test", map[string]any{
 		"engine": "mysql", "host": "db.internal", "port": 3306, "user": "root",
-		"secret_mode": "env",
+		"secret_mode": "stored",
 		"ssh_tunnel": map[string]any{
 			"host":            bastionHost,
 			"port":            bastionPort,
@@ -152,7 +152,7 @@ func TestConnSave_InvalidIdentityOrMissingKnownHosts(t *testing.T) {
 	// 1. Missing known_hosts_ref when ssh_tunnel is provided
 	resp, body := a.do("POST", "/api/v1/backup-connections", map[string]any{
 		"name": "conn-no-kh", "engine": "mysql", "host": "db.internal", "user": "root",
-		"secret_mode": "env",
+		"secret_mode": "stored",
 		"ssh_tunnel": map[string]any{
 			"host": "bastion.internal",
 			"user": "ops",
@@ -165,7 +165,7 @@ func TestConnSave_InvalidIdentityOrMissingKnownHosts(t *testing.T) {
 	// 2. IdentityRef outside STRAND_WEB_SSH_KEY_DIR
 	resp, body = a.do("POST", "/api/v1/backup-connections", map[string]any{
 		"name": "conn-bad-key", "engine": "mysql", "host": "db.internal", "user": "root",
-		"secret_mode": "env",
+		"secret_mode": "stored",
 		"ssh_tunnel": map[string]any{
 			"host":            "bastion.internal",
 			"user":            "ops",
@@ -198,7 +198,7 @@ func TestConnSave_InvalidIdentityOrMissingKnownHosts(t *testing.T) {
 	// 4. Env URI (uri_env) with ssh_tunnel refused with 400
 	resp, body = a.do("POST", "/api/v1/backup-connections", map[string]any{
 		"name": "conn-urienv-tunnel", "engine": "mongodb", "host": "mongo.internal", "user": "root",
-		"secret_mode": "env",
+		"secret_mode": "stored",
 		"uri_env":     "MONGO_URI",
 		"ssh_tunnel": map[string]any{
 			"host":            "bastion.internal",

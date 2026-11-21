@@ -334,10 +334,12 @@ func (s *Server) pageBackupsCatalog(w http.ResponseWriter, r *http.Request, sess
 	var paged bool
 	if v := r.URL.Query().Get("cursor"); v != "" {
 		c, err := backup.ParseCursor(v)
-		if err == nil {
-			f.After = &c
-			paged = true
+		if err != nil {
+			http.Error(w, "invalid cursor", http.StatusBadRequest)
+			return
 		}
+		f.After = &c
+		paged = true
 	}
 	items, err := s.backups.List(r.Context(), f)
 	if err != nil {

@@ -31,23 +31,15 @@
       </fieldset>
       <fieldset class="form-section">
         <legend class="form-section-title">Credentials</legend>
-        <p class="form-section-desc">Passwords never come back from the API or appear on any page.</p>
-        <div class="choice-cards">
-          <label class="choice"><input type="radio" name="secret_mode" value="env"{{if or (not .Conn) (eq .Conn.SecretMode "env")}} checked{{end}}>
-            <span class="choice-title">Environment variable</span><span class="choice-desc">The Web service reads the password from a variable you set on the host.</span></label>
-          {{if .StoredAllowed}}<label class="choice"><input type="radio" name="secret_mode" value="stored"{{if and .Conn (eq .Conn.SecretMode "stored")}} checked{{end}}>
-            <span class="choice-title">Store encrypted</span><span class="choice-desc">Enter the password here; it is sealed with the Web secret key.</span></label>{{end}}
-        </div>
-        {{if not .StoredAllowed}}<p class="field-hint">Stored secrets need STRAND_WEB_SECRET_KEY on the Web service.</p>{{end}}
+        <p class="form-section-desc">The password is encrypted before it is stored and never comes back from the API or appears on any page.</p>
+        <input type="hidden" name="secret_mode" value="stored">
+        {{if and .Conn (eq .Conn.SecretMode "env")}}<div class="alert alert-warn" data-conn-legacy>This connection still reads its password from the environment variable <span class="mono">{{.Conn.PasswordEnv}}{{.Conn.URIEnv}}</span> (legacy). Enter the password here and save to store it encrypted.</div>{{end}}
+        {{if not .StoredAllowed}}<div class="alert alert-error">Saving passwords needs STRAND_WEB_SECRET_KEY on the Web service.</div>{{end}}
         <div class="field-grid">
-          <label class="field" data-secret-mode="env"><span class="field-label">Password variable <span class="opt">optional</span></span>
-            <input type="text" name="password_env" maxlength="128" value="{{if .Conn}}{{.Conn.PasswordEnv}}{{end}}" placeholder="MYSQL_BACKUP_PASSWORD" spellcheck="false"><span class="field-error" hidden></span></label>
-          <label class="field" data-secret-mode="env" data-engines="mongodb"><span class="field-label">URI variable <span class="opt">optional</span></span>
-            <input type="text" name="uri_env" maxlength="128" value="{{if .Conn}}{{.Conn.URIEnv}}{{end}}" placeholder="MONGO_BACKUP_URI" spellcheck="false"><span class="field-error" hidden></span></label>
-          <label class="field" data-secret-mode="stored"><span class="field-label">Password <span class="opt">optional</span></span>
-            <input type="password" name="password" autocomplete="new-password" placeholder="{{if and .Conn .Conn.PasswordSet}}•••• set (leave empty to keep){{end}}"><span class="field-error" hidden></span></label>
-          <label class="field" data-secret-mode="stored" data-engines="mongodb"><span class="field-label">URI <span class="opt">optional</span></span>
-            <input type="password" name="uri" autocomplete="new-password" placeholder="{{if and .Conn .Conn.URISet}}•••• set (leave empty to keep){{else}}mongodb://user:pass@host/{{end}}"><span class="field-error" hidden></span></label>
+          <label class="field"><span class="field-label">Password</span>
+            <input type="password" name="password" autocomplete="new-password" maxlength="4096" placeholder="{{if and .Conn .Conn.PasswordSet}}Stored; leave empty to keep{{end}}"><span class="field-hint">Leave empty only if the server needs no password.</span><span class="field-error" hidden></span></label>
+          <label class="field" data-engines="mongodb"><span class="field-label">Connection URI <span class="opt">optional</span></span>
+            <input type="password" name="uri" autocomplete="new-password" maxlength="4096" placeholder="{{if and .Conn .Conn.URISet}}Stored; leave empty to keep{{else}}mongodb://user:pass@host/{{end}}"><span class="field-hint">Instead of host, user and password (replica sets, SRV records).</span><span class="field-error" hidden></span></label>
         </div>
       </fieldset>
       <details class="advanced">

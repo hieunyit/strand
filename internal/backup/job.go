@@ -113,6 +113,9 @@ type JobOptions struct {
 	// TestRestore restores the newest logical backup into a scratch database after each verification.
 	TestRestore bool     `json:"test_restore,omitempty"`
 	Scratch     ConnSpec `json:"scratch"`
+	// ScratchConnectionID references the saved connection of the scratch server (Scratch is then filled from
+	// it, like Conn from ConnectionID); its stored password reaches the verify process in EnvScratchPassword.
+	ScratchConnectionID string `json:"scratch_connection_id,omitempty"`
 
 	// ConnectionID references a reusable backup connection (Conn is then filled from it); PolicyID a backup
 	// policy providing the fields not listed in Overrides. Both are optional: jobs with an inline conn and
@@ -243,7 +246,7 @@ func ValidateJob(j Job) error {
 	if j.JitterSeconds < 0 || j.JitterSeconds > 3600 {
 		return bad("jitter_seconds must be between 0 and 3600")
 	}
-	for _, id := range []string{j.ConnectionID, j.PolicyID} {
+	for _, id := range []string{j.ConnectionID, j.PolicyID, j.ScratchConnectionID} {
 		if id != "" && !validID(id) {
 			return bad("invalid connection or policy id")
 		}

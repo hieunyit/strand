@@ -617,6 +617,9 @@ func newBackupVerifyCmd() *cobra.Command {
 				return err
 			}
 			if testRestore {
+				if job, err = resolveScratchConnection(ctx, st, job); err != nil {
+					return err
+				}
 				res, terr := env.TestRestore(ctx, job)
 				if terr != nil {
 					rep.Problems = append(rep.Problems, "test restore: "+terr.Error())

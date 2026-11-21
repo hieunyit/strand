@@ -490,6 +490,21 @@ func (s *Server) resolveJobRefs(ctx context.Context, j *backup.Job, present map[
 			return nil, err
 		}
 	}
+	if j.ScratchConnectionID != "" && !j.TestRestore {
+		j.ScratchConnectionID = "" // no test restore: the scratch server is not used
+	}
+	if j.ScratchConnectionID != "" {
+		c, ok, err := s.db.st.GetBackupConnection(ctx, j.ScratchConnectionID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: scratch connection %q does not exist", backup.ErrInvalid, j.ScratchConnectionID)
+		}
+		if *j, err = backup.ApplyScratchConnection(*j, c); err != nil {
+			return nil, err
+		}
+	}
 	if j.PolicyID != "" {
 		p, ok, err := s.db.st.GetBackupPolicy(ctx, j.PolicyID)
 		if err != nil {
@@ -793,6 +808,28 @@ func (s *Server) jobSecretEnv(j backup.Job) []string {
 	return []string{backup.EnvConnPassword + "=" + pw, backup.EnvConnURI + "=" + uri}
 }
 
+// scratchSecretEnv returns the environment carrying the stored password of the job's scratch connection (test
+// restores), for the verify process only. Always sets the variable (empty when there is none) so a value inherited
+// from the Web service's own environment never leaks into the child.
+func (s *Server) scratchSecretEnv(j backup.Job) []string {
+	env := []string{backup.EnvScratchPassword + "="}
+	if j.ScratchConnectionID == "" || !j.TestRestore || s.db == nil {
+		return env
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, ok, err := s.db.st.GetBackupConnection(ctx, j.ScratchConnectionID)
+	if err != nil || !ok || c.SecretMode != backup.SecretStored || !c.PasswordSet {
+		return env
+	}
+	pw, _, err := s.connSecrets(c)
+	if err != nil {
+		s.log.Error("decrypt stored scratch connection secret", "connection", c.ID, "error", err.Error())
+		return env
+	}
+	return []string{backup.EnvScratchPassword + "=" + pw}
+}
+
 // refreshJobsUsing re-materializes every job that references the connection or policy `id` (after an edit
 // of it), stores the changed ones and restarts their schedulers. It returns the ids it updated and the
 // "id: reason" of those it could not.
@@ -802,13 +839,21 @@ func (s *Server) refreshJobsUsing(ctx context.Context, kind, id string) (refresh
 		return nil, []string{"list jobs: " + err.Error()}
 	}
 	for _, j := range jobs {
-		if (kind == "connection" && j.ConnectionID != id) || (kind == "policy" && j.PolicyID != id) {
+		if (kind == "connection" && j.ConnectionID != id && j.ScratchConnectionID != id) || (kind == "policy" && j.PolicyID != id) {
 			continue
 		}
 		nj := j
 		if nj.ConnectionID != "" {
 			if c, ok, err := s.db.st.GetBackupConnection(ctx, nj.ConnectionID); err == nil && ok {
 				if nj, err = backup.ApplyConnection(nj, c); err != nil {
+					failed = append(failed, j.ID+": "+err.Error())
+					continue
+				}
+			}
+		}
+		if nj.ScratchConnectionID != "" && nj.TestRestore {
+			if c, ok, err := s.db.st.GetBackupConnection(ctx, nj.ScratchConnectionID); err == nil && ok {
+				if nj, err = backup.ApplyScratchConnection(nj, c); err != nil {
 					failed = append(failed, j.ID+": "+err.Error())
 					continue
 				}

@@ -325,7 +325,7 @@ func TestRestoreWizardPageAndRBAC(t *testing.T) {
 	// Restore API: Operator and Viewer get 403
 	req := map[string]any{
 		"backup_id":       bkp.ID,
-		"target":          map[string]any{"host": "db2"},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "new_db",
 		"confirm":         "new_db",
 	}
@@ -362,7 +362,7 @@ func TestRestorePITRWindowRejection(t *testing.T) {
 	reqBefore := map[string]any{
 		"source":          "mysql-pitr",
 		"target_time":     "2026-11-20T09:00:00Z",
-		"target":          map[string]any{"host": "db2"},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "pitr_early",
 		"confirm":         "pitr_early",
 	}
@@ -378,7 +378,7 @@ func TestRestorePITRWindowRejection(t *testing.T) {
 	reqAfter := map[string]any{
 		"source":          "mysql-pitr",
 		"target_time":     "2026-11-20T13:00:00Z",
-		"target":          map[string]any{"host": "db2"},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "pitr_late",
 		"confirm":         "pitr_late",
 	}
@@ -394,7 +394,7 @@ func TestRestorePITRWindowRejection(t *testing.T) {
 	reqValid := map[string]any{
 		"source":          "mysql-pitr",
 		"target_time":     "2026-11-20T11:30:00Z",
-		"target":          map[string]any{"host": "db2"},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "pitr_valid",
 		"confirm":         "pitr_valid",
 	}
@@ -516,7 +516,7 @@ func TestRestoreRejectThreadsOption(t *testing.T) {
 	req := map[string]any{
 		"backup_id":       bkp.ID,
 		"threads":         4,
-		"target":          map[string]any{"host": "db2"},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "restored_db",
 		"confirm":         "restored_db",
 	}
@@ -536,7 +536,7 @@ func TestRestoreRejectTargetTimeWhenNoContinuousPITRWindow(t *testing.T) {
 	req := map[string]any{
 		"source":          "mysql-nocont",
 		"target_time":     now.Add(-1 * time.Hour).Format(time.RFC3339),
-		"target":          map[string]any{"host": "db2"},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "restored_db",
 		"confirm":         "restored_db",
 	}

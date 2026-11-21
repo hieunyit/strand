@@ -55,25 +55,31 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	c, csrf := e.loginOK()
 	h := map[string]string{"X-CSRF-Token": csrf, "Content-Type": "application/json"}
 
-	// Page: dashboard, jobs with method/retention/protection, repositories, restore wizard; CSP-safe.
-	resp, body := e.do(c, "GET", "/backups", "", nil)
-	if resp.StatusCode != 200 {
-		t.Fatalf("page %d", resp.StatusCode)
-	}
-	for _, want := range []string{"Backup dashboard", "mysql-prod", "point-in-time", "last 2", "encrypted", "restore-form", "repo-form", "data-backup-action=\"restore\"", "<polyline"} {
-		if want == "point-in-time" {
-			continue // no logs archived here: the window is restore points only
+	// Pages: the dashboard, the restore points (with their Restore links), the jobs, the restore wizard and the
+	// repositories each have their own page; all CSP-safe.
+	for path, wants := range map[string][]string{
+		"/backups":              {"Backup dashboard", "mysql-prod", "<polyline"},
+		"/backups/catalog":      {"mysql-prod", "/backups/restore?backup="},
+		"/backups/jobs":         {"mysqldump"},
+		"/backups/restore":      {"restore-form"},
+		"/backups/repositories": {"bk-repo-form", "Retention (automatic deletion)", "Test connection"},
+	} {
+		resp, body := e.do(c, "GET", path, "", nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s: %d", path, resp.StatusCode)
 		}
-		if !strings.Contains(body, want) {
-			t.Fatalf("page lacks %q", want)
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s lacks %q", path, want)
+			}
 		}
-	}
-	if strings.Contains(body, " style=") || strings.Contains(body, "<style") || strings.Contains(body, "<script>") || strings.Contains(body, "onclick=") {
-		t.Fatal("inline style/script on the backups page")
+		if strings.Contains(body, " style=") || strings.Contains(body, "<style") || strings.Contains(body, "<script>") || strings.Contains(body, "onclick=") {
+			t.Fatalf("inline style/script on %s", path)
+		}
 	}
 
 	// Summary API.
-	resp, body = e.do(c, "GET", "/api/v1/backups/summary", "", nil)
+	resp, body := e.do(c, "GET", "/api/v1/backups/summary", "", nil)
 	var sum struct {
 		Sources []recoveryView `json:"sources"`
 	}
@@ -123,12 +129,15 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	if resp, _ := e.do(c, "POST", "/api/v1/backup-repositories", `{"name":"x","env_prefix":"STRAND_WEB_","bucket":"offsite-b"}`, h); resp.StatusCode != 400 {
 		t.Fatalf("reserved prefix accepted: %d", resp.StatusCode)
 	}
-	resp, body = e.do(c, "POST", "/api/v1/backup-repositories", `{"name":"Offsite","env_prefix":"STRAND_BACKUP_REPO_OFFSITE_","bucket":"offsite-b","lock_mode":"COMPLIANCE","lock_days":30}`, h)
+	if resp, _ := e.do(c, "POST", "/api/v1/backup-repositories", `{"name":"Offsite","env_prefix":"STRAND_BACKUP_REPO_OFFSITE_","bucket":"offsite-b"}`, h); resp.StatusCode != 400 {
+		t.Fatalf("new environment repository accepted: %d", resp.StatusCode)
+	}
+	resp, body = e.do(c, "POST", "/api/v1/backup-repositories", `{"name":"Offsite","endpoint":"https://s3.example.com","access_key":"ak","secret_key":"sk","bucket":"offsite-b","lock_mode":"COMPLIANCE","lock_days":30}`, h)
 	if resp.StatusCode != 200 || !strings.Contains(body, `"id": "offsite"`) {
 		t.Fatalf("repo create %d %s", resp.StatusCode, body)
 	}
 	resp, body = e.do(c, "GET", "/api/v1/backup-repositories", "", nil)
-	if !strings.Contains(body, `"configured": false`) || !strings.Contains(body, "COMPLIANCE") {
+	if !strings.Contains(body, `"configured": true`) || !strings.Contains(body, "COMPLIANCE") {
 		t.Fatalf("repos %s", body)
 	}
 	if resp, _ := e.do(c, "POST", "/api/v1/backups/bkp-wa/copy", `{"repository":"nope"}`, h); resp.StatusCode != 400 {
@@ -156,7 +165,17 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	seedRichBackup(t, st, "bkp-pitr-base", "mysql-prod", "mysql", "mysqldump", backup.KindFull, tBase, backup.Position{GTIDSet: "u:1-100"}, false, nil, "", &tBase, nil, "", nil)
 	seedRichBackup(t, st, "bkp-pitr-log", "mysql-prod", "mysql", "binlog", backup.KindLog, tLogEnd, backup.Position{}, false, nil, "", &tLogStart, &tLogEnd, "", map[string]string{"seq": "1"})
 
-	good := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","target":{"host":"db2","port":3307,"user":"restore","password_env":"RESTORE_PW"},"target_database":"shop_pitr","confirm":"shop_pitr"}`
+	resp, body = e.do(c, "POST", "/api/v1/backup-connections", `{"name":"restore-target","engine":"mysql","host":"db2","port":3307,"user":"restore","password":"restore-canary"}`, h)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("restore target connection %d %s", resp.StatusCode, body)
+	}
+	var tc struct {
+		Connection struct {
+			ID string `json:"id"`
+		} `json:"connection"`
+	}
+	_ = json.Unmarshal([]byte(body), &tc)
+	good := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","connection_id":"` + tc.Connection.ID + `","target_database":"shop_pitr","confirm":"shop_pitr"}`
 	resp, body = e.do(c, "POST", "/api/v1/backup-restores", good, h)
 	if resp.StatusCode != http.StatusAccepted || len(e.auditFor("backup.restore")) != 1 {
 		t.Fatalf("restore %d %s", resp.StatusCode, body)
@@ -169,7 +188,7 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	js, _ := e.srv.jobs.Get(pid.ProcessID)
 	waitIdle(t, e, js.Pipeline)
 	// A second restore runs concurrently (own pipeline), e.g. MySQL and PostgreSQL at the same time.
-	second := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","target":{"host":"db3"},"target_database":"shop_pitr2","confirm":"shop_pitr2"}`
+	second := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","connection_id":"` + tc.Connection.ID + `","target_database":"shop_pitr2","confirm":"shop_pitr2"}`
 	resp2, body2 := e.do(c, "POST", "/api/v1/backup-restores", second, h)
 	if resp2.StatusCode != http.StatusAccepted {
 		t.Fatalf("concurrent restore refused: %d %s", resp2.StatusCode, body2)
@@ -183,7 +202,8 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	}
 	args := strings.Join(js.Args, " ")
 	if !strings.Contains(args, "backup restore --yes --source mysql-prod --to-time 2026-11-20T10:00:00Z") ||
-		!strings.Contains(args, "--target-database shop_pitr") || !strings.Contains(args, "--target-password-env RESTORE_PW") {
+		!strings.Contains(args, "--target-host db2 --target-database shop_pitr") || !strings.Contains(args, "--target-password-env STRAND_RESTORE_TARGET_PASSWORD") ||
+		strings.Contains(args, "restore-canary") {
 		t.Fatalf("restore argv %q", args)
 	}
 
@@ -335,10 +355,10 @@ func TestStoredUnsupportedBackupJobBehaviour(t *testing.T) {
 	c, csrf := e.loginOK()
 	h := map[string]string{"X-CSRF-Token": csrf, "Content-Type": "application/json"}
 
-	// 2. The /backups UI shows it as "unsupported method (removed)".
-	resp, body := e.do(c, "GET", "/backups", "", nil)
+	// 2. The backup jobs page shows it as "unsupported method (removed)".
+	resp, body := e.do(c, "GET", "/backups/jobs", "", nil)
 	if resp.StatusCode != 200 {
-		t.Fatalf("GET /backups status %d", resp.StatusCode)
+		t.Fatalf("GET /backups/jobs status %d", resp.StatusCode)
 	}
 	if !strings.Contains(body, "unsupported method (removed)") {
 		t.Fatalf("expected UI to show 'unsupported method (removed)', got:\n%s", body)

@@ -2,35 +2,72 @@
 {{if .Body.IsAdmin}}
 <section class="drawer-panel" id="bk-repo-drawer" aria-labelledby="bk-repo-title" hidden data-bkops="repo">
   <div class="cardhead"><h2 id="bk-repo-title">New repository</h2><button class="btn small ghost" type="button" id="bk-repo-close">Close</button></div>
+  <div class="alert alert-warn" id="bk-repo-legacy" hidden>This repository still reads its endpoint and keys from environment variables (<span class="mono" id="bk-repo-legacy-prefix"></span>). Enter the endpoint and keys below to store them in the console; the environment variables are then no longer used.</div>
   <form id="bk-repo-form" class="form-stack" novalidate>
     <fieldset class="form-section">
-      <legend class="form-section-title">Location</legend>
+      <legend class="form-section-title">General</legend>
       <div class="field-grid">
-        <label class="field"><span class="field-label">Name <span class="req">*</span></span><input name="name" required maxlength="96" placeholder="offsite" autocomplete="off"></label>
-        <label class="field"><span class="field-label">Type</span><select name="kind"><option value="s3">S3-compatible (AWS, MinIO, Ceph)</option></select><small class="field-hint">Azure Blob and GCS are planned.</small></label>
-        <label class="field"><span class="field-label">Bucket <span class="req">*</span></span><input name="bucket" required autocomplete="off"></label>
-        <label class="field"><span class="field-label">Prefix</span><input name="prefix" autocomplete="off"></label>
-      </div>
-      <div class="choice-cards" role="radiogroup" aria-label="Credentials">
-        <label class="choice"><input type="radio" name="secret_mode" value="env"{{if not .Body.SecretStorage}} checked{{end}}><span class="choice-title">From the environment</span><span class="choice-desc">Endpoint and keys live in STRAND_BACKUP_REPO_&lt;NAME&gt;_* of the Web service.</span></label>
-        {{if .Body.SecretStorage}}<label class="choice"><input type="radio" name="secret_mode" value="stored" checked><span class="choice-title">Enter here</span><span class="choice-desc">Endpoint and keys are stored; the keys are sealed and never shown again.</span></label>{{end}}
-      </div>
-      <div class="field-grid">
-        <label class="field" data-bk-show="secret_mode=env" hidden><span class="field-label">Environment prefix <span class="req">*</span></span><input name="env_prefix" class="mono" value="STRAND_BACKUP_REPO_OFFSITE_" autocomplete="off"></label>
-        <label class="field" data-bk-show="secret_mode=stored"><span class="field-label">Endpoint <span class="req">*</span></span><input name="endpoint" class="mono" placeholder="https://s3.eu-west-1.amazonaws.com" autocomplete="off"></label>
-        <label class="field" data-bk-show="secret_mode=stored"><span class="field-label">Region</span><input name="region" placeholder="eu-west-1" autocomplete="off"></label>
-        <label class="field" data-bk-show="secret_mode=stored"><span class="field-label">Access key <span class="req">*</span></span><input name="access_key" type="password" autocomplete="off"></label>
-        <label class="field" data-bk-show="secret_mode=stored"><span class="field-label">Secret key <span class="req">*</span></span><input name="secret_key" type="password" autocomplete="off"></label>
+        <label class="field"><span class="field-label">Name <span class="req">*</span></span><input name="name" required maxlength="96" placeholder="offsite-s3" autocomplete="off"><small class="field-hint">Shown in jobs, policies and the catalog.</small></label>
+        <label class="field"><span class="field-label">Storage type</span><select name="kind"><option value="s3">S3-compatible object storage</option></select></label>
+        <label class="field"><span class="field-label">Provider</span><select name="provider">
+          <option value="aws">Amazon S3</option><option value="minio">MinIO</option><option value="ceph">Ceph RGW</option><option value="wasabi">Wasabi</option><option value="other">Other S3-compatible</option>
+        </select><small class="field-hint">Fills the endpoint format; any S3-compatible service works.</small></label>
       </div>
     </fieldset>
     <fieldset class="form-section">
-      <legend class="form-section-title">Immutability</legend>
+      <legend class="form-section-title">Connection</legend>
       <div class="field-grid">
-        <label class="field"><span class="field-label">Object Lock mode</span><select name="lock_mode"><option value="">None</option><option value="GOVERNANCE">GOVERNANCE</option><option value="COMPLIANCE">COMPLIANCE (immutable)</option></select><small class="field-hint">The bucket must have been created with Object Lock.</small></label>
-        <label class="field" data-bk-show="lock_mode" hidden><span class="field-label">Lock days</span><input name="lock_days" type="number" min="1" max="36500" value="30"></label>
+        <label class="field"><span class="field-label">Endpoint URL <span class="req">*</span></span><input name="endpoint" class="mono" required maxlength="512" placeholder="https://s3.eu-west-1.amazonaws.com" autocomplete="off" spellcheck="false"><small class="field-hint">https:// URL of the S3 API, without the bucket.</small></label>
+        <label class="field"><span class="field-label">Region</span><input name="region" maxlength="64" placeholder="eu-west-1" autocomplete="off" spellcheck="false"><small class="field-hint">Required by AWS; MinIO/Ceph usually accept us-east-1.</small></label>
+        <label class="check"><input type="checkbox" name="allow_insecure_local"><span>Allow plain HTTP to a local endpoint (loopback only, for testing)</span></label>
       </div>
     </fieldset>
-    <div class="form-actions"><button class="btn primary" type="submit">Add repository</button><button class="btn" type="button" id="bk-repo-cancel">Cancel</button><span class="form-status" id="bk-repo-message" role="status"></span></div>
+    <fieldset class="form-section">
+      <legend class="form-section-title">Credentials</legend>
+      <div class="field-grid">
+        <label class="field"><span class="field-label">Access key ID <span class="req">*</span></span><input name="access_key" type="password" required maxlength="1024" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span class="field-label">Secret access key <span class="req">*</span></span><input name="secret_key" type="password" required maxlength="1024" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <p class="field-hint">Keys are encrypted with the console secret key before they are stored and are never shown again. Backup processes receive them in their environment only.</p>
+    </fieldset>
+    <fieldset class="form-section">
+      <legend class="form-section-title">Storage location</legend>
+      <div class="field-grid">
+        <label class="field"><span class="field-label">Bucket <span class="req">*</span></span><input name="bucket" required maxlength="63" placeholder="company-db-backups" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span class="field-label">Path (prefix)</span><input name="prefix" maxlength="512" placeholder="strand/prod" autocomplete="off" spellcheck="false"><small class="field-hint">Folder inside the bucket; leave empty for the bucket root.</small></label>
+      </div>
+      <p class="field-hint">Backups are written to <span class="mono" id="bk-repo-path-preview">s3://bucket/&lt;source&gt;/...</span></p>
+    </fieldset>
+    <fieldset class="form-section">
+      <legend class="form-section-title">Retention (automatic deletion)</legend>
+      <p class="field-hint">Default policy for backups in this repository that belong to no job (manual and imported backups). Scheduled jobs use the retention of their policy. 0 = not used.</p>
+      <div class="field-grid">
+        <label class="field"><span class="field-label">Delete backups older than (days)</span><input name="ret_max_age_days" type="number" min="0" max="100000" value="0"></label>
+        <label class="field"><span class="field-label">Always keep the newest</span><input name="ret_keep_last" type="number" min="0" max="100000" value="0"><small class="field-hint">Backups per source, even when older than the limit.</small></label>
+        <label class="field"><span class="field-label">Keep every backup of the last (days)</span><input name="ret_keep_within_days" type="number" min="0" max="100000" value="0"></label>
+        <label class="field"><span class="field-label">Daily backups to keep</span><input name="ret_keep_daily" type="number" min="0" max="100000" value="0"></label>
+        <label class="field"><span class="field-label">Weekly backups to keep</span><input name="ret_keep_weekly" type="number" min="0" max="100000" value="0"></label>
+        <label class="field"><span class="field-label">Monthly backups to keep</span><input name="ret_keep_monthly" type="number" min="0" max="100000" value="0"></label>
+        <label class="field"><span class="field-label">Yearly backups to keep</span><input name="ret_keep_yearly" type="number" min="0" max="100000" value="0"></label>
+      </div>
+    </fieldset>
+    <fieldset class="form-section">
+      <legend class="form-section-title">Immutability (Object Lock)</legend>
+      <div class="field-grid">
+        <label class="field"><span class="field-label">Object Lock mode</span><select name="lock_mode"><option value="">None</option><option value="GOVERNANCE">GOVERNANCE (admins with bypass permission can delete)</option><option value="COMPLIANCE">COMPLIANCE (nobody can delete until it expires)</option></select><small class="field-hint">The bucket must have been created with Object Lock enabled; the connection test checks it.</small></label>
+        <label class="field" data-bk-show="lock_mode" hidden><span class="field-label">Lock period (days) <span class="req">*</span></span><input name="lock_days" type="number" min="1" max="36500" value="30"></label>
+      </div>
+    </fieldset>
+    <section class="subcard" id="bk-repo-draft-result" hidden aria-live="polite">
+      <table class="data-table grid" id="bk-repo-draft-steps"><caption class="sr-only">Connection test of the settings above</caption>
+        <thead><tr><th>Step</th><th>Result</th><th>Detail</th><th>Latency</th></tr></thead><tbody></tbody></table>
+    </section>
+    <div class="form-actions">
+      <button class="btn primary" type="submit">Add repository</button>
+      <button class="btn" type="button" id="bk-repo-draft-test">Test connection</button>
+      <button class="btn ghost" type="button" id="bk-repo-cancel">Cancel</button>
+      <span class="form-status" id="bk-repo-message" role="status"></span>
+    </div>
   </form>
 </section>
 {{end}}
@@ -38,17 +75,18 @@
   <div class="cardhead"><h2>Repositories</h2>{{if .Body.IsAdmin}}<button class="btn primary small" type="button" id="bk-repo-new">{{icon "plus"}}<span>New repository</span></button>{{end}}</div>
   {{if .Body.Repos}}
   <div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Backup repositories</caption>
-    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Credentials</th><th>Protection</th><th>Backups</th><th>Used</th><th>Last test</th></tr></thead>
+    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Credentials</th><th>Retention</th><th>Protection</th><th>Backups</th><th>Used</th><th>Last test</th></tr></thead>
     <tbody>{{range .Body.Repos}}<tr data-bk-repo="{{.ID}}">
       <td><a href="/backups/repositories/{{.ID}}">{{.Name}}</a><div class="small mono">{{.ID}}</div></td>
       <td>{{.KindOrS3}}</td>
       <td class="mono small">{{.Bucket}}{{if .Prefix}}/{{.Prefix}}{{end}}{{if .Endpoint}}<div>{{.Endpoint}}</div>{{end}}</td>
-      <td>{{if .Stored}}<span class="badge">stored</span>{{if .SecretKeySet}} <span class="small">keys set</span>{{end}}{{else}}<span class="badge">environment</span> <span class="small mono">{{.EnvPrefix}}</span>{{end}}{{if not .Configured}} <span class="badge st-failed">not configured</span>{{end}}</td>
+      <td>{{if .Stored}}<span class="badge">stored encrypted</span>{{else}}<span class="badge st-warn">legacy: environment</span> <span class="small mono">{{.EnvPrefix}}</span>{{end}}{{if not .Configured}} <span class="badge st-failed">not configured</span>{{end}}</td>
+      <td class="small">{{retentionText .Retention}}</td>
       <td>{{if .Immutable}}<span class="badge st-synced">immutable</span>{{else if .LockMode}}<span class="badge">{{.LockMode}}</span>{{else}}-{{end}}{{if .LockMode}} <span class="small">{{.LockDays}} d</span>{{end}}</td>
       <td>{{.Backups}}{{if .Copies}} <span class="small">({{.Copies}} copies)</span>{{end}}</td>
       <td>{{bytes64 .UsedBytes}}</td>
       <td>{{if .LastTestAt}}<span class="badge {{if eq .LastTestStatus "ok"}}st-synced{{else}}st-failed{{end}}">{{.LastTestStatus}}</span> <span class="small nowrap">{{ts (derefTime .LastTestAt)}}</span>{{else}}-{{end}}</td>
     </tr>{{end}}</tbody></table></div>
-  {{else}}<div class="empty-state"><b>No repositories yet</b><span>Jobs without a repository use the default STRAND_BACKUP_S3_* environment repository. Add one for off-site copies or Object Lock.</span></div>{{end}}
+  {{else}}<div class="empty-state"><b>No repositories yet</b><span>Add an S3-compatible repository (endpoint, keys, bucket and path) before creating backup jobs. Add a second one for off-site copies or Object Lock.</span></div>{{end}}
 </section>
 {{end}}

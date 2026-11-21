@@ -78,8 +78,9 @@ func sourceHost(j backup.Job) string {
 // (host, port, user, secret variable names), so connection edits apply to the next run. A stored secret
 // is handed to this process by the Web process in EnvConnPassword/EnvConnURI.
 func resolveJobConnection(ctx context.Context, st store.Store, j backup.Job, getenv func(string) string) (backup.Job, error) {
-	if j.ConnectionID == "" {
-		return j, nil
+	j, err := resolveScratchConnection(ctx, st, j)
+	if err != nil || j.ConnectionID == "" {
+		return j, err
 	}
 	c, ok, err := st.GetBackupConnection(ctx, j.ConnectionID)
 	if err != nil {
@@ -98,6 +99,23 @@ func resolveJobConnection(ctx context.Context, st store.Store, j backup.Job, get
 			"(the Web process passes the decrypted secret to the backup process)", c.Name)
 	}
 	return out, nil
+}
+
+// resolveScratchConnection refreshes the scratch server of a job with test restores from its saved connection.
+// Its stored password reaches this process in EnvScratchPassword (set by the Web process for verify runs only),
+// so a missing value is not an error here: the test restore reports the failed login.
+func resolveScratchConnection(ctx context.Context, st store.Store, j backup.Job) (backup.Job, error) {
+	if j.ScratchConnectionID == "" || !j.TestRestore {
+		return j, nil
+	}
+	c, ok, err := st.GetBackupConnection(ctx, j.ScratchConnectionID)
+	if err != nil {
+		return j, fmt.Errorf("read scratch connection: %w", err)
+	}
+	if !ok {
+		return j, fmt.Errorf("scratch connection %q of job %s no longer exists", j.ScratchConnectionID, j.ID)
+	}
+	return backup.ApplyScratchConnection(j, c)
 }
 
 // nextAfterRun computes the due time that follows a run (or a missed run) for schedule kinds other than

@@ -25,20 +25,13 @@ type AttentionItem struct {
 	EditURL  string
 }
 
+// backupsPageBody is the backup dashboard (/backups).
 type backupsPageBody struct {
-	Backups    []backup.Record
-	Message    string
-	NextCursor string
-	Paged      bool
-	Jobs       []backupJobView
-	Sources    []dashboardRow
-	Repos      []backup.Repo
-	Checks     []backup.CheckResult
-	Methods    []string
-
-	// MethodOptions are the built-in methods with their engine, so the job form lists only the methods
-	// of the engine the operator picked.
-	MethodOptions []backupMethodOption
+	Message string
+	Jobs    []backupJobView
+	Sources []dashboardRow
+	Repos   []backup.Repo
+	Checks  []backup.CheckResult
 
 	// Overview stat tiles and banners (spec 4.1)
 	StatProtectedSources string
@@ -134,108 +127,89 @@ func (s *Server) dashboardRows(ctx context.Context) []dashboardRow {
 const backupsPageSize = 200
 
 func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Session) {
+	// /backups is the backup dashboard; the catalog, jobs, restore and repositories have their own pages. Old
+	// catalog paging links (/backups?cursor=...) land on the catalog.
+	if r.URL.Query().Get("cursor") != "" {
+		http.Redirect(w, r, "/backups/catalog", http.StatusSeeOther)
+		return
+	}
 	b := backupsPageBody{}
 	if s.backups == nil {
 		b.Message = "Central backup catalog is unavailable: configure the web metadata database."
 	} else {
-		f := backup.Filter{Limit: backupsPageSize}
-		if v := r.URL.Query().Get("cursor"); v != "" {
-			c, err := backup.ParseCursor(v)
-			if err != nil {
-				http.Error(w, "invalid cursor", http.StatusBadRequest)
-				return
-			}
-			f.After, b.Paged = &c, true
-		}
-		items, err := s.backups.List(r.Context(), f)
-		if err != nil {
-			s.log.Error("list backup catalog", "error", err)
-			b.Message = "Could not read the backup catalog."
-		} else {
-			b.Backups = items
-			b.NextCursor = backup.NextCursor(items, f.Limit)
-		}
+		var err error
 		b.Jobs, err = s.backupJobViews(r.Context())
 		if err != nil {
 			b.Message = "Could not read backup jobs."
 		}
-		if !b.Paged {
-			b.Sources = s.dashboardRows(r.Context())
-			b.Repos, _ = s.db.st.ListBackupRepos(r.Context())
-			b.Checks, _ = s.backups.Checks(r.Context(), "", 20)
+		b.Sources = s.dashboardRows(r.Context())
+		b.Repos, _ = s.db.st.ListBackupRepos(r.Context())
+		b.Checks, _ = s.backups.Checks(r.Context(), "", 20)
 
-			h := s.backupHealthFrom(r.Context(), b.Jobs, b.Sources, b.Checks, b.Repos)
-			b.StatProtectedSources = h.ProtectedText()
-			b.IsStandby = !s.isActive()
-			b.NoRepo, b.NoKey = h.NoRepo, h.NoKey
-			b.StatFailingJobs, b.NeedsAttention = h.Failing, h.Attention
-			b.StatLastTestRestore, b.LastTestRestoreOK = h.LastTestRestore, h.LastTestRestoreOK
-			b.RPOBreachCount = h.RPOBreaches
-			b.StatRPOBreaches = "-"
-			if h.RPOKnown {
-				b.StatRPOBreaches = fmt.Sprintf("%d", h.RPOBreaches)
-			}
+		h := s.backupHealthFrom(r.Context(), b.Jobs, b.Sources, b.Checks, b.Repos)
+		b.StatProtectedSources = h.ProtectedText()
+		b.IsStandby = !s.isActive()
+		b.NoRepo, b.NoKey = h.NoRepo, h.NoKey
+		b.StatFailingJobs, b.NeedsAttention = h.Failing, h.Attention
+		b.StatLastTestRestore, b.LastTestRestoreOK = h.LastTestRestore, h.LastTestRestoreOK
+		b.RPOBreachCount = h.RPOBreaches
+		b.StatRPOBreaches = "-"
+		if h.RPOKnown {
+			b.StatRPOBreaches = fmt.Sprintf("%d", h.RPOBreaches)
+		}
 
-			now := time.Now().UTC()
-			since24h := now.Add(-24 * time.Hour)
-			allRuns, _ := s.db.st.ListBackupRuns(r.Context(), store.BackupRunFilter{Limit: 2000})
-			succ24h := 0
-			total24h := 0
-			// Only finished runs count: a running or cancelled run is neither a success nor a failure.
-			finishedBad := func(st string) bool {
-				return st == string(backup.RunStatusFailed) || st == backup.RunStatusPartial || st == string(backup.RunStatusMissed)
+		now := time.Now().UTC()
+		since24h := now.Add(-24 * time.Hour)
+		allRuns, _ := s.db.st.ListBackupRuns(r.Context(), store.BackupRunFilter{Limit: 2000})
+		succ24h := 0
+		total24h := 0
+		// Only finished runs count: a running or cancelled run is neither a success nor a failure.
+		finishedBad := func(st string) bool {
+			return st == string(backup.RunStatusFailed) || st == backup.RunStatusPartial || st == string(backup.RunStatusMissed)
+		}
+		for _, run := range allRuns {
+			if run.StartedAt.After(since24h) && (run.Status == backup.RunStatusSuccess || finishedBad(run.Status)) {
+				total24h++
+				if run.Status == backup.RunStatusSuccess {
+					succ24h++
+				}
 			}
-			for _, run := range allRuns {
-				if run.StartedAt.After(since24h) && (run.Status == backup.RunStatusSuccess || finishedBad(run.Status)) {
-					total24h++
+		}
+		if total24h > 0 {
+			b.StatSuccessRate = fmt.Sprintf("%d%%", int(float64(succ24h)/float64(total24h)*100))
+		} else {
+			b.StatSuccessRate = "-" // no run in 24 h is not a 100% success rate
+		}
+
+		// Total over the whole catalog (per repository), not just the page of backups shown below.
+		var totalStorage int64
+		if usage, err := s.db.st.BackupRepoUsage(r.Context()); err == nil {
+			for _, u := range usage {
+				totalStorage += u.Bytes
+			}
+		}
+		b.StatStorageUsed = fmtBytes(float64(totalStorage))
+
+		days := make([]BackupDayStat, 14)
+		for i := 0; i < 14; i++ {
+			d := now.AddDate(0, 0, -13+i).Truncate(24 * time.Hour)
+			days[i] = BackupDayStat{Date: d}
+		}
+		for _, run := range allRuns {
+			runDate := run.StartedAt.UTC().Truncate(24 * time.Hour)
+			for i := range days {
+				if days[i].Date.Equal(runDate) {
 					if run.Status == backup.RunStatusSuccess {
-						succ24h++
+						days[i].Success++
+					} else if finishedBad(run.Status) {
+						days[i].Failed++
 					}
+					days[i].Bytes += run.BytesWritten
+					break
 				}
-			}
-			if total24h > 0 {
-				b.StatSuccessRate = fmt.Sprintf("%d%%", int(float64(succ24h)/float64(total24h)*100))
-			} else {
-				b.StatSuccessRate = "-" // no run in 24 h is not a 100% success rate
-			}
-
-			// Total over the whole catalog (per repository), not just the page of backups shown below.
-			var totalStorage int64
-			if usage, err := s.db.st.BackupRepoUsage(r.Context()); err == nil {
-				for _, u := range usage {
-					totalStorage += u.Bytes
-				}
-			}
-			b.StatStorageUsed = fmtBytes(float64(totalStorage))
-
-			days := make([]BackupDayStat, 14)
-			for i := 0; i < 14; i++ {
-				d := now.AddDate(0, 0, -13+i).Truncate(24 * time.Hour)
-				days[i] = BackupDayStat{Date: d}
-			}
-			for _, run := range allRuns {
-				runDate := run.StartedAt.UTC().Truncate(24 * time.Hour)
-				for i := range days {
-					if days[i].Date.Equal(runDate) {
-						if run.Status == backup.RunStatusSuccess {
-							days[i].Success++
-						} else if finishedBad(run.Status) {
-							days[i].Failed++
-						}
-						days[i].Bytes += run.BytesWritten
-						break
-					}
-				}
-			}
-			b.Chart14Day = Backup14DayChart(days, 640, 180)
-		}
-		b.Methods = []string{backup.MethodCustom, backup.MethodMySQLDump, backup.MethodMariaDBDump, backup.MethodMydumper,
-			backup.MethodPGDump, backup.MethodPGBaseBackup, backup.MethodMongodump}
-		for _, m := range b.Methods {
-			if engine := backup.MethodEngine(m); engine != "" {
-				b.MethodOptions = append(b.MethodOptions, backupMethodOption{Value: m, Engine: engine})
 			}
 		}
+		b.Chart14Day = Backup14DayChart(days, 640, 180)
 	}
 	s.render(w, "backups", sess, pageData{Title: "Backups", Active: "backups", Refresh: 10, Body: b})
 }

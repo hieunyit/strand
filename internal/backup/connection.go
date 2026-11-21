@@ -14,6 +14,9 @@ import (
 const (
 	EnvConnPassword = "STRAND_BACKUP_CONN_PASSWORD"
 	EnvConnURI      = "STRAND_BACKUP_CONN_URI"
+	// EnvScratchPassword carries the stored password of a job's scratch connection (test restores) to the
+	// verify process.
+	EnvScratchPassword = "STRAND_BACKUP_SCRATCH_PASSWORD"
 )
 
 // Connection engines (MariaDB is a distinct connection engine; its catalog engine is mysql).
@@ -195,6 +198,36 @@ func ApplyConnection(j Job, c Connection) (Job, error) {
 	if j.Source == "" {
 		j.Source = c.Name
 	}
+	return j, nil
+}
+
+// ApplyScratchConnection fills the job's scratch server (test restores) from a saved connection: host, port,
+// user, and EnvScratchPassword when the connection stores its password (the legacy env mode keeps its variable).
+func ApplyScratchConnection(j Job, c Connection) (Job, error) {
+	if j.IsCustom() {
+		return j, fmt.Errorf("%w: custom jobs do not run test restores", ErrInvalid)
+	}
+	if e := j.Engine(); e != c.CatalogEngine() {
+		return j, fmt.Errorf("%w: the scratch server of a %s job must be a %s connection, %q is %s", ErrInvalid, j.Method, e, c.Name, c.Engine)
+	}
+	if c.SSHTunnel != nil {
+		return j, fmt.Errorf("%w: the scratch connection %q uses an SSH tunnel; test restores need a direct connection", ErrInvalid, c.Name)
+	}
+	if c.Host == "" {
+		return j, fmt.Errorf("%w: the scratch connection %q has no host", ErrInvalid, c.Name)
+	}
+	j.Scratch = ConnSpec{Host: c.Host, Port: c.Port, User: c.User}
+	if j.Scratch.Port == 0 {
+		j.Scratch.Port = DefaultPort(c.Engine)
+	}
+	if c.SecretMode == SecretStored {
+		if c.PasswordSet {
+			j.Scratch.PasswordEnv = EnvScratchPassword
+		}
+	} else {
+		j.Scratch.PasswordEnv = c.PasswordEnv
+	}
+	j.ScratchConnectionID = c.ID
 	return j, nil
 }
 

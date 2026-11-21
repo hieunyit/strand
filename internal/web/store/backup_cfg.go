@@ -56,7 +56,7 @@ type BackupConfigStore interface {
 func jobsUsing(jobs []backup.Job, kind, id string) []string {
 	var out []string
 	for _, j := range jobs {
-		if (kind == "connection" && j.ConnectionID == id) || (kind == "policy" && j.PolicyID == id) {
+		if (kind == "connection" && (j.ConnectionID == id || j.ScratchConnectionID == id)) || (kind == "policy" && j.PolicyID == id) {
 			out = append(out, j.ID)
 		}
 	}

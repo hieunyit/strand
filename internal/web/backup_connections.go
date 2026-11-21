@@ -65,11 +65,26 @@ func (s *Server) connFromRequest(req connRequest, cur *backup.Connection) (backu
 	c := backup.Connection{ID: req.ID, Name: req.Name, Engine: req.Engine, Host: req.Host, Port: req.Port, User: req.User,
 		SecretMode: req.SecretMode, PasswordEnv: req.PasswordEnv, URIEnv: req.URIEnv, TLSMode: req.TLSMode,
 		CACertPEM: req.CACertPEM, SSHTunnel: req.SSHTunnel, Labels: req.Labels}
-	if c.SecretMode == "" {
-		c.SecretMode = backup.SecretEnv
-	}
 	if cur != nil {
 		c.ID = cur.ID
+	}
+	if c.SecretMode == "" && (req.PasswordEnv != "" || req.URIEnv != "") && (cur == nil || cur.SecretMode != backup.SecretEnv) {
+		c.SecretMode = backup.SecretEnv // refused just below with the explanation
+	}
+	if c.SecretMode == "" {
+		c.SecretMode = backup.SecretStored
+		if cur != nil && cur.SecretMode == backup.SecretEnv && (req.PasswordEnv != "" || req.URIEnv != "") {
+			c.SecretMode = backup.SecretEnv
+		}
+	}
+	// Passwords and URIs are entered in the console and stored sealed in the metadata database. Reading them from
+	// environment variables of the Web service is a legacy mode: existing connections keep working and stay
+	// editable, but no connection can be created in, or switched to, that mode.
+	if c.SecretMode == backup.SecretEnv && (cur == nil || cur.SecretMode != backup.SecretEnv) {
+		return c, errors.New("passwords read from environment variables are no longer supported: enter the password (it is stored encrypted)")
+	}
+	if c.SecretMode == backup.SecretStored && s.db.box == nil {
+		return c, errors.New(ErrNoSecretKey)
 	}
 	if c.SecretMode != backup.SecretStored && (req.Password != nil || req.URI != nil) {
 		return c, errors.New("password and uri are only accepted with secret_mode stored (secret_mode env reads them from the Web environment)")
@@ -161,7 +176,7 @@ func (s *Server) connsUsedBy(ctx context.Context, kind, id string) ([]string, er
 	}
 	var out []string
 	for _, j := range jobs {
-		if (kind == "connection" && j.ConnectionID == id) || (kind == "policy" && j.PolicyID == id) {
+		if (kind == "connection" && (j.ConnectionID == id || j.ScratchConnectionID == id)) || (kind == "policy" && j.PolicyID == id) {
 			out = append(out, j.ID)
 		}
 	}
@@ -336,11 +351,15 @@ func (s *Server) checkJobsAccept(ctx context.Context, c backup.Connection) error
 		return err
 	}
 	for _, j := range jobs {
-		if j.ConnectionID != c.ID {
-			continue
+		if j.ConnectionID == c.ID {
+			if _, err := backup.ApplyConnection(j, c); err != nil {
+				return errors.New("job " + j.ID + " uses this connection: " + err.Error())
+			}
 		}
-		if _, err := backup.ApplyConnection(j, c); err != nil {
-			return errors.New("job " + j.ID + " uses this connection: " + err.Error())
+		if j.ScratchConnectionID == c.ID && j.TestRestore {
+			if _, err := backup.ApplyScratchConnection(j, c); err != nil {
+				return errors.New("job " + j.ID + " uses this connection for test restores: " + err.Error())
+			}
 		}
 	}
 	return nil

@@ -86,8 +86,18 @@ func (s *Server) startBackupOp(kind, pipeline string, args ...string) (string, e
 
 // backupOpEnv: the log archiver reads the source database, so for a job on a stored-secret connection it
 // receives the decrypted secret in its environment (other operations never touch the source).
+// A verify with --test-restore receives only the stored password of the job's scratch connection.
 func (s *Server) backupOpEnv(args []string) []string {
-	if len(args) < 3 || args[0] != "log-archive" || s.db == nil {
+	if len(args) < 3 || (args[0] != "log-archive" && args[0] != "verify") || s.db == nil {
+		return nil
+	}
+	testRestore := false
+	for _, a := range args {
+		if a == "--test-restore" {
+			testRestore = true
+		}
+	}
+	if args[0] == "verify" && !testRestore {
 		return nil
 	}
 	for i := 1; i+1 < len(args); i++ {
@@ -95,6 +105,9 @@ func (s *Server) backupOpEnv(args []string) []string {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if j, ok, err := s.db.st.GetBackupJob(ctx, args[i+1]); err == nil && ok {
+				if args[0] == "verify" {
+					return s.scratchSecretEnv(j)
+				}
 				return s.jobSecretEnv(j)
 			}
 		}
@@ -462,6 +475,12 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		}
 	}
 
+	// A database restore goes to a saved connection (its password stored encrypted, its SSH tunnel and TLS
+	// settings applied); typing a host and a password variable here is no longer supported.
+	if req.TargetDir == "" && req.ConnectionID == "" {
+		writeErr(w, http.StatusBadRequest, "choose the target connection (connection_id): a restore into a database uses a saved connection")
+		return
+	}
 	var extraEnv []string
 	var tunnelArgs []string
 	if req.ConnectionID != "" && s.db != nil && s.db.st != nil {

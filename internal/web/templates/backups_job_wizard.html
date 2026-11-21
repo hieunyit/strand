@@ -83,7 +83,7 @@
         <p class="form-section-desc">Where backups are written and how they are protected.</p>
         <div class="field" id="wiz-repo-field" data-custom-off><span class="field-label">Repository <span class="req" aria-hidden="true">*</span> <span class="badge override small" data-override="repository" hidden>overridden</span></span>
           <div class="choice-cards" id="wiz-repos" role="radiogroup" aria-label="Repository"></div>
-          <div class="alert alert-warn" id="wiz-no-repo" hidden>No repository exists yet. <a href="/backups">Create one on the Backups page</a>, then reload this wizard.</div>
+          <div class="alert alert-warn" id="wiz-no-repo" hidden>No repository exists yet. <a href="/backups/repositories">Create one under Backup resources, Repositories</a>, then reload this wizard.</div>
           <span class="field-error" hidden></span></div>
         <div class="field-grid">
           <label class="field" data-custom-off><span class="field-label">Second copy <span class="opt">optional</span> <span class="badge override small" data-override="replicate_to" hidden>overridden</span></span>
@@ -124,7 +124,7 @@
         </div>
         <div class="field" id="wiz-scratch-field" hidden><span class="field-label">Scratch connection <span class="req" aria-hidden="true">*</span></span>
           <select name="scratch_connection_id"><option value="">Choose a connection</option></select>
-          <span class="field-hint">The newest dump is restored here after each verification. Only connections that read their password from an environment variable can be used.</span><span class="field-error" hidden></span></div>
+          <span class="field-hint">A server of the same engine where the newest dump is restored into a temporary database after each verification (then dropped). Use a server other than production.</span><span class="field-error" hidden></span></div>
         <div class="field-grid">
           <label class="field"><span class="field-label">Retries after a failure <span class="opt">optional</span> <span class="badge override small" data-override="retry_max" hidden>overridden</span></span><input type="number" name="retry_max" min="0" max="20" value="0"><span class="field-error" hidden></span></label>
           <label class="field" data-show-retry><span class="field-label">Back-off (seconds) <span class="opt">optional</span></span><input type="number" name="retry_backoff" min="10" value="60"><span class="field-error" hidden></span></label>

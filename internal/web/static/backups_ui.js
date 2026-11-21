@@ -55,8 +55,8 @@
   }
   var ERR_FIELDS = [
     [/known_hosts/i, 'ssh_known_hosts_ref'], [/identity_file|identity_ref/i, 'ssh_identity_ref'],
-    [/ssh_tunnel|ssh/i, 'ssh_host'], [/ca_cert/i, 'ca_cert_pem'], [/tls/i, 'tls_mode'], [/password|secret/i, 'password_env'],
-    [/uri/i, 'uri_env'], [/port/i, 'port'], [/host/i, 'host'], [/engine/i, 'engine'], [/name/i, 'name']
+    [/ssh_tunnel|ssh/i, 'ssh_host'], [/ca_cert/i, 'ca_cert_pem'], [/tls/i, 'tls_mode'], [/password|secret/i, 'password'],
+    [/uri/i, 'uri'], [/port/i, 'port'], [/host/i, 'host'], [/engine/i, 'engine'], [/name/i, 'name']
   ];
   // Maps an API error message onto a field of the form when it names one; returns the field or ''.
   function attachError(form, msg, extra) {
@@ -281,38 +281,25 @@
 
   // ---- connection form ----
   var DEFAULT_PORT = { mysql: 3306, mariadb: 3306, postgres: 5432, mongodb: 27017 };
-  var PASS_ENV = { mysql: 'MYSQL_BACKUP_PASSWORD', mariadb: 'MYSQL_BACKUP_PASSWORD', postgres: 'PGPASSWORD_BACKUP', mongodb: 'MONGO_BACKUP_PASSWORD' };
   function connForm() { return document.getElementById('conn-form'); }
-  function checkedVal(f, name) { var c = f.querySelector('input[name="' + name + '"]:checked'); return c ? c.value : ''; }
   function syncConn(f) {
     if (!f) { return; }
-    var engine = f.elements.namedItem('engine').value, mode = checkedVal(f, 'secret_mode') || 'env';
-    $$('[data-engines]', f).forEach(function (n) { n.setAttribute('data-hide-engine', n.getAttribute('data-engines').split(/\s+/).indexOf(engine) < 0 ? '1' : ''); });
-    $$('[data-secret-mode]', f).forEach(function (n) {
-      var hide = n.getAttribute('data-secret-mode') !== mode || n.getAttribute('data-hide-engine') === '1';
-      setHidden(n, hide);
-    });
+    var engine = f.elements.namedItem('engine').value;
+    $$('[data-engines]', f).forEach(function (n) { setHidden(n, n.getAttribute('data-engines').split(/\s+/).indexOf(engine) < 0); });
     var port = f.elements.namedItem('port'), cur = Number(port.value) || 0;
     port.placeholder = String(DEFAULT_PORT[engine] || '');
     if (!f.hasAttribute('data-port-touched') && (cur === 0 || [3306, 5432, 27017].indexOf(cur) >= 0)) { port.value = DEFAULT_PORT[engine] || ''; }
-    var pe = f.elements.namedItem('password_env');
-    if (pe) { pe.placeholder = PASS_ENV[engine] || ''; }
     var req = $('[data-host-req]', f);
     if (req) { req.hidden = engine === 'mongodb'; }
   }
   function connBody(f, forTest) {
     var e = f.elements, g = function (n) { var c = e.namedItem(n); return c && !c.disabled ? String(c.value || '').trim() : ''; };
-    var engine = g('engine'), mode = checkedVal(f, 'secret_mode') || 'env';
-    var body = { name: g('name'), engine: engine, host: g('host'), port: Number(g('port')) || 0, user: g('user'), secret_mode: mode,
+    var engine = g('engine');
+    var body = { name: g('name'), engine: engine, host: g('host'), port: Number(g('port')) || 0, user: g('user'), secret_mode: 'stored',
       tls_mode: g('tls_mode'), ca_cert_pem: g('ca_cert_pem') };
-    if (mode === 'env') {
-      body.password_env = g('password_env');
-      if (engine === 'mongodb') { body.uri_env = g('uri_env'); }
-    } else {
-      var pw = e.namedItem('password'), uri = e.namedItem('uri');
-      if (pw && !pw.disabled && pw.value !== '') { body.password = pw.value; }
-      if (uri && !uri.disabled && uri.value !== '') { body.uri = uri.value; }
-    }
+    var pw = e.namedItem('password'), uri = e.namedItem('uri');
+    if (pw && !pw.disabled && pw.value !== '') { body.password = pw.value; }
+    if (uri && !uri.disabled && engine === 'mongodb' && uri.value !== '') { body.uri = uri.value; }
     if (g('ssh_host')) {
       body.ssh_tunnel = { host: g('ssh_host'), port: Number(g('ssh_port')) || 0, user: g('ssh_user'), identity_ref: g('ssh_identity_ref'), known_hosts_ref: g('ssh_known_hosts_ref') };
     }
@@ -323,7 +310,7 @@
   function validateConn(f) {
     var b = connBody(f), errs = {};
     if (!b.name) { errs.name = 'Name is required.'; }
-    var hasURI = b.engine === 'mongodb' && (b.uri_env || b.uri || (f.getAttribute('data-conn-id') && b.secret_mode === 'stored'));
+    var hasURI = b.engine === 'mongodb' && (b.uri || f.getAttribute('data-conn-id'));
     if (!b.host && !hasURI) { errs.host = 'Host is required.'; }
     if (b.port && (b.port < 1 || b.port > 65535)) { errs.port = 'Port must be between 1 and 65535.'; }
     if (b.ssh_tunnel && b.ssh_tunnel.host) {
@@ -345,8 +332,8 @@
     var alertEl = $('#conn-form-error'), status = $('#conn-form-status'), result = $('#conn-test-result');
     syncConn(f);
     f.removeAttribute('data-dirty');
-    f.addEventListener('change', function (ev) { if (ev.target.name === 'engine' || ev.target.name === 'secret_mode') { syncConn(f); } });
-    f.addEventListener('input', function (ev) { if (ev.target.name === 'port') { f.setAttribute('data-port-touched', '1'); } if (ev.target.name === 'password_env' || ev.target.name === 'host') { /* keep */ } });
+    f.addEventListener('change', function (ev) { if (ev.target.name === 'engine') { syncConn(f); } });
+    f.addEventListener('input', function (ev) { if (ev.target.name === 'port') { f.setAttribute('data-port-touched', '1'); } });
     f.elements.namedItem('name').addEventListener('blur', function () { var errs = validateConn(f); if (errs.name) { fieldError(f, 'name', errs.name); } });
     f.elements.namedItem('host').addEventListener('blur', function () { var errs = validateConn(f); if (errs.host) { fieldError(f, 'host', errs.host); } });
     $('#conn-test-btn', f).addEventListener('click', function () {

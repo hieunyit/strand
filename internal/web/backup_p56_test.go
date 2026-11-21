@@ -912,7 +912,7 @@ func TestBackupWritesAreAuditedWithUserAndDiff(t *testing.T) {
 	expect("backup_repository.create")
 	a.must("POST", "/api/v1/backups/bk-aud/copy", map[string]any{"repository": rid}, 202)
 	expect("backup.copy")
-	a.must("POST", "/api/v1/backup-restores", map[string]any{"backup_id": "bk-aud", "target": map[string]any{"host": "db2", "password_env": "RESTORE_PW"}, "target_database": "r1", "confirm": "r1"}, 202)
+	a.must("POST", "/api/v1/backup-restores", map[string]any{"backup_id": "bk-aud", "connection_id": restoreConn(t, e.st, "mysql"), "target_database": "r1", "confirm": "r1"}, 202)
 	expect("backup.restore")
 	upr := storedRepoBody("Audit Repo", "http://127.0.0.1:1")
 	delete(upr, "access_key")

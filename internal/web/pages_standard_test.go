@@ -34,7 +34,7 @@ func TestStandardPageSkeletonAndNoInlineStyles(t *testing.T) {
 		{"/pipelines", false, true},
 		{"/pipelines/new", false, false},
 		{"/jobs", false, true},
-		{"/backups", true, true},
+		{"/backups", false, false},
 		{"/backups/jobs", false, true},
 		{"/backups/catalog", false, true},
 		{"/backups/restore", false, false},

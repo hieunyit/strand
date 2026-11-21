@@ -10,20 +10,25 @@ import (
 	"strand/internal/web/store"
 )
 
-// The sidebar lists every console feature in four groups; admin-only pages are not linked for other roles
-// (a viewer used to see Settings and get a 403), and the operational tools (archive, tunnels, spool,
-// metadata database, config reference) are reachable from the navigation instead of only by URL.
+// The sidebar has one entry per area (four groups, about a dozen links); related pages are grouped under one
+// entry and reached through the section tab strip at the top of each of them. Admin-only pages are linked
+// neither in the sidebar nor in the tabs for other roles (a viewer used to see Settings and get a 403).
 func TestSidebarGroupsAndRoleLinks(t *testing.T) {
 	e := newCPEnv(t)
-	adminOnly := []string{`href="/users"`, `href="/settings"`, `href="/settings/db"`, `href="/archive"`, `href="/tunnels"`,
-		`href="/tools/spool-inspect"`, `href="/pipelines/new"`, `href="/backups/keys"`, `href="/backups/notifications"`, `href="/backups/activity"`}
-	everyone := []string{`href="/pipelines"`, `href="/backups/jobs"`, `href="/backups/reports"`, `href="/help/schema"`, `href="/account"`, `href="/mcp"`}
 	nav := func(page string) string {
-		i, j := strings.Index(page, `<nav aria-label="Main">`), strings.Index(page, `</nav>`)
-		if i < 0 || j < i {
+		i := strings.Index(page, `<nav aria-label="Main">`)
+		j := strings.Index(page[i:], `data-navgroup="registered"`)
+		if i < 0 || j < 0 {
 			t.Fatal("main navigation not found")
 		}
-		return page[i:j]
+		return page[i : i+j]
+	}
+	tabs := func(page string) string {
+		i := strings.Index(page, `class="tabs sectiontabs"`)
+		if i < 0 {
+			return ""
+		}
+		return page[i : i+strings.Index(page[i:], `</nav>`)]
 	}
 	code, body := e.admin().do("GET", "/", nil)
 	if code != 200 {
@@ -35,25 +40,70 @@ func TestSidebarGroupsAndRoleLinks(t *testing.T) {
 			t.Errorf("nav group %q missing or not a toggle", g)
 		}
 	}
-	for _, h := range append(append([]string{}, adminOnly...), everyone...) {
+	adminNav := []string{`href="/"`, `href="/jobs"`, `href="/pipelines"`, `href="/archive"`, `href="/backups"`, `href="/backups/jobs"`,
+		`href="/backups/catalog"`, `href="/backups/restore"`, `href="/backups/connections"`, `href="/backups/reports"`, `href="/users"`, `href="/settings"`}
+	for _, h := range adminNav {
 		if !strings.Contains(n, h) {
 			t.Errorf("admin nav lacks %s", h)
 		}
 	}
+	if got := strings.Count(n, "<a href="); got != len(adminNav) {
+		t.Errorf("admin sidebar has %d links, want %d (grouped pages belong in section tabs)", got, len(adminNav))
+	}
+	if !strings.Contains(body, `href="/account"`) {
+		t.Error("My account must stay reachable from the user menu")
+	}
+	// Section tabs: every page of a section links its siblings the role may open.
+	for path, want := range map[string][]string{
+		"/archive":             {`href="/tunnels"`, `href="/tools/spool-inspect"`},
+		"/backups/connections": {`href="/backups/repositories"`, `href="/backups/policies"`, `href="/backups/keys"`, `href="/backups/notifications"`},
+		"/backups/reports":     {`href="/backups/activity"`},
+		"/settings":            {`href="/settings/db"`, `href="/mcp"`, `href="/help/schema"`},
+	} {
+		code, body := e.admin().do("GET", path, nil)
+		if code != 200 {
+			t.Fatalf("admin %s = %d", path, code)
+		}
+		tb := tabs(body)
+		for _, h := range want {
+			if !strings.Contains(tb, h) {
+				t.Errorf("admin %s section tabs lack %s", path, h)
+			}
+		}
+		if !strings.Contains(tb, `aria-current="page"`) {
+			t.Errorf("admin %s section tabs mark no current page", path)
+		}
+	}
+	adminOnly := []string{`href="/users"`, `href="/settings"`, `href="/settings/db"`, `href="/archive"`, `href="/tunnels"`,
+		`href="/tools/spool-inspect"`, `href="/backups/keys"`, `href="/backups/notifications"`, `href="/backups/activity"`}
 	for _, role := range []store.Role{store.RoleViewer, store.RoleOperator} {
-		code, body := e.roleClient(role).do("GET", "/", nil)
+		cl := e.roleClient(role)
+		code, body := cl.do("GET", "/", nil)
 		if code != 200 {
 			t.Fatalf("%s overview %d", role, code)
 		}
 		n := nav(body)
-		for _, h := range adminOnly {
-			if strings.Contains(n, h) {
-				t.Errorf("%s nav links admin-only %s", role, h)
-			}
-		}
-		for _, h := range everyone {
+		for _, h := range []string{`href="/pipelines"`, `href="/backups/jobs"`, `href="/backups/reports"`, `href="/backups/connections"`, `href="/mcp"`} {
 			if !strings.Contains(n, h) {
 				t.Errorf("%s nav lacks %s", role, h)
+			}
+		}
+		pages := []string{n}
+		for _, p := range []string{"/backups/connections", "/backups/reports", "/mcp"} {
+			code, body := cl.do("GET", p, nil)
+			if code != 200 {
+				t.Fatalf("%s %s = %d", role, p, code)
+			}
+			pages = append(pages, tabs(body))
+		}
+		if !strings.Contains(pages[3], `href="/help/schema"`) {
+			t.Errorf("%s settings tabs lack the config reference", role)
+		}
+		for _, h := range adminOnly {
+			for _, pg := range pages {
+				if strings.Contains(pg, h) {
+					t.Errorf("%s navigation links admin-only %s", role, h)
+				}
 			}
 		}
 	}

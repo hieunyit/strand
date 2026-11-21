@@ -106,7 +106,7 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 	// A. pg_dump: threads=4 and objects=["users"] accepted (202)
 	code, body := adm.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-pg",
-		"target":          map[string]any{"host": "pg-restore.internal", "port": 5432},
+		"connection_id":   restoreConn(t, e.st, "postgres"),
 		"target_database": "pg_restored",
 		"confirm":         "pg_restored",
 		"threads":         4,
@@ -148,7 +148,7 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 	// B. mysqldump: threads > 1 rejected (400)
 	code, body = adm.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-my",
-		"target":          map[string]any{"host": "my-restore.internal", "port": 3306},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "my_restored",
 		"confirm":         "my_restored",
 		"threads":         4,
@@ -163,7 +163,7 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 	// C. mysqldump: partial restore without target_time accepted (202)
 	code, body = adm.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-my",
-		"target":          map[string]any{"host": "my-restore.internal", "port": 3306},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "my_restored_tbl1",
 		"confirm":         "my_restored_tbl1",
 		"objects":         []string{"tbl1"},
@@ -176,7 +176,7 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 	code, body = adm.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-my",
 		"target_time":     now.Format(time.RFC3339),
-		"target":          map[string]any{"host": "my-restore.internal", "port": 3306},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "my_pitr_partial",
 		"confirm":         "my_pitr_partial",
 		"objects":         []string{"tbl1"},
@@ -219,7 +219,7 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 	// G. MongoDB whole-deployment: partial rejected (400)
 	code, body = adm.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-mongo-whole",
-		"target":          map[string]any{"host": "mongo.internal", "port": 27017},
+		"connection_id":   restoreConn(t, e.st, "mongodb"),
 		"target_database": "mongo_new",
 		"confirm":         "mongo_new",
 		"objects":         []string{"coll1"},
@@ -235,7 +235,7 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 	view := e.roleClient(store.RoleViewer)
 	code, _ = view.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-pg",
-		"target":          map[string]any{"host": "pg-restore.internal"},
+		"connection_id":   restoreConn(t, e.st, "postgres"),
 		"target_database": "pg_view",
 		"confirm":         "pg_view",
 	})
@@ -246,7 +246,7 @@ func TestAPIRestoreParallelPartialMatrix(t *testing.T) {
 	oper := e.roleClient(store.RoleOperator)
 	code, _ = oper.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-pg",
-		"target":          map[string]any{"host": "pg-restore.internal"},
+		"connection_id":   restoreConn(t, e.st, "postgres"),
 		"target_database": "pg_oper",
 		"confirm":         "pg_oper",
 	})
@@ -265,7 +265,7 @@ func TestAPIUnknownTableWithKnownListRejected(t *testing.T) {
 
 	code, body := adm.do("POST", "/api/v1/backup-restores", map[string]any{
 		"backup_id":       "bkp-my-known",
-		"target":          map[string]any{"host": "mysql.internal", "port": 3306},
+		"connection_id":   restoreConn(t, e.st, "mysql"),
 		"target_database": "shop_restored",
 		"confirm":         "shop_restored",
 		"objects":         []string{"unknown_tbl"},
@@ -296,7 +296,7 @@ func TestAPIRestoreSourceBaseWithLogAccepted(t *testing.T) {
 		"source":          "mongo-src",
 		"target_time":     tt.Format(time.RFC3339),
 		"threads":         4,
-		"target":          map[string]any{"host": "mongo.internal", "port": 27017},
+		"connection_id":   restoreConn(t, e.st, "mongodb"),
 		"target_database": "mongo_restored",
 		"confirm":         "mongo_restored",
 	})

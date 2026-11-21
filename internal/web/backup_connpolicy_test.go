@@ -214,11 +214,12 @@ func TestConnectionStoredSecretNeverLeaves(t *testing.T) {
 	if pt, _ := e.srv.db.box.Open(row3.PasswordSealed, id); string(pt) != canary+"-new" {
 		t.Fatal("password not replaced")
 	}
+	// A stored connection can no longer be switched to reading its password from an environment variable.
 	envMode := map[string]any{"name": "prod-mysql", "engine": "mysql", "host": "db1.internal", "secret_mode": "env", "password_env": "PROD_DB_PW"}
-	a.must("PUT", "/api/v1/backup-connections/"+id, envMode, 200)
+	a.must("PUT", "/api/v1/backup-connections/"+id, envMode, 400)
 	row4, _, _ := e.st.GetBackupConnection(context.Background(), id)
-	if row4.PasswordSet || row4.PasswordSealed != nil || row4.PasswordEnv != "PROD_DB_PW" {
-		t.Fatalf("env mode kept a sealed secret: %+v", row4)
+	if row4.SecretMode != backup.SecretStored || !row4.PasswordSet || row4.PasswordEnv != "" {
+		t.Fatalf("refused switch to env mode changed the connection: %+v", row4)
 	}
 	envMode["password"] = "x"
 	a.must("PUT", "/api/v1/backup-connections/"+id, envMode, 400)
@@ -308,8 +309,15 @@ func TestJobWithConnectionResolvesAndPassesSecretByEnvOnly(t *testing.T) {
 	pg["method"] = "pg_dump"
 	a.must("POST", "/api/v1/backup-jobs", pg, 400)
 	a.must("POST", "/api/v1/backup-jobs", mysqlJobBody("bad-ref", "no-such-conn"), 400)
-	envID := connID(t, a.must("POST", "/api/v1/backup-connections", map[string]any{"name": "env-conn", "engine": "mysql", "host": "h2",
-		"secret_mode": "env", "password_env": "H2_PW"}, 201))
+	// New env-mode connections are refused; an existing (legacy) one keeps working without leaking a value.
+	a.must("POST", "/api/v1/backup-connections", map[string]any{"name": "env-conn", "engine": "mysql", "host": "h2",
+		"secret_mode": "env", "password_env": "H2_PW"}, 400)
+	legacy, err := e.st.CreateBackupConnection(context.Background(), backup.Connection{ID: "conn-legacy-h2", Name: "env-conn", Engine: backup.ConnMySQL,
+		Host: "h2", SecretMode: backup.SecretEnv, PasswordEnv: "H2_PW"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envID := legacy.ID
 	e.rec.take()
 	b2 := mysqlJobBody("env-job", envID)
 	b2["enabled"] = true
@@ -378,8 +386,14 @@ func TestConnectionTestEndpoints(t *testing.T) {
 		t.Fatalf("failed test recorded as %q %q", row.LastTestStatus, row.LastTestDetail)
 	}
 	a.must("POST", "/api/v1/backup-connections/missing/test", nil, 404)
+	// An unsaved env-mode probe is refused; a legacy env-mode connection still tests with its variable.
 	t.Setenv("CP_TEST_PW", "from-env-pw")
-	a.must("POST", "/api/v1/backup-connections/test", map[string]any{"engine": "postgres", "host": "pg", "user": "u", "secret_mode": "env", "password_env": "CP_TEST_PW"}, 200)
+	a.must("POST", "/api/v1/backup-connections/test", map[string]any{"engine": "postgres", "host": "pg", "user": "u", "secret_mode": "env", "password_env": "CP_TEST_PW"}, 400)
+	if _, err := e.st.CreateBackupConnection(context.Background(), backup.Connection{ID: "conn-legacy-pg", Name: "legacy-pg", Engine: backup.ConnPostgres,
+		Host: "pg", User: "u", SecretMode: backup.SecretEnv, PasswordEnv: "CP_TEST_PW"}); err != nil {
+		t.Fatal(err)
+	}
+	a.must("POST", "/api/v1/backup-connections/conn-legacy-pg/test", nil, 200)
 	if e.fake.last().Password != "from-env-pw" {
 		t.Fatalf("env-mode password = %q", e.fake.last().Password)
 	}
@@ -393,7 +407,7 @@ func TestConnectionAndPolicyRBAC(t *testing.T) {
 	oper, viewer := e.roleClient(store.RoleOperator), e.roleClient(store.RoleViewer)
 	conn := storedConn("other")
 	pol := map[string]any{"name": "p2", "schedule": map[string]any{"kind": "daily", "at": "03:00"}}
-	probe := map[string]any{"engine": "mysql", "host": "h", "secret_mode": "env"}
+	probe := map[string]any{"engine": "mysql", "host": "h", "secret_mode": "stored"}
 	for _, c := range []struct {
 		who  string
 		cl   *apiClient

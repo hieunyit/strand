@@ -1,4 +1,5 @@
 {{define "content"}}
+{{if not .Body.Repo.Stored}}<div class="alert alert-warn">This repository still reads its endpoint and keys from the environment variables <span class="mono">{{.Body.Repo.EnvPrefix}}*</span> (legacy).{{if .Body.IsAdmin}} <a href="/backups/repositories?edit={{.Body.Repo.ID}}">Enter them in the console</a> to store them encrypted.{{end}}</div>{{end}}
 <section class="card" id="bk-repo-detail" data-bkops="repo-detail" data-repo-id="{{.Body.Repo.ID}}">
   <div class="cardhead"><h2>Overview</h2>
     <span>{{if .Body.CanWrite}}<button class="btn small primary" type="button" id="bk-repo-test">Test repository</button>{{end}}
@@ -6,8 +7,10 @@
   <dl class="kv">
     <dt>Type</dt><dd>{{.Body.Repo.KindOrS3}}</dd>
     <dt>Bucket</dt><dd class="mono">{{.Body.Repo.Bucket}}{{if .Body.Repo.Prefix}}/{{.Body.Repo.Prefix}}{{end}}</dd>
-    {{if .Body.Repo.Endpoint}}<dt>Endpoint</dt><dd class="mono">{{.Body.Repo.Endpoint}}</dd>{{end}}
-    <dt>Credentials</dt><dd>{{if .Body.Repo.Stored}}stored (sealed; access key {{if .Body.Repo.AccessKeySet}}set{{else}}missing{{end}}, secret key {{if .Body.Repo.SecretKeySet}}set{{else}}missing{{end}}){{else}}environment <span class="mono small">{{.Body.Repo.EnvPrefix}}</span>{{end}}</dd>
+    {{if .Body.Repo.Endpoint}}<dt>Endpoint</dt><dd class="mono">{{.Body.Repo.Endpoint}}{{if .Body.Repo.AllowInsecureLocal}} <span class="badge st-warn">plain HTTP allowed (local)</span>{{end}}</dd>{{end}}
+    {{if .Body.Repo.Region}}<dt>Region</dt><dd class="mono">{{.Body.Repo.Region}}</dd>{{end}}
+    <dt>Credentials</dt><dd>{{if .Body.Repo.Stored}}stored encrypted (access key {{if .Body.Repo.AccessKeySet}}set{{else}}missing{{end}}, secret key {{if .Body.Repo.SecretKeySet}}set{{else}}missing{{end}}){{else}}<span class="badge st-warn">legacy</span> environment <span class="mono small">{{.Body.Repo.EnvPrefix}}</span>{{end}}</dd>
+    <dt>Retention</dt><dd>{{retentionText .Body.Repo.Retention}} <span class="small muted">(backups that belong to no job)</span></dd>
     <dt>Protection</dt><dd>{{if .Body.Repo.Immutable}}<span class="badge st-synced">immutable</span> Object Lock COMPLIANCE, {{.Body.Repo.LockDays}} days{{else if .Body.Repo.LockMode}}Object Lock {{.Body.Repo.LockMode}}, {{.Body.Repo.LockDays}} days{{else}}none{{end}}</dd>
     <dt>Backups</dt><dd>{{.Body.Repo.Backups}} ({{bytes64 .Body.Repo.UsedBytes}}{{if .Body.Repo.Copies}}, {{.Body.Repo.Copies}} copies{{end}})</dd>
   </dl>
