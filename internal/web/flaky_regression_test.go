@@ -467,3 +467,159 @@ func TestReconcileLostWakeup(t *testing.T) {
 		t.Fatalf("expected Start to be called 2 times (restarted on exit), got %d", calls)
 	}
 }
+
+type interceptStore struct {
+	store.Store
+	onGetBackupJob func(ctx context.Context, id string) (backup.Job, bool, error)
+}
+
+func (s *interceptStore) GetBackupJob(ctx context.Context, id string) (backup.Job, bool, error) {
+	if s.onGetBackupJob != nil {
+		return s.onGetBackupJob(ctx, id)
+	}
+	return s.Store.GetBackupJob(ctx, id)
+}
+
+// TestReconcileEarlyExitHonorsAgain verifies that if reconcileBackupSchedule exits early
+// (e.g. because job is disabled on the first read), but a concurrent reconcile call sets
+// again=true (e.g. because the job was resumed/enabled), the reconcile loop restarts and
+// starts the enabled job rather than silently dropping the wake-up.
+func TestReconcileEarlyExitHonorsAgain(t *testing.T) {
+	origDelay := reconcileDelay
+	defer func() { reconcileDelay = origDelay }()
+	reconcileDelay = struct{ first, max time.Duration }{10 * time.Millisecond, 20 * time.Millisecond}
+
+	_, script := backupCommandDir(t)
+	baseStore := store.NewMem()
+	j := backup.Job{
+		ID:               "bjob-reconcile-early-again",
+		Name:             "nightly",
+		Command:          script,
+		EverySeconds:     3600,
+		ArtifactTemplate: "/var/backups/{id}.sql",
+		ManifestTemplate: "/var/backups/{id}.json",
+		Bucket:           "central-backups",
+		Enabled:          false, // Initially disabled in store!
+	}
+	if err := baseStore.CreateBackupJob(context.Background(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	pipeline := backupJobPipeline(j.ID)
+	var e *testEnv
+	var getCalls atomic.Int32
+	ist := &interceptStore{
+		Store: baseStore,
+		onGetBackupJob: func(ctx context.Context, id string) (backup.Job, bool, error) {
+			job, found, err := baseStore.GetBackupJob(ctx, id)
+			if id == j.ID && getCalls.Add(1) == 1 {
+				// 1. Concurrent user enables the job in the database:
+				enabledJob := job
+				enabledJob.Enabled = true
+				if _, updateErr := baseStore.UpdateBackupJob(context.Background(), enabledJob); updateErr != nil {
+					t.Errorf("failed to update job to enabled: %v", updateErr)
+				}
+				// 2. Resume handler attempts startBackupJob and calls reconcile:
+				// Since loop 1 is currently running, this sets again=true!
+				e.srv.reconcileBackupSchedule(pipeline)
+
+				// 3. Loop 1 receives the disabled job:
+				job.Enabled = false
+			}
+			return job, found, err
+		},
+	}
+	e = dbEnv(t, ist, nil, nil)
+	defer e.srv.Close()
+
+	runner := &triggerReconcileRunner{JobRunner: e.srv.jobs}
+	e.srv.SetJobRunner(runner)
+
+	// Launch loop 1:
+	go e.srv.reconcileBackupSchedule(pipeline)
+
+	// In b196ed3, loop 1 returns on !job.Enabled and drops again=true, so runner.Start is never called.
+	// With the fix, loop 1's defer sees again=true and re-runs reconcile, starting the enabled job.
+	waitFor(t, "reconcile loop restarts and starts enabled job", func() bool {
+		return runner.startCalls.Load() >= 1
+	})
+}
+
+// TestReconcileAgainDoesNotRestartOnClosedServer verifies that if reconcileBackupSchedule
+// has again=true when exiting, but the server is closed (or closing), it does NOT
+// spawn a new reconcile loop.
+func TestReconcileAgainDoesNotRestartOnClosedServer(t *testing.T) {
+	origDelay := reconcileDelay
+	defer func() { reconcileDelay = origDelay }()
+	reconcileDelay = struct{ first, max time.Duration }{10 * time.Millisecond, 20 * time.Millisecond}
+
+	_, script := backupCommandDir(t)
+	baseStore := store.NewMem()
+	j := backup.Job{
+		ID:               "bjob-reconcile-closed-again",
+		Name:             "nightly",
+		Command:          script,
+		EverySeconds:     3600,
+		ArtifactTemplate: "/var/backups/{id}.sql",
+		ManifestTemplate: "/var/backups/{id}.json",
+		Bucket:           "central-backups",
+		Enabled:          false,
+	}
+	if err := baseStore.CreateBackupJob(context.Background(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	pipeline := backupJobPipeline(j.ID)
+	var e *testEnv
+	var getCalls atomic.Int32
+	ist := &interceptStore{
+		Store: baseStore,
+		onGetBackupJob: func(ctx context.Context, id string) (backup.Job, bool, error) {
+			job, found, err := baseStore.GetBackupJob(ctx, id)
+			if id == j.ID && getCalls.Add(1) == 1 {
+				// Enable job in store so if a rerun were triggered, it would attempt Start
+				enabledJob := job
+				enabledJob.Enabled = true
+				_, _ = baseStore.UpdateBackupJob(context.Background(), enabledJob)
+
+				// Set again=true while loop 1 is running
+				e.srv.reconcileBackupSchedule(pipeline)
+
+				// Close the server before loop 1 returns
+				_ = e.srv.Close()
+			}
+			return job, found, err
+		},
+	}
+	e = dbEnv(t, ist, nil, nil)
+	defer e.srv.Close()
+
+	runner := &triggerReconcileRunner{JobRunner: e.srv.jobs}
+	e.srv.SetJobRunner(runner)
+
+	done := make(chan struct{})
+	go func() {
+		e.srv.reconcileBackupSchedule(pipeline)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reconcileBackupSchedule did not exit")
+	}
+
+	// Give any rogue goroutine time to run
+	time.Sleep(50 * time.Millisecond)
+
+	if calls := runner.startCalls.Load(); calls != 0 {
+		t.Fatalf("expected 0 start calls on closed server, got %d", calls)
+	}
+
+	e.srv.reconcileMu.Lock()
+	_, running := e.srv.reconciling[pipeline]
+	e.srv.reconcileMu.Unlock()
+	if running {
+		t.Fatal("expected pipeline to be removed from reconciling map")
+	}
+}

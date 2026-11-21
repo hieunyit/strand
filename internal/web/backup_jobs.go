@@ -64,10 +64,15 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 
 	defer func() {
 		s.reconcileMu.Lock()
+		rerun := false
 		if s.reconciling[pipeline] == state {
 			delete(s.reconciling, pipeline)
+			rerun = state.again && !s.closed.Load() && s.isActive()
 		}
 		s.reconcileMu.Unlock()
+		if rerun {
+			go s.reconcileBackupSchedule(pipeline)
+		}
 	}()
 	id := strings.TrimPrefix(pipeline, "backup-")
 	delay := reconcileDelay.first
@@ -101,7 +106,6 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 					delay = reconcileDelay.first
 					continue
 				}
-				delete(s.reconciling, pipeline)
 				s.reconcileMu.Unlock()
 				return
 			} else {
