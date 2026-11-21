@@ -86,7 +86,8 @@ type Server struct {
 	closeCtx        context.Context
 	closeCancel     context.CancelFunc
 	closed          atomic.Bool
-	reconciling     sync.Map // pipeline -> struct{}
+	reconcileMu     sync.Mutex
+	reconciling     map[string]*reconcileState
 	archiverMu      sync.Mutex
 	archiverRunning bool
 	archiverDir     string
@@ -97,6 +98,10 @@ type Server struct {
 	delta        liveDelta
 	streams      atomic.Int32
 	sseHeartbeat time.Duration
+}
+
+type reconcileState struct {
+	again bool
 }
 
 // Options của New.
@@ -180,6 +185,7 @@ func New(o Options) (*Server, error) {
 		tunnelCancel: tunnelCancel,
 		closeCtx:     closeCtx,
 		closeCancel:  closeCancel,
+		reconciling:  make(map[string]*reconcileState),
 	}
 	s.db = db
 	s.checker = o.ConnChecker

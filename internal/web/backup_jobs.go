@@ -49,10 +49,26 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 	if s.closed.Load() || !s.isActive() {
 		return
 	}
-	if _, loaded := s.reconciling.LoadOrStore(pipeline, struct{}{}); loaded {
+	s.reconcileMu.Lock()
+	if s.reconciling == nil {
+		s.reconciling = make(map[string]*reconcileState)
+	}
+	if state, running := s.reconciling[pipeline]; running {
+		state.again = true
+		s.reconcileMu.Unlock()
 		return
 	}
-	defer s.reconciling.Delete(pipeline)
+	state := &reconcileState{}
+	s.reconciling[pipeline] = state
+	s.reconcileMu.Unlock()
+
+	defer func() {
+		s.reconcileMu.Lock()
+		if s.reconciling[pipeline] == state {
+			delete(s.reconciling, pipeline)
+		}
+		s.reconcileMu.Unlock()
+	}()
 	id := strings.TrimPrefix(pipeline, "backup-")
 	delay := reconcileDelay.first
 	for attempt := 1; ; attempt++ {
@@ -78,6 +94,15 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 				s.log.Error("scheduled backup job refused", "job", id, "error", verr)
 				return
 			} else if _, err := s.startBackupJob(job); err == nil {
+				s.reconcileMu.Lock()
+				if state.again {
+					state.again = false
+					s.reconcileMu.Unlock()
+					delay = reconcileDelay.first
+					continue
+				}
+				delete(s.reconciling, pipeline)
+				s.reconcileMu.Unlock()
 				return
 			} else {
 				s.log.Warn("restart scheduled backup job", "job", id, "attempt", attempt, "error", err)

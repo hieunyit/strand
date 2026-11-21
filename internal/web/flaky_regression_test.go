@@ -270,6 +270,13 @@ func (b *blockingStartRunner) Start(ctx context.Context, spec JobSpec) (string, 
 func TestDuplicateReconcileOnlyRunsOneLoop(t *testing.T) {
 	_, script := backupCommandDir(t)
 	st := store.NewMem()
+	e := dbEnv(t, st, nil, nil)
+	runner := &blockingStartRunner{
+		JobRunner: e.srv.jobs,
+		block:     make(chan struct{}),
+	}
+	e.srv.SetJobRunner(runner)
+
 	j := backup.Job{
 		ID:               "bjob-dup-reconcile",
 		Name:             "nightly",
@@ -284,16 +291,13 @@ func TestDuplicateReconcileOnlyRunsOneLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := dbEnv(t, st, nil, nil)
-	runner := &blockingStartRunner{
-		JobRunner: e.srv.jobs,
-		block:     make(chan struct{}),
-	}
-	e.srv.SetJobRunner(runner)
-
 	pipeline := backupJobPipeline(j.ID)
 
-	go e.srv.reconcileBackupSchedule(pipeline)
+	done1 := make(chan struct{})
+	go func() {
+		e.srv.reconcileBackupSchedule(pipeline)
+		close(done1)
+	}()
 
 	waitFor(t, "reconcile loop 1 entered Start", func() bool {
 		return runner.entered.Load() == 1
@@ -316,6 +320,13 @@ func TestDuplicateReconcileOnlyRunsOneLoop(t *testing.T) {
 	}
 
 	close(runner.block)
+
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcile loop 1 did not finish")
+	}
+	_ = e.srv.Close()
 }
 
 // TestTemplateCacheAndConcurrentRender verifies that template parsing results are cached
@@ -381,5 +392,78 @@ func TestTemplateCacheAndConcurrentRender(t *testing.T) {
 	close(errCh)
 	for err := range errCh {
 		t.Fatal(err)
+	}
+}
+
+type triggerReconcileRunner struct {
+	JobRunner
+	startCalls atomic.Int32
+	onStart    func()
+}
+
+func (r *triggerReconcileRunner) Start(ctx context.Context, spec JobSpec) (string, error) {
+	n := r.startCalls.Add(1)
+	if n == 1 && r.onStart != nil {
+		r.onStart()
+	}
+	return fmt.Sprintf("job-sched-%d", n), nil
+}
+
+func (r *triggerReconcileRunner) List(pipeline string) []JobStatus {
+	return nil
+}
+
+func (r *triggerReconcileRunner) Get(id string) (JobStatus, bool) {
+	return JobStatus{ID: id, Running: false}, true
+}
+
+// TestReconcileLostWakeup verifies that when a scheduler process exits immediately
+// and triggers another reconcile call while the first reconcile is still running,
+// the scheduler is restarted a second time rather than being silently dropped.
+func TestReconcileLostWakeup(t *testing.T) {
+	_, script := backupCommandDir(t)
+	st := store.NewMem()
+	e := dbEnv(t, st, nil, nil)
+	defer e.srv.Close()
+
+	runner := &triggerReconcileRunner{JobRunner: e.srv.jobs}
+	e.srv.SetJobRunner(runner)
+
+	j := backup.Job{
+		ID:               "bjob-reconcile-wakeup",
+		Name:             "nightly",
+		Command:          script,
+		EverySeconds:     3600,
+		ArtifactTemplate: "/var/backups/{id}.sql",
+		ManifestTemplate: "/var/backups/{id}.json",
+		Bucket:           "central-backups",
+		Enabled:          true,
+	}
+	if err := st.CreateBackupJob(context.Background(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	pipeline := backupJobPipeline(j.ID)
+
+	runner.onStart = func() {
+		// Simulate the process exiting immediately and auditJobEnd triggering
+		// a second reconcile call before the first reconcile returns.
+		e.srv.reconcileBackupSchedule(pipeline)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		e.srv.reconcileBackupSchedule(pipeline)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reconcileBackupSchedule timed out")
+	}
+
+	if calls := runner.startCalls.Load(); calls != 2 {
+		t.Fatalf("expected Start to be called 2 times (restarted on exit), got %d", calls)
 	}
 }
