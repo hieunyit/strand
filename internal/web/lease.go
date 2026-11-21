@@ -119,18 +119,11 @@ func (s *Server) role() string {
 func (s *Server) leaseTick() (gained, lost bool) {
 	l := s.lease
 	was := s.isActive()
-	timeout := l.ttl / 3
-	if timeout < 2*time.Second {
-		timeout = 2 * time.Second
-	}
-	if timeout > l.ttl {
-		timeout = l.ttl
-	}
 	baseCtx := context.Background()
 	if s.closeCtx != nil {
 		baseCtx = s.closeCtx
 	}
-	ctx, cancel := context.WithTimeout(baseCtx, timeout)
+	ctx, cancel := context.WithTimeout(baseCtx, l.ttl/3)
 	t0 := monoNow()
 	cur, err := s.db.st.TryLease(ctx, l.id, l.info, l.ttl)
 	cancel()

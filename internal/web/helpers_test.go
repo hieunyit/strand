@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -229,6 +230,34 @@ func newEnvWith(t *testing.T, mutate func(e *testEnv, c *Config), opt func(o *Op
 	e.srv = srv
 	t.Cleanup(func() {
 		_ = e.srv.Close()
+		e.hold(false)
+		if jr, ok := e.srv.jobs.(*FileJobRunner); ok {
+			for _, j := range jr.List("") {
+				if j.Running {
+					_ = jr.Cancel(j.ID)
+				}
+			}
+			deadline := time.Now().Add(200 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				allStopped := true
+				for _, j := range jr.List("") {
+					if j.Running {
+						allStopped = false
+						break
+					}
+				}
+				if allStopped {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			for _, j := range jr.List("") {
+				if j.Running && j.PID > 0 {
+					_ = syscall.Kill(-j.PID, syscall.SIGKILL)
+					_ = syscall.Kill(j.PID, syscall.SIGKILL)
+				}
+			}
+		}
 	})
 	e.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(e.ts.Close)

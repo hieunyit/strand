@@ -337,41 +337,29 @@ func (s *Server) stopBackupSchedulers() {
 	if jr, ok := s.jobs.(*FileJobRunner); ok && jr.KillGrace > 0 {
 		grace = jr.KillGrace
 	}
-	var pids []int
 	s.ownedBackupProcs.Range(func(k, v any) bool {
 		id, pid := k.(string), v.(int)
 		s.ownedBackupProcs.Delete(id)
-		if syscall.Kill(pid, 0) == nil {
-			if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-				_ = syscall.Kill(pid, syscall.SIGTERM)
-			}
-			pids = append(pids, pid)
+		if syscall.Kill(pid, 0) != nil {
+			return true // đã thoát
 		}
+		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
+		go func() {
+			deadline := time.Now().Add(grace)
+			for time.Now().Before(deadline) {
+				if syscall.Kill(pid, 0) != nil {
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}()
 		s.log.Info("step-down: stopped backup process started by this instance", "job", id, "pid", pid)
 		return true
 	})
-	if len(pids) > 0 {
-		deadline := time.Now().Add(grace)
-		for time.Now().Before(deadline) {
-			alive := false
-			for _, pid := range pids {
-				if syscall.Kill(pid, 0) == nil {
-					alive = true
-					break
-				}
-			}
-			if !alive {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		for _, pid := range pids {
-			if syscall.Kill(pid, 0) == nil {
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
-		}
-	}
 }
 
 func (s *Server) stopBackupJob(id string) error {
@@ -388,8 +376,7 @@ func (s *Server) stopBackupJob(id string) error {
 			continue
 		}
 		if err := s.jobs.Cancel(j.ID); err != nil {
-			if strings.Contains(err.Error(), "job is not running") || strings.Contains(err.Error(), "unknown job") ||
-				strings.Contains(err.Error(), "no such process") || errors.Is(err, syscall.ESRCH) {
+			if errors.Is(err, errJobNotRunning) || errors.Is(err, errUnknownJob) {
 				continue
 			}
 			return err

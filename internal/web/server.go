@@ -1098,7 +1098,7 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// Close stops background tasks (reconcilers, tunnels, backup schedulers) and releases the lease.
+// Close stops background tasks (reconcilers, tunnels) and releases the lease.
 func (s *Server) Close() error {
 	if s == nil || s.closed.Swap(true) {
 		return nil
@@ -1110,7 +1110,6 @@ func (s *Server) Close() error {
 	if s.tunnelCancel != nil {
 		s.tunnelCancel()
 	}
-	s.stopBackupSchedulers()
 	s.releaseLease()
 	if s.audit != nil {
 		_ = s.audit.Close()

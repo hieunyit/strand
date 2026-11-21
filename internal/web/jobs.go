@@ -52,6 +52,11 @@ type FileJobRunner struct {
 	passive atomic.Bool
 }
 
+var (
+	errJobNotRunning = errors.New("job is not running")
+	errUnknownJob    = errors.New("unknown job")
+)
+
 // ErrJobRunning: pipeline đã có job đang chạy.
 type ErrJobRunning struct{ Pipeline, ID string }
 
@@ -393,11 +398,11 @@ func (r *FileJobRunner) Cancel(id string) error {
 	js, ok := r.jobs[id]
 	if !ok {
 		r.mu.Unlock()
-		return errors.New("unknown job")
+		return fmt.Errorf("%w: %s", errUnknownJob, id)
 	}
 	if !js.Running {
 		r.mu.Unlock()
-		return errors.New("job is not running")
+		return fmt.Errorf("%w: %s", errJobNotRunning, id)
 	}
 	js.Cancelled = true
 	r.persistLocked(js)

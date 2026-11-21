@@ -181,8 +181,11 @@ func (r *backupStopTestRunner) Cancel(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	j, ok := r.jobs[id]
-	if !ok || !j.Running {
-		return errors.New("not running")
+	if !ok {
+		return fmt.Errorf("%w: %s", errUnknownJob, id)
+	}
+	if !j.Running {
+		return fmt.Errorf("%w: %s", errJobNotRunning, id)
 	}
 	j.Running = false
 	r.jobs[id] = j
