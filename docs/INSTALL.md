@@ -96,7 +96,7 @@ Backup và restore quản lý (Web UI, `strand backup ...`) gọi công cụ c�
 | `mysqldump` (+ restore, PITR) | `mysqldump`, `mysql`, `mysqlbinlog` | Oracle MySQL client 8.4 LTS (repo.mysql.com). `default-mysql-client` của Debian là MariaDB, không dùng được cho MySQL 8. Server MySQL 8.0/8.1: thêm `mysqldump` của MySQL 8.0 dưới tên `mysqldump-8.0` |
 | `mariadb-dump` | `mariadb-dump` (restore dùng `mysql`) | Gói `mariadb-client` của MariaDB |
 | `mydumper` | `mydumper` (`myloader` để restore tay) | Bản phát hành GitHub của mydumper |
-| `pg_dump`, `pg_basebackup` | `pg_dump`, `pg_restore`, `psql`, `pg_basebackup` | PGDG (apt.postgresql.org / yum.postgresql.org), major >= major của server |
+| `pg_dump`, `pg_basebackup` | `pg_dump`, `pg_restore`, `psql`, `pg_basebackup` | PGDG (apt.postgresql.org / yum.postgresql.org), major >= major của server. Server <= 16 với client 17+: thêm client 16 dưới tên `pg_dump-16`, `pg_restore-16` (pg_restore 17+ không restore được vào server <= 16) |
 | `mongodump` | `mongodump`, `mongorestore` | MongoDB Database Tools |
 
 Mặc định Strand tìm công cụ theo `PATH` của `strand-web.service`. Muốn chỉ định chính xác binary nào được chạy (ví dụ hai bản MySQL client, hoặc PostgreSQL major cụ thể thay cho `pg_wrapper`), gom chúng (file hoặc symlink) vào một thư mục và đặt `STRAND_BACKUP_TOOLS_DIR`; khi đã đặt, Strand **chỉ** tìm ở đó. File phải có quyền chạy và không được group/other ghi:
@@ -109,7 +109,7 @@ echo 'STRAND_BACKUP_TOOLS_DIR=/opt/strand-tools' | sudo tee -a /etc/strand/web.e
 sudo systemctl restart strand-web
 ```
 
-Bảng tương thích server và giới hạn đã biết (ví dụ `pg_restore` 17+ vào PostgreSQL <= 16): docs/CENTRAL-BACKUPS.md mục "Native tools". Image container (mục 10.7) có sẵn tất cả.
+Bảng tương thích server và giới hạn đã biết (server MySQL 8.0 cần `mysqldump-8.0`; server PostgreSQL <= 16 cần `pg_dump-16` và `pg_restore-16` khi client mặc định là 17+): docs/CENTRAL-BACKUPS.md mục "Native tools". Image container (mục 10.7) có sẵn tất cả.
 
 ### 2b. Cài tay (binary hoặc build từ source)
 
@@ -539,6 +539,7 @@ Image `web` có sẵn mọi công cụ mà backup/restore quản lý gọi, lấ
 | `mysqldump-8.0` | Oracle MySQL 8.0.46 (chỉ mysqldump, Strand tự dùng cho server MySQL 8.0/8.1) | `/opt/mysql-8.0/bin` |
 | `mariadb-dump`, `mariadb`, `mariadb-binlog` | MariaDB 12.3.4 LTS (repo MariaDB) | `/usr/bin` |
 | `pg_dump`, `pg_restore`, `pg_basebackup`, `psql` | PostgreSQL 19.0 (PGDG) | `/usr/lib/postgresql/19/bin`, symlink trong `/usr/local/bin` |
+| `pg_dump-16`, `pg_restore-16` | PostgreSQL 16.16 (PGDG; Strand tự dùng cho server PostgreSQL <= 16, kể cả restore/test restore) | `/usr/lib/postgresql/16/bin` |
 | `mongodump`, `mongorestore` | MongoDB Database Tools 100.20.1 | `/usr/bin` |
 | `mydumper`, `myloader` | mydumper 1.0.19-1 | `/usr/bin` |
 

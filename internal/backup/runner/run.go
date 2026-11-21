@@ -282,6 +282,9 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 		meta.Details = map[string]string{"tool_version": strings.TrimSpace(ver)}
 	case backup.MethodPGDump:
 		inv, err = PGDumpInvocation(e.Getenv, job.Conn, enc.Compress)
+		if err == nil {
+			inv.Tool = e.pgDumpTool(ctx, job.Conn)
+		}
 	case backup.MethodPGBaseBackup:
 		inv = PGBaseBackupInvocation(e.Getenv, job.Conn)
 	case backup.MethodMongodump:

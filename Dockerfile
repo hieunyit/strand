@@ -7,6 +7,7 @@
 #   MySQL (Oracle) 8.0     : mysqldump-8.0 (chỉ cho server 8.0/8.1) -> /opt/mysql-8.0/bin/mysqldump
 #   MariaDB LTS            : mariadb-dump, mariadb                 -> /usr/bin (repo MariaDB)
 #   PostgreSQL (PGDG)      : pg_dump, pg_restore, pg_basebackup, psql -> /usr/lib/postgresql/<major>/bin, symlink /usr/local/bin
+#   PostgreSQL 16 (PGDG)   : pg_dump-16, pg_restore-16 (chỉ cho server <= 16)
 #   MongoDB Database Tools : mongodump, mongorestore               -> /usr/bin
 #   mydumper               : mydumper, myloader                    -> /usr/bin
 # Mọi phiên bản ghim bằng ARG; repo apt xác thực bằng keyring signed-by (fingerprint ghim), file tải về
@@ -30,6 +31,11 @@ ARG MARIADB_GPG_FPR=177F4010FE56CA3336300305F1656F24C74CD1D8
 # PostgreSQL: major mới nhất (pg_dump phải >= major của server). Để trống PG_CLIENT_VERSION = bản vá mới nhất của major.
 ARG PG_MAJOR=19
 ARG PG_CLIENT_VERSION=19.0-2.pgdg12+1
+# PostgreSQL 16 client cho server <= 16: pg_restore 17+ luôn gửi SET transaction_timeout (server <= 16 từ chối,
+# restore dùng --exit-on-error) và pg_restore 16 không đọc được archive của pg_dump 17+ (định dạng 1.16).
+# Strand tự dùng pg_dump-16 khi dump server <= 16 và pg_restore-16 khi restore vào server <= 16 (13-16).
+ARG PG_LEGACY_MAJOR=16
+ARG PG_LEGACY_CLIENT_VERSION=16.16-1.pgdg12+1
 ARG PGDG_GPG_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
 ARG MONGO_TOOLS_VERSION=100.20.1
 ARG MONGO_TOOLS_SHA256_AMD64=3659cc8f0a39b551e079dd86624bd1b9422a32333bcc9f1efd8c2f5eaa83dc91
@@ -129,7 +135,7 @@ chmod -R go-w /out
 EOF
 
 FROM debian:bookworm-slim
-ARG MYSQL_VERSION MYSQL80_VERSION MARIADB_VERSION PG_MAJOR PG_CLIENT_VERSION MONGO_TOOLS_VERSION MYDUMPER_VERSION
+ARG MYSQL_VERSION MYSQL80_VERSION MARIADB_VERSION PG_MAJOR PG_CLIENT_VERSION PG_LEGACY_MAJOR PG_LEGACY_CLIENT_VERSION MONGO_TOOLS_VERSION MYDUMPER_VERSION
 # tini: PID 1 thu hoạch zombie (web sinh pipeline nền bằng `strand sync --background`, tiến trình mồ côi về PID 1).
 # ca-certificates: kết nối TLS tới nguồn/đích. curl: HEALTHCHECK.
 # MariaDB và MySQL không cài chung được bằng gói (mariadb-client xung đột với mysql-community-client):
@@ -174,6 +180,7 @@ apt-get update
 apt-get install -y --no-install-recommends \
   tini curl libncurses6 \
   "postgresql-client-${PG_MAJOR}${PG_CLIENT_VERSION:+=${PG_CLIENT_VERSION}}" \
+  "postgresql-client-${PG_LEGACY_MAJOR}${PG_LEGACY_CLIENT_VERSION:+=${PG_LEGACY_CLIENT_VERSION}}" \
   "mariadb-client=1:${MARIADB_VERSION}+maria~deb12" \
   /mnt/tools/debs/mongodb-database-tools.deb /mnt/tools/debs/mydumper.deb
 apt-get clean
@@ -191,8 +198,11 @@ done
 for t in pg_dump pg_restore pg_basebackup psql; do
   ln -s "/usr/lib/postgresql/${PG_MAJOR}/bin/$t" "/usr/local/bin/$t"
 done
+for t in pg_dump pg_restore; do
+  ln -s "/usr/lib/postgresql/${PG_LEGACY_MAJOR}/bin/$t" "/usr/local/bin/$t-${PG_LEGACY_MAJOR}"
+done
 # Mỗi công cụ phải chạy được (thiếu thư viện thì build hỏng ngay, kể cả arm64).
-for t in mysql mysqldump mysqldump-8.0 mysqlbinlog mariadb mariadb-dump pg_dump pg_restore pg_basebackup psql mongodump mongorestore mydumper myloader; do
+for t in mysql mysqldump mysqldump-8.0 mysqlbinlog mariadb mariadb-dump pg_dump pg_restore pg_basebackup psql "pg_dump-${PG_LEGACY_MAJOR}" "pg_restore-${PG_LEGACY_MAJOR}" mongodump mongorestore mydumper myloader; do
   p="$(command -v "$t")"
   if ldd "$(readlink -f "$p")" 2>&1 | grep 'not found'; then echo "$t: missing shared library" >&2; exit 1; fi
   "$t" --version >/dev/null
@@ -206,6 +216,7 @@ LABEL io.strand.tools.mysql="${MYSQL_VERSION}" \
       io.strand.tools.mysql80-mysqldump="${MYSQL80_VERSION}" \
       io.strand.tools.mariadb="${MARIADB_VERSION}" \
       io.strand.tools.postgresql="${PG_CLIENT_VERSION:-${PG_MAJOR}}" \
+      io.strand.tools.postgresql-legacy="${PG_LEGACY_CLIENT_VERSION:-${PG_LEGACY_MAJOR}}" \
       io.strand.tools.mongodb-database-tools="${MONGO_TOOLS_VERSION}" \
       io.strand.tools.mydumper="${MYDUMPER_VERSION}"
 

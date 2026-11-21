@@ -2,6 +2,7 @@ package runner
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -398,18 +399,34 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	}
 
 	var stdin io.Reader
+	var header []byte
 	if needStage {
 		args = append(args, archiveFile)
+		if f, err := os.Open(archiveFile); err == nil {
+			header = make([]byte, 8)
+			n, _ := io.ReadFull(f, header)
+			header = header[:n]
+			f.Close()
+		}
 	} else {
 		body, err := e.openRecord(ctx, base)
 		if err != nil {
 			return err
 		}
 		defer body.Close()
-		stdin = body
+		br := bufio.NewReader(body)
+		header, _ = br.Peek(8)
+		stdin = br
 	}
 
-	inv := Invocation{Tool: "pg_restore", Args: args}
+	tool, err := SelectPGRestore(ctx, e.Getenv, admin.ParameterStatus("server_version"), header)
+	if err != nil {
+		return err
+	}
+	if tool != "pg_restore" {
+		e.logf("restore: PostgreSQL %s target, using %s", admin.ParameterStatus("server_version"), tool)
+	}
+	inv := Invocation{Tool: tool, Args: args}
 	if pw := password(e.Getenv, t.Conn); pw != "" {
 		inv.Env = []string{"PGPASSWORD=" + pw}
 	}

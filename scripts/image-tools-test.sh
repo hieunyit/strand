@@ -21,9 +21,8 @@ PREFIX="${PREFIX:-strand-imgtest-}"
 FAIL=0
 ok()  { printf '  OK    %s\n' "$*"; }
 bad() { printf '  FAIL  %s\n' "$*"; FAIL=1; }
-warn() { printf '  WARN  %s\n' "$*"; }
 
-TOOLS="mysqldump mysqldump-8.0 mysql mysqlbinlog mariadb-dump mariadb mydumper myloader pg_dump pg_restore pg_basebackup psql mongodump mongorestore"
+TOOLS="mysqldump mysqldump-8.0 mysql mysqlbinlog mariadb-dump mariadb mydumper myloader pg_dump pg_restore pg_basebackup psql pg_dump-16 pg_restore-16 mongodump mongorestore"
 
 echo "== image: $IMAGE"
 docker image inspect "$IMAGE" --format '   size: {{.Size}} bytes' || { echo "image $IMAGE not found" >&2; exit 2; }
@@ -160,30 +159,41 @@ for target in $LIVE_TARGETS; do
       "${PREFIX}mariadb" mariadb-dump "--master-data=2 --gtid" mysql
     ;;
   pg)
-    for img in ${PG_IMAGES:-postgres:16 postgres:17}; do
+    for img in ${PG_IMAGES:-postgres:15 postgres:16 postgres:17 postgres:18}; do
+    # Chọn công cụ như runner.SelectPGDump/SelectPGRestore: server <= 16 dùng pg_dump-16/pg_restore-16.
+    major="$(docker run --rm --entrypoint postgres "$img" --version | grep -o '[0-9][0-9]*' | head -n1)"
+    if [ "$major" -le 16 ]; then dump=pg_dump-16; rest=pg_restore-16; else dump=pg_dump; rest=pg_restore; fi
     n="pg$(echo "$img" | tr -c 'a-z0-9\n' '-' | sed 's/^postgres-//')"
     h="$PREFIX$n"
     start "$n" "$img" -e POSTGRES_PASSWORD
     for _ in $(seq 1 60); do docker exec "$h" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
     sleep 2
-    docker exec "$h" sh -c 'echo "host replication all all scram-sha-256" >> "$PGDATA/pg_hba.conf"'
+    docker exec "$h" sh -c 'echo "host replication all all md5" >> "$PGDATA/pg_hba.conf"'
     docker exec "$h" psql -U postgres -qc 'SELECT pg_reload_conf()' -c 'CREATE TABLE t (id int primary key, v text)' \
       -c "INSERT INTO t SELECT g, 'v'||g FROM generate_series(1,100) g" >/dev/null
     # Argv của PGDumpInvocation, rồi pg_restore như restorePGDump (--exit-on-error).
     if res="$(tool "set -euo pipefail
-      pg_dump --host=$h --format=custom --no-password --port=5432 --username=postgres --compress=0 --dbname=postgres > /tmp/d.dump
+      $dump --host=$h --format=custom --no-password --port=5432 --username=postgres --compress=0 --dbname=postgres > /tmp/d.dump
       pg_restore -l /tmp/d.dump | grep -c 'TABLE DATA'" 2>&1)"; then
-      ok "pg_dump -> $img: custom archive, $res table(s)"; else bad "pg_dump -> $img: $res"; fi
+      ok "$dump -> $img: custom archive, $res table(s)"; else bad "$dump -> $img: $res"; fi
     if res="$(tool "set -euo pipefail
-      pg_dump --host=$h --format=custom --no-password --port=5432 --username=postgres --compress=0 --dbname=postgres > /tmp/d.dump
+      $dump --host=$h --format=custom --no-password --port=5432 --username=postgres --compress=0 --dbname=postgres > /tmp/d.dump
       psql -h $h -U postgres -qc 'CREATE DATABASE restored'
       trap \"psql -h $h -U postgres -qc 'DROP DATABASE restored'\" EXIT
-      pg_restore --host=$h --dbname=restored --no-owner --no-privileges --exit-on-error --no-password --port=5432 --username=postgres /tmp/d.dump
+      $rest --host=$h --dbname=restored --no-owner --no-privileges --exit-on-error --no-password --port=5432 --username=postgres /tmp/d.dump
       psql -h $h -U postgres -d restored -Atc 'SELECT count(*) FROM t'" 2>&1)"; then
-      ok "pg_restore (restorePGDump argv) -> $img: $res rows"
-    elif echo "$res" | grep -q 'unrecognized configuration parameter "transaction_timeout"'; then
-      warn "$(tool 'pg_restore --version' 2>/dev/null) -> $img: SET transaction_timeout rejected by a pre-17 server (--exit-on-error); see docs/CENTRAL-BACKUPS.md Native tools"
-    else bad "pg_restore -> $img: $res"; fi
+      ok "$rest --exit-on-error (restorePGDump argv) -> $img: $res rows"
+    else bad "$rest -> $img: $res"; fi
+    if [ "$major" -le 16 ]; then
+      if res="$(tool "pg_dump --host=$h --format=custom --no-password --username=postgres --dbname=postgres > /tmp/d.dump
+        psql -h $h -U postgres -qc 'CREATE DATABASE restored2'
+        pg_restore --host=$h --dbname=restored2 --exit-on-error --no-password --username=postgres /tmp/d.dump; rc=\$?
+        psql -h $h -U postgres -qc 'DROP DATABASE restored2'; exit \$rc" 2>&1)"; then
+        bad "pg_restore 19 -> $img succeeded: pg_restore-16 selection may be unnecessary"
+      elif echo "$res" | grep -q transaction_timeout; then
+        ok "pg_restore 19 -> $img fails as expected (SET transaction_timeout): Strand uses pg_restore-16"
+      else bad "pg_restore 19 -> $img: unexpected error: $res"; fi
+    fi
     if res="$(tool "set -euo pipefail
       pg_basebackup --host=$h --pgdata=- --format=tar --wal-method=fetch --checkpoint=fast --verbose --no-password --label=strand --port=5432 --username=postgres 2>/tmp/log | tar -tf - | grep -c . ; grep -o 'write-ahead log end point: [0-9A-F/]*' /tmp/log" 2>&1)"; then
       ok "pg_basebackup -> $img: $(echo "$res" | tr '\n' ' ')"; else bad "pg_basebackup -> $img: $res"; fi

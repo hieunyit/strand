@@ -290,8 +290,9 @@ tarballs also with Oracle's GPG signature):
 | restore of `mysqldump`/`mariadb-dump`, test restores | `mysql` | Oracle MySQL 8.4.13 | MySQL 5.7-8.4, MariaDB (MariaDB dumps load with it, tested on 10.6-11.4) |
 | MySQL point-in-time restore | `mysqlbinlog` | Oracle MySQL 8.4.13 | MySQL 5.7/8.0/8.4 binlogs |
 | `mydumper` backup (restore: `myloader` by hand) | `mydumper`, `myloader` | mydumper 1.0.19-1 (built against MySQL 8.4 client) | MySQL 5.7/8.0/8.4, MariaDB |
-| `pg_dump` backup, restore | `pg_dump`, `pg_restore`, `psql` | PostgreSQL 19.0 (PGDG) | dump: any server up to 19; restore: see below |
-| `pg_basebackup` backup | `pg_basebackup` | PostgreSQL 19.0 (PGDG) | 16-19 tested (`-Ft -X fetch`, needs a `replication` pg_hba entry) |
+| `pg_dump` backup, restore, test restores | `pg_dump`, `pg_restore`, `psql` | PostgreSQL 19.0 (PGDG) | servers 17+ (dump and restore target) |
+| `pg_dump` backup / restore, PostgreSQL <= 16 | `pg_dump-16`, `pg_restore-16` | PostgreSQL 16.16 (PGDG) | servers 13-16 tested (picked automatically, see below) |
+| `pg_basebackup` backup | `pg_basebackup` | PostgreSQL 19.0 (PGDG) | 13-18 tested (`-Ft -X fetch`, needs a `replication` pg_hba entry) |
 | `mongodump` backup, restore | `mongodump`, `mongorestore` | MongoDB Database Tools 100.20.1 | MongoDB 4.4-8.x (7.0 and 8.0 tested) |
 
 Both architectures (amd64, arm64) get the same versions. On arm64 Oracle
@@ -314,16 +315,29 @@ together as packages (`mariadb-client` conflicts with `mysql-community-client`),
 so the image installs MariaDB's packages (without `mariadb-client-compat`: no
 MariaDB binaries named `mysql*`) and puts Oracle's binaries in `/opt/mysql`
 and `/opt/mysql-8.0`, linked from `/usr/local/bin`; PostgreSQL's binaries are
-linked from `/usr/lib/postgresql/19/bin` (bypassing `pg_wrapper`).
+linked from `/usr/lib/postgresql/19/bin` (bypassing `pg_wrapper`), the 16
+client's as `pg_dump-16`/`pg_restore-16`.
+
+Why two PostgreSQL clients: `pg_restore` 17 or newer always sends
+`SET transaction_timeout = 0`, which PostgreSQL 16 and older reject, and
+restores run with `--exit-on-error`; `pg_restore` 16 cannot read archives
+written by `pg_dump` 17+ (archive format 1.16). So for a PostgreSQL <= 16
+source Strand dumps with `pg_dump-16` (job log: `pg_dump: PostgreSQL 16.x
+server, using pg_dump-16`), and for a restore or test restore into a
+PostgreSQL <= 16 server it reads the target's `server_version` and uses
+`pg_restore-16` (`restore: PostgreSQL 15.x target, using pg_restore-16`).
+`pg_restore-<N>` / `pg_dump-<N>` for N from the server's major to 16 are
+accepted too (exact major first). Without `pg_dump-16` the backup still runs,
+with a warning that it will only restore into PostgreSQL 17+; restoring such
+an archive (or any `pg_dump` 17+ archive) into PostgreSQL <= 16 fails with an
+error saying so, and without `pg_restore-16` with an error naming the tool.
+`runner.OptionalTools()` lists these versioned tools for status pages.
 
 Known limits:
 
-- `pg_restore` 17 or newer always sends `SET transaction_timeout = 0`, which
-  PostgreSQL 16 and older reject; Strand restores with `--exit-on-error`, so a
-  restore (or test restore) **into a PostgreSQL 16 or older server** fails with
-  `unrecognized configuration parameter "transaction_timeout"`. Backups of
-  such servers work; restore them into PostgreSQL 17+ or run `pg_restore`
-  without `--exit-on-error` by hand from `strand backup fetch`.
+- Backups taken before this change from PostgreSQL <= 16 servers by
+  `pg_dump` 17+ restore only into PostgreSQL 17 or newer (or by hand:
+  `strand backup fetch`, then `pg_restore` 19 without `--exit-on-error`).
 - The MariaDB 11.4+ client requires TLS when it cannot rule out an insecure
   login. Jobs always pass the port, which works against servers without TLS;
   `mariadb` by hand against a MariaDB server without TLS needs `--skip-ssl`.
@@ -331,7 +345,9 @@ Known limits:
 Check an image with `make image-tools-test IMAGE=<image>` (every tool found
 on `PATH`, root-owned, not group/world-writable, `--version` runs as user
 `strand`) and `make image-tools-smoke IMAGE=<image>` (dumps and restores against
-throw-away MySQL 8.4/8.0/5.7, MariaDB, PostgreSQL 16/17, MongoDB containers).
+throw-away MySQL 8.4/8.0/5.7, MariaDB, PostgreSQL 15-18, MongoDB containers, then
+`TestPGDumpRestoreOlderServers`: Strand's own backup and restore of PostgreSQL
+15/16 into 15/16/17 with the image's tools).
 
 **Packages (`.deb`/`.rpm`).** The packages do not depend on the tools (CDC
 pipelines need none); they recommend the distribution's PostgreSQL client and
@@ -349,7 +365,9 @@ sudo install -d -m 0755 -o root -g root /opt/strand-tools
 sudo ln -s /usr/bin/mysqldump /usr/bin/mysql /usr/bin/mysqlbinlog /opt/strand-tools/
 sudo ln -s /usr/lib/postgresql/17/bin/pg_dump /usr/lib/postgresql/17/bin/pg_restore \
   /usr/lib/postgresql/17/bin/pg_basebackup /usr/lib/postgresql/17/bin/psql /opt/strand-tools/
-# MySQL 8.0 servers with a mysqldump >= 8.2: also provide MySQL 8.0's mysqldump as mysqldump-8.0
+# MySQL 8.0 servers with a mysqldump >= 8.2: also provide MySQL 8.0's mysqldump as mysqldump-8.0;
+# PostgreSQL <= 16 servers with a client >= 17: also /usr/lib/postgresql/16/bin/pg_dump as pg_dump-16
+# and .../pg_restore as pg_restore-16
 echo 'STRAND_BACKUP_TOOLS_DIR=/opt/strand-tools' | sudo tee -a /etc/strand/web.env
 sudo systemctl restart strand-web
 ```

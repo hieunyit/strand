@@ -18,6 +18,8 @@ image:
 image-tools-test:
 	scripts/image-tools-test.sh $(IMAGE)
 
-# Như trên + dump/nạp lại với server thật (MySQL 8.4/5.7, MariaDB, PostgreSQL, MongoDB) trong container tạm.
+# Như trên + dump/nạp lại với server thật (MySQL 8.4/8.0/5.7, MariaDB, PostgreSQL 15-18, MongoDB) trong container tạm,
+# rồi backup/restore PostgreSQL 15/16 -> 15/16/17 qua chính runner của Strand với công cụ của image (cần Go).
 image-tools-smoke:
 	LIVE=1 scripts/image-tools-test.sh $(IMAGE)
+	STRAND_TEST_TOOLS_IMAGE=$(IMAGE) go test -count=1 -run 'TestPGDumpRestoreOlderServers' ./internal/backup/runner/
