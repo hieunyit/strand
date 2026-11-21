@@ -40,6 +40,7 @@
           <span class="field-hint" id="wiz-dbs-hint"></span><span class="field-error" hidden></span></div>
         <div class="field" id="wiz-methods-field" data-custom-off hidden><span class="field-label">Method <span class="req" aria-hidden="true">*</span></span>
           <div class="choice-cards" id="wiz-methods" role="radiogroup" aria-label="Backup method"></div>
+          <div class="tool-status" id="wiz-tool-status" role="status" aria-live="polite" hidden></div>
           <span class="field-error" hidden></span></div>
         <details class="advanced" id="wiz-custom">
           <summary>Advanced: custom script</summary>
@@ -120,7 +121,8 @@
         <div class="switch-row" id="wiz-tr-row">
           <input type="checkbox" name="test_restore" id="wiz-testrestore" aria-describedby="wiz-tr-reason">
           <div><label for="wiz-testrestore"><b>Test restore</b> <span class="badge override small" data-override="test_restore" hidden>overridden</span></label>
-            <div class="reason" id="wiz-tr-reason"></div></div>
+            <div class="reason" id="wiz-tr-reason"></div>
+            <div class="tool-status" id="wiz-tr-tool" role="status" aria-live="polite" hidden></div></div>
         </div>
         <div class="field" id="wiz-scratch-field" hidden><span class="field-label">Scratch connection <span class="req" aria-hidden="true">*</span></span>
           <select name="scratch_connection_id"><option value="">Choose a connection</option></select>

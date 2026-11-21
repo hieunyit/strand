@@ -140,6 +140,11 @@ func runManagedBuiltinSchedule(ctx context.Context, cmd *cobra.Command, st store
 	if backup.IsUnsupportedMethod(job.Method) {
 		return fmt.Errorf("backup job %s: method %q is unsupported (removed: runs on the database host)", jobID, job.Method)
 	}
+	// Preflight: without its native tool every run would fail; refuse before a run, a catalog record or a
+	// restore point is created.
+	if err := runner.CheckTools(os.Getenv, runner.BackupToolNeeds(job.Method)); err != nil {
+		return fmt.Errorf("backup job %s: %w", jobID, err)
+	}
 	if once {
 		return runManagedBuiltinJob(ctx, cmd, st, job)
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"strand/internal/backup"
+	"strand/internal/backup/runner"
 	"strand/internal/web/store"
 )
 
@@ -352,6 +353,12 @@ type wizData struct {
 	Job           *backup.Job `json:"job,omitempty"`
 	Edit          bool        `json:"edit"`
 	Legacy        bool        `json:"legacy,omitempty"`
+	// Native tool status (backup_tools.go): tools by name, the tools each method's backups and test
+	// restores run.
+	Tools            map[string]wizTool  `json:"tools,omitempty"`
+	MethodTools      map[string][]string `json:"method_tools,omitempty"`
+	TestRestoreTools map[string][]string `json:"test_restore_tools,omitempty"`
+	ToolHint         string              `json:"tool_hint,omitempty"`
 }
 
 type backupJobWizardBody struct {
@@ -409,6 +416,8 @@ func (s *Server) pageBackupJobWizard(edit bool) authedHandler {
 			title, crumb = "Edit "+j.Name, "Edit"
 		}
 		d := s.wizardData(r.Context(), job)
+		d.Tools, d.MethodTools, d.TestRestoreTools = wizardTools(r)
+		d.ToolHint = runner.ToolHint
 		raw, _ := json.Marshal(d)
 		body := backupJobWizardBody{backupRoles: rolesOf(sess), Edit: edit, Data: string(raw), Drawer: connDrawer{StoredAllowed: s.storedAllowed(), Wizard: true}}
 		if job != nil {
@@ -457,6 +466,10 @@ func (s *Server) enrichJobViews(ctx context.Context, views []backupJobView) {
 			}
 		}
 		views[i].Legacy = !j.IsCustom() && j.ConnectionID == ""
+		var tm *runner.ToolMissingError
+		if err := jobToolError(j); errors.As(err, &tm) {
+			views[i].ToolError, views[i].ToolsMissing = tm.Error(), tm.Tools()
+		}
 		var warns []string
 		if w := views[i].Warning; w != "" {
 			warns = append(warns, w)

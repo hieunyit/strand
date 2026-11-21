@@ -11,11 +11,11 @@
     </div>
     {{if .Body.CanWrite}}
     <div class="cardhead-actions">
-      <button type="button" class="btn small" data-job-action="run" data-id="{{.Body.Job.Job.ID}}">Run now</button>
+      <button type="button" class="btn small" data-job-action="run" data-id="{{.Body.Job.Job.ID}}"{{if .Body.Job.ToolError}} disabled title="{{.Body.Job.ToolError}}"{{end}}>Run now</button>
       {{if .Body.Job.Job.Enabled}}
       <button type="button" class="btn small ghost" data-job-action="pause" data-id="{{.Body.Job.Job.ID}}">Pause</button>
       {{else}}
-      <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Body.Job.Job.ID}}">Resume</button>
+      <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Body.Job.Job.ID}}"{{if .Body.Job.ToolError}} disabled title="{{.Body.Job.ToolError}}"{{end}}>Resume</button>
       {{end}}
       {{if .Body.IsAdmin}}
       <a href="/backups/jobs/{{.Body.Job.Job.ID}}/edit" class="btn small">Edit</a>
@@ -28,6 +28,7 @@
 </section>
 
 {{range .Body.Job.Warnings}}<div class="alert alert-warn" role="status"><b>Warning.</b> {{.}}</div>{{end}}
+{{if .Body.Job.ToolError}}<div class="alert alert-error" role="alert" id="job-tool-missing"><b><span class="badge st-failed small">tool missing</span> This job cannot run on this host.</b> {{.Body.Job.ToolError}}{{if .Body.IsAdmin}} <a href="/backups/tools">Backup tools</a>{{end}}</div>{{end}}
 {{if eq (printf "%s" .Body.Job.Job.LastRunStatus) "missed"}}<div class="alert alert-warn" role="status"><b>Missed.</b> The last scheduled run did not start inside its window{{if .Body.Job.Job.WindowMinutes}} of {{.Body.Job.Job.WindowMinutes}} minutes{{end}}.</div>{{end}}
 <nav class="tabs" role="tablist" aria-label="Job detail tabs">
   <a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=overview" role="tab" class="tab{{if eq .Body.ActiveTab "overview"}} active{{end}}" aria-selected="{{if eq .Body.ActiveTab "overview"}}true{{else}}false{{end}}">Overview</a>

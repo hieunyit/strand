@@ -40,6 +40,7 @@ func (s *Server) backupProRoutes(mux *http.ServeMux) {
 	s.backupNotifyRoutes(mux)
 	s.backupKeyRoutes(mux)
 	s.backupRPORoutes(mux)
+	s.backupToolRoutes(mux)
 	mux.Handle("GET /metrics", s.auth(true, s.backupMetrics))
 }
 
@@ -345,6 +346,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 	var backupEngine string
 	var src string
 	var backupRecord *backup.Record
+	planLogs := false // the restore replays archived logs (point-in-time recovery)
 	if req.BackupID != "" {
 		if s.backups != nil {
 			b, ok, err := s.backups.Get(r.Context(), req.BackupID)
@@ -368,6 +370,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 					}
 				}
 				if plan, err := runner.PlanRestore(all, nil, at); err == nil {
+					planLogs = len(plan.Logs) > 0
 					base := plan.Base()
 					backupRecord = &base
 					backupEngine = base.Engine
@@ -564,6 +567,17 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		}
 	}
 
+	// The restore process runs the method's native client tools (mysql, pg_restore, mongorestore and
+	// mysqlbinlog to replay binlogs): refuse before starting it when they are missing on this host.
+	if backupRecord != nil {
+		method := backupRecord.Method
+		if method == "" {
+			method = backupRecord.Tool
+		}
+		if writeToolMissing(w, runner.CheckTools(toolGetenv, runner.RestoreToolNeeds(method, planLogs || req.TargetTime != ""))) {
+			return
+		}
+	}
 	args, err := restoreArgs(req)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -797,7 +811,13 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 			if ok, _ := s.db.st.ClaimBackupJobVerify(ctx, j.ID, now, time.Duration(j.VerifyEverySeconds)*time.Second); ok {
 				args := []string{"verify", "--job-id", j.ID}
 				if j.TestRestore {
-					args = append(args, "--test-restore")
+					// A test restore runs the restore tool; without it only the integrity check runs (the job
+					// shows the missing tool).
+					if err := runner.CheckTools(toolGetenv, runner.TestRestoreToolNeeds(j.Method)); isToolMissing(err) {
+						s.log.Error("scheduled test restore skipped: native tool missing", "job", j.ID, "error", err)
+					} else {
+						args = append(args, "--test-restore")
+					}
 				}
 				if _, err := s.startBackupOp("backup-verify", "backup-verify-"+j.ID, args...); err != nil {
 					s.log.Warn("scheduled verification", "job", j.ID, "error", err)

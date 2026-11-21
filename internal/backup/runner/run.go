@@ -146,6 +146,11 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 	if backup.IsUnsupportedMethod(job.Method) {
 		return backup.Record{}, fmt.Errorf("method %q is unsupported (removed: runs on the database host)", job.Method)
 	}
+	// Resolve the native tool before touching the repository or the catalog: a missing tool must not leave
+	// a failed restore point behind.
+	if err := CheckTools(e.Getenv, BackupToolNeeds(job.Method)); err != nil {
+		return backup.Record{}, err
+	}
 	repo, err := e.OpenJobRepository(ctx, job.Repository, job.Bucket, job.Prefix)
 	if err != nil {
 		return backup.Record{}, err

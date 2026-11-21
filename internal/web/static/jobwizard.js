@@ -12,6 +12,7 @@
   var D;
   try { D = JSON.parse(root.getAttribute('data-wizard') || '{}'); } catch (e) { D = {}; }
   D.connections = D.connections || []; D.policies = D.policies || []; D.repos = D.repos || [];
+  D.tools = D.tools || {}; D.method_tools = D.method_tools || {}; D.test_restore_tools = D.test_restore_tools || {};
   var EDIT = !!D.edit, JOB = D.job || null;
   var el = U.el;
   var STEPS = 4;
@@ -256,6 +257,31 @@
     $('#wiz-enc-row').classList.toggle('is-disabled', !has);
   }
 
+  // ---- native tools (the server refuses an enabled job whose tool is missing) ----
+  var TOOL_HINT = D.tool_hint || 'install it in the Strand Web host/image or set STRAND_BACKUP_TOOLS_DIR';
+  function missingTools(list) { return (list || []).filter(function (t) { return !(D.tools[t] && D.tools[t].found); }); }
+  function backupToolsMissing() { return isCustomJob() ? [] : missingTools(D.method_tools[method()]); }
+  function testRestoreToolsMissing() { return chk('test_restore') && !isCustomJob() ? missingTools(D.test_restore_tools[method()]) : []; }
+  function toolMissingText(miss) { return 'Native tool ' + miss.join(', ') + ' not found on the Strand Web host: an enabled job cannot be saved until it is installed.'; }
+  function renderToolStatus(box, list) {
+    box.textContent = '';
+    if (!list || !list.length) { box.hidden = true; return; }
+    box.hidden = false;
+    list.forEach(function (t) {
+      var info = D.tools[t] || {}, row = el('div', 'small');
+      row.setAttribute('data-tool', t);
+      row.appendChild(el('span', 'badge small ' + (info.found ? 'st-synced' : 'st-failed'), info.found ? 'found' : 'tool missing'));
+      row.appendChild(document.createTextNode(' ' + t + (info.found ? (info.version ? ': ' + info.version : '') : '')));
+      box.appendChild(row);
+    });
+    var miss = missingTools(list);
+    if (miss.length) { box.appendChild(el('div', 'field-hint', 'Not found: ' + TOOL_HINT.charAt(0).toUpperCase() + TOOL_HINT.slice(1) + '.')); }
+  }
+  function syncTools() {
+    renderToolStatus($('#wiz-tool-status'), isCustomJob() ? [] : D.method_tools[method()]);
+    renderToolStatus($('#wiz-tr-tool'), chk('test_restore') && !isCustomJob() ? D.test_restore_tools[method()] : []);
+  }
+
   // ---- step 4 ----
   function syncVerify() {
     var meth = method(), tr = f('test_restore'), ok = TEST_RESTORE_METHODS.indexOf(meth) >= 0;
@@ -373,6 +399,7 @@
         if (!v('connection_id')) { e.connection_id = 'Choose a connection.'; }
         else if (!EDIT && !(S.test && S.testConn === v('connection_id'))) { e.connection_id = 'Test the connection successfully before continuing.'; }
         if (v('connection_id') && !meth) { e.method = 'Choose a backup method.'; }
+        else if (meth && backupToolsMissing().length) { e.method = toolMissingText(backupToolsMissing()); }
         var dbs = selectedDBs();
         if (meth === 'pg_dump' && dbs.length < 1) { e.dbs = 'pg_dump needs at least one database: untick "All databases" and pick some.'; }
         if (meth === 'mongodump' && dbs.length > 1) { e.dbs = 'mongodump takes one database or all of them.'; }
@@ -389,14 +416,15 @@
       if (n('compress_level') < 0 || n('compress_level') > 4) { e.compress_level = 'Use 0 to 4.'; }
     } else if (step === 4) {
       if (chk('test_restore') && !scratchID()) { e.scratch_connection_id = 'Choose the connection of the scratch server.'; }
+      if (testRestoreToolsMissing().length) { e.test_restore = toolMissingText(testRestoreToolsMissing()); }
       if (n('retry_max') > 0 && n('retry_backoff') < 10) { e.retry_backoff = 'Use at least 10 seconds.'; }
       if (n('retry_max') > 20) { e.retry_max = 'At most 20 retries.'; }
     }
     return e;
   }
   // Error holders of the groups that are not a single named control.
-  var HOLDERS = { dbs: '#wiz-dbs-field', method: '#wiz-methods-field', repository: '#wiz-repo-field', policy_choice: '#wiz-policies' };
-  var STEP_OF = { dbs: 1, method: 1, repository: 3, policy_choice: 2 };
+  var HOLDERS = { dbs: '#wiz-dbs-field', method: '#wiz-methods-field', repository: '#wiz-repo-field', policy_choice: '#wiz-policies', test_restore: '#wiz-tr-row' };
+  var STEP_OF = { dbs: 1, method: 1, repository: 3, policy_choice: 2, test_restore: 4 };
   function placeError(k, msg) {
     var input = f(k);
     if (input && input.tagName && window.strandBackupErr.field(form, k, msg)) { return true; }
@@ -496,7 +524,7 @@
   }
   function updateSummary() { var r = rows(); fillDl($('#wiz-summary'), r); if (S.step === STEPS) { fillDl($('#wiz-review'), r); } }
   function syncAll() {
-    syncCustom(); syncPolicyBlock(); syncPitr(); syncEncryption(); syncVerify(); syncBadges(); updateSummary();
+    syncCustom(); syncPolicyBlock(); syncPitr(); syncEncryption(); syncVerify(); syncTools(); syncBadges(); updateSummary();
     $('#wiz-legacy').hidden = !(EDIT && D.legacy);
   }
 

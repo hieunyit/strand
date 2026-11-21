@@ -267,6 +267,22 @@ Names reserved for Strand's own secrets (`STRAND_WEB_*`, `STRAND_BACKUP_S3_*`,
 plaintext SHA-256 checked) before the record becomes `complete`; set
 `STRAND_BACKUP_VERIFY_READBACK=false` to skip.
 
+**Tool preflight.** A job whose native tool is missing never runs: the Web
+refuses to create/save an *enabled* job, to enable/resume it and to Run it now
+(HTTP 409, code `tool_missing`, naming the tool), does not start its scheduler at
+boot or in the reconcile loop, and refuses a restore whose restore tool
+(`mysql`, plus `mysqlbinlog` for binlog replay, `pg_restore`, `mongorestore`) is
+missing; a job with test restore also needs the restore tool. A disabled job can
+still be saved (with a warning) to prepare it before installing the tools.
+`strand backup schedule --job-id` checks the tool before it records a run or a
+catalog record, so a missing tool leaves no failed restore point. The job list
+and job page show a "tool missing" badge and disable Run/Resume; the wizard
+shows found/version or missing for the chosen method. Admins see every tool
+(found/missing, path, version, methods) on **Backup resources > Backup tools**
+(`/backups/tools`, `GET /api/v1/backup-tools`). Fix: install the tool in the
+Strand Web host/image or set `STRAND_BACKUP_TOOLS_DIR`. The log methods
+(binlog, WAL, oplog) and `pg_basebackup` restores need no tool.
+
 ```sh
 strand backup schedule --job-id bjob-...        # scheduler of a built-in job (started by the Web)
 strand backup schedule --job-id bjob-... --once # one run ("Run now")

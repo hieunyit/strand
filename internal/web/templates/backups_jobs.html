@@ -96,6 +96,7 @@
             {{if .Job.Overrides}}<span class="badge override small" title="Overrides: {{join .Job.Overrides ", "}}">overrides</span>{{end}}
             {{if .Legacy}}<span class="badge small" title="This job carries its own connection settings">inline connection</span>{{end}}
             {{range .Warnings}}<div class="job-warning small"><span class="badge st-warning small">warning</span> {{.}}</div>{{end}}
+            {{if .ToolError}}<div class="job-warning small" data-tool-missing><span class="badge st-failed small" title="{{.ToolError}}">tool missing</span> {{join .ToolsMissing ", "}}</div>{{end}}
           </td>
           <td>
             <div>{{.Job.Engine}}</div>
@@ -130,11 +131,11 @@
           </td>
           {{if $.Body.CanWrite}}
           <td class="r nowrap">
-            <button type="button" class="btn small" data-job-action="run" data-id="{{.Job.ID}}">Run now</button>
+            <button type="button" class="btn small" data-job-action="run" data-id="{{.Job.ID}}"{{if .ToolError}} disabled title="{{.ToolError}}"{{end}}>Run now</button>
             {{if .Job.Enabled}}
             <button type="button" class="btn small ghost" data-job-action="pause" data-id="{{.Job.ID}}">Pause</button>
             {{else}}
-            <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Job.ID}}">Resume</button>
+            <button type="button" class="btn small ghost" data-job-action="resume" data-id="{{.Job.ID}}"{{if .ToolError}} disabled title="{{.ToolError}}"{{end}}>Resume</button>
             {{end}}
             {{if $.Body.IsAdmin}}
             <a class="btn small ghost" href="/backups/jobs/{{.Job.ID}}/edit">Edit</a>

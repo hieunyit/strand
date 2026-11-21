@@ -38,6 +38,7 @@ func TestStandardPageSkeletonAndNoInlineStyles(t *testing.T) {
 		{"/backups/jobs", false, true},
 		{"/backups/catalog", false, true},
 		{"/backups/restore", false, false},
+		{"/backups/tools", false, true},
 		{"/mcp", false, true},
 		{"/settings", true, false},
 		{"/settings/db", true, false},

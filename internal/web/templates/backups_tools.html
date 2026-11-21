@@ -1,0 +1,17 @@
+{{define "content"}}
+{{if .Body.Missing}}<div class="alert alert-warn" role="status"><b>{{.Body.Missing}} native tool(s) missing.</b> Jobs whose method needs a missing tool cannot be enabled or run. Install the tools in the Strand Web host/image or set <code>STRAND_BACKUP_TOOLS_DIR</code> to a directory holding them.</div>{{end}}
+<section class="card" id="bk-tools-card">
+  <div class="cardhead"><h2>Native tools</h2></div>
+  <div class="tablewrap"><table class="data-table grid" id="bk-tools-table"><caption class="sr-only">Native backup tools on this host</caption>
+    <thead><tr><th>Tool</th><th>Status</th><th>Path</th><th>Version</th><th>Backups of</th><th>Restores of</th></tr></thead>
+    <tbody>{{range .Body.Tools}}<tr data-tool="{{.Name}}">
+      <td class="mono">{{.Name}}</td>
+      <td>{{if .Found}}<span class="badge st-synced small">found</span>{{else}}<span class="badge st-failed small" title="{{.Error}}">missing</span>{{end}}</td>
+      <td class="mono small">{{if .Path}}{{.Path}}{{else}}<span class="muted">-</span>{{end}}</td>
+      <td class="small">{{if .Version}}{{.Version}}{{else}}<span class="muted">-</span>{{end}}</td>
+      <td class="small">{{if .BackupMethods}}{{join .BackupMethods ", "}}{{else}}<span class="muted">-</span>{{end}}</td>
+      <td class="small">{{if .RestoreMethods}}{{join .RestoreMethods ", "}}{{else}}<span class="muted">-</span>{{end}}</td>
+    </tr>{{end}}</tbody></table></div>
+  <p class="muted">Lookup order: {{if .Body.ToolsDir}}<code>STRAND_BACKUP_TOOLS_DIR</code> = <code>{{.Body.ToolsDir}}</code> (the only place searched){{else}}<code>STRAND_BACKUP_TOOLS_DIR</code> (unset), then <code>STRAND_WEB_BACKUP_COMMAND_DIR</code>, then <code>PATH</code>{{end}}. A tool must be a regular executable that is not group- or world-writable. mysqlbinlog is needed only for point-in-time restores of MySQL dumps; continuous log archiving (binlog, WAL, oplog) needs no native tool.</p>
+</section>
+{{end}}

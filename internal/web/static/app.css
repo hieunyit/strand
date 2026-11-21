@@ -1070,3 +1070,7 @@ dialog.qsearch::backdrop { background: rgba(11, 18, 32, .45); }
 .qsearch-results .qs-empty { padding: 12px; color: var(--ink-2); }
 .qsearch-hint { margin: 0; padding: 8px 16px; border-top: 1px solid var(--line); }
 @media (max-width: 720px) { .qsearch-btn .tlabel, .qsearch-btn kbd { display: none; } }
+
+/* Native backup tool status in the job wizard (jobwizard.js). */
+.tool-status { margin-top: var(--sp-2); display: grid; gap: 4px; }
+.tool-status .field-hint { color: var(--bad); }

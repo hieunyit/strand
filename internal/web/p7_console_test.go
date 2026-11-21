@@ -56,7 +56,7 @@ func TestSidebarGroupsAndRoleLinks(t *testing.T) {
 	// Section tabs: every page of a section links its siblings the role may open.
 	for path, want := range map[string][]string{
 		"/archive":             {`href="/tunnels"`, `href="/tools/spool-inspect"`},
-		"/backups/connections": {`href="/backups/repositories"`, `href="/backups/policies"`, `href="/backups/keys"`, `href="/backups/notifications"`},
+		"/backups/connections": {`href="/backups/repositories"`, `href="/backups/policies"`, `href="/backups/keys"`, `href="/backups/notifications"`, `href="/backups/tools"`},
 		"/backups/reports":     {`href="/backups/activity"`},
 		"/settings":            {`href="/settings/db"`, `href="/mcp"`, `href="/help/schema"`},
 	} {
@@ -75,7 +75,7 @@ func TestSidebarGroupsAndRoleLinks(t *testing.T) {
 		}
 	}
 	adminOnly := []string{`href="/users"`, `href="/settings"`, `href="/settings/db"`, `href="/archive"`, `href="/tunnels"`,
-		`href="/tools/spool-inspect"`, `href="/backups/keys"`, `href="/backups/notifications"`, `href="/backups/activity"`}
+		`href="/tools/spool-inspect"`, `href="/backups/keys"`, `href="/backups/notifications"`, `href="/backups/activity"`, `href="/backups/tools"`}
 	for _, role := range []store.Role{store.RoleViewer, store.RoleOperator} {
 		cl := e.roleClient(role)
 		code, body := cl.do("GET", "/", nil)

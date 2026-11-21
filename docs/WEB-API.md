@@ -40,6 +40,7 @@ Hệ thống phân quyền trung tâm gồm 3 vai trò:
 | Test repository (`POST /api/v1/backup-repositories/{id}/test`: ghi/đọc/xóa một object nhỏ) | ❌ (403) | ✅ | ✅ |
 | Tạo / sửa / xóa repository, kênh thông báo, luật thông báo (`/api/v1/backup-repositories`, `/api/v1/backup-notify-channels`, `/api/v1/backup-notify-rules`), "Send test" của kênh | ❌ (403) | ❌ (403) | ✅ |
 | Xem khóa mã hóa backup, kênh/luật thông báo, backup activity (`/api/v1/backup-keys`, `/api/v1/backup-notify-*`, `/api/v1/backup-activity`, trang `/backups/keys`, `/backups/notifications`, `/backups/activity`) | ❌ (403) | ❌ (403) | ✅ |
+| Xem công cụ native của backup (`GET /api/v1/backup-tools`, trang `/backups/tools`: đường dẫn, phiên bản) | ❌ (403) | ❌ (403) | ✅ |
 | Cài đặt hệ thống (`/settings`, `/api/v1/settings`) | ❌ (403) | ❌ (403) | ✅ |
 | Quản lý người dùng (`/users`, `/api/v1/users/*`) | ❌ (403) | ❌ (403) | ✅ |
 | Xem / xuất Audit log (`/audit`, `/api/v1/audit/*`) | ❌ (403) | ❌ (403) | ✅ |
@@ -351,6 +352,22 @@ phản hồi chỉ có `access_key_set`, `secret_key_set`, `secret_set`; không 
 | `GET /api/v1/backup-activity?cursor=&limit=&action=&user=&from=&to=` (admin) | Audit lọc theo tiền tố `backup` (mọi action `backup.*`, `backup_job.*`, `backup_connection.*`, `backup_policy.*`, `backup_repository.*`, `backup_notify_*`, `backup_run.*`), mới nhất trước. `limit` 1..200 (mặc định 50); `action` phải bắt đầu bằng `backup`. → `{"activity":[{id,time,user,ip,action,target,result,detail}],"next_cursor"}`; cursor = `id` của dòng cuối; trang cuối `""`. `detail.changes` = `{field: {from, to}}` (secret chỉ là `set\|cleared\|changed`). |
 
 Metric `strand_backup_rpo_seconds{source}` (cùng `strand_backup_rpo_target_seconds`, `strand_backup_rpo_breach`) có trong `GET /metrics`.
+
+**Công cụ native (preflight).** Method dựng sẵn chạy công cụ native trên host Web (mysqldump, mariadb-dump, mydumper, pg_dump,
+pg_basebackup, mongodump; restore: mysql, mysqlbinlog khi PITR, pg_restore, mongorestore; binlog/WAL/oplog viết bằng Go, không cần
+công cụ). Tìm như lúc chạy: `STRAND_BACKUP_TOOLS_DIR` (nếu đặt thì chỉ ở đó), rồi `STRAND_WEB_BACKUP_COMMAND_DIR`, rồi `PATH`; file
+phải là executable thường, không group/world-writable.
+
+| Route | Ghi chú |
+| --- | --- |
+| `GET /api/v1/backup-tools` (admin) | `{"tools":[{name, found, path, version, error, backup_methods, restore_methods}],"tools_dir","hint"}`. `version` = dòng đầu của `<tool> --version` (không shell, timeout 3 s, cache 5 phút theo path/size/mtime). Admin-only vì đường dẫn/phiên bản mô tả host; mọi vai trò vẫn thấy job "tool missing" qua `GET /api/v1/backup-jobs` (`tool_error`, `tools_missing`). |
+
+Thiếu công cụ → **409** `{"error":"tool_missing: native tool mysqldump not found (needed for backup of method mysqldump); install it in the Strand Web host/image or set STRAND_BACKUP_TOOLS_DIR","code":"tool_missing","tools":["mysqldump"],"hint":...}` cho:
+tạo/sửa job **đang bật** (`POST`/`PUT /api/v1/backup-jobs`; job tắt vẫn lưu được, `warnings` nêu công cụ thiếu), `POST /{id}/start`
+(bật/Resume), `POST /{id}/run` (chỉ cần công cụ backup), `POST /api/v1/backup-restores` (công cụ restore của method; thêm `mysqlbinlog`
+khi phát lại binlog). Job bật có test restore cần cả công cụ restore. Khi Web khởi động/takeover và trong vòng reconcile, job thiếu
+công cụ không được khởi động và không retry (log lỗi `scheduled backup job blocked`); `strand backup schedule --job-id` cũng từ chối
+trước khi ghi run hay bản ghi catalog.
 Mọi thao tác ghi của backup (job, policy, connection, repository, kênh, luật, run, hủy, restore, legal hold, prune, verify, copy) ghi audit **trước** khi
 thực hiện (từ chối nếu audit lỗi), kèm người dùng và các trường đã đổi.
 

@@ -523,6 +523,7 @@ var sections = map[string][]sectionPage{
 		{"backups-policies", "nav.policies", "/backups/policies", "config", false},
 		{"backups-keys", "nav.encryption_keys", "/backups/keys", "flag", true},
 		{"backups-notify", "nav.notifications", "/backups/notifications", "bolt", true},
+		{"backups-tools", "nav.backup_tools", "/backups/tools", "config", true},
 	},
 	"backup-reports": {
 		{"backups-reports", "nav.reports", "/backups/reports", "graph", false},

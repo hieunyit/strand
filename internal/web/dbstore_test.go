@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"strand/internal/backup/runner"
 	"strand/internal/testutil"
 	"strand/internal/web/store"
 )
@@ -24,7 +25,19 @@ func TestMain(m *testing.M) {
 	if os.Getenv(EnvSecretKey) == "" {
 		os.Setenv(EnvSecretKey, testSecretKey)
 	}
+	// Built-in backup jobs are refused without their native tools (backup_tools.go): give every test a tools
+	// directory of fake tools; tests of the refusal point STRAND_BACKUP_TOOLS_DIR elsewhere.
+	cleanupTools := func() {}
+	if os.Getenv(runner.EnvToolsDir) == "" {
+		dir, err := fakeToolsDir()
+		if err != nil {
+			panic(err)
+		}
+		os.Setenv(runner.EnvToolsDir, dir)
+		cleanupTools = func() { os.RemoveAll(dir) }
+	}
 	code := m.Run()
+	cleanupTools()
 	testutil.TerminatePostgres()
 	os.Exit(code)
 }

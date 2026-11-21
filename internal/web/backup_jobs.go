@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"strand/internal/backup"
+	"strand/internal/backup/runner"
 )
 
 type backupJobView struct {
@@ -33,6 +34,10 @@ type backupJobView struct {
 	PolicyName     string   `json:"policy_name,omitempty"`
 	ConnectionName string   `json:"connection_name,omitempty"`
 	Legacy         bool     `json:"legacy_connection,omitempty"` // built-in job with an inline connection (convertible)
+	// ToolError / ToolsMissing: the job's native tools are missing on this host, so it cannot be scheduled
+	// or run (backup_tools.go).
+	ToolError    string   `json:"tool_error,omitempty"`
+	ToolsMissing []string `json:"tools_missing,omitempty"`
 }
 
 func backupJobPipeline(id string) string    { return "backup-" + id }
@@ -98,6 +103,11 @@ func (s *Server) reconcileBackupSchedule(pipeline string) {
 				// Permanent (configuration) problem: retrying cannot help; the job page shows it on Start.
 				s.log.Error("scheduled backup job refused", "job", id, "error", verr)
 				return
+			} else if terr := jobToolError(job); terr != nil {
+				// Missing native tool: as permanent as a configuration problem until an administrator installs
+				// it; the job shows "tool missing" and Resume re-checks.
+				s.log.Error("scheduled backup job blocked: native tool missing", "job", id, "error", terr)
+				return
 			} else if _, err := s.startBackupJob(job); err == nil {
 				s.reconcileMu.Lock()
 				if state.again {
@@ -159,6 +169,10 @@ func (s *Server) resumeBackupJobs(ctx context.Context) error {
 				s.log.Warn("scheduled backup job validation warning", "job", j.ID, "error", err)
 			}
 			if _, err := s.startBackupJob(j); err != nil {
+				if isToolMissing(err) {
+					s.log.Error("scheduled backup job blocked: native tool missing", "job", j.ID, "error", err)
+					continue
+				}
 				s.log.Error("start scheduled backup job", "job", j.ID, "error", err)
 				go s.reconcileBackupSchedule(backupJobPipeline(j.ID))
 			}
@@ -270,6 +284,14 @@ func (s *Server) startBackupProcessWithTrigger(j backup.Job, once bool, trigger 
 	}
 	if !s.isActive() {
 		return "", errors.New("this web instance is standby; backup jobs run on the active instance")
+	}
+	// Every scheduler start and Run now passes here: never start a process whose native tool is missing.
+	toolErr := runToolError
+	if !once {
+		toolErr = jobToolError
+	}
+	if err := toolErr(j); err != nil {
+		return "", err
 	}
 	if !once {
 		for _, current := range s.jobs.List(backupJobPipeline(j.ID)) {
@@ -493,7 +515,12 @@ func (s *Server) apiBackupJobGet(w http.ResponseWriter, r *http.Request, _ *Sess
 		writeErr(w, http.StatusNotFound, "backup job not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"job": j, "process": s.backupJobProcess(j)})
+	out := map[string]any{"job": j, "process": s.backupJobProcess(j)}
+	var tm *runner.ToolMissingError
+	if err := jobToolError(j); errors.As(err, &tm) {
+		out["tool_error"], out["tools_missing"] = tm.Error(), tm.Tools()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // decodeBackupJob decodes a job body strictly and also reports which top-level fields the request carried
@@ -615,6 +642,9 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if refuseJobWithoutTools(w, j, &warnings) {
+		return
+	}
 	if !s.auditBackupJobDetail(w, r, "backup_job.create", j.ID, jobAuditDetail(j)) {
 		return
 	}
@@ -627,6 +657,9 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		processID, err = s.startBackupJob(j)
 		if err != nil {
 			_, _ = s.db.st.DeleteBackupJob(context.Background(), j.ID)
+			if writeToolMissing(w, err) {
+				return
+			}
 			writeErr(w, http.StatusBadGateway, "could not start backup job: "+err.Error())
 			return
 		}
@@ -657,6 +690,9 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 	}
 	if err := s.validateBackupJob(j); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if refuseJobWithoutTools(w, j, &warnings) {
 		return
 	}
 	detail := jobAuditDetail(j)
@@ -695,6 +731,9 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		processID, err = s.startBackupJob(j)
 	}
 	if err != nil {
+		if writeToolMissing(w, err) {
+			return
+		}
 		go s.reconcileBackupSchedule(backupJobPipeline(j.ID))
 		writeErr(w, http.StatusBadGateway, "could not start backup job: "+err.Error())
 		return
@@ -723,6 +762,9 @@ func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Se
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if writeToolMissing(w, jobToolError(j)) {
+		return
+	}
 	if !s.auditBackupJob(w, r, "backup_job.start", id) {
 		return
 	}
@@ -740,6 +782,9 @@ func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Se
 	}
 	processID, err := s.startBackupJob(j)
 	if err != nil {
+		if writeToolMissing(w, err) {
+			return
+		}
 		go s.reconcileBackupSchedule(backupJobPipeline(id))
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -768,11 +813,17 @@ func (s *Server) apiBackupJobRun(w http.ResponseWriter, r *http.Request, _ *Sess
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if writeToolMissing(w, runToolError(j)) {
+		return
+	}
 	if !s.auditBackupJob(w, r, "backup_job.run", id) {
 		return
 	}
 	processID, err := s.startBackupProcessWithTrigger(j, true, "api")
 	if err != nil {
+		if writeToolMissing(w, err) {
+			return
+		}
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -941,6 +992,10 @@ func (s *Server) refreshJobsUsing(ctx context.Context, kind, id string) (refresh
 		}
 		if nj.Enabled {
 			if _, err := s.startBackupJob(nj); err != nil {
+				if isToolMissing(err) {
+					failed = append(failed, j.ID+": "+err.Error())
+					continue
+				}
 				go s.reconcileBackupSchedule(backupJobPipeline(j.ID))
 			}
 		}

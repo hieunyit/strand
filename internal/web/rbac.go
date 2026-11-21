@@ -117,6 +117,8 @@ var readRules = []routeRule{
 	{"GET", "/api/v1/backup-notify-rules/**", PermAdmin}, {"GET", "/api/v1/backup-notify-rules", PermAdmin},
 	{"GET", "/backups/notifications", PermAdmin},
 	{"GET", "/api/v1/backup-activity", PermAdmin}, {"GET", "/backups/activity", PermAdmin},
+	// Native backup tools: resolved paths and versions describe the host (jobs show "tool missing" to all).
+	{"GET", "/api/v1/backup-tools", PermAdmin}, {"GET", "/backups/tools", PermAdmin},
 	// The job wizard writes: viewers and operators get the 403 page instead of a form they cannot submit.
 	{"GET", "/backups/jobs/new", PermAdmin},
 	{"GET", "/backups/jobs/{id}/edit", PermAdmin},
