@@ -210,7 +210,7 @@ func TestBackupToolsAPIAndPage(t *testing.T) {
 	a := e.admin()
 	res := decode(t, a.must("GET", "/api/v1/backup-tools", nil, 200))
 	list := res["tools"].([]any)
-	if len(list) != len(runner.KnownTools) {
+	if len(list) != len(runner.KnownTools)+len(runner.OptionalTools()) {
 		t.Fatalf("%d tools", len(list))
 	}
 	by := map[string]map[string]any{}
@@ -220,6 +220,9 @@ func TestBackupToolsAPIAndPage(t *testing.T) {
 	}
 	if pg := by["pg_dump"]; pg["found"] != true || pg["path"] != filepath.Join(tools, "pg_dump") || pg["version"] != "pg_dump fake 1.0" {
 		t.Fatalf("pg_dump = %v", pg)
+	}
+	if o := by["pg_restore-16"]; o["optional"] != true || o["found"] != false || o["purpose"] == nil {
+		t.Fatalf("pg_restore-16 = %v", o)
 	}
 	if md := by["mysqldump"]; md["found"] != false || md["path"] != nil || md["backup_methods"].([]any)[0] != "mysqldump" {
 		t.Fatalf("mysqldump = %v", md)

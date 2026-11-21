@@ -90,7 +90,7 @@ type backupToolsPageBody struct {
 func (s *Server) pageBackupTools(w http.ResponseWriter, r *http.Request, sess *Session) {
 	body := backupToolsPageBody{Tools: runner.ToolsStatus(r.Context(), toolGetenv), ToolsDir: toolGetenv(runner.EnvToolsDir)}
 	for _, t := range body.Tools {
-		if !t.Found {
+		if !t.Found && !t.Optional {
 			body.Missing++
 		}
 	}

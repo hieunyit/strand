@@ -191,6 +191,10 @@ type ToolStatus struct {
 	// BackupMethods / RestoreMethods: the methods whose backups / restores (or test restores) run the tool.
 	BackupMethods  []string `json:"backup_methods,omitempty"`
 	RestoreMethods []string `json:"restore_methods,omitempty"`
+	// Optional: a version-specific companion (OptionalTools) used only for some server versions; when it is
+	// missing the jobs still run, and Purpose says which servers need it.
+	Optional bool   `json:"optional,omitempty"`
+	Purpose  string `json:"purpose,omitempty"`
 }
 
 // toolMethods lists the built-in base-backup methods.
@@ -256,7 +260,8 @@ func ToolsStatus(ctx context.Context, getenv Getenv) []ToolStatus {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	out := make([]ToolStatus, len(KnownTools))
+	opt := OptionalTools()
+	out := make([]ToolStatus, len(KnownTools), len(KnownTools)+len(opt))
 	idx := map[string]int{}
 	for i, name := range KnownTools {
 		idx[name] = i
@@ -277,6 +282,9 @@ func ToolsStatus(ctx context.Context, getenv Getenv) []ToolStatus {
 		for _, t := range RestoreTools(m, true) {
 			add(&out[idx[t]].RestoreMethods, m)
 		}
+	}
+	for _, o := range opt {
+		out = append(out, ToolStatus{Name: o.Name, Optional: true, Purpose: o.Purpose})
 	}
 	var wg sync.WaitGroup
 	for i := range out {

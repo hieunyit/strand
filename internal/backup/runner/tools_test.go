@@ -122,12 +122,18 @@ func TestToolsStatusReportsPathVersionAndMethods(t *testing.T) {
 	dir := t.TempDir()
 	fakeTool(t, dir, "mysql", "mysql  Ver 8.4.3 for Linux")
 	st := ToolsStatus(context.Background(), envOf(map[string]string{EnvToolsDir: dir}))
-	if len(st) != len(KnownTools) {
+	if len(st) != len(KnownTools)+len(OptionalTools()) {
 		t.Fatalf("%d tools", len(st))
 	}
 	by := map[string]ToolStatus{}
 	for _, s := range st {
 		by[s.Name] = s
+	}
+	// Version-specific companions are listed as optional with their purpose; missing is not an error for jobs.
+	for _, o := range OptionalTools() {
+		if s := by[o.Name]; !s.Optional || s.Found || s.Purpose == "" {
+			t.Fatalf("optional %s = %+v", o.Name, s)
+		}
 	}
 	m := by["mysql"]
 	if !m.Found || m.Path != filepath.Join(dir, "mysql") || m.Version != "mysql  Ver 8.4.3 for Linux" ||
