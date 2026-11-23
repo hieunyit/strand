@@ -173,7 +173,10 @@
             <select name="repository"><option value="">Chosen per job</option>{{range .Repos}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select><span class="field-error" hidden></span></label>
           <label class="field"><span class="field-label">Second copy <span class="opt">optional</span></span>
             <select name="replicate_to"><option value="">None</option>{{range .Repos}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select><span class="field-error" hidden></span></label>
-          <label class="check"><input type="checkbox" name="compress" checked><span>Compress</span></label>
+          <label class="field"><span class="field-label">Compression</span>
+            <select name="compress"><option value="false">Off</option><option value="true" selected>Zstandard</option></select><span class="field-hint">Compressed backups use the .sbk format.</span><span class="field-error" hidden></span></label>
+          <label class="field" data-compress-level><span class="field-label">Zstandard level (1–4)</span>
+            <select name="compress_level"><option value="1">1 · fastest</option><option value="2" selected>2 · balanced</option><option value="3">3 · smaller files</option><option value="4">4 · smallest files</option></select><span class="field-hint">Higher levels use more CPU. 0 keeps the default level.</span></label>
           <label class="check"><input type="checkbox" name="encrypt"><span>Encrypt<small class="field-hint">Needs STRAND_BACKUP_ENCRYPTION_KEYS on the Web service.</small></span></label>
         </div>
       </fieldset>

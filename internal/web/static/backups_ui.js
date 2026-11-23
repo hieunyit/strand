@@ -419,7 +419,8 @@
     body.rpo_minutes = body.log_archive ? pn(f, 'rpo_minutes') : (stored ? body.rpo_minutes || 0 : 0);
     body.repository = pv(f, 'repository');
     body.replicate_to = pv(f, 'replicate_to');
-    body.compress = pc(f, 'compress');
+    body.compress = pv(f, 'compress') === 'true';
+    body.compress_level = Number(pv(f, 'compress_level')) || 0;
     body.encrypt = pc(f, 'encrypt');
     body.verify_every_seconds = pn(f, 'verify_every');
     body.test_restore = pc(f, 'test_restore');
@@ -435,7 +436,8 @@
     writeRetention(f, p.retention);
     f.elements.namedItem('log_archive').checked = !!p.log_archive; set('rpo_minutes', p.rpo_minutes || 0);
     set('repository', p.repository || ''); set('replicate_to', p.replicate_to || '');
-    f.elements.namedItem('compress').checked = !!p.compress; f.elements.namedItem('encrypt').checked = !!p.encrypt;
+    set('compress', p.compress ? 'true' : 'false'); set('compress_level', String(p.compress_level || 0));
+    f.elements.namedItem('encrypt').checked = !!p.encrypt;
     var v = String(p.verify_every_seconds || 0);
     var sel = f.elements.namedItem('verify_every');
     if (!$$('option', sel).some(function (o) { return o.value === v; }) && p.verify_every_seconds) { var o = el('option', '', 'Every ' + Math.round(p.verify_every_seconds / 60) + ' min'); o.value = v; sel.appendChild(o); }
@@ -449,6 +451,8 @@
       var on = c && (c.type === 'checkbox' ? c.checked : Number(c.value) > 0);
       setHidden(n, !on);
     });
+    var level = $('[data-compress-level]', f);
+    if (level) { setHidden(level, pv(f, 'compress') !== 'true'); }
   }
   function initPolicyForm() {
     var f = policyForm();

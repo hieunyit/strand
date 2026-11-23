@@ -385,7 +385,8 @@
     }
     if (want('compress')) { body.compress = chk('compress'); }
     if (!isCustomJob()) { body.encryption_mode = v('encryption_mode'); }
-    if (!p) { body.compress_level = n('compress_level'); } else if (n('compress_level') !== (p.compress_level || 0)) { body.compress_level = n('compress_level'); }
+    if (!p || S.touched.compress_level) { body.compress_level = n('compress_level'); }
+    else if (n('compress_level') !== (p.compress_level || 0)) { body.compress_level = n('compress_level'); }
     if (want('verify_every_seconds')) { body.verify_every_seconds = n('verify_every'); if (body.verify_every_seconds) { body.verify_sample_percent = n('verify_sample'); } }
     if (want('retry_max')) { body.retry_max = n('retry_max'); body.retry_backoff_seconds = body.retry_max > 0 ? n('retry_backoff') : 0; }
     body.bandwidth_kbps = n('bandwidth_kbps');
@@ -519,7 +520,7 @@
       if (v('replicate_to')) { var r2 = repoById(v('replicate_to')); out.push(['Second copy', r2 ? r2.name || r2.id : v('replicate_to')]); }
     }
     out.push(['Encryption', effectiveEncryption() ? 'On' : 'Off']);
-    out.push(['Compression', chk('compress') ? 'On' : 'Off']);
+    out.push(['Compression', chk('compress') ? 'Zstandard level ' + (n('compress_level') || 2) : 'Off']);
     var ve = n('verify_every');
     out.push(['Verify', ve ? (ve === 86400 ? 'Daily' : ve === 604800 ? 'Weekly' : ve === 2592000 ? 'Monthly' : 'Every ' + Math.round(ve / 60) + ' min') + (chk('test_restore') ? ' + test restore' : '') : 'Never']);
     out.push(['Retries', n('retry_max') ? n('retry_max') + ' with ' + n('retry_backoff') + ' s back-off' : 'None']);
@@ -534,6 +535,8 @@
   function updateSummary() { var r = rows(); fillDl($('#wiz-summary'), r); if (S.step === STEPS) { fillDl($('#wiz-review'), r); } }
   function syncAll() {
     syncCustom(); syncPolicyBlock(); syncPitr(); syncEncryption(); syncVerify(); syncTools(); syncBadges(); updateSummary();
+    var compressOptions = $('[data-wiz-compress-options]');
+    if (compressOptions) { U.setHidden(compressOptions, !chk('compress')); }
     $('#wiz-legacy').hidden = !(EDIT && D.legacy);
   }
 
@@ -558,6 +561,7 @@
     if (nm === 'log_archive') { touch('log_archive'); renderMethods(); }
     if (nm === 'repository') { touch('repository'); }
     if (nm === 'replicate_to' || nm === 'compress' || nm === 'test_restore' || nm === 'retry_max') { touch(nm); }
+    if (nm === 'compress_level') { touch('compress_level'); }
     if (nm === 'verify_every') { touch('verify_every_seconds'); }
     syncAll();
   });
