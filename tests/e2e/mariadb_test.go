@@ -382,7 +382,7 @@ func TestMDB_E2E_SnapshotStreamDDLRestartVerify(t *testing.T) {
 	}
 
 	cfg := strandCfg{Name: "e2e-mdb", SourceDSN: fmt.Sprintf("strand:%s@tcp(%s)/", mdbPass, src.Addr),
-		TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr), Include: []string{"app.*"}, Dir: testDir(t)}
+		TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr), Include: []string{"app.*"}, Dir: testDir(t), TablesExtra: klKeylessCfg}
 	cfgPath := cfg.write(t)
 
 	out, code := runStrandCLI(t, time.Minute, "validate", "-c", cfgPath)

@@ -546,13 +546,24 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	// The YAML bootstrap position seeds an empty checkpoint. A CLI flag remains
 	// an explicit request and is still rejected when a checkpoint exists.
-	if p.startAtFromConfig && hasAppliedCheckpoint(loaded) {
+	hasCheckpoint := hasAppliedCheckpoint(loaded)
+	if p.startAtFromConfig && hasCheckpoint {
 		p.opts.StartAt = ""
 	}
 	if len(p.cascade.signatures) > 0 && p.opts.StartAt == "" {
 		for id := range p.tables {
 			if !p.state.IsDone(id.String()) {
 				return cascadeConfigError(fmt.Sprintf("cascading foreign keys require a consistent initial copy; seed the target and use --start-at seed or its binlog position (table %s still needs a snapshot)", id))
+			}
+		}
+	}
+	// A failed logical bootstrap must leave an empty checkpoint so the
+	// operator can restore a seed and retry with its start position.
+	if !hasCheckpoint && p.opts.StartAt == "" &&
+		(p.cfg.Bootstrap.Default == "" || strings.EqualFold(p.cfg.Bootstrap.Default, "logical")) {
+		for id, table := range p.tables {
+			if table.Keyless {
+				return p.keylessPendingError(ctx, id, table)
 			}
 		}
 	}

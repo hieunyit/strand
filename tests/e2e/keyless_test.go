@@ -307,6 +307,16 @@ func TestKL_E2E_MariaDBToMySQL_Keyless(t *testing.T) {
 	file, pos := src.masterPos(t)
 	cfg := strandCfg{Name: "e2e-kl-mdb", SourceDSN: fmt.Sprintf("strand:%s@tcp(%s)/", mdbPass, src.Addr),
 		TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr), Include: []string{"app.kl"}, Dir: testDir(t)}
+	// A rejected logical bootstrap must let the same pipeline retry from a restored copy.
+	logical := cfg
+	logical.TablesExtra = klKeylessCfg
+	path := logical.write(t)
+	for _, command := range []string{"validate", "sync"} {
+		out, code := runStrandCLI(t, time.Minute, command, "-c", path)
+		if code != 3 || !strings.Contains(out, "missing_pk") || !strings.Contains(out, "logical snapshot") {
+			t.Fatalf("%s with a keyless logical snapshot: exit %d, want missing_pk\n%s", command, code, out)
+		}
+	}
 	klRun(t, klEnv{srcDB: src.DB, dstDB: dst.DB, cfg: cfg, startAt: fmt.Sprintf("%s:%d", file, pos)})
 }
 
