@@ -26,12 +26,14 @@ fi
 
 truthy() { case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
 
-# A public Compose bind must use TLS in Strand. A same-host HTTPS reverse
-# proxy can reach the default loopback binding.
+# A public Compose bind can use TLS in Strand or plain HTTP on a trusted
+# network when STRAND_WEB_ALLOW_PLAIN_HTTP is enabled.
 case "${STRAND_WEB_PUBLISH_HOST:-127.0.0.1}" in
   127.0.0.1|::1|'[::1]') ;;
   *)
-    if [ "$GENERATED" = 1 ] && { [ -z "${STRAND_WEB_TLS_CERT:-}" ] || [ -z "${STRAND_WEB_TLS_KEY:-}" ]; }; then
+    if [ "$GENERATED" = 1 ] \
+      && { [ -z "${STRAND_WEB_TLS_CERT:-}" ] || [ -z "${STRAND_WEB_TLS_KEY:-}" ]; } \
+      && ! truthy "${STRAND_WEB_ALLOW_PLAIN_HTTP:-true}"; then
       echo "A non-loopback STRAND_WEB_BIND requires STRAND_WEB_TLS_CERT and STRAND_WEB_TLS_KEY" >&2
       exit 2
     fi
