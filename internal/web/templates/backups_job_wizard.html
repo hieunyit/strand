@@ -108,10 +108,10 @@
         </div>
         <div class="switch-row">
           <input type="checkbox" name="compress" id="wiz-compress" checked>
-          <div><label for="wiz-compress"><b>Compress with Zstandard</b> <span class="badge override small" data-override="compress" hidden>overridden</span></label><div class="reason">Turn this off to save uncompressed backup files without the .sbk format.</div></div>
+          <div><label for="wiz-compress"><b>Compress</b> <span class="badge override small" data-override="compress" hidden>overridden</span></label></div>
         </div>
-          <div class="field-grid" data-wiz-compress-options>
-            <label class="field"><span class="field-label">Zstandard level (1–4)</span><select name="compress_level"><option value="1">1 · fastest</option><option value="2" selected>2 · balanced</option><option value="3">3 · smaller files</option><option value="4">4 · smallest files</option></select><span class="field-hint">Higher levels use more CPU. 0 keeps the default level.</span><span class="field-error" hidden></span></label>
+          <div class="field-grid">
+            <label class="field"><span class="field-label">Compression level (0-4) <span class="opt">optional</span></span><input type="number" name="compress_level" min="0" max="4" value="0"><span class="field-error" hidden></span></label>
             <label class="field"><span class="field-label">Bandwidth limit (KB/s) <span class="opt">optional</span></span><input type="number" name="bandwidth_kbps" min="0" value="0"><span class="field-hint">0 = unlimited.</span><span class="field-error" hidden></span></label>
             <label class="field"><span class="field-label">Object Lock days <span class="opt">optional</span></span><input type="number" name="lock_days" min="0" value="0"><span class="field-hint">Needs an Object Lock repository.</span><span class="field-error" hidden></span></label>
           </div>
