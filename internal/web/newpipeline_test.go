@@ -397,14 +397,15 @@ func TestNewPipelineKeyless(t *testing.T) {
 	}
 
 	for _, tt := range []struct {
-		name, engine, keyless    string
-		status                   int
-		useForm, wantFullRowYAML bool
+		name, engine, keyless, startAt string
+		status                         int
+		useForm, wantFullRowYAML       bool
 	}{
 		{name: "default", engine: "mysql", status: 200},
 		{name: "explicit-off", engine: "mysql", keyless: "off", status: 200},
 		{name: "full-row-json", engine: "mysql", keyless: "full_row", status: 200, wantFullRowYAML: true},
-		{name: "full-row-form", engine: "postgres", keyless: "full_row", status: 200, useForm: true, wantFullRowYAML: true},
+		{name: "full-row-snapshot", engine: "mariadb", keyless: "full_row", status: 200, useForm: true, wantFullRowYAML: true},
+		{name: "full-row-restored", engine: "postgres", keyless: "full_row", startAt: "0/1ABCDEF", status: 200, useForm: true, wantFullRowYAML: true},
 		{name: "unknown-mode", engine: "mysql", keyless: "anything", status: 400},
 		{name: "mongo-rejects-full-row", engine: "mongodb", keyless: "full_row", status: 400},
 	} {
@@ -412,9 +413,13 @@ func TestNewPipelineKeyless(t *testing.T) {
 			var code int
 			var y, body string
 			if tt.useForm {
+				to := tt.engine
+				if to == "mariadb" {
+					to = "mysql"
+				}
 				code, _, y, body = createNPForm(t, e, c, csrf, url.Values{
-					"name": {tt.name}, "from": {tt.engine}, "to": {tt.engine}, "database": {"shop"},
-					"keyless": {tt.keyless}, "start_at": {"0/1ABCDEF"},
+					"name": {tt.name}, "from": {tt.engine}, "to": {to}, "database": {"shop"},
+					"keyless": {tt.keyless}, "start_at": {tt.startAt},
 				})
 			} else {
 				code, _, y, body = createNP(t, e, c, csrf, NewPipelineOpts{
@@ -435,8 +440,14 @@ func TestNewPipelineKeyless(t *testing.T) {
 			if got := strings.Contains(y, "\n  keyless: full_row\n"); got != tt.wantFullRowYAML {
 				t.Fatalf("keyless YAML present = %v, want %v:\n%s", got, tt.wantFullRowYAML, y)
 			}
-			if tt.useForm && !strings.Contains(y, "  start_at: \"0/1ABCDEF\"") {
-				t.Fatalf("restored copy start position missing:\n%s", y)
+			if tt.useForm {
+				want := "\n  default: logical\n"
+				if tt.startAt != "" {
+					want = "\n  default: start_at\n  start_at: \"" + tt.startAt + "\"\n"
+				}
+				if !strings.Contains(y, want) {
+					t.Fatalf("unexpected bootstrap configuration:\n%s", y)
+				}
 			}
 		})
 	}

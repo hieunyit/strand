@@ -65,9 +65,6 @@
         if (details) { details.open = true; }
         return 'This field is required when using an SSH tunnel.';
       }
-      if (f.name === 'start_at' && !v && val('keyless') === 'full_row') {
-        return 'Restore a consistent copy to the target and enter its binlog position, GTID or LSN.';
-      }
       if (f.required && v === '') { return 'This field is required.'; }
       if (v && f.pattern && !new RegExp('^(?:' + f.pattern.replace(/^\^|\$$/g, '') + ')$').test(v)) {
         return f.name === 'name' ? 'Use letters, digits and - _ . (up to 63), starting with a letter or digit.' : 'This value has an invalid format.';

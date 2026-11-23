@@ -221,11 +221,11 @@
           <option value="full_row">Allow full-row matching for tables without a key</option>
         </select>
       </label>
-      <small class="field-hint" id="np-keyless-help">Full-row matching needs an initial copy restored on the target. MySQL and MariaDB require <code>binlog_row_image=FULL</code>. PostgreSQL requires <code>REPLICA IDENTITY FULL</code> on each keyless table.</small>
+      <small class="field-hint" id="np-keyless-help">Tables without a usable key need an initial copy restored on the target. For those tables, MySQL and MariaDB require <code>binlog_row_image=FULL</code>. PostgreSQL requires <code>REPLICA IDENTITY FULL</code> on each keyless table.</small>
       <label class="field">
-        <span class="field-label">Start position of the restored copy</span>
+        <span class="field-label">Start position of the restored copy <span class="opt">optional</span></span>
         <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678, MySQL GTID or PostgreSQL LSN" aria-describedby="np-start-at-help">
-        <small class="field-hint" id="np-start-at-help">Restore all included tables on the target and enter the position recorded in that backup. Strand starts CDC there and skips the initial snapshot. Leave this blank for a logical snapshot of tables with keys.</small>
+        <small class="field-hint" id="np-start-at-help">Restore all included tables on the target and enter the position recorded in that backup. Strand starts CDC there and skips the initial snapshot. Leave this blank when all included tables have a usable key and you want Strand to take the initial snapshot.</small>
       </label>
     </div>
   </fieldset>
