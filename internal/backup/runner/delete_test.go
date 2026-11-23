@@ -39,6 +39,69 @@ func TestPlanRestoreRefusesIncompleteRestorePoints(t *testing.T) {
 	}
 }
 
+func TestPlanRestoreRejectsInvalidParentChain(t *testing.T) {
+	head := backup.Record{ID: "head", ParentID: "parent", Kind: backup.KindIncremental, Status: backup.StatusComplete}
+	parent := backup.Record{ID: "parent", ParentID: "head", Kind: backup.KindIncremental, Status: backup.StatusComplete}
+	if _, err := PlanRestore([]backup.Record{head, parent}, &head, nil); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("circular incremental chain: %v", err)
+	}
+	parent.Kind, parent.ParentID = backup.KindLog, ""
+	if _, err := PlanRestore([]backup.Record{head, parent}, &head, nil); err == nil || !strings.Contains(err.Error(), "log segment as parent") {
+		t.Fatalf("log parent: %v", err)
+	}
+	parent.Kind, parent.Method = backup.KindFull, backup.MethodPGDump
+	head.Method = backup.MethodPGDump
+	if _, err := PlanRestore([]backup.Record{head, parent}, &head, nil); err == nil || !strings.Contains(err.Error(), "native restore tool") {
+		t.Fatalf("legacy incremental requires native tooling: %v", err)
+	}
+	var env Env
+	if err := env.Restore(t.Context(), RestorePlan{}, RestoreTarget{}); err == nil {
+		t.Fatal("empty restore plan accepted")
+	}
+	if err := env.Restore(t.Context(), RestorePlan{Chain: []backup.Record{parent, head}}, RestoreTarget{}); err == nil || !strings.Contains(err.Error(), "native restore tool") {
+		t.Fatalf("execution accepted an incremental chain: %v", err)
+	}
+}
+
+func TestVerifyJobReportsCancellation(t *testing.T) {
+	env := testEnv(t, nil, store.NewMem())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	report, err := env.VerifyJob(ctx, backup.Job{ID: "job"}, VerifyOptions{})
+	if !errors.Is(err, context.Canceled) || report.Checked != 0 {
+		t.Fatalf("canceled verify: checked=%d err=%v", report.Checked, err)
+	}
+}
+
+func TestArchiveCursorSkipsNewerCopies(t *testing.T) {
+	env := testEnv(t, nil, store.NewMem())
+	ctx := t.Context()
+	at := time.Now().UTC()
+	original := backup.Record{ID: "segment", Source: "pg", JobID: "job", Engine: backup.EnginePostgres,
+		Tool: backup.MethodWAL, Method: backup.MethodWAL, Bucket: "archive", ObjectKey: "segment",
+		Kind: backup.KindLog, Status: backup.StatusQueued, CreatedAt: at}
+	replica := original
+	replica.ID, replica.ObjectKey, replica.CopyOf, replica.CreatedAt = "replica", "copies/segment", original.ID, at.Add(time.Minute)
+	for _, r := range []backup.Record{original, replica} {
+		if _, _, err := env.Catalog.Create(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		for _, status := range []backup.Status{backup.StatusUploading, backup.StatusVerifying} {
+			if _, _, err := env.Catalog.UpdateStatus(ctx, r.ID, status, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		uri := "s3://" + r.Bucket + "/" + r.ObjectKey + ".json"
+		if _, _, err := env.Catalog.Finalize(ctx, r.ID, backup.StatusVerifying, 1, strings.Repeat("a", 64), uri, r.CreatedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last, err := env.latestOriginalLog(ctx, original.JobID)
+	if err != nil || last == nil || last.ID != original.ID {
+		t.Fatalf("archive cursor selected %+v, err=%v", last, err)
+	}
+}
+
 // DeleteRecord against a real S3 server (MinIO): a failed restore point loses its payload, its manifest
 // and the unfinished multipart upload it left, then its catalog record; complete, held, object-locked and
 // in-progress records are refused and keep their objects; an expired record (objects already deleted by
@@ -174,5 +237,25 @@ func TestDeleteRecordRemovesPartialObjects(t *testing.T) {
 		"backup.delete:error:bkp-running", "backup.delete:error:bkp-complete", "backup.delete:ok:bkp-expired"}
 	if strings.Join(audits, ",") != strings.Join(want, ",") {
 		t.Fatalf("audit = %v", audits)
+	}
+}
+
+func TestBinlogBaseCoverageRequiresExactFileAndPosition(t *testing.T) {
+	base := backup.Record{Position: backup.Position{BinlogFile: "binlog.000014", BinlogPos: 100}}
+	log := backup.Record{Method: backup.MethodBinlog,
+		Position:    backup.Position{BinlogFile: "binlog.000014", BinlogPos: 42},
+		EndPosition: backup.Position{BinlogFile: "binlog.000014", BinlogPos: 200},
+	}
+	if !logCoversBase(log, base) {
+		t.Fatal("base position within the archived range was refused")
+	}
+	log.Position.BinlogPos = 101
+	if logCoversBase(log, base) {
+		t.Fatal("segment starting after the base position was accepted")
+	}
+	log.Position.BinlogPos = 4
+	log.Position.BinlogFile, log.EndPosition.BinlogFile = "binlog.000015", "binlog.000015"
+	if logCoversBase(log, base) {
+		t.Fatal("later binlog accepted after losing the base segment")
 	}
 }

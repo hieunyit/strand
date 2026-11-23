@@ -93,7 +93,7 @@
   <label class="field" data-sched-kinds="daily weekly monthly"><span class="field-label">Time <span class="req" aria-hidden="true">*</span></span>
     <input type="time" name="sch_at" value="01:00"><span class="field-error" hidden></span></label>
   <label class="field" data-sched-kinds="interval"><span class="field-label">Every (minutes) <span class="req" aria-hidden="true">*</span></span>
-    <input type="number" name="sch_every_min" min="1" value="60"><span class="field-error" hidden></span></label>
+    <input type="number" name="sch_every_min" min="1" step="any" value="60"><span class="field-error" hidden></span></label>
   <label class="field" data-sched-kinds="cron"><span class="field-label">Cron <span class="req" aria-hidden="true">*</span></span>
     <input type="text" name="sch_cron" placeholder="0 1 * * *" spellcheck="false"><span class="field-hint">minute hour day-of-month month day-of-week</span><span class="field-error" hidden></span></label>
   <label class="field" data-sched-kinds="weekly monthly" data-sched-days><span class="field-label">Days <span class="req" aria-hidden="true">*</span></span>

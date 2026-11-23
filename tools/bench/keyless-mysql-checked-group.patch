@@ -1,0 +1,179 @@
+--- a/internal/writer/writer.go
++++ b/internal/writer/writer.go
+@@ -7,6 +7,8 @@
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
++
++	"github.com/go-sql-driver/mysql"
+ 
+ 	"strand/internal/checkpoint"
+ 	"strand/internal/exitcode"
+@@ -357,7 +359,8 @@
+ 	if err != nil {
+ 		return err
+ 	}
+-	q := &stmtQueue{tx: tx, on: w.pipelining, budget: budget, maxPacket: maxPacket}
++	_, native := w.db.Driver().(*mysql.MySQLDriver)
++	q := &stmtQueue{tx: tx, on: w.pipelining, groupChecks: native && w.pipelining, budget: budget, maxPacket: maxPacket}
+ 	var routed int64
+ 	for _, txn := range batch {
+ 		routed += txn.TotalRows()
+@@ -445,12 +448,19 @@
+ // (multi-statement, tham số được driver interpolate phía client), đúng thứ tự. Với một kết
+ // nối (strict), độ trễ round-trip cho từng câu lệnh là trần thông lượng; gửi theo lô bỏ trần này.
+ // Câu lệnh cần kiểm số row bị ảnh hưởng (row delta, row toàn cục) không đi qua hàng đợi.
++type checkedMatch struct {
++	table model.TableID
++	op    model.Op
++}
++
+ type stmtQueue struct {
+-	tx   *sql.Tx
+-	on   bool
+-	sb   strings.Builder
+-	args []any
+-	n    int
++	groupChecks bool
++	checks      []checkedMatch
++	tx          *sql.Tx
++	on          bool
++	sb          strings.Builder
++	args        []any
++	n           int
+ 	// bytes: ước lượng kích thước payload đang chờ = độ dài SQL + kích thước đã mã hóa của tham số
+ 	// (review N13). Chỉ đếm độ dài SQL (có placeholder) thì blob/text lớn trong args không được tính:
+ 	// SQL ngắn vẫn có thể mang payload vượt max_allowed_packet hoặc cấp phát rất lớn khi interpolate.
+@@ -550,6 +560,10 @@
+ // execRows gửi (hoặc xếp lô) một câu lệnh phủ rows row nguồn; rows được cộng vào written khi câu (hoặc
+ // lô chứa nó) chạy xong không lỗi.
+ func (q *stmtQueue) execRows(ctx context.Context, rows int64, query string, args ...any) error {
++	return q.queueRows(ctx, rows, nil, query, args...)
++}
++
++func (q *stmtQueue) queueRows(ctx context.Context, rows int64, check *checkedMatch, query string, args ...any) error {
+ 	if !q.on {
+ 		if err := q.do(ctx, query, args...); err != nil {
+ 			return err
+@@ -568,12 +582,15 @@
+ 		q.sb.WriteString(";\n")
+ 		q.bytes += 2
+ 	}
++	if check != nil {
++		q.checks = append(q.checks, *check)
++	}
+ 	q.sb.WriteString(query)
+ 	q.args = append(q.args, args...)
+ 	q.bytes += size
+ 	q.n++
+ 	q.pending += rows
+-	if q.bytes >= q.limit() || len(q.args) >= stmtQueueMaxArgs {
++	if q.bytes >= q.limit() || len(q.args) >= stmtQueueMaxArgs || len(q.checks) >= 64 {
+ 		return q.flush(ctx)
+ 	}
+ 	return nil
+@@ -583,7 +600,13 @@
+ 	if q.n == 0 {
+ 		return nil
+ 	}
+-	err := q.do(ctx, q.sb.String(), q.args...)
++	var err error
++	if len(q.checks) == 0 {
++		err = q.do(ctx, q.sb.String(), q.args...)
++	} else {
++		err = q.execCheckedGroup(ctx)
++		q.checks = q.checks[:0]
++	}
+ 	pending := q.pending
+ 	q.sb.Reset()
+ 	q.args = q.args[:0]
+--- a/internal/writer/keyless.go
++++ b/internal/writer/keyless.go
+@@ -145,6 +145,54 @@
+ 	return n, nil
+ }
+ 
++// Keep the result sets and statement order within database/sql's transaction so
++// cancellation, rollback and the checkpoint use the same transaction owner.
++func (q *stmtQueue) keylessDML(ctx context.Context, table model.TableID, op model.Op, query string, args ...any) error {
++	if q.groupChecks {
++		return q.queueRows(ctx, 1, &checkedMatch{table, op}, query+"; SELECT ROW_COUNT()", args...)
++	}
++	n, err := q.execAffected(ctx, query, args...)
++	if err != nil {
++		return err
++	}
++	if n == 0 {
++		return keylessMissing(table, op)
++	}
++	q.written++
++	return nil
++}
++
++func (q *stmtQueue) execCheckedGroup(ctx context.Context) error {
++	results, err := q.tx.QueryContext(ctx, q.sb.String(), q.args...)
++	if err != nil {
++		return err
++	}
++	defer results.Close()
++	for i, check := range q.checks {
++		if i > 0 && !results.NextResultSet() || !results.Next() {
++			if err := results.Err(); err != nil {
++				return err
++			}
++			return fmt.Errorf("missing result for keyless %s on %s", check.op, check.table)
++		}
++		var n int64
++		if err := results.Scan(&n); err != nil {
++			return err
++		}
++		if n == 0 {
++			return keylessMissing(check.table, check.op)
++		}
++		if n != 1 {
++			return fmt.Errorf("keyless %s on %s affected %d rows", check.op, check.table, n)
++		}
++	}
++	// Drain trailing DML: a later keyed statement may have failed.
++	if results.NextResultSet() {
++		return fmt.Errorf("unexpected result after %d keyless row counts", len(q.checks))
++	}
++	return results.Err()
++}
++
+ func (w *MySQLWriter) applyKeylessMySQL(ctx context.Context, q *stmtQueue, row *model.RowChange) error {
+ 	switch row.Op {
+ 	case model.OpInsert:
+@@ -168,30 +216,14 @@
+ 		}
+ 		names, vals := colNamesVals(row.Cols, false)
+ 		str := w.pk.stringCols(row.Table)
+-		n, err := q.execAffected(ctx, buildKeylessUpdateMySQL(row.Table, names, match, str), append(vals, keylessMatchArgs(match, str, before)...)...)
+-		if err != nil {
+-			return fmt.Errorf("keyless update on %s: %w", row.Table, err)
+-		}
+-		if n == 0 {
+-			return keylessMissing(row.Table, row.Op)
+-		}
+-		q.written++
+-		return nil
++		return q.keylessDML(ctx, row.Table, row.Op, buildKeylessUpdateMySQL(row.Table, names, match, str), append(vals, keylessMatchArgs(match, str, before)...)...)
+ 	case model.OpDelete:
+ 		match, err := keylessMatchCols(&w.pk, row, row.Key)
+ 		if err != nil {
+ 			return err
+ 		}
+ 		str := w.pk.stringCols(row.Table)
+-		n, err := q.execAffected(ctx, buildKeylessDeleteMySQL(row.Table, match, str), keylessMatchArgs(match, str, row.Key)...)
+-		if err != nil {
+-			return fmt.Errorf("keyless delete on %s: %w", row.Table, err)
+-		}
+-		if n == 0 {
+-			return keylessMissing(row.Table, row.Op)
+-		}
+-		q.written++
+-		return nil
++		return q.keylessDML(ctx, row.Table, row.Op, buildKeylessDeleteMySQL(row.Table, match, str), keylessMatchArgs(match, str, row.Key)...)
+ 	}
+ 	return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)
+ }

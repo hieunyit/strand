@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"strand/internal/backup"
+	"strand/internal/backup/runner"
 	"strand/internal/web/store"
 )
 
@@ -34,6 +35,7 @@ type backupsJobsPageBody struct {
 
 // backupsJobDetailPageBody is the template body for /backups/jobs/{id}.
 type backupsJobDetailPageBody struct {
+	Protection backupJobProtection
 	Job        backupJobView
 	ActiveTab  string
 	Runs       []backupRunView
@@ -88,13 +90,14 @@ type backupsCatalogDetailPageBody struct {
 }
 
 type restoreSourceInfo struct {
-	Source      string          `json:"source"`
-	Engine      string          `json:"engine"`
-	WindowStart *time.Time      `json:"window_start,omitempty"`
-	WindowEnd   *time.Time      `json:"window_end,omitempty"`
-	Continuous  bool            `json:"continuous"`
-	BaseBackups []backup.Record `json:"base_backups"`
-	LogsCount   int             `json:"logs_count"`
+	Source         string          `json:"source"`
+	Engine         string          `json:"engine"`
+	WindowStart    *time.Time      `json:"window_start,omitempty"`
+	WindowEnd      *time.Time      `json:"window_end,omitempty"`
+	Continuous     bool            `json:"continuous"`
+	VerifyOnReplay bool            `json:"verify_on_replay,omitempty"`
+	BaseBackups    []backup.Record `json:"base_backups"`
+	LogsCount      int             `json:"logs_count"`
 }
 
 type restoreConnView struct {
@@ -273,6 +276,7 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
 
 	body := backupsJobDetailPageBody{
+		Protection: jobEncryption(job),
 		Job:        jobView,
 		ActiveTab:  tab,
 		Runs:       runViews,
@@ -493,6 +497,8 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 			selectedError, selectedBackup = "restore point "+selectedBackup+" was not found in the catalog", ""
 		} else if err := backup.RequireComplete(rec, "restored"); err != nil {
 			selectedError, selectedBackup = catalogMsg(err), ""
+		} else if err := runner.RequireStandaloneBackup(rec); err != nil {
+			selectedError, selectedBackup = err.Error(), ""
 		}
 	}
 	backups, _ := s.backups.ListAll(r.Context(), backup.Filter{Status: backup.StatusComplete}, 1000)
@@ -520,9 +526,12 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	// Embed objects only for the first N backups (N=10) so the embedded wizard JSON does not blow up.
 	// Subsequent backups fetch details on demand via GET /api/v1/backups/{id}.
 	const maxEmbedObjects = 10
-	embedBackups := make([]backup.Record, len(backups))
-	for i, b := range backups {
-		if i >= maxEmbedObjects && b.Details != nil && b.Details["objects"] != "" {
+	embedBackups := make([]backup.Record, 0, len(backups))
+	for _, b := range backups {
+		if runner.RequireStandaloneBackup(b) != nil {
+			continue
+		}
+		if len(embedBackups) >= maxEmbedObjects && b.Details["objects"] != "" {
 			bCopy := b
 			bCopy.Details = make(map[string]string, len(b.Details))
 			for k, v := range b.Details {
@@ -530,10 +539,9 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 					bCopy.Details[k] = v
 				}
 			}
-			embedBackups[i] = bCopy
-		} else {
-			embedBackups[i] = b
+			b = bCopy
 		}
+		embedBackups = append(embedBackups, b)
 	}
 
 	var sourceInfos []restoreSourceInfo
@@ -555,13 +563,14 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 			}
 		}
 		sourceInfos = append(sourceInfos, restoreSourceInfo{
-			Source:      src,
-			Engine:      engine,
-			WindowStart: win.Start,
-			WindowEnd:   win.End,
-			Continuous:  win.Continuous,
-			BaseBackups: baseBackups,
-			LogsCount:   logsCount,
+			Source:         src,
+			Engine:         engine,
+			WindowStart:    win.Start,
+			WindowEnd:      win.End,
+			Continuous:     win.Continuous,
+			VerifyOnReplay: win.VerifyOnReplay,
+			BaseBackups:    baseBackups,
+			LogsCount:      logsCount,
 		})
 	}
 

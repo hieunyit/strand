@@ -1,0 +1,112 @@
+diff --git a/internal/writer/keyless.go b/internal/writer/keyless.go
+--- a/internal/writer/keyless.go
++++ b/internal/writer/keyless.go
+@@ -230,13 +230,20 @@
+ 
+ // --- PostgreSQL ---
+ 
+-// pgMatchSubquery: `(tableoid, ctid) = (SELECT tableoid, ctid FROM t WHERE c IS NOT DISTINCT FROM $n ... LIMIT 1)`;
+-// tham số đánh số từ start. ctid chỉ duy nhất trong MỘT relation vật lý: target là bảng partitioned/có bảng con
+-// kế thừa thì hai partition có thể có cùng ctid, nên định danh hàng vật lý phải là cặp (tableoid, ctid) (NK05/S02).
+-func pgMatchSubquery(t model.TableID, cols []string, start int) string {
++// pgMatchSubquery matches the whole before-image and identifies at most one
++// physical row. The tableoid is required because partitions can share a ctid.
++func pgMatchSubquery(t model.TableID, cols []string, start int, image []model.Value) string {
+ 	conds := make([]string, len(cols))
+ 	for i, c := range cols {
+-		conds[i] = fmt.Sprintf("%s IS NOT DISTINCT FROM $%d", quotePG(c), start+i)
++		// A non-NULL integer can use ordinary equality, which PostgreSQL
++		// can turn into a B-tree index condition. Keep NULL-safe matching
++		// for the other values and compare every column in the before-image.
++		op := "IS NOT DISTINCT FROM"
++		switch image[i].(type) {
++		case int16, int32, int64:
++			op = "="
++		}
++		conds[i] = fmt.Sprintf("%s %s $%d", quotePG(c), op, start+i)
+ 	}
+ 	tbl := quotePGTable(t)
+ 	return fmt.Sprintf("(tableoid, ctid) = (SELECT tableoid, ctid FROM %s WHERE %s LIMIT 1)", tbl, strings.Join(conds, " AND "))
+@@ -270,17 +277,17 @@
+ }
+ 
+ // buildKeylessUpdatePG: UPDATE đúng một hàng (chọn bằng (tableoid, ctid) của hàng đầu tiên khớp ảnh trước).
+-func buildKeylessUpdatePG(t model.TableID, setCols, matchCols []string) string {
++func buildKeylessUpdatePG(t model.TableID, setCols, matchCols []string, image []model.Value) string {
+ 	sets := make([]string, len(setCols))
+ 	for i, c := range setCols {
+ 		sets[i] = fmt.Sprintf("%s = $%d", quotePG(c), i+1)
+ 	}
+-	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotePGTable(t), strings.Join(sets, ", "), pgMatchSubquery(t, matchCols, len(setCols)+1))
++	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quotePGTable(t), strings.Join(sets, ", "), pgMatchSubquery(t, matchCols, len(setCols)+1, image))
+ }
+ 
+ // buildKeylessDeletePG: DELETE đúng một hàng.
+-func buildKeylessDeletePG(t model.TableID, matchCols []string) string {
+-	return fmt.Sprintf("DELETE FROM %s WHERE %s", quotePGTable(t), pgMatchSubquery(t, matchCols, 1))
++func buildKeylessDeletePG(t model.TableID, matchCols []string, image []model.Value) string {
++	return fmt.Sprintf("DELETE FROM %s WHERE %s", quotePGTable(t), pgMatchSubquery(t, matchCols, 1, image))
+ }
+ 
+ func (a *pgApplier) applyKeyless(row *model.RowChange) error {
+@@ -311,7 +318,7 @@
+ 		}
+ 		names, vals := colNamesVals(row.Cols, true) // cột TOAST không đổi không nằm trong SET
+ 		if unchanged || (len(row.Cols) > 0 && len(names) == 0) {
+-			query := "SELECT EXISTS (SELECT 1 FROM " + quotePGTable(row.Table) + " WHERE " + pgMatchSubquery(row.Table, match, 1) + ")"
++			query := "SELECT EXISTS (SELECT 1 FROM " + quotePGTable(row.Table) + " WHERE " + pgMatchSubquery(row.Table, match, 1, before) + ")"
+ 			var found bool
+ 			if err := a.tx.QueryRow(a.ctx, query, toArgs(before)...).Scan(&found); err != nil {
+ 				return fmt.Errorf("check unchanged row in %s: %w", row.Table, err)
+@@ -322,7 +329,7 @@
+ 			a.written++
+ 			return nil
+ 		}
+-		tag, err := a.tx.Exec(a.ctx, buildKeylessUpdatePG(row.Table, names, match), append(vals, toArgs(before)...)...)
++		tag, err := a.tx.Exec(a.ctx, buildKeylessUpdatePG(row.Table, names, match, before), append(vals, toArgs(before)...)...)
+ 		if err != nil {
+ 			return fmt.Errorf("keyless update on %s: %w", row.Table, err)
+ 		}
+@@ -334,7 +341,7 @@
+ 		if err != nil {
+ 			return err
+ 		}
+-		tag, err := a.tx.Exec(a.ctx, buildKeylessDeletePG(row.Table, match), toArgs(row.Key)...)
++		tag, err := a.tx.Exec(a.ctx, buildKeylessDeletePG(row.Table, match, row.Key), toArgs(row.Key)...)
+ 		if err != nil {
+ 			return fmt.Errorf("keyless delete on %s: %w", row.Table, err)
+ 		}
+diff --git a/internal/writer/keyless_regression_test.go b/internal/writer/keyless_regression_test.go
+index d6616a9..2d94710 100644
+--- a/internal/writer/keyless_regression_test.go
++++ b/internal/writer/keyless_regression_test.go
+@@ -188,8 +188,8 @@ func TestNK01_KeylessImagesDifferIsTyped(t *testing.T) {
+ // NK05 (S02): PG keyless UPDATE/DELETE định danh hàng vật lý bằng (tableoid, ctid), không chỉ ctid.
+ func TestNK05_KeylessPGMatchUsesTableoidCtid(t *testing.T) {
+ 	for _, q := range []string{
+-		buildKeylessUpdatePG(klT, []string{"a", "b"}, []string{"a", "b"}),
+-		buildKeylessDeletePG(klT, []string{"a", "b"}),
++		buildKeylessUpdatePG(klT, []string{"a", "b"}, []string{"a", "b"}, []model.Value{int32(1), nil}),
++		buildKeylessDeletePG(klT, []string{"a", "b"}, []model.Value{int16(1), nil}),
+ 	} {
+ 		if !strings.Contains(q, "WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM \"d\".\"k\" WHERE") {
+ 			t.Fatalf("physical row identity must be (tableoid, ctid): %s", q)
+diff --git a/internal/writer/keyless_test.go b/internal/writer/keyless_test.go
+index 7ac956d..3b6d18d 100644
+--- a/internal/writer/keyless_test.go
++++ b/internal/writer/keyless_test.go
+@@ -49,11 +49,11 @@ func TestKeylessPGSQL(t *testing.T) {
+ 	if got, want := buildKeylessInsertPG(klT, []string{"a", "b"}), `INSERT INTO "d"."k" ("a", "b") OVERRIDING SYSTEM VALUE VALUES ($1, $2)`; got != want {
+ 		t.Fatalf("insert: %s", got)
+ 	}
+-	if got, want := buildKeylessUpdatePG(klT, []string{"a", "b"}, []string{"a", "b"}),
+-		`UPDATE "d"."k" SET "a" = $1, "b" = $2 WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "d"."k" WHERE "a" IS NOT DISTINCT FROM $3 AND "b" IS NOT DISTINCT FROM $4 LIMIT 1)`; got != want {
++	if got, want := buildKeylessUpdatePG(klT, []string{"a", "b"}, []string{"a", "b"}, []model.Value{int64(1), nil}),
++		`UPDATE "d"."k" SET "a" = $1, "b" = $2 WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "d"."k" WHERE "a" = $3 AND "b" IS NOT DISTINCT FROM $4 LIMIT 1)`; got != want {
+ 		t.Fatalf("update: %s", got)
+ 	}
+-	if got, want := buildKeylessDeletePG(klT, []string{"a"}),
++	if got, want := buildKeylessDeletePG(klT, []string{"a"}, []model.Value{"one"}),
+ 		`DELETE FROM "d"."k" WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "d"."k" WHERE "a" IS NOT DISTINCT FROM $1 LIMIT 1)`; got != want {
+ 		t.Fatalf("delete: %s", got)
+ 	}

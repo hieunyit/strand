@@ -68,8 +68,10 @@ func TestR08_EventLogSpillRoundTripAndSubxactTruncate(t *testing.T) {
 			if _, ok := l.marks[102]; ok {
 				t.Fatal("nested savepoint mark survived its parent's rollback")
 			}
-			add(10, rowEv(10))
-			want = append(want, rowEv(10))
+			incomplete := rowEv(10)
+			incomplete.PartialRowImage = true
+			add(10, incomplete)
+			want = append(want, incomplete)
 			if got := collect(t, l); !reflect.DeepEqual(got, want) {
 				t.Fatalf("replay differs:\n got %d events %+v\nwant %d events %+v", len(got), got, len(want), want)
 			}

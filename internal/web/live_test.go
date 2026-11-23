@@ -177,6 +177,7 @@ type countingPipeline struct {
 	calls   atomic.Int64
 	block   atomic.Bool
 	applied atomic.Int64
+	top     atomic.Pointer[admin.TopInfo]
 }
 
 func (m *countingPipeline) hit(ctx context.Context) error {
@@ -194,6 +195,9 @@ func (m *countingPipeline) hit(ctx context.Context) error {
 func (m *countingPipeline) Top(ctx context.Context) (*admin.TopInfo, error) {
 	if err := m.hit(ctx); err != nil {
 		return nil, err
+	}
+	if top := m.top.Load(); top != nil {
+		return top, nil
 	}
 	return m.recPipeline.Top(ctx)
 }
@@ -392,6 +396,51 @@ func TestPagesAndStreamNeverCallTheAdminSocket(t *testing.T) {
 	}
 	wg.Wait()
 	cp.block.Store(false) // release the hung server-side handlers
+}
+
+func TestPipelineVerificationEvidenceReachesAPIAndPage(t *testing.T) {
+	e, cp := countedEnv(t)
+	c, _ := e.loginOK()
+	assertResponse := func(path string, present, absent []string) {
+		t.Helper()
+		resp, body := e.do(c, "GET", path, "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: %d", path, resp.StatusCode)
+		}
+		for _, fragment := range present {
+			if !strings.Contains(body, fragment) {
+				t.Errorf("%s missing %q", path, fragment)
+			}
+		}
+		for _, fragment := range absent {
+			if strings.Contains(body, fragment) {
+				t.Errorf("%s retained %q", path, fragment)
+			}
+		}
+	}
+	cp.top.Store(&admin.TopInfo{
+		State: "synced", CDCState: "caught_up",
+		Verification: &admin.VerificationEvidence{
+			Status: "incomplete", CheckedAt: e.clock.Now(),
+			Tables: []admin.VerificationTable{
+				{Table: "app.keyed", Status: "checked", Method: "sample-and-changed-keys"},
+				{Table: "app.keyless", Status: "incomplete", Reason: "source is changing"},
+			},
+		},
+	})
+	e.sampleNow()
+	assertResponse("/api/v1/pipelines/orders",
+		[]string{`"cdc_state": "caught_up"`, `"verification":`, "app.keyed", "app.keyless", "source is changing"}, nil)
+	assertResponse("/api/v1/live?pipeline=orders",
+		[]string{`"cdc_state": "caught_up"`, `"verification_status": "incomplete"`}, nil)
+	assertResponse("/pipelines/orders",
+		[]string{`data-verification-status="incomplete"`, "app.keyed", "app.keyless", "source is changing"}, nil)
+
+	cp.top.Store(&admin.TopInfo{State: "synced"})
+	e.clock.Advance(time.Second)
+	e.sampleNow()
+	assertResponse("/api/v1/live?pipeline=orders", nil, []string{`"verification_status"`, "caught_up"})
+	assertResponse("/pipelines/orders", nil, []string{"data-verification-status", "source is changing"})
 }
 
 // ---- SSE endpoint ----

@@ -401,6 +401,11 @@ Với PK tổng quát (không phải một cột số nguyên), các phần sau 
 - `verify --repair fix` với PG→PG.
 - Chia đôi chunk khi query snapshot quá thời gian (chỉ có cho khóa số nguyên).
 
+Với `verify --mode full --resume`, Strand chờ target bắt kịp nếu có pipeline
+đang chạy và đọc lại tất cả chunk. Trước cutover, chạy full verify mới khi nguồn
+đã được chặn ghi và target đã bắt kịp. Xem cả số dòng lệch và chưa thể đối soát
+trước khi mở ghi ở đích.
+
 ### 5.3 Giới hạn khác
 
 - **UNIQUE ngoài PK:**

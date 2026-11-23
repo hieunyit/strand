@@ -49,7 +49,7 @@ Phần dưới là cài từng bước (khi cần kiểm soát từng việc).
 
 - Linux có systemd (amd64 hoặc arm64). Binary tĩnh, không cần thư viện hay Internet. Web UI cũng nằm trong binary (không cần Node, CDN).
 - Máy chạy Strand nối được tới source và target (mặc định MySQL 3306, PostgreSQL 5432). Strand không cần chạy trên máy DB.
-- Build từ source cần Go 1.25 trở lên.
+- Build từ source cần Go 1.26 trở lên.
 - Có `sudo` (hoặc root) để cài gói, tạo user, chép unit.
 
 | Thành phần | Đường dẫn | Ghi chú |
@@ -465,7 +465,7 @@ docker compose up -d --build               # build image, db khỏe rồi mới 
 docker compose logs web | grep -A1 "GENERATED ADMIN PASSWORD"   # chỉ cần khi KHÔNG đặt STRAND_WEB_ADMIN_PASSWORD
 ```
 
-Mở `http://<host>:8080` và đăng nhập bằng mật khẩu admin. Nếu `STRAND_WEB_ADMIN_PASSWORD` trống, entrypoint sinh mật khẩu ngẫu nhiên và in **một lần** ở lần khởi động đầu (khi database chưa có admin); các lần sau không in và không đổi gì. Kiểm tra: `docker compose ps` (cả hai `healthy`), `curl -s http://localhost:8080/healthz`.
+Trên host, mở `http://127.0.0.1:8080` và đăng nhập bằng mật khẩu admin. Nếu `STRAND_WEB_ADMIN_PASSWORD` trống, entrypoint sinh mật khẩu ngẫu nhiên và in **một lần** ở lần khởi động đầu (khi database chưa có admin); các lần sau không in và không đổi gì. Kiểm tra: `docker compose ps` (cả hai `healthy`), `curl -s http://localhost:8080/healthz`.
 
 ### 10.2 Biến môi trường
 
@@ -479,7 +479,7 @@ Mọi biến nằm trong `.env.example` (kèm giải thích). Các biến chính
 | `STRAND_WEB_SECRET_KEY_PREVIOUS` | Chỉ khi **đổi khóa**: đặt khóa mới vào `STRAND_WEB_SECRET_KEY`, khóa cũ vào biến này, khởi động lại; web mã hóa lại mọi `.env` trong DB bằng khóa mới (log `re-encrypted ...`), sau đó xóa biến này. |
 | `STRAND_WEB_ADMIN_USER` | Tên tài khoản admin khởi tạo (mặc định `admin`). |
 | `STRAND_WEB_ADMIN_PASSWORD` hoặc `STRAND_WEB_ADMIN_PASSWORD_FILE` | Mật khẩu admin, chỉ dùng khi database chưa có admin (tối thiểu 12 ký tự, khác username). `_FILE` dành cho docker secrets (`/run/secrets/...`), tránh để mật khẩu lộ qua `docker inspect`. Đổi sau này: `docker compose exec web strand web passwd --user admin`; quản lý người dùng: `docker compose exec web strand web user add|list|disable|enable|set-role|reset-password`; token script: trang My account hoặc `strand web token`. |
-| `STRAND_WEB_BIND`, `STRAND_WEB_PORT` | Địa chỉ/cổng publish trên host (mặc định `0.0.0.0:8080`). |
+| `STRAND_WEB_BIND`, `STRAND_WEB_PORT` | Địa chỉ/cổng publish trên host (mặc định `127.0.0.1:8080`). |
 | `STRAND_WEB_ALLOW_PLAIN_HTTP`, `STRAND_WEB_TLS_CERT`, `STRAND_WEB_TLS_KEY`, `STRAND_WEB_SECURE_COOKIES`, `STRAND_WEB_TRUST_FORWARDED_FOR` | Mạng và TLS, xem 10.5. |
 | `WEB_CPUS`, `WEB_MEMORY`, `DB_CPUS`, `DB_MEMORY` | Giới hạn tài nguyên (mặc định web 2 CPU/2 GB, db 1 CPU/1 GB). Log container giới hạn 10 MB x 5 file. |
 
@@ -512,7 +512,7 @@ docker run --rm -v strand_strand_config:/c -v strand_strand_state:/s -v "$PWD":/
 
 ### 10.5 TLS và cổng
 
-Mặc định web nghe `0.0.0.0:8080` bằng HTTP thường (`allow_plain_http`): mật khẩu và cookie đi dạng rõ. Chỉ dùng trong mạng tin cậy. Hai cách có TLS:
+Compose mặc định chỉ publish HTTP trên `127.0.0.1:8080` của host. Để truy cập từ xa, dùng TLS:
 
 - **Reverse proxy (khuyến nghị)**: đặt `STRAND_WEB_BIND=127.0.0.1`, `STRAND_WEB_SECURE_COOKIES=true`, `STRAND_WEB_TRUST_FORWARDED_FOR=true`, rồi proxy (nginx, Caddy, Traefik) kết thúc TLS và chuyển tới `127.0.0.1:8080` (mục 5.4).
 - **TLS tại web**: mount chứng chỉ (`./certs:/certs:ro` trong `compose.yaml`) và đặt `STRAND_WEB_TLS_CERT=/certs/tls.crt`, `STRAND_WEB_TLS_KEY=/certs/tls.key`, `STRAND_WEB_ALLOW_PLAIN_HTTP=false`. Healthcheck tự chuyển sang HTTPS.

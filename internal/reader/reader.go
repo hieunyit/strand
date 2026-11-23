@@ -38,11 +38,14 @@ type Event struct {
 	PKColumns []string `json:"pk_columns,omitempty"`
 	KeyMode   string   `json:"key_mode,omitempty"` // verified MySQL row identity: pk or unique
 	// SchemaChanged báo TABLE_MAP mang schema khác với metadata hiện hành (Relation của PG, P3-01b).
-	SchemaChanged bool     `json:"schema_changed,omitempty"`
-	Op            model.Op `json:"op,omitempty"`
-	Rows          [][]any  `json:"rows,omitempty"`
-	XID           uint64   `json:"xid,omitempty"`
-	Err           error    `json:"error,omitempty"`
+	SchemaChanged bool `json:"schema_changed,omitempty"`
+	// PartialRowImage marks missing values that a keyless change needs. A PG
+	// unchanged TOAST value in the after-image is allowed when its old value is present.
+	PartialRowImage bool     `json:"partial_row_image,omitempty"`
+	Op              model.Op `json:"op,omitempty"`
+	Rows            [][]any  `json:"rows,omitempty"`
+	XID             uint64   `json:"xid,omitempty"`
+	Err             error    `json:"error,omitempty"`
 	// BinlogFile/BinlogPos: vị trí bắt đầu của event GTID trong file binlog của source (MySQL; rỗng nếu
 	// không biết). Dùng để kiểm schema tại vị trí CREATE TABLE mà không phải quét binlog từ đầu file.
 	BinlogFile string `json:"binlog_file,omitempty"`

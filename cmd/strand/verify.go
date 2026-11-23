@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/pipeline"
 	"strand/internal/schemagen"
 	"strand/internal/snapshot"
 	"strand/internal/verify"
@@ -29,7 +32,7 @@ import (
 func newVerifyCmd() *cobra.Command {
 	var table, mode, repair, replicaDSN string
 	var rate float64
-	var resume bool
+	var resume, requireComplete bool
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Đối chiếu source với target theo range (sample | delta | full)",
@@ -40,6 +43,10 @@ func newVerifyCmd() *cobra.Command {
 			cfg, err := config.LoadFile(cfgPath)
 			if err != nil {
 				return err
+			}
+			if requireComplete && (mode != "full" || table != "" || repair != "report" || resume || replicaDSN != "" || cfg.IsMongoDB()) {
+				return exitcode.New("invalid_verify_gate", exitcode.InvalidSyntax,
+					"--require-complete requires a fresh SQL full verify against the configured source across all configured tables", nil)
 			}
 			if cfg.IsMongoDB() {
 				if repair != "report" && repair != "fix" {
@@ -170,7 +177,12 @@ func newVerifyCmd() *cobra.Command {
 
 			if mode == "full" {
 				var ids []model.TableID
-				if table != "" {
+				if requireComplete {
+					ids, err = strictVerifyTables(cmd.Context(), src, cfg)
+					if err != nil {
+						return err
+					}
+				} else if table != "" {
 					// --table là lựa chọn tường minh của người dùng, kể cả bảng bị exclude khỏi pipeline.
 					s, t, ok := strings.Cut(table, ".")
 					if !ok || s == "" || t == "" || strings.ContainsAny(table, "*?") {
@@ -198,10 +210,10 @@ func newVerifyCmd() *cobra.Command {
 					fullRate = rate
 				}
 				var bad []string
-				keylessIncomplete := false
+				var incomplete []string
 				for _, id := range ids {
 					pkCols, err := verify.FindPKColumns(cmd.Context(), src, srcEngine, id)
-					if err != nil && cfg.Tables.KeylessOn() {
+					if errors.Is(err, verify.ErrNoRowKey) && cfg.Tables.KeylessOn() {
 						// Bảng keyless (tables.keyless=full_row): chỉ so số hàng + checksum, không sửa được.
 						mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{
 							Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
@@ -214,8 +226,7 @@ func newVerifyCmd() *cobra.Command {
 						fmt.Printf("verify %s (keyless, count+checksum only): source %s target %s match=%v stable_source=%v attempts=%d\n",
 							id, krep.SourceRows, krep.TargetRows, krep.Match, krep.StableOnSource, krep.Attempts)
 						if !krep.StableOnSource {
-							keylessIncomplete = true
-							bad = append(bad, fmt.Sprintf("keyless table %s inconclusive: changing source (%d attempts)", id, krep.Attempts))
+							incomplete = append(incomplete, fmt.Sprintf("keyless table %s inconclusive: changing source (%d attempts)", id, krep.Attempts))
 							continue
 						}
 						if !krep.Match {
@@ -228,6 +239,9 @@ func newVerifyCmd() *cobra.Command {
 						continue
 					}
 					if err != nil {
+						if !errors.Is(err, verify.ErrNoRowKey) {
+							return err
+						}
 						return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, "verify needs a primary key: "+err.Error(), err)
 					}
 					intPK := false
@@ -246,6 +260,9 @@ func newVerifyCmd() *cobra.Command {
 							id, strings.Join(pkCols, ","), rep.TotalChunks, rep.MismatchedChunks, rep.RowsChecked, len(rep.Mismatches))
 						if n := len(rep.UnverifiableHot); n > 0 {
 							fmt.Printf("verify %s (full, key %s): %d unverifiable_hot\n", id, strings.Join(pkCols, ","), n)
+							if requireComplete {
+								incomplete = append(incomplete, fmt.Sprintf("%s has %d unverifiable hot keys", id, n))
+							}
 						}
 						if len(rep.Mismatches) == 0 {
 							continue
@@ -284,6 +301,9 @@ func newVerifyCmd() *cobra.Command {
 					}
 					fmt.Printf("verify %s (full): %d chunks (%d hashed, %d resumed), %d mismatched chunks, %d rows compared, %d mismatches, %d unverifiable_hot\n",
 						id, rep.TotalChunks, rep.HashedChunks, rep.ResumedChunks, rep.MismatchedChunks, rep.RowsChecked, len(rep.Mismatches), len(rep.UnverifiableHot))
+					if n := len(rep.UnverifiableHot); requireComplete && n > 0 {
+						incomplete = append(incomplete, fmt.Sprintf("%s has %d unverifiable hot keys", id, n))
+					}
 					if len(rep.Mismatches) == 0 {
 						continue
 					}
@@ -297,10 +317,19 @@ func newVerifyCmd() *cobra.Command {
 					bad = append(bad, fmt.Sprintf("%d mismatched rows in %s (pk %s)", len(rep.Mismatches), id, strings.Join(firstN(rep.Mismatches, 10), ",")))
 				}
 				if len(bad) > 0 {
-					if keylessIncomplete {
-						return exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError, strings.Join(bad, "; "), nil)
+					return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError, strings.Join(append(bad, incomplete...), "; "), nil)
+				}
+				if len(incomplete) > 0 {
+					return exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError, strings.Join(incomplete, "; "), nil)
+				}
+				if requireComplete {
+					current, err := strictVerifyTables(cmd.Context(), src, cfg)
+					if err != nil {
+						return err
 					}
-					return exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError, strings.Join(bad, "; "), nil)
+					if !slices.Equal(ids, current) {
+						return exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError, "table scope changed during full verify", nil)
+					}
 				}
 				return nil
 			}
@@ -397,13 +426,47 @@ func newVerifyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", "sample", "sample | delta | full")
 	cmd.Flags().StringVar(&repair, "repair", "report", "report | fix")
 	cmd.Flags().Float64Var(&rate, "rate", 0.01, "Tỉ lệ row lấy mẫu (sample) hoặc số chunk/giây (full)")
-	cmd.Flags().BoolVar(&resume, "resume", false, "Chạy tiếp một lượt full verify bị ngắt: chunk đã hash khớp ở lượt đó không hash lại (lượt chạy hết thì tiến độ bị xóa)")
+	cmd.Flags().BoolVar(&requireComplete, "require-complete", false, "Require a fresh full verify across all configured SQL tables and reject incomplete results")
+	cmd.Flags().BoolVar(&resume, "resume", false, "Chạy lại lượt full verify bị ngắt: chờ target bắt kịp và đọc lại mọi chunk")
 	cmd.Flags().StringVar(&replicaDSN, "replica-dsn", "", "DSN của replica để đọc (thay cho source DSN)")
 	cmd.Flags().StringVar(&adminSocketPath, "socket", "", "Admin socket (delta)")
 	return cmd
 }
 
 // mysqlUTCDSN: DSN MySQL với phiên time_zone='+00:00' và time.Time ở UTC.
+// A successful strict run covers the entire configured and runtime-added scope.
+func strictVerifyTables(ctx context.Context, src *sql.DB, cfg *config.Config) ([]model.TableID, error) {
+	added, err := pipeline.VerificationAddedTables(cfg.Resources.Spool.Path, cfg.Name)
+	if err != nil {
+		return nil, fmt.Errorf("read table scope: %w", err)
+	}
+	include := append(slices.Clone(cfg.Tables.Include), added...)
+	ids, _, err := schemagen.Discover(ctx, src, cfg.Source.Kind, include, cfg.Tables.Exclude)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError, "no source tables in verification scope", nil)
+	}
+	for _, pattern := range include {
+		// An explicit exclusion of an exact table wins over inclusion.
+		if !strings.ContainsAny(pattern, "*?[") && slices.ContainsFunc(cfg.Tables.Exclude, func(exclude string) bool {
+			matches, _ := path.Match(exclude, pattern)
+			return matches
+		}) {
+			continue
+		}
+		if !slices.ContainsFunc(ids, func(id model.TableID) bool {
+			matches, _ := path.Match(pattern, id.String())
+			return matches
+		}) {
+			return nil, exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError,
+				fmt.Sprintf("no verifiable source table matched %q", pattern), nil)
+		}
+	}
+	return ids, nil
+}
+
 func mysqlUTCDSN(dsn string) (string, error) {
 	c, err := drivermysql.ParseDSN(dsn)
 	if err != nil {

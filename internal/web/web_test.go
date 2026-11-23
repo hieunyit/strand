@@ -925,5 +925,6 @@ func TestFormLoginSameOriginWithoutLoginCookie(t *testing.T) {
 func memSessionStore(now func() time.Time) *SessionStore {
 	s := NewSessionStore(now)
 	s.db = &metaDB{st: store.NewMem(), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	_, _ = s.db.st.CreateUser(context.Background(), store.User{Username: "admin", Role: store.RoleAdmin})
 	return s
 }

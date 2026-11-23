@@ -83,7 +83,13 @@ func NewSessionStore(now func() time.Time) *SessionStore {
 
 // Create tạo session mới (mặc định admin).
 func (s *SessionStore) Create(ip string) (string, *Session) {
-	return s.CreateUserSession(ip, 0, "admin", store.RoleAdmin)
+	ctx, cancel := dbCtx()
+	defer cancel()
+	u, ok, err := s.db.st.GetUser(ctx, "admin")
+	if err != nil || !ok || u.Disabled || !u.Role.Valid() {
+		return "", nil
+	}
+	return s.CreateUserSession(ip, u.ID, u.Username, u.Role)
 }
 
 // CreateUserSession tạo session mới gắn với user id và role.
@@ -131,31 +137,26 @@ func (s *SessionStore) Get(tok string) *Session {
 		return nil
 	}
 
-	role := store.RoleAdmin
-	username := row.Username
-	if username == "" {
-		username = "admin"
+	// Migration 015 binds legacy sessions to the migrated admin. Any remaining
+	// unbound session must sign in again.
+	if row.UserID <= 0 {
+		_ = s.db.st.DeleteSession(ctx, k)
+		return nil
 	}
-	if row.UserID > 0 {
-		u, uok, err := s.db.st.GetUserByID(ctx, row.UserID)
-		if err == nil && uok {
-			if u.Disabled {
-				_ = s.db.st.DeleteSession(ctx, k)
-				return nil
-			}
-			role = u.Role
-			username = u.Username
-		} else if !uok && err == nil {
-			// User deleted: purge session
-			_ = s.db.st.DeleteSession(ctx, k)
-			return nil
-		}
+	u, ok, err := s.db.st.GetUserByID(ctx, row.UserID)
+	if err != nil {
+		s.db.log.Warn("read session user failed", "err", err)
+		return nil
+	}
+	if !ok || u.Disabled || !u.Role.Valid() {
+		_ = s.db.st.DeleteSession(ctx, k)
+		return nil
 	}
 
 	if t.Sub(row.LastSeen) >= time.Second { // gia hạn idle; bỏ qua ghi dày đặc
 		_ = s.db.st.TouchSession(ctx, k, t)
 	}
-	return &Session{CSRF: row.CSRF, Created: row.Created, LastSeen: t, IP: row.IP, UserID: row.UserID, Username: username, Role: role}
+	return &Session{CSRF: row.CSRF, Created: row.Created, LastSeen: t, IP: row.IP, UserID: row.UserID, Username: u.Username, Role: u.Role}
 }
 
 // Delete hủy session (đăng xuất).

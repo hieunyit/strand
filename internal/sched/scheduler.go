@@ -207,6 +207,13 @@ func (s *Scheduler) TableWritesetEntries(tbl string) int {
 	return 0
 }
 
+// PendingBytes is the amount currently charged against MaxPendingBytes.
+func (s *Scheduler) PendingBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pendingBytes + s.laneHeldBytes
+}
+
 // TotalWritesetEntries trả về tổng số entry trong map rows của tất cả các bảng.
 func (s *Scheduler) TotalWritesetEntries() int {
 	s.mu.Lock()
@@ -436,13 +443,16 @@ func (s *Scheduler) Admit(ctx context.Context, t *model.Txn) error {
 			clear(st.rows)
 		} else {
 			for _, k := range keys {
-				if p, ok := st.rows[k]; ok {
+				if p, exists := st.rows[k]; exists {
+					if p == seq {
+						// This transaction already registered this key and its predecessor.
+						continue
+					}
 					if p < seq {
 						deps = append(deps, p)
 						s.hotRowCount++
 					}
-				}
-				if _, exists := st.rows[k]; !exists {
+				} else {
 					s.totalRows++
 				}
 				st.rows[k] = seq

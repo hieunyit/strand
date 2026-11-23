@@ -25,7 +25,7 @@
     <li class="step" data-step-li="3">
       <button type="button" class="btn ghost step-btn" data-goto="3">
         <span class="step-index">3</span>
-        <span class="step-label">Options</span>
+        <span class="step-label">Advanced</span>
       </button>
     </li>
     <li class="step" data-step-li="4">
@@ -46,11 +46,6 @@
           <span class="choice-title">From a backup ID</span>
           <span class="choice-desc">Restore one backup from the catalog, optionally rolled forward to a time.</span>
         </label>
-        <label class="choice">
-          <input type="radio" name="restore_from" value="pitr"{{if .Body.SelectedSource}} checked{{end}}>
-          <span class="choice-title">Point in time from a source (PITR)</span>
-          <span class="choice-desc">Strand picks the base backup and replays archived logs up to the time.</span>
-        </label>
       </div>
 
       <div class="field-grid">
@@ -65,6 +60,17 @@
           <span class="field-error" id="err-backup-id" data-msg-not-complete="{{t "rp.wizard_not_complete"}}" hidden></span>
         </label>
 
+      </div>
+      <details class="advanced" id="restore-pitr-options"{{if .Body.SelectedSource}} open{{end}}>
+        <summary>Point-in-time recovery and roll-forward</summary>
+        <div class="choice-cards">
+        <label class="choice">
+          <input type="radio" name="restore_from" value="pitr"{{if .Body.SelectedSource}} checked{{end}}>
+          <span class="choice-title">Point in time from a source (PITR)</span>
+          <span class="choice-desc">Strand picks the base backup and replays archived logs up to the time.</span>
+        </label>
+        </div>
+        <div class="field-grid">
         <label class="field" data-show-if="restore_from=pitr">
           <span class="field-label">Source <span class="req">*</span></span>
           <select name="source" id="restore-source-select">
@@ -88,6 +94,8 @@
         <div id="restore-window-text"></div>
         <div id="restore-pitr-preview" class="small muted mt"></div>
       </div>
+
+      </details>
 
       <div class="form-actions mt">
         <button type="button" class="btn primary" id="restore-step1-next" data-next-step="2">Next: Target &rarr;</button>
@@ -125,10 +133,10 @@
           <span class="choice-title">New database</span>
           <span class="choice-desc">Logical backups (mysqldump, mydumper, pg_dump, mongodump).</span>
         </label>
-        <label class="choice" id="choice-restore-dir">
-          <input type="radio" name="restore_into" value="dir">
-          <span class="choice-title">New data directory</span>
-          <span class="choice-desc">Physical backups (pg_basebackup) into an empty directory.</span>
+        <label class="choice" id="choice-restore-deployment" hidden>
+          <input type="radio" name="restore_into" value="deployment">
+          <span class="choice-title">Empty MongoDB deployment</span>
+          <span class="choice-desc">Restore a whole-deployment backup to a dedicated empty target.</span>
         </label>
       </div>
 
@@ -139,6 +147,17 @@
           <small class="field-hint">Must not exist yet on target server.</small>
           <span class="field-error" id="err-target-database" hidden></span>
         </label>
+      </div>
+      <details class="advanced" id="restore-physical-options">
+        <summary>Physical restore</summary>
+        <div class="choice-cards">
+        <label class="choice" id="choice-restore-dir">
+          <input type="radio" name="restore_into" value="dir">
+          <span class="choice-title">New data directory</span>
+          <span class="choice-desc">Physical backups (pg_basebackup) into an empty directory.</span>
+        </label>
+        </div>
+        <div class="field-grid">
         <label class="field" data-show-if="restore_into=dir" id="field-target-dir" hidden>
           <span class="field-label">New data directory <span class="req">*</span></span>
           <input name="target_dir" id="restore-target-dir" class="mono" placeholder="/var/lib/strand-restores/db-01" autocomplete="off">
@@ -147,9 +166,12 @@
         </label>
       </div>
 
+      </details>
+
       <div class="form-actions mt">
         <button type="button" class="btn ghost" data-prev-step="1">&larr; Back</button>
-        <button type="button" class="btn primary" id="restore-step2-next" data-next-step="3">Next: Options &rarr;</button>
+        <button type="button" class="btn" id="restore-step2-options" data-next-step="3">Advanced options</button>
+        <button type="button" class="btn primary" id="restore-step2-next" data-next-step="4">Next: Review &amp; confirm &rarr;</button>
       </div>
     </fieldset>
 
@@ -167,6 +189,8 @@
         Partial restore with point-in-time recovery is not supported for MySQL; the full database is restored.
       </div>
 
+      <details class="advanced" id="restore-advanced-options">
+        <summary>Advanced restore options</summary>
       <div class="field-grid" id="restore-threads-grid">
         <label class="field" id="field-restore-threads">
           <span class="field-label">Parallel restore workers</span>
@@ -212,6 +236,7 @@
         <span class="field-error" id="err-objects" hidden></span>
       </div>
 
+      </details>
       <div class="form-actions mt">
         <button type="button" class="btn ghost" data-prev-step="2">&larr; Back</button>
         <button type="button" class="btn primary" id="restore-step3-next" data-next-step="4">Next: Review &amp; confirm &rarr;</button>
@@ -252,7 +277,7 @@
       </div>
 
       <div class="form-actions mt">
-        <button type="button" class="btn ghost" data-prev-step="3">&larr; Back</button>
+        <button type="button" class="btn ghost" id="restore-confirm-back" data-prev-step="3">&larr; Back</button>
         {{if .Body.IsAdmin}}
         <button class="btn danger" type="submit" id="start-restore-btn" disabled>Start restore</button>
         {{else}}

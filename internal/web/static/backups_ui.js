@@ -137,7 +137,8 @@
     s = s || {};
     set('sch_kind', s.kind || 'daily');
     set('sch_at', s.at || '01:00');
-    set('sch_every_min', s.every_seconds ? Math.round(s.every_seconds / 60) : 60);
+    // The API stores whole seconds while the widget displays minutes.
+    set('sch_every_min', s.every_seconds ? Number((s.every_seconds / 60).toFixed(4)) : 60);
     set('sch_cron', s.cron || '');
     set('sch_days', (s.days || []).join(','));
     set('sch_tz', s.timezone || '');

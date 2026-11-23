@@ -24,17 +24,19 @@ func startContainer(t *testing.T, req testcontainers.ContainerRequest) string {
 	t.Helper()
 	ctx := context.Background()
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
+	if c != nil {
+		t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+	}
 	if err != nil {
 		t.Fatalf("start %s: %v", req.Image, err)
 	}
-	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	host, _ := c.Host(ctx)
 	ports, err := c.Ports(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for p, bindings := range ports {
-		if string(p) == req.ExposedPorts[0] && len(bindings) > 0 {
+		if p.String() == req.ExposedPorts[0] && len(bindings) > 0 {
 			return net.JoinHostPort(host, bindings[0].HostPort)
 		}
 	}

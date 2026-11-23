@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-TMP_DIR="$(mktemp -d /tmp/strand-browser-run-XXXXXX)"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/strand-browser-run-XXXXXX")"
 
 cleanup() {
   echo "Cleaning up..."
@@ -44,7 +44,7 @@ done
 : "${STRAND_BROWSER_CDP_URL:?Owned Chromium CDP endpoint did not become ready}"
 
 echo "=== 2. Building and Starting Web Server Fixture ==="
-/usr/local/go/bin/go build -o "${TMP_DIR}/fixture-bin" "${SCRIPT_DIR}/server_fixture.go"
+go build -o "${TMP_DIR}/fixture-bin" "${SCRIPT_DIR}/server_fixture.go"
 INFO_JSON="${TMP_DIR}/fixture-info.json"
 "${TMP_DIR}/fixture-bin" -info-json "$INFO_JSON" > "${TMP_DIR}/fixture.log" 2>&1 &
 FIXTURE_PID=$!

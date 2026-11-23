@@ -35,7 +35,7 @@ func TestSpoolInventoryTool_DryRunAndApply(t *testing.T) {
 
 	// Build binary tạm thời
 	binPath := filepath.Join(temp, "spool-inventory")
-	cmdBuild := exec.Command("/usr/local/go/bin/go", "build", "-o", binPath, ".")
+	cmdBuild := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := cmdBuild.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v, output: %s", err, string(out))
 	}

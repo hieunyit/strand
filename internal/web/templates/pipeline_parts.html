@@ -141,6 +141,16 @@
     <span class="muted small meta">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}} &middot; sampled <b class="c-time" data-bind="sampled">{{clock .View.SampledAt}}</b></span>
   </div>
   {{$why := stateReason .View}}<p class="reason-line {{stateClass $.View.State}}" data-bind-show="reason"{{if not $why}} hidden{{end}}><b>Why:</b> <span class="wrap" data-bind="reason">{{$why}}</span></p>
+  <p data-bind-show="cdc_state"{{if not .View.Top}} hidden{{else}}{{if not .View.Top.CDCState}} hidden{{end}}{{end}}>CDC: <span data-bind="cdc_state">{{with .View.Top}}{{.CDCState}}{{end}}</span></p>
+  {{with .View.Top}}{{with .Verification}}
+  <details class="mb" data-verification-status="{{.Status}}" data-verification-at="{{.CheckedAt.Format "2006-01-02T15:04:05.999999999Z07:00"}}">
+    <summary>Data verification: {{.Status}}</summary>
+    {{if .Method}}<p>Historical evidence at the checked position. {{.Method}} · {{.CheckedAt}}</p>{{end}}
+    {{if .EndCheckpoint}}<p>Applied checkpoint at completion <code>{{.EndCheckpoint}}</code></p>{{end}}
+    {{if .Reason}}<p>{{.Reason}}</p>{{end}}
+    {{if .Tables}}<ul>{{range .Tables}}<li>{{.Table}} · {{.Status}}{{if .Method}} · {{.Method}}{{end}}{{if .Position}} · {{.Position}}{{end}}{{if .Reason}} · {{.Reason}}{{end}}</li>{{end}}</ul>{{end}}
+  </details>
+  {{end}}{{end}}
   {{if .View.Top}}{{if .View.Top.BreakerOpen}}<div class="alert alert-error mb" role="alert" data-bind-show="breaker"><strong>Circuit Breaker Open:</strong> <span data-bind="breaker_reason">{{.View.Top.BreakerReason}}</span></div>{{end}}{{end}}
   <div class="kpis" aria-label="Live metrics">
     <div class="kpi"><div class="kpi-label">Lag</div><div class="kpi-value c-num {{lagClass .View}}" data-bind="lag" data-bind-lag>{{if .View.Top}}{{lag .View.Top.LagSeconds}}{{else}}-{{end}}</div><div class="kpi-sub">source to target</div></div>

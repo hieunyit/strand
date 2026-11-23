@@ -122,13 +122,16 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 			t.Fatalf("desired = %v", d)
 		}
 		// ObserveStop: running -> stopped (reason observed_stop) once; never touches a stopped/unknown row.
-		if ch, err := s.ObserveStop(ctx, "orders"); err != nil || !ch {
+		if ch, err := s.ObserveStop(ctx, "orders", time.Now().Add(-time.Minute)); err != nil || ch {
+			t.Fatalf("stale stop overrode a newer start: changed=%v err=%v", ch, err)
+		}
+		if ch, err := s.ObserveStop(ctx, "orders", time.Now()); err != nil || !ch {
 			t.Fatalf("observe stop of a running pipeline: changed=%v err=%v", ch, err)
 		}
-		if ch, _ := s.ObserveStop(ctx, "orders"); ch {
+		if ch, _ := s.ObserveStop(ctx, "orders", time.Now()); ch {
 			t.Fatal("observe stop changed an already stopped pipeline")
 		}
-		if ch, _ := s.ObserveStop(ctx, "nobody"); ch {
+		if ch, _ := s.ObserveStop(ctx, "nobody", time.Now()); ch {
 			t.Fatal("observe stop created a row")
 		}
 		ds, err := s.DesiredStates(ctx)

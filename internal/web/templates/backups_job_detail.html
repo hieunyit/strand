@@ -52,7 +52,7 @@
         <tr><th>Next run</th><td>{{if .Body.Job.Job.NextRunAt}}{{ts .Body.Job.Job.NextRunAt}}{{else}}-{{end}}</td></tr>
         <tr><th>Retention</th><td>{{if .Body.Job.Job.Retention.Enabled}}Keep daily: {{.Body.Job.Job.Retention.KeepDaily}}, weekly: {{.Body.Job.Job.Retention.KeepWeekly}}{{else}}Default policy{{end}}</td></tr>
         <tr><th>Compression</th><td>{{if .Body.Job.Job.Compress}}Enabled (sbk1){{else}}Raw / off{{end}}</td></tr>
-        <tr><th>Encryption</th><td>{{if .Body.Job.Job.Encrypt}}Enabled{{else}}Disabled{{end}}</td></tr>
+        <tr><th>Encryption</th><td>{{template "job-protection" .Body.Protection}}</td></tr>
       </tbody>
     </table></div>
   </section>
@@ -184,7 +184,7 @@
       <tr><th>Destination bucket</th><td>{{.Body.Job.Job.Bucket}}</td></tr>
       <tr><th>Prefix</th><td>{{.Body.Job.Job.Prefix}}</td></tr>
       <tr><th>Compression</th><td>{{if .Body.Job.Job.Compress}}Yes{{else}}No{{end}}</td></tr>
-      <tr><th>Encryption</th><td>{{if .Body.Job.Job.Encrypt}}Yes{{else}}No{{end}}</td></tr>
+      <tr><th>Encryption</th><td>{{template "job-protection" .Body.Protection}}</td></tr>
       <tr><th>Consecutive failures</th><td>{{.Body.Job.Job.ConsecutiveFailures}}</td></tr>
       <tr><th>Retry max</th><td>{{.Body.Job.Job.RetryMax}}</td></tr>
       <tr><th>Retry backoff</th><td>{{.Body.Job.Job.RetryBackoffSeconds}}s</td></tr>
@@ -222,3 +222,5 @@
 </section>
 {{end}}
 {{end}}
+
+{{define "job-protection"}}{{if .Effective}}Enabled{{if .KeyID}} · key {{.KeyID}}{{end}}{{else}}Disabled{{end}}{{if eq .Mode "inherit"}} · follows policy{{end}}{{if .Blocked}} · Active encryption key required to run{{end}}{{end}}

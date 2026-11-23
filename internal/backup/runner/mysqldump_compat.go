@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
@@ -39,7 +38,7 @@ func needsMySQLDump80(serverVersion string, tool MySQLDumpFlavor) bool {
 // mysqlServerVersion returns SELECT VERSION() of c ("" when the server cannot be asked: the dump then
 // runs with the default tool and reports its own connection error).
 func (e *Env) mysqlServerVersion(ctx context.Context, c backup.ConnSpec) string {
-	db, err := sql.Open("mysql", mysqlDSN(e.Getenv, c))
+	db, err := openBackupMySQL(e.Getenv, c)
 	if err != nil {
 		return ""
 	}

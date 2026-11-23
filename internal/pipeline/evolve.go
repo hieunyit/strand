@@ -49,6 +49,11 @@ func (p *Pipeline) evolveSchema(ctx context.Context, t *model.Txn, ids []model.T
 	if all.Empty() {
 		return false, nil
 	}
+	if p.state != nil {
+		if err := p.state.invalidateVerification(); err != nil {
+			return false, err
+		}
+	}
 	if all.Additive() && !strings.EqualFold(p.cfg.Schema.Additive, "pause") {
 		if err := p.applyTargetDDL(ctx, all.Statements()); err != nil {
 			return false, err

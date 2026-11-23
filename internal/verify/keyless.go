@@ -21,6 +21,7 @@ type KeylessReport struct {
 	Match          bool
 	StableOnSource bool // source không đổi giữa hai lần đọc (nếu false, kết quả chỉ là tham khảo)
 	Attempts       int
+	Position       string // Source watermark observed during the final attempt.
 }
 
 func allColumns(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID) ([]ColumnInfo, error) {
@@ -78,7 +79,7 @@ func (mv *MerkleVerifier) VerifyTableKeyless(ctx context.Context, t model.TableI
 	if err != nil {
 		return nil, err
 	}
-	dstCols, err := matchTargetColumns(srcCols, allDst, dstTable)
+	dstCols, err := matchTargetColumns(srcCols, allDst, mv.cfg.TargetEngine, dstTable)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +95,7 @@ func (mv *MerkleVerifier) VerifyTableKeyless(ctx context.Context, t model.TableI
 			if err != nil {
 				return nil, err
 			}
+			rep.Position = mark.text
 			if err := mv.cfg.ApplyWaiter.Wait(ctx, mark); err != nil {
 				return nil, err
 			}

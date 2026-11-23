@@ -219,9 +219,8 @@ type Store interface {
 
 	// SetDesired records a desired state chosen from the web (clears Reason).
 	SetDesired(ctx context.Context, name, desired string) error
-	// ObserveStop flips desired running -> stopped with Reason=ReasonObservedStop, atomically (compare-and-set:
-	// a concurrent Start that set running again wins only if it commits later). Reports whether it changed.
-	ObserveStop(ctx context.Context, name string) (bool, error)
+	// ObserveStop flips desired running -> stopped if the explicit Start predates the observed stop.
+	ObserveStop(ctx context.Context, name string, stoppedAt time.Time) (bool, error)
 	Desired(ctx context.Context) (map[string]string, error)
 	DesiredStates(ctx context.Context) (map[string]DesiredState, error)
 

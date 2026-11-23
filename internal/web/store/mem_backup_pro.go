@@ -74,6 +74,26 @@ func (m *Mem) UpdateBackupMeta(_ context.Context, id string, meta backup.Meta) (
 	return cloneBackup(r), true, nil
 }
 
+func (m *Mem) ClaimBackupDeletion(_ context.Context, id string, at time.Time) (backup.Record, bool, error) {
+	if err := m.enter(); err != nil {
+		return backup.Record{}, false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.backups[id]
+	if !ok || r.Status == backup.StatusExpired {
+		return cloneBackup(r), false, nil
+	}
+	if r.Status == backup.StatusDeleting {
+		return cloneBackup(r), true, nil
+	}
+	if r.Status != backup.StatusComplete || r.LegalHold || (r.RetainUntil != nil && r.RetainUntil.After(at)) {
+		return cloneBackup(r), false, fmt.Errorf("%w: backup is not eligible for deletion (status, legal hold or retention lock)", backup.ErrInvalid)
+	}
+	r.Status = backup.StatusDeleting
+	m.backups[id] = cloneBackup(r)
+	return cloneBackup(r), true, nil
+}
+
 func (m *Mem) ExpireBackup(_ context.Context, id string, at time.Time) (backup.Record, bool, error) {
 	if err := m.enter(); err != nil {
 		return backup.Record{}, false, err
@@ -86,7 +106,7 @@ func (m *Mem) ExpireBackup(_ context.Context, id string, at time.Time) (backup.R
 	switch {
 	case r.Status == backup.StatusExpired:
 		return cloneBackup(r), false, nil
-	case r.Status != backup.StatusComplete:
+	case r.Status != backup.StatusComplete && r.Status != backup.StatusDeleting:
 		return backup.Record{}, false, backup.ErrTransition
 	case r.LegalHold:
 		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
@@ -109,8 +129,8 @@ func (m *Mem) SetBackupLegalHold(_ context.Context, id string, hold bool) (backu
 	if !ok {
 		return backup.Record{}, false, nil
 	}
-	if r.Status == backup.StatusExpired {
-		return backup.Record{}, false, fmt.Errorf("%w: an expired backup cannot be put on hold", backup.ErrInvalid)
+	if r.Status == backup.StatusExpired || r.Status == backup.StatusDeleting {
+		return backup.Record{}, false, fmt.Errorf("%w: a backup pending deletion or expired cannot have its hold changed", backup.ErrInvalid)
 	}
 	changed := r.LegalHold != hold
 	r.LegalHold = hold

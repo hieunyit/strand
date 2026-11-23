@@ -16,6 +16,12 @@ const (
 	Skipped = 2 // router bỏ cả Txn (applied0 / rỗng): A = lý do
 	Done    = 3 // worker báo Done: A = worker, B = batch id
 	Applied = 4 // ApplyBatch trả nil: A = worker, B = batch id, Seq = số Txn trong batch
+	// Existing WAL/assembler diagnostics use values 6 through 9.
+	// Timing marks identify a batch by its first source sequence.
+	GatherStart = 10
+	GatherEnd   = 11 // A is the number of source transactions gathered.
+	CommitStart = 12
+	CommitEnd   = 13
 )
 
 type rec struct {

@@ -49,9 +49,8 @@ services:
       db:
         condition: service_healthy
     ports:
-      # Mặc định mọi interface, HTTP thường: chỉ dùng trong mạng tin cậy. Đặt STRAND_WEB_BIND=127.0.0.1 khi có
-      # reverse proxy TLS trên cùng host, hoặc đặt STRAND_WEB_TLS_CERT/KEY (xem .env.example).
-      - "${STRAND_WEB_BIND:-0.0.0.0}:${STRAND_WEB_PORT:-8080}:8080"
+      # Publish on loopback by default. Use a local HTTPS reverse proxy for remote access.
+      - "${STRAND_WEB_BIND:-127.0.0.1}:${STRAND_WEB_PORT:-8080}:8080"
     environment:
       STRAND_WEB_DATABASE_DSN: postgres://strand:${POSTGRES_PASSWORD}@db:5432/strand?sslmode=disable
       STRAND_WEB_SECRET_KEY: ${STRAND_WEB_SECRET_KEY:?set STRAND_WEB_SECRET_KEY in .env (openssl rand -hex 32)}
@@ -60,6 +59,7 @@ services:
       # Docker secrets thay cho biến trên: bỏ comment khối `secrets` cuối file, đặt
       #   STRAND_WEB_ADMIN_PASSWORD_FILE: /run/secrets/strand_admin_password
       STRAND_WEB_LISTEN: 0.0.0.0:8080
+      STRAND_WEB_PUBLISH_HOST: ${STRAND_WEB_BIND:-127.0.0.1}
       STRAND_WEB_ALLOW_PLAIN_HTTP: ${STRAND_WEB_ALLOW_PLAIN_HTTP:-true}
       # Đặt (true/false) thì thắng giá trị trên trang Settings; để trống thì sửa được trên trang Settings.
       STRAND_WEB_SECURE_COOKIES: ${STRAND_WEB_SECURE_COOKIES:-}

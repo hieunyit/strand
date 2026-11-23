@@ -179,7 +179,7 @@ func (r *Reader) readLoop(ctx context.Context, stop context.CancelFunc, out chan
 					return
 				}
 				if pkm.ReplyRequested {
-					if err := r.sendStatus(false); err != nil && ctx.Err() == nil {
+					if err := r.sendStatus(ctx, false); err != nil && ctx.Err() == nil {
 						fail(fmt.Errorf("trả lời keepalive: %w", err))
 						return
 					}
@@ -623,6 +623,15 @@ func rowEvent(rel *pglogrepl.RelationMessage, op model.Op, oldT, newT *pglogrepl
 			}
 		}
 		ev.Rows = [][]any{before, after}
+		ev.PartialRowImage = oldT == nil
+	}
+	if oldT != nil {
+		for _, col := range oldT.Columns {
+			if col.DataType == pglogrepl.TupleDataTypeToast {
+				ev.PartialRowImage = true
+				break
+			}
+		}
 	}
 	return ev, nil
 }

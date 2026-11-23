@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -274,5 +276,32 @@ func TestSinglePutStoresDigestMetadata(t *testing.T) {
 	defer rc.Close()
 	if _, err := io.Copy(io.Discard, rc); err == nil {
 		t.Fatal("download of a tampered single-PUT object must fail against its stored digest")
+	}
+}
+
+func TestDownloadVerifiedVersionReadsCatalogVersion(t *testing.T) {
+	const version = "old/+version"
+	const payload = "original bytes"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("versionId") != version {
+			http.Error(w, "current version is a delete marker", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("X-Amz-Version-Id", version)
+		_, _ = io.WriteString(w, payload)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, nil)
+	ctx := context.Background()
+	sum := sha256.Sum256([]byte(payload))
+	body, _, err := c.DownloadVerifiedVersion(ctx, "backup", version, int64(len(payload)), fmt.Sprintf("%x", sum))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	if err != nil || string(got) != payload {
+		t.Fatalf("download = %q, %v", got, err)
 	}
 }

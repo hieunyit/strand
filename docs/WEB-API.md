@@ -328,6 +328,15 @@ suy ra từ trường gửi khác policy), `schedule`, `window_minutes`, `jitter
 (ví dụ PITR bị tắt vì phương thức/số database không hỗ trợ). Job có `schedule` khác `interval` chạy lần đầu đúng lần kế tiếp của lịch (không phải ngay);
 `last_run_status` có thêm giá trị `missed`.
 
+Job built-in chấp nhận `encryption_mode` với các giá trị `inherit`, `on` và `off`. Job chỉ có thể dùng
+`inherit` khi gắn policy. `inherit` xóa ghi đè mã hóa. `on` và `off` giữ lựa chọn riêng khi policy
+đổi, kể cả khi lựa chọn ban đầu trùng policy. Client cũ tiếp tục gửi `encrypt` và `overrides`. Khi cập
+nhật cùng policy mà bỏ qua cả ba trường này, máy chủ giữ lựa chọn mã hóa hiện tại.
+
+Chi tiết job và phản hồi tạo/sửa job có thêm đối tượng `encryption` gồm `mode`, `effective`, `key_id`
+nếu có khóa hiệu lực, và `blocked` nếu cần khóa để chạy. Khi thiếu khóa, có thể lưu job đang tắt.
+Bật job hoặc yêu cầu chạy ngay trả HTTP 409. Catalog ghi định dạng và key ID thực tế của từng payload.
+
 ### Repository, thông báo, khóa, RPO, báo cáo, activity (P5/P6; xem `docs/CENTRAL-BACKUPS.md`)
 
 Chỉ thêm. Secret (access key, secret key, URL webhook, mật khẩu SMTP) mã hóa bằng `STRAND_WEB_SECRET_KEY` (AAD = id), ghi-một-chiều: mọi
@@ -451,6 +460,8 @@ Cùng cách chạy như `verify` (một job mỗi pipeline, output trực tiếp
 `POST /api/v1/pipelines` với `from` = `to` = `mongodb` (MongoDB 4.4–8.0, replica set): kết nối mỗi phía bằng `source_host`/`target_host` (một host hoặc nhiều `host:port` cách nhau dấu phẩy: các member của replica set), `source_port`/`target_port` (mặc định 27017 cho host không ghi cổng), `source_user`/`target_user`, `source_password`/`target_password`, `source_replica_set`/`target_replica_set` (tùy chọn), `source_auth_db`/`target_auth_db` (`authSource`, mặc định `admin` khi có user), `source_tls`/`target_tls` (bool). Server dựng URI (user/mật khẩu được escape); vẫn nhận `source_uri`/`target_uri` (ưu tiên nếu có) cho client API cũ. URI là bí mật: chỉ vào `.env` mã hóa dưới tên `SRC_URI`/`DST_URI`, YAML ghi `uri: "${SRC_URI}"`. `source_database` bắt buộc (không có mặc định); `target_mongo_database` rỗng = cùng tên database nguồn; `include`/`exclude` dạng `db.collection`, tùy chọn `snapshot_batch`, `stream_batch` (1..100000), `lease_ttl` (5s..1h), `overwrite_target`. Tab Config > Tuning của pipeline MongoDB chỉ có `snapshot_batch`, `stream_batch`, `lease_ttl` (mục `mongodb:`); khóa SQL bị từ chối (**400** "not a setting of this pipeline kind") và ngược lại.
 
 ### 4.4 Wizard Repair và Promote (M4)
+
+Với chuyển ghi có kế hoạch, dừng ghi ứng dụng và đợi `pipeline.top.cdc_state` báo `caught_up` trước khi chạy `strand verify -c <cfg> --mode full --require-complete`. Chỉ tiếp tục `promote-run` khi verify trả exit 0. Giữ ghi ở nguồn dừng cho đến khi chuyển. `pipeline.top.verification` trong `GET /api/v1/pipelines/{name}` ghi phạm vi đối soát sau seed, phương pháp, thời điểm và checkpoint. Kết quả full verify được trả qua tiến trình chạy lệnh.
 
 Trạng thái wizard ở `<state_dir>/wizards/<repair|promote>-<pipeline>.json` (0600, ghi nguyên tử, đọc lại từ đĩa mỗi request nên web khởi động lại vẫn tiếp tục). Thứ tự bước được ép ở server: gọi sai bước trả **409** kèm bước hiện tại. Kết quả job (mã thoát) được đồng bộ vào state khi đọc. Mọi bước chạy tiến trình con `strand` (argv mảng, `env_file`), một job mỗi pipeline.
 

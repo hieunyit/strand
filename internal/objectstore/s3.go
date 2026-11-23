@@ -664,10 +664,19 @@ func (s *S3) abortMultipart(ctx context.Context, key, uploadID string) error {
 
 // Download opens an object body for streaming; callers must close the returned body.
 func (s *S3) Download(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error) {
+	return s.DownloadVersion(ctx, key, "")
+}
+
+// DownloadVersion opens the requested version, or the current object if version is empty.
+func (s *S3) DownloadVersion(ctx context.Context, key, version string) (io.ReadCloser, ObjectInfo, error) {
 	if err := validateKey(key); err != nil {
 		return nil, ObjectInfo{}, err
 	}
-	resp, err := s.request(ctx, http.MethodGet, key, nil, nil, nil, 0)
+	var query url.Values
+	if version != "" {
+		query = url.Values{"versionId": {version}}
+	}
+	resp, err := s.request(ctx, http.MethodGet, key, query, nil, nil, 0)
 	if err != nil {
 		return nil, ObjectInfo{}, err
 	}
@@ -675,6 +684,10 @@ func (s *S3) Download(ctx context.Context, key string) (io.ReadCloser, ObjectInf
 		return nil, ObjectInfo{}, s.responseError("GET object", resp)
 	}
 	info := infoFromHeaders(key, resp.Header)
+	if version != "" && info.VersionID != version {
+		_ = resp.Body.Close()
+		return nil, ObjectInfo{}, errors.New("objectstore: response did not identify the requested object version")
+	}
 	return &verifiedBody{body: resp.Body, wantSize: info.Size, wantSHA: info.SHA256, hash: sha256.New()}, info, nil
 }
 
@@ -684,10 +697,16 @@ func (s *S3) Download(ctx context.Context, key string) (io.ReadCloser, ObjectInf
 // one. A Strand SHA-256 object metadata value that disagrees with wantSHA is rejected before any byte is
 // returned.
 func (s *S3) DownloadVerified(ctx context.Context, key string, wantSize int64, wantSHA string) (io.ReadCloser, ObjectInfo, error) {
+	return s.DownloadVerifiedVersion(ctx, key, "", wantSize, wantSHA)
+}
+
+// DownloadVerifiedVersion verifies the catalogued version, or the current object
+// when reading an older catalog record with no version ID.
+func (s *S3) DownloadVerifiedVersion(ctx context.Context, key, version string, wantSize int64, wantSHA string) (io.ReadCloser, ObjectInfo, error) {
 	if wantSize < 0 || !isHexSHA256(wantSHA) {
 		return nil, ObjectInfo{}, errors.New("objectstore: verified download requires the expected size and SHA-256")
 	}
-	body, info, err := s.Download(ctx, key)
+	body, info, err := s.DownloadVersion(ctx, key, version)
 	if err != nil {
 		return nil, ObjectInfo{}, err
 	}

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -53,7 +52,7 @@ func startToxiproxy(t *testing.T, nw *testcontainers.DockerNetwork, proxies map[
 	for name, upstream := range proxies {
 		body := fmt.Sprintf(`{"name":%q,"listen":"0.0.0.0:%s","upstream":%q}`, name, listen[name], upstream)
 		tp.post(t, "/proxies", body)
-		mp, _ := c.MappedPort(ctx, nat.Port(listen[name]+"/tcp"))
+		mp, _ := c.MappedPort(ctx, listen[name]+"/tcp")
 		tp.ports[name] = net.JoinHostPort(host, mp.Port())
 	}
 	return tp

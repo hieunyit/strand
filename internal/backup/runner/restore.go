@@ -5,11 +5,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -17,7 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
 
 	"strand/internal/backup"
 )
@@ -50,16 +52,26 @@ func ValidateRestoreThreads(threads int) error {
 // not exist) on the target server; physical restores fill Dir (which must not exist or be empty). The
 // source database is never written.
 type RestoreTarget struct {
-	Conn     backup.ConnSpec
-	Database string
-	Dir      string
-	Threads  int
-	Objects  []string
+	Conn       backup.ConnSpec
+	Database   string
+	Dir        string
+	Deployment bool
+	Threads    int
+	Objects    []string
 }
 
 // Restore executes plan into target.
 func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (err error) {
+	if len(plan.Chain) == 0 {
+		return errors.New("restore plan has no base backup")
+	}
 	base := plan.Base()
+	if err := RequireStandaloneBackup(base); err != nil {
+		return err
+	}
+	if len(plan.Chain) != 1 {
+		return errors.New("incremental restore requires `strand backup fetch` and the native restore tool")
+	}
 	defer func() {
 		detail := map[string]any{"backup_id": base.ID, "source": base.Source, "logs": len(plan.Logs), "target_host": t.Conn.Host,
 			"target_database": t.Database, "target_dir": t.Dir}
@@ -77,6 +89,13 @@ func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (e
 		}
 		err = e.audit(context.WithoutCancel(ctx), "backup.restore", err, detail)
 	}()
+
+	if t.Deployment && base.Method != backup.MethodMongodump {
+		return errors.New("a deployment target is only valid for MongoDB backups")
+	}
+	if err := checkRuntimeTLS(base.Engine, t.Conn); err != nil {
+		return err
+	}
 
 	if err := ValidateRestoreThreads(t.Threads); err != nil {
 		return err
@@ -139,12 +158,16 @@ func (e *Env) tmpDir() (string, error) {
 func (e *Env) stageLogs(ctx context.Context, logs []backup.Record, dir string, name func(backup.Record) string) ([]string, error) {
 	var out []string
 	for _, l := range logs {
+		filename := name(l)
+		if filename == "" || filename == "." || filename == ".." || filepath.IsAbs(filename) || filepath.Base(filename) != filename {
+			return nil, fmt.Errorf("invalid staging filename for log %s", l.ID)
+		}
 		body, err := e.openRecord(ctx, l)
 		if err != nil {
 			return nil, err
 		}
-		p := filepath.Join(dir, name(l))
-		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		p := filepath.Join(dir, filename)
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_, err = io.Copy(f, body)
 			if cerr := f.Close(); err == nil {
@@ -184,8 +207,26 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 			}
 		}
 	}
+	client := mysqlClient(e.Getenv, t)
+	if t.Conn.TLSMode != "" {
+		baseTool, err := ResolveTool(e.Getenv, client.Tool)
+		if err != nil {
+			return err
+		}
+		versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		version := exec.CommandContext(versionCtx, baseTool, "--version")
+		version.Env = baseEnv()
+		output, err := version.Output()
+		cancel()
+		if err != nil {
+			return fmt.Errorf("detect native MySQL client TLS options: %w", err)
+		}
+		if err := addNativeMySQLTLS(&client, t.Conn, ParseDumpVersion(string(output))); err != nil {
+			return err
+		}
+	}
 	src := dbs[0]
-	db, err := sql.Open("mysql", mysqlDSN(e.Getenv, t.Conn))
+	db, err := openBackupMySQL(e.Getenv, t.Conn)
 	if err != nil {
 		return err
 	}
@@ -215,7 +256,6 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	}
 	defer body.Close()
 
-	client := mysqlClient(e.Getenv, t)
 	var stream io.Reader
 	var partialFilter *mysqlPartialFilter
 	if len(t.Objects) > 0 {
@@ -243,7 +283,6 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 		return err
 	}
 	defer os.RemoveAll(dir)
-	_ = os.Chmod(dir, 0o755)
 	files, err := e.stageLogs(ctx, plan.Logs, dir, func(l backup.Record) string { return l.Details["seq"] + "-" + l.Details["server_file"] })
 	if err != nil {
 		return err
@@ -362,7 +401,7 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 		}
 	}
 
-	admin, err := pgconn.Connect(ctx, PGConnString(e.Getenv, t.Conn, "postgres", false))
+	admin, err := connectBackupPG(ctx, e.Getenv, t.Conn, "postgres", false)
 	if err != nil {
 		return fmt.Errorf("connect to the restore target: %v", redactAll(err.Error(), []string{password(e.Getenv, t.Conn)}))
 	}
@@ -430,22 +469,14 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	if pw := password(e.Getenv, t.Conn); pw != "" {
 		inv.Env = []string{"PGPASSWORD=" + pw}
 	}
+	if err := addNativePGTLS(&inv, t.Conn); err != nil {
+		return err
+	}
 	if err := e.runTool(ctx, inv, stdin); err != nil {
 		return err
 	}
 	createdDB = false
 	return nil
-}
-
-// newDir checks that dir does not exist or is empty, and creates it 0700.
-func newDir(dir string) error {
-	if dir == "" || !filepath.IsAbs(dir) {
-		return errors.New("--target-dir must be an absolute path")
-	}
-	if ents, err := os.ReadDir(dir); err == nil && len(ents) > 0 {
-		return fmt.Errorf("target directory %s is not empty; restores never overwrite", dir)
-	}
-	return os.MkdirAll(dir, 0o700)
 }
 
 // untar extracts a tar stream into dir, refusing paths that escape it and links.
@@ -493,14 +524,42 @@ func untar(r io.Reader, dir string) error {
 
 func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
 	base := plan.Base()
-	if err := newDir(t.Dir); err != nil {
+	if t.Dir == "" || !filepath.IsAbs(t.Dir) {
+		return errors.New("--target-dir must be an absolute path")
+	}
+	target := filepath.Clean(t.Dir)
+	switch st, err := os.Lstat(target); {
+	case err == nil && !st.IsDir():
+		return fmt.Errorf("target path %s is not a directory", target)
+	case err == nil:
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("target directory %s is not empty; restores never overwrite", target)
+		}
+	case !errors.Is(err, os.ErrNotExist):
 		return err
 	}
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return err
+	}
+	stage, err := os.MkdirTemp(parent, ".strand-restore-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
 	body, err := e.openRecord(ctx, base)
 	if err != nil {
 		return err
 	}
-	err = untar(body, t.Dir)
+	err = untar(body, stage)
+	if err == nil {
+		// The tar end marker can precede EOF of the verified payload.
+		_, err = io.Copy(io.Discard, body)
+	}
 	if cerr := body.Close(); err == nil {
 		err = cerr
 	}
@@ -508,21 +567,27 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 		return fmt.Errorf("extract base backup: %w", err)
 	}
 	if len(plan.Logs) == 0 {
+		if err := os.Rename(stage, target); err != nil {
+			return fmt.Errorf("publish restored data directory: %w", err)
+		}
 		e.logf("restore: base backup extracted to %s (consistent at its end LSN %s); start PostgreSQL on it", t.Dir, base.EndPosition.LSN)
 		return nil
 	}
-	walDir := filepath.Join(t.Dir, "strand_wal")
+	walDir := filepath.Join(stage, "strand_wal")
 	if err := os.MkdirAll(walDir, 0o700); err != nil {
 		return err
 	}
 	if _, err := e.stageLogs(ctx, plan.Logs, walDir, func(l backup.Record) string { return l.Details["segment"] }); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(t.Dir, "postgresql.auto.conf"), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filepath.Join(stage, "postgresql.auto.conf"), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	conf := "\n# added by strand backup restore\nrestore_command = 'cp strand_wal/%f \"%p\"'\nrecovery_target_action = 'promote'\n"
+	if timeline, err := strconv.ParseUint(base.Details["timeline"], 10, 32); err == nil && timeline > 0 {
+		conf += fmt.Sprintf("recovery_target_timeline = '%d'\n", timeline)
+	}
 	if plan.Target != nil {
 		conf += "recovery_target_time = '" + plan.Target.UTC().Format("2006-01-02 15:04:05.999999") + "+00'\n"
 	}
@@ -533,16 +598,44 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(t.Dir, "recovery.signal"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(stage, "recovery.signal"), nil, 0o600); err != nil {
 		return err
 	}
-	e.logf("restore: data directory %s prepared with %d WAL segment(s); starting PostgreSQL on it recovers to %v and promotes", t.Dir, len(plan.Logs), plan.Target)
+	if err := os.Rename(stage, target); err != nil {
+		return fmt.Errorf("publish restored data directory: %w", err)
+	}
+	e.logf("restore: data directory %s prepared with %d WAL segment(s); start PostgreSQL to attempt recovery to %v and verify it reaches the requested target", t.Dir, len(plan.Logs), plan.Target)
 	return nil
+}
+
+// MongoRestoreDestination returns the endpoint and namespace to confirm,
+// without URI credentials or connection options.
+func MongoRestoreDestination(uri, database string) (string, error) {
+	parsed, err := connstring.ParseAndValidate(uri)
+	if err != nil || len(parsed.RawHosts) == 0 {
+		return "", errors.New("invalid MongoDB restore URI")
+	}
+	if database == "" {
+		database = "*"
+	} else if len(database) > 63 || strings.ContainsAny(database, `\/." $*<>:|?`) || strings.ContainsRune(database, 0) {
+		return "", errors.New("invalid MongoDB target database name")
+	}
+	return parsed.Scheme + "://" + strings.Join(parsed.RawHosts, ",") + "/" + database, nil
 }
 
 func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
 	base := plan.Base()
+	pitr := len(plan.Logs) > 0 || plan.Target != nil
+	if pitr && (!t.Deployment || plan.Target == nil || !pitrBase(base)) {
+		return errors.New("MongoDB point-in-time restore requires a whole deployment and a verified embedded oplog boundary")
+	}
 	dbs := base.Details["databases"]
+	if t.Dir != "" || (t.Deployment && t.Database != "") || (!t.Deployment && t.Database == "") {
+		return errors.New("MongoDB restore requires exactly one database or explicit deployment target")
+	}
+	if (dbs == "") != t.Deployment {
+		return errors.New("whole-deployment MongoDB backups require a deployment target; single-database backups require a database target")
+	}
 
 	if dbs == "" && len(t.Objects) > 0 {
 		return errors.New("partial restore is not supported for whole-deployment MongoDB backups")
@@ -565,14 +658,29 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 	if err != nil {
 		return err
 	}
-	dir, err := e.tmpDir()
-	if err != nil {
+	if _, err := MongoRestoreDestination(uri, t.Database); err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
-	_ = os.Chmod(dir, 0o755)
+	client, err := connectBackupMongo(uri, t.Conn)
+	if err != nil {
+		return errors.New("invalid MongoDB target connection")
+	}
+	defer client.Disconnect(context.WithoutCancel(ctx))
+	databaseNames, err := client.ListDatabaseNames(ctx, bson.D{}, options.ListDatabases().SetAuthorizedDatabases(false))
+	if err != nil {
+		return errors.New("cannot verify all MongoDB target databases; restore needs listDatabases privileges")
+	}
+	for _, name := range databaseNames {
+		if t.Deployment {
+			if name != "admin" && name != "config" && name != "local" {
+				return fmt.Errorf("MongoDB target deployment contains database %q; restore needs an empty deployment", name)
+			}
+		} else if name == t.Database {
+			return fmt.Errorf("MongoDB target database %q already exists; restores never overwrite", name)
+		}
+	}
 	cfg := map[string]string{"mongo.yaml": "uri: " + strconv.Quote(uri) + "\n"}
-	args := []string{"--config={dir}/mongo.yaml", "--archive"}
+	args := []string{"--config={dir}/mongo.yaml", "--archive", "--stopOnError"}
 
 	if t.Threads > 0 {
 		args = append(args, fmt.Sprintf("--numParallelCollections=%d", t.Threads))
@@ -583,62 +691,81 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 		args = append(args, fmt.Sprintf("--numInsertionWorkersPerCollection=%d", workers))
 	}
 
-	switch {
-	case dbs != "" && t.Database != "":
+	if !t.Deployment {
 		if len(t.Objects) > 0 {
 			for _, obj := range t.Objects {
 				args = append(args, fmt.Sprintf("--nsInclude=%s.%s", dbs, obj))
 			}
 		}
 		args = append(args, "--nsFrom="+dbs+".*", "--nsTo="+t.Database+".*")
-	case dbs == "" && t.Database != "":
-		return errors.New("a whole-deployment dump (with oplog) restores into a NEW deployment: omit --target-database")
-	default:
+	} else {
 		args = append(args, "--oplogReplay")
+	}
+	inv := Invocation{Tool: "mongorestore", Args: args, Files: cfg}
+	if err := addNativeMongoTLS(&inv, t.Conn); err != nil {
+		return err
+	}
+	var continuation *os.File
+	var anchor bson.Timestamp
+	if pitr {
+		cutoff, err := mongoRecoveryCutoff(*plan.Target)
+		if err != nil {
+			return err
+		}
+		anchor, _ = ParseOplogTS(base.EndPosition.OplogTS)
+		if anchor.Compare(cutoff) >= 0 {
+			return errors.New("MongoDB base already contains writes at or after the requested second")
+		}
+		dir, err := e.tmpDir()
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		continuation, err = os.CreateTemp(dir, "oplog-*.bson")
+		if err != nil {
+			return err
+		}
+		defer continuation.Close()
+		if err := e.stageMongoContinuation(ctx, plan, continuation, anchor, cutoff); err != nil {
+			return err
+		}
+		if _, err := continuation.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
 	}
 	body, err := e.openRecord(ctx, base)
 	if err != nil {
 		return err
 	}
-	err = e.runTool(ctx, Invocation{Tool: "mongorestore", Args: args, Files: cfg}, body)
-	body.Close()
+	defer body.Close()
+	var input io.Reader = body
+	var rewriteDone chan error
+	if pitr {
+		r, w := io.Pipe()
+		defer r.Close()
+		input = r
+		rewriteDone = make(chan error, 1)
+		go func() {
+			_, err := streamMongoArchive(body, w, anchor, func(out io.Writer) error {
+				_, err := io.Copy(out, continuation)
+				return err
+			})
+			_ = w.CloseWithError(err)
+			rewriteDone <- err
+		}()
+		err = e.runTool(ctx, inv, input)
+		_ = r.Close()
+		if err != nil {
+			_ = body.Close()
+		}
+		if rewriteErr := <-rewriteDone; err == nil {
+			err = rewriteErr
+		}
+	} else {
+		err = e.runTool(ctx, inv, input)
+	}
 	if err != nil {
 		return fmt.Errorf("mongorestore: %w", err)
 	}
-	if len(plan.Logs) == 0 {
-		return nil
-	}
-	if dbs != "" {
-		return errors.New("oplog replay needs a whole-deployment dump (mongodump --oplog)")
-	}
-	replay := filepath.Join(dir, "replay")
-	if err := os.MkdirAll(replay, 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(filepath.Join(replay, "oplog.bson"))
-	if err != nil {
-		return err
-	}
-	for _, l := range plan.Logs {
-		body, err := e.openRecord(ctx, l)
-		if err != nil {
-			out.Close()
-			return err
-		}
-		_, err = io.Copy(out, body)
-		body.Close()
-		if err != nil {
-			out.Close()
-			return err
-		}
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	_ = os.Chmod(filepath.Join(replay, "oplog.bson"), 0o644)
-	rargs := []string{"--config={dir}/mongo.yaml", "--oplogReplay", "--dir=" + replay}
-	if plan.Target != nil {
-		rargs = append(rargs, fmt.Sprintf("--oplogLimit=%d:0", plan.Target.Unix()+1))
-	}
-	return e.runTool(ctx, Invocation{Tool: "mongorestore", Args: rargs, Files: cfg}, nil)
+	return nil
 }

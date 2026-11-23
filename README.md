@@ -11,7 +11,7 @@ Strand đồng bộ dữ liệu **một chiều** từ CSDL nguồn sang CSDL đ
 
 ## Build
 
-Cần Go 1.25 trở lên.
+Cần Go 1.26 trở lên.
 
 ```bash
 git clone https://github.com/hieunyit/strand.git && cd strand

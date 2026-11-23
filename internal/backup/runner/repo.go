@@ -143,7 +143,7 @@ func (r *Repository) StorePayload(ctx context.Context, key string, src io.Reader
 // against the catalog size/SHA-256 and the plaintext against plain_sha256 (when recorded). Errors are
 // returned by the final Read, so consumers that read to EOF never accept corrupted data.
 func (r *Repository) OpenPayload(ctx context.Context, rec backup.Record, keys *backup.Keyring) (io.ReadCloser, error) {
-	body, _, err := r.Store.DownloadVerified(ctx, rec.ObjectKey, rec.Bytes, rec.SHA256)
+	body, _, err := r.Store.DownloadVerifiedVersion(ctx, rec.ObjectKey, rec.VersionID, rec.Bytes, rec.SHA256)
 	if err != nil {
 		return nil, err
 	}

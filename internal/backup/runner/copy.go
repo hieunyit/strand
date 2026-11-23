@@ -64,7 +64,7 @@ func (e *Env) Copy(ctx context.Context, src backup.Record, toRepo string) (out b
 	if _, _, err := e.Catalog.UpdateStatus(ctx, id, backup.StatusUploading, nil); err != nil {
 		return fail(err)
 	}
-	body, _, err := from.Store.DownloadVerified(ctx, src.ObjectKey, src.Bytes, src.SHA256)
+	body, _, err := from.Store.DownloadVerifiedVersion(ctx, src.ObjectKey, src.VersionID, src.Bytes, src.SHA256)
 	if err != nil {
 		return fail(err)
 	}

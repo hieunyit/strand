@@ -1,0 +1,43 @@
+name: Checks
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+      - run: go build ./cmd/strand && go vet ./...
+      - name: Race checks without database containers
+        run: |
+          set -o pipefail
+          go test -race -count=1 ./internal/{assemble,backup,config,mcp,model,sched,schemachange,tunnel} ./schema ./tools/diagnostics/spool-inventory | tee unit-${GITHUB_SHA}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-${{ github.sha }}
+          path: unit-*.log
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+      - name: Verify and replication over real databases
+        run: |
+          set -o pipefail
+          docker info
+          go test -race -v -count=1 -timeout 15m -run '^Test(R12_ResumeOnlyContinuesAnInterruptedRun|Review_E2E_PGWideKeySnapshot|PITR(MySQL|Postgres|Mongo)|SQLTableOverlap.*|PGContract|ConnectionTestEndpoints|SensitiveReadsRBAC|SessionUserMustBeVerified|PGRestoreVerifiesPayloadPastTarEOF|PITRPostgreSQLRequiresLineageAndVerifyOnReplay|NativeToolsKeepTLSAndStopAfterExit|CloseUnblocksStalledFeedback|BackupTLSChecksCAAndOriginalHostname|MongoRestoreRefusesExistingDatabaseOrDeployment|APIRestoreMongoConfirmsDeploymentEndpoint|RestorePITRWindowRejection|RestoreLegacyIncrementalRequiresNativeTool|PostgresRestoreOffersReplayProofWithoutContinuousWindow|ArchiveCursorSkipsNewerCopies|VerifyJobReportsCancellation|PlanRestoreRejectsInvalidParentChain|VerificationEvidenceInvalidatedByOfflineSchemaChange|ArchiverIntegration_ResumesWithoutGapOrDuplicate|ArchiverIntegration_PurgedGapIsLogGap)$' ./internal/{backup,backup/runner,pipeline,reader/archive,reader/pg,validate,verify,web,web/store} ./tests/e2e | tee integration-${GITHUB_SHA}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-${{ github.sha }}
+          path: integration-*.log

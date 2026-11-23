@@ -220,6 +220,11 @@ func eventSize(ev reader.Event) int64 {
 // Định dạng một event trong file: độ dài payload (uvarint) rồi payload.
 const valUnchangedCol byte = 0xF0 // model.ColValue{Unchanged: true} — cột TOAST vắng mặt
 
+const (
+	eventSchemaChanged byte = 1 << iota
+	eventPartialRowImage
+)
+
 func (l *eventLog) writeEvent(ev reader.Event) (int64, error) {
 	b, err := encodeEvent(nil, ev)
 	if err != nil {
@@ -248,13 +253,16 @@ func encodeEvent(b []byte, ev reader.Event) ([]byte, error) {
 	b = appendStr(b, ev.Table)
 	b = binary.AppendUvarint(b, ev.TableID)
 	b = binary.AppendUvarint(b, ev.XID)
-	// Spill files are private to this reader run; preserve the Relation barrier
-	// along with its columns so spilling cannot bypass schema evolution.
-	var schemaChanged byte
+	// These files are private to this reader run. Replay must retain both
+	// schema barriers and the distinction between absent values and SQL NULL.
+	var flags byte
 	if ev.SchemaChanged {
-		schemaChanged = 1
+		flags |= eventSchemaChanged
 	}
-	b = append(b, schemaChanged)
+	if ev.PartialRowImage {
+		flags |= eventPartialRowImage
+	}
+	b = append(b, flags)
 	for _, list := range [][]string{ev.Columns, ev.PKColumns} {
 		b = binary.AppendUvarint(b, uint64(len(list)))
 		for _, c := range list {
@@ -324,10 +332,11 @@ func readEvent(r *bufio.Reader) (reader.Event, error) {
 	if err != nil {
 		return ev, err
 	}
-	if flag > 1 {
-		return ev, fmt.Errorf("pg reader spill: invalid schema-changed flag %d", flag)
+	if flag & ^(eventSchemaChanged|eventPartialRowImage) != 0 {
+		return ev, fmt.Errorf("pg reader spill: invalid event flags %d", flag)
 	}
-	ev.SchemaChanged = flag == 1
+	ev.SchemaChanged = flag&eventSchemaChanged != 0
+	ev.PartialRowImage = flag&eventPartialRowImage != 0
 	for _, dst := range []*[]string{&ev.Columns, &ev.PKColumns} {
 		n, err := binary.ReadUvarint(r)
 		if err != nil {

@@ -21,7 +21,7 @@ Tài liệu này chỉ ghi phần riêng của MariaDB. Phần dùng chung với
 
 ## 0. Build
 
-Cần Go 1.25 trở lên, trên máy Linux bất kỳ (không cần cài lên máy MariaDB):
+Cần Go 1.26 trở lên, trên máy Linux bất kỳ (không cần cài lên máy MariaDB):
 
 ```bash
 git clone https://github.com/hieunyit/strand.git && cd strand
@@ -259,7 +259,13 @@ Nguồn vẫn ghi bình thường trong lúc Strand dừng. Khi chạy lại, St
 
 ### Bước 10. Cutover (promote)
 
-Chọn giờ ít tải. Ứng dụng kết nối MariaDB bằng user `app_user`:
+Chọn giờ ít tải. Dừng toàn bộ ghi ứng dụng, tác vụ nền và event ghi vào MariaDB. Giữ CDC chạy và chờ `strand top -c mdb-app.yaml` hiển thị `CDC: caught_up`. Chạy lệnh sau và chỉ tiếp tục khi exit code là 0. Giữ nguồn ở trạng thái ngừng ghi cho tới khi ứng dụng được chuyển.
+
+```bash
+strand verify -c mdb-app.yaml --mode full --require-complete
+```
+
+Nếu ứng dụng kết nối MariaDB bằng user `app_user`, dùng lệnh sau để chuyển quyền ghi:
 
 ```bash
 strand promote -c mdb-app.yaml --pipeline mdb-app \
@@ -446,8 +452,8 @@ Loại bảng ra bằng `tables.exclude: ["app.bang_x"]` trong file cấu hình.
 ## 4. Checklist ngày chuyển
 
 1. `strand validate` đạt. Mọi bảng cần chuyển đều có trong danh sách sẽ tạo.
-2. `strand top` báo `synced` và lag xấp xỉ 0.
-3. `strand verify --mode full` cho từng bảng: 0 mismatches.
+2. Đã dừng ghi ở nguồn. `strand top` báo `CDC: caught_up`.
+3. `strand verify -c mdb-app.yaml --mode full --require-complete` trả exit code 0 cho toàn bộ phạm vi. Ghi lại kết quả, checkpoint và thời điểm đã kiểm.
 4. Đã chuyển view, procedure, function, event (`objects apply --phase pre`), user và quyền (`--phase users`); cutover dùng `promote --objects-post` để tạo trigger và bật event (mục B).
 5. Ứng dụng đã thử với MySQL 8 trên bản sao: cú pháp SQL riêng của MariaDB, collation, chế độ `sql_mode`.
 6. Chạy `strand promote --objects-post` (mục A bước 10, mục B). Trỏ ứng dụng sang MySQL. Dừng `strand sync`. Giữ MariaDB ở `read_only`.

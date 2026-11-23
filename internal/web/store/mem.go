@@ -298,12 +298,12 @@ func (m *Mem) SetDesired(_ context.Context, name, d string) error {
 	m.desired[name] = DesiredState{Desired: d, Updated: time.Now()}
 	return nil
 }
-func (m *Mem) ObserveStop(_ context.Context, name string) (bool, error) {
+func (m *Mem) ObserveStop(_ context.Context, name string, stoppedAt time.Time) (bool, error) {
 	if err := m.enter(); err != nil {
 		return false, err
 	}
 	defer m.mu.Unlock()
-	if m.desired[name].Desired != DesiredRunning {
+	if d := m.desired[name]; d.Desired != DesiredRunning || d.Updated.After(stoppedAt) {
 		return false, nil
 	}
 	m.desired[name] = DesiredState{Desired: DesiredStopped, Reason: ReasonObservedStop, Updated: time.Now()}

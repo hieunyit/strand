@@ -181,7 +181,7 @@ func ApplyConnection(j Job, c Connection) (Job, error) {
 		return j, errors.New("ssh_tunnel cannot be used with a connection URI; use host/port/user")
 	}
 	dbs := j.Conn.Databases
-	j.Conn = ConnSpec{Host: c.Host, Port: c.Port, User: c.User, Databases: dbs}
+	j.Conn = ConnSpec{Host: c.Host, Port: c.Port, User: c.User, Databases: dbs, TLSMode: c.TLSMode, CACertPEM: c.CACertPEM, TLSServerName: c.Host}
 	if j.Conn.Port == 0 && c.Host != "" {
 		j.Conn.Port = DefaultPort(c.Engine)
 	}
@@ -216,7 +216,7 @@ func ApplyScratchConnection(j Job, c Connection) (Job, error) {
 	if c.Host == "" {
 		return j, fmt.Errorf("%w: the scratch connection %q has no host", ErrInvalid, c.Name)
 	}
-	j.Scratch = ConnSpec{Host: c.Host, Port: c.Port, User: c.User}
+	j.Scratch = ConnSpec{Host: c.Host, Port: c.Port, User: c.User, TLSMode: c.TLSMode, CACertPEM: c.CACertPEM}
 	if j.Scratch.Port == 0 {
 		j.Scratch.Port = DefaultPort(c.Engine)
 	}

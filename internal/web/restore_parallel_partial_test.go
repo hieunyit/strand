@@ -278,7 +278,7 @@ func TestAPIUnknownTableWithKnownListRejected(t *testing.T) {
 	}
 }
 
-func TestAPIRestoreSourceBaseWithLogAccepted(t *testing.T) {
+func TestAPIRestoreMongoPITRRefusesUnverifiedOplogBoundary(t *testing.T) {
 	e := newCPEnv(t)
 	tt := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
 	adm := e.admin()
@@ -288,19 +288,38 @@ func TestAPIRestoreSourceBaseWithLogAccepted(t *testing.T) {
 	tLogEnd := tt.Add(2 * time.Hour)
 
 	// Seed base mongodump backup followed by a newer oplog log segment covering target_time
-	posBase := backup.Position{OplogTS: "7000000000:1"}
-	seedRichBackup(t, e.st, "bkp-mongo-base", "mongo-src", "mongodb", "mongodump", backup.KindFull, tBase, posBase, false, nil, "", &tBase, nil, "", map[string]string{"databases": "app"})
-	seedRichBackup(t, e.st, "bkp-mongo-oplog", "mongo-src", "mongodb", "oplog", backup.KindLog, tLogEnd, backup.Position{OplogTS: "7000000010:1"}, false, nil, "", &tLogStart, &tLogEnd, "", map[string]string{"seq": "1"})
+	posBase := backup.Position{OplogTS: "1763632800.1"}
+	seedRichBackup(t, e.st, "bkp-mongo-base", "mongo-src", "mongodb", "mongodump", backup.KindFull, tBase, posBase, false, nil, "", &tBase, nil, "", nil)
+	seedRichBackup(t, e.st, "bkp-mongo-oplog", "mongo-src", "mongodb", "oplog", backup.KindLog, tLogEnd, backup.Position{OplogTS: "1763632810.1"}, false, nil, "", &tLogStart, &tLogEnd, "", map[string]string{"seq": "1"})
 
 	code, body := adm.do("POST", "/api/v1/backup-restores", map[string]any{
-		"source":          "mongo-src",
-		"target_time":     tt.Format(time.RFC3339),
-		"threads":         4,
-		"connection_id":   restoreConn(t, e.st, "mongodb"),
-		"target_database": "mongo_restored",
-		"confirm":         "mongo_restored",
+		"source":            "mongo-src",
+		"target_time":       tt.Format(time.RFC3339),
+		"threads":           4,
+		"connection_id":     restoreConn(t, e.st, "mongodb"),
+		"target_deployment": true,
+		"confirm":           "mongodb://db2:27017/*",
 	})
-	if code != http.StatusAccepted {
-		t.Fatalf("expected 202 for source restore with mongodump base followed by oplog, got %d: %s", code, body)
+	if code != http.StatusBadRequest || !strings.Contains(body, "verified oplog boundary") {
+		t.Fatalf("expected refusal without a verified embedded oplog boundary, got %d: %s", code, body)
+	}
+}
+
+func TestAPIRestoreMongoConfirmsDeploymentEndpoint(t *testing.T) {
+	e := newCPEnv(t)
+	seedRichBackup(t, e.st, "bkp-mongo-deployment", "mongo-prod", "mongodb", "mongodump", backup.KindFull,
+		time.Now().UTC(), backup.Position{}, false, nil, "", nil, nil, "", nil)
+	conn := restoreConn(t, e.st, "mongodb")
+	a := e.admin()
+	req := map[string]any{
+		"backup_id": "bkp-mongo-deployment", "connection_id": conn, "target_deployment": true,
+		"confirm": "mongodb://other.internal/*",
+	}
+	if status, _ := a.do("POST", "/api/v1/backup-restores", req); status != http.StatusBadRequest {
+		t.Fatalf("confirmation for another MongoDB endpoint accepted: %d", status)
+	}
+	req["confirm"] = "mongodb://mongodb-restore.internal/*"
+	if status, body := a.do("POST", "/api/v1/backup-restores", req); status != http.StatusAccepted {
+		t.Fatalf("explicit MongoDB deployment restore rejected: %d: %s", status, body)
 	}
 }

@@ -2,16 +2,21 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"strand/internal/admin"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	pgreader "strand/internal/reader/pg"
 	"strand/internal/snapshot"
 	"strand/internal/verify"
 )
@@ -25,14 +30,15 @@ const (
 
 // touchedSet: khóa đã chạm của một bên tiêu thụ.
 type touchedSet struct {
-	keys map[model.TableID]map[int64]struct{}
-	over map[model.TableID]bool
+	keys         map[model.TableID]map[int64]struct{}
+	over         map[model.TableID]bool
+	dirtyKeyless map[model.TableID]bool
 	// gen: khóa đã chạm của bảng PK tổng quát (việc C), theo khóa mã hóa.
 	gen map[model.TableID]map[snapshot.Key]snapshot.Bound
 }
 
 func newTouchedSet() *touchedSet {
-	return &touchedSet{keys: map[model.TableID]map[int64]struct{}{}, over: map[model.TableID]bool{},
+	return &touchedSet{keys: map[model.TableID]map[int64]struct{}{}, over: map[model.TableID]bool{}, dirtyKeyless: map[model.TableID]bool{},
 		gen: map[model.TableID]map[snapshot.Key]snapshot.Bound{}}
 }
 
@@ -70,9 +76,10 @@ func (s *touchedSet) addBound(t model.TableID, b snapshot.Bound, limit int) {
 
 // touchedTake: kết quả take của một bên tiêu thụ. over = bảng có khóa bị bỏ do vượt giới hạn hoặc lỗi mã hóa.
 type touchedTake struct {
-	keys map[model.TableID][]int64
-	over map[model.TableID]bool
-	gen  map[model.TableID][]snapshot.Bound
+	keys         map[model.TableID][]int64
+	over         map[model.TableID]bool
+	dirtyKeyless map[model.TableID]bool
+	gen          map[model.TableID][]snapshot.Bound
 }
 
 // touchedKeys ghi lại PK mà CDC đã chạm tới, theo bảng nguồn, cho từng bên tiêu thụ đang bật
@@ -154,12 +161,20 @@ func (tk *touchedKeys) add(t model.TableID, key []model.Value) {
 	}
 }
 
+func (tk *touchedKeys) addKeyless(t model.TableID) {
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	for _, set := range tk.sets {
+		set.dirtyKeyless[t] = true
+	}
+}
+
 // take trả về và xóa các khóa đã ghi của một bên tiêu thụ (khóa số + khóa PK tổng quát + cờ overflow,
 // lấy cùng lúc dưới một khóa). Tập của bên khác không đổi.
 func (tk *touchedKeys) take(consumer string) touchedTake {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
-	out := touchedTake{keys: map[model.TableID][]int64{}, over: map[model.TableID]bool{}, gen: map[model.TableID][]snapshot.Bound{}}
+	out := touchedTake{keys: map[model.TableID][]int64{}, over: map[model.TableID]bool{}, dirtyKeyless: map[model.TableID]bool{}, gen: map[model.TableID][]snapshot.Bound{}}
 	s := tk.sets[consumer]
 	if s == nil {
 		return out
@@ -181,6 +196,7 @@ func (tk *touchedKeys) take(consumer string) touchedTake {
 		out.gen[t] = bs
 	}
 	out.over = s.over
+	out.dirtyKeyless = s.dirtyKeyless
 	tk.sets[consumer] = newTouchedSet()
 	return out
 }
@@ -208,6 +224,9 @@ func (tk *touchedKeys) restore(consumer string, tt touchedTake) {
 		if o {
 			s.over[t] = true
 		}
+	}
+	for t := range tt.dirtyKeyless {
+		s.dirtyKeyless[t] = true
 	}
 }
 
@@ -316,14 +335,15 @@ type tableVerdict struct {
 // verifyTables chạy sample (rate) cho mọi bảng và verify các khóa trong keys; trả lỗi
 // verify_mismatch nếu có lệch thật. skipped: bảng không verify được theo range/khóa (genVerifyMode
 // "skip") — bảng có khóa cần verify (hoặc có mẫu) bị bỏ.
-func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[model.TableID][]int64) (skipped []model.TableID, err error) {
+func (p *Pipeline) verifyTables(ctx context.Context, rate float64, keys map[model.TableID][]int64) (skipped map[model.TableID]string, err error) {
 	return p.verifyTablesKeys(ctx, rate, keys, nil, nil)
 }
 
 // verifyTablesKeys như verifyTables, kèm khóa đã chạm của bảng PK tổng quát (gen). full: bảng verify
 // TOÀN BỘ (keyset walk theo chunk 1000 khóa, như rate = 1) thay cho mẫu + khóa đã chạm — dùng khi tập
 // khóa đã chạm của bảng không đầy đủ (vượt giới hạn hoặc lỗi mã hóa).
-func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[model.TableID][]int64, gen map[model.TableID][]snapshot.Bound, full map[model.TableID]bool) (skipped []model.TableID, err error) {
+func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[model.TableID][]int64, gen map[model.TableID][]snapshot.Bound, full map[model.TableID]bool) (skipped map[model.TableID]string, err error) {
+	skipped = make(map[model.TableID]string)
 	rateOf := func(id model.TableID) float64 {
 		if full[id] {
 			return 1
@@ -346,9 +366,11 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 		case m.PKCodec != nil:
 			genIDs = append(genIDs, id) // việc C: verify theo tuple PK
 		case m.Keyless:
+			skipped[id] = "keyless table has no supported row key"
 			// Không có khóa để chia range: verify trong lúc chạy bỏ qua; `strand verify --mode full` so số hàng + checksum.
-			p.log.Info("verify skipped: keyless table (run `strand verify --mode full` for a row count + checksum comparison)", "table", id.String())
+			p.log.Info("keyed sampling and changed-key checks exclude this keyless table", "table", id.String())
 		default:
+			skipped[id] = "primary key type is not supported"
 			p.log.Warn("verify skipped: primary key type is not supported", "table", id.String(), "reason", fmt.Sprint(m.PKCodecErr))
 		}
 	}
@@ -361,7 +383,7 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 		if rate := rateOf(id); rate > 0 {
 			r, err := verify.SampleRangesEngine(ctx, p.src, p.srcEngine, id, m.PK[0], rate, 1000, rng)
 			if err != nil {
-				return nil, err
+				return skipped, err
 			}
 			ranges = append(ranges, r...)
 		}
@@ -373,19 +395,20 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 		if cv != nil {
 			r, err := cv.VerifyRanges(ctx, id, m.PK[0], ranges)
 			if err != nil {
-				return nil, err
+				return skipped, err
 			}
 			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
 		} else {
 			r, err := lv.VerifyRanges(ctx, id, m.PK[0], ranges)
 			if err != nil {
-				return nil, err
+				return skipped, err
 			}
 			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
 		}
 		p.log.Info("verify", "table", id.String(), "ranges", rep.ranges, "rows", rep.rows,
 			"mismatches", len(rep.mismatches), "unverifiable_hot", len(rep.hot))
 		if n := len(rep.hot); n > 0 {
+			skipped[id] = "rows continued changing during verification"
 			p.metrics.VerifyUnverifiableHotTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
 		}
 		if n := len(rep.mismatches); n > 0 {
@@ -408,7 +431,7 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 		exact := false
 		if cv != nil {
 			if dc, exact, err = p.targetKeyCodec(ctx, id, m); err != nil {
-				return nil, err
+				return skipped, err
 			}
 		}
 		var ranges []verify.KeyRange
@@ -417,13 +440,13 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 		case "skip":
 			p.log.Warn("verify skipped: the target orders the primary key differently from the source (exact-key table); run `strand verify --mode full` for it",
 				"table", id.String(), "changed_keys", len(gen[id]))
-			skipped = append(skipped, id)
+			skipped[id] = "primary key order differs between source and target"
 			continue
 		case "live":
 			if rate > 0 {
 				r, err := verify.SampleKeyRanges(ctx, p.src, id, m.PKCodec, rate, 1000, rng)
 				if err != nil {
-					return nil, err
+					return skipped, err
 				}
 				ranges = append(ranges, r...)
 			}
@@ -433,7 +456,7 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 			}
 			r, err := lv.VerifyKeyRanges(ctx, id, m.PKCodec, ranges)
 			if err != nil {
-				return nil, err
+				return skipped, err
 			}
 			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
 		default:
@@ -442,7 +465,7 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 			if rate > 0 {
 				r, err := verify.SampleKeyRangesEngine(ctx, p.src, p.srcEngine, id, m.PKCodec, rate, 1000, rng)
 				if err != nil {
-					return nil, err
+					return skipped, err
 				}
 				ranges = append(ranges, r...)
 			}
@@ -452,13 +475,14 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 			}
 			r, err := cv.VerifyKeyRanges(ctx, id, m.PKCodec, dc, ranges)
 			if err != nil {
-				return nil, err
+				return skipped, err
 			}
 			rep = tableVerdict{r.RangesChecked, r.RowsChecked, r.Mismatches, r.UnverifiableHot}
 		}
 		p.log.Info("verify", "table", id.String(), "ranges", rep.ranges, "rows", rep.rows,
 			"mismatches", len(rep.mismatches), "unverifiable_hot", len(rep.hot))
 		if n := len(rep.hot); n > 0 {
+			skipped[id] = "rows continued changing during verification"
 			p.metrics.VerifyUnverifiableHotTotal.WithLabelValues(p.id, id.String()).Add(float64(n))
 		}
 		if n := len(rep.mismatches); n > 0 {
@@ -482,22 +506,31 @@ func (p *Pipeline) verifyTablesKeys(ctx context.Context, rate float64, keys map[
 // lệch chờ target apply tới vị trí log của source). Lệch thật: dừng với verify_mismatch (exit 5).
 func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	window := durationOr(p.cfg.Verify.PostSeedWindow, 30*time.Minute)
-	p.touched.enable(touchPostSeed, true)
+	defer p.touched.enable(touchPostSeed, false)
 	// Verify chỉ có nghĩa khi target đã theo kịp phần log từ P (catch-up xong) và bảng không có trong
 	// seed (seed PG một phần: snapshot logic) đã snapshot xong.
+	var catchUpDeadline time.Time
 	for !postSeedReady(p.caughtUpWithSource(ctx), p.sched.Lwd(), p.admitted.Load(), p.bootstrap.Load()) {
+		if !p.bootstrap.Load() {
+			now := time.Now()
+			if catchUpDeadline.IsZero() {
+				catchUpDeadline = now.Add(window)
+			} else if now.After(catchUpDeadline) {
+				p.finishPostSeedError(ctx, errors.New("source and target did not reach a stable catch-up point within the post-seed window"), p.state.verificationVersion())
+				return
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+	version := p.state.verificationVersion()
 	p.log.Info("post-seed verify started", "window", window.String(), "source", string(p.srcEngine), "target", string(p.dstEngine))
 	skipped, err := p.verifyTables(ctx, 0.01, nil)
 	if err != nil {
-		if ctx.Err() == nil {
-			p.fail(err)
-		}
+		p.finishPostSeedError(ctx, err, version)
 		return
 	}
 	select {
@@ -520,21 +553,140 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	}
 	more, err := p.verifyTablesKeys(ctx, 0, keys, gen, full)
 	if err != nil {
-		if ctx.Err() == nil {
-			p.fail(err)
-		}
+		p.finishPostSeedError(ctx, err, version)
 		return
 	}
-	if err := p.state.SetVerifyPending(false); err != nil {
+	maps.Copy(skipped, more)
+	result := p.postSeedEvidence(ctx, skipped)
+	if ctx.Err() != nil {
+		return
+	}
+	result, err = p.state.recordVerification(result, p.verificationFingerprint(), result.Status == "mismatch", version)
+	if err != nil {
+		p.fail(err)
+		return
+	}
+	if result.Status == "mismatch" {
+		p.fail(exitcode.New(exitcode.ErrVerifyMismatch, exitcode.DataError, "post-seed keyless checksum found a mismatch", nil))
+		return
+	}
+	p.verifying.Store(false)
+	p.log.Info("post-seed verification finished", "verification", result.Status, "tables", result.Tables)
+}
+
+func (p *Pipeline) finishPostSeedError(ctx context.Context, err error, version uint64) {
+	if ctx.Err() != nil {
+		return
+	}
+	result := &admin.VerificationEvidence{
+		Status: "incomplete", Method: "sample-and-changed-keys", CheckedAt: time.Now().UTC(),
+		Reason: err.Error(),
+	}
+	for _, table := range p.verificationScope() {
+		result.Tables = append(result.Tables, table.evidence)
+	}
+	var verifyErr *exitcode.Error
+	mismatch := errors.As(err, &verifyErr) && verifyErr.Code == exitcode.ErrVerifyMismatch
+	if mismatch {
+		result.Status = "mismatch"
+	}
+	result, saveErr := p.state.recordVerification(result, p.verificationFingerprint(), mismatch, version)
+	if saveErr != nil {
+		p.fail(saveErr)
+		return
+	}
+	if result.Status == "mismatch" {
 		p.fail(err)
 		return
 	}
 	p.verifying.Store(false)
-	if s := skippedNames(append(skipped, more...)); len(s) > 0 {
-		p.log.Warn("post-seed verify passed except for tables it cannot verify by key range; run `strand verify --mode full` for them",
-			"tables", strings.Join(s, ","))
+	p.log.Warn("post-seed verification incomplete", "err", err)
+}
+
+// Run at most one full keyless checksum at a time. A continually changing
+// source or an unavailable check leaves explicit incomplete evidence.
+func (p *Pipeline) postSeedEvidence(ctx context.Context, skipped map[model.TableID]string) *admin.VerificationEvidence {
+	result := &admin.VerificationEvidence{Status: "checked"}
+	scope := p.verificationScope()
+	methods := make(map[string]bool)
+	if len(scope) == 0 {
+		result.Status, result.Reason = "incomplete", "no tables matched the pipeline"
 	}
-	p.log.Info("post-seed verify passed: pipeline synced")
+	for _, table := range scope {
+		id, row := table.id, table.evidence
+		methods[row.Method] = true
+		result.Method = row.Method
+		row.Status, row.Reason = "checked", ""
+		if row.Method == "count-and-checksum" {
+			checkCtx, stop := context.WithTimeout(ctx, time.Minute)
+			rep, err := p.canonicalVerifier().VerifyTableKeyless(checkCtx, id)
+			stop()
+			switch {
+			case err != nil:
+				row.Status, row.Reason = "incomplete", "could not complete the keyless checksum"
+			case !rep.StableOnSource:
+				row.Status, row.Reason = "incomplete", "source changed while verifying"
+			case !rep.Match:
+				row.Status, row.Position = "mismatch", rep.Position
+			default:
+				row.Position = rep.Position
+			}
+		} else if reason := skipped[id]; reason != "" {
+			row.Status, row.Reason = "incomplete", reason
+		}
+		if row.Status == "mismatch" || (row.Status == "incomplete" && result.Status != "mismatch") {
+			result.Status = row.Status
+		}
+		result.Tables = append(result.Tables, row)
+	}
+	if len(methods) > 1 {
+		result.Method = "sample-and-changed-keys, count-and-checksum"
+	}
+	if applied, err := p.store.LoadApplied(ctx); err == nil {
+		result.EndCheckpoint = applied.Lwd().Label()
+	}
+	result.CheckedAt = time.Now().UTC()
+	return result
+}
+
+type verificationScopeTable struct {
+	id       model.TableID
+	evidence admin.VerificationTable
+}
+
+// Include stable schema fields so that reopening the same configuration
+// after an offline ALTER cannot reuse evidence for the old row projection.
+func (p *Pipeline) verificationFingerprint() string {
+	type tableSchema struct {
+		Columns, Key    []string
+		Types           map[string]string
+		PGColumns       []pgreader.ColumnMeta
+		TargetGenerated map[string]bool
+		Keyless         bool
+	}
+	p.tablesMu.RLock()
+	defer p.tablesMu.RUnlock()
+	tables := make(map[string]tableSchema, len(p.tables))
+	for id, meta := range p.tables {
+		tables[id.String()] = tableSchema{meta.Columns, meta.PK, meta.ColTypes, meta.PGColumns, meta.TargetGenerated, meta.Keyless}
+	}
+	raw, _ := json.Marshal(tables)
+	return fmt.Sprintf("%s:%x", configHash(p.cfg), sha256.Sum256(raw))
+}
+
+func (p *Pipeline) verificationScope() []verificationScopeTable {
+	p.tablesMu.RLock()
+	defer p.tablesMu.RUnlock()
+	scope := make([]verificationScopeTable, 0, len(p.tables))
+	for id, meta := range p.tables {
+		row := admin.VerificationTable{Table: id.String(), Status: "not_checked", Method: "sample-and-changed-keys", Reason: "post-seed verification has no result for this table"}
+		if meta.Keyless {
+			row.Method = "count-and-checksum"
+		}
+		scope = append(scope, verificationScopeTable{id, row})
+	}
+	sort.Slice(scope, func(i, j int) bool { return scope[i].evidence.Table < scope[j].evidence.Table })
+	return scope
 }
 
 // postSeedReady: điều kiện bắt đầu post-seed verify — reader đã theo kịp source, mọi Txn đã nhận đã
@@ -582,14 +734,40 @@ func (p *Pipeline) VerifyDelta(ctx context.Context) (string, error) {
 	}
 	tt := p.touched.take(touchDelta)
 	skipped, err := p.verifyTablesKeys(ctx, 0, tt.keys, tt.gen, nil)
+	var keyedSkipped []model.TableID
+	var keyedReasons []string
+	var keylessSkipped []model.TableID
+	for id, reason := range skipped {
+		if meta := p.table(id); meta != nil && meta.Keyless {
+			keylessSkipped = append(keylessSkipped, id)
+		} else {
+			keyedSkipped = append(keyedSkipped, id)
+			keyedReasons = append(keyedReasons, id.String()+" ("+reason+")")
+		}
+	}
+	scope := ""
+	if names := skippedNames(keylessSkipped); len(names) != 0 {
+		scope = "; keyless tables excluded (delta checks changed keys only): " + strings.Join(names, ", ")
+	}
+	if len(keyedReasons) != 0 {
+		sort.Strings(keyedReasons)
+		scope += "; tables skipped by key verification: " + strings.Join(keyedReasons, ", ")
+	}
 	if err != nil {
 		var xe *exitcode.Error
 		if !errors.As(err, &xe) || xe.Code != exitcode.ErrVerifyMismatch {
 			p.touched.restore(touchDelta, tt)
 		}
+		if scope != "" {
+			err = fmt.Errorf("delta verify%s: %w", scope, err)
+		}
 		return "", err
 	}
-	return deltaVerifyResult(tt, skipped...)
+	msg, err := deltaVerifyResult(tt, keyedSkipped...)
+	if err != nil {
+		return "", fmt.Errorf("changed-key verification%s: %w", scope, err)
+	}
+	return msg + scope, nil
 }
 
 // deltaVerifyResult dựng kết quả verify delta sau khi các khóa đã lấy đều 0 lệch. Bảng vượt giới hạn
@@ -620,7 +798,14 @@ func deltaVerifyResult(tt touchedTake, skipped ...model.TableID) (string, error)
 		why = append(why, fmt.Sprintf("%d tables have incomplete changed-key tracking (limit or encoding failure): %s", len(over), strings.Join(over, ", ")))
 	}
 	if sk := skippedNames(skipped); len(sk) > 0 {
-		why = append(why, fmt.Sprintf("%d tables cannot be verified by key (the target orders the primary key differently): %s", len(sk), strings.Join(sk, ", ")))
+		why = append(why, fmt.Sprintf("%d tables cannot be verified by key: %s", len(sk), strings.Join(sk, ", ")))
+	}
+	var dirty []model.TableID
+	for id := range tt.dirtyKeyless {
+		dirty = append(dirty, id)
+	}
+	if names := skippedNames(dirty); len(names) != 0 {
+		why = append(why, "keyless tables changed and cannot be verified by delta: "+strings.Join(names, ", "))
 	}
 	if len(why) > 0 {
 		return "", exitcode.New(exitcode.ErrVerifyIncomplete, exitcode.DataError,

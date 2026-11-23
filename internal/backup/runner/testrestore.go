@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -19,6 +18,9 @@ import (
 // job's scratch server, counts the rows of every table, records the result (kind test_restore) and drops
 // the scratch database. It proves the backup is restorable, not just intact.
 func (e *Env) TestRestore(ctx context.Context, job backup.Job) (backup.CheckResult, error) {
+	if err := checkRuntimeTLS(job.Engine(), job.Scratch); err != nil {
+		return backup.CheckResult{}, err
+	}
 	// A missing restore tool is a setup problem, not a failed backup: refuse before recording a failed check.
 	if err := CheckTools(e.Getenv, TestRestoreToolNeeds(job.Method)); err != nil {
 		return backup.CheckResult{}, err
@@ -79,7 +81,7 @@ func (e *Env) testRestore(ctx context.Context, job backup.Job, rec backup.Record
 	counts := map[string]int64{}
 	switch rec.Method {
 	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
-		db, err := sql.Open("mysql", mysqlDSN(e.Getenv, job.Scratch))
+		db, err := openBackupMySQL(e.Getenv, job.Scratch)
 		if err != nil {
 			return nil, err
 		}
@@ -118,7 +120,7 @@ func (e *Env) testRestore(ctx context.Context, job backup.Job, rec backup.Record
 		defer func() {
 			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			if c, err := pgx.Connect(cctx, PGConnString(e.Getenv, job.Scratch, "postgres", false)); err == nil {
+			if c, err := connectBackupPGX(cctx, e.Getenv, job.Scratch, "postgres"); err == nil {
 				_, _ = c.Exec(cctx, `DROP DATABASE IF EXISTS "`+scratch+`" WITH (FORCE)`)
 				c.Close(cctx)
 			}
@@ -126,7 +128,7 @@ func (e *Env) testRestore(ctx context.Context, job backup.Job, rec backup.Record
 		if err := e.restorePGDump(ctx, rec, target); err != nil {
 			return nil, err
 		}
-		c, err := pgx.Connect(ctx, PGConnString(e.Getenv, job.Scratch, scratch, false))
+		c, err := connectBackupPGX(ctx, e.Getenv, job.Scratch, scratch)
 		if err != nil {
 			return nil, err
 		}

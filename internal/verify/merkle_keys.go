@@ -165,7 +165,7 @@ func (mv *MerkleVerifier) keySides(ctx context.Context, t model.TableID, srcCode
 	if err != nil {
 		return nil, err
 	}
-	dstCols, err := matchTargetColumns(srcCols, allDst, dst.table)
+	dstCols, err := matchTargetColumns(srcCols, allDst, dst.engine, dst.table)
 	if err != nil {
 		return nil, err
 	}

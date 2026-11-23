@@ -125,6 +125,7 @@
     <div class="form-actions">
       <span class="form-status">Run the dry-run first; Promote and Failover ask for the pipeline name.</span>
       <button class="btn primary" type="submit"{{if not (index .Can "promote-plan")}} disabled{{end}}>1. Check state (dry-run)</button>
+      <p class="muted small">For a planned cutover, stop application writes, wait for CDC to catch up, and require a successful <code>strand verify --mode full --require-complete</code> with this pipeline's configuration before promoting.</p>
       <button class="btn danger" type="submit" data-do="promote-run" data-confirm="Promote {{.Name}}? The old source is fenced (read-only) and the target is opened for writes. This cannot be undone from here." data-retype="{{.Name}}"{{if not (index .Can "promote-run")}} disabled{{end}}>2. Promote...</button>
       <button class="btn danger" type="submit" data-do="promote-failover" data-confirm="FAILOVER of {{.Name}}: you confirm the old source is isolated by other means (powered off or network blocked). Promote continues WITHOUT fencing it and every change the target has not applied yet is LOST (see the CLI report on this page). Type the pipeline name to continue." data-confirm2="Last chance. The target will accept writes now and the unapplied source changes are gone for good. Type the pipeline name again to run the failover." data-retype="{{.Name}}"{{if not (index .Can "promote-failover")}} disabled{{end}}>3. Failover...</button>
     </div>

@@ -133,6 +133,17 @@ func newValidateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if r.SourceKind == r.TargetKind {
+				engine := model.EngineMySQL
+				if strings.EqualFold(cfg.Source.Kind, "postgres") {
+					engine = model.EnginePG
+				}
+				if err := validate.CheckTableOverlap(cmd.Context(), r.Source, r.Target, engine, tables, func(id model.TableID) model.TableID {
+					return renamedTarget(cfg.Tables.Rename, id)
+				}); err != nil {
+					return err
+				}
+			}
 			if strings.EqualFold(cfg.Source.Kind, "postgres") {
 				pgWarnings, err := validate.CheckPGSource(cmd.Context(), r.Source, cfg, tables)
 				if err != nil {

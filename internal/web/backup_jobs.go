@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,6 +247,13 @@ func backupCommandAllowed(command string) error {
 		if fi.Mode().Perm()&0o022 != 0 {
 			return fmt.Errorf("%s must not be group- or world-writable", p)
 		}
+	}
+	return nil
+}
+
+func backupJobEncryptionError(j backup.Job) error {
+	if jobEncryption(j).Blocked {
+		return errors.New("this backup job requires Strand encryption; configure a valid active encryption key before enabling or running it")
 	}
 	return nil
 }
@@ -501,6 +509,29 @@ func (s *Server) apiBackupJobs(w http.ResponseWriter, r *http.Request, _ *Sessio
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": views})
 }
 
+type backupJobProtection struct {
+	Mode      string `json:"mode"`
+	Effective bool   `json:"effective"`
+	KeyID     string `json:"key_id,omitempty"`
+	Blocked   bool   `json:"blocked,omitempty"`
+}
+
+func jobEncryption(j backup.Job) backupJobProtection {
+	protection := backupJobProtection{Mode: "off", Effective: j.Encrypt && !j.IsCustom()}
+	if protection.Effective {
+		protection.Mode = "on"
+		if ring, err := backup.LoadKeyring(os.Getenv); err == nil && ring != nil && ring.Active != nil {
+			protection.KeyID = ring.Active.ID
+		} else {
+			protection.Blocked = true
+		}
+	}
+	if !j.IsCustom() && j.PolicyID != "" && !slices.Contains(j.Overrides, "encrypt") {
+		protection.Mode = "inherit"
+	}
+	return protection
+}
+
 func (s *Server) apiBackupJobGet(w http.ResponseWriter, r *http.Request, _ *Session) {
 	if s.db == nil {
 		writeErr(w, http.StatusServiceUnavailable, "backup jobs require the metadata database")
@@ -516,6 +547,7 @@ func (s *Server) apiBackupJobGet(w http.ResponseWriter, r *http.Request, _ *Sess
 		return
 	}
 	out := map[string]any{"job": j, "process": s.backupJobProcess(j)}
+	out["encryption"] = jobEncryption(j)
 	var tm *runner.ToolMissingError
 	if err := jobToolError(j); errors.As(err, &tm) {
 		out["tool_error"], out["tools_missing"] = tm.Error(), tm.Tools()
@@ -525,23 +557,26 @@ func (s *Server) apiBackupJobGet(w http.ResponseWriter, r *http.Request, _ *Sess
 
 // decodeBackupJob decodes a job body strictly and also reports which top-level fields the request carried
 // (a policy-managed field the client omitted keeps following the policy).
-func (s *Server) decodeBackupJob(w http.ResponseWriter, r *http.Request) (backup.Job, map[string]bool, bool) {
-	var j backup.Job
+func (s *Server) decodeBackupJob(w http.ResponseWriter, r *http.Request) (backup.Job, map[string]bool, string, bool) {
+	var bodyJob struct {
+		backup.Job
+		EncryptionMode string `json:"encryption_mode"`
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid backup job JSON")
-		return j, nil, false
+		return bodyJob.Job, nil, "", false
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&j); err != nil {
+	if err := dec.Decode(&bodyJob); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid backup job JSON")
-		return j, nil, false
+		return bodyJob.Job, nil, "", false
 	}
 	var extra any
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		writeErr(w, http.StatusBadRequest, "backup job request must contain exactly one JSON object")
-		return j, nil, false
+		return bodyJob.Job, nil, "", false
 	}
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal(body, &raw)
@@ -549,13 +584,13 @@ func (s *Server) decodeBackupJob(w http.ResponseWriter, r *http.Request) (backup
 	for k := range raw {
 		present[k] = true
 	}
-	return j, present, true
+	return bodyJob.Job, present, bodyJob.EncryptionMode, true
 }
 
 // resolveJobRefs materializes the connection and policy a job references into the job (host, secret
 // variable names, schedule, retention...) and normalizes its schedule. Policy fields the request carried
 // with a different value become overrides (unless the request lists "overrides" itself).
-func (s *Server) resolveJobRefs(ctx context.Context, j *backup.Job, present map[string]bool) (warnings []string, err error) {
+func (s *Server) resolveJobRefs(ctx context.Context, j *backup.Job, present map[string]bool, mode string) (warnings []string, err error) {
 	if j.ConnectionID != "" {
 		c, ok, err := s.db.st.GetBackupConnection(ctx, j.ConnectionID)
 		if err != nil {
@@ -583,6 +618,15 @@ func (s *Server) resolveJobRefs(ctx context.Context, j *backup.Job, present map[
 			return nil, err
 		}
 	}
+	if mode == "inherit" && j.PolicyID == "" {
+		return nil, errors.New("inherit encryption requires a backup policy")
+	}
+	if (present["encryption_mode"] || mode != "") && mode != "inherit" && mode != "on" && mode != "off" {
+		return nil, errors.New("encryption_mode must be inherit, on or off")
+	}
+	if mode == "on" || mode == "off" {
+		j.Encrypt = mode == "on"
+	}
 	if j.PolicyID != "" {
 		p, ok, err := s.db.st.GetBackupPolicy(ctx, j.PolicyID)
 		if err != nil {
@@ -593,6 +637,12 @@ func (s *Server) resolveJobRefs(ctx context.Context, j *backup.Job, present map[
 		}
 		if !present["overrides"] {
 			j.Overrides = backup.DeriveOverrides(*j, p, func(f string) bool { return present[f] })
+		}
+		if mode != "" {
+			j.Overrides = slices.DeleteFunc(j.Overrides, func(field string) bool { return field == "encrypt" })
+			if mode != "inherit" {
+				j.Overrides = append(j.Overrides, "encrypt")
+			}
 		}
 		*j, warnings = backup.ApplyPolicy(*j, p)
 	}
@@ -617,11 +667,11 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusServiceUnavailable, "backup jobs require the metadata database")
 		return
 	}
-	j, present, ok := s.decodeBackupJob(w, r)
+	j, present, encMode, ok := s.decodeBackupJob(w, r)
 	if !ok {
 		return
 	}
-	warnings, err := s.resolveJobRefs(r.Context(), &j, present)
+	warnings, err := s.resolveJobRefs(r.Context(), &j, present, encMode)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -635,6 +685,10 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 		j.ID = id
 	}
 	if j.Enabled {
+		if err := backupJobEncryptionError(j); err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		next := initialNextRun(j, s.now())
 		j.NextRunAt = &next
 	}
@@ -664,7 +718,7 @@ func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *S
 			return
 		}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"job": j, "process_id": processID, "warnings": warnings})
+	writeJSON(w, http.StatusCreated, map[string]any{"job": j, "process_id": processID, "warnings": warnings, "encryption": jobEncryption(j)})
 }
 
 func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -672,15 +726,39 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusServiceUnavailable, "backup jobs require the metadata database")
 		return
 	}
-	j, present, ok := s.decodeBackupJob(w, r)
+	j, present, encMode, ok := s.decodeBackupJob(w, r)
 	if !ok {
 		return
 	}
 	j.ID = r.PathValue("id")
-	warnings, err := s.resolveJobRefs(r.Context(), &j, present)
+	cur, found, err := s.db.st.GetBackupJob(r.Context(), j.ID)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "could not read backup job")
+		return
+	}
+	if !found {
+		writeErr(w, http.StatusNotFound, "backup job not found")
+		return
+	}
+	if !present["encryption_mode"] && !present["encrypt"] && !present["overrides"] && cur.PolicyID == j.PolicyID {
+		switch {
+		case j.PolicyID == "":
+			j.Encrypt = cur.Encrypt
+		case slices.Contains(cur.Overrides, "encrypt"):
+			encMode = jobEncryption(cur).Mode
+		}
+	}
+
+	warnings, err := s.resolveJobRefs(r.Context(), &j, present, encMode)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if j.Enabled && (!cur.Enabled || !cur.Encrypt || cur.IsCustom()) {
+		if err := backupJobEncryptionError(j); err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
 	}
 	if j.Enabled {
 		next := initialNextRun(j, s.now())
@@ -696,17 +774,15 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		return
 	}
 	detail := jobAuditDetail(j)
-	if cur, found, err := s.db.st.GetBackupJob(r.Context(), j.ID); err == nil && found {
-		detail["changes"] = changedFields(cur.JobOptions, j.JobOptions)
-		if cur.EverySeconds != j.EverySeconds {
-			detail["changes"].(map[string]any)["every_seconds"] = map[string]any{"from": cur.EverySeconds, "to": j.EverySeconds}
-		}
-		if cur.Name != j.Name {
-			detail["changes"].(map[string]any)["name"] = map[string]any{"from": cur.Name, "to": j.Name}
-		}
-		if cur.Enabled != j.Enabled {
-			detail["changes"].(map[string]any)["enabled"] = map[string]any{"from": cur.Enabled, "to": j.Enabled}
-		}
+	detail["changes"] = changedFields(cur.JobOptions, j.JobOptions)
+	if cur.EverySeconds != j.EverySeconds {
+		detail["changes"].(map[string]any)["every_seconds"] = map[string]any{"from": cur.EverySeconds, "to": j.EverySeconds}
+	}
+	if cur.Name != j.Name {
+		detail["changes"].(map[string]any)["name"] = map[string]any{"from": cur.Name, "to": j.Name}
+	}
+	if cur.Enabled != j.Enabled {
+		detail["changes"].(map[string]any)["enabled"] = map[string]any{"from": cur.Enabled, "to": j.Enabled}
 	}
 	if !s.auditBackupJobDetail(w, r, "backup_job.update", j.ID, detail) {
 		return
@@ -738,7 +814,7 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 		writeErr(w, http.StatusBadGateway, "could not start backup job: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"job": j, "process_id": processID, "warnings": warnings})
+	writeJSON(w, http.StatusOK, map[string]any{"job": j, "process_id": processID, "warnings": warnings, "encryption": jobEncryption(j)})
 }
 
 func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -754,6 +830,10 @@ func (s *Server) apiBackupJobStart(w http.ResponseWriter, r *http.Request, _ *Se
 	}
 	if !found {
 		writeErr(w, http.StatusNotFound, "backup job not found")
+		return
+	}
+	if err := backupJobEncryptionError(j); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
 	base := j
@@ -805,6 +885,10 @@ func (s *Server) apiBackupJobRun(w http.ResponseWriter, r *http.Request, _ *Sess
 	}
 	if !found {
 		writeErr(w, http.StatusNotFound, "backup job not found")
+		return
+	}
+	if err := backupJobEncryptionError(j); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
 	base := j

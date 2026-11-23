@@ -187,9 +187,7 @@
     var p = policy(); if (!p) { return; }
     setc('log_archive', p.log_archive);
     setc('compress', p.compress);
-    // Encryption defaults to on when keys exist (spec 2.8), whatever the policy says; a differing default is sent as an override.
-    setc('encrypt', !!D.keys_present);
-    if (!!D.keys_present !== !!p.encrypt) { S.touched.encrypt = true; }
+    setv('encryption_mode', 'inherit');
     setv('verify_every', p.verify_every_seconds || 0); setv('verify_sample', p.verify_sample_percent || 100); setc('test_restore', p.test_restore);
     setv('retry_max', p.retry_max || 0); setv('retry_backoff', p.retry_backoff_seconds || 60);
     if (p.repository && !S.touched.repository) { setRepo(p.repository); }
@@ -199,7 +197,7 @@
     setv('compress_level', p.compress_level || 0);
   }
   function applyCustomDefaults() {
-    setc('log_archive', false); setc('compress', true); setc('encrypt', !!D.keys_present);
+    setc('log_archive', false); setc('compress', true); setv('encryption_mode', '');
     setv('verify_every', 604800); setc('test_restore', false); setv('retry_max', 0); setc('customize', false);
     var tz = v('sch_tz');
     U.writeSchedule(root, { kind: 'daily', at: '01:00', timezone: tz }); setv('window_minutes', 240); setv('jitter_seconds', 0);
@@ -248,13 +246,20 @@
     D.repos.forEach(function (r) { var o = el('option', '', r.name || r.id); o.value = r.id; sel.appendChild(o); });
     if (D.repos.length === 1 && !checkedRadio('repository')) { setRepo(D.repos[0].id); }
   }
+  function effectiveEncryption() {
+    return v('encryption_mode') === 'on' || (v('encryption_mode') === 'inherit' && !!(policy() && policy().encrypt));
+  }
   function syncEncryption() {
-    var box = f('encrypt'), has = !!D.keys_present;
-    box.disabled = !has;
-    if (!has) { box.checked = false; }
-    $('#wiz-enc-warning').hidden = has;
-    $('#wiz-enc-reason').textContent = has ? 'Backups are encrypted with key ' + (D.key_id || 'default') + '.' : 'Not available: no encryption keys are configured.';
-    $('#wiz-enc-row').classList.toggle('is-disabled', !has);
+    var select = f('encryption_mode'), p = policy(), enabled = effectiveEncryption();
+    var inherit = select.querySelector('option[value="inherit"]');
+    inherit.hidden = !p;
+    inherit.disabled = !p;
+    var blocked = !isCustomJob() && enabled && !D.keys_present;
+    $('#wiz-enc-warning').hidden = !blocked;
+    if (!EDIT) { $('#wiz-create-only').textContent = blocked ? 'Save disabled draft' : 'Create only'; }
+    $('#wiz-enc-reason').textContent = enabled && D.keys_present ? 'New backups use Strand key ' + (D.key_id || 'default') + '.' :
+      v('encryption_mode') === 'off' || p && !p.encrypt && v('encryption_mode') === 'inherit' ?
+        'Strand encryption is off. The repository may apply its own encryption.' : '';
   }
 
   // ---- native tools (the server refuses an enabled job whose tool is missing) ----
@@ -309,7 +314,7 @@
       case 'repository': return checkedRadio('repository');
       case 'replicate_to': return v('replicate_to');
       case 'compress': return chk('compress');
-      case 'encrypt': return chk('encrypt');
+      case 'encrypt': return effectiveEncryption();
       case 'verify_every_seconds': return n('verify_every');
       case 'test_restore': return chk('test_restore');
       case 'retry_max': return n('retry_max');
@@ -325,10 +330,11 @@
     var p = policy(), out = [];
     if (!p) { return out; }
     Object.keys(S.touched).forEach(function (k) {
-      if (!S.touched[k]) { return; }
+      if (!S.touched[k] || k === 'encrypt') { return; }
       if ((k === 'repository' && !p.repository) || (k === 'replicate_to' && !p.replicate_to)) { return; }
       if (fieldValue(k) !== policyValue(p, k)) { out.push(k); }
     });
+    if (v('encryption_mode') !== 'inherit') { out.push('encrypt'); }
     if (chk('customize')) { out.push('schedule', 'retention'); }
     return out;
   }
@@ -353,7 +359,7 @@
       if (JOB.connection_id && JOB.connection_id !== v('connection_id')) { delete body.source; }
     }
     function want(field) { return !p || S.touched[field]; }
-    body.name = v('name'); body.enabled = true;
+    body.name = v('name'); body.enabled = EDIT && JOB ? JOB.enabled : true;
     if (isCustomJob()) {
       body.method = 'custom'; body.command = v('command'); body.artifact_template = v('artifact_template'); body.manifest_template = v('manifest_template');
       body.bucket = v('bucket'); body.prefix = v('prefix');
@@ -378,7 +384,7 @@
       if (want('log_archive')) { body.log_archive = chk('log_archive'); if (body.log_archive) { body.log_flush_seconds = (p && p.log_flush_seconds) || 300; } }
     }
     if (want('compress')) { body.compress = chk('compress'); }
-    if (want('encrypt')) { body.encrypt = chk('encrypt'); }
+    if (!isCustomJob()) { body.encryption_mode = v('encryption_mode'); }
     if (!p) { body.compress_level = n('compress_level'); } else if (n('compress_level') !== (p.compress_level || 0)) { body.compress_level = n('compress_level'); }
     if (want('verify_every_seconds')) { body.verify_every_seconds = n('verify_every'); if (body.verify_every_seconds) { body.verify_sample_percent = n('verify_sample'); } }
     if (want('retry_max')) { body.retry_max = n('retry_max'); body.retry_backoff_seconds = body.retry_max > 0 ? n('retry_backoff') : 0; }
@@ -391,6 +397,7 @@
   // ---- validation per step ----
   function validateStep(step) {
     var e = {}, meth = method();
+    if (step === 3 && !isCustomJob() && !v('encryption_mode')) { e.encryption_mode = 'Choose how to protect new backups.'; }
     if (step === 1) {
       if (!v('name')) { e.name = 'Give the job a name.'; }
       if (isCustomJob()) {
@@ -427,6 +434,8 @@
   var STEP_OF = { dbs: 1, method: 1, repository: 3, policy_choice: 2, test_restore: 4 };
   function placeError(k, msg) {
     var input = f(k);
+    var advanced = input && input.closest && input.closest('details');
+    if (advanced) { advanced.open = true; }
     if (input && input.tagName && window.strandBackupErr.field(form, k, msg)) { return true; }
     var h = HOLDERS[k] ? $(HOLDERS[k]) : null;
     if (!h) { return false; }
@@ -509,7 +518,7 @@
       out.push(['Repository', rp ? (rp.name || rp.id) + (rp.lock_mode === 'COMPLIANCE' ? ' (immutable)' : '') : '-']);
       if (v('replicate_to')) { var r2 = repoById(v('replicate_to')); out.push(['Second copy', r2 ? r2.name || r2.id : v('replicate_to')]); }
     }
-    out.push(['Encryption', chk('encrypt') ? 'On' : 'Off']);
+    out.push(['Encryption', effectiveEncryption() ? 'On' : 'Off']);
     out.push(['Compression', chk('compress') ? 'On' : 'Off']);
     var ve = n('verify_every');
     out.push(['Verify', ve ? (ve === 86400 ? 'Daily' : ve === 604800 ? 'Weekly' : ve === 2592000 ? 'Monthly' : 'Every ' + Math.round(ve / 60) + ' min') + (chk('test_restore') ? ' + test restore' : '') : 'Never']);
@@ -548,7 +557,7 @@
     if (nm === 'customize') { if (!t.checked) { var p = policy(); if (p) { U.writeSchedule(root, p.schedule); setv('window_minutes', p.window_minutes || 0); setv('jitter_seconds', p.jitter_seconds || 0); U.writeRetention(root, p.retention); } } syncAll(); return; }
     if (nm === 'log_archive') { touch('log_archive'); renderMethods(); }
     if (nm === 'repository') { touch('repository'); }
-    if (nm === 'replicate_to' || nm === 'compress' || nm === 'encrypt' || nm === 'test_restore' || nm === 'retry_max') { touch(nm); }
+    if (nm === 'replicate_to' || nm === 'compress' || nm === 'test_restore' || nm === 'retry_max') { touch(nm); }
     if (nm === 'verify_every') { touch('verify_every_seconds'); }
     syncAll();
   });
@@ -581,7 +590,7 @@
   });
 
   // ---- submit ----
-  var WIZ_ERR = [[/database/i, 'dbs'], [/connection/i, 'connection_id'], [/method/i, 'method'], [/repository|bucket/i, 'repository'], [/schedule|cron|interval|time zone|timezone/i, 'sch_kind'],
+  var WIZ_ERR = [[/encryption|active key/i, 'encryption_mode'], [/database/i, 'dbs'], [/connection/i, 'connection_id'], [/method/i, 'method'], [/repository|bucket/i, 'repository'], [/schedule|cron|interval|time zone|timezone/i, 'sch_kind'],
     [/retention|keep/i, 'ret_daily'], [/scratch|test.?restore/i, 'scratch_connection_id'], [/pitr|binlog|log archiv|gtid/i, 'log_archive'], [/retry|backoff/i, 'retry_max'],
     [/command/i, 'command'], [/artifact/i, 'artifact_template'], [/manifest/i, 'manifest_template'], [/job name|name/i, 'name']];
   function failSubmit(e) {
@@ -609,6 +618,14 @@
     S.submitting = true; btns.forEach(function (b) { b.disabled = true; }); U.busy(btn, true);
     $('#wiz-error').hidden = true; window.strandBackupErr.clear(form);
     var body = buildPayload();
+    if (!isCustomJob() && effectiveEncryption() && !D.keys_present) {
+      if (runNow) {
+        S.submitting = false; btns.forEach(function (b) { b.disabled = false; }); U.busy(btn, false);
+        go(3); showErrors({encryption_mode: 'Configure an active encryption key before running this job.'});
+        return;
+      }
+      if (!EDIT || !JOB.enabled) { body.enabled = false; }
+    }
     var url = '/api/v1/backup-jobs' + (EDIT ? '/' + encodeURIComponent(JOB.id) : '');
     api(EDIT ? 'PUT' : 'POST', url, body).then(function (r) { return U.readJSON(r, 'Could not save the job'); }).then(function (res) {
       var id = res.job.id; S.savedJobID = id;
@@ -647,7 +664,6 @@
       f('sch_tz').value = f('sch_tz').value || (function () { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { return ''; } }());
     }
     syncEncryption();
-    if (!EDIT) { setc('encrypt', !!D.keys_present); }
     go(1);
     form.removeAttribute('data-dirty');
     if (EDIT && JOB && JOB.connection_id && connById(JOB.connection_id)) {
@@ -678,7 +694,7 @@
     U.writeSchedule(root, sched); setv('window_minutes', JOB.window_minutes || 0); setv('jitter_seconds', JOB.jitter_seconds || 0);
     U.writeRetention(root, JOB.retention || {}); setv('lock_days', (JOB.retention && JOB.retention.lock_days) || 0);
     setc('customize', !!p && (ov.indexOf('schedule') >= 0 || ov.indexOf('retention') >= 0 || ov.indexOf('window_minutes') >= 0 || ov.indexOf('jitter_seconds') >= 0));
-    setc('log_archive', JOB.log_archive); setc('compress', JOB.compress); setc('encrypt', JOB.encrypt);
+    setc('log_archive', JOB.log_archive); setc('compress', JOB.compress); setv('encryption_mode', p && ov.indexOf('encrypt') < 0 ? 'inherit' : JOB.encrypt ? 'on' : 'off');
     setv('compress_level', JOB.compress_level || 0); setv('bandwidth_kbps', JOB.bandwidth_kbps || 0);
     setRepo(JOB.repository || ''); setv('replicate_to', JOB.replicate_to || '');
     setv('verify_every', JOB.verify_every_seconds || 0);

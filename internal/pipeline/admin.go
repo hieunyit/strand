@@ -64,6 +64,19 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 		Throughput: p.throughput.rate(), // row/giây trong cửa sổ gần nhất (review R18)
 		Zone:       zone,
 	}
+	if h.ready() == nil && p.state != nil && p.cfg != nil {
+		info.CDCState = "unknown"
+		sourceHead := p.sourceHead.Load()
+		switch {
+		case p.failed() != nil, p.paused.Load(), !p.running.Load(), p.bootstrap.Load():
+			info.CDCState = info.State
+		case p.sched.Lwd() < p.admitted.Load() || sourceHead == sourceHeadAhead:
+			info.CDCState = "catching_up"
+		case sourceHead == sourceHeadCaughtUp:
+			info.CDCState = "caught_up"
+		}
+		info.Verification = p.currentVerification()
+	}
 	if p.breaker != nil && p.breaker.IsOpen() {
 		info.BreakerOpen, info.BreakerReason = true, p.breaker.Reason()
 	}
@@ -81,6 +94,31 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 		info.Progress, info.ETASeconds = snapshotProgress(info)
 	}
 	return info, nil
+}
+
+// A restarted process may resolve the same include glob to a different set of
+// tables, or find a different row key after an offline schema change.
+func (p *Pipeline) currentVerification() *admin.VerificationEvidence {
+	scope := p.verificationScope()
+	stored := p.state.verification(p.verificationFingerprint())
+	if stored != nil && len(stored.Tables) == len(scope) {
+		same := true
+		for i, table := range scope {
+			row := stored.Tables[i]
+			if row.Table != table.evidence.Table || row.Method != table.evidence.Method {
+				same = false
+				break
+			}
+		}
+		if same {
+			return stored
+		}
+	}
+	result := &admin.VerificationEvidence{Status: "not_checked"}
+	for _, table := range scope {
+		result.Tables = append(result.Tables, table.evidence)
+	}
+	return result
 }
 
 func (h *adminHandler) Pause(ctx context.Context) (*admin.PauseResult, error) {

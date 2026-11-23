@@ -32,7 +32,12 @@ type Check struct {
 
 // Result is the outcome of a test. OK means the server was reached and authenticated; missing privileges
 // do not make OK false (the UI shows them), they only list what a backup would lack.
+func (t Target) tlsSpec() backup.ConnSpec {
+	return backup.ConnSpec{Host: t.Host, TLSMode: t.TLSMode, CACertPEM: t.CACertPEM, TLSServerName: t.TLSServerName}
+}
+
 type Result struct {
+	RestoreEndpoint   string   `json:"restore_endpoint,omitempty"`
 	OK                bool     `json:"ok"`
 	Engine            string   `json:"engine"`
 	Version           string   `json:"version,omitempty"`

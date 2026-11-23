@@ -16,6 +16,7 @@ import (
 // repositories, notification bookkeeping). Implemented by PG and Mem.
 type BackupProStore interface {
 	UpdateBackupMeta(ctx context.Context, id string, m backup.Meta) (backup.Record, bool, error)
+	ClaimBackupDeletion(ctx context.Context, id string, at time.Time) (backup.Record, bool, error)
 	ExpireBackup(ctx context.Context, id string, at time.Time) (backup.Record, bool, error)
 	SetBackupLegalHold(ctx context.Context, id string, hold bool) (backup.Record, bool, error)
 	// DeleteBackup removes a record that is not complete (see backup.Repository.DeleteBackup).
@@ -163,9 +164,28 @@ func (p *PG) UpdateBackupMeta(ctx context.Context, id string, m backup.Meta) (ba
 	return p.GetBackup(ctx, id)
 }
 
+func (p *PG) ClaimBackupDeletion(ctx context.Context, id string, at time.Time) (backup.Record, bool, error) {
+	_, err := p.db.ExecContext(ctx, `UPDATE backups SET status='deleting'
+		WHERE id=$1 AND status='complete' AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= $2)`, id, at)
+	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	cur, ok, err := p.GetBackup(ctx, id)
+	if err != nil || !ok {
+		return cur, false, err
+	}
+	if cur.Status == backup.StatusDeleting {
+		return cur, true, nil
+	}
+	if cur.Status == backup.StatusExpired {
+		return cur, false, nil
+	}
+	return cur, false, fmt.Errorf("%w: backup is not eligible for deletion (status, legal hold or retention lock)", backup.ErrInvalid)
+}
+
 func (p *PG) ExpireBackup(ctx context.Context, id string, at time.Time) (backup.Record, bool, error) {
 	res, err := p.db.ExecContext(ctx, `UPDATE backups SET status='expired', expired_at=$2
-		WHERE id=$1 AND status='complete' AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= $2)`, id, at)
+		WHERE id=$1 AND status IN ('complete', 'deleting') AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= $2)`, id, at)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
@@ -189,7 +209,7 @@ func (p *PG) ExpireBackup(ctx context.Context, id string, at time.Time) (backup.
 }
 
 func (p *PG) SetBackupLegalHold(ctx context.Context, id string, hold bool) (backup.Record, bool, error) {
-	res, err := p.db.ExecContext(ctx, `UPDATE backups SET legal_hold=$2 WHERE id=$1 AND status <> 'expired' AND legal_hold <> $2`, id, hold)
+	res, err := p.db.ExecContext(ctx, `UPDATE backups SET legal_hold=$2 WHERE id=$1 AND status NOT IN ('expired', 'deleting') AND legal_hold <> $2`, id, hold)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
@@ -198,8 +218,8 @@ func (p *PG) SetBackupLegalHold(ctx context.Context, id string, hold bool) (back
 	if err != nil || !ok {
 		return cur, ok, err
 	}
-	if n == 0 && cur.Status == backup.StatusExpired {
-		return backup.Record{}, false, fmt.Errorf("%w: an expired backup cannot be put on hold", backup.ErrInvalid)
+	if n == 0 && (cur.Status == backup.StatusExpired || cur.Status == backup.StatusDeleting) {
+		return backup.Record{}, false, fmt.Errorf("%w: a backup pending deletion or expired cannot have its hold changed", backup.ErrInvalid)
 	}
 	return cur, n == 1, nil
 }
@@ -213,7 +233,7 @@ func (p *PG) DeleteBackup(ctx context.Context, id string, now time.Time) (backup
 		return backup.Record{}, false, err
 	}
 	// The same guards in the statement: a concurrent finalize, hold or lock wins (checks cascade).
-	res, err := p.db.ExecContext(ctx, `DELETE FROM backups WHERE id=$1 AND status <> 'complete' AND NOT legal_hold
+	res, err := p.db.ExecContext(ctx, `DELETE FROM backups WHERE id=$1 AND status NOT IN ('complete', 'deleting') AND NOT legal_hold
 		AND (retain_until IS NULL OR retain_until <= $2)`, id, now)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)

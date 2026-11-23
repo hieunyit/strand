@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -227,29 +228,29 @@ func ParsePGBaseBackupLog(log string) (start, end backup.Position, timeline stri
 
 // MongoURI returns the connection URI of c (URIEnv, else built from host/port/user/password).
 func MongoURI(getenv Getenv, c backup.ConnSpec) (string, error) {
+	var uri string
 	if c.URIEnv != "" {
-		u := strings.TrimSpace(getenv(c.URIEnv))
-		if u == "" {
+		uri = strings.TrimSpace(getenv(c.URIEnv))
+		if uri == "" {
 			return "", fmt.Errorf("environment variable %s (MongoDB URI) is empty", c.URIEnv)
 		}
-		return u, nil
-	}
-	host := c.Host
-	if c.Port > 0 {
-		host += ":" + strconv.Itoa(c.Port)
-	}
-	auth, opts := "", "directConnection=true"
-	if c.User != "" {
-		auth = urlEscape(c.User)
-		if pw := password(getenv, c); pw != "" {
-			auth += ":" + urlEscape(pw)
+	} else {
+		host := c.Host
+		if c.Port > 0 {
+			host = net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(c.Port))
 		}
-		auth += "@"
-		// Explicit: mongodump/mongorestore otherwise authenticate against the --db being dumped/restored
-		// (the Go driver already defaults to admin), and an admin-defined user fails with --db=app.
-		opts += "&authSource=admin"
+		auth, opts := "", "directConnection=true"
+		if c.User != "" {
+			auth = urlEscape(c.User)
+			if pw := password(getenv, c); pw != "" {
+				auth += ":" + urlEscape(pw)
+			}
+			auth += "@"
+			opts += "&authSource=admin"
+		}
+		uri = "mongodb://" + auth + host + "/?" + opts
 	}
-	return "mongodb://" + auth + host + "/?" + opts, nil
+	return c.MongoTLSURI(uri)
 }
 
 func urlEscape(s string) string {
@@ -357,6 +358,11 @@ type Process struct {
 	waited bool
 	err    error
 	mu     sync.Mutex
+
+	lifecycleMu sync.Mutex
+	done        chan struct{}
+	killTimer   *time.Timer
+	exited      bool
 }
 
 // capped keeps the last part of stderr (for errors and position parsing) and forwards it to log.
@@ -466,7 +472,7 @@ func Start(ctx context.Context, getenv Getenv, inv Invocation, stdin io.Reader, 
 	cmd.Dir = dir
 	cmd.Stdin = stdin
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	p := &Process{cmd: cmd, dir: dir, stderr: &capped{max: 256 << 10, log: log, hide: secretsOf(inv)}}
+	p := &Process{cmd: cmd, dir: dir, done: make(chan struct{}), stderr: &capped{max: 256 << 10, log: log, hide: secretsOf(inv)}}
 	cmd.Stderr = p.stderr
 	if p.stdout, err = cmd.StdoutPipe(); err != nil {
 		os.RemoveAll(dir)
@@ -477,8 +483,11 @@ func Start(ctx context.Context, getenv Getenv, inv Invocation, stdin io.Reader, 
 		return nil, fmt.Errorf("start %s: %w", inv.Tool, err)
 	}
 	go func() {
-		<-ctx.Done()
-		p.kill()
+		select {
+		case <-ctx.Done():
+			p.kill()
+		case <-p.done:
+		}
 	}()
 	return p, nil
 }
@@ -490,10 +499,20 @@ func (p *Process) Dir() string { return p.dir }
 func (p *Process) Stderr() string { return p.stderr.String() }
 
 func (p *Process) kill() {
-	if p.cmd.Process != nil && p.cmd.ProcessState == nil {
-		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
-		time.AfterFunc(5*time.Second, func() { _ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) })
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	if p.exited || p.killTimer != nil {
+		return
 	}
+	group := -p.cmd.Process.Pid
+	_ = syscall.Kill(group, syscall.SIGTERM)
+	p.killTimer = time.AfterFunc(5*time.Second, func() {
+		p.lifecycleMu.Lock()
+		defer p.lifecycleMu.Unlock()
+		if !p.exited {
+			_ = syscall.Kill(group, syscall.SIGKILL)
+		}
+	})
 }
 
 // Wait waits for exit (idempotent) and returns a redacted error with the stderr tail on failure.
@@ -502,7 +521,15 @@ func (p *Process) Wait() error {
 	defer p.mu.Unlock()
 	if !p.waited {
 		p.waited = true
-		if err := p.cmd.Wait(); err != nil {
+		err := p.cmd.Wait()
+		p.lifecycleMu.Lock()
+		p.exited = true
+		if p.killTimer != nil {
+			p.killTimer.Stop()
+		}
+		close(p.done)
+		p.lifecycleMu.Unlock()
+		if err != nil {
 			tail := strings.TrimSpace(p.stderr.String())
 			if len(tail) > 2000 {
 				tail = tail[len(tail)-2000:]
@@ -526,13 +553,8 @@ func (p *Process) Read(b []byte) (int, error) {
 
 // Close stops the process (if still running) and removes the private directory.
 func (p *Process) Close() error {
-	p.mu.Lock()
-	waited := p.waited
-	p.mu.Unlock()
-	if !waited {
-		p.kill()
-		_ = p.Wait()
-	}
+	p.kill()
+	_ = p.Wait()
 	return os.RemoveAll(p.dir)
 }
 

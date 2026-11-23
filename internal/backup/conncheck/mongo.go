@@ -2,7 +2,6 @@ package conncheck
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net/url"
 	"sort"
@@ -46,24 +45,22 @@ func MongoURI(t Target) string {
 }
 
 func checkMongo(ctx context.Context, t Target, res *Result) {
-	uri := MongoURI(t)
+	policy := t.tlsSpec()
+	uri, err := policy.MongoTLSURI(MongoURI(t))
+	if err != nil {
+		res.fail("tls", err)
+		return
+	}
+	if t.URI != "" {
+		policy.Host = ""
+	}
+	cfg, err := policy.TLSConfig()
+	if err != nil {
+		res.fail("tls", err)
+		return
+	}
 	opts := options.Client().ApplyURI(uri).SetServerSelectionTimeout(8 * time.Second).SetConnectTimeout(8 * time.Second)
-	if t.TLSMode != "" && t.TLSMode != "disable" {
-		serverName := t.TLSServerName
-		if serverName == "" {
-			serverName = t.Host
-		}
-		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
-		if t.TLSMode == "require" {
-			cfg.InsecureSkipVerify = true
-		} else if t.CACertPEM != "" {
-			pool, err := caPool(t)
-			if err != nil {
-				res.fail("tls", err)
-				return
-			}
-			cfg.RootCAs = pool
-		}
+	if cfg != nil {
 		opts.SetTLSConfig(cfg)
 	}
 	start := time.Now()

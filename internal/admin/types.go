@@ -139,15 +139,35 @@ type TableInfo struct {
 	GenericPK    bool           `json:"generic_pk"`    // PK không phải một cột số nguyên (khóa tổng quát)
 }
 
+// VerificationEvidence records the scope of a historical post-seed check.
+type VerificationEvidence struct {
+	Reason        string              `json:"reason,omitempty"`
+	EndCheckpoint string              `json:"end_checkpoint,omitempty"`
+	Status        string              `json:"status"`
+	Method        string              `json:"method"`
+	CheckedAt     time.Time           `json:"checked_at"`
+	Tables        []VerificationTable `json:"tables"`
+}
+
+type VerificationTable struct {
+	Table    string `json:"table"`
+	Status   string `json:"status"`
+	Method   string `json:"method,omitempty"`
+	Position string `json:"position,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 // TopInfo chứa thông tin hiển thị của lệnh `strand top` theo spec/02 §10.
 type TopInfo struct {
-	PipelineID string  `json:"pipeline_id"`
-	State      string  `json:"state"`
-	LagSeconds float64 `json:"lag_seconds"`
-	Throughput float64 `json:"throughput"` // rows/sec hoặc MB/s
-	Zone       string  `json:"zone"`       // Zone GRACE hoặc onoff (e.g. green, yellow, red, breaker)
-	Progress   float64 `json:"progress"`   // 0.0 - 100.0 %
-	ETASeconds float64 `json:"eta_seconds"`
+	CDCState     string                `json:"cdc_state,omitempty"`
+	Verification *VerificationEvidence `json:"verification,omitempty"`
+	PipelineID   string                `json:"pipeline_id"`
+	State        string                `json:"state"`
+	LagSeconds   float64               `json:"lag_seconds"`
+	Throughput   float64               `json:"throughput"` // rows/sec hoặc MB/s
+	Zone         string                `json:"zone"`       // Zone GRACE hoặc onoff (e.g. green, yellow, red, breaker)
+	Progress     float64               `json:"progress"`   // 0.0 - 100.0 %
+	ETASeconds   float64               `json:"eta_seconds"`
 
 	// Bootstrap (snapshot logic): bảng đang chạy, số bảng xong/tổng, row đã ghi / ước lượng, tốc độ.
 	// SnapshotTable: các bảng đang snapshot, nối bằng ", " (giữ cho client cũ); SnapshotTables: danh sách

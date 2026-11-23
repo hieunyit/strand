@@ -247,7 +247,7 @@ Jobs page with its log.
 | `mydumper` | MySQL | full, logical, parallel | `metadata` source position (`[source]` of mydumper 0.16+, `[master]`, or legacy SHOW MASTER STATUS text) | tar of the dump dir |
 | `pg_dump` | PostgreSQL | full, logical (`-Fc`) | consistent time | yes |
 | `pg_basebackup` | PostgreSQL | full, physical (`-Ft -X fetch`) | start/end LSN, timeline | yes (`-D -`) |
-| `mongodump` | MongoDB | full, logical (`--archive --oplog`) | oplog timestamp before/after | yes |
+| `mongodump` | MongoDB | full, logical (`--archive --oplog`) | last BSON timestamp embedded in the oplog | yes |
 | `custom` | any | whatever the wrapper produces | from the v1 seed manifest | file/dir upload |
 
 Strand builds the native tool's argv itself (no shell). Tools are taken from
@@ -490,8 +490,10 @@ GFS policy per job (and a default per repository for backups without a job):
 `keep_yearly`, `keep_within_days`, `max_age_days`, plus `lock_days`. A backup is
 kept when any rule selects it; `max_age_days` is a hard cap. Guarantees: the
 newest full backup is never expired; a kept incremental keeps its whole chain;
-log segments are kept from the oldest kept base onward (PITR stays possible for
-every kept base); legal hold and an unexpired Object Lock always block expiry.
+log segments are kept from the oldest kept base onward. Retention claims each
+object in the catalog before touching storage. A legal hold or an unexpired
+Object Lock blocks the claim. A record in `deleting` can no longer be restored
+or put on hold, and a later prune retries interrupted storage deletion.
 
 ```sh
 strand backup prune --job-id bjob-... --dry-run   # decision and reason per backup
@@ -546,8 +548,9 @@ exist, the directory must be empty — and the source is never written:
   `strand_wal/`, and `restore_command`, `recovery_target_time` and
   `recovery_target_action=promote` are set with `recovery.signal`; start
   PostgreSQL on the directory to recover and promote.
-- MongoDB: `mongorestore --oplogReplay` of the base into a new deployment, then
-  the archived oplog with `--oplogLimit`; single-database dumps restore under a
+- MongoDB: restore into a new deployment with one `mongorestore --oplogReplay`.
+  Strand appends verified archive entries strictly after the embedded base
+  timestamp and before the chosen UTC second. Single-database dumps restore under a
   new name (`--nsFrom/--nsTo`).
 
 `--id <backup>` restores one backup as is. The Web restore wizard (Backups page)
@@ -851,7 +854,7 @@ retention turns `complete` into `expired` after deleting its objects. Only a `co
 `DELETE /api/v1/backups/{id}` (operator and admin; audited `backup.delete`) runs `strand backup delete --id <id>` as a job:
 the process gets the repository credentials in its environment (like verify, copy and prune; the Web holds no S3 client),
 aborts an unfinished multipart upload of the payload, deletes the payload and the `manifest.json` sidecar, then the catalog
-record and its checks. Objects go first, as for retention: a crash in between leaves a record without objects, and deleting it
+record and its checks. A crash after deleting objects leaves a record without objects, and deleting it
 again finishes the job. Refused (409, nothing deleted): a complete record, legal hold (release it first; a hold can be released
 on any record but set only on a complete one), an Object Lock retention (`retain_until`) still in the future, and a record whose
 writer may still run: its job has a run in progress, its job's log archiver or its copy process is running, or (no job and no
@@ -867,7 +870,11 @@ status filter of `/backups/catalog` covers every status (`status=failed` lists t
 Validation rules enforced by `backup.ValidateJob` and UI:
 - **MySQL**: Method `mysqldump` with a GTID-capable connection and exactly one database. MariaDB / `mariadb-dump` is rejected with `"MariaDB does not support binlog archiving"`. Multi-database configurations are rejected with `"PITR requires exactly one database"`.
 - **PostgreSQL**: Only `pg_basebackup`. `pg_dump` is rejected with `"PITR needs pg_basebackup as the base backup"`.
-- **MongoDB**: `mongodump`.
+- **MongoDB**: a whole-deployment `mongodump --oplog` with archiving enabled
+  records its embedded, majority-committed oplog boundary. The archive
+  account needs `replSetGetConfig` and `replSetGetStatus` privileges. PITR
+  uses one replica set and a whole-second UTC cutoff. Take a new base and
+  start a new archive job if legacy records lack replica-set provenance.
 - **Custom**: Rejected.
 - Stored jobs from older versions that fail these constraints are still listed and presented with clear warning badges; the scheduler skips their log archiving with an explicit logged reason instead of failing silently. The web UI disables the PITR checkbox with explanatory help text when unsupported combinations are chosen.
 
@@ -882,8 +889,22 @@ Validation rules enforced by `backup.ValidateJob` and UI:
   created anymore).
 - MySQL PITR needs GTID mode and a single-database `mysqldump` base; MariaDB
   binlog archiving is not supported (MariaDB GTIDs).
-- PostgreSQL PITR follows one timeline; tablespaces (symlinks) are refused on
-  restore. pg_dump bases are not PITR anchors (use pg_basebackup).
+- New MySQL and PostgreSQL archives record the server identity. A PITR base
+  and its logs must come from the same job and server. Legacy records without
+  that evidence remain usable as standalone backups. Start a new archive job
+  and take a new base when upgrading an unverified archive.
+- PostgreSQL PITR follows one timeline. The CLI prepares a directory from
+  contiguous WAL and marks the target as pending replay verification. Start
+  PostgreSQL and verify it reaches the requested time. The console does not
+  advertise a time window from WAL ingest timestamps.
+- MongoDB restores require a new database (`--target-database`) or a dedicated
+  empty deployment (`--target-deployment`). Confirm the endpoint and
+  namespace with `--confirm-target mongodb://host:27017/new_db` or
+  `--confirm-target 'mongodb://host:27017/*'`.
+- Native tools that cannot enforce a saved TLS policy fail before using it.
+  For MySQL or MongoDB hostname verification, run the native tool over a
+  connection that preserves the server hostname. PostgreSQL supports hostname
+  verification through the local SSH forward.
 - No deduplication across backups (every run is a full stream; incremental chain
   creation is removed).
 - Test restores cover mysqldump/mariadb-dump/pg_dump; physical and MongoDB test

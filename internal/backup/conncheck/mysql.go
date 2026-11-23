@@ -2,8 +2,6 @@ package conncheck
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"fmt"
 	"net"
@@ -30,66 +28,18 @@ var mysqlGlobalOnly = map[string]bool{"RELOAD": true, "REPLICATION CLIENT": true
 var tlsSeq atomic.Int64
 
 func mysqlTLS(t Target) (name string, cleanup func(), err error) {
-	switch t.TLSMode {
-	case "", "disable":
+	cfg, err := t.tlsSpec().TLSConfig()
+	if err != nil {
+		return "", nil, err
+	}
+	if cfg == nil {
 		return "false", func() {}, nil
-	}
-	serverName := t.TLSServerName
-	if serverName == "" {
-		serverName = t.Host
-	}
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
-	switch t.TLSMode {
-	case "require":
-		cfg.InsecureSkipVerify = true
-	case "verify-ca":
-		cfg.InsecureSkipVerify = true // chain verified below; the host name is not
-		pool, err := caPool(t)
-		if err != nil {
-			return "", nil, err
-		}
-		cfg.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
-				return fmt.Errorf("server sent no certificate")
-			}
-			var certs []*x509.Certificate
-			for _, r := range raw {
-				c, err := x509.ParseCertificate(r)
-				if err != nil {
-					return err
-				}
-				certs = append(certs, c)
-			}
-			inter := x509.NewCertPool()
-			for _, c := range certs[1:] {
-				inter.AddCert(c)
-			}
-			_, err := certs[0].Verify(x509.VerifyOptions{Roots: pool, Intermediates: inter})
-			return err
-		}
-	case "verify-full":
-		pool, err := caPool(t)
-		if err != nil {
-			return "", nil, err
-		}
-		cfg.RootCAs = pool
 	}
 	name = fmt.Sprintf("strand-conncheck-%d", tlsSeq.Add(1))
 	if err := mysql.RegisterTLSConfig(name, cfg); err != nil {
 		return "", nil, err
 	}
 	return name, func() { mysql.DeregisterTLSConfig(name) }, nil
-}
-
-func caPool(t Target) (*x509.CertPool, error) {
-	if t.CACertPEM == "" {
-		return x509.SystemCertPool()
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM([]byte(t.CACertPEM)) {
-		return nil, fmt.Errorf("ca_cert_pem holds no certificate")
-	}
-	return pool, nil
 }
 
 var (

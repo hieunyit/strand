@@ -26,7 +26,8 @@ type Metrics struct {
 	CheckpointCompactionLagSeconds *prometheus.GaugeVec
 
 	// 6. strand_writeset_entries: gauge, label [pipeline, table]
-	WritesetEntries *prometheus.GaugeVec
+	WritesetEntries       *prometheus.GaugeVec
+	SchedulerPendingBytes *prometheus.GaugeVec
 
 	// 7. strand_pending_cross_range: gauge, label [pipeline]
 	PendingCrossRange *prometheus.GaugeVec
@@ -119,6 +120,11 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Help: "Số phần tử trong writeset theo từng bảng.",
 		}, []string{"pipeline", "table"}),
 
+		SchedulerPendingBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "strand_scheduler_pending_bytes",
+			Help: "Estimated bytes charged to the scheduler pending-memory budget, including the ordered lane.",
+		}, []string{"pipeline"}),
+
 		PendingCrossRange: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "strand_pending_cross_range",
 			Help: "Số thao tác đổi PK xuyên range đang chờ xử lý.",
@@ -209,6 +215,7 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.Holes,
 		m.CheckpointCompactionLagSeconds,
 		m.WritesetEntries,
+		m.SchedulerPendingBytes,
 		m.PendingCrossRange,
 		m.PendingCrossRangeOldestSeconds,
 		m.GovernorRateTokens,

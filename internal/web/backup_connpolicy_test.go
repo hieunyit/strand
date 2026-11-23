@@ -372,10 +372,10 @@ func TestConnectionTestEndpoints(t *testing.T) {
 	if row.LastTestAt == nil || row.LastTestStatus != "warning" || !strings.Contains(row.LastTestDetail, "RELOAD") {
 		t.Fatalf("last test = %v %q %q", row.LastTestAt, row.LastTestStatus, row.LastTestDetail)
 	}
-	a.must("POST", "/api/v1/backup-connections/test", map[string]any{"id": id, "name": "prod", "engine": "mysql", "host": "db1.internal",
+	a.must("POST", "/api/v1/backup-connections/test", map[string]any{"id": id, "name": "prod", "engine": "mysql", "host": "proposed.internal",
 		"secret_mode": "stored"}, 200)
-	if e.fake.last().Password != canary {
-		t.Fatal("edit-form test did not reuse the stored secret")
+	if tgt := e.fake.last(); tgt.Host != "proposed.internal" || tgt.Password != "" || tgt.URI != "" {
+		t.Fatal("unsaved edit must not reuse credentials from the saved connection")
 	}
 	e.fake.mu.Lock()
 	e.fake.result = conncheck.Result{OK: false, Error: "connect: access denied", MissingPrivileges: []string{}, Databases: []string{}}

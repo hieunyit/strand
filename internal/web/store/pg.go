@@ -341,14 +341,14 @@ func (p *PG) SetDesired(ctx context.Context, name, desired string) error {
 	if desired != DesiredRunning && desired != DesiredStopped {
 		return fmt.Errorf("invalid desired state %q", desired)
 	}
-	_, err := p.db.ExecContext(ctx, `INSERT INTO pipeline_desired (name, desired, reason) VALUES ($1,$2,'')
-		ON CONFLICT (name) DO UPDATE SET desired = EXCLUDED.desired, reason = '', updated_at = now()`, name, desired)
+	_, err := p.db.ExecContext(ctx, `INSERT INTO pipeline_desired (name, desired, reason, updated_at) VALUES ($1,$2,'',$3)
+		ON CONFLICT (name) DO UPDATE SET desired = EXCLUDED.desired, reason = '', updated_at = EXCLUDED.updated_at`, name, desired, time.Now().UTC())
 	return p.wrap(err)
 }
 
-func (p *PG) ObserveStop(ctx context.Context, name string) (bool, error) {
+func (p *PG) ObserveStop(ctx context.Context, name string, stoppedAt time.Time) (bool, error) {
 	res, err := p.db.ExecContext(ctx, `UPDATE pipeline_desired SET desired = 'stopped', reason = $2, updated_at = now()
-		WHERE name = $1 AND desired = 'running'`, name, ReasonObservedStop)
+		WHERE name = $1 AND desired = 'running' AND updated_at <= $3`, name, ReasonObservedStop, stoppedAt)
 	if err != nil {
 		return false, p.wrap(err)
 	}

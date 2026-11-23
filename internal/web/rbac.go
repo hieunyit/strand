@@ -178,6 +178,9 @@ func isWrite(method string) bool {
 // listed in writeRules (and not a pipeline action listed in ActionPermissions) requires admin.
 func RequiredPermissionForRequest(r *http.Request) Permission {
 	path, method := r.URL.Path, r.Method
+	if method == http.MethodHead {
+		method = http.MethodGet
+	}
 	if isWrite(method) {
 		if matchPattern("/api/v1/pipelines/{name}/actions/{action}", path) {
 			act := strings.Split(strings.Trim(path, "/"), "/")[5]
@@ -193,6 +196,13 @@ func RequiredPermissionForRequest(r *http.Request) Permission {
 	}
 	if perm, ok := lookupRule(readRules, method, path); ok {
 		return perm
+	}
+	// ServeMux unescapes route segments individually. Use its matched pattern
+	// as well so an escaped slash in a wildcard cannot hide a sensitive route.
+	if _, route, ok := strings.Cut(r.Pattern, " "); ok && method == http.MethodGet {
+		if perm, ok := lookupRule(readRules, method, route); ok {
+			return perm
+		}
 	}
 	return PermRead
 }

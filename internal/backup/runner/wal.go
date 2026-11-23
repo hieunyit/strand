@@ -26,7 +26,13 @@ import (
 // PGConnString builds a keyword/value connection string for c.
 func PGConnString(getenv Getenv, c backup.ConnSpec, database string, replication bool) string {
 	q := url.Values{}
-	q.Set("sslmode", "prefer")
+	mode := "prefer"
+	if c.TLSMode == "disable" {
+		mode = "disable"
+	} else if c.TLSMode != "" {
+		mode = "require" // connectBackupPG installs the verification policy without fallback.
+	}
+	q.Set("sslmode", mode)
 	if replication {
 		q.Set("replication", "true")
 	}
@@ -66,6 +72,9 @@ func parseSize(s string) (uint64, error) {
 
 // ArchiveWAL streams WAL until ctx ends. It resumes after the newest archived segment of the job.
 func (e *Env) ArchiveWAL(ctx context.Context, job backup.Job) error {
+	if err := checkRuntimeTLS(job.Engine(), job.Conn); err != nil {
+		return err
+	}
 	repo, err := e.OpenJobRepository(ctx, job.Repository, job.Bucket, job.Prefix)
 	if err != nil {
 		return err
@@ -75,7 +84,7 @@ func (e *Env) ArchiveWAL(ctx context.Context, job backup.Job) error {
 		return err
 	}
 	slot := "strand_" + strings.ReplaceAll(strings.ToLower(job.ID), "-", "_")
-	conn, err := pgconn.Connect(ctx, PGConnString(e.Getenv, job.Conn, "", true))
+	conn, err := connectBackupPG(ctx, e.Getenv, job.Conn, "", true)
 	if err != nil {
 		return fmt.Errorf("replication connection: %v", redactAll(err.Error(), []string{password(e.Getenv, job.Conn)}))
 	}
@@ -92,6 +101,21 @@ func (e *Env) ArchiveWAL(ctx context.Context, job backup.Job) error {
 	if err != nil || segSize == 0 {
 		return fmt.Errorf("invalid wal_segment_size")
 	}
+	start := uint64(sys.XLogPos) / segSize * segSize
+	last, err := e.latestOriginalLog(ctx, job.ID)
+	if err != nil {
+		return err
+	}
+	if last != nil && last.Method == backup.MethodWAL {
+		if last.Details["source_identity"] != sys.SystemID || last.Details["timeline"] != strconv.FormatUint(uint64(sys.Timeline), 10) {
+			return errors.New("WAL archive cannot resume: prior log does not prove the current PostgreSQL system and timeline")
+		}
+		v, err := ParseLSN(last.EndPosition.LSN)
+		if err != nil || v == 0 || v%segSize != 0 {
+			return errors.New("WAL archive cannot resume from an invalid segment boundary")
+		}
+		start = v
+	}
 	if _, err := pglogrepl.CreateReplicationSlot(ctx, conn, slot, "", pglogrepl.CreateReplicationSlotOptions{
 		Mode: pglogrepl.PhysicalReplication, SnapshotAction: "RESERVE_WAL"}); err != nil {
 		var pgErr *pgconn.PgError
@@ -99,22 +123,12 @@ func (e *Env) ArchiveWAL(ctx context.Context, job backup.Job) error {
 			return fmt.Errorf("create replication slot %s: %w", slot, err)
 		}
 	}
-	start := uint64(sys.XLogPos) / segSize * segSize
-	last, err := e.Catalog.List(ctx, backup.Filter{JobID: job.ID, Kind: backup.KindLog, Status: backup.StatusComplete, Limit: 1})
-	if err != nil {
-		return err
-	}
-	if len(last) == 1 && last[0].Method == backup.MethodWAL {
-		if v, err := ParseLSN(last[0].EndPosition.LSN); err == nil {
-			start = v
-		}
-	}
 	if err := pglogrepl.StartReplication(ctx, conn, slot, pglogrepl.LSN(start), pglogrepl.StartReplicationOptions{
 		Mode: pglogrepl.PhysicalReplication, Timeline: sys.Timeline}); err != nil {
 		return fmt.Errorf("start replication at %s: %w", FormatLSN(start), err)
 	}
 	e.logf("wal archive %s: streaming from %s (timeline %d, segment %d bytes)", job.Source, FormatLSN(start), sys.Timeline, segSize)
-	w := &walWriter{env: e, job: job, repo: repo, enc: enc, segSize: segSize, timeline: uint32(sys.Timeline), segStart: start}
+	w := &walWriter{env: e, job: job, repo: repo, enc: enc, segSize: segSize, sourceID: sys.SystemID, timeline: uint32(sys.Timeline), segStart: start}
 	w.buf = make([]byte, 0, segSize)
 	flushEvery := time.Duration(job.LogFlushSeconds) * time.Second
 	status := time.Now()
@@ -178,7 +192,7 @@ func (e *Env) switchWAL(job backup.Job) {
 	if len(job.Conn.Databases) > 0 {
 		db = job.Conn.Databases[0]
 	}
-	conn, err := pgconn.Connect(ctx, PGConnString(e.Getenv, job.Conn, db, false))
+	conn, err := connectBackupPG(ctx, e.Getenv, job.Conn, db, false)
 	if err != nil {
 		e.logf("wal archive: pg_switch_wal connection failed")
 		return
@@ -195,6 +209,7 @@ type walWriter struct {
 	repo     *Repository
 	enc      backup.EncodeOptions
 	segSize  uint64
+	sourceID string
 	timeline uint32
 	segStart uint64
 	buf      []byte
@@ -245,7 +260,7 @@ func (w *walWriter) upload(ctx context.Context) error {
 		ID: "wal-" + safeSegment(w.job.ID) + "-" + name, Name: "wal/" + name, Data: bytes.NewReader(w.buf),
 		Method: backup.MethodWAL, Seq: segno,
 		Meta: backup.Meta{Position: backup.Position{LSN: FormatLSN(w.segStart)}, EndPosition: backup.Position{LSN: FormatLSN(end)},
-			StartTime: &first, EndTime: &last, Details: map[string]string{"timeline": strconv.Itoa(int(w.timeline)), "segment": name}},
+			StartTime: &first, EndTime: &last, Details: map[string]string{"timeline": strconv.Itoa(int(w.timeline)), "segment": name, "source_identity": w.sourceID}},
 	})
 	if err != nil {
 		return fmt.Errorf("archive WAL segment %s: %w", name, err)

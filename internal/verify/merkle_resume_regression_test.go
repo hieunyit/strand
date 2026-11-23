@@ -6,7 +6,6 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
@@ -40,10 +39,8 @@ func (resumeConn) QueryContext(_ context.Context, q string, _ []driver.NamedValu
 	case strings.HasPrefix(q, "SELECT MIN("):
 		// Empty source: one chunk spans the entire key space.
 		return &keylessHashRows{cols: []string{"min", "max"}, data: [][]driver.Value{{nil, nil}}}, nil
-	case strings.Contains(q, "FROM _strand_verify"):
-		return &keylessHashRows{cols: []string{"id", "start", "end", "src", "dst"}, data: [][]driver.Value{
-			{int64(0), int64(math.MinInt64), int64(math.MaxInt64), "0:0", "0:0"},
-		}}, nil
+	case strings.Contains(q, "COALESCE(SUM("):
+		return &keylessHashRows{cols: []string{"count", "checksum"}, data: [][]driver.Value{{int64(0), "0"}}}, nil
 	default:
 		return nil, fmt.Errorf("unexpected query: %s", q)
 	}
@@ -99,7 +96,7 @@ func TestMerkleResumeRequiresSuccessfulCatchUp(t *testing.T) {
 				if rep != nil || cleared {
 					t.Fatalf("failed catch-up must preserve progress and return no clean report: report=%+v cleared=%v", rep, cleared)
 				}
-			} else if !cleared || rep.ResumedChunks != 1 || rep.HashedChunks != 0 {
+			} else if !cleared || rep.ResumedChunks != 0 || rep.HashedChunks != 1 {
 				t.Fatalf("successful resume: report=%+v cleared=%v", rep, cleared)
 			}
 		})

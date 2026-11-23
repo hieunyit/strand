@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
@@ -40,7 +39,7 @@ func schemaDB(t *testing.T, pg bool) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := c.MappedPort(ctx, nat.Port(port))
+	p, err := c.MappedPort(ctx, port)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,8 +33,8 @@ func TestR03_LiveRowCompareIsUnambiguous(t *testing.T) {
 	}
 }
 
-// review R12: lượt full verify chạy hết thì --resume sau đó không được tin hash cũ; chỉ lượt bị ngắt
-// mới chạy tiếp, và chunk từng lệch luôn được hash lại.
+// review R12: lượt full verify chạy hết thì --resume sau đó không được tin hash cũ; mọi lượt
+// đều đọc lại các chunk kể cả khi lượt trước bị ngắt.
 func TestR12_ResumeOnlyContinuesAnInterruptedRun(t *testing.T) {
 	src, dst := getMySQL(t)
 	ctx := context.Background()
@@ -58,17 +58,18 @@ func TestR12_ResumeOnlyContinuesAnInterruptedRun(t *testing.T) {
 		t.Fatalf("after a completed run: resumed=%d mismatches=%v, want a fresh run that sees id=1", rep.ResumedChunks, rep.Mismatches)
 	}
 
-	// Lượt bị ngắt sau 2 chunk rồi chạy tiếp: 2 chunk đầu (id=1 vẫn lệch → hash lại; id=2 khớp → dùng lại).
+	// Làm lệch một chunk đã khớp trong lượt bị ngắt.
 	cfg.Resume, cfg.StopAfter = false, 2
 	if _, err := verify.NewMerkleVerifier(cfg).VerifyTableFull(ctx, tid, "id"); !errors.Is(err, verify.ErrVerifyInterrupted) {
 		t.Fatalf("interrupted run: %v", err)
 	}
+	mustExec(t, dst, "UPDATE r12_resume SET v = 999 WHERE id = 2")
 	cfg.Resume, cfg.StopAfter = true, 0
 	rep, err = verify.NewMerkleVerifier(cfg).VerifyTableFull(ctx, tid, "id")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.ResumedChunks != 1 || len(rep.Mismatches) != 1 {
+	if rep.ResumedChunks != 0 || len(rep.Mismatches) != 2 {
 		t.Fatalf("resume of interrupted run: resumed=%d hashed=%d mismatches=%v", rep.ResumedChunks, rep.HashedChunks, rep.Mismatches)
 	}
 }

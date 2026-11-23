@@ -65,7 +65,7 @@ func startPostgres(t *testing.T, image string, extraCmd ...string) (*sql.DB, str
 		_ = container.Terminate(ctx)
 		t.Fatalf("failed to get mapped port: %v", err)
 	}
-	port := mappedPort.Int()
+	port := int(mappedPort.Num())
 
 	dsn := fmt.Sprintf("postgres://strand:dev@%s:%d/strand?sslmode=disable", host, port)
 
@@ -566,7 +566,7 @@ func TestAC4_StandbyLogicalDecoding_PG16(t *testing.T) {
 
 	priHost, _ := primaryContainer.Host(ctx)
 	priPortRaw, _ := primaryContainer.MappedPort(ctx, "5432/tcp")
-	priPort := priPortRaw.Int()
+	priPort := int(priPortRaw.Num())
 
 	priDSN := fmt.Sprintf("postgres://strand:dev@%s:%d/strand?sslmode=disable", priHost, priPort)
 	var priDB *sql.DB
@@ -620,7 +620,7 @@ func TestAC4_StandbyLogicalDecoding_PG16(t *testing.T) {
 
 	stbHost, _ := standbyContainer.Host(ctx)
 	stbPortRaw, _ := standbyContainer.MappedPort(ctx, "5432/tcp")
-	stbPort := stbPortRaw.Int()
+	stbPort := int(stbPortRaw.Num())
 
 	stbDSN := fmt.Sprintf("postgres://strand:dev@%s:%d/strand?sslmode=disable", stbHost, stbPort)
 	var stbDB *sql.DB

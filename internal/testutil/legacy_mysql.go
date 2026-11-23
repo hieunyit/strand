@@ -32,10 +32,12 @@ func LegacyMySQL(t testing.TB, image string, extra ...string) *sql.DB {
 		},
 		Started: true,
 	})
+	if c != nil {
+		t.Cleanup(func() { _ = c.Terminate(ctx) })
+	}
 	if err != nil {
 		t.Fatalf("start %s: %v", image, err)
 	}
-	t.Cleanup(func() { _ = c.Terminate(ctx) })
 	host, _ := c.Host(ctx)
 	pn, _ := c.MappedPort(ctx, "3306")
 	dsn := fmt.Sprintf("root:dev@tcp(%s)/?multiStatements=true", net.JoinHostPort(host, pn.Port()))

@@ -316,8 +316,8 @@ func TestAC3_ResumeAfterPartialVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run 2 (resume): %v", err)
 	}
-	if rep.TotalChunks != 7 || rep.ResumedChunks != 2 || rep.HashedChunks != 5 {
-		t.Fatalf("run 2: total=%d resumed=%d hashed=%d, want 7/2/5", rep.TotalChunks, rep.ResumedChunks, rep.HashedChunks)
+	if rep.TotalChunks != 7 || rep.ResumedChunks != 0 || rep.HashedChunks != 7 {
+		t.Fatalf("run 2: total=%d resumed=%d hashed=%d, want 7/0/7", rep.TotalChunks, rep.ResumedChunks, rep.HashedChunks)
 	}
 	if !reflect.DeepEqual(rep.Mismatches, []string{"45000"}) {
 		t.Fatalf("run 2 mismatches = %v, want [45000]", rep.Mismatches)

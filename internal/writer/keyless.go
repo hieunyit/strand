@@ -2,6 +2,8 @@ package writer
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -36,7 +38,7 @@ func keylessMatchCols(r *pkRegistry, row *model.RowChange, img []model.Value) ([
 	return cols, nil
 }
 
-// keylessBefore: ảnh trước của UPDATE; nil nếu ảnh trước = ảnh sau (không đổi gì → không cần ghi).
+// keylessBefore: ảnh trước đã thay đổi của UPDATE. Nếu nil, kiểm sự tồn tại của ảnh không đổi.
 // So bằng keylessImagesDiffer (phân biệt kiểu/NULL), KHÔNG dùng keysDiffer (fmt.Sprint): NULL và chuỗi literal
 // "<nil>" có cùng biểu diễn chuỗi nên keysDiffer coi là bằng → UPDATE bị bỏ trong khi checkpoint vẫn tiến (NK01).
 func keylessBefore(row *model.RowChange) []model.Value {
@@ -154,13 +156,29 @@ func (w *MySQLWriter) applyKeylessMySQL(ctx context.Context, q *stmtQueue, row *
 		names, vals := colNamesVals(row.Cols, false)
 		return q.execRows(ctx, 1, buildKeylessInsertMySQL(row.Table, names), vals...)
 	case model.OpUpdate:
-		before := keylessBefore(row)
-		if before == nil {
-			q.written++ // ảnh trước = ảnh sau: không có gì để ghi
-			return nil
-		}
 		if hasUnchanged(row) {
 			return fmt.Errorf("table %s: partial row image is not supported on a MySQL target", row.Table)
+		}
+		before := keylessBefore(row)
+		if before == nil {
+			match, err := keylessMatchCols(&w.pk, row, row.Key)
+			if err != nil {
+				return err
+			}
+			if err := q.flush(ctx); err != nil {
+				return err
+			}
+			str := w.pk.stringCols(row.Table)
+			query := "SELECT 1 FROM " + quoteMySQLTable(row.Table) + " WHERE " + mysqlMatchCond(match, str) + " LIMIT 1"
+			var found int
+			if err := q.tx.QueryRowContext(ctx, query, keylessMatchArgs(match, str, row.Key)...).Scan(&found); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return keylessMissing(row.Table, row.Op)
+				}
+				return fmt.Errorf("check unchanged row in %s: %w", row.Table, err)
+			}
+			q.written++
+			return nil
 		}
 		match, err := keylessMatchCols(&w.pk, row, before)
 		if err != nil {
@@ -283,15 +301,27 @@ func (a *pgApplier) applyKeyless(row *model.RowChange) error {
 		}
 	case model.OpUpdate:
 		before := keylessBefore(row)
+		unchanged := before == nil
 		if before == nil {
-			a.written++
-			return nil
+			before = row.Key
 		}
 		match, err := keylessMatchCols(&a.w.pk, row, before)
 		if err != nil {
 			return err
 		}
 		names, vals := colNamesVals(row.Cols, true) // cột TOAST không đổi không nằm trong SET
+		if unchanged || (len(row.Cols) > 0 && len(names) == 0) {
+			query := "SELECT EXISTS (SELECT 1 FROM " + quotePGTable(row.Table) + " WHERE " + pgMatchSubquery(row.Table, match, 1) + ")"
+			var found bool
+			if err := a.tx.QueryRow(a.ctx, query, toArgs(before)...).Scan(&found); err != nil {
+				return fmt.Errorf("check unchanged row in %s: %w", row.Table, err)
+			}
+			if !found {
+				return keylessMissing(row.Table, row.Op)
+			}
+			a.written++
+			return nil
+		}
 		tag, err := a.tx.Exec(a.ctx, buildKeylessUpdatePG(row.Table, names, match), append(vals, toArgs(before)...)...)
 		if err != nil {
 			return fmt.Errorf("keyless update on %s: %w", row.Table, err)

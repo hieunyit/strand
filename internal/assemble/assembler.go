@@ -460,6 +460,10 @@ func (a *Assembler) Push(ev reader.Event) (*model.Txn, error) {
 	case reader.EventRows:
 		a.ensureTxnStartedEv(ev)
 		tableID := model.TableID{Schema: ev.Schema, Table: ev.Table}
+		if ev.PartialRowImage && a.keyless != nil && a.keyless(tableID) {
+			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("keyless table %s: source %s has a partial row image; configure FULL row images and re-seed or recover the missing source data before retrying", tableID, ev.Op), nil)
+		}
 		tbl := a.registry.GetTable(ev.Schema, ev.Table)
 		if tbl == nil {
 			a.registry.RegisterTable(ev.Schema, ev.Table, nil, nil)

@@ -12,7 +12,7 @@ package verify
 //     "COUNT:SUM(hash row)". Cùng một thuật toán cho MySQL và PG nên MySQL→PG, PG→PG,
 //     MySQL→MySQL đều so được.
 //  3. Hash lá được lưu vào _strand_verify trên target ngay sau khi tính, để dừng giữa chừng rồi
-//     chạy tiếp (Resume) mà không hash lại chunk đã xong.
+//     chạy lại an toàn (Resume) bằng cách đọc lại các chunk.
 //  4. Dựng cây Merkle (lá = hash chunk, nút cha = sha256(trái:phải)) ở hai phía, so từ gốc, chỉ
 //     đi xuống nhánh khác hash. Lá khác hash là chunk duy nhất phải so từng row.
 //  5. So từng row trong chunk lệch: dùng LiveVerifier (MySQL→MySQL, nếu được cấu hình) hoặc so
@@ -93,7 +93,7 @@ type FullVerifyConfig struct {
 	TargetName   func(model.TableID) model.TableID
 	ChunkRows    int
 	Rate         float64 // tối đa N chunk/giây; <= 0 là không giới hạn
-	Resume       bool    // dùng lại hash chunk đã lưu trong _strand_verify
+	Resume       bool    // chờ target bắt kịp trước khi đọc lại các chunk
 	StopAfter    int     // dừng sau khi hash N chunk mới (phục vụ test resume); 0 = không dừng
 	// LiveVerifier, nếu có và cả hai phía là MySQL, được dùng để so từng row trong chunk lệch
 	// (có kiểm lại PK để tách unverifiable_hot). Chạy độc lập thì tạo nó với SkipApplyWait.
@@ -112,7 +112,7 @@ type FullVerifyReport struct {
 	Table            string
 	TotalChunks      int
 	HashedChunks     int // số chunk được hash trong lượt này
-	ResumedChunks    int // số chunk lấy hash từ _strand_verify (không hash lại)
+	ResumedChunks    int // giữ để tương thích với báo cáo cũ, hiện luôn bằng 0
 	MismatchedChunks int // số lá khác hash
 	RangesChecked    int // số chunk được so từng row
 	RowsChecked      int
@@ -248,6 +248,9 @@ func IsIntegerPK(ctx context.Context, db *sql.DB, engine model.Engine, t model.T
 	return isIntegerType(engine, cols[0].DataType), nil
 }
 
+// ErrNoRowKey means catalog inspection completed and found no usable row key.
+var ErrNoRowKey = errors.New("no primary key or NOT NULL unique key")
+
 // FindPKColumns trả các cột PK theo thứ tự PK.
 func FindPKColumns(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID) ([]string, error) {
 	schema := schemaOrDefault(ctx, db, engine, t)
@@ -288,15 +291,26 @@ func FindPKColumns(ctx context.Context, db *sql.DB, engine model.Engine, t model
 		if engine == model.EnginePG {
 			var oid int64
 			if err := db.QueryRowContext(ctx, `SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-				WHERE n.nspname = $1 AND c.relname = $2`, schema, t.Table).Scan(&oid); err == nil {
-				if res, err := rowkey.ResolvePG(ctx, db, model.TableID{Schema: schema, Table: t.Table}, oid); err == nil && res.Key != nil {
-					return res.Key.Columns, nil
-				}
+				WHERE n.nspname = $1 AND c.relname = $2`, schema, t.Table).Scan(&oid); err != nil {
+				return nil, err
 			}
-		} else if res, err := rowkey.ResolveMySQL(ctx, db, schema, t.Table); err == nil && res.Key != nil {
-			return res.Key.Columns, nil
+			res, err := rowkey.ResolvePG(ctx, db, model.TableID{Schema: schema, Table: t.Table}, oid)
+			if err != nil {
+				return nil, err
+			}
+			if res.Key != nil {
+				return res.Key.Columns, nil
+			}
+		} else {
+			res, err := rowkey.ResolveMySQL(ctx, db, schema, t.Table)
+			if err != nil {
+				return nil, err
+			}
+			if res.Key != nil {
+				return res.Key.Columns, nil
+			}
 		}
-		return nil, fmt.Errorf("table %s has no primary key or NOT NULL unique key", t)
+		return nil, fmt.Errorf("table %s has %w", t, ErrNoRowKey)
 	}
 	return cols, nil
 }
@@ -373,7 +387,7 @@ func GetTableColumns(ctx context.Context, db *sql.DB, engine model.Engine, t mod
 			return nil, err
 		}
 		c.DataType = strings.ToLower(c.DataType)
-		if strings.EqualFold(c.Name, pkCol) {
+		if c.Name == pkCol || (engine == model.EngineMySQL && strings.EqualFold(c.Name, pkCol)) {
 			pk = &c
 			continue
 		}
@@ -388,15 +402,23 @@ func GetTableColumns(ctx context.Context, db *sql.DB, engine model.Engine, t mod
 	return append([]ColumnInfo{*pk}, cols...), nil
 }
 
-// matchTargetColumns trả cột target theo đúng thứ tự cột source (khớp tên không phân biệt hoa thường).
-func matchTargetColumns(src, dst []ColumnInfo, dstTable model.TableID) ([]ColumnInfo, error) {
+// PostgreSQL distinguishes quoted column names by case. MySQL column names are case-insensitive.
+func columnKey(engine model.Engine, name string) string {
+	if engine == model.EngineMySQL {
+		return strings.ToLower(name)
+	}
+	return name
+}
+
+// matchTargetColumns returns target columns in source order using target identifier semantics.
+func matchTargetColumns(src, dst []ColumnInfo, engine model.Engine, dstTable model.TableID) ([]ColumnInfo, error) {
 	byName := make(map[string]ColumnInfo, len(dst))
 	for _, c := range dst {
-		byName[strings.ToLower(c.Name)] = c
+		byName[columnKey(engine, c.Name)] = c
 	}
 	out := make([]ColumnInfo, len(src))
 	for i, c := range src {
-		d, ok := byName[strings.ToLower(c.Name)]
+		d, ok := byName[columnKey(engine, c.Name)]
 		if !ok {
 			return nil, fmt.Errorf("column %s missing on target table %s", c.Name, dstTable)
 		}
@@ -616,32 +638,6 @@ func DiffMerkleTrees(srcRoot, dstRoot *MerkleNode) []ChunkRange {
 	return out
 }
 
-type cachedChunk struct {
-	start, end int64
-	src, dst   string
-}
-
-func (mv *MerkleVerifier) loadProgress(ctx context.Context, table string) (map[int]cachedChunk, error) {
-	e := mv.cfg.TargetEngine
-	q := fmt.Sprintf(`SELECT chunk_id, range_start, range_end, source_hash, target_hash FROM _strand_verify
-		WHERE pipeline_id = %s AND table_name = %s`, ph(e, 1), ph(e, 2))
-	rows, err := mv.cfg.Meta.QueryContext(ctx, q, mv.cfg.PipelineID, table)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[int]cachedChunk{}
-	for rows.Next() {
-		var id int
-		var c cachedChunk
-		if err := rows.Scan(&id, &c.start, &c.end, &c.src, &c.dst); err != nil {
-			return nil, err
-		}
-		out[id] = c
-	}
-	return out, rows.Err()
-}
-
 func (mv *MerkleVerifier) clearProgress(ctx context.Context, table string) error {
 	e := mv.cfg.TargetEngine
 	_, err := mv.cfg.Meta.ExecContext(ctx, fmt.Sprintf("DELETE FROM _strand_verify WHERE pipeline_id = %s AND table_name = %s",
@@ -695,7 +691,7 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 	if err != nil {
 		return nil, err
 	}
-	dstCols, err := matchTargetColumns(srcCols, allDst, dstTable)
+	dstCols, err := matchTargetColumns(srcCols, allDst, mv.cfg.TargetEngine, dstTable)
 	if err != nil {
 		return nil, err
 	}
@@ -706,19 +702,16 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 	rep := &FullVerifyReport{Table: t.String(), TotalChunks: len(chunks)}
 	tableKey := t.String()
 
-	var cached map[int]cachedChunk
+	// The apply watermark is not a version for either database. Even on resume,
+	// read both sides again because a previously matched range may have changed.
 	if mv.cfg.Resume {
-		if cached, err = mv.loadProgress(ctx, tableKey); err != nil {
-			return nil, fmt.Errorf("load _strand_verify progress: %w", err)
-		}
-		// Khi chạy tiếp (--resume) trong lúc pipeline đang hoạt động, chờ target apply tới vị trí
-		// hiện tại của source trước khi dùng lại cache tiến độ, tránh false-negative do replication lag.
 		if w := mv.waiter(); w != nil {
 			if err := waitMark(ctx, w); err != nil {
 				return nil, fmt.Errorf("wait for target before resuming verify of %s: %w", t, err)
 			}
 		}
-	} else if err := mv.clearProgress(ctx, tableKey); err != nil {
+	}
+	if err := mv.clearProgress(ctx, tableKey); err != nil {
 		return nil, fmt.Errorf("clear _strand_verify progress: %w", err)
 	}
 
@@ -732,32 +725,25 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 	dstLeaves := make([]*MerkleNode, 0, len(chunks))
 	for _, c := range chunks {
 		var sh, th string
-		// Chunk đã hash KHỚP ở lượt trước bị ngắt (cùng ranh giới) thì dùng lại, không hash lại. Chunk
-		// từng lệch luôn hash lại để báo đúng trạng thái hiện tại.
-		if cc, ok := cached[c.ID]; ok && cc.start == c.Start && cc.end == c.End && cc.src != "" && cc.src == cc.dst {
-			sh, th = cc.src, cc.dst
-			rep.ResumedChunks++
-		} else {
-			if mv.cfg.StopAfter > 0 && rep.HashedChunks >= mv.cfg.StopAfter {
-				return rep, fmt.Errorf("full verify of %s stopped after %d chunks: %w", t, rep.HashedChunks, ErrVerifyInterrupted)
+		if mv.cfg.StopAfter > 0 && rep.HashedChunks >= mv.cfg.StopAfter {
+			return rep, fmt.Errorf("full verify of %s stopped after %d chunks: %w", t, rep.HashedChunks, ErrVerifyInterrupted)
+		}
+		if tick != nil {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-tick:
 			}
-			if tick != nil {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-tick:
-				}
-			}
-			if sh, err = HashChunk(ctx, src, mv.cfg.SourceEngine, t, pkCol, c, srcCols); err != nil {
-				return nil, fmt.Errorf("source: %w", err)
-			}
-			if th, err = HashChunk(ctx, mv.cfg.Target, mv.cfg.TargetEngine, dstTable, pkCol, c, dstCols); err != nil {
-				return nil, fmt.Errorf("target: %w", err)
-			}
-			rep.HashedChunks++
-			if err := mv.saveProgress(ctx, tableKey, c, sh, th); err != nil {
-				return nil, fmt.Errorf("save _strand_verify progress: %w", err)
-			}
+		}
+		if sh, err = HashChunk(ctx, src, mv.cfg.SourceEngine, t, pkCol, c, srcCols); err != nil {
+			return nil, fmt.Errorf("source: %w", err)
+		}
+		if th, err = HashChunk(ctx, mv.cfg.Target, mv.cfg.TargetEngine, dstTable, pkCol, c, dstCols); err != nil {
+			return nil, fmt.Errorf("target: %w", err)
+		}
+		rep.HashedChunks++
+		if err := mv.saveProgress(ctx, tableKey, c, sh, th); err != nil {
+			return nil, fmt.Errorf("save _strand_verify progress: %w", err)
 		}
 		srcLeaves = append(srcLeaves, &MerkleNode{Hash: sh, Range: c, IsLeaf: true})
 		dstLeaves = append(dstLeaves, &MerkleNode{Hash: th, Range: c, IsLeaf: true})

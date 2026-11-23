@@ -45,6 +45,9 @@ func seedRichBackup(t *testing.T, st store.Store, id, src, engine, tool, kind st
 		Method:      method,
 		Details:     details,
 	}
+	if details["source_identity"] != "" {
+		r.JobID = "job-" + src
+	}
 	if _, _, err := cat.Create(ctx, r); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +63,15 @@ func seedRichBackup(t *testing.T, st store.Store, id, src, engine, tool, kind st
 		LockMode:    lockMode,
 		RetainUntil: retain,
 		Details:     details,
+	}
+	if method == backup.MethodBinlog && pos.BinlogFile != "" {
+		meta.EndPosition = backup.Position{BinlogFile: pos.BinlogFile, BinlogPos: 2048}
+	}
+	if method == backup.MethodPGBaseBackup {
+		meta.EndPosition = pos
+	}
+	if method == backup.MethodWAL {
+		meta.EndPosition = backup.Position{LSN: details["end_lsn"]}
 	}
 	if end != nil {
 		meta.EndTime = end
@@ -340,21 +352,37 @@ func TestRestoreWizardPageAndRBAC(t *testing.T) {
 	}
 }
 
+func TestRestoreLegacyIncrementalRequiresNativeTool(t *testing.T) {
+	e := newCPEnv(t)
+	at := time.Now().UTC()
+	base := seedRichBackup(t, e.st, "legacy-base", "legacy", "mysql", "mysqldump", backup.KindFull, at, backup.Position{}, false, nil, "", nil, nil, "", nil)
+	inc := seedRichBackup(t, e.st, "legacy-inc", base.Source, base.Engine, base.Method, backup.KindIncremental, at.Add(time.Minute), backup.Position{}, false, nil, "", nil, nil, base.ID, nil)
+	adm := e.admin()
+	code, body := adm.do("GET", "/backups/restore?backup="+inc.ID, nil)
+	if code != http.StatusOK || !strings.Contains(body, "native restore tool") {
+		t.Fatalf("wizard should direct legacy incremental to native restore: status %d", code)
+	}
+	code, body = adm.do("POST", "/api/v1/backup-restores", map[string]any{"backup_id": inc.ID})
+	if code != http.StatusBadRequest || !strings.Contains(body, "native restore tool") {
+		t.Fatalf("legacy incremental restore: status %d body %s", code, body)
+	}
+}
+
 func TestRestorePITRWindowRejection(t *testing.T) {
 	e := newCPEnv(t)
 	baseTime := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
 	// Base backup at 10:00
-	pos := backup.Position{GTIDSet: "0000:1-100"}
-	seedRichBackup(t, e.st, "bkp-pitr-base", "mysql-pitr", "mysql", "mysqldump", backup.KindFull, baseTime, pos, false, nil, "", nil, nil, "", nil)
+	pos := backup.Position{GTIDSet: "0000:1-100", BinlogFile: "mysql-bin.000001", BinlogPos: 1234}
+	seedRichBackup(t, e.st, "bkp-pitr-base", "mysql-pitr", "mysql", "mysqldump", backup.KindFull, baseTime, pos, false, nil, "", nil, nil, "", map[string]string{"source_identity": "mysql-fixture"})
 
 	// 2 continuous log segments: 10:00 - 11:00, and 11:00 - 12:00
 	l1Start := baseTime
 	l1End := baseTime.Add(1 * time.Hour)
-	seedRichBackup(t, e.st, "bkp-pitr-log1", "mysql-pitr", "mysql", "binlog", backup.KindLog, baseTime, backup.Position{GTIDSet: "0000:101-200"}, false, nil, "", &l1Start, &l1End, "", map[string]string{"seq": "1"})
+	seedRichBackup(t, e.st, "bkp-pitr-log1", "mysql-pitr", "mysql", "binlog", backup.KindLog, baseTime, backup.Position{GTIDSet: "0000:101-200", BinlogFile: "mysql-bin.000001", BinlogPos: 4}, false, nil, "", &l1Start, &l1End, "", map[string]string{"seq": "1", "source_identity": "mysql-fixture", "next_file": "mysql-bin.000002"})
 
 	l2Start := baseTime.Add(1 * time.Hour)
 	l2End := baseTime.Add(2 * time.Hour)
-	seedRichBackup(t, e.st, "bkp-pitr-log2", "mysql-pitr", "mysql", "binlog", backup.KindLog, baseTime.Add(1*time.Hour), backup.Position{GTIDSet: "0000:201-300"}, false, nil, "", &l2Start, &l2End, "", map[string]string{"seq": "2"})
+	seedRichBackup(t, e.st, "bkp-pitr-log2", "mysql-pitr", "mysql", "binlog", backup.KindLog, baseTime.Add(1*time.Hour), backup.Position{GTIDSet: "0000:201-300", BinlogFile: "mysql-bin.000002", BinlogPos: 4}, false, nil, "", &l2Start, &l2End, "", map[string]string{"seq": "2", "source_identity": "mysql-fixture"})
 
 	adm := e.admin()
 
@@ -547,6 +575,35 @@ func TestRestoreRejectTargetTimeWhenNoContinuousPITRWindow(t *testing.T) {
 	if !strings.Contains(body, "has no continuous PITR window") {
 		t.Fatalf("expected error to mention no continuous PITR window, got %s", body)
 	}
+}
+
+func TestPostgresRestoreOffersReplayProofWithoutContinuousWindow(t *testing.T) {
+	e := newCPEnv(t)
+	baseTime := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	source := "pg-pitr"
+	base := seedRichBackup(t, e.st, "pg-base", source, backup.EnginePostgres, backup.MethodPGBaseBackup,
+		backup.KindFull, baseTime, backup.Position{LSN: "0/18"}, false, nil, "", nil, nil, "",
+		map[string]string{"source_identity": "pg-system", "timeline": "1"})
+	req := map[string]any{"source": source, "target_time": baseTime.Add(time.Hour).Format(time.RFC3339),
+		"target_dir": "/tmp/pg-pitr-proof", "confirm": "/tmp/pg-pitr-proof"}
+	admin := e.admin()
+	admin.must("POST", "/api/v1/backup-restores", req, http.StatusBadRequest)
+	seedRichBackup(t, e.st, "pg-wal", source, backup.EnginePostgres, backup.MethodWAL, backup.KindLog,
+		baseTime, backup.Position{LSN: "0/10"}, false, nil, "", nil, nil, "",
+		map[string]string{"source_identity": "pg-system", "timeline": "1", "end_lsn": "0/20", "seq": "1"})
+	win, err := e.srv.recoveryWindow(t.Context(), source)
+	if err != nil || win.Continuous || !win.VerifyOnReplay {
+		t.Fatalf("PostgreSQL window: %+v, %v", win, err)
+	}
+	html := admin.must("GET", "/backups/restore", nil, http.StatusOK)
+	if !strings.Contains(html, "verify_on_replay") {
+		t.Fatal("restore wizard hides provisional PostgreSQL PITR")
+	}
+	dumpPage(t, "restore_postgres_pitr.html", html)
+	admin.must("POST", "/api/v1/backup-restores", req, http.StatusAccepted)
+	delete(req, "source")
+	req["backup_id"] = base.ID
+	admin.must("POST", "/api/v1/backup-restores", req, http.StatusAccepted)
 }
 
 func TestRestoreRejectConnectionEngineMismatch(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/txntrace"
 )
 
 // spec: 02 §3 (Writer, DeltaRow), §4 (quy tắc epoch, metadata), §6 (COPY vào bảng tạm rồi MERGE), §8 (PG TOAST)
@@ -358,8 +359,14 @@ func (w *PGWriter) applyTx(ctx context.Context, tx pgx.Tx, batch []*model.Txn, d
 
 	// 3. Commit dữ liệu cùng delta.
 	*committing = true
+	if txntrace.On && len(batch) > 0 {
+		txntrace.Put(txntrace.CommitStart, 0, 0, batch[0].Seq(), 0, 0)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit batch transaction: %w", err)
+	}
+	if txntrace.On && len(batch) > 0 {
+		txntrace.Put(txntrace.CommitEnd, 0, 0, batch[0].Seq(), 0, 0)
 	}
 	return nil
 }

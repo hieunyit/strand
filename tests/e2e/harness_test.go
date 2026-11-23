@@ -28,6 +28,7 @@ import (
 
 	"strand/internal/admin"
 	"strand/internal/checkpoint"
+	"strand/internal/config"
 	"strand/tests/checker"
 )
 
@@ -151,10 +152,12 @@ func startMySQL(t testing.TB, image, alias string, serverID int, nw *testcontain
 		}
 	}
 	c, err := testcontainers.GenericContainer(ctx, gcr)
+	if c != nil {
+		t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+	}
 	if err != nil {
 		t.Fatalf("start %s: %v", image, err)
 	}
-	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	host, _ := c.Host(ctx)
 	port, _ := c.MappedPort(ctx, "3306")
 	n := &mysqlNode{c: c, Alias: alias, Addr: net.JoinHostPort(host, port.Port())}
@@ -254,6 +257,7 @@ type strandCfg struct {
 	SourceIOPS     int
 	BreakerLag     string // governor.breaker.replica_lag.max
 	MetricsAddr    string // observability.metrics, ví dụ 127.0.0.1:19464
+	Batch          *config.BatchConfig
 	Overflow       string // resources.spool.overflow (s3://bucket/prefix)
 	// SourceKind / TargetKind: mysql (mặc định) | postgres. SourceExtra: các khóa thêm trong source
 	// (dạng YAML flow, ví dụ ", slot: s1, publication: p1").
@@ -345,6 +349,10 @@ func (c *strandCfg) write(t testing.TB) string {
 		}
 		return "[" + strings.Join(out, ", ") + "]"
 	}
+	batch := c.Batch
+	if batch == nil {
+		batch = &config.BatchConfig{MaxRows: 2000, MaxBytes: "4MiB", MaxWait: "50ms"}
+	}
 	yaml := fmt.Sprintf(`version: 1
 name: %s
 source: { kind: %s, dsn: %q, server_id: %d, read_from: primary%s }
@@ -353,7 +361,7 @@ target:
   dsn: %q
   write_mode: upsert
   commit_order: %s
-  batch: { max_rows: 2000, max_bytes: 4MiB, max_wait: 50ms }
+  batch: { max_rows: %d, max_bytes: %s, max_wait: %s }
 tables:
   include: %s
   exclude: %s
@@ -366,7 +374,7 @@ resources:
 governor: { algorithm: %s%s, tick: 1s, lag_slo: %s, breaker: { strand_query_p99: { max_ratio: 1000 }, replica_lag: { max: %s } } }
 verify: { delta: %s, post_seed_window: %s }
 observability: { metrics: %q, admin_socket: %q, log: { level: info, format: json } }
-`, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, q(c.Include), q(c.Exclude), c.TablesExtra,
+`, c.Name, c.SourceKind, c.SourceDSN, 40000+rand.Intn(20000), c.SourceExtra, c.TargetKind, c.TargetDSN, c.CommitOrder, batch.MaxRows, batch.MaxBytes, batch.MaxWait, q(c.Include), q(c.Exclude), c.TablesExtra,
 		c.Bootstrap, c.CreateSchema, c.chunkRows(), c.maxParallel(), filepath.Join(c.Dir, "state"), c.Overflow, c.SourceIOPS, c.SourceIOPS*3/2, c.Workers, c.GovernorAlgo, probe, c.LagSLO, c.BreakerLag, c.VerifyDelta, c.PostSeedWindow, c.MetricsAddr, c.socket(t))
 	if c.SchemaOnlineDDL != "" {
 		add := c.SchemaAdditive
@@ -418,8 +426,13 @@ func f11WitnessTest(name string) bool {
 
 func startStrand(t testing.TB, cfgPath string, extra ...string) *strandProc {
 	t.Helper()
+	return startStrandBinary(t, strandBin, cfgPath, extra...)
+}
+
+func startStrandBinary(t testing.TB, binary, cfgPath string, extra ...string) *strandProc {
+	t.Helper()
 	args := append([]string{"sync", "-c", cfgPath}, extra...)
-	cmd := exec.Command(strandBin, args...)
+	cmd := exec.Command(binary, args...)
 	logPath := filepath.Join(filepath.Dir(cfgPath), fmt.Sprintf("strand-%04d.log", runCounter.Add(1)))
 	if os.Getenv("STRAND_E2E_F11_WITNESS") == "1" && f11WitnessTest(t.Name()) {
 		cmd.Env = append(os.Environ(), "STRAND_TXN_TRACE="+logPath+".txn")

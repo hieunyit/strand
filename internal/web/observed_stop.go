@@ -107,7 +107,7 @@ func (s *Server) observeStop(p *Pipeline, rt Runtime) bool {
 		return false // the web's own stop
 	}
 	ctx, cancel := dbCtx()
-	changed, err := s.db.st.ObserveStop(ctx, p.Name)
+	changed, err := s.db.st.ObserveStop(ctx, p.Name, at)
 	cancel()
 	if err != nil {
 		s.log.Warn("record observed stop failed", "pipeline", p.Name, "err", err)

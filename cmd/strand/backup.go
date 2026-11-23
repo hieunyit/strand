@@ -1121,7 +1121,7 @@ func newBackupFetchCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fetchErr = fetchVerified(ctx, obj, rec.ObjectKey, rec.Bytes, rec.SHA256, outPath)
+				fetchErr = fetchVerified(ctx, obj, rec, outPath)
 				if fetchErr == nil && withManifest {
 					fetchErr = fetchManifest(ctx, obj, rec, outPath+".manifest.json")
 				}
@@ -1150,8 +1150,8 @@ func newBackupFetchCmd() *cobra.Command {
 	return cmd
 }
 
-func fetchVerified(ctx context.Context, obj *objectstore.S3, key string, size int64, sha string, outPath string) error {
-	body, _, err := obj.DownloadVerified(ctx, key, size, sha)
+func fetchVerified(ctx context.Context, obj *objectstore.S3, rec backup.Record, outPath string) error {
+	body, _, err := obj.DownloadVerifiedVersion(ctx, rec.ObjectKey, rec.VersionID, rec.Bytes, rec.SHA256)
 	if err != nil {
 		return verifyErr(fmt.Errorf("download backup artifact: %w", err))
 	}
@@ -1197,7 +1197,7 @@ func fetchManifest(ctx context.Context, obj *objectstore.S3, rec backup.Record, 
 	if !strings.HasPrefix(rec.ManifestURI, prefix) {
 		return fmt.Errorf("manifest %s is not in bucket %s", rec.ManifestURI, rec.Bucket)
 	}
-	body, _, err := obj.Download(ctx, strings.TrimPrefix(rec.ManifestURI, prefix))
+	body, _, err := obj.DownloadVersion(ctx, strings.TrimPrefix(rec.ManifestURI, prefix), rec.Details["manifest_version"])
 	if err != nil {
 		return fmt.Errorf("download manifest sidecar: %w", err)
 	}

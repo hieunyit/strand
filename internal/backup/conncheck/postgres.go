@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"time"
 
@@ -19,26 +18,18 @@ func checkPostgres(ctx context.Context, t Target, res *Result) {
 		port = 5432
 	}
 	q := url.Values{"connect_timeout": {"8"}}
-	switch t.TLSMode {
-	case "":
-		q.Set("sslmode", "prefer")
-	default:
-		q.Set("sslmode", t.TLSMode)
+	tlsConfig, err := t.tlsSpec().TLSConfig()
+	if err != nil {
+		res.fail("tls", err)
+		return
 	}
-	if t.CACertPEM != "" {
-		f, err := os.CreateTemp("", "strand-ca-*.pem")
-		if err != nil {
-			res.fail("tls", err)
-			return
-		}
-		defer os.Remove(f.Name())
-		_, werr := f.WriteString(t.CACertPEM)
-		if cerr := f.Close(); werr != nil || cerr != nil {
-			res.fail("tls", fmt.Errorf("write CA certificate"))
-			return
-		}
-		q.Set("sslrootcert", f.Name())
+	mode := "prefer"
+	if tlsConfig != nil {
+		mode = "require"
+	} else if t.TLSMode == "disable" {
+		mode = "disable"
 	}
+	q.Set("sslmode", mode)
 	u := url.URL{Scheme: "postgres", User: url.UserPassword(t.User, t.Password), Host: hostPort(Target{Host: t.Host, Port: port, Engine: t.Engine}),
 		Path: "/postgres", RawQuery: q.Encode()}
 	cfg, err := pgx.ParseConfig(u.String())
@@ -46,8 +37,9 @@ func checkPostgres(ctx context.Context, t Target, res *Result) {
 		res.fail("connect", fmt.Errorf("invalid connection settings"))
 		return
 	}
-	if cfg.TLSConfig != nil && t.TLSServerName != "" {
-		cfg.TLSConfig.ServerName = t.TLSServerName
+	if tlsConfig != nil {
+		cfg.TLSConfig = tlsConfig
+		cfg.Fallbacks = nil
 	}
 	start := time.Now()
 	conn, err := pgx.ConnectConfig(ctx, cfg)

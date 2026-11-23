@@ -19,7 +19,7 @@ type PruneResult struct {
 
 // PruneJob applies the job's retention policy to every backup of the job (including its log segments).
 func (e *Env) PruneJob(ctx context.Context, job backup.Job, dryRun bool) (PruneResult, error) {
-	rs, err := e.Catalog.ListAll(ctx, backup.Filter{JobID: job.ID, Status: backup.StatusComplete}, 0)
+	rs, err := e.pruneRecords(ctx, backup.Filter{JobID: job.ID}, dryRun)
 	if err != nil {
 		return PruneResult{}, err
 	}
@@ -28,7 +28,7 @@ func (e *Env) PruneJob(ctx context.Context, job backup.Job, dryRun bool) (PruneR
 
 // PruneRepository applies a repository's default policy to its backups that belong to no job, per source.
 func (e *Env) PruneRepository(ctx context.Context, repo backup.Repo, dryRun bool) ([]PruneResult, error) {
-	rs, err := e.Catalog.ListAll(ctx, backup.Filter{Repository: repo.ID, Status: backup.StatusComplete}, 0)
+	rs, err := e.pruneRecords(ctx, backup.Filter{Repository: repo.ID}, dryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -51,14 +51,35 @@ func (e *Env) PruneRepository(ctx context.Context, repo backup.Repo, dryRun bool
 	return out, nil
 }
 
+func (e *Env) pruneRecords(ctx context.Context, filter backup.Filter, dryRun bool) ([]backup.Record, error) {
+	filter.Status = backup.StatusComplete
+	records, err := e.Catalog.ListAll(ctx, filter, 0)
+	if err != nil || dryRun {
+		return records, err
+	}
+	filter.Status = backup.StatusDeleting
+	pending, err := e.Catalog.ListAll(ctx, filter, 0)
+	return append(records, pending...), err
+}
+
 func (e *Env) prune(ctx context.Context, group string, rs []backup.Record, p backup.RetentionPolicy, dryRun bool) PruneResult {
-	res := PruneResult{Group: group, DryRun: dryRun, Decisions: backup.PlanRetention(rs, p, e.now()), Expired: []string{}}
+	var complete []backup.Record
+	byID := map[string]backup.Record{}
+	res := PruneResult{Group: group, DryRun: dryRun, Expired: []string{}}
+	for _, r := range rs {
+		byID[r.ID] = r
+		if r.Status == backup.StatusComplete {
+			complete = append(complete, r)
+		}
+	}
+	res.Decisions = backup.PlanRetention(complete, p, e.now())
 	if dryRun {
 		return res
 	}
-	byID := map[string]backup.Record{}
-	for _, r := range rs {
-		byID[r.ID] = r
+	for _, r := range byID {
+		if r.Status == backup.StatusDeleting {
+			res.Decisions = append(res.Decisions, backup.Decision{ID: r.ID, Reasons: []string{"resume retention deletion"}})
+		}
 	}
 	for _, d := range res.Decisions {
 		if d.Keep {
@@ -73,24 +94,22 @@ func (e *Env) prune(ctx context.Context, group string, rs []backup.Record, p bac
 	return res
 }
 
-// expire deletes a backup's objects, then marks it expired. Objects go first: a crash in between leaves
-// a "complete" record whose objects are missing, which verification reports and the next prune retries;
-// the opposite order could leak objects forever.
+// expire claims a backup before touching storage. A subsequent prune resumes
+// the claim if deletion or expiration was interrupted.
 func (e *Env) expire(ctx context.Context, r backup.Record, reason string) (err error) {
 	defer func() {
 		err = e.audit(context.WithoutCancel(ctx), "backup.expire", err, map[string]any{"backup_id": r.ID, "source": r.Source,
 			"object": "s3://" + r.Bucket + "/" + r.ObjectKey, "reason": reason})
 	}()
-	if r.LegalHold {
-		return fmt.Errorf("legal hold")
-	}
-	if r.RetainUntil != nil && r.RetainUntil.After(e.now()) {
-		return fmt.Errorf("object-locked until %s", r.RetainUntil.UTC())
-	}
 	repo, err := e.OpenRecordRepository(ctx, r)
 	if err != nil {
 		return err
 	}
+	claimed, ok, err := e.Catalog.ClaimDeletion(ctx, r.ID, e.now())
+	if err != nil || !ok {
+		return err
+	}
+	r = claimed
 	if err := repo.Delete(ctx, r.ObjectKey, r.VersionID); err != nil {
 		return fmt.Errorf("delete payload: %w", err)
 	}

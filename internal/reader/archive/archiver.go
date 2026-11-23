@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -75,11 +76,12 @@ type archiveState struct {
 
 // Archiver ghi binlog liên tục vào Dir.
 type Archiver struct {
-	cfg      ArchiverConfig
-	log      *slog.Logger
-	executed *gomysql.MysqlGTIDSet // GTID của mọi file đã chốt (và StartGTID)
-	nextSeq  int
-	lock     *os.File
+	cfg             ArchiverConfig
+	log             *slog.Logger
+	executed        *gomysql.MysqlGTIDSet // GTID của mọi file đã chốt (và StartGTID)
+	durableExecuted atomic.Value          // string, published after the archive state is synced
+	nextSeq         int
+	lock            *os.File
 
 	// file đang ghi
 	curName  string // tên file kế tiếp trên server (từ ROTATE)
@@ -125,7 +127,10 @@ func OpenArchiver(cfg ArchiverConfig) (*Archiver, error) {
 }
 
 // Executed trả tập GTID đã chốt trong archive.
-func (a *Archiver) Executed() string { return a.executed.String() }
+func (a *Archiver) Executed() string {
+	last, _ := a.durableExecuted.Load().(string)
+	return last
+}
 
 // Close bỏ file đang ghi dở (sẽ được stream lại) và nhả khóa.
 func (a *Archiver) Close() error {
@@ -204,7 +209,8 @@ func (a *Archiver) recover() error {
 }
 
 func (a *Archiver) saveState(lastSeq int) error {
-	b, err := json.Marshal(archiveState{Version: 1, Executed: a.executed.String(), LastSeq: lastSeq})
+	executed := a.executed.String()
+	b, err := json.Marshal(archiveState{Version: 1, Executed: executed, LastSeq: lastSeq})
 	if err != nil {
 		return err
 	}
@@ -215,7 +221,11 @@ func (a *Archiver) saveState(lastSeq int) error {
 	if err := os.Rename(tmp, filepath.Join(a.cfg.Dir, stateFile)); err != nil {
 		return err
 	}
-	return syncDir(a.cfg.Dir)
+	if err := syncDir(a.cfg.Dir); err != nil {
+		return err
+	}
+	a.durableExecuted.Store(executed)
+	return nil
 }
 
 // Run stream binlog từ tập đã chốt tới khi ctx bị hủy (trả nil) hoặc gặp lỗi không thể tự hồi phục.

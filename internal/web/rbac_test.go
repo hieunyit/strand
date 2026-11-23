@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -188,6 +190,12 @@ func TestSensitiveReadsRBAC(t *testing.T) {
 			if respA.StatusCode != tc.wantAdmin {
 				t.Errorf("Admin GET %s status = %d, want %d", tc.path, respA.StatusCode, tc.wantAdmin)
 			}
+			for role, want := range map[store.Role]int{store.RoleViewer: tc.wantViewer, store.RoleOperator: tc.wantOper, store.RoleAdmin: tc.wantAdmin} {
+				resp, _ := e.do(users[role].client, "HEAD", tc.path, "", nil)
+				if resp.StatusCode != want {
+					t.Errorf("%s HEAD %s = %d, want %d", role, tc.path, resp.StatusCode, want)
+				}
+			}
 		})
 	}
 }
@@ -360,5 +368,45 @@ func TestSensitiveConfigMaskedEvenForAdmin(t *testing.T) {
 	}
 	if !strings.Contains(body, "********") && !strings.Contains(body, "[masked") {
 		t.Errorf("Config does not contain masked indication: %s", body)
+	}
+}
+
+type brokenSessionUsers struct{ store.Store }
+
+func (brokenSessionUsers) GetUserByID(context.Context, int64) (store.User, bool, error) {
+	return store.User{}, false, errors.New("user lookup unavailable")
+}
+
+func TestSessionUserMustBeVerified(t *testing.T) {
+	for _, name := range []string{"lookup error", "disabled", "missing", "unbound legacy"} {
+		t.Run(name, func(t *testing.T) {
+			sessions := memSessionStore(nil)
+			st := sessions.db.st
+			ctx := context.Background()
+			u, err := st.CreateUser(ctx, store.User{Username: "viewer", Role: store.RoleViewer, Disabled: name == "disabled"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := u.ID
+			switch name {
+			case "lookup error":
+				sessions.db.st = brokenSessionUsers{st}
+			case "missing":
+				id++
+			case "unbound legacy":
+				id = 0
+			}
+			token, _ := sessions.CreateUserSession("127.0.0.1", id, "viewer", store.RoleViewer)
+			srv := &Server{sessions: sessions}
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+			req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+			out := httptest.NewRecorder()
+			srv.auth(true, func(http.ResponseWriter, *http.Request, *Session) {
+				t.Fatal("an unverified session reached the admin handler")
+			}).ServeHTTP(out, req)
+			if out.Code != http.StatusUnauthorized {
+				t.Fatalf("unverified session returned %d", out.Code)
+			}
+		})
 	}
 }

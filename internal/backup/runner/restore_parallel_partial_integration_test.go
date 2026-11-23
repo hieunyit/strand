@@ -18,6 +18,7 @@ import (
 
 	"strand/internal/backup"
 	"strand/internal/objectstore"
+	"strand/internal/testutil"
 	"strand/internal/web/store"
 )
 
@@ -40,8 +41,8 @@ func startRPPContainer(t *testing.T, name, dir string, args ...string) string {
 func startRPPMinIO(t *testing.T, dir string, buckets ...string) map[string]string {
 	port := freePort(t)
 	cPort := freePort(t)
-	startRPPContainer(t, "minio", dir, "-e", "MINIO_ROOT_USER=minioadmin", "-e", "MINIO_ROOT_PASSWORD=minioadmin", "minio:latest",
-		"server", "/data", "--address", fmt.Sprintf("127.0.0.1:%d", port), "--console-address", fmt.Sprintf("127.0.0.1:%d", cPort))
+	startRPPContainer(t, "minio", dir, "-e", "MINIO_ROOT_USER=minioadmin", "-e", "MINIO_ROOT_PASSWORD=minioadmin", "--entrypoint", testutil.MinIOEntrypoint, testutil.PinnedMinIOImage,
+		"server", "/tmp/minio-data", "--address", fmt.Sprintf("127.0.0.1:%d", port), "--console-address", fmt.Sprintf("127.0.0.1:%d", cPort))
 	env := map[string]string{
 		"STRAND_BACKUP_S3_ENDPOINT":             fmt.Sprintf("http://127.0.0.1:%d", port),
 		"STRAND_BACKUP_S3_ACCESS_KEY":           "minioadmin",

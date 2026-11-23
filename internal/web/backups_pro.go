@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strand/internal/web/store"
 	"strconv"
@@ -331,14 +332,17 @@ type RestoreRequest struct {
 	BackupID string `json:"backup_id,omitempty"`
 	Source   string `json:"source,omitempty"`
 	// TargetTime (RFC3339): point-in-time restore; the base backup is chosen automatically.
-	TargetTime   string          `json:"target_time,omitempty"`
-	ConnectionID string          `json:"connection_id,omitempty"`
-	Target       backup.ConnSpec `json:"target"`
-	TargetDB     string          `json:"target_database,omitempty"`
-	TargetDir    string          `json:"target_dir,omitempty"`
-	Threads      int             `json:"threads,omitempty"`
-	Objects      []string        `json:"objects,omitempty"`
-	Confirm      string          `json:"confirm"` // must equal the target database or directory
+	TargetTime       string          `json:"target_time,omitempty"`
+	ConnectionID     string          `json:"connection_id,omitempty"`
+	Target           backup.ConnSpec `json:"target"`
+	TargetDB         string          `json:"target_database,omitempty"`
+	TargetDir        string          `json:"target_dir,omitempty"`
+	TargetDeployment bool            `json:"target_deployment,omitempty"`
+	mongoDestination string
+
+	Threads int      `json:"threads,omitempty"`
+	Objects []string `json:"objects,omitempty"`
+	Confirm string   `json:"confirm"` // must equal the target database or directory
 }
 
 func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Session) {
@@ -354,6 +358,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 	var src string
 	var backupRecord *backup.Record
 	planLogs := false // the restore replays archived logs (point-in-time recovery)
+	var planProblem string
 	if req.BackupID != "" {
 		if s.backups != nil {
 			b, ok, err := s.backups.Get(r.Context(), req.BackupID)
@@ -365,39 +370,57 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 				writeErr(w, http.StatusConflict, catalogMsg(err))
 				return
 			}
+			if err := runner.RequireStandaloneBackup(b); err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			backupRecord = &b
 			backupEngine = b.Engine
 			src = b.Source
 		}
-	} else if req.Source != "" {
+	} else {
 		src = req.Source
-		if s.backups != nil {
-			all, _ := s.backups.ListAll(r.Context(), backup.Filter{Source: req.Source, Status: backup.StatusComplete}, 0)
-			if len(all) > 0 {
-				var at *time.Time
-				if req.TargetTime != "" {
-					if t, err := time.Parse(time.RFC3339, req.TargetTime); err == nil {
-						at = &t
-					}
-				}
-				if plan, err := runner.PlanRestore(all, nil, at); err == nil {
-					planLogs = len(plan.Logs) > 0
-					base := plan.Base()
-					backupRecord = &base
-					backupEngine = base.Engine
-				} else {
-					for _, r := range all {
-						if r.KindOrFull() != backup.KindLog {
-							if at == nil || !r.CreatedAt.After(*at) {
-								rr := r
-								backupRecord = &rr
-								backupEngine = rr.Engine
-								break
-							}
-						}
+	}
+	if req.TargetTime != "" {
+		tt, err := time.Parse(time.RFC3339, req.TargetTime)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "target_time must be RFC3339")
+			return
+		}
+		if src == "" || s.backups == nil {
+			writeErr(w, http.StatusBadRequest, "source could not be resolved for PITR restore")
+			return
+		}
+		records, err := s.backups.ListAll(r.Context(), backup.Filter{Source: src, Status: backup.StatusComplete}, 200000)
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "could not read the backup catalog")
+			return
+		}
+		plan, err := runner.PlanRestore(records, backupRecord, &tt)
+		if err != nil {
+			win := runner.RecoveryWindow(records)
+			switch {
+			case !win.Continuous && !win.VerifyOnReplay:
+				planProblem = fmt.Sprintf("source %s has no continuous PITR window: %v", src, err)
+			case win.Continuous && (tt.Before(*win.Start) || tt.After(*win.End)):
+				planProblem = fmt.Sprintf("target time %s is outside PITR recovery window [%s, %s]",
+					tt.Format(time.RFC3339), win.Start.Format(time.RFC3339), win.End.Format(time.RFC3339))
+			default:
+				planProblem = err.Error()
+			}
+			// Preserve engine-specific diagnostics for a request that also
+			// uses unsupported options. An invalid plan cannot start a job.
+			if backupRecord == nil {
+				for _, record := range records {
+					if record.KindOrFull() != backup.KindLog && !runner.ConsistentTime(record).After(tt) {
+						backupRecord, backupEngine = &record, record.Engine
+						break
 					}
 				}
 			}
+		} else {
+			base := plan.Base()
+			backupRecord, backupEngine, planLogs = &base, base.Engine, len(plan.Logs) > 0
 		}
 	}
 
@@ -426,8 +449,16 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 				return
 			}
 		case backup.MethodMongodump:
-			if len(req.Objects) > 0 && (backupRecord.Details == nil || backupRecord.Details["databases"] == "") {
+			if req.TargetTime != "" && backupRecord.Details["oplog_boundary"] != "embedded-v1" {
+				writeErr(w, http.StatusBadRequest, "MongoDB point-in-time restore requires a verified oplog boundary in the base backup")
+				return
+			}
+			if len(req.Objects) > 0 && backupRecord.Details["databases"] == "" {
 				writeErr(w, http.StatusBadRequest, "partial restore is not available for whole-deployment MongoDB backups")
+				return
+			}
+			if req.TargetDir != "" || (backupRecord.Details["databases"] == "") != req.TargetDeployment {
+				writeErr(w, http.StatusBadRequest, "MongoDB restore must match the backup scope: a new database or an explicit empty deployment")
 				return
 			}
 		case backup.MethodPGDump:
@@ -442,6 +473,10 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 				return
 			}
 		}
+	}
+	if planProblem != "" {
+		writeErr(w, http.StatusBadRequest, planProblem)
+		return
 	}
 	if req.TargetDir != "" {
 		if req.Threads > 0 {
@@ -495,10 +530,15 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		writeErr(w, http.StatusBadRequest, "choose the target connection (connection_id): a restore into a database uses a saved connection")
 		return
 	}
+	if req.TargetDeployment && backupEngine != backup.EngineMongoDB {
+		writeErr(w, http.StatusBadRequest, "a deployment target is only valid for MongoDB backups")
+		return
+	}
+	var restoreURI string
 	var extraEnv []string
 	var tunnelArgs []string
 	if req.ConnectionID != "" && s.db != nil && s.db.st != nil {
-		if req.Target.Host != "" || req.Target.Port != 0 || req.Target.User != "" || req.Target.PasswordEnv != "" || req.Target.URIEnv != "" {
+		if req.Target.Host != "" || req.Target.Port != 0 || req.Target.User != "" || req.Target.PasswordEnv != "" || req.Target.URIEnv != "" || req.Target.TLSMode != "" || req.Target.CACertPEM != "" {
 			writeErr(w, http.StatusBadRequest, "target fields are taken from the saved connection")
 			return
 		}
@@ -514,6 +554,14 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		req.Target.Host = conn.Host
 		req.Target.Port = conn.Port
 		req.Target.User = conn.User
+		if conn.TLSMode != "" {
+			tunnelArgs = append(tunnelArgs, "--target-tls-mode", conn.TLSMode)
+		}
+		if conn.CACertPEM != "" {
+			const name = "STRAND_RESTORE_TARGET_CA"
+			extraEnv = append(extraEnv, name+"="+conn.CACertPEM)
+			tunnelArgs = append(tunnelArgs, "--target-ca-env", name)
+		}
 		if conn.SSHTunnel != nil && (conn.URISet || conn.URIEnv != "") {
 			writeErr(w, http.StatusBadRequest, "ssh_tunnel cannot be used with a connection URI; use host/port/user")
 			return
@@ -546,6 +594,7 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 				extraEnv = append(extraEnv, envName+"="+pw, "MYSQL_PWD="+pw, "PGPASSWORD="+pw)
 			}
 			if uri != "" {
+				restoreURI = uri
 				envName := "STRAND_RESTORE_TARGET_URI"
 				req.Target.URIEnv = envName
 				extraEnv = append(extraEnv, envName+"="+uri)
@@ -553,28 +602,20 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 		} else if conn.SecretMode == backup.SecretEnv {
 			req.Target.PasswordEnv = conn.PasswordEnv
 			req.Target.URIEnv = conn.URIEnv
+			if conn.URIEnv != "" {
+				restoreURI = os.Getenv(conn.URIEnv)
+			}
 		}
-	}
-
-	if req.TargetTime != "" {
-		tt, err := time.Parse(time.RFC3339, req.TargetTime)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "target_time must be RFC3339")
-			return
-		}
-		if src == "" {
-			writeErr(w, http.StatusBadRequest, "source could not be resolved for PITR restore")
-			return
-		}
-		win, err := s.recoveryWindow(r.Context(), src)
-		if err != nil || !win.Continuous || win.Start == nil || win.End == nil {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf("source %s has no continuous PITR window", src))
-			return
-		}
-		if tt.Before(*win.Start) || tt.After(*win.End) {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf("target time %s is outside PITR recovery window [%s, %s]",
-				tt.Format(time.RFC3339), win.Start.Format(time.RFC3339), win.End.Format(time.RFC3339)))
-			return
+		if backupEngine == backup.EngineMongoDB {
+			if restoreURI == "" && req.Target.URIEnv == "" {
+				restoreURI, err = runner.MongoURI(os.Getenv, req.Target)
+			}
+			var destinationErr error
+			req.mongoDestination, destinationErr = runner.MongoRestoreDestination(restoreURI, req.TargetDB)
+			if err != nil || destinationErr != nil {
+				writeErr(w, http.StatusBadRequest, "invalid MongoDB restore endpoint or namespace")
+				return
+			}
 		}
 	}
 
@@ -596,14 +637,15 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 	}
 	args = append(args, tunnelArgs...)
 	auditDetail := map[string]any{
-		"backup_id":       req.BackupID,
-		"source":          req.Source,
-		"target_time":     req.TargetTime,
-		"target_host":     req.Target.Host,
-		"target_database": req.TargetDB,
-		"target_dir":      req.TargetDir,
-		"threads":         req.Threads,
-		"object_count":    len(req.Objects),
+		"backup_id":         req.BackupID,
+		"source":            req.Source,
+		"target_time":       req.TargetTime,
+		"target_host":       req.Target.Host,
+		"target_database":   req.TargetDB,
+		"target_dir":        req.TargetDir,
+		"target_deployment": req.TargetDeployment,
+		"threads":           req.Threads,
+		"object_count":      len(req.Objects),
 	}
 	if len(req.Objects) > 0 && len(req.Objects) <= 20 {
 		auditDetail["objects"] = req.Objects
@@ -631,11 +673,19 @@ func restoreArgs(req RestoreRequest) ([]string, error) {
 			return nil, errors.New("target_time must be RFC3339")
 		}
 	}
-	if (req.TargetDB == "") == (req.TargetDir == "") {
-		return nil, errors.New("give exactly one of target_database (logical restore) and target_dir (physical restore)")
+	if req.TargetDeployment {
+		if req.TargetDB != "" || req.TargetDir != "" || req.mongoDestination == "" {
+			return nil, errors.New("a MongoDB deployment target cannot be combined with a database or directory")
+		}
+	} else if (req.TargetDB == "") == (req.TargetDir == "") {
+		return nil, errors.New("select one target database, directory, or MongoDB deployment")
 	}
-	if want := req.TargetDB + req.TargetDir; req.Confirm != want {
-		return nil, errors.New("type the target database or directory to confirm the restore")
+	want := req.TargetDB + req.TargetDir
+	if req.mongoDestination != "" {
+		want = req.mongoDestination
+	}
+	if req.Confirm != want {
+		return nil, errors.New("type the target name to confirm the restore")
 	}
 	if err := runner.ValidateRestoreThreads(req.Threads); err != nil {
 		return nil, err
@@ -672,15 +722,26 @@ func restoreArgs(req RestoreRequest) ([]string, error) {
 	if req.TargetDir != "" {
 		args = append(args, "--target-dir", req.TargetDir)
 	} else {
-		probe := backup.Job{ID: "probe", Name: "probe", EverySeconds: 3600, Bucket: "probe-bucket",
-			JobOptions: backup.JobOptions{Method: backup.MethodPGDump, Source: "probe", Conn: req.Target}}
-		probe.Conn.Databases = []string{req.TargetDB}
-		if err := backup.ValidateJob(probe); err != nil && !strings.Contains(err.Error(), "host") {
-			return nil, fmt.Errorf("target: %v", err)
-		} else if err != nil {
-			return nil, errors.New("target host is required")
+		if req.mongoDestination == "" {
+			probe := backup.Job{ID: "probe", Name: "probe", EverySeconds: 3600, Bucket: "probe-bucket",
+				JobOptions: backup.JobOptions{Method: backup.MethodPGDump, Source: "probe", Conn: req.Target}}
+			probe.Conn.Databases = []string{req.TargetDB}
+			if err := backup.ValidateJob(probe); err != nil && !strings.Contains(err.Error(), "host") {
+				return nil, fmt.Errorf("target: %v", err)
+			} else if err != nil {
+				return nil, errors.New("target host is required")
+			}
+		} else {
+			args = append(args, "--confirm-target", req.mongoDestination)
 		}
-		args = append(args, "--target-host", req.Target.Host, "--target-database", req.TargetDB)
+		if req.Target.Host != "" {
+			args = append(args, "--target-host", req.Target.Host)
+		}
+		if req.TargetDeployment {
+			args = append(args, "--target-deployment")
+		} else {
+			args = append(args, "--target-database", req.TargetDB)
+		}
 		if req.Target.Port > 0 {
 			args = append(args, "--target-port", strconv.Itoa(req.Target.Port))
 		}

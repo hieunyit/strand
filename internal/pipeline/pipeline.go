@@ -46,6 +46,7 @@ import (
 	"strand/internal/seed"
 	"strand/internal/snapshot"
 	"strand/internal/spool"
+	"strand/internal/validate"
 	"strand/internal/writer"
 )
 
@@ -141,6 +142,7 @@ type Pipeline struct {
 	// srcAhead: lần thăm dò đầu source gần nhất (monitor, ≤ 1 lần/giây) thấy source có thay đổi mà reader
 	// chưa đọc tới. Lỗi/không biết → false (lagSeconds lùi về cách tính theo hàng đợi nội bộ).
 	srcAhead   atomic.Bool
+	sourceHead atomic.Uint32
 	paused     atomic.Bool
 	pauseMu    sync.Mutex
 	pauseCond  *sync.Cond
@@ -421,13 +423,36 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	} else {
 		p.store = checkpoint.NewMySQLStore(p.dst, p.id, model.EngineMySQL)
 	}
-	if err := p.store.EnsureTables(ctx); err != nil {
-		return fmt.Errorf("ensure metadata tables: %w", err)
-	}
 	if p.release, err = p.store.Lock(ctx, p.id); err != nil {
 		return err
 	}
 	defer func() { _ = p.release() }()
+	// --- Metadata source ---
+	// State cục bộ mở trước khi đọc metadata: các bảng thêm qua `snapshot add` phải vào bộ lọc trước loadTables.
+	if p.state, err = openLocalState(p.cfg.Resources.Spool.Path, p.id); err != nil {
+		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
+	}
+	p.state.targetOf = func(name string) string {
+		sc, t, _ := strings.Cut(name, ".")
+		return p.filter.Target(model.TableID{Schema: sc, Table: t}).String()
+	}
+	addedTables := p.state.AddedTables()
+	excludedAddedTables := mergeAddedTables(p.filter, addedTables)
+	if p.tables, err = p.loadTables(ctx, p.filter); err != nil {
+		return fmt.Errorf("load source schema: %w", err)
+	}
+	if p.srcEngine == p.dstEngine {
+		tables := make([]model.TableID, 0, len(p.tables))
+		for id := range p.tables {
+			tables = append(tables, id)
+		}
+		if err := validate.CheckTableOverlap(ctx, p.src, p.dst, p.srcEngine, tables, p.filter.Target); err != nil {
+			return err
+		}
+	}
+	if err := p.store.EnsureTables(ctx); err != nil {
+		return fmt.Errorf("ensure metadata tables: %w", err)
+	}
 	// Đã giữ khóa pipeline: mọi instance khác cùng pipeline_id là instance cũ. Ngắt kết nối
 	// target của chúng TRƯỚC khi tăng epoch, vì transaction dở của chúng giữ row lock trên
 	// chính row delta mà bước tăng epoch phải cập nhật.
@@ -441,24 +466,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	ctx = checkpoint.WithFence(ctx, checkpoint.Fence{PipelineID: p.id, Epoch: p.epoch})
 	p.runCtx = ctx
 
-	// --- Metadata source ---
-	// State cục bộ mở trước khi đọc metadata: các bảng thêm qua `snapshot add` phải vào bộ lọc trước loadTables.
-	if p.state, err = openLocalState(p.cfg.Resources.Spool.Path, p.id); err != nil {
-		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, err.Error(), err)
-	}
-	p.state.targetOf = func(name string) string {
-		sc, t, _ := strings.Cut(name, ".")
-		return p.filter.Target(model.TableID{Schema: sc, Table: t}).String()
-	}
-	addedTables := p.state.AddedTables()
-	for _, name := range mergeAddedTables(p.filter, addedTables) {
+	for _, name := range excludedAddedTables {
 		p.log.Warn("table added by `snapshot add` is excluded by tables.exclude (or its name is invalid): exclude wins, dropping it from the pipeline", "table", name)
 		if err := p.state.DropAddedTable(name); err != nil {
 			return err
 		}
-	}
-	if p.tables, err = p.loadTables(ctx, p.filter); err != nil {
-		return fmt.Errorf("load source schema: %w", err)
 	}
 	for _, name := range addedTables {
 		sc, t, _ := strings.Cut(name, ".")
@@ -983,6 +995,14 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			p.worker(wctx, i+1, w)
 		}(i, w)
 	}
+	// Enable both consumers before the router can process its first transaction.
+	postSeedPending := p.state.VerifyPending()
+	if postSeedPending {
+		p.touched.enable(touchPostSeed, true)
+	}
+	if strings.EqualFold(p.cfg.Verify.Delta, "on") {
+		p.touched.enable(touchDelta, true)
+	}
 	routerDone := make(chan struct{})
 	go func() {
 		defer close(routerDone)
@@ -994,9 +1014,6 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	go func() { defer bgWG.Done(); p.progressLoop(ctx) }()
 	go func() { defer bgWG.Done(); p.monitor(ctx) }()
 	go func() { defer bgWG.Done(); p.watchCompactor(ctx) }()
-	if strings.EqualFold(p.cfg.Verify.Delta, "on") {
-		p.touched.enable(touchDelta, true)
-	}
 	if p.pgReader != nil {
 		bgWG.Add(2)
 		go func() { defer bgWG.Done(); p.pgConfirmLoop(ctx) }()
@@ -1012,7 +1029,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		go func() { defer bgWG.Done(); p.runSnapshots(ctx, pending) }()
 	}
 	// Sau bootstrap.Store: postSeedVerify chờ snapshot logic xong (seed PG một phần) trước khi verify.
-	if p.state.VerifyPending() {
+	if postSeedPending {
 		p.verifying.Store(true)
 		bgWG.Add(1)
 		go func() { defer bgWG.Done(); p.postSeedVerify(ctx) }()
@@ -1266,6 +1283,17 @@ func (p *Pipeline) table(id model.TableID) *tableMeta {
 }
 
 func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
+	// Routing consumes runtime input even when its checkpoint is already applied.
+	// A decoded prefetch sidecar remains owned by its durable spool.
+	var ownedInput string
+	if t.SpillOwned && t.SpillPath != "" {
+		ownedInput = t.SpillPath
+		defer func() {
+			if ownedInput != "" {
+				_ = os.Remove(ownedInput)
+			}
+		}()
+	}
 	pos := t.SourcePos
 	if p.posMode {
 		if _, _, err := p.checkBinlogTxn(t); err != nil {
@@ -1375,7 +1403,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			keyCodec = meta.PKCodec
 		}
 		for _, part := range parts {
-			if meta == nil || !meta.Keyless { // bảng keyless không verify theo khóa
+			if meta != nil && meta.Keyless {
+				p.touched.addKeyless(rc.Table)
+			} else {
 				p.touched.addKey(rc.Table, part.Key, keyCodec)
 				if len(part.OldKey) > 0 {
 					p.touched.addKey(rc.Table, part.OldKey, keyCodec)
@@ -1442,8 +1472,9 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
-		if t.SpillOwned {
-			_ = os.Remove(t.SpillPath)
+		// Release the input before potentially blocking on admission of the output.
+		if ownedInput != "" && os.Remove(ownedInput) == nil {
+			ownedInput = ""
 		}
 		if err != nil {
 			_ = os.Remove(f.Name())
@@ -1671,7 +1702,13 @@ func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 		if first == nil {
 			return
 		}
+		if txntrace.On {
+			txntrace.Put(txntrace.GatherStart, 0, 0, first.Seq(), 0, 0)
+		}
 		batch, rows, next := gatherBatch(ctx, first, p.readyCh, lim)
+		if txntrace.On {
+			txntrace.Put(txntrace.GatherEnd, 0, 0, first.Seq(), int64(len(batch)), 0)
+		}
 		stash = next
 		if p.strict {
 			b := batch
@@ -2419,10 +2456,24 @@ func (p *Pipeline) lagSeconds() float64 {
 	return time.Since(time.Unix(ts, 0)).Seconds()
 }
 
+const (
+	sourceHeadUnknown uint32 = iota
+	sourceHeadCaughtUp
+	sourceHeadAhead
+)
+
 // pollSourceAhead cập nhật srcAhead từ đầu source (cùng phép so với caughtUpWithSource). Chỉ gọi từ monitor.
 func (p *Pipeline) pollSourceAhead(ctx context.Context) {
 	caught, known := p.sourceHeadState(ctx)
 	p.srcAhead.Store(known && !caught)
+	switch {
+	case !known:
+		p.sourceHead.Store(sourceHeadUnknown)
+	case caught:
+		p.sourceHead.Store(sourceHeadCaughtUp)
+	default:
+		p.sourceHead.Store(sourceHeadAhead)
+	}
 }
 
 func (p *Pipeline) monitor(ctx context.Context) {
@@ -2443,6 +2494,7 @@ func (p *Pipeline) monitor(ctx context.Context) {
 		if phase != "bootstrap" {
 			p.pollSourceAhead(ctx)
 		} else {
+			p.sourceHead.Store(sourceHeadUnknown)
 			p.srcAhead.Store(false) // bootstrap có cách tính lag riêng bên dưới
 		}
 		lag := p.lagSeconds()
@@ -2499,6 +2551,7 @@ func parseBytes(s string) float64 {
 // updateMetrics cập nhật các gauge theo 02 §11 mà không có nơi phát sinh tự nhiên.
 func (p *Pipeline) updateMetrics() {
 	m := p.metrics
+	m.SchedulerPendingBytes.WithLabelValues(p.id).Set(float64(p.sched.PendingBytes()))
 	p.tablesMu.RLock()
 	for id := range p.tables {
 		t := p.filter.Target(id).String()

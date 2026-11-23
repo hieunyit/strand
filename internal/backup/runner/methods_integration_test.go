@@ -184,7 +184,9 @@ func TestBuiltinMethodsMySQLAndPostgres(t *testing.T) {
 	pgJob := backup.Job{ID: "bjob-pgd", Name: "pgdump", EverySeconds: 3600, Bucket: "central-backups",
 		JobOptions: backup.JobOptions{Method: backup.MethodPGDump, Source: "pg-prod", Compress: true,
 			Conn: backup.ConnSpec{Host: "127.0.0.1", Port: pg.Port, User: "postgres", PasswordEnv: "PG_BACKUP_PW", Databases: []string{"app"}}}}
+	plainStarted := time.Now()
 	prec, err := e.RunJob(ctx, pgJob)
+	plainElapsed := time.Since(plainStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,6 +205,47 @@ func TestBuiltinMethodsMySQLAndPostgres(t *testing.T) {
 	restored := waitSQL(t, "pgx", fmt.Sprintf("postgres://postgres:pgpw@127.0.0.1:%d/app_restored?sslmode=disable", pg.Port))
 	if err := restored.QueryRow("SELECT count(*) FROM items").Scan(&n); err != nil || n != 5000 {
 		t.Fatalf("pg restored %d %v", n, err)
+	}
+	// Restore matching plaintext and encrypted logical backups after rotating the
+	// writer key. Historical encrypted objects must still use the key in their catalog entry.
+	encryptedJob := pgJob
+	encryptedJob.ID, encryptedJob.Encrypt = "bjob-pgd-encrypted", true
+	encryptedStarted := time.Now()
+	encrypted, err := e.RunJob(ctx, encryptedJob)
+	encryptedElapsed := time.Since(encryptedStarted)
+	if err != nil || encrypted.KeyID != "k2026" || encrypted.Compression != prec.Compression {
+		t.Fatalf("encrypted counterpart: %+v %v", encrypted, err)
+	}
+	rotatedVars := make(map[string]string, len(vars))
+	for name, value := range vars {
+		rotatedVars[name] = value
+	}
+	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32))
+	rotatedVars[backup.EnvEncryptionKeys] = "k2027:" + newKey + ",k2026:" + key
+	rotated := testEnv(t, rotatedVars, st)
+	current, err := rotated.RunJob(ctx, encryptedJob)
+	if err != nil || current.KeyID != "k2027" {
+		t.Fatalf("backup after rotation: %+v %v", current, err)
+	}
+	for _, tc := range []struct {
+		record        backup.Record
+		db            string
+		backupElapsed time.Duration
+	}{{prec, "restore_plain", plainElapsed}, {encrypted, "restore_old_key", encryptedElapsed}} {
+		restore, err := PlanRestore([]backup.Record{tc.record}, &tc.record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		if err := rotated.Restore(ctx, restore, RestoreTarget{Conn: pgJob.Conn, Database: tc.db}); err != nil {
+			t.Fatalf("restore %s with rotated keyring: %v", tc.db, err)
+		}
+		t.Logf("PostgreSQL logical backup key_id=%q stored_bytes=%d plain_bytes=%d backup=%s restore=%s",
+			tc.record.KeyID, tc.record.Bytes, tc.record.PlainBytes, tc.backupElapsed, time.Since(started))
+		db := waitSQL(t, "pgx", fmt.Sprintf("postgres://postgres:pgpw@127.0.0.1:%d/%s?sslmode=disable", pg.Port, tc.db))
+		if err := db.QueryRow("SELECT count(*) FROM items WHERE payload = repeat('x', 100) || id").Scan(&n); err != nil || n != 5000 {
+			t.Fatalf("restored data %s: count %d, %v", tc.db, n, err)
+		}
 	}
 	baseJob := pgJob
 	baseJob.ID, baseJob.Method, baseJob.Conn.Databases, baseJob.Encrypt = "bjob-pgb", backup.MethodPGBaseBackup, nil, true

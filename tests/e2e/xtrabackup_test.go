@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -41,10 +41,12 @@ func startMySQLWithDatadir(t *testing.T, image, alias string, serverID int, nw *
 		}
 	}
 	c, err := testcontainers.GenericContainer(ctx, gcr)
+	if c != nil {
+		t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+	}
 	if err != nil {
 		t.Fatalf("start %s: %v", image, err)
 	}
-	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	host, _ := c.Host(ctx)
 	port, _ := c.MappedPort(ctx, "3306")
 	n := &mysqlNode{c: c, Alias: alias, Addr: net.JoinHostPort(host, port.Port())}

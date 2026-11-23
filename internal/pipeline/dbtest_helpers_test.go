@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
@@ -43,7 +42,7 @@ func startTestDB(t *testing.T, engine string) (*sql.DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mp, err := c.MappedPort(ctx, nat.Port(port+"/tcp"))
+	mp, err := c.MappedPort(ctx, port+"/tcp")
 	if err != nil {
 		t.Fatal(err)
 	}

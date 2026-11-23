@@ -306,4 +306,115 @@ func TestDumpUIPagesForHarness(t *testing.T) {
 	seedRichBackup(t, e.st, "bkp-dump-1", "shop", "mysql", "mysqldump", backup.KindFull, e.srv.now().UTC().Add(-time.Hour), backup.Position{}, false, nil, "", nil, nil, "", nil)
 	dumpPage(t, "catalog_detail.html", a.must("GET", "/backups/catalog/bkp-dump-1", nil, 200))
 	dumpPage(t, "catalog.html", a.must("GET", "/backups/catalog", nil, 200))
+	dumpPage(t, "restore.html", a.must("GET", "/backups/restore?backup=bkp-dump-1", nil, 200))
+	if os.Getenv("STRAND_DUMP_UI_DIR") != "" {
+		out := decode(t, a.must("POST", "/api/v1/backup-jobs", map[string]any{
+			"name": "schedule-intent", "method": "mysqldump", "repository": "central", "enabled": false,
+			"connection_id": ids["shop-mysql"], "policy_id": "policy-silver", "encryption_mode": "on",
+			"conn":           map[string]any{"databases": []string{"app"}},
+			"schedule":       map[string]any{"kind": "interval", "every_seconds": 91},
+			"window_minutes": 19, "jitter_seconds": 11,
+			"retention": map[string]any{"keep_last": 4, "keep_daily": 12, "max_age_days": 90},
+		}, 201))
+		id := out["job"].(map[string]any)["id"].(string)
+		dumpPage(t, "wizard_schedule_edit.html", a.must("GET", "/backups/jobs/"+id+"/edit", nil, 200))
+	}
+}
+
+func TestJobEncryptionChoicePersistsAcrossPolicyAndJobEdits(t *testing.T) {
+	for _, name := range []string{backup.EnvEncryptionKey, backup.EnvEncryptionKeyFile, backup.EnvEncryptionKeys, backup.EnvEncryptionKeysFile} {
+		t.Setenv(name, "")
+	}
+	e := newCPEnv(t)
+	a := e.admin()
+	id := connID(t, a.must("POST", "/api/v1/backup-connections", storedConn("prod"), 201))
+	body := map[string]any{"name": "explicit-protection", "enabled": false, "method": "mysqldump",
+		"connection_id": id, "policy_id": "policy-gold", "conn": map[string]any{"databases": []string{"app"}},
+		"bucket": "central-backups", "encryption_mode": "on"}
+	reply := decode(t, a.must("POST", "/api/v1/backup-jobs", body, 201))
+	path := "/api/v1/backup-jobs/" + reply["job"].(map[string]any)["id"].(string)
+	check := func(mode string, effective, blocked bool) {
+		t.Helper()
+		j := decode(t, a.must("GET", path, nil, 200))["encryption"].(map[string]any)
+		if j["mode"] != mode || j["effective"] != effective || (j["blocked"] == true) != blocked {
+			t.Fatalf("mode=%s effective=%v blocked=%v, got %v", mode, effective, blocked, j)
+		}
+		if effective && !blocked && j["key_id"] != "pilot-key" {
+			t.Fatalf("key_id = %v, want pilot-key", j["key_id"])
+		}
+	}
+	check("on", true, true)
+	for _, action := range []string{"start", "run"} {
+		if msg := a.must("POST", path+"/"+action, nil, 409); !strings.Contains(msg, "active encryption key") {
+			t.Fatalf("%s returned the wrong conflict: %s", action, msg)
+		}
+	}
+	body["enabled"] = true
+	a.must("POST", "/api/v1/backup-jobs", body, 409)
+	body["enabled"] = false
+	policyPath := "/api/v1/backup-policies/policy-gold"
+	policy := decode(t, a.must("GET", policyPath, nil, 200))["policy"].(map[string]any)
+	policy["encrypt"] = true
+	a.must("PUT", policyPath, policy, 200)
+	a.must("PUT", path, body, 200)
+	check("on", true, true)
+	delete(body, "encryption_mode")
+	body["name"] = "updated-draft"
+	body["schedule"] = map[string]any{"kind": "interval", "every_seconds": 1800}
+	body["retention"] = map[string]any{"keep_last": 4, "keep_daily": 12}
+	a.must("PUT", path, body, 200)
+	check("on", true, true)
+	policy["encrypt"] = false
+	a.must("PUT", policyPath, policy, 200)
+	check("on", true, true)
+	body["enabled"] = true
+	a.must("PUT", path, body, 409)
+	body["enabled"] = false
+	body["encryption_mode"] = "inherit"
+	a.must("PUT", path, body, 200)
+	check("inherit", false, false)
+	policy["encrypt"] = true
+	a.must("PUT", policyPath, policy, 200)
+	check("inherit", true, true)
+	t.Setenv(backup.EnvEncryptionKeyID, "pilot-key")
+	t.Setenv(backup.EnvEncryptionKey, "invalid")
+	check("inherit", true, true)
+	t.Setenv(backup.EnvEncryptionKey, base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	check("inherit", true, false)
+	details := a.must("GET", "/backups/jobs/"+reply["job"].(map[string]any)["id"].(string), nil, 200)
+	if !strings.Contains(details, "pilot-key") {
+		t.Fatal("job page did not show the active key ID")
+	}
+	body["encryption_mode"] = "off"
+	policy["encrypt"] = false
+	a.must("PUT", policyPath, policy, 200)
+	a.must("PUT", path, body, 200)
+	check("off", false, false)
+	policy["encrypt"] = true
+	a.must("PUT", policyPath, policy, 200)
+	delete(body, "encryption_mode")
+	a.must("PUT", path, body, 200)
+	check("off", false, false)
+	body["encrypt"] = true
+	body["overrides"] = []string{"encrypt"}
+	a.must("PUT", path, body, 200)
+	check("on", true, false)
+	body["encryption_mode"] = "inherit"
+	a.must("PUT", path, body, 200)
+	check("inherit", true, false)
+	delete(body, "encrypt")
+	delete(body, "overrides")
+	body["encryption_mode"] = ""
+	a.must("PUT", path, body, 400)
+	delete(body, "policy_id")
+	body["encryption_mode"] = "inherit"
+	a.must("PUT", path, body, 400)
+	body["schedule"] = map[string]any{"kind": "interval", "every_seconds": 3600}
+	body["encryption_mode"] = "on"
+	a.must("PUT", path, body, 200)
+	check("on", true, false)
+	delete(body, "encryption_mode")
+	a.must("PUT", path, body, 200)
+	check("on", true, false)
+	a.must("POST", path+"/run", nil, 202)
 }

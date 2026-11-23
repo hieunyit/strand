@@ -13,6 +13,7 @@ package e2e
 //   TestKL_E2E_DivergenceFailsClosed
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math/rand"
@@ -23,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"strand/internal/admin"
 )
 
 const klKeylessCfg = "  keyless: full_row\n"
@@ -217,6 +220,15 @@ func klRun(t *testing.T, env klEnv) {
 		}
 	}()
 	waitSynced(t, &cfg, p, 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	top, err := admin.NewClient(cfg.Socket).Top(ctx)
+	cancel()
+	if err != nil || top.Verification == nil || top.Verification.Status != "checked" {
+		t.Fatalf("expected checked post-seed evidence, got %+v, err=%v\n%s", top, err, p.tail())
+	}
+	if tables := top.Verification.Tables; len(tables) != 1 || tables[0].Method != "count-and-checksum" || tables[0].Position == "" {
+		t.Fatalf("missing keyless verification scope or watermark: %+v", tables)
+	}
 	wl.Start(4, 11)
 	time.Sleep(8 * time.Second)
 	wl.Stop()
@@ -226,13 +238,31 @@ func klRun(t *testing.T, env klEnv) {
 	if !strings.Contains(p.output.String(), "running in keyless mode") {
 		t.Fatalf("log does not mention keyless mode\n%s", p.tail())
 	}
-	if code := p.stop(t); code != 0 {
+	if env.pgSrc && env.pgDst {
+		p.kill9()
+		if _, err := env.srcDB.Exec("INSERT INTO app.kl (a,b,c) VALUES (1010,'restart',NULL),(1010,'restart',NULL)"); err != nil {
+			t.Fatal(err)
+		}
+		restarted := startStrand(t, path)
+		defer restarted.kill9()
+		waitSynced(t, &cfg, restarted, time.Minute)
+		restartCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		evidence, err := admin.NewClient(cfg.Socket).Top(restartCtx)
+		stop()
+		if err != nil || !reflect.DeepEqual(evidence.Verification, top.Verification) {
+			t.Fatalf("post-seed evidence changed after restart: %+v, err=%v", evidence, err)
+		}
+		ukWaitEqual(t, restarted, time.Minute, func() string { return klDiff(env.srcDB, env.dstDB, q) })
+		if code := restarted.stop(t); code != 0 {
+			t.Fatalf("restart exit %d\n%s", code, restarted.tail())
+		}
+	} else if code := p.stop(t); code != 0 {
 		t.Fatalf("strand exit %d\n%s", code, p.tail())
 	}
 	if d := klDiff(env.srcDB, env.dstDB, q); d != "" {
 		t.Fatalf("final state differs: %s", d)
 	}
-	out, code = runStrandCLI(t, 5*time.Minute, "verify", "-c", path, "--table", "app.kl", "--mode", "full")
+	out, code = runStrandCLI(t, 5*time.Minute, "verify", "-c", path, "--mode", "full", "--require-complete")
 	if code != 0 || !strings.Contains(out, "keyless") || !strings.Contains(out, "match=true") {
 		t.Fatalf("verify --mode full of the keyless table: exit %d\n%s", code, out)
 	}
@@ -240,7 +270,7 @@ func klRun(t *testing.T, env klEnv) {
 	if _, err := env.dstDB.Exec(ukBind(env.pgDst, "INSERT INTO app.kl (a, b, c) VALUES (?, ?, ?)"), 999, "zz", 1); err != nil {
 		t.Fatal(err)
 	}
-	out, code = runStrandCLI(t, 5*time.Minute, "verify", "-c", path, "--table", "app.kl", "--mode", "full")
+	out, code = runStrandCLI(t, 5*time.Minute, "verify", "-c", path, "--mode", "full", "--require-complete")
 	if code == 0 || !strings.Contains(out, "match=false") {
 		t.Fatalf("verify must report the divergence: exit %d\n%s", code, out)
 	}
@@ -345,14 +375,40 @@ func TestKL_E2E_DivergenceFailsClosed(t *testing.T) {
 	src, dst := newPair(t)
 	src.exec(t, klMySQLDDL)
 	dst.exec(t, klMySQLDDL)
+	for _, db := range []*mysqlNode{src, dst} {
+		db.exec(t, "CREATE TABLE app.control (id INT PRIMARY KEY)")
+	}
 	src.exec(t, "INSERT INTO app.kl (a,b,c) VALUES (1,'x',1),(2,'y',2)")
-	dst.exec(t, "INSERT INTO app.kl (a,b,c) VALUES (1,'x',1)") // thiếu (2,'y',2)
+	dst.exec(t, "INSERT INTO app.kl (a,b,c) VALUES (1,'x',1),(2,'y',2)")
 	start := strings.ReplaceAll(src.gtidExecuted(t), "\n", "")
-	cfg := strandCfg{Name: "e2e-kl-div", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand", Include: []string{"app.kl"},
+	cfg := strandCfg{Name: "e2e-kl-div", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand", Include: []string{"app.kl", "app.control"},
 		Dir: testDir(t), Bootstrap: "start_at", TablesExtra: klKeylessCfg}
 	p := startStrand(t, cfg.write(t), "--start-at", start)
 	waitSynced(t, &cfg, p, 3*time.Minute)
-	src.exec(t, "DELETE FROM app.kl WHERE a = 2 LIMIT 1")
+	dst.exec(t, "DELETE FROM app.kl WHERE a = 2 LIMIT 1")
+	readCheckpoint := func() string {
+		t.Helper()
+		var applied string
+		if err := dst.DB.QueryRow("SELECT applied FROM strand._strand_checkpoint WHERE pipeline_id=?", cfg.Name).Scan(&applied); err != nil {
+			t.Fatal(err)
+		}
+		return applied
+	}
+	before := readCheckpoint()
+	tx, err := src.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO app.control VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("DELETE FROM app.kl WHERE a = 2 LIMIT 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-p.done:
 	case <-time.After(2 * time.Minute):
@@ -361,5 +417,109 @@ func TestKL_E2E_DivergenceFailsClosed(t *testing.T) {
 	}
 	if p.exitCode() != 5 || !strings.Contains(p.output.String(), "keyless_row_missing") {
 		t.Fatalf("exit %d, want 5 keyless_row_missing\n%s", p.exitCode(), p.tail())
+	}
+	var count int
+	if err := dst.DB.QueryRow("SELECT COUNT(*) FROM app.control").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("mixed transaction was partially applied: count=%d err=%v", count, err)
+	}
+	if after := readCheckpoint(); after != before {
+		t.Fatalf("checkpoint advanced despite rollback: %q → %q", before, after)
+	}
+}
+
+func TestKL_E2E_PostSeedDetectsKeylessDrift(t *testing.T) {
+	src, dst := newPair(t)
+	for _, db := range []*mysqlNode{src, dst} {
+		db.exec(t, klMySQLDDL)
+		db.exec(t, "CREATE TABLE app.control (id INT PRIMARY KEY, v INT)", "INSERT INTO app.control VALUES (1, 1)")
+		db.exec(t, "INSERT INTO app.kl (a,b,c) VALUES (1,'x',NULL),(1,'x',NULL)")
+	}
+	dst.exec(t, "UPDATE app.kl SET b = 'y' LIMIT 1")
+	start := strings.ReplaceAll(src.gtidExecuted(t), "\n", "")
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mixed=%t", mixed), func(t *testing.T) {
+			tables := []string{"app.kl"}
+			if mixed {
+				tables = append(tables, "app.control")
+			}
+			cfg := strandCfg{Name: fmt.Sprintf("e2e-kl-seed-%t", mixed), SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
+				Include: tables, Dir: testDir(t), Bootstrap: "start_at", TablesExtra: klKeylessCfg, PostSeedWindow: "1s"}
+			p := startStrand(t, cfg.write(t), "--start-at", start)
+			select {
+			case <-p.done:
+			case <-time.After(time.Minute):
+				p.kill9()
+				t.Fatalf("post-seed did not stop on mismatch\n%s", p.tail())
+			}
+			if p.exitCode() != 5 || !strings.Contains(p.output.String(), "keyless checksum found a mismatch") {
+				t.Fatalf("exit %d, want keyless seed mismatch\n%s", p.exitCode(), p.tail())
+			}
+		})
+	}
+}
+
+func TestKL_E2E_MissingBeforeImageFailsClosed(t *testing.T) {
+	src, dst := newPair(t)
+	for _, db := range []*mysqlNode{src, dst} {
+		db.exec(t, "CREATE TABLE app.images (id INT, payload BLOB)",
+			"INSERT INTO app.images VALUES (1, X'FF')",
+			"CREATE TABLE app.marker (id INT PRIMARY KEY)")
+	}
+	start := strings.ReplaceAll(src.gtidExecuted(t), "\n", "")
+	cfg := strandCfg{Name: "kl-partial-image", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
+		Include: []string{"app.images", "app.marker"}, Dir: testDir(t), Bootstrap: "start_at", TablesExtra: klKeylessCfg,
+		CommitOrder: "strict"}
+	p := startStrand(t, cfg.write(t), "--start-at", start)
+	waitSynced(t, &cfg, p, time.Minute)
+	readCheckpoint := func() string {
+		t.Helper()
+		var applied string
+		if err := dst.DB.QueryRow("SELECT applied FROM strand._strand_checkpoint WHERE pipeline_id=?", cfg.Name).Scan(&applied); err != nil {
+			t.Fatal(err)
+		}
+		return applied
+	}
+	before := readCheckpoint()
+
+	// Override the setting on a single source connection after startup validation.
+	// NOBLOB omits the unchanged binary payload from the row images.
+	conn, err := src.DB.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(t.Context(), "SET SESSION binlog_row_image='NOBLOB'"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), "SET SESSION binlog_row_image='FULL'")
+	tx, err := conn.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO app.marker VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("UPDATE app.images SET id=2 WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.done:
+	case <-time.After(30 * time.Second):
+		p.kill9()
+		t.Fatalf("pipeline did not reject the partial row image\n%s", p.tail())
+	}
+	if p.exitCode() != 3 || !strings.Contains(p.output.String(), "has a partial row image") {
+		t.Fatalf("exit %d, want partial row image error\n%s", p.exitCode(), p.tail())
+	}
+	var id, markers int
+	if err := dst.DB.QueryRow("SELECT id, (SELECT COUNT(*) FROM app.marker) FROM app.images").Scan(&id, &markers); err != nil {
+		t.Fatal(err)
+	}
+	if after := readCheckpoint(); after != before || id != 1 || markers != 0 {
+		t.Fatalf("target advanced despite rejected image: id=%d markers=%d checkpoint %q → %q", id, markers, before, after)
 	}
 }

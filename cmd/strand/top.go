@@ -48,6 +48,25 @@ func printTop(top *admin.TopInfo) {
 	fmt.Printf("Pipeline:   %s\n", top.PipelineID)
 	fmt.Printf("Trạng thái: %s\n", top.State)
 	fmt.Printf("Lag:        %.3f s\n", top.LagSeconds)
+	if top.CDCState != "" {
+		fmt.Printf("CDC: %s\n", top.CDCState)
+	}
+	if v := top.Verification; v != nil {
+		fmt.Printf("Đối soát:   %s", v.Status)
+		if !v.CheckedAt.IsZero() {
+			fmt.Printf(" (%s, bằng chứng tại mốc kiểm)", v.CheckedAt.Format(time.RFC3339))
+		}
+		fmt.Println()
+		if v.EndCheckpoint != "" {
+			fmt.Printf("  Checkpoint cuối lượt kiểm: %s\n", v.EndCheckpoint)
+		}
+		if v.Reason != "" {
+			fmt.Printf("  %s\n", v.Reason)
+		}
+		for _, table := range v.Tables {
+			fmt.Printf("  %s: %s %s %s %s\n", table.Table, table.Status, table.Method, table.Position, table.Reason)
+		}
+	}
 	fmt.Printf("Tốc độ:     %.1f rows/s (stream)\n", top.Throughput)
 	fmt.Printf("Vùng (Zone):%s\n", top.Zone)
 	if top.BreakerOpen {

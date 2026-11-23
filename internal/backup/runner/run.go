@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"strand/internal/backup"
 )
@@ -145,6 +143,9 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 	}
 	if backup.IsUnsupportedMethod(job.Method) {
 		return backup.Record{}, fmt.Errorf("method %q is unsupported (removed: runs on the database host)", job.Method)
+	}
+	if err := checkRuntimeTLS(job.Engine(), job.Conn); err != nil {
+		return backup.Record{}, err
 	}
 	// Resolve the native tool before touching the repository or the catalog: a missing tool must not leave
 	// a failed restore point behind.
@@ -277,6 +278,8 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 	var inv Invocation
 	var err error
 	var mongoURI string
+	var sourceID string
+	var mongoAnchor bson.Timestamp
 	switch job.Method {
 	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
 		tool, ver, flavor, terr := e.mysqlDumpTool(ctx, job)
@@ -284,6 +287,9 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 			return meta, PayloadResult{}, terr
 		}
 		inv = MySQLDumpInvocation(e.Getenv, tool, job.Conn, flavor)
+		if err := addNativeMySQLTLS(&inv, job.Conn, flavor); err != nil {
+			return meta, PayloadResult{}, err
+		}
 		meta.Details = map[string]string{"tool_version": strings.TrimSpace(ver)}
 	case backup.MethodPGDump:
 		inv, err = PGDumpInvocation(e.Getenv, job.Conn, enc.Compress)
@@ -296,14 +302,13 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 		if mongoURI, err = MongoURI(e.Getenv, job.Conn); err == nil {
 			inv, err = MongodumpInvocation(mongoURI, job.Conn)
 		}
-		if err == nil && len(job.Conn.Databases) == 0 {
-			ts, terr := LatestOplogTS(ctx, mongoURI)
-			if terr != nil {
-				return meta, PayloadResult{}, terr
-			}
-			meta.Position.OplogTS = FormatOplogTS(ts)
+		if err == nil {
+			err = addNativeMongoTLS(&inv, job.Conn)
 		}
 	case backup.MethodMydumper:
+		if job.Conn.TLSMode != "" {
+			return meta, PayloadResult{}, errors.New("mydumper cannot enforce the saved TLS policy")
+		}
 		return e.streamMydumper(ctx, job, repo, key, enc)
 	default:
 		return meta, PayloadResult{}, fmt.Errorf("unsupported method %q", job.Method)
@@ -311,13 +316,62 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 	if err != nil {
 		return meta, PayloadResult{}, err
 	}
+	switch job.Method {
+	case backup.MethodMySQLDump, backup.MethodPGBaseBackup:
+		sourceID = e.pitrSourceIdentity(ctx, job)
+	}
+	if job.Engine() == backup.EnginePostgres {
+		if err := addNativePGTLS(&inv, job.Conn); err != nil {
+			return meta, PayloadResult{}, err
+		}
+	}
+	captureMongo := job.Method == backup.MethodMongodump && len(job.Conn.Databases) == 0 && job.LogArchive
+	var mongoClient *mongo.Client
+	var mongoTerm int64
+	if captureMongo {
+		mongoClient, err = connectBackupMongo(mongoURI, job.Conn)
+		if err != nil {
+			return meta, PayloadResult{}, err
+		}
+		defer mongoClient.Disconnect(context.WithoutCancel(ctx))
+		sourceID, mongoTerm, _, err = mongoHistory(ctx, mongoClient)
+		if err != nil {
+			return meta, PayloadResult{}, err
+		}
+	}
 	proc, err := Start(ctx, e.Getenv, inv, nil, e.Log)
 	if err != nil {
 		return meta, PayloadResult{}, err
 	}
 	defer proc.Close()
 	tap := &headTap{r: proc, max: 4 << 20}
-	res, err := repo.StorePayload(ctx, key, tap, enc, job.Retention.LockDays, job.BandwidthKBps)
+	var output io.Reader = tap
+	var archiveResult chan error
+	var archiveInput *io.PipeReader
+	if captureMongo {
+		input, write := io.Pipe()
+		archiveInput = input
+		defer archiveInput.Close()
+		output = archiveInput
+		archiveResult = make(chan error, 1)
+		go func() {
+			var err error
+			mongoAnchor, err = streamMongoArchive(tap, write, bson.Timestamp{}, nil)
+			_ = write.CloseWithError(err)
+			archiveResult <- err
+		}()
+	}
+	res, err := repo.StorePayload(ctx, key, output, enc, job.Retention.LockDays, job.BandwidthKBps)
+	if archiveResult != nil {
+		if err != nil {
+			_ = archiveInput.Close()
+			_ = proc.Close()
+		}
+		if parseErr := <-archiveResult; err == nil {
+			err = parseErr
+		}
+	}
+
 	if err != nil {
 		return meta, res, err
 	}
@@ -327,6 +381,18 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 	if meta.Details == nil {
 		meta.Details = map[string]string{}
 	}
+	if captureMongo {
+		if err := awaitMongoCommit(ctx, mongoClient, sourceID, mongoTerm, mongoAnchor); err != nil {
+			return meta, res, err
+		}
+		meta.Details["source_identity"] = sourceID
+		meta.Details["oplog_boundary"] = "embedded-v1"
+		meta.EndPosition.OplogTS = FormatOplogTS(mongoAnchor)
+		meta.Position.OplogTS = meta.EndPosition.OplogTS
+	} else if sourceID != "" && sourceID == e.pitrSourceIdentity(ctx, job) {
+		meta.Details["source_identity"] = sourceID
+	}
+
 	if len(job.Conn.Databases) > 0 {
 		meta.Details["databases"] = strings.Join(job.Conn.Databases, ",")
 	}
@@ -341,12 +407,6 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 		meta.Position, meta.EndPosition = start, end
 		if tl != "" {
 			meta.Details["timeline"] = tl
-		}
-	case backup.MethodMongodump:
-		if len(job.Conn.Databases) == 0 {
-			if ts, err := LatestOplogTS(ctx, mongoURI); err == nil {
-				meta.EndPosition.OplogTS = FormatOplogTS(ts)
-			}
 		}
 	}
 	if meta.Details["objects"] == "" && meta.Details["objects_truncated"] == "" {
@@ -382,7 +442,7 @@ func (e *Env) queryBackupObjects(ctx context.Context, job backup.Job, mongoURI s
 		if len(job.Conn.Databases) != 1 {
 			return nil
 		}
-		db, err := sql.Open("mysql", mysqlDSN(e.Getenv, job.Conn))
+		db, err := openBackupMySQL(e.Getenv, job.Conn)
 		if err != nil {
 			return nil
 		}
@@ -406,7 +466,7 @@ func (e *Env) queryBackupObjects(ctx context.Context, job backup.Job, mongoURI s
 		if len(job.Conn.Databases) > 0 && job.Conn.Databases[0] != "" {
 			dbName = job.Conn.Databases[0]
 		}
-		c, err := pgx.Connect(cctx, PGConnString(e.Getenv, job.Conn, dbName, false))
+		c, err := connectBackupPGX(cctx, e.Getenv, job.Conn, dbName)
 		if err != nil {
 			return nil
 		}
@@ -433,7 +493,7 @@ func (e *Env) queryBackupObjects(ctx context.Context, job backup.Job, mongoURI s
 				return nil
 			}
 		}
-		client, err := mongo.Connect(options.Client().ApplyURI(mongoURI))
+		client, err := connectBackupMongo(mongoURI, job.Conn)
 		if err != nil {
 			return nil
 		}

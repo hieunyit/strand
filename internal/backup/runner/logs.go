@@ -20,6 +20,28 @@ type logSegment struct {
 	Meta   backup.Meta
 }
 
+// latestOriginalLog locates the archive cursor. Copies can be created at any
+// time, so their creation time cannot decide where ingestion should resume.
+func (e *Env) latestOriginalLog(ctx context.Context, jobID string) (*backup.Record, error) {
+	filter := backup.Filter{JobID: jobID, Kind: backup.KindLog, Status: backup.StatusComplete, Limit: backup.MaxListLimit}
+	for {
+		page, err := e.Catalog.List(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range page {
+			if record.CopyOf == "" {
+				return &record, nil
+			}
+		}
+		if len(page) < filter.Limit {
+			return nil, nil
+		}
+		last := page[len(page)-1]
+		filter.After = &backup.Cursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+}
+
 // storeLog uploads and catalogs a log segment. A segment already cataloged complete is skipped
 // (restarts re-send the tail of the stream).
 func (e *Env) storeLog(ctx context.Context, job backup.Job, repo *Repository, enc backup.EncodeOptions, seg logSegment) (backup.Record, error) {
@@ -33,7 +55,7 @@ func (e *Env) storeLog(ctx context.Context, job backup.Job, repo *Repository, en
 			_, _, _ = e.Catalog.UpdateStatus(ctx, seg.ID, backup.StatusFailed, nil)
 		}
 	}
-	key := repo.Key(safeSegment(job.Source), seg.Name)
+	key := repo.Key(safeSegment(job.Source), "archives", safeSegment(job.ID), seg.Name)
 	if enc.Format() == backup.FormatSBK1 {
 		key += ".sbk"
 	}

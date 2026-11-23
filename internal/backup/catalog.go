@@ -22,6 +22,7 @@ const (
 	StatusComplete  Status = "complete"
 	StatusFailed    Status = "failed"
 	StatusExpired   Status = "expired"
+	StatusDeleting  Status = "deleting"
 )
 
 var (
@@ -233,7 +234,10 @@ type Repository interface {
 	FinalizeBackup(context.Context, string, Status, int64, string, string, time.Time) (Record, bool, error)
 	// UpdateBackupMeta replaces the mutable metadata of a backup that is uploading or verifying.
 	UpdateBackupMeta(ctx context.Context, id string, m Meta) (Record, bool, error)
-	// ExpireBackup moves a complete backup to expired (refused under legal hold or an unexpired lock).
+	// ClaimBackupDeletion moves a complete backup out of the restore catalog
+	// before retention deletes any objects. An existing claim can be retried.
+	ClaimBackupDeletion(ctx context.Context, id string, at time.Time) (Record, bool, error)
+	// ExpireBackup finishes expiration (refused under legal hold or an unexpired lock).
 	ExpireBackup(ctx context.Context, id string, at time.Time) (Record, bool, error)
 	// SetBackupLegalHold sets or clears legal hold on a backup that is not expired.
 	SetBackupLegalHold(ctx context.Context, id string, hold bool) (Record, bool, error)
@@ -572,7 +576,7 @@ func validID(id string) bool { return idRE.MatchString(id) }
 func ValidID(s string) bool { return validID(s) }
 func validStatus(s Status) bool {
 	switch s {
-	case StatusQueued, StatusUploading, StatusVerifying, StatusComplete, StatusFailed, StatusExpired:
+	case StatusQueued, StatusUploading, StatusVerifying, StatusComplete, StatusFailed, StatusExpired, StatusDeleting:
 		return true
 	}
 	return false

@@ -511,7 +511,7 @@ func (mv *MerkleVerifier) intColumns(ctx context.Context, t model.TableID, pkCol
 	if err != nil {
 		return nil, nil, err
 	}
-	dstCols, err = matchTargetColumns(srcCols, allDst, dstTable)
+	dstCols, err = matchTargetColumns(srcCols, allDst, mv.cfg.TargetEngine, dstTable)
 	if err != nil {
 		return nil, nil, err
 	}

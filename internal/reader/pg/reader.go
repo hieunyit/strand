@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -485,7 +486,7 @@ func (r *Reader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-chan 
 	r.progress.Store(startLSN)
 	r.hold.Store(0)
 
-	sctx, scancel := context.WithCancel(ctx)
+	sctx, scancel := replicationContext(ctx, conn.Conn())
 	r.cancel = scancel
 	out := make(chan reader.Event, r.cfg.BufferSize)
 
@@ -493,6 +494,13 @@ func (r *Reader) Start(ctx context.Context, from checkpoint.AppliedSet) (<-chan 
 	go r.statusLoop(sctx)
 	go r.readLoop(sctx, scancel, out, applied)
 	return out, nil
+}
+
+// pglogrepl writes feedback directly to the socket and ignores its Context.
+func replicationContext(parent context.Context, socket net.Conn) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	context.AfterFunc(ctx, func() { _ = socket.Close() })
+	return ctx, cancel
 }
 
 // streamOpts là bộ option START_REPLICATION đã thương lượng.
@@ -618,7 +626,7 @@ func (r *Reader) statusLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := r.sendStatus(false); err != nil && ctx.Err() == nil {
+			if err := r.sendStatus(ctx, false); err != nil && ctx.Err() == nil {
 				slog.Warn("gửi StandbyStatusUpdate thất bại", "slot", r.cfg.Slot, "err", err)
 			}
 		}
@@ -627,7 +635,7 @@ func (r *Reader) statusLoop(ctx context.Context) {
 
 // sendStatus gửi StandbyStatusUpdate với write = flush = apply = flushLSN(). Với slot logical, server
 // chỉ dùng flush để dời confirmed_flush_lsn; khi flushLSN() = 0 cả ba bằng 0 và server bỏ qua.
-func (r *Reader) sendStatus(replyRequested bool) error {
+func (r *Reader) sendStatus(ctx context.Context, replyRequested bool) error {
 	r.mu.Lock()
 	conn := r.conn
 	r.mu.Unlock()
@@ -637,13 +645,26 @@ func (r *Reader) sendStatus(replyRequested bool) error {
 	f := pglogrepl.LSN(r.flushLSN())
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
-	return pglogrepl.SendStandbyStatusUpdate(context.Background(), conn, pglogrepl.StandbyStatusUpdate{
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	socket := conn.Conn()
+	if err := socket.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	defer socket.SetWriteDeadline(time.Time{})
+	err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
 		WALWritePosition: f,
 		WALFlushPosition: f,
 		WALApplyPosition: f,
 		ClientTime:       time.Now(),
 		ReplyRequested:   replyRequested,
 	})
+	if err != nil {
+		// A partial replication message cannot safely be followed by another.
+		_ = socket.Close()
+	}
+	return err
 }
 
 // Close dừng các goroutine, đóng kết nối. Kênh Event được đóng khi readLoop thoát.
@@ -671,7 +692,11 @@ func (r *Reader) Close() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return conn.Close(ctx)
+	err := conn.Close(ctx)
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 // quoteIdent bọc định danh trong dấu nháy kép (publication_names là danh sách định danh).

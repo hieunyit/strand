@@ -65,11 +65,14 @@
         </div>
         <div id="wiz-sched-block" hidden>
           {{template "schedule-fields"}}
+          <details class="advanced">
+            <summary>Advanced scheduling and retention</summary>
           <div class="field-grid">
             <label class="field"><span class="field-label">Start window (minutes) <span class="opt">optional</span></span><input type="number" name="window_minutes" min="0" value="240"><span class="field-error" hidden></span></label>
             <label class="field"><span class="field-label">Jitter (seconds) <span class="opt">optional</span></span><input type="number" name="jitter_seconds" min="0" value="0"><span class="field-error" hidden></span></label>
           </div>
           {{template "retention-fields"}}
+          </details>
         </div>
         <p class="words" id="wiz-policy-words" hidden></p>
         <div class="switch-row" id="wiz-pitr-row">
@@ -86,22 +89,27 @@
           <div class="choice-cards" id="wiz-repos" role="radiogroup" aria-label="Repository"></div>
           <div class="alert alert-warn" id="wiz-no-repo" hidden>No repository exists yet. <a href="/backups/repositories">Create one under Backup resources, Repositories</a>, then reload this wizard.</div>
           <span class="field-error" hidden></span></div>
+        <label class="field" id="wiz-enc-row" data-custom-off>
+          <span class="field-label">Strand encryption</span>
+          <select name="encryption_mode" aria-describedby="wiz-enc-reason">
+            <option value="" disabled selected>Choose encryption</option>
+            <option value="inherit">Follow policy</option>
+            <option value="on">Encrypt with Strand</option>
+            <option value="off">Turn off Strand encryption</option>
+          </select>
+          <span class="field-hint" id="wiz-enc-reason"></span><span class="field-error" hidden></span>
+        </label>
+        <div class="alert alert-warn" id="wiz-enc-warning" role="status" hidden>This job needs an active Strand encryption key before it can be enabled or run.</div>
+        <details class="advanced">
+          <summary>Advanced</summary>
         <div class="field-grid">
           <label class="field" data-custom-off><span class="field-label">Second copy <span class="opt">optional</span> <span class="badge override small" data-override="replicate_to" hidden>overridden</span></span>
             <select name="replicate_to"><option value="">None</option></select><span class="field-hint">A copy in another repository (the 3-2-1 rule).</span><span class="field-error" hidden></span></label>
         </div>
-        <div class="switch-row" id="wiz-enc-row">
-          <input type="checkbox" name="encrypt" id="wiz-encrypt" aria-describedby="wiz-enc-reason">
-          <div><label for="wiz-encrypt"><b>Encrypt backups</b> <span class="badge override small" data-override="encrypt" hidden>overridden</span></label>
-            <div class="reason" id="wiz-enc-reason"></div></div>
-        </div>
-        <div class="alert alert-warn" id="wiz-enc-warning" role="status" hidden><b>No encryption keys.</b> Backups will be stored unencrypted. Set <code>STRAND_BACKUP_ENCRYPTION_KEYS</code> on the Web service to enable encryption.</div>
         <div class="switch-row">
           <input type="checkbox" name="compress" id="wiz-compress" checked>
           <div><label for="wiz-compress"><b>Compress</b> <span class="badge override small" data-override="compress" hidden>overridden</span></label></div>
         </div>
-        <details class="advanced">
-          <summary>Advanced</summary>
           <div class="field-grid">
             <label class="field"><span class="field-label">Compression level (0-4) <span class="opt">optional</span></span><input type="number" name="compress_level" min="0" max="4" value="0"><span class="field-error" hidden></span></label>
             <label class="field"><span class="field-label">Bandwidth limit (KB/s) <span class="opt">optional</span></span><input type="number" name="bandwidth_kbps" min="0" value="0"><span class="field-hint">0 = unlimited.</span><span class="field-error" hidden></span></label>
@@ -113,6 +121,8 @@
       <fieldset class="form-section wiz-step" data-step="4" hidden>
         <legend class="form-section-title"><span class="step-no">4</span> Verify and review</legend>
         <p class="form-section-desc">Prove the backups are readable, and decide what happens after a failure.</p>
+        <details class="advanced" id="wiz-verification-options">
+          <summary>Advanced verification and retries</summary>
         <div class="field-grid">
           <label class="field"><span class="field-label">Verify <span class="opt">optional</span> <span class="badge override small" data-override="verify_every_seconds" hidden>overridden</span></span>
             <select name="verify_every"><option value="0">Never</option><option value="86400">Daily</option><option value="604800">Weekly</option><option value="2592000">Monthly</option></select><span class="field-error" hidden></span></label>
@@ -131,6 +141,7 @@
           <label class="field"><span class="field-label">Retries after a failure <span class="opt">optional</span> <span class="badge override small" data-override="retry_max" hidden>overridden</span></span><input type="number" name="retry_max" min="0" max="20" value="0"><span class="field-error" hidden></span></label>
           <label class="field" data-show-retry><span class="field-label">Back-off (seconds) <span class="opt">optional</span></span><input type="number" name="retry_backoff" min="10" value="60"><span class="field-error" hidden></span></label>
         </div>
+        </details>
         <div class="field"><span class="field-label">Notifications <span class="opt">optional</span></span>
           <select name="notify_channel" disabled aria-describedby="wiz-notify-hint"><option>Inherit the global rules</option></select>
           <span class="field-hint" id="wiz-notify-hint">Events follow the global notification settings (STRAND_BACKUP_NOTIFY_*). Per-job channels arrive with the Notifications page.</span></div>

@@ -13,6 +13,7 @@
   }
 
   var sources = wizardData.sources || [];
+  var restoreEndpoint = "";
   var connections = wizardData.connections || [];
   var backups = wizardData.backups || [];
 
@@ -50,6 +51,14 @@
 
   function filterConnectionsByEngine() {
     var eng = getChosenEngine();
+    var deployment = document.getElementById('choice-restore-deployment');
+    if (deployment) {
+      deployment.hidden = eng !== 'mongodb';
+      if (deployment.hidden && form.elements['restore_into'].value === 'deployment') {
+        form.elements['restore_into'].value = 'database';
+        syncRestoreInto();
+      }
+    }
     var sel = document.getElementById('restore-conn-select');
     if (!sel) { return; }
     var hadSelected = sel.value;
@@ -77,6 +86,9 @@
   var stepPanels = document.querySelectorAll('#restore-form .wiz-step[data-step]');
 
   function updateStepper(step) {
+    if (step === 4) {
+      document.getElementById('restore-confirm-back').setAttribute('data-prev-step', curStep === 3 ? '3' : '2');
+    }
     curStep = step;
     stepperLis.forEach(function (li) {
       var s = parseInt(li.getAttribute('data-step-li'), 10);
@@ -127,12 +139,13 @@
     var fDb = document.getElementById('field-target-db');
     var fDir = document.getElementById('field-target-dir');
     if (fDb) { fDb.hidden = !intoDb; }
-    if (fDir) { fDir.hidden = intoDb; }
+    if (fDir) { fDir.hidden = form.elements['restore_into'].value !== 'dir'; }
     syncRestoreOptions();
   }
 
   // Target connection change
   function syncConnection() {
+    restoreEndpoint = "";
     testOK = false;
     existingDBs = [];
     var testResult = document.getElementById('restore-test-result');
@@ -142,13 +155,13 @@
 
     // If backup tool was pg_basebackup, enforce restore_into = dir
     var chosenTool = getChosenTool();
-    var choiceDir = document.getElementById('choice-restore-dir');
+    var physical = document.getElementById('restore-physical-options');
     var choiceDb = document.getElementById('choice-restore-db');
-    var radDir = form.elements['restore_into'] && form.elements['restore_into'][1];
-    var radDb = form.elements['restore_into'] && form.elements['restore_into'][0];
+    var radDir = form.querySelector('input[name="restore_into"][value="dir"]');
 
     if (chosenTool === 'pg_basebackup') {
       if (radDir) { radDir.checked = true; }
+      if (physical) { physical.open = true; }
       if (choiceDb) { choiceDb.hidden = true; }
     } else {
       if (choiceDb) { choiceDb.hidden = false; }
@@ -256,7 +269,7 @@
       return;
     }
 
-    if (sInfo.window_start && sInfo.window_end) {
+    if (sInfo.continuous && sInfo.window_start && sInfo.window_end) {
       var wStart = new Date(sInfo.window_start);
       var wEnd = new Date(sInfo.window_end);
       if (timeInput) {
@@ -271,23 +284,14 @@
           ' UTC (' + (sInfo.logs_count || 0) + ' log segments available).';
       }
     } else {
-      if (winBox) { winBox.hidden = true; }
+      if (winBox) { winBox.hidden = !sInfo.verify_on_replay; }
+      if (winText && sInfo.verify_on_replay) { winText.textContent = 'PostgreSQL verifies the requested recovery time when it replays the archived WAL.'; }
       if (timeInput) { timeInput.removeAttribute('min'); timeInput.removeAttribute('max'); }
     }
 
     // PITR preview
     if (preview && timeInput && timeInput.value) {
-      var normVal = normalizeTargetTime(timeInput.value);
-      var tVal = new Date(normVal);
-      var base = (sInfo.base_backups || []).filter(function (bk) {
-        return new Date(bk.created_at) <= tVal;
-      }).pop();
-      if (base) {
-        preview.textContent = 'Restore plan: base backup ' + base.id + ' (' +
-          new Date(base.created_at).toISOString().slice(0, 16).replace('T', ' ') + ') rolled forward to target time.';
-      } else {
-        preview.textContent = 'No base backup found before target time.';
-      }
+      preview.textContent = 'Strand checks the available base backup and log chain before starting the restore.';
     } else if (preview) {
       preview.textContent = '';
     }
@@ -430,6 +434,7 @@
   }
 
   function validateStep3() {
+    var advanced = document.getElementById('restore-advanced-options');
     var errThreads = document.getElementById('err-threads');
     var errObjects = document.getElementById('err-objects');
     if (errThreads) { errThreads.hidden = true; }
@@ -445,6 +450,7 @@
             errThreads.textContent = 'Threads must be between 1 and 16.';
             errThreads.hidden = false;
           }
+          if (advanced) { advanced.open = true; }
           return false;
         }
       }
@@ -458,6 +464,7 @@
           errObjects.textContent = 'Select or enter at least one object to restore, or choose "All objects".';
           errObjects.hidden = false;
         }
+        if (advanced) { advanced.open = true; }
         return false;
       }
       if (objs.length > 1000) {
@@ -465,6 +472,7 @@
           errObjects.textContent = 'Too many objects: maximum is 1000.';
           errObjects.hidden = false;
         }
+        if (advanced) { advanced.open = true; }
         return false;
       }
       var validRE = /^[A-Za-z0-9_$.-]+$/;
@@ -474,6 +482,7 @@
             errObjects.textContent = 'Invalid object name "' + objs[i] + '": must match [A-Za-z0-9_$.-]';
             errObjects.hidden = false;
           }
+          if (advanced) { advanced.open = true; }
           return false;
         }
       }
@@ -513,7 +522,7 @@
         valid = false;
       } else {
         var sInfoContinuous = sources.find(function (x) { return x.source === src; });
-        if (sInfoContinuous && sInfoContinuous.continuous === false) {
+        if (sInfoContinuous && sInfoContinuous.continuous === false && !sInfoContinuous.verify_on_replay) {
           if (errSource) {
             errSource.textContent = 'Source ' + src + ' has no continuous PITR window.';
             errSource.hidden = false;
@@ -527,7 +536,7 @@
         valid = false;
       } else {
         var sInfo = sources.find(function (x) { return x.source === src; });
-        if (sInfo && sInfo.window_start && sInfo.window_end) {
+        if (sInfo && sInfo.continuous && sInfo.window_start && sInfo.window_end) {
           var tSel = new Date(normalizeTargetTime(tt));
           var tMin = new Date(sInfo.window_start);
           var tMax = new Date(sInfo.window_end);
@@ -542,6 +551,9 @@
           }
         }
       }
+    }
+    if (!valid && !fromBackup) {
+      document.getElementById('restore-pitr-options').open = true;
     }
     return valid;
   }
@@ -571,8 +583,18 @@
       return false;
     }
 
-    var intoDir = form.elements['restore_into'].value === 'dir';
-    if (!intoDir) {
+    var scope = form.elements['restore_into'].value;
+    if (getChosenEngine() === 'mongodb' && !restoreEndpoint) {
+      if (errTest) { errTest.textContent = 'Test a MongoDB connection with a valid endpoint.'; errTest.hidden = false; }
+      return false;
+    }
+    if (scope === 'deployment' && existingDBs.some(function (name) {
+      return name !== 'admin' && name !== 'config' && name !== 'local';
+    })) {
+      if (errTest) { errTest.textContent = 'Choose a MongoDB deployment with no application databases.'; errTest.hidden = false; }
+      return false;
+    }
+    if (scope === 'database') {
       var dbName = (form.elements['target_database'].value || '').trim();
       if (!dbName) {
         if (errDb) { errDb.textContent = 'Enter a new database name.'; errDb.hidden = false; }
@@ -585,9 +607,10 @@
         }
         return false;
       }
-    } else {
+    } else if (scope === 'dir') {
       var dirName = (form.elements['target_dir'].value || '').trim();
       if (!dirName) {
+        document.getElementById('restore-physical-options').open = true;
         if (errDir) { errDir.textContent = 'Enter a new data directory.'; errDir.hidden = false; }
         return false;
       }
@@ -643,10 +666,12 @@
           }
           return;
         }
+        if ((form.elements['connection_id'].value || '').trim() !== connSel) { return; }
         var data = result.data;
         testOK = true;
         lastTestError = '';
         existingDBs = data.databases || [];
+        restoreEndpoint = data.restore_endpoint || "";
         if (status) { status.textContent = 'Connection test successful'; }
         if (testResult) {
           testResult.hidden = false;
@@ -693,7 +718,9 @@
 
     var intoDir = form.elements['restore_into'].value === 'dir';
     if (destEl) {
-      if (intoDir) {
+      if (form.elements['restore_into'].value === 'deployment') {
+        destEl.textContent = 'Empty MongoDB deployment';
+      } else if (intoDir) {
         destEl.textContent = 'Directory: ' + (form.elements['target_dir'].value || '').trim();
       } else {
         destEl.textContent = 'Database: ' + (form.elements['target_database'].value || '').trim();
@@ -726,9 +753,17 @@
     }
   }
 
+  function confirmedDestination(targetName) {
+    var scope = form.elements['restore_into'].value;
+    if (getChosenEngine() !== 'mongodb') { return targetName; }
+    if (scope === 'dir' || !restoreEndpoint) { return ''; }
+    return scope === 'deployment' ? restoreEndpoint + '/*' : restoreEndpoint + '/' + targetName;
+  }
+
   function updateConfirm() {
     var intoDir = form.elements['restore_into'].value === 'dir';
     var targetName = intoDir ? (form.elements['target_dir'].value || '').trim() : (form.elements['target_database'].value || '').trim();
+    targetName = confirmedDestination(targetName);
     var confirmInput = document.getElementById('restore-confirm-input');
     var confirmVal = confirmInput ? confirmInput.value.trim() : '';
     var startBtn = document.getElementById('start-restore-btn');
@@ -756,7 +791,7 @@
       var nextS = parseInt(nextBtn.getAttribute('data-next-step'), 10);
       if (curStep === 1 && !validateStep1()) { return; }
       if (curStep === 2 && !validateStep2()) { return; }
-      if (curStep === 3 && !validateStep3()) { return; }
+      if (nextS === 4 && !validateStep3()) { updateStepper(3); return; }
       updateStepper(nextS);
       return;
     }
@@ -850,7 +885,7 @@
     var confirmVal = (form.elements['confirm'].value || '').trim();
     var status = document.getElementById('restore-message');
 
-    if (confirmVal !== targetName) {
+    if (confirmVal !== confirmedDestination(targetName)) {
       if (status) { status.textContent = 'Type the target name exactly to confirm.'; status.classList.add('err'); }
       return;
     }
@@ -877,7 +912,9 @@
       payload.connection_id = connSel;
     }
 
-    if (intoDir) {
+    if (form.elements['restore_into'].value === 'deployment') {
+      payload.target_deployment = true;
+    } else if (intoDir) {
       payload.target_dir = targetName;
     } else {
       payload.target_database = targetName;
@@ -923,7 +960,7 @@
     Array.prototype.forEach.call(srcSel.options, function (opt) {
       if (!opt.value) { return; }
       var sInfo = sources.find(function (x) { return x.source === opt.value; });
-      if (sInfo && sInfo.continuous === false) {
+      if (sInfo && sInfo.continuous === false && !sInfo.verify_on_replay) {
         opt.disabled = true;
         if (!opt.textContent.includes('no continuous PITR')) {
           opt.textContent += ' (no continuous PITR)';

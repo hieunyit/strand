@@ -16,9 +16,9 @@ import (
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
-)
 
-const pinnedMinIOImage = "minio@sha256:7df55d002b698e4494a131b848dd553361bbe58b7e19f62d9623c29af1ba9ccf"
+	"strand/internal/testutil"
+)
 
 type s3ErrorResponse struct {
 	XMLName   xml.Name `xml:"Error"`
@@ -85,17 +85,18 @@ func TestMinIO_PostReadyProbe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	t.Logf("pinned MinIO image: %s", pinnedMinIOImage)
+	t.Logf("pinned MinIO image: %s", testutil.PinnedMinIOImage)
 
 	req := testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        pinnedMinIOImage,
+			Image:        testutil.PinnedMinIOImage,
+			Entrypoint:   []string{testutil.MinIOEntrypoint},
 			ExposedPorts: []string{"9000/tcp"},
 			Env: map[string]string{
 				"MINIO_ROOT_USER":     "minioadmin",
 				"MINIO_ROOT_PASSWORD": "minioadmin",
 			},
-			Cmd: []string{"server", "/data"},
+			Cmd: []string{"server", "/tmp/minio-data"},
 			WaitingFor: wait.ForHTTP("/minio/health/ready").
 				WithPort("9000/tcp").
 				WithStartupTimeout(90 * time.Second),
@@ -287,13 +288,14 @@ func TestMinIO_PreAndPostReadyCapture(t *testing.T) {
 	// Khởi động container KHÔNG dùng ForHTTP để có thể gửi request ngay từ millisecond đầu tiên
 	req := testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        pinnedMinIOImage,
+			Image:        testutil.PinnedMinIOImage,
+			Entrypoint:   []string{testutil.MinIOEntrypoint},
 			ExposedPorts: []string{"9000/tcp"},
 			Env: map[string]string{
 				"MINIO_ROOT_USER":     "minioadmin",
 				"MINIO_ROOT_PASSWORD": "minioadmin",
 			},
-			Cmd: []string{"server", "/data"},
+			Cmd: []string{"server", "/tmp/minio-data"},
 		},
 		Started: true,
 	}

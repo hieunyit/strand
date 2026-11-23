@@ -13,7 +13,10 @@ import (
 )
 
 // PinnedMinIOImage là digest cố định của MinIO container dùng cho fixture kiểm thử.
-const PinnedMinIOImage = "minio@sha256:7df55d002b698e4494a131b848dd553361bbe58b7e19f62d9623c29af1ba9ccf"
+const PinnedMinIOImage = "bitnamilegacy/minio:2025.4.22-debian-12-r0@sha256:a26e42a4d6550d2fb7708c8ceefc60474b42c124b6f3273a081721ddf1d86b20"
+
+// MinIOEntrypoint runs the pinned MinIO binary directly with test-owned data.
+const MinIOEntrypoint = "/opt/bitnami/minio/bin/minio"
 
 // MinIOEndpoint trả endpoint của MinIO riêng, cùng thông tin đăng nhập test minioadmin/minioadmin.
 func MinIOEndpoint(t testing.TB) string {
@@ -21,7 +24,7 @@ func MinIOEndpoint(t testing.TB) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: testcontainers.ContainerRequest{
-		Image: PinnedMinIOImage, ExposedPorts: []string{"9000/tcp"}, Env: map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"}, Cmd: []string{"server", "/data"},
+		Image: PinnedMinIOImage, Entrypoint: []string{MinIOEntrypoint}, ExposedPorts: []string{"9000/tcp"}, Env: map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"}, Cmd: []string{"server", "/tmp/minio-data"},
 		WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithStartupTimeout(90 * time.Second),
 	}, Started: true})
 	if c != nil {

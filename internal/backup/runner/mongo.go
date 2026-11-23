@@ -28,22 +28,76 @@ func ParseOplogTS(s string) (bson.Timestamp, error) {
 	return bson.Timestamp{T: uint32(t), I: uint32(i)}, nil
 }
 
-// LatestOplogTS returns the newest oplog entry timestamp of a replica set.
-func LatestOplogTS(ctx context.Context, uri string) (bson.Timestamp, error) {
+// latestOplogTS returns the newest oplog entry timestamp of a replica set.
+func latestOplogTS(ctx context.Context, client *mongo.Client) (bson.Timestamp, error) {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri).SetServerSelectionTimeout(20 * time.Second))
-	if err != nil {
-		return bson.Timestamp{}, err
-	}
-	defer client.Disconnect(context.Background())
 	var doc struct {
 		TS bson.Timestamp `bson:"ts"`
 	}
-	err = client.Database("local").Collection("oplog.rs").FindOne(cctx, bson.D{},
+	err := client.Database("local").Collection("oplog.rs").FindOne(cctx, bson.D{},
 		options.FindOne().SetSort(bson.D{{Key: "$natural", Value: -1}}).SetProjection(bson.D{{Key: "ts", Value: 1}})).Decode(&doc)
 	if err != nil {
 		return bson.Timestamp{}, fmt.Errorf("read latest oplog entry (is the source a replica set?): %w", err)
 	}
 	return doc.TS, nil
+}
+
+// mongoHistory identifies the replica set and checks its majority commit
+// point. Read history from the primary to avoid archiving a divergent tail.
+func mongoHistory(ctx context.Context, client *mongo.Client) (string, int64, bson.Timestamp, error) {
+	admin := client.Database("admin")
+	var config struct {
+		Config struct {
+			Settings struct {
+				ID bson.ObjectID `bson:"replicaSetId"`
+			}
+		}
+	}
+	if err := admin.RunCommand(ctx, bson.D{{Key: "replSetGetConfig", Value: 1}}).Decode(&config); err != nil {
+		return "", 0, bson.Timestamp{}, fmt.Errorf("read replica set identity: %w", err)
+	}
+	var status struct {
+		State   int   `bson:"myState"`
+		Term    int64 `bson:"term"`
+		OpTimes struct {
+			Committed struct {
+				TS bson.Timestamp
+			} `bson:"lastCommittedOpTime"`
+		}
+	}
+	if err := admin.RunCommand(ctx, bson.D{{Key: "replSetGetStatus", Value: 1}}).Decode(&status); err != nil {
+		return "", 0, bson.Timestamp{}, fmt.Errorf("read majority oplog position: %w", err)
+	}
+	if config.Config.Settings.ID.IsZero() || status.State != 1 || status.Term <= 0 || status.OpTimes.Committed.TS.T == 0 {
+		return "", 0, bson.Timestamp{}, fmt.Errorf("MongoDB PITR needs an identified replica set primary with a majority commit position")
+	}
+	return config.Config.Settings.ID.Hex(), status.Term, status.OpTimes.Committed.TS, nil
+}
+
+func awaitMongoCommit(ctx context.Context, client *mongo.Client, sourceID string, term int64, at bson.Timestamp) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if at.T == 0 {
+		return fmt.Errorf("mongodump did not contain an oplog boundary")
+	}
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		id, currentTerm, committed, err := mongoHistory(ctx, client)
+		if err != nil {
+			return err
+		}
+		if id != sourceID || currentTerm != term {
+			return fmt.Errorf("MongoDB replica set or primary term changed before oplog commit was verified")
+		}
+		if at.Compare(committed) <= 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for MongoDB majority oplog commit: %w", ctx.Err())
+		case <-tick.C:
+		}
+	}
 }

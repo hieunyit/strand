@@ -78,11 +78,14 @@ func MethodLogArchive(method string) string {
 // ConnSpec says how a built-in method reaches the database. Secrets are never stored: PasswordEnv /
 // URIEnv name environment variables of the Web service that hold them.
 type ConnSpec struct {
-	Host        string   `json:"host,omitempty"`
-	Port        int      `json:"port,omitempty"`
-	User        string   `json:"user,omitempty"`
-	PasswordEnv string   `json:"password_env,omitempty"`
-	Databases   []string `json:"databases,omitempty"`
+	Host          string   `json:"host,omitempty"`
+	Port          int      `json:"port,omitempty"`
+	User          string   `json:"user,omitempty"`
+	PasswordEnv   string   `json:"password_env,omitempty"`
+	Databases     []string `json:"databases,omitempty"`
+	TLSMode       string   `json:"tls_mode,omitempty"`
+	CACertPEM     string   `json:"ca_cert_pem,omitempty"`
+	TLSServerName string   `json:"-"`
 	// URIEnv (MongoDB): environment variable holding a mongodb:// URI (with credentials).
 	URIEnv string `json:"uri_env,omitempty"`
 	// Datadir (xtrabackup/mariabackup): the MySQL data directory, readable on the Strand host.

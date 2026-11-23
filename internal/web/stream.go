@@ -195,6 +195,11 @@ func liveFormat(v PipelineView, r LiveRecord, h HeadInfo, now time.Time) map[str
 		"sampled": "-", "pid": ""}
 	if v.Top != nil {
 		f["lag"] = fmtLag(v.Top.LagSeconds)
+		f["cdc_state"] = v.Top.CDCState
+		if v.Top.Verification != nil {
+			f["verification_status"] = v.Top.Verification.Status
+			f["verification_at"] = v.Top.Verification.CheckedAt.Format(time.RFC3339Nano)
+		}
 		if v.Top.Zone != "" {
 			f["zone"] = v.Top.Zone
 		}

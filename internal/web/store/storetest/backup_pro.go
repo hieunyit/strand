@@ -107,6 +107,9 @@ func runBackupPro(t *testing.T, s store.Store) {
 	if _, _, err := cat.SetLegalHold(ctx, wal.ID, true); err == nil {
 		t.Fatal("hold on expired backup accepted")
 	}
+	if _, _, err := cat.ClaimDeletion(ctx, full.ID, time.Now()); err == nil {
+		t.Fatal("accepted hold must prevent claiming deletion")
+	}
 	_, _, _ = cat.SetLegalHold(ctx, full.ID, false)
 	// Checks.
 	now := time.Now().UTC().Truncate(time.Millisecond)
@@ -164,6 +167,19 @@ func runBackupPro(t *testing.T, s store.Store) {
 	if ok, err := s.DeleteBackupRepo(ctx, "offsite"); !ok || err != nil {
 		t.Fatalf("delete repo %v %v", ok, err)
 	}
+	for i := 0; i < 2; i++ {
+		claimed, ok, err := cat.ClaimDeletion(ctx, full.ID, now)
+		if err != nil || !ok || claimed.Status != backup.StatusDeleting {
+			t.Fatalf("claim or resume deletion: %+v, %v", claimed, err)
+		}
+	}
+	if _, _, err := cat.SetLegalHold(ctx, full.ID, true); err == nil {
+		t.Fatal("hold accepted after retention reserved deletion")
+	}
+	if _, ok, err := cat.Expire(ctx, full.ID, now); err != nil || !ok {
+		t.Fatalf("finish deletion: %v, %v", ok, err)
+	}
+
 }
 
 func runBackupRetry(t *testing.T, s store.Store) {

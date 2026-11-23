@@ -89,7 +89,8 @@ func (e *Env) VerifyJob(ctx context.Context, job backup.Job, opt VerifyOptions) 
 	if err != nil {
 		return VerifyReport{}, err
 	}
-	return e.verifyRecords(ctx, rs, opt), nil
+	report := e.verifyRecords(ctx, rs, opt)
+	return report, ctx.Err()
 }
 
 func (e *Env) verifyRecords(ctx context.Context, rs []backup.Record, opt VerifyOptions) VerifyReport {
@@ -127,13 +128,8 @@ func (e *Env) verifyRecords(ctx context.Context, rs []backup.Record, opt VerifyO
 		_, _ = e.Catalog.AddCheck(ctx, backup.CheckResult{BackupID: r.ID, Kind: "verify", Status: status, StartedAt: started,
 			FinishedAt: e.now(), Detail: detail, Metrics: map[string]string{"bytes_read": strconv.FormatInt(n, 10)}})
 		if r.KindOrFull() == backup.KindIncremental {
-			for p, guard := r.ParentID, 0; p != "" && guard < 10000; guard++ {
-				pr, ok := byID[p]
-				if !ok {
-					rep.Problems = append(rep.Problems, fmt.Sprintf("incremental %s: parent %s is missing or not complete (broken chain)", r.ID, p))
-					break
-				}
-				p = pr.ParentID
+			if _, err := restoreChain(r, byID); err != nil {
+				rep.Problems = append(rep.Problems, err.Error())
 			}
 		}
 	}
@@ -145,19 +141,20 @@ func (e *Env) verifyRecords(ctx context.Context, rs []backup.Record, opt VerifyO
 // segment whose start LSN is not the previous end, binlog archive sequence holes, or oplog slices that do
 // not overlap/abut.
 func LogGaps(rs []backup.Record) []string {
-	bySource := map[string][]backup.Record{}
+	byLineage := map[archiveLineage][]backup.Record{}
 	for _, r := range rs {
-		if r.KindOrFull() == backup.KindLog && r.Status == backup.StatusComplete {
-			bySource[r.Source] = append(bySource[r.Source], r)
+		if r.KindOrFull() == backup.KindLog && r.Status == backup.StatusComplete && r.CopyOf == "" {
+			key := archiveLineageOf(r)
+			byLineage[key] = append(byLineage[key], r)
 		}
 	}
 	var out []string
-	for src, logs := range bySource {
+	for lineage, logs := range byLineage {
 		sort.SliceStable(logs, func(i, j int) bool { return logSeq(logs[i]) < logSeq(logs[j]) })
 		for i := 1; i < len(logs); i++ {
 			prev, cur := logs[i-1], logs[i]
 			if !Contiguous(prev, cur) {
-				out = append(out, fmt.Sprintf("%s: log gap between %s and %s", src, prev.ID, cur.ID))
+				out = append(out, fmt.Sprintf("%s: log gap between %s and %s", lineage.source, prev.ID, cur.ID))
 			}
 		}
 	}
@@ -175,17 +172,47 @@ func logSeq(r backup.Record) string {
 
 // Contiguous reports whether cur directly follows prev.
 func Contiguous(prev, cur backup.Record) bool {
+	if prev.Engine != cur.Engine || prev.Source != cur.Source || prev.Method != cur.Method || prev.JobID != cur.JobID {
+		return false
+	}
 	switch prev.Method {
 	case backup.MethodWAL:
-		return prev.EndPosition.LSN != "" && prev.EndPosition.LSN == cur.Position.LSN
+		return prev.EndPosition.LSN != "" && prev.EndPosition.LSN == cur.Position.LSN &&
+			prev.Details["source_identity"] != "" && prev.Details["source_identity"] == cur.Details["source_identity"] &&
+			prev.Details["timeline"] != "" && prev.Details["timeline"] == cur.Details["timeline"]
 	case backup.MethodBinlog:
 		a, _ := strconv.ParseInt(prev.Details["seq"], 10, 64)
 		b, _ := strconv.ParseInt(cur.Details["seq"], 10, 64)
-		return b == a+1
+		return a > 0 && b == a+1 &&
+			prev.Details["source_identity"] != "" && prev.Details["source_identity"] == cur.Details["source_identity"] &&
+			nextBinlogFile(prev, cur.Position.BinlogFile) &&
+			cur.Position.BinlogPos == 4 && cur.EndPosition.BinlogPos > cur.Position.BinlogPos
 	case backup.MethodOplog:
-		pa, err1 := ParseOplogTS(prev.EndPosition.OplogTS)
-		pb, err2 := ParseOplogTS(cur.Position.OplogTS)
-		return err1 == nil && err2 == nil && (pb.T < pa.T || (pb.T == pa.T && pb.I <= pa.I))
+		return prev.Details["source_identity"] != "" && prev.Details["source_identity"] == cur.Details["source_identity"] &&
+			prev.Details["oplog_boundary"] == "exclusive-v1" && cur.Details["oplog_boundary"] == "exclusive-v1" &&
+			prev.EndPosition.OplogTS != "" && prev.EndPosition.OplogTS == cur.Position.OplogTS
 	}
 	return true
+}
+
+// When MySQL shuts down cleanly, STOP closes the current file and the next
+// startup increments its sequence without a ROTATE event in the old file.
+func nextBinlogFile(prev backup.Record, next string) bool {
+	if next == "" {
+		return false
+	}
+	if successor := prev.Details["next_file"]; successor != "" {
+		return successor == next
+	}
+	if prev.Details["closed_with_stop"] != "true" {
+		return false
+	}
+	n := strings.LastIndexByte(prev.EndPosition.BinlogFile, '.')
+	m := strings.LastIndexByte(next, '.')
+	if n < 0 || m < 0 || prev.EndPosition.BinlogFile[:n] != next[:m] {
+		return false
+	}
+	a, aErr := strconv.ParseUint(prev.EndPosition.BinlogFile[n+1:], 10, 32)
+	b, bErr := strconv.ParseUint(next[m+1:], 10, 32)
+	return aErr == nil && bErr == nil && b == a+1
 }

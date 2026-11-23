@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
@@ -35,7 +34,7 @@ func startPGForKeys(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	host, _ := c.Host(ctx)
-	port, _ := c.MappedPort(ctx, nat.Port("5432/tcp"))
+	port, _ := c.MappedPort(ctx, "5432/tcp")
 	lastPGKeysDSN = fmt.Sprintf("postgres://strand:dev@%s:%s/app?sslmode=disable", host, port.Port())
 	cc, err := pgx.ParseConfig(lastPGKeysDSN)
 	if err != nil {

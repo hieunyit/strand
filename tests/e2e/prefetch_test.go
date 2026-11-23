@@ -15,6 +15,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"strand/internal/testutil"
 )
 
 // archiveBinlogs đóng binlog hiện tại rồi chép mọi file binlog của source ra dir (archive).
@@ -214,9 +215,9 @@ func TestG1_E2E_PrefetchSpoolOverflowsToBucket(t *testing.T) {
 	ctx := context.Background()
 	mc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image: "minio:latest", ExposedPorts: []string{"9000/tcp"},
+			Image: testutil.PinnedMinIOImage, Entrypoint: []string{testutil.MinIOEntrypoint}, ExposedPorts: []string{"9000/tcp"},
 			Env:        map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
-			Cmd:        []string{"server", "/data"},
+			Cmd:        []string{"server", "/tmp/minio-data"},
 			WaitingFor: wait.ForListeningPort("9000/tcp").WithStartupTimeout(90 * time.Second),
 		}, Started: true})
 	if err != nil {
@@ -255,9 +256,9 @@ func TestG1_E2E_PrefetchDuringLongRestore(t *testing.T) {
 	ctx := context.Background()
 	mc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image: "minio:latest", ExposedPorts: []string{"9000/tcp"},
+			Image: testutil.PinnedMinIOImage, Entrypoint: []string{testutil.MinIOEntrypoint}, ExposedPorts: []string{"9000/tcp"},
 			Env:        map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
-			Cmd:        []string{"server", "/data"},
+			Cmd:        []string{"server", "/tmp/minio-data"},
 			WaitingFor: wait.ForListeningPort("9000/tcp").WithStartupTimeout(90 * time.Second),
 		}, Started: true})
 	if err != nil {

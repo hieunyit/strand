@@ -439,12 +439,15 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				return fail(err)
 			}
 		}
-		if r.cfg.RequireFullRowImage {
-			for _, skipped := range rowsEv.SkippedColumns {
-				if len(skipped) > 0 {
-					return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "source prefetch requires FULL row images; refusing omitted columns", nil))
-				}
+		partial := false
+		for _, skipped := range rowsEv.SkippedColumns {
+			if len(skipped) > 0 {
+				partial = true
+				break
 			}
+		}
+		if partial && r.cfg.RequireFullRowImage {
+			return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "source prefetch requires FULL row images; refusing omitted columns", nil))
 		}
 		segs := []rowSeg{{op: op, rows: rowsEv.Rows}}
 		if info != nil && info.SysVersioned {
@@ -458,16 +461,17 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 				return fail(err)
 			}
 			if !emit(reader.Event{
-				Type:       reader.EventRows,
-				Pos:        posAt(),
-				BinlogFile: startFile,
-				BinlogPos:  startPos,
-				TableID:    rowsEv.TableID,
-				Schema:     schema,
-				Table:      table,
-				Op:         sg.op,
-				Rows:       sg.rows,
-				Timestamp:  ts,
+				Type:            reader.EventRows,
+				Pos:             posAt(),
+				BinlogFile:      startFile,
+				BinlogPos:       startPos,
+				TableID:         rowsEv.TableID,
+				Schema:          schema,
+				Table:           table,
+				Op:              sg.op,
+				Rows:            sg.rows,
+				PartialRowImage: partial,
+				Timestamp:       ts,
 			}) {
 				return false
 			}

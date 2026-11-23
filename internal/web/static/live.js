@@ -151,6 +151,10 @@
       if (root.hasAttribute('data-live-nav')) { root.title = rec.name + ': ' + rec.state; }
       bindScope(root, scope, f, rec);
       if (root.hasAttribute('data-live-head')) {
+        var evidence = root.querySelector('[data-verification-status]');
+        if ((evidence && !f.verification_status) || (f.verification_status && (!evidence ||
+            evidence.getAttribute('data-verification-status') !== f.verification_status ||
+            evidence.getAttribute('data-verification-at') !== f.verification_at))) { structural(); }
         var was = root.getAttribute('data-state');
         if (was && was !== rec.state) { root.setAttribute('data-state', rec.state); structural(); } // buttons depend on the state
       }

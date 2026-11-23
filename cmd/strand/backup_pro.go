@@ -383,9 +383,10 @@ backup process is gone (the Web checks that before it passes the flag); it is ma
 
 func newBackupRestoreCmd() *cobra.Command {
 	var id, source, toTime, targetDB, targetDir string
-	var tunnelSSH, tunnelUser, tunnelIdentity, tunnelKnownHosts string
+	var tunnelSSH, tunnelUser, tunnelIdentity, tunnelKnownHosts, targetCAEnv string
 	var target backup.ConnSpec
-	var yes, dryRun bool
+	var yes, dryRun, targetDeployment bool
+	var confirmTarget string
 	var threads int
 	var objects []string
 	cmd := &cobra.Command{
@@ -404,8 +405,14 @@ Passwords come from the environment variable named by --target-password-env.`,
 			if source != "" && toTime == "" {
 				return backupUsageErr("--source needs --to-time")
 			}
-			if !dryRun && (targetDB == "") == (targetDir == "") {
-				return backupUsageErr("exactly one of --target-database and --target-dir is required")
+			if !dryRun {
+				if targetDeployment {
+					if targetDB != "" || targetDir != "" {
+						return backupUsageErr("--target-deployment cannot be combined with a database or directory")
+					}
+				} else if (targetDB == "") == (targetDir == "") {
+					return backupUsageErr("specify one of --target-database, --target-dir or --target-deployment")
+				}
 			}
 			if target.PasswordEnv != "" && !backup.ValidEnvName(target.PasswordEnv) || target.URIEnv != "" && !backup.ValidEnvName(target.URIEnv) {
 				return backupUsageErr("invalid or reserved environment variable name for the target secret")
@@ -460,6 +467,28 @@ Passwords come from the environment variable named by --target-password-env.`,
 			if !yes {
 				return backupUsageErr("restores need --yes (the target must be new; nothing is overwritten)")
 			}
+			if targetCAEnv != "" {
+				if !backup.ValidEnvName(targetCAEnv) || os.Getenv(targetCAEnv) == "" {
+					return backupUsageErr("--target-ca-env must name a variable containing the target CA")
+				}
+				target.CACertPEM = os.Getenv(targetCAEnv)
+			}
+			base := plan.Base()
+			if base.Engine == backup.EngineMongoDB {
+				uri, err := runner.MongoURI(os.Getenv, target)
+				if err != nil {
+					return backupUsageErr(err.Error())
+				}
+				destination, err := runner.MongoRestoreDestination(uri, targetDB)
+				if err != nil {
+					return backupUsageErr(err.Error())
+				}
+				if confirmTarget != destination {
+					return backupUsageErr("confirm the MongoDB restore with --confirm-target " + destination)
+				}
+			} else if targetDeployment {
+				return backupUsageErr("--target-deployment applies only to MongoDB")
+			}
 			if tunnelSSH != "" {
 				if target.URIEnv != "" {
 					return backupUsageErr("ssh tunnel cannot be used with a connection URI; use host/port/user")
@@ -493,6 +522,7 @@ Passwords come from the environment variable named by --target-password-env.`,
 					return fmt.Errorf("parse restore tunnel address: %w", err)
 				}
 				p, _ := strconv.Atoi(pStr)
+				target.TLSServerName = target.Host
 				target.Host = h
 				target.Port = p
 			}
@@ -531,11 +561,12 @@ Passwords come from the environment variable named by --target-password-env.`,
 				}
 			}
 			return env.Restore(ctx, plan, runner.RestoreTarget{
-				Conn:     target,
-				Database: targetDB,
-				Dir:      targetDir,
-				Threads:  threads,
-				Objects:  objects,
+				Conn:       target,
+				Database:   targetDB,
+				Deployment: targetDeployment,
+				Dir:        targetDir,
+				Threads:    threads,
+				Objects:    objects,
 			})
 		},
 	}
@@ -547,7 +578,11 @@ Passwords come from the environment variable named by --target-password-env.`,
 	cmd.Flags().StringVar(&target.User, "target-user", "", "target server user")
 	cmd.Flags().StringVar(&target.PasswordEnv, "target-password-env", "", "environment variable holding the target password")
 	cmd.Flags().StringVar(&target.URIEnv, "target-uri-env", "", "MongoDB: environment variable holding the target URI")
+	cmd.Flags().StringVar(&target.TLSMode, "target-tls-mode", "", "target TLS policy (disable, require, verify-ca or verify-full)")
+	cmd.Flags().StringVar(&targetCAEnv, "target-ca-env", "", "environment variable containing the target CA PEM")
 	cmd.Flags().StringVar(&targetDB, "target-database", "", "new database to create (logical restores)")
+	cmd.Flags().BoolVar(&targetDeployment, "target-deployment", false, "restore a MongoDB deployment backup into an empty deployment")
+	cmd.Flags().StringVar(&confirmTarget, "confirm-target", "", "MongoDB endpoint and database or /* for a deployment restore")
 	cmd.Flags().StringVar(&targetDir, "target-dir", "", "new data directory (physical restores)")
 	cmd.Flags().IntVar(&threads, "threads", 0, "parallel restore workers (1..16, pg_dump/mongodump only)")
 	cmd.Flags().StringSliceVar(&objects, "objects", nil, "comma-separated or repeatable list of tables/collections to restore")
@@ -754,7 +789,7 @@ func fetchManaged(ctx context.Context, st store.Store, rec backup.Record, raw, w
 	}
 	var body io.ReadCloser
 	if raw {
-		body, _, err = repo.Store.DownloadVerified(ctx, rec.ObjectKey, rec.Bytes, rec.SHA256)
+		body, _, err = repo.Store.DownloadVerifiedVersion(ctx, rec.ObjectKey, rec.VersionID, rec.Bytes, rec.SHA256)
 	} else {
 		body, err = repo.OpenPayload(ctx, rec, env.Keys)
 	}

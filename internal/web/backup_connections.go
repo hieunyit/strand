@@ -14,6 +14,7 @@ import (
 
 	"strand/internal/backup"
 	"strand/internal/backup/conncheck"
+	"strand/internal/backup/runner"
 	"strand/internal/backup/sshtun"
 )
 
@@ -401,11 +402,10 @@ func (s *Server) connChecker() conncheck.Checker {
 	return conncheck.Live{}
 }
 
-// apiConnTest tests a stored connection (saved=true) or the unsaved definition in the body. An unsaved
-// test of an existing connection (body has "id") reuses that connection's stored secret when the body
-// carries none. The test result is the response (200 even when the server refused the login).
+// apiConnTest uses saved credentials only with the saved connection definition.
+// An unsaved probe uses credentials supplied in the request alone.
 func (s *Server) apiConnTest(saved bool) authedHandler {
-	return func(w http.ResponseWriter, r *http.Request, _ *Session) {
+	return func(w http.ResponseWriter, r *http.Request, sess *Session) {
 		if !s.needDB(w) {
 			return
 		}
@@ -432,16 +432,10 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 			if !decodeStrict(w, r, &req) {
 				return
 			}
-			var cur *backup.Connection
-			if req.ID != "" {
-				if x, ok, _ := s.db.st.GetBackupConnection(r.Context(), req.ID); ok {
-					cur = &x
-				}
-			}
 			if req.ID == "" {
 				req.ID = "conn-unsaved"
 			}
-			built, err := s.connFromRequest(req, cur)
+			built, err := s.connFromRequest(req, nil)
 			if err != nil {
 				writeErr(w, http.StatusBadRequest, err.Error())
 				return
@@ -454,22 +448,22 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 				return
 			}
 			c = built
-			if built.SecretMode == backup.SecretStored && req.Password != nil {
+			if req.Password != nil {
 				password = *req.Password
-			} else if built.SecretMode == backup.SecretStored && cur != nil {
-				// keep the stored secret of the connection being edited
-				var err error
-				if password, _, err = s.connSecrets(*cur); err != nil {
-					writeErr(w, http.StatusConflict, err.Error())
-					return
-				}
-			} else if built.SecretMode == backup.SecretEnv {
-				password, uri, _ = s.connSecrets(built)
 			}
-			if built.SecretMode == backup.SecretStored && req.URI != nil {
+			if req.URI != nil {
 				uri = *req.URI
-			} else if built.SecretMode == backup.SecretStored && cur != nil {
-				_, uri, _ = s.connSecrets(*cur)
+			}
+		}
+		var restoreEndpoint string
+		if saved && sess != nil && RoleAllows(sess.Role, PermAdmin) && c.Engine == backup.ConnMongoDB {
+			original := uri
+			if original == "" {
+				original, _ = runner.MongoURI(os.Getenv, backup.ConnSpec{Host: c.Host, Port: c.Port})
+			}
+			destination, err := runner.MongoRestoreDestination(original, "")
+			if err == nil {
+				restoreEndpoint = strings.TrimSuffix(destination, "/*")
 			}
 		}
 		if !s.auditBackupOp(w, r, "backup_connection.test", map[string]any{"connection": c.ID, "saved": saved, "engine": c.Engine, "host": c.Host}) {
@@ -526,6 +520,7 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 				CACertPEM:     c.CACertPEM,
 				TLSServerName: origHost,
 			})
+			res.RestoreEndpoint = restoreEndpoint
 			res.Checks = append([]conncheck.Check{
 				{Name: "ssh_tunnel", Status: "ok", Detail: "connected via " + c.SSHTunnel.Host},
 			}, res.Checks...)
@@ -546,6 +541,7 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 		}
 		res := s.connChecker().Check(r.Context(), conncheck.Target{Engine: c.Engine, Host: c.Host, Port: c.Port, User: c.User,
 			Password: password, URI: uri, TLSMode: c.TLSMode, CACertPEM: c.CACertPEM})
+		res.RestoreEndpoint = restoreEndpoint
 		if saved {
 			status, detail := "ok", "connected"
 			if !res.OK {

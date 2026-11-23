@@ -21,7 +21,15 @@ func (c *Catalog) UpdateMeta(ctx context.Context, id, engine string, m Meta) (Re
 	return c.repo.UpdateBackupMeta(ctx, id, m)
 }
 
-// Expire marks a complete backup expired after its objects were deleted.
+// ClaimDeletion reserves a backup for retention before any storage writes.
+func (c *Catalog) ClaimDeletion(ctx context.Context, id string, at time.Time) (Record, bool, error) {
+	if !validID(id) || at.IsZero() {
+		return Record{}, false, fmt.Errorf("%w: invalid id or time", ErrInvalid)
+	}
+	return c.repo.ClaimBackupDeletion(ctx, id, at.UTC())
+}
+
+// Expire marks a backup expired after its objects were deleted.
 func (c *Catalog) Expire(ctx context.Context, id string, at time.Time) (Record, bool, error) {
 	if !validID(id) || at.IsZero() {
 		return Record{}, false, fmt.Errorf("%w: invalid id or time", ErrInvalid)
@@ -110,6 +118,8 @@ func InProgress(s Status) bool {
 // unexpired Object Lock retention always win.
 func DeletableErr(r Record, now time.Time) error {
 	switch {
+	case r.Status == StatusDeleting:
+		return fmt.Errorf("%w: restore point %s is pending deletion by retention", ErrInvalid, r.ID)
 	case r.Status == StatusComplete:
 		return fmt.Errorf("%w: restore point %s is complete: complete restore points are removed by the retention policy (prune), not deleted by hand", ErrInvalid, r.ID)
 	case r.LegalHold:

@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"strand/internal/backup"
 )
 
@@ -136,7 +134,7 @@ func SelectPGDump(ctx context.Context, getenv Getenv, serverVersion string) (too
 func (e *Env) pgServerVersion(ctx context.Context, c backup.ConnSpec, db string) string {
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	conn, err := pgconn.Connect(cctx, PGConnString(e.Getenv, c, db, false))
+	conn, err := connectBackupPG(cctx, e.Getenv, c, db, false)
 	if err != nil {
 		return ""
 	}
