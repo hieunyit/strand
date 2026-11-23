@@ -453,21 +453,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.tables, err = p.loadTables(ctx, p.filter); err != nil {
 		return fmt.Errorf("load source schema: %w", err)
 	}
-	p.cascade, err = p.planMySQLCascade(ctx)
-	if err != nil {
-		return err
-	}
-	if len(p.cascade.signatures) > 0 {
-		if _, err := os.Stat(filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")); err == nil {
-			return cascadeConfigError("cascading foreign keys require a live binlog reader; prefetch spools do not preserve foreign-key session flags")
-		} else if !errors.Is(err, os.ErrNotExist) {
+	if !p.cfg.Bootstrap.AutoSeed {
+		if err := p.initMySQLCascade(ctx); err != nil {
 			return err
 		}
-		p.strict = true
-		p.log.Info("MySQL cascade enabled; applying CDC in source commit order")
-	}
-	if err := p.state.checkCascadeSignatures(p.cascade.signatures); err != nil {
-		return err
 	}
 	if p.srcEngine == p.dstEngine {
 		tables := make([]model.TableID, 0, len(p.tables))
@@ -550,9 +539,52 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.startAtFromConfig && hasCheckpoint {
 		p.opts.StartAt = ""
 	}
+	if err := p.state.resolveAutoSeed(hasCheckpoint); err != nil {
+		return err
+	}
+	if p.cfg.Bootstrap.AutoSeed {
+		if !p.posMode || p.opts.StartAt != "" {
+			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				"bootstrap.auto_seed requires binlog position mode and cannot be combined with --start-at", nil)
+		}
+		var rowImage string
+		if err := p.src.QueryRowContext(ctx, "SELECT @@GLOBAL.binlog_row_image").Scan(&rowImage); err != nil {
+			return fmt.Errorf("auto-seed: read source binlog_row_image: %w", err)
+		}
+		if !strings.EqualFold(rowImage, "FULL") {
+			return autoSeedRejected("source binlog_row_image must be FULL")
+		}
+		if !hasCheckpoint {
+			seeded, seedErr := p.autoSeed(ctx, loaded)
+			var rejected *exitcode.Error
+			if errors.As(seedErr, &rejected) && rejected.Code == exitcode.ErrLogGap && ctx.Err() == nil {
+				p.log.Warn("auto-seed binlog point expired before commit; retrying from a fresh snapshot")
+				seeded, seedErr = p.autoSeed(ctx, loaded)
+			}
+			if seedErr != nil {
+				return seedErr
+			}
+			loaded = seeded
+			hasCheckpoint = hasAppliedCheckpoint(loaded)
+		} else {
+			if err := p.initMySQLCascade(ctx); err != nil {
+				return err
+			}
+			group, err := p.autoSeedTables(ctx)
+			if err != nil {
+				return err
+			}
+			for _, table := range group {
+				if !p.state.IsDone(table.String()) {
+					return autoSeedRejected(fmt.Sprintf("table %s has no completed initial copy at the existing checkpoint", table))
+				}
+			}
+		}
+	}
+
 	if len(p.cascade.signatures) > 0 && p.opts.StartAt == "" {
 		for id := range p.tables {
-			if !p.state.IsDone(id.String()) {
+			if !p.state.IsDone(id.String()) && (!p.cfg.Bootstrap.AutoSeed || p.cascade.parents[id] || p.cascade.children[id]) {
 				return cascadeConfigError(fmt.Sprintf("cascading foreign keys require a consistent initial copy; seed the target and use --start-at seed or its binlog position (table %s still needs a snapshot)", id))
 			}
 		}
@@ -734,7 +766,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 
 	mysqlWriterDB := p.dst
 	if len(p.cascade.signatures) > 0 {
-		if len(pending) > 0 {
+		if len(pending) > 0 && !p.cfg.Bootstrap.AutoSeed {
 			return cascadeConfigError("cannot run an online snapshot with cascading foreign keys; seed the target from a consistent copy")
 		}
 		dsn, err := targetDSN(p.cfg.Target.DSN, p.id, p.instance)

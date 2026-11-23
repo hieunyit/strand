@@ -277,8 +277,9 @@ func CheckRowKeys(ctx context.Context, src *sql.DB, srcKind string, dst *sql.DB,
 
 // KeylessOpts: cấu hình chế độ keyless (tables.keyless=full_row) cho validate.
 type KeylessOpts struct {
-	On         bool
-	AllowFloat bool
+	On                    bool
+	AllowFloat            bool
+	RequireBinlogPosition bool
 	// Seeded(table "schema.table"): dữ liệu đầu của bảng đến từ seed/start_at (không snapshot logic).
 	Seeded func(table string) bool
 }

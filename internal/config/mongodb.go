@@ -129,8 +129,8 @@ func validateMongoDB(cfg *Config) error {
 		return bad("tables.keyless does not apply to MongoDB (every document has _id)")
 	case cfg.Bootstrap.Default != "" && cfg.Bootstrap.Default != "logical":
 		return bad("bootstrap.default must be logical for MongoDB pipelines (snapshot + change stream)")
-	case cfg.Bootstrap.StartAt != "" || len(cfg.Bootstrap.PerTable) > 0:
-		return bad("bootstrap.start_at / per_table are not supported for MongoDB pipelines")
+	case cfg.Bootstrap.AutoSeed || cfg.Bootstrap.StartAt != "" || len(cfg.Bootstrap.PerTable) > 0:
+		return bad("bootstrap.auto_seed / start_at / per_table are not supported for MongoDB pipelines")
 	}
 	switch strings.ToLower(cfg.MongoDB.Updates) {
 	case "", "auto", "delta", "lookup":

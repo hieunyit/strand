@@ -114,6 +114,7 @@ func (t TablesConfig) KeylessOn() bool {
 }
 
 type BootstrapConfig struct {
+	AutoSeed bool                          `yaml:"auto_seed,omitempty" json:"auto_seed,omitempty"`
 	Default  string                        `yaml:"default" json:"default"` // logical | seed | start_at
 	StartAt  string                        `yaml:"start_at,omitempty" json:"start_at,omitempty"`
 	PerTable map[string]BootstrapTableMode `yaml:"per_table,omitempty" json:"per_table,omitempty"`
@@ -465,6 +466,16 @@ func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 
 	if err := ValidateRename(cfg.Tables.Rename, TargetFoldsTableCase(cfg.Target.Kind)); err != nil {
 		return nil, err
+	}
+
+	if cfg.Bootstrap.AutoSeed {
+		b := cfg.Bootstrap
+		if !strings.EqualFold(cfg.Source.Kind, "mysql") || !strings.EqualFold(cfg.Target.Kind, "mysql") ||
+			(b.Default != "" && !strings.EqualFold(b.Default, "logical")) || b.StartAt != "" || len(b.PerTable) != 0 ||
+			!cfg.Tables.KeylessOn() || len(cfg.Tables.Mask) != 0 {
+			return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+				"bootstrap.auto_seed requires a MySQL-protocol source and MySQL target, tables.keyless=full_row and logical bootstrap without start_at, per_table or column masks", nil)
+		}
 	}
 
 	// bootstrap.logical.max_parallel: số bảng snapshot đồng thời (0/vắng = 1, hành vi tuần tự cũ).

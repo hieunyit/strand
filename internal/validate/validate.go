@@ -147,6 +147,9 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 	}
 	// gtid_mode ON: chế độ GTID. OFF hoặc không có biến (5.5): chế độ vị trí binlog (file:pos, bắt đầu bằng
 	// --start-at <file>:<pos>). *_PERMISSIVE trộn Txn có/không GTID trong cùng binlog: không chế độ nào đúng.
+	if ko.RequireBinlogPosition && strings.EqualFold(gtidMode, "ON") {
+		return warnings, reject("bootstrap.auto_seed currently requires binlog file position mode")
+	}
 	switch strings.ToUpper(gtidMode) {
 	case "ON", "OFF", "":
 	default:

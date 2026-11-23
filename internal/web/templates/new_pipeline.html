@@ -221,7 +221,13 @@
           <option value="full_row">Allow full-row matching for tables without a key</option>
         </select>
       </label>
-      <small class="field-hint" id="np-keyless-help">Tables without a usable key need an initial copy restored on the target. For those tables, MySQL and MariaDB require <code>binlog_row_image=FULL</code>. PostgreSQL requires <code>REPLICA IDENTITY FULL</code> on each keyless table.</small>
+      <small class="field-hint" id="np-keyless-help">Tables without a usable key need an initial copy on the target. For those tables, MySQL and MariaDB require <code>binlog_row_image=FULL</code>. PostgreSQL requires <code>REPLICA IDENTITY FULL</code> on each keyless table.</small>
+      <label class="check" data-when="dst:mysql">
+        <input type="checkbox" name="auto_seed" value="true">
+        <span>Automatically copy tables without a usable key and their foreign-key groups
+          <small class="field-hint">Choose full-row matching and leave Start position blank. Requires empty target tables, binlog file positions and the source RELOAD privilege.</small>
+        </span>
+      </label>
       <label class="field">
         <span class="field-label">Start position of the restored copy <span class="opt">optional</span></span>
         <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678, MySQL GTID or PostgreSQL LSN" aria-describedby="np-start-at-help">

@@ -251,9 +251,13 @@ func objectsSummaryWarning(c map[objects.Kind]int, toMySQL bool) string {
 // cấu hình riêng) bootstrap.default là seed/start_at.
 func keylessOpts(cfg *config.Config) validate.KeylessOpts {
 	return validate.KeylessOpts{
-		On:         cfg.Tables.KeylessOn(),
-		AllowFloat: cfg.Tables.KeylessAllowFloat,
+		On:                    cfg.Tables.KeylessOn(),
+		AllowFloat:            cfg.Tables.KeylessAllowFloat,
+		RequireBinlogPosition: cfg.Bootstrap.AutoSeed,
 		Seeded: func(table string) bool {
+			if cfg.Bootstrap.AutoSeed {
+				return true
+			}
 			if pt, ok := cfg.Bootstrap.PerTable[table]; ok && pt.Mode != "" {
 				return strings.EqualFold(pt.Mode, "seed")
 			}

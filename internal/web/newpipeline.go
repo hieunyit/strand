@@ -85,6 +85,7 @@ type NewPipelineOpts struct {
 	ChunkRows       int      `json:"chunk_rows,omitempty"`
 	MaxParallel     int      `json:"max_parallel,omitempty"` // bootstrap.logical.max_parallel: số bảng snapshot cùng lúc
 	StartAt         string   `json:"start_at,omitempty"`
+	AutoSeed        bool     `json:"auto_seed,omitempty"`
 	Windows         []string `json:"windows,omitempty"`
 	BreakerMaxRatio float64  `json:"breaker_max_ratio,omitempty"`
 	ReplicaLagMax   string   `json:"replica_lag_max,omitempty"`
@@ -238,6 +239,9 @@ bootstrap:
   start_at: {{printf "%q" .StartAt}}
 {{- else}}
   default: logical
+{{- if .AutoSeed}}
+  auto_seed: true
+{{- end}}
 {{- if or .ChunkRows .Windows .MaxParallel}}
   logical: { {{logical .}} }
 {{- end}}
@@ -298,6 +302,7 @@ type tmplData struct {
 	ChunkRows         int
 	MaxParallel       int
 	StartAt           string
+	AutoSeed          bool
 	Windows           []string
 	BreakerMaxRatio   float64
 	ReplicaLagMax     string
@@ -371,6 +376,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		ChunkRows:         opts.ChunkRows,
 		MaxParallel:       opts.MaxParallel,
 		StartAt:           opts.StartAt,
+		AutoSeed:          opts.AutoSeed,
 		Windows:           opts.Windows,
 		BreakerMaxRatio:   opts.BreakerMaxRatio,
 		ReplicaLagMax:     opts.ReplicaLagMax,
@@ -536,6 +542,11 @@ func checkOpts(opts NewPipelineOpts) error {
 	default:
 		return errors.New("keyless: choose off or full_row")
 	}
+	if opts.AutoSeed && ((opts.From != "mysql" && opts.From != "mariadb") || opts.To != "mysql" ||
+		!strings.EqualFold(strings.TrimSpace(opts.Keyless), "full_row") || strings.TrimSpace(opts.StartAt) != "") {
+		return errors.New("auto_seed: choose full-row matching on MariaDB/MySQL to MySQL and leave Start position blank")
+	}
+
 	for _, endpoint := range []struct {
 		name, kind string
 		ssh        *config.SSHTunnelConfig
@@ -1027,6 +1038,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.Metrics = f.Get("metrics")
 	opts.LogFormat = f.Get("log_format")
 	opts.StartAt = strings.TrimSpace(f.Get("start_at"))
+	opts.AutoSeed = f.Get("auto_seed") == "true"
 	opts.SourceURI = f.Get("source_uri")
 	opts.TargetURI = f.Get("target_uri")
 	opts.SourceAuthDB = strings.TrimSpace(f.Get("source_auth_db"))

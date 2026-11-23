@@ -1009,7 +1009,7 @@
           } else if (k === 'include' || k === 'exclude' || k === 'databases' || k === 'windows') {
             // API nhận mảng chuỗi: tách theo dấu phẩy
             payload[k] = str.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
-          } else if (k === 'overwrite' || k === 'overwrite_target' || k === 'source_tls' || k === 'target_tls') {
+          } else if (k === 'overwrite' || k === 'overwrite_target' || k === 'auto_seed' || k === 'source_tls' || k === 'target_tls') {
             payload[k] = v === 'true' || v === '1' || v === 'on';
           } else {
             payload[k] = str;

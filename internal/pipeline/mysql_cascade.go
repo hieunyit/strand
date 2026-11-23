@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -321,4 +323,25 @@ func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.Tab
 		}
 	}
 	return plan, nil
+}
+
+func (p *Pipeline) initMySQLCascade(ctx context.Context) error {
+	plan, err := p.planMySQLCascade(ctx)
+	if err != nil {
+		return err
+	}
+	if len(plan.signatures) > 0 {
+		if _, err := os.Stat(filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")); err == nil {
+			return cascadeConfigError("cascading foreign keys require a live binlog reader; prefetch spools do not preserve foreign-key session flags")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		p.strict = true
+		p.log.Info("MySQL cascade enabled; applying CDC in source commit order")
+	}
+	if err := p.state.checkCascadeSignatures(plan.signatures); err != nil {
+		return err
+	}
+	p.cascade = plan
+	return nil
 }

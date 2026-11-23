@@ -36,6 +36,7 @@ type localState struct {
 type stateFile struct {
 	CascadeSignatures []string                         `json:"mysql_cascade_signatures,omitempty"`
 	PipelineID        string                           `json:"pipeline_id"`
+	AutoSeedPending   []string                         `json:"auto_seed_pending,omitempty"`
 	Done              map[string]bool                  `json:"snapshot_done"`
 	Plans             map[string]snapshot.SnapshotPlan `json:"snapshot_plans,omitempty"`
 	// VerifyPending persists outstanding post-seed work across restarts.
@@ -319,6 +320,45 @@ func (s *localState) SetDone(table string, done bool) error {
 	}
 	// Bảng xong hoặc phải snapshot lại từ đầu: bỏ plan cũ.
 	delete(s.data.Plans, table)
+	return s.flushLocked()
+}
+
+// prepareAutoSeed records the provisional completion before committing target rows and checkpoint.
+func (s *localState) prepareAutoSeed(tables []model.TableID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.AutoSeedPending = make([]string, 0, len(tables))
+	if s.data.Targets == nil {
+		s.data.Targets = map[string]string{}
+	}
+	for _, id := range tables {
+		name := id.String()
+		s.data.AutoSeedPending = append(s.data.AutoSeedPending, name)
+		s.data.Done[name] = true
+		s.data.Targets[name] = s.targetOf(name)
+		delete(s.data.Plans, name)
+	}
+	s.clearVerificationLocked()
+	s.data.VerifyPending = true
+	return s.flushLocked()
+}
+
+// resolveAutoSeed reconciles the local journal with the atomic target commit after a restart.
+func (s *localState) resolveAutoSeed(hasCheckpoint bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.data.AutoSeedPending) == 0 {
+		return nil
+	}
+	if !hasCheckpoint {
+		for _, name := range s.data.AutoSeedPending {
+			delete(s.data.Done, name)
+			delete(s.data.Targets, name)
+		}
+		s.clearVerificationLocked()
+		s.data.VerifyPending = false
+	}
+	s.data.AutoSeedPending = nil
 	return s.flushLocked()
 }
 

@@ -170,6 +170,25 @@ observability:
   metrics: "127.0.0.1:9464"
 ```
 
+#### Tự nạp bảng thiếu khóa và nhóm khóa ngoại
+
+Với một pipeline mới dùng binlog dạng `file:position`, bật **Allow full-row matching** và **Automatically copy tables without a usable key and their foreign-key groups** trong Web. Để trống **Start position**. Cấu hình YAML tương ứng:
+
+```yaml
+tables:
+  include: ["app.*"]
+  keyless: full_row
+bootstrap:
+  default: logical
+  auto_seed: true
+```
+
+Strand lấy một ảnh InnoDB nhất quán, tự ghi vị trí binlog và truyền theo lô tới MySQL. Các bảng có khóa độc lập vẫn dùng snapshot thông thường. Nhóm nạp tự động gồm bảng thiếu khóa, bảng tham gia cascade và các bảng có khóa ngoại nối với chúng. Nếu nhóm đi ra ngoài phạm vi cấu hình, Strand dừng và báo tên bảng cần đưa vào phạm vi.
+
+Tài khoản nguồn cần quyền `RELOAD` để lấy vị trí binlog cùng ảnh dữ liệu. Strand giới hạn thời gian chờ và giữ global read lock ở bước này, sau đó tiếp tục đọc từ ảnh nhất quán. `binlog_row_image` phải là `FULL`. Các bảng nạp tự động ở đích phải là InnoDB, trống và không có trigger. Giữ ứng dụng ở nguồn trong lúc khởi tạo.
+
+Dữ liệu của nhóm và checkpoint được commit cùng một transaction ở MySQL. Nếu tiến trình dừng trước commit, lần Start sau tự chép lại nhóm còn dở. Dung lượng undo, redo và binlog đích phải đủ cho **nhóm nạp tự động**. Các bảng độc lập ngoài nhóm không nằm trong transaction này. Binlog nguồn phải còn đủ dài để phủ thời gian nạp và bắt kịp.
+
 ### Bước 5. Kiểm tra trước
 
 ```bash

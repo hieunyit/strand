@@ -453,6 +453,23 @@ func TestNewPipelineKeyless(t *testing.T) {
 	}
 }
 
+func TestNewPipelineAutoSeed(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	form := url.Values{
+		"name": {"auto-seed"}, "from": {"mariadb"}, "to": {"mysql"}, "database": {"shop"},
+		"keyless": {"full_row"}, "auto_seed": {"true"},
+	}
+	code, _, raw, out := createNPForm(t, e, c, csrf, form)
+	if code != 200 || !strings.Contains(raw, "  auto_seed: true") || !strings.Contains(raw, "  default: logical") {
+		t.Fatalf("auto-seed create: %d %s\n%s", code, out, raw)
+	}
+	form.Set("name", "auto-seed-conflict")
+	form.Set("start_at", "binlog.000001:4")
+	if code, _, _, _ := createNPForm(t, e, c, csrf, form); code != 400 {
+		t.Fatalf("auto-seed with explicit start position: got status %d, want 400", code)
+	}
+}
+
 // target.database (nơi chứa _strand_*) phải tách khỏi database dữ liệu; mặc định "strand".
 func TestNewPipelineTargetMetaDatabase(t *testing.T) {
 	e, c, csrf := npEnv(t)

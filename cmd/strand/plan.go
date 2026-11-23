@@ -114,9 +114,7 @@ func newPlanCmd() *cobra.Command {
 				if pt, ok := cfg.Bootstrap.PerTable[name]; ok && pt.Mode != "" {
 					mode = pt.Mode
 				}
-				if mode == "logical" {
-					total += size
-				}
+
 				res, err := rowkey.ResolveMySQL(ctx, db, s, t)
 				if err != nil {
 					return fmt.Errorf("inspect table %s: %w", name, err)
@@ -139,10 +137,16 @@ func newPlanCmd() *cobra.Command {
 					}
 					if ko.On && why == "" {
 						keyDesc = rowkey.KeylessLabel
+						if cfg.Bootstrap.AutoSeed {
+							mode = "auto_seed"
+						}
 					} else {
 						noKey = append(noKey, rowkey.Suggest(rowkey.SuggestInput{Flavor: flavor, Major: ver.Major, Minor: ver.Minor, Patch: ver.Patch,
 							Table: model.TableID{Schema: s, Table: t}, EstRows: n, Notes: rowkey.Explain(res.Rejected), KeylessWhy: why}))
 					}
+				}
+				if mode == "logical" || mode == "auto_seed" {
+					total += size
 				}
 				fmt.Printf("%-40s %14d %14d %12s  %s\n", name, n, size, mode, keyDesc)
 			}
@@ -157,8 +161,13 @@ func newPlanCmd() *cobra.Command {
 			// 5.7: expire_logs_days * 86400 (không có binlog_expire_logs_seconds).
 			expire, _ := mysqlver.BinlogRetentionSeconds(ctx, db)
 			retention := time.Duration(expire) * time.Second
-			fmt.Printf("\nlogical snapshot: %d bytes at source soft limit %d IOPS (~%.1f MiB/s) → ETA %s\n",
-				total, iops, bytesPerSec/1024/1024, eta.Round(time.Second))
+			label := "logical snapshot"
+			if cfg.Bootstrap.AutoSeed {
+				label = "initial copy"
+				fmt.Println("\nAuto-seed includes foreign-key dependencies when needed. The estimate covers the initial copy of all selected tables.")
+			}
+			fmt.Printf("\n%s: %d bytes at source soft limit %d IOPS (~%.1f MiB/s) → ETA %s\n",
+				label, total, iops, bytesPerSec/1024/1024, eta.Round(time.Second))
 			if expire <= 0 {
 				fmt.Println("binlog retention: unlimited")
 				return nil

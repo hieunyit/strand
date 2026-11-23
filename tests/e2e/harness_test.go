@@ -251,6 +251,7 @@ type strandCfg struct {
 	LagSLO       string
 	Bootstrap    string
 	StartAt      string
+	AutoSeed     bool
 	CreateSchema string
 	// PostSeedWindow: cửa sổ verify sau seed (mặc định 5s trong test; production 30m).
 	PostSeedWindow string
@@ -281,6 +282,9 @@ type strandCfg struct {
 }
 
 func (c *strandCfg) startAtYAML() string {
+	if c.AutoSeed {
+		return ", auto_seed: true"
+	}
 	if c.StartAt == "" {
 		return ""
 	}

@@ -225,7 +225,18 @@ func (s *MySQLStore) LoadApplied(ctx context.Context) (AppliedSet, error) {
 
 // WriteGlobal ghi lại checkpoint toàn cục có kiểm tra điều kiện epoch.
 func (s *MySQLStore) WriteGlobal(ctx context.Context, g Global) error {
-	res, err := s.db.ExecContext(ctx,
+	return writeMySQLGlobal(ctx, s.db, g)
+}
+
+// WriteGlobalTx publishes the initial checkpoint atomically with the copied data.
+func (s *MySQLStore) WriteGlobalTx(ctx context.Context, tx *sql.Tx, g Global) error {
+	return writeMySQLGlobal(ctx, tx, g)
+}
+
+func writeMySQLGlobal(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, g Global) error {
+	res, err := db.ExecContext(ctx,
 		"UPDATE _strand_checkpoint SET applied = ?, updated_at = NOW(6) WHERE pipeline_id = ? AND epoch = ?",
 		g.Applied, g.PipelineID, g.Epoch,
 	)
