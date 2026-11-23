@@ -32,4 +32,15 @@ func TestNewPipelineSSHTunnelConfig(t *testing.T) {
 		cfg.Target.SSHTunnel == nil || cfg.Target.SSHTunnel.Port != 2222 {
 		t.Fatalf("unexpected SSH config: source=%+v target=%+v", cfg.Source.SSHTunnel, cfg.Target.SSHTunnel)
 	}
+	opts.SourceSSHTunnel = &config.SSHTunnelConfig{Profile: "shared-bastion"}
+	opts.TargetSSHTunnel = &config.SSHTunnelConfig{Profile: "shared-bastion"}
+	raw, err = buildNewPipelineYAML(opts, t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.LoadYAMLStrictWithEnv([]byte(raw), map[string]string{"SRC_PW": "secret", "DST_PW": "secret"})
+	if err != nil || cfg.Source.SSHTunnel.Profile != "shared-bastion" || cfg.Target.SSHTunnel.Profile != "shared-bastion" {
+		t.Fatalf("could not load shared profile references from generated YAML: %v", err)
+	}
+
 }

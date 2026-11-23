@@ -12,6 +12,7 @@ import (
 	"strand/internal/backup"
 	"strand/internal/backup/conncheck"
 	"strand/internal/config"
+	"strand/internal/tunnel"
 	"strand/internal/web/store"
 )
 
@@ -106,7 +107,7 @@ func (s *Server) apiPipelineConnTest(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	if req.SSHTunnel != nil {
-		host, port, closeTunnel, err := openPipelineProbe(r.Context(), req.Engine, req.Host, req.Port, req.SSHTunnel)
+		host, port, closeTunnel, err := s.openPipelineProbe(r.Context(), req.Engine, req.Host, req.Port, req.SSHTunnel)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
 			return
@@ -121,7 +122,7 @@ func (s *Server) apiPipelineConnTest(w http.ResponseWriter, r *http.Request, ses
 	writeJSON(w, http.StatusOK, res)
 }
 
-func openPipelineProbe(ctx context.Context, engine, host string, port int, ssh *config.SSHTunnelConfig) (string, int, func(), error) {
+func (s *Server) openPipelineProbe(ctx context.Context, engine, host string, port int, ssh *config.SSHTunnelConfig) (string, int, func(), error) {
 	if port == 0 {
 		if engine == backup.ConnPostgres {
 			port = 5432
@@ -133,7 +134,18 @@ func openPipelineProbe(ctx context.Context, engine, host string, port int, ssh *
 	if host == "" || port < 1 || port > 65535 {
 		return "", 0, nil, fmt.Errorf("database host and valid port are required")
 	}
-	forward, err := ssh.Open(ctx, engine, net.JoinHostPort(host, strconv.Itoa(port)))
+	remote := net.JoinHostPort(host, strconv.Itoa(port))
+	var forward *tunnel.Forward
+	var err error
+	if ssh.Profile != "" {
+		settings, loadErr := s.savedTunnel(ctx, ssh.Profile)
+		if loadErr != nil {
+			return "", 0, nil, loadErr
+		}
+		forward, err = config.OpenSSHTunnelConfig(ctx, settings, remote)
+	} else {
+		forward, err = ssh.Open(ctx, engine, remote)
+	}
 	if err != nil {
 		return "", 0, nil, fmt.Errorf("SSH tunnel: %w", err)
 	}

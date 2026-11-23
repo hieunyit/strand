@@ -13,8 +13,9 @@ const JSONSchema = `{
       "type": "object",
       "description": "Optional verified SSH bastion for a single MySQL, MariaDB or PostgreSQL endpoint",
       "additionalProperties": false,
-      "required": ["host", "user"],
+      "oneOf": [{"required": ["profile"]}, {"required": ["host", "user"]}],
       "properties": {
+        "profile": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$" },
         "host": { "type": "string", "minLength": 1 },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
         "user": { "type": "string", "minLength": 1 },

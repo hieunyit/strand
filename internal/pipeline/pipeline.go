@@ -65,11 +65,12 @@ type Options struct {
 
 // Pipeline là một lần chạy `strand sync`.
 type Pipeline struct {
-	opts   Options
-	cfg    *config.Config
-	log    *slog.Logger
-	id     string
-	strict bool
+	opts    Options
+	cfg     *config.Config
+	log     *slog.Logger
+	id      string
+	strict  bool
+	cascade mysqlCascadePlan
 
 	src, dst *sql.DB
 	srcDSN   string
@@ -448,6 +449,29 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if p.tables, err = p.loadTables(ctx, p.filter); err != nil {
 		return fmt.Errorf("load source schema: %w", err)
 	}
+	p.cascade, err = p.planMySQLCascade(ctx)
+	if err != nil {
+		return err
+	}
+	if len(p.cascade.signatures) > 0 {
+		if p.opts.StartAt == "" {
+			for id := range p.tables {
+				if !p.state.IsDone(id.String()) {
+					return cascadeConfigError(fmt.Sprintf("cascading foreign keys require a consistent initial copy; seed the target and use --start-at seed or its binlog position (table %s still needs a snapshot)", id))
+				}
+			}
+		}
+		if _, err := os.Stat(filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")); err == nil {
+			return cascadeConfigError("cascading foreign keys require a live binlog reader; prefetch spools do not preserve foreign-key session flags")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		p.strict = true
+		p.log.Info("MySQL cascade enabled; applying CDC in source commit order")
+	}
+	if err := p.state.checkCascadeSignatures(p.cascade.signatures); err != nil {
+		return err
+	}
 	if p.srcEngine == p.dstEngine {
 		tables := make([]model.TableID, 0, len(p.tables))
 		for id := range p.tables {
@@ -688,6 +712,28 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 	}
 
+	mysqlWriterDB := p.dst
+	if len(p.cascade.signatures) > 0 {
+		if len(pending) > 0 {
+			return cascadeConfigError("cannot run an online snapshot with cascading foreign keys; seed the target from a consistent copy")
+		}
+		dsn, err := targetDSN(p.cfg.Target.DSN, p.id, p.instance)
+		if err != nil {
+			return err
+		}
+		dc, err := drivermysql.ParseDSN(dsn)
+		if err != nil {
+			return err
+		}
+		dc.Params["foreign_key_checks"] = "1"
+		dc.ClientFoundRows = true
+		connector, err := drivermysql.NewConnector(dc)
+		if err != nil {
+			return err
+		}
+		mysqlWriterDB = sql.OpenDB(connector)
+		defer mysqlWriterDB.Close()
+	}
 	// --- Observability ---
 	p.metrics = metrics.NewMetrics(prometheus.NewRegistry())
 	p.health = metrics.NewHealthChecker(2 * time.Minute)
@@ -732,8 +778,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		if p.dstEngine == model.EnginePG {
 			w = writer.NewPGWriter(p.dst, p.id, i, p.epoch)
 		} else {
-			mw := writer.NewMySQLWriter(p.dst, p.id, i, p.epoch)
+			mw := writer.NewMySQLWriter(mysqlWriterDB, p.id, i, p.epoch)
 			mw.SetStatementPipelining(true)
+			mw.SetNativeCascades(len(p.cascade.signatures) > 0)
 			w = mw
 		}
 		for id, m := range p.tables {
@@ -926,7 +973,10 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			return err
 		}
 		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID, Flavor: srcVer.SyncerFlavor(), CollationCharsets: charsets,
-			TableInfo: mysqlreader.NewInfoSchemaProvider(p.src), SchemaHistory: p.state})
+			TableInfo: mysqlreader.NewInfoSchemaProvider(p.src), SchemaHistory: p.state,
+			RejectDisabledForeignKeys: func(schema, table string) bool {
+				return len(p.cascade.signatures) > 0 && p.table(model.TableID{Schema: schema, Table: table}) != nil
+			}})
 		if err != nil {
 			return err
 		}
@@ -1421,6 +1471,11 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 				p.touched.addKey(rc.Table, part.Key, keyCodec)
 				if len(part.OldKey) > 0 {
 					p.touched.addKey(rc.Table, part.OldKey, keyCodec)
+				}
+			}
+			if part.Op != model.OpInsert && p.cascade.parents[rc.Table] {
+				for child := range p.cascade.children {
+					p.touched.addUntrackedChanges(child)
 				}
 			}
 			c := *part
@@ -2311,6 +2366,9 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	if p.pgChunks != nil && p.pgChunks.GateErr != nil {
 		return fmt.Errorf("logical snapshot from this PostgreSQL source is not possible: %w", p.pgChunks.GateErr)
 	}
+	if len(p.cascade.signatures) > 0 {
+		return cascadeConfigError("snapshot add is unavailable with cascading foreign keys; use a consistent seed for the expanded scope")
+	}
 	// Giành quyền add bảng một cách nguyên tử: hai lệnh đồng thời cho cùng bảng chỉ một lệnh đi tiếp
 	// (review R14). Nhả khi trả lỗi sớm, hoặc khi goroutine snapshot kết thúc.
 	if !p.claimSnapshotAdd(id) {
@@ -2351,6 +2409,11 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		if err != nil {
 			return err
 		}
+	}
+	if plan, err := p.planMySQLCascade(ctx, id); err != nil {
+		return err
+	} else if len(plan.signatures) > 0 {
+		return cascadeConfigError("snapshot add cannot activate cascading foreign keys; seed the expanded scope")
 	}
 	if err := p.checkSnapshotKey(ctx, id, m); err != nil {
 		return err

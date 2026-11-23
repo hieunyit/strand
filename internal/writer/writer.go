@@ -244,6 +244,7 @@ type MySQLWriter struct {
 	orderer             *CommitOrderer
 	pk                  pkRegistry
 	pipelining          bool
+	nativeCascades      bool
 	mu                  sync.Mutex
 	maxPacket           atomic.Int64 // @@max_allowed_packet của target, 0 = chưa đọc (review N13)
 	MultiRowUpsertCount int64
@@ -263,6 +264,10 @@ func NewMySQLWriter(db *sql.DB, pipelineID string, workerID int, epoch int64) *M
 // SetStatementPipelining bật gửi các câu lệnh dữ liệu theo lô multi-statement (DSN phải có
 // multiStatements=true và interpolateParams=true).
 func (w *MySQLWriter) SetStatementPipelining(on bool) { w.pipelining = on }
+
+// SetNativeCascades selects in-place writes. Its SQL pool must have foreign_key_checks
+// and clientFoundRows enabled, and its target must be seeded at the starting checkpoint.
+func (w *MySQLWriter) SetNativeCascades(on bool) { w.nativeCascades = on }
 
 // SetPrimaryKey khai báo tên các cột khóa chính của bảng (theo thứ tự của RowChange.Key).
 func (w *MySQLWriter) SetPrimaryKey(t model.TableID, cols []string) { w.pk.set(t, cols) }
@@ -683,6 +688,9 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 			}
 			return w.applyKeylessMySQL(ctx, q, row)
 		}
+		if w.nativeCascades {
+			return w.applyNativeCascadeRow(ctx, q, row)
+		}
 		switch row.Op {
 		case model.OpInsert, model.OpUpdate:
 			// Upsert MySQL dựa trên mọi unique key của bảng; tên cột PK chỉ cần để
@@ -747,6 +755,60 @@ func (w *MySQLWriter) applyTxnMySQL(ctx context.Context, q *stmtQueue, txn *mode
 		return err
 	}
 	return nil // phần upsert còn dở được gom tiếp với Txn kế trong batch
+}
+
+// An UPDATE of a referenced key must remain an UPDATE: DELETE+INSERT triggers
+// ON DELETE rather than ON UPDATE. Plain INSERT also avoids updating an unrelated
+// row through MySQL's ON DUPLICATE KEY semantics.
+func (w *MySQLWriter) applyNativeCascadeRow(ctx context.Context, q *stmtQueue, row *model.RowChange) error {
+	if row.Op == model.OpInsert {
+		names, vals := colNamesVals(row.Cols, false)
+		if len(names) == 0 {
+			return fmt.Errorf("table %s: insert without column values", row.Table)
+		}
+		return q.execRows(ctx, 1, buildKeylessInsertMySQL(row.Table, names), vals...)
+	}
+	key := row.Key
+	if row.Op == model.OpUpdate && len(row.OldKey) != 0 {
+		key = row.OldKey
+	}
+	pk, err := w.pk.get(row.Table, len(key))
+	if err != nil {
+		return err
+	}
+	conds := make([]string, len(pk))
+	for i, c := range pk {
+		conds[i] = quoteMySQL(c) + " = ?"
+	}
+	table := quoteMySQLTable(row.Table)
+	var stmt string
+	var args []any
+	switch row.Op {
+	case model.OpDelete:
+		stmt = "DELETE FROM " + table
+	case model.OpUpdate:
+		if len(row.Cols) == 0 || hasUnchanged(row) {
+			return fmt.Errorf("table %s: native cascade update requires a full row image", row.Table)
+		}
+		set := make([]string, len(row.Cols))
+		for i, col := range row.Cols {
+			set[i] = quoteMySQL(col.Name) + " = ?"
+			args = append(args, col.Value)
+		}
+		stmt = "UPDATE " + table + " SET " + strings.Join(set, ", ")
+	default:
+		return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)
+	}
+	stmt += " WHERE " + strings.Join(conds, " AND ")
+	n, err := q.execAffected(ctx, stmt, append(args, toArgs(key)...)...)
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("table %s: %s matched %d rows during native cascade apply; verify the target at the saved checkpoint", row.Table, row.Op, n)
+	}
+	q.written++
+	return nil
 }
 
 // checkRowPacket (review N13): row mà riêng nó đã vượt ngân sách lô vẫn đi nguyên một mình, nhưng

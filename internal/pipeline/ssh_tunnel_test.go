@@ -3,18 +3,22 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"strand/internal/config"
+	"strand/internal/sshprofile"
 	"strand/internal/tunnel/tunneltest"
+	"strand/internal/web/store"
 )
 
 func TestPipelinePostgresCDCThroughSSH(t *testing.T) {
@@ -46,7 +50,7 @@ func TestPipelinePostgresCDCThroughSSH(t *testing.T) {
 		Target: config.TargetConfig{Kind: "postgres", DSN: u.String()},
 		Tables: config.TablesConfig{Include: []string{"public.items"}},
 	}
-	assertCDCThroughSSH(t, conf, source, destination, "public.items", "$1")
+	assertCDCThroughSSH(t, conf, source, destination, "public.items", "$1", srcDSN)
 }
 
 func TestPipelineMySQLCDCThroughSSH(t *testing.T) {
@@ -61,10 +65,10 @@ func TestPipelineMySQLCDCThroughSSH(t *testing.T) {
 		Target: config.TargetConfig{Kind: "mysql", DSN: dstDSN},
 		Tables: config.TablesConfig{Include: []string{"app.items"}},
 	}
-	assertCDCThroughSSH(t, conf, source, destination, "app.items", "?")
+	assertCDCThroughSSH(t, conf, source, destination, "app.items", "?", "")
 }
 
-func assertCDCThroughSSH(t *testing.T, conf *config.Config, source, destination *sql.DB, table, placeholder string) {
+func assertCDCThroughSSH(t *testing.T, conf *config.Config, source, destination *sql.DB, table, placeholder, metadataDSN string) {
 	t.Helper()
 	bastion := tunneltest.StartSSHServer(t, false)
 	t.Setenv("STRAND_WEB_SSH_KEY_DIR", filepath.Dir(bastion.IdentityFile()))
@@ -78,6 +82,39 @@ func assertCDCThroughSSH(t *testing.T, conf *config.Config, source, destination 
 		t.Fatal(err)
 	}
 	bastionConfig := &config.SSHTunnelConfig{Host: host, Port: port, User: "strand", IdentityFile: bastion.IdentityFile()}
+	if metadataDSN != "" {
+		const secret = "test-metadata-secret-at-least-16-chars"
+		t.Setenv("STRAND_WEB_DATABASE_DSN", metadataDSN)
+		t.Setenv("STRAND_WEB_SECRET_KEY", secret)
+		box, err := store.NewBox(secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, err := os.ReadFile(bastion.IdentityFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		profile := sshprofile.Profile{ID: "shared", Host: host, Port: port, User: "strand"}
+		profile.SealedKey, err = profile.SealKey(box, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal([]sshprofile.Profile{profile})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := source.Exec("CREATE TABLE web_meta (key text PRIMARY KEY, value text NOT NULL)"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := source.Exec("INSERT INTO web_meta (key,value) VALUES ($1,$2)", sshprofile.MetaKey, string(raw)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(bastion.IdentityFile()); err != nil {
+			t.Fatal(err)
+		}
+		bastionConfig = &config.SSHTunnelConfig{Profile: profile.ID}
+	}
+
 	conf.Source.SSHTunnel = bastionConfig
 	conf.Target.SSHTunnel = bastionConfig
 

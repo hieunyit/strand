@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,14 +18,17 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"strand/internal/sshprofile"
 	"strand/internal/tunnel"
+	"strand/internal/web/store"
 )
 
 // SSHTunnelConfig describes a bastion for a single SQL endpoint.
 type SSHTunnelConfig struct {
-	Host         string `yaml:"host" json:"host"`
+	Profile      string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	Host         string `yaml:"host,omitempty" json:"host"`
 	Port         int    `yaml:"port,omitempty" json:"port,omitempty"`
-	User         string `yaml:"user" json:"user"`
+	User         string `yaml:"user,omitempty" json:"user"`
 	IdentityFile string `yaml:"identity_file,omitempty" json:"identity_file,omitempty"`
 }
 
@@ -36,6 +40,12 @@ func (c *SSHTunnelConfig) Validate(kind string) error {
 	case "mysql", "mariadb", "postgres", "postgresql", "pg":
 	default:
 		return errors.New("SSH tunneling is only supported for MySQL, MariaDB and PostgreSQL endpoints")
+	}
+	if c.Profile != "" {
+		if !sshprofile.ValidID(c.Profile) || c.Host != "" || c.User != "" || c.Port != 0 || c.IdentityFile != "" {
+			return errors.New("SSH tunnel profile must be a valid ID and cannot be combined with inline bastion settings")
+		}
+		return nil
 	}
 	if c.Host == "" || strings.ContainsAny(c.Host, " \t\r\n\x00,[]") || strings.Contains(c.Host, ":") && net.ParseIP(c.Host) == nil {
 		return errors.New("SSH bastion host must be a hostname or an IP address")
@@ -61,22 +71,44 @@ func (c *SSHTunnelConfig) Open(ctx context.Context, kind, remote string) (*tunne
 	if err := c.Validate(kind); err != nil {
 		return nil, err
 	}
-	keys, err := tunnel.ConfiguredKnownHosts()
-	if err != nil {
-		return nil, err
-	}
-	if err := tunnel.ValidateSecurity(c.IdentityFile, keys); err != nil {
-		return nil, err
+	if c.Profile != "" {
+		p, err := sshprofile.Load(ctx, os.Getenv("STRAND_WEB_DATABASE_DSN"), c.Profile)
+		if err != nil {
+			return nil, err
+		}
+		var box *store.Box
+		if len(p.SealedKey) > 0 {
+			box, err = store.NewBox(os.Getenv("STRAND_WEB_SECRET_KEY"))
+			if err != nil {
+				return nil, err
+			}
+		}
+		settings, err := p.TunnelConfig(box)
+		if err != nil {
+			return nil, err
+		}
+		return OpenSSHTunnelConfig(ctx, settings, remote)
 	}
 	port := c.Port
 	if port == 0 {
 		port = 22
 	}
-	return tunnel.Start(ctx, tunnel.Config{
-		SSHAddress: net.JoinHostPort(c.Host, strconv.Itoa(port)),
-		SSHUser:    c.User, IdentityFile: c.IdentityFile, HostKeysFile: keys,
-		Remote: remote,
-	})
+	return OpenSSHTunnelConfig(ctx, tunnel.Config{SSHAddress: net.JoinHostPort(c.Host, strconv.Itoa(port)),
+		SSHUser: c.User, IdentityFile: c.IdentityFile}, remote)
+}
+
+// OpenSSHTunnelConfig uses the trust and identity policy of the Strand service.
+func OpenSSHTunnelConfig(ctx context.Context, settings tunnel.Config, remote string) (*tunnel.Forward, error) {
+	keys, err := tunnel.ConfiguredKnownHosts()
+	if err != nil {
+		return nil, err
+	}
+	if err := tunnel.ValidateSecurity(settings.IdentityFile, keys); err != nil {
+		return nil, err
+	}
+	settings.HostKeysFile, settings.Remote = keys, remote
+	defer clear(settings.PrivateKey)
+	return tunnel.Start(ctx, settings)
 }
 
 type pgTunnelTLS struct {
@@ -282,4 +314,9 @@ func OpenSQL(driver, dsn string) (*sql.DB, error) {
 		return nil, err
 	}
 	return stdlib.OpenDB(*cfg), nil
+}
+
+func (cfg *Config) UsesSSHTunnelProfile() bool {
+	return cfg.Source.SSHTunnel != nil && cfg.Source.SSHTunnel.Profile != "" ||
+		cfg.Target.SSHTunnel != nil && cfg.Target.SSHTunnel.Profile != ""
 }

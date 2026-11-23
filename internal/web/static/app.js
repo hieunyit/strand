@@ -890,6 +890,8 @@
       var input = form.querySelector('[name="' + side + '_ssh_' + key + '"]:not([disabled])');
       return input ? input.value.trim() : '';
     }
+    var profile = val('profile');
+    if (profile) { return {profile: profile}; }
     var host = val('host'), port = val('port'), user = val('user'), identity = val('identity_file');
     if (!host && !port && !user && !identity) { return null; }
     return {host: host, port: port ? Number(port) : 0, user: user, identity_file: identity};

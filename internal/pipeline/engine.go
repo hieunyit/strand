@@ -135,13 +135,6 @@ func (p *Pipeline) loadTables(ctx context.Context, f *tableFilter) (map[model.Ta
 	if err != nil {
 		return nil, err
 	}
-	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EngineMySQL {
-		for id := range out {
-			if err := p.checkMySQLCascadingFK(ctx, id); err != nil {
-				return nil, err
-			}
-		}
-	}
 	p.markKeyless(out)
 	// review R10: hai bảng nguồn cùng tên đích (rename trùng, hoặc rename trùng bảng không rename) thì từ chối.
 	if err := checkTargetCollisions(f, out, nil); err != nil {
@@ -149,26 +142,6 @@ func (p *Pipeline) loadTables(ctx context.Context, f *tableFilter) (map[model.Ta
 	}
 	resolveForeignKeys(out, p.table)
 	return out, nil
-}
-
-// InnoDB does not emit child-row events for foreign-key actions. The target
-// session disables foreign key checks, so it cannot reproduce these actions.
-func (p *Pipeline) checkMySQLCascadingFK(ctx context.Context, id model.TableID) error {
-	var name string
-	err := p.src.QueryRowContext(ctx, `
-		SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS
-		WHERE CONSTRAINT_SCHEMA=? AND TABLE_NAME=?
-		  AND (DELETE_RULE IN ('CASCADE','SET NULL','SET DEFAULT')
-		    OR UPDATE_RULE IN ('CASCADE','SET NULL','SET DEFAULT'))
-		ORDER BY CONSTRAINT_NAME LIMIT 1`, id.Schema, id.Table).Scan(&name)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect foreign key actions on %s: %w", id, err)
-	}
-	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-		fmt.Sprintf("foreign key %q on replicated table %s has a cascading action that MySQL-to-MySQL CDC cannot apply", name, id), nil)
 }
 
 // resolveForeignKeys gắn mỗi FK với khóa cha nó tham chiếu (PK hoặc unique index), để writeset của

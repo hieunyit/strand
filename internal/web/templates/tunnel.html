@@ -1,17 +1,44 @@
 {{define "content"}}
+<section class="card mb">
+  <div class="cardhead"><h2>Saved SSH tunnels</h2></div>
+  <div class="pad">
+    <p class="small muted">Save a bastion once to use it here or in a pipeline. The destination database is chosen when you use it.</p>
+    <form method="post" action="/tunnels" class="form-stack" autocomplete="off">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <input type="hidden" name="intent" value="save-profile">
+      <div class="field-grid">
+        <label class="field">Profile name<input name="profile_id" required maxlength="63" placeholder="production-bastion"></label>
+        <label class="field">SSH host<input name="profile_host" required placeholder="bastion.example.com"></label>
+        <label class="field">SSH port<input name="profile_port" type="number" min="1" max="65535" value="22"></label>
+        <label class="field">SSH user<input name="profile_user" required placeholder="strand"></label>
+        <label class="field">Identity file on the server<input name="profile_identity_file"></label>
+        <label class="field">Or paste SSH private key<textarea name="profile_private_key" class="mono" rows="4" maxlength="49152" spellcheck="false" autocomplete="off"></textarea>
+          <small class="field-hint">The key is encrypted in the metadata database. Leave both identity fields blank to use the SSH agent.</small>
+        </label>
+      </div>
+      <button type="submit" class="btn">Save SSH tunnel</button>
+    </form>
+  </div>
+</section>
 <form class="act form-stack" data-action="tunnel-open" method="post" action="/tunnels">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <fieldset class="form-section">
     <legend class="form-section-title">Open a verified SSH tunnel</legend>
     <p class="form-section-desc">Create loopback-only verified SSH local port forwards to reach private database endpoints through bastions.</p>
+    <label class="field">Saved SSH tunnel
+      <select name="profile">
+        <option value="">Manual bastion below</option>
+        {{range .Body.Profiles}}<option value="{{.ID}}">{{.ID}} · {{.User}}@{{.Host}}:{{.Port}}{{if .HasStoredKey}} · stored key{{end}}</option>{{end}}
+      </select>
+    </label>
     <div class="field-grid">
       <div class="field">
         <label class="field-label" for="tun-ssh">SSH Bastion Host:Port <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="tun-ssh" name="ssh" class="mono" placeholder="bastion.internal:22" required>
+        <input type="text" id="tun-ssh" name="ssh" class="mono" placeholder="bastion.internal:22">
       </div>
       <div class="field">
         <label class="field-label" for="tun-user">SSH Username <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="tun-user" name="user" placeholder="ops" required>
+        <input type="text" id="tun-user" name="user" placeholder="ops">
       </div>
       <div class="field">
         <label class="field-label" for="tun-remote">Remote Target Host:Port <span class="req" aria-hidden="true">*</span></label>

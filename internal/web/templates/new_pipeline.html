@@ -97,7 +97,7 @@
         <small class="field-hint">Usually <code>public</code>. All tables in it are copied unless you narrow it in step 3.</small>
       </label>
     </div>
-    <div data-when="src:mysql,mariadb,postgres">{{template "pipeline-ssh-fields" "source"}}</div>
+    <div data-when="src:mysql,mariadb,postgres">{{template "pipeline-ssh-fields" (pipelineSSHFields "source" .Body.SSHProfiles)}}</div>
     <div class="conn-test">
       <button type="button" class="btn" id="np-test-source" data-test="source">Test source connection</button>
       <div class="conn-result" id="np-test-source-result" aria-live="polite"></div>
@@ -173,7 +173,7 @@
         <small class="field-hint">Small database where Strand keeps its checkpoint (<code>_strand_*</code> tables), not your data. Create it once on the target: <code>CREATE DATABASE strand;</code></small>
       </label>
     </div>
-    <div data-when="dst:mysql,postgres">{{template "pipeline-ssh-fields" "target"}}</div>
+    <div data-when="dst:mysql,postgres">{{template "pipeline-ssh-fields" (pipelineSSHFields "target" .Body.SSHProfiles)}}</div>
     <div class="conn-test">
       <button type="button" class="btn" id="np-test-target" data-test="target">Test target connection</button>
       <div class="conn-result" id="np-test-target-result" aria-live="polite"></div>
@@ -375,22 +375,30 @@
 <details class="advanced">
   <summary>SSH tunnel <span class="opt">optional</span></summary>
   <p class="field-hint">Enter the database host above as seen from the SSH bastion. Strand verifies the bastion with its server-managed host keys.</p>
+  <label class="field">
+    <span class="field-label">Saved SSH tunnel</span>
+    <select name="{{.Side}}_ssh_profile">
+      <option value="">None or manual bastion below</option>
+      {{range .Profiles}}<option value="{{.ID}}">{{.ID}} · {{.User}}@{{.Host}}:{{.Port}}</option>{{end}}
+    </select>
+    <small class="field-hint">A saved tunnel takes precedence over manual fields. <a href="/tunnels">Manage saved tunnels</a>.</small>
+  </label>
   <div class="field-grid cols-4">
     <label class="field">
       <span class="field-label">SSH bastion host</span>
-      <input type="text" name="{{.}}_ssh_host" class="mono" placeholder="bastion.example.com" autocomplete="off">
+      <input type="text" name="{{.Side}}_ssh_host" class="mono" placeholder="bastion.example.com" autocomplete="off">
     </label>
     <label class="field">
       <span class="field-label">SSH port</span>
-      <input type="number" name="{{.}}_ssh_port" class="mono" min="1" max="65535" placeholder="22">
+      <input type="number" name="{{.Side}}_ssh_port" class="mono" min="1" max="65535" placeholder="22">
     </label>
     <label class="field">
       <span class="field-label">SSH user</span>
-      <input type="text" name="{{.}}_ssh_user" class="mono" placeholder="strand" autocomplete="off">
+      <input type="text" name="{{.Side}}_ssh_user" class="mono" placeholder="strand" autocomplete="off">
     </label>
     <label class="field">
       <span class="field-label">Identity file on the server</span>
-      <input type="text" name="{{.}}_ssh_identity_file" class="mono" placeholder="Use SSH agent if empty" autocomplete="off">
+      <input type="text" name="{{.Side}}_ssh_identity_file" class="mono" placeholder="Use SSH agent if empty" autocomplete="off">
     </label>
   </div>
 </details>

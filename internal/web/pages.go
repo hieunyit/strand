@@ -130,6 +130,9 @@ func templateFuncsForLang(lang string) template.FuncMap {
 		"remediationHint": func(code string) string {
 			return backup.RemediationHints[code]
 		},
+		"pipelineSSHFields": func(side string, profiles []sshProfileView) pipelineSSHFieldsView {
+			return pipelineSSHFieldsView{Side: side, Profiles: profiles}
+		},
 		"jobsCtx": func(j []JobStatus, showPipeline, canOperate bool, origins ...map[string]jobOrigin) jobsTableCtx {
 			v := jobsTableCtx{Jobs: j, ShowPipeline: showPipeline, CanOperate: canOperate}
 			if len(origins) > 0 {
@@ -1033,7 +1036,8 @@ type activeTunnel struct {
 }
 
 type tunnelView struct {
-	Tunnels []tunnelItem
+	Profiles []sshProfileView
+	Tunnels  []tunnelItem
 }
 
 type dbMigrateReport struct {
@@ -1169,7 +1173,7 @@ func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Sessio
 	s.render(w, "tunnel", sess, pageData{
 		Title:  "SSH Tunnels",
 		Active: "tunnels",
-		Body:   &tunnelView{Tunnels: list},
+		Body:   &tunnelView{Tunnels: list, Profiles: s.sshProfileViews(r.Context())},
 	})
 }
 

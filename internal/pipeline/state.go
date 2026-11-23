@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -33,9 +34,10 @@ type localState struct {
 }
 
 type stateFile struct {
-	PipelineID string                           `json:"pipeline_id"`
-	Done       map[string]bool                  `json:"snapshot_done"`
-	Plans      map[string]snapshot.SnapshotPlan `json:"snapshot_plans,omitempty"`
+	CascadeSignatures []string                         `json:"mysql_cascade_signatures,omitempty"`
+	PipelineID        string                           `json:"pipeline_id"`
+	Done              map[string]bool                  `json:"snapshot_done"`
+	Plans             map[string]snapshot.SnapshotPlan `json:"snapshot_plans,omitempty"`
 	// VerifyPending persists outstanding post-seed work across restarts.
 	// A completed attempt can leave incomplete evidence while CDC keeps running.
 	VerifyPending  bool                        `json:"post_seed_verify_pending,omitempty"`
@@ -436,4 +438,20 @@ func targetConflictError(conflicts []targetChange) error {
 			"Revert tables.rename, or re-bootstrap the table into the new target: add it to tables.exclude and start once "+
 			"(its snapshot state is dropped), then either remove the exclude and restart (it is snapshotted into the new target) "+
 			"or run `strand snapshot add --table <t>` against the running pipeline", nil)
+}
+
+func (s *localState) checkCascadeSignatures(signatures []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.data.CascadeSignatures) > 0 && !slices.Equal(s.data.CascadeSignatures, signatures) {
+		return cascadeConfigError("cascading foreign-key rules changed since the checkpoint; use a new consistent seed or restore the original rules before resuming")
+	}
+	if len(signatures) > 0 && len(s.data.CascadeSignatures) == 0 {
+		s.data.CascadeSignatures = slices.Clone(signatures)
+		if err := s.flushLocked(); err != nil {
+			s.data.CascadeSignatures = nil
+			return err
+		}
+	}
+	return nil
 }

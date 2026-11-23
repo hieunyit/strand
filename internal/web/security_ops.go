@@ -273,8 +273,17 @@ func (s *Server) validateArchiveDir(dir string) (string, error) {
 
 // ---- Tunnel HTTP Handlers ----
 
-func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user, remote, listen, identity, knownHosts string) (tunnelItem, error) {
-	_ = ctx // Tunnel lifetime is owned by the Server, not by the short-lived HTTP request.
+func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user, remote, listen, identity, knownHosts string, profile string) (tunnelItem, error) {
+	var privateKey []byte
+	if profile != "" {
+		saved, err := s.savedTunnel(ctx, profile)
+		if err != nil {
+			return tunnelItem{}, err
+		}
+		sshAddr, user, identity, knownHosts = saved.SSHAddress, saved.SSHUser, saved.IdentityFile, ""
+		privateKey = saved.PrivateKey
+		defer clear(privateKey)
+	}
 	if strings.TrimSpace(user) == "" {
 		return tunnelItem{}, errors.New("ssh user is required")
 	}
@@ -304,7 +313,7 @@ func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user
 		cancel()
 		return tunnelItem{}, err
 	}
-	fwd, err := tunnel.Start(ctx, tunnel.Config{SSHAddress: sshAddr, SSHUser: user, Remote: remote, LocalAddress: listen, IdentityFile: identity, HostKeysFile: knownHosts})
+	fwd, err := tunnel.Start(ctx, tunnel.Config{SSHAddress: sshAddr, SSHUser: user, Remote: remote, LocalAddress: listen, IdentityFile: identity, HostKeysFile: knownHosts, PrivateKey: privateKey})
 	if err != nil {
 		cancel()
 		_ = s.auditSensitive(r, "tunnel.start", map[string]any{"ssh": sshAddr, "remote": remote, "error": err.Error()}, "error")
@@ -369,12 +378,13 @@ func (s *Server) apiTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Ses
 		Listen       string `json:"listen"`
 		IdentityFile string `json:"identity_file"`
 		KnownHosts   string `json:"known_hosts"`
+		Profile      string `json:"profile"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	item, err := s.startTunnel(r.Context(), r, req.SSH, req.User, req.Remote, req.Listen, req.IdentityFile, req.KnownHosts)
+	item, err := s.startTunnel(r.Context(), r, req.SSH, req.User, req.Remote, req.Listen, req.IdentityFile, req.KnownHosts, req.Profile)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -408,14 +418,26 @@ func (s *Server) apiTunnelStop(w http.ResponseWriter, r *http.Request, sess *Ses
 }
 
 func (s *Server) pageTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Session) {
-	_ = r.ParseForm()
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
+	if err := r.ParseForm(); err != nil {
+		s.renderError(w, r, sess, http.StatusBadRequest, "invalid SSH tunnel form")
+		return
+	}
+	if r.FormValue("intent") == "save-profile" {
+		if err := s.saveSSHProfile(r); err != nil {
+			s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
+			return
+		}
+		http.Redirect(w, r, "/tunnels", http.StatusSeeOther)
+		return
+	}
 	ssh := r.FormValue("ssh")
 	user := r.FormValue("user")
 	remote := r.FormValue("remote")
 	listen := r.FormValue("listen")
 	identity := r.FormValue("identity_file")
 
-	if _, err := s.startTunnel(r.Context(), r, ssh, user, remote, listen, identity, ""); err != nil {
+	if _, err := s.startTunnel(r.Context(), r, ssh, user, remote, listen, identity, "", r.FormValue("profile")); err != nil {
 		s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
 		return
 	}

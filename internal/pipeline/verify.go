@@ -169,6 +169,15 @@ func (tk *touchedKeys) addKeyless(t model.TableID) {
 	}
 }
 
+// Native cascades have no child row events, so a key-only verify must report incomplete coverage.
+func (tk *touchedKeys) addUntrackedChanges(t model.TableID) {
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	for _, set := range tk.sets {
+		set.over[t] = true
+	}
+}
+
 // take trả về và xóa các khóa đã ghi của một bên tiêu thụ (khóa số + khóa PK tổng quát + cờ overflow,
 // lấy cùng lúc dưới một khóa). Tập của bên khác không đổi.
 func (tk *touchedKeys) take(consumer string) touchedTake {
@@ -547,7 +556,7 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	for t, o := range over {
 		if o {
 			full[t] = true
-			p.log.Warn("post-seed verify: changed-key tracking incomplete for this table (limit or encoding failure); verifying the whole table",
+			p.log.Warn("post-seed verify: changed-key tracking incomplete for this table (limit, encoding failure or implicit cascade); verifying the whole table",
 				"table", t.String())
 		}
 	}
@@ -795,7 +804,7 @@ func deltaVerifyResult(tt touchedTake, skipped ...model.TableID) (string, error)
 	var why []string
 	if len(over) > 0 {
 		sort.Strings(over)
-		why = append(why, fmt.Sprintf("%d tables have incomplete changed-key tracking (limit or encoding failure): %s", len(over), strings.Join(over, ", ")))
+		why = append(why, fmt.Sprintf("%d tables have incomplete changed-key tracking (limit, encoding failure or implicit cascade): %s", len(over), strings.Join(over, ", ")))
 	}
 	if sk := skippedNames(skipped); len(sk) > 0 {
 		why = append(why, fmt.Sprintf("%d tables cannot be verified by key: %s", len(sk), strings.Join(sk, ", ")))

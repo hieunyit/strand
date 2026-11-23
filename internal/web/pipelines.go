@@ -79,7 +79,8 @@ type Pipeline struct {
 	Cfg    *config.Config
 	CfgErr string
 
-	dbYAML []byte // bản cấu hình trong kho metadata (nil: chưa có trong DB, đọc từ file)
+	profileDBDSN string
+	dbYAML       []byte // bản cấu hình trong kho metadata (nil: chưa có trong DB, đọc từ file)
 }
 
 // Mode trả cách quản lý hiệu lực.
@@ -177,25 +178,33 @@ func ParseEnvData(r io.Reader) ([]string, error) {
 
 // Env trả môi trường của file env_file (rỗng nếu không khai báo).
 func (p *Pipeline) Env() ([]string, error) {
-	if p.EnvFile == "" {
+	usesProfile := p.Cfg != nil && p.Cfg.UsesSSHTunnelProfile()
+	if p.EnvFile == "" && !usesProfile {
 		return nil, nil
 	}
-	env, err := ReadEnvFile(p.EnvFile)
-	if err != nil {
-		return nil, err
+	var env []string
+	if p.EnvFile != "" {
+		var err error
+		env, err = ReadEnvFile(p.EnvFile)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// The Web service owns which SSH keys and agent a child may use.
 	filtered := env[:0]
 	for _, definition := range env {
 		key, _, _ := strings.Cut(definition, "=")
 		switch key {
-		case "STRAND_WEB_SSH_KNOWN_HOSTS", "STRAND_WEB_SSH_KEY_DIR", "SSH_AUTH_SOCK":
+		case "STRAND_WEB_SSH_KNOWN_HOSTS", "STRAND_WEB_SSH_KEY_DIR", "SSH_AUTH_SOCK", EnvDatabaseDSN, EnvSecretKey:
 			continue
 		}
 		filtered = append(filtered, definition)
 	}
 	if path, err := tunnel.ConfiguredKnownHosts(); err == nil {
 		filtered = append(filtered, "STRAND_WEB_SSH_KNOWN_HOSTS="+path)
+	}
+	if p.profileDBDSN != "" && usesProfile {
+		filtered = append(filtered, EnvDatabaseDSN+"="+p.profileDBDSN)
 	}
 	return filtered, nil
 }
@@ -265,6 +274,7 @@ func (r *Registry) publish(byName map[string]*Pipeline, warns []string) {
 	names := make([]string, 0, len(byName))
 	for n, p := range byName {
 		names = append(names, n)
+		p.profileDBDSN = r.cfg.Database.DSN
 		// The editor's conventional env path is durable across refresh/restart,
 		// including explicit entries without an env_file setting.
 		if p.EnvFile == "" {

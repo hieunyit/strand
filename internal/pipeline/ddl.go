@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -181,6 +182,22 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		}
 		return fmt.Errorf("DDL at %s: pipeline did not drain", t.SourcePos.Label())
 	}
+	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EngineMySQL {
+		var joining []model.TableID
+		for id := range newCreated {
+			joining = append(joining, id)
+		}
+		joining = append(joining, renamedIn...)
+		plan, err := p.planMySQLCascade(ctx, joining...)
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(p.cascade.signatures, plan.signatures) {
+			return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+				fmt.Sprintf("cascading foreign-key rules changed at %s; checkpoint cannot pass this DDL", t.SourcePos.Label()), nil)
+		}
+	}
+
 	ids := make([]model.TableID, 0, len(affected))
 	for id := range affected {
 		ids = append(ids, id)

@@ -177,6 +177,9 @@ source:
 {{- end}}
 {{- with .SourceSSHTunnel}}
   ssh_tunnel:
+{{- if .Profile}}
+    profile: {{printf "%q" .Profile}}
+{{- else}}
     host: {{quote .Host}}
     user: {{quote .User}}
     {{- if .Port}}
@@ -185,6 +188,7 @@ source:
     {{- if .IdentityFile}}
     identity_file: {{quote .IdentityFile}}
     {{- end}}
+{{- end}}
 {{- end}}
 
 target:
@@ -203,6 +207,9 @@ target:
 {{- end}}
 {{- with .TargetSSHTunnel}}
   ssh_tunnel:
+{{- if .Profile}}
+    profile: {{printf "%q" .Profile}}
+{{- else}}
     host: {{quote .Host}}
     user: {{quote .User}}
     {{- if .Port}}
@@ -211,6 +218,7 @@ target:
     {{- if .IdentityFile}}
     identity_file: {{quote .IdentityFile}}
     {{- end}}
+{{- end}}
 {{- end}}
 
 tables:
@@ -755,6 +763,13 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	if err := checkOpts(opts); err != nil {
 		return nil, BadRequest("%s", err.Error())
 	}
+	for _, ssh := range []*config.SSHTunnelConfig{opts.SourceSSHTunnel, opts.TargetSSHTunnel} {
+		if ssh != nil && ssh.Profile != "" {
+			if _, err := s.savedTunnel(ctx, ssh.Profile); err != nil {
+				return nil, BadRequest("%s", err.Error())
+			}
+		}
+	}
 	// Mỗi pipeline một cổng /metrics riêng; cổng do người dùng đặt không được trùng pipeline khác.
 	opts.Metrics = strings.TrimSpace(opts.Metrics)
 	if opts.Metrics == "" {
@@ -879,10 +894,13 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	if p == nil {
 		// Tạo đối tượng tạm nếu refresh chưa kịp nhận
 		p = &Pipeline{
-			Name:       opts.Name,
-			ConfigPath: yamlPath,
-			EnvFile:    envPath,
-			Origin:     "created",
+			Name:         opts.Name,
+			ConfigPath:   yamlPath,
+			EnvFile:      envPath,
+			Origin:       "created",
+			profileDBDSN: s.cfg.Database.DSN,
+			Cfg: &config.Config{Source: config.SourceConfig{SSHTunnel: opts.SourceSSHTunnel},
+				Target: config.TargetConfig{SSHTunnel: opts.TargetSSHTunnel}},
 		}
 	}
 
@@ -1041,6 +1059,11 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 		{"source", &opts.SourceSSHTunnel},
 		{"target", &opts.TargetSSHTunnel},
 	} {
+		profile := strings.TrimSpace(f.Get(side.name + "_ssh_profile"))
+		if profile != "" {
+			*side.tunnel = &config.SSHTunnelConfig{Profile: profile}
+			continue
+		}
 		host := strings.TrimSpace(f.Get(side.name + "_ssh_host"))
 		user := strings.TrimSpace(f.Get(side.name + "_ssh_user"))
 		key := strings.TrimSpace(f.Get(side.name + "_ssh_identity_file"))
@@ -1071,8 +1094,9 @@ func (s *Server) pageNewPipeline(w http.ResponseWriter, r *http.Request, sess *S
 		Active:  "new-pipeline",
 		Refresh: 0,
 		Body: map[string]any{
-			"ConfigDir": s.ConfigDir(),
-			"StateDir":  s.cfg.StateDir,
+			"ConfigDir":   s.ConfigDir(),
+			"StateDir":    s.cfg.StateDir,
+			"SSHProfiles": s.sshProfileViews(r.Context()),
 		},
 	}
 	s.render(w, "new_pipeline", sess, data)
@@ -1149,7 +1173,7 @@ func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, sess
 			writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing database discovery")
 			return
 		}
-		host, port, closeTunnel, err := openPipelineProbe(r.Context(), req.From, req.Host, req.Port, req.SSHTunnel)
+		host, port, closeTunnel, err := s.openPipelineProbe(r.Context(), req.From, req.Host, req.Port, req.SSHTunnel)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
 			return

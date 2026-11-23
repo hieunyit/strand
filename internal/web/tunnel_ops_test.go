@@ -1,15 +1,20 @@
 package web
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strand/internal/sshprofile"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,4 +189,66 @@ func webTestEchoServer(t *testing.T) string {
 		}
 	}()
 	return ln.Addr().String()
+}
+
+func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	e := opsEnv(t, false, nil)
+	c, csrf := e.loginOK()
+	addr, identity, hosts := webTestSSHServer(t, t.TempDir())
+	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", hosts)
+	key, err := os.ReadFile(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, page := range []string{"/tunnels", "/pipelines/new"} {
+		resp, _ := e.do(c, "GET", page, "", nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET %s returned %d", page, resp.StatusCode)
+		}
+	}
+	params := url.Values{"intent": {"save-profile"}, "profile_id": {"shared-bastion"}, "profile_host": {host}, "profile_port": {port},
+		"profile_user": {"strand"}, "profile_private_key": {string(key)}, "csrf": {csrf}}
+	resp, body := e.do(c, "POST", "/tunnels", params.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", csrfHeader: csrf})
+	if resp.StatusCode != 200 && resp.StatusCode != 303 {
+		t.Fatalf("save profile: status=%d body=%s", resp.StatusCode, body)
+	}
+	raw, found, err := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey)
+	if err != nil || !found || strings.Contains(raw, "PRIVATE KEY") || strings.Contains(raw, base64.StdEncoding.EncodeToString(key)) || !strings.Contains(raw, "sealed_key") {
+		t.Fatalf("profile metadata is not sealed: found=%v err=%v", found, err)
+	}
+	for _, page := range []string{"/tunnels", "/pipelines/new"} {
+		resp, body := e.do(c, "GET", page, "", nil)
+		if resp.StatusCode != 200 || !strings.Contains(body, `value="shared-bastion"`) || strings.Contains(body, "BEGIN OPENSSH PRIVATE KEY") {
+			t.Fatalf("profile picker not rendered safely in %s: %d", page, resp.StatusCode)
+		}
+	}
+	payload, _ := json.Marshal(map[string]string{"profile": "shared-bastion", "remote": webTestEchoServer(t)})
+	resp, body = e.do(c, "POST", "/api/v1/tunnels", string(payload), map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("open stored-key tunnel: %d %s", resp.StatusCode, body)
+	}
+	var reply struct {
+		Tunnel tunnelItem `json:"tunnel"`
+	}
+	if err := json.Unmarshal([]byte(body), &reply); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.DialTimeout("tcp", reply.Tunnel.LocalAddress, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.WriteString(conn, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	out := make([]byte, 2)
+	if _, err := io.ReadFull(conn, out); err != nil || string(out) != "ok" {
+		t.Fatalf("forwarded response %q: %v", out, err)
+	}
 }

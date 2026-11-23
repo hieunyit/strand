@@ -26,7 +26,10 @@ type Config struct {
 	// Prefetch cannot represent omitted columns as SQL NULL.
 	RequireFullRowImage bool
 	// Optional verified seed table scope; transaction boundaries still pass through.
-	TableScope func(schema, table string) bool
+	// RejectDisabledForeignKeys protects native target cascades from source statements
+	// deliberately executed with foreign_key_checks=0.
+	RejectDisabledForeignKeys func(schema, table string) bool
+	TableScope                func(schema, table string) bool
 
 	DSN        string
 	Host       string
@@ -432,6 +435,11 @@ func (r *MySQLReader) handleEventDepth(st *streamState, ev *replication.BinlogEv
 		}
 		if r.cfg.TableScope != nil && !r.cfg.TableScope(schema, table) {
 			return true
+		}
+		if rowsEv.Flags&replication.NO_FOREIGN_KEY_CHECKS_F != 0 &&
+			r.cfg.RejectDisabledForeignKeys != nil && r.cfg.RejectDisabledForeignKeys(schema, table) {
+			return fail(exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+				fmt.Sprintf("row event on %s.%s disables foreign_key_checks; refusing to apply it with native target cascades", schema, table), nil))
 		}
 		tm, info := st.tableMap[rowsEv.TableID], st.info[rowsEv.TableID]
 		if comp := st.compressed[rowsEv.TableID]; len(comp) > 0 {

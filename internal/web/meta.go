@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"strand/internal/sshprofile"
 	"strand/internal/web/store"
 )
 
@@ -236,6 +237,33 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 						return err
 					}
 					n++
+				}
+			}
+			profiles, err := sshprofile.List(ctx, m.st)
+			if err != nil {
+				return err
+			}
+			profilesChanged := false
+			for i, profile := range profiles {
+				if len(profile.SealedKey) == 0 {
+					continue
+				}
+				if _, err := profile.OpenKey(m.box); err == nil {
+					continue
+				}
+				key, err := profile.OpenKey(old)
+				if err != nil {
+					return fmt.Errorf("SSH tunnel profile %s: cannot decrypt the stored key with either secret key", profile.ID)
+				}
+				profiles[i].SealedKey, err = profile.SealKey(m.box, key)
+				if err != nil {
+					return err
+				}
+				profilesChanged = true
+			}
+			if profilesChanged {
+				if err := sshprofile.Save(ctx, m.st, profiles); err != nil {
+					return err
 				}
 			}
 			if n > 0 {

@@ -128,21 +128,21 @@ func TestCDCMySQLStopsBeforeTruncate(t *testing.T) {
 	}
 }
 
-func TestCDCMySQLRejectsCascadingFK(t *testing.T) {
-	src, srcDSN := startTestDB(t, "mysql")
+func TestCDCMySQLRejectsCascadeWithExcludedParent(t *testing.T) {
+	src, _ := startTestDB(t, "mysql")
 	if _, err := src.Exec("CREATE TABLE app.parents(id bigint primary key); CREATE TABLE app.children(id bigint primary key, parent_id bigint, CONSTRAINT fk_parent FOREIGN KEY(parent_id) REFERENCES app.parents(id) ON DELETE CASCADE)"); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// The child can lose data even if the parent is outside the replication scope.
-	p := &Pipeline{src: src, srcDSN: srcDSN, srcEngine: model.EngineMySQL, dstEngine: model.EngineMySQL, cfg: &config.Config{}}
 	filter, err := newTableFilter([]string{"app.children"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = p.loadTables(ctx, filter)
-	if err == nil || !strings.Contains(err.Error(), "fk_parent") {
-		t.Fatalf("loadTables error = %v", err)
+	child := model.TableID{Schema: "app", Table: "children"}
+	p := &Pipeline{src: src, dst: src, filter: filter, srcEngine: model.EngineMySQL, dstEngine: model.EngineMySQL, tables: map[model.TableID]*tableMeta{child: {}}}
+	_, err = p.planMySQLCascade(ctx)
+	if err == nil || !strings.Contains(err.Error(), "requires its parent app.parents") {
+		t.Fatalf("cascade preflight error = %v", err)
 	}
 }

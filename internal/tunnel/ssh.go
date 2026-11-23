@@ -25,6 +25,7 @@ type Config struct {
 	SSHAddress   string // host:port; port defaults to 22
 	SSHUser      string
 	IdentityFile string
+	PrivateKey   []byte // in-memory SSH identity, mutually exclusive with IdentityFile
 	HostKeysFile string
 	LocalAddress string // host:port; bind to loopback by default
 	Remote       string // host:port as resolved from the SSH server
@@ -71,7 +72,7 @@ func Start(ctx context.Context, cfg Config) (*Forward, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: load known_hosts: %w", err)
 	}
-	auth, cleanup, err := authMethods(cfg.IdentityFile)
+	auth, cleanup, err := authMethods(cfg.IdentityFile, cfg.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -175,13 +176,24 @@ func validateLocalAddress(address string) error {
 	return nil
 }
 
-func authMethods(identityFile string) ([]ssh.AuthMethod, func(), error) {
+func authMethods(identityFile string, privateKey []byte) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
 	var closers []io.Closer
 	cleanup := func() {
 		for _, c := range closers {
 			_ = c.Close()
 		}
+	}
+	if len(privateKey) > 0 {
+		if identityFile != "" {
+			return nil, cleanup, errors.New("tunnel: choose an inline SSH private key or an identity file")
+		}
+		key, err := ssh.ParsePrivateKey(privateKey)
+		if err != nil {
+			return nil, cleanup, errors.New("tunnel: invalid SSH private key or unsupported passphrase-protected key")
+		}
+		methods = append(methods, ssh.PublicKeys(key))
+		return methods, cleanup, nil
 	}
 	if identityFile != "" {
 		keyBytes, err := os.ReadFile(identityFile)
