@@ -14,6 +14,7 @@ import (
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/mysqlver"
 	mysqlreader "strand/internal/reader/mysql"
 )
 
@@ -154,6 +155,9 @@ func (p *Pipeline) autoSeed(ctx context.Context, empty checkpoint.AppliedSet) (c
 		if err := p.createTargetTables(ctx, ids); err != nil {
 			return nil, err
 		}
+		if err := p.addMissingTargetCascades(ctx, scope); err != nil {
+			return nil, err
+		}
 	}
 	if err := p.initMySQLCascade(ctx); err != nil {
 		return nil, err
@@ -212,7 +216,199 @@ func closeAutoSeedConn(conn *sql.Conn) {
 	_ = conn.Close()
 }
 
+// addMissingTargetCascades recreates source cascading foreign keys that an
+// existing target table lacks. It only touches empty target tables: the
+// auto-seed copy fills them and requires them to be empty anyway.
+func (p *Pipeline) addMissingTargetCascades(ctx context.Context, scope map[model.TableID]bool) error {
+	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
+		return nil
+	}
+	source, err := readSourceCascadingFKs(ctx, p.src, scope)
+	if err != nil {
+		return fmt.Errorf("inspect source cascading foreign keys: %w", err)
+	}
+	target, err := readCascadingFKs(ctx, p.dst)
+	if err != nil {
+		return fmt.Errorf("inspect target cascading foreign keys: %w", err)
+	}
+	pin := checkCascadeOrder(source) != nil
+	for _, fk := range source {
+		if !scope[fk.Child] || !scope[fk.Parent] || fk.constraint == "" || fk.OnDelete == "SET DEFAULT" || fk.OnUpdate == "SET DEFAULT" {
+			continue // planMySQLCascade reports these
+		}
+		sourceChild := fk.Child
+		if pin {
+			fk.Name = fk.constraint
+		}
+		fk.Child, fk.Parent = p.filter.Target(fk.Child), p.filter.Target(fk.Parent)
+		present := false
+		for _, t := range target {
+			// Any constraint on the same columns stays as it is; a mismatch is
+			// reported by planMySQLCascade instead of being changed here.
+			if t.Child == fk.Child && t.Parent == fk.Parent && slices.Equal(t.Columns, fk.Columns) {
+				present = true
+				break
+			}
+		}
+		if present {
+			continue
+		}
+		empty := true
+		for _, id := range []model.TableID{fk.Child, fk.Parent} {
+			var one int
+			err := p.dst.QueryRowContext(ctx, "SELECT 1 FROM "+autoSeedTableSQL(id)+" LIMIT 1").Scan(&one)
+			if err == nil {
+				empty = false
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("auto-seed: inspect target %s: %w", id, err)
+			}
+		}
+		if !empty {
+			continue
+		}
+		stmt := cascadeAddSQL(fk, p.cascadeTargetName(sourceChild, fk))
+		if _, err := p.dst.ExecContext(ctx, stmt); err != nil {
+			return autoSeedRejected(fmt.Sprintf("add missing cascading foreign key on target %s: %v (statement: %s)", fk.Child, err, stmt))
+		}
+		p.log.Warn("auto-seed: added a cascading foreign key missing on the empty target table", "table", fk.Child.String(), "references", fk.Parent.String(), "constraint", p.cascadeTargetName(sourceChild, fk))
+	}
+	return nil
+}
+
 func (p *Pipeline) openAutoSeedSnapshot(ctx context.Context, ids []model.TableID) (*sql.Conn, mysqlreader.BinlogStatus, error) {
+	if ver, err := mysqlver.Cached(ctx, p.src); err != nil {
+		return nil, mysqlreader.BinlogStatus{}, err
+	} else if ver.IsMariaDB() {
+		// MariaDB reports the binlog position of a consistent snapshot, so no
+		// global read lock (and no RELOAD privilege) is needed.
+		for attempt := 0; attempt < 5; attempt++ {
+			conn, pos, again, err := p.openMariaDBSnapshot(ctx, ids)
+			if err != nil || !again {
+				return conn, pos, err
+			}
+			p.log.Warn("auto-seed: source wrote DDL while the snapshot was opening; retrying")
+		}
+		return nil, mysqlreader.BinlogStatus{}, autoSeedRejected("source kept writing DDL while the snapshot was opening; retry when the schema is stable")
+	}
+	return p.openFlushLockSnapshot(ctx, ids)
+}
+
+// openMariaDBSnapshot opens a consistent snapshot and reads its binlog
+// position from Binlog_snapshot_file/position. Table definitions are pinned
+// after the snapshot; again=true when the binlog between the snapshot and the
+// pin holds a statement that may be DDL, so the caller retries.
+func (p *Pipeline) openMariaDBSnapshot(ctx context.Context, ids []model.TableID) (conn *sql.Conn, pos mysqlreader.BinlogStatus, again bool, err error) {
+	setupCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	c, err := p.src.Conn(setupCtx)
+	if err != nil {
+		return nil, pos, false, err
+	}
+	conn = c
+	defer func() {
+		if err != nil || again {
+			closeAutoSeedConn(c)
+			conn = nil
+		}
+	}()
+	if _, err = conn.ExecContext(setupCtx, "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"); err != nil {
+		return nil, pos, false, err
+	}
+	if _, err = conn.ExecContext(setupCtx, "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY"); err != nil {
+		return nil, pos, false, err
+	}
+	rows, err := conn.QueryContext(setupCtx, "SHOW SESSION STATUS LIKE 'binlog_snapshot_%'")
+	if err != nil {
+		return nil, pos, false, fmt.Errorf("auto-seed: read snapshot binlog position: %w", err)
+	}
+	for rows.Next() {
+		var name, value string
+		if err = rows.Scan(&name, &value); err != nil {
+			rows.Close()
+			return nil, pos, false, err
+		}
+		switch strings.ToLower(name) {
+		case "binlog_snapshot_file":
+			pos.File = value
+		case "binlog_snapshot_position":
+			if _, err = fmt.Sscan(value, &pos.Position); err != nil {
+				rows.Close()
+				return nil, pos, false, fmt.Errorf("auto-seed: parse Binlog_snapshot_position %q: %w", value, err)
+			}
+		}
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, pos, false, err
+	}
+	if pos.File == "" || pos.Position == 0 {
+		return nil, pos, false, autoSeedRejected("source did not report Binlog_snapshot_file/position; binary logging must be enabled")
+	}
+	if err = pinAutoSeedTables(setupCtx, conn, ids); err != nil {
+		return nil, pos, false, err
+	}
+	head, err := mysqlreader.ReadBinlogStatus(setupCtx, p.src)
+	if err != nil {
+		return nil, pos, false, err
+	}
+	if head.File != pos.File {
+		return conn, pos, true, nil // binlog rotated in between; a fresh attempt is simpler than following it
+	}
+	for from := pos.Position; from < head.Position; {
+		events, err := readBinlogEvents(setupCtx, p.src, pos.File, from)
+		if err != nil {
+			return nil, pos, false, fmt.Errorf("auto-seed: check source binlog after the snapshot: %w", err)
+		}
+		if len(events) == 0 {
+			break
+		}
+		for _, e := range events {
+			if e.end > head.Position {
+				break
+			}
+			if strings.EqualFold(e.kind, "Query") && !transactionControlQuery(e.info) {
+				return conn, pos, true, nil
+			}
+		}
+		next := events[len(events)-1].end
+		if next <= from {
+			return nil, pos, false, fmt.Errorf("auto-seed: binlog cursor did not advance at %s:%d", pos.File, from)
+		}
+		from = next
+	}
+	return conn, pos, false, nil
+}
+
+// transactionControlQuery: Query events that every row-based transaction writes.
+func transactionControlQuery(info string) bool {
+	q := strings.ToUpper(strings.TrimSpace(info))
+	for _, prefix := range []string{"BEGIN", "COMMIT", "ROLLBACK", "XA ", "SAVEPOINT", "RELEASE SAVEPOINT"} {
+		if strings.HasPrefix(q, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func pinAutoSeedTables(ctx context.Context, source *sql.Conn, ids []model.TableID) error {
+	// Pin several definitions per round trip. Stay below the 61-table MySQL join limit.
+	for batch := range slices.Chunk(ids, 32) {
+		refs := make([]string, 0, len(batch))
+		for i, id := range batch {
+			refs = append(refs, fmt.Sprintf("%s AS t%d", autoSeedTableSQL(id), i))
+		}
+		rows, err := source.QueryContext(ctx, "SELECT 1 FROM "+strings.Join(refs, " CROSS JOIN ")+" LIMIT 0")
+		if err != nil {
+			return fmt.Errorf("pin source table definitions starting at %s: %w", batch[0], err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Pipeline) openFlushLockSnapshot(ctx context.Context, ids []model.TableID) (*sql.Conn, mysqlreader.BinlogStatus, error) {
 	// Bound the lock wait and the lock interval. UNLOCK TABLES releases the
 	// global flush lock without committing this session's InnoDB snapshot.
 	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -228,7 +424,7 @@ func (p *Pipeline) openAutoSeedSnapshot(ctx context.Context, ids []model.TableID
 		}
 	}()
 	if _, err := source.ExecContext(lockCtx, "FLUSH TABLES WITH READ LOCK"); err != nil {
-		return nil, mysqlreader.BinlogStatus{}, fmt.Errorf("auto-seed: acquire short source read lock (requires RELOAD or equivalent privilege): %w", err)
+		return nil, mysqlreader.BinlogStatus{}, fmt.Errorf("auto-seed: acquire short source read lock (MySQL sources need the RELOAD privilege for FLUSH TABLES WITH READ LOCK; MariaDB sources do not): %w", err)
 	}
 	if _, err := source.ExecContext(lockCtx, "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"); err != nil {
 		return nil, mysqlreader.BinlogStatus{}, err
@@ -236,20 +432,9 @@ func (p *Pipeline) openAutoSeedSnapshot(ctx context.Context, ids []model.TableID
 	if _, err := source.ExecContext(lockCtx, "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY"); err != nil {
 		return nil, mysqlreader.BinlogStatus{}, err
 	}
-	// Pin several definitions per round trip to keep the global read lock short
-	// even when the source is remote. Stay below the 61-table MySQL join limit.
-	for batch := range slices.Chunk(ids, 32) {
-		refs := make([]string, 0, len(batch))
-		for i, id := range batch {
-			refs = append(refs, fmt.Sprintf("%s AS t%d", autoSeedTableSQL(id), i))
-		}
-		rows, err := source.QueryContext(lockCtx, "SELECT 1 FROM "+strings.Join(refs, " CROSS JOIN ")+" LIMIT 0")
-		if err != nil {
-			return nil, mysqlreader.BinlogStatus{}, fmt.Errorf("pin source table definitions starting at %s: %w", batch[0], err)
-		}
-		if err := rows.Close(); err != nil {
-			return nil, mysqlreader.BinlogStatus{}, err
-		}
+	// Batched pinning keeps the global read lock short even for a remote source.
+	if err := pinAutoSeedTables(lockCtx, source, ids); err != nil {
+		return nil, mysqlreader.BinlogStatus{}, err
 	}
 	pos, err := mysqlreader.ReadBinlogStatus(lockCtx, source)
 	if err != nil {

@@ -23,6 +23,11 @@ type cascadeFK struct {
 	Columns, References               []string
 	ChildCollations, ParentCollations []string
 	OnDelete, OnUpdate                string
+	// Name pins the constraint name into the signature. It is set only when
+	// overlapping cascades make InnoDB's constraint-name order observable.
+	Name string `json:",omitempty"`
+	// constraint is the name read from the catalog; never part of the signature by itself.
+	constraint string
 }
 
 func readCascadingFKs(ctx context.Context, db *sql.DB) ([]cascadeFK, error) {
@@ -57,6 +62,7 @@ func readCascadingFKs(ctx context.Context, db *sql.DB) ([]cascadeFK, error) {
 			return nil, err
 		}
 		if len(out) == 0 || name != lastName || out[len(out)-1].Child != fk.Child {
+			fk.constraint = name
 			out = append(out, fk)
 			lastName = name
 		}
@@ -75,7 +81,7 @@ const cascadeIdent = "`(?:[^`]|``)+`|[[:alnum:]_$]+|\"(?:[^\"]|\"\")+\""
 const cascadeColumns = `(?:` + cascadeIdent + `)(?:\s*,\s*(?:` + cascadeIdent + `))*`
 
 var (
-	mysqlFKLine   = regexp.MustCompile(`(?i)^\s*(?:CONSTRAINT\s+(?:` + cascadeIdent + `)\s+)?FOREIGN\s+KEY\s*\((` + cascadeColumns + `)\)\s+REFERENCES\s+(` + cascadeIdent + `)(?:\s*\.\s*(` + cascadeIdent + `))?\s*\((` + cascadeColumns + `)\)(.*)$`)
+	mysqlFKLine   = regexp.MustCompile(`(?i)^\s*(?:CONSTRAINT\s+(` + cascadeIdent + `)\s+)?FOREIGN\s+KEY\s*\((` + cascadeColumns + `)\)\s+REFERENCES\s+(` + cascadeIdent + `)(?:\s*\.\s*(` + cascadeIdent + `))?\s*\((` + cascadeColumns + `)\)(.*)$`)
 	mysqlFKPrefix = regexp.MustCompile(`(?i)^\s*(?:CONSTRAINT\s+(?:` + cascadeIdent + `)\s+)?FOREIGN\s+KEY\b`)
 	mysqlFKAction = regexp.MustCompile(`(?i)\bON\s+(DELETE|UPDATE)\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)\b`)
 	mysqlFKColumn = regexp.MustCompile(cascadeIdent)
@@ -101,8 +107,9 @@ func parseMySQLCascadeFKs(table model.TableID, ddl string) ([]cascadeFK, error) 
 		if m == nil {
 			return nil, fmt.Errorf("cannot inspect foreign key from SHOW CREATE TABLE on %s", table)
 		}
+		m = m[1:] // m[0] is the optional constraint name
 		fk := cascadeFK{Child: table, Parent: model.TableID{Schema: table.Schema, Table: unquoteMySQLFK(m[2])},
-			OnDelete: "RESTRICT", OnUpdate: "RESTRICT"}
+			OnDelete: "RESTRICT", OnUpdate: "RESTRICT", constraint: unquoteMySQLFK(m[0])}
 		if m[3] != "" {
 			fk.Parent.Schema, fk.Parent.Table = unquoteMySQLFK(m[2]), unquoteMySQLFK(m[3])
 		}
@@ -256,15 +263,7 @@ func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.Tab
 		return plan, nil
 	}
 	plan.parents, plan.children = map[model.TableID]bool{}, map[model.TableID]bool{}
-	p.tablesMu.RLock()
-	sourceScope := make(map[model.TableID]bool, len(p.tables)+len(additional))
-	for id := range p.tables {
-		sourceScope[id] = true
-	}
-	p.tablesMu.RUnlock()
-	for _, id := range additional {
-		sourceScope[id] = true
-	}
+	sourceScope := p.cascadeSourceScope(additional...)
 	source, err := readSourceCascadingFKs(ctx, p.src, sourceScope)
 	if err != nil {
 		return plan, fmt.Errorf("inspect source cascading foreign keys: %w", err)
@@ -273,6 +272,10 @@ func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.Tab
 	for id := range sourceScope {
 		targetScope[p.filter.Target(id)] = true
 	}
+	// InnoDB runs the cascades of one row in constraint-id order ("schema/name")
+	// on MariaDB and MySQL alike. When several constraints reach the same table
+	// that order decides the result, so the target must keep the same names.
+	overlap := checkCascadeOrder(source)
 	expected := map[string]int{}
 	rules := map[string]cascadeFK{}
 	for _, fk := range source {
@@ -289,6 +292,15 @@ func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.Tab
 			return plan, cascadeConfigError(fmt.Sprintf("cascading foreign key on %s requires a primary or unique key on parent %s", fk.Child, fk.Parent))
 		}
 		plan.parents[fk.Parent], plan.children[fk.Child] = true, true
+		if overlap != nil {
+			if fk.constraint == "" {
+				return plan, cascadeConfigError(overlap.Error() + "; the source constraint name could not be read")
+			}
+			if p.filter.Target(fk.Child) != fk.Child {
+				return plan, cascadeConfigError(fmt.Sprintf("%v; InnoDB applies them in constraint-name order, so %s must keep its schema, table and constraint names on the target (tables.rename is not supported here)", overlap, fk.Child))
+			}
+			fk.Name = fk.constraint
+		}
 		fk.Child, fk.Parent = p.filter.Target(fk.Child), p.filter.Target(fk.Parent)
 		key := cascadeSignature(fk)
 		expected[key]++
@@ -298,31 +310,112 @@ func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.Tab
 	if len(plan.signatures) == 0 {
 		return plan, nil
 	}
-	if err := checkCascadeOrder(source); err != nil {
-		return plan, err
-	}
 	target, err := readCascadingFKs(ctx, p.dst)
 	if err != nil {
 		return plan, fmt.Errorf("inspect target cascading foreign keys: %w", err)
+	}
+	hint := ""
+	if overlap != nil {
+		hint = fmt.Sprintf(" (%v; InnoDB applies them in constraint-name order, so target constraint names must equal the source names)", overlap)
 	}
 	sort.Strings(plan.signatures)
 	for _, fk := range target {
 		if !targetScope[fk.Parent] {
 			continue
 		}
+		if overlap != nil {
+			fk.Name = fk.constraint
+		}
 		key := cascadeSignature(fk)
 		if expected[key] == 0 {
-			return plan, cascadeConfigError(fmt.Sprintf("unexpected cascading foreign key on target %s referencing %s; target cascade rules and key column collations must match the replicated source scope", fk.Child, fk.Parent))
+			return plan, cascadeConfigError(fmt.Sprintf("unexpected cascading foreign key %s on target %s referencing %s (%s); target cascade rules and key column collations must match the replicated source scope%s",
+				fk.constraint, fk.Child, fk.Parent, describeCascadeFK(fk), hint))
 		}
 		expected[key]--
 	}
 	for _, key := range plan.signatures {
 		if expected[key] > 0 {
 			fk := rules[key]
-			return plan, cascadeConfigError(fmt.Sprintf("missing matching target cascading foreign key on %s referencing %s (ON DELETE %s, ON UPDATE %s); restore a consistent seed with matching constraints before starting CDC", fk.Child, fk.Parent, fk.OnDelete, fk.OnUpdate))
+			return plan, cascadeConfigError(p.missingCascadeMessage(ctx, fk, target) + hint)
 		}
 	}
 	return plan, nil
+}
+
+func (p *Pipeline) cascadeSourceScope(additional ...model.TableID) map[model.TableID]bool {
+	p.tablesMu.RLock()
+	scope := make(map[model.TableID]bool, len(p.tables)+len(additional))
+	for id := range p.tables {
+		scope[id] = true
+	}
+	p.tablesMu.RUnlock()
+	for _, id := range additional {
+		scope[id] = true
+	}
+	return scope
+}
+
+func describeCascadeFK(fk cascadeFK) string {
+	desc := fmt.Sprintf("(%s) -> (%s) ON DELETE %s ON UPDATE %s", strings.Join(fk.Columns, ","), strings.Join(fk.References, ","), fk.OnDelete, fk.OnUpdate)
+	if collations := strings.Trim(strings.Join(fk.ChildCollations, ",")+"/"+strings.Join(fk.ParentCollations, ","), ",/"); collations != "" {
+		desc += " collations " + strings.Join(fk.ChildCollations, ",") + " / " + strings.Join(fk.ParentCollations, ",")
+	}
+	return desc
+}
+
+// cascadeAddSQL is the target DDL that recreates a source cascading foreign key.
+func cascadeAddSQL(fk cascadeFK, name string) string {
+	cols := make([]string, len(fk.Columns))
+	for i, c := range fk.Columns {
+		cols[i] = mysqlFKQuote(c)
+	}
+	refs := make([]string, len(fk.References))
+	for i, c := range fk.References {
+		refs[i] = mysqlFKQuote(c)
+	}
+	return "ALTER TABLE " + autoSeedTableSQL(fk.Child) + " ADD CONSTRAINT " + mysqlFKQuote(name) +
+		" FOREIGN KEY (" + strings.Join(cols, ", ") + ") REFERENCES " + autoSeedTableSQL(fk.Parent) +
+		" (" + strings.Join(refs, ", ") + ") ON DELETE " + fk.OnDelete + " ON UPDATE " + fk.OnUpdate
+}
+
+// cascadeTargetName is the constraint name schemagen gives the target copy.
+func (p *Pipeline) cascadeTargetName(sourceChild model.TableID, fk cascadeFK) string {
+	if fk.Name != "" {
+		return fk.Name
+	}
+	if dst := p.filter.Target(sourceChild); dst != sourceChild {
+		return dst.Table + "_" + fk.constraint
+	}
+	return fk.constraint
+}
+
+// missingCascadeMessage says why no target constraint matches fk (target names)
+// and how to add it.
+func (p *Pipeline) missingCascadeMessage(ctx context.Context, fk cascadeFK, target []cascadeFK) string {
+	msg := fmt.Sprintf("missing matching target cascading foreign key on %s referencing %s (ON DELETE %s, ON UPDATE %s)", fk.Child, fk.Parent, fk.OnDelete, fk.OnUpdate)
+	var exists int
+	err := p.dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", fk.Child.Schema, fk.Child.Table).Scan(&exists)
+	if err == nil && exists == 0 {
+		return msg + fmt.Sprintf(": target table %s does not exist; create it with its foreign keys (bootstrap.create_schema: auto does this) or restore a consistent seed", fk.Child)
+	}
+	var similar []string
+	for _, t := range target {
+		if t.Child == fk.Child && t.Parent == fk.Parent {
+			similar = append(similar, fmt.Sprintf("%s %s", t.constraint, describeCascadeFK(t)))
+		}
+	}
+	if len(similar) > 0 {
+		return msg + fmt.Sprintf(": the target has %s, but the source needs %s %s; make the target rules, columns and key collations match the source",
+			strings.Join(similar, "; "), fk.constraint, describeCascadeFK(fk))
+	}
+	name := fk.Name
+	if name == "" {
+		name = fk.constraint
+	}
+	if name == "" {
+		name = fk.Child.Table + "_" + fk.Parent.Table + "_fk"
+	}
+	return msg + fmt.Sprintf(": target table %s exists without it (created before Strand, or by a tool that drops foreign keys); add it on the target with: %s", fk.Child, cascadeAddSQL(fk, name))
 }
 
 func (p *Pipeline) initMySQLCascade(ctx context.Context) error {

@@ -185,7 +185,7 @@ bootstrap:
 
 Strand lấy một ảnh InnoDB nhất quán, tự ghi vị trí binlog và truyền theo lô tới MySQL. Các bảng có khóa độc lập vẫn dùng snapshot thông thường. Nhóm nạp tự động gồm bảng thiếu khóa, bảng tham gia cascade và các bảng có khóa ngoại nối với chúng. Nếu nhóm đi ra ngoài phạm vi cấu hình, Strand dừng và báo tên bảng cần đưa vào phạm vi.
 
-Tài khoản nguồn cần quyền `RELOAD` để lấy vị trí binlog cùng ảnh dữ liệu. Strand giới hạn thời gian chờ và giữ global read lock ở bước này, sau đó tiếp tục đọc từ ảnh nhất quán. `binlog_row_image` phải là `FULL`. Các bảng nạp tự động ở đích phải là InnoDB, trống và không có trigger. Giữ ứng dụng ở nguồn trong lúc khởi tạo.
+Với nguồn MariaDB, Strand đọc vị trí binlog của ảnh dữ liệu qua `Binlog_snapshot_file` và `Binlog_snapshot_position`. Bước này không cần quyền `RELOAD` và không giữ global read lock. Nếu có DDL ghi vào binlog đúng lúc mở ảnh, Strand tự mở lại ảnh. Với nguồn MySQL, tài khoản nguồn cần quyền `RELOAD`. Strand giữ `FLUSH TABLES WITH READ LOCK` trong thời gian ngắn, có giới hạn thời gian chờ, rồi đọc tiếp từ ảnh nhất quán. `binlog_row_image` phải là `FULL`. Các bảng nạp tự động ở đích phải là InnoDB, trống và không có trigger. Giữ ứng dụng ở nguồn trong lúc khởi tạo.
 
 Dữ liệu của nhóm và checkpoint được commit cùng một transaction ở MySQL. Nếu tiến trình dừng trước commit, lần Start sau tự chép lại nhóm còn dở. Dung lượng undo, redo và binlog đích phải đủ cho **nhóm nạp tự động**. Các bảng độc lập ngoài nhóm không nằm trong transaction này. Binlog nguồn phải còn đủ dài để phủ thời gian nạp và bắt kịp.
 

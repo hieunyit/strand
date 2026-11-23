@@ -17,7 +17,7 @@ func TestParseMySQLCascadeFKs(t *testing.T) {
 )`
 	got, err := parseMySQLCascadeFKs(child, ddl)
 	want := []cascadeFK{{Child: child, Parent: model.TableID{Schema: "crm", Table: "parent"},
-		Columns: []string{"a", "b"}, References: []string{"k,1", `k"2`}, OnDelete: "SET NULL", OnUpdate: "CASCADE"}}
+		Columns: []string{"a", "b"}, References: []string{"k,1", `k"2`}, OnDelete: "SET NULL", OnUpdate: "CASCADE", constraint: "phone_parent_fk"}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("FKs = %#v, error = %v; want %#v", got, err, want)
 	}
@@ -93,5 +93,40 @@ func TestCheckCascadeOrder(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tc.wantOverlap)
 			}
 		})
+	}
+}
+
+func TestCascadeSignatureKeepsUnpinnedFormat(t *testing.T) {
+	// Pipelines started before names could be pinned stored signatures without
+	// a Name; an unpinned constraint must keep producing exactly that text.
+	fk := cascadeFK{Child: model.TableID{Schema: "app", Table: "c"}, Parent: model.TableID{Schema: "app", Table: "p"},
+		Columns: []string{"p_id"}, References: []string{"id"}, OnDelete: "CASCADE", OnUpdate: "NO ACTION", constraint: "c_ibfk_1"}
+	const want = `{"Child":{"schema":"app","table":"c"},"Parent":{"schema":"app","table":"p"},"Columns":["p_id"],"References":["id"],"ChildCollations":null,"ParentCollations":null,"OnDelete":"CASCADE","OnUpdate":"RESTRICT"}`
+	if got := cascadeSignature(fk); got != want {
+		t.Fatalf("signature = %s\nwant        %s", got, want)
+	}
+	fk.Name = fk.constraint
+	if got := cascadeSignature(fk); !strings.Contains(got, `"Name":"c_ibfk_1"`) {
+		t.Fatalf("pinned signature lacks the name: %s", got)
+	}
+}
+
+func TestCascadeAddSQL(t *testing.T) {
+	fk := cascadeFK{Child: model.TableID{Schema: "call_dashboard", Table: "customer_attribute"}, Parent: model.TableID{Schema: "call_dashboard", Table: "customer"},
+		Columns: []string{"customer_id"}, References: []string{"id"}, OnDelete: "CASCADE", OnUpdate: "RESTRICT"}
+	const want = "ALTER TABLE `call_dashboard`.`customer_attribute` ADD CONSTRAINT `fk_ca` FOREIGN KEY (`customer_id`) REFERENCES `call_dashboard`.`customer` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+	if got := cascadeAddSQL(fk, "fk_ca"); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestTransactionControlQuery(t *testing.T) {
+	for q, want := range map[string]bool{
+		"BEGIN": true, "COMMIT /* implicit, from Xid_log_event */": true, "XA END X'01',X'',1": true, " savepoint `a`": true,
+		"use `app`; ALTER TABLE t ADD c int": false, "TRUNCATE app.t": false, "CREATE TABLE x (id int)": false,
+	} {
+		if got := transactionControlQuery(q); got != want {
+			t.Errorf("transactionControlQuery(%q) = %v, want %v", q, got, want)
+		}
 	}
 }
