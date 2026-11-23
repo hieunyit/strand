@@ -24,12 +24,12 @@ func (s *Server) pageBackupsReports(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 	body := reportsPageBody{opsBody: roleBody(sess)}
-	now := s.now().UTC()
+	now := s.now().In(webTimeZone)
 	to := now
 	from := to.AddDate(0, 0, -30)
 	q := r.URL.Query()
 	parse := func(v string) (time.Time, bool) {
-		t, err := time.Parse("2006-01-02", v)
+		t, err := time.ParseInLocation("2006-01-02", v, webTimeZone)
 		return t, err == nil
 	}
 	if v := q.Get("from"); v != "" {
@@ -53,8 +53,8 @@ func (s *Server) pageBackupsReports(w http.ResponseWriter, r *http.Request, sess
 	body.From = from.Format("2006-01-02")
 	body.To = to.Add(-time.Nanosecond).Format("2006-01-02")
 	v := url.Values{}
-	v.Set("from", body.From)
-	v.Set("to", body.To)
+	v.Set("from", from.Format(time.RFC3339Nano))
+	v.Set("to", to.Format(time.RFC3339Nano))
 	body.CSVURL = "/api/v1/backup-reports/compliance.csv?" + v.Encode()
 	rep, err := s.buildCompliance(r.Context(), from, to)
 	if err != nil {

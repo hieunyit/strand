@@ -19,6 +19,7 @@ import (
 
 	"strand/internal/backup/conncheck"
 	"strand/internal/config"
+	"strand/internal/web/store"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 
@@ -43,6 +44,9 @@ type NewPipelineOpts struct {
 	SourcePort int    `json:"source_port"`
 	TargetHost string `json:"target_host"`
 	TargetPort int    `json:"target_port"`
+
+	SourceSSHTunnel *config.SSHTunnelConfig `json:"source_ssh_tunnel,omitempty"`
+	TargetSSHTunnel *config.SSHTunnelConfig `json:"target_ssh_tunnel,omitempty"`
 
 	SourceUser string `json:"source_user"`
 	TargetUser string `json:"target_user"`
@@ -171,6 +175,17 @@ source:
   create_slot: true
   publication: strand_{{.Name | slot}}
 {{- end}}
+{{- with .SourceSSHTunnel}}
+  ssh_tunnel:
+    host: {{quote .Host}}
+    user: {{quote .User}}
+    {{- if .Port}}
+    port: {{.Port}}
+    {{- end}}
+    {{- if .IdentityFile}}
+    identity_file: {{quote .IdentityFile}}
+    {{- end}}
+{{- end}}
 
 target:
 {{- if .TargetMySQL}}
@@ -185,6 +200,17 @@ target:
   kind: postgres
   dsn: "{{.TargetDSN}}"
   commit_order: {{.CommitOrder}}
+{{- end}}
+{{- with .TargetSSHTunnel}}
+  ssh_tunnel:
+    host: {{quote .Host}}
+    user: {{quote .User}}
+    {{- if .Port}}
+    port: {{.Port}}
+    {{- end}}
+    {{- if .IdentityFile}}
+    identity_file: {{quote .IdentityFile}}
+    {{- end}}
 {{- end}}
 
 tables:
@@ -231,8 +257,11 @@ observability:
 `
 
 type tmplData struct {
-	Name              string
-	From, To          string
+	Name            string
+	From, To        string
+	SourceSSHTunnel *config.SSHTunnelConfig
+	TargetSSHTunnel *config.SSHTunnelConfig
+
 	SourceHost        string
 	SourcePort        int
 	TargetHost        string
@@ -272,6 +301,7 @@ type tmplData struct {
 var pipelineTmpl = texttmpl.Must(texttmpl.New("pipe").Funcs(texttmpl.FuncMap{
 	"slot":    func(s string) string { return strings.ReplaceAll(s, "-", "_") },
 	"logical": logicalYAML,
+	"quote":   strconv.Quote,
 }).Parse(pipelineTmplText))
 
 // logicalYAML: nội dung khối bootstrap.logical (chunk_rows, max_parallel, windows) của pipeline mới.
@@ -303,6 +333,8 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 	td := tmplData{
 		Name:              opts.Name,
 		From:              from,
+		SourceSSHTunnel:   opts.SourceSSHTunnel,
+		TargetSSHTunnel:   opts.TargetSSHTunnel,
 		To:                to,
 		SourceHost:        opts.SourceHost,
 		SourcePort:        opts.SourcePort,
@@ -503,6 +535,17 @@ var plainDBNameRE = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
 
 // checkOpts từ chối giá trị làm hỏng YAML sinh ra (dấu nháy, xuống dòng, ...) và tên database metadata lạ.
 func checkOpts(opts NewPipelineOpts) error {
+	for _, endpoint := range []struct {
+		name, kind string
+		ssh        *config.SSHTunnelConfig
+	}{
+		{"source", opts.From, opts.SourceSSHTunnel},
+		{"target", opts.To, opts.TargetSSHTunnel},
+	} {
+		if err := endpoint.ssh.Validate(endpoint.kind); err != nil {
+			return fmt.Errorf("%s_ssh_host: %w", endpoint.name, err)
+		}
+	}
 	if isMongo(opts.From) || isMongo(opts.To) {
 		if err := checkMongoOpts(opts); err != nil {
 			return err
@@ -991,6 +1034,25 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 		}
 		*dst = n
 	}
+	for _, side := range []struct {
+		name   string
+		tunnel **config.SSHTunnelConfig
+	}{
+		{"source", &opts.SourceSSHTunnel},
+		{"target", &opts.TargetSSHTunnel},
+	} {
+		host := strings.TrimSpace(f.Get(side.name + "_ssh_host"))
+		user := strings.TrimSpace(f.Get(side.name + "_ssh_user"))
+		key := strings.TrimSpace(f.Get(side.name + "_ssh_identity_file"))
+		port, err := atoiField(r, side.name+"_ssh_port")
+		if err != nil {
+			return opts, err
+		}
+		if host != "" || user != "" || key != "" || port != 0 {
+			*side.tunnel = &config.SSHTunnelConfig{Host: host, Port: port, User: user, IdentityFile: key}
+		}
+	}
+
 	if v := strings.TrimSpace(f.Get("breaker_max_ratio")); v != "" {
 		x, err := strconv.ParseFloat(v, 64)
 		if err != nil || x < 0 {
@@ -1051,11 +1113,12 @@ func (s *Server) apiPipelineCreate(w http.ResponseWriter, r *http.Request, sess 
 }
 
 type sourceDatabaseRequest struct {
-	From     string `json:"from"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Password string `json:"password"`
+	From      string                  `json:"from"`
+	Host      string                  `json:"host"`
+	Port      int                     `json:"port"`
+	User      string                  `json:"user"`
+	Password  string                  `json:"password"`
+	SSHTunnel *config.SSHTunnelConfig `json:"ssh_tunnel,omitempty"`
 	// MongoDB only (Host may list several host:port).
 	AuthDB     string `json:"auth_db"`
 	ReplicaSet string `json:"replica_set"`
@@ -1064,13 +1127,37 @@ type sourceDatabaseRequest struct {
 
 // apiSourceDatabases lists databases reachable by the credentials currently entered in the new-pipeline form.
 // MySQL/MariaDB run SHOW DATABASES; PostgreSQL and MongoDB use the connection checker (system databases left out).
-func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, _ *Session) {
+func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, sess *Session) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	var req sourceDatabaseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if req.SSHTunnel != nil {
+		if sess == nil || sess.Role != store.RoleAdmin {
+			writeErr(w, http.StatusForbidden, "SSH tunnel database discovery requires an administrator")
+			return
+		}
+		if err := req.SSHTunnel.Validate(req.From); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), User: sess.Username, Action: "pipeline.list_source_databases", Result: "started", Detail: map[string]any{
+			"engine": req.From, "host": req.Host, "port": req.Port, "ssh_host": req.SSHTunnel.Host,
+		}}); err != nil {
+			writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing database discovery")
+			return
+		}
+		host, port, closeTunnel, err := openPipelineProbe(r.Context(), req.From, req.Host, req.Port, req.SSHTunnel)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		defer closeTunnel()
+		req.Host, req.Port = host, port
+	}
+
 	switch req.From {
 	case "mysql", "mariadb":
 	case "postgres", "mongodb":

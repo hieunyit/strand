@@ -131,10 +131,11 @@
     if (tz) { s.timezone = tz; }
     return s;
   }
+  var defaultScheduleZone = 'Asia/Ho_Chi_Minh';
   function writeSchedule(root, s) {
     var base = sched(root);
     function set(n, v) { var c = base.querySelector('[name="' + n + '"]'); if (c) { c.value = v; } }
-    s = s || {};
+    s = s || { timezone: defaultScheduleZone };
     set('sch_kind', s.kind || 'daily');
     set('sch_at', s.at || '01:00');
     // The API stores whole seconds while the widget displays minutes.
@@ -459,7 +460,7 @@
     bindSchedule(f, function () { f.setAttribute('data-dirty', '1'); });
     bindRetention(f);
     if (stored) { fillPolicy(f, stored); }
-    else { writeRetention(f, { keep_daily: 7, keep_weekly: 4 }); }
+    else { writeSchedule(f); writeRetention(f, { keep_daily: 7, keep_weekly: 4 }); }
     syncPolicyConditions(f);
     previewSchedule(f);
     f.removeAttribute('data-dirty');

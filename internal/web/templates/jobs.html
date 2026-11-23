@@ -1,8 +1,8 @@
 {{define "content"}}
 <section class="card">
   <div class="cardhead"><h2>Process jobs{{if .Body.Running}} <span class="badge st-running">{{.Body.Running}} running</span>{{end}}</h2></div>
-  <p class="card-desc">Long-running commands started from the web (verify, plan, schema, export). History is kept under the state directory; one job at a time per pipeline.</p>
+  <p class="card-desc">Open a job to see its status and output. The list includes pipeline commands and backup operations.</p>
   {{template "job-filterbar" .}}
-  {{template "jobs-table" (jobsCtx .Body.Jobs true .CanOperate)}}
+  {{template "jobs-table" (jobsCtx .Body.Jobs true .CanOperate .Body.Origins)}}
 </section>
 {{end}}

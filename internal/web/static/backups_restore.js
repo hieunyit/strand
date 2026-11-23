@@ -26,16 +26,13 @@
     if (!tt) { return ''; }
     var s = tt.trim();
     if (!s) { return ''; }
-    if (s.endsWith('Z')) {
-      s = s.slice(0, -1);
-    }
     if (s.indexOf('.') !== -1) {
       s = s.split('.')[0];
     }
     if (s.length === 16) {
       s += ':00';
     }
-    return s + 'Z';
+    return s + '+07:00';
   }
 
   function getChosenEngine() {
@@ -270,18 +267,18 @@
     }
 
     if (sInfo.continuous && sInfo.window_start && sInfo.window_end) {
-      var wStart = new Date(sInfo.window_start);
-      var wEnd = new Date(sInfo.window_end);
+      var wStart = window.strandLocalISO(sInfo.window_start);
+      var wEnd = window.strandLocalISO(sInfo.window_end);
       if (timeInput) {
-        timeInput.min = wStart.toISOString().slice(0, 19);
-        timeInput.max = wEnd.toISOString().slice(0, 19);
+        timeInput.min = wStart;
+        timeInput.max = wEnd;
       }
       if (winBox && winText) {
         winBox.hidden = false;
         winText.textContent = 'Recovery window for ' + src + ': ' +
-          wStart.toISOString().slice(0, 19).replace('T', ' ') + ' to ' +
-          wEnd.toISOString().slice(0, 19).replace('T', ' ') +
-          ' UTC (' + (sInfo.logs_count || 0) + ' log segments available).';
+          wStart.replace('T', ' ') + ' to ' +
+          wEnd.replace('T', ' ') +
+          ' UTC+7 (' + (sInfo.logs_count || 0) + ' log segments available).';
       }
     } else {
       if (winBox) { winBox.hidden = !sInfo.verify_on_replay; }
@@ -543,8 +540,8 @@
           if (tSel < tMin || tSel > tMax) {
             if (errTime) {
               errTime.textContent = 'Target time is outside the recovery window [' +
-                tMin.toISOString().slice(0, 19).replace('T', ' ') + ', ' +
-                tMax.toISOString().slice(0, 19).replace('T', ' ') + '].';
+                window.strandLocalISO(tMin).replace('T', ' ') + ', ' +
+                window.strandLocalISO(tMax).replace('T', ' ') + '] (UTC+7).';
               errTime.hidden = false;
             }
             valid = false;
@@ -708,7 +705,7 @@
     }
 
     var tt = (form.elements['target_time'].value || '').trim();
-    if (timeEl) { timeEl.textContent = tt ? normalizeTargetTime(tt) + ' (UTC)' : 'Original backup snapshot'; }
+    if (timeEl) { timeEl.textContent = tt ? tt.replace('T', ' ') + ' (UTC+7)' : 'Original backup snapshot'; }
 
     var connSel = (form.elements['connection_id'].value || '').trim();
     if (srvEl) {

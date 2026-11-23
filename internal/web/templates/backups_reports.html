@@ -1,7 +1,7 @@
 {{define "content"}}
 {{if .Body.Message}}<div class="alert alert-warn mb" role="status">{{.Body.Message}}</div>{{end}}
 <section class="card" id="bk-report-range">
-  <div class="cardhead"><h2>Period</h2><a class="btn small" href="{{.Body.CSVURL}}" download>{{icon "download"}}Download CSV</a></div>
+  <div class="cardhead"><h2>Period (UTC+7)</h2><a class="btn small" href="{{.Body.CSVURL}}" download>{{icon "download"}}Download CSV</a></div>
   <form method="get" action="/backups/reports" class="filterbar">
     <div class="field-grid cols-3">
       <label class="field"><span class="field-label">From</span><input type="date" name="from" value="{{.Body.From}}" required></label>

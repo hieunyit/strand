@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strconv"
@@ -24,11 +25,11 @@ func schemaRequest(cfg *config.Config) (schemagen.Request, error) {
 		return "mysql"
 	}
 	var err error
-	r.Source, err = sql.Open(driver(r.SourceKind), cfg.Source.DSN)
+	r.Source, err = config.OpenSQL(driver(r.SourceKind), cfg.Source.DSN)
 	if err != nil {
 		return r, err
 	}
-	r.Target, err = sql.Open(driver(r.TargetKind), cfg.Target.DSN)
+	r.Target, err = config.OpenSQL(driver(r.TargetKind), cfg.Target.DSN)
 	if err != nil {
 		r.Source.Close()
 		return r, err
@@ -45,6 +46,11 @@ func newSchemaCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		closeTunnels, err := config.OpenSSHTunnels(cmd.Context(), cfg)
+		if err != nil {
+			return err
+		}
+		defer closeTunnels()
 		r, err := schemaRequest(cfg)
 		if err != nil {
 			return err
@@ -80,23 +86,30 @@ func newSchemaCmd() *cobra.Command {
 }
 
 // openSchemaStore mở kết nối target của cấu hình và Store các thay đổi schema đang chờ (P3-01).
-func openSchemaStore() (*config.Config, *sql.DB, *schemachange.Store, error) {
+func openSchemaStore(ctx context.Context) (*config.Config, *sql.DB, *schemachange.Store, func(), error) {
 	if cfgPath == "" {
-		return nil, nil, nil, exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing config file path (use -c or --config)", nil)
+		return nil, nil, nil, nil, exitcode.New("missing_config_path", exitcode.InvalidSyntax, "missing config file path (use -c or --config)", nil)
 	}
 	cfg, err := config.LoadFile(cfgPath)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	driver := "mysql"
 	if cfg.Target.Kind == "postgres" {
 		driver = "pgx"
 	}
-	db, err := sql.Open(driver, cfg.Target.DSN)
+	// Schema change records live on the target.
+	cfg.Source.SSHTunnel = nil
+	closeTunnels, err := config.OpenSSHTunnels(ctx, cfg)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return cfg, db, schemachange.NewStore(db, cfg.Target.Kind == "postgres"), nil
+	db, err := config.OpenSQL(driver, cfg.Target.DSN)
+	if err != nil {
+		closeTunnels()
+		return nil, nil, nil, nil, err
+	}
+	return cfg, db, schemachange.NewStore(db, cfg.Target.Kind == "postgres"), closeTunnels, nil
 }
 
 func printSchemaChange(cmd *cobra.Command, c schemachange.Change) {
@@ -117,10 +130,11 @@ func printSchemaChange(cmd *cobra.Command, c schemachange.Change) {
 func newSchemaDiffCmd() *cobra.Command {
 	var all bool
 	c := &cobra.Command{Use: "diff", Short: "Liệt kê thay đổi schema đang chờ duyệt cùng DDL đề xuất cho target", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, db, store, err := openSchemaStore()
+		cfg, db, store, closeTunnels, err := openSchemaStore(cmd.Context())
 		if err != nil {
 			return err
 		}
+		defer closeTunnels()
 		defer db.Close()
 		changes, err := store.List(cmd.Context(), cfg.Name, all)
 		if err != nil {
@@ -146,10 +160,11 @@ func newSchemaApproveCmd() *cobra.Command {
 		if err != nil {
 			return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, fmt.Sprintf("invalid schema change id %q", args[0]), err)
 		}
-		cfg, db, store, err := openSchemaStore()
+		cfg, db, store, closeTunnels, err := openSchemaStore(cmd.Context())
 		if err != nil {
 			return err
 		}
+		defer closeTunnels()
 		defer db.Close()
 		c, applied, err := store.Approve(cmd.Context(), cfg.Name, id, dryRun)
 		if err != nil {

@@ -5,11 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
-	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/validate"
 )
 
 // Bảng partitioned ở source PG (review R02). Pipeline theo dõi bảng gốc (relkind 'p'); snapshot đọc
@@ -21,49 +20,13 @@ import (
 //   - lúc stream: row của một partition lá có gốc thuộc pipeline → dừng với lỗi, không bỏ qua
 //     (phòng publication bị đổi khi đang chạy).
 
-// checkPGPartitionPublication từ chối cấu hình làm mất row của partition (xem trên).
-func (p *Pipeline) checkPGPartitionPublication(ctx context.Context, ids []model.TableID) error {
-	if p.srcEngine != model.EnginePG || len(ids) == 0 {
-		return nil
-	}
-	var parted []string
-	for _, id := range ids {
-		var kind string
-		err := p.src.QueryRowContext(ctx, `
-			SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-			 WHERE n.nspname = $1 AND c.relname = $2`, id.Schema, id.Table).Scan(&kind)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("check partitioned table %s: %w", id, err)
-		}
-		if kind == "p" {
-			parted = append(parted, id.String())
-		}
-	}
-	if len(parted) == 0 {
+func (p *Pipeline) checkPGPublication(ctx context.Context, ids []model.TableID) error {
+	if p.srcEngine != model.EnginePG {
 		return nil
 	}
 	_, pub := p.pgSlotNames()
-	var viaRoot bool
-	err := p.src.QueryRowContext(ctx, `SELECT pubviaroot FROM pg_publication WHERE pubname = $1`, pub).Scan(&viaRoot)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil // publication chưa có: reader báo lỗi riêng khi mở slot
-	}
-	if err != nil {
-		return fmt.Errorf("read publication %s: %w", pub, err)
-	}
-	if viaRoot {
-		return nil
-	}
-	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
-		"partitioned table(s) %s: publication %q publishes changes under the partition (leaf) names, which strand does not "+
-			"replicate — rows inserted after the snapshot would be lost. Run: ALTER PUBLICATION %s SET (publish_via_partition_root = true)",
-		strings.Join(parted, ", "), pub, quotePGIdent(pub)), nil)
+	return validate.CheckPGPublication(ctx, p.src, pub, ids)
 }
-
-func quotePGIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 // pgPartitionRoots: cache bảng ngoài pipeline → bảng gốc partition (rỗng nếu không phải partition).
 type pgPartitionRoots struct {

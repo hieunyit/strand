@@ -109,7 +109,12 @@ strand stop -c p.yaml
   also updates one of the owner's fence documents (one per parallel worker); a new
   owner rewrites all fence documents first, so a stale process (GC pause, SIGSTOP, VM
   freeze, network partition) cannot commit anything once taken over and exits with
-  "lease lost" (exit 4).
+  "lease lost" (exit 4). Collection drop, rename and recreation hold a durable
+  `ddl_in_progress` guard on the lease. If a process dies or loses its connection
+  while issuing one of these commands, a new process stops before taking over.
+  Recover only after stopping the old process, confirming that the target command
+  has finished or cannot still run, and checking the affected collections. Then
+  clear the guard on the matching lease document and restart from its checkpoint.
 - **Lost history.** If the saved resume point is no longer in the source oplog the
   pipeline fails closed (exit 5, `log_gap`): "source change history is no longer
   available; a fresh snapshot (new pipeline name) is required". It never silently

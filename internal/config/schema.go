@@ -9,6 +9,18 @@ const JSONSchema = `{
   "required": ["version", "name", "source", "target", "tables"],
   "additionalProperties": false,
   "definitions": {
+    "sshTunnel": {
+      "type": "object",
+      "description": "Optional verified SSH bastion for a single MySQL, MariaDB or PostgreSQL endpoint",
+      "additionalProperties": false,
+      "required": ["host", "user"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
+        "user": { "type": "string", "minLength": 1 },
+        "identity_file": { "type": "string" }
+      }
+    },
     "byteRate": {
       "type": "object",
       "description": "Cặp soft/hard theo kích thước mỗi giây, ví dụ { soft: 40MiB, hard: 60MiB } (chưa triển khai, validate cảnh báo)",
@@ -37,6 +49,7 @@ const JSONSchema = `{
         "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/db hoặc user:pass@tcp(host:3306)/db; bỏ trống khi dùng host/user; kind mongodb: mongodb://h1,h2,h3/?replicaSet=rs0" },
         "uri": { "type": "string", "description": "kind mongodb: URI mongodb:// (thường ${SRC_URI}/${DST_URI}), thay cho dsn" },
         "uri_env": { "type": "string", "description": "kind mongodb: tên biến môi trường chứa URI (thay cho dsn)" },
+        "ssh_tunnel": { "$ref": "#/definitions/sshTunnel" },
         "host": { "type": "string" },
         "port": { "type": "integer" },
         "user": { "type": "string" },
@@ -61,6 +74,7 @@ const JSONSchema = `{
         "dsn": { "type": "string", "description": "mysql://user:pass@host:3306/strand hoặc user:pass@tcp(host:3306)/strand; bỏ trống khi dùng host/user; kind mongodb: mongodb:// URI" },
         "uri": { "type": "string", "description": "kind mongodb: URI mongodb:// (thường ${SRC_URI}/${DST_URI}), thay cho dsn" },
         "uri_env": { "type": "string", "description": "kind mongodb: tên biến môi trường chứa URI (thay cho dsn)" },
+        "ssh_tunnel": { "$ref": "#/definitions/sshTunnel" },
         "host": { "type": "string" },
         "port": { "type": "integer" },
         "user": { "type": "string" },

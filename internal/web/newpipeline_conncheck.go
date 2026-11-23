@@ -1,12 +1,18 @@
 package web
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"strand/internal/backup"
 	"strand/internal/backup/conncheck"
+	"strand/internal/config"
+	"strand/internal/web/store"
 )
 
 // POST /api/v1/pipeline-connections/test: the "Test connection" buttons of the New pipeline wizard. It probes
@@ -18,13 +24,14 @@ import (
 // logged, audited or echoed (conncheck redacts them from its messages).
 
 type pipelineConnRequest struct {
-	Role     string `json:"role"`   // source | target
-	Engine   string `json:"engine"` // mysql | mariadb | postgres | mongodb
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Password string `json:"password"`
-	URI      string `json:"uri"` // mongodb://... (secret); API clients only, the console sends the fields below
+	Role      string                  `json:"role"`   // source | target
+	Engine    string                  `json:"engine"` // mysql | mariadb | postgres | mongodb
+	Host      string                  `json:"host"`
+	Port      int                     `json:"port"`
+	User      string                  `json:"user"`
+	Password  string                  `json:"password"`
+	SSHTunnel *config.SSHTunnelConfig `json:"ssh_tunnel,omitempty"`
+	URI       string                  `json:"uri"` // mongodb://... (secret); API clients only, the console sends the fields below
 	// MongoDB without a URI: Host may list several host:port (replica set members).
 	AuthDB     string `json:"auth_db"`
 	ReplicaSet string `json:"replica_set"`
@@ -46,6 +53,17 @@ func (s *Server) apiPipelineConnTest(w http.ResponseWriter, r *http.Request, ses
 		writeErr(w, http.StatusBadRequest, "role must be source or target")
 		return
 	}
+	if req.SSHTunnel != nil {
+		if sess == nil || sess.Role != store.RoleAdmin {
+			writeErr(w, http.StatusForbidden, "SSH tunnel connection tests require an administrator")
+			return
+		}
+		if err := req.SSHTunnel.Validate(req.Engine); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	switch req.Engine {
 	case backup.ConnMySQL, backup.ConnMariaDB, backup.ConnPostgres:
 		if req.Host == "" || req.User == "" {
@@ -78,15 +96,58 @@ func (s *Server) apiPipelineConnTest(w http.ResponseWriter, r *http.Request, ses
 	if req.Host != "" {
 		detail["host"], detail["port"] = req.Host, req.Port
 	}
+	if req.SSHTunnel != nil {
+		detail["ssh_host"] = req.SSHTunnel.Host
+	}
+
 	if err := s.audit.Log(AuditEntry{IP: s.clientIP(r), User: user, Action: "pipeline.test_connection", Result: "started", Detail: detail}); err != nil {
 		s.log.Error("audit pipeline connection test", "error", err)
 		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing the connection test")
 		return
 	}
+	if req.SSHTunnel != nil {
+		host, port, closeTunnel, err := openPipelineProbe(r.Context(), req.Engine, req.Host, req.Port, req.SSHTunnel)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		defer closeTunnel()
+		req.Host, req.Port = host, port
+	}
+
 	res := s.connChecker().Check(r.Context(), conncheck.Target{
 		Engine: req.Engine, Host: req.Host, Port: req.Port, User: req.User, Password: req.Password, URI: strings.TrimSpace(req.URI),
 	})
 	writeJSON(w, http.StatusOK, res)
+}
+
+func openPipelineProbe(ctx context.Context, engine, host string, port int, ssh *config.SSHTunnelConfig) (string, int, func(), error) {
+	if port == 0 {
+		if engine == backup.ConnPostgres {
+			port = 5432
+		} else {
+			port = 3306
+		}
+	}
+	host = strings.TrimSpace(host)
+	if host == "" || port < 1 || port > 65535 {
+		return "", 0, nil, fmt.Errorf("database host and valid port are required")
+	}
+	forward, err := ssh.Open(ctx, engine, net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return "", 0, nil, fmt.Errorf("SSH tunnel: %w", err)
+	}
+	localHost, localPort, err := net.SplitHostPort(forward.Address())
+	if err != nil {
+		_ = forward.Close()
+		return "", 0, nil, err
+	}
+	n, err := strconv.Atoi(localPort)
+	if err != nil {
+		_ = forward.Close()
+		return "", 0, nil, err
+	}
+	return localHost, n, func() { _ = forward.Close() }, nil
 }
 
 // createFormFields are the form fields a create error can be attached to.
@@ -99,7 +160,7 @@ var createFormFields = map[string]bool{
 	"windows": true, "breaker_max_ratio": true, "replica_lag_max": true, "governor_algorithm": true, "lag_slo": true,
 	"source_uri": true, "target_uri": true, "source_database": true, "target_mongo_database": true, "snapshot_batch": true,
 	"stream_batch": true, "lease_ttl": true, "source_auth_db": true, "target_auth_db": true, "source_replica_set": true,
-	"target_replica_set": true,
+	"target_replica_set": true, "source_ssh_host": true, "target_ssh_host": true,
 }
 
 var createErrFieldRE = regexp.MustCompile(`^([a-z_]+)(?::| ")`)

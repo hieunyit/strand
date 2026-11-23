@@ -20,7 +20,7 @@
 {{if .Body.RecentCalls}}
 <div class="tablewrap">
 <table class="data-table grid"><thead><tr><th scope="col">Time</th><th scope="col">Tool</th><th scope="col">Result</th></tr></thead><tbody>
-{{range .Body.RecentCalls}}<tr><td class="mono small">{{.Time.UTC.Format "2006-01-02 15:04:05"}}</td><td class="mono">{{.Tool}}</td><td>{{.Result}}</td></tr>{{end}}
+{{range .Body.RecentCalls}}<tr><td class="mono small">{{ts .Time}}</td><td class="mono">{{.Tool}}</td><td>{{.Result}}</td></tr>{{end}}
 </tbody></table>
 </div>
 {{else}}<div class="empty-state">{{icon "jobs"}}<b>No MCP calls yet</b><span>No MCP tool calls recorded yet.</span></div>{{end}}

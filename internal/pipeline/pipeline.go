@@ -234,9 +234,16 @@ func Run(ctx context.Context, opts Options) error {
 			fmt.Sprintf("unsupported pipeline %s → %s (supported: mysql→mysql, mysql→postgres, postgres→postgres)",
 				cfg.Source.Kind, cfg.Target.Kind), nil)
 	}
+	// Keep the configured endpoints stable for checkpoint metadata and callers.
+	runtimeConfig := *cfg
+	closeTunnels, err := config.OpenSSHTunnels(ctx, &runtimeConfig)
+	if err != nil {
+		return stopRequestedIsClean(ctx, opts.Logger, err)
+	}
+	defer closeTunnels()
 	p := &Pipeline{
 		opts:      opts,
-		cfg:       cfg,
+		cfg:       &runtimeConfig,
 		log:       opts.Logger.With("pipeline", cfg.Name),
 		id:        cfg.Name,
 		strict:    !strings.EqualFold(cfg.Target.CommitOrder, "relaxed"),
@@ -373,7 +380,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 		}
 	}
-	if p.src, err = sql.Open(srcDriver, srcSQLDSN); err != nil {
+	if p.src, err = config.OpenSQL(srcDriver, srcSQLDSN); err != nil {
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid source DSN: %v", err), err)
 	}
 	defer p.src.Close()
@@ -457,7 +464,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	// target của chúng TRƯỚC khi tăng epoch, vì transaction dở của chúng giữ row lock trên
 	// chính row delta mà bước tăng epoch phải cập nhật.
 	p.killStaleInstances(ctx)
-	if p.epoch, err = p.store.AdvanceEpoch(ctx, p.id, fmt.Sprintf("%s/%d", host, os.Getpid()), configHash(p.cfg)); err != nil {
+	if p.epoch, err = p.store.AdvanceEpoch(ctx, p.id, fmt.Sprintf("%s/%d", host, os.Getpid()), configHash(p.opts.Config)); err != nil {
 		return fmt.Errorf("advance epoch: %w", err)
 	}
 	p.log = p.log.With("epoch", p.epoch)
@@ -499,7 +506,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		for id := range p.tables {
 			ids = append(ids, id)
 		}
-		if err := p.checkPGPartitionPublication(ctx, ids); err != nil {
+		if err := p.checkPGPublication(ctx, ids); err != nil {
 			return err
 		}
 	}
@@ -955,19 +962,22 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			select {
 			case <-rctx.Done():
 				return
-			case err, ok := <-liveErr:
-				if ok && err != nil {
-					asmErr <- err
-					return
-				}
-				liveErr = nil
 			case t, ok := <-live:
 				if !ok {
+					// Process closes live only after publishing its terminal error.
+					if err := <-liveErr; err != nil {
+						asmErr <- err
+					} else if rctx.Err() == nil {
+						asmErr <- errors.New("replication stream ended unexpectedly")
+					}
 					return
 				}
 				select {
 				case txns <- t:
 				case <-rctx.Done():
+					if t.SpillOwned {
+						_ = os.Remove(t.SpillPath)
+					}
 					return
 				}
 			}
@@ -1236,15 +1246,17 @@ func (p *Pipeline) router(ctx context.Context, txns <-chan *model.Txn, asmErr <-
 		select {
 		case <-ctx.Done():
 			return
-		case err, ok := <-asmErr:
-			if ok && err != nil {
-				// Lỗi đọc binlog/lắp Txn: dừng, supervisor khởi động lại và resume theo GTID.
-				p.fail(fmt.Errorf("binlog stream: %w", err))
-				return
-			}
-			asmErr = nil
 		case t, ok := <-txns:
 			if !ok {
+				// The producer sends the error before closing txns. Process every
+				// queued transaction before reporting the final stream failure.
+				select {
+				case err := <-asmErr:
+					if err != nil && ctx.Err() == nil {
+						p.fail(fmt.Errorf("replication stream: %w", err))
+					}
+				default:
+				}
 				return
 			}
 			p.waitIfPaused(ctx)
@@ -2343,7 +2355,7 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	if err := p.checkSnapshotKey(ctx, id, m); err != nil {
 		return err
 	}
-	if err := p.checkPGPartitionPublication(ctx, []model.TableID{id}); err != nil {
+	if err := p.checkPGPublication(ctx, []model.TableID{id}); err != nil {
 		return err
 	}
 	if p.conv != nil {

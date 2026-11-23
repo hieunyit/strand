@@ -109,7 +109,7 @@
           <div class="sub muted small">{{.Tool}}</div>
         </td>
         <td><span class="badge small">{{.Kind}}</span></td>
-        <td class="small">{{if and .Details (index .Details "databases")}}<code>{{index .Details "databases"}}</code>{{else}}All databases / cluster{{end}}</td>
+        <td class="small">{{template "backup-database-scope" .Details}}</td>
         <td class="r nowrap">{{bytes64 .Bytes}}</td>
         <td class="small mono">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else if .Position.OplogTS}}{{.Position.OplogTS}}{{else}}-{{end}}</td>
         <td class="nowrap">{{ts .CreatedAt}}</td>

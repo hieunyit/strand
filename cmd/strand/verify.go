@@ -92,6 +92,11 @@ func newVerifyCmd() *cobra.Command {
 			if repair == "fix" && srcEngine != dstEngine {
 				return exitcode.New("invalid_repair", exitcode.InvalidSyntax, "--repair fix needs source and target of the same engine", nil)
 			}
+			closeTunnels, err := config.OpenSSHTunnels(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+			defer closeTunnels()
 			// --replica-dsn: đọc phía source từ replica (design §7: full chạy trên replica).
 			srcDSN := cfg.Source.DSN
 			if replicaDSN != "" {
@@ -115,12 +120,12 @@ func newVerifyCmd() *cobra.Command {
 					return err
 				}
 			}
-			src, err := sql.Open(driverOf(srcEngine), srcDSN)
+			src, err := config.OpenSQL(driverOf(srcEngine), srcDSN)
 			if err != nil {
 				return err
 			}
 			defer src.Close()
-			dst, err := sql.Open(driverOf(dstEngine), dstDSN)
+			dst, err := config.OpenSQL(driverOf(dstEngine), dstDSN)
 			if err != nil {
 				return err
 			}
@@ -159,7 +164,7 @@ func newVerifyCmd() *cobra.Command {
 			// source.dsn của pipeline (primary) để đọc vị trí WAL và ghi watermark (verify/recheck.go).
 			var primary *sql.DB
 			if running && srcEngine == model.EnginePG && replicaDSN != "" {
-				if primary, err = sql.Open(driverOf(srcEngine), cfg.Source.DSN); err != nil {
+				if primary, err = config.OpenSQL(driverOf(srcEngine), cfg.Source.DSN); err != nil {
 					return err
 				}
 				defer primary.Close()

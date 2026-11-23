@@ -60,10 +60,7 @@ func templateFuncsForLang(lang string) template.FuncMap {
 		"num":           fmtNum,
 		"int64":         func(v int64) string { return fmtInt(v) },
 		"clock": func(t time.Time) string {
-			if t.IsZero() {
-				return "-"
-			}
-			return t.Local().Format("15:04:05 MST")
+			return formatWebTime(t, "15:04:05 MST")
 		},
 		"derefTime": func(t *time.Time) time.Time {
 			if t == nil {
@@ -85,11 +82,10 @@ func templateFuncsForLang(lang string) template.FuncMap {
 		"bytes":       fmtBytes,
 		"bytes64":     func(n int64) string { return fmtBytes(float64(n)) },
 		"ts": func(t time.Time) string {
-			if t.IsZero() {
-				return "-"
-			}
-			return t.Local().Format("2006-01-02 15:04:05 MST")
+			return formatWebTime(t, "2006-01-02 15:04:05 MST")
 		},
+		"logTS":                     formatWebLogTime,
+		"tsMinute":                  func(t time.Time) string { return formatWebTime(t, "2006-01-02 15:04 MST") },
 		"pct":                       func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
 		"bar":                       ProgressBar,
 		"bigbar":                    BigProgressBar,
@@ -134,8 +130,12 @@ func templateFuncsForLang(lang string) template.FuncMap {
 		"remediationHint": func(code string) string {
 			return backup.RemediationHints[code]
 		},
-		"jobsCtx": func(j []JobStatus, showPipeline, canOperate bool) jobsTableCtx {
-			return jobsTableCtx{j, showPipeline, canOperate}
+		"jobsCtx": func(j []JobStatus, showPipeline, canOperate bool, origins ...map[string]jobOrigin) jobsTableCtx {
+			v := jobsTableCtx{Jobs: j, ShowPipeline: showPipeline, CanOperate: canOperate}
+			if len(origins) > 0 {
+				v.Origins = origins[0]
+			}
+			return v
 		},
 		"jobStateKey": jobStateKey,
 		"tabsCtx":     func(tabs []tabLink, active string) tabsData { return tabsData{tabs, active} },
@@ -150,6 +150,7 @@ type (
 		Jobs         []JobStatus
 		ShowPipeline bool
 		CanOperate   bool
+		Origins      map[string]jobOrigin
 	}
 	tabsData struct {
 		Tabs   []tabLink
@@ -1125,7 +1126,7 @@ func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Sessi
 							files = append(files, archiveFileItem{
 								Name:      e.Name(),
 								Size:      fmtBytes(float64(info.Size())),
-								ModTime:   info.ModTime().Format("2006-01-02 15:04:05"),
+								ModTime:   formatWebTime(info.ModTime(), "2006-01-02 15:04:05 MST"),
 								IsPartial: strings.HasPrefix(e.Name(), ".partial-"),
 							})
 						}

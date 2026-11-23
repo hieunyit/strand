@@ -122,7 +122,7 @@ func LineChart(title, unit string, series []ChartSeries, w, h int) template.HTML
 		x := float64(padL) + pw*f
 		anchor := []string{"start", "middle", "end"}[i]
 		fmt.Fprintf(&sb, `<line class="tick" x1="%.1f" x2="%.1f" y1="%d" y2="%d"/>`, x, x, h-padB, h-padB+3)
-		fmt.Fprintf(&sb, `<text class="axis" x="%.1f" y="%d" text-anchor="%s">%s</text>`, x, h-6, anchor, tmin.Add(time.Duration(float64(tmax.Sub(tmin))*f)).Format("15:04:05"))
+		fmt.Fprintf(&sb, `<text class="axis" x="%.1f" y="%d" text-anchor="%s">%s</text>`, x, h-6, anchor, formatWebTime(tmin.Add(time.Duration(float64(tmax.Sub(tmin))*f)), "15:04:05"))
 	}
 	for _, s := range series {
 		var pts []string
@@ -506,7 +506,7 @@ func CatalogTimelineSVG(sources []string, records []backup.Record, w, h int) tem
 		} else if i == 4 {
 			anchor = "end"
 		}
-		fmt.Fprintf(&sb, `<text class="timeline-tick-text" x="%.1f" y="%.1f" text-anchor="%s">%s</text>`, x, yAxis+16, anchor, tTick.Format("01-02 15:04"))
+		fmt.Fprintf(&sb, `<text class="timeline-tick-text" x="%.1f" y="%.1f" text-anchor="%s">%s</text>`, x, yAxis+16, anchor, formatWebTime(tTick, "01-02 15:04"))
 	}
 
 	bySource := make(map[string][]backup.Record)
@@ -570,7 +570,7 @@ func CatalogTimelineSVG(sources []string, records []backup.Record, w, h int) tem
 					x2 = x1 + 6
 				}
 				fmt.Fprintf(&sb, `<a href="/backups/restore?source=%s" aria-label="Restore PITR for %s"><rect class="timeline-pitr-band" x="%.1f" y="%.1f" width="%.1f" height="12" rx="2"><title>PITR coverage: %s to %s</title></rect></a>`,
-					html.EscapeString(src), html.EscapeString(src), x1, y-6, x2-x1, bStart.Format("2006-01-02 15:04"), bEnd.Format("2006-01-02 15:04"))
+					html.EscapeString(src), html.EscapeString(src), x1, y-6, x2-x1, formatWebTime(bStart, "2006-01-02 15:04 MST"), formatWebTime(bEnd, "2006-01-02 15:04 MST"))
 			}
 
 			renderGap := func(gStart, gEnd time.Time) {
@@ -578,7 +578,7 @@ func CatalogTimelineSVG(sources []string, records []backup.Record, w, h int) tem
 				x2 := xOf(gEnd)
 				if x2-x1 > 1 {
 					fmt.Fprintf(&sb, `<rect class="timeline-gap" x="%.1f" y="%.1f" width="%.1f" height="12" rx="2"><title>Log gap: %s to %s</title></rect>`,
-						x1, y-6, x2-x1, gStart.Format("2006-01-02 15:04"), gEnd.Format("2006-01-02 15:04"))
+						x1, y-6, x2-x1, formatWebTime(gStart, "2006-01-02 15:04 MST"), formatWebTime(gEnd, "2006-01-02 15:04 MST"))
 				}
 			}
 
@@ -621,12 +621,12 @@ func CatalogTimelineSVG(sources []string, records []backup.Record, w, h int) tem
 				}
 				fmt.Fprintf(&sb, `<a href="/backups/catalog/%s" aria-label="Backup %s (%s)"><circle class="%s" cx="%.1f" cy="%.1f" r="%.1f"><title>%s (%s, %s at %s)</title></circle></a>`,
 					html.EscapeString(b.ID), html.EscapeString(b.ID), b.Status, cls, cx, y, r,
-					html.EscapeString(b.ID), b.Status, b.Kind, b.CreatedAt.Format("2006-01-02 15:04"))
+					html.EscapeString(b.ID), b.Status, b.Kind, formatWebTime(b.CreatedAt, "2006-01-02 15:04 MST"))
 				continue
 			}
 			fmt.Fprintf(&sb, `<a href="/backups/restore?backup=%s" aria-label="Restore backup %s"><circle class="%s" cx="%.1f" cy="%.1f" r="%.1f"><title>%s (%s at %s, %s)</title></circle></a>`,
 				html.EscapeString(b.ID), html.EscapeString(b.ID), cls, cx, y, r,
-				html.EscapeString(b.ID), b.Kind, b.CreatedAt.Format("2006-01-02 15:04"), fmtBytes(float64(b.Bytes)))
+				html.EscapeString(b.ID), b.Kind, formatWebTime(b.CreatedAt, "2006-01-02 15:04 MST"), fmtBytes(float64(b.Bytes)))
 		}
 	}
 

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,6 +40,7 @@ type lease struct {
 	pipeline string
 	ttl      time.Duration
 	slots    int
+	ddlMu    sync.Mutex
 }
 
 // ownerInfo identifies the process holding a lease.
@@ -117,10 +119,15 @@ type leaseDoc struct {
 	Pipeline  string    `bson:"pipeline"`
 	ExpiresAt time.Time `bson:"expires_at"`
 	Info      ownerInfo `bson:"info"`
+	DDL       string    `bson:"ddl_in_progress"`
 }
 
 // ErrLeaseHeld reports that another live process owns the lease.
 var ErrLeaseHeld = errors.New("mongodb cdc: lease held by another process")
+
+// ErrDDLUncertain means the previous target DDL may still run. A new owner
+// cannot safely start until the operation has been checked on the target.
+var ErrDDLUncertain = errors.New("mongodb cdc: target DDL outcome requires operator review")
 
 func acquireLease(ctx context.Context, client *mongo.Client, coll *mongo.Collection, key, pipeline string, ttl time.Duration, slots int, log *slog.Logger) (*lease, error) {
 	owner := uuid.NewString()
@@ -129,8 +136,12 @@ func acquireLease(ctx context.Context, client *mongo.Client, coll *mongo.Collect
 	// the pipeline takes ownership only when the current lease is absent or expired
 	// on the target clock, and the returned post-image tells us who owns it.
 	expired := bson.D{{Key: "$lte", Value: bson.A{bson.D{{Key: "$ifNull", Value: bson.A{"$expires_at", time.Unix(0, 0).UTC()}}}, "$$NOW"}}}
+	available := bson.D{{Key: "$and", Value: bson.A{
+		expired,
+		bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: "$ddl_in_progress"}}, "missing"}}},
+	}}}
 	take := func(field string, v any) bson.E {
-		return bson.E{Key: field, Value: bson.D{{Key: "$cond", Value: bson.A{expired, v, "$" + field}}}}
+		return bson.E{Key: field, Value: bson.D{{Key: "$cond", Value: bson.A{available, v, "$" + field}}}}
 	}
 	update := mongo.Pipeline{bson.D{{Key: "$set", Value: bson.D{
 		take("owner", bson.D{{Key: "$literal", Value: owner}}), take("pipeline", bson.D{{Key: "$literal", Value: pipeline}}),
@@ -147,6 +158,9 @@ func acquireLease(ctx context.Context, client *mongo.Client, coll *mongo.Collect
 		return nil, fmt.Errorf("acquire MongoDB CDC lease: %w", err)
 	}
 	if got.Owner != owner {
+		if got.DDL != "" {
+			return nil, fmt.Errorf("%w: %s on database %q (lease owner %s)", ErrDDLUncertain, got.DDL, key, got.Owner)
+		}
 		if !provablyGone(got.Info, self) {
 			return nil, fmt.Errorf("%w: another MongoDB CDC process (pipeline %q, host %q, pid %d) holds the lease for target database %q until %s (target clock); stop it or wait for expiry",
 				ErrLeaseHeld, got.Pipeline, got.Info.Host, got.Info.PID, key, got.ExpiresAt.UTC().Format(time.RFC3339))
@@ -154,7 +168,7 @@ func acquireLease(ctx context.Context, client *mongo.Client, coll *mongo.Collect
 		// The previous owner crashed on this host: take over now instead of waiting for
 		// the TTL. Conditional on the exact previous owner, so two restarting processes
 		// cannot both win; the fence rewrite below cuts off anything still in flight.
-		res, err := coll.UpdateOne(ctx, bson.D{{Key: "_id", Value: key}, {Key: "owner", Value: got.Owner}}, mongo.Pipeline{bson.D{{Key: "$set", Value: bson.D{
+		res, err := coll.UpdateOne(ctx, bson.D{{Key: "_id", Value: key}, {Key: "owner", Value: got.Owner}, {Key: "ddl_in_progress", Value: bson.D{{Key: "$exists", Value: false}}}}, mongo.Pipeline{bson.D{{Key: "$set", Value: bson.D{
 			{Key: "owner", Value: bson.D{{Key: "$literal", Value: owner}}}, {Key: "pipeline", Value: bson.D{{Key: "$literal", Value: pipeline}}},
 			{Key: "info", Value: bson.D{{Key: "$literal", Value: self}}}, {Key: "acquired_at", Value: "$$NOW"}, {Key: "expires_at", Value: expiresIn(ttl)},
 		}}}})
@@ -267,6 +281,38 @@ func (l *lease) check(ctx context.Context) error {
 	return l.txn(ctx, 0, func(context.Context) error { return nil })
 }
 
+func durableDDLWriteConcern() bson.D {
+	wc := durableTargetWriteConcern()
+	return bson.D{{Key: "w", Value: wc.W}, {Key: "j", Value: *wc.Journal}}
+}
+
+// withDDL keeps a durable guard on the lease document while MongoDB runs DDL
+// outside a transaction. Expiry and process death never override this guard.
+func (l *lease) withDDL(ctx context.Context, description string, fn func() error) error {
+	l.ddlMu.Lock()
+	defer l.ddlMu.Unlock()
+	filter := bson.D{{Key: "_id", Value: l.key}, {Key: "owner", Value: l.owner}}
+	unlocked := append(append(bson.D(nil), filter...), bson.E{Key: "ddl_in_progress", Value: bson.D{{Key: "$exists", Value: false}}})
+	res, err := l.coll.UpdateOne(ctx, unlocked, bson.D{{Key: "$set", Value: bson.D{{Key: "ddl_in_progress", Value: description}}}})
+	if err != nil {
+		return fmt.Errorf("%w: acquire guard for %s: %v", ErrDDLUncertain, description, err)
+	}
+	if res.MatchedCount != 1 {
+		return fmt.Errorf("%w: could not acquire guard for %s", ErrDDLUncertain, description)
+	}
+	if err := fn(); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrDDLUncertain, description, err)
+	}
+	// A successful command has a known outcome even if the pipeline is stopping.
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	res, err = l.coll.UpdateOne(cleanup, filter, bson.D{{Key: "$unset", Value: bson.D{{Key: "ddl_in_progress", Value: ""}}}})
+	if err != nil || res.MatchedCount != 1 {
+		return fmt.Errorf("%w: clear guard for %s: %v", ErrDDLUncertain, description, err)
+	}
+	return nil
+}
+
 func (l *lease) refreshLoop(ctx context.Context, log *slog.Logger, cancel context.CancelCauseFunc, onLost func()) {
 	interval := l.ttl / 3
 	ticker := time.NewTicker(interval)
@@ -316,5 +362,5 @@ func (l *lease) refreshLoop(ctx context.Context, log *slog.Logger, cancel contex
 func (l *lease) release() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = l.coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: l.key}, {Key: "owner", Value: l.owner}})
+	_, _ = l.coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: l.key}, {Key: "owner", Value: l.owner}, {Key: "ddl_in_progress", Value: bson.D{{Key: "$exists", Value: false}}}})
 }

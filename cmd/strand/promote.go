@@ -75,13 +75,47 @@ func newPromoteCmd() *cobra.Command {
 				promotePipelineID = "default"
 			}
 
-			// tables.rename từ cấu hình pipeline (nếu có -c): ánh xạ bảng nguồn → target cho counter AUTO_INCREMENT.
+			targetEndpoint, fenceEndpoint := promoteTargetDSN, promoteFenceSourceDSN
+			var objectsSourceEndpoint string
+			// Use the saved bastions with the privileged DSNs supplied for cutover.
 			if cfgPath != "" {
 				c, err := config.LoadFile(cfgPath)
 				if err != nil {
 					return err
 				}
 				promoteRename = c.Tables.Rename
+				cutoverTarget := &config.Config{Target: c.Target}
+				cutoverTarget.Target.DSN = targetEndpoint
+				closeTarget, err := config.OpenSSHTunnels(cmd.Context(), cutoverTarget)
+				if err != nil {
+					return err
+				}
+				defer closeTarget()
+				targetEndpoint = cutoverTarget.Target.DSN
+
+				// An emergency cutover without --fence must work when the source
+				// and its bastion have both been taken offline.
+				needsObjectsSource := promoteObjectsPost && promoteObjectsFrom == ""
+				if fenceEndpoint != "" || needsObjectsSource {
+					cutoverSource := &config.Config{Source: c.Source}
+					if fenceEndpoint != "" {
+						cutoverSource.Source.DSN = fenceEndpoint
+					}
+					closeSource, err := config.OpenSSHTunnels(cmd.Context(), cutoverSource)
+					if err != nil {
+						if needsObjectsSource || cmd.Context().Err() != nil {
+							return err
+						}
+						fmt.Fprintln(cmd.ErrOrStderr(), err)
+						fenceEndpoint = "" // let the existing promote decision flow handle unreachable sources
+					} else {
+						defer closeSource()
+						objectsSourceEndpoint = cutoverSource.Source.DSN
+						if fenceEndpoint != "" {
+							fenceEndpoint = cutoverSource.Source.DSN
+						}
+					}
+				}
 			}
 			var seqOverrides map[string]int64
 			if promoteOverrideSeqsJSON != "" {
@@ -100,8 +134,8 @@ func newPromoteCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("--objects-post needs the pipeline config (-c): %w", err)
 				}
-				if promoteObjectsFrom == "" && promoteFenceSourceDSN != "" {
-					objSourceDSN = promoteFenceSourceDSN // --fence là DSN có quyền hơn user Strand
+				if promoteObjectsFrom == "" && objectsSourceEndpoint != "" {
+					ocfg.Source.DSN = objectsSourceEndpoint
 				}
 				if objectsSet, err = loadObjects(cmd.Context(), ocfg, promoteObjectsFrom, false); err != nil {
 					return fmt.Errorf("--objects-post: read objects: %w", err)
@@ -131,7 +165,7 @@ func newPromoteCmd() *cobra.Command {
 
 			if isPG {
 				// Kết nối Target DB PostgreSQL
-				targetDB, err := sql.Open("pgx", promoteTargetDSN)
+				targetDB, err := config.OpenSQL("pgx", targetEndpoint)
 				if err != nil {
 					return fmt.Errorf("connect target DB (PG): %w", err)
 				}
@@ -145,9 +179,9 @@ func newPromoteCmd() *cobra.Command {
 
 				// Kết nối Source DB (nếu có): PG→PG hoặc MySQL→PG, nhận diện theo DSN của --fence.
 				var pgSourceDB *sql.DB
-				if promoteFenceSourceDSN != "" {
-					if isPGDSN(promoteFenceSourceDSN) {
-						sourceDB, err := sql.Open("pgx", promoteFenceSourceDSN)
+				if fenceEndpoint != "" {
+					if isPGDSN(fenceEndpoint) {
+						sourceDB, err := config.OpenSQL("pgx", fenceEndpoint)
 						if err != nil {
 							return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 						}
@@ -162,7 +196,7 @@ func newPromoteCmd() *cobra.Command {
 						}
 						pgTargetDriver.WithCatchUpCheck(sourceDB, promotePipelineID, promoteCatchUpTimeout, logger)
 					} else {
-						sourceDB, err := sql.Open("mysql", promoteFenceSourceDSN)
+						sourceDB, err := sql.Open("mysql", fenceEndpoint)
 						if err != nil {
 							return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 						}
@@ -198,8 +232,8 @@ func newPromoteCmd() *cobra.Command {
 				sequences = seqs
 			} else {
 				// Kết nối Target DB MySQL (giữ nguyên 100% hành vi cũ)
-				targetDSN := promoteTargetDSN
-				if c, err := drivermysql.ParseDSN(promoteTargetDSN); err == nil {
+				targetDSN := targetEndpoint
+				if c, err := drivermysql.ParseDSN(targetEndpoint); err == nil {
 					c.ParseTime = true
 					targetDSN = c.FormatDSN()
 				}
@@ -215,8 +249,8 @@ func newPromoteCmd() *cobra.Command {
 				stateStore = promote.NewDBStateStore(targetDB)
 
 				// Kết nối Source DB (nếu có)
-				if promoteFenceSourceDSN != "" {
-					sourceDB, err := sql.Open("mysql", promoteFenceSourceDSN)
+				if fenceEndpoint != "" {
+					sourceDB, err := sql.Open("mysql", fenceEndpoint)
 					if err != nil {
 						return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid --fence DSN: %v", err), err)
 					}
@@ -237,7 +271,7 @@ func newPromoteCmd() *cobra.Command {
 						}
 						// Tắt event của source ở đây (sau fence + catch-up), không phải lúc promote mới bắt đầu: promote
 						// lỗi trước fence thì source vẫn phục vụ ứng dụng và không được mất event.
-						stopSourceEvents(ctx, logger)
+						stopSourceEvents(ctx, logger, fenceEndpoint)
 						var sb strings.Builder
 						err := runApply(ctx, hookDB, objectsSet, objects.PhasePost, false, &sb)
 						fmt.Print(sb.String())
@@ -294,7 +328,7 @@ func newPromoteCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Promote pipeline %s thành công. Target đã mở quyền ghi.\n", progress.PipelineID)
-			if len(promoteFenceSourceDSN) > 0 && !isPGDSN(promoteFenceSourceDSN) {
+			if fenceEndpoint != "" && !isPGDSN(fenceEndpoint) {
 				fmt.Println("Lưu ý nguồn không có super_read_only (MySQL 5.5/5.6/5.7<5.7.8, MariaDB; fence bằng read_only + FLUSH TABLES WITH READ LOCK): khóa FTWRL nhả khi lệnh này thoát, " +
 					"read_only=ON vẫn giữ nhưng KHÔNG chặn user SUPER. Giữ source tắt hoặc read_only và cắt kết nối ứng dụng cho tới khi cut-over xong.")
 			}
@@ -333,11 +367,11 @@ func countEnable(s *objects.Set) int {
 
 // stopSourceEvents tắt event scheduler của source (đã fence) để event không còn ghi vào source cũ
 // (SET GLOBAL không ghi bảng, không vào binlog, chạy được cả dưới FTWRL). Lỗi chỉ cảnh báo: fence vẫn chặn ghi.
-func stopSourceEvents(ctx context.Context, logger *slog.Logger) {
-	if promoteFenceSourceDSN == "" || isPGDSN(promoteFenceSourceDSN) {
+func stopSourceEvents(ctx context.Context, logger *slog.Logger, fenceEndpoint string) {
+	if fenceEndpoint == "" || isPGDSN(fenceEndpoint) {
 		return
 	}
-	db, err := sql.Open("mysql", promoteFenceSourceDSN)
+	db, err := sql.Open("mysql", fenceEndpoint)
 	if err != nil {
 		logger.Warn("cannot disable the source event scheduler", "error", err)
 		return

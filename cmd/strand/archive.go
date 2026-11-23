@@ -43,6 +43,8 @@ từ gtid_purged của source (mọi binlog còn trên server), hoặc --start-g
 			if (from == "") == (pipelineConfig == "") || to == "" {
 				return exitcode.New("missing_flag", exitcode.InvalidSyntax, "provide exactly one of --from or --config, and provide --to", nil)
 			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
 			if pipelineConfig != "" {
 				pcfg, err := config.LoadFile(pipelineConfig)
 				if err != nil {
@@ -51,6 +53,12 @@ từ gtid_purged của source (mọi binlog còn trên server), hoặc --start-g
 				if !strings.EqualFold(pcfg.Source.Kind, "mysql") {
 					return errors.New("archive binlog requires a MySQL/MariaDB source in the pipeline config")
 				}
+				pcfg.Target.SSHTunnel = nil
+				closeTunnel, err := config.OpenSSHTunnels(ctx, pcfg)
+				if err != nil {
+					return err
+				}
+				defer closeTunnel()
 				from = pcfg.Source.DSN
 			}
 			if strings.Contains(to, "://") {
@@ -76,8 +84,6 @@ từ gtid_purged của source (mọi binlog còn trên server), hoặc --start-g
 			scfg.ServerID = serverID
 			log := slog.New(slog.NewJSONHandler(os.Stderr, nil)).With("dir", dir, "server_id", serverID)
 
-			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-			defer stop()
 			start := startGTID
 			if start == "" {
 				if start, err = sourceGTIDPurged(ctx, from); err != nil {

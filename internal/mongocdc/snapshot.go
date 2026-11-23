@@ -101,10 +101,7 @@ func (r *runner) snapshot(ctx context.Context) error {
 			if strings.HasPrefix(name, "system.") || sourceNames[name] || progress[name] != nil || !selected(cfg, cfg.SourceDB+"."+name) {
 				continue
 			}
-			if err := r.lease.check(ctx); err != nil {
-				return err
-			}
-			if err := r.target.Collection(name).Drop(ctx); err != nil {
+			if err := r.dropTargetCollection(ctx, name); err != nil {
 				return fmt.Errorf("drop stale target collection %s: %w", name, err)
 			}
 		}
@@ -178,9 +175,6 @@ func (r *runner) snapshot(ctx context.Context) error {
 // The target collection is dropped first: it is either ours from a crashed attempt
 // (snapshot started) or explicitly allowed to be overwritten.
 func (r *runner) startCopy(ctx context.Context, slot int, info collectionInfo, kind string, estimate int64) (*collProgress, error) {
-	if err := r.lease.check(ctx); err != nil {
-		return nil, err
-	}
 	if err := r.recreateTargetCollection(ctx, info); err != nil {
 		return nil, err
 	}
@@ -198,14 +192,22 @@ func (r *runner) startCopy(ctx context.Context, slot int, info collectionInfo, k
 // recreateTargetCollection drops and creates the target collection, with the source's
 // collection options when indexes/options are replicated.
 func (r *runner) recreateTargetCollection(ctx context.Context, info collectionInfo) error {
-	if err := dropCollectionIfPresent(ctx, r.target, info.Name); err != nil {
-		return err
-	}
-	cmd := bson.D{{Key: "create", Value: info.Name}}
-	if r.cfg.ReplicateIndexes {
-		cmd = append(cmd, creatableOptions(info.Options)...)
-	}
-	return r.target.RunCommand(ctx, cmd).Err()
+	return r.lease.withDDL(ctx, "recreate collection "+info.Name, func() error {
+		if err := dropCollectionIfPresent(ctx, r.target, info.Name); err != nil {
+			return err
+		}
+		cmd := bson.D{{Key: "create", Value: info.Name}}
+		if r.cfg.ReplicateIndexes {
+			cmd = append(cmd, creatableOptions(info.Options)...)
+		}
+		return r.target.RunCommand(ctx, append(cmd, bson.E{Key: "writeConcern", Value: durableDDLWriteConcern()})).Err()
+	})
+}
+
+func (r *runner) dropTargetCollection(ctx context.Context, name string) error {
+	return r.lease.withDDL(ctx, "drop collection "+name, func() error {
+		return dropCollectionIfPresent(ctx, r.target, name)
+	})
 }
 
 // copyCollection pages through the source collection in _id order from the progress

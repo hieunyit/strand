@@ -54,7 +54,7 @@
           <input name="backup_id" id="restore-backup-id" class="mono" value="{{.Body.SelectedBackup}}" placeholder="bkp-..." list="backups-datalist" autocomplete="off">
           <datalist id="backups-datalist">
             {{range .Body.Backups}}
-            <option value="{{.ID}}">{{.Source}} ({{.Kind}}, {{.CreatedAt.Format "2006-01-02 15:04"}})</option>
+            <option value="{{.ID}}">{{.Source}} ({{.Kind}}, {{tsMinute .CreatedAt}})</option>
             {{end}}
           </datalist>
           <span class="field-error" id="err-backup-id" data-msg-not-complete="{{t "rp.wizard_not_complete"}}" hidden></span>
@@ -83,7 +83,7 @@
         </label>
 
         <label class="field">
-          <span class="field-label">Point in time (UTC)</span>
+          <span class="field-label">Point in time (UTC+7)</span>
           <input name="target_time" id="restore-target-time" type="datetime-local" step="1">
           <small class="field-hint" id="restore-time-hint">Required for PITR; optional for backup roll-forward.</small>
           <span class="field-error" id="err-target-time" hidden></span>

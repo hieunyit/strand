@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/seed"
@@ -56,7 +57,7 @@ func (p *Pipeline) pgSourceSystemID(ctx context.Context) (string, error) {
 	if err == nil && strings.TrimSpace(id) != "" {
 		return strings.TrimSpace(id), nil
 	}
-	cfg, perr := pgconn.ParseConfig(p.srcDSN)
+	cfg, perr := config.ParsePGConnConfig(p.srcDSN)
 	if perr != nil {
 		return "", fmt.Errorf("read source system_identifier: pg_control_system(): %v; parse DSN: %w", err, perr)
 	}

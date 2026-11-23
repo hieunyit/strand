@@ -39,6 +39,11 @@ func newValidateCmd() *cobra.Command {
 				return err
 			}
 
+			closeTunnels, err := config.OpenSSHTunnels(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+			defer closeTunnels()
 			if cfg.IsMongoDB() {
 				return mongoValidate(cmd.Context(), os.Stdout, cfg, false, false)
 			}
@@ -105,7 +110,7 @@ func newValidateCmd() *cobra.Command {
 					var dstDB *sql.DB
 					if cfg.Target.DSN != "" {
 						var dstErr error
-						dstDB, dstErr = sql.Open("pgx", cfg.Target.DSN)
+						dstDB, dstErr = config.OpenSQL("pgx", cfg.Target.DSN)
 						if dstErr != nil {
 							return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid target DSN: %v", dstErr), dstErr)
 						}

@@ -99,7 +99,7 @@
   <label class="field" data-sched-kinds="weekly monthly" data-sched-days><span class="field-label">Days <span class="req" aria-hidden="true">*</span></span>
     <input type="text" name="sch_days" placeholder="Weekly: 0-6 (0 = Sunday), monthly: 1-31" spellcheck="false"><span class="field-hint" data-sched-days-hint></span><span class="field-error" hidden></span></label>
   <label class="field"><span class="field-label">Time zone <span class="opt">optional</span></span>
-    <input type="text" name="sch_tz" list="tz-list" placeholder="UTC" spellcheck="false"><span class="field-error" hidden></span></label>
+    <input type="text" name="sch_tz" list="tz-list" placeholder="Asia/Ho_Chi_Minh" spellcheck="false"><span class="field-hint">Leave blank for UTC.</span><span class="field-error" hidden></span></label>
   <div class="field span-all"><span class="field-label">Next 5 runs</span>
     <ol class="sched-preview" data-sched-preview aria-live="polite"><li class="muted">Set the schedule to preview it.</li></ol>
   </div>
@@ -197,3 +197,11 @@
   </form>
 </dialog>
 {{end}}
+
+{{define "backup-database-scope" -}}
+  {{- if eq (index . "database_scope") "cluster" -}}Whole cluster
+  {{- else if eq (index . "database_scope") "all" -}}All databases
+  {{- else if index . "databases" -}}<code>{{index . "databases"}}</code>
+  {{- else -}}Unknown
+  {{- end -}}
+{{- end}}

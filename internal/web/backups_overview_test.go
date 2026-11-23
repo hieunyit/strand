@@ -46,7 +46,7 @@ func TestBackupReportsPage(t *testing.T) {
 		t.Fatalf("reports page: %d", resp.StatusCode)
 	}
 	for _, want := range []string{`class="pagehead"`, `class="breadcrumb"`, "Compliance report",
-		`href="/api/v1/backup-reports/compliance.csv?from=2026-10-01&amp;to=2026-10-31"`, `value="2026-10-01"`, `value="2026-10-31"`} {
+		`href="/api/v1/backup-reports/compliance.csv?from=2026-10-01T00%3A00%3A00%2B07%3A00&amp;to=2026-11-01T00%3A00%3A00%2B07%3A00"`, `value="2026-10-01"`, `value="2026-10-31"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("reports page lacks %q", want)
 		}

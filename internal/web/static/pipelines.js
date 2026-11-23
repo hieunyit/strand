@@ -55,6 +55,12 @@
     }
     function problem(f) {
       var v = (f.value || '').trim();
+      var ssh = /^(source|target)_ssh_(host|user)$/.exec(f.name);
+      if (ssh && !v && window.strandPipelineSSH && window.strandPipelineSSH(form, ssh[1])) {
+        var details = f.closest('details');
+        if (details) { details.open = true; }
+        return 'This field is required when using an SSH tunnel.';
+      }
       if (f.required && v === '') { return 'This field is required.'; }
       if (v && f.pattern && !new RegExp('^(?:' + f.pattern.replace(/^\^|\$$/g, '') + ')$').test(v)) {
         return f.name === 'name' ? 'Use letters, digits and - _ . (up to 63), starting with a letter or digit.' : 'This value has an invalid format.';
@@ -132,6 +138,8 @@
       var h = val(prefix + '_host'), p = val(prefix + '_port'), u = val(prefix + '_user');
       var s = (h || '?') + (p ? ':' + p : '') + (u ? ' as ' + u : '');
       if (withDb) { s += ' / ' + (withDb); }
+      var bastion = val(prefix + '_ssh_host');
+      if (bastion) { s += ' via SSH ' + bastion + ':' + (val(prefix + '_ssh_port') || '22'); }
       return s;
     }
     function summaryRows() {
@@ -186,6 +194,8 @@
       var box = btn.closest('fieldset');
       // only the connection fields of this side are checked here
       var names = eng === 'mongodb' ? [pre + '_host', pre + '_port'] : [pre + '_host', pre + '_port', pre + '_user'];
+      var ssh = window.strandPipelineSSH && window.strandPipelineSSH(form, pre);
+      if (ssh) { names = names.concat([pre + '_ssh_host', pre + '_ssh_port', pre + '_ssh_user']); }
       var bad = null;
       names.forEach(function (n) {
         var f = field(n);
@@ -196,6 +206,7 @@
       if (bad) { bad.focus(); return; }
       var body = { role: role, engine: eng };
       body.host = val(pre + '_host'); body.port = Number(val(pre + '_port')); body.user = val(pre + '_user'); body.password = field(pre + '_password') ? field(pre + '_password').value : '';
+      if (ssh) { body.ssh_tunnel = ssh; }
       if (eng === 'mongodb') {
         body.auth_db = val(pre + '_auth_db'); body.replica_set = val(pre + '_replica_set');
         body.tls = !!(field(pre + '_tls') && field(pre + '_tls').checked);

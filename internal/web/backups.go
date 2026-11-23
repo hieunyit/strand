@@ -109,7 +109,7 @@ func (s *Server) dashboardRows(ctx context.Context) []dashboardRow {
 			r.Age = fmtAge(v.AgeSeconds)
 			r.LastSize = fmtBytes(float64(v.LastSuccess.Bytes))
 			if v.LastSuccess.CheckedAt != nil {
-				r.LastCheck = v.LastSuccess.CheckStatus + " " + v.LastSuccess.CheckedAt.UTC().Format("2006-01-02 15:04")
+				r.LastCheck = v.LastSuccess.CheckStatus + " " + formatWebTime(*v.LastSuccess.CheckedAt, "2006-01-02 15:04 MST")
 			}
 		}
 		if v.WindowStart != nil && v.WindowEnd != nil {
@@ -117,7 +117,7 @@ func (s *Server) dashboardRows(ctx context.Context) []dashboardRow {
 			if win, err := s.recoveryWindow(ctx, v.Source); err == nil && win.Continuous {
 				kind = "point-in-time"
 			}
-			r.Window = v.WindowStart.UTC().Format("2006-01-02 15:04") + " → " + v.WindowEnd.UTC().Format("2006-01-02 15:04:05") + " UTC (" + kind + ")"
+			r.Window = formatWebTime(*v.WindowStart, "2006-01-02 15:04") + " → " + formatWebTime(*v.WindowEnd, "2006-01-02 15:04:05 MST") + " (" + kind + ")"
 		}
 		out = append(out, r)
 	}
@@ -158,7 +158,7 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 			b.StatRPOBreaches = fmt.Sprintf("%d", h.RPOBreaches)
 		}
 
-		now := time.Now().UTC()
+		now := s.now()
 		since24h := now.Add(-24 * time.Hour)
 		allRuns, _ := s.db.st.ListBackupRuns(r.Context(), store.BackupRunFilter{Limit: 2000})
 		succ24h := 0
@@ -192,11 +192,11 @@ func (s *Server) pageBackups(w http.ResponseWriter, r *http.Request, sess *Sessi
 
 		days := make([]BackupDayStat, 14)
 		for i := 0; i < 14; i++ {
-			d := now.AddDate(0, 0, -13+i).Truncate(24 * time.Hour)
+			d := webDay(now).AddDate(0, 0, -13+i)
 			days[i] = BackupDayStat{Date: d}
 		}
 		for _, run := range allRuns {
-			runDate := run.StartedAt.UTC().Truncate(24 * time.Hour)
+			runDate := webDay(run.StartedAt)
 			for i := range days {
 				if days[i].Date.Equal(runDate) {
 					if run.Status == backup.RunStatusSuccess {

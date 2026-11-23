@@ -2,6 +2,12 @@
 // the whole content is re-fetched only for structural changes. No libraries.
 (function () {
   'use strict';
+  // Format an instant for UTC+7 charts and date inputs without using the browser timezone.
+  window.strandLocalISO = function (value) {
+    if (value === null || value === undefined || value === '') { return ''; }
+    var ms = new Date(value).getTime();
+    return isFinite(ms) ? new Date(ms + 7 * 60 * 60 * 1000).toISOString().slice(0, 19) : '';
+  };
   var content = document.getElementById('content');
   if (!content) { return; }
   var csrfMeta = document.querySelector('meta[name="csrf-token"]');
@@ -879,6 +885,17 @@
     form.addEventListener('input', function (ev) { if (ev.target !== from && ev.target !== to) apply(); });
     apply();
   }
+  function pipelineSSH(form, side) {
+    function val(key) {
+      var input = form.querySelector('[name="' + side + '_ssh_' + key + '"]:not([disabled])');
+      return input ? input.value.trim() : '';
+    }
+    var host = val('host'), port = val('port'), user = val('user'), identity = val('identity_file');
+    if (!host && !port && !user && !identity) { return null; }
+    return {host: host, port: port ? Number(port) : 0, user: user, identity_file: identity};
+  }
+  window.strandPipelineSSH = pipelineSSH;
+
   var newPipeForm = document.getElementById('new-pipeline-form');
   if (newPipeForm) {
     npSetup(newPipeForm);
@@ -890,7 +907,10 @@
       var value = function (name) { var el = newPipeForm.querySelector('[name="' + name + '"]'); return el ? el.value.trim() : ''; };
       listDBButton.disabled = true;
       if (status) status.textContent = ' Connecting to source…';
-      api('POST', '/api/v1/source/databases', {from: value('from'), host: value('source_host'), port: Number(value('source_port')), user: value('source_user'), password: value('source_password')})
+      var body = {from: value('from'), host: value('source_host'), port: Number(value('source_port')), user: value('source_user'), password: value('source_password')};
+      var ssh = pipelineSSH(newPipeForm, 'source');
+      if (ssh) { body.ssh_tunnel = ssh; }
+      api('POST', '/api/v1/source/databases', body)
         .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Could not list databases'); return j; }); })
         .then(function (data) {
           if (!box || !field) return;
@@ -934,6 +954,8 @@
           var tls = newPipeForm.querySelector('[name="source_tls"]');
           body.tls = !!(tls && tls.checked);
         }
+        var ssh = pipelineSSH(newPipeForm, 'source');
+        if (ssh) { body.ssh_tunnel = ssh; }
         btn.disabled = true;
         if (status) status.textContent = 'Connecting to source…';
         api('POST', '/api/v1/source/databases', body)
@@ -974,6 +996,7 @@
       var payload = {};
       var fd = new FormData(newPipeForm);
       fd.forEach(function (v, k) {
+        if (/^(source|target)_ssh_/.test(k)) { return; }
         var str = (v || '').trim();
         if (str !== '') {
           if (k === 'source_port' || k === 'target_port' || k === 'workers' || k === 'server_id' ||
@@ -990,6 +1013,10 @@
             payload[k] = str;
           }
         }
+      });
+      ['source', 'target'].forEach(function (side) {
+        var ssh = pipelineSSH(newPipeForm, side);
+        if (ssh) { payload[side + '_ssh_tunnel'] = ssh; }
       });
       if (newPipeForm.getAttribute('data-allow-overwrite') === payload.name) {
         payload.overwrite = true;

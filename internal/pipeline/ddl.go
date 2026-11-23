@@ -99,6 +99,26 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		p.log.Info("online DDL: ignoring statement on temporary table/trigger", "base", oc.Base.String(), "position", t.SourcePos.Label(), "ddl", t.DDL)
 		return nil
 	}
+	// TRUNCATE is logged as a statement even with ROW binlog format. Matching
+	// column definitions say nothing about the rows it removed.
+	if p.srcEngine == model.EngineMySQL {
+		if m := reTruncate.FindStringSubmatch(stripComments(t.DDL)); m != nil {
+			id := qualify(m[1], m[2], t.DDLSchema)
+			p.tablesMu.RLock()
+			replicated := false
+			for table := range p.tables {
+				if strings.EqualFold(table.Table, id.Table) && (id.Schema == "" || strings.EqualFold(table.Schema, id.Schema)) {
+					replicated = true
+					break
+				}
+			}
+			p.tablesMu.RUnlock()
+			if replicated {
+				return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+					fmt.Sprintf("TRUNCATE on replicated table %s at %s requires resynchronization; checkpoint cannot pass this event", id, t.SourcePos.Label()), nil)
+			}
+		}
+	}
 	created, renamedTo := ddlNewTables(t.DDL, t.DDLSchema)
 	if oc.Kind == onlineCutover {
 		// RENAME t TO _t_del, _t_gho TO t: ALTER trên t. Bảng cũ (_t_del/_t_old) không phải "bảng mới vào pipeline",

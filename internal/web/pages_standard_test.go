@@ -370,7 +370,8 @@ func TestSecurityControlsAndAuditing(t *testing.T) {
 		t.Fatalf("expected loopback error, got %d: %s", resp.StatusCode, body)
 	}
 
-	// 2. Tunnels: reject missing known_hosts
+	// 2. Tunnels: reject missing server trust file.
+	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", filepath.Join(t.TempDir(), "missing_known_hosts"))
 	badHostsJSON, _ := json.Marshal(map[string]string{
 		"ssh":    "bastion.example.com:22",
 		"user":   "strand",
@@ -599,6 +600,9 @@ func TestArchiveAndTunnelFormsHTML(t *testing.T) {
 	}
 	if !strings.Contains(page, `name="csrf"`) {
 		t.Errorf("tunnel form missing csrf input: %s", page)
+	}
+	if strings.Contains(page, `name="known_hosts"`) {
+		t.Error("tunnel form must use server-managed SSH host keys")
 	}
 }
 

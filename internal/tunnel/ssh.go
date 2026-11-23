@@ -357,3 +357,14 @@ func DefaultKnownHosts() (string, error) {
 	}
 	return filepath.Join(home, ".ssh", "known_hosts"), nil
 }
+
+// ConfiguredKnownHosts resolves the trust file for server-managed tunnels.
+func ConfiguredKnownHosts() (string, error) {
+	if path := strings.TrimSpace(os.Getenv("STRAND_WEB_SSH_KNOWN_HOSTS")); path != "" {
+		if !filepath.IsAbs(path) {
+			return "", errors.New("STRAND_WEB_SSH_KNOWN_HOSTS must be an absolute path")
+		}
+		return filepath.Clean(path), nil
+	}
+	return DefaultKnownHosts()
+}

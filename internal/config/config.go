@@ -31,8 +31,9 @@ type Config struct {
 }
 
 type SourceConfig struct {
-	Kind string `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
-	DSN  string `yaml:"dsn" json:"dsn"`
+	Kind      string           `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
+	DSN       string           `yaml:"dsn" json:"dsn"`
+	SSHTunnel *SSHTunnelConfig `yaml:"ssh_tunnel,omitempty" json:"ssh_tunnel,omitempty"`
 	// URI: chuỗi kết nối MongoDB (kind mongodb), thường "${SRC_URI}" từ .env; thay cho dsn.
 	URI      string `yaml:"uri,omitempty" json:"uri,omitempty"`
 	ServerID uint32 `yaml:"server_id" json:"server_id"`
@@ -64,8 +65,9 @@ type SourceConfig struct {
 }
 
 type TargetConfig struct {
-	Kind string `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
-	DSN  string `yaml:"dsn" json:"dsn"`
+	Kind      string           `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
+	DSN       string           `yaml:"dsn" json:"dsn"`
+	SSHTunnel *SSHTunnelConfig `yaml:"ssh_tunnel,omitempty" json:"ssh_tunnel,omitempty"`
 	// URI: chuỗi kết nối MongoDB (kind mongodb), thường "${DST_URI}" từ .env; thay cho dsn.
 	URI string `yaml:"uri,omitempty" json:"uri,omitempty"`
 	// URIEnv (kind mongodb): tên biến môi trường chứa URI mongodb:// (thay cho dsn).
@@ -379,6 +381,12 @@ func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 	}
 	if cfg.Target.Kind == "" || cfg.Target.DSN == "" {
 		return nil, exitcode.New("missing_target", exitcode.InvalidSyntax, "missing required target configuration", nil)
+	}
+	if err := cfg.Source.SSHTunnel.Validate(cfg.Source.Kind); err != nil {
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax, "source.ssh_tunnel: "+err.Error(), err)
+	}
+	if err := cfg.Target.SSHTunnel.Validate(cfg.Target.Kind); err != nil {
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax, "target.ssh_tunnel: "+err.Error(), err)
 	}
 	if cfg.IsMongoDB() {
 		if err := validateMongoDB(&cfg); err != nil {

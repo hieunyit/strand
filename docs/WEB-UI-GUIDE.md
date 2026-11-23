@@ -41,6 +41,12 @@ Strand Web UI is an operational dashboard for high-throughput distributed CDC re
 | `/help/schema` | Config Reference | Complete JSON schema reference for pipeline configs | Interactive schema browser, required fields | Copy JSON schema |
 | `/tools/spool-inspect`| Spool Sidecar Inspector| Read-only Pebble spool database offline inventory | Discovered sidecars, orphan files, total bytes | Scan spool inventory |
 
+The SSH Tunnel tool uses the Web service's trusted host keys. Set
+`STRAND_WEB_SSH_KNOWN_HOSTS` to an absolute path on the server, or leave it unset
+to use the Web service account's `~/.ssh/known_hosts`. The file must contain the
+verified bastion host key. In Compose, mount the file read-only and use its
+container path for the environment variable.
+
 ---
 
 ## 2. Identified Design & Ergonomic Inconsistencies

@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -326,6 +328,61 @@ type jobsBody struct {
 	Kinds     []string
 	States    []string
 	Running   int
+	Origins   map[string]jobOrigin
+}
+
+type jobOrigin struct {
+	Label, Href string
+	Pipeline    bool
+}
+
+func backupProcessJobID(j JobStatus) string {
+	for i, arg := range j.Args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--job-id" && i+1 < len(j.Args) {
+			return j.Args[i+1]
+		}
+	}
+	return ""
+}
+
+func (s *Server) jobOrigins(ctx context.Context, jobs []JobStatus) map[string]jobOrigin {
+	origins := make(map[string]jobOrigin, len(jobs))
+	backupJobs := make(map[string]string)
+	for _, j := range jobs {
+		if strings.HasPrefix(j.Kind, "backup-") {
+			origins[j.ID] = jobOrigin{Label: "Backups", Href: "/backups"}
+			if id := backupProcessJobID(j); id != "" {
+				backupJobs[j.ID] = id
+			}
+			continue
+		}
+		origin := jobOrigin{Label: j.Pipeline}
+		if s.reg.Get(j.Pipeline) != nil {
+			origin.Pipeline = true
+			origin.Href = "/pipelines/" + url.PathEscape(j.Pipeline)
+		}
+		origins[j.ID] = origin
+	}
+	if len(backupJobs) == 0 || s.db == nil || s.db.st == nil {
+		return origins
+	}
+	// Load the backup job definitions once even when many historical processes
+	// share them. Deleted jobs fall back to the Backups landing page.
+	if definitions, err := s.db.st.ListBackupJobs(ctx); err == nil {
+		names := make(map[string]string, len(definitions))
+		for _, j := range definitions {
+			names[j.ID] = j.Name
+		}
+		for processID, backupID := range backupJobs {
+			if name, ok := names[backupID]; ok {
+				origins[processID] = jobOrigin{Label: name, Href: "/backups/jobs/" + url.PathEscape(backupID) + "?tab=runs"}
+			}
+		}
+	}
+	return origins
 }
 
 // jobFilterStates are the states of the Jobs filter (jobState values reduced to the filterable ones).
@@ -353,7 +410,7 @@ func jobStateKey(j JobStatus) string {
 
 func (s *Server) pageJobs(w http.ResponseWriter, r *http.Request, sess *Session) {
 	jobs := s.listJobs("")
-	b := jobsBody{Jobs: jobs, States: jobFilterStates}
+	b := jobsBody{Jobs: jobs, States: jobFilterStates, Origins: s.jobOrigins(r.Context(), jobs)}
 	pl, kd := map[string]bool{}, map[string]bool{}
 	for _, j := range jobs {
 		pl[j.Pipeline], kd[j.Kind] = true, true
@@ -373,8 +430,9 @@ func (s *Server) pageJobs(w http.ResponseWriter, r *http.Request, sess *Session)
 }
 
 type jobBody struct {
-	Job   JobStatus
-	Chunk JobOutput
+	Job    JobStatus
+	Chunk  JobOutput
+	Origin jobOrigin
 }
 
 func (s *Server) pageJob(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -390,5 +448,10 @@ func (s *Server) pageJob(w http.ResponseWriter, r *http.Request, sess *Session) 
 	}
 	// Output ban đầu nạp sẵn (HTML), phần sau lấy bằng polling ?offset= từ app.js.
 	out, _ := s.jobs.Output(id, 0)
-	s.render(w, "job", sess, pageData{Title: "Job " + j.Kind + " " + j.Pipeline, Active: j.Pipeline, Refresh: 0, Body: jobBody{Job: j, Chunk: out}})
+	origin := s.jobOrigins(r.Context(), []JobStatus{j})[j.ID]
+	active := "jobs"
+	if origin.Pipeline {
+		active = j.Pipeline
+	}
+	s.render(w, "job", sess, pageData{Title: "Job " + j.Kind + " " + origin.Label, Active: active, Refresh: 0, Body: jobBody{Job: j, Chunk: out, Origin: origin}})
 }

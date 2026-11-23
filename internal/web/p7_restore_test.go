@@ -684,3 +684,26 @@ func TestCatalogLegalHoldPaging(t *testing.T) {
 		t.Fatalf("expected non-held backups excluded when legal_hold=1, got: %s", body)
 	}
 }
+
+func TestBackupCatalogDatabaseScopeUsesRecordedMetadata(t *testing.T) {
+	e := newCPEnv(t)
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		id      string
+		details map[string]string
+		want    string
+	}{
+		{"bkp-scope-unknown", nil, "Unknown"},
+		{"bkp-scope-selected", map[string]string{"databases": "shop"}, "<code>shop</code>"},
+		{"bkp-scope-all", map[string]string{"database_scope": "all"}, "All databases"},
+	} {
+		seedRichBackup(t, e.st, tc.id, tc.id, "mysql", "mysqldump", backup.KindFull, now,
+			backup.Position{}, false, nil, "", nil, nil, "", tc.details)
+		for _, path := range []string{"/backups/catalog?source=" + tc.id, "/backups/catalog/" + tc.id} {
+			code, body := e.admin().do("GET", path, nil)
+			if code != http.StatusOK || !strings.Contains(body, "Database scope") || !strings.Contains(body, tc.want+"</td>") {
+				t.Errorf("%s: status %d, expected scope %q", path, code, tc.want)
+			}
+		}
+	}
+}

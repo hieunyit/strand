@@ -199,8 +199,7 @@
   function applyCustomDefaults() {
     setc('log_archive', false); setc('compress', true); setv('encryption_mode', '');
     setv('verify_every', 604800); setc('test_restore', false); setv('retry_max', 0); setc('customize', false);
-    var tz = v('sch_tz');
-    U.writeSchedule(root, { kind: 'daily', at: '01:00', timezone: tz }); setv('window_minutes', 240); setv('jitter_seconds', 0);
+    U.writeSchedule(root); setv('window_minutes', 240); setv('jitter_seconds', 0);
     U.writeRetention(root, { keep_daily: 7, keep_weekly: 4 });
   }
   function syncPolicyBlock() {
@@ -659,9 +658,6 @@
       if (def) { S.policy = def.id; S.custom = false; } else { S.custom = true; }
       if (S.custom) { applyCustomDefaults(); } else { applyPolicyDefaults(); }
       setRadio('policy_choice', S.custom ? '__custom' : S.policy);
-      U.writeSchedule(root, S.custom ? { kind: 'daily', at: '01:00' } : policy().schedule);
-      if (S.custom) { U.writeRetention(root, { keep_daily: 7, keep_weekly: 4 }); }
-      f('sch_tz').value = f('sch_tz').value || (function () { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { return ''; } }());
     }
     syncEncryption();
     go(1);

@@ -104,7 +104,7 @@ Chỉ bảng thường (MySQL `BASE TABLE`; PG bảng thường và bảng parti
 2. Mọi bảng phải có khóa hàng: PRIMARY KEY, hoặc UNIQUE index NOT NULL (mục 5.1). Bảng không có khóa làm `sync`/`validate` dừng với `missing_pk`, kèm lệnh `ALTER TABLE` gợi ý cho từng bảng (mục 5.1.2).
 3. Kiểm từng bảng có PK snapshot logic được (mục 5.2). Bảng không hỗ trợ: seed từ backup hoặc đổi kiểu PK.
 4. User, quyền, view, routine, trigger và event **không** được sao chép. Tạo tay ở target. Seed bằng XtraBackup/CLONE thì backup mang theo chúng.
-5. PG source: publication phải chứa mọi bảng (`FOR ALL TABLES` hoặc liệt kê). Bảng partitioned cần `publish_via_partition_root = true`.
+5. PG source: publication phải chứa mọi bảng (`FOR ALL TABLES` hoặc liệt kê), phát INSERT/UPDATE/DELETE và không lọc dòng hay bỏ cột dữ liệu. Bảng partitioned cần `publish_via_partition_root = true`. Dừng pipeline trước khi đổi publication. PostgreSQL không gửi các thay đổi đã bị lọc, nên reader không thể phát hiện chúng từ stream.
 6. Chạy `strand validate`, rồi `strand plan` (ETA, chọn A hay B), rồi `strand sync`.
 
 ---
@@ -1313,8 +1313,28 @@ Cố ý để lại CLI (lý do):
 
 - `seed plan/apply`: điều phối restore bản backup vật lý lên máy target (cần quyền và đường dẫn trên máy DB, thao tác phá hủy dữ liệu đích); không an toàn để bấm từ web.
 - `archive binlog`: tiến trình lưu trữ chạy liên tục, độc lập với pipeline (thường là một unit systemd riêng trên replica), không có trạng thái để web quan sát.
-- `tunnel open`: tiến trình SSH chạy liên tục; cấu hình pipeline chưa có khóa tunnel nên web chưa gắn được tunnel vào source/target (tunnel cho job backup thuộc phần backup).
 - `spool-inspect`, `top`, `export`, `config schema`, `mongodb sync` (bí danh của `strand sync -c` cho pipeline MongoDB; dạng cờ cũ vẫn nhận), `mongodb repair`, `web db migrate|export|audit-archive` (công cụ quản trị chạy ngoài web: chuyển bản cài cũ, sao lưu/quay về).
+
+### SSH tunnel cho pipeline SQL
+
+Trong form tạo pipeline, có thể bật SSH tunnel riêng cho source hoặc target. Giữ địa chỉ database trong phần kết nối DB như bastion nhìn thấy. Nhập host, cổng và tài khoản SSH trong phần tunnel. `strand` mở cổng loopback tạm trong tiến trình chạy pipeline, rồi đóng cổng khi tiến trình kết thúc.
+
+Ví dụ YAML cho nguồn MySQL:
+
+```yaml
+source:
+  kind: mysql
+  dsn: "${SRC_DSN}"
+  ssh_tunnel:
+    host: bastion.example.net
+    port: 22
+    user: strand
+    identity_file: /etc/strand/keys/bastion
+```
+
+`target.ssh_tunnel` dùng cùng cấu trúc. Đặt khóa riêng trên máy hoặc container chạy Strand và đặt `STRAND_WEB_SSH_KEY_DIR` thành thư mục chứa các khóa được phép sử dụng. Nếu bỏ `identity_file`, tiến trình cần truy cập được SSH agent qua `SSH_AUTH_SOCK`. Khóa máy chủ SSH phải có trong file tin cậy của dịch vụ. Đặt `STRAND_WEB_SSH_KNOWN_HOSTS` thành đường dẫn file nếu dịch vụ dùng file riêng, hoặc dùng `~/.ssh/known_hosts` của tài khoản chạy Strand. Tunnel vẫn xác minh host key. Cấu hình TLS đến database tiếp tục dùng tên máy chủ database trong DSN.
+
+SSH tunnel tích hợp hỗ trợ các đầu kết nối MySQL, MariaDB và PostgreSQL. MongoDB replica set cần đường mạng truy cập được những địa chỉ member mà cluster công bố.
 
 ## Pipeline MongoDB → MongoDB
 

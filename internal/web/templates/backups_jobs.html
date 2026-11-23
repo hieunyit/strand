@@ -123,7 +123,7 @@
           <td>
             <div class="run-squares">
               {{range .Last10Runs}}
-              <span class="run-dot st-{{.Status}}" title="{{.StartedAt.Format "2006-01-02 15:04"}}: {{.Status}} ({{fmtDuration .Duration}})"></span>
+              <span class="run-dot st-{{.Status}}" title="{{tsMinute .StartedAt}}: {{.Status}} ({{fmtDuration .Duration}})"></span>
               {{else}}
               <span class="muted small">-</span>
               {{end}}

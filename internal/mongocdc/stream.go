@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"golang.org/x/sync/semaphore"
 )
 
 const (
@@ -315,7 +316,7 @@ func (r *runner) stream(ctx context.Context) error {
 	}
 	// The reader goroutine fetches and copies events while the previous batch commits on
 	// the target (source reads and target writes overlap; the channel bounds memory).
-	items, readerDone, stopReader := startReader(ctx, cs)
+	items, readerDone, stopReader, budget := startReader(ctx, cs)
 	defer func() {
 		stopReader()
 		<-readerDone
@@ -386,6 +387,7 @@ func (r *runner) stream(ctx context.Context) error {
 			}
 			continue
 		case it = <-items:
+			budget.Release(it.bytes())
 		}
 		if it.err != nil {
 			if ctx.Err() != nil {
@@ -483,7 +485,7 @@ func (r *runner) stream(ctx context.Context) error {
 				cs = nil
 				return fmt.Errorf("reopen MongoDB change stream after invalidate: %w", err)
 			}
-			items, readerDone, stopReader = startReader(ctx, cs)
+			items, readerDone, stopReader, budget = startReader(ctx, cs)
 			continue
 		}
 		if err := flush(); err != nil {
@@ -500,19 +502,31 @@ type streamItem struct {
 	err   error
 }
 
-const readerBuffer = 4096
+func (it streamItem) bytes() int64 {
+	return int64(len(it.raw) + len(it.token))
+}
 
-func startReader(parent context.Context, cs *mongo.ChangeStream) (<-chan streamItem, <-chan struct{}, context.CancelFunc) {
+const (
+	readerBuffer      = 4096
+	readerBufferBytes = 64 << 20
+)
+
+func startReader(parent context.Context, cs *mongo.ChangeStream) (<-chan streamItem, <-chan struct{}, context.CancelFunc, *semaphore.Weighted) {
 	ctx, cancel := context.WithCancel(parent)
 	out := make(chan streamItem, readerBuffer)
 	done := make(chan struct{})
+	budget := semaphore.NewWeighted(readerBufferBytes)
 	go func() {
 		defer close(done)
 		send := func(it streamItem) bool {
+			if err := budget.Acquire(ctx, it.bytes()); err != nil {
+				return false
+			}
 			select {
 			case out <- it:
 				return true
 			case <-ctx.Done():
+				budget.Release(it.bytes())
 				return false
 			}
 		}
@@ -536,7 +550,7 @@ func startReader(parent context.Context, cs *mongo.ChangeStream) (<-chan streamI
 			}
 		}
 	}()
-	return out, done, cancel
+	return out, done, cancel, budget
 }
 
 func (r *runner) logStreamProgress(stats *streamStats, force bool) {
@@ -655,8 +669,25 @@ func (r *runner) resolve(ctx context.Context, b *batch) (int, error) {
 			n++
 		}
 	}
+	if n == 0 {
+		return 0, nil
+	}
+	if b.last.T == 0 {
+		return 0, errors.New("cannot look up source images without a change stream cluster time")
+	}
+	// A majority read on a secondary can lag the event we are about to
+	// checkpoint. Wait until that secondary can serve a causally ordered read.
+	session, err := r.srcClient.StartSession(options.Session().SetCausalConsistency(true))
+	if err != nil {
+		return 0, err
+	}
+	defer session.EndSession(context.Background())
+	if err := session.AdvanceOperationTime(&b.last); err != nil {
+		return 0, err
+	}
+	sourceCtx := mongo.NewSessionContext(ctx, session)
 	for coll, ops := range lookups {
-		images, err := fetchByID(ctx, r.source.Collection(coll), ops)
+		images, err := fetchByID(sourceCtx, r.source.Collection(coll), ops)
 		if err != nil {
 			return 0, fmt.Errorf("look up source documents of %s.%s: %w", r.cfg.SourceDB, coll, err)
 		}
@@ -755,9 +786,6 @@ func (r *runner) applyBatch(ctx context.Context, b *batch) (int, error) {
 // the re-copy record and the checkpoint past the event are then already committed.
 func (r *runner) applyDDL(ctx context.Context, event *streamEvent, token bson.Raw) (string, error) {
 	cfg := r.cfg
-	if err := r.lease.check(ctx); err != nil {
-		return "", err // re-check ownership right before the unfenced DDL
-	}
 	switch event.OperationType {
 	case "invalidate":
 		return "", nil
@@ -771,7 +799,7 @@ func (r *runner) applyDDL(ctx context.Context, event *streamEvent, token bson.Ra
 		}
 		for _, name := range names {
 			if selected(cfg, cfg.SourceDB+"."+name) {
-				if err := r.target.Collection(name).Drop(ctx); err != nil {
+				if err := r.dropTargetCollection(ctx, name); err != nil {
 					return "", err
 				}
 				r.obs.removeCollection(name)
@@ -785,7 +813,7 @@ func (r *runner) applyDDL(ctx context.Context, event *streamEvent, token bson.Ra
 		}
 		cfg.Logger.Warn("MongoDB source collection dropped; dropping target collection", "pipeline", cfg.Pipeline, "collection", event.NS.Coll)
 		r.obs.removeCollection(event.NS.Coll)
-		return "", dropCollectionIfPresent(ctx, r.target, event.NS.Coll)
+		return "", r.dropTargetCollection(ctx, event.NS.Coll)
 	case "rename":
 		return r.applyRename(ctx, event, token)
 	}
@@ -801,7 +829,7 @@ func (r *runner) applyRename(ctx context.Context, event *streamEvent, token bson
 	if event.To.DB != cfg.SourceDB || event.To.Coll == "" {
 		if oldSelected {
 			r.obs.removeCollection(event.NS.Coll)
-			return "", dropCollectionIfPresent(ctx, r.target, event.NS.Coll)
+			return "", r.dropTargetCollection(ctx, event.NS.Coll)
 		}
 		return "", nil
 	}
@@ -821,7 +849,7 @@ func (r *runner) applyRename(ctx context.Context, event *streamEvent, token bson
 	}
 	if oldSelected {
 		r.obs.removeCollection(event.NS.Coll)
-		if err := dropCollectionIfPresent(ctx, r.target, event.NS.Coll); err != nil {
+		if err := r.dropTargetCollection(ctx, event.NS.Coll); err != nil {
 			return "", err
 		}
 	}
@@ -851,9 +879,11 @@ func (r *runner) renameTarget(ctx context.Context, from, to string) (bool, error
 		dest, err := r.target.ListCollectionNames(ctx, bson.D{{Key: "name", Value: to}})
 		return err == nil && len(dest) == 1, err
 	}
-	err = r.tgtClient.Database("admin").RunCommand(ctx, bson.D{
-		{Key: "renameCollection", Value: r.cfg.TargetDB + "." + from}, {Key: "to", Value: r.cfg.TargetDB + "." + to}, {Key: "dropTarget", Value: true},
-	}).Err()
+	err = r.lease.withDDL(ctx, "rename collection "+from+" to "+to, func() error {
+		return r.tgtClient.Database("admin").RunCommand(ctx, bson.D{
+			{Key: "renameCollection", Value: r.cfg.TargetDB + "." + from}, {Key: "to", Value: r.cfg.TargetDB + "." + to}, {Key: "dropTarget", Value: true}, {Key: "writeConcern", Value: durableDDLWriteConcern()},
+		}).Err()
+	})
 	return err == nil, err
 }
 
@@ -895,9 +925,6 @@ func (r *runner) resumeRecopies(ctx context.Context) error {
 		if p.LastID.IsZero() && p.Copied == 0 {
 			info, err := r.sourceCollectionInfo(ctx, name)
 			if err != nil {
-				return err
-			}
-			if err := r.lease.check(ctx); err != nil {
 				return err
 			}
 			if err := r.recreateTargetCollection(ctx, info); err != nil {

@@ -78,10 +78,10 @@
 
 {{define "job-filterbar"}}
 <div class="filterbar" role="search" aria-label="Filter jobs">
-  <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Search jobs" aria-label="Search jobs by command, kind or pipeline" autocomplete="off"></span>
+  <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Search jobs" aria-label="Search jobs by command, kind or origin" autocomplete="off"></span>
   <select class="chip-select" id="pl-kind" aria-label="Kind"><option value="">All kinds</option>{{range .Body.Kinds}}<option value="{{.}}">{{.}}</option>{{end}}</select>
   <select class="chip-select" id="pl-state" aria-label="State"><option value="">All states</option>{{range .Body.States}}<option value="{{.}}">{{.}}</option>{{end}}</select>
-  <select class="chip-select" id="pl-pipeline" aria-label="Pipeline"><option value="">All pipelines</option>{{range .Body.Pipelines}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+  <select class="chip-select" id="pl-pipeline" aria-label="Origin"><option value="">All origins</option>{{range .Body.Pipelines}}<option value="{{.}}">{{.}}</option>{{end}}</select>
   <button type="button" class="btn ghost small" id="pl-clear" hidden>Clear filters</button>
   <span class="muted small push" id="pl-count" aria-live="polite"></span>
 </div>
@@ -90,16 +90,16 @@
 {{define "jobs-table"}}
 <div class="tablewrap tall">
 <table class="data-table grid"{{if .ShowPipeline}} id="jobs-table" data-filterable{{end}}>
-  <caption class="sr-only">{{if .ShowPipeline}}Process jobs of all pipelines{{else}}Process jobs of this pipeline{{end}}</caption>
-  <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Pipeline</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Command</th>{{if .CanOperate}}<th scope="col" class="r"><span class="sr-only">Actions</span></th>{{end}}</tr></thead>
-  <tbody>{{range .Jobs}}<tr data-name="{{.ID}}" data-state="{{jobStateKey .}}" data-kinds="{{.Kind}}" data-pipeline="{{.Pipeline}}">
+  <caption class="sr-only">{{if .ShowPipeline}}Pipeline and backup process jobs{{else}}Process jobs of this pipeline{{end}}</caption>
+  <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Origin</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Command</th>{{if .CanOperate}}<th scope="col" class="r"><span class="sr-only">Actions</span></th>{{end}}</tr></thead>
+  <tbody>{{range .Jobs}}{{$origin := index $.Origins .ID}}<tr data-name="{{.ID}}" data-state="{{jobStateKey .}}" data-kinds="{{.Kind}}" data-pipeline="{{.Pipeline}}">
     <td class="small nowrap"><a href="/jobs/{{.ID}}">{{ts .Started}}</a></td>
-    {{if $.ShowPipeline}}<td><a href="/pipelines/{{.Pipeline}}/jobs">{{.Pipeline}}</a></td>{{end}}
-    <td class="mono">{{.Kind}}</td>
+    {{if $.ShowPipeline}}<td>{{if $origin.Href}}<a href="{{$origin.Href}}{{if $origin.Pipeline}}/jobs{{end}}">{{$origin.Label}}</a>{{else}}{{$origin.Label}}{{end}}</td>{{end}}
+    <td class="mono"><a href="/jobs/{{.ID}}">{{.Kind}}</a></td>
     <td><span class="badge {{jobClass .}}">{{jobState .}}</span></td>
     <td class="small r nowrap c-num">{{jobDur .}}</td>
     <td class="mono small wrap">strand {{join .Args " "}}</td>
-    {{if $.CanOperate}}<td class="r nowrap">{{if .Running}}{{if not .Cancelled}}<form class="act inline" data-action="job-cancel" data-pipeline="{{.Pipeline}}" data-confirm="Cancel this {{.Kind}} job of {{.Pipeline}}? The child process receives SIGTERM." data-stay><input type="hidden" name="job_id" value="{{.ID}}"><button class="btn small danger" type="submit" aria-label="Cancel job {{.Kind}} of {{.Pipeline}}">Cancel</button></form>{{end}}{{end}}</td>{{end}}
+    {{if $.CanOperate}}<td class="r nowrap">{{if and .Running (not .Cancelled) (or (not $.ShowPipeline) $origin.Pipeline)}}<form class="act inline" data-action="job-cancel" data-pipeline="{{.Pipeline}}" data-confirm="Cancel this {{.Kind}} job of {{.Pipeline}}? The child process receives SIGTERM." data-stay><input type="hidden" name="job_id" value="{{.ID}}"><button class="btn small danger" type="submit" aria-label="Cancel job {{.Kind}} of {{.Pipeline}}">Cancel</button></form>{{end}}</td>{{end}}
   </tr>{{else}}<tr class="empty"><td colspan="{{if $.ShowPipeline}}{{if $.CanOperate}}7{{else}}6{{end}}{{else}}{{if $.CanOperate}}6{{else}}5{{end}}{{end}}"><div class="empty-state">{{icon "jobs"}}<b>No jobs yet</b><span>Verify, plan and schema runs started from a pipeline's Jobs tab appear here.</span></div></td></tr>{{end}}
   <tr class="nomatch" hidden><td colspan="7" class="muted">No job matches the filter. <a href="/jobs">Clear filters</a></td></tr></tbody>
 </table>
@@ -108,6 +108,17 @@
 
 {{define "pipeline-tabs"}}
 <nav class="tabs" role="tablist" aria-label="Pipeline sections">{{$act := .Active}}{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $act .Key}} active{{end}}" role="tab" aria-selected="{{if eq $act .Key}}true{{else}}false{{end}}"{{if eq $act .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
+<details class="advanced" id="pipeline-tab-help">
+  <summary>{{t "pipeline.tabs_help"}}</summary>
+  <dl class="dl">
+  {{range .Tabs}}
+    {{if eq .Key "checkpoint" "jobs" "schema" "objects" "repair" "promote" "seed"}}
+    <dt><a href="{{.Href}}">{{.Label}}</a></dt>
+    <dd>{{t (printf "pipeline.tab_help.%s" .Key)}}</dd>
+    {{end}}
+  {{end}}
+  </dl>
+</details>
 {{end}}
 
 {{define "pipeline-props"}}

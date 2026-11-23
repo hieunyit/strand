@@ -307,7 +307,9 @@
       if (have[key]) { return; }
       have[key] = true;
       var tr = document.createElement('tr'); tr.setAttribute('data-ev', key); tr.className = 'is-new';
-      var t = document.createElement('td'); t.className = 'small nowrap'; t.textContent = e.time;
+      var t = document.createElement('td'); t.className = 'small nowrap';
+      var localTime = window.strandLocalISO(e.time);
+      t.textContent = localTime ? localTime.replace('T', ' ') + ' UTC+7' : e.time;
       var l = document.createElement('td'); var b = document.createElement('span'); b.className = 'badge lv-' + String(e.level).toLowerCase(); b.textContent = e.level; l.appendChild(b);
       var m = document.createElement('td'); m.className = 'wrap msg'; m.textContent = e.message;
       tr.appendChild(t); tr.appendChild(l); tr.appendChild(m);
@@ -412,9 +414,8 @@
     return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * Math.pow(10, e);
   }
   function hhmmss(t, long) {
-    var d = new Date(t); var p = function (n) { return (n < 10 ? '0' : '') + n; };
-    if (long) { return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()); }
-    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    var local = window.strandLocalISO(t);
+    return long ? local.slice(5, 16).replace('T', ' ') : local.slice(11);
   }
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   // Same geometry as LineChart in chart.go, so the live chart replaces the server one without a jump.

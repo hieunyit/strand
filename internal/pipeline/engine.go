@@ -22,11 +22,11 @@ import (
 	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"strand/internal/assemble"
 	"strand/internal/checkpoint"
+	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/promote"
@@ -71,7 +71,7 @@ func pgAppName(pipelineID, instance string) string {
 
 // openPGTarget mở pool target PG bằng pgx stdlib (PGWriter cần *stdlib.Conn để COPY).
 func openPGTarget(dsn, appName string) (*sql.DB, error) {
-	cc, err := pgx.ParseConfig(dsn)
+	cc, err := config.ParsePGConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +135,13 @@ func (p *Pipeline) loadTables(ctx context.Context, f *tableFilter) (map[model.Ta
 	if err != nil {
 		return nil, err
 	}
+	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EngineMySQL {
+		for id := range out {
+			if err := p.checkMySQLCascadingFK(ctx, id); err != nil {
+				return nil, err
+			}
+		}
+	}
 	p.markKeyless(out)
 	// review R10: hai bảng nguồn cùng tên đích (rename trùng, hoặc rename trùng bảng không rename) thì từ chối.
 	if err := checkTargetCollisions(f, out, nil); err != nil {
@@ -142,6 +149,26 @@ func (p *Pipeline) loadTables(ctx context.Context, f *tableFilter) (map[model.Ta
 	}
 	resolveForeignKeys(out, p.table)
 	return out, nil
+}
+
+// InnoDB does not emit child-row events for foreign-key actions. The target
+// session disables foreign key checks, so it cannot reproduce these actions.
+func (p *Pipeline) checkMySQLCascadingFK(ctx context.Context, id model.TableID) error {
+	var name string
+	err := p.src.QueryRowContext(ctx, `
+		SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS
+		WHERE CONSTRAINT_SCHEMA=? AND TABLE_NAME=?
+		  AND (DELETE_RULE IN ('CASCADE','SET NULL','SET DEFAULT')
+		    OR UPDATE_RULE IN ('CASCADE','SET NULL','SET DEFAULT'))
+		ORDER BY CONSTRAINT_NAME LIMIT 1`, id.Schema, id.Table).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect foreign key actions on %s: %w", id, err)
+	}
+	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+		fmt.Sprintf("foreign key %q on replicated table %s has a cascading action that MySQL-to-MySQL CDC cannot apply", name, id), nil)
 }
 
 // resolveForeignKeys gắn mỗi FK với khóa cha nó tham chiếu (PK hoặc unique index), để writeset của
@@ -919,7 +946,7 @@ func pgColumns(ctx context.Context, db *sql.DB, id model.TableID) ([]string, boo
 // openPGSnapshotSource mở pool đọc chunk ở source PG với GUC phiên giống kết nối replication, để
 // `col::text` có đúng định dạng text của pgoutput (row snapshot và row stream cùng dạng Go).
 func openPGSnapshotSource(dsn string) (*sql.DB, error) {
-	cc, err := pgx.ParseConfig(dsn)
+	cc, err := config.ParsePGConfig(dsn)
 	if err != nil {
 		return nil, err
 	}

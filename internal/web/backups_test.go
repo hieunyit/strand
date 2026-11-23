@@ -145,7 +145,7 @@ func TestBackupsPageRendersManagedJob(t *testing.T) {
 	if err := pages["backups_jobs"].ExecuteTemplate(&rendered, "base", data); err != nil {
 		t.Fatalf("render backup page: %v", err)
 	}
-	if !bytes.Contains(rendered.Bytes(), []byte("nightly")) || !bytes.Contains(rendered.Bytes(), []byte(next.Local().Format("15:04:05"))) {
+	if !bytes.Contains(rendered.Bytes(), []byte("nightly")) || !bytes.Contains(rendered.Bytes(), []byte(next.In(webTimeZone).Format("15:04:05"))) {
 		t.Fatalf("backup job state not present in rendered page: %s", rendered.String())
 	}
 }

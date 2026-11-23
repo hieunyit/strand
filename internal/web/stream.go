@@ -225,10 +225,10 @@ func liveFormat(v PipelineView, r LiveRecord, h HeadInfo, now time.Time) map[str
 		f["uptime"] = fmtSecs(h.Uptime)
 	}
 	if !h.CkptAt.IsZero() {
-		f["ckpt"], f["ckpt_ts"] = fmtRel(h.CkptAt, now), h.CkptAt.Local().Format("2006-01-02 15:04:05 MST")
+		f["ckpt"], f["ckpt_ts"] = fmtRel(h.CkptAt, now), formatWebTime(h.CkptAt, "2006-01-02 15:04:05 MST")
 	}
 	if !v.SampledAt.IsZero() {
-		f["sampled"] = v.SampledAt.Local().Format("15:04:05 MST")
+		f["sampled"] = formatWebTime(v.SampledAt, "15:04:05 MST")
 	}
 	if v.Runtime.PID != 0 {
 		f["pid"] = strconv.Itoa(v.Runtime.PID)

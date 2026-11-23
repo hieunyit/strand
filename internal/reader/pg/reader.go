@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"strand/internal/checkpoint"
+	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	"strand/internal/reader"
@@ -91,7 +92,7 @@ func New(cfg Config) (*Reader, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	pgCfg, err := pgconn.ParseConfig(cfg.DSN)
+	pgCfg, err := config.ParsePGConnConfig(cfg.DSN)
 	if err != nil {
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "DSN PostgreSQL không hợp lệ", err)
 	}
@@ -162,7 +163,7 @@ func New(cfg Config) (*Reader, error) {
 
 // connectSQL mở kết nối SQL thường (không replication) để kiểm tra cấu hình và slot.
 func (r *Reader) connectSQL(ctx context.Context) (*pgx.Conn, error) {
-	ccfg, err := pgx.ParseConfig(r.cfg.DSN)
+	ccfg, err := config.ParsePGConfig(r.cfg.DSN)
 	if err != nil {
 		return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "DSN PostgreSQL không hợp lệ", err)
 	}

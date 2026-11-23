@@ -22,13 +22,14 @@ func TestWebTunnelOpensAndStopsVerifiedLoopbackForward(t *testing.T) {
 	keyDir := t.TempDir()
 	t.Setenv("STRAND_WEB_SSH_KEY_DIR", keyDir)
 	sshAddr, identity, hosts := webTestSSHServer(t, keyDir)
+	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", hosts)
 	remote := webTestEchoServer(t)
 
 	e := opsEnv(t, false, nil)
 	e.sampleNow()
 	c, csrf := e.loginOK()
 	hdr := map[string]string{csrfHeader: csrf, "Content-Type": "application/json"}
-	payload, _ := json.Marshal(map[string]string{"ssh": sshAddr, "user": "backup", "remote": remote, "listen": "127.0.0.1:0", "identity_file": identity, "known_hosts": hosts})
+	payload, _ := json.Marshal(map[string]string{"ssh": sshAddr, "user": "backup", "remote": remote, "listen": "127.0.0.1:0", "identity_file": identity})
 	resp, body := e.do(c, "POST", "/api/v1/tunnels", string(payload), hdr)
 	if resp.StatusCode != 200 {
 		t.Fatalf("open tunnel: status=%d body=%s", resp.StatusCode, body)

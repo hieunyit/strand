@@ -791,7 +791,7 @@ th.c-check, td.c-check { width: 40px; padding-right: 0; }
 .skeleton-rows .skeleton:nth-child(3n) { width: 70%; }
 .detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: var(--sp-4); align-items: start; }
 .detail-main { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-4); }
-.detail-main > .tabs, .detail-main > .card, .detail-main > .alert { margin: 0; }
+.detail-main > .tabs, .detail-main > .card, .detail-main > .alert, .detail-main > details.advanced { margin: 0; }
 .detail-side { position: sticky; top: calc(var(--topbar-h) + var(--sp-4)); min-width: 0; }
 .detail-side .card { margin: 0; }
 dl.props { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); gap: var(--sp-2) var(--sp-3); margin: 0; font-size: var(--fs-sm); }

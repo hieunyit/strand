@@ -25,13 +25,8 @@
     </div>
   </fieldset>
   <fieldset class="form-section">
-    <legend class="form-section-title">Host keys &amp; identity</legend>
+    <legend class="form-section-title">SSH identity</legend>
     <div class="field-grid cols-1">
-      <div class="field">
-        <label class="field-label" for="tun-known-hosts">Trusted known_hosts file <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="tun-known-hosts" name="known_hosts" class="mono" placeholder="/etc/strand/ssh/known_hosts" required>
-        <small class="field-hint">Unknown or changed SSH host keys are rejected.</small>
-      </div>
       <div class="field">
         <label class="field-label" for="tun-identity">SSH private key <span class="opt">optional</span></label>
         <input type="text" id="tun-identity" name="identity_file" class="mono" placeholder="/etc/strand/ssh/keys/bastion_ed25519">
@@ -39,7 +34,7 @@
       </div>
     </div>
     <div class="form-actions flat">
-      <span class="form-status">The tunnel listens on loopback only.</span>
+      <span class="form-status">The server verifies the bastion's SSH host key. The tunnel listens on loopback only.</span>
       <button class="btn primary" type="submit" data-action="tunnel-open">Open Tunnel</button>
     </div>
   </fieldset>

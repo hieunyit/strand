@@ -281,7 +281,18 @@ func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user
 	if strings.TrimSpace(listen) == "" {
 		listen = "127.0.0.1:0"
 	}
+	useServerTrust := strings.TrimSpace(knownHosts) == ""
+	if useServerTrust {
+		var err error
+		knownHosts, err = tunnel.ConfiguredKnownHosts()
+		if err != nil {
+			return tunnelItem{}, fmt.Errorf("find server SSH host keys: %w", err)
+		}
+	}
 	if err := validateTunnelParams(sshAddr, remote, listen, identity, knownHosts); err != nil {
+		if useServerTrust && strings.HasPrefix(err.Error(), "known_hosts:") {
+			return tunnelItem{}, fmt.Errorf("configure the Web server's SSH trust file with STRAND_WEB_SSH_KNOWN_HOSTS or ~/.ssh/known_hosts: %w", err)
+		}
 		return tunnelItem{}, err
 	}
 	parent := s.tunnelCtx
@@ -403,9 +414,8 @@ func (s *Server) pageTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Se
 	remote := r.FormValue("remote")
 	listen := r.FormValue("listen")
 	identity := r.FormValue("identity_file")
-	knownHosts := r.FormValue("known_hosts")
 
-	if _, err := s.startTunnel(r.Context(), r, ssh, user, remote, listen, identity, knownHosts); err != nil {
+	if _, err := s.startTunnel(r.Context(), r, ssh, user, remote, listen, identity, ""); err != nil {
 		s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
 		return
 	}

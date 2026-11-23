@@ -10,7 +10,34 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"strand/internal/backup"
 )
+
+func TestBackupProcessJobLinks(t *testing.T) {
+	e := newCPEnv(t)
+	e.st.SeedBackupJob(backup.Job{ID: "bjob-shop", Name: "Shop backups", EverySeconds: 3600})
+	runner, err := NewFileJobRunner(t.TempDir(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runID, restoreID = "20261115T100000Z-deadbeef", "20261115T100001Z-deadbeef"
+	runner.jobs[runID] = &JobStatus{ID: runID, Pipeline: backupJobRunPipeline("bjob-shop"), Kind: "backup-run",
+		Args: []string{"backup", "schedule", "--job-id", "bjob-shop", "--once"}, Running: true}
+	runner.jobs[restoreID] = &JobStatus{ID: restoreID, Pipeline: "backup-restore-r-1", Kind: "backup-restore",
+		Args: []string{"backup", "restore", "--id", "bkp-shop"}}
+	e.srv.SetJobRunner(runner)
+	a := e.admin()
+	const runs = "/backups/jobs/bjob-shop?tab=runs"
+	for path, want := range map[string]string{"/jobs": runs, "/jobs/" + runID: runs, "/jobs/" + restoreID: "/backups"} {
+		body := a.must("GET", path, nil, 200)
+		if !strings.Contains(body, `href="`+want+`"`) || strings.Contains(body, `href="/pipelines/run-bjob-shop`) ||
+			strings.Contains(body, `href="/pipelines/backup-restore-r-1`) || strings.Contains(body, `data-action="job-cancel"`) {
+			t.Errorf("%s did not show a valid backup link and actions", path)
+		}
+	}
+	a.must("GET", runs, nil, 200)
+}
 
 func (e *testEnv) job(c interface{}, id string) JobStatus {
 	j, ok := e.srv.jobs.Get(id)

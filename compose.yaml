@@ -66,11 +66,15 @@ services:
       STRAND_WEB_TRUST_FORWARDED_FOR: ${STRAND_WEB_TRUST_FORWARDED_FOR:-}
       STRAND_WEB_TLS_CERT: ${STRAND_WEB_TLS_CERT:-}
       STRAND_WEB_TLS_KEY: ${STRAND_WEB_TLS_KEY:-}
+      STRAND_WEB_SSH_KNOWN_HOSTS: ${STRAND_WEB_SSH_KNOWN_HOSTS:-}
+      STRAND_WEB_SSH_KEY_DIR: ${STRAND_WEB_SSH_KEY_DIR:-}
     volumes:
       - strand_config:/etc/strand          # bản vật chất hóa từ DB (cấu hình + .env) cho tiến trình strand
       - strand_state:/var/lib/strand-web   # spool, checkpoint, output job, audit.log (bản sao)
       # TLS tại web: mount cert/key rồi đặt STRAND_WEB_TLS_CERT=/certs/tls.crt, STRAND_WEB_TLS_KEY=/certs/tls.key
       #   - ./certs:/certs:ro
+      # SSH tool: mount verified host keys and authentication keys at the configured paths.
+      #   - ./ssh:/run/strand/ssh:ro
     # Container dừng thì web dừng êm pipeline nền (tối đa ~100 s chờ ghi checkpoint) rồi thoát.
     stop_grace_period: 120s
     # Nguồn/đích ở máy khác: dùng IP/DNS của chúng trong cấu hình pipeline. Nguồn/đích là dịch vụ trên chính host

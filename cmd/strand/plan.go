@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"strand/internal/model"
 	"strand/internal/mysqlver"
 	"strand/internal/rowkey"
+	"strand/internal/schemagen"
 )
 
 // `strand plan -c p.yaml` (02 §10): ước lượng ETA của snapshot logic; từ chối chế độ A khi
@@ -32,8 +35,18 @@ func newPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Planning reads only the source.
+			cfg.Target.SSHTunnel = nil
+			closeTunnels, err := config.OpenSSHTunnels(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+			defer closeTunnels()
 			if cfg.IsMongoDB() {
 				return mongoValidate(cmd.Context(), cmd.OutOrStdout(), cfg, true, force)
+			}
+			if engineOf(cfg.Source.Kind) == model.EnginePG {
+				return planPGSnapshot(cmd.Context(), cmd.OutOrStdout(), cfg)
 			}
 			db, err := sql.Open("mysql", cfg.Source.DSN)
 			if err != nil {
@@ -143,4 +156,37 @@ func newPlanCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Chấp nhận chế độ A dù ETA > 50% retention")
 	return cmd
+}
+
+func planPGSnapshot(ctx context.Context, out io.Writer, cfg *config.Config) error {
+	db, err := config.OpenSQL("pgx", cfg.Source.DSN)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tables, warnings, err := schemagen.Discover(ctx, db, "postgres", cfg.Tables.Include, cfg.Tables.Exclude)
+	if err != nil {
+		return err
+	}
+	for _, warning := range warnings {
+		fmt.Fprintln(out, "warning:", warning)
+	}
+	var total int64
+	for _, table := range tables {
+		var size int64
+		err := db.QueryRowContext(ctx, `
+			WITH relation AS (SELECT to_regclass(quote_ident($1) || '.' || quote_ident($2)) AS oid)
+			SELECT COALESCE(
+				(SELECT sum(pg_total_relation_size(p.relid)) FROM pg_partition_tree(relation.oid) p WHERE p.isleaf),
+				pg_total_relation_size(relation.oid)
+			)::bigint FROM relation
+		`, table.Schema, table.Table).Scan(&size)
+		if err != nil {
+			return fmt.Errorf("estimate size of %s: %w", table, err)
+		}
+		fmt.Fprintf(out, "%-40s %14d bytes\n", table, size)
+		total += size
+	}
+	fmt.Fprintf(out, "\nPostgreSQL snapshot scope: %d table(s), %d bytes (including indexes and TOAST).\n", len(tables), total)
+	return nil
 }

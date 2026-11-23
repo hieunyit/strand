@@ -326,7 +326,7 @@ func (s *Server) pageBackupsCatalog(w http.ResponseWriter, r *http.Request, sess
 			return nil
 		}
 		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02"} {
-			if t, err := time.Parse(layout, str); err == nil {
+			if t, err := time.ParseInLocation(layout, str, webTimeZone); err == nil {
 				if endOfDay && layout == "2006-01-02" {
 					t = t.Add(24*time.Hour - time.Nanosecond)
 				}

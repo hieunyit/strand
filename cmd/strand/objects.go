@@ -60,18 +60,29 @@ func objectsOptions(cfg *config.Config, withUsers bool) (objects.Options, error)
 	return o, nil
 }
 
-func sourceDSN(cfg *config.Config) string {
-	if objSourceDSN != "" {
-		return objSourceDSN
+func openObjectsTunnels(ctx context.Context, cfg *config.Config, source, target bool) (func(), error) {
+	for _, endpoint := range []struct {
+		use      bool
+		override string
+		dsn      *string
+		ssh      **config.SSHTunnelConfig
+	}{
+		{source, objSourceDSN, &cfg.Source.DSN, &cfg.Source.SSHTunnel},
+		{target, objTargetDSN, &cfg.Target.DSN, &cfg.Target.SSHTunnel},
+	} {
+		if !endpoint.use {
+			*endpoint.ssh = nil
+			continue
+		}
+		if endpoint.override != "" {
+			dsn, err := config.NormalizeMySQLDSN(endpoint.override)
+			if err != nil {
+				return nil, exitcode.New("invalid_connection", exitcode.InvalidSyntax, "invalid objects DSN override", nil)
+			}
+			*endpoint.dsn = dsn
+		}
 	}
-	return cfg.Source.DSN
-}
-
-func targetDSN(cfg *config.Config) string {
-	if objTargetDSN != "" {
-		return objTargetDSN
-	}
-	return cfg.Target.DSN
+	return config.OpenSSHTunnels(ctx, cfg)
 }
 
 func openMySQL(dsn string) (*sql.DB, error) {
@@ -87,7 +98,7 @@ func loadObjects(ctx context.Context, cfg *config.Config, from string, withUsers
 	if from != "" {
 		return objects.LoadManifest(from)
 	}
-	db, err := openMySQL(sourceDSN(cfg))
+	db, err := openMySQL(cfg.Source.DSN)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +153,11 @@ Trigger KHÔNG được tồn tại ở target trong lúc sync (binlog ROW đã 
 			if err != nil {
 				return err
 			}
+			closeTunnels, err := openObjectsTunnels(cmd.Context(), cfg, true, false)
+			if err != nil {
+				return err
+			}
+			defer closeTunnels()
 			set, err := loadObjects(cmd.Context(), cfg, "", true)
 			if err != nil {
 				return err
@@ -194,6 +210,11 @@ Trigger KHÔNG được tồn tại ở target trong lúc sync (binlog ROW đã 
 			if err != nil {
 				return err
 			}
+			closeTunnels, err := openObjectsTunnels(cmd.Context(), cfg, true, false)
+			if err != nil {
+				return err
+			}
+			defer closeTunnels()
 			set, err := loadObjects(cmd.Context(), cfg, "", true)
 			if err != nil {
 				return err
@@ -221,10 +242,16 @@ Trigger KHÔNG được tồn tại ở target trong lúc sync (binlog ROW đã 
 			if err != nil {
 				return err
 			}
+
 			phase := objects.Phase(objPhase)
 			if phase != objects.PhasePre && phase != objects.PhasePost && phase != objects.PhaseUsers {
 				return exitcode.New("invalid_flag", exitcode.InvalidSyntax, "--phase must be pre, post or users", nil)
 			}
+			closeTunnels, err := openObjectsTunnels(cmd.Context(), cfg, objFrom == "", true)
+			if err != nil {
+				return err
+			}
+			defer closeTunnels()
 			set, err := loadObjects(cmd.Context(), cfg, objFrom, phase == objects.PhaseUsers)
 			if err != nil {
 				return err
@@ -233,7 +260,7 @@ Trigger KHÔNG được tồn tại ở target trong lúc sync (binlog ROW đã 
 				return exitcode.New("invalid_flag", exitcode.InvalidSyntax, "no users in the manifest: export it with `strand objects export`", nil)
 			}
 			printWarnings(cmd.ErrOrStderr(), set)
-			tdb, err := openMySQL(targetDSN(cfg))
+			tdb, err := openMySQL(cfg.Target.DSN)
 			if err != nil {
 				return err
 			}

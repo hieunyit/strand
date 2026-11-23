@@ -196,6 +196,18 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 	if meta.Details == nil {
 		meta.Details = map[string]string{}
 	}
+	// Record scope from the invocation that produced the payload, including
+	// methods that return early from stream (for example mydumper).
+	switch {
+	case job.Method == backup.MethodPGBaseBackup:
+		meta.Details["database_scope"] = "cluster"
+	case job.Method == backup.MethodMydumper && len(job.Conn.Databases) > 1:
+		// Tool versions differ in how they interpret repeated --database flags.
+	case len(job.Conn.Databases) > 0:
+		meta.Details["databases"] = strings.Join(job.Conn.Databases, ",")
+	case job.Method == backup.MethodMySQLDump || job.Method == backup.MethodMariaDBDump || job.Method == backup.MethodMongodump || job.Method == backup.MethodMydumper:
+		meta.Details["database_scope"] = "all"
+	}
 	meta.Details["duration_ms"] = fmt.Sprint(e.now().Sub(started).Milliseconds())
 	meta.Format, meta.PlainBytes, meta.PlainSHA256, meta.VersionID = res.Format, res.Plain.PlainBytes, res.Plain.PlainSHA256, res.Object.VersionID
 	if enc.Compress {
@@ -393,9 +405,6 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 		meta.Details["source_identity"] = sourceID
 	}
 
-	if len(job.Conn.Databases) > 0 {
-		meta.Details["databases"] = strings.Join(job.Conn.Databases, ",")
-	}
 	switch job.Method {
 	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
 		meta.Position = ParseMySQLDumpHeader(tap.buf.Bytes())

@@ -19,6 +19,7 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/tunnel"
 	"strand/internal/web/store"
 )
 
@@ -179,7 +180,24 @@ func (p *Pipeline) Env() ([]string, error) {
 	if p.EnvFile == "" {
 		return nil, nil
 	}
-	return ReadEnvFile(p.EnvFile)
+	env, err := ReadEnvFile(p.EnvFile)
+	if err != nil {
+		return nil, err
+	}
+	// The Web service owns which SSH keys and agent a child may use.
+	filtered := env[:0]
+	for _, definition := range env {
+		key, _, _ := strings.Cut(definition, "=")
+		switch key {
+		case "STRAND_WEB_SSH_KNOWN_HOSTS", "STRAND_WEB_SSH_KEY_DIR", "SSH_AUTH_SOCK":
+			continue
+		}
+		filtered = append(filtered, definition)
+	}
+	if path, err := tunnel.ConfiguredKnownHosts(); err == nil {
+		filtered = append(filtered, "STRAND_WEB_SSH_KNOWN_HOSTS="+path)
+	}
+	return filtered, nil
 }
 
 // Registry giữ danh sách pipeline phát hiện từ web.yaml (khai báo + glob scan).

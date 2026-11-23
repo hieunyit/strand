@@ -353,7 +353,7 @@ func TestLineChartSVG(t *testing.T) {
 		pts = append(pts, Point{T: t0.Add(time.Duration(i) * 5 * time.Second), V: float64(i * 10)})
 	}
 	svg := string(LineChart("Lag <x>", "seconds", []ChartSeries{{Name: "lag", Class: "s1", Points: pts}, {Name: "second", Class: "s2", Points: pts[:1]}}, 520, 150))
-	for _, want := range []string{`<svg class="linechart"`, `<polyline class="line s1"`, `<circle class="pt s2"`, "10:00:00", "10:00:45", ">100<", ">0<", "Lag &lt;x&gt;", `class="legend"`} {
+	for _, want := range []string{`<svg class="linechart"`, `<polyline class="line s1"`, `<circle class="pt s2"`, "17:00:00", "17:00:45", ">100<", ">0<", "Lag &lt;x&gt;", `class="legend"`} {
 		if !strings.Contains(svg, want) {
 			t.Errorf("chart lacks %q:\n%s", want, svg)
 		}

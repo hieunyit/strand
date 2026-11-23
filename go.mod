@@ -15,6 +15,7 @@ require (
 
 require (
 	go.mongodb.org/mongo-driver/v2 v2.10.0
+	golang.org/x/sync v0.25.0
 	golang.org/x/term v0.48.0
 )
 
@@ -111,7 +112,6 @@ require (
 	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/crypto v0.59.0
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
-	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0
 	google.golang.org/protobuf v1.34.2 // indirect

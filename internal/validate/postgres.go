@@ -56,34 +56,10 @@ func CheckPGSource(ctx context.Context, db *sql.DB, cfg *config.Config, tables [
 	if pub == "" {
 		pub = norm(cfg.Name)
 	}
-	var ins, upd, del, viaRoot bool
-	err = db.QueryRowContext(ctx, "SELECT pubinsert, pubupdate, pubdelete, pubviaroot FROM pg_publication WHERE pubname=$1", pub).Scan(&ins, &upd, &del, &viaRoot)
-	if err == sql.ErrNoRows {
-		return nil, reject(fmt.Sprintf("publication %q does not exist", pub))
+	if err := CheckPGPublication(ctx, db, pub, tables); err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect publication %q: %w", pub, err)
-	}
-	if !ins || !upd || !del {
-		return nil, reject(fmt.Sprintf("publication %q must publish insert, update and delete", pub))
-	}
-	for _, table := range tables {
-		var partitioned bool
-		if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind='p')", table.Schema, table.Table).Scan(&partitioned); err != nil {
-			return nil, fmt.Errorf("inspect partitioned table: %w", err)
-		}
-		if partitioned && !viaRoot {
-			return nil, reject(fmt.Sprintf("publication %q needs publish_via_partition_root for %s", pub, table.String()))
-		}
-		var exists bool
-		if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname=$1 AND schemaname=$2 AND tablename=$3)", pub, table.Schema, table.Table).Scan(&exists); err != nil {
-			return nil, fmt.Errorf("inspect publication tables: %w", err)
-		}
-		if !exists {
-			return nil, reject(fmt.Sprintf("publication %q does not include %s", pub, table.String()))
-		}
-	}
-	warnings := []string{"PostgreSQL publication row filters and column lists are not checked by validate"}
+	var warnings []string
 	slot := cfg.Source.Slot
 	if slot == "" {
 		return append(warnings, "slot not explicitly configured: seed state may choose the slot; validate did not inspect it"), nil
@@ -114,4 +90,57 @@ func CheckPGSource(ctx context.Context, db *sql.DB, cfg *config.Config, tables [
 		warnings = append(warnings, fmt.Sprintf("replication slot %q is active; validate cannot determine its owner", slot))
 	}
 	return warnings, nil
+}
+
+// CheckPGPublication checks that pgoutput will publish all row changes in the snapshot scope.
+func CheckPGPublication(ctx context.Context, db *sql.DB, pub string, tables []model.TableID) error {
+	reject := func(message string) error {
+		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, message, nil)
+	}
+	var insert, update, deleteRows, viaRoot bool
+	err := db.QueryRowContext(ctx, "SELECT pubinsert, pubupdate, pubdelete, pubviaroot FROM pg_publication WHERE pubname=$1", pub).
+		Scan(&insert, &update, &deleteRows, &viaRoot)
+	if err == sql.ErrNoRows {
+		return reject(fmt.Sprintf("publication %q does not exist", pub))
+	}
+	if err != nil {
+		return fmt.Errorf("inspect publication %q: %w", pub, err)
+	}
+	if !insert || !update || !deleteRows {
+		return reject(fmt.Sprintf("publication %q must publish insert, update and delete", pub))
+	}
+	for _, table := range tables {
+		var partitioned, included, filtered, missingColumns bool
+		// Use JSON field lookup for columns introduced in PostgreSQL 15.
+		err := db.QueryRowContext(ctx, `
+			SELECT c.relkind = 'p', p.pubname IS NOT NULL, to_jsonb(p)->>'rowfilter' IS NOT NULL,
+			       EXISTS (SELECT 1 FROM pg_attribute a
+			                WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+			                  AND a.attgenerated='' AND to_jsonb(p)->'attnames' IS NOT NULL
+			                  AND NOT ((to_jsonb(p)->'attnames') ? a.attname::text))
+			  FROM pg_namespace n
+			  JOIN pg_class c ON c.relnamespace=n.oid
+			  LEFT JOIN pg_publication_tables p
+			    ON p.pubname=$1 AND p.schemaname=n.nspname AND p.tablename=c.relname
+			 WHERE n.nspname=$2 AND c.relname=$3`,
+			pub, table.Schema, table.Table).Scan(&partitioned, &included, &filtered, &missingColumns)
+		if err == sql.ErrNoRows {
+			return reject(fmt.Sprintf("publication %q does not include %s", pub, table))
+		}
+		if err != nil {
+			return fmt.Errorf("inspect publication %q for %s: %w", pub, table, err)
+		}
+		switch {
+		case partitioned && !viaRoot:
+			quoted := `"` + strings.ReplaceAll(pub, `"`, `""`) + `"`
+			return reject(fmt.Sprintf("publication %q needs publish_via_partition_root for %s. Run: ALTER PUBLICATION %s SET (publish_via_partition_root = true)", pub, table, quoted))
+		case !included:
+			return reject(fmt.Sprintf("publication %q does not include %s", pub, table))
+		case filtered:
+			return reject(fmt.Sprintf("publication %q has a row filter for %s; the snapshot copies all rows", pub, table))
+		case missingColumns:
+			return reject(fmt.Sprintf("publication %q omits columns of %s", pub, table))
+		}
+	}
+	return nil
 }

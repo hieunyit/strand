@@ -4,17 +4,18 @@
   <div class="headrow">
     <span class="badge big {{jobClass .Job}}">{{jobState .Job}}</span>
     <span class="pair"><b>{{.Job.Kind}}</b></span>
-    <a class="mono" href="/pipelines/{{.Job.Pipeline}}">{{.Job.Pipeline}}</a> <span class="muted small">(<a href="/pipelines/{{.Job.Pipeline}}/jobs">all pipeline jobs</a>)</span>
+    {{if .Origin.Href}}<a class="mono" href="{{.Origin.Href}}">{{.Origin.Label}}</a>{{else}}<span class="mono">{{.Origin.Label}}</span>{{end}}
+    {{if .Origin.Pipeline}}<span class="muted small">(<a href="{{.Origin.Href}}/jobs">all pipeline jobs</a>)</span>{{end}}
   </div>
   {{if .Job.Error}}<div class="alert alert-error mt10" role="alert">{{.Job.Error}}</div>{{end}}
   <div class="actions" role="group" aria-label="Job actions">
-    {{if and $.CanOperate .Job.Running}}
+    {{if and $.CanOperate .Job.Running (not .Job.Cancelled) .Origin.Pipeline}}
     <form class="act inline" data-action="job-cancel" data-pipeline="{{.Job.Pipeline}}" data-confirm="Cancel this job? The child process receives SIGTERM.">
       <input type="hidden" name="job_id" value="{{.Job.ID}}">
       <button class="btn danger" type="submit" data-action="job-cancel">Cancel job</button>
     </form>
     {{end}}
-    {{if $.CanAdmin}}<a class="btn" href="/api/v1/jobs/{{.Job.ID}}/download" download="job-{{.Job.ID}}.log">Download output</a>{{end}}
+    {{if and $.CanAdmin (eq .Job.Kind "export") .Job.ExitCode (eq (ptrInt .Job.ExitCode) 0)}}<a class="btn" href="/api/v1/jobs/{{.Job.ID}}/download">Download export</a>{{end}}
     <a class="btn ghost" href="/jobs">All jobs</a>
   </div>
 </section>
