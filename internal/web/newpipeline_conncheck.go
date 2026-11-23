@@ -172,7 +172,7 @@ var createFormFields = map[string]bool{
 	"windows": true, "breaker_max_ratio": true, "replica_lag_max": true, "governor_algorithm": true, "lag_slo": true,
 	"source_uri": true, "target_uri": true, "source_database": true, "target_mongo_database": true, "snapshot_batch": true,
 	"stream_batch": true, "lease_ttl": true, "source_auth_db": true, "target_auth_db": true, "source_replica_set": true,
-	"target_replica_set": true, "source_ssh_host": true, "target_ssh_host": true,
+	"target_replica_set": true, "source_ssh_host": true, "target_ssh_host": true, "keyless": true,
 }
 
 var createErrFieldRE = regexp.MustCompile(`^([a-z_]+)(?::| ")`)

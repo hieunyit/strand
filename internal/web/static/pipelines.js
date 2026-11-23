@@ -163,6 +163,7 @@
       rows.push(['Copy', pv ? pv.textContent : '']);
       var opts = [];
       OPTION_FIELDS.forEach(function (o) { var v = val(o[0]); if (v && v !== o[1]) { opts.push(o[0] + ' ' + v); } });
+      if (val('keyless') === 'full_row') { opts.push('full-row matching for tables without a key'); }
       rows.push(['Options', opts.length ? opts.join(', ') : 'defaults']);
       return rows;
     }

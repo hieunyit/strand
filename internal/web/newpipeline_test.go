@@ -359,6 +359,57 @@ func TestNewPipelineJSONDatabases(t *testing.T) {
 	}
 }
 
+func TestNewPipelineKeyless(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	resp, page := e.do(c, "GET", "/pipelines/new", "", nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(page, `name="keyless"`) ||
+		!strings.Contains(page, `value="full_row"`) || !strings.Contains(page, "REPLICA IDENTITY FULL") {
+		t.Fatalf("expected the keyless choice and prerequisites in the wizard, got %d", resp.StatusCode)
+	}
+
+	for _, tt := range []struct {
+		name, engine, keyless    string
+		status                   int
+		useForm, wantFullRowYAML bool
+	}{
+		{name: "default", engine: "mysql", status: 200},
+		{name: "explicit-off", engine: "mysql", keyless: "off", status: 200},
+		{name: "full-row-json", engine: "mysql", keyless: "full_row", status: 200, wantFullRowYAML: true},
+		{name: "full-row-form", engine: "postgres", keyless: "full_row", status: 200, useForm: true, wantFullRowYAML: true},
+		{name: "unknown-mode", engine: "mysql", keyless: "anything", status: 400},
+		{name: "mongo-rejects-full-row", engine: "mongodb", keyless: "full_row", status: 400},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var code int
+			var y, body string
+			if tt.useForm {
+				code, _, y, body = createNPForm(t, e, c, csrf, url.Values{
+					"name": {tt.name}, "from": {tt.engine}, "to": {tt.engine}, "database": {"shop"},
+					"keyless": {tt.keyless},
+				})
+			} else {
+				code, _, y, body = createNP(t, e, c, csrf, NewPipelineOpts{
+					Name: tt.name, From: tt.engine, To: tt.engine, Database: "shop", Keyless: tt.keyless,
+				})
+			}
+			if code != tt.status {
+				t.Fatalf("create: got %d, want %d: %s", code, tt.status, body)
+			}
+			if code == http.StatusBadRequest {
+				var result struct {
+					Fields map[string]string `json:"fields"`
+				}
+				if err := json.Unmarshal([]byte(body), &result); err != nil || result.Fields["keyless"] == "" {
+					t.Fatalf("expected a keyless field error, got %s", body)
+				}
+			}
+			if got := strings.Contains(y, "\n  keyless: full_row\n"); got != tt.wantFullRowYAML {
+				t.Fatalf("keyless YAML present = %v, want %v:\n%s", got, tt.wantFullRowYAML, y)
+			}
+		})
+	}
+}
+
 // target.database (nơi chứa _strand_*) phải tách khỏi database dữ liệu; mặc định "strand".
 func TestNewPipelineTargetMetaDatabase(t *testing.T) {
 	e, c, csrf := npEnv(t)

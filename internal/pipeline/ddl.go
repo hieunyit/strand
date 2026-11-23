@@ -19,11 +19,13 @@ import (
 // resume chỉ chạy tiếp khi schema ở target đã khớp."
 
 var (
-	ddlIdent      = "(`[^`]+`|[A-Za-z0-9_$]+)(?:\\s*\\.\\s*(`[^`]+`|[A-Za-z0-9_$]+))?"
-	reCreateTable = regexp.MustCompile(`(?is)^\s*(?:/\*.*?\*/\s*)?create\s+table\s+(?:if\s+not\s+exists\s+)?` + ddlIdent)
-	reRenameTable = regexp.MustCompile(`(?is)^\s*(?:/\*.*?\*/\s*)?rename\s+tables?\s+(.+)$`)
-	reRenamePair  = regexp.MustCompile(`(?is)` + ddlIdent + `\s+to\s+` + ddlIdent)
-	reAlterRename = regexp.MustCompile(`(?is)^\s*(?:/\*.*?\*/\s*)?alter\s+table\s+` + ddlIdent + `\s+rename\s+(?:to\s+|as\s+)?` + ddlIdent)
+	ddlIdent       = "(`[^`]+`|[A-Za-z0-9_$]+)(?:\\s*\\.\\s*(`[^`]+`|[A-Za-z0-9_$]+))?"
+	reCreateTable  = regexp.MustCompile(`(?is)^\s*(?:/\*.*?\*/\s*)?create\s+table\s+(?:if\s+not\s+exists\s+)?` + ddlIdent)
+	reRenameTable  = regexp.MustCompile(`(?is)^\s*(?:/\*.*?\*/\s*)?rename\s+tables?\s+(.+)$`)
+	reRenamePair   = regexp.MustCompile(`(?is)` + ddlIdent + `\s+to\s+` + ddlIdent)
+	reAlterRename  = regexp.MustCompile(`(?is)^\s*(?:/\*.*?\*/\s*)?alter\s+table\s+` + ddlIdent + `\s+rename\s+(?:to\s+|as\s+)?` + ddlIdent)
+	mysqlDDLLexeme = regexp.MustCompile(`(?s)/\*.*?\*/|--(?:[ \t\f\v][^\r\n]*|\r?\n|$)|#[^\r\n]*|` +
+		`'(?:\\.|''|[^'\\])*'|"(?:\\.|""|[^"\\])*"|` + "`(?:``|[^`])*`" + `|[\p{L}\p{N}_$]+|\S`)
 )
 
 func unquoteIdent(s string) string { return strings.Trim(strings.TrimSpace(s), "`") }
@@ -78,6 +80,45 @@ func ddlMentionsTable(q, table string) bool {
 			return true
 		}
 		from = i + 1
+	}
+	return false
+}
+
+func mysqlDDLTokens(query string) []string {
+	var tokens []string
+	for _, token := range mysqlDDLLexeme.FindAllString(query, -1) {
+		if body, ok := strings.CutPrefix(token, "/*!"); ok {
+			tokens = append(tokens, mysqlDDLTokens(strings.TrimLeft(strings.TrimSuffix(body, "*/"), "0123456789"))...)
+		} else if body, ok := strings.CutPrefix(token, "/*M!"); ok {
+			tokens = append(tokens, mysqlDDLTokens(strings.TrimLeft(strings.TrimSuffix(body, "*/"), "0123456789"))...)
+		} else if !strings.HasPrefix(token, "/*") && !strings.HasPrefix(token, "--") && !strings.HasPrefix(token, "#") {
+			tokens = append(tokens, strings.ToLower(token))
+		}
+	}
+	return tokens
+}
+
+// MySQL and MariaDB log FK DDL as SQL. Today's schema cannot establish what
+// cascade actions were in force at a historical event, even if it matches the
+// target now. DROP CONSTRAINT may drop a foreign key on MariaDB.
+func mysqlForeignKeyDDL(query string) bool {
+	tokens := mysqlDDLTokens(query)
+	if len(tokens) < 2 || (tokens[0] != "alter" && tokens[0] != "create") {
+		return false
+	}
+	for i := 1; i < len(tokens); i++ {
+		switch tokens[i] {
+		case "online", "ignore", "or", "replace", "temporary":
+			continue
+		case "table":
+			for j := i + 1; j+1 < len(tokens); j++ {
+				if tokens[j] == "references" || (tokens[j] == "foreign" && tokens[j+1] == "key") ||
+					(tokens[j] == "drop" && tokens[j+1] == "constraint") {
+					return true
+				}
+			}
+		}
+		break
 	}
 	return false
 }
@@ -183,6 +224,11 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		return fmt.Errorf("DDL at %s: pipeline did not drain", t.SourcePos.Label())
 	}
 	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EngineMySQL {
+		if mysqlForeignKeyDDL(t.DDL) {
+			return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+				fmt.Sprintf("foreign-key DDL at %s may change historical cascade behavior; checkpoint cannot pass this event. Start a new pipeline from a consistent seed taken after the change. DDL: %q",
+					t.SourcePos.Label(), t.DDL), nil)
+		}
 		var joining []model.TableID
 		for id := range newCreated {
 			joining = append(joining, id)

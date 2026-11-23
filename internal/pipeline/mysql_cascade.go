@@ -179,8 +179,55 @@ func readFKCollations(ctx context.Context, db *sql.DB, table model.TableID, cols
 	return out, nil
 }
 
+// InnoDB can order actions by constraint name. Distinct cascading FKs reached
+// by the same write can affect the same row when they reach the same table.
+func checkCascadeOrder(fks []cascadeFK) error {
+	outgoing := make(map[model.TableID][]*cascadeFK)
+	for i := range fks {
+		fk := &fks[i]
+		outgoing[fk.Parent] = append(outgoing[fk.Parent], fk)
+	}
+	type change struct {
+		table    model.TableID
+		deleting bool
+	}
+	for parent := range outgoing {
+		for _, deleting := range []bool{true, false} {
+			pending := []change{{table: parent, deleting: deleting}}
+			visited := make(map[change]bool)
+			reached := make(map[model.TableID]*cascadeFK)
+			for len(pending) > 0 {
+				current := pending[len(pending)-1]
+				pending = pending[:len(pending)-1]
+				if visited[current] {
+					continue
+				}
+				visited[current] = true
+				for _, fk := range outgoing[current.table] {
+					rule := fk.OnUpdate
+					if current.deleting {
+						rule = fk.OnDelete
+					}
+					if !isCascadeAction(rule) {
+						continue
+					}
+					if previous := reached[fk.Child]; previous != nil && previous != fk {
+						return cascadeConfigError(fmt.Sprintf("overlapping cascading foreign keys from %s can reach %s through multiple constraints; cascade results can depend on constraint order", parent, fk.Child))
+					}
+					reached[fk.Child] = fk
+					// Only DELETE CASCADE removes the child. SET NULL
+					// may in turn trigger ON UPDATE rules on its children.
+					pending = append(pending, change{table: fk.Child, deleting: current.deleting && rule == "CASCADE"})
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func cascadeSignature(fk cascadeFK) string {
-	// The FK name is local to the schema. NO ACTION and RESTRICT are equivalent in InnoDB.
+	// The preflight rejects order-sensitive rule sets, so signatures can omit
+	// constraint names. NO ACTION and RESTRICT are equivalent in InnoDB.
 	if fk.OnDelete == "NO ACTION" {
 		fk.OnDelete = "RESTRICT"
 	}
@@ -248,6 +295,9 @@ func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.Tab
 	}
 	if len(plan.signatures) == 0 {
 		return plan, nil
+	}
+	if err := checkCascadeOrder(source); err != nil {
+		return plan, err
 	}
 	target, err := readCascadingFKs(ctx, p.dst)
 	if err != nil {

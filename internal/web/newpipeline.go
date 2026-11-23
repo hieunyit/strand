@@ -71,6 +71,7 @@ type NewPipelineOpts struct {
 
 	Includes []string `json:"include,omitempty"`
 	Excludes []string `json:"exclude,omitempty"`
+	Keyless  string   `json:"keyless,omitempty"`
 
 	ServerID    int    `json:"server_id,omitempty"`
 	CommitOrder string `json:"commit_order,omitempty"`
@@ -226,6 +227,9 @@ tables:
 {{- if .Excludes}}
   exclude: [{{range $i, $e := .Excludes}}{{if $i}}, {{end}}"{{$e}}"{{end}}]
 {{- end}}
+{{- if .FullRowKeyless}}
+  keyless: full_row
+{{- end}}
 
 bootstrap:
 {{- if .StartAt}}
@@ -284,6 +288,7 @@ type tmplData struct {
 	TargetDatabase    string
 	Includes          []string
 	Excludes          []string
+	FullRowKeyless    bool
 	ServerID          int
 	CommitOrder       string
 	SpoolDir          string
@@ -356,6 +361,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		TargetDatabase:    strings.TrimSpace(opts.TargetDatabase),
 		Includes:          opts.Includes,
 		Excludes:          opts.Excludes,
+		FullRowKeyless:    strings.EqualFold(strings.TrimSpace(opts.Keyless), "full_row"),
 		ServerID:          opts.ServerID,
 		CommitOrder:       opts.CommitOrder,
 		SpoolDir:          spoolDir,
@@ -543,6 +549,16 @@ var plainDBNameRE = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
 
 // checkOpts từ chối giá trị làm hỏng YAML sinh ra (dấu nháy, xuống dòng, ...) và tên database metadata lạ.
 func checkOpts(opts NewPipelineOpts) error {
+	mongo := isMongo(opts.From) || isMongo(opts.To)
+	switch strings.ToLower(strings.TrimSpace(opts.Keyless)) {
+	case "", "off":
+	case "full_row":
+		if mongo {
+			return errors.New("keyless: full-row matching is only available for SQL pipelines")
+		}
+	default:
+		return errors.New("keyless: choose off or full_row")
+	}
 	for _, endpoint := range []struct {
 		name, kind string
 		ssh        *config.SSHTunnelConfig
@@ -554,7 +570,7 @@ func checkOpts(opts NewPipelineOpts) error {
 			return fmt.Errorf("%s_ssh_host: %w", endpoint.name, err)
 		}
 	}
-	if isMongo(opts.From) || isMongo(opts.To) {
+	if mongo {
 		if err := checkMongoOpts(opts); err != nil {
 			return err
 		}
@@ -1039,6 +1055,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.Databases = splitList(f.Get("databases"))
 	opts.Includes = splitList(f.Get("include"))
 	opts.Excludes = splitList(f.Get("exclude"))
+	opts.Keyless = f.Get("keyless")
 	opts.Windows = splitList(f.Get("windows"))
 	for field, dst := range map[string]*int{
 		"source_port": &opts.SourcePort, "target_port": &opts.TargetPort, "workers": &opts.Workers,

@@ -58,3 +58,31 @@ func TestDDLMentionsTableWholeIdentifier(t *testing.T) {
 		}
 	}
 }
+
+func TestMySQLForeignKeyDDL(t *testing.T) {
+	for _, query := range []string{
+		"ALTER TABLE app.child ADD CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES app.parent(id) ON DELETE CASCADE",
+		"ALTER TABLE app.child DROP FOREIGN KEY fk_parent",
+		"ALTER ONLINE TABLE app.child DROP CONSTRAINT fk_parent",
+		"CREATE TABLE app.child (parent_id INT REFERENCES app.parent(id) ON DELETE SET NULL)",
+		"ALTER TABLE app.child ADD FOREIGN /* migration note */ KEY (parent_id) REFERENCES app.parent(id)",
+		"ALTER TABLE app.child ADD FOREIGN -- migration note\n KEY (parent_id) REFERENCES app.parent(id)",
+		"ALTER TABLE app.child /*!80000 DROP FOREIGN KEY fk_parent */",
+		"/*M!100600 ALTER TABLE app.child DROP CONSTRAINT fk_parent */",
+	} {
+		if !mysqlForeignKeyDDL(query) {
+			t.Errorf("missed foreign-key DDL %q", query)
+		}
+	}
+	for _, query := range []string{
+		"ALTER TABLE app.child ADD INDEX fk_parent (parent_id)",
+		"ALTER TABLE app.child ADD COLUMN note VARCHAR(40) COMMENT 'DROP FOREIGN KEY'",
+		"ALTER TABLE app.child ADD COLUMN `references` INT /* FOREIGN KEY */",
+		`ALTER TABLE app.child ADD COLUMN "drop constraint" INT`,
+		"GRANT REFERENCES ON app.child TO other_user",
+	} {
+		if mysqlForeignKeyDDL(query) {
+			t.Errorf("misclassified %q as foreign-key DDL", query)
+		}
+	}
+}

@@ -213,6 +213,16 @@
       </div>
     </details>
     <p class="np-preview">Will copy: <code id="np-preview">…</code></p>
+    <div data-when="src:mysql,mariadb,postgres">
+      <label class="field">
+        <span class="field-label">Tables without a usable row key</span>
+        <select name="keyless" aria-describedby="np-keyless-help">
+          <option value="">Require a primary key or usable NOT NULL unique key</option>
+          <option value="full_row">Allow full-row matching for tables without a key</option>
+        </select>
+      </label>
+      <small class="field-hint" id="np-keyless-help">Use full-row matching when you cannot add a key. Start from a restored seed backup, or preload matching data on the target and set Start position below. Logical snapshots require a key. MySQL and MariaDB sources need <code>binlog_row_image=FULL</code>. PostgreSQL needs <code>REPLICA IDENTITY FULL</code> on each keyless source table. Validation reports missing keys and suggests fixes.</small>
+    </div>
   </fieldset>
 
   <details class="advanced" data-when="src:mongodb">

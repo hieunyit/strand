@@ -363,6 +363,8 @@ bootstrap: { default: seed }  # hoặc start_at, hoặc per_table[bảng].mode: 
 - **Verify:** chỉ so **số hàng + checksum không phụ thuộc thứ tự** (`strand verify --mode full`); không chỉ ra hàng lệch và `--repair fix` bị từ chối (nạp lại bảng từ seed). Nguồn thay đổi giữa hai lần hash thì thử lại tối đa 5 lượt; nếu vẫn chưa ổn định, CLI trả `verify_incomplete`, không báo match. Verify theo mẫu/delta trong lúc chạy bỏ qua bảng keyless.
 - Web UI / `top`: cột key của bảng hiện `full row (keyless)`.
 
+Trong wizard **New pipeline** trên Web, chọn **Allow full-row matching for tables without a key** để ghi `tables.keyless: full_row`. Điều kiện seed hoặc Start position ở trên vẫn áp dụng.
+
 ### 5.2 Snapshot logic với từng kiểu PK
 
 Snapshot logic chia bảng thành các range khóa. Mỗi thay đổi từ stream phải được gán đúng range bằng phép so trong Go. Vì vậy **thứ tự và phép bằng của khóa trong Go phải giống hệt DB** (`ORDER BY pk`, unique index). Lệch một chút là mất dữ liệu âm thầm. Strand chỉ nhận những kiểu có thứ tự chứng minh được, còn lại từ chối rõ ràng.
@@ -414,6 +416,8 @@ trước khi mở ghi ở đích.
   - PG có nhiều Txn chạm bảng như vậy: làn tuần tự làm relaxed gần bằng tốc độ strict. Nếu phần lớn tải đi qua các bảng này, dùng `strict` cho đơn giản; hoặc đặt `ALTER TABLE ... REPLICA IDENTITY FULL` để bảng không phải đi làn (đổi lại WAL lớn hơn).
 - **FK:** MySQL thông thường tắt kiểm FK ở phiên ghi của Strand để snapshot có thể chép các bảng độc lập. Pipeline MySQL/MariaDB → MySQL có FK cascade dùng chế độ riêng bên dưới. PostgreSQL kiểm FK và snapshot chép bảng cha trước bảng con.
 - **Cascade trên MySQL/MariaDB → MySQL:** Strand hỗ trợ `ON DELETE` và `ON UPDATE` với `CASCADE` hoặc `SET NULL` khi chọn cả bảng cha và bảng con, target là InnoDB và khóa ngoại đích khớp nguồn. Writer bật kiểm tra FK ở MySQL đích, áp theo thứ tự commit ở nguồn và ghi checkpoint cùng transaction. Pipeline mới cần restore bản sao nhất quán rồi chạy `--start-at seed` hoặc chỉ định vị trí GTID/binlog của bản sao. Pipeline đã có bảng hoàn chỉnh có thể tiếp tục từ checkpoint sau khi đối chiếu dữ liệu và ràng buộc đích. Giữ quy tắc FK ổn định trong thời gian chạy và trong phần binlog sẽ phát lại. Tài khoản đích phải nhìn thấy các FK tham chiếu đến bảng được đồng bộ, kể cả từ schema khác, để Strand đối chiếu phạm vi cascade. Không dùng snapshot logic theo từng bảng, `snapshot add` hoặc prefetch cho chế độ này. Dùng `verify --mode full` để kiểm cả các dòng con bị cascade, vì chúng không có sự kiện riêng để verify delta nhận diện.
+  - Khi phát lại DDL tạo hoặc thay đổi FK trên bảng đang đồng bộ, Strand có thể dừng tại `schema_change_pending` và giữ checkpoint trước DDL. Nếu gặp chặn do cascade lịch sử, khởi tạo pipeline mới từ seed nhất quán tại vị trí sau thay đổi.
+  - Nếu một UPDATE hoặc DELETE có thể tác động tới cùng bảng con qua nhiều ràng buộc cascade, Strand từ chối cấu hình. Kết quả của InnoDB có thể phụ thuộc vào thứ tự ràng buộc trong trường hợp này.
 - **TOAST (PG):** UPDATE mà cột TOAST không đổi chỉ gửi các cột còn lại.
   - Nếu row không có ở target, Strand dừng với `verify_mismatch` (exit 5). Sửa bằng `verify --mode full --table … --repair fix` rồi chạy lại.
   - Đổi PK kèm cột TOAST không đổi khi bảng đang snapshot: Strand đọc lại khóa mới từ source. Metric `strand_pending_cross_range` và `strand_pending_cross_range_oldest_seconds` theo dõi việc này.
