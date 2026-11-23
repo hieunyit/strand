@@ -195,10 +195,11 @@ func TestMongoRestoreDestinationStripsCredentials(t *testing.T) {
 }
 
 func TestMySQLRecoveryWindowKeepsStandaloneSnapshotsOutside(t *testing.T) {
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Second)
 	anchor := now.Add(-time.Hour)
+	end := anchor.Add(-time.Second)
 	base := backup.Record{ID: "base", Source: "prod", Engine: backup.EngineMySQL, Method: backup.MethodMySQLDump,
-		Status: backup.StatusComplete, JobID: "job", CreatedAt: anchor,
+		Status: backup.StatusComplete, JobID: "job", CreatedAt: end.Add(-time.Minute), EndTime: &end,
 		Position: backup.Position{BinlogFile: "binlog.000001", BinlogPos: 100, GTIDSet: "server:1"},
 		Details:  map[string]string{"source_identity": "server1"}}
 	log := backup.Record{ID: "log", Source: base.Source, Engine: base.Engine, Method: backup.MethodBinlog,
@@ -217,6 +218,8 @@ func TestMySQLRecoveryWindowKeepsStandaloneSnapshotsOutside(t *testing.T) {
 	// A newer snapshot without coverage must not invalidate the window
 	// certified by an older base. An explicit selection stays pinned.
 	newer.CreatedAt = now.Add(-time.Minute)
+	newerEnd := newer.CreatedAt.Add(time.Second)
+	newer.EndTime = &newerEnd
 	records := []backup.Record{old, newer, base, log}
 	plan, err := PlanRestore(records, nil, &now)
 	if err != nil || plan.Base().ID != base.ID {
@@ -224,6 +227,25 @@ func TestMySQLRecoveryWindowKeepsStandaloneSnapshotsOutside(t *testing.T) {
 	}
 	if _, err := PlanRestore(records, &newer, &now); err == nil {
 		t.Fatal("restore silently changed an explicit base")
+	}
+	// A newer dump cannot be used until the cutoff is in a later whole second,
+	// even if it has matching logs. Automatic selection can still use the old base.
+	newer.JobID = base.JobID
+	unsafe := newerEnd.Add(500 * time.Millisecond)
+	records = []backup.Record{base, newer, log}
+	if plan, err := PlanRestore(records, nil, &unsafe); err != nil || plan.Base().ID != base.ID {
+		t.Fatalf("restore did not fall back to the safe older base: %+v %v", plan, err)
+	}
+	if _, err := PlanRestore(records, &newer, &unsafe); err == nil {
+		t.Fatal("restore accepted a cutoff in the same second the dump completed")
+	}
+	legacy := base
+	legacy.EndTime = nil
+	if RecoveryWindow([]backup.Record{legacy, log}).Continuous {
+		t.Fatal("advertised PITR for a legacy dump without an end time")
+	}
+	if _, err := PlanRestore(nil, &legacy, nil); err != nil {
+		t.Fatalf("standalone legacy restore was rejected: %v", err)
 	}
 	copy := log
 	copy.ID, copy.CopyOf = "log-copy", log.ID

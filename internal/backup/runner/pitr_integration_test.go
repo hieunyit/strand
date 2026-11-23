@@ -59,7 +59,19 @@ func TestPITRMySQL(t *testing.T) {
 	for k, v := range vars {
 		t.Setenv(k, v)
 	}
-	wrapper(t, tools, "mysqldump", my.Container, "mysqldump", "MYSQL_PWD")
+	wrapper(t, tools, "mysqldump-inner", my.Container, "mysqldump", "MYSQL_PWD")
+	dumpReady := filepath.Join(tools, "dump-ready")
+	dumpRelease := filepath.Join(tools, "dump-release")
+	dumpTool := fmt.Sprintf(`#!/bin/sh
+if [ "$1" != --version ]; then
+  touch "%s"
+  until [ -f "%s" ]; do sleep 0.1; done
+fi
+exec "%s" "$@"
+`, dumpReady, dumpRelease, filepath.Join(tools, "mysqldump-inner"))
+	if err := os.WriteFile(filepath.Join(tools, "mysqldump"), []byte(dumpTool), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	wrapper(t, tools, "mysql", my.Container, "mysql", "MYSQL_PWD")
 	binlogTool := "#!/bin/sh\nexec docker run --rm -i --network host --user " + fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()) + " -e TZ -v " + dir + ":" + dir + " --entrypoint mysqlbinlog percona/percona-xtrabackup:8.4 \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(tools, "mysqlbinlog"), []byte(binlogTool), 0o755); err != nil {
@@ -97,24 +109,65 @@ func TestPITRMySQL(t *testing.T) {
 	}
 	archErr := make(chan error, 1)
 	go func() { archErr <- e.ArchiveBinlog(ctx, job, filepath.Join(dir, "binlog-staging")) }()
-	base, err := e.RunJob(context.Background(), job)
-	if err != nil {
+
+	// Commit rows after the first requested time but before mysqldump takes its snapshot.
+	dumpCtx, cancelDump := context.WithTimeout(ctx, time.Minute)
+	var base backup.Record
+	var dumpErr error
+	dumpDone := make(chan struct{})
+	go func() {
+		defer close(dumpDone)
+		base, dumpErr = e.RunJob(dumpCtx, job)
+	}()
+	defer func() {
+		cancelDump()
+		<-dumpDone
+	}()
+	for {
+		if _, err := os.Stat(dumpReady); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		select {
+		case <-dumpDone:
+			t.Fatalf("backup finished before reaching the snapshot gate: %v", dumpErr)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	beforeSnapshot := time.Now().UTC().Truncate(time.Second).Add(time.Second)
+	time.Sleep(time.Until(beforeSnapshot.Add(time.Millisecond)))
+	insert(11, 20)
+	if err := os.WriteFile(dumpRelease, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	insert(11, 20)
+	<-dumpDone
+	if dumpErr != nil {
+		t.Fatal(dumpErr)
+	}
+	if base.StartTime == nil || base.EndTime == nil || !base.StartTime.Before(beforeSnapshot) || !base.EndTime.After(beforeSnapshot) {
+		t.Fatalf("test target %s must fall between dump start %v and end %v", beforeSnapshot, base.StartTime, base.EndTime)
+	}
+
 	target := time.Now().UTC().Truncate(time.Second).Add(time.Second)
 	time.Sleep(time.Until(target.Add(1100 * time.Millisecond)))
 	insert(21, 30)
 	mustExec(t, my.DB, "FLUSH BINARY LOGS")
 	waitLogs(t, e, job.ID, target)
-	all, _ := e.Catalog.ListAll(context.Background(), backup.Filter{Source: "mysql-prod", Status: backup.StatusComplete}, 0)
+	all, err := e.Catalog.ListAll(ctx, backup.Filter{Source: "mysql-prod", Status: backup.StatusComplete}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, record := range all {
 		if record.KeyID != base.KeyID || record.Format != backup.FormatSBK1 {
 			t.Fatalf("full backup and logs should use the configured key: %+v", record)
 		}
 	}
+	if plan, err := PlanRestore(all, nil, &beforeSnapshot); err == nil {
+		t.Fatalf("planned restore to %s with a dump that already includes later writes: %+v", beforeSnapshot, plan)
+	}
 	w := RecoveryWindow(all)
-	if !w.Continuous || w.End.Before(target) || w.Start.After(ConsistentTime(base)) {
+	if !w.Continuous || w.End.Before(target) || !w.Start.Equal(base.EndTime.Truncate(time.Second).Add(time.Second)) {
 		t.Fatalf("window %+v", w)
 	}
 	plan, err := PlanRestore(all, nil, &target)

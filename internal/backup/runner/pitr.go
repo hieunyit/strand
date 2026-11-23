@@ -13,8 +13,8 @@ import (
 	"strand/internal/backup"
 )
 
-// ConsistentTime is the time a base backup's data is consistent to: the snapshot start for logical
-// single-transaction dumps, the end for physical backups and mongodump --oplog.
+// ConsistentTime labels a standalone restore point. Logical dumps use the
+// recorded job start, which is only an approximation of their snapshot time.
 func ConsistentTime(r backup.Record) time.Time {
 	if r.Method == backup.MethodMongodump && r.Details["oplog_boundary"] == "embedded-v1" {
 		if ts, err := ParseOplogTS(r.EndPosition.OplogTS); err == nil {
@@ -44,7 +44,7 @@ func pitrBase(r backup.Record) bool {
 	}
 	switch r.Engine {
 	case backup.EngineMySQL:
-		return r.Position.GTIDSet != "" && r.Method == backup.MethodMySQLDump
+		return r.Position.GTIDSet != "" && r.Method == backup.MethodMySQLDump && mysqlDumpHasEndTime(r)
 	case backup.EnginePostgres:
 		return r.Method == backup.MethodPGBaseBackup && r.EndPosition.LSN != ""
 	case backup.EngineMongoDB:
@@ -53,6 +53,20 @@ func pitrBase(r backup.Record) bool {
 			r.Details["oplog_boundary"] == "embedded-v1" && err == nil
 	}
 	return false
+}
+
+func mysqlDumpHasEndTime(r backup.Record) bool {
+	return r.EndTime != nil && !r.EndTime.IsZero() && !r.EndTime.Before(ConsistentTime(r))
+}
+
+func pitrBaseEarliestTime(r backup.Record) time.Time {
+	if r.Method == backup.MethodMySQLDump && mysqlDumpHasEndTime(r) {
+		// The dump's snapshot is acquired sometime before the stream ends.
+		// mysqlbinlog excludes events from the cutoff second onwards, so use
+		// the first whole second strictly after that upper bound.
+		return r.EndTime.Truncate(time.Second).Add(time.Second)
+	}
+	return ConsistentTime(r)
 }
 
 func logEnd(r backup.Record) time.Time {
@@ -142,7 +156,7 @@ func RecoveryWindow(rs []backup.Record) Window {
 		end := logEnd(run[len(run)-1])
 		var start *time.Time
 		for _, base := range bases {
-			t := ConsistentTime(base)
+			t := pitrBaseEarliestTime(base)
 			if !pitrBase(base) || t.After(end) || (start != nil && !t.Before(*start)) {
 				continue
 			}
@@ -243,13 +257,18 @@ func PlanRestore(rs []backup.Record, chosen *backup.Record, target *time.Time) (
 		if err := RequireStandaloneBackup(*chosen); err != nil {
 			return RestorePlan{}, err
 		}
+		if chosen.Method == backup.MethodMySQLDump {
+			if err := checkMySQLPITRBaseTime(*chosen, *target); err != nil {
+				return RestorePlan{}, err
+			}
+		}
 	}
 	var bases []backup.Record
 	for _, r := range byID {
 		if chosen != nil && r.ID != chosen.ID {
 			continue
 		}
-		if r.Status != backup.StatusComplete || !pitrBase(r) || ConsistentTime(r).After(*target) {
+		if r.Status != backup.StatusComplete || !pitrBase(r) || pitrBaseEarliestTime(r).After(*target) {
 			continue
 		}
 		if r.Engine == backup.EngineMongoDB {
@@ -283,6 +302,17 @@ func PlanRestore(rs []backup.Record, chosen *backup.Record, target *time.Time) (
 		}
 	}
 	return RestorePlan{}, newestErr
+}
+
+func checkMySQLPITRBaseTime(base backup.Record, target time.Time) error {
+	if !mysqlDumpHasEndTime(base) {
+		return fmt.Errorf("base backup %s has no valid dump completion time for point-in-time recovery", base.ID)
+	}
+	if earliest := pitrBaseEarliestTime(base); target.Before(earliest) {
+		return fmt.Errorf("base backup %s can only anchor point-in-time recovery at or after %s, following dump completion",
+			base.ID, earliest.UTC().Format(time.RFC3339))
+	}
+	return nil
 }
 
 func planPITRFromBase(base backup.Record, byID map[string]backup.Record, archives []backup.Record, target *time.Time) (RestorePlan, error) {

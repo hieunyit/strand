@@ -373,7 +373,8 @@ func TestRestorePITRWindowRejection(t *testing.T) {
 	baseTime := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
 	// Base backup at 10:00
 	pos := backup.Position{GTIDSet: "0000:1-100", BinlogFile: "mysql-bin.000001", BinlogPos: 1234}
-	seedRichBackup(t, e.st, "bkp-pitr-base", "mysql-pitr", "mysql", "mysqldump", backup.KindFull, baseTime, pos, false, nil, "", nil, nil, "", map[string]string{"source_identity": "mysql-fixture"})
+	baseEnd := baseTime.Add(time.Minute)
+	seedRichBackup(t, e.st, "bkp-pitr-base", "mysql-pitr", "mysql", "mysqldump", backup.KindFull, baseTime, pos, false, nil, "", nil, &baseEnd, "", map[string]string{"source_identity": "mysql-fixture"})
 
 	// 2 continuous log segments: 10:00 - 11:00, and 11:00 - 12:00
 	l1Start := baseTime
@@ -400,6 +401,10 @@ func TestRestorePITRWindowRejection(t *testing.T) {
 	}
 	if !strings.Contains(body, "outside PITR recovery window") {
 		t.Errorf("error message should state outside PITR recovery window: %s", body)
+	}
+	reqBefore["target_time"] = baseTime.Add(30 * time.Second).Format(time.RFC3339)
+	if code, body = adm.do("POST", "/api/v1/backup-restores", reqBefore); code != http.StatusBadRequest || !strings.Contains(body, "outside PITR recovery window") {
+		t.Fatalf("expected 400 for a time during the dump, got %d: %s", code, body)
 	}
 
 	// 2. Target time AFTER window (13:00 > 12:00) -> 400 Bad Request

@@ -889,6 +889,7 @@ Validation rules enforced by `backup.ValidateJob` and UI:
   created anymore).
 - MySQL PITR needs GTID mode and a single-database `mysqldump` base; MariaDB
   binlog archiving is not supported (MariaDB GTIDs).
+- A MySQL PITR target must be at least the first whole second after the base dump completed. An earlier target can use an older base with continuous binlog coverage. Dumps without a recorded completion time remain available for standalone restore.
 - New MySQL and PostgreSQL archives record the server identity. A PITR base
   and its logs must come from the same job and server. Legacy records without
   that evidence remain usable as standalone backups. Start a new archive job

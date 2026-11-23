@@ -72,6 +72,11 @@ func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (e
 	if len(plan.Chain) != 1 {
 		return errors.New("incremental restore requires `strand backup fetch` and the native restore tool")
 	}
+	if base.Method == backup.MethodMySQLDump && plan.Target != nil {
+		if err := checkMySQLPITRBaseTime(base, *plan.Target); err != nil {
+			return err
+		}
+	}
 	defer func() {
 		detail := map[string]any{"backup_id": base.ID, "source": base.Source, "logs": len(plan.Logs), "target_host": t.Conn.Host,
 			"target_database": t.Database, "target_dir": t.Dir}
