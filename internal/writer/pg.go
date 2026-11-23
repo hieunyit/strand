@@ -600,6 +600,12 @@ func (a *pgApplier) apply(row *model.RowChange) error {
 	if a.w.pk.isKeyless(row.Table) {
 		return a.applyKeyless(row)
 	}
+	if row.Op == model.OpUpdate && len(row.OldKey) > 0 && keysDiffer(row.OldKey, row.Key) {
+		handled, err := a.applyReferencedPKUpdate(row)
+		if handled || err != nil {
+			return err
+		}
+	}
 	ordered, err := a.isOrdered(row.Table)
 	if err != nil {
 		return err
@@ -691,6 +697,94 @@ func (a *pgApplier) apply(row *model.RowChange) error {
 	default:
 		return fmt.Errorf("table %s: unknown op %q", row.Table, row.Op)
 	}
+}
+
+// For a referenced row an UPDATE and a DELETE have different FK actions.
+// Keep the key move as an UPDATE, including when a TOAST value is omitted.
+func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) {
+	table := quotePGTable(row.Table)
+	var referenced bool
+	const referencesKey = `SELECT EXISTS (
+		SELECT 1 FROM pg_constraint
+		WHERE contype = 'f' AND (
+			confrelid = $1::text::regclass OR
+			confrelid IN (SELECT pg_partition_ancestors($1::text::regclass))
+		)
+	)`
+	if err := a.tx.QueryRow(a.ctx, referencesKey, table).Scan(&referenced); err != nil {
+		return false, fmt.Errorf("inspect foreign keys referencing %s: %w", row.Table, err)
+	}
+	if !referenced {
+		return false, nil
+	}
+	if len(row.Cols) == 0 || len(row.OldKey) != len(row.Key) {
+		return true, fmt.Errorf("table %s: invalid primary-key update image", row.Table)
+	}
+	if err := a.flushAll(); err != nil {
+		return true, err
+	}
+	pkCols, err := a.w.pk.get(row.Table, len(row.Key))
+	if err != nil {
+		return true, err
+	}
+
+	var names []string
+	var values []any
+	var set, where []string
+	for i, name := range pkCols {
+		names, values = append(names, name), append(values, row.Key[i])
+	}
+	for _, col := range row.Cols {
+		if !col.Unchanged && !containsString(pkCols, col.Name) {
+			names, values = append(names, col.Name), append(values, col.Value)
+		}
+	}
+	for i, name := range names {
+		set = append(set, fmt.Sprintf("%s = $%d", quotePG(name), i+1))
+	}
+	args := append([]any(nil), values...)
+	for i, name := range pkCols {
+		args = append(args, row.OldKey[i])
+		where = append(where, fmt.Sprintf("%s = $%d", quotePG(name), len(args)))
+	}
+	rows := model.PGRelationRows(table, "")
+	tag, err := a.tx.Exec(a.ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s",
+		table, strings.Join(set, ", "), rows, strings.Join(where, " AND ")), args...)
+	if err != nil {
+		return true, fmt.Errorf("move referenced primary key on %s: %w", row.Table, err)
+	}
+	if tag.RowsAffected() == 0 {
+		// A snapshot or a preceding native cascade can already have moved the
+		// row. Never delete the old key as a fallback on a referenced table.
+		var oldExists bool
+		// Rebuild placeholders for a query that only binds the old key.
+		for i, name := range pkCols {
+			where[i] = fmt.Sprintf("%s = $%d", quotePG(name), i+1)
+		}
+		q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s WHERE %s AND %s)", table, rows, strings.Join(where, " AND "))
+		if err := a.tx.QueryRow(a.ctx, q, args[len(values):]...).Scan(&oldExists); err != nil {
+			return true, err
+		}
+		if oldExists {
+			return true, fmt.Errorf("move referenced primary key on %s: old row remains after UPDATE", row.Table)
+		}
+		if hasUnchanged(row) {
+			var newExists bool
+			if err := a.tx.QueryRow(a.ctx, q, values[:len(pkCols)]...).Scan(&newExists); err != nil {
+				return true, err
+			}
+			if !newExists {
+				return true, newToastRowMissing(row.Table, row.OldKey)
+			}
+		} else {
+			q, args := buildUpsert(row.Table, names, pkCols, [][]any{values})
+			if _, err := a.tx.Exec(a.ctx, q, args...); err != nil {
+				return true, err
+			}
+		}
+	}
+	a.written++
+	return true, nil
 }
 
 // partialUpdate áp một UPDATE có cột Unchanged (TOAST): cột Unchanged không bao giờ nằm trong SET.

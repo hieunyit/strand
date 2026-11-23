@@ -71,6 +71,65 @@ func TestCDCLeaseBlocksTakeoverDuringUncertainDDL(t *testing.T) {
 
 }
 
+func TestCDCLeaseTakeoverFencesStaleTransaction(t *testing.T) {
+	rs := testutil.MongoReplicaSet(t)
+	client := mustClient(t, rs.URI)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	locks := client.Database(stateDatabase, targetDBOptions()).Collection(lockCollection)
+	acquire := func() (*lease, error) {
+		return acquireLease(ctx, client, locks, "takeover_target", "review", time.Minute, 1, quietLogger(t))
+	}
+	first, err := acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.release()
+	docs := client.Database("takeover_target").Collection("docs")
+	if err := first.txn(ctx, 0, func(tx context.Context) error {
+		_, err := docs.InsertOne(tx, bson.D{{Key: "_id", Value: "before-takeover"}})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an expired predecessor whose process disappeared. The new owner
+	// must rewrite the fence documents before it starts accepting writes.
+	if _, err := locks.UpdateOne(ctx, bson.D{{Key: "_id", Value: first.key}}, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "expires_at", Value: time.Unix(0, 0)},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.release()
+
+	staleCallbackRan := false
+	err = first.txn(ctx, 0, func(tx context.Context) error {
+		staleCallbackRan = true
+		_, err := docs.InsertOne(tx, bson.D{{Key: "_id", Value: "stale-write"}})
+		return err
+	})
+	if !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("stale owner's transaction returned %v, want ErrLeaseLost", err)
+	}
+	if staleCallbackRan {
+		t.Fatal("stale owner reached the write callback after takeover")
+	}
+	if err := second.txn(ctx, 0, func(tx context.Context) error {
+		_, err := docs.InsertOne(tx, bson.D{{Key: "_id", Value: "after-takeover"}})
+		return err
+	}); err != nil {
+		t.Fatalf("current owner could not write after takeover: %v", err)
+	}
+	count, err := docs.CountDocuments(ctx, bson.D{})
+	if err != nil || count != 2 {
+		t.Fatalf("target has %d documents after takeover, err=%v; want only the before/after writes", count, err)
+	}
+}
+
 func TestCDCSourceLookupCarriesEventClusterTime(t *testing.T) {
 	rs := testutil.MongoReplicaSet(t)
 	times := make(chan bson.Timestamp, 1)
