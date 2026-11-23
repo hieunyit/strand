@@ -77,6 +77,7 @@
         <tr><th>Engine</th><td>{{.Body.Backup.Engine}}</td></tr>
         <tr><th>Tool</th><td>{{.Body.Backup.Tool}} {{if .Body.Backup.ToolVersion}}({{.Body.Backup.ToolVersion}}){{end}}</td></tr>
         <tr><th>Kind</th><td><span class="badge small">{{.Body.Backup.Kind}}</span></td></tr>
+        <tr><th>Database scope</th><td>{{if and .Body.Backup.Details (index .Body.Backup.Details "databases")}}<code>{{index .Body.Backup.Details "databases"}}</code>{{else}}All databases / cluster{{end}}</td></tr>
         <tr><th>Size</th><td>{{bytes64 .Body.Backup.Bytes}}</td></tr>
         <tr><th>Format</th><td>{{if .Body.Backup.Format}}{{.Body.Backup.Format}}{{else}}raw{{end}}</td></tr>
         <tr><th>Key ID</th><td>{{if .Body.Backup.KeyID}}<code>{{.Body.Backup.KeyID}}</code>{{else}}<span class="muted">none (unencrypted)</span>{{end}}</td></tr>

@@ -91,6 +91,7 @@
         <th>Source</th>
         <th>Engine / Tool</th>
         <th>Kind</th>
+        <th>Database scope</th>
         <th class="r">Size</th>
         <th>Position</th>
         <th>Created</th>
@@ -108,6 +109,7 @@
           <div class="sub muted small">{{.Tool}}</div>
         </td>
         <td><span class="badge small">{{.Kind}}</span></td>
+        <td class="small">{{if and .Details (index .Details "databases")}}<code>{{index .Details "databases"}}</code>{{else}}All databases / cluster{{end}}</td>
         <td class="r nowrap">{{bytes64 .Bytes}}</td>
         <td class="small mono">{{if .Position.GTIDSet}}{{.Position.GTIDSet}}{{else if .Position.LSN}}{{.Position.LSN}}{{else if .Position.BinlogFile}}{{.Position.BinlogFile}}:{{.Position.BinlogPos}}{{else if .Position.OplogTS}}{{.Position.OplogTS}}{{else}}-{{end}}</td>
         <td class="nowrap">{{ts .CreatedAt}}</td>
@@ -125,7 +127,7 @@
         </td>
       </tr>
       {{else}}
-      <tr><td colspan="9" class="empty">No restore points found matching the selected filters.</td></tr>
+      <tr><td colspan="10" class="empty">No restore points found matching the selected filters.</td></tr>
       {{end}}
     </tbody>
   </table></div>
