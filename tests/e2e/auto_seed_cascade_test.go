@@ -26,6 +26,7 @@ func TestMDB_E2E_AutoSeedCascadesWithoutReload(t *testing.T) {
 			" CONSTRAINT fk_log_scenario FOREIGN KEY (scenario_id) REFERENCES app.dm_scenario(id) ON DELETE CASCADE,"+
 			" CONSTRAINT fk_log_step FOREIGN KEY (step_id) REFERENCES app.dm_step(id) ON DELETE SET NULL) ENGINE=InnoDB",
 		"CREATE TABLE app.plain (id BIGINT PRIMARY KEY, v VARCHAR(20)) ENGINE=InnoDB",
+		"CREATE TABLE app.plain_note (id BIGINT PRIMARY KEY, plain_id BIGINT, CONSTRAINT note_parent_fk FOREIGN KEY (plain_id) REFERENCES app.plain(id) ON DELETE RESTRICT)",
 		"CREATE TABLE extra.customer_note (id BIGINT PRIMARY KEY, parent_id BIGINT, CONSTRAINT fk_external_customer FOREIGN KEY (parent_id) REFERENCES app.customer(id) ON DELETE CASCADE)",
 		"INSERT INTO app.customer VALUES (1,'a'),(2,'b')",
 		"INSERT INTO app.customer_attribute VALUES (10,1,'x'),(11,1,'y'),(20,2,'z')",
@@ -33,6 +34,7 @@ func TestMDB_E2E_AutoSeedCascadesWithoutReload(t *testing.T) {
 		"INSERT INTO app.dm_step VALUES (100,1),(200,2)",
 		"INSERT INTO app.dm_log_scenario VALUES (1000,1,100,'s1'),(1001,2,100,'cross'),(2000,2,200,'s2')",
 		"INSERT INTO app.plain VALUES (1,'p')",
+		"INSERT INTO app.plain_note VALUES (1,1)",
 		"INSERT INTO extra.customer_note VALUES (10,1),(20,2)")
 	// Created before Strand, without the cascading foreign key (as a manual or tool-made schema).
 	dst.exec(t, "CREATE TABLE app.customer (id BIGINT PRIMARY KEY, name VARCHAR(20)) ENGINE=InnoDB",
@@ -58,6 +60,15 @@ func TestMDB_E2E_AutoSeedCascadesWithoutReload(t *testing.T) {
 		t.Fatalf("preflight altered the target on failure: %d, err=%v", untouched, err)
 	}
 	dst.exec(t, "ALTER TABLE app.customer_attribute DROP FOREIGN KEY unexpected_restrict")
+	// Although this FK is outside the cascade component, native cascade
+	// enables FOREIGN_KEY_CHECKS globally and the extra FK would block CDC.
+	dst.exec(t, "CREATE TABLE app.plain (id BIGINT PRIMARY KEY, v VARCHAR(20)) ENGINE=InnoDB",
+		"CREATE TABLE app.isolated_extra (id BIGINT PRIMARY KEY, plain_id BIGINT, CONSTRAINT isolated_restrict FOREIGN KEY (plain_id) REFERENCES app.plain(id) ON DELETE RESTRICT)")
+	out, code = runStrandCLI(t, time.Minute, "sync", "-c", path)
+	if code != 3 || !strings.Contains(out, "unexpected foreign key isolated_restrict") {
+		t.Fatalf("unrelated target RESTRICT with native checks: exit %d\n%s", code, out)
+	}
+	dst.exec(t, "DROP TABLE app.isolated_extra")
 	p := startStrand(t, path)
 	defer func() {
 		if !p.exited() {
@@ -73,7 +84,7 @@ func TestMDB_E2E_AutoSeedCascadesWithoutReload(t *testing.T) {
 		t.Fatalf("target fk_ca: rule=%q err=%v", rule, err)
 	}
 	waitSynced(t, &cfg, p, time.Minute)
-	tables := []string{"customer", "customer_attribute", "dm_scenario", "dm_step", "dm_log_scenario", "plain"}
+	tables := []string{"customer", "customer_attribute", "dm_scenario", "dm_step", "dm_log_scenario", "plain", "plain_note"}
 	same := func() {
 		t.Helper()
 		for _, table := range tables {

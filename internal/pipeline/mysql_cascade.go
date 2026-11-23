@@ -251,15 +251,42 @@ func cascadeSignature(fk cascadeFK) string {
 	return string(raw)
 }
 
+// MySQL and MariaDB use both names for the same legacy three-byte UTF-8 collation.
+func canonicalFKCollation(name string) string {
+	if suffix, ok := strings.CutPrefix(strings.ToLower(name), "utf8_"); ok {
+		return "utf8mb3_" + suffix
+	}
+	return strings.ToLower(name)
+}
+
+func equivalentFKCollations(left, right []string) bool {
+	return slices.EqualFunc(left, right, func(a, b string) bool {
+		return canonicalFKCollation(a) == canonicalFKCollation(b)
+	})
+}
+
+// Compare canonical aliases without changing the signatures saved in older checkpoints.
+func cascadeMatchSignature(fk cascadeFK) string {
+	fk.ChildCollations = slices.Clone(fk.ChildCollations)
+	fk.ParentCollations = slices.Clone(fk.ParentCollations)
+	for _, names := range [][]string{fk.ChildCollations, fk.ParentCollations} {
+		for i, name := range names {
+			names[i] = canonicalFKCollation(name)
+		}
+	}
+	return cascadeSignature(fk)
+}
+
 func cascadeConfigError(message string) error {
 	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, message, nil)
 }
 
 type mysqlCascadePlan struct {
-	signatures []string
-	parents    map[model.TableID]bool
-	children   map[model.TableID]bool
-	missing    []cascadeFK
+	signatures    []string
+	parents       map[model.TableID]bool
+	children      map[model.TableID]bool
+	checkedTables map[model.TableID]bool
+	missing       []cascadeFK
 }
 
 func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.TableID) (mysqlCascadePlan, error) {
@@ -272,6 +299,7 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 		return plan, nil
 	}
 	plan.parents, plan.children = map[model.TableID]bool{}, map[model.TableID]bool{}
+	plan.checkedTables = map[model.TableID]bool{}
 	sourceScope := p.cascadeSourceScope(additional...)
 	source, err := readSourceForeignKeys(ctx, p.src, sourceScope, true)
 	if err != nil {
@@ -286,23 +314,25 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 		targetScope[p.filter.Target(id)] = true
 	}
 	sourceGroup, sourcePinned, overlap := cascadeGroups(source)
-	targetGroup := make(map[model.TableID]bool, len(sourceGroup))
+	// Native cascade turns FOREIGN_KEY_CHECKS on for the entire writer. An
+	// unrelated restrictive FK can therefore affect CDC even outside a
+	// cascade-connected component.
+	nativeChecks := len(sourceGroup) > 0
 	targetPinned := make(map[model.TableID]bool, len(sourcePinned))
-	for id := range sourceGroup {
-		dst := p.filter.Target(id)
-		targetGroup[dst] = true
-		targetPinned[dst] = sourcePinned[id]
+	for id := range sourcePinned {
+		targetPinned[p.filter.Target(id)] = true
 	}
 	expected := make(map[string]int)
 	var rules []cascadeFK
 	for _, fk := range source {
 		native := fk.cascades()
-		if !native && !(sourceGroup[fk.Child] || sourceGroup[fk.Parent]) {
+		if !native && !nativeChecks {
 			continue
 		}
 		if !sourceScope[fk.Parent] {
 			return plan, cascadeConfigError(fmt.Sprintf("foreign key %s on %s requires its parent %s in the replication scope", fk.constraint, fk.Child, fk.Parent))
 		}
+		plan.checkedTables[fk.Parent], plan.checkedTables[fk.Child] = true, true
 		if fk.OnDelete == "SET DEFAULT" || fk.OnUpdate == "SET DEFAULT" {
 			return plan, cascadeConfigError(fmt.Sprintf("SET DEFAULT foreign-key actions on %s are unsupported by the MySQL InnoDB target", fk.Child))
 		}
@@ -320,7 +350,7 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 		}
 		sourceChild := fk.Child
 		fk.Child, fk.Parent = p.filter.Target(fk.Child), p.filter.Target(fk.Parent)
-		key := cascadeSignature(fk)
+		key := cascadeMatchSignature(fk)
 		expected[key]++
 		// Keep the persisted signature format compatible with existing checkpoints.
 		// Restrictive FKs are verified directly against the target on every start.
@@ -343,13 +373,17 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 	}
 	sort.Strings(plan.signatures)
 	for _, fk := range target {
-		if !(fk.cascades() && targetScope[fk.Parent]) && !targetGroup[fk.Child] && !targetGroup[fk.Parent] {
+		if nativeChecks {
+			if !targetScope[fk.Child] && !targetScope[fk.Parent] {
+				continue
+			}
+		} else if !fk.cascades() || !targetScope[fk.Parent] {
 			continue
 		}
 		if targetPinned[fk.Child] || targetPinned[fk.Parent] {
 			fk.Name = fk.constraint
 		}
-		key := cascadeSignature(fk)
+		key := cascadeMatchSignature(fk)
 		if expected[key] == 0 {
 			kind := "foreign key"
 			if fk.cascades() {
@@ -361,7 +395,7 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 		expected[key]--
 	}
 	for _, fk := range rules {
-		key := cascadeSignature(fk)
+		key := cascadeMatchSignature(fk)
 		if expected[key] == 0 {
 			continue
 		}

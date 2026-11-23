@@ -27,6 +27,54 @@ type seedDependency struct {
 	child, parent model.TableID
 }
 
+const autoSeedBinlogCheckInterval = 30 * time.Second
+
+// autoSeedBinlogGuard verifies that the snapshot's resume point is still
+// available while a potentially long initial copy is in progress. checkedAt
+// keeps the throttle monotonic because time.Now values carry Go's monotonic
+// clock reading.
+type autoSeedBinlogGuard struct {
+	check     func(context.Context) error
+	checkedAt time.Time
+}
+
+func (g *autoSeedBinlogGuard) checkIfDue(ctx context.Context) error {
+	if g == nil || g.check == nil {
+		return nil
+	}
+	now := time.Now()
+	if !g.checkedAt.IsZero() && now.Sub(g.checkedAt) < autoSeedBinlogCheckInterval {
+		return nil
+	}
+	if err := g.check(ctx); err != nil {
+		return err
+	}
+	g.checkedAt = time.Now()
+	return nil
+}
+
+// waitUntil lets the periodic retention check run even when IOPS throttling
+// pauses between INSERT batches for longer than the check interval.
+func (g *autoSeedBinlogGuard) waitUntil(ctx context.Context, deadline time.Time) error {
+	for {
+		if err := g.checkIfDue(ctx); err != nil {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		wait := min(remaining, autoSeedBinlogCheckInterval)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func readSeedDependencies(ctx context.Context, db *sql.DB) ([]seedDependency, error) {
 	rows, err := db.QueryContext(ctx, `SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME
 		FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_NAME IS NOT NULL`)
@@ -60,7 +108,7 @@ func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan)
 	roots := make([]model.TableID, 0)
 	for id, table := range p.tables {
 		targets[p.filter.Target(id)] = id
-		if table.Keyless || cascade.parents[id] || cascade.children[id] {
+		if table.Keyless || cascade.parents[id] || cascade.children[id] || cascade.checkedTables[id] {
 			roots = append(roots, id)
 		}
 	}
@@ -278,7 +326,7 @@ func (p *Pipeline) preflightAutoSeedForeignKeys(ctx context.Context) ([]cascadeF
 			if err != nil {
 				return nil, fmt.Errorf("auto-seed: inspect foreign-key columns on target %s: %w", side.table, err)
 			}
-			if !slices.Equal(collations, side.collations) {
+			if !equivalentFKCollations(collations, side.collations) {
 				return nil, autoSeedRejected(fmt.Sprintf("target %s foreign-key columns (%s) must use the source collations before automatic schema creation", side.table, strings.Join(side.columns, ", ")))
 			}
 		}
@@ -561,8 +609,14 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 	if iops <= 0 {
 		iops = 600
 	}
+	binlogGuard := &autoSeedBinlogGuard{check: func(ctx context.Context) error {
+		return p.checkBinlogPosition(ctx, pos.File, pos.Position)
+	}}
+	if err := binlogGuard.checkIfDue(ctx); err != nil {
+		return err
+	}
 	for _, id := range group {
-		rows, err := copyAutoSeedTable(ctx, source, target, id, p.filter.Target(id), writableColumns(p.tables[id]), float64(iops)*16*1024)
+		rows, err := copyAutoSeedTable(ctx, source, target, id, p.filter.Target(id), writableColumns(p.tables[id]), float64(iops)*16*1024, binlogGuard)
 		if err != nil {
 			return fmt.Errorf("auto-seed copy %s: %w", id, err)
 		}
@@ -585,7 +639,7 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 	return nil
 }
 
-func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, from, to model.TableID, columns []string, bytesPerSecond float64) (int64, error) {
+func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, from, to model.TableID, columns []string, bytesPerSecond float64, binlogGuard *autoSeedBinlogGuard) (int64, error) {
 	if len(columns) == 0 {
 		return 0, autoSeedRejected("table has no writable columns")
 	}
@@ -615,13 +669,11 @@ func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, fr
 			return nil
 		}
 		if pause := time.Duration(float64(size)/bytesPerSecond*float64(time.Second)) - time.Since(start); pause > 0 {
-			timer := time.NewTimer(pause)
-			defer timer.Stop()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-timer.C:
+			if err := binlogGuard.waitUntil(ctx, time.Now().Add(pause)); err != nil {
+				return err
 			}
+		} else if err := binlogGuard.checkIfDue(ctx); err != nil {
+			return err
 		}
 		count := len(batch) / len(columns)
 		if _, err := target.ExecContext(ctx, insert+valueList+strings.Repeat(","+valueList, count-1), batch...); err != nil {

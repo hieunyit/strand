@@ -187,9 +187,9 @@ Strand lấy một ảnh InnoDB nhất quán, tự ghi vị trí binlog và truy
 
 Với nguồn MariaDB, Strand đọc vị trí binlog của ảnh dữ liệu qua `Binlog_snapshot_file` và `Binlog_snapshot_position`. Bước này không cần quyền `RELOAD` và không giữ global read lock. Nếu có DDL ghi vào binlog đúng lúc mở ảnh, Strand tự mở lại ảnh. Với nguồn MySQL, tài khoản nguồn cần quyền `RELOAD`. Strand giữ `FLUSH TABLES WITH READ LOCK` trong thời gian ngắn, có giới hạn thời gian chờ, rồi đọc tiếp từ ảnh nhất quán. `binlog_row_image` phải là `FULL`. Các bảng nạp tự động ở đích phải là InnoDB, trống và không có trigger. Giữ ứng dụng ở nguồn trong lúc khởi tạo.
 
-Trước khi tạo hoặc bổ sung khóa ngoại, Strand đối chiếu cả `RESTRICT` và `NO ACTION` trong nhóm cascade. Nếu định nghĩa ở đích xung đột hoặc nhóm tự nạp đã có dữ liệu, Strand dừng trước khi thay đổi schema ứng dụng. Khi tiếp tục từ checkpoint, Strand kiểm tra sự tương thích của khóa ngoại mà không tự sửa schema đích.
+Khi pipeline có cascade, MySQL kiểm tra FK trên mọi câu ghi CDC của pipeline. Strand đối chiếu cả `RESTRICT` và `NO ACTION` trong phạm vi, kể cả ở nhóm độc lập, và nạp trước các nhóm có FK để CDC không ghi vào chúng trong lúc snapshot. Các bảng độc lập không có FK vẫn snapshot như trước. Nếu định nghĩa ở đích xung đột hoặc nhóm tự nạp đã có dữ liệu, Strand dừng trước khi thay đổi schema ứng dụng. Khi tiếp tục từ checkpoint, Strand kiểm tra sự tương thích của khóa ngoại mà không tự sửa schema đích.
 
-Dữ liệu của nhóm và checkpoint được commit cùng một transaction ở MySQL. Nếu tiến trình dừng trước commit, lần Start sau tự chép lại nhóm còn dở. Dung lượng undo, redo và binlog đích phải đủ cho **nhóm nạp tự động**. Các bảng độc lập ngoài nhóm không nằm trong transaction này. Binlog nguồn phải còn đủ dài để phủ thời gian nạp và bắt kịp.
+Dữ liệu của nhóm và checkpoint được commit cùng một transaction ở MySQL. Nếu tiến trình dừng trước commit, lần Start sau tự chép lại nhóm còn dở. Dung lượng undo, redo và binlog đích phải đủ cho **nhóm nạp tự động**. Các bảng độc lập ngoài nhóm không nằm trong transaction này. Strand kiểm tra vị trí binlog trong lúc nạp và trước khi commit. Binlog nguồn phải còn đủ dài để phủ thời gian nạp và bắt kịp.
 
 ### Bước 5. Kiểm tra trước
 

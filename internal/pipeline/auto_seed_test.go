@@ -1,7 +1,10 @@
 package pipeline
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"strand/internal/model"
 )
@@ -39,5 +42,37 @@ func TestAutoSeedJournalRecovery(t *testing.T) {
 				t.Fatal("seed journal was not resolved")
 			}
 		})
+	}
+}
+
+func TestAutoSeedBinlogGuardThrottlesChecks(t *testing.T) {
+	calls := 0
+	guard := &autoSeedBinlogGuard{check: func(context.Context) error {
+		calls++
+		return nil
+	}}
+	if err := guard.checkIfDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.checkIfDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("checks within the interval were not throttled: got %d, want 1", calls)
+	}
+	guard.checkedAt = time.Now().Add(-autoSeedBinlogCheckInterval)
+	if err := guard.checkIfDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("expired interval was not checked: got %d checks, want 2", calls)
+	}
+}
+
+func TestAutoSeedBinlogGuardPropagatesRetentionFailure(t *testing.T) {
+	want := errors.New("binlog anchor was purged")
+	guard := &autoSeedBinlogGuard{check: func(context.Context) error { return want }}
+	if err := guard.checkIfDue(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("got %v, want retention error %v", err, want)
 	}
 }

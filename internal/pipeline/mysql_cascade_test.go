@@ -112,6 +112,23 @@ func TestCascadeSignatureKeepsUnpinnedFormat(t *testing.T) {
 	}
 }
 
+func TestCascadeMatchSignatureAcceptsOnlyEquivalentCollationAliases(t *testing.T) {
+	source := cascadeFK{ChildCollations: []string{"utf8_general_ci"}, ParentCollations: []string{"utf8_bin"}}
+	target := cascadeFK{ChildCollations: []string{"utf8mb3_general_ci"}, ParentCollations: []string{"utf8mb3_bin"}}
+	if !equivalentFKCollations(source.ChildCollations, target.ChildCollations) ||
+		cascadeMatchSignature(source) != cascadeMatchSignature(target) {
+		t.Fatal("the same UTF-8 collation under a different catalog alias must match")
+	}
+	if cascadeSignature(source) == cascadeSignature(target) || source.ChildCollations[0] != "utf8_general_ci" {
+		t.Fatal("matching must not change durable signatures or the original metadata")
+	}
+	target.ChildCollations[0] = "utf8mb3_unicode_ci"
+	if equivalentFKCollations(source.ChildCollations, target.ChildCollations) ||
+		cascadeMatchSignature(source) == cascadeMatchSignature(target) {
+		t.Fatal("different collations must not match")
+	}
+}
+
 func TestCascadeAddSQL(t *testing.T) {
 	fk := cascadeFK{Child: model.TableID{Schema: "call_dashboard", Table: "customer_attribute"}, Parent: model.TableID{Schema: "call_dashboard", Table: "customer"},
 		Columns: []string{"customer_id"}, References: []string{"id"}, OnDelete: "CASCADE", OnUpdate: "RESTRICT"}
