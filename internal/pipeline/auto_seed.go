@@ -16,6 +16,7 @@ import (
 	"strand/internal/model"
 	"strand/internal/mysqlver"
 	mysqlreader "strand/internal/reader/mysql"
+	"strand/internal/schemagen"
 )
 
 func autoSeedRejected(msg string) error {
@@ -46,7 +47,7 @@ func readSeedDependencies(ctx context.Context, db *sql.DB) ([]seedDependency, er
 
 // autoSeedTables closes the selected tables over foreign keys in both databases.
 // A connected group cannot straddle online snapshot and the consistent initial copy.
-func (p *Pipeline) autoSeedTables(ctx context.Context) ([]model.TableID, error) {
+func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan) ([]model.TableID, error) {
 	source, err := readSeedDependencies(ctx, p.src)
 	if err != nil {
 		return nil, fmt.Errorf("inspect source foreign keys: %w", err)
@@ -59,7 +60,7 @@ func (p *Pipeline) autoSeedTables(ctx context.Context) ([]model.TableID, error) 
 	roots := make([]model.TableID, 0)
 	for id, table := range p.tables {
 		targets[p.filter.Target(id)] = id
-		if table.Keyless || p.cascade.parents[id] || p.cascade.children[id] {
+		if table.Keyless || cascade.parents[id] || cascade.children[id] {
 			roots = append(roots, id)
 		}
 	}
@@ -115,7 +116,7 @@ func (p *Pipeline) autoSeed(ctx context.Context, empty checkpoint.AppliedSet) (c
 		scope[id] = true
 		ids = append(ids, id)
 	}
-	cascades, err := readSourceCascadingFKs(ctx, p.src, scope)
+	cascades, err := readSourceForeignKeys(ctx, p.src, scope, false)
 	if err != nil {
 		return nil, err
 	}
@@ -152,17 +153,21 @@ func (p *Pipeline) autoSeed(ctx context.Context, empty checkpoint.AppliedSet) (c
 	}
 	p.tables = fresh
 	if p.cfg.Bootstrap.CreateSchemaAuto() {
+		repairs, err := p.preflightAutoSeedForeignKeys(ctx)
+		if err != nil {
+			return nil, err
+		}
 		if err := p.createTargetTables(ctx, ids); err != nil {
 			return nil, err
 		}
-		if err := p.addMissingTargetCascades(ctx, scope); err != nil {
+		if err := p.addMissingTargetCascades(ctx, repairs); err != nil {
 			return nil, err
 		}
 	}
 	if err := p.initMySQLCascade(ctx); err != nil {
 		return nil, err
 	}
-	group, err := p.autoSeedTables(ctx)
+	group, err := p.autoSeedTables(ctx, p.cascade)
 	if err != nil {
 		return nil, err
 	}
@@ -216,61 +221,117 @@ func closeAutoSeedConn(conn *sql.Conn) {
 	_ = conn.Close()
 }
 
-// addMissingTargetCascades recreates source cascading foreign keys that an
-// existing target table lacks. It only touches empty target tables: the
-// auto-seed copy fills them and requires them to be empty anyway.
-func (p *Pipeline) addMissingTargetCascades(ctx context.Context, scope map[model.TableID]bool) error {
-	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL {
+// preflightAutoSeedForeignKeys checks the entire plan before any target schema
+// changes. Missing child tables get their FKs from schemagen; only empty, existing
+// child tables are eligible for additional ALTER statements.
+func (p *Pipeline) preflightAutoSeedForeignKeys(ctx context.Context) ([]cascadeFK, error) {
+	plan, err := p.compareMySQLForeignKeys(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	group, err := p.autoSeedTables(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
+
+	existing := map[model.TableID]bool{}
+	for _, id := range group {
+		dst := p.filter.Target(id)
+		present, err := schemagen.Exists(ctx, p.dst, p.cfg.Target.Kind, dst)
+		if err != nil {
+			return nil, err
+		}
+		existing[dst] = present
+		if present {
+			if err := requireEmptyForeignKeyTarget(ctx, p.dst, dst); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var repairs []cascadeFK
+	for _, fk := range plan.missing {
+		for _, id := range []model.TableID{fk.Child, fk.Parent} {
+			if _, checked := existing[id]; checked {
+				continue
+			}
+			present, err := schemagen.Exists(ctx, p.dst, p.cfg.Target.Kind, id)
+			if err != nil {
+				return nil, err
+			}
+			existing[id] = present
+			if present {
+				if err := requireEmptyForeignKeyTarget(ctx, p.dst, id); err != nil {
+					return nil, err
+				}
+			}
+		}
+		for _, side := range []struct {
+			table               model.TableID
+			columns, collations []string
+		}{
+			{fk.Child, fk.Columns, fk.ChildCollations}, {fk.Parent, fk.References, fk.ParentCollations},
+		} {
+			if !existing[side.table] {
+				continue
+			}
+			collations, err := readFKCollations(ctx, p.dst, side.table, side.columns)
+			if err != nil {
+				return nil, fmt.Errorf("auto-seed: inspect foreign-key columns on target %s: %w", side.table, err)
+			}
+			if !slices.Equal(collations, side.collations) {
+				return nil, autoSeedRejected(fmt.Sprintf("target %s foreign-key columns (%s) must use the source collations before automatic schema creation", side.table, strings.Join(side.columns, ", ")))
+			}
+		}
+		if existing[fk.Child] {
+			repairs = append(repairs, fk)
+		}
+	}
+	return repairs, nil
+}
+
+type autoSeedQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func requireEmptyForeignKeyTarget(ctx context.Context, db autoSeedQueryer, id model.TableID) error {
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM "+autoSeedTableSQL(id)+" LIMIT 1").Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
-	source, err := readSourceCascadingFKs(ctx, p.src, scope)
 	if err != nil {
-		return fmt.Errorf("inspect source cascading foreign keys: %w", err)
+		return fmt.Errorf("auto-seed: inspect target %s: %w", id, err)
 	}
-	target, err := readCascadingFKs(ctx, p.dst)
+	return autoSeedRejected(fmt.Sprintf("target %s already contains data; automatic foreign-key changes require empty tables", id))
+}
+
+func (p *Pipeline) addMissingTargetCascades(ctx context.Context, repairs []cascadeFK) error {
+	if len(repairs) == 0 {
+		return nil
+	}
+	conn, err := p.dst.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("inspect target cascading foreign keys: %w", err)
+		return err
 	}
-	pin := checkCascadeOrder(source) != nil
-	for _, fk := range source {
-		if !scope[fk.Child] || !scope[fk.Parent] || fk.constraint == "" || fk.OnDelete == "SET DEFAULT" || fk.OnUpdate == "SET DEFAULT" {
-			continue // planMySQLCascade reports these
-		}
-		sourceChild := fk.Child
-		if pin {
-			fk.Name = fk.constraint
-		}
-		fk.Child, fk.Parent = p.filter.Target(fk.Child), p.filter.Target(fk.Parent)
-		present := false
-		for _, t := range target {
-			// Any constraint on the same columns stays as it is; a mismatch is
-			// reported by planMySQLCascade instead of being changed here.
-			if t.Child == fk.Child && t.Parent == fk.Parent && slices.Equal(t.Columns, fk.Columns) {
-				present = true
-				break
-			}
-		}
-		if present {
-			continue
-		}
-		empty := true
+	defer closeAutoSeedConn(conn)
+	if _, err := conn.ExecContext(ctx, "SET SESSION FOREIGN_KEY_CHECKS=1"); err != nil {
+		return err
+	}
+	for _, fk := range repairs {
 		for _, id := range []model.TableID{fk.Child, fk.Parent} {
-			var one int
-			err := p.dst.QueryRowContext(ctx, "SELECT 1 FROM "+autoSeedTableSQL(id)+" LIMIT 1").Scan(&one)
-			if err == nil {
-				empty = false
-			} else if !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("auto-seed: inspect target %s: %w", id, err)
+			if err := requireEmptyForeignKeyTarget(ctx, conn, id); err != nil {
+				return err
 			}
 		}
-		if !empty {
-			continue
+		stmt := cascadeAddSQL(fk, fk.constraint)
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return autoSeedRejected(fmt.Sprintf("add missing foreign key on target %s: %v (statement: %s)", fk.Child, err, stmt))
 		}
-		stmt := cascadeAddSQL(fk, p.cascadeTargetName(sourceChild, fk))
-		if _, err := p.dst.ExecContext(ctx, stmt); err != nil {
-			return autoSeedRejected(fmt.Sprintf("add missing cascading foreign key on target %s: %v (statement: %s)", fk.Child, err, stmt))
+		action := "added a foreign key missing on the empty target table"
+		if fk.cascades() {
+			action = "added a cascading foreign key missing on the empty target table"
 		}
-		p.log.Warn("auto-seed: added a cascading foreign key missing on the empty target table", "table", fk.Child.String(), "references", fk.Parent.String(), "constraint", p.cascadeTargetName(sourceChild, fk))
+		p.log.Warn("auto-seed: "+action, "table", fk.Child.String(), "references", fk.Parent.String(), "constraint", fk.constraint)
 	}
 	return nil
 }

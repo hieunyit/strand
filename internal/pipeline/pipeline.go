@@ -570,7 +570,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			if err := p.initMySQLCascade(ctx); err != nil {
 				return err
 			}
-			group, err := p.autoSeedTables(ctx)
+			group, err := p.autoSeedTables(ctx, p.cascade)
 			if err != nil {
 				return err
 			}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -30,7 +31,7 @@ type cascadeFK struct {
 	constraint string
 }
 
-func readCascadingFKs(ctx context.Context, db *sql.DB) ([]cascadeFK, error) {
+func readTargetForeignKeys(ctx context.Context, db *sql.DB) ([]cascadeFK, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT k.TABLE_SCHEMA,k.TABLE_NAME,k.REFERENCED_TABLE_SCHEMA,k.REFERENCED_TABLE_NAME,
 		       k.COLUMN_NAME,k.REFERENCED_COLUMN_NAME,r.DELETE_RULE,r.UPDATE_RULE,k.CONSTRAINT_NAME,
@@ -45,8 +46,6 @@ func readCascadingFKs(ctx context.Context, db *sql.DB) ([]cascadeFK, error) {
 		  ON p.TABLE_SCHEMA=k.REFERENCED_TABLE_SCHEMA AND p.TABLE_NAME=k.REFERENCED_TABLE_NAME
 		 AND p.COLUMN_NAME=k.REFERENCED_COLUMN_NAME
 		WHERE k.REFERENCED_TABLE_NAME IS NOT NULL
-		  AND (r.DELETE_RULE IN ('CASCADE','SET NULL','SET DEFAULT')
-		    OR r.UPDATE_RULE IN ('CASCADE','SET NULL','SET DEFAULT'))
 		ORDER BY k.TABLE_SCHEMA,k.TABLE_NAME,k.CONSTRAINT_NAME,k.ORDINAL_POSITION`)
 	if err != nil {
 		return nil, err
@@ -97,7 +96,7 @@ func unquoteMySQLFK(s string) string {
 
 func mysqlFKQuote(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
 
-func parseMySQLCascadeFKs(table model.TableID, ddl string) ([]cascadeFK, error) {
+func parseMySQLForeignKeys(table model.TableID, ddl string) ([]cascadeFK, error) {
 	var out []cascadeFK
 	for _, line := range strings.Split(ddl, "\n") {
 		if !mysqlFKPrefix.MatchString(line) {
@@ -130,9 +129,7 @@ func parseMySQLCascadeFKs(table model.TableID, ddl string) ([]cascadeFK, error) 
 		if strings.Contains(strings.ToUpper(mysqlFKAction.ReplaceAllString(m[5], "")), "ON ") {
 			return nil, fmt.Errorf("unrecognized foreign-key action on %s", table)
 		}
-		if isCascadeAction(fk.OnDelete) || isCascadeAction(fk.OnUpdate) {
-			out = append(out, fk)
-		}
+		out = append(out, fk)
 	}
 	return out, nil
 }
@@ -141,7 +138,11 @@ func isCascadeAction(rule string) bool {
 	return rule == "CASCADE" || rule == "SET NULL" || rule == "SET DEFAULT"
 }
 
-func readSourceCascadingFKs(ctx context.Context, db *sql.DB, scope map[model.TableID]bool) ([]cascadeFK, error) {
+func (fk cascadeFK) cascades() bool {
+	return isCascadeAction(fk.OnDelete) || isCascadeAction(fk.OnUpdate)
+}
+
+func readSourceForeignKeys(ctx context.Context, db *sql.DB, scope map[model.TableID]bool, includeRestrictive bool) ([]cascadeFK, error) {
 	var out []cascadeFK
 	for table := range scope {
 		var name, ddl string
@@ -153,11 +154,14 @@ func readSourceCascadingFKs(ctx context.Context, db *sql.DB, scope map[model.Tab
 			}
 			return nil, fmt.Errorf("read foreign keys of %s: %w", table, err)
 		}
-		fks, err := parseMySQLCascadeFKs(table, ddl)
+		fks, err := parseMySQLForeignKeys(table, ddl)
 		if err != nil {
 			return nil, err
 		}
 		for _, fk := range fks {
+			if !includeRestrictive && !fk.cascades() {
+				continue
+			}
 			if !scope[fk.Parent] {
 				out = append(out, fk) // The caller reports the missing parent even if its columns aren't visible.
 				continue
@@ -255,91 +259,163 @@ type mysqlCascadePlan struct {
 	signatures []string
 	parents    map[model.TableID]bool
 	children   map[model.TableID]bool
+	missing    []cascadeFK
 }
 
 func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.TableID) (mysqlCascadePlan, error) {
+	return p.compareMySQLForeignKeys(ctx, false, additional...)
+}
+
+func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing bool, additional ...model.TableID) (mysqlCascadePlan, error) {
 	var plan mysqlCascadePlan
 	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL || p.src == nil || p.dst == nil || p.filter == nil {
 		return plan, nil
 	}
 	plan.parents, plan.children = map[model.TableID]bool{}, map[model.TableID]bool{}
 	sourceScope := p.cascadeSourceScope(additional...)
-	source, err := readSourceCascadingFKs(ctx, p.src, sourceScope)
+	source, err := readSourceForeignKeys(ctx, p.src, sourceScope, true)
 	if err != nil {
-		return plan, fmt.Errorf("inspect source cascading foreign keys: %w", err)
+		return plan, fmt.Errorf("inspect source foreign keys: %w", err)
+	}
+	var cascading []cascadeFK
+	for _, fk := range source {
+		if fk.cascades() {
+			cascading = append(cascading, fk)
+		}
+	}
+	if len(cascading) == 0 {
+		return plan, nil
+	}
+	target, err := readTargetForeignKeys(ctx, p.dst)
+	if err != nil {
+		return plan, fmt.Errorf("inspect target foreign keys: %w", err)
 	}
 	targetScope := make(map[model.TableID]bool, len(sourceScope))
 	for id := range sourceScope {
 		targetScope[p.filter.Target(id)] = true
 	}
-	// InnoDB runs the cascades of one row in constraint-id order ("schema/name")
-	// on MariaDB and MySQL alike. When several constraints reach the same table
-	// that order decides the result, so the target must keep the same names.
-	overlap := checkCascadeOrder(source)
-	expected := map[string]int{}
-	rules := map[string]cascadeFK{}
+	overlap := checkCascadeOrder(cascading) != nil
+	sourceGroup := cascadeConnectedTables(source, cascading)
+	targetGroup := make(map[model.TableID]bool, len(sourceGroup))
+	for id := range sourceGroup {
+		targetGroup[p.filter.Target(id)] = true
+	}
+	// A restrictive FK can be evaluated before or after a native cascade
+	// even when only one FK cascades. Match names as well in those groups.
+	pinned := overlap
 	for _, fk := range source {
-		if !sourceScope[fk.Child] {
+		if !fk.cascades() && sourceGroup[fk.Parent] {
+			pinned = true
+			break
+		}
+	}
+	expected := make(map[string]int)
+	var rules []cascadeFK
+	for _, fk := range source {
+		native := fk.cascades()
+		if !native && !(sourceGroup[fk.Child] || sourceGroup[fk.Parent]) {
 			continue
 		}
 		if !sourceScope[fk.Parent] {
-			return plan, cascadeConfigError(fmt.Sprintf("cascading foreign key on %s requires its parent %s in the replication scope", fk.Child, fk.Parent))
+			return plan, cascadeConfigError(fmt.Sprintf("foreign key %s on %s requires its parent %s in the replication scope", fk.constraint, fk.Child, fk.Parent))
 		}
 		if fk.OnDelete == "SET DEFAULT" || fk.OnUpdate == "SET DEFAULT" {
 			return plan, cascadeConfigError(fmt.Sprintf("SET DEFAULT foreign-key actions on %s are unsupported by the MySQL InnoDB target", fk.Child))
 		}
-		if meta := p.table(fk.Parent); meta != nil && meta.Keyless {
-			return plan, cascadeConfigError(fmt.Sprintf("cascading foreign key on %s requires a primary or unique key on parent %s", fk.Child, fk.Parent))
-		}
-		plan.parents[fk.Parent], plan.children[fk.Child] = true, true
-		if overlap != nil {
-			if fk.constraint == "" {
-				return plan, cascadeConfigError(overlap.Error() + "; the source constraint name could not be read")
+		if native {
+			if meta := p.table(fk.Parent); meta != nil && meta.Keyless {
+				return plan, cascadeConfigError(fmt.Sprintf("cascading foreign key on %s requires a primary or unique key on parent %s", fk.Child, fk.Parent))
 			}
-			if p.filter.Target(fk.Child) != fk.Child {
-				return plan, cascadeConfigError(fmt.Sprintf("%v; InnoDB applies them in constraint-name order, so %s must keep its schema, table and constraint names on the target (tables.rename is not supported here)", overlap, fk.Child))
+			plan.parents[fk.Parent], plan.children[fk.Child] = true, true
+		}
+		if pinned {
+			if fk.constraint == "" || p.filter.Target(fk.Child) != fk.Child {
+				return plan, cascadeConfigError(fmt.Sprintf("order-sensitive foreign keys: %s must keep its schema, table and constraint names on the target", fk.Child))
 			}
 			fk.Name = fk.constraint
 		}
+		sourceChild := fk.Child
 		fk.Child, fk.Parent = p.filter.Target(fk.Child), p.filter.Target(fk.Parent)
 		key := cascadeSignature(fk)
 		expected[key]++
-		rules[key] = fk
-		plan.signatures = append(plan.signatures, key)
-	}
-	if len(plan.signatures) == 0 {
-		return plan, nil
-	}
-	target, err := readCascadingFKs(ctx, p.dst)
-	if err != nil {
-		return plan, fmt.Errorf("inspect target cascading foreign keys: %w", err)
+		// Keep the persisted signature format compatible with existing checkpoints.
+		// Restrictive FKs are verified directly against the target on every start.
+		if native {
+			signatureFK := fk
+			if !overlap {
+				signatureFK.Name = ""
+			}
+			plan.signatures = append(plan.signatures, cascadeSignature(signatureFK))
+		}
+		fk.constraint = p.cascadeTargetName(sourceChild, fk)
+		rules = append(rules, fk)
 	}
 	hint := ""
-	if overlap != nil {
-		hint = fmt.Sprintf(" (%v; InnoDB applies them in constraint-name order, so target constraint names must equal the source names)", overlap)
+	if overlap {
+		hint = " (overlapping cascading foreign keys: target rules and constraint names must match the source)"
+	} else if pinned {
+		hint = " (order-sensitive foreign keys: target rules and constraint names must match the source)"
 	}
 	sort.Strings(plan.signatures)
 	for _, fk := range target {
-		if !targetScope[fk.Parent] {
+		if !(fk.cascades() && targetScope[fk.Parent]) && !targetGroup[fk.Child] && !targetGroup[fk.Parent] {
 			continue
 		}
-		if overlap != nil {
+		if pinned {
 			fk.Name = fk.constraint
 		}
 		key := cascadeSignature(fk)
 		if expected[key] == 0 {
-			return plan, cascadeConfigError(fmt.Sprintf("unexpected cascading foreign key %s on target %s referencing %s (%s); target cascade rules and key column collations must match the replicated source scope%s",
-				fk.constraint, fk.Child, fk.Parent, describeCascadeFK(fk), hint))
+			kind := "foreign key"
+			if fk.cascades() {
+				kind = "cascading foreign key"
+			}
+			return plan, cascadeConfigError(fmt.Sprintf("unexpected %s %s on target %s referencing %s (%s); target rules, columns and key collations must match the source%s",
+				kind, fk.constraint, fk.Child, fk.Parent, describeCascadeFK(fk), hint))
 		}
 		expected[key]--
 	}
-	for _, key := range plan.signatures {
-		if expected[key] > 0 {
-			fk := rules[key]
+	for _, fk := range rules {
+		key := cascadeSignature(fk)
+		if expected[key] == 0 {
+			continue
+		}
+		if !allowMissing {
 			return plan, cascadeConfigError(p.missingCascadeMessage(ctx, fk, target) + hint)
 		}
+		for _, existing := range target {
+			sameLink := existing.Child == fk.Child && existing.Parent == fk.Parent && slices.Equal(existing.Columns, fk.Columns)
+			sameName := existing.Child.Schema == fk.Child.Schema && strings.EqualFold(existing.constraint, fk.constraint)
+			if sameLink || sameName {
+				return plan, cascadeConfigError(p.missingCascadeMessage(ctx, fk, target) + hint)
+			}
+		}
+		plan.missing = append(plan.missing, fk)
+		expected[key]--
 	}
 	return plan, nil
+}
+
+func cascadeConnectedTables(all, cascading []cascadeFK) map[model.TableID]bool {
+	neighbors := map[model.TableID][]model.TableID{}
+	for _, fk := range all {
+		neighbors[fk.Parent] = append(neighbors[fk.Parent], fk.Child)
+		neighbors[fk.Child] = append(neighbors[fk.Child], fk.Parent)
+	}
+	var queue []model.TableID
+	for _, fk := range cascading {
+		queue = append(queue, fk.Parent, fk.Child)
+	}
+	group := map[model.TableID]bool{}
+	for len(queue) > 0 {
+		id := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if !group[id] {
+			group[id] = true
+			queue = append(queue, neighbors[id]...)
+		}
+	}
+	return group
 }
 
 func (p *Pipeline) cascadeSourceScope(additional ...model.TableID) map[model.TableID]bool {
@@ -392,7 +468,11 @@ func (p *Pipeline) cascadeTargetName(sourceChild model.TableID, fk cascadeFK) st
 // missingCascadeMessage says why no target constraint matches fk (target names)
 // and how to add it.
 func (p *Pipeline) missingCascadeMessage(ctx context.Context, fk cascadeFK, target []cascadeFK) string {
-	msg := fmt.Sprintf("missing matching target cascading foreign key on %s referencing %s (ON DELETE %s, ON UPDATE %s)", fk.Child, fk.Parent, fk.OnDelete, fk.OnUpdate)
+	kind := "foreign key"
+	if fk.cascades() {
+		kind = "cascading foreign key"
+	}
+	msg := fmt.Sprintf("missing matching target %s on %s referencing %s (ON DELETE %s, ON UPDATE %s)", kind, fk.Child, fk.Parent, fk.OnDelete, fk.OnUpdate)
 	var exists int
 	err := p.dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", fk.Child.Schema, fk.Child.Table).Scan(&exists)
 	if err == nil && exists == 0 {

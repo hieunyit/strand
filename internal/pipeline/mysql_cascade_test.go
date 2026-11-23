@@ -8,16 +8,17 @@ import (
 	"strand/internal/model"
 )
 
-func TestParseMySQLCascadeFKs(t *testing.T) {
+func TestParseMySQLForeignKeys(t *testing.T) {
 	child := model.TableID{Schema: "sales", Table: "phones"}
 	ddl := `CREATE TABLE "phones" (
   "a" int,
   CONSTRAINT "phone_parent_fk" FOREIGN KEY ("a","b") REFERENCES "crm"."parent" ("k,1","k""2") ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT "ignored_fk" FOREIGN KEY ("c") REFERENCES "other" ("id")
 )`
-	got, err := parseMySQLCascadeFKs(child, ddl)
+	got, err := parseMySQLForeignKeys(child, ddl)
 	want := []cascadeFK{{Child: child, Parent: model.TableID{Schema: "crm", Table: "parent"},
-		Columns: []string{"a", "b"}, References: []string{"k,1", `k"2`}, OnDelete: "SET NULL", OnUpdate: "CASCADE", constraint: "phone_parent_fk"}}
+		Columns: []string{"a", "b"}, References: []string{"k,1", `k"2`}, OnDelete: "SET NULL", OnUpdate: "CASCADE", constraint: "phone_parent_fk"},
+		{Child: child, Parent: model.TableID{Schema: "sales", Table: "other"}, Columns: []string{"c"}, References: []string{"id"}, OnDelete: "RESTRICT", OnUpdate: "RESTRICT", constraint: "ignored_fk"}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("FKs = %#v, error = %v; want %#v", got, err, want)
 	}

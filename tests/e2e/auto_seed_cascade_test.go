@@ -41,6 +41,18 @@ func TestMDB_E2E_AutoSeedCascadesWithoutReload(t *testing.T) {
 		Include:   []string{"app.*"}, Dir: testDir(t), AutoSeed: true, TablesExtra: klKeylessCfg,
 	}
 	path := cfg.write(t)
+	dst.exec(t, "ALTER TABLE app.customer_attribute ADD CONSTRAINT unexpected_restrict FOREIGN KEY (customer_id) REFERENCES app.customer(id) ON DELETE RESTRICT")
+	out, code := runStrandCLI(t, time.Minute, "sync", "-c", path)
+	if code != 3 || !strings.Contains(out, "unexpected foreign key unexpected_restrict") {
+		t.Fatalf("incompatible target: exit %d, want foreign-key preflight rejection\n%s", code, out)
+	}
+	var untouched int
+	if err := dst.DB.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='app' AND TABLE_NAME='dm_scenario') +
+		(SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='app' AND CONSTRAINT_NAME='fk_ca')`).Scan(&untouched); err != nil || untouched != 0 {
+		t.Fatalf("preflight altered the target on failure: %d, err=%v", untouched, err)
+	}
+	dst.exec(t, "ALTER TABLE app.customer_attribute DROP FOREIGN KEY unexpected_restrict")
 	p := startStrand(t, path)
 	defer func() {
 		if !p.exited() {
@@ -77,6 +89,12 @@ func TestMDB_E2E_AutoSeedCascadesWithoutReload(t *testing.T) {
 	if p.stop(t) != 0 {
 		t.Fatalf("pipeline did not stop cleanly\n%s", p.tail())
 	}
+	dst.exec(t, "ALTER TABLE app.dm_log_scenario ADD CONSTRAINT unexpected_restrict FOREIGN KEY (scenario_id) REFERENCES app.dm_scenario(id) ON DELETE RESTRICT")
+	out, code = runStrandCLI(t, time.Minute, "sync", "-c", path)
+	if code != 3 || !strings.Contains(out, "unexpected foreign key unexpected_restrict") {
+		t.Fatalf("resume with an incompatible restrictive foreign key: exit %d\n%s", code, out)
+	}
+	dst.exec(t, "ALTER TABLE app.dm_log_scenario DROP FOREIGN KEY unexpected_restrict")
 	// Restart keeps the pinned constraint names.
 	p = startStrand(t, path)
 	waitSynced(t, &cfg, p, time.Minute)
