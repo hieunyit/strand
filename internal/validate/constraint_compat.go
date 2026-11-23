@@ -110,8 +110,39 @@ func CheckTableConstraintCompatibility(ctx context.Context, srcDB *sql.DB, srcEn
 		return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("source table %s does not exist", srcTable), nil)
 	}
 
-	// 3. Verify compatibility.
+	// A target-only generated invisible PK allocates a fresh ID for each
+	// INSERT. The writer names source columns, so this ID is never supplied
+	// by CDC and cannot compete with the replicated row key on an upsert.
+	if srcEngine == model.EngineMySQL && dstEngine == model.EngineMySQL && targetOnlyGIPKCandidate(srcTC, dstTC, opts) {
+		var generated int
+		err := dstDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = 'my_row_id'
+			  AND LOWER(COLUMN_TYPE) = 'bigint unsigned' AND IS_NULLABLE = 'NO'
+			  AND LOWER(EXTRA) = 'auto_increment invisible'`, dstTable.Schema, dstTable.Table).Scan(&generated)
+		if err != nil {
+			return fmt.Errorf("inspect invisible primary key on %s: %w", dstTable, err)
+		}
+		if generated == 1 {
+			dstTC.PrimaryKey = nil
+		}
+	}
 	return VerifyConstraintsCompatible(srcTC, dstTC, opts)
+}
+
+func targetOnlyGIPKCandidate(src, dst *TableConstraints, opts ConstraintCheckOptions) bool {
+	pk := dst.PrimaryKey
+	if src.PrimaryKey != nil || len(src.Uniques) == 0 || len(src.Columns) == 0 {
+		return false
+	}
+	if pk == nil || len(pk.Columns) != 1 || pk.Columns[0] != "my_row_id" || pk.HasPrefix || pk.HasExpr {
+		return false
+	}
+	for name := range src.Columns {
+		if strings.EqualFold(opts.MapColumn(src.Table, name), "my_row_id") {
+			return false
+		}
+	}
+	return true
 }
 
 // VerifyConstraintsCompatible checks if every target unique constraint is implied by at least one source constraint.

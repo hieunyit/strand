@@ -311,6 +311,59 @@ func (w *mdbWriter) one(r *rand.Rand) error {
 	}
 }
 
+func TestMDB_E2E_TargetInvisiblePrimaryKeyRestart(t *testing.T) {
+	src := startMariaDB(t, "src", 1)
+	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil, "--sql-generate-invisible-primary-key=ON")
+	mdbSourceUsers(t, src)
+	mdbTargetSetup(t, dst)
+	src.exec(t, "CREATE DATABASE app",
+		"CREATE TABLE app.version (table_name VARCHAR(32) NOT NULL, table_version INT NOT NULL, UNIQUE KEY t_name_idx (table_name)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci",
+		"INSERT INTO app.version VALUES ('version', 1)")
+	cfg := strandCfg{Name: "mdb-target-gipk", SourceDSN: fmt.Sprintf("strand:%s@tcp(%s)/", mdbPass, src.Addr),
+		TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr), Include: []string{"app.version"}, Dir: testDir(t)}
+	path := cfg.write(t)
+	if out, code := runStrandCLI(t, time.Minute, "validate", "-c", path); code != 0 {
+		t.Fatalf("validate before first start = %d:\n%s", code, out)
+	}
+	process := startStrand(t, path)
+	t.Cleanup(func() {
+		if !process.exited() {
+			process.stop(t)
+		}
+	})
+	waitSynced(t, &cfg, process, 20*time.Second)
+	var id uint64
+	if err := dst.DB.QueryRow("SELECT my_row_id FROM app.version WHERE table_name='version'").Scan(&id); err != nil || id == 0 {
+		t.Fatalf("expected generated invisible primary key: id=%d, error=%v", id, err)
+	}
+	if code := process.stop(t); code != 0 {
+		t.Fatalf("stop exit %d:\n%s", code, process.tail())
+	}
+	if out, code := runStrandCLI(t, time.Minute, "validate", "-c", path); code != 0 {
+		t.Fatalf("validate before restart = %d:\n%s", code, out)
+	}
+	src.exec(t, "UPDATE app.version SET table_version=2 WHERE table_name='version'")
+	process = startStrand(t, path)
+	waitSynced(t, &cfg, process, 20*time.Second)
+	var version int
+	var resumedID uint64
+	if err := dst.DB.QueryRow("SELECT my_row_id, table_version FROM app.version WHERE table_name='version'").Scan(&resumedID, &version); err != nil || resumedID != id || version != 2 {
+		t.Fatalf("expected resumed update with unchanged invisible key: id=%d, version=%d, error=%v", resumedID, version, err)
+	}
+	if code := process.stop(t); code != 0 {
+		t.Fatalf("stop after restart exit %d:\n%s", code, process.tail())
+	}
+	dst.exec(t, "ALTER TABLE app.version ALTER COLUMN my_row_id SET VISIBLE")
+	if out, code := runStrandCLI(t, time.Minute, "validate", "-c", path); code != 3 || !strings.Contains(out, "my_row_id") {
+		t.Fatalf("expected visible primary key to be rejected, got %d:\n%s", code, out)
+	}
+	dst.exec(t, "ALTER TABLE app.version ALTER COLUMN my_row_id SET INVISIBLE")
+	dst.exec(t, "ALTER TABLE app.version ADD UNIQUE KEY uk_target_only (table_version)")
+	if out, code := runStrandCLI(t, time.Minute, "validate", "-c", path); code != 3 || !strings.Contains(out, "uk_target_only") {
+		t.Fatalf("expected conflicting unique index to be rejected, got %d:\n%s", code, out)
+	}
+}
+
 func TestMDB_E2E_SnapshotStreamDDLRestartVerify(t *testing.T) {
 	src := startMariaDB(t, "src", 1)
 	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)

@@ -339,6 +339,8 @@ Khóa đang dùng được in ở `validate` (`table app.t: no primary key, row 
 
 Cột `INVISIBLE` không đổi `SELECT *` hay `INSERT` của ứng dụng. Strand đọc cột theo tên tường minh (binlog khớp theo vị trí cột của `information_schema`, vốn gồm cả cột ẩn); target MySQL→MySQL giữ `INVISIBLE` (qua `SHOW CREATE TABLE`), target PG tạo cột thường. Khi tự kiểm tra bằng `SELECT`, hãy nêu tên cột ẩn (`SELECT _strand_id, ...`).
 
+Khi MySQL đích tự sinh khóa vô hình `my_row_id` còn nguồn dùng khóa UNIQUE thay cho PK, Strand vẫn dùng UNIQUE để tìm hàng. Đích chỉ được giữ `my_row_id` theo chế độ này khi đó là khóa `AUTO_INCREMENT INVISIBLE` riêng của đích và các ràng buộc UNIQUE còn lại tương thích với nguồn.
+
 **Khóa và bảng lớn (> 1 triệu hàng):** thêm cột AUTO_INCREMENT **chặn ghi** trong lúc xây lại bảng (`ALGORITHM=COPY` hoặc INPLACE với `LOCK=SHARED`; đọc vẫn chạy), thời gian tỉ lệ kích thước bảng. `pt-online-schema-change` và `gh-ost` **không** thêm được khóa thay thế cho bảng không có PRIMARY KEY/UNIQUE nào: cả hai cần một khóa chung giữa bảng cũ và bảng mới để sao chép và theo dõi hàng. Lựa chọn: (1) chạy ALTER trong cửa sổ bảo trì; (2) chạy ALTER trên replica trước rồi chuyển vai; (3) nếu có tập cột NOT NULL vốn duy nhất, thêm UNIQUE index online (`CREATE UNIQUE INDEX ... ALGORITHM=INPLACE, LOCK=NONE`) — Strand dùng nó làm khóa hàng ngay, không cần cột mới. PG: thêm cột bigint NULL, điền theo lô, `CREATE UNIQUE INDEX CONCURRENTLY`, `SET NOT NULL`, rồi `REPLICA IDENTITY USING INDEX` (hoặc `ADD PRIMARY KEY USING INDEX`).
 
 #### 5.1.3 Chế độ keyless (`tables.keyless: full_row`), chỉ khi dữ liệu đầu đến từ seed
