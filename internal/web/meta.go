@@ -48,7 +48,7 @@ const (
 	ErrNoDatabase = "strand web needs a PostgreSQL metadata database: set database.dsn in web.yaml or " + EnvDatabaseDSN +
 		" (new install: `strand web init --database-dsn postgres://...`; an install that ran without a database (file mode): " +
 		"run `strand web db migrate --config <web.yaml> --dsn postgres://...` first to import its pipelines, jobs and audit log)"
-	ErrNoSecretKey = EnvSecretKey + " is required: pipeline secrets (.env) are stored encrypted in the metadata database. " +
+	ErrNoSecretKey = EnvSecretKey + " is required: pipeline credentials are encrypted in the metadata database. " +
 		"Generate one with `openssl rand -hex 32`, keep it safe (it cannot be recovered), and set it in the service environment " +
 		"(/etc/strand/web.env for the systemd unit, .env for docker compose)"
 )
@@ -59,7 +59,7 @@ func (c *Config) DBEnabled() bool { return c.Database.DSN != "" }
 // metaDB là kho metadata PostgreSQL (hoặc Mem trong test) gắn với một Server.
 type metaDB struct {
 	st       store.Store
-	box      *store.Box // STRAND_WEB_SECRET_KEY (bắt buộc): mã hóa .env của pipeline trong DB
+	box      *store.Box // STRAND_WEB_SECRET_KEY (bắt buộc): mã hóa thông tin đăng nhập của pipeline trong DB
 	log      *slog.Logger
 	secret   string
 	previous string // STRAND_WEB_SECRET_KEY_PREVIOUS (xoay khóa)
@@ -440,6 +440,25 @@ func (s *Server) materializeAll() {
 	for _, r := range rows {
 		s.materialize(r.Name)
 	}
+}
+
+// pipelineEnv reads the newest stored credentials without writing a plaintext file.
+func (m *metaDB) pipelineEnv(name string) ([]string, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row, found, err := m.st.GetPipeline(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("read pipeline credentials: %w", err)
+	}
+	if !found || len(row.EnvEnc) == 0 {
+		return nil, errors.New("pipeline credentials are missing from the metadata database")
+	}
+	plain, err := m.box.Open(row.EnvEnc, name)
+	if err != nil {
+		return nil, errors.New("cannot decrypt pipeline credentials")
+	}
+	defer clear(plain)
+	return ParseEnvData(bytes.NewReader(plain))
 }
 
 // persistPipelineFiles đọc lại file cấu hình/.env của pipeline do web tạo và lưu vào DB (sau khi tạo hoặc sửa).

@@ -15,7 +15,7 @@ import (
 )
 
 // The console asks for host(s), port, user, password, replica set, auth database and TLS instead of a URI; the
-// server builds the URI (user and password escaped) and keeps it only in the encrypted .env.
+// server builds the URI (user and password escaped) and keeps it only in the encrypted credential record.
 func TestBuildMongoURI(t *testing.T) {
 	for _, tc := range []struct {
 		e    mongoEndpoint

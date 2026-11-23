@@ -188,13 +188,9 @@ func newSyncCmd() *cobra.Command {
 				}
 				return runMongoSync(ctx, cfg, logger, events)
 			}
-			startAt := syncStartAt
-			if startAt == "" && cfg.Bootstrap.StartAt != "" {
-				startAt = cfg.Bootstrap.StartAt
-			}
 			return pipeline.Run(ctx, pipeline.Options{
 				Config:       cfg,
-				StartAt:      startAt,
+				StartAt:      syncStartAt,
 				SeedManifest: syncSeedManifest,
 				Logger:       logger,
 				Events:       events,

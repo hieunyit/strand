@@ -765,18 +765,18 @@
       if (newK && newV && newK.value.trim()) {
         entries[newK.value.trim()] = newV.value;
       }
-      toast('Saving .env...', true);
+      toast('Saving credentials…', true);
       api('POST', '/api/v1/pipelines/' + encodeURIComponent(p) + '/env', { entries: entries })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (res) {
           if (res.ok) {
-            toast('.env saved successfully!', true);
+            toast('Credentials saved.', true);
             setTimeout(function () { location.reload(); }, 1200);
           } else {
-            toast('.env save failed: ' + (res.j.error || 'error'), false);
+            toast('Could not save credentials: ' + (res.j.error || 'error'), false);
           }
         })
-        .catch(function (err) { toast('.env error: ' + err, false); });
+        .catch(function (err) { toast('Could not save credentials: ' + err, false); });
     }
   });
 

@@ -184,6 +184,14 @@
     {{if .Config.Error}}{{template "error-state" (errState "Configuration could not be read" .Config.Error)}}{{end}}
     {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
 
+    {{if .AddedTablesError}}
+    <p class="muted small">The tables added during sync could not be read from local pipeline state.</p>
+    {{else if .AddedTables}}
+    <h3>Tables added during sync</h3>
+    <p class="muted small">Strand remembers these tables across restarts. They supplement the YAML table list. The exclude rules still apply.</p>
+    <ul class="mono">{{range .AddedTables}}<li>{{.}}</li>{{end}}</ul>
+    {{end}}
+
     <div id="cfg-view-mode">
       {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code wrapcode">{{.Config.YAML}}</pre>{{end}}
     </div>
@@ -245,10 +253,10 @@
     {{end}}
   </section>
 
-  <section class="card"><div class="cardhead"><h2>Credentials &amp; Environment (.env)</h2></div>
+  <section class="card"><div class="cardhead"><h2>{{if .Env.Database}}Pipeline credentials{{else}}Credentials &amp; Environment (.env){{end}}</h2></div>
     <p class="muted small mono">{{.Env.Path}}</p>
-    {{if .Env.Error}}{{template "error-state" (errState "Environment file could not be read" .Env.Error)}}{{end}}
-    <p class="card-desc">Environment variables used by the pipeline process. Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.</p>
+    {{if .Env.Error}}{{template "error-state" (errState "Pipeline credentials could not be read" .Env.Error)}}{{end}}
+    <p class="card-desc">{{if .Env.Database}}Credentials are encrypted in the metadata database. Enter a new value to replace a saved credential.{{else}}Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.{{end}}</p>
     <form id="env-edit-form" data-pipeline="{{.View.Name}}">
       <div class="tablewrap env-wrap"><table class="data-table grid">
         <caption class="sr-only">Environment variables of the pipeline process</caption>
@@ -256,11 +264,11 @@
         <tbody id="env-entries-body">
           {{range $k, $v := .Env.Entries}}
           <tr>
-            <td class="mono"><b>{{$k}}</b></td>
+            <td class="mono"><b>{{if eq $k "STRAND_PIPELINE_SOURCE_PASSWORD"}}Source password{{else if eq $k "STRAND_PIPELINE_TARGET_PASSWORD"}}Target password{{else if eq $k "STRAND_PIPELINE_SOURCE_DSN"}}Source connection string{{else if eq $k "STRAND_PIPELINE_TARGET_DSN"}}Target connection string{{else}}{{$k}}{{end}}</b></td>
             <td><input type="password" aria-label="{{$k}}" name="env_{{$k}}" data-key="{{$k}}" value="********" placeholder="Leave unchanged (********)" class="mono wide" autocomplete="new-password"></td>
           </tr>
           {{else}}
-          <tr class="empty"><td colspan="2"><div class="empty-state"><b>No variables in .env yet</b><span>Add one below; passwords are stored write-only.</span></div></td></tr>
+          <tr class="empty"><td colspan="2"><div class="empty-state"><b>No credentials saved</b><span>Add one below; passwords are stored write-only.</span></div></td></tr>
           {{end}}
           <tr id="env-new-row">
             <td><input type="text" id="env-new-key" placeholder="NEW_VAR" class="mono envkey" aria-label="New variable name"></td>
@@ -268,7 +276,7 @@
           </tr>
         </tbody>
       </table></div>
-      <div class="form-actions"><button class="btn primary" type="button" id="env-btn-save">Save .env</button></div>
+      <div class="form-actions"><button class="btn primary" type="button" id="env-btn-save">{{if .Env.Database}}Save credentials{{else}}Save .env{{end}}</button></div>
     </form>
   </section>
 

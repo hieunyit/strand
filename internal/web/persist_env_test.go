@@ -45,7 +45,6 @@ func TestCreatedPipelineSurvivesRestartReadOnlyWebYAML(t *testing.T) {
 	}
 	// Mất cả file cấu hình lẫn .env (ví dụ volume mới): khởi động lại dựng lại từ DB.
 	_ = os.Remove(row.ConfigPath)
-	_ = os.Remove(row.EnvPath)
 	cfg2 := &Config{StrandBinary: e.bin, Listen: "127.0.0.1:0",
 		StateDir: stateDir, SourcePath: webYAML, ConfigDir: cfgDir,
 		Pipelines: []PipelineEntry{e.srv.cfg.Pipelines[0]}}
@@ -58,11 +57,11 @@ func TestCreatedPipelineSurvivesRestartReadOnlyWebYAML(t *testing.T) {
 	if p == nil {
 		t.Fatal("web-created pipeline vanished after restart")
 	}
-	if p.Origin != "created" || p.CfgErr != "" || p.EnvFile == "" {
+	if p.Origin != "created" || p.CfgErr != "" || p.EnvFile != "" || p.dbEnv == nil {
 		t.Errorf("unexpected pipeline after restart: %+v", p)
 	}
-	if !fileExists(row.ConfigPath) || !fileExists(row.EnvPath) {
-		t.Error("config/.env not materialised from the database on start")
+	if !fileExists(row.ConfigPath) || fileExists(filepath.Join(cfgDir, "persist1.env")) {
+		t.Error("restart should restore YAML and keep credentials in the database")
 	}
 }
 
@@ -141,30 +140,25 @@ func TestReadEnvFileLegacyExport(t *testing.T) {
 	}
 }
 
-func TestCreatePipelineEnvFileTrickyAndNewline(t *testing.T) {
+func TestCreatePipelineCredentialsTrickyAndNewline(t *testing.T) {
 	e, c, csrf := npEnv(t)
 	pw := "p@ss \"w'o$rd\\#1`"
-	code, res, _, out := createNP(t, e, c, csrf, newOpts("envt", pw, "plain"))
+	code, _, _, out := createNP(t, e, c, csrf, newOpts("envt", pw, "plain"))
 	if code != 200 {
 		t.Fatalf("%d %s", code, out)
 	}
-	envPath := e.srv.reg.Get("envt").EnvFile
-	raw, _ := os.ReadFile(envPath)
-	if strings.Contains(string(raw), "export ") {
-		t.Errorf("env must not use export: %s", raw)
-	}
-	kv, err := ReadEnvFile(envPath)
-	if err != nil || len(kv) != 2 || kv[0] != "SRC_PW="+pw || kv[1] != "DST_PW=plain" {
-		t.Fatalf("read back %v %v (%+v)", kv, err, res)
-	}
-	// Đường sửa .env: giữ nguyên giá trị bí mật khi gửi '********', giá trị mới ghi đúng định dạng.
 	p := e.srv.reg.Get("envt")
-	if _, err := e.srv.saveEnvContent(t.Context(), p, map[string]string{"SRC_PW": maskStr, "EXTRA": "n w$"}, "ip"); err != nil {
+	kv, err := e.srv.db.pipelineEnv(p.Name)
+	target := pipelineTargetDSN + "=postgres://u:plain@10.0.0.21:5432/store?sslmode=prefer"
+	if err != nil || len(kv) != 2 || kv[0] != pipelineSourcePassword+"="+pw || kv[1] != target {
+		t.Fatal("stored credentials failed to round-trip")
+	}
+	if _, err := e.srv.saveEnvContent(t.Context(), p, map[string]string{pipelineSourcePassword: maskStr, "EXTRA": "n w$"}, "ip"); err != nil {
 		t.Fatal(err)
 	}
-	kv, _ = ReadEnvFile(envPath)
-	if strings.Join(kv, "|") != "DST_PW=plain|EXTRA=n w$|SRC_PW="+pw {
-		t.Fatalf("after save: %v", kv)
+	kv, err = e.srv.db.pipelineEnv(p.Name)
+	if err != nil || strings.Join(kv, "|") != "EXTRA=n w$|"+pipelineSourcePassword+"="+pw+"|"+target {
+		t.Fatal("credential edit lost the original or new value")
 	}
 	code, _, _, out = createNP(t, e, c, csrf, newOpts("envnl", "a\nb", "x"))
 	if code != 400 || !strings.Contains(out, "newline") {

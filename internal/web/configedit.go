@@ -402,10 +402,11 @@ func (s *Server) rollbackFile(path string, orig []byte) {
 
 // EnvView thể hiện các biến môi trường của pipeline (.env), các khóa bí mật được che bằng '********'.
 type EnvView struct {
-	Path    string            `json:"path"`
-	Exists  bool              `json:"exists"`
-	Entries map[string]string `json:"entries"`
-	Error   string            `json:"error,omitempty"`
+	Path     string            `json:"path"`
+	Database bool              `json:"database,omitempty"`
+	Exists   bool              `json:"exists"`
+	Entries  map[string]string `json:"entries"`
+	Error    string            `json:"error,omitempty"`
 }
 
 func (s *Server) envPathFor(p *Pipeline) string {
@@ -418,9 +419,15 @@ func (s *Server) envPathFor(p *Pipeline) string {
 
 func (s *Server) getEnvView(p *Pipeline) EnvView {
 	s.materialize(p.Name)
-	path := s.envPathFor(p)
-	v := EnvView{Path: path, Entries: map[string]string{}}
-	lines, err := ReadEnvFile(path)
+	v := EnvView{Entries: map[string]string{}, Database: p.dbEnv != nil}
+	var lines []string
+	var err error
+	if v.Database {
+		lines, err = p.dbEnv.pipelineEnv(p.Name)
+	} else {
+		v.Path = s.envPathFor(p)
+		lines, err = ReadEnvFile(v.Path)
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			v.Exists = false
@@ -433,7 +440,7 @@ func (s *Server) getEnvView(p *Pipeline) EnvView {
 	for _, l := range lines {
 		k, val, ok := strings.Cut(l, "=")
 		if ok {
-			if isSecretKey(k) {
+			if v.Database || isSecretKey(k) {
 				v.Entries[k] = maskStr
 			} else {
 				v.Entries[k] = val
@@ -443,24 +450,27 @@ func (s *Server) getEnvView(p *Pipeline) EnvView {
 	return v
 }
 
-// saveEnvContent lưu file .env (mode 0600), giữ nguyên giá trị cũ nếu người dùng gửi '********'.
+// saveEnvContent lưu credentials, giữ nguyên giá trị cũ nếu người dùng gửi '********'.
 func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[string]string, ip string) (string, error) {
 	s.configEditMu.Lock()
 	defer s.configEditMu.Unlock()
 	s.materialize(p.Name)
-	envPath := s.envPathFor(p)
-	origEnv, origEnvErr := os.ReadFile(envPath)
-	dir := filepath.Dir(envPath)
-	_ = os.MkdirAll(dir, 0o750)
-
-	// Đọc các giá trị hiện có để giữ nguyên khi người dùng giữ '********'
+	var existing []string
+	var envPath string
+	if p.dbEnv != nil {
+		var err error
+		existing, err = p.dbEnv.pipelineEnv(p.Name)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		envPath = s.envPathFor(p)
+		existing, _ = ReadEnvFile(envPath)
+	}
 	existingVals := map[string]string{}
-	if origLines, err := ReadEnvFile(envPath); err == nil {
-		for _, l := range origLines {
-			k, v, ok := strings.Cut(l, "=")
-			if ok {
-				existingVals[k] = v
-			}
+	for _, l := range existing {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			existingVals[k] = v
 		}
 	}
 
@@ -501,6 +511,30 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 		}
 		b.WriteString(line)
 	}
+
+	if p.dbEnv != nil {
+		row, found, err := s.db.st.GetPipeline(ctx, p.Name)
+		if err != nil {
+			return "", err
+		}
+		if !found || row.EnvPath != "" {
+			return "", Conflict("pipeline credential storage changed; reload Config")
+		}
+		row.EnvEnc, err = s.db.box.Seal(b.Bytes(), p.Name)
+		if err != nil {
+			return "", err
+		}
+		if err := s.db.st.UpsertPipeline(ctx, row); err != nil {
+			s.log.Warn("store pipeline credentials failed", "pipeline", p.Name, "err", err)
+			return "", &ActionError{Status: http.StatusServiceUnavailable, Msg: "Could not save credentials to the metadata database. Try again."}
+		}
+		_ = s.audit.Log(AuditEntry{IP: ip, Action: "env.edit", Pipeline: p.Name, Result: "ok",
+			Detail: map[string]any{"storage": "encrypted metadata database"}})
+		return "", nil
+	}
+	origEnv, origEnvErr := os.ReadFile(envPath)
+	dir := filepath.Dir(envPath)
+	_ = os.MkdirAll(dir, 0o750)
 
 	tmp, err := os.CreateTemp(dir, ".env-save-*")
 	if err != nil {

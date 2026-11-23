@@ -111,6 +111,9 @@ func (r *Registry) refreshDB(ctx context.Context) {
 		p.Conflicts = parseConflicts(row.Conflicts)
 		if row.HasConfig {
 			p.dbYAML = []byte(row.ConfigYAML) // bản DB là nguồn sự thật, không phụ thuộc file vật chất hóa
+			if row.EnvPath == "" && len(row.EnvEnc) != 0 && p.EnvFile == "" && p.Mode() == ModeBackground {
+				p.dbEnv = r.db
+			}
 		}
 		byName[p.Name] = p
 	}
@@ -123,6 +126,10 @@ func (r *Registry) refreshDB(ctx context.Context) {
 			}
 			byName[name] = p
 			continue
+		}
+		// Preserve the editor's saved env path when an entry leaves env_file unspecified.
+		if e.EnvFile == "" && row.ConfigPath == e.Config {
+			e.EnvFile, p.EnvFile = row.EnvPath, row.EnvPath
 		}
 		// Khai báo tường minh thắng scan và pipeline tạo từ web cùng tên.
 		if row.Origin == store.OriginCreated {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,12 +27,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Tạo pipeline mới (M5):
-// - Form cấu hình (tên whitelist, kind source/target, DSN không mật khẩu, user, biến môi trường mật khẩu, tables...)
-// - Sinh YAML bằng logic config init + file .env (mode 0600) trong config_dir (mặc định /etc/strand nếu ghi được, nếu không thì state_dir/pipelines)
-// - Chạy `validate` và `plan`, hiện kết quả
-// - Thêm pipeline vào registry (web.yaml hoặc scan) rồi Registry.Refresh
-// - Có nút Start (dùng action start sẵn có, chế độ background)
+const (
+	pipelineSourcePassword = "STRAND_PIPELINE_SOURCE_PASSWORD"
+	pipelineTargetPassword = "STRAND_PIPELINE_TARGET_PASSWORD"
+	pipelineSourceDSN      = "STRAND_PIPELINE_SOURCE_DSN"
+	pipelineTargetDSN      = "STRAND_PIPELINE_TARGET_DSN"
+)
 
 // NewPipelineOpts là tham số tạo pipeline mới.
 type NewPipelineOpts struct {
@@ -51,13 +52,13 @@ type NewPipelineOpts struct {
 	SourceUser string `json:"source_user"`
 	TargetUser string `json:"target_user"`
 
-	SourcePassword string `json:"source_password"` // chỉ ghi vào .env, không bao giờ vào YAML
+	SourcePassword string `json:"source_password"`
 	TargetPassword string `json:"target_password"`
 
-	SourcePasswordEnv string `json:"source_password_env"` // mặc định SRC_PW
-	TargetPasswordEnv string `json:"target_password_env"` // mặc định DST_PW
+	SourcePasswordEnv string `json:"source_password_env"` // optional legacy API override
+	TargetPasswordEnv string `json:"target_password_env"` // optional legacy API override
 
-	SourceDSN string `json:"source_dsn,omitempty"` // PG: dsn không có mật khẩu
+	SourceDSN string `json:"source_dsn,omitempty"`
 	TargetDSN string `json:"target_dsn,omitempty"`
 
 	Databases []string `json:"databases,omitempty"`
@@ -95,7 +96,7 @@ type NewPipelineOpts struct {
 
 	// MongoDB -> MongoDB (from = to = mongodb). The console sends host(s)/port/user/password (the source_* /
 	// target_* fields above) plus the options below and the server builds the URI; source_uri / target_uri are
-	// still accepted from the API. Either way the URI is a secret: only in the encrypted .env (SRC_URI / DST_URI).
+	// still accepted from the API. Either way the URI is a secret: only in the encrypted credential record (SRC_URI / DST_URI).
 	SourceURI            string `json:"source_uri,omitempty"`
 	TargetURI            string `json:"target_uri,omitempty"`
 	SourceAuthDB         string `json:"source_auth_db,omitempty"`
@@ -172,7 +173,7 @@ source:
   server_id: {{.ServerID}}
 {{- else}}
   kind: postgres
-  dsn: "{{.SourceDSN}}"
+  dsn_env: STRAND_PIPELINE_SOURCE_DSN
   create_slot: true
   publication: strand_{{.Name | slot}}
 {{- end}}
@@ -203,7 +204,7 @@ target:
   commit_order: {{.CommitOrder}}
 {{- else}}
   kind: postgres
-  dsn: "{{.TargetDSN}}"
+  dsn_env: STRAND_PIPELINE_TARGET_DSN
   commit_order: {{.CommitOrder}}
 {{- end}}
 {{- with .TargetSSHTunnel}}
@@ -234,7 +235,7 @@ tables:
 bootstrap:
 {{- if .StartAt}}
   default: start_at
-  start_at: "{{.StartAt}}"
+  start_at: {{printf "%q" .StartAt}}
 {{- else}}
   default: logical
 {{- if or .ChunkRows .Windows .MaxParallel}}
@@ -282,8 +283,6 @@ type tmplData struct {
 	TargetUser        string
 	SourcePasswordEnv string
 	TargetPasswordEnv string
-	SourceDSN         string
-	TargetDSN         string
 	Database          string
 	TargetDatabase    string
 	Includes          []string
@@ -434,10 +433,10 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		td.TargetUser = "strand"
 	}
 	if td.SourcePasswordEnv == "" {
-		td.SourcePasswordEnv = "SRC_PW"
+		td.SourcePasswordEnv = pipelineSourcePassword
 	}
 	if td.TargetPasswordEnv == "" {
-		td.TargetPasswordEnv = "DST_PW"
+		td.TargetPasswordEnv = pipelineTargetPassword
 	}
 	dbs := dataDatabases(opts)
 	if len(dbs) == 0 {
@@ -479,28 +478,6 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 	}
 	if td.LogFormat == "" {
 		td.LogFormat = "json"
-	}
-
-	// DSN PostgreSQL
-	if !td.SourceMySQL {
-		if opts.SourceDSN != "" {
-			td.SourceDSN = opts.SourceDSN
-		} else {
-			td.SourceDSN = fmt.Sprintf("postgres://%s:${%s}@%s:%d/%s?sslmode=prefer",
-				td.SourceUser, td.SourcePasswordEnv, td.SourceHost, td.SourcePort, td.Database)
-		}
-	}
-	if !td.TargetMySQL {
-		if opts.TargetDSN != "" {
-			td.TargetDSN = opts.TargetDSN
-		} else {
-			tdb := strings.TrimSpace(opts.TargetPGDatabase)
-			if tdb == "" {
-				tdb = td.Database
-			}
-			td.TargetDSN = fmt.Sprintf("postgres://%s:${%s}@%s:%d/%s?sslmode=prefer",
-				td.TargetUser, td.TargetPasswordEnv, td.TargetHost, td.TargetPort, tdb)
-		}
 	}
 
 	var buf bytes.Buffer
@@ -724,21 +701,48 @@ func (s *Server) pickMetricsAddrFor(pipelineName string) (string, error) {
 	return "", errors.New("no free metrics port in 9464-10463")
 }
 
+func pipelinePGDSN(dsn, host string, port int, user, password, database string) string {
+	if dsn != "" {
+		return dsn
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == 0 {
+		port = 5432
+	}
+	if user == "" {
+		user = "strand"
+	}
+	address := net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(user, password), Host: address, Path: "/" + database, RawQuery: "sslmode=prefer"}
+	return u.String()
+}
+
 // createPipeline thực hiện tạo pipeline mới:
 // 1. Kiểm tra whitelist tên và trùng lặp
-// 2. Sinh file cấu hình YAML và file .env (mode 0600) trong config_dir
+// 2. Lưu YAML và thông tin đăng nhập đã mã hóa vào metadata DB.
 // 3. Thêm pipeline vào web.yaml / scan
 // 4. Registry.Refresh
 // 5. Chạy validate và plan
 // 6. Ghi audit log
 func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip string) (*CreatePipelineResult, error) {
 	opts.Name = strings.TrimSpace(opts.Name)
+	opts.From, opts.To = strings.ToLower(strings.TrimSpace(opts.From)), strings.ToLower(strings.TrimSpace(opts.To))
+	for _, engine := range []*string{&opts.From, &opts.To} {
+		if *engine == "pg" || *engine == "postgresql" {
+			*engine = "postgres"
+		}
+	}
 	if !ValidName(opts.Name) {
 		return nil, BadRequest("invalid pipeline name %q (allowed: letters, digits, _ . - ; up to 63 chars)", opts.Name)
 	}
 
 	existing := s.reg.Get(opts.Name)
 	if existing != nil {
+		if opts.Overwrite && existing.Mode() == ModeSystemd {
+			return nil, Conflict("edit the existing systemd pipeline to keep its service credential configuration")
+		}
 		if s.isRunning(existing) {
 			return nil, Conflict("pipeline %q is currently running; stop it first before overwriting", opts.Name)
 		}
@@ -809,18 +813,31 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		return nil, BadRequest("%s", err.Error())
 	}
 
-	// Ghi file .env với mode 0600 (trước khi ghi YAML)
 	srcEnv := opts.SourcePasswordEnv
 	if srcEnv == "" {
-		srcEnv = "SRC_PW"
+		srcEnv = pipelineSourcePassword
 	}
 	dstEnv := opts.TargetPasswordEnv
 	if dstEnv == "" {
-		dstEnv = "DST_PW"
+		dstEnv = pipelineTargetPassword
 	}
 	var envBuf bytes.Buffer
 	envBuf.WriteString(fmt.Sprintf("# Environment variables for pipeline %s\n", opts.Name))
 	secrets := [][2]string{{srcEnv, opts.SourcePassword}, {dstEnv, opts.TargetPassword}}
+	sourceDB := "app"
+	if dbs := dataDatabases(opts); len(dbs) > 0 {
+		sourceDB = dbs[0]
+	}
+	if opts.From == "postgres" {
+		secrets[0] = [2]string{pipelineSourceDSN, pipelinePGDSN(opts.SourceDSN, opts.SourceHost, opts.SourcePort, opts.SourceUser, opts.SourcePassword, sourceDB)}
+	}
+	if opts.To == "postgres" {
+		database := strings.TrimSpace(opts.TargetPGDatabase)
+		if database == "" {
+			database = sourceDB
+		}
+		secrets[1] = [2]string{pipelineTargetDSN, pipelinePGDSN(opts.TargetDSN, opts.TargetHost, opts.TargetPort, opts.TargetUser, opts.TargetPassword, database)}
+	}
 	if isMongo(opts.From) {
 		srcURI, err := mongoURIOf(opts, "source")
 		if err != nil {
@@ -832,6 +849,9 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		}
 		secrets = [][2]string{{mongoSrcURIEnv, srcURI}, {mongoDstURIEnv, dstURI}}
 	}
+	if secrets[0][0] == secrets[1][0] {
+		return nil, BadRequest("source and target credentials must use distinct environment variable names")
+	}
 	for _, kv := range secrets {
 		line, err := formatEnvLine(kv[0], kv[1])
 		if err != nil {
@@ -840,70 +860,30 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		envBuf.WriteString(line)
 	}
 
-	tmpEnv, err := os.CreateTemp(configDir, ".env-init-*")
+	sealed, err := s.db.box.Seal(envBuf.Bytes(), opts.Name)
 	if err != nil {
-		return nil, fmt.Errorf("create temp env file: %w", err)
+		return nil, fmt.Errorf("encrypt pipeline credentials: %w", err)
 	}
-	tmpEnvName := tmpEnv.Name()
-	defer os.Remove(tmpEnvName)
-
-	if err := tmpEnv.Chmod(0o600); err != nil {
-		tmpEnv.Close()
-		return nil, err
-	}
-	if _, err := tmpEnv.Write(envBuf.Bytes()); err != nil {
-		tmpEnv.Close()
-		return nil, err
-	}
-	if err := tmpEnv.Close(); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmpEnvName, envPath); err != nil {
-		return nil, fmt.Errorf("write %s: %w", envPath, err)
-	}
-	_ = os.Chmod(envPath, 0o600)
-
-	// Ghi file YAML
-	tmpYaml, err := os.CreateTemp(configDir, ".yaml-init-*")
+	row, found, err := s.db.st.GetPipeline(ctx, opts.Name)
 	if err != nil {
-		_ = os.Remove(envPath)
-		return nil, fmt.Errorf("create temp yaml file: %w", err)
-	}
-	tmpYamlName := tmpYaml.Name()
-	defer os.Remove(tmpYamlName)
-
-	if err := tmpYaml.Chmod(0o640); err != nil {
-		tmpYaml.Close()
-		_ = os.Remove(envPath)
 		return nil, err
 	}
-	if _, err := tmpYaml.Write([]byte(yamlContent)); err != nil {
-		tmpYaml.Close()
-		_ = os.Remove(envPath)
-		return nil, err
+	row.Name, row.ConfigPath, row.ConfigYAML = opts.Name, yamlPath, yamlContent
+	row.HasConfig, row.EnvEnc, row.EnvPath = true, sealed, ""
+	row.MissingSince = time.Time{}
+	if !found {
+		row.Origin = store.OriginCreated
 	}
-	if err := tmpYaml.Close(); err != nil {
-		_ = os.Remove(envPath)
-		return nil, err
+	if opts.Overwrite {
+		if err := s.db.st.UpsertPipeline(ctx, row); err != nil {
+			return nil, fmt.Errorf("store pipeline configuration: %w", err)
+		}
+	} else if created, err := s.db.st.CreatePipeline(ctx, row); err != nil {
+		return nil, fmt.Errorf("store pipeline configuration: %w", err)
+	} else if !created {
+		return nil, Conflict("pipeline %q already exists", opts.Name)
 	}
-	if err := os.Rename(tmpYamlName, yamlPath); err != nil {
-		_ = os.Remove(envPath)
-		return nil, fmt.Errorf("write %s: %w", yamlPath, err)
-	}
-
-	// Đăng ký pipeline vào registry (DB).
-	entry := PipelineEntry{
-		Name:    opts.Name,
-		Config:  yamlPath,
-		EnvFile: envPath,
-	}
-	// DB là nguồn sự thật (dòng pipeline + YAML + .env mã hóa); file chỉ là bản vật chất hóa cho tiến trình strand.
-	if err := s.reg.AddCreated(entry); err != nil {
-		return nil, fmt.Errorf("pipeline files written but registering in the database failed: %w", err)
-	}
-	if err := s.persistPipelineFiles(&Pipeline{Name: opts.Name}); err != nil {
-		return nil, fmt.Errorf("pipeline files written but storing them in the database failed: %w", err)
-	}
+	s.materialize(opts.Name)
 	s.reg.Refresh(ctx)
 
 	p := s.reg.Get(opts.Name)
@@ -912,7 +892,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		p = &Pipeline{
 			Name:         opts.Name,
 			ConfigPath:   yamlPath,
-			EnvFile:      envPath,
+			dbEnv:        s.db,
 			Origin:       "created",
 			profileDBDSN: s.cfg.Database.DSN,
 			Cfg: &config.Config{Source: config.SourceConfig{SSHTunnel: opts.SourceSSHTunnel},
@@ -955,9 +935,9 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		Result:   map[bool]string{true: "ok", false: "validate_failed"}[valOK],
 		ExitCode: vCode,
 		Detail: map[string]any{
-			"config":   yamlPath,
-			"env":      envPath,
-			"val_exit": valExit,
+			"config":      yamlPath,
+			"credentials": "encrypted metadata database",
+			"val_exit":    valExit,
 		},
 	})
 
@@ -965,7 +945,6 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 		OK:         valOK,
 		Pipeline:   opts.Name,
 		ConfigPath: yamlPath,
-		EnvPath:    envPath,
 		Message:    "Pipeline created successfully",
 	}
 	if !valOK {

@@ -52,7 +52,10 @@ func TestMDB_E2E_SeededForeignKeyCascade(t *testing.T) {
 	src.exec(t, "ALTER TABLE app.attrs DROP FOREIGN KEY a_cascade")
 	dst.exec(t, "ALTER TABLE app.attrs DROP FOREIGN KEY z_cascade")
 	file, pos = src.masterPos(t)
-	process := startStrand(t, path, "--start-at", fmt.Sprintf("%s:%d", file, pos))
+	cfg.Bootstrap = "start_at"
+	cfg.StartAt = fmt.Sprintf("%s:%d", file, pos)
+	path = cfg.write(t)
+	process := startStrand(t, path)
 	check := func() {
 		t.Helper()
 		deadline := time.Now().Add(20 * time.Second)
@@ -80,6 +83,10 @@ func TestMDB_E2E_SeededForeignKeyCascade(t *testing.T) {
 	check()
 	if code := process.stop(t); code != 0 {
 		t.Fatalf("stop exit %d\n%s", code, process.tail())
+	}
+	out, code = runStrandCLI(t, time.Minute, "sync", "-c", path, "--start-at", cfg.StartAt)
+	if code != exitcode.InvalidSyntax || !strings.Contains(out, "a checkpoint already exists") {
+		t.Fatalf("explicit start position with an existing checkpoint = %d:\n%s", code, out)
 	}
 	process = startStrand(t, path)
 	waitStrandLog(t, process, "pipeline running", 20*time.Second)

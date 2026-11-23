@@ -20,6 +20,7 @@ import (
 	"strand/internal/admin"
 	"strand/internal/backup"
 	"strand/internal/config"
+	"strand/internal/pipeline"
 	"strand/internal/spool"
 	"strand/internal/tunnel"
 	"strand/internal/web/store"
@@ -876,6 +877,9 @@ type detailBody struct {
 	CanOperate bool   // operator or admin: start/stop/pause/... controls
 	CanAdmin   bool   // admin: delete, config edit, rewind
 	Revision   string // short content hash of the stored config (shown as "Config revision")
+
+	AddedTables      []string
+	AddedTablesError bool
 }
 
 // Controls quyết định nút nào hiện ở trang chi tiết (chỉ là gợi ý UI: API vẫn kiểm lại).
@@ -983,6 +987,10 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	case "config":
 		_ = s.audit.Log(AuditEntry{IP: s.clientIP(r), Action: "config.view", Pipeline: p.Name})
 		b.Config = s.configView(p)
+		if p.Cfg != nil && !p.Cfg.IsMongoDB() && p.Cfg.Resources.Spool.Path != "" {
+			added, err := pipeline.VerificationAddedTables(p.Cfg.Resources.Spool.Path, p.Cfg.Name)
+			b.AddedTables, b.AddedTablesError = added, err != nil
+		}
 		b.Tuning = s.tuningView(p)
 		b.Env = s.getEnvView(p)
 	case "logs":

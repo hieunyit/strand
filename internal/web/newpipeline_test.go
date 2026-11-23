@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -90,7 +91,7 @@ func TestNewPipelineCreation(t *testing.T) {
 	if !strings.Contains(yamlContent, "name: store-sync") {
 		t.Errorf("yaml missing pipeline name: %s", yamlContent)
 	}
-	if !strings.Contains(yamlContent, "password_env: SRC_PW") {
+	if !strings.Contains(yamlContent, "password_env: "+pipelineSourcePassword) {
 		t.Errorf("yaml missing password_env: %s", yamlContent)
 	}
 	// Bí mật KHÔNG ĐƯỢC nằm trong YAML
@@ -98,22 +99,18 @@ func TestNewPipelineCreation(t *testing.T) {
 		t.Fatalf("passwords leaked into YAML config: %s", yamlContent)
 	}
 
-	// 2. Kiểm tra file .env với mode 0600
 	envPath := filepath.Join(customCfgDir, "store-sync.env")
-	envBytes, err := os.ReadFile(envPath)
-	if err != nil {
-		t.Fatalf("env file not created at %s: %v", envPath, err)
+	assertNoEnvFile := func() {
+		t.Helper()
+		if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+			t.Fatalf("expected no plaintext credentials file: %v", err)
+		}
 	}
-	fi, err := os.Stat(envPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("env file permissions %o, want 0600", fi.Mode().Perm())
-	}
-	envContent := string(envBytes)
-	if !strings.Contains(envContent, "SecretSrcPassword123") || !strings.Contains(envContent, "SecretTgtPassword456") {
-		t.Errorf("env file missing passwords: %s", envContent)
+	assertNoEnvFile()
+	row, found, err := e.srv.db.st.GetPipeline(t.Context(), opts.Name)
+	if err != nil || !found || row.EnvPath != "" || res.EnvPath != "" || len(row.EnvEnc) == 0 ||
+		strings.Contains(string(row.EnvEnc), opts.SourcePassword) || strings.Contains(string(row.EnvEnc), opts.TargetPassword) {
+		t.Fatalf("expected database-only encrypted credentials: found=%v err=%v", found, err)
 	}
 
 	// 3. Pipeline đã được nạp vào Registry
@@ -121,6 +118,37 @@ func TestNewPipelineCreation(t *testing.T) {
 	if p == nil {
 		t.Fatalf("store-sync pipeline not found in registry")
 	}
+	if p.CfgErr != "" || p.Cfg == nil {
+		t.Fatalf("registry could not load pipeline credentials: %s", p.CfgErr)
+	}
+	env, err := p.Env()
+	if err != nil || !slices.Contains(env, pipelineSourcePassword+"="+opts.SourcePassword) ||
+		!slices.Contains(env, pipelineTargetDSN+"=postgres://strand_tgt:"+opts.TargetPassword+"@10.0.0.21:5432/store?sslmode=prefer") {
+		t.Fatal("pipeline process did not receive stored source credentials")
+	}
+	resp, out = e.do(c, "GET", "/api/v1/pipelines/store-sync/env", "", nil)
+	var view EnvView
+	if resp.StatusCode != 200 || json.Unmarshal([]byte(out), &view) != nil || !view.Database ||
+		view.Entries[pipelineSourcePassword] != maskStr || view.Entries[pipelineTargetDSN] != maskStr {
+		t.Fatalf("credentials view returned status %d and exposed or omitted a credential", resp.StatusCode)
+	}
+	const replacement = `new-src:p@ss"$`
+	edit, _ := json.Marshal(map[string]any{"entries": map[string]string{
+		pipelineSourcePassword: replacement, pipelineTargetDSN: maskStr,
+	}})
+	resp, out = e.do(c, "POST", "/api/v1/pipelines/store-sync/env", string(edit),
+		map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("edit credentials: %d %s", resp.StatusCode, out)
+	}
+	e.srv.Registry().Refresh(t.Context())
+	p = e.srv.Registry().Get(opts.Name)
+	env, err = p.Env()
+	if err != nil || !slices.Contains(env, pipelineSourcePassword+"="+replacement) ||
+		!slices.Contains(env, pipelineTargetDSN+"=postgres://strand_tgt:"+opts.TargetPassword+"@10.0.0.21:5432/store?sslmode=prefer") {
+		t.Fatal("credential edit did not replace the source password and preserve the target DSN")
+	}
+	assertNoEnvFile()
 	if p.Mode() != ModeBackground {
 		t.Errorf("new pipeline mode %s, want background", p.Mode())
 	}
@@ -363,7 +391,8 @@ func TestNewPipelineKeyless(t *testing.T) {
 	e, c, csrf := npEnv(t)
 	resp, page := e.do(c, "GET", "/pipelines/new", "", nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(page, `name="keyless"`) ||
-		!strings.Contains(page, `value="full_row"`) || !strings.Contains(page, "REPLICA IDENTITY FULL") {
+		!strings.Contains(page, `value="full_row"`) || !strings.Contains(page, "REPLICA IDENTITY FULL") || !strings.Contains(page, "Start position of the restored copy") ||
+		strings.Contains(page, `name="source_password_env"`) || strings.Contains(page, `name="target_password_env"`) {
 		t.Fatalf("expected the keyless choice and prerequisites in the wizard, got %d", resp.StatusCode)
 	}
 
@@ -385,7 +414,7 @@ func TestNewPipelineKeyless(t *testing.T) {
 			if tt.useForm {
 				code, _, y, body = createNPForm(t, e, c, csrf, url.Values{
 					"name": {tt.name}, "from": {tt.engine}, "to": {tt.engine}, "database": {"shop"},
-					"keyless": {tt.keyless},
+					"keyless": {tt.keyless}, "start_at": {"0/1ABCDEF"},
 				})
 			} else {
 				code, _, y, body = createNP(t, e, c, csrf, NewPipelineOpts{
@@ -405,6 +434,9 @@ func TestNewPipelineKeyless(t *testing.T) {
 			}
 			if got := strings.Contains(y, "\n  keyless: full_row\n"); got != tt.wantFullRowYAML {
 				t.Fatalf("keyless YAML present = %v, want %v:\n%s", got, tt.wantFullRowYAML, y)
+			}
+			if tt.useForm && !strings.Contains(y, "  start_at: \"0/1ABCDEF\"") {
+				t.Fatalf("restored copy start position missing:\n%s", y)
 			}
 		})
 	}
@@ -525,18 +557,38 @@ func TestNewPipelinePageHasTargetDatabaseInput(t *testing.T) {
 // không hỗ trợ bị từ chối 400 ngay khi tạo.
 func TestNewPipelineTargetPGDatabaseAndPairs(t *testing.T) {
 	e, c, csrf := npEnv(t)
-	_, _, y, _ := createNP(t, e, c, csrf, NewPipelineOpts{Name: "p1", From: "mysql", To: "postgres", Database: "shop"})
-	if !strings.Contains(y, "/shop?sslmode=prefer") {
-		t.Errorf("mặc định database PG đích = database nguồn:\n%s", y)
+	for _, tc := range []struct {
+		name, from, database, target, sourcePath, targetPath string
+	}{
+		{"p1", "mysql", "shop", "", "", "/shop?sslmode=prefer"},
+		{"p2", "mysql", "shop", "warehouse", "", "/warehouse?sslmode=prefer"},
+		{"p3", "pg", "src_db", "dst_db", "/src_db?sslmode=prefer", "/dst_db?sslmode=prefer"},
+	} {
+		code, _, _, out := createNP(t, e, c, csrf, NewPipelineOpts{
+			Name: tc.name, From: tc.from, To: "postgres", Database: tc.database, TargetPGDatabase: tc.target,
+		})
+		p := e.srv.Registry().Get(tc.name)
+		if code != 200 || p == nil || p.Cfg == nil {
+			t.Fatalf("%s: create failed with status %d: %s", tc.name, code, out)
+		}
+		env, err := p.Env()
+		if err != nil {
+			t.Fatal(err)
+		}
+		values := make(map[string]string, len(env))
+		for _, l := range env {
+			k, v, _ := strings.Cut(l, "=")
+			values[k] = v
+		}
+		cfg, err := config.LoadYAMLStrictWithEnv(p.dbYAML, values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(cfg.Source.DSN, tc.sourcePath) || !strings.HasSuffix(cfg.Target.DSN, tc.targetPath) {
+			t.Errorf("%s: configured source or target database does not match", tc.name)
+		}
 	}
-	_, _, y, _ = createNP(t, e, c, csrf, NewPipelineOpts{Name: "p2", From: "mysql", To: "postgres", Database: "shop", TargetPGDatabase: "warehouse"})
-	if !strings.Contains(y, ":5432/warehouse?sslmode=prefer") && !strings.Contains(y, "/warehouse?sslmode=prefer") {
-		t.Errorf("target_pg_database không được áp dụng:\n%s", y)
-	}
-	_, _, y, _ = createNP(t, e, c, csrf, NewPipelineOpts{Name: "p3", From: "postgres", To: "postgres", Database: "src_db", TargetPGDatabase: "dst_db"})
-	if !strings.Contains(y, "/dst_db?sslmode=prefer") || !strings.Contains(y, "/src_db?sslmode=prefer") {
-		t.Errorf("PG→PG: nguồn src_db, đích dst_db:\n%s", y)
-	}
+
 	for _, o := range []NewPipelineOpts{
 		{Name: "bad1", From: "postgres", To: "mysql", Database: "x"},
 		{Name: "bad2", From: "mariadb", To: "postgres", Database: "x"},

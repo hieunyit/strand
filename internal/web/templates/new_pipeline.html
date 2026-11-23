@@ -221,7 +221,12 @@
           <option value="full_row">Allow full-row matching for tables without a key</option>
         </select>
       </label>
-      <small class="field-hint" id="np-keyless-help">Use full-row matching when you cannot add a key. Start from a restored seed backup, or preload matching data on the target and set Start position below. Logical snapshots require a key. MySQL and MariaDB sources need <code>binlog_row_image=FULL</code>. PostgreSQL needs <code>REPLICA IDENTITY FULL</code> on each keyless source table. Validation reports missing keys and suggests fixes.</small>
+      <small class="field-hint" id="np-keyless-help">Full-row matching needs an initial copy restored on the target. MySQL and MariaDB require <code>binlog_row_image=FULL</code>. PostgreSQL requires <code>REPLICA IDENTITY FULL</code> on each keyless table.</small>
+      <label class="field">
+        <span class="field-label">Start position of the restored copy</span>
+        <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678, MySQL GTID or PostgreSQL LSN" aria-describedby="np-start-at-help">
+        <small class="field-hint" id="np-start-at-help">Restore all included tables on the target and enter the position recorded in that backup. Strand starts CDC there and skips the initial snapshot. Leave this blank for a logical snapshot of tables with keys.</small>
+      </label>
     </div>
   </fieldset>
 
@@ -265,14 +270,6 @@
         <span class="field-label">Spool directory</span>
         <input type="text" name="spool_dir" class="mono" placeholder="default: &lt;state_dir&gt;/pipelines/&lt;name&gt;/spool">
       </label>
-      <label class="field">
-        <span class="field-label">Source password variable</span>
-        <input type="text" name="source_password_env" value="SRC_PW" class="mono">
-      </label>
-      <label class="field">
-        <span class="field-label">Target password variable</span>
-        <input type="text" name="target_password_env" value="DST_PW" class="mono">
-      </label>
     </div>
   </details>
 
@@ -299,11 +296,6 @@
         <span class="field-label">Tables in parallel</span>
         <input type="number" name="max_parallel" class="mono" min="1" max="32" placeholder="default: 1">
         <small class="field-hint">How many tables the snapshot copies at the same time (1-32). They share the source read limit; memory and target connections grow with this number. Ignored for PostgreSQL sources.</small>
-      </label>
-      <label class="field">
-        <span class="field-label">Start position (--start-at)</span>
-        <input type="text" name="start_at" class="mono" placeholder="e.g. mariadb-bin.000042:1075678 or GTID (skips snapshot)">
-        <small class="field-hint">Tùy chọn: Nhập vị trí binlog hoặc GTID sau khi đã tự import DB sang Target để bỏ qua bước snapshot.</small>
       </label>
       <label class="field">
         <span class="field-label">Snapshot windows</span>

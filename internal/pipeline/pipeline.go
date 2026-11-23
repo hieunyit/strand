@@ -72,6 +72,8 @@ type Pipeline struct {
 	strict  bool
 	cascade mysqlCascadePlan
 
+	startAtFromConfig bool
+
 	src, dst *sql.DB
 	srcDSN   string
 
@@ -222,7 +224,8 @@ func Run(ctx context.Context, opts Options) error {
 		opts.ShutdownTimeout = 100 * time.Second
 	}
 	cfg := opts.Config
-	if opts.StartAt == "" && cfg.Bootstrap.StartAt != "" {
+	startAtFromConfig := opts.StartAt == "" && cfg.Bootstrap.StartAt != ""
+	if startAtFromConfig {
 		opts.StartAt = cfg.Bootstrap.StartAt
 	}
 	srcEngine, dstEngine := engineOf(cfg.Source.Kind), engineOf(cfg.Target.Kind)
@@ -243,14 +246,15 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer closeTunnels()
 	p := &Pipeline{
-		opts:      opts,
-		cfg:       &runtimeConfig,
-		log:       opts.Logger.With("pipeline", cfg.Name),
-		id:        cfg.Name,
-		strict:    !strings.EqualFold(cfg.Target.CommitOrder, "relaxed"),
-		srcEngine: srcEngine,
-		dstEngine: dstEngine,
-		startedAt: time.Now(),
+		opts:              opts,
+		startAtFromConfig: startAtFromConfig,
+		cfg:               &runtimeConfig,
+		log:               opts.Logger.With("pipeline", cfg.Name),
+		id:                cfg.Name,
+		strict:            !strings.EqualFold(cfg.Target.CommitOrder, "relaxed"),
+		srcEngine:         srcEngine,
+		dstEngine:         dstEngine,
+		startedAt:         time.Now(),
 	}
 	if srcEngine == model.EnginePG {
 		p.lsns = &lsnTracker{}
@@ -454,13 +458,6 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		return err
 	}
 	if len(p.cascade.signatures) > 0 {
-		if p.opts.StartAt == "" {
-			for id := range p.tables {
-				if !p.state.IsDone(id.String()) {
-					return cascadeConfigError(fmt.Sprintf("cascading foreign keys require a consistent initial copy; seed the target and use --start-at seed or its binlog position (table %s still needs a snapshot)", id))
-				}
-			}
-		}
 		if _, err := os.Stat(filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")); err == nil {
 			return cascadeConfigError("cascading foreign keys require a live binlog reader; prefetch spools do not preserve foreign-key session flags")
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -546,6 +543,18 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	loaded, err := p.store.LoadApplied(ctx)
 	if err != nil {
 		return fmt.Errorf("load applied set: %w", err)
+	}
+	// The YAML bootstrap position seeds an empty checkpoint. A CLI flag remains
+	// an explicit request and is still rejected when a checkpoint exists.
+	if p.startAtFromConfig && hasAppliedCheckpoint(loaded) {
+		p.opts.StartAt = ""
+	}
+	if len(p.cascade.signatures) > 0 && p.opts.StartAt == "" {
+		for id := range p.tables {
+			if !p.state.IsDone(id.String()) {
+				return cascadeConfigError(fmt.Sprintf("cascading foreign keys require a consistent initial copy; seed the target and use --start-at seed or its binlog position (table %s still needs a snapshot)", id))
+			}
+		}
 	}
 	var applied checkpoint.AppliedSet
 	if p.srcEngine == model.EnginePG {
@@ -1174,6 +1183,18 @@ func configHash(cfg *config.Config) string {
 	raw, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])[:32]
+}
+
+func hasAppliedCheckpoint(loaded checkpoint.AppliedSet) bool {
+	switch set := loaded.(type) {
+	case *checkpoint.MySQLPosAppliedSet:
+		return !set.IsEmpty()
+	case *checkpoint.MySQLAppliedSet:
+		return set.String() != ""
+	case *checkpoint.PGAppliedSet:
+		return set.String() != ""
+	}
+	return false
 }
 
 // initialPosition quyết định điểm bắt đầu cho pipeline mới (chế độ A/B/C, 02 §1, §10).

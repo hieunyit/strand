@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,16 +60,15 @@ func TestConfigEditFailsClosedWhenDatabaseWriteFails(t *testing.T) {
 	if b, _ := os.ReadFile(yamlPath); string(b) != string(orig) {
 		t.Fatalf("file changed although the database copy was not updated: %q", b)
 	}
-	// .env edit: same rule.
-	envPath := filepath.Join(cfgDir, "flaky.env")
-	origEnv, _ := os.ReadFile(envPath)
+	// A rejected credential edit also leaves the existing ciphertext intact.
+	original, _, _ := fs.GetPipeline(t.Context(), "flaky")
 	eb, _ := json.Marshal(map[string]any{"entries": map[string]string{"EXTRA": "1"}})
 	resp, out = e.do(c, "POST", "/api/v1/pipelines/flaky/env", string(eb), map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
 	if resp.StatusCode != 503 {
 		t.Fatalf("env save with DB write failing: %d %s (want 503)", resp.StatusCode, out)
 	}
-	if b, _ := os.ReadFile(envPath); string(b) != string(origEnv) {
-		t.Fatalf(".env changed although the database copy was not updated")
+	if saved, _, _ := fs.GetPipeline(t.Context(), "flaky"); !bytes.Equal(saved.EnvEnc, original.EnvEnc) {
+		t.Fatal("encrypted credentials changed despite the failed write")
 	}
 	// Database back: the edit goes through and lands in both.
 	fs.failUpsertPipeline.Store(false)

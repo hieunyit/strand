@@ -404,7 +404,6 @@ func TestCreatedPipelineSourceOfTruthIsDatabase(t *testing.T) {
 		yamlPath, envPath := filepath.Join(cfgDir, "dbpipe.yaml"), filepath.Join(cfgDir, "dbpipe.env")
 		wantYAML, _ := os.ReadFile(yamlPath)
 		must0(t, os.Remove(yamlPath))
-		must0(t, os.Remove(envPath))
 		e2 := e.restart()
 		got, err := os.ReadFile(yamlPath)
 		if err != nil || string(got) != string(wantYAML) {
@@ -413,15 +412,16 @@ func TestCreatedPipelineSourceOfTruthIsDatabase(t *testing.T) {
 		if fi, _ := os.Stat(yamlPath); fi.Mode().Perm() != 0o640 {
 			t.Errorf("config mode %o, want 0640", fi.Mode().Perm())
 		}
-		envB, err := os.ReadFile(envPath)
-		if err != nil || !strings.Contains(string(envB), "SrcSecretPw") {
-			t.Fatalf("env not materialised: %v %q", err, envB)
+		if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+			t.Fatalf("restart materialised plaintext credentials: %v", err)
 		}
-		if fi, _ := os.Stat(envPath); fi.Mode().Perm() != 0o600 {
-			t.Errorf("env mode %o, want 0600", fi.Mode().Perm())
-		}
-		if e2.srv.reg.Get("dbpipe") == nil {
+		p := e2.srv.reg.Get("dbpipe")
+		if p == nil {
 			t.Fatal("pipeline missing after restart")
+		}
+		env, err := p.Env()
+		if err != nil || !strings.Contains(strings.Join(env, "\n"), pipelineSourcePassword+"=SrcSecretPw") {
+			t.Fatal("restart could not read the database credential")
 		}
 		// Sửa file bằng tay rồi chạy validate/start: DB thắng (nguồn sự thật).
 		must0(t, os.WriteFile(yamlPath, []byte("# hand edit\n"), 0o640))
@@ -641,9 +641,8 @@ func TestTuningAndEnvViewSaveWhenDiskFileMissing(t *testing.T) {
 		t.Fatal("pipeline tuneenv not found")
 	}
 
-	// Xóa cả file config và file .env trên đĩa để mô phỏng môi trường DB-first
+	// Lose the materialised configuration to exercise the database source of truth.
 	_ = os.Remove(p.ConfigPath)
-	_ = os.Remove(p.EnvFile)
 
 	// 1. tuningView phải đọc được từ DB
 	tv := e.srv.tuningView(p)
@@ -656,8 +655,8 @@ func TestTuningAndEnvViewSaveWhenDiskFileMissing(t *testing.T) {
 	if ev.Error != "" || !ev.Exists {
 		t.Fatalf("getEnvView failed: exists=%v, err=%s", ev.Exists, ev.Error)
 	}
-	if ev.Entries["SRC_PW"] != maskStr {
-		t.Fatalf("SRC_PW should be masked, got: %s", ev.Entries["SRC_PW"])
+	if !ev.Database || ev.Entries[pipelineSourcePassword] != maskStr {
+		t.Fatal("source password should be masked")
 	}
 
 	// 3. saveTuning với force: true thành công và lưu vào DB
@@ -672,8 +671,8 @@ func TestTuningAndEnvViewSaveWhenDiskFileMissing(t *testing.T) {
 	// 4. saveEnv gửi lại masked password không được ghi '********' vào file
 	eBody, _ := json.Marshal(map[string]any{
 		"entries": map[string]string{
-			"SRC_PW":  maskStr, // giữ nguyên mật khẩu cũ từ DB
-			"NEW_KEY": "newval",
+			pipelineSourcePassword: maskStr, // giữ nguyên mật khẩu cũ từ DB
+			"NEW_KEY":              "newval",
 		},
 	})
 	resp, out = e.do(c, "POST", "/api/v1/pipelines/tuneenv/env", string(eBody), map[string]string{
@@ -683,19 +682,16 @@ func TestTuningAndEnvViewSaveWhenDiskFileMissing(t *testing.T) {
 		t.Fatalf("save env: %d %s", resp.StatusCode, out)
 	}
 
-	// Đọc lại file .env vừa materialize và kiểm tra
-	envBytes, err := os.ReadFile(p.EnvFile)
+	env, err := p.Env()
 	if err != nil {
-		t.Fatalf("read env file: %v", err)
+		t.Fatal(err)
 	}
-	if strings.Contains(string(envBytes), "********") {
-		t.Fatalf(".env file contains masked stars '********'")
+	values := strings.Join(env, "\n")
+	if strings.Contains(values, maskStr) || !strings.Contains(values, pipelineSourcePassword+"=MySrcSecret") || !strings.Contains(values, "NEW_KEY=newval") {
+		t.Fatal("database lost a stored credential or the new value")
 	}
-	if !strings.Contains(string(envBytes), "MySrcSecret") {
-		t.Fatalf(".env file lost original secret, content:\n%s", envBytes)
-	}
-	if !strings.Contains(string(envBytes), "NEW_KEY=newval") {
-		t.Fatalf(".env file missing NEW_KEY, content:\n%s", envBytes)
+	if _, err := os.Stat(filepath.Join(cfgDir, "tuneenv.env")); !os.IsNotExist(err) {
+		t.Fatalf("credential edit materialised a plaintext file: %v", err)
 	}
 }
 

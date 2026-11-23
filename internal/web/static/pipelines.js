@@ -16,7 +16,7 @@
   // ---------------------------------------------------------------- New pipeline wizard
   var ENGINES = { mysql: 'MySQL', mariadb: 'MariaDB', postgres: 'PostgreSQL', mongodb: 'MongoDB' };
   var OPTION_FIELDS = [['commit_order', 'relaxed'], ['workers', '8'], ['spool_dir', ''], ['iops_soft', ''], ['iops_hard', ''], ['chunk_rows', ''],
-    ['max_parallel', ''], ['start_at', ''], ['windows', ''], ['governor_algorithm', ''], ['lag_slo', ''], ['breaker_max_ratio', ''],
+    ['max_parallel', ''], ['windows', ''], ['governor_algorithm', ''], ['lag_slo', ''], ['breaker_max_ratio', ''],
     ['replica_lag_max', ''], ['snapshot_batch', ''], ['stream_batch', ''], ['lease_ttl', '']];
 
   function wizard(form) {
@@ -37,9 +37,13 @@
       if (!w) { return; }
       w.classList.remove('has-error');
       var s = w.querySelector(':scope > .field-error');
-      if (s) { s.remove(); }
+      if (s) {
+        var ids = (f.getAttribute('aria-describedby') || '').split(/\s+/).filter(function (id) { return id && id !== s.id; });
+        if (ids.length) { f.setAttribute('aria-describedby', ids.join(' ')); }
+        else { f.removeAttribute('aria-describedby'); }
+        s.remove();
+      }
       f.removeAttribute('aria-invalid');
-      f.removeAttribute('aria-describedby');
     }
     function showErr(f, msg) {
       clearErr(f);
@@ -51,7 +55,7 @@
       s.setAttribute('role', 'alert');
       w.appendChild(s);
       f.setAttribute('aria-invalid', 'true');
-      f.setAttribute('aria-describedby', s.id);
+      f.setAttribute('aria-describedby', [f.getAttribute('aria-describedby'), s.id].filter(Boolean).join(' '));
     }
     function problem(f) {
       var v = (f.value || '').trim();
@@ -60,6 +64,9 @@
         var details = f.closest('details');
         if (details) { details.open = true; }
         return 'This field is required when using an SSH tunnel.';
+      }
+      if (f.name === 'start_at' && !v && val('keyless') === 'full_row') {
+        return 'Restore a consistent copy to the target and enter its binlog position, GTID or LSN.';
       }
       if (f.required && v === '') { return 'This field is required.'; }
       if (v && f.pattern && !new RegExp('^(?:' + f.pattern.replace(/^\^|\$$/g, '') + ')$').test(v)) {
@@ -159,6 +166,7 @@
         rows.push(['Target', ENGINES[dst] + ', ' + addr('target', dst === 'postgres' ? val('target_pg_database') : '')]);
         rows.push(['Target password', val('target_password') ? 'set (hidden)' : 'none']);
       }
+      if (val('start_at')) { rows.push(['CDC start position', val('start_at') + ' (from restored copy)']); }
       var pv = $('np-preview');
       rows.push(['Copy', pv ? pv.textContent : '']);
       var opts = [];

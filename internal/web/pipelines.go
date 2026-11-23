@@ -80,7 +80,8 @@ type Pipeline struct {
 	CfgErr string
 
 	profileDBDSN string
-	dbYAML       []byte // bản cấu hình trong kho metadata (nil: chưa có trong DB, đọc từ file)
+	dbEnv        *metaDB // credentials are read from the database for Web-managed pipelines
+	dbYAML       []byte  // bản cấu hình trong kho metadata (nil: chưa có trong DB, đọc từ file)
 }
 
 // Mode trả cách quản lý hiệu lực.
@@ -176,19 +177,22 @@ func ParseEnvData(r io.Reader) ([]string, error) {
 	return out, sc.Err()
 }
 
-// Env trả môi trường của file env_file (rỗng nếu không khai báo).
+// Env returns the pipeline process environment from its configured credential storage.
 func (p *Pipeline) Env() ([]string, error) {
 	usesProfile := p.Cfg != nil && p.Cfg.UsesSSHTunnelProfile()
-	if p.EnvFile == "" && !usesProfile {
+	if p.EnvFile == "" && p.dbEnv == nil && !usesProfile {
 		return nil, nil
 	}
 	var env []string
-	if p.EnvFile != "" {
-		var err error
+	var err error
+	switch {
+	case p.dbEnv != nil:
+		env, err = p.dbEnv.pipelineEnv(p.Name)
+	case p.EnvFile != "":
 		env, err = ReadEnvFile(p.EnvFile)
-		if err != nil {
-			return nil, err
-		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	// The Web service owns which SSH keys and agent a child may use.
 	filtered := env[:0]
@@ -277,7 +281,7 @@ func (r *Registry) publish(byName map[string]*Pipeline, warns []string) {
 		p.profileDBDSN = r.cfg.Database.DSN
 		// The editor's conventional env path is durable across refresh/restart,
 		// including explicit entries without an env_file setting.
-		if p.EnvFile == "" {
+		if p.EnvFile == "" && p.dbEnv == nil {
 			path := filepath.Join(filepath.Dir(p.ConfigPath), p.Name+".env")
 			if fileExists(path) {
 				p.EnvFile = path

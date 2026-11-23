@@ -30,13 +30,26 @@ func resolveConnections(cfg *Config) error {
 
 func resolveConnectionsWithEnv(cfg *Config, env map[string]string) error {
 	for _, m := range []struct {
-		name                                                      string
-		kind, dsn, uri, uriEnv, host, user, password, passwordEnv *string
-		port                                                      *int
+		name                                                              string
+		kind, dsn, dsnEnv, uri, uriEnv, host, user, password, passwordEnv *string
+		port                                                              *int
 	}{
-		{"source", &cfg.Source.Kind, &cfg.Source.DSN, &cfg.Source.URI, &cfg.Source.URIEnv, &cfg.Source.Host, &cfg.Source.User, &cfg.Source.Password, &cfg.Source.PasswordEnv, &cfg.Source.Port},
-		{"target", &cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.URI, &cfg.Target.URIEnv, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password, &cfg.Target.PasswordEnv, &cfg.Target.Port},
+		{"source", &cfg.Source.Kind, &cfg.Source.DSN, &cfg.Source.DSNEnv, &cfg.Source.URI, &cfg.Source.URIEnv, &cfg.Source.Host, &cfg.Source.User, &cfg.Source.Password, &cfg.Source.PasswordEnv, &cfg.Source.Port},
+		{"target", &cfg.Target.Kind, &cfg.Target.DSN, &cfg.Target.DSNEnv, &cfg.Target.URI, &cfg.Target.URIEnv, &cfg.Target.Host, &cfg.Target.User, &cfg.Target.Password, &cfg.Target.PasswordEnv, &cfg.Target.Port},
 	} {
+		if *m.dsnEnv != "" {
+			if *m.dsn != "" || IsMongoKind(*m.kind) {
+				return exitcode.New("invalid_connection", exitcode.InvalidSyntax, m.name+": dsn_env requires a SQL connection without dsn", nil)
+			}
+			value, ok := env[*m.dsnEnv]
+			if !ok {
+				value = os.Getenv(*m.dsnEnv)
+			}
+			if value == "" {
+				return exitcode.New("invalid_connection", exitcode.InvalidSyntax, m.name+": dsn_env "+*m.dsnEnv+" is empty or unset", nil)
+			}
+			*m.dsn = value
+		}
 		if IsMongoKind(*m.kind) {
 			if err := resolveMongoConn(m.name, m.kind, m.dsn, m.uri, m.uriEnv, m.host, m.user, m.password, m.passwordEnv, m.port, env); err != nil {
 				return exitcode.New("invalid_connection", exitcode.InvalidSyntax, err.Error(), err)

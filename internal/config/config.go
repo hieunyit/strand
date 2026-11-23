@@ -33,6 +33,7 @@ type Config struct {
 type SourceConfig struct {
 	Kind      string           `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
 	DSN       string           `yaml:"dsn" json:"dsn"`
+	DSNEnv    string           `yaml:"dsn_env,omitempty" json:"dsn_env,omitempty"`
 	SSHTunnel *SSHTunnelConfig `yaml:"ssh_tunnel,omitempty" json:"ssh_tunnel,omitempty"`
 	// URI: chuỗi kết nối MongoDB (kind mongodb), thường "${SRC_URI}" từ .env; thay cho dsn.
 	URI      string `yaml:"uri,omitempty" json:"uri,omitempty"`
@@ -67,6 +68,7 @@ type SourceConfig struct {
 type TargetConfig struct {
 	Kind      string           `yaml:"kind" json:"kind"` // mysql | postgres | mongodb
 	DSN       string           `yaml:"dsn" json:"dsn"`
+	DSNEnv    string           `yaml:"dsn_env,omitempty" json:"dsn_env,omitempty"`
 	SSHTunnel *SSHTunnelConfig `yaml:"ssh_tunnel,omitempty" json:"ssh_tunnel,omitempty"`
 	// URI: chuỗi kết nối MongoDB (kind mongodb), thường "${DST_URI}" từ .env; thay cho dsn.
 	URI string `yaml:"uri,omitempty" json:"uri,omitempty"`

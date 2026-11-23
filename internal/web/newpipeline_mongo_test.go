@@ -2,14 +2,13 @@ package web
 
 import (
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
 	"strand/internal/config"
 )
 
-// MongoDB -> MongoDB from the new-pipeline form: the URIs are secrets (only in the encrypted .env, never in the
+// MongoDB -> MongoDB from the new-pipeline form: the URIs are secrets (only in the encrypted credential record, never in the
 // YAML), scope is "db.collection" patterns, tuning keys land under mongodb:, and the stored config parses.
 func TestNewPipelineMongoDBKind(t *testing.T) {
 	e, c, csrf := npEnv(t)
@@ -41,7 +40,7 @@ func TestNewPipelineMongoDBKind(t *testing.T) {
 	}
 	plain, err := e.srv.db.box.Open(row.EnvEnc, "mongo1")
 	if err != nil || !strings.Contains(string(plain), "SRC_URI=") || !strings.Contains(string(plain), "MongoSrcSecret") {
-		t.Fatalf("encrypted .env: %v %q", err, plain)
+		t.Fatalf("encrypted credential record: %v %q", err, plain)
 	}
 	// Full strict load with the pipeline env: the URI becomes the source DSN.
 	env := map[string]string{}
@@ -60,8 +59,8 @@ func TestNewPipelineMongoDBKind(t *testing.T) {
 	if p := e.srv.reg.Get("mongo1"); p == nil || p.CfgErr != "" || p.Pair() != "mongodb → mongodb" {
 		t.Fatalf("registry: %+v", p)
 	}
-	if _, err := os.Stat(row.EnvPath); err != nil {
-		t.Fatalf(".env not materialised for the strand process: %v", err)
+	if row.EnvPath != "" {
+		t.Fatal("MongoDB credentials should be stored only in the metadata database")
 	}
 
 	// Tuning card: MongoDB keys only; SQL keys are refused for this kind (and vice versa).

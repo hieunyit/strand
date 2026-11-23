@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -358,10 +359,10 @@ func TestCreateErrorsNameTheField(t *testing.T) {
 		`invalid pipeline name "a b" (allowed: letters)`:                           "name",
 		`pipeline "x" already exists in registry (check 'Overwrite' to update it)`: "name",
 		"iops_soft: 5 is not an integer between 1 and 10000000":                    "iops_soft",
-		"windows: bad window":                                "windows",
-		`target_database "a-b" is not a plain database name`: "target_database",
+		"windows: bad window":                                                              "windows",
+		`target_database "a-b" is not a plain database name`:                               "target_database",
 		"PostgreSQL can only be copied to PostgreSQL (postgres -> mysql is not supported)": "to",
-		"something unrelated": "",
+		"something unrelated":                                                              "",
 	} {
 		if got := createErrField(msg); got != want {
 			t.Errorf("createErrField(%q) = %q, want %q", msg, got, want)
@@ -413,5 +414,31 @@ func TestToastAndDialogContract(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js lacks %q", want)
 		}
+	}
+}
+
+func TestConfigShowsTablesAddedDuringSync(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, _ := e.loginOK()
+	p := e.srv.Registry().Get("orders")
+	if p == nil || p.Cfg == nil {
+		t.Fatal("orders was not registered")
+	}
+	dir := p.Cfg.Resources.Spool.Path
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	state, err := json.Marshal(map[string]any{
+		"pipeline_id": p.Cfg.Name, "added_tables": []string{"other.new_table"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pipeline-state.json"), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := e.do(c, "GET", "/pipelines/orders/config", "", nil)
+	if resp.StatusCode != 200 || !strings.Contains(body, "Tables added during sync") || !strings.Contains(body, "other.new_table") {
+		t.Fatalf("Config page did not show persisted scope, status=%d", resp.StatusCode)
 	}
 }

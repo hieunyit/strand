@@ -24,7 +24,7 @@ func TestNewPipelineSSHTunnelConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.LoadYAMLStrictWithEnv([]byte(raw), map[string]string{"SRC_PW": "secret", "DST_PW": "secret"})
+	cfg, err := config.LoadYAMLStrictWithEnv([]byte(raw), map[string]string{pipelineSourcePassword: "secret", pipelineTargetDSN: "postgres://strand:secret@127.0.0.1/app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestNewPipelineSSHTunnelConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err = config.LoadYAMLStrictWithEnv([]byte(raw), map[string]string{"SRC_PW": "secret", "DST_PW": "secret"})
+	cfg, err = config.LoadYAMLStrictWithEnv([]byte(raw), map[string]string{pipelineSourcePassword: "secret", pipelineTargetDSN: "postgres://strand:secret@127.0.0.1/app"})
 	if err != nil || cfg.Source.SSHTunnel.Profile != "shared-bastion" || cfg.Target.SSHTunnel.Profile != "shared-bastion" {
 		t.Fatalf("could not load shared profile references from generated YAML: %v", err)
 	}

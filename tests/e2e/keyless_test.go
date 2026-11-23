@@ -199,6 +199,7 @@ func klRun(t *testing.T, env klEnv) {
 	t.Helper()
 	cfg := env.cfg
 	cfg.Bootstrap = "start_at"
+	cfg.StartAt = env.startAt
 	cfg.TablesExtra = klKeylessCfg
 	path := cfg.write(t)
 
@@ -213,7 +214,7 @@ func klRun(t *testing.T, env klEnv) {
 	}
 
 	wl := &klWorkload{db: env.srcDB, pg: env.pgSrc, table: "app.kl"}
-	p := startStrand(t, path, "--start-at", env.startAt)
+	p := startStrand(t, path)
 	defer func() {
 		if !p.exited() {
 			p.kill9()
@@ -238,7 +239,7 @@ func klRun(t *testing.T, env klEnv) {
 	if !strings.Contains(p.output.String(), "running in keyless mode") {
 		t.Fatalf("log does not mention keyless mode\n%s", p.tail())
 	}
-	if env.pgSrc && env.pgDst {
+	if env.pgSrc == env.pgDst {
 		p.kill9()
 		if _, err := env.srcDB.Exec("INSERT INTO app.kl (a,b,c) VALUES (1010,'restart',NULL),(1010,'restart',NULL)"); err != nil {
 			t.Fatal(err)
