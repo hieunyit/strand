@@ -277,15 +277,6 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 	if err != nil {
 		return plan, fmt.Errorf("inspect source foreign keys: %w", err)
 	}
-	var cascading []cascadeFK
-	for _, fk := range source {
-		if fk.cascades() {
-			cascading = append(cascading, fk)
-		}
-	}
-	if len(cascading) == 0 {
-		return plan, nil
-	}
 	target, err := readTargetForeignKeys(ctx, p.dst)
 	if err != nil {
 		return plan, fmt.Errorf("inspect target foreign keys: %w", err)
@@ -294,20 +285,13 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 	for id := range sourceScope {
 		targetScope[p.filter.Target(id)] = true
 	}
-	overlap := checkCascadeOrder(cascading) != nil
-	sourceGroup := cascadeConnectedTables(source, cascading)
+	sourceGroup, sourcePinned, overlap := cascadeGroups(source)
 	targetGroup := make(map[model.TableID]bool, len(sourceGroup))
+	targetPinned := make(map[model.TableID]bool, len(sourcePinned))
 	for id := range sourceGroup {
-		targetGroup[p.filter.Target(id)] = true
-	}
-	// A restrictive FK can be evaluated before or after a native cascade
-	// even when only one FK cascades. Match names as well in those groups.
-	pinned := overlap
-	for _, fk := range source {
-		if !fk.cascades() && sourceGroup[fk.Parent] {
-			pinned = true
-			break
-		}
+		dst := p.filter.Target(id)
+		targetGroup[dst] = true
+		targetPinned[dst] = sourcePinned[id]
 	}
 	expected := make(map[string]int)
 	var rules []cascadeFK
@@ -328,7 +312,7 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 			}
 			plan.parents[fk.Parent], plan.children[fk.Child] = true, true
 		}
-		if pinned {
+		if sourcePinned[fk.Child] {
 			if fk.constraint == "" || p.filter.Target(fk.Child) != fk.Child {
 				return plan, cascadeConfigError(fmt.Sprintf("order-sensitive foreign keys: %s must keep its schema, table and constraint names on the target", fk.Child))
 			}
@@ -342,8 +326,9 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 		// Restrictive FKs are verified directly against the target on every start.
 		if native {
 			signatureFK := fk
-			if !overlap {
-				signatureFK.Name = ""
+			signatureFK.Name = ""
+			if overlap {
+				signatureFK.Name = fk.constraint
 			}
 			plan.signatures = append(plan.signatures, cascadeSignature(signatureFK))
 		}
@@ -353,7 +338,7 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 	hint := ""
 	if overlap {
 		hint = " (overlapping cascading foreign keys: target rules and constraint names must match the source)"
-	} else if pinned {
+	} else if len(sourcePinned) > 0 {
 		hint = " (order-sensitive foreign keys: target rules and constraint names must match the source)"
 	}
 	sort.Strings(plan.signatures)
@@ -361,7 +346,7 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 		if !(fk.cascades() && targetScope[fk.Parent]) && !targetGroup[fk.Child] && !targetGroup[fk.Parent] {
 			continue
 		}
-		if pinned {
+		if targetPinned[fk.Child] || targetPinned[fk.Parent] {
 			fk.Name = fk.constraint
 		}
 		key := cascadeSignature(fk)
@@ -396,26 +381,52 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 	return plan, nil
 }
 
-func cascadeConnectedTables(all, cascading []cascadeFK) map[model.TableID]bool {
+// cascadeGroups finds the FK components in which native cascade is in use.
+// Name order is observable only inside components with overlapping actions or
+// restrictive checks, so an unrelated component can still be renamed.
+func cascadeGroups(all []cascadeFK) (group, pinned map[model.TableID]bool, hasOverlap bool) {
 	neighbors := map[model.TableID][]model.TableID{}
+	outgoing := map[model.TableID][]cascadeFK{}
 	for _, fk := range all {
 		neighbors[fk.Parent] = append(neighbors[fk.Parent], fk.Child)
 		neighbors[fk.Child] = append(neighbors[fk.Child], fk.Parent)
+		outgoing[fk.Parent] = append(outgoing[fk.Parent], fk)
 	}
-	var queue []model.TableID
-	for _, fk := range cascading {
-		queue = append(queue, fk.Parent, fk.Child)
-	}
-	group := map[model.TableID]bool{}
-	for len(queue) > 0 {
-		id := queue[len(queue)-1]
-		queue = queue[:len(queue)-1]
-		if !group[id] {
+	group, pinned = map[model.TableID]bool{}, map[model.TableID]bool{}
+	for _, fk := range all {
+		if !fk.cascades() || group[fk.Parent] {
+			continue
+		}
+		queue := []model.TableID{fk.Parent}
+		var component []model.TableID
+		var cascades []cascadeFK
+		restrictive := false
+		for len(queue) > 0 {
+			id := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			if group[id] {
+				continue
+			}
 			group[id] = true
+			component = append(component, id)
 			queue = append(queue, neighbors[id]...)
+			for _, edge := range outgoing[id] {
+				if edge.cascades() {
+					cascades = append(cascades, edge)
+				} else {
+					restrictive = true
+				}
+			}
+		}
+		overlap := checkCascadeOrder(cascades) != nil
+		hasOverlap = hasOverlap || overlap
+		if restrictive || overlap {
+			for _, id := range component {
+				pinned[id] = true
+			}
 		}
 	}
-	return group
+	return group, pinned, hasOverlap
 }
 
 func (p *Pipeline) cascadeSourceScope(additional ...model.TableID) map[model.TableID]bool {
