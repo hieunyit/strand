@@ -479,6 +479,21 @@ func (s *Server) runStrand(ctx context.Context, p *Pipeline, args ...string) (st
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	runErr := cmd.Run()
+	if len(args) > 0 && (args[0] == "validate" || args[0] == "plan") {
+		output := strings.TrimSpace(MaskSecrets(out.String()))
+		const limit = 16 * 1024
+		if len(output) > limit {
+			first, last := output[:limit/2], output[len(output)-limit/2:]
+			if index := strings.LastIndexByte(first, '\n'); index >= 0 {
+				first = first[:index]
+			}
+			if index := strings.IndexByte(last, '\n'); index >= 0 {
+				last = last[index+1:]
+			}
+			output = first + "\n\n[... output shortened ...]\n\n" + last
+		}
+		return output, zeroOr(runErr), runErr
+	}
 	return trimOut(out.Bytes()), zeroOr(runErr), runErr
 }
 

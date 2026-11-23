@@ -918,7 +918,7 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 
 	// Chạy plan
 	pctx, pcancel := context.WithTimeout(ctx, newPipelineCheckTimeout)
-	pOut, pCode, _ := s.runStrand(pctx, p, "plan", "-c", yamlPath)
+	pOut, pCode, pErr := s.runStrand(pctx, p, "plan", "-c", yamlPath)
 	if pctx.Err() == context.DeadlineExceeded {
 		pOut += fmt.Sprintf("\n[strand web: plan stopped after %s: the source or target did not answer]", newPipelineCheckTimeout)
 	}
@@ -926,6 +926,11 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	planExit := 0
 	if pCode != nil {
 		planExit = *pCode
+	} else if pErr != nil {
+		planExit = -1
+	}
+	if pErr != nil && pOut == "" {
+		pOut = pErr.Error()
 	}
 
 	_ = s.audit.Log(AuditEntry{
@@ -950,6 +955,9 @@ func (s *Server) createPipeline(ctx context.Context, opts NewPipelineOpts, ip st
 	if !valOK {
 		// File vẫn được giữ lại để sửa ở tab Config; ok=false để UI/API không báo thành công giả.
 		res.Message = fmt.Sprintf("Pipeline files were created but validation failed (exit %d): fix the pipeline in the Config tab and re-validate before Start", valExit)
+		if strings.Contains(vOut, "a logical snapshot of a keyless table") {
+			res.Message += ". To keep tables without a key, restore a consistent backup of all included tables on the target, then set bootstrap.default to start_at and bootstrap.start_at to the position recorded in that backup"
+		}
 		if strings.Contains(vOut, "Unknown database") || strings.Contains(vOut, "1049") {
 			res.Message += fmt.Sprintf(". Hint: the target metadata database must exist (CREATE DATABASE %s;)", metaDBOf(opts))
 		}

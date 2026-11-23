@@ -205,11 +205,10 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 			return warnings, fmt.Errorf("inspect table %s: %w", t, err)
 		}
 		if res.Key == nil && ko.On {
-			cols, types, terr := mysqlColTypes(ctx, db, schema, table)
+			why, terr := ko.DecideMySQL(ctx, db, schema, table)
 			if terr != nil {
 				return warnings, fmt.Errorf("inspect table %s: %w", t, terr)
 			}
-			why := ko.Decide(t, cols, types, false, "")
 			if why == "" {
 				warnings = append(warnings, KeylessWarnings(t)...)
 				continue

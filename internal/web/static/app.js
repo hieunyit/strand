@@ -1041,14 +1041,14 @@
                 if (owBox) owBox.checked = true;
               }
               var vPass = res.j.validate && res.j.validate.exit_code === 0;
-              var pPass = res.j.plan && res.j.plan.exit_code === 0;
+              var planGenerated = res.j.plan && res.j.plan.exit_code === 0;
               var html = '';
               if (!res.j.ok) {
                 // Tạo file xong nhưng validate lỗi: báo rõ, không cho Start ngay.
                 html += '<p class="err"><b>Validation failed.</b> ' + escHtml(res.j.message || '') + '</p>';
               }
               html += '<p><span class="badge ' + (vPass ? 'st-synced' : 'st-failed') + '">Validate: ' + (vPass ? 'PASS' : 'FAIL') + '</span> ';
-              html += '<span class="badge ' + (pPass ? 'st-synced' : 'st-warn') + '">Plan: ' + (pPass ? 'PASS' : 'WARN') + '</span></p>';
+              html += '<span class="badge ' + (planGenerated ? 'st-info' : 'st-failed') + '">Plan: ' + (planGenerated ? 'Generated' : 'FAIL') + '</span></p>';
               html += '<h4>Validate Output</h4><pre class="code">' + escHtml(res.j.validate ? res.j.validate.output : '') + '</pre>';
               html += '<h4>Plan Output</h4><pre class="code">' + escHtml(res.j.plan ? res.j.plan.output : '') + '</pre>';
               html += '<div class="mt14">';
@@ -1056,7 +1056,7 @@
                 html += '<form class="act inline" data-action="start" data-pipeline="' + escHtml(res.j.pipeline) + '">';
                 html += '<button class="btn primary" type="submit">Start ' + escHtml(res.j.pipeline) + ' now</button></form> ';
               }
-              html += '<a href="/pipelines/' + encodeURIComponent(res.j.pipeline) + '" class="btn">' + (res.j.ok ? 'Go to pipeline' : 'Fix in Config tab') + '</a>';
+              html += '<a href="/pipelines/' + encodeURIComponent(res.j.pipeline) + (res.j.ok ? '' : '/config') + '" class="btn">' + (res.j.ok ? 'Go to pipeline' : 'Fix in Config tab') + '</a>';
               html += '</div>';
               resBody.innerHTML = html;
               newPipeForm.dispatchEvent(new CustomEvent('pipeline-created'));

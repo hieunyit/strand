@@ -311,6 +311,15 @@ func (o KeylessOpts) Decide(table string, cols []string, types map[string]string
 	return ""
 }
 
+// DecideMySQL checks full-row eligibility for a source table without a usable key.
+func (o KeylessOpts) DecideMySQL(ctx context.Context, db *sql.DB, schema, table string) (string, error) {
+	cols, types, err := mysqlColTypes(ctx, db, schema, table)
+	if err != nil {
+		return "", err
+	}
+	return o.Decide(schema+"."+table, cols, types, false, ""), nil
+}
+
 func mysqlColTypes(ctx context.Context, db *sql.DB, schema, table string) ([]string, map[string]string, error) {
 	rs, err := db.QueryContext(ctx, `SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`, schema, table)
 	if err != nil {

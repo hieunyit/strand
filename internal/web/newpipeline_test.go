@@ -495,6 +495,37 @@ func TestNewPipelineValidateFailureNotOK(t *testing.T) {
 	}
 }
 
+func TestNewPipelineKeylessBootstrapDiagnostics(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	script := `#!/bin/sh
+echo 'Error [missing_pk]: table app.keyless cannot use a logical snapshot of a keyless table'
+echo 'mysql://u:canary@host/db'
+i=0
+while [ "$i" -lt 350 ]; do
+  echo 'Additional table diagnostic with a long table name.'
+  i=$((i + 1))
+done
+echo 'Last diagnostic'
+exit 3
+`
+	if err := os.WriteFile(e.bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, res, _, out := createNP(t, e, c, csrf, NewPipelineOpts{Name: "keyless-diagnostics", From: "mariadb", To: "mysql", Keyless: "full_row"})
+	if code != 200 || res.OK || res.Plan.ExitCode != 3 || res.Validate.ExitCode != 3 {
+		t.Fatalf("unexpected result: %d %s", code, out)
+	}
+	if !strings.Contains(res.Message, "position recorded in that backup") {
+		t.Errorf("missing restored backup instructions: %s", res.Message)
+	}
+	for _, diagnostic := range []string{res.Validate.Output, res.Plan.Output} {
+		if !strings.HasPrefix(diagnostic, "Error [missing_pk]") || !strings.Contains(diagnostic, "output shortened") ||
+			!strings.HasSuffix(diagnostic, "Last diagnostic") || strings.Contains(diagnostic, "canary") {
+			t.Fatal("diagnostics must preserve the first error and final line with secrets masked")
+		}
+	}
+}
+
 func TestDefaultAdminSocketFitsLimit(t *testing.T) {
 	short := defaultAdminSocket("/var/lib/strand/p/spool", "p", "/var/lib/strand")
 	if short != "/var/lib/strand/p/spool/admin.sock" {

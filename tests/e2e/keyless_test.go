@@ -213,6 +213,13 @@ func klRun(t *testing.T, env klEnv) {
 		}
 	}
 
+	if !env.pgSrc {
+		out, code = runStrandCLI(t, time.Minute, "plan", "-c", path)
+		if code != 0 || !strings.Contains(out, "full row (keyless)") || strings.Contains(out, "missing_pk") {
+			t.Fatalf("plan of a seeded keyless table: exit %d, want full-row matching\n%s", code, out)
+		}
+	}
+
 	wl := &klWorkload{db: env.srcDB, pg: env.pgSrc, table: "app.kl"}
 	p := startStrand(t, path)
 	defer func() {
@@ -311,7 +318,7 @@ func TestKL_E2E_MariaDBToMySQL_Keyless(t *testing.T) {
 	logical := cfg
 	logical.TablesExtra = klKeylessCfg
 	path := logical.write(t)
-	for _, command := range []string{"validate", "sync"} {
+	for _, command := range []string{"validate", "plan", "sync"} {
 		out, code := runStrandCLI(t, time.Minute, command, "-c", path)
 		if code != 3 || !strings.Contains(out, "missing_pk") || !strings.Contains(out, "logical snapshot") {
 			t.Fatalf("%s with a keyless logical snapshot: exit %d, want missing_pk\n%s", command, code, out)

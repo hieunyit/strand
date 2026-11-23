@@ -54,7 +54,8 @@ func newPlanCmd() *cobra.Command {
 			}
 			defer db.Close()
 			ctx := cmd.Context()
-			if ver, err := mysqlver.Cached(ctx, db); err != nil {
+			ver, err := mysqlver.Cached(ctx, db)
+			if err != nil {
 				return err
 			} else if err := mysqlver.CheckSupported(ver); err != nil {
 				return err
@@ -90,7 +91,7 @@ func newPlanCmd() *cobra.Command {
 			bytesPerSec := float64(iops) * 16 * 1024
 			var total int64
 			var noKey []string
-			ver, _ := mysqlver.Cached(ctx, db)
+			ko := keylessOpts(cfg)
 			flavor := "mysql"
 			if ver.IsMariaDB() {
 				flavor = "mariadb"
@@ -116,20 +117,41 @@ func newPlanCmd() *cobra.Command {
 				if mode == "logical" {
 					total += size
 				}
-				keyDesc := "-"
-				if res, kerr := rowkey.ResolveMySQL(ctx, db, s, t); kerr == nil {
-					if res.Key != nil {
-						keyDesc = res.Key.Label()
+				res, err := rowkey.ResolveMySQL(ctx, db, s, t)
+				if err != nil {
+					return fmt.Errorf("inspect table %s: %w", name, err)
+				}
+				var keyDesc string
+				switch {
+				case res.Info.PKPrefix:
+					keyDesc = "NONE (missing_pk)"
+					noKey = append(noKey, fmt.Sprintf("table %s: primary key with prefix part is not supported; use a full-column primary key", name))
+				case res.Key != nil:
+					keyDesc = res.Key.Label()
+				default:
+					keyDesc = "NONE (missing_pk)"
+					var why string
+					if ko.On {
+						why, err = ko.DecideMySQL(ctx, db, s, t)
+						if err != nil {
+							return fmt.Errorf("inspect table %s: %w", name, err)
+						}
+					}
+					if ko.On && why == "" {
+						keyDesc = rowkey.KeylessLabel
 					} else {
-						keyDesc = "NONE (missing_pk)"
 						noKey = append(noKey, rowkey.Suggest(rowkey.SuggestInput{Flavor: flavor, Major: ver.Major, Minor: ver.Minor, Patch: ver.Patch,
-							Table: model.TableID{Schema: s, Table: t}, EstRows: n, Notes: rowkey.Explain(res.Rejected)}))
+							Table: model.TableID{Schema: s, Table: t}, EstRows: n, Notes: rowkey.Explain(res.Rejected), KeylessWhy: why}))
 					}
 				}
 				fmt.Printf("%-40s %14d %14d %12s  %s\n", name, n, size, mode, keyDesc)
 			}
-			for _, sug := range noKey {
-				fmt.Printf("\n%s\n", sug)
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			if len(noKey) > 0 {
+				return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
+					fmt.Sprintf("%d table(s) have no usable row key for this plan:\n\n%s", len(noKey), strings.Join(noKey, "\n\n")), nil)
 			}
 			eta := time.Duration(float64(total) / bytesPerSec * float64(time.Second))
 			// 5.7: expire_logs_days * 86400 (không có binlog_expire_logs_seconds).
