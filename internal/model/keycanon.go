@@ -33,12 +33,47 @@ func canonValue(v Value) string {
 	// khác (DECIMAL, FK con int32 vs PK cha int64) — chúng phải hash bằng nhau.
 	switch x := v.(type) {
 	case string:
-		return foldString(x)
+		return canonicalDecimal(foldString(x))
 	case []byte:
-		return foldString(string(x))
+		return canonicalDecimal(foldString(string(x)))
 	default:
-		return fmt.Sprint(x)
+		return canonicalDecimal(fmt.Sprint(x))
 	}
+}
+
+// canonicalDecimal removes scale from decimal key spellings without rounding.
+func canonicalDecimal(s string) string {
+	value := s
+	sign := ""
+	if strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+") {
+		sign, value = value[:1], value[1:]
+	}
+	whole, fraction, _ := strings.Cut(value, ".")
+	if whole == "" && fraction == "" {
+		return s
+	}
+	for _, part := range []string{whole, fraction} {
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return s
+			}
+		}
+	}
+	whole = strings.TrimLeft(whole, "0")
+	fraction = strings.TrimRight(fraction, "0")
+	if whole == "" {
+		whole = "0"
+		if fraction == "" {
+			return whole
+		}
+	}
+	if sign == "-" {
+		whole = sign + whole
+	}
+	if fraction != "" {
+		return whole + "." + fraction
+	}
+	return whole
 }
 
 // canonKey nối các thành phần khóa với length prefix (không mơ hồ khi có dấu phân cách trong dữ liệu).
@@ -66,8 +101,8 @@ func foldString(s string) string {
 	d := norm.NFKD.String(s)
 	var out []rune
 	push := func(r rune) {
-		if n := len(out); n > 0 && out[n-1] == r {
-			return // gộp lặp liền nhau
+		if n := len(out); n > 0 && out[n-1] == r && (r < '0' || r > '9') {
+			return // Repeated decimal digits must keep their place value.
 		}
 		out = append(out, r)
 	}

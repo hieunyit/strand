@@ -238,6 +238,15 @@ func enableEvent(ctx context.Context, db *sql.DB, o Object, dry bool) Result {
 		r.Action, r.Err = ActFailed, err
 		return r
 	}
+	matches, err := same(ctx, db, o)
+	if err != nil {
+		r.Action, r.Err = ActFailed, fmt.Errorf("cannot compare target event definition: %w", err)
+		return r
+	}
+	if !matches {
+		r.Action, r.Err = ActFailed, fmt.Errorf("target event definition differs from source; refusing to enable it")
+		return r
+	}
 	if strings.EqualFold(status, "ENABLED") {
 		r.Action, r.Detail = ActIdentical, "already enabled"
 		return r

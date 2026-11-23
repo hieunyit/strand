@@ -301,7 +301,14 @@ func tokenString(token bson.Raw) string {
 	return hex.EncodeToString(token)
 }
 
-func (r *runner) stream(ctx context.Context) error {
+func (r *runner) stream(ctx context.Context) (err error) {
+	ctx, stopStream := context.WithCancelCause(ctx)
+	defer func() {
+		if cause := context.Cause(ctx); errors.Is(cause, ErrLeaseLost) || errors.Is(cause, ErrDDLUncertain) {
+			err = cause
+		}
+		stopStream(nil)
+	}()
 	cfg := r.cfg
 	r.obs.setConsistentAt(r.state.ConsistentAt)
 	r.obs.setPhase(PhaseStreaming)
@@ -329,7 +336,15 @@ func (r *runner) stream(ctx context.Context) error {
 	go r.monitorOplog(bgCtx)
 	if cfg.ReplicateIndexes {
 		r.reconcileTrigger = make(chan struct{}, 1)
-		go r.reconcileLoop(bgCtx)
+		reconcileDone := make(chan struct{})
+		go func() {
+			defer close(reconcileDone)
+			r.reconcileLoop(bgCtx, stopStream)
+		}()
+		defer func() {
+			stopBG()
+			<-reconcileDone
+		}()
 	}
 	cfg.Logger.Info("MongoDB change stream started", "pipeline", cfg.Pipeline, "update_mode", cfg.UpdateMode)
 

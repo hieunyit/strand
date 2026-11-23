@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"strand/internal/backup"
@@ -686,22 +685,19 @@ func (s *Server) apiBackupRunCancel(w http.ResponseWriter, r *http.Request, sess
 		writeErr(w, http.StatusConflict, fmt.Sprintf("backup run is not running (status: %s)", run.Status))
 		return
 	}
-	var ownedPID int
-	if pidVal, ok := s.ownedBackupProcs.Load(run.ProcessID); ok {
-		ownedPID = pidVal.(int)
-	} else if pidVal, ok := s.ownedBackupProcs.Load(run.ID); ok {
-		ownedPID = pidVal.(int)
-	} else {
-		s.ownedBackupProcs.Range(func(k, v any) bool {
-			if strconv.Itoa(v.(int)) == run.ProcessID {
-				ownedPID = v.(int)
-				return false
-			}
-			return true
-		})
-	}
-	if ownedPID == 0 {
+	pid, owned := s.ownedBackupProcs.Load(run.ProcessID)
+	if !owned || s.jobs == nil || !JobIDRE.MatchString(run.ProcessID) {
 		writeErr(w, http.StatusConflict, "backup run is owned by another instance or not running on this host")
+		return
+	}
+	process, ok := s.jobs.Get(run.ProcessID)
+	if !ok || !process.Running || process.PID != pid.(int) ||
+		(process.Pipeline != backupJobPipeline(run.JobID) && process.Pipeline != backupJobRunPipeline(run.JobID)) {
+		writeErr(w, http.StatusConflict, "backup run process is no longer active for this job")
+		return
+	}
+	if runner, ok := s.jobs.(*FileJobRunner); ok && !jobProcessMatches(process.PID, process.ID, runner.bin, runner.logPath(process.ID)) {
+		writeErr(w, http.StatusConflict, "backup run process identity could not be verified")
 		return
 	}
 	// Cancelling kills the job's scheduler process, which the reconciler restarts while the job is
@@ -720,13 +716,9 @@ func (s *Server) apiBackupRunCancel(w http.ResponseWriter, r *http.Request, sess
 			return
 		}
 	}
-	if syscall.Kill(ownedPID, 0) == nil {
-		if err := syscall.Kill(-ownedPID, syscall.SIGTERM); err != nil {
-			_ = syscall.Kill(ownedPID, syscall.SIGTERM)
-		}
-	}
-	if s.jobs != nil {
-		_ = s.jobs.Cancel(run.ProcessID)
+	if err := s.jobs.Cancel(run.ProcessID); err != nil {
+		writeErr(w, http.StatusConflict, "backup run could not be cancelled: "+err.Error())
+		return
 	}
 	now := time.Now().UTC()
 	dur := now.Sub(run.StartedAt)

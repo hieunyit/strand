@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -158,34 +159,33 @@ func runScheduleLoop(ctx context.Context, errw, outw io.Writer, st store.Store, 
 	same := func(j backup.Job, ok bool) bool { return ok && j.Enabled && j.UpdatedAt.Equal(revision) }
 	return st.Locked(ctx, "backup-job-scheduler:"+jobID, func(lockCtx context.Context) error {
 		for {
-			job, found, err := st.GetBackupJob(lockCtx, jobID)
-			if err != nil {
-				return err
-			}
-			if !same(job, found) {
-				return nil
-			}
-			err = st.Locked(lockCtx, "backup-job-execution:"+jobID, func(c context.Context) error {
-				_, err := st.RecoverBackupJobRun(c, jobID, revision)
-				return err
-			})
-			if err != nil {
-				return err
-			}
-			job, found, err = st.GetBackupJob(lockCtx, jobID)
-			if err != nil || !same(job, found) {
-				return err
-			}
-			next := o.clock().UTC()
-			if job.NextRunAt != nil {
-				next = *job.NextRunAt
-			} else {
+			var next time.Time
+			var ready bool
+			err := st.Locked(lockCtx, "backup-job-execution:"+jobID, func(execCtx context.Context) error {
+				job, found, err := st.GetBackupJob(execCtx, jobID)
+				if err != nil || !same(job, found) {
+					return err
+				}
+				if _, err := st.RecoverBackupJobRun(execCtx, jobID, revision); err != nil {
+					return err
+				}
+				job, found, err = st.GetBackupJob(execCtx, jobID)
+				if err != nil || !same(job, found) {
+					return err
+				}
+				if job.NextRunAt != nil {
+					next, ready = *job.NextRunAt, true
+					return nil
+				}
+				next = o.clock().UTC()
 				if n, ok := nextAfterRun(job, next); ok {
 					next = n
 				}
-				if ok, err := st.SetBackupJobNextRun(lockCtx, jobID, revision, next); err != nil || !ok {
-					return err
-				}
+				ready, err = st.SetBackupJobNextRun(execCtx, jobID, revision, next)
+				return err
+			})
+			if err != nil || !ready {
+				return err
 			}
 			stillSame := func() (bool, error) {
 				j, ok, err := st.GetBackupJob(lockCtx, jobID)
@@ -241,16 +241,28 @@ func runScheduleLoop(ctx context.Context, errw, outw io.Writer, st store.Store, 
 				if !ok {
 					n = o.clock().UTC().Add(time.Duration(cur.EverySeconds) * time.Second)
 				}
-				if rec, err := st.RecordBackupJobMissed(lockCtx, jobID, revision, n); err != nil {
+				err := st.Locked(lockCtx, "backup-job-execution:"+jobID, func(execCtx context.Context) error {
+					current, found, err := st.GetBackupJob(execCtx, jobID)
+					if err != nil || !same(current, found) || !sameBackupDue(current.NextRunAt, cur.NextRunAt) {
+						return err
+					}
+					rec, err := st.RecordBackupJobMissed(execCtx, jobID, revision, n)
+					if rec && err == nil {
+						fmt.Fprintf(errw, "backup run missed: not started within %d minute(s) of its due time %s (next %s)\n",
+							cur.WindowMinutes, due.UTC().Format(time.RFC3339), n.UTC().Format(time.RFC3339))
+					}
 					return err
-				} else if rec {
-					fmt.Fprintf(errw, "backup run missed: not started within %d minute(s) of its due time %s (next %s)\n",
-						cur.WindowMinutes, due.UTC().Format(time.RFC3339), n.UTC().Format(time.RFC3339))
+				})
+				if err != nil {
+					return err
 				}
 				continue
 			}
 			runErr := o.run(lockCtx, cur)
 			release()
+			if errors.Is(runErr, errBackupDueChanged) {
+				continue
+			}
 			if runErr != nil {
 				if lockCtx.Err() != nil {
 					return nil
@@ -261,6 +273,15 @@ func runScheduleLoop(ctx context.Context, errw, outw io.Writer, st store.Store, 
 			}
 		}
 	})
+}
+
+var errBackupDueChanged = errors.New("scheduled backup due time changed")
+
+func sameBackupDue(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
 }
 
 type startOutcome int

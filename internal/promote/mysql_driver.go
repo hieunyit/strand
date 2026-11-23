@@ -151,15 +151,15 @@ func (d *MySQLTargetDriver) IsReadOnly(ctx context.Context) (bool, error) {
 // ApplyRemaining (bước 3) chờ đến khi mọi GTID đã executed trên source (đã fence) nằm trong
 // tập đã apply của pipeline trên target. Không xác minh được thì trả lỗi, để promote
 // không bao giờ mở ghi khi target còn thiếu dữ liệu (PR-1).
-// Failover khẩn cấp (source không truy cập được): theo 05 §5, mất dữ liệu bằng lag là
-// chấp nhận được, nên chỉ cảnh báo và đi tiếp.
 func (d *MySQLTargetDriver) ApplyRemaining(ctx context.Context) error {
-	if d.source == nil || d.pipelineID == "" || d.db == nil {
-		return fmt.Errorf("apply remaining: cannot verify the target caught up (no source connection / pipeline id configured)")
+	if d.pipelineID == "" || d.db == nil {
+		return fmt.Errorf("apply remaining: cannot verify the target caught up (no target connection / pipeline id configured)")
+	}
+	if d.source == nil {
+		return fmt.Errorf("apply remaining: %w (no source connection configured)", errCatchUpSourceUnavailable)
 	}
 	if err := d.source.PingContext(ctx); err != nil {
-		d.logger.Warn("source unreachable: cannot verify remaining log was applied (failover; data loss bounded by lag)", "error", err)
-		return nil
+		return fmt.Errorf("apply remaining: %w: %w", errCatchUpSourceUnavailable, err)
 	}
 	// Chế độ vị trí binlog (nguồn không GTID): so với vị trí binlog đọc sau fence.
 	if applied, err := checkpoint.LoadAppliedSnapshotMySQL(ctx, d.db, d.pipelineID, model.EngineMySQL); err == nil {

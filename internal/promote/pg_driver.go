@@ -444,12 +444,14 @@ func (d *PGTargetDriver) IsReadOnly(ctx context.Context) (bool, error) {
 //
 // Source MySQL (MySQL→PG): so gtid_executed với tập GTID đã apply như MySQLTargetDriver.
 func (d *PGTargetDriver) ApplyRemaining(ctx context.Context) error {
-	if d.source == nil || d.pipelineID == "" || d.db == nil {
-		return fmt.Errorf("apply remaining: cannot verify the target caught up (no source connection / pipeline id configured)")
+	if d.pipelineID == "" || d.db == nil {
+		return fmt.Errorf("apply remaining: cannot verify the target caught up (no target connection / pipeline id configured)")
+	}
+	if d.source == nil {
+		return fmt.Errorf("apply remaining: %w (no source connection configured)", errCatchUpSourceUnavailable)
 	}
 	if err := d.source.PingContext(ctx); err != nil {
-		d.logger.Warn("source unreachable: cannot verify remaining log was applied (failover; data loss bounded by lag)", "error", err)
-		return nil
+		return fmt.Errorf("apply remaining: %w: %w", errCatchUpSourceUnavailable, err)
 	}
 	deadline := time.Now().Add(d.catchUpTimeout)
 

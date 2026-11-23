@@ -84,3 +84,25 @@ func TestG4_FoldStringKanaAndIgnorables(t *testing.T) {
 		}
 	}
 }
+
+func TestWritesetEquivalentDecimalScales(t *testing.T) {
+	table := TableID{Table: "balances"}
+	hash := func(v Value) uint64 {
+		row := RowChange{Table: table, Key: []Value{v}}
+		ws := make(map[string][]uint64)
+		row.AppendWriteset(ws)
+		return ws[table.String()][0]
+	}
+	for _, pair := range [][2]Value{
+		{"1", "1.00"}, {"-0.00", "0"}, {"-100.2500", "-100.25"},
+		{"0.10000000000000000000000001000", "0.10000000000000000000000001"},
+		{int64(1234), "1234.0000"},
+	} {
+		if hash(pair[0]) != hash(pair[1]) {
+			t.Errorf("equivalent keys %v and %v produced different writesets", pair[0], pair[1])
+		}
+	}
+	if hash("50000.00") == hash(int64(50)) || hash("50000.00") != hash(int64(50000)) {
+		t.Fatal("decimal normalization changed the integer's place value")
+	}
+}

@@ -4,6 +4,7 @@ package promote_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -146,5 +147,52 @@ func TestPR1_UnfencedStopShowsFailoverSummary(t *testing.T) {
 	}
 	if !strings.HasPrefix(progress2.FailoverSummary, "unknown") {
 		t.Fatalf("progress.FailoverSummary = %q, want prefix \"unknown\"", progress2.FailoverSummary)
+	}
+}
+
+type catchUpTestTarget struct {
+	*mockTargetDriver
+	verify func(context.Context) error
+}
+
+func (t *catchUpTestTarget) ApplyRemaining(ctx context.Context) error {
+	return t.verify(ctx)
+}
+
+func TestPromoteSourceUnavailableRequiresConfirmedFence(t *testing.T) {
+	db, err := sql.Open("mysql", "unused@tcp(127.0.0.1:1)/?timeout=200ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, engine := range []string{"mysql", "postgres"} {
+		for _, external := range []bool{false, true} {
+			t.Run(engine+map[bool]string{false: "/promote", true: "/failover"}[external], func(t *testing.T) {
+				const pipeline = "catchup"
+				var verify func(context.Context) error
+				var source promote.SourceDriver
+				var sourceConn *sql.DB
+				if !external {
+					source = newMockSourceDriver(true) // Fence succeeds before the catch-up ping fails.
+					sourceConn = db
+				}
+				if engine == "mysql" {
+					verify = promote.NewMySQLTargetDriver(db).WithCatchUpCheck(sourceConn, pipeline, 0, nil).ApplyRemaining
+				} else {
+					verify = promote.NewPGTargetDriver(db, "").WithCatchUpCheck(sourceConn, pipeline, 0, nil).ApplyRemaining
+				}
+				target := &catchUpTestTarget{mockTargetDriver: newMockTargetDriver(), verify: verify}
+				cfg := promote.Config{PipelineID: pipeline, SourceFencedExternally: external}
+				progress, err := promote.NewPromoter(cfg, promote.NewMemoryStateStore(), source, target, nil, nil).Run(t.Context())
+				if external {
+					if err != nil || target.openCalls != 1 || !strings.Contains(progress.FailoverSummary, "could not be verified") {
+						t.Fatalf("confirmed failover: progress=%+v, open=%d, error=%v", progress, target.openCalls, err)
+					}
+				} else if err == nil || target.openCalls != 0 || progress.IsStepCompleted(promote.StepApplyRemaining) {
+					t.Fatalf("unverified promote: progress=%+v, open=%d, error=%v", progress, target.openCalls, err)
+				}
+			})
+		}
 	}
 }

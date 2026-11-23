@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"strand/internal/web/store"
 )
@@ -126,7 +128,7 @@ func (r *FileJobRunner) Recover() error {
 	r.jobs = map[string]*JobStatus{}
 	for _, js := range loaded {
 		if js.Running {
-			if js.PID > 0 && procIsBinary(js.PID, bin) {
+			if jobProcessMatches(js.PID, js.ID, bin, r.logPath(js.ID)) {
 				adopt = append(adopt, js.ID)
 			} else {
 				t := now()
@@ -271,7 +273,7 @@ func (r *FileJobRunner) Start(_ context.Context, spec JobSpec) (string, error) {
 	defer devnull.Close()
 	cmd := exec.Command(r.bin, spec.Args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, logf, logf
-	cmd.Env = append(os.Environ(), spec.Env...)
+	cmd.Env = append(append(os.Environ(), spec.Env...), runnerIDEnv+"="+id)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		_ = os.Remove(r.logPath(id))
@@ -318,7 +320,7 @@ func (r *FileJobRunner) adopt(id string) {
 			pid = js.PID
 		}
 		r.mu.Unlock()
-		if js == nil || !procIsBinary(pid, r.bin) {
+		if js == nil || !jobProcessMatches(pid, id, r.bin, r.logPath(id)) {
 			break
 		}
 		time.Sleep(time.Second)
@@ -404,98 +406,100 @@ func (r *FileJobRunner) Cancel(id string) error {
 		r.mu.Unlock()
 		return fmt.Errorf("%w: %s", errJobNotRunning, id)
 	}
+	pid := js.PID
+	if err := r.terminate(pid, id); err != nil && !errors.Is(err, syscall.ESRCH) {
+		r.mu.Unlock()
+		return err
+	}
 	js.Cancelled = true
 	r.persistLocked(js)
-	pid := js.PID
 	r.mu.Unlock()
-	if pid <= 0 {
-		return errors.New("job has no pid")
+	return nil
+}
+
+func (r *FileJobRunner) terminate(pid int, id string) error {
+	if err := signalJobProcess(pid, id, r.bin, r.logPath(id), syscall.SIGTERM); err != nil {
+		return err
 	}
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-		if err2 := syscall.Kill(pid, syscall.SIGTERM); err2 != nil {
-			if !errors.Is(err2, syscall.ESRCH) {
-				return err
-			}
-		}
-	}
-	grace := r.KillGrace
 	go func() {
-		time.Sleep(grace)
-		if j, ok := r.Get(id); ok && j.Running {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}
+		time.Sleep(r.KillGrace)
+		_ = signalJobProcess(pid, id, r.bin, r.logPath(id), syscall.SIGKILL)
 	}()
 	return nil
 }
 
 const maxOutputChunk = 256 << 10
 
-// Output trả phần output từ offset. Khi job còn chạy chỉ trả đến dòng đầy đủ cuối cùng (không cắt giữa dòng,
-// không cắt giữa ký tự UTF-8). Mật khẩu/DSN trong output bị che.
+// Output pages the original byte offsets after recognizing secrets in their full log context.
+// Use the DB retention limit for both sources so a live log has the same offsets after shipping.
 func (r *FileJobRunner) Output(id string, offset int64) (JobOutput, bool) {
 	js, ok := r.Get(id)
 	if !ok {
 		return JobOutput{}, false
 	}
 	out := JobOutput{Offset: offset, Running: js.Running, ExitCode: js.ExitCode}
-	var buf []byte
+	var raw []byte
+	var size int64
+	var capped bool
 	f, err := os.Open(r.logPath(id))
 	switch {
 	case err == nil:
-		// File spool còn (chế độ file, hoặc chế độ DB khi job đang chạy / chưa chuyển hết vào DB).
 		defer f.Close()
 		st, err := f.Stat()
 		if err != nil {
 			return out, true
 		}
-		if offset < 0 || offset > st.Size() {
-			offset = st.Size()
-			out.Offset = offset
-		}
-		n := st.Size() - offset
-		if n > maxOutputChunk {
-			n = maxOutputChunk
-		}
-		if n <= 0 {
+		size = st.Size()
+		capped = size > MaxJobOutputDB
+		if !capped && (offset < 0 || offset >= size) {
+			out.Offset = size
 			return out, true
 		}
-		buf = make([]byte, n)
-		m, err := f.ReadAt(buf, offset)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return out, true
-		}
-		buf = buf[:m]
-	case r.st != nil:
-		ctx, cancel := dbCtx()
-		defer cancel()
-		size, err := r.st.JobOutputSize(ctx, id)
+		raw, err = io.ReadAll(io.LimitReader(f, min(size, MaxJobOutputDB)))
 		if err != nil {
 			return out, true
 		}
-		if offset < 0 || offset > size {
-			offset = size
-			out.Offset = offset
+	case r.st != nil:
+		ctx, cancel := dbCtx()
+		defer cancel()
+		if size, err = r.st.JobOutputSize(ctx, id); err != nil {
+			return out, true
 		}
-		if buf, err = r.st.ReadJobOutput(ctx, id, offset, maxOutputChunk); err != nil || len(buf) == 0 {
+		capped = size >= MaxJobOutputDB
+		if !capped && (offset < 0 || offset >= size) {
+			out.Offset = size
+			return out, true
+		}
+		if raw, err = r.st.ReadJobOutput(ctx, id, 0, int(min(size, MaxJobOutputDB))); err != nil {
 			return out, true
 		}
 	default:
 		return out, true
 	}
-	// Trạng thái "đang chạy" lấy TRƯỚC khi đọc file: nếu job kết thúc giữa chừng, lần hỏi kế tiếp mới báo xong
-	// và trả nốt phần đuôi, nên client không bao giờ dừng sớm mà bỏ sót output.
-	if js.Running {
-		cut := strings.LastIndexByte(string(buf), '\n')
-		if cut < 0 {
-			if len(buf) < maxOutputChunk {
-				return out, true // chưa có dòng đầy đủ
-			}
-			cut = len(buf) - 1
-		}
-		buf = buf[:cut+1]
+	if capped {
+		size = MaxJobOutputDB + 1 // reserve one offset for the truncation notice
 	}
-	out.Offset = offset + int64(len(buf))
-	out.Data = MaskSecrets(strings.ToValidUTF8(string(buf), "�"))
+	if offset < 0 || offset > size {
+		out.Offset = size
+		return out, true
+	}
+	// Neither a moving end nor a retention cut is enough context to redact a partial line.
+	if js.Running || capped {
+		raw = raw[:bytes.LastIndexByte(raw, '\n')+1]
+	}
+	if offset < int64(len(raw)) {
+		start := int(offset)
+		end := min(start+maxOutputChunk, len(raw))
+		for end > start && end < len(raw) && !utf8.RuneStart(raw[end]) {
+			end--
+		}
+		out.Data = maskJobLogPage(string(raw), start, end)
+		out.Offset = int64(end)
+	}
+	if capped && out.Offset >= int64(len(raw)) && out.Offset < size {
+		out.Data += fmt.Sprintf("\n[strand web: output truncated at the %d MiB log limit]\n", MaxJobOutputDB>>20)
+		out.Offset = size
+	}
 	return out, true
 }
 
@@ -597,24 +601,36 @@ func (r *FileJobRunner) shipOnce(id string, shipped int64, final bool) (int64, b
 	return shipped, shipped >= limit, nil
 }
 
-// procIsBinary: pid còn sống và đúng là tiến trình chạy bin (argv[0], hoặc argv[1] khi bin là script #!).
-func procIsBinary(pid int, bin string) bool {
-	if pid <= 0 {
+const runnerIDEnv = "STRAND_RUNNER_ID"
+
+// jobProcessMatches verifies the per-launch ID. Older jobs can be adopted
+// using their private local spool inode, which their stdout still points to.
+func jobProcessMatches(pid int, id, bin, logPath string) bool {
+	if pid <= 0 || !JobIDRE.MatchString(id) {
 		return false
 	}
-	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
-		return false
-	}
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	dir := fmt.Sprintf("/proc/%d/", pid)
+	b, err := os.ReadFile(dir + "cmdline")
 	if err != nil {
 		return false
 	}
-	args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
-	for i := 0; i < len(args) && i < 2; i++ {
-		if args[i] == bin {
-			return true
+	args := strings.SplitN(string(b), "\x00", 3)
+	if args[0] != bin && (len(args) < 2 || args[1] != bin) {
+		return false
+	}
+	env, err := os.ReadFile(dir + "environ")
+	if err != nil {
+		return false
+	}
+	for v := range bytes.SplitSeq(env, []byte{0}) {
+		if value, ok := bytes.CutPrefix(v, []byte(runnerIDEnv+"=")); ok {
+			return string(value) == id
 		}
 	}
-	// zombie: /proc/<pid>/cmdline rỗng => coi như đã thoát.
-	return false
+	logInfo, err := os.Stat(logPath)
+	if err != nil || !logInfo.Mode().IsRegular() {
+		return false
+	}
+	stdout, err := os.Stat(dir + "fd/1")
+	return err == nil && os.SameFile(logInfo, stdout)
 }

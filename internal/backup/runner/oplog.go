@@ -69,7 +69,7 @@ func (e *Env) ArchiveOplog(ctx context.Context, job backup.Job) error {
 	e.logf("oplog archive %s: tailing from %s", job.Source, FormatOplogTS(from))
 	for ctx.Err() == nil {
 		cur, err := coll.Find(ctx, bson.D{{Key: "ts", Value: bson.D{{Key: "$gte", Value: from}}}},
-			options.Find().SetCursorType(options.TailableAwait).SetMaxAwaitTime(2*time.Second).SetSort(bson.D{{Key: "$natural", Value: 1}}))
+			options.Find().SetCursorType(options.TailableAwait).SetMaxAwaitTime(min(2*time.Second, every)).SetSort(bson.D{{Key: "$natural", Value: 1}}))
 		if err != nil {
 			return err
 		}
@@ -120,7 +120,7 @@ func (e *Env) ArchiveOplog(ctx context.Context, job backup.Job) error {
 				buf.Write(cur.Current)
 				n++
 				lastTS = doc.TS
-				if buf.Len() >= maxOplogSlice {
+				if buf.Len() >= maxOplogSlice || time.Since(sliceStart) >= every {
 					if err := flush(); err != nil {
 						cur.Close(context.Background())
 						return err

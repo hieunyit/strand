@@ -2,6 +2,7 @@ package promote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,6 +11,8 @@ import (
 
 	"strand/internal/exitcode"
 )
+
+var errCatchUpSourceUnavailable = errors.New("source unavailable for catch-up verification")
 
 // Promoter điều khiển quy trình 6 bước promote theo spec/02 §8 và spec/05 §5.
 type Promoter struct {
@@ -347,7 +350,16 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 		_ = p.stateStore.SaveProgress(ctx, progress)
 
 		if err := p.targetDriver.ApplyRemaining(ctx); err != nil {
-			return progress, fmt.Errorf("apply remaining log failed: %w", err)
+			if !p.cfg.SourceFencedExternally || !errors.Is(err, errCatchUpSourceUnavailable) || ctx.Err() != nil {
+				return progress, fmt.Errorf("apply remaining log failed: %w", err)
+			}
+			const message = "Source fenced externally. Catch-up could not be verified; transactions may be missing."
+			if progress.FailoverSummary == "" {
+				progress.FailoverSummary = message
+			} else if !strings.Contains(progress.FailoverSummary, message) {
+				progress.FailoverSummary += " " + message
+			}
+			p.logger.Warn("continuing externally fenced failover without verified catch-up", "pipeline", p.cfg.PipelineID, "error", err)
 		}
 		progress.MarkStepCompleted(StepApplyRemaining)
 		if err := p.stateStore.SaveProgress(ctx, progress); err != nil {

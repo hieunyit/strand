@@ -275,12 +275,6 @@ func (l *lease) txn(ctx context.Context, slot int, fn func(tx context.Context) e
 	return err
 }
 
-// check verifies ownership right before an operation that cannot run in a transaction
-// (DDL). It is a fenced no-op transaction.
-func (l *lease) check(ctx context.Context) error {
-	return l.txn(ctx, 0, func(context.Context) error { return nil })
-}
-
 func durableDDLWriteConcern() bson.D {
 	wc := durableTargetWriteConcern()
 	return bson.D{{Key: "w", Value: wc.W}, {Key: "j", Value: *wc.Journal}}
@@ -291,13 +285,23 @@ func durableDDLWriteConcern() bson.D {
 func (l *lease) withDDL(ctx context.Context, description string, fn func() error) error {
 	l.ddlMu.Lock()
 	defer l.ddlMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	filter := bson.D{{Key: "_id", Value: l.key}, {Key: "owner", Value: l.owner}}
-	unlocked := append(append(bson.D(nil), filter...), bson.E{Key: "ddl_in_progress", Value: bson.D{{Key: "$exists", Value: false}}})
+	unlocked := append(append(bson.D(nil), filter...),
+		bson.E{Key: "ddl_in_progress", Value: bson.D{{Key: "$exists", Value: false}}},
+		bson.E{Key: "$expr", Value: bson.D{{Key: "$gt", Value: bson.A{"$expires_at", "$$NOW"}}}})
 	res, err := l.coll.UpdateOne(ctx, unlocked, bson.D{{Key: "$set", Value: bson.D{{Key: "ddl_in_progress", Value: description}}}})
 	if err != nil {
 		return fmt.Errorf("%w: acquire guard for %s: %v", ErrDDLUncertain, description, err)
 	}
 	if res.MatchedCount != 1 {
+		var current leaseDoc
+		err := l.coll.FindOne(ctx, filter).Decode(&current)
+		if errors.Is(err, mongo.ErrNoDocuments) || err == nil && current.DDL == "" {
+			return ErrLeaseLost
+		}
 		return fmt.Errorf("%w: could not acquire guard for %s", ErrDDLUncertain, description)
 	}
 	if err := fn(); err != nil {

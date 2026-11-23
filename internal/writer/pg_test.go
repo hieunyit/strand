@@ -17,6 +17,7 @@ import (
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 	"strand/internal/model"
+	"strand/internal/snapshot"
 	"strand/internal/writer"
 )
 
@@ -786,5 +787,45 @@ func TestPGWriter_UniqueSwapOrdered(t *testing.T) {
 				t.Fatalf("applied = %q", applied)
 			}
 		})
+	}
+}
+
+func TestPGInheritanceScopeInSnapshotAndCDC(t *testing.T) {
+	e := newPGEnv(t, "inheritance")
+	pgExec(t, e.db, "CREATE TABLE public.scope_parent (id bigint PRIMARY KEY, v text)")
+	pgExec(t, e.db, "CREATE TABLE public.scope_child () INHERITS (public.scope_parent)")
+	pgExec(t, e.db, "INSERT INTO public.scope_parent VALUES (1, 'parent')")
+	pgExec(t, e.db, "INSERT INTO public.scope_child VALUES (1, 'child'), (9, 'extra')")
+	pgExec(t, e.db, "CREATE TABLE public.scope_partitioned (id bigint PRIMARY KEY, v text) PARTITION BY RANGE (id)")
+	pgExec(t, e.db, "CREATE TABLE public.scope_partition PARTITION OF public.scope_partitioned FOR VALUES FROM (0) TO (10)")
+	pgExec(t, e.db, "INSERT INTO public.scope_partitioned VALUES (2, 'partition')")
+	parent := model.TableID{Schema: "public", Table: "scope_parent"}
+	partitioned := model.TableID{Schema: "public", Table: "scope_partitioned"}
+
+	source := &snapshot.PGChunkSource{DB: e.db}
+	for table, want := range map[model.TableID]int64{parent: 1, partitioned: 2} {
+		bounds, err := source.Bounds(t.Context(), table, "id")
+		if err != nil || bounds.MinPK != want || bounds.MaxPK != want {
+			t.Fatalf("%s bounds = %+v, error %v", table, bounds, err)
+		}
+	}
+
+	w := e.writer(t, map[model.TableID][]string{parent: {"id"}, partitioned: {"id"}})
+	w.SetCopyMinRows(1)
+	if err := w.ApplyBatch(t.Context(), []*model.Txn{{Rows: []model.RowChange{
+		upd(parent, []model.Value{int64(1)}, cv("id", int64(1)), cv("v", "updated")),
+		{Table: parent, Op: model.OpDelete, Key: []model.Value{int64(1)}},
+		{Table: partitioned, Op: model.OpDelete, Key: []model.Value{int64(2)}},
+	}}}, e.delta("1")); err != nil {
+		t.Fatal(err)
+	}
+	var parentCount, partitionCount int
+	var childValue string
+	if err := e.db.QueryRow(`SELECT (SELECT count(*) FROM ONLY public.scope_parent),
+		(SELECT v FROM ONLY public.scope_child WHERE id=1), (SELECT count(*) FROM public.scope_partitioned)`).Scan(&parentCount, &childValue, &partitionCount); err != nil {
+		t.Fatal(err)
+	}
+	if parentCount != 0 || childValue != "child" || partitionCount != 0 {
+		t.Fatalf("wrong inheritance scope: parent=%d child=%q partitions=%d", parentCount, childValue, partitionCount)
 	}
 }

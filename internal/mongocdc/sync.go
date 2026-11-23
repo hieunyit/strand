@@ -363,7 +363,7 @@ func resolveUpdateMode(mode string, srcWire int32) string {
 // killed cursors, write-concern timeouts and unknown commit results. Everything else
 // (auth, configuration, lost history, unsupported events) stops the process.
 func retryable(err error) bool {
-	if err == nil || errors.Is(err, ErrResyncRequired) || errors.Is(err, ErrLeaseLost) || errors.Is(err, context.Canceled) {
+	if err == nil || errors.Is(err, ErrResyncRequired) || errors.Is(err, ErrDDLUncertain) || errors.Is(err, ErrLeaseLost) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	if mongo.IsNetworkError(err) || mongo.IsTimeout(err) || errors.Is(err, context.DeadlineExceeded) {

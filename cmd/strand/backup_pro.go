@@ -59,7 +59,7 @@ func printJSON(w io.Writer, v any) error {
 
 // runManagedBuiltinJob runs one built-in-method backup for a managed job (tracked run, execution lock),
 // then applies retention and replication.
-func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Store, job backup.Job) error {
+func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Store, job backup.Job, scheduled bool) error {
 	if backup.IsUnsupportedMethod(job.Method) {
 		return fmt.Errorf("backup job %s: method %q is unsupported (removed: runs on the database host)", job.ID, job.Method)
 	}
@@ -74,6 +74,9 @@ func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Stor
 		}
 		if !found || !current.UpdatedAt.Equal(job.UpdatedAt) {
 			return errors.New("backup job is missing or its configuration changed")
+		}
+		if scheduled && !sameBackupDue(current.NextRunAt, job.NextRunAt) {
+			return errBackupDueChanged
 		}
 		if current, err = resolveJobConnection(lockCtx, st, current, os.Getenv); err != nil {
 			return err
@@ -146,12 +149,12 @@ func runManagedBuiltinSchedule(ctx context.Context, cmd *cobra.Command, st store
 		return fmt.Errorf("backup job %s: %w", jobID, err)
 	}
 	if once {
-		return runManagedBuiltinJob(ctx, cmd, st, job)
+		return runManagedBuiltinJob(ctx, cmd, st, job, false)
 	}
 	return runScheduleLoop(ctx, cmd.ErrOrStderr(), cmd.OutOrStdout(), st, jobID, schedulerOptions{
 		limits: concurrencyFromEnv(os.Getenv),
 		run: func(c context.Context, j backup.Job) error {
-			return runManagedBuiltinJob(c, cmd, st, j)
+			return runManagedBuiltinJob(c, cmd, st, j, true)
 		},
 	})
 }

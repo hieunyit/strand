@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"strand/internal/backup"
 	"strand/internal/web/store"
 )
@@ -341,5 +343,22 @@ func TestResolveJobConnection(t *testing.T) {
 	j.ConnectionID = ""
 	if got, err := resolveJobConnection(ctx, st, j, envWith("")); err != nil || got.Conn.Host != "stale-host" {
 		t.Fatalf("legacy inline job changed: %+v %v", got.Conn, err)
+	}
+}
+
+func TestManagedBackupSkipsSupersededDueTime(t *testing.T) {
+	ctx := t.Context()
+	st := store.NewMem()
+	job := createDue(t, st, schedJob("superseded", "db"), time.Now().Add(-time.Minute))
+	newDue := time.Now().Add(time.Hour)
+	if ok, err := st.SetBackupJobNextRun(ctx, job.ID, job.UpdatedAt, newDue); err != nil || !ok {
+		t.Fatalf("move schedule: %v", err)
+	}
+	if err := runManagedBuiltinJob(ctx, &cobra.Command{}, st, job, true); !errors.Is(err, errBackupDueChanged) {
+		t.Fatalf("scheduled backup with stale due time: %v", err)
+	}
+	current, _, err := st.GetBackupJob(ctx, job.ID)
+	if err != nil || current.RunStartedAt != nil || current.NextRunAt == nil || !current.NextRunAt.Equal(newDue) {
+		t.Fatalf("stale scheduler modified the job: %+v, %v", current, err)
 	}
 }

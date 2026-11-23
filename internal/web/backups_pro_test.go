@@ -162,7 +162,7 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 	tBase := tt.Add(-2 * time.Hour)
 	tLogStart := tt.Add(-3 * time.Hour)
 	tLogEnd := tt.Add(2 * time.Hour)
-	seedRichBackup(t, st, "bkp-pitr-base", "mysql-prod", "mysql", "mysqldump", backup.KindFull, tBase, backup.Position{GTIDSet: "u:1-100", BinlogFile: "mysql-bin.000001", BinlogPos: 1234}, false, nil, "", &tBase, nil, "", map[string]string{"source_identity": "mysql-fixture"})
+	seedRichBackup(t, st, "bkp-pitr-base", "mysql-prod", "mysql", "mysqldump", backup.KindFull, tBase, backup.Position{GTIDSet: "u:1-100", BinlogFile: "mysql-bin.000001", BinlogPos: 1234}, false, nil, "", &tBase, &tBase, "", map[string]string{"source_identity": "mysql-fixture"})
 	seedRichBackup(t, st, "bkp-pitr-log", "mysql-prod", "mysql", "binlog", backup.KindLog, tLogEnd, backup.Position{BinlogFile: "mysql-bin.000001", BinlogPos: 4}, false, nil, "", &tLogStart, &tLogEnd, "", map[string]string{"seq": "1", "source_identity": "mysql-fixture"})
 
 	resp, body = e.do(c, "POST", "/api/v1/backup-connections", `{"name":"restore-target","engine":"mysql","host":"db2","port":3307,"user":"restore","password":"restore-canary"}`, h)

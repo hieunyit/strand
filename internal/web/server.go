@@ -1127,6 +1127,7 @@ func (s *Server) String() string { return fmt.Sprintf("strand web on %s", s.cfg.
 
 // auditJobEnd ghi dòng audit khi job kết thúc: result ok khi exit 0, error khi khác 0 hoặc không quan sát được.
 func (s *Server) auditJobEnd(j JobStatus) {
+	s.ownedBackupProcs.Delete(j.ID)
 	res := "error"
 	if j.ExitCode != nil && *j.ExitCode == 0 {
 		res = "ok"

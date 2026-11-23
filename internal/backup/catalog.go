@@ -105,8 +105,8 @@ type Record struct {
 	PlainSHA256 string `json:"plain_sha256,omitempty"`
 	// EndPosition is where a log segment (or a physical backup) ends.
 	EndPosition Position `json:"end_position"`
-	// StartTime is the consistent point of a base backup or the first event of a log segment; EndTime is
-	// the last event of a log segment.
+	// StartTime and EndTime bound the backup run for managed base backups, or
+	// the event range for log segments. A dump can open its snapshot after StartTime.
 	StartTime   *time.Time        `json:"start_time,omitempty"`
 	EndTime     *time.Time        `json:"end_time,omitempty"`
 	VersionID   string            `json:"version_id,omitempty"` // S3 object version (Object Lock buckets)

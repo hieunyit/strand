@@ -123,13 +123,19 @@ func (r *runner) triggerReconcile() {
 // reconcileLoop keeps target indexes and collection options equal to the source
 // (ReplicateIndexes): at stream start, every IndexReconcileEvery, and after DDL events.
 // Unique indexes are built only once the target is past the snapshot overlap.
-func (r *runner) reconcileLoop(ctx context.Context) {
+func (r *runner) reconcileLoop(ctx context.Context, cancel context.CancelCauseFunc) {
 	ticker := time.NewTicker(r.cfg.IndexReconcileEvery)
 	defer ticker.Stop()
 	pendingUnique := true
 	for {
 		allowUnique := r.consistent.Load()
 		err := r.reconcileAll(ctx, allowUnique)
+		if errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrDDLUncertain) {
+			if ctx.Err() == nil || errors.Is(err, ErrDDLUncertain) {
+				cancel(err)
+			}
+			return
+		}
 		if err != nil && ctx.Err() == nil {
 			r.cfg.Logger.Warn("MongoDB index/option reconcile failed; retrying later", "pipeline", r.cfg.Pipeline, "error", err)
 		}
@@ -158,7 +164,7 @@ func (r *runner) reconcileAll(ctx context.Context, allowUnique bool) error {
 	var errs []error
 	for _, info := range infos {
 		if err := r.reconcileCollection(ctx, info, allowUnique); err != nil {
-			if errors.Is(err, ErrLeaseLost) {
+			if errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrDDLUncertain) {
 				return err
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", info.Name, err))
@@ -216,20 +222,16 @@ func (r *runner) reconcileCollection(ctx context.Context, info collectionInfo, a
 				}
 				continue
 			}
-			if err := r.lease.check(ctx); err != nil {
-				return err
-			}
-			if err := r.target.Collection(info.Name).Indexes().DropOne(ctx, name); err != nil && !serverErrorCode(err, 27) {
+			if err := r.dropReconciledIndex(ctx, info.Name, name); err != nil {
 				return fmt.Errorf("drop changed index %s: %w", name, err)
 			}
 		}
 		if s.unique && !allowUnique {
 			continue // built once the target is past the snapshot overlap
 		}
-		if err := r.lease.check(ctx); err != nil {
-			return err
-		}
-		err := r.target.RunCommand(ctx, bson.D{{Key: "createIndexes", Value: info.Name}, {Key: "indexes", Value: bson.A{s.spec}}}).Err()
+		err := r.reconcileDDL(ctx, "create index "+info.Name+"."+name, func() error {
+			return r.target.RunCommand(ctx, bson.D{{Key: "createIndexes", Value: info.Name}, {Key: "indexes", Value: bson.A{s.spec}}, {Key: "writeConcern", Value: durableDDLWriteConcern()}}).Err()
+		})
 		if err != nil {
 			return fmt.Errorf("create index %s: %w", name, err)
 		}
@@ -241,10 +243,7 @@ func (r *runner) reconcileCollection(ctx context.Context, info collectionInfo, a
 			continue
 		}
 		if _, ok := dst[name]; ok {
-			if err := r.lease.check(ctx); err != nil {
-				return err
-			}
-			if err := r.target.Collection(info.Name).Indexes().DropOne(ctx, name); err != nil && !serverErrorCode(err, 27) {
+			if err := r.dropReconciledIndex(ctx, info.Name, name); err != nil {
 				return fmt.Errorf("drop index %s: %w", name, err)
 			}
 			r.cfg.Logger.Info("MongoDB index dropped on target (dropped on source)", "pipeline", r.cfg.Pipeline, "collection", info.Name, "index", name)
@@ -262,6 +261,34 @@ func (r *runner) reconcileCollection(ctx context.Context, info collectionInfo, a
 	sort.Strings(list)
 	_, err = r.indexes.ReplaceOne(ctx, bson.D{{Key: "_id", Value: mid}}, managedIndexes{ID: mid, Names: list}, options.Replace().SetUpsert(true))
 	return err
+}
+
+// A definite command rejection is safe to retry after re-reading the catalog.
+func (r *runner) reconcileDDL(ctx context.Context, description string, command func() error) error {
+	var rejected error
+	err := r.lease.withDDL(ctx, description, func() error {
+		err := command()
+		var commandErr mongo.CommandError
+		if errors.As(err, &commandErr) && !retryable(err) {
+			rejected = err
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return rejected
+}
+
+func (r *runner) dropReconciledIndex(ctx context.Context, collection, name string) error {
+	return r.reconcileDDL(ctx, "drop index "+collection+"."+name, func() error {
+		err := r.target.RunCommand(ctx, bson.D{{Key: "dropIndexes", Value: collection}, {Key: "index", Value: name}, {Key: "writeConcern", Value: durableDDLWriteConcern()}}).Err()
+		if serverErrorCode(err, 27) {
+			return nil
+		}
+		return err
+	})
 }
 
 // reconcileOptions applies validator / validation level / action changes with collMod.
@@ -301,10 +328,10 @@ func (r *runner) reconcileOptions(ctx context.Context, info collectionInfo) erro
 	if len(cmd) == 1 {
 		return nil
 	}
-	if err := r.lease.check(ctx); err != nil {
-		return err
-	}
-	if err := r.target.RunCommand(ctx, cmd).Err(); err != nil {
+	cmd = append(cmd, bson.E{Key: "writeConcern", Value: durableDDLWriteConcern()})
+	if err := r.reconcileDDL(ctx, "modify collection "+info.Name, func() error {
+		return r.target.RunCommand(ctx, cmd).Err()
+	}); err != nil {
 		return fmt.Errorf("collMod: %w", err)
 	}
 	r.cfg.Logger.Info("MongoDB collection options updated on target", "pipeline", r.cfg.Pipeline, "collection", info.Name)

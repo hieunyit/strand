@@ -1,13 +1,17 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strand/internal/web/store"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -438,4 +442,57 @@ func TestRunnerPrunesOldHistory(t *testing.T) {
 	if _, ok := r.Get(ids[0]); ok {
 		t.Errorf("oldest job kept")
 	}
+}
+
+func TestJobOutputMasksCredentialsAcrossPageBoundaries(t *testing.T) {
+	const secret = "credential-canary"
+	for _, dbOnly := range []bool{false, true} {
+		t.Run(fmt.Sprint("db=", dbOnly), func(t *testing.T) {
+			r, _, _ := newRunner(t)
+			const id = "20261123T000000Z-deadbeef"
+			r.jobs[id] = &JobStatus{ID: id}
+			prefix := strings.Repeat("x", maxOutputChunk-len(" mysql://user:")+3)
+			raw := []byte(prefix + " mysql://user:" + secret + "@host/db\npassword='line one\n" + secret + "'\n")
+			if dbOnly {
+				r.st = store.NewMem()
+				r.persistLocked(r.jobs[id])
+				if err := r.st.AppendJobOutput(t.Context(), id, 0, raw); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(r.logPath(id), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, offset := range []int64{0, int64(maxOutputChunk), int64(bytes.Index(raw, []byte(secret))) + 3,
+				int64(bytes.LastIndex(raw, []byte(secret)))} {
+				out, _ := r.Output(id, offset)
+				if strings.Contains(out.Data, "canary") || strings.Contains(out.Data, "credential") || out.Offset <= offset {
+					t.Fatalf("offset %d returned a secret fragment or failed to advance", offset)
+				}
+			}
+		})
+	}
+}
+
+func TestJobSignalRejectsUnrelatedLaunchWithMatchingBinary(t *testing.T) {
+	r, bin, dir := newRunner(t)
+	hold := filepath.Join(dir, "hold")
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(hold)
+	id, err := r.Start(t.Context(), JobSpec{Pipeline: "p", Kind: "verify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ := r.Get(id)
+	if err := signalJobProcess(job.PID, "20261123T000000Z-deadbeef", bin, r.logPath(id), syscall.SIGTERM); !errors.Is(err, errJobNotRunning) {
+		t.Fatalf("unrelated process signal = %v", err)
+	}
+	if !jobProcessMatches(job.PID, id, bin, r.logPath(id)) {
+		t.Fatal("job process disappeared after signaling a different launch ID")
+	}
+	if err := r.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "job exit", func() bool { job, _ := r.Get(id); return !job.Running })
 }

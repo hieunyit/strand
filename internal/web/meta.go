@@ -239,6 +239,52 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 					n++
 				}
 			}
+			rotate := func(sealed *[]byte, aad string) (bool, error) {
+				if len(*sealed) == 0 || opens(m.box, *sealed, aad) {
+					return false, nil
+				}
+				plain, err := old.Open(*sealed, aad)
+				if err != nil {
+					return false, errors.New("stored secret cannot be decrypted with either Web secret key")
+				}
+				defer clear(plain)
+				*sealed, err = m.box.Seal(plain, aad)
+				return err == nil, err
+			}
+			repos, err := m.st.ListBackupRepos(ctx)
+			if err != nil {
+				return err
+			}
+			for _, repo := range repos {
+				changed := false
+				for _, secret := range []*[]byte{&repo.AccessKeySealed, &repo.SecretKeySealed} {
+					rotated, err := rotate(secret, repo.ID)
+					if err != nil {
+						return fmt.Errorf("backup repository %s: %w", repo.ID, err)
+					}
+					changed = changed || rotated
+				}
+				if changed {
+					if _, err := m.st.UpdateBackupRepo(ctx, repo); err != nil {
+						return err
+					}
+				}
+			}
+			channels, err := m.st.ListNotifyChannels(ctx)
+			if err != nil {
+				return err
+			}
+			for _, channel := range channels {
+				changed, err := rotate(&channel.SecretSealed, channel.ID)
+				if err != nil {
+					return fmt.Errorf("notification channel %s: %w", channel.ID, err)
+				}
+				if changed {
+					if _, err := m.st.UpdateNotifyChannel(ctx, channel); err != nil {
+						return err
+					}
+				}
+			}
 			profiles, err := sshprofile.List(ctx, m.st)
 			if err != nil {
 				return err

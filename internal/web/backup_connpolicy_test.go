@@ -698,6 +698,13 @@ func TestConnectionSecretsSurviveKeyRotation(t *testing.T) {
 	e := newCPEnv(t)
 	a := e.admin()
 	id := connID(t, a.must("POST", "/api/v1/backup-connections", storedConn("prod"), 201))
+	repoResult := decode(t, a.must("POST", "/api/v1/backup-repositories", storedRepoBody("Primary", "http://127.0.0.1:1"), 200))
+	repoID := repoResult["repository"].(map[string]any)["id"].(string)
+	notifyURL := "https://hooks.example.com/services/" + canary
+	channelResult := decode(t, a.must("POST", "/api/v1/backup-notify-channels", map[string]any{
+		"name": "alerts", "kind": "slack", "url": notifyURL,
+	}, 201))
+	channelID := channelResult["channel"].(map[string]any)["id"].(string)
 	oldKey := e.srv.db.secret
 	e.srv.releaseLease()
 	c2 := *e.srv.cfg
@@ -711,4 +718,26 @@ func TestConnectionSecretsSurviveKeyRotation(t *testing.T) {
 	if err != nil || string(pt) != canary {
 		t.Fatalf("stored secret not re-encrypted with the new key: %v", err)
 	}
+	repo, _, err := e.st.GetBackupRepo(t.Context(), repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel, _, err := e.st.GetNotifyChannel(t.Context(), channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		id, want string
+		sealed   []byte
+	}{
+		"access key": {repoID, "AK-" + canary, repo.AccessKeySealed},
+		"secret key": {repoID, "SK-" + canary, repo.SecretKeySealed},
+		"webhook":    {channelID, notifyURL, channel.SecretSealed},
+	} {
+		pt, err := srv.db.box.Open(test.sealed, test.id)
+		if err != nil || string(pt) != test.want {
+			t.Errorf("%s was not re-encrypted with the new key: %v", name, err)
+		}
+	}
+
 }

@@ -735,7 +735,7 @@ func (a *pgApplier) partialUpdateRow(row *model.RowChange, pkCols []string) erro
 		if len(sets) == 0 {
 			// Mọi cột không-PK đều Unchanged: không có gì để ghi, nhưng row vẫn phải tồn tại.
 			var one int
-			err := a.tx.QueryRow(a.ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE %s", tbl, keyCond(row.Key)), args...).Scan(&one)
+			err := a.tx.QueryRow(a.ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE %s AND %s", tbl, model.PGRelationRows(tbl, ""), keyCond(row.Key)), args...).Scan(&one)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return newToastRowMissing(row.Table, row.Key)
 			}
@@ -744,7 +744,7 @@ func (a *pgApplier) partialUpdateRow(row *model.RowChange, pkCols []string) erro
 			}
 			return nil
 		}
-		q := fmt.Sprintf("UPDATE %s SET %s WHERE %s", tbl, strings.Join(sets, ", "), keyCond(row.Key))
+		q := fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s", tbl, strings.Join(sets, ", "), model.PGRelationRows(tbl, ""), keyCond(row.Key))
 		tag, err := a.tx.Exec(a.ctx, q, args...)
 		if err != nil {
 			return fmt.Errorf("partial update on %s: %w", row.Table, err)
@@ -770,8 +770,8 @@ func (a *pgApplier) partialUpdateRow(row *model.RowChange, pkCols []string) erro
 	}
 	oldCond := keyCond(row.OldKey)
 	newCond := keyCond(row.Key)
-	q := fmt.Sprintf("UPDATE %s SET %s WHERE %s AND NOT EXISTS (SELECT 1 FROM %s WHERE %s)",
-		tbl, strings.Join(sets, ", "), oldCond, tbl, newCond)
+	q := fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s AND NOT EXISTS (SELECT 1 FROM %s WHERE %s AND %s)",
+		tbl, strings.Join(sets, ", "), model.PGRelationRows(tbl, ""), oldCond, tbl, model.PGRelationRows(tbl, ""), newCond)
 	tag, err := a.tx.Exec(a.ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("partial pk-change update on %s: %w", row.Table, err)
@@ -780,7 +780,7 @@ func (a *pgApplier) partialUpdateRow(row *model.RowChange, pkCols []string) erro
 		// Hoặc PK mới đã có ở target (giữ nguyên, chỉ xóa PK cũ), hoặc thiếu row PK cũ để dựng row mới.
 		args = args[:0]
 		var one int
-		err := a.tx.QueryRow(a.ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE %s", tbl, keyCond(row.Key)), args...).Scan(&one)
+		err := a.tx.QueryRow(a.ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE %s AND %s", tbl, model.PGRelationRows(tbl, ""), keyCond(row.Key)), args...).Scan(&one)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return newToastRowMissing(row.Table, row.OldKey)
 		}
@@ -871,7 +871,8 @@ func (b *pgUpsertBlock) flush(a *pgApplier) error {
 	}
 
 	isPK := make(map[string]bool, len(b.pkCols))
-	on := make([]string, len(b.pkCols))
+	on := make([]string, len(b.pkCols)+1)
+	on[len(b.pkCols)] = model.PGRelationRows(quotePGTable(b.table), "_strand_t.")
 	for i, c := range b.pkCols {
 		isPK[c] = true
 		on[i] = fmt.Sprintf("_strand_t.%s = _strand_s.%s", quotePG(c), quotePG(c))
@@ -1027,7 +1028,7 @@ func buildDelete(t model.TableID, pkCols []string, keys [][]model.Value) (string
 	for i, c := range pkCols {
 		quoted[i] = quotePG(c)
 	}
-	q := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)", quotePGTable(t), strings.Join(quoted, ", "), strings.Join(tuples, ", "))
+	q := fmt.Sprintf("DELETE FROM %s WHERE %s AND (%s) IN (%s)", quotePGTable(t), model.PGRelationRows(quotePGTable(t), ""), strings.Join(quoted, ", "), strings.Join(tuples, ", "))
 	return q, args, nil
 }
 

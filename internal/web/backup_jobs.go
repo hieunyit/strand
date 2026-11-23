@@ -15,7 +15,6 @@ import (
 	"reflect"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -377,46 +376,43 @@ func (s *Server) startBackupJobProcess(j backup.Job, once bool, args []string) (
 	if err != nil {
 		return "", err
 	}
-	// Ghi nhớ tiến trình do CHÍNH instance này khởi động: khi mất quyền active chỉ dừng đúng các tiến trình
-	// này. Danh sách job dùng chung qua DB không dùng được cho việc đó: instance mới lên active đánh dấu
-	// tiến trình của instance cũ là "không chạy" (dù vẫn sống) và có tiến trình mới cùng pipeline.
-	if st, ok := s.jobs.Get(id); ok && st.PID > 0 {
-		s.ownedBackupProcs.Store(id, st.PID)
-		s.ownedBackupProcs.Store(strconv.Itoa(st.PID), st.PID)
-	}
+	s.trackBackupProcess(id)
 	return id, nil
 }
 
-// stopBackupSchedulers stops every backup scheduler and Run-now process of this instance (SIGTERM, then
-// SIGKILL after the runner's grace period). Called when this instance stops being the active one, so the
-// new active instance's schedulers take over; a run in progress is recorded as interrupted by the next
-// scheduler and the job's next run is kept.
-func (s *Server) stopBackupSchedulers() {
-	grace := 10 * time.Second
-	if jr, ok := s.jobs.(*FileJobRunner); ok && jr.KillGrace > 0 {
-		grace = jr.KillGrace
+func (s *Server) trackBackupProcess(id string) {
+	if st, ok := s.jobs.Get(id); ok && st.Running && st.PID > 0 {
+		s.ownedBackupProcs.Store(id, st.PID)
+		// The exit callback can run before registration.
+		if current, ok := s.jobs.Get(id); !ok || !current.Running {
+			s.ownedBackupProcs.Delete(id)
+		}
 	}
-	s.ownedBackupProcs.Range(func(k, v any) bool {
-		id, pid := k.(string), v.(int)
-		s.ownedBackupProcs.Delete(id)
-		if syscall.Kill(pid, 0) != nil {
-			return true // đã thoát
+	// The lease may have been lost while starting the process.
+	if !s.isActive() {
+		s.stopBackupSchedulers()
+	}
+}
+
+// stopBackupSchedulers uses this instance's launch records, since the shared
+// runner history may already have been reloaded from the new active instance.
+func (s *Server) stopBackupSchedulers() {
+	s.ownedBackupProcs.Range(func(key, _ any) bool {
+		id := key.(string)
+		value, ok := s.ownedBackupProcs.LoadAndDelete(id)
+		if !ok {
+			return true
 		}
-		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
+		pid := value.(int)
+		var err error
+		if runner, ok := s.jobs.(*FileJobRunner); ok {
+			err = runner.terminate(pid, id)
+		} else if s.jobs != nil {
+			err = s.jobs.Cancel(id)
 		}
-		go func() {
-			deadline := time.Now().Add(grace)
-			for time.Now().Before(deadline) {
-				if syscall.Kill(pid, 0) != nil {
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}()
-		s.log.Info("step-down: stopped backup process started by this instance", "job", id, "pid", pid)
+		if err != nil && !errors.Is(err, errJobNotRunning) && !errors.Is(err, syscall.ESRCH) {
+			s.log.Warn("step-down: could not stop backup process", "job", id, "error", err)
+		}
 		return true
 	})
 }

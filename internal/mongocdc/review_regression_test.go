@@ -52,6 +52,23 @@ func TestCDCLeaseBlocksTakeoverDuringUncertainDDL(t *testing.T) {
 	if _, err := acquire(); !errors.Is(err, ErrDDLUncertain) {
 		t.Fatalf("takeover after uncertain DDL: %v", err)
 	}
+	if _, err := coll.UpdateOne(ctx, bson.D{{Key: "_id", Value: first.key}}, bson.D{
+		{Key: "$unset", Value: bson.D{{Key: "ddl_in_progress", Value: ""}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.release()
+	if err := first.withDDL(ctx, "stale index operation", func() error {
+		t.Error("the previous owner reached the DDL command")
+		return nil
+	}); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("old owner was not fenced: %v", err)
+	}
+
 }
 
 func TestCDCSourceLookupCarriesEventClusterTime(t *testing.T) {

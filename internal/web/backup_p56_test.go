@@ -10,11 +10,10 @@ import (
 	"net/http/httptest"
 	"net/smtp"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -970,13 +969,22 @@ func cancelRun(t *testing.T, e *cpEnv, a *apiClient) {
 	if err := e.st.CreateBackupJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	cmd := startSleeper(t)
-	pid := cmd.Process.Pid
-	if err := e.st.CreateBackupRun(ctx, backup.Run{ID: "brun-cancel", JobID: job.ID, Trigger: backup.TriggerManual, StartedAt: e.srv.now().UTC(),
-		Status: string(backup.RunStatusRunning), ProcessID: fmt.Sprint(pid)}); err != nil {
+	runner, _, dir := newRunner(t)
+	hold := filepath.Join(dir, "hold")
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	e.srv.ownedBackupProcs.Store(fmt.Sprint(pid), pid)
+	t.Cleanup(func() { _ = os.Remove(hold) })
+	e.srv.SetJobRunner(runner)
+	id, err := runner.Start(ctx, JobSpec{Pipeline: backupJobRunPipeline(job.ID), Kind: "backup-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.srv.trackBackupProcess(id)
+	if err := e.st.CreateBackupRun(ctx, backup.Run{ID: "brun-cancel", JobID: job.ID, Trigger: backup.TriggerManual, StartedAt: e.srv.now().UTC(),
+		Status: string(backup.RunStatusRunning), ProcessID: id}); err != nil {
+		t.Fatal(err)
+	}
 	a.must("POST", "/api/v1/backup-runs/brun-cancel/cancel", nil, 200)
 }
 
@@ -1079,17 +1087,6 @@ func TestMaskAuditSecrets(t *testing.T) {
 		t.Fatalf("changes = %v", ch)
 	}
 	_ = time.Now
-}
-
-func startSleeper(t *testing.T) *exec.Cmd {
-	t.Helper()
-	cmd := exec.Command("sleep", "60")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
-	return cmd
 }
 
 func TestOpsPagesRenderAndFollowTheDesignRules(t *testing.T) {

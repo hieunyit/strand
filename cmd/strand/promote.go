@@ -328,6 +328,9 @@ func newPromoteCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Promote pipeline %s thành công. Target đã mở quyền ghi.\n", progress.PipelineID)
+			if progress.FailoverSummary != "" {
+				fmt.Println(progress.FailoverSummary)
+			}
 			if fenceEndpoint != "" && !isPGDSN(fenceEndpoint) {
 				fmt.Println("Lưu ý nguồn không có super_read_only (MySQL 5.5/5.6/5.7<5.7.8, MariaDB; fence bằng read_only + FLUSH TABLES WITH READ LOCK): khóa FTWRL nhả khi lệnh này thoát, " +
 					"read_only=ON vẫn giữ nhưng KHÔNG chặn user SUPER. Giữ source tắt hoặc read_only và cắt kết nối ứng dụng cho tới khi cut-over xong.")

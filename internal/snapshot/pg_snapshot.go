@@ -171,7 +171,8 @@ func (c *PGChunkSource) BeforeRegister(ctx context.Context) error {
 // Bounds: MIN/MAX của PK (đọc đầu/cuối index).
 func (c *PGChunkSource) Bounds(ctx context.Context, table model.TableID, pkCol string) (*TableBounds, error) {
 	// pg_current_snapshot() trong CÙNG câu lệnh: snapshot mà MIN/MAX nhìn thấy (BoundSnapshot).
-	q := fmt.Sprintf("SELECT MIN(%s)::bigint, MAX(%s)::bigint, pg_current_snapshot()::text, pg_current_wal_insert_lsn()::text FROM %s", quotePGIdent(pkCol), quotePGIdent(pkCol), quotePGTable(table))
+	q := fmt.Sprintf("SELECT MIN(%s)::bigint, MAX(%s)::bigint, pg_current_snapshot()::text, pg_current_wal_insert_lsn()::text FROM %s WHERE %s", quotePGIdent(pkCol), quotePGIdent(pkCol), quotePGTable(table),
+		model.PGRelationRows(quotePGTable(table), ""))
 	var minV, maxV sql.NullInt64
 	var snapTxt, boundsLSN string
 	if err := c.DB.QueryRowContext(ctx, q).Scan(&minV, &maxV, &snapTxt, &boundsLSN); err != nil {
@@ -193,8 +194,8 @@ func (c *PGChunkSource) KeysetEnd(ctx context.Context, table model.TableID, pkCo
 		rows = 5000
 	}
 	pk := quotePGIdent(pkCol)
-	q := fmt.Sprintf("SELECT %s::bigint FROM %s WHERE %s >= $1 AND %s <= $2 ORDER BY %s LIMIT 1 OFFSET %d",
-		pk, quotePGTable(table), pk, pk, pk, rows-1)
+	q := fmt.Sprintf("SELECT %s::bigint FROM %s WHERE %s AND %s >= $1 AND %s <= $2 ORDER BY %s LIMIT 1 OFFSET %d",
+		pk, quotePGTable(table), model.PGRelationRows(quotePGTable(table), ""), pk, pk, pk, rows-1)
 	var end int64
 	err := c.DB.QueryRowContext(ctx, q, start, max).Scan(&end)
 	if err == sql.ErrNoRows {
@@ -283,8 +284,8 @@ func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chun
 			return ChunkRead{}, nil, err
 		}
 		// ORDER BY t.pk (cột của BẢNG), không phải cột kết quả pk::text (xem 9f614ab).
-		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s",
-			strings.Join(sel, ", "), quotePGTable(table), cond, kq.OrderBy(false))
+		query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s AND (%s) ORDER BY %s",
+			strings.Join(sel, ", "), quotePGTable(table), model.PGRelationRows(quotePGTable(table), "t."), cond, kq.OrderBy(false))
 		if read.Rows, read.Bytes, err = c.queryChunk(ctx, query, columnNames, pkIdxs, types, table, 0, args...); err != nil {
 			return ChunkRead{}, nil, fmt.Errorf("re-read %d keys of %s: %w", len(chunk.KeySet), table, err)
 		}
@@ -296,8 +297,8 @@ func (c *PGChunkSource) ReadChunk(ctx context.Context, s *MySQLSnapshotter, chun
 			}
 			// ORDER BY t.pk (cột của BẢNG): `ORDER BY pk` trỏ vào cột kết quả `pk::text` và sắp theo chuỗi
 			// ("10" < "9") — chunk bị cắt theo max_chunk_bytes khi đó không phủ trọn [Start, Cut] (mất row).
-			query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s",
-				strings.Join(sel, ", "), quotePGTable(table), cond, kq.OrderBy(false))
+			query := fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s AND (%s) ORDER BY %s",
+				strings.Join(sel, ", "), quotePGTable(table), model.PGRelationRows(quotePGTable(table), "t."), cond, kq.OrderBy(false))
 			return c.queryChunk(qCtx, query, columnNames, pkIdxs, types, table, maxBytes, args...)
 		}
 		if read, err = s.Chunker.ReadChunkAdaptive(ctx, chunk, s.opts, queryFn); err != nil {
@@ -489,8 +490,8 @@ func (c *PGChunkSource) KeyBounds(ctx context.Context, table model.TableID, code
 	}
 	q := PGKeySQL{Table: table, Codec: codec, Alias: "t"}
 	one := func(desc bool) (Bound, bool, error) {
-		return c.pgScanBound(ctx, tx, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t ORDER BY %s LIMIT 1",
-			c.keyCols(codec), quotePGTable(table), q.OrderBy(desc)))
+		return c.pgScanBound(ctx, tx, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s LIMIT 1",
+			c.keyCols(codec), quotePGTable(table), model.PGRelationRows(quotePGTable(table), "t."), q.OrderBy(desc)))
 	}
 	if lo, ok, err = one(false); err != nil || !ok {
 		return
@@ -509,8 +510,8 @@ func (c *PGChunkSource) KeyKeysetEnd(ctx context.Context, table model.TableID, c
 	if err != nil {
 		return Bound{}, err
 	}
-	b, ok, err := c.pgScanBound(ctx, c.DB, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s ORDER BY %s LIMIT 1 OFFSET %d",
-		c.keyCols(codec), quotePGTable(table), cond, q.OrderBy(false), n-1), args...)
+	b, ok, err := c.pgScanBound(ctx, c.DB, table, codec, fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s AND (%s) ORDER BY %s LIMIT 1 OFFSET %d",
+		c.keyCols(codec), quotePGTable(table), model.PGRelationRows(quotePGTable(table), "t."), cond, q.OrderBy(false), n-1), args...)
 	if err != nil {
 		return Bound{}, err
 	}

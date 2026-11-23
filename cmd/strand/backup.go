@@ -318,11 +318,23 @@ func runManagedBackupSchedule(ctx context.Context, cmd *cobra.Command, st interf
 		if job.NextRunAt != nil {
 			next = *job.NextRunAt
 		} else {
-			ok, err := st.SetBackupJobNextRun(ctx, job.ID, job.UpdatedAt, next)
+			var ready bool
+			err := st.Locked(ctx, "backup-job-execution:"+jobID, func(execCtx context.Context) error {
+				current, found, err := st.GetBackupJob(execCtx, jobID)
+				if err != nil || !found || !current.Enabled || !current.UpdatedAt.Equal(job.UpdatedAt) {
+					return err
+				}
+				if current.NextRunAt != nil {
+					next, ready = *current.NextRunAt, true
+					return nil
+				}
+				ready, err = st.SetBackupJobNextRun(execCtx, jobID, job.UpdatedAt, next)
+				return err
+			})
 			if err != nil {
 				return fmt.Errorf("initialize backup schedule: %w", err)
 			}
-			if !ok {
+			if !ready {
 				continue
 			}
 			job.NextRunAt = &next
@@ -353,8 +365,8 @@ func runManagedBackupSchedule(ctx context.Context, cmd *cobra.Command, st interf
 				manifestTemplate, bucket, prefix, sshAddress, sshUser, identityFile, knownHosts, remoteAddress, cleanupLocal) {
 				return nil
 			}
-			if current.NextRunAt != nil && current.NextRunAt.After(time.Now()) {
-				return nil // Run now or another completed run moved the due time.
+			if !sameBackupDue(current.NextRunAt, job.NextRunAt) {
+				return nil // Run now or another completed run moved this occurrence.
 			}
 			ran, err = runTrackedBackupJob(runCtx, st, current, run)
 			return err

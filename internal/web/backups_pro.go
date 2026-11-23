@@ -122,9 +122,7 @@ func (s *Server) backupOpEnv(args []string) []string {
 func (s *Server) startOwnedBackupOp(kind, pipeline string, args ...string) (string, error) {
 	id, err := s.startBackupOp(kind, pipeline, args...)
 	if err == nil {
-		if st, ok := s.jobs.Get(id); ok && st.PID > 0 {
-			s.ownedBackupProcs.Store(id, st.PID)
-		}
+		s.trackBackupProcess(id)
 	}
 	return id, err
 }

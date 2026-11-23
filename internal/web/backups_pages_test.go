@@ -265,11 +265,12 @@ func TestBackupPagesAndAPIsP1(t *testing.T) {
 	}
 
 	// D) Running run owned by this instance -> 200 and marked cancelled
-	// Store harmless PID in s.ownedBackupProcs
-	ownedPID := 99999999
-	e.srv.ownedBackupProcs.Store(run3.ID, ownedPID)
-	e.srv.ownedBackupProcs.Store("proc-333", ownedPID)
-	run3.ProcessID = "proc-333"
+	run3.ProcessID = "20261123T000000Z-deadbeef"
+	const ownedPID = 4242
+	e.srv.ownedBackupProcs.Store(run3.ProcessID, ownedPID)
+	e.srv.SetJobRunner(&backupStopTestRunner{jobs: map[string]JobStatus{
+		run3.ProcessID: {ID: run3.ProcessID, Pipeline: backupJobRunPipeline(job.ID), Running: true, PID: ownedPID},
+	}})
 	_, _ = st.UpdateBackupRun(ctx, run3)
 
 	resp, body = e.do(c, "POST", "/api/v1/backup-runs/"+run3.ID+"/cancel", "", h)

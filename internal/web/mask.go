@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -28,6 +29,40 @@ func MaskSecrets(s string) string {
 	s = dsnPassRE.ReplaceAllString(s, "${1}"+maskStr+"${3}")
 	s, _ = maskKVSecrets(s)
 	return s
+}
+
+// maskJobLogPage finds secret spans before slicing, including any spans that
+// started before offset or ended after end. Offsets remain raw log byte offsets.
+func maskJobLogPage(log string, offset, end int) string {
+	hits := findKVSecrets(log)
+	for _, re := range []*regexp.Regexp{urlPassRE, dsnPassRE} {
+		for _, m := range re.FindAllStringSubmatchIndex(log, -1) {
+			if m[4] < m[5] {
+				hits = append(hits, kvHit{m[4], m[5]})
+			}
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].valStart < hits[j].valStart })
+	var out strings.Builder
+	pos := offset
+	for i := 0; i < len(hits); i++ {
+		from, to := hits[i].valStart, hits[i].end
+		for i+1 < len(hits) && hits[i+1].valStart <= to {
+			i++
+			to = max(to, hits[i].end)
+		}
+		if to <= pos {
+			continue
+		}
+		if from >= end {
+			break
+		}
+		out.WriteString(log[pos:max(pos, from)])
+		out.WriteString(maskStr)
+		pos = min(to, end)
+	}
+	out.WriteString(log[pos:end])
+	return strings.ToValidUTF8(out.String(), "�")
 }
 
 // scanKVValue trả vị trí kết thúc của giá trị key=value bắt đầu tại start. Theo quy tắc keyword DSN của
