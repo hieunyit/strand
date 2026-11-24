@@ -198,3 +198,38 @@ func TestEnvSaveKeepsNewerDatabaseConfig(t *testing.T) {
 		t.Fatal("env save did not store the .env")
 	}
 }
+
+// Credentials kept in the encrypted metadata database (no .env file): another
+// Web instance saves a config between this instance's read and its write. The
+// credential save must not put the older config_yaml back.
+func TestDatabaseCredentialSaveKeepsConcurrentConfig(t *testing.T) {
+	e, c, csrf := npEnv(t)
+	if code, _, _, out := createNP(t, e, c, csrf, newOpts("dbcred", "a", "b")); code != 200 {
+		t.Fatalf("create: %d %s", code, out)
+	}
+	p := e.srv.reg.Get("dbcred")
+	if p == nil || p.dbEnv == nil {
+		t.Fatal("expected a pipeline with database-stored credentials")
+	}
+	const suffix = "# saved on another Web instance\n"
+	other := &concurrentConfigSave{Store: e.srv.db.st, name: p.Name, suffix: suffix}
+	e.srv.db.st = other
+	other.armed.Store(true)
+	if _, err := e.srv.saveEnvContent(t.Context(), p, map[string]string{"EXTRA": "1"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if other.armed.Load() {
+		t.Fatal("the concurrent save was not interleaved")
+	}
+	row, _, err := other.Store.GetPipeline(t.Context(), p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(row.ConfigYAML, suffix) {
+		t.Fatalf("credential save replaced the newer config:\n%s", row.ConfigYAML)
+	}
+	kv, err := e.srv.db.pipelineEnv(p.Name)
+	if err != nil || !strings.Contains(strings.Join(kv, "|"), "EXTRA=1") {
+		t.Fatalf("credentials not stored: %v %v", kv, err)
+	}
+}

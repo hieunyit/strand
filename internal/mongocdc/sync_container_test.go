@@ -136,6 +136,10 @@ func TestContainer_TransactionalCreateAndUnselectedLargeTransactionKeepStreaming
 		}
 	}
 	inTxn(func(tx context.Context) error {
+		// Review P3: an empty collection created in a transaction must exist on the target.
+		if err := p.srcC.Database(db).CreateCollection(tx, "empty_in_txn"); err != nil {
+			return err
+		}
 		if err := p.srcC.Database(db).CreateCollection(tx, "docs"); err != nil {
 			return err
 		}
@@ -168,6 +172,9 @@ func TestContainer_TransactionalCreateAndUnselectedLargeTransactionKeepStreaming
 			t.Fatalf("target docs = %d err=%v, want 3", n, err)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if names, err := p.dstC.Database(db).ListCollectionNames(ctx, bson.D{{Key: "name", Value: "empty_in_txn"}}); err != nil || len(names) != 1 {
+		t.Fatalf("empty collection created in a source transaction is missing on the target: %v err=%v", names, err)
 	}
 	if names, err := p.dstC.Database(db).ListCollectionNames(ctx, bson.D{{Key: "name", Value: "noise"}}); err != nil || len(names) != 0 {
 		t.Fatalf("excluded collection reached the target: %v err=%v", names, err)

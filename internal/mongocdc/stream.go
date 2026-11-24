@@ -500,6 +500,15 @@ func (r *runner) stream(ctx context.Context) (err error) {
 		if err != nil {
 			return fmt.Errorf("apply MongoDB event %s on %s.%s: %w", event.OperationType, event.NS.DB, event.NS.Coll, err)
 		}
+		if event.OperationType == "create" && txn != "" {
+			// A create inside a source transaction is no batch boundary, but an
+			// empty collection still has to exist on the target. Creating it
+			// before the transaction's writes are applied exposes no partial
+			// data, and the checkpoint stays where it is.
+			if err := r.createTargetCollection(ctx, event.NS.DB, event.NS.Coll); err != nil {
+				return fmt.Errorf("apply MongoDB event create on %s.%s: %w", event.NS.DB, event.NS.Coll, err)
+			}
+		}
 		switch {
 		case txn == "":
 			b.txnEvents, b.txnBytes = 0, 0
@@ -646,9 +655,8 @@ func (r *runner) addEvent(b *batch, event *streamEvent) (bool, error) {
 	case "dropDatabase", "rename", "drop", "invalidate":
 		return true, nil
 	case "create":
-		// Inside a transaction the create cannot be a batch boundary: the target
-		// collection is created by the transaction's first write and its options
-		// are reconciled (as before showExpandedEvents create handling).
+		// Inside a transaction the create cannot be a batch boundary; the
+		// stream loop creates the target collection without a checkpoint.
 		if event.txnKey() == "" {
 			return true, nil
 		}
@@ -863,40 +871,46 @@ func (r *runner) applyBatch(ctx context.Context, b *batch) (int, error) {
 // inside one). It is idempotent, so replay after a crash before the checkpoint is safe.
 // For a rename that needs the destination re-copied it returns the collection name;
 // the re-copy record and the checkpoint past the event are then already committed.
+// createTargetCollection creates a selected collection on the target with the
+// source's creation options. It is idempotent and does not checkpoint, so it
+// is also safe for a create inside a source transaction.
+func (r *runner) createTargetCollection(ctx context.Context, db, coll string) error {
+	cfg := r.cfg
+	if db != cfg.SourceDB || coll == "" || !selected(cfg, cfg.SourceDB+"."+coll) {
+		return nil
+	}
+	info, err := r.sourceCollectionInfo(ctx, coll)
+	if errors.Is(err, errUnsupportedCollectionType) {
+		// Views and time-series collections are not replicated; the snapshot
+		// skips them the same way.
+		cfg.Logger.Warn("MongoDB create of a non-replicable collection type ignored; add an exclude pattern to silence this", "collection", cfg.SourceDB+"."+coll, "error", err)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Source create has already happened. Create the matching target namespace
+	// under the durable DDL lease guard; a crash replays this idempotent create.
+	return r.lease.withDDL(ctx, "create collection "+coll, func() error {
+		names, err := r.target.ListCollectionNames(ctx, bson.D{{Key: "name", Value: coll}})
+		if err != nil || len(names) > 0 {
+			return err
+		}
+		cmd := bson.D{{Key: "create", Value: coll}}
+		if cfg.ReplicateIndexes {
+			cmd = append(cmd, creatableOptions(info.Options)...)
+		}
+		return r.target.RunCommand(ctx, append(cmd, bson.E{Key: "writeConcern", Value: durableDDLWriteConcern()})).Err()
+	})
+}
+
 func (r *runner) applyDDL(ctx context.Context, event *streamEvent, token bson.Raw) (string, error) {
 	cfg := r.cfg
 	switch event.OperationType {
 	case "invalidate":
 		return "", nil
 	case "create":
-		if event.NS.DB != cfg.SourceDB || !selected(cfg, cfg.SourceDB+"."+event.NS.Coll) {
-			return "", nil
-		}
-		info, err := r.sourceCollectionInfo(ctx, event.NS.Coll)
-		if errors.Is(err, errUnsupportedCollectionType) {
-			// Views and time-series collections are not replicated; the snapshot
-			// skips them the same way.
-			cfg.Logger.Warn("MongoDB create of a non-replicable collection type ignored; add an exclude pattern to silence this", "collection", cfg.SourceDB+"."+event.NS.Coll, "error", err)
-			return "", nil
-		}
-		if err != nil {
-			return "", err
-		}
-		// Source create has already happened. Create the matching target namespace under
-		// the durable DDL lease guard, then commit the event token in a fenced txn. A crash
-		// between the two safely replays the idempotent create.
-		err = r.lease.withDDL(ctx, "create collection "+event.NS.Coll, func() error {
-			names, err := r.target.ListCollectionNames(ctx, bson.D{{Key: "name", Value: event.NS.Coll}})
-			if err != nil || len(names) > 0 {
-				return err
-			}
-			cmd := bson.D{{Key: "create", Value: event.NS.Coll}}
-			if cfg.ReplicateIndexes {
-				cmd = append(cmd, creatableOptions(info.Options)...)
-			}
-			return r.target.RunCommand(ctx, append(cmd, bson.E{Key: "writeConcern", Value: durableDDLWriteConcern()})).Err()
-		})
-		if err != nil {
+		if err := r.createTargetCollection(ctx, event.NS.DB, event.NS.Coll); err != nil {
 			return "", err
 		}
 		next := r.state.clone()

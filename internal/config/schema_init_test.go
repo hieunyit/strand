@@ -58,3 +58,12 @@ func TestBootstrapCreateSchemaEnvAndJSONSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestJSONSchemaAcceptsMongoMaxTransactionMiB(t *testing.T) {
+	root := loadSchema(t)
+	doc := map[string]any{"mongodb": map[string]any{"stream_batch": 2000, "max_transaction_mib": 256}}
+	mongo := root["properties"].(map[string]any)["mongodb"].(map[string]any)
+	if errs := schemaCheck(root, mongo, doc["mongodb"], "$.mongodb"); len(errs) > 0 {
+		t.Fatalf("schema rejected mongodb.max_transaction_mib: %v", errs)
+	}
+}

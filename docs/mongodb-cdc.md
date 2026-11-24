@@ -105,8 +105,9 @@ strand stop -c p.yaml
   replicate do not count. The resume token stays before the transaction: raise
   `stream_batch` (up to 1,000,000) or `max_transaction_mib` and start again.
   `create`, `createIndexes`, `dropIndexes` and `modify` inside a transaction
-  (MongoDB 4.4+) are applied without splitting it: the transaction's first
-  write creates the collection and options are reconciled afterwards.
+  (MongoDB 4.4+) are applied without splitting it: the target collection is
+  created (even if it stays empty) before the transaction's writes, and options
+  are reconciled afterwards.
 - **Writes** use `w: majority, j: true`; reads `readConcern: majority`.
   The read preference comes from the URI (default `primary`; `readPreference=secondaryPreferred`
   moves snapshot and lookup reads off the source primary; the change stream follows the

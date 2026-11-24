@@ -303,6 +303,7 @@ const JSONSchema = `{
       "properties": {
         "snapshot_batch": { "type": "integer" },
         "stream_batch": { "type": "integer" },
+        "max_transaction_mib": { "type": "integer", "minimum": 0, "maximum": 4096 },
         "overwrite_target": { "type": "boolean" },
         "updates": { "type": "string", "enum": ["auto", "delta", "lookup"] },
         "indexes": { "type": "string", "enum": ["off", "replicate"] },

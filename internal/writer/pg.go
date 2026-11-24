@@ -774,10 +774,15 @@ func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) 
 		}
 		if oldExists {
 			// Both keys exist, so the guard skipped the UPDATE: the new row is
-			// the later state. Remove the old key with the target's FK actions
-			// in force; a RESTRICT child still on it fails with a clear error.
+			// the later state. Before removing the old key, give its children
+			// what the key UPDATE would have given them (ON UPDATE actions);
+			// a plain DELETE would fire ON DELETE actions instead and could
+			// silently delete children that the source moved.
+			if err := a.moveChildrenOfReplayedKey(row, pkCols); err != nil {
+				return true, err
+			}
 			if err := execDelete(a.ctx, a.tx, row.Table, pkCols, [][]model.Value{row.OldKey}); err != nil {
-				return true, fmt.Errorf("move referenced primary key on %s: new key already present; removing the old key failed (rows still reference it?): %w", row.Table, err)
+				return true, fmt.Errorf("move referenced primary key on %s: new key already present; removing the old key failed: %w", row.Table, err)
 			}
 			a.written++
 			return true, nil
@@ -799,6 +804,119 @@ func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) 
 	}
 	a.written++
 	return true, nil
+}
+
+// moveChildrenOfReplayedKey applies the ON UPDATE action of every foreign key
+// that references the old primary key, as the skipped key UPDATE would have.
+// It refuses (instead of deleting) when an action cannot be reproduced.
+func (a *pgApplier) moveChildrenOfReplayedKey(row *model.RowChange, pkCols []string) error {
+	table := quotePGTable(row.Table)
+	const referencing = `SELECT c.conname, c.conrelid::regclass::text, c.confupdtype::text,
+		ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(n, i)
+		      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.i),
+		ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(n, i)
+		      JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.n ORDER BY k.i)
+		FROM pg_constraint c
+		WHERE c.contype = 'f' AND c.conparentid = 0 AND (
+			c.confrelid = $1::text::regclass OR
+			c.confrelid IN (SELECT pg_partition_ancestors($1::text::regclass)))
+		ORDER BY c.conname`
+	type fk struct {
+		name, child, onUpdate string
+		cols, refs            []string
+	}
+	rows, err := a.tx.Query(a.ctx, referencing, table)
+	if err != nil {
+		return fmt.Errorf("inspect foreign keys referencing %s: %w", row.Table, err)
+	}
+	var fks []fk
+	for rows.Next() {
+		var f fk
+		if err := rows.Scan(&f.name, &f.child, &f.onUpdate, &f.cols, &f.refs); err != nil {
+			rows.Close()
+			return err
+		}
+		fks = append(fks, f)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	pkIndex := make(map[string]int, len(pkCols))
+	for i, c := range pkCols {
+		pkIndex[c] = i
+	}
+	for _, f := range fks {
+		refsKey := len(f.refs) == len(pkCols)
+		for _, r := range f.refs {
+			if _, ok := pkIndex[r]; !ok {
+				refsKey = false
+			}
+		}
+		if !refsKey {
+			// The key move does not change these referenced columns; children
+			// on the old row would only be hit by its DELETE. Refuse if any.
+			where := make([]string, len(pkCols))
+			for i, c := range pkCols {
+				where[i] = fmt.Sprintf("p.%s = $%d", quotePG(c), i+1)
+			}
+			join := make([]string, len(f.cols))
+			for i := range f.cols {
+				join[i] = fmt.Sprintf("ch.%s = p.%s", quotePG(f.cols[i]), quotePG(f.refs[i]))
+			}
+			var referenced bool
+			q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s ch JOIN %s p ON %s WHERE %s)", f.child, table, strings.Join(join, " AND "), strings.Join(where, " AND "))
+			oldKey := make([]any, len(row.OldKey))
+			for i, v := range row.OldKey {
+				oldKey[i] = v
+			}
+			if err := a.tx.QueryRow(a.ctx, q, oldKey...).Scan(&referenced); err != nil {
+				return fmt.Errorf("inspect rows of %s referencing %s: %w", f.child, row.Table, err)
+			}
+			if referenced {
+				return fmt.Errorf("move referenced primary key on %s: both the old and the new key exist on the target and %s still references the old row through %s; verify and repair the target (strand verify --mode full) before resuming", row.Table, f.child, f.name)
+			}
+			continue
+		}
+		where := make([]string, len(f.cols))
+		oldArgs := make([]any, len(f.cols))
+		for i, c := range f.cols {
+			where[i] = fmt.Sprintf("%s = $%d", quotePG(c), i+1)
+			oldArgs[i] = row.OldKey[pkIndex[f.refs[i]]]
+		}
+		var set []string
+		args := append([]any(nil), oldArgs...)
+		switch f.onUpdate {
+		case "c": // CASCADE: follow the key
+			for i, c := range f.cols {
+				args = append(args, row.Key[pkIndex[f.refs[i]]])
+				set = append(set, fmt.Sprintf("%s = $%d", quotePG(c), len(args)))
+			}
+		case "n":
+			for _, c := range f.cols {
+				set = append(set, quotePG(c)+" = NULL")
+			}
+		case "d":
+			for _, c := range f.cols {
+				set = append(set, quotePG(c)+" = DEFAULT")
+			}
+		default: // NO ACTION / RESTRICT: the source update could not have left children behind
+			var referenced bool
+			q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s WHERE %s)", f.child, strings.Join(where, " AND "))
+			if err := a.tx.QueryRow(a.ctx, q, oldArgs...).Scan(&referenced); err != nil {
+				return fmt.Errorf("inspect rows of %s referencing %s: %w", f.child, row.Table, err)
+			}
+			if referenced {
+				return fmt.Errorf("move referenced primary key on %s: both the old and the new key exist on the target and %s still references the old key through %s (ON UPDATE NO ACTION/RESTRICT); verify and repair the target (strand verify --mode full) before resuming", row.Table, f.child, f.name)
+			}
+			continue
+		}
+		q := fmt.Sprintf("UPDATE %s SET %s WHERE %s", f.child, strings.Join(set, ", "), strings.Join(where, " AND "))
+		if _, err := a.tx.Exec(a.ctx, q, args...); err != nil {
+			return fmt.Errorf("move children of %s through %s: %w", row.Table, f.name, err)
+		}
+	}
+	return nil
 }
 
 // partialUpdate áp một UPDATE có cột Unchanged (TOAST): cột Unchanged không bao giờ nằm trong SET.

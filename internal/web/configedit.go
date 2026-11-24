@@ -550,11 +550,17 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 		if !found || row.EnvPath != "" {
 			return "", Conflict("pipeline credential storage changed; reload Config")
 		}
-		row.EnvEnc, err = s.db.box.Seal(b.Bytes(), p.Name)
+		sealed, err := s.db.box.Seal(b.Bytes(), p.Name)
 		if err != nil {
 			return "", err
 		}
-		if err := s.db.st.UpsertPipeline(ctx, row); err != nil {
+		// Write env_enc only: a full-row upsert could replace a config that
+		// another Web instance saved after the read above.
+		updated, err := s.db.st.UpdatePipelineEnv(ctx, p.Name, "", sealed)
+		if err == nil && !updated {
+			return "", Conflict("pipeline was removed; reload Config")
+		}
+		if err != nil {
 			s.log.Warn("store pipeline credentials failed", "pipeline", p.Name, "err", err)
 			return "", &ActionError{Status: http.StatusServiceUnavailable, Msg: "Could not save credentials to the metadata database. Try again."}
 		}
