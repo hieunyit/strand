@@ -37,6 +37,8 @@ func (h *adminHandler) state() string {
 		return "failed"
 	case h.p.paused.Load():
 		return "paused"
+	case h.p.autoSeeding.Load():
+		return "bootstrapping"
 	case !h.p.running.Load():
 		return "starting"
 	case h.p.bootstrap.Load(), h.p.verifying.Load():
@@ -77,10 +79,17 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 		}
 		info.Verification = p.currentVerification()
 	}
-	if p.breaker != nil && p.breaker.IsOpen() {
+	// The breaker is built after the admin socket opens; ready() orders the read.
+	if h.ready() == nil && p.breaker != nil && p.breaker.IsOpen() {
 		info.BreakerOpen, info.BreakerReason = true, p.breaker.Reason()
 	}
-	if total := p.snapTablesTotal.Load(); total > 0 {
+	if p.autoSeeding.Load() {
+		info.TablesTotal, info.TablesDone = p.autoSeedTotal.Load(), p.autoSeedDone.Load()
+		if table := p.autoSeedTable.Load(); table != nil {
+			info.SnapshotTables, info.SnapshotTable = []string{*table}, *table
+		}
+		info.SnapshotRows = p.autoSeedRows.Load()
+	} else if total := p.snapTablesTotal.Load(); total > 0 {
 		info.TablesTotal, info.TablesDone = total, p.snapTablesDone.Load()
 		if running := p.runningSnapshotNames(); len(running) > 0 && info.TablesDone < total {
 			info.SnapshotTables = running

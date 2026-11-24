@@ -231,6 +231,12 @@ func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan)
 // autoSeed runs before CDC and only with an empty checkpoint. Rows and the new
 // binlog boundary become visible in the same transaction on the destination.
 func (p *Pipeline) autoSeed(ctx context.Context, empty checkpoint.AppliedSet) (checkpoint.AppliedSet, error) {
+	p.autoSeedTotal.Store(0)
+	p.autoSeedDone.Store(0)
+	p.autoSeedRows.Store(0)
+	p.autoSeedTable.Store(nil)
+	p.autoSeeding.Store(true)
+	defer p.autoSeeding.Store(false)
 	scope := make(map[model.TableID]bool, len(p.tables))
 	var ids []model.TableID
 	for id := range p.tables {
@@ -688,13 +694,27 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 	if err := binlogGuard.checkIfDue(ctx); err != nil {
 		return err
 	}
+	p.autoSeedTotal.Store(int64(len(group)))
 	for _, id := range group {
-		rows, err := copyAutoSeedTable(ctx, source, target, id, p.filter.Target(id), writableColumns(p.tables[id]), float64(iops)*16*1024, binlogGuard)
+		name := id.String()
+		p.autoSeedTable.Store(&name)
+		lastLog, base := time.Now(), p.autoSeedRows.Load()
+		progress := func(copied int64) {
+			p.autoSeedRows.Store(base + copied)
+			if time.Since(lastLog) >= autoSeedProgressLogEvery {
+				lastLog = time.Now()
+				p.log.Info("auto-seed copy in progress", "table", name, "rows", copied,
+					"tables_done", p.autoSeedDone.Load(), "tables_total", len(group))
+			}
+		}
+		rows, err := copyAutoSeedTable(ctx, source, target, id, p.filter.Target(id), writableColumns(p.tables[id]), float64(iops)*16*1024, binlogGuard, progress)
 		if err != nil {
 			return fmt.Errorf("auto-seed copy %s: %w", id, err)
 		}
-		p.log.Info("auto-seed table copied (awaiting checkpoint commit)", "table", id.String(), "rows", rows)
+		p.autoSeedDone.Add(1)
+		p.log.Info("auto-seed table copied (awaiting checkpoint commit)", "table", name, "rows", rows)
 	}
+	p.autoSeedTable.Store(nil)
 	if err := p.checkBinlogPosition(ctx, pos.File, pos.Position); err != nil {
 		return err
 	}
@@ -712,7 +732,12 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 	return nil
 }
 
-func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, from, to model.TableID, columns []string, bytesPerSecond float64, binlogGuard *autoSeedBinlogGuard) (int64, error) {
+// autoSeedProgressLogEvery spaces the progress lines of a long table copy.
+const autoSeedProgressLogEvery = 30 * time.Second
+
+// copyAutoSeedTable copies one table inside the seed transaction. progress,
+// when set, receives the rows copied so far after each batch.
+func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, from, to model.TableID, columns []string, bytesPerSecond float64, binlogGuard *autoSeedBinlogGuard, progress func(int64)) (int64, error) {
 	if len(columns) == 0 {
 		return 0, autoSeedRejected("table has no writable columns")
 	}
@@ -753,6 +778,9 @@ func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, fr
 			return err
 		}
 		n += int64(count)
+		if progress != nil {
+			progress(n)
+		}
 		clear(batch)
 		batch, size, start = batch[:0], 0, time.Now()
 		return nil

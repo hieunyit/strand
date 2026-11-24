@@ -162,6 +162,13 @@ type Pipeline struct {
 	snapTablesDone  atomic.Int64
 	snapRowsEst     atomic.Int64
 	snapRate        rateWindow
+	// Auto-seed runs before the rest of the pipeline is built; the admin socket
+	// is already open then and reports this progress.
+	autoSeeding     atomic.Bool
+	autoSeedTotal   atomic.Int64
+	autoSeedDone    atomic.Int64
+	autoSeedRows    atomic.Int64
+	autoSeedTable   atomic.Pointer[string]
 	breaker         *governor.Breaker
 	mysqlSignals    *governor.MySQLDBSignalReader
 	breakerLogged   time.Time
@@ -480,6 +487,17 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	p.log = p.log.With("epoch", p.epoch)
 	p.log.Info("pipeline lock acquired")
+	// Open the admin socket as soon as this instance owns the pipeline: an
+	// auto-seed can copy for hours before the rest is built, and a missing
+	// socket makes the process look hung ("unreachable"). Commands that need
+	// the scheduler or writers wait for ready().
+	if sock := p.cfg.Observability.AdminSocket; sock != "" {
+		as := admin.NewServer(sock, &adminHandler{p: p}, p.log)
+		if err := as.Start(); err != nil {
+			return fmt.Errorf("start admin socket: %w", err)
+		}
+		defer as.Close()
+	}
 	// Mọi ghi snapshot dùng ctx này kiểm epoch trong transaction của chính nó (SG-1, review R07).
 	ctx = checkpoint.WithFence(ctx, checkpoint.Fence{PipelineID: p.id, Epoch: p.epoch})
 	p.runCtx = ctx
@@ -800,14 +818,6 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		}
 		defer ms.Close()
 	}
-	if sock := p.cfg.Observability.AdminSocket; sock != "" {
-		as := admin.NewServer(sock, &adminHandler{p: p}, p.log)
-		if err := as.Start(); err != nil {
-			return fmt.Errorf("start admin socket: %w", err)
-		}
-		defer as.Close()
-	}
-
 	// --- Scheduler, writer, coordinator ---
 	scfg := sched.DefaultConfig()
 	scfg.Serial = p.strict // strict: một writer, apply tuần tự theo seq (xem sched.Config.Serial)

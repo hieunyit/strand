@@ -28,21 +28,23 @@ func (h *adminHandler) Status(ctx context.Context) (*admin.StatusInfo, error) {
 		StartAt:        p.opts.StartAt,
 		SourceKind:     p.cfg.Source.Kind,
 		TargetKind:     p.cfg.Target.Kind,
-		CommitOrder:    "relaxed",
-		Workers:        len(p.writers),
 		Paused:         p.paused.Load(),
 		SnapshotPaused: p.snapPaused.Load(),
 		AppliedTxns:    p.appliedTxns.Load(),
 		AppliedRows:    p.appliedRows.Load(),
 	}
-	if p.strict {
-		info.CommitOrder = "strict"
-	}
-	if p.applied0 != nil {
-		info.StartPosition = fmt.Sprint(p.applied0)
-	}
-	gi := admin.GovernorInfo{Algorithm: p.govAlgo}
+	// The admin socket opens before startup sets these (an auto-seed can run
+	// for hours in between); ready() orders the reads after their writes.
+	gi := admin.GovernorInfo{}
 	if h.ready() == nil {
+		info.Workers, info.CommitOrder = len(p.writers), "relaxed"
+		if p.strict {
+			info.CommitOrder = "strict"
+		}
+		if p.applied0 != nil {
+			info.StartPosition = fmt.Sprint(p.applied0)
+		}
+		gi.Algorithm = p.govAlgo
 		if p.gov != nil && p.govAlgo != "static" {
 			gi.ForegroundRate, gi.BackgroundRate = p.gov.CurrentRate()
 			gi.Zone = p.gov.Zone().String()
