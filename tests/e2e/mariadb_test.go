@@ -345,9 +345,17 @@ func TestMDB_E2E_TargetInvisiblePrimaryKeyRestart(t *testing.T) {
 	src.exec(t, "UPDATE app.version SET table_version=2 WHERE table_name='version'")
 	process = startStrand(t, path)
 	waitSynced(t, &cfg, process, 20*time.Second)
+	// Synced means the bootstrap is done, not that CDC has applied the UPDATE.
 	var version int
 	var resumedID uint64
-	if err := dst.DB.QueryRow("SELECT my_row_id, table_version FROM app.version WHERE table_name='version'").Scan(&resumedID, &version); err != nil || resumedID != id || version != 2 {
+	var err error
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		err = dst.DB.QueryRow("SELECT my_row_id, table_version FROM app.version WHERE table_name='version'").Scan(&resumedID, &version)
+		if err == nil && version == 2 {
+			break
+		}
+	}
+	if err != nil || resumedID != id || version != 2 {
 		t.Fatalf("expected resumed update with unchanged invisible key: id=%d, version=%d, error=%v", resumedID, version, err)
 	}
 	if code := process.stop(t); code != 0 {
