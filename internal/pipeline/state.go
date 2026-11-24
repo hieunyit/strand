@@ -59,6 +59,10 @@ type stateFile struct {
 	// AddedTables: bảng thêm bằng `snapshot add` khi pipeline đang chạy mà không nằm trong tables.include.
 	// Khởi động sau hợp chúng vào bộ lọc (tables.exclude vẫn thắng), nếu không bảng sẽ âm thầm rời pipeline.
 	AddedTables []string `json:"added_tables,omitempty"`
+	// TargetEpoch is the pipeline epoch last taken on the target. Epochs only
+	// grow while the target metadata exists: a lower or equal one means the
+	// checkpoint database was recreated, and this state describes old copies.
+	TargetEpoch int64 `json:"target_epoch,omitempty"`
 }
 
 // VerificationAddedTables reads the runtime additions used on pipeline restart.
@@ -371,6 +375,60 @@ func (s *localState) resolveAutoSeed(hasCheckpoint bool) error {
 	}
 	s.data.AutoSeedPending = nil
 	return s.flushLocked()
+}
+
+// noteTargetEpoch records the epoch just taken on the target. When the target
+// metadata was recreated (operators drop the target databases to start over
+// under the same pipeline name), it forgets the copy progress of the old
+// target and reports true.
+func (s *localState) noteTargetEpoch(epoch int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reset := s.data.TargetEpoch > 0 && epoch <= s.data.TargetEpoch
+	if reset {
+		s.forgetCopiesLocked()
+	}
+	s.data.TargetEpoch = epoch
+	return reset, s.flushLocked()
+}
+
+// forgetCopiesLocked drops what describes rows on the target. Runtime table
+// additions, source schema history and the PG slot are kept.
+func (s *localState) forgetCopiesLocked() {
+	s.data.Done = map[string]bool{}
+	s.data.Plans, s.data.Targets = nil, nil
+	s.data.CascadeSignatures, s.data.AutoSeedPending, s.data.AutoSeedPartial = nil, nil, nil
+	s.data.VerifyPending = false
+	s.clearVerificationLocked()
+}
+
+// forgetWithoutCheckpoint runs when the target has no checkpoint: no
+// cascade rule needs protecting yet, and a table marked copied whose target
+// table is missing was dropped since (missing reports it per target name).
+func (s *localState) forgetWithoutCheckpoint(missing func(table string) bool) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := len(s.data.CascadeSignatures) > 0
+	s.data.CascadeSignatures = nil
+	var dropped []string
+	for table, done := range s.data.Done {
+		if done && missing(table) {
+			dropped = append(dropped, table)
+			delete(s.data.Done, table)
+			delete(s.data.Targets, table)
+			delete(s.data.Plans, table)
+		}
+	}
+	if len(dropped) > 0 {
+		changed = true
+		s.clearVerificationLocked()
+		s.data.VerifyPending = false
+	}
+	sort.Strings(dropped)
+	if !changed {
+		return nil, nil
+	}
+	return dropped, s.flushLocked()
 }
 
 // markAutoSeedPartial records target tables before a chunked auto-seed makes

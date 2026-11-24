@@ -337,6 +337,58 @@ func (p *Pipeline) autoSeed(ctx context.Context, empty checkpoint.AppliedSet) (c
 	return set, p.state.resolveAutoSeed(true)
 }
 
+// checkSeededTargetTables runs when the pipeline already has a checkpoint, so
+// auto-seed will neither create nor copy tables again. A target table missing
+// then (dropped to start over, or the wrong target) would otherwise surface as
+// a confusing foreign-key or apply error.
+func (p *Pipeline) checkSeededTargetTables(ctx context.Context) error {
+	bySchema := map[string][]model.TableID{}
+	for id := range p.tables {
+		if !p.state.IsDone(id.String()) {
+			continue // a pending snapshot still creates it (bootstrap.create_schema: auto)
+		}
+		dst := p.filter.Target(id)
+		bySchema[dst.Schema] = append(bySchema[dst.Schema], dst)
+	}
+	var missing []string
+	for schema, tables := range bySchema {
+		rows, err := p.dst.QueryContext(ctx, "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=?", schema)
+		if err != nil {
+			return fmt.Errorf("auto-seed: list target tables of %s: %w", schema, err)
+		}
+		present := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				return err
+			}
+			present[strings.ToLower(name)] = true
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, id := range tables {
+			if !present[strings.ToLower(id.Table)] {
+				missing = append(missing, id.String())
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	shown := missing
+	if len(shown) > 10 {
+		shown = append(shown[:10:10], fmt.Sprintf("and %d more", len(missing)-10))
+	}
+	return autoSeedRejected(fmt.Sprintf("pipeline %s already has a checkpoint, so it will not create or copy tables again, but %d copied target table(s) are missing: %s; "+
+		"restore them from the seed, or start over with a new pipeline name (or after removing this pipeline's checkpoint and state)",
+		p.id, len(missing), strings.Join(shown, ", ")))
+}
+
 func tableInSortedGroup(group []model.TableID, id model.TableID) bool {
 	name := id.String()
 	i := sort.Search(len(group), func(i int) bool { return group[i].String() >= name })
@@ -773,6 +825,95 @@ func (p *Pipeline) autoSeedCommitBudget(ctx context.Context) (int64, error) {
 		budget = max(limit.Int64/4, 1)
 	}
 	return budget, nil
+}
+
+// targetGroupReplicationActive reports whether the MySQL target is a member of
+// a running Group Replication group.
+func targetGroupReplicationActive(ctx context.Context, db *sql.DB) (bool, error) {
+	var name sql.NullString
+	err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.group_replication_group_name").Scan(&name)
+	var me *drivermysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1193 { // unknown system variable: no plugin
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read target group_replication_group_name: %w", err)
+	}
+	if !name.Valid || name.String == "" {
+		return false, nil
+	}
+	var state string
+	err = db.QueryRowContext(ctx, "SELECT MEMBER_STATE FROM performance_schema.replication_group_members WHERE MEMBER_ID=@@server_uuid").Scan(&state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return true, nil // performance_schema not readable: the plugin is configured with a group
+	}
+	return state != "OFFLINE", nil
+}
+
+// checkGroupReplicationKeyless refuses, before any target change, source
+// tables without a key whose target table would have none: Group Replication
+// rejects their rows (error 3098), so the copy or CDC would fail later.
+func (p *Pipeline) checkGroupReplicationKeyless(ctx context.Context) error {
+	if p.dstEngine != model.EngineMySQL {
+		return nil
+	}
+	var keyless []model.TableID
+	for id, m := range p.tables {
+		if m.Keyless {
+			keyless = append(keyless, id)
+		}
+	}
+	if len(keyless) == 0 {
+		return nil
+	}
+	active, err := targetGroupReplicationActive(ctx, p.dst)
+	if err != nil || !active {
+		return err
+	}
+	var gipk sql.NullInt64
+	if err := p.dst.QueryRowContext(ctx, "SELECT @@SESSION.sql_generate_invisible_primary_key").Scan(&gipk); err != nil {
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1193 { // before MySQL 8.0.30 the variable does not exist
+			return fmt.Errorf("read target sql_generate_invisible_primary_key: %w", err)
+		}
+	}
+	var blocked []string
+	for _, id := range keyless {
+		dst := p.filter.Target(id)
+		present, err := schemagen.Exists(ctx, p.dst, p.cfg.Target.Kind, dst)
+		if err != nil {
+			return err
+		}
+		if !present {
+			if gipk.Int64 == 0 || !p.cfg.Bootstrap.CreateSchemaAuto() {
+				blocked = append(blocked, id.String())
+			}
+			continue
+		}
+		// Group Replication accepts a primary key or a unique key on NOT NULL columns.
+		var one int
+		err = p.dst.QueryRowContext(ctx, "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING SUM(NULLABLE='YES')=0 LIMIT 1",
+			dst.Schema, dst.Table).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			blocked = append(blocked, id.String())
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect keys of target %s: %w", dst, err)
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	sort.Strings(blocked)
+	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
+		"the target uses Group Replication, which rejects rows of tables without a primary key (error 3098), and these source tables have no key: %s. "+
+			"Before Strand creates their target tables, set sql_generate_invisible_primary_key=ON on every group member (MySQL 8.0.30+, SET PERSIST) "+
+			"so they get an invisible primary key; or add a key on the source, add one to an existing target table, or exclude the tables",
+		strings.Join(blocked, ", ")), nil)
 }
 
 // autoSeedTarget is the target side of an auto-seed copy. Without a budget it

@@ -189,3 +189,74 @@ func TestAutoSeedBinlogGuardPropagatesRetentionFailure(t *testing.T) {
 		t.Fatalf("got %v, want retention error %v", err, want)
 	}
 }
+
+// MySQL keeps foreign-key names unique per schema, ignoring case: a target
+// constraint of another table with the source name blocks creating the child,
+// and the error must say so instead of only "table does not exist".
+func TestMissingCascadeMessageNamesConstraintClash(t *testing.T) {
+	db := sql.OpenDB(wiringConnector{answer: func(q string) ([]string, []driver.Value, error) {
+		return []string{"n"}, []driver.Value{int64(0)}, nil // the child table does not exist
+	}})
+	defer db.Close()
+	step := model.TableID{Schema: "fptai_v3", Table: "dm_step"}
+	fk := cascadeFK{Child: model.TableID{Schema: "fptai_v3", Table: "dm_step_config"}, Parent: step,
+		Columns: []string{"step_id"}, References: []string{"id"}, OnDelete: "CASCADE", OnUpdate: "CASCADE", constraint: "FK_STEP"}
+	other := cascadeFK{Child: model.TableID{Schema: "fptai_v3", Table: "dm_log"}, Parent: step,
+		Columns: []string{"step_id"}, References: []string{"id"}, OnDelete: "CASCADE", OnUpdate: "CASCADE", constraint: "fk_step"}
+	msg := missingCascadeMessage(context.Background(), db, fk, []cascadeFK{other})
+	for _, want := range []string{"target table fptai_v3.dm_step_config does not exist", "constraint name fk_step is already used on the target by fptai_v3.dm_log"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message %q does not contain %q", msg, want)
+		}
+	}
+	other.Child.Schema = "elsewhere"
+	if msg := missingCascadeMessage(context.Background(), db, fk, []cascadeFK{other}); strings.Contains(msg, "already used") {
+		t.Fatalf("a constraint in another schema does not clash: %q", msg)
+	}
+}
+
+// Dropping the target databases (checkpoint database included) restarts the
+// target epoch: the local copy progress then describes rows that are gone.
+func TestLocalStateForgetsCopiesOfARecreatedTarget(t *testing.T) {
+	dir := t.TempDir()
+	state, err := openLocalState(dir, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.targetOf = func(table string) string { return table }
+	if reset, err := state.noteTargetEpoch(4); err != nil || reset {
+		t.Fatalf("first epoch: reset=%v err=%v", reset, err)
+	}
+	if err := state.SetDone("app.kept", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetDone("app.dropped", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.checkCascadeSignatures([]string{"old"}); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := state.noteTargetEpoch(5); err != nil || reset || !state.IsDone("app.kept") {
+		t.Fatalf("growing epoch: reset=%v err=%v", reset, err)
+	}
+
+	// Legacy state (no recorded epoch) on a target without a checkpoint.
+	dropped, err := state.forgetWithoutCheckpoint(func(table string) bool { return table == "app.dropped" })
+	if err != nil || strings.Join(dropped, ",") != "app.dropped" || !state.IsDone("app.kept") || state.IsDone("app.dropped") {
+		t.Fatalf("forget without checkpoint: dropped=%v err=%v", dropped, err)
+	}
+	if err := state.checkCascadeSignatures([]string{"new"}); err != nil {
+		t.Fatalf("cascade signatures of a target without checkpoint must not block: %v", err)
+	}
+
+	reopened, err := openLocalState(dir, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := reopened.noteTargetEpoch(1); err != nil || !reset {
+		t.Fatalf("epoch went back: reset=%v err=%v", reset, err)
+	}
+	if reopened.IsDone("app.kept") || len(reopened.data.CascadeSignatures) != 0 {
+		t.Fatalf("recreated target kept old progress: %+v", reopened.data)
+	}
+}

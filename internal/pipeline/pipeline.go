@@ -43,6 +43,7 @@ import (
 	pgreader "strand/internal/reader/pg"
 	"strand/internal/rowkey"
 	"strand/internal/sched"
+	"strand/internal/schemagen"
 	"strand/internal/seed"
 	"strand/internal/snapshot"
 	"strand/internal/spool"
@@ -487,6 +488,11 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	p.log = p.log.With("epoch", p.epoch)
 	p.log.Info("pipeline lock acquired")
+	if reset, err := p.state.noteTargetEpoch(p.epoch); err != nil {
+		return err
+	} else if reset {
+		p.log.Warn("the target checkpoint database was recreated since the last run: forgetting the local copy progress of the old target")
+	}
 	// Open the admin socket as soon as this instance owns the pipeline: an
 	// auto-seed can copy for hours before the rest is built, and a missing
 	// socket makes the process look hung ("unreachable"). Commands that need
@@ -530,6 +536,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			p.log.Info("table has no primary key: using a NOT NULL unique index as the row key", "table", id.String(), "key", keyLabel(m))
 		}
 	}
+	if err := p.checkGroupReplicationKeyless(ctx); err != nil {
+		return err
+	}
 	{
 		ids := make([]model.TableID, 0, len(p.tables))
 		for id := range p.tables {
@@ -561,6 +570,19 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.state.resolveAutoSeed(hasCheckpoint); err != nil {
 		return err
 	}
+	if !hasCheckpoint && p.opts.StartAt == "" {
+		dropped, err := p.state.forgetWithoutCheckpoint(func(table string) bool {
+			sc, t, _ := strings.Cut(table, ".")
+			present, err := schemagen.Exists(ctx, p.dst, p.cfg.Target.Kind, p.filter.Target(model.TableID{Schema: sc, Table: t}))
+			return err == nil && !present
+		})
+		if err != nil {
+			return err
+		}
+		if len(dropped) > 0 {
+			p.log.Warn("tables marked copied have no target table and there is no checkpoint: copying them again", "tables", strings.Join(dropped, ", "))
+		}
+	}
 	if partial := p.state.autoSeedPartial(); len(partial) > 0 && !p.cfg.Bootstrap.AutoSeed {
 		return autoSeedRejected(fmt.Sprintf("an interrupted auto-seed left partial rows in target tables %s; enable bootstrap.auto_seed again so it empties and copies them", strings.Join(partial, ", ")))
 	}
@@ -589,6 +611,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			loaded = seeded
 			hasCheckpoint = hasAppliedCheckpoint(loaded)
 		} else {
+			if err := p.checkSeededTargetTables(ctx); err != nil {
+				return err
+			}
 			if err := p.initMySQLCascade(ctx); err != nil {
 				return err
 			}

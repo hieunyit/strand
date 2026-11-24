@@ -412,7 +412,13 @@ func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope 
 			sameLink := existing.Child == fk.Child && existing.Parent == fk.Parent && slices.Equal(existing.Columns, fk.Columns)
 			sameName := existing.Child.Schema == fk.Child.Schema && strings.EqualFold(existing.constraint, fk.constraint)
 			if sameLink || sameName {
-				return plan, cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target) + hint)
+				// Name the existing constraint: auto-seed cannot add this one
+				// beside it (missingCascadeMessage covers a clash on another table).
+				conflict := ""
+				if existing.Child == fk.Child {
+					conflict = fmt.Sprintf("; the target already has %s on %s %s", existing.constraint, existing.Child, describeCascadeFK(existing))
+				}
+				return plan, cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target) + conflict + hint)
 			}
 		}
 		plan.missing = append(plan.missing, fk)
@@ -513,10 +519,19 @@ func missingCascadeMessage(ctx context.Context, db *sql.DB, fk cascadeFK, target
 		kind = "cascading foreign key"
 	}
 	msg := fmt.Sprintf("missing matching target %s on %s referencing %s (ON DELETE %s, ON UPDATE %s)", kind, fk.Child, fk.Parent, fk.OnDelete, fk.OnUpdate)
+	// MySQL keeps foreign-key names unique per schema (case-insensitively), so a
+	// constraint of another table can block creating this one under its name.
+	clash := ""
+	for _, t := range target {
+		if fk.constraint != "" && t.Child.Schema == fk.Child.Schema && t.Child != fk.Child && strings.EqualFold(t.constraint, fk.constraint) {
+			clash = fmt.Sprintf("; the constraint name %s is already used on the target by %s (MySQL foreign-key names are unique per schema, ignoring case): rename one of them", t.constraint, t.Child)
+			break
+		}
+	}
 	var exists int
 	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", fk.Child.Schema, fk.Child.Table).Scan(&exists)
 	if err == nil && exists == 0 {
-		return msg + fmt.Sprintf(": target table %s does not exist; create it with its foreign keys (bootstrap.create_schema: auto does this) or restore a consistent seed", fk.Child)
+		return msg + fmt.Sprintf(": target table %s does not exist; create it with its foreign keys (bootstrap.create_schema: auto does this on a pipeline without a checkpoint) or restore a consistent seed", fk.Child) + clash
 	}
 	var similar []string
 	for _, t := range target {
@@ -526,7 +541,7 @@ func missingCascadeMessage(ctx context.Context, db *sql.DB, fk cascadeFK, target
 	}
 	if len(similar) > 0 {
 		return msg + fmt.Sprintf(": the target has %s, but the source needs %s %s; make the target rules, columns and key collations match the source",
-			strings.Join(similar, "; "), fk.constraint, describeCascadeFK(fk))
+			strings.Join(similar, "; "), fk.constraint, describeCascadeFK(fk)) + clash
 	}
 	name := fk.Name
 	if name == "" {
@@ -535,7 +550,7 @@ func missingCascadeMessage(ctx context.Context, db *sql.DB, fk cascadeFK, target
 	if name == "" {
 		name = fk.Child.Table + "_" + fk.Parent.Table + "_fk"
 	}
-	return msg + fmt.Sprintf(": target table %s exists without it (created before Strand, or by a tool that drops foreign keys); add it on the target with: %s", fk.Child, cascadeAddSQL(fk, name))
+	return msg + fmt.Sprintf(": target table %s exists without it (created before Strand, or by a tool that drops foreign keys); add it on the target with: %s", fk.Child, cascadeAddSQL(fk, name)) + clash
 }
 
 func (p *Pipeline) initMySQLCascade(ctx context.Context) error {
