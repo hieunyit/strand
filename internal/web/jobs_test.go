@@ -147,9 +147,12 @@ func TestVerifyJobStreamingHistoryAndAudit(t *testing.T) {
 	}
 	// History persisted in the metadata database: job row + output.
 	jobsDir := filepath.Join(e.srv.cfg.StateDir, "jobs")
-	if b, err := e.srv.db.st.ReadJobOutput(context.Background(), id, 0, 1<<20); err != nil || !strings.Contains(string(b), "line two") {
-		t.Errorf("job output not in the database: %q %v", b, err)
-	}
+	// The output reaches the database asynchronously (shipLoop, every shipEvery);
+	// the final part may land just after the job is reported as ended.
+	waitFor(t, "job output in the database", func() bool {
+		b, err := e.srv.db.st.ReadJobOutput(context.Background(), id, 0, 1<<20)
+		return err == nil && strings.Contains(string(b), "line two")
+	})
 	// A fresh runner on the same database (web restart) sees the history.
 	r2, err := newJobRunner(jobsDir, e.bin, nil, e.srv.db.st, false)
 	if err != nil {
@@ -159,6 +162,8 @@ func TestVerifyJobStreamingHistoryAndAudit(t *testing.T) {
 		t.Errorf("history after reload: %+v", l)
 	}
 	// Audit: started + ok (action) and a job.end line with the exit code.
+	// OnEnd writes it after the job is reported as ended.
+	waitFor(t, "job.end audit", func() bool { return len(e.auditFor("job.end")) > 0 })
 	end := e.auditFor("job.end")
 	if len(end) != 1 || end[0]["result"] != "error" || end[0]["exit_code"] != float64(5) || end[0]["pipeline"] != "orders" {
 		t.Errorf("job.end audit: %v", end)
