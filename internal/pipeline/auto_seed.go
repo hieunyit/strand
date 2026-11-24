@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	drivermysql "github.com/go-sql-driver/mysql"
+
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -237,6 +239,9 @@ func (p *Pipeline) autoSeed(ctx context.Context, empty checkpoint.AppliedSet) (c
 	p.autoSeedTable.Store(nil)
 	p.autoSeeding.Store(true)
 	defer p.autoSeeding.Store(false)
+	if err := p.clearPartialAutoSeed(ctx); err != nil {
+		return nil, err
+	}
 	scope := make(map[model.TableID]bool, len(p.tables))
 	var ids []model.TableID
 	for id := range p.tables {
@@ -657,6 +662,10 @@ func (p *Pipeline) checkAutoSeedTable(ctx context.Context, id model.TableID) err
 }
 
 func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []model.TableID, pos mysqlreader.BinlogStatus, set *checkpoint.MySQLPosAppliedSet) error {
+	budget, err := p.autoSeedCommitBudget(ctx)
+	if err != nil {
+		return err
+	}
 	conn, err := p.dst.Conn(ctx)
 	if err != nil {
 		return err
@@ -665,24 +674,24 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 	if _, err := conn.ExecContext(ctx, "SET SESSION sql_mode=?", mysqlTargetSessionSQLMode+",NO_AUTO_VALUE_ON_ZERO"); err != nil {
 		return err
 	}
-	target, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
-	if err != nil {
+	target := &autoSeedTarget{p: p, conn: conn, budget: budget, group: group}
+	if err := target.begin(ctx); err != nil {
 		return err
 	}
-	defer target.Rollback()
-	if err := checkpoint.CheckFence(ctx, target, false); err != nil {
-		return err
-	}
+	defer target.rollback()
 	for _, id := range group {
 		dst := p.filter.Target(id)
 		var exists int
-		err := target.QueryRowContext(ctx, "SELECT 1 FROM "+autoSeedTableSQL(dst)+" LIMIT 1 FOR UPDATE").Scan(&exists)
+		err := target.tx.QueryRowContext(ctx, "SELECT 1 FROM "+autoSeedTableSQL(dst)+" LIMIT 1 FOR UPDATE").Scan(&exists)
 		if err == nil {
 			return autoSeedRejected(fmt.Sprintf("target %s already contains data", dst))
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+	}
+	if budget > 0 {
+		p.log.Info("auto-seed target uses Group Replication: committing the copy in parts", "part_bytes", budget)
 	}
 	iops := p.cfg.Resources.Source.IOPS.Soft
 	if iops <= 0 {
@@ -709,6 +718,10 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 		}
 		rows, err := copyAutoSeedTable(ctx, source, target, id, p.filter.Target(id), writableColumns(p.tables[id]), float64(iops)*16*1024, binlogGuard, progress)
 		if err != nil {
+			var me *drivermysql.MySQLError
+			if errors.As(err, &me) && me.Number == 3098 {
+				return autoSeedRejected(fmt.Sprintf("target %s rejects rows: Group Replication requires a primary key (or a NOT NULL unique key) on every table: %v", p.filter.Target(id), err))
+			}
 			return fmt.Errorf("auto-seed copy %s: %w", id, err)
 		}
 		p.autoSeedDone.Add(1)
@@ -719,17 +732,137 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 		return err
 	}
 	store := p.store.(*checkpoint.MySQLStore)
-	if err := store.WriteGlobalTx(ctx, target, checkpoint.Global{PipelineID: p.id, Epoch: p.epoch, Applied: set.String()}); err != nil {
+	if err := store.WriteGlobalTx(ctx, target.tx, checkpoint.Global{PipelineID: p.id, Epoch: p.epoch, Applied: set.String()}); err != nil {
 		return err
 	}
 	if err := p.state.prepareAutoSeed(group); err != nil {
 		return err
 	}
-	if err := target.Commit(); err != nil {
+	if err := target.tx.Commit(); err != nil {
 		return fmt.Errorf("commit auto-seed and its checkpoint: %w", err)
 	}
-	p.log.Info("auto-seed committed", "tables", len(group), "file", pos.File, "position", pos.Position)
+	target.tx = nil
+	if err := p.state.clearAutoSeedPartial(); err != nil {
+		return err
+	}
+	p.log.Info("auto-seed committed", "tables", len(group), "parts", target.parts+1, "file", pos.File, "position", pos.Position)
 	return nil
+}
+
+// Group Replication rejects, at commit, a transaction larger than
+// group_replication_transaction_size_limit (error 3100 in the before_commit
+// hook), and very large transactions stall the group even below it.
+const autoSeedMaxPartBytes = 64 << 20
+
+// autoSeedCommitBudget returns how many copied bytes one target transaction
+// may hold: 0 (the whole copy and its checkpoint in one transaction) unless
+// the target has the Group Replication plugin.
+func (p *Pipeline) autoSeedCommitBudget(ctx context.Context) (int64, error) {
+	var limit sql.NullInt64
+	err := p.dst.QueryRowContext(ctx, "SELECT @@GLOBAL.group_replication_transaction_size_limit").Scan(&limit)
+	var me *drivermysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1193 { // unknown system variable: no plugin
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("auto-seed: read target group_replication_transaction_size_limit: %w", err)
+	}
+	budget := int64(autoSeedMaxPartBytes)
+	// The copy counts value bytes; row events and write sets add to them.
+	if limit.Valid && limit.Int64 > 0 && limit.Int64/4 < budget {
+		budget = max(limit.Int64/4, 1)
+	}
+	return budget, nil
+}
+
+// autoSeedTarget is the target side of an auto-seed copy. Without a budget it
+// is one transaction that also commits the checkpoint, so an interrupted copy
+// leaves the target empty. With a budget it commits every budget bytes; before
+// the first such commit the local state records the group's target tables, and
+// the next attempt empties them (clearAutoSeedPartial) before copying again.
+type autoSeedTarget struct {
+	p       *Pipeline
+	conn    *sql.Conn
+	tx      *sql.Tx
+	budget  int64
+	pending int64
+	parts   int
+	group   []model.TableID
+}
+
+func (t *autoSeedTarget) begin(ctx context.Context) error {
+	tx, err := t.conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return err
+	}
+	t.tx = tx
+	return checkpoint.CheckFence(ctx, tx, false)
+}
+
+func (t *autoSeedTarget) rollback() {
+	if t.tx != nil {
+		_ = t.tx.Rollback()
+	}
+}
+
+// wrote accounts for bytes inserted in the open transaction and commits it
+// once the budget is reached.
+func (t *autoSeedTarget) wrote(ctx context.Context, bytes int64) error {
+	if t.budget == 0 {
+		return nil
+	}
+	if t.pending += bytes; t.pending < t.budget {
+		return nil
+	}
+	if t.parts == 0 {
+		targets := make([]string, 0, len(t.group))
+		for _, id := range t.group {
+			targets = append(targets, t.p.filter.Target(id).String())
+		}
+		if err := t.p.state.markAutoSeedPartial(targets); err != nil {
+			return err
+		}
+	}
+	if err := t.tx.Commit(); err != nil {
+		t.tx = nil
+		return fmt.Errorf("commit auto-seed part: %w", err)
+	}
+	t.parts++
+	t.pending = 0
+	t.p.log.Info("auto-seed part committed", "parts", t.parts)
+	return t.begin(ctx)
+}
+
+// clearPartialAutoSeed empties the target tables an interrupted chunked
+// auto-seed committed rows into. It runs only without a checkpoint, so CDC has
+// never applied to them; TRUNCATE is DDL and so not bound by the Group
+// Replication transaction size limit.
+func (p *Pipeline) clearPartialAutoSeed(ctx context.Context) error {
+	tables := p.state.autoSeedPartial()
+	if len(tables) == 0 {
+		return nil
+	}
+	conn, err := p.dst.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeAutoSeedConn(conn)
+	if _, err := conn.ExecContext(ctx, "SET SESSION foreign_key_checks=0"); err != nil {
+		return err
+	}
+	for _, name := range tables {
+		schema, table, _ := strings.Cut(name, ".")
+		_, err := conn.ExecContext(ctx, "TRUNCATE TABLE "+autoSeedTableSQL(model.TableID{Schema: schema, Table: table}))
+		var me *drivermysql.MySQLError
+		if errors.As(err, &me) && me.Number == 1146 { // table no longer exists
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("auto-seed: empty %s left partly copied by an interrupted attempt: %w", name, err)
+		}
+	}
+	p.log.Warn("auto-seed: emptied target tables partly copied by an interrupted attempt", "tables", strings.Join(tables, ", "))
+	return p.state.clearAutoSeedPartial()
 }
 
 // autoSeedProgressLogEvery spaces the progress lines of a long table copy.
@@ -737,7 +870,7 @@ const autoSeedProgressLogEvery = 30 * time.Second
 
 // copyAutoSeedTable copies one table inside the seed transaction. progress,
 // when set, receives the rows copied so far after each batch.
-func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, from, to model.TableID, columns []string, bytesPerSecond float64, binlogGuard *autoSeedBinlogGuard, progress func(int64)) (int64, error) {
+func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *autoSeedTarget, from, to model.TableID, columns []string, bytesPerSecond float64, binlogGuard *autoSeedBinlogGuard, progress func(int64)) (int64, error) {
 	if len(columns) == 0 {
 		return 0, autoSeedRejected("table has no writable columns")
 	}
@@ -774,12 +907,15 @@ func copyAutoSeedTable(ctx context.Context, source *sql.Conn, target *sql.Tx, fr
 			return err
 		}
 		count := len(batch) / len(columns)
-		if _, err := target.ExecContext(ctx, insert+valueList+strings.Repeat(","+valueList, count-1), batch...); err != nil {
+		if _, err := target.tx.ExecContext(ctx, insert+valueList+strings.Repeat(","+valueList, count-1), batch...); err != nil {
 			return err
 		}
 		n += int64(count)
 		if progress != nil {
 			progress(n)
+		}
+		if err := target.wrote(ctx, int64(size)); err != nil {
+			return err
 		}
 		clear(batch)
 		batch, size, start = batch[:0], 0, time.Now()

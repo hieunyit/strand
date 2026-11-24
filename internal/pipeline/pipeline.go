@@ -561,6 +561,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.state.resolveAutoSeed(hasCheckpoint); err != nil {
 		return err
 	}
+	if partial := p.state.autoSeedPartial(); len(partial) > 0 && !p.cfg.Bootstrap.AutoSeed {
+		return autoSeedRejected(fmt.Sprintf("an interrupted auto-seed left partial rows in target tables %s; enable bootstrap.auto_seed again so it empties and copies them", strings.Join(partial, ", ")))
+	}
 	if p.cfg.Bootstrap.AutoSeed {
 		if !p.posMode || p.opts.StartAt != "" {
 			return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,

@@ -34,11 +34,14 @@ type localState struct {
 }
 
 type stateFile struct {
-	CascadeSignatures []string                         `json:"mysql_cascade_signatures,omitempty"`
-	PipelineID        string                           `json:"pipeline_id"`
-	AutoSeedPending   []string                         `json:"auto_seed_pending,omitempty"`
-	Done              map[string]bool                  `json:"snapshot_done"`
-	Plans             map[string]snapshot.SnapshotPlan `json:"snapshot_plans,omitempty"`
+	CascadeSignatures []string `json:"mysql_cascade_signatures,omitempty"`
+	PipelineID        string   `json:"pipeline_id"`
+	AutoSeedPending   []string `json:"auto_seed_pending,omitempty"`
+	// AutoSeedPartial lists target tables that a chunked auto-seed (Group
+	// Replication target) committed rows into before its checkpoint commit.
+	AutoSeedPartial []string                         `json:"auto_seed_partial,omitempty"`
+	Done            map[string]bool                  `json:"snapshot_done"`
+	Plans           map[string]snapshot.SnapshotPlan `json:"snapshot_plans,omitempty"`
 	// VerifyPending persists outstanding post-seed work across restarts.
 	// A completed attempt can leave incomplete evidence while CDC keeps running.
 	VerifyPending  bool                        `json:"post_seed_verify_pending,omitempty"`
@@ -347,7 +350,15 @@ func (s *localState) prepareAutoSeed(tables []model.TableID) error {
 func (s *localState) resolveAutoSeed(hasCheckpoint bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A checkpoint means the final chunk committed: the rows are complete.
+	partial := hasCheckpoint && len(s.data.AutoSeedPartial) > 0
+	if partial {
+		s.data.AutoSeedPartial = nil
+	}
 	if len(s.data.AutoSeedPending) == 0 {
+		if partial {
+			return s.flushLocked()
+		}
 		return nil
 	}
 	if !hasCheckpoint {
@@ -359,6 +370,33 @@ func (s *localState) resolveAutoSeed(hasCheckpoint bool) error {
 		s.data.VerifyPending = false
 	}
 	s.data.AutoSeedPending = nil
+	return s.flushLocked()
+}
+
+// markAutoSeedPartial records target tables before a chunked auto-seed makes
+// any of their rows visible without a checkpoint.
+func (s *localState) markAutoSeedPartial(targets []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.AutoSeedPartial = append([]string(nil), targets...)
+	return s.flushLocked()
+}
+
+// autoSeedPartial returns the target tables an interrupted chunked auto-seed
+// may have left partly copied.
+func (s *localState) autoSeedPartial() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.data.AutoSeedPartial...)
+}
+
+func (s *localState) clearAutoSeedPartial() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.data.AutoSeedPartial) == 0 {
+		return nil
+	}
+	s.data.AutoSeedPartial = nil
 	return s.flushLocked()
 }
 

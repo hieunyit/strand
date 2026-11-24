@@ -48,6 +48,39 @@ func TestAutoSeedJournalRecovery(t *testing.T) {
 	}
 }
 
+// A chunked auto-seed (Group Replication target) records the tables it made
+// partly visible; only a committed checkpoint retires that record.
+func TestAutoSeedPartialJournal(t *testing.T) {
+	for _, committed := range []bool{false, true} {
+		dir := t.TempDir()
+		state, err := openLocalState(dir, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.markAutoSeedPartial([]string{"app.parent", "app.child"}); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := openLocalState(dir, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := reopened.resolveAutoSeed(committed); err != nil {
+			t.Fatal(err)
+		}
+		again, err := openLocalState(dir, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(again.autoSeedPartial(), ",")
+		if want := map[bool]string{false: "app.parent,app.child", true: ""}[committed]; got != want {
+			t.Fatalf("committed=%v: partial tables %q, want %q", committed, got, want)
+		}
+		if err := again.clearAutoSeedPartial(); err != nil || len(again.autoSeedPartial()) != 0 {
+			t.Fatalf("clear partial: %v %v", again.autoSeedPartial(), err)
+		}
+	}
+}
+
 func TestValidateAutoSeedPreflightReportsFirstStartBlockers(t *testing.T) {
 	child := model.TableID{Schema: "app", Table: "child"}
 	parent := model.TableID{Schema: "app", Table: "parent"}

@@ -189,7 +189,9 @@ Với nguồn MariaDB, Strand đọc vị trí binlog của ảnh dữ liệu qu
 
 Khi pipeline có cascade, MySQL kiểm tra FK trên mọi câu ghi CDC của pipeline. Strand đối chiếu cả `RESTRICT` và `NO ACTION` trong phạm vi, kể cả ở nhóm độc lập, và nạp trước các nhóm có FK để CDC không ghi vào chúng trong lúc snapshot. Các bảng độc lập không có FK vẫn snapshot như trước. Nếu định nghĩa ở đích xung đột hoặc nhóm tự nạp đã có dữ liệu, Strand dừng trước khi thay đổi schema ứng dụng. Khi tiếp tục từ checkpoint, Strand kiểm tra sự tương thích của khóa ngoại mà không tự sửa schema đích.
 
-Dữ liệu của nhóm và checkpoint được commit cùng một transaction ở MySQL. Nếu tiến trình dừng trước commit, lần Start sau tự chép lại nhóm còn dở. Dung lượng undo, redo và binlog đích phải đủ cho **nhóm nạp tự động**. Các bảng độc lập ngoài nhóm không nằm trong transaction này. Strand kiểm tra vị trí binlog trong lúc nạp và trước khi commit. Binlog nguồn phải còn đủ dài để phủ thời gian nạp và bắt kịp.
+Dữ liệu của nhóm và checkpoint được commit cùng một transaction ở MySQL. Nếu tiến trình dừng trước commit, lần Start sau tự chép lại nhóm còn dở. Dung lượng undo, redo và binlog đích phải đủ cho **nhóm nạp tự động**.
+
+MySQL đích có Group Replication (InnoDB Cluster) từ chối transaction lớn hơn `group_replication_transaction_size_limit` lúc commit (lỗi 3100 ở `before_commit`). Khi đích có plugin này, Strand commit bản nạp theo từng phần, mỗi phần tối đa 64 MiB hoặc một phần tư giới hạn đó, và chỉ commit checkpoint cùng phần cuối. Trước phần đầu tiên, Strand ghi danh sách bảng đích vào state cục bộ. Nếu lần nạp bị ngắt, lần Start sau `TRUNCATE` các bảng đó (cần quyền DROP) rồi nạp lại từ đầu. Trong lúc nạp, các bảng đích có thể chứa một phần dữ liệu. Nếu tắt `bootstrap.auto_seed` khi còn phần nạp dở, pipeline từ chối khởi động. Group Replication cũng bắt buộc mọi bảng có primary key hoặc unique key NOT NULL, nên bảng không có khóa không nạp được vào đích này. Các bảng độc lập ngoài nhóm không nằm trong transaction này. Strand kiểm tra vị trí binlog trong lúc nạp và trước khi commit. Binlog nguồn phải còn đủ dài để phủ thời gian nạp và bắt kịp.
 
 ### Bước 5. Kiểm tra trước
 
