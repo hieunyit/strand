@@ -334,6 +334,25 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 		}
 	}
 
+	// Coordinate the final disk write and metadata update with materializeOpt.
+	// Validation ran before this lock, so runStrand's materialization cannot
+	// deadlock by trying to acquire it recursively.
+	unlockFiles, err := lockPipelineFiles(p.ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("lock pipeline config files: %w", err)
+	}
+	locked := true
+	unlock := func() {
+		if locked {
+			unlockFiles()
+			locked = false
+		}
+	}
+	defer unlock()
+	if err := s.checkPipelineConfigSnapshot(p, origBytes); err != nil {
+		return nil, err
+	}
+
 	// (d) Ghi đè nguyên tử (rename)
 	copyOwner(tmpName, p.ConfigPath)
 	if err := os.Rename(tmpName, p.ConfigPath); err != nil {
@@ -344,8 +363,18 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 
 	// Chế độ DB: lưu bản mới vào DB ngay (DB là nguồn sự thật của pipeline do web tạo). Không lưu được thì
 	// trả file về bản cũ và báo lỗi: chỉ giữ bản trên đĩa thì lần start/khởi động sau DB sẽ ghi đè lặng lẽ.
-	if err := s.persistPipelineFiles(p); err != nil {
+	if err := s.persistPipelineConfigSnapshot(p, origBytes, unmasked); err != nil {
+		var actionErr *ActionError
+		if errors.As(err, &actionErr) && actionErr.Status == http.StatusConflict {
+			unlock()
+			// A concurrent editor won the database compare-and-swap. Restore this
+			// host's disk from the winning DB version; never roll it back to the
+			// stale bytes that this request originally read.
+			s.materialize(p.Name)
+			return nil, err
+		}
 		rollbackErr := writeFilePreserving(p.ConfigPath, origBytes, false, false)
+		unlock()
 		_ = s.audit.Log(AuditEntry{IP: ip, Action: "config.edit", Pipeline: p.Name, Result: "error",
 			Detail: map[string]any{"error": "metadata database: " + err.Error()}})
 		msg := "config NOT saved: storing it in the metadata database failed (" + err.Error() + "); the file was left unchanged, try again"
@@ -354,6 +383,7 @@ func (s *Server) saveConfigContentLocked(ctx context.Context, p *Pipeline, yamlC
 		}
 		return nil, &ActionError{Status: http.StatusServiceUnavailable, Msg: msg}
 	}
+	unlock()
 
 	// Làm mới cấu hình trong registry
 	s.reg.Refresh(ctx)

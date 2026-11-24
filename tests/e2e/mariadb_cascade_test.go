@@ -190,3 +190,35 @@ func TestMDB_E2E_CascadeDDLBlocksHistoricalReplay(t *testing.T) {
 		t.Fatalf("target applied the marker after the unsafe DDL: count=%d err=%v", count, err)
 	}
 }
+
+func TestMDB_E2E_OutsideScopeForeignKeyDDLWithSameTableName(t *testing.T) {
+	src := startMariaDB(t, "src", 1)
+	dst := startMySQL(t, "mysql:8.4", "dst", 2, nil)
+	mdbSourceUsers(t, src)
+	mdbTargetSetup(t, dst)
+	src.exec(t, "CREATE DATABASE IF NOT EXISTS app", "CREATE DATABASE other",
+		"CREATE TABLE app.same_name (id BIGINT PRIMARY KEY) ENGINE=InnoDB",
+		"CREATE TABLE other.parent (id BIGINT PRIMARY KEY) ENGINE=InnoDB",
+		"CREATE TABLE other.same_name (id BIGINT PRIMARY KEY, parent_id BIGINT) ENGINE=InnoDB",
+		"INSERT INTO app.same_name VALUES (1)")
+	cfg := strandCfg{
+		Name: "fk-ddl-outside-scope", SourceDSN: fmt.Sprintf("strand:%s@tcp(%s)/", mdbPass, src.Addr),
+		TargetDSN: fmt.Sprintf("strand:%s@tcp(%s)/strand", mdbPass, dst.Addr),
+		Include:   []string{"app.same_name"}, Dir: testDir(t),
+	}
+	p := startStrand(t, cfg.write(t))
+	t.Cleanup(func() {
+		if !p.exited() {
+			p.kill9()
+		}
+	})
+	waitSynced(t, &cfg, p, time.Minute)
+	src.exec(t, "ALTER TABLE other.same_name ADD CONSTRAINT other_fk FOREIGN KEY (parent_id) REFERENCES other.parent(id) ON DELETE CASCADE",
+		"INSERT INTO app.same_name VALUES (2)")
+	ukWaitEqual(t, p, time.Minute, func() string {
+		return klDiff(src.DB, dst.DB, "SELECT id FROM app.same_name ORDER BY id")
+	})
+	if p.stop(t) != 0 {
+		t.Fatalf("pipeline did not stop cleanly after unrelated DDL\n%s", p.tail())
+	}
+}

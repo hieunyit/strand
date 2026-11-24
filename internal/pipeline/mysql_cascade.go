@@ -294,24 +294,30 @@ func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.Tab
 }
 
 func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing bool, additional ...model.TableID) (mysqlCascadePlan, error) {
-	var plan mysqlCascadePlan
 	if p.srcEngine != model.EngineMySQL || p.dstEngine != model.EngineMySQL || p.src == nil || p.dst == nil || p.filter == nil {
-		return plan, nil
+		return mysqlCascadePlan{}, nil
 	}
+	return compareMySQLForeignKeys(ctx, p.src, p.dst, p.cascadeSourceScope(additional...), p.filter.Target, func(id model.TableID) bool {
+		meta := p.table(id)
+		return meta != nil && meta.Keyless
+	}, allowMissing)
+}
+
+func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope map[model.TableID]bool, mapTarget func(model.TableID) model.TableID, isKeyless func(model.TableID) bool, allowMissing bool) (mysqlCascadePlan, error) {
+	var plan mysqlCascadePlan
 	plan.parents, plan.children = map[model.TableID]bool{}, map[model.TableID]bool{}
 	plan.checkedTables = map[model.TableID]bool{}
-	sourceScope := p.cascadeSourceScope(additional...)
-	source, err := readSourceForeignKeys(ctx, p.src, sourceScope, true)
+	source, err := readSourceForeignKeys(ctx, src, sourceScope, true)
 	if err != nil {
 		return plan, fmt.Errorf("inspect source foreign keys: %w", err)
 	}
-	target, err := readTargetForeignKeys(ctx, p.dst)
+	target, err := readTargetForeignKeys(ctx, dst)
 	if err != nil {
 		return plan, fmt.Errorf("inspect target foreign keys: %w", err)
 	}
 	targetScope := make(map[model.TableID]bool, len(sourceScope))
 	for id := range sourceScope {
-		targetScope[p.filter.Target(id)] = true
+		targetScope[mapTarget(id)] = true
 	}
 	sourceGroup, sourcePinned, overlap := cascadeGroups(source)
 	// Native cascade turns FOREIGN_KEY_CHECKS on for the entire writer. An
@@ -320,7 +326,7 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 	nativeChecks := len(sourceGroup) > 0
 	targetPinned := make(map[model.TableID]bool, len(sourcePinned))
 	for id := range sourcePinned {
-		targetPinned[p.filter.Target(id)] = true
+		targetPinned[mapTarget(id)] = true
 	}
 	expected := make(map[string]int)
 	var rules []cascadeFK
@@ -337,19 +343,19 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 			return plan, cascadeConfigError(fmt.Sprintf("SET DEFAULT foreign-key actions on %s are unsupported by the MySQL InnoDB target", fk.Child))
 		}
 		if native {
-			if meta := p.table(fk.Parent); meta != nil && meta.Keyless {
+			if isKeyless(fk.Parent) {
 				return plan, cascadeConfigError(fmt.Sprintf("cascading foreign key on %s requires a primary or unique key on parent %s", fk.Child, fk.Parent))
 			}
 			plan.parents[fk.Parent], plan.children[fk.Child] = true, true
 		}
 		if sourcePinned[fk.Child] {
-			if fk.constraint == "" || p.filter.Target(fk.Child) != fk.Child {
+			if fk.constraint == "" || mapTarget(fk.Child) != fk.Child {
 				return plan, cascadeConfigError(fmt.Sprintf("order-sensitive foreign keys: %s must keep its schema, table and constraint names on the target", fk.Child))
 			}
 			fk.Name = fk.constraint
 		}
 		sourceChild := fk.Child
-		fk.Child, fk.Parent = p.filter.Target(fk.Child), p.filter.Target(fk.Parent)
+		fk.Child, fk.Parent = mapTarget(fk.Child), mapTarget(fk.Parent)
 		key := cascadeMatchSignature(fk)
 		expected[key]++
 		// Keep the persisted signature format compatible with existing checkpoints.
@@ -362,7 +368,9 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 			}
 			plan.signatures = append(plan.signatures, cascadeSignature(signatureFK))
 		}
-		fk.constraint = p.cascadeTargetName(sourceChild, fk)
+		if fk.Name == "" && fk.Child != sourceChild {
+			fk.constraint = fk.Child.Table + "_" + fk.constraint
+		}
 		rules = append(rules, fk)
 	}
 	hint := ""
@@ -400,13 +408,13 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 			continue
 		}
 		if !allowMissing {
-			return plan, cascadeConfigError(p.missingCascadeMessage(ctx, fk, target) + hint)
+			return plan, cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target) + hint)
 		}
 		for _, existing := range target {
 			sameLink := existing.Child == fk.Child && existing.Parent == fk.Parent && slices.Equal(existing.Columns, fk.Columns)
 			sameName := existing.Child.Schema == fk.Child.Schema && strings.EqualFold(existing.constraint, fk.constraint)
 			if sameLink || sameName {
-				return plan, cascadeConfigError(p.missingCascadeMessage(ctx, fk, target) + hint)
+				return plan, cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target) + hint)
 			}
 		}
 		plan.missing = append(plan.missing, fk)
@@ -499,27 +507,16 @@ func cascadeAddSQL(fk cascadeFK, name string) string {
 		" (" + strings.Join(refs, ", ") + ") ON DELETE " + fk.OnDelete + " ON UPDATE " + fk.OnUpdate
 }
 
-// cascadeTargetName is the constraint name schemagen gives the target copy.
-func (p *Pipeline) cascadeTargetName(sourceChild model.TableID, fk cascadeFK) string {
-	if fk.Name != "" {
-		return fk.Name
-	}
-	if dst := p.filter.Target(sourceChild); dst != sourceChild {
-		return dst.Table + "_" + fk.constraint
-	}
-	return fk.constraint
-}
-
 // missingCascadeMessage says why no target constraint matches fk (target names)
 // and how to add it.
-func (p *Pipeline) missingCascadeMessage(ctx context.Context, fk cascadeFK, target []cascadeFK) string {
+func missingCascadeMessage(ctx context.Context, db *sql.DB, fk cascadeFK, target []cascadeFK) string {
 	kind := "foreign key"
 	if fk.cascades() {
 		kind = "cascading foreign key"
 	}
 	msg := fmt.Sprintf("missing matching target %s on %s referencing %s (ON DELETE %s, ON UPDATE %s)", kind, fk.Child, fk.Parent, fk.OnDelete, fk.OnUpdate)
 	var exists int
-	err := p.dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", fk.Child.Schema, fk.Child.Table).Scan(&exists)
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", fk.Child.Schema, fk.Child.Table).Scan(&exists)
 	if err == nil && exists == 0 {
 		return msg + fmt.Sprintf(": target table %s does not exist; create it with its foreign keys (bootstrap.create_schema: auto does this) or restore a consistent seed", fk.Child)
 	}
@@ -544,11 +541,18 @@ func (p *Pipeline) missingCascadeMessage(ctx context.Context, fk cascadeFK, targ
 }
 
 func (p *Pipeline) initMySQLCascade(ctx context.Context) error {
+	if err := p.checkMySQLPostgresForeignKeys(ctx); err != nil {
+		return err
+	}
 	plan, err := p.planMySQLCascade(ctx)
 	if err != nil {
 		return err
 	}
-	if len(plan.signatures) > 0 {
+	signatures := plan.signatures
+	if p.dstEngine == model.EnginePG {
+		signatures = p.pgCascade.signatures
+	}
+	if len(signatures) > 0 {
 		if _, err := os.Stat(filepath.Join(p.cfg.Resources.Spool.Path, "prefetch")); err == nil {
 			return cascadeConfigError("cascading foreign keys require a live binlog reader; prefetch spools do not preserve foreign-key session flags")
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -557,7 +561,7 @@ func (p *Pipeline) initMySQLCascade(ctx context.Context) error {
 		p.strict = true
 		p.log.Info("MySQL cascade enabled; applying CDC in source commit order")
 	}
-	if err := p.state.checkCascadeSignatures(plan.signatures); err != nil {
+	if err := p.state.checkCascadeSignatures(signatures); err != nil {
 		return err
 	}
 	p.cascade = plan

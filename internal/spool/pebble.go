@@ -3,7 +3,9 @@ package spool
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,11 +29,12 @@ const (
 )
 
 var (
-	metaNextSeqKey     = []byte("meta/next_seq")
-	metaUsageKey       = []byte("meta/usage_bytes")
-	metaBucketUsageKey = []byte("meta/bucket_usage_bytes")
-	bucketRefPrefix    = []byte("BUCKET:")
-	bucketSegRefPrefix = []byte("BUCKETSEG:")
+	metaNextSeqKey      = []byte("meta/next_seq")
+	metaUsageKey        = []byte("meta/usage_bytes")
+	metaBucketUsageKey  = []byte("meta/bucket_usage_bytes")
+	bucketRefPrefix     = []byte("BUCKET:")
+	bucketSegRefPrefix  = []byte("BUCKETSEG:")
+	bucketPendingPrefix = []byte("bucket/pending/segment/")
 )
 
 type segEntry struct {
@@ -185,7 +188,65 @@ func New(dir string, opts ...Option) (*PebbleSpool, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize spool sidecars: %w", err)
 	}
+	if err := s.reconcilePendingBucketSegments(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("reconcile pending spool bucket segments: %w", err)
+	}
 	return s, nil
+}
+
+func bucketPendingKey(firstSeq, lastSeq uint64, uploadID string) []byte {
+	return []byte(fmt.Sprintf("%s%016x-%016x-%s", bucketPendingPrefix, firstSeq, lastSeq, uploadID))
+}
+
+func newSegmentUploadID() (string, error) {
+	var randomBytes [16]byte
+	if _, err := cryptorand.Read(randomBytes[:]); err != nil {
+		return "", fmt.Errorf("generate segment upload ID: %w", err)
+	}
+	return hex.EncodeToString(randomBytes[:]), nil
+}
+
+// reconcilePendingBucketSegments removes only the exact object keys this local
+// spool recorded before uploading. It never sweeps the shared bucket prefix,
+// which may also contain objects owned by another local spool.
+func (s *PebbleSpool) reconcilePendingBucketSegments(ctx context.Context) error {
+	if s.bucket == nil {
+		return nil
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: bucketPendingPrefix, UpperBound: []byte(string(bucketPendingPrefix) + "\xff")})
+	if err != nil {
+		return err
+	}
+	type pendingObject struct {
+		intentKey []byte
+		objectKey string
+	}
+	var pending []pendingObject
+	for ok := iter.First(); ok; ok = iter.Next() {
+		objectKey := string(iter.Value())
+		if !strings.HasPrefix(objectKey, s.bucketPrefix+"seg/") {
+			_ = iter.Close()
+			return fmt.Errorf("invalid pending bucket segment key %q", objectKey)
+		}
+		pending = append(pending, pendingObject{intentKey: bytes.Clone(iter.Key()), objectKey: objectKey})
+	}
+	if err := iter.Error(); err != nil {
+		_ = iter.Close()
+		return err
+	}
+	if err := iter.Close(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		if err := s.bucket.Delete(ctx, item.objectKey); err != nil {
+			return fmt.Errorf("delete pending segment %q: %w", item.objectKey, err)
+		}
+		if err := s.db.Delete(item.intentKey, pebble.Sync); err != nil {
+			return fmt.Errorf("clear pending segment intent %q: %w", item.intentKey, err)
+		}
+	}
+	return nil
 }
 
 func txnKey(seq uint64) []byte {
@@ -289,8 +350,18 @@ func (s *PebbleSpool) flushSegmentLocked(ctx context.Context) error {
 	segBytes := s.segBytes
 	firstSeq := entries[0].seq
 	lastSeq := entries[len(entries)-1].seq
-	objKey := fmt.Sprintf("%sseg/%016x-%016x", s.bucketPrefix, firstSeq, lastSeq)
+	uploadID, err := newSegmentUploadID()
+	if err != nil {
+		s.discardSegmentLocked()
+		return err
+	}
+	objKey := fmt.Sprintf("%sseg/%016x-%016x-%s", s.bucketPrefix, firstSeq, lastSeq, uploadID)
 	segData := encodeSegment(entries, s.segRawBytes)
+	intentKey := bucketPendingKey(firstSeq, lastSeq, uploadID)
+	if err := s.db.Set(intentKey, []byte(objKey), pebble.Sync); err != nil {
+		s.discardSegmentLocked()
+		return fmt.Errorf("record pending overflow segment: %w", err)
+	}
 
 	if err := s.bucket.Put(ctx, objKey, segData); err != nil {
 		s.discardSegmentLocked()
@@ -306,6 +377,10 @@ func (s *PebbleSpool) flushSegmentLocked(ctx context.Context) error {
 
 	batch := s.db.NewBatch()
 	defer batch.Close()
+	if err := batch.Delete(intentKey, nil); err != nil {
+		s.discardSegmentLocked()
+		return err
+	}
 
 	for i, e := range entries {
 		if e.sidecar != "" {

@@ -26,12 +26,22 @@ type testSSHServer struct {
 	mu        sync.Mutex
 	targets   []string
 	dropKA    bool // stop answering global requests (dead bastion)
+	conn      net.Conn
 }
 
 func (s *testSSHServer) requested() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.targets...)
+}
+
+func (s *testSSHServer) disconnect() {
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func startSSHServer(t *testing.T, dropKeepalive bool) *testSSHServer {
@@ -79,6 +89,9 @@ func (s *testSSHServer) serve(c net.Conn, cfg *ssh.ServerConfig) {
 		c.Close()
 		return
 	}
+	s.mu.Lock()
+	s.conn = c
+	s.mu.Unlock()
 	if s.dropKA {
 		go func() { // read but never reply: requests time out on the client
 			for range reqs {
@@ -112,6 +125,76 @@ func (s *testSSHServer) serve(c net.Conn, cfg *ssh.ServerConfig) {
 		go ssh.DiscardRequests(creqs)
 		go func() { io.Copy(ch, up); ch.CloseWrite(); ch.Close() }()
 		go func() { io.Copy(up, ch); up.Close() }()
+	}
+}
+
+func TestRejectsChangedHostKeyAtSameAddress(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	srv := startSSHServer(t, false)
+	other := startSSHServer(t, false)
+	otherEntry, err := os.ReadFile(other.knownHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(otherEntry))
+	if len(fields) < 3 {
+		t.Fatalf("malformed test known_hosts entry %q", otherEntry)
+	}
+	changed := knownhosts.Line([]string{srv.addr}, mustParseHostKey(t, fields[1]+" "+fields[2])) + "\n"
+	if err := os.WriteFile(srv.knownHost, []byte(changed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Start(context.Background(), Config{SSHAddress: srv.addr, SSHUser: "u", IdentityFile: srv.identity, HostKeysFile: srv.knownHost, Remote: "127.0.0.1:1"})
+	if err == nil || !strings.Contains(err.Error(), "host-key verification failed") {
+		t.Fatalf("changed host key error = %v, want host-key verification failure", err)
+	}
+}
+
+func mustParseHostKey(t *testing.T, encoded string) ssh.PublicKey {
+	t.Helper()
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func TestForwardClosesAfterSSHConnectionDrops(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	srv := startSSHServer(t, false)
+	f, err := Start(context.Background(), Config{SSHAddress: srv.addr, SSHUser: "backup", IdentityFile: srv.identity, HostKeysFile: srv.knownHost, Remote: echoServer(t), KeepAlive: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := net.DialTimeout("tcp", f.Address(), time.Second)
+	if err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	defer local.Close()
+	if _, err := local.Write([]byte("before-drop")); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	got := make([]byte, len("before-drop"))
+	_ = local.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(local, got); err != nil || string(got) != "before-drop" {
+		_ = f.Close()
+		t.Fatalf("pre-drop echo %q: %v", got, err)
+	}
+	srv.disconnect()
+	select {
+	case <-f.Done():
+	case <-time.After(3 * time.Second):
+		_ = f.Close()
+		t.Fatal("forward did not close after SSH connection loss")
+	}
+	_ = local.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := local.Read(make([]byte, 1)); err == nil {
+		t.Fatal("existing local connection remained open after SSH connection loss")
+	}
+	if _, err := net.DialTimeout("tcp", f.Address(), 200*time.Millisecond); err == nil {
+		t.Fatal("closed forward still accepts connections")
 	}
 }
 

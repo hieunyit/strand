@@ -29,6 +29,7 @@ type mockQueryConn struct {
 type mockTableData struct {
 	cols []string
 	rows [][]driver.Value
+	err  error
 }
 
 func (c *mockQueryConn) Prepare(string) (driver.Stmt, error) {
@@ -46,6 +47,9 @@ func (c *mockQueryConn) QueryContext(_ context.Context, q string, _ []driver.Nam
 	}
 	for pattern, data := range c.responses {
 		if strings.Contains(q, pattern) {
+			if data.err != nil {
+				return nil, data.err
+			}
 			return &mockRows{
 				cols: data.cols,
 				data: append([][]driver.Value(nil), data.rows...),
@@ -989,5 +993,23 @@ func TestRegressionPGNullsNotDistinctCatalog(t *testing.T) {
 				t.Fatalf("reject=%v: %v", tc.reject, err)
 			}
 		})
+	}
+}
+
+func TestRegressionPGColumnCatalogFailureIsNotIgnored(t *testing.T) {
+	table := model.TableID{Schema: "app", Table: "t"}
+	key := []UniqueConstraint{{Name: "email_key", Columns: []string{"email"}}}
+	src := buildMockPGDB(true, []ColumnDescriptor{{Name: "email", Nullable: true}}, key)
+	dst := buildMockPGDB(true, []ColumnDescriptor{{Name: "email", Nullable: false}}, key)
+	defer src.Close()
+	defer dst.Close()
+
+	// A permission/catalog failure must not erase the target NOT NULL metadata and
+	// make the source nullable unique key appear compatible.
+	dstDB := dst.Driver().(mockDriver).c.responses
+	dstDB["information_schema.columns"].err = errors.New("permission denied reading columns")
+	err := CheckTableConstraintCompatibility(context.Background(), src, model.EnginePG, dst, model.EnginePG, table, table, ConstraintCheckOptions{})
+	if err == nil || !strings.Contains(err.Error(), "permission denied reading columns") {
+		t.Fatalf("column catalog error was ignored: %v", err)
 	}
 }

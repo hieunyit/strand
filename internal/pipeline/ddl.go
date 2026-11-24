@@ -123,6 +123,52 @@ func mysqlForeignKeyDDL(query string) bool {
 	return false
 }
 
+// mysqlForeignKeyDDLTables extracts table names from FK DDL. The second return
+// value is false if the operands cannot be resolved safely.
+func mysqlForeignKeyDDLTables(query, defSchema string) ([]model.TableID, bool) {
+	tokens := mysqlDDLTokens(query)
+	var tables []model.TableID
+	for i, token := range tokens {
+		if token != "table" && token != "references" {
+			continue
+		}
+		j := i + 1
+		if token == "table" && j < len(tokens) && tokens[j] == "if" {
+			j++
+			if j < len(tokens) && tokens[j] == "not" {
+				j++
+			}
+			if j >= len(tokens) || tokens[j] != "exists" {
+				return nil, false
+			}
+			j++
+		}
+		if j >= len(tokens) || !mysqlDDLIdentifier.MatchString(tokens[j]) {
+			return nil, false
+		}
+		id := model.TableID{Schema: defSchema, Table: unquoteMySQLFK(tokens[j])}
+		if j+1 < len(tokens) && tokens[j+1] == "." {
+			if j+2 >= len(tokens) || !mysqlDDLIdentifier.MatchString(tokens[j+2]) {
+				return nil, false
+			}
+			id = model.TableID{Schema: id.Table, Table: unquoteMySQLFK(tokens[j+2])}
+		}
+		tables = append(tables, id)
+	}
+	return tables, len(tables) != 0
+}
+
+var mysqlDDLIdentifier = regexp.MustCompile("^(?:`(?:``|[^`])+`|\"(?:\"\"|[^\"])+\"|[\\p{L}\\p{N}_$]+)$")
+
+func mysqlForeignKeyDDLTouches(tables []model.TableID, table model.TableID) bool {
+	for _, id := range tables {
+		if strings.EqualFold(table.Table, id.Table) && (id.Schema == "" || strings.EqualFold(table.Schema, id.Schema)) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleDDL quyết định một Txn DDL: không đụng bảng nào của pipeline thì bỏ qua; có đụng thì chỉ đi
 // tiếp khi cột của mọi bảng liên quan ở target đã khớp source (DBA đã áp DDL ở target), và nạp lại
 // metadata bảng. Bảng MỚI khớp bộ lọc:
@@ -179,9 +225,19 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 	newCreated := map[model.TableID]bool{}
 	q := strings.ToLower(t.DDL)
 	p.tablesMu.RLock()
-	for id := range p.tables {
-		if ddlMentionsTable(q, strings.ToLower(id.Table)) {
-			affected[id] = true
+	fkDDL := p.srcEngine == model.EngineMySQL && mysqlForeignKeyDDL(t.DDL)
+	if fkDDL {
+		tables, resolved := mysqlForeignKeyDDLTables(t.DDL, t.DDLSchema)
+		for id := range p.tables {
+			if !resolved || mysqlForeignKeyDDLTouches(tables, id) {
+				affected[id] = true
+			}
+		}
+	} else {
+		for id := range p.tables {
+			if ddlMentionsTable(q, strings.ToLower(id.Table)) {
+				affected[id] = true
+			}
 		}
 	}
 	p.tablesMu.RUnlock()
@@ -223,8 +279,12 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 		}
 		return fmt.Errorf("DDL at %s: pipeline did not drain", t.SourcePos.Label())
 	}
+	if p.dstEngine == model.EnginePG && fkDDL {
+		return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+			fmt.Sprintf("foreign-key DDL at %s may change cross-engine cascade behavior; checkpoint cannot pass this event. Start a new pipeline from a consistent seed after the change. DDL: %q", t.SourcePos.Label(), t.DDL), nil)
+	}
 	if p.srcEngine == model.EngineMySQL && p.dstEngine == model.EngineMySQL {
-		if mysqlForeignKeyDDL(t.DDL) {
+		if fkDDL {
 			return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
 				fmt.Sprintf("foreign-key DDL at %s may change historical cascade behavior; checkpoint cannot pass this event. Start a new pipeline from a consistent seed taken after the change. DDL: %q",
 					t.SourcePos.Label(), t.DDL), nil)

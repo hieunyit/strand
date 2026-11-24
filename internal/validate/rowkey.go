@@ -280,6 +280,9 @@ type KeylessOpts struct {
 	On                    bool
 	AllowFloat            bool
 	RequireBinlogPosition bool
+	// FoundKeyless is called for tables whose source has no usable key when
+	// keyless mode is enabled. Callers can reuse the result for seed preflight.
+	FoundKeyless func(model.TableID)
 	// Seeded(table "schema.table"): dữ liệu đầu của bảng đến từ seed/start_at (không snapshot logic).
 	Seeded func(table string) bool
 }

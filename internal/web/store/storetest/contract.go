@@ -72,6 +72,22 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if bare.HasConfig || bare.EnvEnc != nil && len(bare.EnvEnc) != 0 {
 			t.Fatalf("bare pipeline = %+v", bare)
 		}
+		updated, err := s.UpdatePipelineConfigCompareAndSwap(ctx, "bare", false, "", "version: 1\n")
+		must(t, err)
+		if !updated {
+			t.Fatal("CAS did not initialize the config on a discovered pipeline")
+		}
+		updated, err = s.UpdatePipelineConfigCompareAndSwap(ctx, "bare", true, "stale", "wrong")
+		must(t, err)
+		if updated {
+			t.Fatal("CAS overwrote a changed config")
+		}
+		updated, err = s.UpdatePipelineConfigCompareAndSwap(ctx, "bare", true, "version: 1\n", "version: 2\n")
+		must(t, err)
+		bare, _, _ = s.GetPipeline(ctx, "bare")
+		if !updated || bare.ConfigYAML != "version: 2\n" || bare.ConfigPath != "/x.yaml" {
+			t.Fatalf("CAS result for discovered pipeline = %+v", bare)
+		}
 		p.ConfigYAML = "version: 2\n"
 		must(t, s.UpsertPipeline(ctx, p))
 		l, _ := s.ListPipelines(ctx)

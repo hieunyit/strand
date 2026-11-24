@@ -2,7 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +45,83 @@ func TestAutoSeedJournalRecovery(t *testing.T) {
 				t.Fatal("seed journal was not resolved")
 			}
 		})
+	}
+}
+
+func TestValidateAutoSeedPreflightReportsFirstStartBlockers(t *testing.T) {
+	child := model.TableID{Schema: "app", Table: "child"}
+	parent := model.TableID{Schema: "app", Table: "parent"}
+	newDB := func(targetHasRows bool) *sql.DB {
+		return sql.OpenDB(wiringConnector{answer: func(q string) ([]string, []driver.Value, error) {
+			switch {
+			case strings.HasPrefix(q, "SHOW CREATE TABLE"):
+				if strings.Contains(q, "`child`") {
+					return []string{"table", "ddl"}, []driver.Value{"child", "CREATE TABLE `child` (\n  CONSTRAINT `fk_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE\n)"}, nil
+				}
+				return []string{"table", "ddl"}, []driver.Value{"parent", "CREATE TABLE `parent` (`id` int PRIMARY KEY)"}, nil
+			case strings.Contains(q, "REFERENTIAL_CONSTRAINTS"):
+				return []string{"fk"}, nil, nil
+			case strings.Contains(q, "COLLATION_NAME"):
+				return []string{"collation"}, []driver.Value{""}, nil
+			case strings.Contains(q, "KEY_COLUMN_USAGE"):
+				return []string{"a", "b", "c", "d"}, nil, nil
+			case strings.Contains(q, "TABLE_TYPE"):
+				return []string{"type"}, []driver.Value{"BASE TABLE"}, nil
+			case strings.HasPrefix(q, "SELECT 1 FROM `app`."):
+				if targetHasRows {
+					return []string{"one"}, []driver.Value{int64(1)}, nil
+				}
+				return []string{"one"}, nil, nil
+			default:
+				return nil, nil, errors.New("unexpected query: " + q)
+			}
+		}})
+	}
+	source := newDB(false)
+	target := newDB(false)
+	defer source.Close()
+	defer target.Close()
+	if err := ValidateAutoSeedPreflight(context.Background(), source, target, true, []model.TableID{child}, nil, nil); err == nil || !strings.Contains(err.Error(), "app.parent") {
+		t.Fatalf("missing FK scope error = %v, want app.parent", err)
+	}
+	_ = source.Close()
+	source = newDB(false)
+	defer source.Close()
+	_ = target.Close()
+	target = newDB(true)
+	defer target.Close()
+	if err := ValidateAutoSeedPreflight(context.Background(), source, target, true, []model.TableID{child, parent}, nil, nil); err == nil || !strings.Contains(err.Error(), "already contains data") {
+		t.Fatalf("nonempty destination error = %v, want already contains data", err)
+	}
+}
+
+func TestValidateAutoSeedPreflightChecksKeylessSeedTables(t *testing.T) {
+	id := model.TableID{Schema: "app", Table: "keyless"}
+	newDB := func(targetHasRows bool) *sql.DB {
+		return sql.OpenDB(wiringConnector{answer: func(q string) ([]string, []driver.Value, error) {
+			switch {
+			case strings.HasPrefix(q, "SHOW CREATE TABLE"):
+				return []string{"table", "ddl"}, []driver.Value{"keyless", "CREATE TABLE `keyless` (`v` text)"}, nil
+			case strings.Contains(q, "KEY_COLUMN_USAGE"):
+				return []string{"a", "b", "c", "d"}, nil, nil
+			case strings.Contains(q, "TABLE_TYPE"):
+				return []string{"type"}, []driver.Value{"BASE TABLE"}, nil
+			case strings.HasPrefix(q, "SELECT 1 FROM `app`."):
+				if targetHasRows {
+					return []string{"one"}, []driver.Value{int64(1)}, nil
+				}
+				return []string{"one"}, nil, nil
+			default:
+				return nil, nil, errors.New("unexpected query: " + q)
+			}
+		}})
+	}
+	source, target := newDB(false), newDB(true)
+	defer source.Close()
+	defer target.Close()
+	err := ValidateAutoSeedPreflight(context.Background(), source, target, true, []model.TableID{id}, []model.TableID{id}, nil)
+	if err == nil || !strings.Contains(err.Error(), "already contains data") {
+		t.Fatalf("keyless seed target error = %v, want already contains data", err)
 	}
 }
 

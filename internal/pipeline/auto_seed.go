@@ -27,6 +27,63 @@ type seedDependency struct {
 	child, parent model.TableID
 }
 
+// ValidateAutoSeedPreflight runs the same FK-group closure as Start and checks
+// that existing destination tables in the first-copy group are empty. Unrelated
+// tables may already contain data. target maps source IDs through table renames.
+func ValidateAutoSeedPreflight(ctx context.Context, src, dst *sql.DB, allowMissingFK bool, tables, seedTables []model.TableID, target func(model.TableID) model.TableID) error {
+	if target == nil {
+		target = func(id model.TableID) model.TableID { return id }
+	}
+	scope := make(map[model.TableID]bool, len(tables))
+	for _, id := range tables {
+		scope[id] = true
+	}
+	keyless := make(map[model.TableID]bool, len(seedTables))
+	for _, id := range seedTables {
+		keyless[id] = true
+	}
+	plan, err := compareMySQLForeignKeys(ctx, src, dst, scope, target, func(id model.TableID) bool { return keyless[id] }, allowMissingFK)
+	if err != nil {
+		return err
+	}
+	if len(plan.checkedTables) == 0 && len(seedTables) == 0 {
+		return nil
+	}
+	sourceDeps, err := readSeedDependencies(ctx, src)
+	if err != nil {
+		return fmt.Errorf("inspect source foreign keys: %w", err)
+	}
+	targetDeps, err := readSeedDependencies(ctx, dst)
+	if err != nil {
+		return fmt.Errorf("inspect target foreign keys: %w", err)
+	}
+	roots := append([]model.TableID(nil), seedTables...)
+	for id := range plan.checkedTables {
+		roots = append(roots, id)
+	}
+	byTarget := make(map[model.TableID]model.TableID, len(tables))
+	for _, id := range tables {
+		byTarget[target(id)] = id
+	}
+	group, err := closeAutoSeedGroup(scope, sourceDeps, targetDeps, byTarget, roots, target)
+	if err != nil {
+		return err
+	}
+	for _, id := range group {
+		dstID := target(id)
+		present, err := schemagen.Exists(ctx, dst, "mysql", dstID)
+		if err != nil {
+			return err
+		}
+		if present {
+			if err := requireEmptyForeignKeyTarget(ctx, dst, dstID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 const autoSeedBinlogCheckInterval = 30 * time.Second
 
 // autoSeedBinlogGuard verifies that the snapshot's resume point is still
@@ -93,25 +150,11 @@ func readSeedDependencies(ctx context.Context, db *sql.DB) ([]seedDependency, er
 	return deps, rows.Err()
 }
 
-// autoSeedTables closes the selected tables over foreign keys in both databases.
-// A connected group cannot straddle online snapshot and the consistent initial copy.
-func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan) ([]model.TableID, error) {
-	source, err := readSeedDependencies(ctx, p.src)
-	if err != nil {
-		return nil, fmt.Errorf("inspect source foreign keys: %w", err)
-	}
-	target, err := readSeedDependencies(ctx, p.dst)
-	if err != nil {
-		return nil, fmt.Errorf("inspect target foreign keys: %w", err)
-	}
-	targets := make(map[model.TableID]model.TableID, len(p.tables))
-	roots := make([]model.TableID, 0)
-	for id, table := range p.tables {
-		targets[p.filter.Target(id)] = id
-		if table.Keyless || cascade.parents[id] || cascade.children[id] || cascade.checkedTables[id] {
-			roots = append(roots, id)
-		}
-	}
+// closeAutoSeedGroup is the shared graph closure used by Start and Validate.
+// Edges are undirected because a child and its parent must be in the same
+// consistent initial copy. Source edges use source IDs; target edges use the
+// renamed target IDs.
+func closeAutoSeedGroup(scope map[model.TableID]bool, source, target []seedDependency, targets map[model.TableID]model.TableID, roots []model.TableID, mapTarget func(model.TableID) model.TableID) ([]model.TableID, error) {
 	neighbors := map[model.TableID][]model.TableID{}
 	add := func(a, b model.TableID) {
 		neighbors[a] = append(neighbors[a], b)
@@ -141,11 +184,15 @@ func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan)
 		if seen[id] {
 			continue
 		}
-		if p.tables[id] == nil {
+		if !scope[id] {
 			return nil, autoSeedRejected(fmt.Sprintf("foreign-key group requires source table %s in the replication scope", id))
 		}
 		if outside, ok := externalTarget[id]; ok {
-			return nil, autoSeedRejected(fmt.Sprintf("target %s has a foreign-key dependency on %s outside the replication scope", p.filter.Target(id), outside))
+			mapped := id
+			if mapTarget != nil {
+				mapped = mapTarget(id)
+			}
+			return nil, autoSeedRejected(fmt.Sprintf("target %s has a foreign-key dependency on %s outside the replication scope", mapped, outside))
 		}
 		seen[id] = true
 		result = append(result, id)
@@ -153,6 +200,32 @@ func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].String() < result[j].String() })
 	return result, nil
+}
+
+// autoSeedTables closes the selected tables over foreign keys in both databases.
+// A connected group cannot straddle online snapshot and the consistent initial copy.
+func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan) ([]model.TableID, error) {
+	source, err := readSeedDependencies(ctx, p.src)
+	if err != nil {
+		return nil, fmt.Errorf("inspect source foreign keys: %w", err)
+	}
+	target, err := readSeedDependencies(ctx, p.dst)
+	if err != nil {
+		return nil, fmt.Errorf("inspect target foreign keys: %w", err)
+	}
+	targets := make(map[model.TableID]model.TableID, len(p.tables))
+	roots := make([]model.TableID, 0)
+	for id, table := range p.tables {
+		targets[p.filter.Target(id)] = id
+		if table.Keyless || cascade.parents[id] || cascade.children[id] || cascade.checkedTables[id] {
+			roots = append(roots, id)
+		}
+	}
+	scope := make(map[model.TableID]bool, len(p.tables))
+	for id := range p.tables {
+		scope[id] = true
+	}
+	return closeAutoSeedGroup(scope, source, target, targets, roots, p.filter.Target)
 }
 
 // autoSeed runs before CDC and only with an empty checkpoint. Rows and the new

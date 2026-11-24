@@ -50,6 +50,7 @@ const (
 	defaultSnapshotBatch   = 1000
 	snapshotBatchBytes     = 8 << 20
 	defaultStreamBatch     = 2000
+	maxStreamBatch         = 1_000_000
 	streamBatchBytes       = 8 << 20
 	defaultCheckpointEvery = time.Second
 	defaultMaxAwait        = 500 * time.Millisecond
@@ -570,6 +571,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.SnapshotParallel > maxSnapshotParallel {
 		return fmt.Errorf("mongodb cdc: snapshot parallelism %d exceeds %d", cfg.SnapshotParallel, maxSnapshotParallel)
+	}
+	if cfg.StreamBatch > maxStreamBatch {
+		return fmt.Errorf("mongodb cdc: stream batch %d exceeds %d", cfg.StreamBatch, maxStreamBatch)
 	}
 	if len(cfg.Include) == 0 {
 		return errors.New("mongodb cdc: at least one --include database.collection pattern is required")

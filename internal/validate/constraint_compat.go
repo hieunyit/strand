@@ -393,7 +393,10 @@ func InspectTableConstraints(ctx context.Context, db *sql.DB, engine model.Engin
 	}
 
 	cols, err := readColumnDescriptors(ctx, db, engine, table)
-	if err == nil && len(cols) > 0 {
+	if err != nil {
+		return nil, fmt.Errorf("read columns of %s: %w", table, err)
+	}
+	if len(cols) > 0 {
 		tc.Columns = cols
 	}
 

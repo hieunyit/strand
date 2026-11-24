@@ -125,6 +125,59 @@ func TestContainer_ReplicateIndexesAndOptions(t *testing.T) {
 	r.stop(t)
 }
 
+func TestContainer_CreateEmptyCollectionWithValidatorAndIndex(t *testing.T) {
+	p := newPair(t)
+	ctx := context.Background()
+	db := "empty_create"
+	cfg := p.cfg(t, "empty-create", db)
+	cfg.ReplicateIndexes = true
+	cfg.IndexReconcileEvery = time.Hour
+	cfg.Observer = NewObserver("empty-create")
+	r := start(cfg)
+	defer r.stop(t)
+	// Wait until the stream is established before issuing the DDL.
+	deadline := time.Now().Add(time.Minute)
+	for cfg.Observer.Snapshot().Phase != PhaseStreaming {
+		if time.Now().After(deadline) {
+			t.Fatal("pipeline did not reach streaming")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	validator := bson.D{{Key: "v", Value: bson.D{{Key: "$exists", Value: true}}}}
+	if err := p.srcC.Database(db).CreateCollection(ctx, "empty", options.CreateCollection().SetValidator(validator)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.srcC.Database(db).Collection("empty").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "v", Value: 1}}, Options: options.Index().SetName("v_idx"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	target := p.dstC.Database(db)
+	deadline = time.Now().Add(time.Minute)
+	for {
+		names, err := target.ListCollectionNames(ctx, bson.D{{Key: "name", Value: "empty"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(names) == 1 && bytes.Equal(validatorOf(t, p.srcC.Database(db), "empty"), validatorOf(t, target, "empty")) {
+			if _, ok := func() (indexSpec, bool) {
+				specs, e := listIndexSpecs(ctx, target.Collection("empty"))
+				if e != nil {
+					return indexSpec{}, false
+				}
+				s, ok := specs["v_idx"]
+				return s, ok
+			}(); ok {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("empty collection metadata was not replicated")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // A collection re-copy (repair) is checkpointed per batch: interrupted, it resumes from
 // its last batch (no restart from zero, nothing skipped); a rename past the snapshot
 // overlap renames the target collection in place.

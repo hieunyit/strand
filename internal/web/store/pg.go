@@ -289,6 +289,20 @@ func (p *PG) UpdatePipelineMeta(ctx context.Context, r Pipeline) error {
 	return p.wrap(err)
 }
 
+func (p *PG) UpdatePipelineConfigCompareAndSwap(ctx context.Context, name string, expectedHasConfig bool, expected, config string) (bool, error) {
+	res, err := p.db.ExecContext(ctx, `UPDATE pipelines SET config_yaml = $4, updated_at = now()
+		WHERE name = $1 AND ((config_yaml IS NULL AND NOT $2) OR (config_yaml IS NOT NULL AND $2 AND config_yaml = $3))`,
+		name, expectedHasConfig, expected, config)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	return n == 1, nil
+}
+
 func (p *PG) SetPipelineConflicts(ctx context.Context, name, conflicts string) error {
 	if conflicts == "" {
 		conflicts = "[]"

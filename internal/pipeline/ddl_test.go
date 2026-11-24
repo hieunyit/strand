@@ -86,3 +86,34 @@ func TestMySQLForeignKeyDDL(t *testing.T) {
 		}
 	}
 }
+
+func TestMySQLForeignKeyDDLAffectsSchemaAware(t *testing.T) {
+	app := model.TableID{Schema: "app", Table: "same_name"}
+	other := model.TableID{Schema: "other", Table: "same_name"}
+	cases := []struct {
+		query, schema string
+		tables        map[model.TableID]bool
+		want          bool
+	}{
+		{"ALTER TABLE other.same_name ADD CONSTRAINT fk FOREIGN KEY (x) REFERENCES other.parent(id)", "app", map[model.TableID]bool{app: true}, false},
+		{"ALTER TABLE app.same_name ADD CONSTRAINT fk FOREIGN KEY (x) REFERENCES other.parent(id)", "other", map[model.TableID]bool{app: true}, true},
+		{"ALTER TABLE other.child ADD CONSTRAINT fk FOREIGN KEY (x) REFERENCES app.same_name(id)", "other", map[model.TableID]bool{app: true}, true},
+		{"ALTER TABLE same_name ADD CONSTRAINT fk FOREIGN KEY (x) REFERENCES parent(id)", "app", map[model.TableID]bool{app: true, other: true}, true},
+		{"ALTER TABLE `other`.`child` ADD CONSTRAINT fk FOREIGN KEY (x) REFERENCES `app`.`same_name`(id)", "app", map[model.TableID]bool{app: true}, true},
+		{"ALTER TABLE other.same_name ADD CONSTRAINT same_name FOREIGN KEY (x) REFERENCES other.parent(id)", "app", map[model.TableID]bool{app: true}, false},
+		{"ALTER TABLE other.same_name ADD CONSTRAINT fk FOREIGN KEY (x) REFERENCES other.parent(id), ADD FOREIGN KEY (y) REFERENCES app.same_name(id)", "other", map[model.TableID]bool{app: true}, true},
+		{"ALTER TABLE IF EXISTS app.same_name DROP FOREIGN KEY fk", "other", map[model.TableID]bool{app: true}, true},
+		{`ALTER TABLE "app"."same_name" DROP FOREIGN KEY fk`, "other", map[model.TableID]bool{app: true}, true},
+		{"ALTER TABLE same_name DROP FOREIGN KEY fk", "", map[model.TableID]bool{app: true}, true},
+	}
+	for _, tc := range cases {
+		tables, resolved := mysqlForeignKeyDDLTables(tc.query, tc.schema)
+		got := !resolved
+		for known := range tc.tables {
+			got = got || mysqlForeignKeyDDLTouches(tables, known)
+		}
+		if got != tc.want {
+			t.Errorf("mysqlForeignKeyDDLAffects(%q): got %v want %v", tc.query, got, tc.want)
+		}
+	}
+}

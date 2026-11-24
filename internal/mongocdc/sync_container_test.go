@@ -4,6 +4,7 @@ package mongocdc
 // and target are separate containers. Convergence is checked byte for byte per _id.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,6 +20,146 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 )
+
+// An oversized source transaction spanning many one-event getMore batches is rejected
+// before any member is written or its resume token is committed. A larger limit resumes
+// from the previous checkpoint and applies the complete transaction atomically.
+func TestContainer_OversizedTransactionFailsClosedAndResumes(t *testing.T) {
+	p := newPair(t)
+	ctx := context.Background()
+	db, pipeline := "oversized_txn", "oversized-txn"
+	if err := p.srcC.Database(db).CreateCollection(ctx, "docs"); err != nil {
+		t.Fatal(err)
+	}
+	stateColl := p.dstC.Database(stateDatabase, targetDBOptions()).Collection(stateCollection)
+	readState := func() syncState {
+		t.Helper()
+		var state syncState
+		if err := stateColl.FindOne(ctx, bson.D{{Key: "_id", Value: pipeline}}).Decode(&state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	observer := NewObserver(pipeline)
+	cfg := p.cfg(t, pipeline, db)
+	cfg.StreamBatch = 1 // also sets change-stream batchSize to one event per getMore
+	cfg.Observer = observer
+	r := start(cfg)
+	deadline := time.Now().Add(time.Minute)
+	for observer.Snapshot().Phase != PhaseStreaming {
+		r.failIfExited(t)
+		if time.Now().After(deadline) {
+			t.Fatal("pipeline did not reach streaming")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	before := readState()
+	sess, err := p.srcC.StartSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sess.WithTransaction(ctx, func(tx context.Context) (any, error) {
+		coll := p.srcC.Database(db).Collection("docs")
+		for i := 0; i < 25; i++ {
+			if _, err := coll.InsertOne(tx, bson.D{{Key: "_id", Value: i}, {Key: "v", Value: i}}); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}, options.Transaction().SetWriteConcern(writeconcern.Majority()))
+	sess.EndSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-r.done:
+		if !errors.Is(err, ErrSourceTransactionTooLarge) {
+			t.Fatalf("pipeline error = %v, want oversized source transaction error", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("pipeline did not reject oversized transaction")
+	}
+	target := p.dstC.Database(db).Collection("docs")
+	if n, err := target.CountDocuments(ctx, bson.D{}); err != nil || n != 0 {
+		t.Fatalf("target has %d transaction documents after rejection, err=%v; want none", n, err)
+	}
+	afterFailure := readState()
+	if !bytes.Equal(before.ResumeToken, afterFailure.ResumeToken) {
+		t.Fatal("checkpoint advanced into the rejected transaction")
+	}
+
+	resumeCfg := p.cfg(t, pipeline, db)
+	resumeCfg.StreamBatch = 50
+	r = start(resumeCfg)
+	p.waitIdentical(t, db, time.Minute, r)
+	if n, err := target.CountDocuments(ctx, bson.D{}); err != nil || n != 25 {
+		t.Fatalf("target has %d documents after atomic replay, err=%v; want 25", n, err)
+	}
+	if afterResume := readState(); bytes.Equal(afterFailure.ResumeToken, afterResume.ResumeToken) {
+		t.Fatal("checkpoint did not advance after replaying the full transaction")
+	}
+	r.stop(t)
+}
+
+func TestContainer_TransactionCreateDDLIsRejectedBeforeCheckpoint(t *testing.T) {
+	p := newPair(t)
+	ctx := context.Background()
+	db, pipeline := "txn_create", "txn-create"
+	observer := NewObserver(pipeline)
+	cfg := p.cfg(t, pipeline, db)
+	cfg.Observer = observer
+	r := start(cfg)
+	deadline := time.Now().Add(time.Minute)
+	for observer.Snapshot().Phase != PhaseStreaming {
+		r.failIfExited(t)
+		if time.Now().After(deadline) {
+			t.Fatal("pipeline did not reach streaming")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stateColl := p.dstC.Database(stateDatabase, targetDBOptions()).Collection(stateCollection)
+	var before syncState
+	if err := stateColl.FindOne(ctx, bson.D{{Key: "_id", Value: pipeline}}).Decode(&before); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := p.srcC.StartSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sess.WithTransaction(ctx, func(tx context.Context) (any, error) {
+		if err := p.srcC.Database(db).CreateCollection(tx, "docs"); err != nil {
+			return nil, err
+		}
+		_, err := p.srcC.Database(db).Collection("docs").InsertOne(tx, bson.D{{Key: "_id", Value: 1}})
+		return nil, err
+	}, options.Transaction().SetWriteConcern(writeconcern.Majority()))
+	sess.EndSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-r.done:
+		if !errors.Is(err, ErrSourceTransactionDDL) {
+			t.Fatalf("pipeline error = %v, want source transaction DDL error", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("pipeline did not reject transactional create")
+	}
+	names, err := p.dstC.Database(db).ListCollectionNames(ctx, bson.D{{Key: "name", Value: "docs"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 0 {
+		t.Fatal("target collection was created despite rejecting the source transaction")
+	}
+	var after syncState
+	if err := stateColl.FindOne(ctx, bson.D{{Key: "_id", Value: pipeline}}).Decode(&after); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before.ResumeToken, after.ResumeToken) {
+		t.Fatal("checkpoint advanced past DDL in the rejected source transaction")
+	}
+}
 
 // Snapshot of N documents while concurrent insert/update/replace/delete traffic runs
 // through the snapshot and into streaming; repeated on fresh databases.

@@ -212,6 +212,9 @@ type Store interface {
 	// UpdatePipelineMeta updates only the registry metadata of an existing row (paths, unit, origin,
 	// missing_since), never config_yaml/env_enc/conflicts: safe against a concurrent config edit.
 	UpdatePipelineMeta(ctx context.Context, p Pipeline) error
+	// UpdatePipelineConfigCompareAndSwap changes only config_yaml, and only if
+	// the stored config still matches the version the editor read.
+	UpdatePipelineConfigCompareAndSwap(ctx context.Context, name string, expectedHasConfig bool, expected, config string) (bool, error)
 	// SetPipelineConflicts replaces the conflicts JSON of a row.
 	SetPipelineConflicts(ctx context.Context, name, conflicts string) error
 	// DeletePipeline removes the registry row and its desired state (files are left alone).

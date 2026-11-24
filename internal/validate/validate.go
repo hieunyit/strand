@@ -213,6 +213,9 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 				return warnings, fmt.Errorf("inspect table %s: %w", t, terr)
 			}
 			if why == "" {
+				if ko.FoundKeyless != nil {
+					ko.FoundKeyless(model.TableID{Schema: schema, Table: table})
+				}
 				warnings = append(warnings, KeylessWarnings(t)...)
 				continue
 			}

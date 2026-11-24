@@ -98,8 +98,12 @@ strand stop -c p.yaml
   with its resume token. After a crash (even `kill -9`) the snapshot resumes from the
   last committed `_id` and the stream from the last committed token: nothing is lost,
   nothing is applied twice, documents cannot be duplicated (unique `_id`).
-- **Source transactions** commit atomically on the target: the batch size cut-off
-  never splits a source transaction (unless it exceeds 20x the batch size).
+- **Source transactions** commit atomically on the target. Strand stops before
+  applying any part of a transaction that exceeds 20 × `stream_batch` events
+  or reaches 64 MiB of change-event data. The resume token stays before the
+  transaction. Increase `stream_batch` up to 1,000,000 if the event count is the
+  limiting factor. Strand also stops before transactional DDL that it cannot
+  apply atomically.
 - **Writes** use `w: majority, j: true`; reads `readConcern: majority`.
   The read preference comes from the URI (default `primary`; `readPreference=secondaryPreferred`
   moves snapshot and lookup reads off the source primary; the change stream follows the
@@ -173,6 +177,8 @@ first sync of large collections, and keep `strand_retention_headroom_seconds` al
   during the snapshot overlap, or into the selection, re-copies the destination
   collection; that re-copy is checkpointed per batch and resumes after a crash.
   `dropDatabase` invalidates the stream, which is restarted after the invalidate.
+- On MongoDB 6.0+, a selected collection's `create` event creates it on the target
+  even if the collection is empty.
 - `mongodb.indexes: off` (default): indexes, validators and other collection options
   are not replicated; create the indexes you need on the target yourself. Do **not**
   create unique indexes on the target in this mode (intermediate states during replay

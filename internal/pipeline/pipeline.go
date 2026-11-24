@@ -65,12 +65,13 @@ type Options struct {
 
 // Pipeline là một lần chạy `strand sync`.
 type Pipeline struct {
-	opts    Options
-	cfg     *config.Config
-	log     *slog.Logger
-	id      string
-	strict  bool
-	cascade mysqlCascadePlan
+	opts      Options
+	cfg       *config.Config
+	log       *slog.Logger
+	id        string
+	strict    bool
+	cascade   mysqlCascadePlan
+	pgCascade mysqlCascadePlan
 
 	startAtFromConfig bool
 
@@ -721,6 +722,9 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			return err
 		}
 	}
+	if err := p.checkMySQLPostgresForeignKeys(ctx); err != nil {
+		return err
+	}
 	// Cột generated ở target không nhận giá trị: đọc sau khi bảng đích chắc chắn đã có.
 	if err := p.loadTargetGenerated(ctx, p.tables); err != nil {
 		return err
@@ -1027,7 +1031,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		mrd, err := mysqlreader.New(mysqlreader.Config{DSN: p.srcDSN, ServerID: p.cfg.Source.ServerID, Flavor: srcVer.SyncerFlavor(), CollationCharsets: charsets,
 			TableInfo: mysqlreader.NewInfoSchemaProvider(p.src), SchemaHistory: p.state,
 			RejectDisabledForeignKeys: func(schema, table string) bool {
-				return len(p.cascade.signatures) > 0 && p.table(model.TableID{Schema: schema, Table: table}) != nil
+				return (len(p.cascade.signatures) > 0 || len(p.pgCascade.signatures) > 0) && p.table(model.TableID{Schema: schema, Table: table}) != nil
 			}})
 		if err != nil {
 			return err
@@ -1537,8 +1541,15 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 					p.touched.addKey(rc.Table, part.OldKey, keyCodec)
 				}
 			}
-			if part.Op != model.OpInsert && p.cascade.parents[rc.Table] {
-				for child := range p.cascade.children {
+			cascade := &p.cascade
+			if p.dstEngine == model.EnginePG {
+				cascade = &p.pgCascade
+			}
+			if part.Op != model.OpInsert && cascade.parents[rc.Table] {
+				for child := range cascade.children {
+					if p.dstEngine == model.EnginePG && !p.state.IsDone(child.String()) {
+						return cascadeConfigError(fmt.Sprintf("cannot apply a cascading change on %s while %s is still being snapshotted; bootstrap from a consistent seed or pause cascading writes during the initial copy", rc.Table, child))
+					}
 					p.touched.addUntrackedChanges(child)
 				}
 			}
@@ -2430,7 +2441,7 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	if p.pgChunks != nil && p.pgChunks.GateErr != nil {
 		return fmt.Errorf("logical snapshot from this PostgreSQL source is not possible: %w", p.pgChunks.GateErr)
 	}
-	if len(p.cascade.signatures) > 0 {
+	if len(p.cascade.signatures) > 0 || len(p.pgCascade.signatures) > 0 {
 		return cascadeConfigError("snapshot add is unavailable with cascading foreign keys; use a consistent seed for the expanded scope")
 	}
 	// Giành quyền add bảng một cách nguyên tử: hai lệnh đồng thời cho cùng bảng chỉ một lệnh đi tiếp

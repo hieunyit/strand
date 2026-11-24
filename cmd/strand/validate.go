@@ -15,6 +15,7 @@ import (
 	"strand/internal/model"
 	"strand/internal/mysqlver"
 	"strand/internal/objects"
+	"strand/internal/pipeline"
 	"strand/internal/schemagen"
 	"strand/internal/typemap"
 	"strand/internal/validate"
@@ -54,6 +55,7 @@ func newValidateCmd() *cobra.Command {
 			if w := maxParallelWarning(cfg); w != "" {
 				fmt.Fprintln(os.Stderr, "warning: "+w)
 			}
+			var autoSeedKeylessTables []model.TableID
 
 			if err := validate.Preflight(cmd.Context(), cfg); err != nil {
 				return err
@@ -79,7 +81,11 @@ func newValidateCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				kw, err := validate.CheckMySQLSourceOpts(cmd.Context(), db, tables, keylessOpts(cfg))
+				keyOpts := keylessOpts(cfg)
+				if cfg.Bootstrap.AutoSeed {
+					keyOpts.FoundKeyless = func(id model.TableID) { autoSeedKeylessTables = append(autoSeedKeylessTables, id) }
+				}
+				kw, err := validate.CheckMySQLSourceOpts(cmd.Context(), db, tables, keyOpts)
 				for _, w := range kw {
 					fmt.Fprintln(os.Stderr, "warning: "+w)
 				}
@@ -165,12 +171,44 @@ func newValidateCmd() *cobra.Command {
 				return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.Rejected,
 					fmt.Sprintf("%d target table(s) missing and bootstrap.create_schema=off; run strand schema init", len(plan.Tables)), nil)
 			}
-			keyLines, err := validate.CheckKeys(cmd.Context(), r.Source, r.SourceKind, r.Target, r.TargetKind, tables, cfg.Tables.Rename, keylessOpts(cfg))
+			keyOpts := keylessOpts(cfg)
+			keyLines, err := validate.CheckKeys(cmd.Context(), r.Source, r.SourceKind, r.Target, r.TargetKind, tables, cfg.Tables.Rename, keyOpts)
 			for _, l := range keyLines {
 				fmt.Fprintln(cmd.OutOrStdout(), l)
 			}
 			if err != nil {
 				return err
+			}
+			if cfg.Bootstrap.AutoSeed && strings.EqualFold(cfg.Source.Kind, "mysql") && strings.EqualFold(cfg.Target.Kind, "mysql") {
+				resumed := false
+				var targetSchema sql.NullString
+				if err := r.Target.QueryRowContext(cmd.Context(), "SELECT DATABASE()").Scan(&targetSchema); err != nil {
+					return err
+				}
+				if !targetSchema.Valid || targetSchema.String == "" {
+					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "target DSN must select the MySQL checkpoint database for auto-seed", nil)
+				}
+				hasCheckpointTable, err := schemagen.Exists(cmd.Context(), r.Target, "mysql", model.TableID{Schema: targetSchema.String, Table: "_strand_checkpoint"})
+				if err != nil {
+					return err
+				}
+				if hasCheckpointTable {
+					var applied string
+					err := r.Target.QueryRowContext(cmd.Context(), "SELECT applied FROM _strand_checkpoint WHERE pipeline_id=?", cfg.Name).Scan(&applied)
+					// Start creates an empty checkpoint row before attempting the copy;
+					// only a published applied position means this is a real resume.
+					resumed = err == nil && applied != ""
+					if err != nil && err != sql.ErrNoRows {
+						return err
+					}
+				}
+				if !resumed {
+					if err := pipeline.ValidateAutoSeedPreflight(cmd.Context(), r.Source, r.Target, cfg.Bootstrap.CreateSchemaAuto(), tables, autoSeedKeylessTables, func(id model.TableID) model.TableID {
+						return renamedTarget(cfg.Tables.Rename, id)
+					}); err != nil {
+						return err
+					}
+				}
 			}
 			printed := map[string]bool{}
 			for _, w := range append(warnings, plan.Warnings...) {

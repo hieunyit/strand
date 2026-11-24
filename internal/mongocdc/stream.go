@@ -22,6 +22,33 @@ const (
 	codeInvalidResumeToken      = 260
 )
 
+// ErrSourceTransactionTooLarge is returned before applying or checkpointing a source
+// transaction that cannot be kept atomic within the configured safety bound.
+var ErrSourceTransactionTooLarge = errors.New("mongodb cdc: source transaction exceeds the atomic apply limit; refusing to split it")
+var ErrSourceTransactionDDL = errors.New("mongodb cdc: source transaction contains DDL that cannot be applied atomically; refusing to advance checkpoint")
+
+func sourceTxnContainsDDL(operation, txn string) bool {
+	if txn == "" {
+		return false
+	}
+	switch operation {
+	case "create", "createIndexes", "dropIndexes", "modify", "drop", "dropDatabase", "rename", "invalidate":
+		return true
+	default:
+		return false
+	}
+}
+
+func sourceTxnOverLimit(b *batch, txn string, eventBytes, eventLimit, byteLimit int) bool {
+	if txn == "" {
+		return false
+	}
+	if txn != b.txn {
+		return eventBytes >= byteLimit
+	}
+	return b.txnEvents >= eventLimit || b.txnBytes+eventBytes >= byteLimit
+}
+
 type streamEvent struct {
 	ID            bson.Raw `bson:"_id"`
 	OperationType string   `bson:"operationType"`
@@ -51,6 +78,10 @@ func (e *streamEvent) txnKey() string {
 
 func streamOptions(cfg Config, srcWire int32) *options.ChangeStreamOptionsBuilder {
 	opts := options.ChangeStream().SetMaxAwaitTime(cfg.MaxAwait)
+	if cfg.StreamBatch > 0 {
+		maxBatchSize := int(^uint32(0) >> 1)
+		opts.SetBatchSize(int32(min(cfg.StreamBatch, maxBatchSize)))
+	}
 	if cfg.UpdateMode == UpdateModeLookup {
 		// updateLookup: update events carry the current majority-committed image of the
 		// document; replaying events in order converges to the source state.
@@ -62,6 +93,11 @@ func streamOptions(cfg Config, srcWire int32) *options.ChangeStreamOptionsBuilde
 		opts.SetShowExpandedEvents(true)
 	}
 	return opts
+}
+
+func batchFlushDue(b *batch, txn string, eventLimit, byteLimit int, checkpointDue bool) bool {
+	full := b.events >= eventLimit || b.bytes >= byteLimit || checkpointDue
+	return full && (b.empty() || txn == "" || txn != b.txn)
 }
 
 // streamPipeline drops the update description in lookup mode: it is unused (full images
@@ -131,15 +167,17 @@ type docOp struct {
 // batch accumulates document events between DDL boundaries. Several events for the
 // same document collapse (keyed by MongoDB _id equality, see idKey).
 type batch struct {
-	ops    map[string]*docOp
-	slow   map[string]bool // collections with _ids idKey cannot canonicalize
-	seq    int
-	bytes  int
-	events int
-	byOp   map[string]int
-	token  bson.Raw
-	txn    string
-	last   bson.Timestamp
+	ops       map[string]*docOp
+	slow      map[string]bool // collections with _ids idKey cannot canonicalize
+	seq       int
+	bytes     int
+	events    int
+	byOp      map[string]int
+	token     bson.Raw
+	txn       string
+	txnEvents int
+	txnBytes  int
+	last      bson.Timestamp
 }
 
 func newBatch() *batch {
@@ -437,23 +475,33 @@ func (r *runner) stream(ctx context.Context) (err error) {
 		if len(token) == 0 {
 			return errors.New("MongoDB change stream returned an empty resume token")
 		}
-		// Size-based cut only between source transactions, so one source transaction
-		// commits atomically on the target (unless it is enormous).
+		// Size-based cuts occur only between source transactions. A transaction beyond
+		// the atomic safety bound fails closed before any of its events are applied.
 		txn := event.txnKey()
-		full := b.events >= cfg.StreamBatch || b.bytes >= streamBatchBytes || time.Since(lastCheckpoint) >= cfg.CheckpointEvery
-		if full && (b.empty() || txn == "" || txn != b.txn) {
-			if err := flush(); err != nil {
-				return err
-			}
-		} else if !b.empty() && (b.events >= 20*cfg.StreamBatch || b.bytes >= 8*streamBatchBytes) {
-			cfg.Logger.Warn("MongoDB source transaction exceeds the apply batch limit; it is split across target transactions", "pipeline", cfg.Pipeline)
+		if sourceTxnContainsDDL(event.OperationType, txn) {
+			return fmt.Errorf("%w (%s)", ErrSourceTransactionDDL, event.OperationType)
+		}
+		checkpointDue := time.Since(lastCheckpoint) >= cfg.CheckpointEvery
+		if sourceTxnOverLimit(b, txn, len(it.raw), 20*cfg.StreamBatch, 8*streamBatchBytes) {
+			return fmt.Errorf("%w (events=%d bytes=%d)", ErrSourceTransactionTooLarge, b.txnEvents+1, b.txnBytes+len(it.raw))
+		}
+		if batchFlushDue(b, txn, cfg.StreamBatch, streamBatchBytes, checkpointDue) {
 			if err := flush(); err != nil {
 				return err
 			}
 		}
+		priorTxn := b.txn
 		ddl, err := r.addEvent(b, &event)
 		if err != nil {
 			return fmt.Errorf("apply MongoDB event %s on %s.%s: %w", event.OperationType, event.NS.DB, event.NS.Coll, err)
+		}
+		if txn == "" {
+			b.txnEvents, b.txnBytes = 0, 0
+		} else if txn == priorTxn {
+			b.txnEvents++
+			b.txnBytes += len(it.raw)
+		} else {
+			b.txnEvents, b.txnBytes = 1, len(it.raw)
 		}
 		b.txn = txn
 		if event.ClusterTime.T != 0 {
@@ -586,7 +634,7 @@ func (r *runner) logStreamProgress(stats *streamStats, force bool) {
 func (r *runner) addEvent(b *batch, event *streamEvent) (bool, error) {
 	cfg := r.cfg
 	switch event.OperationType {
-	case "dropDatabase", "rename", "drop", "invalidate":
+	case "dropDatabase", "rename", "drop", "create", "invalidate":
 		return true, nil
 	}
 	if event.NS.DB != cfg.SourceDB || event.NS.Coll == "" || !selected(cfg, cfg.SourceDB+"."+event.NS.Coll) {
@@ -803,6 +851,42 @@ func (r *runner) applyDDL(ctx context.Context, event *streamEvent, token bson.Ra
 	cfg := r.cfg
 	switch event.OperationType {
 	case "invalidate":
+		return "", nil
+	case "create":
+		if event.NS.DB != cfg.SourceDB || !selected(cfg, cfg.SourceDB+"."+event.NS.Coll) {
+			return "", nil
+		}
+		info, err := r.sourceCollectionInfo(ctx, event.NS.Coll)
+		if err != nil {
+			return "", err
+		}
+		// Source create has already happened. Create the matching target namespace under
+		// the durable DDL lease guard, then commit the event token in a fenced txn. A crash
+		// between the two safely replays the idempotent create.
+		err = r.lease.withDDL(ctx, "create collection "+event.NS.Coll, func() error {
+			names, err := r.target.ListCollectionNames(ctx, bson.D{{Key: "name", Value: event.NS.Coll}})
+			if err != nil || len(names) > 0 {
+				return err
+			}
+			cmd := bson.D{{Key: "create", Value: event.NS.Coll}}
+			if cfg.ReplicateIndexes {
+				cmd = append(cmd, creatableOptions(info.Options)...)
+			}
+			return r.target.RunCommand(ctx, append(cmd, bson.E{Key: "writeConcern", Value: durableDDLWriteConcern()})).Err()
+		})
+		if err != nil {
+			return "", err
+		}
+		next := r.state.clone()
+		next.ResumeToken, next.StartAfter = token, false
+		if event.ClusterTime.T != 0 {
+			next.AppliedTime = event.ClusterTime
+		}
+		if err := r.lease.txn(ctx, 0, func(tx context.Context) error { return r.saveState(tx, next) }); err != nil {
+			return "", err
+		}
+		r.state = next
+		r.triggerReconcile()
 		return "", nil
 	case "dropDatabase":
 		if event.NS.DB != cfg.SourceDB {

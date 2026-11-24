@@ -619,6 +619,12 @@ func TestSegment_CrashSafetyBeforeBatchCommit(t *testing.T) {
 	if got := memBucket.PutCalls(); got != 1 {
 		t.Fatalf("expected 1 PutCall before simulated crash, got %d", got)
 	}
+	if keys, err := memBucket.List(ctx, "pref/seg/"); err != nil || len(keys) != 1 {
+		t.Fatalf("expected one unreferenced segment after injected crash, keys=%v err=%v", keys, err)
+	}
+	if err := memBucket.Put(ctx, "pref/seg/other-owner", []byte("keep")); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := sp1.Close(); err != nil {
 		t.Fatalf("Close sp1 failed: %v", err)
@@ -637,6 +643,9 @@ func TestSegment_CrashSafetyBeforeBatchCommit(t *testing.T) {
 	if u := sp2.Usage(); u.LocalBytes != 0 || u.BucketBytes != 0 {
 		t.Fatalf("expected 0 usage after reopen, got %+v", u)
 	}
+	if keys, err := memBucket.List(ctx, "pref/seg/"); err != nil || len(keys) != 1 || keys[0] != "pref/seg/other-owner" {
+		t.Fatalf("restart cleanup should remove only this spool's orphan and preserve other objects: keys=%v err=%v", keys, err)
+	}
 
 	iter, err := sp2.Iter(ctx, model.Pos{})
 	if err != nil {
@@ -647,6 +656,103 @@ func TestSegment_CrashSafetyBeforeBatchCommit(t *testing.T) {
 	tx, err := iter.Next(ctx)
 	if !errors.Is(err, io.EOF) || tx != nil {
 		t.Fatalf("expected empty iter (io.EOF) after crash before batch commit, got tx=%v, err=%v", tx, err)
+	}
+	if err := iter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := sp2.Append(ctx, makeOverflowTxn(uuid, i)); err != nil {
+			t.Fatalf("retry Append(%d): %v", i, err)
+		}
+	}
+	if err := sp2.Flush(ctx); err != nil {
+		t.Fatalf("retry Flush: %v", err)
+	}
+	retried, err := sp2.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retried.Close()
+	for i := 1; i <= 2; i++ {
+		tx, err := retried.Next(ctx)
+		want := fmt.Sprintf("%s:%d", uuid, i)
+		if err != nil || tx == nil || tx.SourcePos.GTID != want {
+			t.Fatalf("retry iter(%d) = %v, %v; want GTID %s", i, tx, err, want)
+		}
+	}
+	if tx, err := retried.Next(ctx); !errors.Is(err, io.EOF) || tx != nil {
+		t.Fatalf("retry iter tail = %v, %v; want EOF", tx, err)
+	}
+}
+
+func TestSegment_FailedFlushRetryUsesDistinctObjects(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	const uuid = "44444444-5555-6666-7777-888888888888"
+	bucket := spool.NewMemoryBucketBackend()
+	sp, err := spool.New(dir, spool.WithLocalHardLimit(1), spool.WithBucket(bucket, "retry/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFlush := true
+	spool.SetBeforeBatchCommitForTest(sp, func() error {
+		if firstFlush {
+			firstFlush = false
+			return errors.New("simulated pre-commit failure")
+		}
+		return nil
+	})
+	for i := 1; i <= 2; i++ {
+		if err := sp.Append(ctx, makeOverflowTxn(uuid, i)); err != nil {
+			t.Fatalf("first Append(%d): %v", i, err)
+		}
+	}
+	if err := sp.Flush(ctx); err == nil {
+		t.Fatal("expected first Flush to fail")
+	}
+	failedKeys, err := bucket.List(ctx, "retry/seg/")
+	if err != nil || len(failedKeys) != 1 {
+		t.Fatalf("first failed upload keys=%v err=%v", failedKeys, err)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := sp.Append(ctx, makeOverflowTxn(uuid, i)); err != nil {
+			t.Fatalf("retry Append(%d): %v", i, err)
+		}
+	}
+	if err := sp.Flush(ctx); err != nil {
+		t.Fatalf("retry Flush: %v", err)
+	}
+	allKeys, err := bucket.List(ctx, "retry/seg/")
+	if err != nil || len(allKeys) != 2 || allKeys[0] == allKeys[1] {
+		t.Fatalf("retry should use a distinct object and retain the pending orphan for recovery: keys=%v err=%v", allKeys, err)
+	}
+	if err := sp.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := spool.New(dir, spool.WithLocalHardLimit(1), spool.WithBucket(bucket, "retry/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	keys, err := bucket.List(ctx, "retry/seg/")
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("recovery should remove only failed upload and retain committed object: keys=%v err=%v", keys, err)
+	}
+	iter, err := reopened.Iter(ctx, model.Pos{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iter.Close()
+	for i := 1; i <= 2; i++ {
+		tx, err := iter.Next(ctx)
+		want := fmt.Sprintf("%s:%d", uuid, i)
+		if err != nil || tx == nil || tx.SourcePos.GTID != want {
+			t.Fatalf("iter(%d) = %v, %v; want GTID %s", i, tx, err, want)
+		}
+	}
+	if tx, err := iter.Next(ctx); !errors.Is(err, io.EOF) || tx != nil {
+		t.Fatalf("iter tail = %v, %v; want EOF", tx, err)
 	}
 }
 

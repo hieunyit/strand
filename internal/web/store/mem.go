@@ -235,6 +235,20 @@ func (m *Mem) UpdatePipelineMeta(_ context.Context, r Pipeline) error {
 	return nil
 }
 
+func (m *Mem) UpdatePipelineConfigCompareAndSwap(_ context.Context, name string, expectedHasConfig bool, expected, config string) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.pipes[name]
+	if !ok || r.HasConfig != expectedHasConfig || (expectedHasConfig && r.ConfigYAML != expected) {
+		return false, nil
+	}
+	r.ConfigYAML, r.HasConfig, r.Updated = config, true, time.Now()
+	m.pipes[name] = r
+	return true, nil
+}
+
 func (m *Mem) SetPipelineConflicts(_ context.Context, name, conflicts string) error {
 	if err := m.enter(); err != nil {
 		return err

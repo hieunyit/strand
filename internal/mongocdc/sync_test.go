@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -56,6 +57,69 @@ func TestBatchSlowPathKeepsOrder(t *testing.T) {
 	}
 	if _, ok := c.models[1].(*mongo.DeleteOneModel); !ok {
 		t.Fatalf("order not kept: %T", c.models[1])
+	}
+}
+
+func TestSourceTransactionLimitFailsBeforeBatchCanFlush(t *testing.T) {
+	b := newBatch()
+	b.txn = "session/txn-1"
+	b.txnEvents = 3
+	b.txnBytes = 90
+	if !sourceTxnOverLimit(b, b.txn, 11, 3, 100) {
+		t.Fatal("transaction at the event limit was allowed to continue")
+	}
+	if sourceTxnOverLimit(b, "", 1000, 3, 100) {
+		t.Fatal("non-transactional event was treated as an oversized source transaction")
+	}
+	empty := newBatch()
+	if !sourceTxnOverLimit(empty, "session/txn-2", 100, 3, 100) {
+		t.Fatal("single-event transaction at the byte limit was allowed")
+	}
+}
+
+func TestSourceTransactionDDLIsRejected(t *testing.T) {
+	if !sourceTxnContainsDDL("create", "session/txn-1") {
+		t.Fatal("create inside a source transaction was not classified as atomic DDL")
+	}
+	if sourceTxnContainsDDL("create", "") || sourceTxnContainsDDL("insert", "session/txn-1") {
+		t.Fatal("ordinary non-transactional create or transactional insert was misclassified")
+	}
+}
+
+func TestValidateConfigBoundsStreamBatch(t *testing.T) {
+	cfg := Config{
+		Pipeline: "bounded", SourceURI: "mongodb://source", TargetURI: "mongodb://target",
+		SourceDB: "source", TargetDB: "target", Include: []string{"source.*"},
+		StreamBatch: maxStreamBatch + 1,
+	}
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "stream batch") {
+		t.Fatalf("oversized stream batch validation error = %v", err)
+	}
+}
+
+func TestBusyStreamFlushesAtCheckpointDeadline(t *testing.T) {
+	const interval = 20 * time.Millisecond
+	const step = 5 * time.Millisecond
+	start := time.Unix(0, 0)
+	lastCheckpoint := start
+	b := newBatch()
+	flushes := 0
+	maxDelay := time.Duration(0)
+	for i := 0; i < 100; i++ {
+		now := start.Add(time.Duration(i) * step)
+		if batchFlushDue(b, "", 1000, 1<<20, now.Sub(lastCheckpoint) >= interval) {
+			delay := now.Sub(lastCheckpoint)
+			if delay > maxDelay {
+				maxDelay = delay
+			}
+			flushes++
+			lastCheckpoint = now
+			b = newBatch()
+		}
+		b.add("c", rawID(t, int32(i)), bson.Raw{5, 0, 0, 0, 0})
+	}
+	if flushes < 20 || maxDelay > interval+step {
+		t.Fatalf("busy stream flushes=%d max delay=%s, want repeated flushes within %s", flushes, maxDelay, interval+step)
 	}
 }
 

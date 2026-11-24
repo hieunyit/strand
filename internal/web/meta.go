@@ -347,14 +347,39 @@ func (s *Server) materialize(name string) { s.materializeOpt(name, false) }
 
 // materializeOpt: force = dựng lại cả pipeline đang bị đánh dấu missing (thao tác Restore file).
 func (s *Server) materializeOpt(name string, force bool) {
+	// Serialize the database read and file rewrite with config saves. The lock is
+	// process-shared so another Web instance cannot restore a stale row over a
+	// just-saved config.
 	ctx, cancel := dbCtx()
-	defer cancel()
 	row, ok, err := s.db.st.GetPipeline(ctx, name)
+	cancel()
 	if err != nil {
 		s.log.Warn("materialize: read pipeline from database failed", "pipeline", name, "err", err)
 		return
 	}
 	if !ok || !row.HasConfig || row.ConfigPath == "" {
+		return
+	}
+	lockedPath := row.ConfigPath
+	unlock, err := lockPipelineFiles(lockedPath)
+	if err != nil {
+		s.log.Warn("materialize: lock pipeline files failed", "pipeline", name, "err", err)
+		return
+	}
+	defer unlock()
+	// The row could have changed while waiting for the file lock.
+	ctx, cancel = dbCtx()
+	defer cancel()
+	row, ok, err = s.db.st.GetPipeline(ctx, name)
+	if err != nil {
+		s.log.Warn("materialize: read pipeline from database failed", "pipeline", name, "err", err)
+		return
+	}
+	if !ok || !row.HasConfig || row.ConfigPath == "" {
+		return
+	}
+	if row.ConfigPath != lockedPath {
+		s.log.Warn("materialize: config path changed while acquiring file lock", "pipeline", name)
 		return
 	}
 	if !row.MissingSince.IsZero() && !force {
@@ -507,6 +532,52 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 		}
 	}
 	return s.db.st.UpsertPipeline(ctx, row)
+}
+
+// persistPipelineConfigSnapshot stores exactly the bytes that the caller wrote
+// to disk. expected is the config version read before validation; when another
+// Web instance saved meanwhile, fail instead of replacing its newer version.
+func (s *Server) persistPipelineConfigSnapshot(p *Pipeline, expected, config []byte) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row, ok, err := s.db.st.GetPipeline(ctx, p.Name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("pipeline metadata row is missing")
+	}
+	if err := checkPipelineConfigVersion(row, expected); err != nil {
+		return err
+	}
+	updated, err := s.db.st.UpdatePipelineConfigCompareAndSwap(ctx, p.Name, row.HasConfig, row.ConfigYAML, string(config))
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return Conflict("pipeline configuration changed while you were editing it; reload Config and try again")
+	}
+	return nil
+}
+
+func checkPipelineConfigVersion(row store.Pipeline, expected []byte) error {
+	if row.HasConfig && !bytes.Equal([]byte(row.ConfigYAML), expected) {
+		return Conflict("pipeline configuration changed while you were editing it; reload Config and try again")
+	}
+	return nil
+}
+
+func (s *Server) checkPipelineConfigSnapshot(p *Pipeline, expected []byte) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row, ok, err := s.db.st.GetPipeline(ctx, p.Name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("pipeline metadata row is missing")
+	}
+	return checkPipelineConfigVersion(row, expected)
 }
 
 // ---- desired state, autostart ----

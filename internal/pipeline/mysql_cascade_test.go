@@ -129,6 +129,44 @@ func TestCascadeMatchSignatureAcceptsOnlyEquivalentCollationAliases(t *testing.T
 	}
 }
 
+func TestMySQLCascadeMatchesPostgres(t *testing.T) {
+	source := cascadeFK{Child: model.TableID{Schema: "app", Table: "child"}, Parent: model.TableID{Schema: "app", Table: "parent"},
+		Columns: []string{"tenant", "parent_id"}, References: []string{"tenant", "id"}, OnDelete: "CASCADE", OnUpdate: "RESTRICT"}
+	target := source
+	target.OnUpdate = "NO ACTION"
+	if pgCascadeSignature(source) != pgCascadeSignature(target) {
+		t.Fatal("matching PostgreSQL FK with equivalent NO ACTION was rejected")
+	}
+	target.Columns = []string{"parent_id", "tenant"}
+	if pgCascadeSignature(source) == pgCascadeSignature(target) {
+		t.Fatal("reordered FK columns matched")
+	}
+	target = source
+	target.OnDelete = "SET NULL"
+	if pgCascadeSignature(source) == pgCascadeSignature(target) {
+		t.Fatal("mismatched action matched")
+	}
+	if postgresFKEnforced(postgresCascadeFK{deferrable: true, validated: true, triggers: 4}) {
+		t.Fatal("deferrable target FK is considered enforced immediately")
+	}
+	if postgresFKEnforced(postgresCascadeFK{validated: false, triggers: 4}) || postgresFKEnforced(postgresCascadeFK{validated: true, disabled: true, triggers: 4}) || postgresFKEnforced(postgresCascadeFK{validated: true, triggers: 3}) {
+		t.Fatal("NOT VALID or disabled-trigger target FK is considered enforced")
+	}
+	if postgresFKEnforced(postgresCascadeFK{validated: true, triggers: 4, unsupportedRules: true}) {
+		t.Fatal("foreign key with PostgreSQL-specific actions is considered equivalent")
+	}
+	if postgresCascadeTriggersActive("replica") || !postgresCascadeTriggersActive("origin") {
+		t.Fatal("session_replication_role did not gate FK cascade behavior")
+	}
+	if !mysqlFKCollationProven(source) {
+		t.Fatal("numeric FK columns should not need collation proof")
+	}
+	source.ChildCollations = []string{"utf8mb4_0900_ai_ci"}
+	if mysqlFKCollationProven(source) {
+		t.Fatal("text FK with engine-specific collation should be rejected")
+	}
+}
+
 func TestCascadeAddSQL(t *testing.T) {
 	fk := cascadeFK{Child: model.TableID{Schema: "call_dashboard", Table: "customer_attribute"}, Parent: model.TableID{Schema: "call_dashboard", Table: "customer"},
 		Columns: []string{"customer_id"}, References: []string{"id"}, OnDelete: "CASCADE", OnUpdate: "RESTRICT"}
