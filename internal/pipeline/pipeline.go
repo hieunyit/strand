@@ -165,11 +165,15 @@ type Pipeline struct {
 	snapRate        rateWindow
 	// Auto-seed runs before the rest of the pipeline is built; the admin socket
 	// is already open then and reports this progress.
-	autoSeeding     atomic.Bool
-	autoSeedTotal   atomic.Int64
-	autoSeedDone    atomic.Int64
-	autoSeedRows    atomic.Int64
-	autoSeedTable   atomic.Pointer[string]
+	autoSeeding   atomic.Bool
+	autoSeedTotal atomic.Int64
+	autoSeedDone  atomic.Int64
+	autoSeedRows  atomic.Int64
+	autoSeedTable atomic.Pointer[string]
+	// autoSeedCopy is the per-table view of the running auto-seed copy.
+	autoSeedMu      sync.Mutex
+	autoSeedGroup   []string
+	autoSeedCopied  map[string]int64
 	breaker         *governor.Breaker
 	mysqlSignals    *governor.MySQLDBSignalReader
 	breakerLogged   time.Time

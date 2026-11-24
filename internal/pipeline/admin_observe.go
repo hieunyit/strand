@@ -65,6 +65,9 @@ func (h *adminHandler) Status(ctx context.Context) (*admin.StatusInfo, error) {
 // tiến độ theo PK, ước lượng row (thống kê source, cache) và ETA của bảng đang chạy.
 func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 	if err := h.ready(); err != nil {
+		if h.p.autoSeeding.Load() {
+			return h.autoSeedTables(ctx), nil
+		}
 		return nil, err
 	}
 	p := h.p
@@ -122,6 +125,54 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 		out = append(out, ti)
 	}
 	return out, nil
+}
+
+// autoSeedTables reports the tables while auto-seed copies, before the rest of
+// the pipeline exists. Group tables are copied one after another in a single
+// consistent snapshot; the others wait for the logical snapshot or are done.
+func (h *adminHandler) autoSeedTables(ctx context.Context) []admin.TableInfo {
+	p := h.p
+	p.autoSeedMu.Lock()
+	order := make(map[string]int, len(p.autoSeedGroup))
+	for i, name := range p.autoSeedGroup {
+		order[name] = i
+	}
+	copied := make(map[string]int64, len(p.autoSeedCopied))
+	for name, rows := range p.autoSeedCopied {
+		copied[name] = rows
+	}
+	p.autoSeedMu.Unlock()
+	done := int(p.autoSeedDone.Load())
+
+	p.tablesMu.RLock()
+	metas := make([]*tableMeta, 0, len(p.tables))
+	for _, m := range p.tables {
+		metas = append(metas, m)
+	}
+	p.tablesMu.RUnlock()
+	sort.Slice(metas, func(i, j int) bool { return metas[i].ID.String() < metas[j].ID.String() })
+	out := make([]admin.TableInfo, 0, len(metas))
+	for _, m := range metas {
+		name := m.ID.String()
+		ti := admin.TableInfo{Table: name, PK: m.PK, GenericPK: !m.PKNumeric, Key: keyLabel(m), State: "pending"}
+		i, inGroup := order[name]
+		switch {
+		case inGroup && i < done:
+			ti.State, ti.ProgressPct, ti.RowsCopied = "done", 100, copied[name]
+		case inGroup && i == done:
+			ti.State, ti.RowsCopied = "running", copied[name]
+			ti.RowsEstimate = h.rowsEstimate(ctx, m.ID)
+			if ti.RowsEstimate > 0 {
+				ti.ProgressPct = min(99, float64(ti.RowsCopied)*100/float64(ti.RowsEstimate))
+			}
+		case !inGroup && p.state.IsDone(name):
+			ti.State, ti.ProgressPct = "done", 100
+		default:
+			ti.RowsEstimate = h.rowsEstimate(ctx, m.ID)
+		}
+		out = append(out, ti)
+	}
+	return out
 }
 
 // monotonicSnapshotProgress prevents the progress display from moving backwards when a

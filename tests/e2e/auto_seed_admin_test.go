@@ -37,7 +37,7 @@ func TestMDB_E2E_AutoSeedAdminSocketReportsProgress(t *testing.T) {
 		}
 	}()
 
-	var answered, sawRows bool
+	var answered, sawRows, sawTableRows bool
 	deadline := time.Now().Add(90 * time.Second)
 	for !strings.Contains(p.output.String(), "auto-seed committed") {
 		if time.Now().After(deadline) || p.exited() {
@@ -56,14 +56,20 @@ func TestMDB_E2E_AutoSeedAdminSocketReportsProgress(t *testing.T) {
 				cancel()
 				t.Fatalf("status during auto-seed: %+v err=%v", status, err)
 			}
+			tables, err := c.Tables(ctx)
+			if err != nil || len(tables) != 1 || tables[0].Table != "app.payload" || tables[0].State != "running" {
+				cancel()
+				t.Fatalf("tables during auto-seed: %+v err=%v", tables, err)
+			}
+			sawTableRows = sawTableRows || tables[0].RowsCopied > 0
 			answered = true
 			sawRows = sawRows || top.SnapshotRows > 0
 		}
 		cancel()
 		time.Sleep(200 * time.Millisecond)
 	}
-	if !answered || !sawRows {
-		t.Fatalf("admin socket during auto-seed: answered=%v rows reported=%v\n%s", answered, sawRows, p.tail())
+	if !answered || !sawRows || !sawTableRows {
+		t.Fatalf("admin socket during auto-seed: answered=%v rows reported=%v table rows reported=%v\n%s", answered, sawRows, sawTableRows, p.tail())
 	}
 	waitSynced(t, &cfg, p, time.Minute)
 	ukWaitEqual(t, p, time.Minute, func() string { return klDiff(src.DB, dst.DB, "SELECT * FROM app.payload") })

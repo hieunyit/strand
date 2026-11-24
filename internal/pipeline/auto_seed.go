@@ -283,7 +283,9 @@ func (p *Pipeline) autoSeed(ctx context.Context, empty checkpoint.AppliedSet) (c
 			return nil, p.missingKeyError(ctx, id, m)
 		}
 	}
+	p.tablesMu.Lock() // the admin socket reads p.tables during the copy
 	p.tables = fresh
+	p.tablesMu.Unlock()
 	if p.cfg.Bootstrap.CreateSchemaAuto() {
 		repairs, err := p.preflightAutoSeedForeignKeys(ctx)
 		if err != nil {
@@ -756,12 +758,25 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 		return err
 	}
 	p.autoSeedTotal.Store(int64(len(group)))
+	names := make([]string, len(group))
+	for i, id := range group {
+		names[i] = id.String()
+	}
+	p.autoSeedMu.Lock()
+	p.autoSeedGroup, p.autoSeedCopied = names, map[string]int64{}
+	p.autoSeedMu.Unlock()
+	noteCopied := func(name string, rows int64) {
+		p.autoSeedMu.Lock()
+		p.autoSeedCopied[name] = rows
+		p.autoSeedMu.Unlock()
+	}
 	for _, id := range group {
 		name := id.String()
 		p.autoSeedTable.Store(&name)
 		lastLog, base := time.Now(), p.autoSeedRows.Load()
 		progress := func(copied int64) {
 			p.autoSeedRows.Store(base + copied)
+			noteCopied(name, copied)
 			if time.Since(lastLog) >= autoSeedProgressLogEvery {
 				lastLog = time.Now()
 				p.log.Info("auto-seed copy in progress", "table", name, "rows", copied,
@@ -776,6 +791,7 @@ func (p *Pipeline) copyAutoSeed(ctx context.Context, source *sql.Conn, group []m
 			}
 			return fmt.Errorf("auto-seed copy %s: %w", id, err)
 		}
+		noteCopied(name, rows)
 		p.autoSeedDone.Add(1)
 		p.log.Info("auto-seed table copied (awaiting checkpoint commit)", "table", name, "rows", rows)
 	}
