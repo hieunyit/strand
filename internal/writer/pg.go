@@ -730,7 +730,7 @@ func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) 
 
 	var names []string
 	var values []any
-	var set, where []string
+	var set, where, replayWhere []string
 	for i, name := range pkCols {
 		names, values = append(names, name), append(values, row.Key[i])
 	}
@@ -745,19 +745,22 @@ func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) 
 	args := append([]any(nil), values...)
 	for i, name := range pkCols {
 		args = append(args, row.OldKey[i])
-		where = append(where, fmt.Sprintf("%s = $%d", quotePG(name), len(args)))
+		where = append(where, fmt.Sprintf("old_row.%s = $%d", quotePG(name), len(args)))
+		replayWhere = append(replayWhere, fmt.Sprintf("old_row.%s = $%d", quotePG(name), len(pkCols)+i+1))
 	}
-	rows := model.PGRelationRows(table, "")
+	rows := model.PGRelationRows(table, "old_row.")
 	// The new key comes first in values, so $1..$n bind it in the guard.
 	newWhere := make([]string, len(pkCols))
 	for i, name := range pkCols {
-		newWhere[i] = fmt.Sprintf("%s = $%d", quotePG(name), i+1)
+		newWhere[i] = fmt.Sprintf("new_row.%s = $%d", quotePG(name), i+1)
 	}
-	// Replaying an already-applied move can find the new key present (a later
-	// snapshot or catch-up copied it). Like the partial-update path, keep that
-	// row instead of failing on a duplicate key.
-	tag, err := a.tx.Exec(a.ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s AND NOT EXISTS (SELECT 1 FROM %s WHERE %s AND %s)",
-		table, strings.Join(set, ", "), rows, strings.Join(where, " AND "), table, rows, strings.Join(newWhere, " AND ")), args...)
+	// The new key can compare equal to the old key under PostgreSQL's equality
+	// rules (for example citext). Only a physically different row blocks the
+	// UPDATE. Include tableoid since different partitions can reuse a ctid.
+	otherRow := fmt.Sprintf("EXISTS (SELECT 1 FROM %s AS new_row WHERE %s AND %s AND (new_row.tableoid, new_row.ctid) <> (old_row.tableoid, old_row.ctid))",
+		table, model.PGRelationRows(table, "new_row."), strings.Join(newWhere, " AND "))
+	tag, err := a.tx.Exec(a.ctx, fmt.Sprintf("UPDATE %s AS old_row SET %s WHERE %s AND %s AND NOT %s",
+		table, strings.Join(set, ", "), rows, strings.Join(where, " AND "), otherRow), args...)
 	if err != nil {
 		return true, fmt.Errorf("move referenced primary key on %s: %w", row.Table, err)
 	}
@@ -766,13 +769,25 @@ func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) 
 		var oldExists bool
 		// Rebuild placeholders for a query that only binds the old key.
 		for i, name := range pkCols {
-			where[i] = fmt.Sprintf("%s = $%d", quotePG(name), i+1)
+			where[i] = fmt.Sprintf("old_row.%s = $%d", quotePG(name), i+1)
 		}
-		q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s WHERE %s AND %s)", table, rows, strings.Join(where, " AND "))
+		q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s AS old_row WHERE %s AND %s)", table, rows, strings.Join(where, " AND "))
 		if err := a.tx.QueryRow(a.ctx, q, args[len(values):]...).Scan(&oldExists); err != nil {
 			return true, err
 		}
 		if oldExists {
+			// A zero-row UPDATE can also be suppressed by a trigger or policy.
+			// Require a distinct new-key row before deleting the old one.
+			var conflict bool
+			q := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s AS old_row WHERE %s AND %s AND %s)",
+				table, rows, strings.Join(replayWhere, " AND "), otherRow)
+			keys := append(append([]any(nil), values[:len(pkCols)]...), args[len(values):]...)
+			if err := a.tx.QueryRow(a.ctx, q, keys...).Scan(&conflict); err != nil {
+				return true, err
+			}
+			if !conflict {
+				return true, fmt.Errorf("move referenced primary key on %s: UPDATE left the old row and no distinct row exists at the new key", row.Table)
+			}
 			// Both keys exist, so the guard skipped the UPDATE: the new row is
 			// the later state. Before removing the old key, give its children
 			// what the key UPDATE would have given them (ON UPDATE actions);

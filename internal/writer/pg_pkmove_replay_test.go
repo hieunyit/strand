@@ -88,3 +88,22 @@ func TestPGReferencedPKMoveReplayRefusesNoActionChildren(t *testing.T) {
 		t.Fatalf("child changed after refusal: %d err=%v", n, err)
 	}
 }
+
+func TestPGReferencedCaseInsensitiveKeyUpdate(t *testing.T) {
+	e := newPGEnv(t, "casefold-pkmove")
+	pgExec(t, e.db, "CREATE EXTENSION IF NOT EXISTS citext")
+	parent := pgTable(t, e.db, "casefold_parent", "id citext PRIMARY KEY")
+	pgExec(t, e.db, "CREATE TABLE public.casefold_child (id bigint PRIMARY KEY, pid citext REFERENCES public.casefold_parent(id) ON UPDATE CASCADE ON DELETE CASCADE)")
+	pgExec(t, e.db, "INSERT INTO public.casefold_parent VALUES ('alice')")
+	pgExec(t, e.db, "INSERT INTO public.casefold_child VALUES (1, 'alice')")
+	w := e.writer(t, map[model.TableID][]string{parent: {"id"}})
+	move := model.RowChange{Table: parent, Op: model.OpUpdate, OldKey: []model.Value{"alice"}, Key: []model.Value{"ALICE"}, Cols: []model.ColValue{cv("id", "ALICE")}}
+	if err := w.ApplyBatch(context.Background(), []*model.Txn{{Rows: []model.RowChange{move}}}, e.delta("casefold")); err != nil {
+		t.Fatal(err)
+	}
+	var parents, children int
+	var key string
+	if err := e.db.QueryRow("SELECT (SELECT count(*) FROM public.casefold_parent), (SELECT count(*) FROM public.casefold_child), COALESCE((SELECT id::text FROM public.casefold_parent), '')").Scan(&parents, &children, &key); err != nil || parents != 1 || children != 1 || key != "ALICE" {
+		t.Fatalf("parents=%d children=%d key=%q err=%v; expected both retained with updated parent key", parents, children, key, err)
+	}
+}

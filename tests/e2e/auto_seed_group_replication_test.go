@@ -69,6 +69,23 @@ func TestMDB_E2E_AutoSeedGroupReplicationTargetCommitsInParts(t *testing.T) {
 		t.Fatalf("interrupted copy left a checkpoint: %q err=%v", applied, err)
 	}
 
+	// Changing the scope must stop recovery before it truncates any table.
+	dst.exec(t, "INSERT INTO app.child VALUES (999, NULL, 'outside-scope')")
+	narrow := cfg
+	narrow.Include = []string{"app.parent"}
+	out, code := runStrandCLI(t, time.Minute, "sync", "-c", narrow.write(t))
+	if code != 3 || !strings.Contains(out, "outside the current replication scope: app.child") {
+		t.Fatalf("resume with a narrower scope: exit %d\n%s", code, out)
+	}
+	if err := dst.DB.QueryRow("SELECT COUNT(*) FROM app.child").Scan(&visible); err != nil || visible < 2 {
+		t.Fatalf("rejected recovery removed child rows: %d err=%v", visible, err)
+	}
+	var sentinel int
+	if err := dst.DB.QueryRow("SELECT COUNT(*) FROM app.child WHERE id=999").Scan(&sentinel); err != nil || sentinel != 1 {
+		t.Fatalf("sentinel in excluded app.child: %d err=%v", sentinel, err)
+	}
+	path = cfg.write(t)
+
 	// Rows deleted at the source while the pipeline is down must not survive
 	// from the interrupted attempt.
 	src.exec(t, "DELETE FROM app.child WHERE id=1")

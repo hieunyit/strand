@@ -999,6 +999,23 @@ func (p *Pipeline) clearPartialAutoSeed(ctx context.Context) error {
 	if len(tables) == 0 {
 		return nil
 	}
+	// The journal describes the previous copy. Validate every entry before the
+	// first TRUNCATE: an edited scope or rename may no longer own one of them.
+	currentTargets := make(map[string]model.TableID, len(p.tables))
+	for id := range p.tables {
+		dst := p.filter.Target(id)
+		currentTargets[dst.String()] = dst
+	}
+	var outside []string
+	for _, name := range tables {
+		if _, ok := currentTargets[name]; !ok {
+			outside = append(outside, name)
+		}
+	}
+	if len(outside) > 0 {
+		sort.Strings(outside)
+		return autoSeedRejected(fmt.Sprintf("interrupted auto-seed has target tables outside the current replication scope: %s; restore the previous table selection and mappings before retrying", strings.Join(outside, ", ")))
+	}
 	conn, err := p.dst.Conn(ctx)
 	if err != nil {
 		return err
@@ -1008,8 +1025,7 @@ func (p *Pipeline) clearPartialAutoSeed(ctx context.Context) error {
 		return err
 	}
 	for _, name := range tables {
-		schema, table, _ := strings.Cut(name, ".")
-		_, err := conn.ExecContext(ctx, "TRUNCATE TABLE "+autoSeedTableSQL(model.TableID{Schema: schema, Table: table}))
+		_, err := conn.ExecContext(ctx, "TRUNCATE TABLE "+autoSeedTableSQL(currentTargets[name]))
 		var me *drivermysql.MySQLError
 		if errors.As(err, &me) && me.Number == 1146 { // table no longer exists
 			continue
