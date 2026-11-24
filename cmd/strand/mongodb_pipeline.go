@@ -50,6 +50,9 @@ func mongoConfig(cfg *config.Config, logger *slog.Logger) mongocdc.Config {
 	if cfg.MongoDB.StreamBatch > 0 {
 		mc.StreamBatch = cfg.MongoDB.StreamBatch
 	}
+	if cfg.MongoDB.MaxTransactionMiB > 0 {
+		mc.MaxTransactionBytes = cfg.MongoDB.MaxTransactionMiB << 20
+	}
 	if d, err := time.ParseDuration(cfg.Checkpoint.FlushEvery); err == nil {
 		mc.CheckpointEvery = d
 	}

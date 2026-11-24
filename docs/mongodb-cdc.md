@@ -99,11 +99,14 @@ strand stop -c p.yaml
   last committed `_id` and the stream from the last committed token: nothing is lost,
   nothing is applied twice, documents cannot be duplicated (unique `_id`).
 - **Source transactions** commit atomically on the target. Strand stops before
-  applying any part of a transaction that exceeds 20 × `stream_batch` events
-  or reaches 64 MiB of change-event data. The resume token stays before the
-  transaction. Increase `stream_batch` up to 1,000,000 if the event count is the
-  limiting factor. Strand also stops before transactional DDL that it cannot
-  apply atomically.
+  applying any part of a transaction whose replicated changes exceed 20 ×
+  `stream_batch` events or reach `mongodb.max_transaction_mib` of change-event
+  data (default 64, max 4096). Changes to collections the pipeline does not
+  replicate do not count. The resume token stays before the transaction: raise
+  `stream_batch` (up to 1,000,000) or `max_transaction_mib` and start again.
+  `create`, `createIndexes`, `dropIndexes` and `modify` inside a transaction
+  (MongoDB 4.4+) are applied without splitting it: the transaction's first
+  write creates the collection and options are reconciled afterwards.
 - **Writes** use `w: majority, j: true`; reads `readConcern: majority`.
   The read preference comes from the URI (default `primary`; `readPreference=secondaryPreferred`
   moves snapshot and lookup reads off the source primary; the change stream follows the
@@ -177,8 +180,9 @@ first sync of large collections, and keep `strand_retention_headroom_seconds` al
   during the snapshot overlap, or into the selection, re-copies the destination
   collection; that re-copy is checkpointed per batch and resumes after a crash.
   `dropDatabase` invalidates the stream, which is restarted after the invalidate.
-- On MongoDB 6.0+, a selected collection's `create` event creates it on the target
-  even if the collection is empty.
+- On MongoDB 6.0+, a selected collection's `create` event (outside a transaction)
+  creates it on the target even if the collection is empty. Views and
+  time-series collections are skipped with a warning; exclude them to silence it.
 - `mongodb.indexes: off` (default): indexes, validators and other collection options
   are not replicated; create the indexes you need on the target yourself. Do **not**
   create unique indexes on the target in this mode (intermediate states during replay

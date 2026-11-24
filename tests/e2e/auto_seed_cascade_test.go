@@ -138,10 +138,21 @@ func TestMDB_E2E_AutoSeedCascadesWithoutReload(t *testing.T) {
 		t.Fatalf("restart did not stop cleanly\n%s", p.tail())
 	}
 	dst.exec(t, "CREATE TABLE app.target_only (id BIGINT PRIMARY KEY, parent_id BIGINT, CONSTRAINT target_only_fk FOREIGN KEY(parent_id) REFERENCES app.plain(id) ON DELETE CASCADE)")
+	// Without a source cascade the writer runs with foreign_key_checks=0, so a
+	// target-only cascade never fires and must not block the pipeline.
+	dst.exec(t, "INSERT INTO app.target_only SELECT 1, id FROM app.plain WHERE id=2")
 	cfg.Name, cfg.Dir, cfg.Include, cfg.AutoSeed = "target-only-cascade", testDir(t), []string{"app.plain"}, false
-	cfg.TablesExtra = ""
-	out, code = runStrandCLI(t, time.Minute, "sync", "-c", cfg.write(t))
-	if code != 3 || !strings.Contains(out, "unexpected cascading foreign key target_only_fk") {
-		t.Fatalf("a target-only cascade must be rejected even without any source cascade: exit %d\n%s", code, out)
+	cfg.TablesExtra, cfg.Bootstrap = "", "start_at"
+	cfg.StartAt = func() string { f, pos := src.masterPos(t); return fmt.Sprintf("%s:%d", f, pos) }()
+	p = startStrand(t, cfg.write(t))
+	waitSynced(t, &cfg, p, time.Minute)
+	src.exec(t, "DELETE FROM app.plain WHERE id=2")
+	ukWaitEqual(t, p, time.Minute, func() string { return klDiff(src.DB, dst.DB, "SELECT * FROM app.plain ORDER BY 1") })
+	var kept int
+	if err := dst.DB.QueryRow("SELECT COUNT(*) FROM app.target_only").Scan(&kept); err != nil || kept != 1 {
+		t.Fatalf("target-only cascade fired with foreign_key_checks=0: rows=%d err=%v", kept, err)
+	}
+	if p.stop(t) != 0 {
+		t.Fatalf("target-only pipeline did not stop cleanly\n%s", p.tail())
 	}
 }

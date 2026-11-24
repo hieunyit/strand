@@ -748,14 +748,21 @@ func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) 
 		where = append(where, fmt.Sprintf("%s = $%d", quotePG(name), len(args)))
 	}
 	rows := model.PGRelationRows(table, "")
-	tag, err := a.tx.Exec(a.ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s",
-		table, strings.Join(set, ", "), rows, strings.Join(where, " AND ")), args...)
+	// The new key comes first in values, so $1..$n bind it in the guard.
+	newWhere := make([]string, len(pkCols))
+	for i, name := range pkCols {
+		newWhere[i] = fmt.Sprintf("%s = $%d", quotePG(name), i+1)
+	}
+	// Replaying an already-applied move can find the new key present (a later
+	// snapshot or catch-up copied it). Like the partial-update path, keep that
+	// row instead of failing on a duplicate key.
+	tag, err := a.tx.Exec(a.ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s AND NOT EXISTS (SELECT 1 FROM %s WHERE %s AND %s)",
+		table, strings.Join(set, ", "), rows, strings.Join(where, " AND "), table, rows, strings.Join(newWhere, " AND ")), args...)
 	if err != nil {
 		return true, fmt.Errorf("move referenced primary key on %s: %w", row.Table, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// A snapshot or a preceding native cascade can already have moved the
-		// row. Never delete the old key as a fallback on a referenced table.
+		// A snapshot or a preceding native cascade can already have moved the row.
 		var oldExists bool
 		// Rebuild placeholders for a query that only binds the old key.
 		for i, name := range pkCols {
@@ -766,7 +773,14 @@ func (a *pgApplier) applyReferencedPKUpdate(row *model.RowChange) (bool, error) 
 			return true, err
 		}
 		if oldExists {
-			return true, fmt.Errorf("move referenced primary key on %s: old row remains after UPDATE", row.Table)
+			// Both keys exist, so the guard skipped the UPDATE: the new row is
+			// the later state. Remove the old key with the target's FK actions
+			// in force; a RESTRICT child still on it fails with a clear error.
+			if err := execDelete(a.ctx, a.tx, row.Table, pkCols, [][]model.Value{row.OldKey}); err != nil {
+				return true, fmt.Errorf("move referenced primary key on %s: new key already present; removing the old key failed (rows still reference it?): %w", row.Table, err)
+			}
+			a.written++
+			return true, nil
 		}
 		if hasUnchanged(row) {
 			var newExists bool

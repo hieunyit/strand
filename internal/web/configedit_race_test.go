@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -139,5 +140,61 @@ func TestConfigSaveCopiesDiscoveredConfigIntoMetadata(t *testing.T) {
 	row, ok, err = e.srv.db.st.GetPipeline(ctx, p.Name)
 	if err != nil || !ok || !row.HasConfig || row.ConfigYAML != updated {
 		t.Fatalf("discovered pipeline edit did not persist: found=%v configured=%v same=%v err=%v", ok, row.HasConfig, row.ConfigYAML == updated, err)
+	}
+}
+
+// concurrentConfigSave commits a newer config from "another Web instance"
+// right before this instance's next metadata write.
+type concurrentConfigSave struct {
+	store.Store
+	armed  atomic.Bool
+	name   string
+	suffix string
+}
+
+func (c *concurrentConfigSave) interleave(ctx context.Context) {
+	if !c.armed.CompareAndSwap(true, false) {
+		return
+	}
+	row, _, _ := c.Store.GetPipeline(ctx, c.name)
+	_, _ = c.Store.UpdatePipelineConfigCompareAndSwap(ctx, c.name, row.HasConfig, row.ConfigYAML, row.ConfigYAML+c.suffix)
+}
+
+func (c *concurrentConfigSave) UpsertPipeline(ctx context.Context, p store.Pipeline) error {
+	c.interleave(ctx)
+	return c.Store.UpsertPipeline(ctx, p)
+}
+
+func (c *concurrentConfigSave) UpdatePipelineEnv(ctx context.Context, name, envPath string, envEnc []byte) (bool, error) {
+	c.interleave(ctx)
+	return c.Store.UpdatePipelineEnv(ctx, name, envPath, envEnc)
+}
+
+// Another Web instance saves a config after this instance synced its disk but
+// before it stores the .env: the .env save must not copy the older disk config
+// back over the newer database version.
+func TestEnvSaveKeepsNewerDatabaseConfig(t *testing.T) {
+	e := newEnv(t, nil)
+	p := e.srv.reg.Get("orders")
+	ctx := context.Background()
+	const suffix = "# saved on another Web instance\n"
+	other := &concurrentConfigSave{Store: e.srv.db.st, name: p.Name, suffix: suffix}
+	e.srv.db.st = other
+	other.armed.Store(true)
+	if _, err := e.srv.saveEnvContent(ctx, p, map[string]string{"EXTRA": "1"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if other.armed.Load() {
+		t.Fatal("the concurrent save was not interleaved")
+	}
+	after, _, err := other.Store.GetPipeline(ctx, p.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(after.ConfigYAML, suffix) {
+		t.Fatalf("env save replaced the newer database config with the local file:\n%s", after.ConfigYAML)
+	}
+	if len(after.EnvEnc) == 0 {
+		t.Fatal("env save did not store the .env")
 	}
 }

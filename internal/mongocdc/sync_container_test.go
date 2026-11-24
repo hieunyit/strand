@@ -101,12 +101,18 @@ func TestContainer_OversizedTransactionFailsClosedAndResumes(t *testing.T) {
 	r.stop(t)
 }
 
-func TestContainer_TransactionCreateDDLIsRejectedBeforeCheckpoint(t *testing.T) {
+// MongoDB 4.4+ allows creating a collection inside a transaction (6.0+ reports
+// it as a create event in the transaction), and a large transaction on a
+// collection the pipeline does not replicate must not count against the
+// atomic-transaction limit. Neither may stop the pipeline.
+func TestContainer_TransactionalCreateAndUnselectedLargeTransactionKeepStreaming(t *testing.T) {
 	p := newPair(t)
 	ctx := context.Background()
 	db, pipeline := "txn_create", "txn-create"
 	observer := NewObserver(pipeline)
 	cfg := p.cfg(t, pipeline, db)
+	cfg.StreamBatch = 1 // atomic limit: 20 selected events per source transaction
+	cfg.Exclude = []string{db + ".noise"}
 	cfg.Observer = observer
 	r := start(cfg)
 	deadline := time.Now().Add(time.Minute)
@@ -117,48 +123,56 @@ func TestContainer_TransactionCreateDDLIsRejectedBeforeCheckpoint(t *testing.T) 
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	stateColl := p.dstC.Database(stateDatabase, targetDBOptions()).Collection(stateCollection)
-	var before syncState
-	if err := stateColl.FindOne(ctx, bson.D{{Key: "_id", Value: pipeline}}).Decode(&before); err != nil {
-		t.Fatal(err)
+	inTxn := func(fn func(tx context.Context) error) {
+		t.Helper()
+		sess, err := p.srcC.StartSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sess.EndSession(ctx)
+		if _, err := sess.WithTransaction(ctx, func(tx context.Context) (any, error) { return nil, fn(tx) },
+			options.Transaction().SetWriteConcern(writeconcern.Majority())); err != nil {
+			t.Fatal(err)
+		}
 	}
-	sess, err := p.srcC.StartSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = sess.WithTransaction(ctx, func(tx context.Context) (any, error) {
+	inTxn(func(tx context.Context) error {
 		if err := p.srcC.Database(db).CreateCollection(tx, "docs"); err != nil {
-			return nil, err
+			return err
 		}
-		_, err := p.srcC.Database(db).Collection("docs").InsertOne(tx, bson.D{{Key: "_id", Value: 1}})
-		return nil, err
-	}, options.Transaction().SetWriteConcern(writeconcern.Majority()))
-	sess.EndSession(ctx)
-	if err != nil {
+		_, err := p.srcC.Database(db).Collection("docs").InsertMany(tx, []any{bson.D{{Key: "_id", Value: 1}}, bson.D{{Key: "_id", Value: 2}}})
+		return err
+	})
+	if err := p.srcC.Database(db).CreateCollection(ctx, "noise"); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-r.done:
-		if !errors.Is(err, ErrSourceTransactionDDL) {
-			t.Fatalf("pipeline error = %v, want source transaction DDL error", err)
+	inTxn(func(tx context.Context) error {
+		for i := 0; i < 100; i++ {
+			if _, err := p.srcC.Database(db).Collection("noise").InsertOne(tx, bson.D{{Key: "_id", Value: i}}); err != nil {
+				return err
+			}
 		}
-	case <-time.After(time.Minute):
-		t.Fatal("pipeline did not reject transactional create")
-	}
-	names, err := p.dstC.Database(db).ListCollectionNames(ctx, bson.D{{Key: "name", Value: "docs"}})
-	if err != nil {
+		return nil
+	})
+	if _, err := p.srcC.Database(db).Collection("docs").InsertOne(ctx, bson.D{{Key: "_id", Value: 3}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 0 {
-		t.Fatal("target collection was created despite rejecting the source transaction")
+	target := p.dstC.Database(db).Collection("docs")
+	deadline = time.Now().Add(time.Minute)
+	for {
+		r.failIfExited(t)
+		n, err := target.CountDocuments(ctx, bson.D{})
+		if err == nil && n == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("target docs = %d err=%v, want 3", n, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	var after syncState
-	if err := stateColl.FindOne(ctx, bson.D{{Key: "_id", Value: pipeline}}).Decode(&after); err != nil {
-		t.Fatal(err)
+	if names, err := p.dstC.Database(db).ListCollectionNames(ctx, bson.D{{Key: "name", Value: "noise"}}); err != nil || len(names) != 0 {
+		t.Fatalf("excluded collection reached the target: %v err=%v", names, err)
 	}
-	if !bytes.Equal(before.ResumeToken, after.ResumeToken) {
-		t.Fatal("checkpoint advanced past DDL in the rejected source transaction")
-	}
+	r.stop(t)
 }
 
 // Snapshot of N documents while concurrent insert/update/replace/delete traffic runs

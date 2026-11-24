@@ -19,6 +19,10 @@ type MongoDBConfig struct {
 	// StreamBatch: change events per apply transaction (default 2000; falls back to
 	// target.batch.max_rows).
 	StreamBatch int `yaml:"stream_batch,omitempty" json:"stream_batch,omitempty"`
+	// MaxTransactionMiB: largest source transaction (selected change events only)
+	// applied atomically; a larger one stops the pipeline before any of it is
+	// applied (default 64, max 4096).
+	MaxTransactionMiB int `yaml:"max_transaction_mib,omitempty" json:"max_transaction_mib,omitempty"`
 	// OverwriteTarget: the first snapshot may drop and recreate existing selected target
 	// collections (default false: refuse).
 	OverwriteTarget bool `yaml:"overwrite_target,omitempty" json:"overwrite_target,omitempty"`

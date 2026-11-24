@@ -46,22 +46,26 @@ const (
 	lockCollection     = "mongo_sync_locks"
 	indexCollection    = "mongo_sync_indexes"
 
-	defaultLeaseDuration   = 45 * time.Second
-	defaultSnapshotBatch   = 1000
-	snapshotBatchBytes     = 8 << 20
-	defaultStreamBatch     = 2000
-	maxStreamBatch         = 1_000_000
-	streamBatchBytes       = 8 << 20
-	defaultCheckpointEvery = time.Second
-	defaultMaxAwait        = 500 * time.Millisecond
-	defaultRetryBackoffMax = 30 * time.Second
-	defaultIndexReconcile  = time.Minute
-	progressLogInterval    = 10 * time.Second
-	minWireVersion44       = 9  // MongoDB 4.4: implicit collection creation inside transactions.
-	wireVersion50          = 13 // MongoDB 5.0: $v:2 update diffs, $setField.
-	wireVersion60          = 17 // MongoDB 6.0: showExpandedEvents.
-	wireVersion61          = 18 // MongoDB 6.1: disambiguatedPaths in update descriptions.
-	maxSnapshotParallel    = 32
+	defaultLeaseDuration = 45 * time.Second
+	defaultSnapshotBatch = 1000
+	snapshotBatchBytes   = 8 << 20
+	defaultStreamBatch   = 2000
+	maxStreamBatch       = 1_000_000
+	streamBatchBytes     = 8 << 20
+	// defaultMaxTransactionBytes keeps a source transaction atomic up to 64 MiB of
+	// selected change events; maxTransactionBytes is the configurable ceiling.
+	defaultMaxTransactionBytes = 8 * streamBatchBytes
+	maxTransactionBytes        = 4096 << 20
+	defaultCheckpointEvery     = time.Second
+	defaultMaxAwait            = 500 * time.Millisecond
+	defaultRetryBackoffMax     = 30 * time.Second
+	defaultIndexReconcile      = time.Minute
+	progressLogInterval        = 10 * time.Second
+	minWireVersion44           = 9  // MongoDB 4.4: implicit collection creation inside transactions.
+	wireVersion50              = 13 // MongoDB 5.0: $v:2 update diffs, $setField.
+	wireVersion60              = 17 // MongoDB 6.0: showExpandedEvents.
+	wireVersion61              = 18 // MongoDB 6.1: disambiguatedPaths in update descriptions.
+	maxSnapshotParallel        = 32
 
 	// UpdateModeDelta applies update descriptions to the target image (default).
 	UpdateModeDelta = "delta"
@@ -96,12 +100,14 @@ type Config struct {
 	Logger          *slog.Logger
 
 	// Tuning; zero means default.
-	LeaseDuration    time.Duration // lease TTL on the target (target clock); refreshed at TTL/3
-	SnapshotBatch    int           // documents per snapshot write transaction
-	StreamBatch      int           // change events per apply transaction
-	CheckpointEvery  time.Duration // idle resume-token checkpoint interval
-	MaxAwait         time.Duration // change stream getMore maxAwaitTimeMS
-	SnapshotParallel int           // collections copied concurrently (default 1, max 32)
+	LeaseDuration time.Duration // lease TTL on the target (target clock); refreshed at TTL/3
+	SnapshotBatch int           // documents per snapshot write transaction
+	StreamBatch   int           // change events per apply transaction
+	// MaxTransactionBytes bounds one atomic source transaction (selected events only).
+	MaxTransactionBytes int
+	CheckpointEvery     time.Duration // idle resume-token checkpoint interval
+	MaxAwait            time.Duration // change stream getMore maxAwaitTimeMS
+	SnapshotParallel    int           // collections copied concurrently (default 1, max 32)
 	// UpdateMode: UpdateModeDelta (default) or UpdateModeLookup.
 	UpdateMode string
 	// ReplicateIndexes creates the source's indexes and collection options (validators,
@@ -125,6 +131,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.StreamBatch <= 0 {
 		c.StreamBatch = defaultStreamBatch
+	}
+	if c.MaxTransactionBytes <= 0 {
+		c.MaxTransactionBytes = defaultMaxTransactionBytes
 	}
 	if c.CheckpointEvery <= 0 {
 		c.CheckpointEvery = defaultCheckpointEvery
@@ -574,6 +583,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.StreamBatch > maxStreamBatch {
 		return fmt.Errorf("mongodb cdc: stream batch %d exceeds %d", cfg.StreamBatch, maxStreamBatch)
+	}
+	if cfg.MaxTransactionBytes > maxTransactionBytes {
+		return fmt.Errorf("mongodb cdc: max transaction size %d MiB exceeds %d MiB", cfg.MaxTransactionBytes>>20, maxTransactionBytes>>20)
 	}
 	if len(cfg.Include) == 0 {
 		return errors.New("mongodb cdc: at least one --include database.collection pattern is required")

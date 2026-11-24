@@ -35,6 +35,21 @@ func (f *flakyStore) UpsertPipeline(ctx context.Context, p store.Pipeline) error
 	return f.Store.UpsertPipeline(ctx, p)
 }
 
+func (f *flakyStore) UpdatePipelineEnv(ctx context.Context, name, envPath string, envEnc []byte) (bool, error) {
+	if f.failUpsertPipeline.Load() {
+		return false, errFlaky
+	}
+	return f.Store.UpdatePipelineEnv(ctx, name, envPath, envEnc)
+}
+
+// Config saves write config_yaml with a compare-and-swap; the outage must hit that path too.
+func (f *flakyStore) UpdatePipelineConfigCompareAndSwap(ctx context.Context, name string, expectedHasConfig bool, expected, config string) (bool, error) {
+	if f.failUpsertPipeline.Load() {
+		return false, errFlaky
+	}
+	return f.Store.UpdatePipelineConfigCompareAndSwap(ctx, name, expectedHasConfig, expected, config)
+}
+
 const dbKey = "0123456789abcdef0123456789abcdef"
 
 // Config edit while the database rejects the write: the old code kept the new file and only logged a

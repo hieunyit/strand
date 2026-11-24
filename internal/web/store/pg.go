@@ -303,6 +303,19 @@ func (p *PG) UpdatePipelineConfigCompareAndSwap(ctx context.Context, name string
 	return n == 1, nil
 }
 
+func (p *PG) UpdatePipelineEnv(ctx context.Context, name, envPath string, envEnc []byte) (bool, error) {
+	res, err := p.db.ExecContext(ctx, `UPDATE pipelines SET env_path = $2, env_enc = $3, updated_at = now() WHERE name = $1`,
+		name, envPath, envEnc)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	return n == 1, nil
+}
+
 func (p *PG) SetPipelineConflicts(ctx context.Context, name, conflicts string) error {
 	if conflicts == "" {
 		conflicts = "[]"

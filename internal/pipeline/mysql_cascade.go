@@ -381,11 +381,9 @@ func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope 
 	}
 	sort.Strings(plan.signatures)
 	for _, fk := range target {
-		if nativeChecks {
-			if !targetScope[fk.Child] && !targetScope[fk.Parent] {
-				continue
-			}
-		} else if !fk.cascades() || !targetScope[fk.Parent] {
+		// Without a source cascade the writer keeps foreign_key_checks=0, so
+		// no target FK (cascading or not) acts on replicated writes.
+		if !nativeChecks || !targetScope[fk.Child] && !targetScope[fk.Parent] {
 			continue
 		}
 		if targetPinned[fk.Child] || targetPinned[fk.Parent] {

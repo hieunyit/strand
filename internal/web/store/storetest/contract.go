@@ -88,6 +88,16 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if !updated || bare.ConfigYAML != "version: 2\n" || bare.ConfigPath != "/x.yaml" {
 			t.Fatalf("CAS result for discovered pipeline = %+v", bare)
 		}
+		// An env save touches env columns only and keeps the CAS-written config.
+		updated, err = s.UpdatePipelineEnv(ctx, "bare", "/x.env", []byte("sealed"))
+		must(t, err)
+		bare, _, _ = s.GetPipeline(ctx, "bare")
+		if !updated || bare.ConfigYAML != "version: 2\n" || bare.EnvPath != "/x.env" || string(bare.EnvEnc) != "sealed" {
+			t.Fatalf("env update = %v %+v", updated, bare)
+		}
+		if updated, err = s.UpdatePipelineEnv(ctx, "no-such-pipeline", "/y.env", nil); err != nil || updated {
+			t.Fatalf("env update of a missing row = %v %v", updated, err)
+		}
 		p.ConfigYAML = "version: 2\n"
 		must(t, s.UpsertPipeline(ctx, p))
 		l, _ := s.ListPipelines(ctx)

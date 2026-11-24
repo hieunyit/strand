@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -198,7 +199,7 @@ func newValidateCmd() *cobra.Command {
 					// Start creates an empty checkpoint row before attempting the copy;
 					// only a published applied position means this is a real resume.
 					resumed = err == nil && applied != ""
-					if err != nil && err != sql.ErrNoRows {
+					if err != nil && !errors.Is(err, sql.ErrNoRows) {
 						return err
 					}
 				}

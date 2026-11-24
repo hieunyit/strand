@@ -215,6 +215,9 @@ type Store interface {
 	// UpdatePipelineConfigCompareAndSwap changes only config_yaml, and only if
 	// the stored config still matches the version the editor read.
 	UpdatePipelineConfigCompareAndSwap(ctx context.Context, name string, expectedHasConfig bool, expected, config string) (bool, error)
+	// UpdatePipelineEnv changes only env_path and env_enc of an existing row
+	// (never config_yaml), and reports whether the row exists.
+	UpdatePipelineEnv(ctx context.Context, name, envPath string, envEnc []byte) (bool, error)
 	// SetPipelineConflicts replaces the conflicts JSON of a row.
 	SetPipelineConflicts(ctx context.Context, name, conflicts string) error
 	// DeletePipeline removes the registry row and its desired state (files are left alone).

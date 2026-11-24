@@ -112,6 +112,14 @@ func (s rejectPipelineWrites) UpsertPipeline(context.Context, store.Pipeline) er
 	return errors.New("test database unavailable")
 }
 
+func (s rejectPipelineWrites) UpdatePipelineEnv(context.Context, string, string, []byte) (bool, error) {
+	return false, errors.New("test database unavailable")
+}
+
+func (s rejectPipelineWrites) UpdatePipelineConfigCompareAndSwap(context.Context, string, bool, string, string) (bool, error) {
+	return false, errors.New("test database unavailable")
+}
+
 func TestEditPersistenceFailureRollsBack(t *testing.T) {
 	e := opsEnv(t, false, nil)
 	p := e.srv.reg.Get("orders")

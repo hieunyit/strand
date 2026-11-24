@@ -105,7 +105,7 @@ func (s *Server) registerRegistryOps() {
 					if err := writeFilePreserving(envPath, b, true, false); err != nil {
 						return ActionResult{}, err
 					}
-					if err := srv.persistPipelineFiles(p); err != nil {
+					if err := srv.persistPipelineEnv(p, envPath); err != nil {
 						srv.rollbackFile(envPath, orig)
 						return ActionResult{}, &ActionError{Status: http.StatusServiceUnavailable, Msg: ".env NOT adopted: metadata database: " + err.Error()}
 					}

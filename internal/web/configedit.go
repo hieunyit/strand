@@ -606,9 +606,7 @@ func (s *Server) saveEnvContent(ctx context.Context, p *Pipeline, entries map[st
 		}
 	}
 
-	updated := *p
-	updated.EnvFile = envPath
-	if err := s.persistPipelineFiles(&updated); err != nil {
+	if err := s.persistPipelineEnv(p, envPath); err != nil {
 		var rollbackErr error
 		if errors.Is(origEnvErr, os.ErrNotExist) {
 			rollbackErr = os.Remove(envPath)

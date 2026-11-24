@@ -534,6 +534,36 @@ func (s *Server) persistPipelineFiles(p *Pipeline) error {
 	return s.db.st.UpsertPipeline(ctx, row)
 }
 
+// persistPipelineEnv stores the .env file only. It never rewrites config_yaml
+// from the local disk, which can hold an older config than the database when
+// another Web instance saved a config meanwhile.
+func (s *Server) persistPipelineEnv(p *Pipeline, envPath string) error {
+	if p == nil {
+		return nil
+	}
+	envB, err := os.ReadFile(envPath)
+	if err != nil {
+		return err
+	}
+	sealed, err := s.db.box.Seal(envB, p.Name)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := dbCtx()
+	defer cancel()
+	updated, err := s.db.st.UpdatePipelineEnv(ctx, p.Name, envPath, sealed)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		// No metadata row yet: create it from the files once.
+		withEnv := *p
+		withEnv.EnvFile = envPath
+		return s.persistPipelineFiles(&withEnv)
+	}
+	return nil
+}
+
 // persistPipelineConfigSnapshot stores exactly the bytes that the caller wrote
 // to disk. expected is the config version read before validation; when another
 // Web instance saved meanwhile, fail instead of replacing its newer version.

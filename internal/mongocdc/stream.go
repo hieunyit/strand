@@ -31,8 +31,10 @@ func sourceTxnContainsDDL(operation, txn string) bool {
 	if txn == "" {
 		return false
 	}
+	// create/createIndexes/dropIndexes/modify are allowed in MongoDB 4.4+
+	// transactions; they are reconciled inline without a batch boundary.
 	switch operation {
-	case "create", "createIndexes", "dropIndexes", "modify", "drop", "dropDatabase", "rename", "invalidate":
+	case "drop", "dropDatabase", "rename", "invalidate":
 		return true
 	default:
 		return false
@@ -478,11 +480,14 @@ func (r *runner) stream(ctx context.Context) (err error) {
 		// Size-based cuts occur only between source transactions. A transaction beyond
 		// the atomic safety bound fails closed before any of its events are applied.
 		txn := event.txnKey()
-		if sourceTxnContainsDDL(event.OperationType, txn) {
+		// Only changes this pipeline replicates count: traffic on other or
+		// excluded collections can neither block nor split the pipeline.
+		sel := event.NS.DB == cfg.SourceDB && event.NS.Coll != "" && selected(cfg, cfg.SourceDB+"."+event.NS.Coll)
+		if sel && sourceTxnContainsDDL(event.OperationType, txn) {
 			return fmt.Errorf("%w (%s)", ErrSourceTransactionDDL, event.OperationType)
 		}
 		checkpointDue := time.Since(lastCheckpoint) >= cfg.CheckpointEvery
-		if sourceTxnOverLimit(b, txn, len(it.raw), 20*cfg.StreamBatch, 8*streamBatchBytes) {
+		if sel && sourceTxnOverLimit(b, txn, len(it.raw), 20*cfg.StreamBatch, cfg.MaxTransactionBytes) {
 			return fmt.Errorf("%w (events=%d bytes=%d)", ErrSourceTransactionTooLarge, b.txnEvents+1, b.txnBytes+len(it.raw))
 		}
 		if batchFlushDue(b, txn, cfg.StreamBatch, streamBatchBytes, checkpointDue) {
@@ -495,13 +500,17 @@ func (r *runner) stream(ctx context.Context) (err error) {
 		if err != nil {
 			return fmt.Errorf("apply MongoDB event %s on %s.%s: %w", event.OperationType, event.NS.DB, event.NS.Coll, err)
 		}
-		if txn == "" {
+		switch {
+		case txn == "":
 			b.txnEvents, b.txnBytes = 0, 0
-		} else if txn == priorTxn {
-			b.txnEvents++
-			b.txnBytes += len(it.raw)
-		} else {
-			b.txnEvents, b.txnBytes = 1, len(it.raw)
+		case txn != priorTxn:
+			b.txnEvents, b.txnBytes = 0, 0
+			fallthrough
+		default:
+			if sel {
+				b.txnEvents++
+				b.txnBytes += len(it.raw)
+			}
 		}
 		b.txn = txn
 		if event.ClusterTime.T != 0 {
@@ -634,8 +643,15 @@ func (r *runner) logStreamProgress(stats *streamStats, force bool) {
 func (r *runner) addEvent(b *batch, event *streamEvent) (bool, error) {
 	cfg := r.cfg
 	switch event.OperationType {
-	case "dropDatabase", "rename", "drop", "create", "invalidate":
+	case "dropDatabase", "rename", "drop", "invalidate":
 		return true, nil
+	case "create":
+		// Inside a transaction the create cannot be a batch boundary: the target
+		// collection is created by the transaction's first write and its options
+		// are reconciled (as before showExpandedEvents create handling).
+		if event.txnKey() == "" {
+			return true, nil
+		}
 	}
 	if event.NS.DB != cfg.SourceDB || event.NS.Coll == "" || !selected(cfg, cfg.SourceDB+"."+event.NS.Coll) {
 		return false, nil
@@ -857,6 +873,12 @@ func (r *runner) applyDDL(ctx context.Context, event *streamEvent, token bson.Ra
 			return "", nil
 		}
 		info, err := r.sourceCollectionInfo(ctx, event.NS.Coll)
+		if errors.Is(err, errUnsupportedCollectionType) {
+			// Views and time-series collections are not replicated; the snapshot
+			// skips them the same way.
+			cfg.Logger.Warn("MongoDB create of a non-replicable collection type ignored; add an exclude pattern to silence this", "collection", cfg.SourceDB+"."+event.NS.Coll, "error", err)
+			return "", nil
+		}
 		if err != nil {
 			return "", err
 		}
@@ -1049,6 +1071,8 @@ func (r *runner) resumeRecopies(ctx context.Context) error {
 	return nil
 }
 
+var errUnsupportedCollectionType = errors.New("unsupported MongoDB collection type")
+
 func (r *runner) sourceCollectionInfo(ctx context.Context, name string) (collectionInfo, error) {
 	info := collectionInfo{Name: name, Type: "collection"}
 	cur, err := r.source.ListCollections(ctx, bson.D{{Key: "name", Value: name}})
@@ -1062,7 +1086,7 @@ func (r *runner) sourceCollectionInfo(ctx context.Context, name string) (collect
 		}
 		info.Options = append(bson.Raw(nil), info.Options...)
 		if info.Type != "" && info.Type != "collection" {
-			return info, fmt.Errorf("%s.%s has MongoDB collection type %q; only ordinary collections can be replicated", r.cfg.SourceDB, name, info.Type)
+			return info, fmt.Errorf("%w: %s.%s has MongoDB collection type %q; only ordinary collections can be replicated", errUnsupportedCollectionType, r.cfg.SourceDB, name, info.Type)
 		}
 	}
 	return info, cur.Err()

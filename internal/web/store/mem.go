@@ -249,6 +249,20 @@ func (m *Mem) UpdatePipelineConfigCompareAndSwap(_ context.Context, name string,
 	return true, nil
 }
 
+func (m *Mem) UpdatePipelineEnv(_ context.Context, name, envPath string, envEnc []byte) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	r, ok := m.pipes[name]
+	if !ok {
+		return false, nil
+	}
+	r.EnvPath, r.EnvEnc, r.Updated = envPath, append([]byte(nil), envEnc...), time.Now()
+	m.pipes[name] = r
+	return true, nil
+}
+
 func (m *Mem) SetPipelineConflicts(_ context.Context, name, conflicts string) error {
 	if err := m.enter(); err != nil {
 		return err

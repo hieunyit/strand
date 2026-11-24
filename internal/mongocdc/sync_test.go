@@ -78,11 +78,17 @@ func TestSourceTransactionLimitFailsBeforeBatchCanFlush(t *testing.T) {
 }
 
 func TestSourceTransactionDDLIsRejected(t *testing.T) {
-	if !sourceTxnContainsDDL("create", "session/txn-1") {
-		t.Fatal("create inside a source transaction was not classified as atomic DDL")
+	if !sourceTxnContainsDDL("drop", "session/txn-1") {
+		t.Fatal("drop inside a source transaction was not classified as atomic DDL")
 	}
-	if sourceTxnContainsDDL("create", "") || sourceTxnContainsDDL("insert", "session/txn-1") {
-		t.Fatal("ordinary non-transactional create or transactional insert was misclassified")
+	// MongoDB 4.4+ permits these inside transactions; they are reconciled inline.
+	for _, op := range []string{"create", "createIndexes", "dropIndexes", "modify", "insert"} {
+		if sourceTxnContainsDDL(op, "session/txn-1") {
+			t.Fatalf("transactional %s was rejected", op)
+		}
+	}
+	if sourceTxnContainsDDL("drop", "") {
+		t.Fatal("non-transactional drop was misclassified")
 	}
 }
 
