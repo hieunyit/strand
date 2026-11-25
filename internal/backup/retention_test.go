@@ -148,3 +148,93 @@ func TestRetentionChainsAndLogs(t *testing.T) {
 		t.Fatalf("chain 4 = %v", got)
 	}
 }
+
+// A replica is cataloged when the copy runs (later than its original, same job). It must not take the
+// original's keep slot: originals and replicas are planned separately, each with its own safety net.
+func TestRetentionReplicasDoNotExpireOriginals(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	b1 := rec("b1", now.Add(-48*time.Hour), KindFull, "")
+	b2 := rec("b2", now.Add(-24*time.Hour), KindFull, "")
+	c1 := rec("c1", now.Add(-time.Hour), KindFull, "") // replica of b1, copied after b2 was taken
+	c1.CopyOf, c1.Repository = "b1", "offsite"
+	ds := PlanRetention([]Record{b1, b2, c1}, RetentionPolicy{KeepLast: 1}, now)
+	if got, want := kept(ds), []string{"b2", "c1"}; !eq(got, want) {
+		t.Fatalf("kept %v, want %v (decisions %+v)", got, want, ds)
+	}
+	// Newest first across lineages.
+	if ds[0].ID != "c1" || ds[1].ID != "b2" || ds[2].ID != "b1" {
+		t.Fatalf("order %v", ds)
+	}
+	// Replica of the newest original only: the original is still kept.
+	c2 := rec("c2", now, KindFull, "")
+	c2.CopyOf, c2.Repository = "b2", "offsite"
+	ds = PlanRetention([]Record{b1, b2, c1, c2}, RetentionPolicy{KeepLast: 1}, now)
+	if got, want := kept(ds), []string{"b2", "c2"}; !eq(got, want) {
+		t.Fatalf("kept %v, want %v", got, want)
+	}
+	// Replicas in two repositories are planned per repository; a replicated incremental keeps the replica of
+	// its parent.
+	inc := rec("i1", now.Add(-12*time.Hour), KindIncremental, "b2")
+	ci := rec("ci", now.Add(-11*time.Hour), KindIncremental, "b2")
+	ci.CopyOf, ci.Repository = "i1", "offsite"
+	c3 := rec("c3", now.Add(-30*time.Minute), KindFull, "")
+	c3.CopyOf, c3.Repository = "b2", "dr"
+	ds = PlanRetention([]Record{b1, b2, inc, c1, c2, ci, c3}, RetentionPolicy{KeepLast: 1}, now)
+	if got, want := kept(ds), []string{"b2", "c2", "c3", "i1"}; !eq(got, want) {
+		t.Fatalf("kept %v, want %v", got, want)
+	}
+	ci.CreatedAt = now.Add(time.Minute)
+	c0 := rec("c0", now.Add(30*time.Second), KindFull, "")
+	c0.CopyOf, c0.Repository = "b1", "offsite"
+	ds = PlanRetention([]Record{b1, b2, inc, c0, c2, ci}, RetentionPolicy{KeepLast: 1}, now)
+	if got, want := kept(ds), []string{"b2", "c0", "c2", "ci", "i1"}; !eq(got, want) {
+		t.Fatalf("replica chain: kept %v, want %v", got, want)
+	}
+}
+
+// A restore point whose verification failed is not a restore point for the keep rules: it never takes
+// the slot of a good one, and expires once older than the oldest kept good restore point.
+func TestRetentionSkipsFailedChecks(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	b1 := rec("b1", now.Add(-72*time.Hour), KindFull, "")
+	b1.CheckStatus = CheckOK
+	b2 := rec("b2", now.Add(-48*time.Hour), KindFull, "")
+	b2.CheckStatus = CheckFailed
+	b3 := rec("b3", now.Add(-24*time.Hour), KindFull, "")
+	b3.CheckStatus = CheckFailed
+	ds := PlanRetention([]Record{b1, b2, b3}, RetentionPolicy{KeepLast: 1}, now)
+	if got, want := kept(ds), []string{"b1", "b2", "b3"}; !eq(got, want) {
+		t.Fatalf("kept %v, want %v (decisions %+v)", got, want, ds)
+	}
+	for _, d := range ds {
+		if d.ID == "b1" && d.Reasons[0] != "keep-last 1" {
+			t.Fatalf("b1 reasons %v", d.Reasons)
+		}
+	}
+	// A newer good backup arrives: the failed ones are older than every kept good one and expire.
+	b4 := rec("b4", now, KindFull, "")
+	ds = PlanRetention([]Record{b1, b2, b3, b4}, RetentionPolicy{KeepLast: 1}, now)
+	if got, want := kept(ds), []string{"b4"}; !eq(got, want) {
+		t.Fatalf("kept %v, want %v", got, want)
+	}
+	for _, d := range ds {
+		if d.ID == "b3" && (d.Keep || d.Reasons[0] != "check failed; older than every kept verified restore point") {
+			t.Fatalf("b3 = %+v", d)
+		}
+	}
+	// keep_last 2 counts good restore points only.
+	ds = PlanRetention([]Record{b1, b2, b3, b4}, RetentionPolicy{KeepLast: 2}, now)
+	if got, want := kept(ds), []string{"b1", "b2", "b3", "b4"}; !eq(got, want) {
+		t.Fatalf("keep-last 2: kept %v, want %v", got, want)
+	}
+	// The safety net protects the newest good full, also under max age; a failed one past max age expires.
+	ds = PlanRetention([]Record{b1, b2, b3}, RetentionPolicy{MaxAgeDays: 1}, now)
+	if got, want := kept(ds), []string{"b1", "b3"}; !eq(got, want) {
+		t.Fatalf("max age: kept %v, want %v", got, want)
+	}
+	// Nothing verified good: the failed ones are planned as ordinary restore points.
+	ds = PlanRetention([]Record{b2, b3}, RetentionPolicy{KeepLast: 1}, now)
+	if got, want := kept(ds), []string{"b3"}; !eq(got, want) {
+		t.Fatalf("all failed: kept %v, want %v", got, want)
+	}
+}

@@ -58,19 +58,65 @@ type Decision struct {
 }
 
 // PlanRetention applies p to the complete records of one retention group (one job, or one source in one
-// repository) and returns a decision per record, newest first. Guarantees:
+// repository) and returns a decision per record, newest first.
+//
+// The records are first split into lineages that are planned independently (see retentionLineage):
+// originals among originals, and replicas (CopyOf set) among the replicas in the same target repository.
+// A replica is created later than its original (it is cataloged when the copy runs), so planning both
+// together would let a fresh replica take a keep slot and expire the original it was made from; a
+// replica is also not a PITR base. Every guarantee below holds per lineage:
 //   - the newest complete full backup is always kept (a policy can never leave zero restore points);
 //   - an incremental that is kept keeps its whole parent chain;
 //   - log segments (binlog/WAL/oplog) are kept from the oldest kept base backup onward so every kept base
 //     stays point-in-time recoverable; older segments expire;
 //   - legal hold and S3 Object Lock retention (RetainUntil in the future) block expiry.
+//
+// Verification results: a restore point whose last check failed (CheckStatus == CheckFailed) is not
+// a usable restore point, so it never fills a keep slot (keep_last, hourly/daily/..., within) and is not
+// the "newest full" the safety net protects; the keep rules select among the restore points that are not
+// known to be bad (verified OK or not checked yet). A failed-check restore point is kept only while it is
+// newer than the oldest kept good restore point (it may be a false alarm and costs no good slot) and
+// expires once it is older than all of them. When a lineage has no good restore point at all, the
+// failed-check ones are planned as ordinary restore points rather than deleting everything.
 func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decision {
-	recs := make([]Record, 0, len(records))
+	lineages := map[string][]Record{}
+	var order []string
+	byID := map[string]Record{}
 	for _, r := range records {
-		if r.Status == StatusComplete {
-			recs = append(recs, r)
+		if r.Status != StatusComplete {
+			continue
 		}
+		k := retentionLineage(r)
+		if _, ok := lineages[k]; !ok {
+			order = append(order, k)
+		}
+		lineages[k] = append(lineages[k], r)
+		byID[r.ID] = r
 	}
+	out := []Decision{}
+	for _, k := range order {
+		out = append(out, planLineage(lineages[k], p, now)...)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := byID[out[i].ID], byID[out[j].ID]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID > b.ID
+	})
+	return out
+}
+
+// retentionLineage is the set of records one retention plan covers: the originals of the group, or the
+// replicas of the group stored in one target repository.
+func retentionLineage(r Record) string {
+	if r.CopyOf != "" {
+		return "copy:" + r.Repository + "|" + r.Bucket
+	}
+	return "original"
+}
+
+func planLineage(recs []Record, p RetentionPolicy, now time.Time) []Decision {
 	sort.SliceStable(recs, func(i, j int) bool {
 		if !recs[i].CreatedAt.Equal(recs[j].CreatedAt) {
 			return recs[i].CreatedAt.After(recs[j].CreatedAt)
@@ -80,12 +126,26 @@ func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decisio
 	reasons := map[string][]string{}
 	add := func(id, why string) { reasons[id] = append(reasons[id], why) }
 	byID := map[string]Record{}
-	var points []Record
+	// A replica keeps the ParentID of its original; within a replica lineage the parent is the replica
+	// of that original.
+	replicaOf := map[string]string{}
+	var points, good, bad []Record
 	for _, r := range recs {
 		byID[r.ID] = r
+		if r.CopyOf != "" {
+			replicaOf[r.CopyOf] = r.ID
+		}
 		if r.KindOrFull() != KindLog {
 			points = append(points, r)
+			if r.CheckStatus == CheckFailed {
+				bad = append(bad, r)
+			} else {
+				good = append(good, r)
+			}
 		}
+	}
+	if len(good) == 0 {
+		good, bad = points, nil
 	}
 	if !p.Enabled() {
 		out := make([]Decision, 0, len(recs))
@@ -96,7 +156,7 @@ func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decisio
 	}
 	now = now.UTC()
 	if p.KeepLast > 0 {
-		for i, r := range points {
+		for i, r := range good {
 			if i < p.KeepLast {
 				add(r.ID, fmt.Sprintf("keep-last %d", p.KeepLast))
 			}
@@ -107,7 +167,7 @@ func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decisio
 			return
 		}
 		seen := map[string]bool{}
-		for _, r := range points {
+		for _, r := range good {
 			k := key(r.CreatedAt.UTC())
 			if seen[k] {
 				continue
@@ -129,7 +189,7 @@ func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decisio
 	bucketRule(p.KeepYearly, "yearly", func(t time.Time) string { return t.Format("2006") })
 	if p.KeepWithinDays > 0 {
 		cut := now.Add(-time.Duration(p.KeepWithinDays) * 24 * time.Hour)
-		for _, r := range points {
+		for _, r := range good {
 			if !r.CreatedAt.Before(cut) {
 				add(r.ID, fmt.Sprintf("within %dd", p.KeepWithinDays))
 			}
@@ -137,24 +197,60 @@ func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decisio
 	}
 	onlyMaxAge := p.KeepLast == 0 && p.KeepHourly == 0 && p.KeepDaily == 0 && p.KeepWeekly == 0 &&
 		p.KeepMonthly == 0 && p.KeepYearly == 0 && p.KeepWithinDays == 0
+	var maxAgeCut time.Time
 	if p.MaxAgeDays > 0 {
-		cut := now.Add(-time.Duration(p.MaxAgeDays) * 24 * time.Hour)
-		for _, r := range points {
-			if r.CreatedAt.Before(cut) {
+		maxAgeCut = now.Add(-time.Duration(p.MaxAgeDays) * 24 * time.Hour)
+		for _, r := range good {
+			if r.CreatedAt.Before(maxAgeCut) {
 				delete(reasons, r.ID)
 			} else if onlyMaxAge {
 				add(r.ID, fmt.Sprintf("younger than max age %dd", p.MaxAgeDays))
 			}
 		}
 	}
-	// Safety net: never expire the newest full backup.
-	for _, r := range points {
-		if r.KindOrFull() == KindFull {
-			if len(reasons[r.ID]) == 0 {
-				add(r.ID, "newest full backup (always kept)")
+	// Safety net: never expire the newest good full backup (the newest full of any check status when no
+	// good full exists).
+	newestFull := func(rs []Record) (Record, bool) {
+		for _, r := range rs {
+			if r.KindOrFull() == KindFull {
+				return r, true
 			}
-			break
 		}
+		return Record{}, false
+	}
+	nf, ok := newestFull(good)
+	if !ok {
+		nf, ok = newestFull(points)
+	}
+	if ok && len(reasons[nf.ID]) == 0 {
+		add(nf.ID, "newest full backup (always kept)")
+	}
+	// Failed-check restore points never displace a good one: kept while newer than the oldest kept good
+	// restore point, expired after.
+	var oldestGood *time.Time
+	for _, r := range good {
+		if len(reasons[r.ID]) > 0 && (oldestGood == nil || r.CreatedAt.Before(*oldestGood)) {
+			t := r.CreatedAt
+			oldestGood = &t
+		}
+	}
+	for _, r := range bad {
+		if len(reasons[r.ID]) > 0 || oldestGood == nil || !r.CreatedAt.After(*oldestGood) {
+			continue
+		}
+		if p.MaxAgeDays > 0 && r.CreatedAt.Before(maxAgeCut) {
+			continue
+		}
+		add(r.ID, "check failed; newer than the oldest kept verified restore point")
+	}
+	parentOf := func(id string) (Record, bool) {
+		if pr, ok := byID[id]; ok {
+			return pr, true
+		}
+		if rid, ok := replicaOf[id]; ok {
+			return byID[rid], true
+		}
+		return Record{}, false
 	}
 	// Chains: a kept incremental keeps every ancestor.
 	for _, r := range points {
@@ -162,12 +258,12 @@ func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decisio
 			continue
 		}
 		for parent, guard := r.ParentID, 0; parent != "" && guard < 10000; guard++ {
-			pr, ok := byID[parent]
+			pr, ok := parentOf(parent)
 			if !ok {
 				break
 			}
-			if !containsPrefix(reasons[parent], "parent of ") {
-				add(parent, "parent of "+r.ID)
+			if !containsPrefix(reasons[pr.ID], "parent of ") {
+				add(pr.ID, "parent of "+r.ID)
 			}
 			parent = pr.ParentID
 		}
@@ -206,7 +302,10 @@ func PlanRetention(records []Record, p RetentionPolicy, now time.Time) []Decisio
 				keep, blocked, why = true, true, []string{"object lock until " + r.RetainUntil.UTC().Format(time.RFC3339)}
 			} else {
 				why = []string{"not selected by any keep rule"}
-				if p.MaxAgeDays > 0 && r.CreatedAt.Before(now.Add(-time.Duration(p.MaxAgeDays)*24*time.Hour)) {
+				if r.KindOrFull() != KindLog && r.CheckStatus == CheckFailed && len(bad) > 0 {
+					why = []string{"check failed; older than every kept verified restore point"}
+				}
+				if p.MaxAgeDays > 0 && r.CreatedAt.Before(maxAgeCut) {
 					why = []string{fmt.Sprintf("older than max age %dd", p.MaxAgeDays)}
 				}
 			}
