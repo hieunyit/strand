@@ -485,7 +485,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `bootstrap.default` | `logical` | `logical` (chế độ A). `seed` hoặc `start_at` cho pipeline mới bắt buộc `--start-at`, không có thì exit 2 |
 | `bootstrap.per_table.<t>.mode` | — | Chỉ `strand plan` đọc (ETA theo bảng); `sync` không dùng |
 | `bootstrap.logical.chunk_rows` | `auto` (5000) | Số row mỗi chunk snapshot |
-| `bootstrap.logical.max_parallel` | 1 | Số bảng snapshot logic **cùng lúc** (1–32). Chunk của một bảng vẫn đọc tuần tự; các bảng khác nhau chạy song song và cùng chia **một** ngân sách đọc nguồn (`iops.soft/hard`). Bảng lớn được bắt đầu trước. Source PostgreSQL: bỏ qua (luôn 1, có cảnh báo). Mục 8.1 |
+| `bootstrap.logical.max_parallel` | 1 | Số bảng snapshot logic **cùng lúc** (1–32). Chunk của một bảng vẫn đọc tuần tự; các bảng khác nhau chạy song song và cùng chia **một** ngân sách đọc nguồn (`iops.soft/hard`). Bảng lớn được bắt đầu trước. Source PostgreSQL: bỏ qua (luôn 1, có cảnh báo). MongoDB: tổng số worker copy collection, collection lớn được chia thành khoảng `_id` cho nhiều worker (mục "Pipeline MongoDB → MongoDB"). Mục 8.1 |
 | `bootstrap.logical.windows` | rỗng (mọi lúc) | Khung giờ cho phép snapshot, ví dụ `["22:00-06:00"]` (giờ địa phương của process; qua nửa đêm được). Khi `bootstrap_retention_risk` bật, snapshot chạy cả ngoài khung |
 | `bootstrap.create_schema` | `auto` | Mục 3.1 |
 | `bootstrap.auto_seed` | `false` | Tự nạp bảng không khóa và nhóm FK cascade trong một ảnh nhất quán rồi chạy CDC. Cần nguồn họ MySQL, đích MySQL, `tables.keyless: full_row`, `bootstrap.default: logical`, không `start_at`/`per_table`/che cột. Nguồn MySQL cần `RELOAD`. Chi tiết: [MARIADB-MIGRATION.md](MARIADB-MIGRATION.md) "Tự nạp bảng thiếu khóa và nhóm khóa ngoại" |
@@ -902,7 +902,7 @@ Hướng dẫn từng bước (cài đặt, quyền file, TLS/reverse proxy, s�
 
 `strand web --config web.yaml` chạy một giao diện web theo kiểu Flink Dashboard: Overview (số pipeline theo trạng thái, lag lớn nhất, tổng rows/s), danh sách pipeline, và trang chi tiết có các tab **Graph** (Source → Assembler → Scheduler → Writer×N → Target kèm số liệu và biểu đồ: 1 giờ trong RAM; chế độ PostgreSQL thêm bộ chọn 6 h, 24 h, 7 d đọc từ lịch sử trong DB và giữ biểu đồ qua lần khởi động lại web), **Tables** (snapshot từng bảng), **Checkpoint**, **Errors** (WARN/ERROR gần nhất, exit code lần dừng gần nhất kèm cách xử lý), **Config** (che mật khẩu, cảnh báo khóa chưa có tác dụng, chế độ sửa YAML và .env), **Logs**. Từ M3 có **thao tác**; M5 có **sửa cấu hình** và **tạo pipeline mới**; từ M4 có **wizard Repair và Promote** (đoạn dưới). REST: `docs/WEB-API.md`. Quyết định: `questions/DECISIONS-WEB-UI-2026-11-15.md`.
 
-**Chỉnh tốc độ snapshot trên web.** Form tạo pipeline có mục "Snapshot speed & safety" (tùy chọn), và tab Config có thẻ **Tuning** cho pipeline đang có: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.max_parallel` ("Tables in parallel"), `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.*` (`strand_query_p99.max_ratio`, `replica_lag.max`), `resources.workers.max` (mục 6.2, 8.1). Chỉ gồm khóa đã có tác dụng, không gồm khóa ở 6.3. Lưu qua đường sửa cấu hình thường (validate, diff, `.bak`), có hiệu lực sau restart; đổi nóng tốc độ đọc dùng Throttle (tab Graph). `GET/POST /api/v1/pipelines/{name}/tuning` trong `docs/WEB-API.md`.
+**Chỉnh tốc độ snapshot trên web.** Form tạo pipeline có mục "Snapshot speed & safety" (tùy chọn), và tab Config có thẻ **Tuning** cho pipeline đang có: `resources.source.iops.soft/hard`, `bootstrap.logical.chunk_rows`, `bootstrap.logical.max_parallel` ("Tables in parallel"), `bootstrap.logical.windows`, `governor.algorithm`, `governor.lag_slo`, `governor.breaker.*` (`strand_query_p99.max_ratio`, `replica_lag.max`), `resources.workers.max` (mục 6.2, 8.1). Pipeline MongoDB có thẻ Tuning riêng: `max_parallel`, `split_min_docs`, `snapshot_batch`, `stream_batch`, `lease_ttl`. Chỉ gồm khóa đã có tác dụng, không gồm khóa ở 6.3. Lưu qua đường sửa cấu hình thường (validate, diff, `.bak`), có hiệu lực sau restart; đổi nóng tốc độ đọc dùng Throttle (tab Graph). `GET/POST /api/v1/pipelines/{name}/tuning` trong `docs/WEB-API.md`.
 
 Không cần thư viện hay mạng ngoài: HTML, CSS, JS nhỏ và biểu đồ SVG đều nằm trong binary.
 
@@ -1359,4 +1359,58 @@ Với MongoDB CDC, các địa chỉ member mà replica set công bố phải tr
 
 ## Pipeline MongoDB → MongoDB
 
-`source.kind` = `target.kind` = `mongodb` là pipeline bình thường: `strand validate|plan|sync|top|pause|resume|checkpoint show|verify|snapshot add|stop|status`, unit systemd `strand@<tên>`, admin socket, `/metrics` và Web UI như pipeline SQL. Cấu hình (`uri: "${SRC_URI}"`, `database` hoặc nhiều database bằng `databases: [app, billing]`, `tables.include: ["db.*"]`, mục `mongodb:`), yêu cầu (replica set, MongoDB 4.4–8.0), quyền tối thiểu, cửa sổ oplog, hành vi failover, metric/cảnh báo và runbook: xem [docs/mongodb-cdc.md](mongodb-cdc.md). Một pipeline nhiều database chạy một change stream và checkpoint riêng cho mỗi database; transaction ghi vào nhiều database được áp dụng riêng phần của từng database (mục "Several databases in one pipeline").
+`source.kind` = `target.kind` = `mongodb` là pipeline bình thường: `strand validate|plan|sync|top|pause|resume|checkpoint show|verify|snapshot add|stop|status`, unit systemd `strand@<tên>`, admin socket, `/metrics` và Web UI như pipeline SQL. Cấu hình (`uri: "${SRC_URI}"`, `database` hoặc nhiều database bằng `databases: [app, billing]`, `tables.include: ["db.*"]`, mục `mongodb:`), yêu cầu (replica set, MongoDB 4.4–8.0), quyền tối thiểu, cửa sổ oplog, hành vi failover, metric/cảnh báo và runbook: xem [docs/mongodb-cdc.md](mongodb-cdc.md). Phần dưới hướng dẫn ba việc hay gặp: một pipeline nhiều database, copy song song nhiều collection, chia collection lớn cho nhiều worker.
+
+### Một pipeline, nhiều database
+
+Trên Web: ở bước nguồn, ô **Source databases** nhận một hoặc nhiều tên cách nhau dấu phẩy (`app, billing`). Bấm **List source databases** rồi bấm chọn từng database (bấm lại để bỏ chọn). Với nhiều database, mỗi database giữ nguyên tên ở đích; ô **Target database** chỉ dùng khi có một database nguồn. Để trống ô include thì mỗi database được copy toàn bộ (`app.*`, `billing.*`); nếu có ghi include thì mỗi database đã chọn phải có ít nhất một mẫu chọn nó.
+
+Trong YAML:
+
+```yaml
+source:
+  kind: mongodb
+  uri: "${SRC_URI}"
+  databases: [app, billing]          # thay cho database: app
+target:
+  kind: mongodb
+  uri: "${DST_URI}"
+  databases: { billing: billing_copy } # tùy chọn: đổi tên ở đích; database không ghi giữ nguyên tên
+tables:
+  include: ["app.*", "billing.invoices"]
+  exclude: ["*.tmp_*"]
+```
+
+Cách chạy và điều cần biết:
+
+- Mỗi database có snapshot, change stream, checkpoint và lease riêng, nhưng chạy chung một tiến trình và hiện là **một pipeline**: `strand top`, tab Tables, `verify`, `validate`, `plan` gộp mọi database và ghi tên `database.collection`. `snapshot add`, `verify --table`, `mongodb repair` phải ghi đủ `database.collection` (ghi mỗi tên collection bị từ chối khi pipeline có nhiều database).
+- Một database lỗi (mất lịch sử oplog, sự kiện không hỗ trợ, mất lease) thì **cả pipeline dừng**, mỗi database dừng ở checkpoint đã ghi, thông báo lỗi nêu tên database. Lỗi tạm (mạng, failover) được thử lại riêng từng database.
+- **Transaction ghi vào nhiều database được áp dụng riêng phần của từng database**: mỗi phần nguyên tử trên database đích của nó, nhưng người đọc đích có thể thấy phần này trước phần kia (tách thành nhiều pipeline cũng vậy). Kiểm tra app có chấp nhận được không trước khi cho đọc đích.
+- Hai database nguồn không được về cùng một database đích; database đích không được trùng một database nguồn khác của pipeline.
+- **Thêm database vào pipeline đang chạy** (sửa `source.databases`, restart): database cũ giữ checkpoint dưới tên pipeline nên **không bị copy lại**, chỉ database mới được snapshot (checkpoint `<tên pipeline>/<database>`). Bỏ một database khỏi danh sách: checkpoint và dữ liệu đích của nó được giữ nguyên.
+- Quyền: cấp quyền nguồn cho **mọi** database nguồn và quyền đích cho **mọi** database đích (mẫu role trong docs/mongodb-cdc.md mục Security); quyền trên `_strand_cdc` và `local` chỉ cần một lần.
+- Mỗi database mở kết nối riêng tới nguồn và đích (một change stream mỗi database). Metric của pipeline nhiều database mang nhãn `pipeline="<tên>/<database>"`.
+
+### Copy song song nhiều collection
+
+`bootstrap.logical.max_parallel` (1–32, mặc định 1) là **tổng số worker** của snapshot ban đầu, giống "Tables in parallel" của pipeline MySQL. Pipeline nhiều database chia số worker này cho các database (mỗi database ít nhất một).
+
+- Trên Web, pipeline mới: mục **MongoDB tuning** → **Collections in parallel** (điền sẵn 4).
+- Pipeline đang có: tab **Config** → thẻ **Tuning** → **Tables in parallel**, lưu rồi restart. Collection đã copy xong không bị copy lại; giá trị mới áp dụng cho phần còn lại.
+- YAML: `bootstrap: { logical: { max_parallel: 4 } }`.
+
+Collection lớn được bắt đầu trước. Mỗi worker là một luồng đọc nguồn và một luồng ghi đích: nguồn đang phục vụ production thì bắt đầu khoảng 4, theo dõi tải nguồn và độ trễ rồi mới tăng.
+
+### Chia collection lớn cho nhiều worker
+
+Collection có từ **2 × `mongodb.split_min_docs`** document trở lên (mặc định 100 000, tức từ 200 000 document) được chia thành tối đa `max_parallel` khoảng `_id`, mỗi khoảng do một worker copy. Nhờ vậy một collection rất lớn không còn giới hạn thời gian của cả snapshot.
+
+- Điểm chia lấy từ một mẫu ngẫu nhiên `_id` (`$sample`, đã sắp theo `_id`), nên các khoảng có số document gần bằng nhau. Mỗi khoảng đọc bằng biên của index `_id`, nên đúng với `_id` thuộc mọi kiểu BSON (số, chuỗi, ObjectId, Decimal128, document, binary…).
+- Mỗi khoảng có checkpoint riêng (`_strand_cdc.mongo_sync_progress`, `kind: snapshot_part`). Sau crash hay restart, từng khoảng copy tiếp từ `_id` cuối đã ghi: không copy trùng, không sót. Khoảng xong cuối cùng đánh dấu cả collection đã copy.
+- Tab Tables và `strand top` vẫn hiện **một dòng mỗi collection**, tiến độ gộp từ các khoảng; log có `MongoDB collection split between workers` (số khoảng) và `MongoDB collection range copied` (từng khoảng).
+- Chỉnh ngưỡng: thẻ **Tuning** → **Split large collections (documents per range)**, hoặc YAML `mongodb: { split_min_docs: 50000 }`. Nhỏ hơn thì collection nhỏ hơn cũng được chia; `-1` = không bao giờ chia. `max_parallel` = 1 thì không chia.
+- Quyết định chia được đưa ra **khi collection bắt đầu copy**. Collection đang copy dở giữ cách copy cũ (một worker, hoặc các khoảng đã chia) qua các lần restart; đổi ngưỡng chỉ có tác dụng với collection chưa bắt đầu.
+- Không chia: copy lại một collection (`snapshot add`, `verify --repair fix`) và collection có collation mặc định khác mặc định của MongoDB (thứ tự `_id` khi đó theo collation).
+- `strand plan` tính thời gian ước lượng theo số khoảng của collection lớn nhất.
+
+Ví dụ: collection `orders` 3 triệu document, `max_parallel: 8`, `split_min_docs` mặc định → 8 khoảng khoảng 375 000 document, 8 worker copy cùng lúc. Collection khác chờ tới khi có worker rảnh.
