@@ -69,7 +69,8 @@ func shared(t *testing.T) string {
 	_ = os.Chmod(d, 0o777)
 	t.Cleanup(func() {
 		// Files written by container users: remove through a container.
-		_ = exec.Command("docker", "run", "--rm", "-v", d+":"+d, "debian:bookworm-slim", "rm", "-rf", d+"/.").Run()
+		_ = exec.Command("docker", "run", "--rm", "--name", fmt.Sprintf("%s-cleanup-%d-%d", containerPrefix("bkp"), os.Getpid(), time.Now().UnixNano()),
+			"-v", d+":"+d, "debian:bookworm-slim", "rm", "-rf", d+"/.").Run()
 		_ = os.RemoveAll(d)
 	})
 	return d
@@ -84,9 +85,17 @@ func docker(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// containerPrefix names test containers: bkp, or STRAND_TEST_CONTAINER_PREFIX on a shared host.
+func containerPrefix(fallback string) string {
+	if p := os.Getenv("STRAND_TEST_CONTAINER_PREFIX"); p != "" {
+		return p + "-" + fallback
+	}
+	return fallback
+}
+
 func startContainer(t *testing.T, name, dir string, args ...string) string {
 	t.Helper()
-	full := fmt.Sprintf("bkp-%s-%d", name, os.Getpid())
+	full := fmt.Sprintf("%s-%s-%d", containerPrefix("bkp"), name, os.Getpid())
 	_ = exec.Command("docker", "rm", "-f", full).Run()
 	run := append([]string{"run", "-d", "--name", full, "--network", "host", "-v", dir + ":" + dir}, args...)
 	docker(t, run...)

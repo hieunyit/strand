@@ -231,7 +231,7 @@ func TestMySQLRecoveryWindowKeepsStandaloneSnapshotsOutside(t *testing.T) {
 	// A newer dump cannot be used until the cutoff is in a later whole second,
 	// even if it has matching logs. Automatic selection can still use the old base.
 	newer.JobID = base.JobID
-	unsafe := newerEnd.Add(500 * time.Millisecond)
+	unsafe := newerEnd // whole seconds only: MySQL replay has one-second resolution
 	records = []backup.Record{base, newer, log}
 	if plan, err := PlanRestore(records, nil, &unsafe); err != nil || plan.Base().ID != base.ID {
 		t.Fatalf("restore did not fall back to the safe older base: %+v %v", plan, err)

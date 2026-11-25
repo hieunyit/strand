@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -12,12 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
 
@@ -73,6 +77,9 @@ func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (e
 		return errors.New("incremental restore requires `strand backup fetch` and the native restore tool")
 	}
 	if base.Method == backup.MethodMySQLDump && plan.Target != nil {
+		if err := checkMySQLTargetTime(*plan.Target); err != nil {
+			return err
+		}
 		if err := checkMySQLPITRBaseTime(base, *plan.Target); err != nil {
 			return err
 		}
@@ -207,7 +214,8 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 			knownMap[strings.TrimSpace(k)] = true
 		}
 		for _, obj := range t.Objects {
-			if !knownMap[strings.TrimSpace(obj)] {
+			name := strings.TrimPrefix(strings.TrimSpace(obj), dbs[0]+".")
+			if !knownMap[name] {
 				return fmt.Errorf("table %q not found in backup", obj)
 			}
 		}
@@ -243,15 +251,60 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	if exists != 0 {
 		return fmt.Errorf("target database %s already exists; restores never overwrite", t.Database)
 	}
+	// Point-in-time recovery: stage the binlogs and prove the replay stays inside the target database
+	// before anything is created (see binlogGuard).
+	var binlogFiles, binlogNames, binlogArgs []string
+	var prescan *binlogGuard
+	var forbidden map[string]bool
+	if len(plan.Logs) > 0 {
+		dir, err := e.tmpDir()
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		binlogFiles, err = e.stageLogs(ctx, plan.Logs, dir, func(l backup.Record) string { return l.Details["seq"] + "-" + l.Details["server_file"] })
+		if err != nil {
+			return err
+		}
+		for _, l := range plan.Logs {
+			binlogNames = append(binlogNames, l.Details["server_file"])
+		}
+		targetDBs, err := mysqlDatabaseNames(ctx, db)
+		if err != nil {
+			return fmt.Errorf("list the databases of the restore target: %w", err)
+		}
+		forbidden = binlogForbiddenDatabases(src, t.Database, targetDBs)
+		// Transactions already in the dump are excluded by GTID; GTIDs are stripped so the replay is not
+		// skipped on a server that executed them (e.g. a new database next to the source).
+		binlogArgs = []string{"--exclude-gtids=" + base.Position.GTIDSet, "--skip-gtids"}
+		if plan.Target != nil {
+			binlogArgs = append(binlogArgs, "--stop-datetime="+plan.Target.UTC().Format("2006-01-02 15:04:05"))
+		}
+		scan, err := Start(ctx, e.Getenv, Invocation{Tool: "mysqlbinlog", Args: append(slices.Clone(binlogArgs), binlogFiles...)}, nil, e.Log)
+		if err != nil {
+			return err
+		}
+		prescan = newBinlogGuard(scan, src, t.Database, forbidden, binlogNames, false)
+		_, err = io.Copy(io.Discard, prescan)
+		scan.Close()
+		if prescan.Err() != nil {
+			return prescan.Err()
+		}
+		if err != nil {
+			return fmt.Errorf("read binlogs: %w", err)
+		}
+	}
 	if _, err := db.ExecContext(ctx, "CREATE DATABASE `"+strings.ReplaceAll(t.Database, "`", "``")+"`"); err != nil {
 		return err
 	}
 	createdDB := true
 	defer func() {
 		if err != nil && createdDB {
-			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 			defer cancel()
-			_, _ = db.ExecContext(cctx, "DROP DATABASE IF EXISTS `"+strings.ReplaceAll(t.Database, "`", "``")+"`")
+			if _, derr := db.ExecContext(cctx, "DROP DATABASE IF EXISTS `"+strings.ReplaceAll(t.Database, "`", "``")+"`"); derr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup failed: database %s created by this restore is left on the target: %w", t.Database, derr))
+			}
 		}
 	}()
 
@@ -264,7 +317,7 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	var stream io.Reader
 	var partialFilter *mysqlPartialFilter
 	if len(t.Objects) > 0 {
-		partialFilter = NewMySQLPartialFilter(body, t.Objects)
+		partialFilter = NewMySQLPartialFilterIn(body, src, t.Objects)
 		stream = NewGTIDPurgedFilter(partialFilter)
 	} else {
 		stream = NewGTIDPurgedFilter(body)
@@ -283,37 +336,48 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 		e.logf("restore: dump of %s loaded into %s", src, t.Database)
 		return nil
 	}
-	dir, err := e.tmpDir()
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	files, err := e.stageLogs(ctx, plan.Logs, dir, func(l backup.Record) string { return l.Details["seq"] + "-" + l.Details["server_file"] })
-	if err != nil {
-		return err
-	}
-	// Transactions already in the dump are excluded by GTID; GTIDs are stripped so the replay is not
-	// skipped on a server that executed them (e.g. a new database next to the source).
-	args := []string{"--exclude-gtids=" + base.Position.GTIDSet, "--skip-gtids", "--database=" + t.Database,
-		"--rewrite-db=" + src + "->" + t.Database}
-	if plan.Target != nil {
-		args = append(args, "--stop-datetime="+plan.Target.UTC().Format("2006-01-02 15:04:05"))
-	}
-	args = append(args, files...)
+	args := append(slices.Clone(binlogArgs), "--database="+t.Database, "--rewrite-db="+src+"->"+t.Database)
+	args = append(args, binlogFiles...)
 	binlog, err := Start(ctx, e.Getenv, Invocation{Tool: "mysqlbinlog", Args: args}, nil, e.Log)
 	if err != nil {
 		return err
 	}
 	defer binlog.Close()
-	if err := e.runTool(ctx, client, binlog); err != nil {
+	guard := newBinlogGuard(binlog, src, t.Database, forbidden, binlogNames, true)
+	err = e.runTool(ctx, client, guard)
+	if guard.Err() != nil {
+		return guard.Err()
+	}
+	if err != nil {
 		return fmt.Errorf("replay binlogs: %w", err)
 	}
 	if err := binlog.Wait(); err != nil {
 		return err
 	}
+	if missed := prescan.unreplayed(guard); len(missed) > 0 {
+		return fmt.Errorf("binlog statements that change %s were not replayed (at %s); the restore would silently diverge "+
+			"from the source. Restore without a target time, or replay the binlogs manually", quoteMy(src), strings.Join(missed, ", "))
+	}
 	createdDB = false
 	e.logf("restore: %s restored into %s up to %v", src, t.Database, plan.Target)
 	return nil
+}
+
+func mysqlDatabaseNames(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 func mysqlClient(getenv Getenv, t RestoreTarget) Invocation {
@@ -424,7 +488,22 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	createdDB := true
 	defer func() {
 		if err != nil && createdDB {
-			_, _ = admin.Exec(context.Background(), `DROP DATABASE IF EXISTS "`+strings.ReplaceAll(t.Database, `"`, `""`)+`" WITH (FORCE)`).ReadAll()
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			conn := admin
+			if conn.IsClosed() {
+				c, cerr := connectBackupPG(cctx, e.Getenv, t.Conn, "postgres", false)
+				if cerr != nil {
+					err = errors.Join(err, fmt.Errorf("cleanup failed: database %s created by this restore is left on the target: %v",
+						t.Database, redactAll(cerr.Error(), []string{password(e.Getenv, t.Conn)})))
+					return
+				}
+				defer c.Close(context.Background())
+				conn = c
+			}
+			if derr := dropPGDatabase(cctx, conn, t.Database); derr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup failed: database %s created by this restore is left on the target: %w", t.Database, derr))
+			}
 		}
 	}()
 
@@ -484,6 +563,61 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	return nil
 }
 
+// dropPGDatabase drops a database a restore created. DROP DATABASE ... WITH (FORCE) exists from PostgreSQL
+// 13; on older servers new connections are refused and the other sessions on the database are terminated
+// before the DROP. Errors are returned, never discarded.
+func dropPGDatabase(ctx context.Context, c *pgconn.PgConn, name string) error {
+	ident := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	literal := "'" + strings.ReplaceAll(name, "'", "''") + "'"
+	res, err := c.Exec(ctx, "SELECT current_setting('server_version_num')").ReadAll()
+	if err != nil {
+		return fmt.Errorf("read server_version_num: %w", err)
+	}
+	if len(res) == 0 || len(res[0].Rows) == 0 || len(res[0].Rows[0]) == 0 {
+		return errors.New("read server_version_num: no result")
+	}
+	version, err := strconv.Atoi(string(res[0].Rows[0][0]))
+	if err != nil {
+		return fmt.Errorf("parse server_version_num %q: %w", res[0].Rows[0][0], err)
+	}
+	if version >= 130000 {
+		if _, err := c.Exec(ctx, "DROP DATABASE IF EXISTS "+ident+" WITH (FORCE)").ReadAll(); err != nil {
+			return fmt.Errorf("drop database %s: %w", name, err)
+		}
+		return nil
+	}
+	res, err = c.Exec(ctx, "SELECT 1 FROM pg_database WHERE datname = "+literal).ReadAll()
+	if err != nil {
+		return fmt.Errorf("drop database %s: %w", name, err)
+	}
+	if len(res) == 0 || len(res[0].Rows) == 0 {
+		return nil
+	}
+	var errs []error
+	if _, err := c.Exec(ctx, "ALTER DATABASE "+ident+" ALLOW_CONNECTIONS false").ReadAll(); err != nil {
+		errs = append(errs, fmt.Errorf("refuse new connections to %s: %w", name, err))
+	}
+	for attempt := 0; ; attempt++ {
+		if _, err := c.Exec(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = "+literal+
+			" AND pid <> pg_backend_pid()").ReadAll(); err != nil {
+			errs = append(errs, fmt.Errorf("terminate sessions on %s: %w", name, err))
+		}
+		_, err := c.Exec(ctx, "DROP DATABASE IF EXISTS "+ident).ReadAll()
+		if err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		// 55006 object_in_use: a terminated session had not exited yet.
+		if !errors.As(err, &pgErr) || pgErr.Code != "55006" || attempt >= 20 || ctx.Err() != nil {
+			return errors.Join(append(errs, fmt.Errorf("drop database %s: %w", name, err))...)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
 // untar extracts a tar stream into dir, refusing paths that escape it and links.
 func untar(r io.Reader, dir string) error {
 	tr := tar.NewReader(r)
@@ -525,6 +659,19 @@ func untar(r io.Reader, dir string) error {
 			return fmt.Errorf("symlink %q in archive is not supported (tablespaces)", h.Name)
 		}
 	}
+}
+
+// dataDirMajor reads the major version of an extracted PostgreSQL data directory (PG_VERSION).
+func dataDirMajor(dir string) (int, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "PG_VERSION"))
+	if err != nil {
+		return 0, fmt.Errorf("base backup has no readable PG_VERSION: %w", err)
+	}
+	major := pgMajor(strings.TrimSpace(string(b)))
+	if major == 0 {
+		return 0, fmt.Errorf("base backup has an invalid PG_VERSION %q", strings.TrimSpace(string(b)))
+	}
+	return major, nil
 }
 
 func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
@@ -578,12 +725,40 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 		e.logf("restore: base backup extracted to %s (consistent at its end LSN %s); start PostgreSQL on it", t.Dir, base.EndPosition.LSN)
 		return nil
 	}
+	// recovery.signal and recovery settings in postgresql.auto.conf exist from PostgreSQL 12; older servers
+	// would ignore them (and need recovery.conf).
+	major, err := dataDirMajor(stage)
+	if err != nil {
+		return err
+	}
+	if major < 12 {
+		return fmt.Errorf("point-in-time recovery of PostgreSQL %d is not supported (Strand configures recovery for "+
+			"PostgreSQL 12 and newer); restore the base backup without a target time and configure recovery.conf manually", major)
+	}
 	walDir := filepath.Join(stage, "strand_wal")
 	if err := os.MkdirAll(walDir, 0o700); err != nil {
 		return err
 	}
-	if _, err := e.stageLogs(ctx, plan.Logs, walDir, func(l backup.Record) string { return l.Details["segment"] }); err != nil {
+	segments, err := e.stageLogs(ctx, plan.Logs, walDir, func(l backup.Record) string { return l.Details["segment"] })
+	if err != nil {
 		return err
+	}
+	if major == 12 && plan.Target != nil {
+		// PostgreSQL 12 promotes without an error when recovery runs out of WAL before the target.
+		from, err := ParseLSN(base.EndPosition.LSN)
+		if err != nil {
+			return fmt.Errorf("base backup %s has no valid end LSN: %w", base.ID, err)
+		}
+		res, err := walReachesTarget(segments, from, *plan.Target)
+		if err != nil {
+			return fmt.Errorf("read staged WAL: %w", err)
+		}
+		if !res.Reached {
+			return fmt.Errorf("the archived WAL does not reach the target time %s (%s): PostgreSQL 12 would end recovery "+
+				"early and promote without an error, so the restore was stopped; choose an earlier target or wait until "+
+				"WAL with a later transaction is archived", plan.Target.UTC().Format(time.RFC3339Nano), res)
+		}
+		e.logf("restore: staged WAL reaches the target (%s)", res)
 	}
 	f, err := os.OpenFile(filepath.Join(stage, "postgresql.auto.conf"), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
@@ -613,6 +788,31 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 	return nil
 }
 
+// dropMongoRestored drops the databases a failed MongoDB restore created (see restoreMongo).
+func dropMongoRestored(ctx context.Context, client *mongo.Client, t RestoreTarget, existing map[string]bool) error {
+	var drop []string
+	if t.Deployment {
+		names, err := client.ListDatabaseNames(ctx, bson.D{}, options.ListDatabases().SetAuthorizedDatabases(false))
+		if err != nil {
+			return fmt.Errorf("cleanup failed: cannot list the target deployment to drop the partially restored databases: %w", err)
+		}
+		for _, name := range names {
+			if !existing[name] && name != "admin" && name != "config" && name != "local" {
+				drop = append(drop, name)
+			}
+		}
+	} else if !existing[t.Database] {
+		drop = []string{t.Database}
+	}
+	var errs []error
+	for _, name := range drop {
+		if err := client.Database(name).Drop(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup failed: database %q created by this restore is left on the target: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // MongoRestoreDestination returns the endpoint and namespace to confirm,
 // without URI credentials or connection options.
 func MongoRestoreDestination(uri, database string) (string, error) {
@@ -628,7 +828,7 @@ func MongoRestoreDestination(uri, database string) (string, error) {
 	return parsed.Scheme + "://" + strings.Join(parsed.RawHosts, ",") + "/" + database, nil
 }
 
-func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
+func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarget) (err error) {
 	base := plan.Base()
 	pitr := len(plan.Logs) > 0 || plan.Target != nil
 	if pitr && (!t.Deployment || plan.Target == nil || !pitrBase(base)) {
@@ -738,6 +938,23 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 			return err
 		}
 	}
+	// From here on mongorestore may write. On failure or cancellation drop what this restore created:
+	// the target database, or every database of the (verified empty) target deployment except the
+	// system ones, like the MySQL and PostgreSQL restores do.
+	existing := map[string]bool{}
+	for _, name := range databaseNames {
+		existing[name] = true
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		if cerr := dropMongoRestored(cctx, client, t, existing); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}()
 	body, err := e.openRecord(ctx, base)
 	if err != nil {
 		return err

@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -33,7 +35,10 @@ func (e *Env) TestRestore(ctx context.Context, job backup.Job) (backup.CheckResu
 		return backup.CheckResult{}, errors.New("no complete backup to test")
 	}
 	rec := rs[0]
-	scratch := fmt.Sprintf("strand_verify_%d", e.now().Unix())
+	scratch, err := scratchDatabaseName(e.now())
+	if err != nil {
+		return backup.CheckResult{}, err
+	}
 	res := backup.CheckResult{BackupID: rec.ID, Kind: "test_restore", StartedAt: e.now(), Metrics: map[string]string{"scratch_database": scratch}}
 	counts, err := e.testRestore(ctx, job, rec, scratch)
 	res.FinishedAt = e.now()
@@ -63,6 +68,16 @@ func (e *Env) TestRestore(ctx context.Context, job backup.Job) (backup.CheckResu
 	return res, err
 }
 
+// scratchDatabaseName names a test-restore database. The random suffix keeps two runs started in the same
+// second (another job on the same scratch server, or another Strand) from sharing a database.
+func scratchDatabaseName(now time.Time) (string, error) {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("scratch database name: %w", err)
+	}
+	return fmt.Sprintf("strand_verify_%d_%s", now.Unix(), hex.EncodeToString(b[:])), nil
+}
+
 func sanitizeMetric(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
@@ -75,7 +90,7 @@ func sanitizeMetric(s string) string {
 	}, s)
 }
 
-func (e *Env) testRestore(ctx context.Context, job backup.Job, rec backup.Record, scratch string) (map[string]int64, error) {
+func (e *Env) testRestore(ctx context.Context, job backup.Job, rec backup.Record, scratch string) (_ map[string]int64, retErr error) {
 	plan := RestorePlan{Chain: []backup.Record{rec}}
 	target := RestoreTarget{Conn: job.Scratch, Database: scratch}
 	counts := map[string]int64{}
@@ -86,14 +101,18 @@ func (e *Env) testRestore(ctx context.Context, job backup.Job, rec backup.Record
 			return nil, err
 		}
 		defer db.Close()
-		defer func() {
-			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			_, _ = db.ExecContext(cctx, "DROP DATABASE IF EXISTS `"+scratch+"`")
-		}()
+		// Only a database this run created is dropped: a failed restore drops what it created itself, and
+		// a name that already existed (restores never overwrite) belongs to someone else.
 		if err := e.restoreMySQL(ctx, plan, target); err != nil {
 			return nil, err
 		}
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			if _, derr := db.ExecContext(cctx, "DROP DATABASE IF EXISTS `"+strings.ReplaceAll(scratch, "`", "``")+"`"); derr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("drop scratch database %s: %w", scratch, derr))
+			}
+		}()
 		rows, err := db.QueryContext(ctx, "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'", scratch)
 		if err != nil {
 			return nil, err
@@ -117,17 +136,23 @@ func (e *Env) testRestore(ctx context.Context, job backup.Job, rec backup.Record
 		}
 		return counts, nil
 	case backup.MethodPGDump:
-		defer func() {
-			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			if c, err := connectBackupPGX(cctx, e.Getenv, job.Scratch, "postgres"); err == nil {
-				_, _ = c.Exec(cctx, `DROP DATABASE IF EXISTS "`+scratch+`" WITH (FORCE)`)
-				c.Close(cctx)
-			}
-		}()
 		if err := e.restorePGDump(ctx, rec, target); err != nil {
 			return nil, err
 		}
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			c, cerr := connectBackupPG(cctx, e.Getenv, job.Scratch, "postgres", false)
+			if cerr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("drop scratch database %s: %v", scratch,
+					redactAll(cerr.Error(), []string{password(e.Getenv, job.Scratch)})))
+				return
+			}
+			defer c.Close(context.Background())
+			if derr := dropPGDatabase(cctx, c, scratch); derr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("drop scratch database %s: %w", scratch, derr))
+			}
+		}()
 		c, err := connectBackupPGX(ctx, e.Getenv, job.Scratch, scratch)
 		if err != nil {
 			return nil, err

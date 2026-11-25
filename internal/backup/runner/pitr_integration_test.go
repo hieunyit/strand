@@ -324,7 +324,7 @@ func TestPITRPostgres(t *testing.T) {
 	}
 	verifyCtx, stop := context.WithTimeout(t.Context(), 25*time.Second)
 	defer stop()
-	name = fmt.Sprintf("bkp-pg-unreached-%d", os.Getpid())
+	name = fmt.Sprintf("%s-pg-unreached-%d", containerPrefix("bkp"), os.Getpid())
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
 	out, err := exec.CommandContext(verifyCtx, "docker", "run", "--rm", "--name", name,
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),

@@ -103,12 +103,13 @@ func (e *Env) verifyRecords(ctx context.Context, rs []backup.Record, opt VerifyO
 	if pct <= 0 || pct > 100 {
 		pct = 100
 	}
+	newest := newestRestorePoint(rs)
 	for i, r := range rs {
 		if ctx.Err() != nil {
 			break
 		}
-		// The newest restore point is always fully read; others by sample.
-		full := pct == 100 || i == 0 || rand.IntN(100) < pct
+		// The newest restore point (a base backup, never a log segment) is always fully read; others by sample.
+		full := pct == 100 || i == newest || rand.IntN(100) < pct
 		var n int64
 		started := e.now()
 		err := e.checkPayload(ctx, r, full, &n)
@@ -135,6 +136,21 @@ func (e *Env) verifyRecords(ctx context.Context, rs []backup.Record, opt VerifyO
 	}
 	rep.Problems = append(rep.Problems, LogGaps(rs)...)
 	return rep
+}
+
+// newestRestorePoint returns the index in rs of the newest record that is not a log segment, or -1.
+// With log archiving the newest record is usually a log segment; that is not a restore point.
+func newestRestorePoint(rs []backup.Record) int {
+	best := -1
+	for i, r := range rs {
+		if r.KindOrFull() == backup.KindLog {
+			continue
+		}
+		if best < 0 || r.CreatedAt.After(rs[best].CreatedAt) {
+			best = i
+		}
+	}
+	return best
 }
 
 // LogGaps reports discontinuities between consecutive archived log segments of each source: a WAL

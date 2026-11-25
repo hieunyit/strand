@@ -564,3 +564,64 @@ func TestMySQLRestoreUnknownTableWithKnownListPreValidation(t *testing.T) {
 		t.Fatalf("expected table not found error before DB creation, got: %v", err)
 	}
 }
+
+// In a multi-database dump a table name is only unique within its database: selecting "a.t" keeps t of
+// database a only, and a bare "t" that exists in several databases is refused as ambiguous.
+func TestMySQLPartialFilterMatchesDatabaseAndTable(t *testing.T) {
+	q := func(s string) string { return "`" + s + "`" }
+	section := func(db string, tables ...string) string {
+		var b strings.Builder
+		b.WriteString("--\n-- Current Database: " + q(db) + "\n--\n\n")
+		b.WriteString("CREATE DATABASE /*!32312 IF NOT EXISTS*/ " + q(db) + ";\n\nUSE " + q(db) + ";\n\n")
+		for _, tbl := range tables {
+			b.WriteString("--\n-- Table structure for table " + q(tbl) + "\n--\n\n")
+			b.WriteString("CREATE TABLE " + q(tbl) + " (id int) /* " + db + "." + tbl + " */;\n\n")
+			b.WriteString("--\n-- Dumping data for table " + q(tbl) + "\n--\n\n")
+			b.WriteString("INSERT INTO " + q(tbl) + " VALUES (1) /* rows of " + db + "." + tbl + " */;\n\n")
+		}
+		b.WriteString("--\n-- Dumping triggers for database '" + db + "'\n--\n\n")
+		for _, tbl := range tables {
+			b.WriteString("DELIMITER ;;\n/*!50003 CREATE*/ /*!50003 TRIGGER " + q("tr_"+db+"_"+tbl) + " AFTER INSERT ON " + q(tbl) +
+				" FOR EACH ROW BEGIN END */;;\nDELIMITER ;\n")
+		}
+		return b.String()
+	}
+	dump := "/*!40101 SET NAMES utf8mb4 */;\n" + section("a", "t", "u") + section("b", "t", "v") + "-- Dump completed\n"
+	run := func(objects ...string) (string, error) {
+		f := NewMySQLPartialFilter(strings.NewReader(dump), objects)
+		out, err := io.ReadAll(f)
+		return string(out), err
+	}
+
+	out, err := run("a.t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "/* a.t */") || !strings.Contains(out, "rows of a.t") || !strings.Contains(out, "tr_a_t") {
+		t.Fatalf("a.t not kept:\n%s", out)
+	}
+	for _, other := range []string{"/* b.t */", "rows of b.t", "tr_b_t", "/* a.u */", "/* b.v */"} {
+		if strings.Contains(out, other) {
+			t.Fatalf("selecting a.t kept %q:\n%s", other, out)
+		}
+	}
+
+	out, err = run("v")
+	if err != nil || !strings.Contains(out, "rows of b.v") || strings.Contains(out, "rows of a.t") {
+		t.Fatalf("an unambiguous bare name: %v\n%s", err, out)
+	}
+	if _, err := run("t"); err == nil || !strings.Contains(err.Error(), "several databases") {
+		t.Fatalf("an ambiguous bare name must be refused: %v", err)
+	}
+	if _, err := run("a.v"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("a table of another database must not satisfy a qualified name: %v", err)
+	}
+
+	// A single-database dump has no Current Database header: a qualified name matches its database.
+	single := strings.Replace(section("shop", "t", "u"), "--\n-- Current Database: `shop`\n--\n", "", 1)
+	f := NewMySQLPartialFilterIn(strings.NewReader(single), "shop", []string{"shop.t"})
+	b, err := io.ReadAll(f)
+	if err != nil || !strings.Contains(string(b), "rows of shop.t") || strings.Contains(string(b), "rows of shop.u") {
+		t.Fatalf("qualified selection in a single-database dump: %v\n%s", err, b)
+	}
+}

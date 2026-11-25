@@ -175,6 +175,11 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 		} `json:"connection"`
 	}
 	_ = json.Unmarshal([]byte(body), &tc)
+	// MySQL binlog replay has one-second resolution: a fractional target is refused, not silently truncated.
+	fractional := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00.5Z","connection_id":"` + tc.Connection.ID + `","target_database":"shop_frac","confirm":"shop_frac"}`
+	if resp, body := e.do(c, "POST", "/api/v1/backup-restores", fractional, h); resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "whole-second") {
+		t.Fatalf("fractional MySQL target: %d %s", resp.StatusCode, body)
+	}
 	good := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","connection_id":"` + tc.Connection.ID + `","target_database":"shop_pitr","confirm":"shop_pitr"}`
 	resp, body = e.do(c, "POST", "/api/v1/backup-restores", good, h)
 	if resp.StatusCode != http.StatusAccepted || len(e.auditFor("backup.restore")) != 1 {

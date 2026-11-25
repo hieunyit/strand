@@ -24,7 +24,7 @@ import (
 
 func startRPPContainer(t *testing.T, name, dir string, args ...string) string {
 	t.Helper()
-	full := fmt.Sprintf("rpp-%s-%d-%d", name, os.Getpid(), time.Now().UnixNano()%100000)
+	full := fmt.Sprintf("%s-%s-%d-%d", containerPrefix("rpp"), name, os.Getpid(), time.Now().UnixNano()%100000)
 	_ = exec.Command("docker", "rm", "-f", full).Run()
 	run := append([]string{"run", "-d", "--name", full, "--network", "host", "-v", dir + ":" + dir}, args...)
 	docker(t, run...)

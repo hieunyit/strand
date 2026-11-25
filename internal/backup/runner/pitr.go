@@ -253,6 +253,11 @@ func PlanRestore(rs []backup.Record, chosen *backup.Record, target *time.Time) (
 		}
 		return RestorePlan{Chain: chain}, nil
 	}
+	if chosen != nil && chosen.Engine == backup.EngineMySQL || slices.ContainsFunc(rs, func(r backup.Record) bool { return r.Engine == backup.EngineMySQL }) {
+		if err := checkMySQLTargetTime(*target); err != nil {
+			return RestorePlan{}, err
+		}
+	}
 	if chosen != nil {
 		if err := RequireStandaloneBackup(*chosen); err != nil {
 			return RestorePlan{}, err
@@ -302,6 +307,17 @@ func PlanRestore(rs []backup.Record, chosen *backup.Record, target *time.Time) (
 		}
 	}
 	return RestorePlan{}, newestErr
+}
+
+// checkMySQLTargetTime refuses a point-in-time target with fractional seconds: mysqlbinlog --stop-datetime
+// has one-second resolution, so the replay would silently stop up to a second before the requested time.
+func checkMySQLTargetTime(target time.Time) error {
+	if target.Nanosecond() != 0 {
+		return fmt.Errorf("MySQL point-in-time recovery needs a whole-second target time (got %s); binlog replay stops at whole seconds, use %s or %s",
+			target.UTC().Format(time.RFC3339Nano), target.UTC().Truncate(time.Second).Format(time.RFC3339),
+			target.UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339))
+	}
+	return nil
 }
 
 func checkMySQLPITRBaseTime(base backup.Record, target time.Time) error {
