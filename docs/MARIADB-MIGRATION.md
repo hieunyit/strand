@@ -305,7 +305,7 @@ strand verify -c mdb-app.yaml --mode full --table app.t
 # verify app.t (full): 3 chunks (...), 0 mismatched chunks, ..., 0 mismatches, 0 unverifiable_hot
 ```
 
-Mỗi bảng chạy một lần. Nếu lệch, lệnh thoát khác 0 và in khóa của dòng lệch.
+Bỏ `--table` để kiểm mọi bảng của pipeline. Trước cutover dùng `--require-complete`. Nếu lệch, lệnh thoát khác 0 và in khóa của dòng lệch. Bảng keyless chỉ so số hàng và checksum, không chỉ ra hàng lệch.
 
 ### Bước 9. Khi nguồn đổi cấu trúc bảng (ALTER TABLE)
 

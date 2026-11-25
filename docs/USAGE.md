@@ -770,7 +770,8 @@ Bảng thêm bằng lệnh này mà không nằm trong `tables.include` được
 
 - Mọi chế độ kiểm lại row lệch: đọc source, chờ target apply tới vị trí log của source lúc đọc (MySQL: `gtid_executed`; PG: WAL insert LSN, kèm một watermark `pg_logical_emit_message` để pipeline dời checkpoint qua đó cả khi source rảnh), đọc target, đọc lại source. Row đổi ở source trong mọi lần thử (mặc định 5) được đếm `unverifiable_hot` (metric `strand_verify_unverifiable_hot_total`), không báo lệch.
 - Bước chờ apply chỉ chạy khi pipeline đang chạy (khóa pipeline trên target đang bị giữ). Pipeline đã dừng thì không chờ; pipeline đang `pause` thì chờ hết hạn (2 phút) rồi lỗi. Source PG đọc qua `--replica-dsn` (standby) không ghi được watermark: source rảnh thì chờ có thể hết hạn.
-- `--table` của full: không đặt thì dùng `tables.include`, nhưng **không nhận wildcard**. Với `app.*`, phải chạy từng bảng (handoff dòng 51).
+- `--table` của full: không đặt thì kiểm **mọi bảng của pipeline** (theo `tables.include`/`exclude`, kể cả mẫu `app.*`). `--table` chỉ nhận một bảng `schema.table`, không nhận wildcard.
+- `--require-complete`: bắt buộc một lượt full mới trên mọi bảng đã cấu hình, kết quả chưa trọn vẹn thì lệnh thất bại. Dùng trước cutover.
 - `--resume`: chạy tiếp lượt full bị ngắt. Chỉ dùng lại chunk đã khớp. Lượt chạy hết thì tiến độ bị xóa. Không có cho PK tổng quát.
 - `--replica-dsn`: đọc phía source từ replica.
 - `--repair report|fix`:
