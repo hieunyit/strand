@@ -24,6 +24,33 @@
     });
   });
 
+  var mobileMenu = document.getElementById('mobile-nav-toggle');
+  var mobileNav = document.getElementById('main-nav');
+  if (mobileMenu && mobileNav) {
+    var narrowNav = window.matchMedia('(max-width: 1000px)');
+    function setMobileNav(open) {
+      mobileMenu.setAttribute('aria-expanded', String(open));
+      mobileNav.hidden = narrowNav.matches && !open;
+    }
+    function sizeNav() {
+      mobileMenu.hidden = !narrowNav.matches;
+      setMobileNav(false);
+    }
+    mobileMenu.addEventListener('click', function () { setMobileNav(mobileNav.hidden); });
+    mobileNav.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && narrowNav.matches) { setMobileNav(false); mobileMenu.focus(); }
+    });
+    narrowNav.addEventListener('change', sizeNav);
+    sizeNav();
+  }
+  var narrowDetail = window.matchMedia('(max-width: 1200px)');
+  function updateProperties() {
+    var properties = document.querySelector('[data-responsive-properties]');
+    if (properties) { properties.open = !narrowDetail.matches; }
+  }
+  narrowDetail.addEventListener('change', updateProperties);
+  updateProperties();
+
   // Same-origin fetch that always carries the session cookie and the CSRF header (for POST).
   function api(method, url, body) {
     var opts = { method: method, credentials: 'same-origin', headers: { 'X-CSRF-Token': csrf } };
@@ -146,7 +173,7 @@
         if (!fresh || fresh.innerHTML === lastFresh) { return; }
         // A proxy may serve another tab's HTML without an HTTP redirect. Bind
         // the server's active tab to the requested path before replacing content.
-        var activeTab = fresh.querySelector('nav.tabs a.active');
+        var activeTab = fresh.querySelector('nav.tabs a.active, #pipeline-tab-help [aria-current=page]');
         if (activeTab && new URL(activeTab.getAttribute('href'), location.href).pathname !== location.pathname) { return; }
         if (force !== true && (editing() || selecting())) { return; }
         var st = saveState();
@@ -362,7 +389,7 @@
   document.addEventListener('keydown', function (ev) {
     var el = ev.target;
     if (!el || !el.closest) { return; }
-    var tabNav = el.closest('nav.tabs, .tabs');
+    var tabNav = el.closest('[role=tablist]');
     if (!tabNav) { return; }
     if (el.tagName !== 'A' && el.getAttribute('role') !== 'tab' && !el.classList.contains('tab')) { return; }
     var links = Array.prototype.slice.call(tabNav.querySelectorAll('a, button, [role="tab"], .tab'));
@@ -493,9 +520,9 @@
       var form = document.getElementById('confirm-form');
       var opener = document.activeElement;
       var titleEl = document.getElementById('confirm-title');
-      if (titleEl) { titleEl.textContent = opts.title || (retype ? 'Confirm: this cannot be undone' : 'Confirm'); }
+      if (titleEl) { titleEl.textContent = opts.title || (opts.danger ? 'Confirm irreversible action' : 'Confirm action'); }
       ok.textContent = opts.ok || 'Confirm';
-      ok.classList.toggle('danger', !!retype || !!opts.danger);
+      ok.classList.toggle('danger', opts.danger === undefined ? !!retype : opts.danger);
       msg.textContent = message;
       input.value = '';
       box.hidden = !retype;
@@ -529,7 +556,7 @@
       dlg.addEventListener('keydown', onKey);
       dlg.returnValue = '';
       dlg.showModal();
-      if (retype) { input.focus(); } else { ok.focus(); }
+      if (retype) { input.focus(); } else { cancel.focus(); }
     });
   }
 
@@ -589,7 +616,7 @@
     var confirmUser = form.getAttribute('data-confirm-user');
     if (confirmUser) {
       ev.preventDefault();
-      confirmDialog('Delete user ' + confirmUser + '? This action cannot be undone.', confirmUser, { ok: 'Delete user' }).then(function (res) {
+      confirmDialog('Delete user ' + confirmUser + '? This action cannot be undone.', confirmUser, { title: 'Delete user', ok: 'Delete user', danger: true }).then(function (res) {
         if (!res) { return; }
         form.removeAttribute('data-confirm-user');
         form.submit();
@@ -606,7 +633,12 @@
     var message = src.getAttribute('data-confirm');
     if (!message) { runAction(form, body, act); return; }
     var retype = src.getAttribute('data-retype') || '';
-    confirmDialog(message, retype).then(function (res) {
+    var opts = {};
+    var action = act || form.getAttribute('data-action');
+    if (src.hasAttribute('data-confirm-title')) { opts.title = src.getAttribute('data-confirm-title'); }
+    if (src.hasAttribute('data-confirm-label')) { opts.ok = src.getAttribute('data-confirm-label'); }
+    if (src.hasAttribute('data-confirm-danger') || action === 'stop') { opts.danger = src.getAttribute('data-confirm-danger') === 'true'; }
+    confirmDialog(message, retype, opts).then(function (res) {
       if (!res) { return; }
       if (retype) { body.confirm_name = retype; }
       // Failover: a second, separate dialog that must be retyped again.
@@ -1131,17 +1163,29 @@
 
   // Click to copy data attributes
   document.addEventListener('click', function (ev) {
-    var btn = ev.target && ev.target.closest && ev.target.closest('[data-copy]');
+    var btn = ev.target && ev.target.closest && ev.target.closest('[data-copy], [data-copy-from]');
     if (btn) {
       ev.preventDefault();
-      var val = btn.getAttribute('data-copy');
+      var source = btn.getAttribute('data-copy-from');
+      var element = source && document.getElementById(source);
+      var val = element ? element.textContent : btn.getAttribute('data-copy');
       if (val && navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(val).then(function () {
           toast('Copied to clipboard', true);
-        });
-      }
+        }).catch(function () { toast('Clipboard unavailable. Select the text to copy it.', false); });
+      } else if (val) { toast('Clipboard unavailable. Select the text to copy it.', false); }
     }
   });
+
+  function updateLogWrap() {
+    var toggle = document.getElementById('log-wrap');
+    var log = document.getElementById('logtail');
+    if (toggle && log) { log.classList.toggle('wrapcode', toggle.checked); }
+  }
+  document.addEventListener('change', function (ev) {
+    if (ev.target.id === 'log-wrap') { updateLogWrap(); }
+  });
+  onSwap.push(updateLogWrap);
 
   // Unsaved changes: leaving a page with a dirty form[data-guard] asks first. The periodic refresh never
   // replaces such a form (editing() above).

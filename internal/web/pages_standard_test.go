@@ -89,17 +89,10 @@ func TestStandardPageSkeletonAndNoInlineStyles(t *testing.T) {
 				t.Errorf("%s missing standard content cards", tc.path)
 			}
 
-			// 4. Tabs component where relevant
-			if tc.hasTabs {
-				if !strings.Contains(body, `class="tabs"`) {
-					t.Errorf("%s expected to have tabs component", tc.path)
-				}
-				if !strings.Contains(body, `role="tablist"`) {
-					t.Errorf("%s tabs missing role=\"tablist\"", tc.path)
-				}
-				if !strings.Contains(body, `role="tab"`) {
-					t.Errorf("%s tabs missing role=\"tab\"", tc.path)
-				}
+			// Pipeline sections are links between pages, so they use navigation and aria-current.
+			if tc.hasTabs && (!strings.Contains(body, `class="tabs" aria-label="Pipeline sections"`) ||
+				!strings.Contains(body, `aria-current="page"`) || strings.Contains(body, `role="tablist"`)) {
+				t.Errorf("%s missing pipeline page navigation", tc.path)
 			}
 
 			// 5. Tables component where relevant
@@ -673,8 +666,15 @@ func TestArchiveAndTunnelFormsHTML(t *testing.T) {
 		t.Errorf("archive form missing csrf input: %s", page)
 	}
 
-	// 2. /tunnels form has method="post", action="/tunnels", and CSRF hidden field
+	// The list opens first, with the form available from Add tunnel.
 	_, page = e.do(c, "GET", "/tunnels", "", nil)
+	if !strings.Contains(page, `href="/tunnels?new=1"`) || strings.Contains(page, `action="/tunnels"`) {
+		t.Fatal("tunnel list should open without the create form")
+	}
+	_, page = e.do(c, "GET", "/tunnels?new=1", "", nil)
+	if strings.Contains(page, `name="profile_private_key"`) || !strings.Contains(page, "Show fingerprint") {
+		t.Fatal("the first step should request the fingerprint before showing credentials")
+	}
 	if !strings.Contains(page, `action="/tunnels"`) || !strings.Contains(page, `method="post"`) {
 		t.Errorf("tunnel form missing method=post or action=/tunnels: %s", page)
 	}

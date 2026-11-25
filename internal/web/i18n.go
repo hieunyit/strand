@@ -142,7 +142,7 @@ var messagesEn = map[string]string{
 	"pipelines.subtitle": "Active change data capture pipelines, streaming status and latency",
 
 	// Pipeline tab help
-	"pipeline.tabs_help":                 "Guide to pipeline operations",
+	"pipeline.tabs_help":                 "Advanced operations",
 	"pipeline.tab_help.checkpoint":       "See the source log position saved for CDC to resume from. Administrators can rewind a running MySQL-to-MySQL pipeline to replay changes.",
 	"pipeline.tab_help.jobs":             "Run Verify to compare source and target data without repairing it. See live output and past jobs.",
 	"pipeline.tab_help.checkpoint_mongo": "See the change stream resume token saved for CDC to resume from, per database.",
@@ -337,7 +337,7 @@ var messagesVi = map[string]string{
 	"pipelines.subtitle": "Danh sách pipeline đồng bộ dữ liệu, trạng thái truyền tải và độ trễ",
 
 	// Pipeline tab help
-	"pipeline.tabs_help":                 "Hướng dẫn các tab vận hành pipeline",
+	"pipeline.tabs_help":                 "Thao tác nâng cao",
 	"pipeline.tab_help.checkpoint":       "Xem vị trí log nguồn đã lưu, nơi CDC sẽ đọc tiếp. Quản trị viên có thể lùi checkpoint của pipeline MySQL → MySQL đang chạy để phát lại thay đổi.",
 	"pipeline.tab_help.jobs":             "Chạy Verify để đối chiếu dữ liệu nguồn và đích mà không sửa dữ liệu. Xem kết quả trực tiếp và lịch sử các job.",
 	"pipeline.tab_help.checkpoint_mongo": "Xem resume token của change stream đã lưu (theo từng database), nơi CDC sẽ đọc tiếp.",

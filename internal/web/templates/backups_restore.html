@@ -1,6 +1,5 @@
 {{define "content"}}
 <section class="card" id="restore-section">
-  <div class="cardhead"><h2>Restore</h2></div>
   <p class="muted">A restore always goes to a <strong>new</strong> target and never modifies the source. Progress and log appear on the job page.</p>
   {{if .Body.SelectedError}}
   <div class="alert alert-error" id="restore-selected-error" role="alert">
@@ -39,7 +38,7 @@
   <form id="restore-form" class="form-stack" data-wizard="{{.Body.WizardJSON}}" novalidate autocomplete="off">
     <!-- Step 1: Restore point -->
     <fieldset class="form-section wiz-step" data-step="1">
-      <legend class="form-section-title"><span class="step-no">1</span> What to restore</legend>
+      <legend class="form-section-title">What to restore</legend>
       <div class="choice-cards" role="radiogroup" aria-label="Restore from">
         <label class="choice">
           <input type="radio" name="restore_from" value="backup"{{if not .Body.SelectedSource}} checked{{end}}>
@@ -104,7 +103,7 @@
 
     <!-- Step 2: Target server -->
     <fieldset class="form-section wiz-step" data-step="2" hidden>
-      <legend class="form-section-title"><span class="step-no">2</span> Target server</legend>
+      <legend class="form-section-title">Target server</legend>
       <div class="field-grid">
         <label class="field">
           <span class="field-label">Target connection</span>
@@ -121,8 +120,8 @@
 
 
       <div class="actions-row mt">
-        <button type="button" class="btn small" id="restore-test-btn">Test connection</button>
-        <span id="restore-test-status" class="small muted"></span>
+        <button type="button" class="btn small" id="restore-test-btn" aria-describedby="restore-test-status err-test-connection">Test connection</button>
+        <span id="restore-test-status" class="small muted" role="status"></span>
       </div>
       <div id="restore-test-result" class="alert alert-info mt" hidden></div>
       <span class="field-error" id="err-test-connection" hidden></span>
@@ -177,7 +176,7 @@
 
     <!-- Step 3: Options -->
     <fieldset class="form-section wiz-step" data-step="3" hidden>
-      <legend class="form-section-title"><span class="step-no">3</span> Restore options</legend>
+      <legend class="form-section-title">Restore options</legend>
 
       <div id="restore-opt-physical-notice" class="alert alert-info mt" hidden>
         Physical backups restore the entire cluster directory; parallel workers and partial restore are not supported.
@@ -245,7 +244,7 @@
 
     <!-- Step 4: Confirm -->
     <fieldset class="form-section wiz-step" data-step="4" hidden>
-      <legend class="form-section-title"><span class="step-no">4</span> Review and confirm</legend>
+      <legend class="form-section-title">Review and confirm</legend>
 
       <section class="card mb" id="restore-summary-card">
         <div class="cardhead"><h3>Restore plan summary</h3></div>

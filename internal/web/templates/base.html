@@ -21,7 +21,8 @@
 <a class="skip" href="#content">{{t "nav.skip"}}</a>
 <aside class="nav" aria-label="Sidebar">
   <a class="brand" href="/" aria-label="Strand home"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand<small>CDC console</small></span></a>
-  <nav aria-label="Main">
+  <button class="btn mobile-nav-toggle" id="mobile-nav-toggle" type="button" aria-controls="main-nav" aria-expanded="false" hidden>Menu</button>
+  <nav aria-label="Main" id="main-nav">
     <div class="navgroup" data-navgroup="monitor">
       <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-monitor">{{t "nav.monitor"}}</button>
       <div class="navitems" id="navg-monitor">
@@ -75,7 +76,7 @@
       {{if .EnvName}}<span class="envchip env-{{.EnvTone}}" title="Environment (Settings &gt; General). Host: {{.Host}}">{{icon "server"}}{{.EnvName}}</span>{{else}}<span class="envchip" title="Host running this console">{{icon "server"}}{{.Host}}</span>{{end}}
       <button type="button" class="iconbtn" id="theme-toggle" aria-label="Colour theme: follows the system. Click to change." title="Colour theme">{{icon "auto"}}<span class="tlabel">Auto</span></button>
       <details class="usermenu" id="usermenu">
-        <summary aria-label="{{t "top.user_menu"}}">{{icon "user"}}{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</summary>
+        <summary aria-label="{{t "top.user_menu"}}">{{icon "user"}}<span class="user-label">{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</span></summary>
         <div class="menu">
           <div class="who">{{t "top.signed_in_as"}} <b>{{if .CurrentUser.Username}}{{.CurrentUser.Username}}{{else}}admin{{end}}</b> <span class="badge small">{{if .CurrentUser.Role}}{{.CurrentUser.Role}}{{else}}admin{{end}}</span></div>
           <a class="menuitem" href="/account">{{icon "user"}}{{t "nav.my_account"}}</a>
@@ -107,7 +108,7 @@
     </header>
     {{if .SectionTabs}}<nav class="tabs sectiontabs" data-section="{{.Section}}" aria-label="{{t "nav.section_pages"}}">{{range .SectionTabs}}<a class="tab{{if .Active}} active{{end}}" href="{{.URL}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{t .Label}}</span></a>{{end}}</nav>{{end}}
     {{if .SummaryStrip}}<section class="summary-strip" aria-label="Status summary">{{.SummaryStrip}}</section>{{end}}
-    {{if ne .Section "system-settings"}}<p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>{{end}}
+    {{if ne .Section "system-settings"}}<p class="asof" id="asof">{{if .Live}}Page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time><span id="last-live-update" hidden> &middot; Last update <time></time></span>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>{{end}}
     <div class="page-content">
       {{template "content" .}}
     </div>
@@ -116,6 +117,7 @@
 <dialog id="confirm" class="dlg" aria-labelledby="confirm-title" aria-describedby="confirm-msg">
   <form method="dialog" id="confirm-form">
     <h3 id="confirm-title">{{t "confirm.title"}}</h3>
+    {{if .EnvName}}<p class="muted small">Environment <strong>{{.EnvName}}</strong></p>{{end}}
     <p id="confirm-msg"></p>
     <p id="confirm-retype" hidden>{{t "confirm.type"}} <b id="confirm-name"></b> {{t "confirm.to_confirm"}}:<input id="confirm-input" type="text" aria-label="{{t "confirm.type_to_confirm"}}" autocomplete="off" spellcheck="false"></p>
     <div class="dlgbtns"><button class="btn" value="cancel" id="confirm-cancel" type="button">{{t "btn.cancel"}}</button><button class="btn primary" id="confirm-ok" type="submit" value="ok">{{t "confirm.title"}}</button></div>

@@ -161,10 +161,13 @@ func TestFailedBackgroundPipelinePagesShowStateAndReason(t *testing.T) {
 		t.Error("secret leaked in header")
 	}
 	_, body = e.do(c, "GET", "/pipelines/bg/errors", "", nil)
-	for _, want := range []string{"Last exit", "Exit code 1", "What to do", "connection refused", "pipeline failed"} {
+	for _, want := range []string{"Last exit code 1", "What to do", "connection refused", "pipeline failed", "Recent log entries", "Live events are not available"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("errors tab lacks %q: %s", want, body)
 		}
+	}
+	if strings.Contains(body, `aria-label="Live metrics"`) || !strings.Contains(body, `<tr class="empty-row" hidden`) {
+		t.Error("failed pipeline should hide unavailable metrics and the live empty-state message")
 	}
 }
 
