@@ -425,6 +425,8 @@ func (s *Server) checkpointView(_ context.Context, p *Pipeline) CheckpointView {
 type ErrorsView struct {
 	Live      []LogEvent `json:"live_events"` // ring buffer 200 bản ghi của tiến trình đang chạy
 	FromLog   []LogEvent `json:"log_events"`  // WARN/ERROR rút từ đuôi log (cũng cho pipeline đã dừng)
+	LogReadAt time.Time  `json:"-"`
+	LogErr    string     `json:"-"`
 	LiveErr   string     `json:"live_error,omitempty"`
 	LastExit  *ExitInfo  `json:"last_exit,omitempty"`
 	ExitFrom  string     `json:"exit_from,omitempty"` // systemd | log (suy ra từ mã lỗi trong log)
@@ -467,7 +469,10 @@ func (s *Server) errorsView(ctx context.Context, p *Pipeline) ErrorsView {
 	for i := range v.Live {
 		v.Live[i].Message = MaskSecrets(v.Live[i].Message)
 	}
-	if lines, err := s.reg.Logs(ctx, p, 1000); err == nil {
+	if lines, err := s.reg.Logs(ctx, p, 1000); err != nil {
+		v.LogErr = MaskSecrets(err.Error())
+	} else {
+		v.LogReadAt = s.now()
 		v.FromLog = ParseLogEvents(lines, 100)
 		for i := range v.FromLog {
 			v.FromLog[i].Message = MaskSecrets(v.FromLog[i].Message)

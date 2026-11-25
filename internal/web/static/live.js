@@ -322,13 +322,14 @@
   }
 
   // ---------- Logs tab: live tail, follow toggle, pause on scroll-up ----------
-  var logPre = null, logFollow = null, logStatus = null, logJump = null, logPending = 0, logLines = [];
+  var logPre = null, logFollow = null, logStatus = null, logJump = null, logPending = 0, logLines = [], logError = "";
   function logAttach() {
     logPre = document.getElementById('logtail');
     logFollow = document.getElementById('log-follow');
     logStatus = document.getElementById('log-status');
     logJump = document.getElementById('log-jump');
     logPending = 0;
+    logError = "";
     if (!logPre) { return; }
     logLines = logPre.textContent.replace(/\n$/, '').split('\n');
     if (logLines.length === 1 && logLines[0] === '(no log lines)') { logLines = []; }
@@ -349,6 +350,9 @@
     var paused = following && !logAtEnd() && logPre.scrollHeight > logPre.clientHeight;
     var txt = !following ? 'Not following' : (paused ? 'Paused while you scroll' : 'Following the live tail');
     if (logPending > 0) { txt += ' \u00b7 ' + logPending + ' new line' + (logPending === 1 ? '' : 's') + ' below'; }
+    if (logError) { txt = 'Log unavailable: ' + logError; }
+    else if (conn === 'polling') { txt = 'Metrics are polling. Reload this page to update the log.'; }
+    else if (conn !== 'live') { txt = 'Live log disconnected. Showing the last loaded lines.'; }
     setText(logStatus, txt);
     if (logJump) { logJump.hidden = !(logPending > 0 || paused); }
   }
@@ -363,10 +367,11 @@
   }
   function applyLog(ev) {
     if (!logPre) { return; }
-    if (ev.error) { setText(logStatus || logPre, 'Log unavailable: ' + ev.error); return; }
+    logError = ev.error || '';
+    if (logError) { logStat(); return; }
     var lines = ev.lines || [];
     if (ev.initial) { lines = lines.slice(overlap(logLines, lines)); }
-    if (!lines.length) { return; }
+    if (!lines.length) { logStat(); return; }
     if (logFollow && !logFollow.checked) { logPending += lines.length; logStat(); return; } // not following: leave the text alone
     var stick = logAtEnd();
     if (logLines.length === 0) { logPre.textContent = ''; }
@@ -578,7 +583,11 @@
   }
   var pill = document.getElementById('livepill'), pillText = document.getElementById('livetext');
   var conn = 'connecting';
-  function setConn(c) { conn = c; paintPill(); }
+  function setConn(c) {
+    conn = c;
+    paintPill();
+    logStat();
+  }
   function paintPill() {
     if (!pill) { return; }
     var quiet = lastEvent && Date.now() - lastEvent > (interval * 3 + 20) * 1000;
@@ -587,7 +596,7 @@
     var ago = lastEvent ? Math.max(0, Math.floor((Date.now() - lastEvent) / 1000)) : -1;
     var txt = { connecting: 'Connecting', live: 'Live', quiet: 'No new data', reconnecting: 'Reconnecting', polling: 'Live (polling)', offline: 'Offline' }[c] || c;
     setText(pillText, txt);
-    pill.title = c === 'polling' ? 'The event stream is unavailable; polling every ' + interval + ' s' :
+    pill.title = c === 'polling' ? 'The event stream is unavailable. Checking overview and pipeline telemetry every ' + interval + ' s.' :
       (c === 'live' ? 'Live: the server pushes a sample every ' + interval + ' s' : 'Live data: ' + txt + (ago >= 0 ? ' (last message ' + ago + ' s ago)' : ''));
   }
   setInterval(function () {
