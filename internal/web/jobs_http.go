@@ -378,7 +378,7 @@ func (s *Server) jobOrigins(ctx context.Context, jobs []JobStatus) map[string]jo
 		}
 		for processID, backupID := range backupJobs {
 			if name, ok := names[backupID]; ok {
-				origins[processID] = jobOrigin{Label: name, Href: "/backups/jobs/" + url.PathEscape(backupID) + "?tab=runs"}
+				origins[processID] = jobOrigin{Label: name, Href: "/backups/jobs/" + url.PathEscape(backupID) + "?tab=runs&process=" + url.QueryEscape(processID)}
 			}
 		}
 	}

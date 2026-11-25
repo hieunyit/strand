@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,42 +35,46 @@ type backupsJobsPageBody struct {
 
 // backupsJobDetailPageBody is the template body for /backups/jobs/{id}.
 type backupsJobDetailPageBody struct {
-	Protection backupJobProtection
-	Job        backupJobView
-	ActiveTab  string
-	Runs       []backupRunView
-	RunsCursor string
-	RunsPaged  bool
-	Chart30    template.HTML
-	Backups    []backup.Record
-	Audit      []store.AuditRow
-	CanWrite   bool
-	IsAdmin    bool
+	Protection   backupJobProtection
+	LatestBackup *backup.Record
+	RPO          backup.RPOStatus
+	LastSuccess  *time.Time
+	Job          backupJobView
+	ActiveTab    string
+	Runs         []backupRunView
+	RunsCursor   string
+	RunsPaged    bool
+	RunProcess   string
+	Chart30      template.HTML
+	Backups      []backup.Record
+	Audit        []store.AuditRow
+	CanWrite     bool
+	IsAdmin      bool
 }
 
 type backupRunView struct {
 	backup.Run
 	RemediationHint string
+	LogURL          string
 }
 
 // backupsCatalogPageBody is the template body for /backups/catalog.
 type backupsCatalogPageBody struct {
-	Backups     []backup.Record
-	NextCursor  string
-	Paged       bool
-	Source      string
-	Engine      string
-	Kind        string
-	Status      string
-	Repo        string
-	Repos       []backup.Repo
-	Sources     []string
-	From        string
-	To          string
-	LegalHold   string
-	TimelineSVG template.HTML
-	CanWrite    bool
-	IsAdmin     bool
+	Backups         []backup.Record
+	NextCursor      string
+	Paged           bool
+	Source          string
+	Engine          string
+	Kind            string
+	Status          string
+	Repo            string
+	Repos           []backup.Repo
+	From            string
+	To              string
+	LegalHold       string
+	RecoverySources []catalogRecoverySource
+	CanWrite        bool
+	IsAdmin         bool
 }
 
 // backupsCatalogDetailPageBody is the template body for /backups/catalog/{id}.
@@ -86,6 +91,70 @@ type backupsCatalogDetailPageBody struct {
 	// a still running writer); DeleteBlocked explains a block to an operator.
 	CanDelete     bool
 	DeleteBlocked string
+}
+
+type catalogRecoverySource struct {
+	Name       string
+	Latest     *backup.Record
+	Window     runner.Window
+	RestoreURL string
+	HasLogs    bool
+	LogBreaks  int
+	Records    []backup.Record
+}
+
+func catalogRecoverySources(items []backup.Record) []catalogRecoverySource {
+	bySource := make(map[string][]backup.Record)
+	for _, item := range items {
+		bySource[item.Source] = append(bySource[item.Source], item)
+	}
+	out := make([]catalogRecoverySource, 0, len(bySource))
+	for name, records := range bySource {
+		row := catalogRecoverySource{Name: name, Records: records, Window: runner.RecoveryWindow(records)}
+		row.LogBreaks = catalogLogBreaks(records)
+		for _, record := range records {
+			if record.Kind == backup.KindLog {
+				row.HasLogs = row.HasLogs || record.Status == backup.StatusComplete
+				continue
+			}
+			if record.Status == backup.StatusComplete && runner.RequireStandaloneBackup(record) == nil &&
+				(row.Latest == nil || runner.ConsistentTime(record).After(runner.ConsistentTime(*row.Latest))) {
+				latest := record
+				row.Latest = &latest
+			}
+		}
+		if row.Window.Continuous && row.Window.End != nil {
+			row.RestoreURL = "/backups/restore?" + (url.Values{
+				"source": {name}, "target_time": {row.Window.End.Format(time.RFC3339)},
+			}).Encode()
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func catalogLogBreaks(records []backup.Record) int {
+	type lineage struct{ engine, method, job, identity, timeline string }
+	groups := make(map[lineage][]backup.Record)
+	for _, record := range records {
+		identity := record.Details["source_identity"]
+		if record.Kind == backup.KindLog && record.Status == backup.StatusComplete && record.CopyOf == "" &&
+			identity != "" && record.JobID != "" && record.StartTime != nil && record.EndTime != nil {
+			key := lineage{record.Engine, record.Method, record.JobID, identity, record.Details["timeline"]}
+			groups[key] = append(groups[key], record)
+		}
+	}
+	breaks := 0
+	for _, logs := range groups {
+		sort.Slice(logs, func(i, j int) bool { return logs[i].StartTime.Before(*logs[j].StartTime) })
+		for i := 1; i < len(logs); i++ {
+			if !runner.Contiguous(logs[i-1], logs[i]) {
+				breaks++
+			}
+		}
+	}
+	return breaks
 }
 
 type restoreSourceInfo struct {
@@ -111,16 +180,17 @@ type restoreConnView struct {
 // backupsRestorePageBody is the template body for /backups/restore.
 type backupsRestorePageBody struct {
 	// SelectedError: the backup in ?backup= cannot be restored (unknown or not complete); it is not preselected.
-	SelectedError  string
-	SelectedBackup string
-	SelectedSource string
-	Backups        []backup.Record
-	Sources        []string
-	Connections    []restoreConnView
-	SourceInfos    []restoreSourceInfo
-	WizardJSON     template.JS
-	CanWrite       bool
-	IsAdmin        bool
+	SelectedError      string
+	SelectedBackup     string
+	SelectedSource     string
+	SelectedTargetTime string
+	Backups            []backup.Record
+	Sources            []string
+	Connections        []restoreConnView
+	SourceInfos        []restoreSourceInfo
+	WizardJSON         template.JS
+	CanWrite           bool
+	IsAdmin            bool
 }
 
 func (s *Server) pageBackupsJobs(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -238,9 +308,14 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 	}
 
 	limit := 30
+	processID := r.URL.Query().Get("process")
+	if tab != "runs" || !JobIDRE.MatchString(processID) {
+		processID = ""
+	}
 	runFilter := store.BackupRunFilter{
-		JobID: id,
-		Limit: limit,
+		ProcessID: processID,
+		JobID:     id,
+		Limit:     limit,
 	}
 	var runsPaged bool
 	if cur := r.URL.Query().Get("cursor"); cur != "" {
@@ -252,14 +327,53 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 	runs, _ := s.db.st.ListBackupRuns(r.Context(), runFilter)
 	var runViews []backupRunView
 	for _, run := range runs {
-		runViews = append(runViews, backupRunView{
-			Run:             run,
-			RemediationHint: run.Remediation(),
-		})
+		view := backupRunView{Run: run, RemediationHint: run.Remediation()}
+		if s.jobs != nil && JobIDRE.MatchString(run.ProcessID) {
+			if process, ok := s.jobs.Get(run.ProcessID); ok &&
+				(process.Pipeline == backupJobPipeline(id) || process.Pipeline == backupJobRunPipeline(id)) {
+				view.LogURL = "/jobs/" + run.ProcessID
+			}
+		}
+		runViews = append(runViews, view)
 	}
 	nextCursor := backup.RunNextCursor(runs, limit)
 
 	backups, _ := s.db.st.ListBackups(r.Context(), backup.Filter{JobID: id, Limit: 50})
+	var latest *backup.Record
+	var lastSuccess *time.Time
+	completed, _ := s.db.st.ListBackups(r.Context(), backup.Filter{JobID: id, Status: backup.StatusComplete, NotKind: backup.KindLog, Limit: 50})
+	for _, b := range completed {
+		if latest == nil || runner.ConsistentTime(b).After(runner.ConsistentTime(*latest)) {
+			record := b
+			latest = &record
+		}
+	}
+	if job.LastRunStatus == backup.RunStatusSuccess {
+		lastSuccess = job.RunFinishedAt
+	}
+	if lastSuccess == nil {
+		successes, _ := s.db.st.ListBackupRuns(r.Context(), store.BackupRunFilter{JobID: id, Status: string(backup.RunStatusSuccess), Limit: 1})
+		if len(successes) > 0 {
+			lastSuccess = successes[0].FinishedAt
+		}
+	}
+	rpoInput := backup.RPOInput{Source: job.Source, JobID: id, JobName: job.Name, Engine: job.Engine(), PolicyID: job.PolicyID}
+	if latest != nil {
+		at := runner.ConsistentTime(*latest)
+		rpoInput.LastBackup = &at
+	}
+	if job.PolicyID != "" {
+		if policy, ok, err := s.db.st.GetBackupPolicy(r.Context(), job.PolicyID); ok && err == nil {
+			rpoInput.TargetMinutes, rpoInput.RTOMinutes = policy.RPOMinutes, policy.RTOMinutes
+		}
+	}
+	if job.LogArchive {
+		logs, _ := s.db.st.ListBackups(r.Context(), backup.Filter{JobID: id, Status: backup.StatusComplete, Kind: backup.KindLog, Limit: 50})
+		window := runner.RecoveryWindow(append(completed, logs...))
+		if window.Continuous {
+			rpoInput.PITR, rpoInput.LastLogEnd = true, window.End
+		}
+	}
 
 	allAudit, _ := s.db.st.ListAudit(r.Context(), 100)
 	var jobAudit []store.AuditRow
@@ -275,12 +389,14 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
 
 	body := backupsJobDetailPageBody{
-		Protection: jobEncryption(job),
+		Protection:   jobEncryption(job),
+		LatestBackup: latest, LastSuccess: lastSuccess, RPO: backup.ComputeRPO(s.now(), rpoInput),
 		Job:        jobView,
 		ActiveTab:  tab,
 		Runs:       runViews,
 		RunsCursor: nextCursor,
 		RunsPaged:  runsPaged,
+		RunProcess: processID,
 		Chart30:    chart,
 		Backups:    backups,
 		Audit:      jobAudit,
@@ -363,62 +479,25 @@ func (s *Server) pageBackupsCatalog(w http.ResponseWriter, r *http.Request, sess
 		repos, _ = s.db.st.ListBackupRepos(r.Context())
 	}
 
-	// Sources for timeline
-	srcMap := make(map[string]bool)
-	var sources []string
-	if source != "" {
-		sources = append(sources, source)
-		srcMap[source] = true
-	}
-	for _, it := range items {
-		if it.Source != "" && !srcMap[it.Source] {
-			srcMap[it.Source] = true
-			sources = append(sources, it.Source)
-		}
-	}
-	if s.db != nil && s.db.st != nil {
-		if jobs, err := s.db.st.ListBackupJobs(r.Context()); err == nil {
-			for _, j := range jobs {
-				if j.Source != "" && !srcMap[j.Source] {
-					srcMap[j.Source] = true
-					sources = append(sources, j.Source)
-				}
-			}
-		}
-	}
-	sort.Strings(sources)
-
-	// Fetch some recent log segments for the sources to show PITR bands on timeline if items only has full
-	timelineRecs := append([]backup.Record(nil), items...)
-	if f.Kind != backup.KindLog && len(sources) > 0 {
-		for _, src := range sources {
-			if logs, err := s.backups.List(r.Context(), backup.Filter{Source: src, Kind: backup.KindLog, Limit: 50}); err == nil {
-				timelineRecs = append(timelineRecs, logs...)
-			}
-		}
-	}
-	timelineSVG := CatalogTimelineSVG(sources, timelineRecs, 900, 0)
-
 	canWrite := sess != nil && (sess.Role == store.RoleAdmin || sess.Role == store.RoleOperator)
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
 
 	body := backupsCatalogPageBody{
-		Backups:     items,
-		NextCursor:  nextCursor,
-		Paged:       paged,
-		Source:      source,
-		Engine:      engine,
-		Kind:        kind,
-		Status:      status,
-		Repo:        repo,
-		Repos:       repos,
-		Sources:     sources,
-		From:        from,
-		To:          to,
-		LegalHold:   legalHold,
-		TimelineSVG: timelineSVG,
-		CanWrite:    canWrite,
-		IsAdmin:     isAdmin,
+		Backups:         items,
+		NextCursor:      nextCursor,
+		Paged:           paged,
+		Source:          source,
+		Engine:          engine,
+		Kind:            kind,
+		Status:          status,
+		Repo:            repo,
+		Repos:           repos,
+		From:            from,
+		To:              to,
+		LegalHold:       legalHold,
+		RecoverySources: catalogRecoverySources(items),
+		CanWrite:        canWrite,
+		IsAdmin:         isAdmin,
 	}
 	s.render(w, "backups_catalog", sess, pageData{Title: "Restore Points", Active: "backups-catalog", Refresh: 10, Body: body})
 }
@@ -490,6 +569,12 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	}
 	selectedBackup := r.URL.Query().Get("backup")
 	selectedSource := r.URL.Query().Get("source")
+	var selectedTargetTime string
+	if selectedSource != "" {
+		if target, err := time.Parse(time.RFC3339, r.URL.Query().Get("target_time")); err == nil {
+			selectedTargetTime = target.In(webTimeZone).Format("2006-01-02T15:04:05")
+		}
+	}
 	var selectedError string
 	if selectedBackup != "" {
 		if rec, found, err := s.backups.Get(r.Context(), selectedBackup); err != nil || !found {
@@ -601,16 +686,17 @@ func (s *Server) pageBackupsRestore(w http.ResponseWriter, r *http.Request, sess
 	isAdmin := sess != nil && sess.Role == store.RoleAdmin
 
 	body := backupsRestorePageBody{
-		SelectedError:  selectedError,
-		SelectedBackup: selectedBackup,
-		SelectedSource: selectedSource,
-		Backups:        backups,
-		Sources:        sources,
-		Connections:    conns,
-		SourceInfos:    sourceInfos,
-		WizardJSON:     template.JS(wizBytes),
-		CanWrite:       canWrite,
-		IsAdmin:        isAdmin,
+		SelectedError:      selectedError,
+		SelectedBackup:     selectedBackup,
+		SelectedSource:     selectedSource,
+		SelectedTargetTime: selectedTargetTime,
+		Backups:            backups,
+		Sources:            sources,
+		Connections:        conns,
+		SourceInfos:        sourceInfos,
+		WizardJSON:         template.JS(wizBytes),
+		CanWrite:           canWrite,
+		IsAdmin:            isAdmin,
 	}
 	s.render(w, "backups_restore", sess, pageData{Title: "Restore", Active: "backups-restore", Body: body})
 }

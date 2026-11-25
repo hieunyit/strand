@@ -333,6 +333,7 @@
     if (!logPre) { return; }
     logLines = logPre.textContent.replace(/\n$/, '').split('\n');
     if (logLines.length === 1 && logLines[0] === '(no log lines)') { logLines = []; }
+    if (hooks.paintLog) { hooks.paintLog(logPre); }
     if (logFollow && logFollow.checked) { logPre.scrollTop = logPre.scrollHeight; }
     logPre.addEventListener('scroll', function () {
       if (logAtEnd()) { logPending = 0; logStat(); }
@@ -374,19 +375,11 @@
     if (!lines.length) { logStat(); return; }
     if (logFollow && !logFollow.checked) { logPending += lines.length; logStat(); return; } // not following: leave the text alone
     var stick = logAtEnd();
-    if (logLines.length === 0) { logPre.textContent = ''; }
-    var add = (ev.gap ? '\u2026 (lines skipped)\n' : '') + lines.join('\n') + '\n';
-    logPre.appendChild(document.createTextNode(add));
-    logLines = logLines.concat(lines);
-    // keep the DOM bounded: drop the oldest text nodes beyond ~2000 lines
-    if (logLines.length > 2000) {
-      var drop = logLines.length - 2000;
-      logLines = logLines.slice(drop);
-      while (drop > 0 && logPre.firstChild) {
-        var n = logPre.firstChild, cnt = (n.nodeValue || '').split('\n').length - 1;
-        if (cnt > drop) { n.nodeValue = n.nodeValue.split('\n').slice(drop).join('\n'); drop = 0; } else { logPre.removeChild(n); drop -= cnt; }
-      }
-    }
+    if (ev.gap) { lines.unshift('… (lines skipped)'); }
+    logLines = logLines.concat(lines).slice(-2000);
+    var text = logLines.join('\n') + '\n';
+    if (hooks.paintLog) { hooks.paintLog(logPre, text); }
+    else { logPre.textContent = text; }
     if (stick) { toEnd(); } else { logPending += lines.length; }
     logStat();
   }

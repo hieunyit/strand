@@ -128,6 +128,11 @@ func runBackupRuns(t *testing.T, s store.Store) {
 		t.Fatalf("page 2 contains items from page 1: %+v", p2)
 	}
 
+	filtered, err := s.ListBackupRuns(ctx, store.BackupRunFilter{JobID: job.ID, Status: backup.RunStatusSuccess, ProcessID: "proc-1", Limit: 1})
+	if err != nil || len(filtered) != 1 || filtered[0].ID != run1.ID {
+		t.Fatalf("ListBackupRuns for process/status = %+v, %v", filtered, err)
+	}
+
 	// 6. Cascade delete: deleting the job deletes its runs
 	if ok, err := s.DeleteBackupJob(ctx, job.ID); err != nil || !ok {
 		t.Fatalf("DeleteBackupJob: ok=%v err=%v", ok, err)

@@ -246,6 +246,10 @@ func (s *Server) fullDelta(p *Pipeline, r *LiveRecord, sn *Snap, all bool) {
 	for k, v := range r.F {
 		f[k] = v
 	}
+	f["flow_phase"] = replicationPhase(s.view(p))
+	for _, d := range flowDiagnostics(sn.Metrics) {
+		f[d.Bind] = d.Value
+	}
 	for _, n := range s.graphNodes(s.view(p), sn.Status, sn.Metrics) {
 		for i, b := range n.Binds {
 			if b != "" && i < len(n.Lines) {

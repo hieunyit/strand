@@ -194,8 +194,8 @@
 
   // ---- list tables (pipelines, jobs): client-side search, engine/kind, state and pipeline filters, sort.
   // The filters live in the query string (shareable links) and survive the periodic refresh. ----
-  var FILTERS = [['q', 'pl-filter'], ['kind', 'pl-kind'], ['state', 'pl-state'], ['pipeline', 'pl-pipeline']];
-  var listState = { sort: '', dir: 1, q: '', kind: '', state: '', pipeline: '' };
+  var FILTERS = [['q', 'pl-filter'], ['kind', 'pl-kind'], ['state', 'pl-state'], ['pipeline', 'pl-pipeline'], ['tags', 'pl-tags']];
+  var listState = { sort: '', dir: 1, q: '', kind: '', state: '', pipeline: '', tags: '' };
   (function () {
     var qs = new URLSearchParams(location.search);
     FILTERS.forEach(function (f) { if (qs.get(f[0])) { listState[f[0]] = qs.get(f[0]); } });
@@ -236,18 +236,20 @@
       rows.forEach(function (r) { body.insertBefore(r, anchor); });
     }
     var q = listState.q.trim().toLowerCase(), shown = 0;
+    var tags = listState.tags.toLowerCase().split(/[\s,]+/).filter(Boolean);
     rows.forEach(function (r) {
       var kinds = (r.getAttribute('data-kinds') || '').split(/\s+/);
       var ok = (!listState.state || r.getAttribute('data-state') === listState.state) &&
         (!listState.kind || kinds.indexOf(listState.kind) >= 0) &&
         (!listState.pipeline || r.getAttribute('data-pipeline') === listState.pipeline) &&
-        (!q || r.textContent.toLowerCase().indexOf(q) >= 0);
+        tags.every(function (tag) { return (r.dataset.tags || '').split(' ').includes(tag); }) &&
+        (!q || (r.textContent + ' ' + (r.dataset.endpoints || '') + ' ' + (r.dataset.searchCommand || '')).toLowerCase().includes(q));
       r.hidden = !ok;
       if (ok) { shown++; }
     });
     var nm = body.querySelector('tr.nomatch');
     if (nm) { nm.hidden = !(rows.length > 0 && shown === 0); }
-    var active = !!(listState.q || listState.kind || listState.state || listState.pipeline);
+    var active = !!(listState.q || listState.kind || listState.state || listState.pipeline || listState.tags);
     var cnt = document.getElementById('pl-count');
     var noun = table.id === 'jobs-table' ? ' jobs' : ' pipelines';
     if (cnt) { cnt.textContent = active ? shown + ' of ' + rows.length + ' shown' : rows.length + noun; }
@@ -274,7 +276,9 @@
     applyList(); syncListURL();
   });
   document.addEventListener('input', function (ev) {
-    if (ev.target && ev.target.id === 'pl-filter') { listState.q = ev.target.value; applyList(); syncListURL(); }
+    if (!ev.target) { return; }
+    if (ev.target.id === 'pl-filter') { listState.q = ev.target.value; applyList(); syncListURL(); }
+    if (ev.target.id === 'pl-tags') { listState.tags = ev.target.value; applyList(); syncListURL(); }
   });
   document.addEventListener('change', function (ev) {
     var id = ev.target && ev.target.id;
@@ -661,6 +665,57 @@
     if (form) { form.setAttribute('data-dirty', '1'); }
   });
 
+  // Filter only the lines currently loaded, using the same controls for job and pipeline logs.
+  var rawLogs = new WeakMap();
+  function logLevel(line) {
+    var value;
+    var text = line.trimStart();
+    if (text.startsWith('{')) {
+      try { value = JSON.parse(text).level; } catch (e) { /* unstructured output */ }
+    }
+    if (!value) {
+      var match = /(?:^|\s)level="?([a-z]+)\b/i.exec(text) ||
+        /^(?:\d{4}-\d{2}-\d{2}[T ][^ ]+\s+)?\[?(error|warn(?:ing)?|info|debug|fatal|panic|notice)\]?(?:[ :\[]|$)/i.exec(text);
+      value = match && match[1];
+    }
+    var level = String(value || '').toUpperCase();
+    if (level === 'WARNING') { return 'WARN'; }
+    if (level === 'FATAL' || level === 'PANIC') { return 'ERROR'; }
+    if (level === 'NOTICE') { return 'INFO'; }
+    return ['ERROR', 'WARN', 'INFO', 'DEBUG'].includes(level) ? level : 'UNKNOWN';
+  }
+  function paintLog(pre, raw) {
+    if (!pre) { return; }
+    if (raw !== undefined) { rawLogs.set(pre, raw); }
+    else if (!rawLogs.has(pre)) { rawLogs.set(pre, pre.textContent); }
+    var queryInput = document.getElementById('log-query'), levelSelect = document.getElementById('log-level');
+    if (!queryInput || !levelSelect) { if (raw !== undefined) { pre.textContent = raw; } return; }
+    var query = queryInput.value.trim().toLowerCase(), level = levelSelect.value;
+    var count = document.getElementById('log-match-count');
+    var all = rawLogs.get(pre);
+    var text = all;
+    if (query || level) {
+      var lines = all === '(no log lines)' || !all ? [] : all.replace(/\n$/, '').split('\n');
+      var matches = lines.filter(function (line) {
+        return (!level || logLevel(line) === level) && (!query || line.toLowerCase().includes(query));
+      });
+      text = matches.length ? matches.join('\n') + '\n' : 'No matching log lines';
+      var status = matches.length + ' of ' + lines.length + ' loaded lines';
+      if (count.textContent !== status) { count.textContent = status; }
+    } else if (count.textContent) {
+      count.textContent = '';
+    }
+    if (pre.textContent !== text) { pre.textContent = text; }
+  }
+  window.strandConsole.paintLog = paintLog;
+  window.strandConsole.rawLog = function (pre) { return rawLogs.has(pre) ? rawLogs.get(pre) : pre.textContent; };
+  document.addEventListener('input', function (ev) {
+    if (ev.target.id === 'log-query') { paintLog(document.querySelector('[data-raw-log]')); }
+  });
+  document.addEventListener('change', function (ev) {
+    if (ev.target.id === 'log-level') { paintLog(document.querySelector('[data-raw-log]')); }
+  });
+
   // ---- live job output: poll the offset endpoint until the job ends ----
   var out = document.getElementById('joboutput');
   if (out) {
@@ -674,7 +729,7 @@
           if (!j) { setTimeout(poll, 3000); return; }
           if (j.data) {
             var stick = out.scrollTop + out.clientHeight >= out.scrollHeight - 20;
-            out.textContent += j.data;
+            paintLog(out, window.strandConsole.rawLog(out) + j.data);
             if (stick) { out.scrollTop = out.scrollHeight; }
           }
           offset = j.offset;

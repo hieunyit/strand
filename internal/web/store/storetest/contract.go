@@ -98,10 +98,15 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 		if updated, err = s.UpdatePipelineEnv(ctx, "no-such-pipeline", "/y.env", nil); err != nil || updated {
 			t.Fatalf("env update of a missing row = %v %v", updated, err)
 		}
+		updated, err = s.SetPipelineTags(ctx, p.Name, "payments prod")
+		must(t, err)
+		if !updated {
+			t.Fatal("tag update did not find the pipeline")
+		}
 		p.ConfigYAML = "version: 2\n"
 		must(t, s.UpsertPipeline(ctx, p))
 		l, _ := s.ListPipelines(ctx)
-		if len(l) != 2 || l[0].Name != "bare" || l[1].ConfigYAML != "version: 2\n" {
+		if len(l) != 2 || l[0].Name != "bare" || l[1].ConfigYAML != "version: 2\n" || l[1].Tags != "payments prod" {
 			t.Fatalf("list = %+v", l)
 		}
 		if got.Origin != store.OriginCreated || got.Conflicts != "[]" || !got.MissingSince.IsZero() {

@@ -196,7 +196,7 @@ func (m *Mem) UpsertPipeline(_ context.Context, p Pipeline) error {
 	defer m.mu.Unlock()
 	now := time.Now()
 	if old, ok := m.pipes[p.Name]; ok {
-		p.Created = old.Created
+		p.Created, p.Tags = old.Created, old.Tags
 	} else {
 		p.Created = now
 	}
@@ -260,6 +260,20 @@ func (m *Mem) UpdatePipelineEnv(_ context.Context, name, envPath string, envEnc 
 	}
 	r.EnvPath, r.EnvEnc, r.Updated = envPath, append([]byte(nil), envEnc...), time.Now()
 	m.pipes[name] = r
+	return true, nil
+}
+
+func (m *Mem) SetPipelineTags(_ context.Context, name, tags string) (bool, error) {
+	if err := m.enter(); err != nil {
+		return false, err
+	}
+	defer m.mu.Unlock()
+	p, ok := m.pipes[name]
+	if !ok {
+		return false, nil
+	}
+	p.Tags, p.Updated = tags, time.Now()
+	m.pipes[name] = p
 	return true, nil
 }
 

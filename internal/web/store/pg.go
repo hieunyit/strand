@@ -230,13 +230,13 @@ func (p *PG) CountSessions(ctx context.Context) (int, error) {
 	return n, p.wrap(err)
 }
 
-const pipelineCols = `name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts::text, created_at, updated_at`
+const pipelineCols = `name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts::text, created_at, updated_at, tags`
 
 func scanPipeline(sc interface{ Scan(...any) error }) (Pipeline, error) {
 	var p Pipeline
 	var y sql.NullString
 	var miss sql.NullTime
-	err := sc.Scan(&p.Name, &p.ConfigPath, &p.EnvPath, &p.SystemdUnit, &p.LogFile, &p.PidFile, &y, &p.EnvEnc, &p.Origin, &miss, &p.Conflicts, &p.Created, &p.Updated)
+	err := sc.Scan(&p.Name, &p.ConfigPath, &p.EnvPath, &p.SystemdUnit, &p.LogFile, &p.PidFile, &y, &p.EnvEnc, &p.Origin, &miss, &p.Conflicts, &p.Created, &p.Updated, &p.Tags)
 	p.ConfigYAML, p.HasConfig = y.String, y.Valid
 	if miss.Valid {
 		p.MissingSince = miss.Time
@@ -253,11 +253,11 @@ func pipelineArgs(r Pipeline) []any {
 	if !r.MissingSince.IsZero() {
 		miss = r.MissingSince
 	}
-	return []any{r.Name, r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile, y, r.EnvEnc, r.Origin, miss, r.Conflicts}
+	return []any{r.Name, r.ConfigPath, r.EnvPath, r.SystemdUnit, r.LogFile, r.PidFile, y, r.EnvEnc, r.Origin, miss, r.Conflicts, r.Tags}
 }
 
-const pipelineInsert = `INSERT INTO pipelines (name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts, created_at, updated_at)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb, now(), now())`
+const pipelineInsert = `INSERT INTO pipelines (name, config_path, env_path, systemd_unit, log_file, pid_file, config_yaml, env_enc, origin, missing_since, conflicts, created_at, updated_at, tags)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb, now(), now(), $12)`
 
 func (p *PG) UpsertPipeline(ctx context.Context, r Pipeline) error {
 	_, err := p.db.ExecContext(ctx, pipelineInsert+`
@@ -314,6 +314,15 @@ func (p *PG) UpdatePipelineEnv(ctx context.Context, name, envPath string, envEnc
 		return false, p.wrap(err)
 	}
 	return n == 1, nil
+}
+
+func (p *PG) SetPipelineTags(ctx context.Context, name, tags string) (bool, error) {
+	res, err := p.db.ExecContext(ctx, `UPDATE pipelines SET tags = $2, updated_at = now() WHERE name = $1`, name, tags)
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	n, err := res.RowsAffected()
+	return n == 1, p.wrap(err)
 }
 
 func (p *PG) SetPipelineConflicts(ctx context.Context, name, conflicts string) error {

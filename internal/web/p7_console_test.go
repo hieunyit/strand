@@ -17,8 +17,11 @@ func TestSidebarGroupsAndRoleLinks(t *testing.T) {
 	e := newCPEnv(t)
 	nav := func(page string) string {
 		i := strings.Index(page, `<nav aria-label="Main" id="main-nav">`)
-		j := strings.Index(page[i:], `data-navgroup="registered"`)
-		if i < 0 || j < 0 {
+		if i < 0 {
+			t.Fatal("main navigation not found")
+		}
+		j := strings.Index(page[i:], `</nav>`)
+		if j < 0 {
 			t.Fatal("main navigation not found")
 		}
 		return page[i : i+j]

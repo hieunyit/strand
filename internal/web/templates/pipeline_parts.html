@@ -6,7 +6,8 @@
 
 {{define "pipeline-filterbar"}}
 <div class="filterbar" role="search" aria-label="Filter pipelines">
-  <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Search by name or engine" aria-label="Search pipelines by name or engine" autocomplete="off"></span>
+  <span class="searchbox">{{icon "search"}}<input type="search" id="pl-filter" placeholder="Search pipelines" aria-label="Search pipelines" autocomplete="off"></span>
+  <label class="pipeline-tag-filter"><span class="sr-only">Filter by tags</span><input type="search" id="pl-tags" placeholder="Filter by tags" title="Separate tags with commas"></label>
   <select class="chip-select" id="pl-kind" aria-label="Engine"><option value="">All engines</option>{{range .Body.Kinds}}<option value="{{.}}">{{.}}</option>{{end}}</select>
   <select class="chip-select" id="pl-state" aria-label="State"><option value="">All states</option>{{range .Body.States}}<option value="{{.}}">{{.}}</option>{{end}}</select>
   <button type="button" class="btn ghost small" id="pl-clear" hidden>Clear filters</button>
@@ -37,9 +38,9 @@
     <th scope="col" class="hide-md">Zone</th><th scope="col" class="hide-md">Managed by</th><th scope="col" class="hide-md">Last exit</th>
     <th scope="col" class="r"><span class="sr-only">Actions</span></th></tr></thead>
   <tbody>
-  {{range .Body.Views}}<tr data-name="{{.Name}}" data-live-row="{{.Name}}" data-state="{{.State}}" data-sev="{{stateSev .State}}" data-lag="{{lagSort .}}" data-rate="{{if .Top}}{{printf "%.3f" .Rates.Rows}}{{else}}-1{{end}}" data-kinds="{{kindsOf .}}" class="{{if .Stale}}is-stale{{end}}">
+  {{range .Body.Views}}<tr data-name="{{.Name}}" data-live-row="{{.Name}}" data-state="{{.State}}" data-sev="{{stateSev .State}}" data-lag="{{lagSort .}}" data-rate="{{if .Top}}{{printf "%.3f" .Rates.Rows}}{{else}}-1{{end}}" data-kinds="{{kindsOf .}}" data-tags="{{join .Tags " "}}" data-endpoints="{{.SourceHost}} {{.TargetHost}}" class="{{if .Stale}}is-stale{{end}}">
     {{if $bulk}}<td class="c-check"><input type="checkbox" class="rowcheck" data-name="{{.Name}}" aria-label="Select pipeline {{.Name}}"></td>{{end}}
-    <td><a class="mono" href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}{{template "stale-tag" .}}</td>
+    <td><a class="mono" href="/pipelines/{{.Name}}">{{.Name}}</a>{{if .ConfigErr}} <span class="err small">config error</span>{{end}}{{template "stale-tag" .}} <a class="small pipeline-log-link" href="/pipelines/{{.Name}}/logs" aria-label="Logs for {{.Name}}">Logs</a>{{if .Tags}}<div class="pipeline-tags">{{range .Tags}}<span class="badge small">{{.}}</span>{{end}}</div>{{end}}</td>
     <td class="hide-md">{{.Pair}}</td>
     <td><span class="badge {{stateClass .State}}" data-bind-badge="state">{{.State}}</span>{{$why := stateReason .}}<div class="reason small muted" title="{{$why}}" data-bind="reason"{{if not $why}} hidden{{end}}>{{$why}}</div></td>
     <td class="r nowrap c-num {{lagClass .}}" data-bind="lag" data-bind-lag>{{if .Top}}{{lag .Top.LagSeconds}}{{else}}-{{end}}</td>
@@ -62,7 +63,6 @@
   <div class="rowmenu-list" role="group" aria-label="{{.View.Name}} actions">
     <a class="btn" href="/pipelines/{{.View.Name}}">Open</a>
     <a class="btn" href="/pipelines/{{.View.Name}}/tables">Tables</a>
-    <a class="btn" href="/pipelines/{{.View.Name}}/logs">Logs</a>
     {{if .CanOperate}}<hr>
     <form class="act" data-action="start" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">{{icon "play"}}Start</button></form>
     <form class="act" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start." data-retype="{{.View.Name}}"><button class="btn" type="submit">{{icon "stop"}}Stop</button></form>{{end}}
@@ -91,14 +91,14 @@
 <div class="tablewrap tall">
 <table class="data-table grid"{{if .ShowPipeline}} id="jobs-table" data-filterable{{end}}>
   <caption class="sr-only">{{if .ShowPipeline}}Pipeline and backup process jobs{{else}}Process jobs of this pipeline{{end}}</caption>
-  <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Origin</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Command</th>{{if .CanOperate}}<th scope="col" class="r"><span class="sr-only">Actions</span></th>{{end}}</tr></thead>
-  <tbody>{{range .Jobs}}{{$origin := index $.Origins .ID}}<tr data-name="{{.ID}}" data-state="{{jobStateKey .}}" data-kinds="{{.Kind}}" data-pipeline="{{.Pipeline}}">
+  <thead><tr><th scope="col">Started</th>{{if .ShowPipeline}}<th scope="col">Origin</th>{{end}}<th scope="col">Job</th><th scope="col">State</th><th scope="col" class="r">Duration</th><th scope="col">Result</th>{{if .CanOperate}}<th scope="col" class="r"><span class="sr-only">Actions</span></th>{{end}}</tr></thead>
+  <tbody>{{range .Jobs}}{{$origin := index $.Origins .ID}}<tr data-name="{{.ID}}" data-state="{{jobStateKey .}}" data-kinds="{{.Kind}}" data-pipeline="{{.Pipeline}}" data-search-command="{{join .Args " "}}">
     <td class="small nowrap"><a href="/jobs/{{.ID}}">{{ts .Started}}</a></td>
     {{if $.ShowPipeline}}<td>{{if $origin.Href}}<a href="{{$origin.Href}}{{if $origin.Pipeline}}/jobs{{end}}">{{$origin.Label}}</a>{{else}}{{$origin.Label}}{{end}}</td>{{end}}
     <td class="mono"><a href="/jobs/{{.ID}}">{{.Kind}}</a></td>
     <td><span class="badge {{jobClass .}}">{{jobState .}}</span></td>
     <td class="small r nowrap c-num">{{jobDur .}}</td>
-    <td class="mono small wrap">strand {{join .Args " "}}</td>
+    <td class="small wrap">{{if .Error}}<span class="text-bad">{{.Error}}</span>{{else if .ExitCode}}Exit code {{ptrInt .ExitCode}}{{else if .Running}}In progress{{else}}Unavailable{{end}} <a href="/jobs/{{.ID}}#joboutput">Output</a></td>
     {{if $.CanOperate}}<td class="r nowrap">{{if and .Running (not .Cancelled) (or (not $.ShowPipeline) $origin.Pipeline)}}<form class="act inline" data-action="job-cancel" data-pipeline="{{.Pipeline}}" data-confirm="Cancel this {{.Kind}} job of {{.Pipeline}}? The child process receives SIGTERM." data-stay><input type="hidden" name="job_id" value="{{.ID}}"><button class="btn small danger" type="submit" aria-label="Cancel job {{.Kind}} of {{.Pipeline}}">Cancel</button></form>{{end}}</td>{{end}}
   </tr>{{else}}<tr class="empty"><td colspan="{{if $.ShowPipeline}}{{if $.CanOperate}}7{{else}}6{{end}}{{else}}{{if $.CanOperate}}6{{else}}5{{end}}{{end}}"><div class="empty-state">{{icon "jobs"}}<b>No jobs yet</b><span>Verify, plan and schema runs started from a pipeline's Jobs tab appear here.</span></div></td></tr>{{end}}
   <tr class="nomatch" hidden><td colspan="7" class="muted">No job matches the filter. <a href="/jobs">Clear filters</a></td></tr></tbody>
@@ -196,9 +196,9 @@
       {{end}}
       {{if or .Ctl.Running .Ctl.Systemd}}
         <details class="rowmenu inline"><summary class="btn">More actions</summary><div class="menu">
-          {{if .Ctl.Running}}<form class="act" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}} after writing a checkpoint?" data-confirm-title="Restart pipeline" data-confirm-label="Restart pipeline"><button class="menuitem" type="submit">Restart</button></form>{{end}}
-          {{if .Ctl.Systemd}}<form class="act" data-action="enable" data-pipeline="{{.View.Name}}"><button class="menuitem" type="submit">Enable at boot</button></form>
-          <form class="act" data-action="disable" data-pipeline="{{.View.Name}}"><button class="menuitem" type="submit">Disable at boot</button></form>{{end}}
+          {{if .Ctl.Running}}<form class="act" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}} after writing a checkpoint?" data-confirm-title="Restart pipeline" data-confirm-label="Restart pipeline"><button class="btn ghost menuitem" type="submit">Restart</button></form>{{end}}
+          {{if .Ctl.Systemd}}<form class="act" data-action="enable" data-pipeline="{{.View.Name}}"><button class="btn ghost menuitem" type="submit">Enable at boot</button></form>
+          <form class="act" data-action="disable" data-pipeline="{{.View.Name}}"><button class="btn ghost menuitem" type="submit">Disable at boot</button></form>{{end}}
         </div></details>
       {{end}}
     {{end}}
@@ -206,4 +206,14 @@
   </div>{{end}}
   {{if and .View.ConfigErr (not $why)}}<div class="alert alert-error" role="alert">Config error: {{.View.ConfigErr}} <a href="/pipelines/{{.View.Name}}/config">Open configuration</a></div>{{end}}
 </section>
+{{end}}
+
+{{define "log-filters"}}
+<div class="log-filters" role="search" aria-label="Filter loaded log lines">
+  <label><span class="sr-only">Search log text</span><input id="log-query" name="log_query" type="search" placeholder="Search loaded log lines" autocomplete="off"></label>
+  <label><span class="sr-only">Log level</span><select id="log-level" name="log_level">
+    <option value="">All levels</option><option value="ERROR">Error</option><option value="WARN">Warning</option><option value="INFO">Info</option><option value="DEBUG">Debug</option><option value="UNKNOWN">Unknown level</option>
+  </select></label>
+  <span class="small muted" id="log-match-count" role="status"></span>
+</div>
 {{end}}

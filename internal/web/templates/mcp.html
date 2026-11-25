@@ -2,12 +2,12 @@
 <section class="card"><div class="cardhead"><h2>MCP (Model Context Protocol)</h2><span class="badge st-synced">read-only</span></div>
 <p class="card-desc"><code>strand mcp</code> is a <strong>read-only</strong> MCP server over stdio. Your MCP client (Claude Desktop, Claude Code, an IDE) starts it on a machine that has the <code>strand</code> binary and can reach this web's PostgreSQL metadata database; the web does not run it. Every tool call is written to the audit log as <code>mcp.&lt;tool&gt;</code>.</p>
 <h3>Connect</h3>
-<p class="small">Command: <code>{{.Body.Command}}</code></p>
+<p class="small wrap">Command <code id="mcp-command">{{.Body.Command}}</code> <button class="btn small ghost" type="button" data-copy-from="mcp-command">Copy command</button></p>
 <p class="small">Claude Code:</p>
 <pre class="code wrapcode">{{.Body.ClaudeCode}}</pre>
 <p class="small">Claude Desktop / other clients (<code>mcpServers</code> entry):</p>
 <pre class="code wrapcode">{{.Body.ClientJSON}}</pre>
-<p class="muted small">The process needs read access to <code>{{.Body.ConfigPath}}</code> (for <code>database.dsn</code>), or set <code>STRAND_WEB_DATABASE_DSN</code> in the client's environment for the server. Run it as a user that may read the backup catalog.</p>
+<p class="muted small wrap">The process needs read access to <code>{{.Body.ConfigPath}}</code> (for <code>database.dsn</code>), or set <code>STRAND_WEB_DATABASE_DSN</code> in the client's environment for the server. Run it as a user that may read the backup catalog.</p>
 </section>
 <section class="card"><div class="cardhead"><h2>Tools (allowlist, read-only)</h2></div>
 <div class="tablewrap">

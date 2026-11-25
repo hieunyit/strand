@@ -55,13 +55,6 @@
       <a href="{{sectionHome "system-settings" .CanAdmin}}" class="{{if eq .Section "system-settings"}}active{{end}}"{{if eq .Section "system-settings"}} aria-current="page"{{end}}>{{icon "config"}}{{t "nav.settings"}}</a>
       </div>
     </div>
-    <div class="navgroup" data-navgroup="registered">
-      <button type="button" class="navhead navbtn" aria-expanded="true" aria-controls="navg-registered">{{t "nav.registered_pipelines"}}</button>
-      <div class="navitems" id="navg-registered">
-      {{range .Nav}}<a href="/pipelines/{{.Name}}" class="sub {{if eq $.Active .Name}}active{{end}}"{{if eq $.Active .Name}} aria-current="page"{{end}} title="{{.Name}}: {{.State}}" data-live-nav="{{.Name}}"><span class="dot {{stateClass .State}}" role="img" aria-label="{{.State}}" data-bind-dot="state"></span>{{.Name}}</a>
-      {{else}}<span class="muted pad small">{{t "nav.none_registered"}}</span>{{end}}
-      </div>
-    </div>
   </nav>
   <div class="navfoot">strand {{.Version}}</div>
 </aside>

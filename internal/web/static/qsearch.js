@@ -4,7 +4,7 @@
   var dlg = document.getElementById('qsearch'), input = document.getElementById('qsearch-input'), list = document.getElementById('qsearch-results');
   var opener = document.getElementById('qsearch-open');
   if (!dlg || !input || !list || typeof dlg.showModal !== 'function') { return; }
-  var items = [], shown = [], sel = 0, loaded = false;
+  var items = [], shown = [], sel = 0, loadPending = null;
   var ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 
   function navItems() {
@@ -16,22 +16,23 @@
     return out;
   }
   function load() {
+    if (loadPending) { return loadPending; }
     items = navItems();
-    if (loaded || !window.strandApi) { return Promise.resolve(); }
-    loaded = true;
+    if (!window.strandApi) { return Promise.resolve(); }
     var get = function (url) { return window.strandApi('GET', url).then(function (r) { return r.ok ? r.json() : {}; }).catch(function () { return {}; }); };
-    return Promise.all([get('/api/v1/pipelines'), get('/api/v1/backup-jobs')]).then(function (res) {
+    loadPending = Promise.all([get('/api/v1/pipelines'), get('/api/v1/backup-jobs')]).then(function (res) {
       var seen = {};
       items.forEach(function (it) { seen[it.href] = true; });
       (res[0].pipelines || []).forEach(function (p) {
         var href = '/pipelines/' + encodeURIComponent(p.name);
-        if (!seen[href]) { items.push({ label: p.name, kind: 'Pipeline', href: href }); seen[href] = true; }
+        if (!seen[href]) { items.push({ label: p.name, kind: 'Pipeline', detail: (p.tags || []).join(' '), href: href }); seen[href] = true; }
       });
       (res[1].jobs || []).forEach(function (v) {
         var j = v.job || v;
         items.push({ label: j.name || j.id, kind: 'Backup job', detail: j.id, href: '/backups/jobs/' + encodeURIComponent(j.id) });
       });
     });
+    return loadPending;
   }
   function score(it, q) {
     var l = (it.label + ' ' + (it.detail || '') + ' ' + it.kind).toLowerCase();
@@ -80,7 +81,12 @@
   if (opener) { opener.addEventListener('click', open); }
   input.addEventListener('input', function () { sel = 0; render(); });
   input.addEventListener('keydown', function (e) {
-    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, shown.length - 1); render(); }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      dlg.close();
+      if (opener) { opener.focus(); }
+    } else if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, shown.length - 1); render(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); render(); }
     else if (e.key === 'Enter') { e.preventDefault(); go(sel); }
   });

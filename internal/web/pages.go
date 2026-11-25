@@ -19,6 +19,7 @@ import (
 
 	"strand/internal/admin"
 	"strand/internal/backup"
+	"strand/internal/backup/runner"
 	"strand/internal/config"
 	"strand/internal/pipeline"
 	"strand/internal/spool"
@@ -48,18 +49,20 @@ func templateFuncsForLang(lang string) template.FuncMap {
 			}
 			return T(l, key)
 		},
-		"kindsOf":       kindsOf,
-		"retentionText": retentionWords,
-		"dur":           fmtDur,
-		"stateClass":    stateClass,
-		"stateTone":     stateTone,
-		"secs":          fmtSecs,
-		"lag":           fmtLag,
-		"governor":      fmtGovernor,
-		"tblRows":       tblRowsText,
-		"tblETA":        tblETAText,
-		"num":           fmtNum,
-		"int64":         func(v int64) string { return fmtInt(v) },
+		"kindsOf":              kindsOf,
+		"retentionText":        retentionWords,
+		"dur":                  fmtDur,
+		"stateClass":           stateClass,
+		"stateTone":            stateTone,
+		"secs":                 fmtSecs,
+		"seconds":              func(n int64) string { return fmtSecs(float64(n)) },
+		"consistentBackupTime": func(b *backup.Record) time.Time { return runner.ConsistentTime(*b) },
+		"lag":                  fmtLag,
+		"governor":             fmtGovernor,
+		"tblRows":              tblRowsText,
+		"tblETA":               tblETAText,
+		"num":                  fmtNum,
+		"int64":                func(v int64) string { return fmtInt(v) },
 		"clock": func(t time.Time) string {
 			return formatWebTime(t, "15:04:05 MST")
 		},
@@ -478,7 +481,6 @@ type pageData struct {
 	AsOf         time.Time // when the page was rendered (shown as "data as of")
 	Active       string    // overview | pipelines | tên pipeline
 	CSRF         string
-	Nav          []NavItem
 	Version      string
 	Host         string // host name shown in the top bar
 	EnvName      string // environment chip label (setting environment_name); empty: the host name
@@ -676,7 +678,7 @@ func (s *Server) render(w http.ResponseWriter, name string, sess *Session, d pag
 		}
 		d.CanOperate, d.CanAdmin = RoleAllows(sess.Role, PermOperator), RoleAllows(sess.Role, PermAdmin)
 	}
-	d.Nav, d.Version = s.navItems(), s.version
+	d.Version = s.version
 	d.Standby = s.standbyMessage()
 	d.Host = hostName()
 	d.EnvName, d.EnvTone = s.settingStr("environment_name"), "neutral"
@@ -855,31 +857,32 @@ func kindsOf(v PipelineView) string {
 
 // detailBody là dữ liệu của trang chi tiết; chỉ trường của tab đang xem được điền.
 type detailBody struct {
-	Tab        string
-	View       PipelineView
-	Tabs       []tabLink
-	Status     StatusView
-	Graph      template.HTML
-	Charts     []chartCard
-	HasHistory bool // chế độ DB: lịch sử số liệu quá 1 giờ (6 h, 24 h, 7 d) trong DB
-	Metrics    map[string]float64
-	Tables     TablesView
-	TablesBase string
-	Checkpoint CheckpointView
-	Errors     ErrorsView
-	Config     ConfigView
-	Tuning     TuningView
-	Env        EnvView
-	Logs       LogsView
-	Follow     bool
-	Jobs       []JobStatus
-	Src        SourceTablesView
-	SrcLoaded  bool // Src có sẵn trong cache; không thì trình duyệt tải khi người dùng bấm (không gọi socket khi render)
-	Ctl        Controls
-	Head       HeadInfo
-	CanOperate bool   // operator or admin: start/stop/pause/... controls
-	CanAdmin   bool   // admin: delete, config edit, rewind
-	Revision   string // short content hash of the stored config (shown as "Config revision")
+	Tab                                 string
+	View                                PipelineView
+	Tabs                                []tabLink
+	Status                              StatusView
+	SourceLabel, TargetLabel, FlowPhase string
+	Diagnostics                         []flowDiagnostic
+	Charts                              []chartCard
+	HasHistory                          bool // chế độ DB: lịch sử số liệu quá 1 giờ (6 h, 24 h, 7 d) trong DB
+	Metrics                             map[string]float64
+	Tables                              TablesView
+	TablesBase                          string
+	Checkpoint                          CheckpointView
+	Errors                              ErrorsView
+	Config                              ConfigView
+	Tuning                              TuningView
+	Env                                 EnvView
+	Logs                                LogsView
+	Follow                              bool
+	Jobs                                []JobStatus
+	Src                                 SourceTablesView
+	SrcLoaded                           bool // Src có sẵn trong cache; không thì trình duyệt tải khi người dùng bấm (không gọi socket khi render)
+	Ctl                                 Controls
+	Head                                HeadInfo
+	CanOperate                          bool   // operator or admin: start/stop/pause/... controls
+	CanAdmin                            bool   // admin: delete, config edit, rewind
+	Revision                            string // short content hash of the stored config (shown as "Config revision")
 
 	AddedTables      []string
 	AddedTablesError bool
@@ -1015,7 +1018,10 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		if sn := s.samp.Latest(p.Name); sn != nil {
 			b.Metrics = sn.Metrics
 		}
-		b.Graph = PipelineGraph(s.graphNodes(b.View, b.Status.Status, b.Metrics))
+		e := engines(b.View.Pair)
+		b.SourceLabel, b.TargetLabel = e[0].Label, e[1].Label
+		b.FlowPhase = replicationPhase(b.View)
+		b.Diagnostics = flowDiagnostics(b.Metrics)
 		b.HasHistory = true
 		b.Charts = s.charts(p.Name, isMongo(b.View.SourceKind))
 	case "tables":
@@ -1313,6 +1319,49 @@ func mval(m map[string]float64, k string) string {
 }
 
 // graphNodes dựng sơ đồ Source → Assembler → Scheduler → Writer×N → Target với số liệu có sẵn.
+type flowDiagnostic struct{ Label, Bind, Value string }
+
+func replicationPhase(v PipelineView) string {
+	if v.Stale && v.State == StateSynced {
+		return "Showing the last reported state"
+	}
+	switch v.State {
+	case StateBootstrapping:
+		return "Copying the initial snapshot"
+	case StateSynced:
+		return "Applying changes"
+	case StatePaused:
+		return "Paused"
+	case StateStarting:
+		return "Starting"
+	case StateStopped:
+		return "Stopped"
+	case StateFailed:
+		return "Failed"
+	default:
+		return "Runtime data unavailable"
+	}
+}
+
+func flowDiagnostics(metrics map[string]float64) []flowDiagnostic {
+	var rows []flowDiagnostic
+	for _, d := range []struct{ key, label, bind string }{
+		{"strand_pending_cross_range", "Pending primary-key changes across snapshot ranges", "flow_pending"},
+		{"strand_spool_bytes", "Spool storage", "flow_spool"},
+		{"strand_holes", "Pending gaps in apply order", "flow_holes"},
+		{"strand_writeset_entries", "Tracked write dependencies", "flow_dependencies"},
+	} {
+		if value, ok := metrics[d.key]; ok {
+			formatted := FormatValue(value)
+			if d.key == "strand_spool_bytes" {
+				formatted = fmtBytes(value)
+			}
+			rows = append(rows, flowDiagnostic{d.label, d.bind, formatted})
+		}
+	}
+	return rows
+}
+
 func (s *Server) graphNodes(v PipelineView, st *admin.StatusInfo, m map[string]float64) []GraphNode {
 	cls := "idle"
 	switch v.State {

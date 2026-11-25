@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"strand/internal/backup"
@@ -102,46 +103,29 @@ func (p *PG) ListBackupRuns(ctx context.Context, f BackupRunFilter) ([]backup.Ru
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	var (
-		query string
-		args  []any
-	)
+	query := `SELECT id, job_id, trigger, started_at, finished_at, status,
+		bytes_read, bytes_written, duration, backup_id, error_code, error_message, process_id, attempt
+		FROM backup_runs WHERE true`
+	var args []any
 	if f.JobID != "" {
-		if f.After != nil {
-			query = `SELECT id, job_id, trigger, started_at, finished_at, status,
-				bytes_read, bytes_written, duration, backup_id, error_code, error_message, process_id, attempt
-				FROM backup_runs
-				WHERE job_id = $1 AND (started_at < $2 OR (started_at = $2 AND id < $3))
-				ORDER BY started_at DESC, id DESC
-				LIMIT $4`
-			args = []any{f.JobID, f.After.CreatedAt, f.After.ID, limit}
-		} else {
-			query = `SELECT id, job_id, trigger, started_at, finished_at, status,
-				bytes_read, bytes_written, duration, backup_id, error_code, error_message, process_id, attempt
-				FROM backup_runs
-				WHERE job_id = $1
-				ORDER BY started_at DESC, id DESC
-				LIMIT $2`
-			args = []any{f.JobID, limit}
-		}
-	} else {
-		if f.After != nil {
-			query = `SELECT id, job_id, trigger, started_at, finished_at, status,
-				bytes_read, bytes_written, duration, backup_id, error_code, error_message, process_id, attempt
-				FROM backup_runs
-				WHERE (started_at < $1 OR (started_at = $1 AND id < $2))
-				ORDER BY started_at DESC, id DESC
-				LIMIT $3`
-			args = []any{f.After.CreatedAt, f.After.ID, limit}
-		} else {
-			query = `SELECT id, job_id, trigger, started_at, finished_at, status,
-				bytes_read, bytes_written, duration, backup_id, error_code, error_message, process_id, attempt
-				FROM backup_runs
-				ORDER BY started_at DESC, id DESC
-				LIMIT $1`
-			args = []any{limit}
-		}
+		args = append(args, f.JobID)
+		query += fmt.Sprintf(" AND job_id = $%d", len(args))
 	}
+	if f.Status != "" {
+		args = append(args, f.Status)
+		query += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	if f.ProcessID != "" {
+		args = append(args, f.ProcessID)
+		query += fmt.Sprintf(" AND process_id = $%d", len(args))
+	}
+	if f.After != nil {
+		n := len(args) + 1
+		args = append(args, f.After.CreatedAt, f.After.ID)
+		query += fmt.Sprintf(" AND (started_at, id) < ($%d, $%d)", n, n+1)
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY started_at DESC, id DESC LIMIT $%d", len(args))
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

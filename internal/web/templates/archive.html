@@ -9,7 +9,7 @@
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <fieldset class="form-section">
     <legend class="form-section-title">Continuous Binlog Archiver</legend>
-    <p class="form-section-desc">Chạy archiver nền từ source MySQL có GTID. MariaDB chưa được hỗ trợ cho binlog archive. Thông tin kết nối lấy từ cấu hình pipeline và env của nó; credential không được đưa vào argv hoặc form.</p>
+    <p class="form-section-desc">Archive binlogs from a MySQL source with GTID enabled. The archiver uses the selected pipeline’s source connection. Backup jobs manage their own log archives.</p>
     <div class="field-grid">
       <div class="field">
         <label class="field-label" for="archive-pipeline">MySQL pipeline <span class="req" aria-hidden="true">*</span></label>

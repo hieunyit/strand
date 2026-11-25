@@ -1,15 +1,4 @@
 {{define "content"}}
-{{if .Body.TimelineSVG}}
-<section class="card mb" id="catalog-timeline-card">
-  <div class="cardhead">
-    <h2>Timeline by source</h2>
-  </div>
-  <div class="timeline-wrap">
-    {{.Body.TimelineSVG}}
-  </div>
-</section>
-{{end}}
-
 <section class="card" id="backup-catalog-card">
   <div class="cardhead">
     <h2>Restore points (catalog)</h2>
@@ -82,6 +71,26 @@
       <a href="/backups/catalog" class="btn small ghost">Reset</a>
     </div>
   </form>
+  {{with .Body.RecoverySources}}<section class="restore-source-summary" aria-label="Restore points by source">
+    <h3>Recovery by source</h3>
+    <p class="muted small">Based on the records shown on this page. Times use UTC+7.</p>
+    <ul class="recovery-sources">
+    {{range .}}<li>
+      <h4 class="wrap">{{if .Name}}{{.Name}}{{else}}Unnamed source{{end}}</h4>
+      {{if .Latest}}<p>Latest backup <a href="/backups/catalog/{{.Latest.ID}}">{{ts (consistentBackupTime .Latest)}}</a></p>{{else}}<p class="muted">No standalone backup in these results</p>{{end}}
+      {{if .RestoreURL}}<p>Catalog-validated window <b>{{ts (deref2 .Window.Start)}} – {{ts (deref2 .Window.End)}}</b> <a href="{{.RestoreURL}}">Preview restore at end</a></p>
+      {{else if .Window.VerifyOnReplay}}<p>Recovery time must be verified during PostgreSQL replay.</p>
+      {{else if .HasLogs}}<p>Logs available · restorable window unconfirmed</p>
+      {{else}}<p class="muted">No archived logs in these results</p>{{end}}
+      {{if .LogBreaks}}<p><span class="badge st-warning">Discontinuous archive segments</span> {{.LogBreaks}} break(s) in the displayed records</p>{{end}}
+      <details class="advanced"><summary>Show timeline records</summary><ul class="time-records">
+      {{range .Records}}<li><a href="/backups/catalog/{{.ID}}">{{ts .CreatedAt}}</a> <b>{{.KindOrFull}}</b> <span>{{.Status}}</span>
+        {{if and (eq .Kind "log") .StartTime .EndTime}}<span class="muted">Log span {{ts (deref2 .StartTime)}} – {{ts (deref2 .EndTime)}}</span>{{end}}</li>{{end}}
+      </ul></details>
+    </li>{{end}}
+    </ul>
+  </section>{{end}}
+
 
   <div class="tablewrap"><table class="data-table" id="catalog-table">
     <caption>Available restore points recorded in central catalog</caption>

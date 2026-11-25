@@ -1,13 +1,13 @@
 {{define "content"}}
 <section class="card">
-  <div class="cardhead"><h2>PostgreSQL Metadata Store Migration (strand web db migrate)</h2></div>
+  <div class="cardhead"><h2>Import legacy metadata</h2></div>
   <p class="card-desc">Import legacy file-mode state from the configured web.yaml into this PostgreSQL metadata store, then verify it. This requires a legacy config file; it does not migrate database tables.</p>
   <form class="act" data-action="db-migrate" method="post" action="/settings/db/migrate">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
     <div class="form-actions">
       <span class="form-status">Preview first: the dry-run reports new, present and conflicting items without writing.</span>
-      <button class="btn" type="submit" name="dry_run" value="true" data-action="db-migrate-dry">Dry-Run Migration (Preview)</button>
-      <button class="btn primary" type="submit" name="dry_run" value="false" data-action="db-migrate" data-confirm="Execute migration to PostgreSQL metadata database?">Apply Migration</button>
+      <button class="btn primary" type="submit" name="dry_run" value="true" data-action="db-migrate-dry">Dry-Run Migration (Preview)</button>
+      <button class="btn" type="submit" name="dry_run" value="false" data-action="db-migrate" data-confirm="Import the legacy web state into the PostgreSQL metadata database used by this console? Run the preview first.">Apply Migration</button>
     </div>
   </form>
 </section>
@@ -36,7 +36,7 @@
 <form class="act" data-action="db-export" method="post" action="/settings/db/export">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <fieldset class="form-section">
-    <legend class="form-section-title">Export Metadata Database to Files (strand web db export)</legend>
+    <legend class="form-section-title">Export metadata to files</legend>
     <p class="form-section-desc">Export all pipelines, state, jobs, wizards, and audit log from PostgreSQL metadata store into a file directory layout for backup or reverting to file mode.</p>
     <div class="field-grid cols-1">
       <div class="field">
@@ -46,7 +46,7 @@
       </div>
     </div>
     <div class="form-actions flat">
-      <button class="btn primary" type="submit" data-action="db-export" data-confirm="Export all database metadata to directory?">Export Database</button>
+      <button class="btn" type="submit" data-action="db-export" data-confirm="Export all database metadata to directory?">Export Database</button>
     </div>
   </fieldset>
 </form>

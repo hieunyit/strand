@@ -111,18 +111,16 @@ func TestCatalogFilterAndTimeline(t *testing.T) {
 
 	adm := e.admin()
 
-	// 1. Basic catalog listing with timeline SVG
+	// 1. Catalog recovery uses only the displayed records and never promises PITR from unproven log spans
 	code, body := adm.do("GET", "/backups/catalog", nil)
 	if code != http.StatusOK {
 		t.Fatalf("catalog returned %d", code)
 	}
 	for _, want := range []string{
-		"Timeline by source",
-		"<svg class=\"timeline-svg\"",
-		"timeline-pitr-band",
-		"timeline-dot-full",
-		"timeline-dot-inc",
-		`href="/backups/restore?source=mysql-app"`,
+		"Recovery by source",
+		"Show timeline records",
+		"Logs available · restorable window unconfirmed",
+		`href="/backups/catalog/bkp-log-1"`,
 		`href="/backups/restore?backup=bkp-full-1"`,
 		b1.ID,
 	} {
@@ -710,5 +708,26 @@ func TestBackupCatalogDatabaseScopeUsesRecordedMetadata(t *testing.T) {
 				t.Errorf("%s: status %d, expected scope %q", path, code, tc.want)
 			}
 		}
+	}
+}
+
+func TestCatalogRecoveryWindowStartsRestoreAtSelectedTime(t *testing.T) {
+	e := newCPEnv(t)
+	end := time.Date(2026, 11, 20, 12, 0, 5, 0, time.UTC)
+	baseAt := end.Add(-2 * time.Hour)
+	start := end.Add(-3 * time.Hour)
+	const file = "mysql-bin.000001"
+	base := seedRichBackup(t, e.st, "timeline-base", "mysql-prod", "mysql", "mysqldump", backup.KindFull, baseAt,
+		backup.Position{GTIDSet: "uuid:1-100", BinlogFile: file, BinlogPos: 1234}, false, nil, "", &baseAt, &baseAt, "", map[string]string{"source_identity": "mysql-fixture"})
+	log := seedRichBackup(t, e.st, "timeline-log", "mysql-prod", "mysql", "binlog", backup.KindLog, end,
+		backup.Position{BinlogFile: file, BinlogPos: 4}, false, nil, "", &start, &end, "", map[string]string{"seq": "1", "source_identity": "mysql-fixture"})
+
+	rows := catalogRecoverySources([]backup.Record{base, log})
+	if len(rows) != 1 || !rows[0].Window.Continuous || rows[0].RestoreURL == "" {
+		t.Fatalf("wanted a confirmed recovery window, got %+v", rows)
+	}
+	_, page := e.admin().do("GET", rows[0].RestoreURL, nil)
+	if !strings.Contains(page, `value="2026-11-20T19:00:05"`) {
+		t.Fatal("selected recovery time was not prefilled in UTC+7")
 	}
 }

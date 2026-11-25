@@ -388,6 +388,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /{$}", s.auth(false, s.pageOverview))
 	mux.Handle("GET /pipelines", s.auth(false, s.pagePipelines))
 	mux.Handle("GET /pipelines/new", s.auth(false, s.pageNewPipeline))
+	mux.Handle("POST /pipelines/{name}/tags", s.auth(false, s.pageSavePipelineTags))
 	mux.Handle("POST /pipelines/new", s.auth(false, s.apiPipelineCreate))
 	mux.Handle("GET /jobs", s.auth(false, s.pageJobs))
 	mux.Handle("GET /settings", s.auth(false, s.pageSettings))

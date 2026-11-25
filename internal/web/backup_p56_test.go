@@ -980,6 +980,11 @@ func cancelRun(t *testing.T, e *cpEnv, a *apiClient) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The test script is only cancellable after its launch identity is visible in /proc.
+	waitFor(t, "backup child launch identity", func() bool {
+		process, ok := runner.Get(id)
+		return ok && jobProcessMatches(process.PID, id, runner.bin, runner.logPath(id))
+	})
 	e.srv.trackBackupProcess(id)
 	if err := e.st.CreateBackupRun(ctx, backup.Run{ID: "brun-cancel", JobID: job.ID, Trigger: backup.TriggerManual, StartedAt: e.srv.now().UTC(),
 		Status: string(backup.RunStatusRunning), ProcessID: id}); err != nil {
