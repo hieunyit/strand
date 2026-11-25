@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
@@ -253,9 +254,11 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	createdDB := true
 	defer func() {
 		if err != nil && createdDB {
-			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 			defer cancel()
-			_, _ = db.ExecContext(cctx, "DROP DATABASE IF EXISTS `"+strings.ReplaceAll(t.Database, "`", "``")+"`")
+			if _, derr := db.ExecContext(cctx, "DROP DATABASE IF EXISTS `"+strings.ReplaceAll(t.Database, "`", "``")+"`"); derr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup failed: database %s created by this restore is left on the target: %w", t.Database, derr))
+			}
 		}
 	}()
 
@@ -428,7 +431,22 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	createdDB := true
 	defer func() {
 		if err != nil && createdDB {
-			_, _ = admin.Exec(context.Background(), `DROP DATABASE IF EXISTS "`+strings.ReplaceAll(t.Database, `"`, `""`)+`" WITH (FORCE)`).ReadAll()
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			conn := admin
+			if conn.IsClosed() {
+				c, cerr := connectBackupPG(cctx, e.Getenv, t.Conn, "postgres", false)
+				if cerr != nil {
+					err = errors.Join(err, fmt.Errorf("cleanup failed: database %s created by this restore is left on the target: %v",
+						t.Database, redactAll(cerr.Error(), []string{password(e.Getenv, t.Conn)})))
+					return
+				}
+				defer c.Close(context.Background())
+				conn = c
+			}
+			if derr := dropPGDatabase(cctx, conn, t.Database); derr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup failed: database %s created by this restore is left on the target: %w", t.Database, derr))
+			}
 		}
 	}()
 
@@ -486,6 +504,61 @@ func (e *Env) restorePGDump(ctx context.Context, base backup.Record, t RestoreTa
 	}
 	createdDB = false
 	return nil
+}
+
+// dropPGDatabase drops a database a restore created. DROP DATABASE ... WITH (FORCE) exists from PostgreSQL
+// 13; on older servers new connections are refused and the other sessions on the database are terminated
+// before the DROP. Errors are returned, never discarded.
+func dropPGDatabase(ctx context.Context, c *pgconn.PgConn, name string) error {
+	ident := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	literal := "'" + strings.ReplaceAll(name, "'", "''") + "'"
+	res, err := c.Exec(ctx, "SELECT current_setting('server_version_num')").ReadAll()
+	if err != nil {
+		return fmt.Errorf("read server_version_num: %w", err)
+	}
+	if len(res) == 0 || len(res[0].Rows) == 0 || len(res[0].Rows[0]) == 0 {
+		return errors.New("read server_version_num: no result")
+	}
+	version, err := strconv.Atoi(string(res[0].Rows[0][0]))
+	if err != nil {
+		return fmt.Errorf("parse server_version_num %q: %w", res[0].Rows[0][0], err)
+	}
+	if version >= 130000 {
+		if _, err := c.Exec(ctx, "DROP DATABASE IF EXISTS "+ident+" WITH (FORCE)").ReadAll(); err != nil {
+			return fmt.Errorf("drop database %s: %w", name, err)
+		}
+		return nil
+	}
+	res, err = c.Exec(ctx, "SELECT 1 FROM pg_database WHERE datname = "+literal).ReadAll()
+	if err != nil {
+		return fmt.Errorf("drop database %s: %w", name, err)
+	}
+	if len(res) == 0 || len(res[0].Rows) == 0 {
+		return nil
+	}
+	var errs []error
+	if _, err := c.Exec(ctx, "ALTER DATABASE "+ident+" ALLOW_CONNECTIONS false").ReadAll(); err != nil {
+		errs = append(errs, fmt.Errorf("refuse new connections to %s: %w", name, err))
+	}
+	for attempt := 0; ; attempt++ {
+		if _, err := c.Exec(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = "+literal+
+			" AND pid <> pg_backend_pid()").ReadAll(); err != nil {
+			errs = append(errs, fmt.Errorf("terminate sessions on %s: %w", name, err))
+		}
+		_, err := c.Exec(ctx, "DROP DATABASE IF EXISTS "+ident).ReadAll()
+		if err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		// 55006 object_in_use: a terminated session had not exited yet.
+		if !errors.As(err, &pgErr) || pgErr.Code != "55006" || attempt >= 20 || ctx.Err() != nil {
+			return errors.Join(append(errs, fmt.Errorf("drop database %s: %w", name, err))...)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // untar extracts a tar stream into dir, refusing paths that escape it and links.
