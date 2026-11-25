@@ -1340,6 +1340,7 @@ Web UI (PostgreSQL bắt buộc) làm được: tạo pipeline cho mọi cặp �
 
 - Mở URL của tab không áp dụng (bookmark cũ, gõ tay) sẽ quay về trang pipeline. Mục "Guide to pipeline operations" chỉ liệt kê các tab đang hiện; với MongoDB, tab Checkpoint là resume token của change stream theo từng database.
 - Tab **Graph** của pipeline MongoDB vẽ Source → Copy ×N (worker snapshot, docs/s, số collection đã xong) → Change stream → Target, kèm biểu đồ lag và throughput; không có Assembler/Scheduler/governor, thẻ Throttle và biểu đồ holes/spool (không áp dụng cho MongoDB; giới hạn tốc độ copy bằng `max_parallel`).
+- Tab **Tables**, thẻ **Rows (estimate)**: số đã copy ở dòng trên, "of ~tổng (phần trăm)" ở dòng dưới, nên số hàng chục, hàng trăm triệu không còn tràn sang thẻ **Copy rate** bên cạnh.
 - Tab **Jobs** chỉ gồm **Verify**, **Plan** và lịch sử job; duyệt thay đổi schema nằm ở tab **Schema**, database objects ở tab **Objects** (không lặp lại ở Jobs). Verify của pipeline MongoDB: xem đoạn "Job verify".
 - Tạo pipeline thành công (validate đạt) thì console tự mở trang pipeline vừa tạo; validate lỗi thì ở lại trang tạo và hiện lỗi.
 
@@ -1420,13 +1421,29 @@ Collection lớn được bắt đầu trước. Mỗi worker là một luồng 
 
 Collection có từ **2 × `mongodb.split_min_docs`** document trở lên (mặc định 100 000, tức từ 200 000 document) được chia thành tối đa **4 × `max_parallel`** khoảng `_id` (mỗi khoảng ít nhất `split_min_docs` document), mỗi khoảng do một worker copy. Số khoảng nhiều hơn số worker là cố ý: ranh giới lấy từ `$sample` của MongoDB vốn lấy mẫu lệch nên các khoảng to nhỏ không đều; worker nào xong sớm thì nhận khoảng tiếp theo thay vì ngồi chờ, nên đến cuối không còn cảnh một worker chạy một mình. Nhờ vậy một collection rất lớn không còn giới hạn thời gian của cả snapshot.
 
-- Điểm chia lấy từ một mẫu ngẫu nhiên `_id` (`$sample`, đã sắp theo `_id`), nên các khoảng có số document gần bằng nhau. Mỗi khoảng đọc bằng biên của index `_id`, nên đúng với `_id` thuộc mọi kiểu BSON (số, chuỗi, ObjectId, Decimal128, document, binary…).
+- Điểm chia lấy từ một mẫu ngẫu nhiên `_id` (`$sample`, đã sắp theo `_id`). Mẫu này lệch (đo trên 12 triệu document: các điểm tứ phân vị lệch khoảng 15%, tăng cỡ mẫu không hết lệch), nên các khoảng to nhỏ khác nhau, có khi gấp đôi nhau; vì vậy mới chia nhiều khoảng hơn số worker. Mỗi khoảng đọc bằng biên của index `_id`, nên đúng với `_id` thuộc mọi kiểu BSON (số, chuỗi, ObjectId, Decimal128, document, binary…).
 - Mỗi khoảng có checkpoint riêng (`_strand_cdc.mongo_sync_progress`, `kind: snapshot_part`). Sau crash hay restart, từng khoảng copy tiếp từ `_id` cuối đã ghi: không copy trùng, không sót. Khoảng xong cuối cùng đánh dấu cả collection đã copy.
 - Tab Tables và `strand top` vẫn hiện **một dòng mỗi collection**, tiến độ gộp từ các khoảng; log có `MongoDB collection split between workers` (số khoảng) và `MongoDB collection range copied` (từng khoảng).
 - Chỉnh ngưỡng: thẻ **Tuning** → **Split large collections (documents per range)**, hoặc YAML `mongodb: { split_min_docs: 50000 }`. Nhỏ hơn thì collection nhỏ hơn cũng được chia; `-1` = không bao giờ chia. `max_parallel` = 1 thì không chia.
 - Quyết định chia được đưa ra **khi collection bắt đầu copy**; collection đã chia giữ nguyên các khoảng qua các lần restart.
 - Collection đang copy dở bằng **một worker** (pipeline chạy với `max_parallel: 1`, hoặc bắt đầu từ bản strand chưa có tính năng chia) sẽ được **chia phần còn lại** khi khởi động lại: khoảng đầu chạy tiếp từ `_id` cuối đã copy (giữ nguyên số đã copy), phần sau được chia cho các worker khác. Muốn tăng tốc một pipeline đang copy chậm: tăng `max_parallel` rồi Restart, không cần copy lại từ đầu.
 - Không chia: copy lại một collection (`snapshot add`, `verify --repair fix`) và collection có collation mặc định khác mặc định của MongoDB (thứ tự `_id` khi đó theo collation).
-- `strand plan` tính thời gian ước lượng theo số khoảng của collection lớn nhất.
+- `strand plan` tính thời gian ước lượng theo số worker copy được collection lớn nhất.
+- ETA từng collection (tab Tables) sau khi restart chỉ tính tốc độ từ lúc chạy lại, không tính số document đã copy trước đó (trước đây ETA ngay sau restart thấp hơn thực tế nhiều).
 
-Ví dụ: collection `orders` 3 triệu document, `max_parallel: 8`, `split_min_docs` mặc định → 8 khoảng khoảng 375 000 document, 8 worker copy cùng lúc. Collection khác chờ tới khi có worker rảnh.
+Ví dụ: collection `orders` 3 triệu document, `max_parallel: 8`, `split_min_docs` mặc định → tối đa 4 × 8 = 32 khoảng, nhưng mỗi khoảng phải có ít nhất 100 000 document nên được 30 khoảng khoảng 100 000 document. 8 worker copy cùng lúc, worker nào xong khoảng của mình thì lấy khoảng kế tiếp. Collection khác chờ tới khi có worker rảnh.
+
+Số đo thực tế (2 database, 15,7 triệu document, collection lớn nhất 12 triệu, `max_parallel: 4`, MongoDB 8.0 trên cùng một máy): khoảng 55 000 document/giây suốt quá trình, xong trong 4 phút 39 giây. Bản cũ chia cứng 2 + 2 worker cho hai database: database nhỏ xong thì chỉ còn 2 worker, khoảng 31 000 document/giây.
+
+### Snapshot MongoDB chậm hoặc chạy ít luồng hơn `max_parallel`
+
+Xem tốc độ ở tab **Tables** (thẻ **Copy rate**, cột tiến độ từng collection), tab **Graph** (khối **Copy ×N** và biểu đồ **Throughput**, đường "snapshot"), hoặc log `MongoDB snapshot progress` (`docs_per_sec` từng khoảng).
+
+| Triệu chứng | Nguyên nhân | Xử lý |
+| --- | --- | --- |
+| Chọn 4 luồng nhưng chỉ có 1–2 collection/khoảng chạy | Chỉ còn ít việc: collection nhỏ, chưa tới 2 × `split_min_docs` nên không chia; hoặc chạy bản strand cũ (chia cứng worker cho từng database) | Cập nhật strand; hạ `split_min_docs` (thẻ Tuning) để collection vừa cũng được chia |
+| Một collection lớn copy bằng một worker từ đầu tới cuối | Copy bắt đầu với `max_parallel: 1` hoặc bằng bản chưa có tính năng chia | Tăng `max_parallel` rồi **Restart**: phần còn lại được chia, phần đã copy giữ nguyên |
+| Gần cuối chỉ còn một worker chạy | Bản cũ chia đúng `max_parallel` khoảng, khoảng lớn nhất chạy một mình | Bản mới chia 4 khoảng mỗi worker; collection đã chia theo cách cũ giữ các khoảng cũ tới khi xong |
+| Collection có collation riêng copy bằng một worker | Thứ tự `_id` theo collation, không chia an toàn được | Bình thường; tăng `max_parallel` chỉ giúp các collection khác |
+| Tốc độ tụt mạnh, log `lease refresh failed`, `NoSuchTransaction`, pipeline dừng vì `lease lost` | Máy nguồn/đích quá tải (thiếu RAM, swap, IO), lệnh tới MongoDB quá chậm | Giảm `max_parallel`, kiểm tra RAM/IO máy MongoDB (cache WiredTiger), tăng `mongodb.lease_ttl`; pipeline chạy tiếp từ checkpoint, không mất dữ liệu |
+| Tốc độ mỗi worker thấp dù máy rảnh | Mỗi lô là một transaction trên đích | Tăng `mongodb.snapshot_batch` (mặc định 1000; giới hạn 8 MiB mỗi lô) |
