@@ -84,6 +84,7 @@ func TestFailedRunAfterUploadKeepsVersionAndLock(t *testing.T) {
 	s3 := &versionedS3{locks: map[string]string{}}
 	srv := httptest.NewServer(s3)
 	defer srv.Close()
+	mem := store.NewMem()
 	tools := t.TempDir()
 	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'mysqldump  Ver 8.0.36 for Linux'; exit 0; fi\necho 'CREATE TABLE t (id int);'\n"
 	if err := os.WriteFile(filepath.Join(tools, "mysqldump"), []byte(script), 0o755); err != nil {
@@ -91,7 +92,7 @@ func TestFailedRunAfterUploadKeepsVersionAndLock(t *testing.T) {
 	}
 	e := testEnv(t, map[string]string{EnvToolsDir: tools, "STRAND_BACKUP_TMPDIR": t.TempDir(),
 		"TESTREPO_ENDPOINT": srv.URL, "TESTREPO_ACCESS_KEY": "test", "TESTREPO_SECRET_KEY": "test",
-		"TESTREPO_ALLOW_INSECURE_LOCAL": "true"}, failFullMeta{store.NewMem()})
+		"TESTREPO_ALLOW_INSECURE_LOCAL": "true"}, failFullMeta{mem})
 	e.NoReadBack = true
 	e.Repo = func(context.Context, string) (backup.Repo, bool, error) {
 		return backup.Repo{ID: "repo1", Bucket: "locked", EnvPrefix: "TESTREPO_", LockMode: "GOVERNANCE", LockDays: 1}, true, nil
@@ -122,7 +123,10 @@ func TestFailedRunAfterUploadKeepsVersionAndLock(t *testing.T) {
 	if len(s3.deletes) != 0 {
 		t.Fatalf("objects deleted under lock: %v", s3.deletes)
 	}
-	e.Now = func() time.Time { return rec.RetainUntil.Add(time.Minute) }
+	// The lock lapses. Lock checks use the catalog's clock, not the writer's (e.Now), so both move.
+	later := rec.RetainUntil.Add(time.Minute)
+	mem.SetClock(func() time.Time { return later })
+	e.Now = func() time.Time { return later }
 	if _, err := e.DeleteRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,7 @@ import (
 // Mem is an in-memory Store for tests (several web Servers can share one Mem to model a restart).
 type Mem struct {
 	mu       sync.Mutex
+	clock    func() time.Time // the "database clock" for Object Lock and pin checks; nil: time.Now
 	admin    *Admin
 	sessions map[string]Session
 	pipes    map[string]Pipeline
@@ -940,4 +941,19 @@ func (m *Mem) TryLocked(ctx context.Context, key string, fn func(ctx context.Con
 func (m *Mem) nextAuditID() int64 {
 	m.auditSeq++
 	return m.auditSeq
+}
+
+// SetClock replaces the clock the store uses where the PG store uses the database's now() (Object Lock
+// and pin checks), so tests can let a lock lapse without changing the caller's clock.
+func (m *Mem) SetClock(clock func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clock = clock
+}
+
+func (m *Mem) dbNow() time.Time {
+	if m.clock != nil {
+		return m.clock()
+	}
+	return time.Now()
 }

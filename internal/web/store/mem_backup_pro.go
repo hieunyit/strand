@@ -91,7 +91,7 @@ func (m *Mem) ClaimBackupDeletion(_ context.Context, id string, at time.Time) (b
 		return backup.Record{}, false, fmt.Errorf("%w: %s", backup.ErrPinned, id)
 	}
 	// Like the PG store, the Object Lock is checked against the store's clock, not the caller's.
-	if r.Status != backup.StatusComplete || r.LegalHold || (r.RetainUntil != nil && r.RetainUntil.After(time.Now())) {
+	if r.Status != backup.StatusComplete || r.LegalHold || (r.RetainUntil != nil && r.RetainUntil.After(m.dbNow())) {
 		return cloneBackup(r), false, fmt.Errorf("%w: backup is not eligible for deletion (status, legal hold or retention lock)", backup.ErrInvalid)
 	}
 	r.Status = backup.StatusDeleting
@@ -117,7 +117,7 @@ func (m *Mem) ExpireBackup(_ context.Context, id string, at time.Time) (backup.R
 		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
 	case r.Status == backup.StatusComplete && m.pinnedLocked(id):
 		return backup.Record{}, false, fmt.Errorf("%w: %s", backup.ErrPinned, id)
-	case r.RetainUntil != nil && r.RetainUntil.After(time.Now()):
+	case r.RetainUntil != nil && r.RetainUntil.After(m.dbNow()):
 		return backup.Record{}, false, fmt.Errorf("%w: backup is object-locked until %s", backup.ErrInvalid, r.RetainUntil.UTC().Format(time.RFC3339))
 	}
 	r.Status = backup.StatusExpired
@@ -129,7 +129,7 @@ func (m *Mem) ExpireBackup(_ context.Context, id string, at time.Time) (backup.R
 
 // pinnedLocked reports a live pin on id (m.mu held).
 func (m *Mem) pinnedLocked(id string) bool {
-	now := time.Now()
+	now := m.dbNow()
 	for _, until := range m.pro.pins[id] {
 		if until.After(now) {
 			return true
@@ -151,7 +151,7 @@ func (m *Mem) PinBackups(_ context.Context, holder string, ids []string, ttl tim
 	if m.pro.pins == nil {
 		m.pro.pins = map[string]map[string]time.Time{}
 	}
-	until := time.Now().Add(ttl)
+	until := m.dbNow().Add(ttl)
 	for _, id := range ids {
 		if m.pro.pins[id] == nil {
 			m.pro.pins[id] = map[string]time.Time{}
@@ -205,7 +205,7 @@ func (m *Mem) DeleteBackup(_ context.Context, id string, now time.Time) (backup.
 	if err := backup.DeletableErr(r, now); err != nil {
 		return backup.Record{}, false, err
 	}
-	if err := backup.DeletableErr(r, time.Now()); err != nil { // the store's clock decides the Object Lock
+	if err := backup.DeletableErr(r, m.dbNow()); err != nil { // the store's clock decides the Object Lock
 		return backup.Record{}, false, err
 	}
 	delete(m.backups, id)
