@@ -280,32 +280,12 @@ func uploadPushPayload(ctx context.Context, obj interface {
 		k := *keys.Active
 		opt.Key = &k
 	}
-	pr, pw := io.Pipe()
-	var enc *backup.Encoder
-	done := make(chan error, 1)
-	go func() {
-		var err error
-		if enc, err = backup.NewEncoder(pw, opt); err != nil {
-			_ = pw.CloseWithError(err)
-			done <- err
-			return
-		}
-		_, err = io.Copy(enc, src)
-		if err == nil {
-			err = enc.Close()
-		}
-		_ = pw.CloseWithError(err)
-		done <- err
-	}()
-	info, upErr := obj.Upload(ctx, key, pr, -1, "")
-	_ = pr.CloseWithError(errors.New("upload ended"))
-	if err := <-done; err != nil {
+	info, st, err := backup.EncodeUpload(src, opt, func(body io.Reader) (objectstore.ObjectInfo, error) {
+		return obj.Upload(ctx, key, body, -1, "")
+	})
+	if err != nil {
 		return info, nil, err
 	}
-	if upErr != nil {
-		return info, nil, upErr
-	}
-	st := enc.Stats()
 	m := backup.Meta{Format: backup.FormatSBK1, PlainBytes: st.PlainBytes, PlainSHA256: st.PlainSHA256}
 	if opt.Compress {
 		m.Compression = backup.CompressionZstd

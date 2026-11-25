@@ -109,34 +109,13 @@ type PayloadResult struct {
 // error from src (e.g. the backup tool failed) aborts the upload.
 func (r *Repository) StorePayload(ctx context.Context, key string, src io.Reader, enc backup.EncodeOptions, lockDays, bandwidthKBps int) (PayloadResult, error) {
 	put := r.putOptions(lockDays, bandwidthKBps, time.Now())
-	pr, pw := io.Pipe()
-	// The encoder writes its header immediately: create it on the writer side of the pipe.
-	var encoder *backup.Encoder
-	copyErr := make(chan error, 1)
-	go func() {
-		var err error
-		if encoder, err = backup.NewEncoder(pw, enc); err != nil {
-			_ = pw.CloseWithError(err)
-			copyErr <- err
-			return
-		}
-		_, err = io.Copy(encoder, src)
-		if err == nil {
-			err = encoder.Close()
-		}
-		_ = pw.CloseWithError(err)
-		copyErr <- err
-	}()
-	info, upErr := r.Store.UploadWith(ctx, key, pr, -1, "", put)
-	_ = pr.CloseWithError(errors.New("upload ended"))
-	srcErr := <-copyErr
-	if srcErr != nil {
-		return PayloadResult{}, srcErr
+	info, stats, err := backup.EncodeUpload(src, enc, func(body io.Reader) (objectstore.ObjectInfo, error) {
+		return r.Store.UploadWith(ctx, key, body, -1, "", put)
+	})
+	if err != nil {
+		return PayloadResult{}, err
 	}
-	if upErr != nil {
-		return PayloadResult{}, upErr
-	}
-	return PayloadResult{Object: info, Plain: encoder.Stats(), Format: enc.Format(), Lock: put}, nil
+	return PayloadResult{Object: info, Plain: stats, Format: enc.Format(), Lock: put}, nil
 }
 
 // OpenPayload opens a cataloged payload and returns its verified plaintext: the stored bytes are checked
