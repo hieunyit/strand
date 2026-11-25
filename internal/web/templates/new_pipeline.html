@@ -244,7 +244,7 @@
       <label class="field">
         <span class="field-label">Collections in parallel</span>
         <input type="number" name="max_parallel" min="1" max="32" value="4" class="mono" placeholder="default: 1">
-        <small class="field-hint">How many collections the initial snapshot copies at the same time (1-32), shared by all selected databases. More is faster but loads the source and target more; one collection is always copied by one worker.</small>
+        <small class="field-hint">How many collections the initial snapshot copies at the same time (1-32), shared by all selected databases. More is faster but loads the source and target more. A large collection (200 000+ documents) is split into _id ranges copied by several workers.</small>
       </label>
       <label class="field">
         <span class="field-label">Snapshot batch</span>

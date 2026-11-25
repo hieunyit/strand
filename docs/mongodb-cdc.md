@@ -26,7 +26,17 @@ by commas. The source databases have no default: type one or several separated b
 **List source databases** (it connects with the entered credentials and lists the user databases)
 and click the ones to copy. **Collections in parallel** (MongoDB tuning, prefilled with 4) is
 `bootstrap.logical.max_parallel`: how many collections the initial snapshot copies at the same
-time, like "Tables in parallel" of MySQL pipelines; it can be changed later on the Tuning card. With one database, an empty target database means the same name as the
+time, like "Tables in parallel" of MySQL pipelines; it can be changed later on the Tuning card.
+
+**Large collections are split between workers.** A collection with at least twice
+`mongodb.split_min_docs` documents (default 100 000) is cut into up to `max_parallel`
+ranges of `_id` (from a random `$sample` of `_id`s, sorted), each copied by its own worker
+and checkpointed on its own: after a crash every range resumes from its last copied
+`_id`, so nothing is copied twice or skipped. Ranges use the `_id` index bounds, so
+`_id`s of every BSON type are covered. Collections with a non-simple default collation
+are copied by one worker. The split is decided when the copy of a collection starts;
+a copy in progress keeps its ranges (or its single worker) across restarts. A re-copy
+(`snapshot add`, `verify --repair fix`) uses one worker. With one database, an empty target database means the same name as the
 source; several databases keep their names on the target (write `target.databases` in the YAML to
 rename them). The console builds the connection URI (user and password escaped) and
 stores it only in the pipeline's encrypted `.env` as `SRC_URI` / `DST_URI`; the YAML below is what it
@@ -50,13 +60,14 @@ tables:
   exclude: ["app.tmp_*"]
 bootstrap:
   logical:
-    max_parallel: 4             # collections copied concurrently (1..32, default 1)
+    max_parallel: 4             # copy workers: collections, or _id ranges of a large one (1..32, default 1)
 checkpoint:
   flush_every: 1s               # idle checkpoint interval
 mongodb:
   snapshot_batch: 1000          # documents per snapshot transaction (default 1000)
   stream_batch: 2000            # change events per apply transaction (default 2000)
   lease_ttl: 45s                # single-writer lease TTL, target clock (>= 3s)
+  split_min_docs: 100000        # split a collection of >= 2x this many documents into _id ranges (-1: never)
   overwrite_target: false       # true: the first snapshot may drop existing target collections
   updates: auto                 # auto | delta | lookup (see "Updates")
   indexes: off                  # off | replicate (see "Indexes and collection options")
@@ -365,6 +376,7 @@ MongoDB 4.4, 5.0, 6.0, 7.0 and 8.0 (source and target of the same version):
 
 | Test | What it proves |
 |---|---|
+| `SplitCollectionCopy`, `SplitCollectionExactCount` | a large collection with `_id`s of 7 BSON types is copied by 3-4 workers in ranges, interrupted several times, under load; exact document count, byte-identical |
 | `SeveralDatabases` | a one-database pipeline gets a second database (renamed on the target) without copying the first again; concurrent writes to both; `top`/`tables`/`verify`/`verify --repair fix` with `database.collection` names |
 | `FirstClassPipeline` | `strand validate/plan/sync --background/status/stop/verify/verify --repair fix`, admin socket (top, status, tables, events, checkpoint, source_tables, pause/resume), `/metrics` |
 | `SnapshotUnderConcurrentLoad` | snapshot handoff under insert/update/replace/delete load, byte-identical result |
@@ -407,7 +419,8 @@ the target; the parallel snapshot scales ~3x with 4 workers.
 - Databases map one to one (source database → target database); no transforms, no
   collection renaming, no filtering of documents. A transaction across several
   databases is applied per database (see "Several databases in one pipeline").
-- A single collection is copied by one worker (no range splitting).
+- A re-copy of one collection (`snapshot add`, `verify --repair fix`) and collections
+  with a non-simple default collation are copied by one worker.
 - Views, time-series collections and (with `indexes: replicate`) client-side field
   level encryption options are not replicated.
 - In `delta` mode on 5.0–6.0 sources, field names containing `.` require

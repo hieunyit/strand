@@ -27,7 +27,8 @@ import (
 //	source.database / target.database one database
 //	source.databases / target.databases several databases (one change stream each)
 //	tables.include / exclude         "db.collection" globs
-//	bootstrap.logical.max_parallel   collections copied concurrently
+//	bootstrap.logical.max_parallel   copy workers (collections, or _id ranges of a large one)
+//	mongodb.split_min_docs           smallest _id range of a split collection
 //	mongodb.snapshot_batch           documents per snapshot batch (or bootstrap.logical.chunk_rows)
 //	mongodb.stream_batch             change events per apply transaction (or target.batch.max_rows)
 //	checkpoint.flush_every           idle checkpoint interval
@@ -43,6 +44,7 @@ func mongoConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger) (
 		StreamBatch:      cfg.Target.Batch.MaxRows,
 		UpdateMode:       cfg.MongoDB.Updates,
 		ReplicateIndexes: cfg.MongoDB.Indexes == "replicate",
+		SplitMinDocs:     cfg.MongoDB.SplitMinDocs,
 	}
 	if n, err := strconv.Atoi(cfg.Bootstrap.Logical.ChunkRows); err == nil {
 		mc.SnapshotBatch = n

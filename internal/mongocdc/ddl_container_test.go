@@ -201,7 +201,7 @@ func TestContainer_RecopyResumesAndRenameInPlace(t *testing.T) {
 	progress := p.dstC.Database(stateDatabase).Collection(progressCollection)
 	var pr collProgress
 	for {
-		if err := progress.FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"recopy", "big"}}}).Decode(&pr); err == nil && pr.Copied >= 3000 {
+		if err := progress.FindOne(ctx, bson.D{{Key: "_id", Value: progressID{Pipeline: "recopy", Collection: "big"}}}).Decode(&pr); err == nil && pr.Copied >= 3000 {
 			break
 		}
 		r.failIfExited(t)
@@ -211,7 +211,7 @@ func TestContainer_RecopyResumesAndRenameInPlace(t *testing.T) {
 	if err := <-r.done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	_ = progress.FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"recopy", "big"}}}).Decode(&pr)
+	_ = progress.FindOne(ctx, bson.D{{Key: "_id", Value: progressID{Pipeline: "recopy", Collection: "big"}}}).Decode(&pr)
 	stoppedAt := pr.Copied
 	if pr.Kind != progressRecopy || stoppedAt == 0 || stoppedAt >= 20000 {
 		t.Fatalf("re-copy progress after interruption: %+v", pr)
@@ -220,7 +220,7 @@ func TestContainer_RecopyResumesAndRenameInPlace(t *testing.T) {
 	cfg.Observer = NewObserver("recopy")
 	r = start(cfg)
 	p.waitIdentical(t, db, time.Minute, r)
-	if n, _ := progress.CountDocuments(ctx, bson.D{{Key: "_id", Value: progressID{"recopy", "big"}}}); n != 0 {
+	if n, _ := progress.CountDocuments(ctx, bson.D{{Key: "_id", Value: progressID{Pipeline: "recopy", Collection: "big"}}}); n != 0 {
 		t.Fatal("finished re-copy record not removed")
 	}
 	snap := cfg.Observer.Snapshot()

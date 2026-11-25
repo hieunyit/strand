@@ -1029,7 +1029,7 @@ func (r *runner) beginRecopy(ctx context.Context, coll string, token bson.Raw) e
 	if len(token) > 0 {
 		next.ResumeToken, next.StartAfter = token, false
 	}
-	p := collProgress{ID: progressID{r.cfg.Pipeline, coll}, Kind: progressRecopy}
+	p := collProgress{ID: progressID{Pipeline: r.cfg.Pipeline, Collection: coll}, Kind: progressRecopy}
 	err := r.lease.txn(ctx, 0, func(tx context.Context) error {
 		if _, err := r.progress.ReplaceOne(tx, bson.D{{Key: "_id", Value: p.ID}}, p, options.Replace().SetUpsert(true)); err != nil {
 			return err

@@ -139,6 +139,21 @@ func (o *Observer) setCollection(name, state, kind string, copied, estimate int6
 	}
 }
 
+// setCollectionState changes only the state of a known collection (ranges of a split
+// copy report their documents through copied).
+func (o *Observer) setCollectionState(name, state string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	c := o.colls[name]
+	if c == nil || c.State == state {
+		return
+	}
+	if state == CollRunning {
+		c.Started = time.Now()
+	}
+	c.State = state
+}
+
 func (o *Observer) removeCollection(name string) {
 	o.mu.Lock()
 	delete(o.colls, name)

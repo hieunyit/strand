@@ -66,6 +66,9 @@ const (
 	wireVersion60              = 17 // MongoDB 6.0: showExpandedEvents.
 	wireVersion61              = 18 // MongoDB 6.1: disambiguatedPaths in update descriptions.
 	maxSnapshotParallel        = 32
+	// defaultSplitMinDocs: a collection is split into ranges copied by several workers
+	// when it has at least twice this many documents.
+	defaultSplitMinDocs = 100000
 
 	// UpdateModeDelta applies update descriptions to the target image (default).
 	UpdateModeDelta = "delta"
@@ -109,7 +112,11 @@ type Config struct {
 	MaxTransactionBytes int
 	CheckpointEvery     time.Duration // idle resume-token checkpoint interval
 	MaxAwait            time.Duration // change stream getMore maxAwaitTimeMS
-	SnapshotParallel    int           // collections copied concurrently (default 1, max 32)
+	SnapshotParallel    int           // copy workers: collections, or ranges of one, copied concurrently (default 1, max 32)
+	// SplitMinDocs: smallest range when a large collection is split between several
+	// workers (default 100000; a collection needs twice this many documents to be
+	// split; negative: never split).
+	SplitMinDocs int
 	// UpdateMode: UpdateModeDelta (default) or UpdateModeLookup.
 	UpdateMode string
 	// ReplicateIndexes creates the source's indexes and collection options (validators,
@@ -146,6 +153,9 @@ func (c *Config) setDefaults() {
 	if c.SnapshotParallel <= 0 {
 		c.SnapshotParallel = 1
 	}
+	if c.SplitMinDocs == 0 {
+		c.SplitMinDocs = defaultSplitMinDocs
+	}
 	if c.IndexReconcileEvery <= 0 {
 		c.IndexReconcileEvery = defaultIndexReconcile
 	}
@@ -161,21 +171,30 @@ func (c *Config) setDefaults() {
 // one document per collection in _strand_cdc.mongo_sync_progress.
 type collProgress struct {
 	ID       progressID    `bson:"_id"`
-	Kind     string        `bson:"kind"` // progressSnapshot | progressRecopy
+	Kind     string        `bson:"kind"` // progressSnapshot | progressRecopy | progressPart
 	LastID   bson.RawValue `bson:"last_id,omitempty"`
 	Copied   int64         `bson:"copied"`
 	Done     bool          `bson:"done"`
 	Estimate int64         `bson:"estimate,omitempty"`
+	// Parts: number of ranges of a split snapshot copy (0 or 1: one range). The
+	// ranges are progressPart documents with _id.r = 1..Parts.
+	Parts int `bson:"parts,omitempty"`
+	// Lo / Hi: _id bounds of a range (progressPart): Lo inclusive, Hi exclusive;
+	// absent = start / end of the collection.
+	Lo bson.RawValue `bson:"lo,omitempty"`
+	Hi bson.RawValue `bson:"hi,omitempty"`
 }
 
 type progressID struct {
 	Pipeline   string `bson:"p"`
 	Collection string `bson:"c"`
+	Part       int    `bson:"r,omitempty"` // 1..Parts for a range of a split copy
 }
 
 const (
 	progressSnapshot = "snapshot"
 	progressRecopy   = "recopy"
+	progressPart     = "snapshot_part"
 )
 
 // legacyProgress is the per-collection progress kept inside the state document by the
@@ -555,7 +574,7 @@ func (r *runner) migrateLegacyProgress(ctx context.Context) error {
 	st := r.state.clone()
 	err := r.lease.txn(ctx, 0, func(tx context.Context) error {
 		for _, c := range legacy {
-			p := collProgress{ID: progressID{r.cfg.Pipeline, c.Name}, Kind: progressSnapshot, LastID: c.LastID, Copied: c.Copied, Done: c.Done}
+			p := collProgress{ID: progressID{Pipeline: r.cfg.Pipeline, Collection: c.Name}, Kind: progressSnapshot, LastID: c.LastID, Copied: c.Copied, Done: c.Done}
 			if _, err := r.progress.ReplaceOne(tx, bson.D{{Key: "_id", Value: p.ID}}, p, options.Replace().SetUpsert(true)); err != nil {
 				return err
 			}

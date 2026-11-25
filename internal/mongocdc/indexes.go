@@ -195,7 +195,7 @@ func (r *runner) reconcileCollection(ctx context.Context, info collectionInfo, a
 		}
 		return err
 	}
-	mid := progressID{r.cfg.Pipeline, info.Name}
+	mid := progressID{Pipeline: r.cfg.Pipeline, Collection: info.Name}
 	var managed managedIndexes
 	if err := r.indexes.FindOne(ctx, bson.D{{Key: "_id", Value: mid}}).Decode(&managed); err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
 		return err

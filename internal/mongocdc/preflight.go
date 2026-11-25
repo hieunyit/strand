@@ -156,8 +156,12 @@ func Preflight(ctx context.Context, cfg Config) (checks []Check, plan Plan, err 
 	workers := int64(min(cfg.SnapshotParallel, max(len(infos), 1)))
 	plan.EstimatedCopy = time.Duration(float64(plan.Documents)/float64(AssumedSnapshotDocsPerSec*workers)*float64(time.Second)) + time.Second
 	if len(plan.Collections) > 0 {
-		// A single huge collection is copied by one worker.
-		if big := time.Duration(float64(plan.Collections[0].Documents) / AssumedSnapshotDocsPerSec * float64(time.Second)); big > plan.EstimatedCopy {
+		// A huge collection is copied by as many workers as it is split into.
+		parts := 1
+		if cfg.SnapshotParallel > 1 && cfg.SplitMinDocs > 0 && plan.Collections[0].Documents >= 2*int64(cfg.SplitMinDocs) {
+			parts = int(min(int64(cfg.SnapshotParallel), plan.Collections[0].Documents/int64(cfg.SplitMinDocs)))
+		}
+		if big := time.Duration(float64(plan.Collections[0].Documents) / float64(AssumedSnapshotDocsPerSec*parts) * float64(time.Second)); big > plan.EstimatedCopy {
 			plan.EstimatedCopy = big
 		}
 	}

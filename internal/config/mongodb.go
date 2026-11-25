@@ -32,6 +32,10 @@ type MongoDBConfig struct {
 	// Indexes: off (default) | replicate — create the source's indexes and collection
 	// options (validators, collation, TTL, ...) on the target and keep them in sync.
 	Indexes string `yaml:"indexes,omitempty" json:"indexes,omitempty"`
+	// SplitMinDocs: a collection with at least twice this many documents is split into
+	// _id ranges copied by several workers (bootstrap.logical.max_parallel), each range
+	// at least this large (default 100000; -1: never split a collection).
+	SplitMinDocs int `yaml:"split_min_docs,omitempty" json:"split_min_docs,omitempty"`
 	// LeaseTTL: single-writer lease TTL on the target clock (default 45s).
 	LeaseTTL string `yaml:"lease_ttl,omitempty" json:"lease_ttl,omitempty"`
 }
@@ -147,6 +151,9 @@ func validateMongoDB(cfg *Config) error {
 		cfg.MongoDB.Indexes = "replicate"
 	default:
 		return bad(fmt.Sprintf("invalid mongodb.indexes %q (want off | replicate)", cfg.MongoDB.Indexes))
+	}
+	if n := cfg.MongoDB.SplitMinDocs; n < -1 || n > 1000000000 {
+		return bad(fmt.Sprintf("invalid mongodb.split_min_docs %d (documents per range, -1 = never split)", n))
 	}
 	if cfg.MongoDB.LeaseTTL != "" {
 		d, err := time.ParseDuration(cfg.MongoDB.LeaseTTL)

@@ -566,7 +566,7 @@ func TestContainer_SnapshotResumeMixedIDs(t *testing.T) {
 			t.Fatal(err)
 		}
 		var pr collProgress
-		if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"resume", "m"}}}).Decode(&pr); err == nil {
+		if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{Pipeline: "resume", Collection: "m"}}}).Decode(&pr); err == nil {
 			t.Logf("after stop %d: copied=%d done=%v", i, pr.Copied, pr.Done)
 		}
 	}
@@ -574,7 +574,7 @@ func TestContainer_SnapshotResumeMixedIDs(t *testing.T) {
 	p.waitIdentical(t, db, time.Minute, r)
 	r.stop(t)
 	var pr collProgress
-	if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{"resume", "m"}}}).Decode(&pr); err != nil {
+	if err := p.dstC.Database(stateDatabase).Collection(progressCollection).FindOne(ctx, bson.D{{Key: "_id", Value: progressID{Pipeline: "resume", Collection: "m"}}}).Decode(&pr); err != nil {
 		t.Fatal(err)
 	}
 	if pr.Copied != 7000 || !pr.Done {

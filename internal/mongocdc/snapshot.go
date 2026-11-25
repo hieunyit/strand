@@ -106,11 +106,7 @@ func (r *runner) snapshot(ctx context.Context) error {
 			}
 		}
 	}
-	type job struct {
-		info     collectionInfo
-		estimate int64
-	}
-	var jobs []job
+	var colls []*collCopy
 	for _, in := range infos {
 		est, _ := r.source.Collection(in.Name).EstimatedDocumentCount(ctx)
 		p := progress[in.Name]
@@ -123,10 +119,28 @@ func (r *runner) snapshot(ctx context.Context) error {
 		default:
 			r.obs.setCollection(in.Name, CollPending, progressSnapshot, 0, est)
 		}
-		jobs = append(jobs, job{in, est})
+		c := &collCopy{info: in, estimate: est, parent: p, parts: 1}
+		switch {
+		case p != nil && p.Parts > 1:
+			c.parts = p.Parts // a split copy resumes with its ranges
+		case p == nil:
+			c.parts = r.splitParts(in, est)
+		}
+		colls = append(colls, c)
 	}
-	// Largest first: with parallel workers the longest copy starts immediately.
-	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].estimate > jobs[j].estimate })
+	// Largest first: with parallel workers the longest copy starts immediately; the
+	// ranges of a split collection are handed out one after the other.
+	sort.SliceStable(colls, func(i, j int) bool { return colls[i].estimate > colls[j].estimate })
+	type job struct {
+		c    *collCopy
+		part int // 1..c.parts
+	}
+	var jobs []job
+	for _, c := range colls {
+		for part := 1; part <= c.parts; part++ {
+			jobs = append(jobs, job{c, part})
+		}
+	}
 
 	workCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -148,16 +162,14 @@ func (r *runner) snapshot(ctx context.Context) error {
 		go func(j job, slot int) {
 			defer wg.Done()
 			defer func() { slots <- slot }()
-			p := progress[j.info.Name]
-			if p == nil {
-				var err error
-				if p, err = r.startCopy(workCtx, slot, j.info, progressSnapshot, j.estimate); err != nil {
-					cancel(fmt.Errorf("prepare target collection %s: %w", j.info.Name, err))
-					return
-				}
+			c := j.c
+			c.once.Do(func() { c.err = r.prepareCopy(workCtx, slot, c) })
+			if c.err != nil {
+				cancel(fmt.Errorf("prepare target collection %s: %w", c.info.Name, c.err))
+				return
 			}
-			if err := r.copyCollection(workCtx, slot, p); err != nil {
-				cancel(fmt.Errorf("copy collection %s.%s: %w", cfg.SourceDB, j.info.Name, err))
+			if err := r.copyPart(workCtx, slot, c, j.part); err != nil {
+				cancel(fmt.Errorf("copy collection %s.%s: %w", cfg.SourceDB, c.info.Name, err))
 			}
 		}(j, slot)
 	}
@@ -171,6 +183,215 @@ func (r *runner) snapshot(ctx context.Context) error {
 	return nil
 }
 
+// collCopy is the snapshot copy of one collection: one range, or several ranges of
+// _id copied by different workers (split copy).
+type collCopy struct {
+	info     collectionInfo
+	estimate int64
+	parts    int // planned ranges; prepareCopy may lower it (fewer distinct _id bounds)
+	once     sync.Once
+	err      error
+	parent   *collProgress   // the collection's progress document
+	ranges   []*collProgress // split copy: ranges 1..parts
+	mu       sync.Mutex
+	left     int // ranges not finished
+	start    time.Time
+}
+
+// splitParts is the number of ranges a new copy of a collection is split into: one
+// per worker, each of at least SplitMinDocs documents. A collection with a non-simple
+// default collation is not split (its _id order follows the collation).
+func (r *runner) splitParts(info collectionInfo, estimate int64) int {
+	if r.cfg.SnapshotParallel <= 1 || r.cfg.SplitMinDocs <= 0 || estimate < 2*int64(r.cfg.SplitMinDocs) {
+		return 1
+	}
+	if _, err := info.Options.LookupErr("collation"); err == nil {
+		return 1
+	}
+	return int(min(int64(r.cfg.SnapshotParallel), estimate/int64(r.cfg.SplitMinDocs)))
+}
+
+// prepareCopy creates the target collection and the progress records of a new copy,
+// or loads the ranges of a split copy that is resumed.
+func (r *runner) prepareCopy(ctx context.Context, slot int, c *collCopy) error {
+	c.start = time.Now()
+	if c.parent != nil {
+		if c.parts <= 1 {
+			return nil
+		}
+		return r.loadRanges(ctx, c)
+	}
+	var bounds []bson.RawValue
+	if c.parts > 1 {
+		var err error
+		if bounds, err = r.sampleBounds(ctx, c.info.Name, c.parts); err != nil {
+			r.cfg.Logger.Warn("MongoDB: cannot sample _id bounds; the collection is copied by one worker", "collection", r.cfg.SourceDB+"."+c.info.Name, "error", err)
+			bounds = nil
+		}
+		c.parts = len(bounds) + 1
+	}
+	if c.parts <= 1 {
+		p, err := r.startCopy(ctx, slot, c.info, progressSnapshot, c.estimate)
+		c.parent = p
+		return err
+	}
+	if err := r.recreateTargetCollection(ctx, c.info); err != nil {
+		return err
+	}
+	parent := &collProgress{ID: progressID{Pipeline: r.cfg.Pipeline, Collection: c.info.Name}, Kind: progressSnapshot, Estimate: c.estimate, Parts: c.parts}
+	ranges := make([]*collProgress, c.parts)
+	for i := range ranges {
+		rp := &collProgress{ID: progressID{Pipeline: r.cfg.Pipeline, Collection: c.info.Name, Part: i + 1}, Kind: progressPart}
+		if i > 0 {
+			rp.Lo = bounds[i-1]
+		}
+		if i < len(bounds) {
+			rp.Hi = bounds[i]
+		}
+		ranges[i] = rp
+	}
+	err := r.lease.txn(ctx, slot, func(tx context.Context) error {
+		if _, err := r.progress.DeleteMany(tx, bson.D{{Key: "_id.p", Value: r.cfg.Pipeline}, {Key: "_id.c", Value: c.info.Name}, {Key: "kind", Value: progressPart}}); err != nil {
+			return err
+		}
+		if _, err := r.progress.ReplaceOne(tx, bson.D{{Key: "_id", Value: parent.ID}}, parent, options.Replace().SetUpsert(true)); err != nil {
+			return err
+		}
+		docs := make([]any, len(ranges))
+		for i, rp := range ranges {
+			docs[i] = rp
+		}
+		_, err := r.progress.InsertMany(tx, docs)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	c.parent, c.ranges, c.left = parent, ranges, len(ranges)
+	r.cfg.Logger.Info("MongoDB collection split between workers", "pipeline", r.cfg.Pipeline, "collection", r.cfg.SourceDB+"."+c.info.Name, "ranges", c.parts, "estimate", c.estimate)
+	return nil
+}
+
+// loadRanges reads the ranges of a split copy being resumed.
+func (r *runner) loadRanges(ctx context.Context, c *collCopy) error {
+	cur, err := r.progress.Find(ctx, bson.D{{Key: "_id.p", Value: r.cfg.Pipeline}, {Key: "_id.c", Value: c.info.Name}, {Key: "kind", Value: progressPart}})
+	if err != nil {
+		return err
+	}
+	defer cur.Close(ctx)
+	ranges := make([]*collProgress, c.parts)
+	for cur.Next(ctx) {
+		var rp collProgress
+		if err := cur.Decode(&rp); err != nil {
+			return err
+		}
+		if rp.ID.Part < 1 || rp.ID.Part > c.parts {
+			continue
+		}
+		for _, v := range []*bson.RawValue{&rp.LastID, &rp.Lo, &rp.Hi} {
+			*v = bson.RawValue{Type: v.Type, Value: append([]byte(nil), v.Value...)}
+		}
+		ranges[rp.ID.Part-1] = &rp
+	}
+	if err := cur.Err(); err != nil {
+		return err
+	}
+	var copied int64
+	for i, rp := range ranges {
+		if rp == nil {
+			return fmt.Errorf("progress of range %d/%d of %s is missing; start the pipeline under a new name", i+1, c.parts, c.info.Name)
+		}
+		copied += rp.Copied
+		if !rp.Done {
+			c.left++
+		}
+	}
+	c.ranges = ranges
+	r.obs.setCollection(c.info.Name, CollPending, progressSnapshot, copied, c.estimate)
+	return nil
+}
+
+// sampleBounds picks up to parts-1 _id values that split the collection into ranges
+// of about the same number of documents, from a random sample sorted in _id order.
+func (r *runner) sampleBounds(ctx context.Context, name string, parts int) ([]bson.RawValue, error) {
+	size := min(parts*100, 10000)
+	cur, err := r.source.Collection(name).Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$sample", Value: bson.D{{Key: "size", Value: size}}}},
+		{{Key: "$project", Value: bson.D{{Key: "_id", Value: 1}}}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var ids []bson.RawValue
+	for cur.Next(ctx) {
+		id := cur.Current.Lookup("_id")
+		ids = append(ids, bson.RawValue{Type: id.Type, Value: append([]byte(nil), id.Value...)})
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+	var bounds []bson.RawValue
+	for k := 1; k < parts && len(ids) > 0; k++ {
+		b := ids[k*len(ids)/parts]
+		if n := len(bounds); n > 0 && bounds[n-1].Type == b.Type && bytes.Equal(bounds[n-1].Value, b.Value) {
+			continue
+		}
+		bounds = append(bounds, b)
+	}
+	return bounds, nil
+}
+
+// copyPart copies range part of a collection (part 1 of a collection copied as one
+// range is the whole collection).
+func (r *runner) copyPart(ctx context.Context, slot int, c *collCopy, part int) error {
+	if len(c.ranges) == 0 {
+		if part > 1 {
+			return nil // prepareCopy found fewer bounds than planned
+		}
+		return r.copyCollection(ctx, slot, c.parent)
+	}
+	if part > len(c.ranges) {
+		return nil
+	}
+	rp := c.ranges[part-1]
+	finished := false
+	if !rp.Done {
+		r.obs.setCollectionState(c.info.Name, CollRunning)
+		if err := r.copyCollection(ctx, slot, rp); err != nil {
+			return err
+		}
+		finished = true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if finished {
+		c.left--
+	}
+	// The last range to finish (or, after a crash between the last range and the
+	// collection record, the first range looked at) marks the collection copied.
+	if c.left > 0 || c.parent.Done {
+		return nil
+	}
+	var copied int64
+	for _, x := range c.ranges {
+		copied += x.Copied
+	}
+	err := r.lease.txn(ctx, slot, func(tx context.Context) error {
+		_, err := r.progress.UpdateOne(tx, bson.D{{Key: "_id", Value: c.parent.ID}}, bson.D{{Key: "$set", Value: bson.D{{Key: "done", Value: true}, {Key: "copied", Value: copied}}}})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	c.parent.Done, c.parent.Copied = true, copied
+	r.obs.setCollection(c.info.Name, CollDone, progressSnapshot, copied, max(c.estimate, copied))
+	r.cfg.Logger.Info("MongoDB collection copy complete", "pipeline", r.cfg.Pipeline, "collection", r.cfg.SourceDB+"."+c.info.Name, "kind", progressSnapshot,
+		"documents", copied, "ranges", len(c.ranges), "seconds", time.Since(c.start).Seconds())
+	return nil
+}
+
 // startCopy (re)creates the target collection and records an empty progress document.
 // The target collection is dropped first: it is either ours from a crashed attempt
 // (snapshot started) or explicitly allowed to be overwritten.
@@ -178,7 +399,7 @@ func (r *runner) startCopy(ctx context.Context, slot int, info collectionInfo, k
 	if err := r.recreateTargetCollection(ctx, info); err != nil {
 		return nil, err
 	}
-	p := &collProgress{ID: progressID{r.cfg.Pipeline, info.Name}, Kind: kind, Estimate: estimate}
+	p := &collProgress{ID: progressID{Pipeline: r.cfg.Pipeline, Collection: info.Name}, Kind: kind, Estimate: estimate}
 	err := r.lease.txn(ctx, slot, func(tx context.Context) error {
 		_, err := r.progress.ReplaceOne(tx, bson.D{{Key: "_id", Value: p.ID}}, p, options.Replace().SetUpsert(true))
 		return err
@@ -218,10 +439,19 @@ func (r *runner) copyCollection(ctx context.Context, slot int, prog *collProgres
 	log := r.cfg.Logger
 	name := prog.ID.Collection
 	findOpts := options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}).SetHint(bson.D{{Key: "_id", Value: 1}}).SetBatchSize(int32(r.cfg.SnapshotBatch))
-	if !prog.LastID.IsZero() {
+	switch {
+	case !prog.LastID.IsZero():
 		findOpts.SetMin(bson.D{{Key: "_id", Value: prog.LastID}})
+	case !prog.Lo.IsZero():
+		findOpts.SetMin(bson.D{{Key: "_id", Value: prog.Lo}}) // inclusive: the previous range ends before it
 	}
-	r.obs.setCollection(name, CollRunning, prog.Kind, prog.Copied, prog.Estimate)
+	if !prog.Hi.IsZero() {
+		findOpts.SetMax(bson.D{{Key: "_id", Value: prog.Hi}}) // exclusive
+	}
+	part := prog.Kind == progressPart
+	if !part {
+		r.obs.setCollection(name, CollRunning, prog.Kind, prog.Copied, prog.Estimate)
+	}
 	// The copy must not read a state older than the stream position it is replayed
 	// from: a majority read may return a snapshot that lags behind the change-stream
 	// start token captured just before (observed on 4.4: changes between the two were
@@ -305,11 +535,19 @@ func (r *runner) copyCollection(ctx context.Context, slot int, prog *collProgres
 		if time.Since(lastLog) >= progressLogInterval {
 			lastLog = time.Now()
 			rate := float64(prog.Copied-startCopied) / time.Since(start).Seconds()
-			log.Info("MongoDB snapshot progress", "pipeline", r.cfg.Pipeline, "collection", name, "copied", prog.Copied, "estimate", prog.Estimate, "docs_per_sec", int64(rate))
+			if part {
+				log.Info("MongoDB snapshot progress", "pipeline", r.cfg.Pipeline, "collection", name, "range", prog.ID.Part, "copied", prog.Copied, "docs_per_sec", int64(rate))
+			} else {
+				log.Info("MongoDB snapshot progress", "pipeline", r.cfg.Pipeline, "collection", name, "copied", prog.Copied, "estimate", prog.Estimate, "docs_per_sec", int64(rate))
+			}
 		}
 		if sb.last {
 			if err := r.finishCopy(ctx, slot, prog); err != nil {
 				return err
+			}
+			if part {
+				log.Info("MongoDB collection range copied", "pipeline", r.cfg.Pipeline, "collection", r.cfg.SourceDB+"."+name, "range", prog.ID.Part, "documents", prog.Copied, "seconds", time.Since(start).Seconds())
+				return nil
 			}
 			log.Info("MongoDB collection copy complete", "pipeline", r.cfg.Pipeline, "collection", r.cfg.SourceDB+"."+name, "kind", prog.Kind, "documents", prog.Copied, "seconds", time.Since(start).Seconds())
 			return nil
@@ -320,7 +558,7 @@ func (r *runner) copyCollection(ctx context.Context, slot int, prog *collProgres
 // finishCopy marks a snapshot copy done (a re-copy's record is removed by its caller,
 // together with the checkpoint that follows it).
 func (r *runner) finishCopy(ctx context.Context, slot int, prog *collProgress) error {
-	if prog.Kind == progressSnapshot {
+	if prog.Kind == progressSnapshot || prog.Kind == progressPart {
 		err := r.lease.txn(ctx, slot, func(tx context.Context) error {
 			_, err := r.progress.UpdateOne(tx, bson.D{{Key: "_id", Value: prog.ID}}, bson.D{{Key: "$set", Value: bson.D{{Key: "done", Value: true}}}})
 			return err
@@ -330,7 +568,9 @@ func (r *runner) finishCopy(ctx context.Context, slot int, prog *collProgress) e
 		}
 	}
 	prog.Done = true
-	r.obs.setCollection(prog.ID.Collection, CollDone, prog.Kind, prog.Copied, max(prog.Estimate, prog.Copied))
+	if prog.Kind != progressPart { // a split copy is done when its last range is (copyPart)
+		r.obs.setCollection(prog.ID.Collection, CollDone, prog.Kind, prog.Copied, max(prog.Estimate, prog.Copied))
+	}
 	return nil
 }
 
