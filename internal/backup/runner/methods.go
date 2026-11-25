@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -369,13 +370,17 @@ type Process struct {
 	exited      bool
 }
 
-// capped keeps the last part of stderr (for errors and position parsing) and forwards it to log.
+// capped keeps the last part of stderr (for errors and position parsing) and forwards it to log. Secrets
+// are redacted from what is logged and returned by String, also when a secret is split across writes:
+// the last (longest secret - 1) bytes are held back until the next write or Flush.
 type capped struct {
-	mu   sync.Mutex
-	buf  bytes.Buffer
-	max  int
-	log  io.Writer
-	hide []string
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	max       int
+	truncated bool
+	log       io.Writer
+	hide      []string
+	pending   []byte
 }
 
 func (c *capped) Write(p []byte) (int, error) {
@@ -385,49 +390,148 @@ func (c *capped) Write(p []byte) (int, error) {
 	if c.buf.Len() > c.max {
 		b := c.buf.Bytes()[c.buf.Len()-c.max:]
 		c.buf = *bytes.NewBuffer(append([]byte(nil), b...))
+		c.truncated = true
 	}
 	if c.log != nil {
-		_, _ = io.WriteString(c.log, redactAll(string(p), c.hide))
+		c.pending = append(c.pending, p...)
+		c.emit(false)
 	}
 	return len(p), nil
+}
+
+// Flush writes what Write held back (the process has exited).
+func (c *capped) Flush() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.log != nil {
+		c.emit(true)
+	}
+}
+
+// emit logs the redacted pending bytes; unless final it keeps the tail that may begin a secret.
+func (c *capped) emit(final bool) {
+	data := c.pending
+	var out bytes.Buffer
+	i := 0
+	for {
+		at, n := -1, 0
+		for _, x := range c.hide {
+			if len(x) < minSecretLen {
+				continue
+			}
+			if j := bytes.Index(data[i:], []byte(x)); j >= 0 && (at < 0 || j < at || j == at && len(x) > n) {
+				at, n = j, len(x)
+			}
+		}
+		if at < 0 {
+			break
+		}
+		out.Write(data[i : i+at])
+		out.WriteString("[redacted]")
+		i += at + n
+	}
+	rest := data[i:]
+	keep := 0
+	if !final {
+		keep = min(len(rest), longestSecret(c.hide)-1)
+		keep = max(keep, 0)
+	}
+	out.Write(rest[:len(rest)-keep])
+	c.pending = append(c.pending[:0:0], rest[len(rest)-keep:]...)
+	if out.Len() > 0 {
+		_, _ = c.log.Write(out.Bytes())
+	}
+}
+
+// raw returns the unredacted tail (for parsing positions; never shown).
+func (c *capped) raw() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
 }
 
 func (c *capped) String() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return redactAll(c.buf.String(), c.hide)
+	s := c.buf.String()
+	if c.truncated {
+		// The cut may have split a secret: drop the bytes that could hold the rest of one.
+		s = s[min(len(s), max(longestSecret(c.hide)-1, 0)):]
+	}
+	return redactAll(s, c.hide)
+}
+
+const minSecretLen = 3
+
+func longestSecret(secrets []string) int {
+	n := 0
+	for _, x := range secrets {
+		if len(x) >= minSecretLen {
+			n = max(n, len(x))
+		}
+	}
+	return n
 }
 
 func redactAll(s string, secrets []string) string {
 	for _, x := range secrets {
-		if len(x) >= 3 {
+		if len(x) >= minSecretLen {
 			s = strings.ReplaceAll(s, x, "[redacted]")
 		}
 	}
 	return s
 }
 
-// secretsOf lists the secret values of an invocation for redaction.
+// secretEnvName reports whether an invocation variable holds a secret (MYSQL_PWD, PGPASSWORD, ...), as
+// opposed to settings such as PGSSLMODE, PGHOSTADDR or a {dir} path, which must stay readable.
+func secretEnvName(name string) bool {
+	n := strings.ToUpper(name)
+	return strings.Contains(n, "PASSWORD") || strings.Contains(n, "PWD") || strings.Contains(n, "SECRET") ||
+		strings.Contains(n, "TOKEN") || strings.HasSuffix(n, "URI") || strings.HasSuffix(n, "DSN")
+}
+
+// uriSecrets returns a connection URI with credentials and its password (raw and decoded).
+func uriSecrets(v string) []string {
+	out := []string{v}
+	if u, err := url.Parse(v); err == nil && u.User != nil {
+		if pw, ok := u.User.Password(); ok {
+			out = append(out, pw, url.QueryEscape(pw), url.PathEscape(pw))
+		}
+	}
+	return out
+}
+
+// secretsOf lists the secret values of an invocation for redaction: passwords and credentialed URIs passed
+// in its environment or option files. Non-secret settings are not listed: redacting them could blank
+// output that is parsed (positions) or needed to diagnose a failure.
 func secretsOf(inv Invocation) []string {
 	var out []string
 	for _, kv := range inv.Env {
-		if _, v, ok := strings.Cut(kv, "="); ok {
-			out = append(out, v)
+		if k, v, ok := strings.Cut(kv, "="); ok && secretEnvName(k) {
+			out = append(out, uriSecrets(v)...)
 		}
 	}
 	for _, content := range inv.Files {
 		for _, line := range strings.Split(content, "\n") {
-			if _, v, ok := strings.Cut(line, "="); ok {
-				out = append(out, strings.TrimSpace(v))
+			if k, v, ok := strings.Cut(line, "="); ok && secretFileKey(k) {
+				out = append(out, uriSecrets(strings.Trim(strings.TrimSpace(v), `"'`))...)
 			}
-			if _, v, ok := strings.Cut(line, ": "); ok {
-				if uq, err := strconv.Unquote(strings.TrimSpace(v)); err == nil {
-					out = append(out, uq)
+			if k, v, ok := strings.Cut(line, ": "); ok && secretFileKey(k) {
+				v = strings.TrimSpace(v)
+				if uq, err := strconv.Unquote(v); err == nil {
+					v = uq
 				}
+				out = append(out, uriSecrets(v)...)
 			}
 		}
 	}
 	return out
+}
+
+// secretFileKey reports whether an option-file key (client.cnf password=, mongo.yaml uri:) holds a secret.
+func secretFileKey(k string) bool {
+	k = strings.ToLower(strings.TrimSpace(k))
+	return k == "password" || k == "pass" || k == "uri" || strings.Contains(k, "password") || strings.Contains(k, "secret")
 }
 
 // baseEnv is the environment of native tools. Every STRAND_* variable is removed: they carry Strand's own
@@ -516,6 +620,9 @@ func (p *Process) Dir() string { return p.dir }
 // Stderr returns the redacted tail of the tool's stderr.
 func (p *Process) Stderr() string { return p.stderr.String() }
 
+// rawStderr is the unredacted tail, for parsing positions only (never logged or returned in errors).
+func (p *Process) rawStderr() string { return p.stderr.raw() }
+
 func (p *Process) kill() {
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
@@ -540,6 +647,7 @@ func (p *Process) Wait() error {
 	if !p.waited {
 		p.waited = true
 		err := p.cmd.Wait()
+		p.stderr.Flush()
 		p.lifecycleMu.Lock()
 		p.exited = true
 		if p.killTimer != nil {

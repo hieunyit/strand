@@ -462,7 +462,7 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 			e.logf("warning: the dump contains no binlog position (binary logging disabled?); it cannot anchor point-in-time recovery")
 		}
 	case backup.MethodPGBaseBackup:
-		start, end, tl := ParsePGBaseBackupLog(proc.Stderr())
+		start, end, tl := ParsePGBaseBackupLog(proc.rawStderr())
 		meta.Position, meta.EndPosition = start, end
 		if tl != "" {
 			meta.Details["timeline"] = tl
