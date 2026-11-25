@@ -83,6 +83,17 @@ Tùy chọn, để log chẩn đoán khi snapshot đứng liệt kê được gi
 
 MariaDB 10.5 trở lên: cấp thêm `GRANT SLAVE MONITOR ON *.* TO 'strand'@'%';` để Strand đọc được replica lag (thiếu thì `validate` cảnh báo và breaker không dùng được tín hiệu này).
 
+Auto-seed (`bootstrap.auto_seed`) trên nguồn MariaDB không cần thêm quyền: Strand đọc vị trí binlog của ảnh nhất quán, không dùng `FLUSH TABLES WITH READ LOCK` nên không cần `RELOAD`.
+
+Nếu chạy `strand objects` bằng chính tài khoản này, cấp thêm (lặp lại cho từng database cần chuyển):
+
+```sql
+GRANT SHOW VIEW, TRIGGER, EVENT ON app.* TO 'strand'@'%';  -- đọc view, trigger, event
+GRANT SELECT ON mysql.* TO 'strand'@'%';                    -- user, quyền và định nghĩa procedure/function
+```
+
+Không muốn cấp `SELECT ON mysql.*` (đọc được hash mật khẩu) cho tài khoản đồng bộ thì chạy `strand objects` bằng tài khoản quản trị: `--source-dsn`/`--target-dsn` (mục B).
+
 `REPLICATION CLIENT` là quyền Strand cần để đọc vị trí binlog. Từ MariaDB 10.5.2 nó là tên cũ của `BINLOG MONITOR` (cả hai cách ghi đều được); 10.3 và 10.4 chỉ có `REPLICATION CLIENT`.
 
 Liệt kê database đang có để chọn:
@@ -111,9 +122,41 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON 
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON *.* TO 'strand'@'%';
 ```
 
-`REFERENCES` cần cho bảng có FOREIGN KEY (thiếu thì `apply schema DDL: ... REFERENCES command denied`).
+Ý nghĩa từng quyền ở đích:
 
-Cần `strand objects` (view, trigger, procedure, event) thì cấp thêm trên các database đó: `CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, TRIGGER, EVENT` (xem mục B).
+| Quyền | Dùng cho | Thiếu thì |
+| --- | --- | --- |
+| `SELECT, INSERT, UPDATE, DELETE` | Ghi dữ liệu và bảng `_strand_*` | Không chạy được |
+| `CREATE, ALTER, INDEX` | Tạo database, bảng (`create_schema: auto`) và áp DDL của nguồn | `apply schema DDL: ... command denied` |
+| `DROP` | DDL `DROP`/`TRUNCATE` của nguồn; auto-seed trên Group Replication `TRUNCATE` bảng của lần nạp bị ngắt | Start sau lần nạp bị ngắt lỗi `empty ... left partly copied` |
+| `REFERENCES` | Tạo bảng có FOREIGN KEY, auto-seed thêm FK cascade còn thiếu | `REFERENCES command denied` |
+| `CONNECTION_ADMIN ON *.*` | Ghi khi đích đang `read_only=ON` (trước cutover) | Ghi bị từ chối khi bật `read_only` |
+
+Tài khoản đích phải **nhìn thấy** mọi FK tham chiếu đến bảng được đồng bộ, kể cả FK nằm ở database khác ngoài phạm vi. MySQL chỉ hiện FK của bảng mà tài khoản có quyền, nên khi có FK chéo database thì cấp ít nhất `SELECT` trên database đó.
+
+Đích là **Group Replication / InnoDB Cluster**: không cần thêm quyền cho tài khoản Strand, nhưng DBA phải làm trước lần Start đầu tiên:
+
+- Nếu phạm vi có bảng không khóa: `SET PERSIST sql_generate_invisible_primary_key = ON;` trên **mọi member** (MySQL 8.0.30+).
+- Strand phải kết nối vào member **primary** (single-primary). Chế độ multi-primary không cho FK cascade.
+
+#### Quyền ở đích cho `strand objects`
+
+Đã kiểm chứng trên MySQL 8.0 với nguồn MariaDB 10.6:
+
+```sql
+-- view, procedure, function, event (--phase pre) và trigger (--phase post), lặp cho từng database
+GRANT CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, TRIGGER, EVENT ON app.* TO 'strand'@'%';
+
+-- Đích bật binlog (MySQL 8 mặc định bật, Group Replication luôn bật): tạo function và trigger
+-- cần SUPER, nếu không thì lỗi 1419. Bật trên MỌI member nếu là Group Replication:
+SET PERSIST log_bin_trust_function_creators = ON;
+
+-- user và quyền (--phase users)
+GRANT CREATE USER ON *.* TO 'strand'@'%';
+GRANT GRANT OPTION ON app.* TO 'strand'@'%';   -- lặp cho từng database
+```
+
+Khi cấp quyền cho user ứng dụng, tài khoản chạy `apply` phải **có sẵn** đúng các quyền đó (kèm `GRANT OPTION`). Nếu thiếu, MySQL báo lỗi 1044 `Access denied ... to database`. Lỗi 1227 `you need ... CREATE USER` nghĩa là thiếu `CREATE USER`. Đơn giản nhất là chạy `--phase users` bằng tài khoản quản trị qua `--target-dsn`.
 
 ### Bước 4. File cấu hình `mdb-app.yaml`
 
@@ -327,6 +370,16 @@ MariaDB 10.6 không có `super_read_only`, nên user có quyền SUPER vẫn ghi
 
 `sync` chỉ chép bảng. Phần còn lại do `strand objects` (nguồn MariaDB/MySQL → đích MySQL; cặp khác bị từ chối exit 3 `objects_unsupported`). Dùng cùng file `-c` của pipeline, tôn trọng `tables.include/exclude/rename`.
 
+**Quyền:** nguồn cần `SHOW VIEW, TRIGGER, EVENT` trên các database và `SELECT ON mysql.*` (bước 2). Đích cần các quyền ở mục "Quyền ở đích cho `strand objects`" (bước 3). Có thể dùng tài khoản quản trị riêng qua `--source-dsn` và `--target-dsn`, các phần khác vẫn đọc từ file `-c`.
+
+**Đọc kết quả `objects list`:** nguồn MariaDB/MySQL chỉ hiện các đối tượng mà tài khoản có quyền xem.
+
+- Thiếu `SHOW VIEW`: view hiện dòng `SKIPPED: cannot read definition: Error 1142 ... SHOW VIEW command denied` và không được chuyển.
+- Thiếu `TRIGGER` hoặc `EVENT`: **không có cảnh báo nào**, dòng `total:` ghi `0 trigger` hoặc `0 event` dù nguồn có.
+- Thiếu `SELECT ON mysql.*`: lệnh dừng với `read mysql.user (needs SELECT on mysql.user)` hoặc `SHOW GRANTS FOR ...: Error 1044`.
+
+Muốn chắc số đếm, so với kết quả của root trên nguồn ở mục 5.
+
 **Quy tắc thời điểm (quan trọng):**
 
 | Đối tượng | Khi nào tạo trên đích | Lý do |
@@ -392,7 +445,9 @@ strand promote -c mdb-app.yaml --pipeline mdb-app --objects-post \
 | `binlog_row_metadata` | NO_LOG (mặc định) và FULL đã kiểm |
 | Bảng InnoDB | Có |
 | Bảng MyISAM / Aria / MEMORY | Bị từ chối. Đổi sang InnoDB trên nguồn (`ALTER TABLE ... ENGINE=InnoDB`) hoặc loại ra |
-| Bảng không có PRIMARY KEY | Bị từ chối. Thêm PRIMARY KEY hoặc loại ra |
+| Bảng không có PRIMARY KEY (và không có unique key NOT NULL) | Mặc định bị từ chối. Với `tables.keyless: full_row` và `bootstrap.auto_seed: true` thì Strand tự nạp và đồng bộ theo toàn bộ cột (mục "Tự nạp bảng thiếu khóa và nhóm khóa ngoại"). Cách khác: thêm khóa hoặc loại bảng ra |
+| Khóa ngoại `ON DELETE`/`ON UPDATE` `CASCADE` hoặc `SET NULL` | Hỗ trợ khi chọn cả bảng cha và con, dùng `bootstrap.auto_seed`. `SET DEFAULT` và FK trỏ tới bảng cha ngoài phạm vi bị từ chối |
+| Đích MySQL Group Replication / InnoDB Cluster (single-primary) | Hỗ trợ (e2e MySQL 8.4). Auto-seed commit theo từng phần. Bảng không khóa cần `sql_generate_invisible_primary_key=ON` trên mọi member. Multi-primary không dùng được với FK cascade |
 | Kiểu `INET6` (10.5+), `INET4` (10.10+), `UUID` (10.7+) | Hỗ trợ khi nằm ngoài khóa chính: đích là `VARCHAR(39)` / `VARCHAR(15)` / `CHAR(36)` (ascii_bin), chữ giống hệt `SELECT` của MariaDB |
 | `INET6`/`INET4`/`UUID` nằm trong PRIMARY KEY | Bị từ chối (thứ tự khóa khác thứ tự chữ nên không chứng minh được khoảng khóa) |
 | Cột `COMPRESSED` | Hỗ trợ: đích là cột thường (không nén), giá trị gốc giữ nguyên |
@@ -459,7 +514,15 @@ Với cột khóa, so sánh khác nhau có thể gộp hai khóa khác nhau ở 
 | `column(s) in a PRIMARY KEY or UNIQUE index use a MariaDB collation without an exact MySQL equivalent` | Đổi collation cột khóa trên nguồn, xem mục 2.1 |
 | `source collation(s) not available on the target and without a mapping` | Đổi cột hoặc bảng sang collation MySQL có (vd `utf8mb4_general_ci`, `utf8mb4_bin`) |
 | `uses nontransactional/unsupported engine MyISAM` (hoặc Aria) | `ALTER TABLE ... ENGINE=InnoDB` trên nguồn |
-| `has no primary key` | Thêm PRIMARY KEY |
+| `has no primary key` | Thêm PRIMARY KEY, hoặc bật `tables.keyless: full_row` + `bootstrap.auto_seed: true` |
+| `SHOW VIEW command denied` (Error 1142) trong `objects list` | Nguồn: `GRANT SHOW VIEW ON <db>.* TO 'strand'@'%'` (mục A bước 2) |
+| `read mysql.user (needs SELECT on mysql.user)` / `SHOW GRANTS FOR ...: Error 1044` | Nguồn: `GRANT SELECT ON mysql.* TO 'strand'@'%'`, hoặc chạy `objects` với `--source-dsn` của tài khoản quản trị |
+| `objects list` ra `0 trigger` / `0 event` dù nguồn có | Nguồn thiếu `TRIGGER` / `EVENT` trên database đó: MySQL ẩn đối tượng, không báo lỗi |
+| Error 1419 `You do not have the SUPER privilege and binary logging is enabled` khi `objects apply` | Đích: `SET PERSIST log_bin_trust_function_creators = ON` (mọi member nếu là Group Replication) |
+| Error 1227 `you need ... CREATE USER` / Error 1044 khi `--phase users` | Đích: `GRANT CREATE USER ON *.*` và `GRANT OPTION` trên database, hoặc dùng `--target-dsn` của tài khoản quản trị |
+| `Error 3100 ... before_commit` | Đích Group Replication từ chối transaction quá lớn. Strand bản mới tự commit auto-seed theo từng phần. Hãy build lại từ `main` |
+| `rejects rows of tables without a primary key (error 3098)` | Đích Group Replication: `SET PERSIST sql_generate_invisible_primary_key = ON` trên mọi member trước lần Start đầu tiên |
+| `interrupted auto-seed has target tables outside the current replication scope` | Khôi phục phạm vi bảng cũ, hoặc bỏ lần nạp dở (mục "Tự nạp bảng thiếu khóa và nhóm khóa ngoại") |
 | `Unknown database 'strand'` | Tạo database `strand` trên đích (mục A bước 3) |
 | `schema_change_pending` (exit 10) | Xem mục A bước 9 |
 | `compressed MariaDB binlog event` khi đang chạy | Ai đó đã bật `log_bin_compress`. Tắt đi rồi tạo lại pipeline từ đầu |
@@ -500,7 +563,7 @@ SHOW BINARY LOGS;
 SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES
 WHERE TABLE_SCHEMA='app' AND TABLE_TYPE='BASE TABLE' AND ENGINE <> 'InnoDB';
 
--- 4. Bảng không có PRIMARY KEY: bị từ chối
+-- 4. Bảng không có PRIMARY KEY: bị từ chối, trừ khi bật tables.keyless: full_row + bootstrap.auto_seed
 SELECT t.TABLE_NAME FROM information_schema.TABLES t
 LEFT JOIN information_schema.STATISTICS s
   ON s.TABLE_SCHEMA=t.TABLE_SCHEMA AND s.TABLE_NAME=t.TABLE_NAME AND s.INDEX_NAME='PRIMARY'
@@ -518,7 +581,7 @@ WHERE TABLE_SCHEMA='app' AND (DATA_TYPE IN ('inet6','inet4','uuid') OR COLUMN_TY
 SELECT DISTINCT COLLATION_NAME FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA='app' AND COLLATION_NAME IS NOT NULL;
 
--- 8. Strand KHÔNG chép: tạo lại bằng tay trên MySQL
+-- 8. sync KHÔNG chép: chuyển bằng strand objects (mục B). So số đếm ở đây với `strand objects list`
 SELECT TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA='app';
 SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='app';
 SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA='app';
@@ -530,5 +593,7 @@ SELECT TABLE_NAME, TABLE_ROWS, ROUND((DATA_LENGTH+INDEX_LENGTH)/1024/1024) AS MB
 FROM information_schema.TABLES WHERE TABLE_SCHEMA='app' ORDER BY MB DESC;
 
 -- 10. Quyền của user strand. Cần: REPLICATION SLAVE, REPLICATION CLIENT (= BINLOG MONITOR từ 10.5.2) ON *.*; SELECT, LOCK TABLES ON app.*
+--     Khuyến nghị: SLAVE MONITOR ON *.* (10.5+), PROCESS ON *.*
+--     Cho strand objects: SHOW VIEW, TRIGGER, EVENT ON app.*; SELECT ON mysql.*
 SHOW GRANTS FOR 'strand'@'%';
 ```

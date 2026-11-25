@@ -287,14 +287,21 @@ Kết nối PG chỉ khai báo được bằng `dsn` (`postgres://user:pass@host
 
 | User | Nơi | Quyền | Dùng cho |
 | --- | --- | --- | --- |
-| `strand` | Source MySQL | `REPLICATION SLAVE, REPLICATION CLIENT ON *.*`; `SELECT ON app.*` | Đọc binlog, snapshot, verify |
-| `strand` | Source MySQL (khuyến nghị) | `SELECT` trên `performance_schema.variables_by_thread`, `performance_schema.threads` | validate kiểm session; thiếu thì chỉ cảnh báo |
-| `strand` | Target MySQL | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON app.*` và trên schema metadata; `CONNECTION_ADMIN ON *.*` | Apply, bảng `_strand_*`, ghi khi `read_only=ON`, ngắt instance cũ |
+| `strand` | Source MySQL/MariaDB | `REPLICATION SLAVE, REPLICATION CLIENT ON *.*` (MariaDB 10.5.2+: `REPLICATION CLIENT` = `BINLOG MONITOR`); `SELECT ON app.*` | Đọc binlog, snapshot, verify |
+| `strand` | Source không GTID (MariaDB, MySQL 5.x `gtid_mode=OFF`) | `LOCK TABLES ON app.*` | Snapshot logic ở chế độ vị trí binlog |
+| `strand` | Source MySQL (không phải MariaDB) có `bootstrap.auto_seed` | `RELOAD ON *.*` | `FLUSH TABLES WITH READ LOCK` ngắn để mở ảnh nhất quán. MariaDB không cần |
+| `strand` | Source (khuyến nghị) | `SELECT` trên `performance_schema.variables_by_thread`, `performance_schema.threads`; `PROCESS ON *.*`; MariaDB 10.5+: `SLAVE MONITOR ON *.*` | validate kiểm session; log liệt kê giao dịch mở lâu khi snapshot đứng; tín hiệu replica lag. Thiếu thì chỉ cảnh báo |
+| `strand` | Target MySQL | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON app.*` và trên schema metadata; `CONNECTION_ADMIN ON *.*` | Apply, bảng `_strand_*`, ghi khi `read_only=ON`, ngắt instance cũ. `DROP` còn dùng cho `TRUNCATE` khi auto-seed trên Group Replication làm lại lần nạp dở; `REFERENCES` cho FK |
+| `strand` | Target MySQL có FK chéo database | `SELECT` trên database chứa bảng con | Strand phải nhìn thấy mọi FK tham chiếu bảng được đồng bộ |
+| tài khoản chạy `strand objects` | Source MySQL/MariaDB | `SHOW VIEW, TRIGGER, EVENT ON app.*`; `SELECT ON mysql.*` | Đọc view, trigger, event, định nghĩa routine, user và quyền. Thiếu `TRIGGER`/`EVENT` thì số đếm ra 0 mà không báo lỗi |
+| tài khoản chạy `strand objects` | Target MySQL | `CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, TRIGGER, EVENT ON app.*`; `--phase users`: `CREATE USER ON *.*`, `GRANT OPTION ON app.*` và các quyền sẽ cấp cho user ứng dụng | Đích bật binlog: thêm `SET PERSIST log_bin_trust_function_creators=ON` (hoặc `SUPER`), thiếu thì function/trigger lỗi 1419. Có thể dùng tài khoản quản trị qua `--source-dsn`/`--target-dsn` |
 | `strand` | Target PG | `CONNECT, TEMPORARY` trên database; `USAGE, CREATE` trên schema; `SELECT, INSERT, UPDATE, DELETE` trên bảng; `UPDATE` trên sequence | Apply, `_strand_*`, setval khi promote |
 | `strand_admin` | Source và target MySQL | `SYSTEM_VARIABLES_ADMIN ON *.*` | Chỉ `promote` |
 | (PG promote) | Source và target PG | Quyền `ALTER SYSTEM`, `ALTER ROLE`, `pg_terminate_backend`, GRANT/REVOKE trên bảng của ứng dụng | Chỉ `promote` |
 
-Để tạo schema, target cần quyền CREATE trên database/schema đích (và quyền tạo database nếu chưa có). `validate` không kiểm quyền; thiếu quyền chỉ lộ ra khi chạy.
+Để tạo schema, target cần quyền CREATE trên database/schema đích (và quyền tạo database nếu chưa có). `validate` chỉ kiểm vài quyền phụ (`SLAVE MONITOR`, đọc `performance_schema`) và in cảnh báo; thiếu các quyền khác chỉ lộ ra khi chạy.
+
+Target MySQL là Group Replication / InnoDB Cluster: không cần thêm quyền cho `strand`. DBA cần bật `SET PERSIST sql_generate_invisible_primary_key=ON` trên mọi member nếu phạm vi có bảng không khóa, và trỏ Strand vào member primary. Chi tiết: [MARIADB-MIGRATION.md](MARIADB-MIGRATION.md) mục A bước 3.
 
 Strand không ghi gì vào source khi đồng bộ, với hai ngoại lệ:
 
@@ -481,6 +488,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `bootstrap.logical.max_parallel` | 1 | Số bảng snapshot logic **cùng lúc** (1–32). Chunk của một bảng vẫn đọc tuần tự; các bảng khác nhau chạy song song và cùng chia **một** ngân sách đọc nguồn (`iops.soft/hard`). Bảng lớn được bắt đầu trước. Source PostgreSQL: bỏ qua (luôn 1, có cảnh báo). Mục 8.1 |
 | `bootstrap.logical.windows` | rỗng (mọi lúc) | Khung giờ cho phép snapshot, ví dụ `["22:00-06:00"]` (giờ địa phương của process; qua nửa đêm được). Khi `bootstrap_retention_risk` bật, snapshot chạy cả ngoài khung |
 | `bootstrap.create_schema` | `auto` | Mục 3.1 |
+| `bootstrap.auto_seed` | `false` | Tự nạp bảng không khóa và nhóm FK cascade trong một ảnh nhất quán rồi chạy CDC. Cần nguồn họ MySQL, đích MySQL, `tables.keyless: full_row`, `bootstrap.default: logical`, không `start_at`/`per_table`/che cột. Nguồn MySQL cần `RELOAD`. Chi tiết: [MARIADB-MIGRATION.md](MARIADB-MIGRATION.md) "Tự nạp bảng thiếu khóa và nhóm khóa ngoại" |
 | `checkpoint.flush_every` | `500ms` | Chu kỳ gộp row delta vào checkpoint toàn cục (relaxed) |
 | `resources.spool.path` | **bắt buộc** | Thư mục trạng thái cục bộ, spill, prefetch (`<path>/prefetch`), file tràn của reader PG (`<path>/pg-reader-<name>`) |
 | `resources.spool.hard` | không giới hạn | Trần spool local; từ 95% trở lên là tín hiệu cứng dừng snapshot |
@@ -831,6 +839,7 @@ strand objects apply  -c p.yaml --phase pre|users|post [--from ./objects] [--dry
 - `pre`: view (theo thứ tự phụ thuộc), procedure, function, event ở trạng thái DISABLE. `post`: trigger và bật event. `users`: `CREATE USER` + `GRANT`.
 - Trigger chỉ tạo ở cutover (`post`), vì binlog ROW đã chứa dòng trigger sinh ra ở nguồn.
 - Idempotent: giống hệt thì bỏ qua, khác thì lỗi rõ ràng. `--source-dsn`/`--target-dsn` thay DSN trong cấu hình.
+- Quyền cần ở hai phía: mục 4.3. Nguồn chỉ liệt kê đối tượng mà tài khoản có quyền xem: thiếu `SHOW VIEW` thì view bị `SKIPPED`, thiếu `TRIGGER`/`EVENT` thì số đếm ra 0 mà không báo lỗi.
 - `strand promote --objects-post [--objects-from ./objects]` chạy `post` sau bắt kịp, trước khi mở ghi; lỗi thì target vẫn read-only, chạy lại cùng lệnh. Tắt `event_scheduler` ở nguồn khi fence.
 - `strand validate` in cảnh báo "N views, M triggers... not migrated automatically" khi nguồn có các đối tượng này.
 

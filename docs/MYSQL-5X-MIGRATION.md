@@ -333,6 +333,8 @@ GRANT LOCK TABLES ON app.* TO 'strand'@'%';
 
 Promote cần user có `SUPER` trên nguồn, vì phải đặt `read_only` và chạy `FLUSH TABLES WITH READ LOCK`.
 
+Bật `bootstrap.auto_seed` (tự nạp bảng không khóa và nhóm FK cascade) thì cấp thêm `GRANT RELOAD ON *.* TO 'strand'@'%';` để Strand giữ `FLUSH TABLES WITH READ LOCK` trong lúc mở ảnh nhất quán. Quyền cho `strand objects` (view, trigger, routine, event, user) ở cả hai phía: [USAGE.md](USAGE.md) mục 4.3.
+
 ---
 
 ## 4. Chuẩn bị đích
