@@ -24,7 +24,9 @@ func TestPGRestoreCleanupOnPostgreSQL12(t *testing.T) {
 	vars["PG_PW"] = "pgpw"
 	port := freePort(t)
 	c := startContainer(t, "pg12", dir, "-e", "POSTGRES_PASSWORD=pgpw", "postgres:12", "-p", fmt.Sprint(port), "-c", "listen_addresses=127.0.0.1")
-	dsn := func(db string) string { return fmt.Sprintf("postgres://postgres:pgpw@127.0.0.1:%d/%s?sslmode=disable", port, db) }
+	dsn := func(db string) string {
+		return fmt.Sprintf("postgres://postgres:pgpw@127.0.0.1:%d/%s?sslmode=disable", port, db)
+	}
 	db := waitSQL(t, "pgx", dsn("postgres"))
 	time.Sleep(2 * time.Second) // the entrypoint restarts the server once after init
 	db = waitSQL(t, "pgx", dsn("postgres"))
