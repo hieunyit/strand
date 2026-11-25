@@ -658,6 +658,45 @@ func initialNextRun(j backup.Job, now time.Time) time.Time {
 	return now
 }
 
+// nextRunAfterEdit is next_run_at of an edited job (cur: the stored job, j: its new settings). A disabled
+// job has none; a job being enabled (or without a due time yet) starts like a new one. Otherwise an edit
+// keeps the due time it has, unless it changed the schedule: then the new schedule decides, counted from
+// the last run for interval jobs (due now when that is already past), from now for the other kinds. A
+// rename or a retention change must not trigger a backup or postpone one.
+func nextRunAfterEdit(cur, j backup.Job, now time.Time) *time.Time {
+	if !j.Enabled {
+		return nil
+	}
+	if !cur.Enabled || cur.NextRunAt == nil {
+		n := initialNextRun(j, now)
+		return &n
+	}
+	if sameSchedule(cur.EffectiveSchedule(), j.EffectiveSchedule()) {
+		t := *cur.NextRunAt
+		return &t
+	}
+	if j.EffectiveSchedule().Kind != backup.ScheduleInterval {
+		n := j.NextRunAfter(now.UTC())
+		return &n
+	}
+	n := now.UTC()
+	last := cur.RunFinishedAt
+	if last == nil || cur.LastRunStatus == backup.RunStatusRunning {
+		last = cur.RunStartedAt
+	}
+	if last != nil {
+		if due := j.NextRunAfter(*last); due.After(n) {
+			n = due
+		}
+	}
+	return &n
+}
+
+func sameSchedule(a, b backup.Schedule) bool {
+	return a.Kind == b.Kind && a.EverySeconds == b.EverySeconds && a.At == b.At && a.Cron == b.Cron &&
+		a.Timezone == b.Timezone && slices.Equal(a.Days, b.Days)
+}
+
 func (s *Server) apiBackupJobCreate(w http.ResponseWriter, r *http.Request, _ *Session) {
 	if s.db == nil {
 		writeErr(w, http.StatusServiceUnavailable, "backup jobs require the metadata database")
@@ -756,12 +795,7 @@ func (s *Server) apiBackupJobUpdate(w http.ResponseWriter, r *http.Request, _ *S
 			return
 		}
 	}
-	if j.Enabled {
-		next := initialNextRun(j, s.now())
-		j.NextRunAt = &next
-	} else {
-		j.NextRunAt = nil
-	}
+	j.NextRunAt = nextRunAfterEdit(cur, j, s.now())
 	if err := s.validateBackupJob(j); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -1049,14 +1083,7 @@ func (s *Server) refreshJobsUsing(ctx context.Context, kind, id string) (refresh
 		if reflect.DeepEqual(j.JobOptions, nj.JobOptions) && j.EverySeconds == nj.EverySeconds {
 			continue // nothing the edit touches changes this job
 		}
-		if nj.Enabled {
-			if nj.Schedule != nil && nj.Schedule.Kind != backup.ScheduleInterval {
-				n := initialNextRun(nj, s.now())
-				nj.NextRunAt = &n
-			}
-		} else {
-			nj.NextRunAt = nil
-		}
+		nj.NextRunAt = nextRunAfterEdit(j, nj, s.now())
 		if err := s.validateBackupJob(nj); err != nil {
 			failed = append(failed, j.ID+": "+err.Error())
 			continue
@@ -1066,10 +1093,10 @@ func (s *Server) refreshJobsUsing(ctx context.Context, kind, id string) (refresh
 			continue
 		}
 		refreshed = append(refreshed, j.ID)
-		if err := s.stopBackupJob(j.ID); err != nil {
-			failed = append(failed, j.ID+": "+err.Error())
-			continue
-		}
+		// A run in flight is not cancelled: it finishes with the settings it started with and the new ones
+		// apply from the next run. Its scheduler sees the new revision and exits after that run (at once when
+		// idle); auditJobEnd then restarts it with the new settings and secrets. Starting here covers a
+		// scheduler that is not running (startBackupJob leaves a running one alone).
 		if nj.Enabled {
 			if _, err := s.startBackupJob(nj); err != nil {
 				if isToolMissing(err) {
