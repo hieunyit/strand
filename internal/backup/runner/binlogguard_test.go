@@ -48,10 +48,12 @@ func TestBinlogGuardRefusesStatementsThatEscapeTheTarget(t *testing.T) {
 		{"quoted, other case", binlogQuery("1373", "shop", "ALTER TABLE `SHOP` . `orders` ADD COLUMN c2 int"), "names database `SHOP` explicitly"},
 		{"executable comment", binlogQuery("1373", "shop", "CREATE TABLE t2 /*!50100 LIKE shop.orders */"), "names database `shop`"},
 		{"another database of the server", binlogQuery("1373", "shop", "DROP TABLE `other`.`x`"), "names database `other` explicitly"},
-		{"database DDL", binlogQuery("1373", "shop", "DROP DATABASE scratch"), "DROP DATABASE"},
+		{"database DDL of the source", binlogQuery("1373", "", "DROP DATABASE shop"), "DROP DATABASE `shop`"},
+		{"database DDL of the source, stale use", binlogQuery("1373", "other", "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop`"), "CREATE DATABASE `shop`"},
 		{"drift: another default database", binlogQuery("1862", "other", "CREATE TABLE shop.drift (id int)"), "while its default database was `other`"},
 		{"drift: no default database", binlogQuery("1862", "", "ALTER TABLE `shop`.orders ADD COLUMN x int"), "while its default database was (none)"},
-		{"drift: database DDL of the source", binlogQuery("1862", "other", "ALTER DATABASE shop CHARACTER SET utf8mb4"), "changes database `shop`"},
+		{"database DDL of the source with another default", binlogQuery("1862", "other", "ALTER DATABASE shop CHARACTER SET utf8mb4"), "ALTER DATABASE `shop`"},
+		{"drift: database DDL in another letter case", binlogQuery("1862", "other", "ALTER DATABASE SHOP CHARACTER SET utf8mb4"), "another letter case"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, _, err := runGuard(t, binlogHead+binlogRows+c.body+binlogTail, "shop", "shop_restore", server, false)
@@ -79,9 +81,11 @@ func TestBinlogGuardPassesStatementsConfinedToTheTarget(t *testing.T) {
 		binlogQuery("1300", "shop", "CREATE DEFINER=`root`@`localhost` TRIGGER trg BEFORE INSERT ON orders FOR EACH ROW SET NEW.v = orders.v") +
 		binlogQuery("1400", "shop", "CREATE VIEW v AS SELECT o.id FROM orders o JOIN information_schema.tables x ON 1=1") +
 		binlogQuery("1500", "shop", "ALTER DATABASE CHARACTER SET utf8mb4")
+	// Database DDL of another database is logged with that database as default: never replayed.
+	others := binlogQuery("1550", "shop", "CREATE DATABASE scratch") +
+		binlogQuery("1600", "other", "CREATE TABLE o (id int)") + binlogQuery("1700", "other", "DROP DATABASE scratch")
 	// Statements of other default databases are not replayed (mysqlbinlog --database leaves them out of the
 	// replay stream); they are fine when they do not touch the source.
-	others := binlogQuery("1600", "other", "CREATE TABLE o (id int)") + binlogQuery("1700", "other", "DROP DATABASE scratch")
 	for _, replay := range []bool{false, true} {
 		in := binlogHead + body + binlogTail
 		if !replay {

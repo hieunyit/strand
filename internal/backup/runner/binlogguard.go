@@ -196,9 +196,25 @@ func (g *binlogGuard) statement(text string) error {
 	case "", "SET", "BEGIN", "COMMIT", "ROLLBACK", "XA", "SAVEPOINT", "RELEASE":
 		return nil
 	}
-	quals := qualifiers(toks)
 	ddl, ddlName, ddlNamed := databaseDDL(toks)
-	touchesSrc := ddlNamed && strings.EqualFold(ddlName, g.src)
+	if ddlNamed {
+		// MySQL logs CREATE/ALTER/DROP DATABASE x with x as the event's database (mysqlbinlog prints no
+		// `use` for it), so --database replays it exactly when x is the source; --rewrite-db does not
+		// rename x in the text, which would then run against the source.
+		if g.replay || ddlName == g.src {
+			return fmt.Errorf("binlog statement at %s (%s DATABASE %s) is replayed by point-in-time recovery but changes a "+
+				"database rather than tables in it; Strand never replays it into %s. Restore to a point before it, or replay "+
+				"the binlogs manually", g.position(), ddl, quoteMy(ddlName), quoteMy(g.dst))
+		}
+		if strings.EqualFold(ddlName, g.src) {
+			return fmt.Errorf("binlog statement at %s (%s DATABASE %s) changes the source database under another letter case; "+
+				"the point-in-time replay of %s would not replay it and the restore would silently diverge. Restore without "+
+				"a target time, or replay the binlogs manually", g.position(), ddl, quoteMy(ddlName), quoteMy(g.src))
+		}
+		return nil
+	}
+	quals := qualifiers(toks)
+	touchesSrc := false
 	for _, q := range quals {
 		if strings.EqualFold(q, g.src) {
 			touchesSrc = true
@@ -214,9 +230,8 @@ func (g *binlogGuard) statement(text string) error {
 		}
 		return nil
 	}
-	if ddl != "" && (ddl != "ALTER" || ddlNamed) {
-		return fmt.Errorf("binlog statement at %s (%s DATABASE) is replayed by point-in-time recovery but changes a database "+
-			"rather than tables in it; Strand never replays it into %s. Restore to a point before it, or replay the binlogs manually",
+	if ddl != "" && ddl != "ALTER" { // CREATE/DROP DATABASE without a name: not valid SQL, never replayed
+		return fmt.Errorf("binlog statement at %s (%s DATABASE) cannot be checked; Strand never replays it into %s",
 			g.position(), ddl, quoteMy(g.dst))
 	}
 	for _, q := range quals {
