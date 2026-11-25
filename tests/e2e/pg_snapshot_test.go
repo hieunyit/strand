@@ -326,7 +326,8 @@ func TestP2_E2E_PGSeedExportStartAtSeed(t *testing.T) {
 	// Verify sau seed tự động cho PG→PG (02 §9): pipeline chỉ synced sau khi post-seed verify báo 0 lệch
 	// (trạng thái verify pending giữ qua restart, nên lượt chạy nào cũng có thể là lượt verify).
 	all := firstOut + p.output.String()
-	if !strings.Contains(all, "post-seed verify started") || !strings.Contains(all, "post-seed verify passed: pipeline synced") {
+	if !strings.Contains(all, "post-seed verify started") || !strings.Contains(all, `"msg":"post-seed verification finished","pipeline":"e2e-pg-seed"`) ||
+		!strings.Contains(all, `"verification":"checked"`) {
 		t.Fatalf("post-seed verify did not run/pass for the PG seed\n%s", p.tail())
 	}
 	if strings.Contains(all, "MySQL→MySQL only") {

@@ -518,15 +518,23 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	defer p.touched.enable(touchPostSeed, false)
 	// Verify chỉ có nghĩa khi target đã theo kịp phần log từ P (catch-up xong) và bảng không có trong
 	// seed (seed PG một phần: snapshot logic) đã snapshot xong.
+	// Catching up after a seed can take longer than the post-seed window (an
+	// old backup, a busy source). Report that as incomplete evidence once the
+	// window has passed, but keep waiting and keep the verify pending across
+	// restarts: giving up here would leave a seed that is never verified.
 	var catchUpDeadline time.Time
+	reported := false
 	for !postSeedReady(p.caughtUpWithSource(ctx), p.sched.Lwd(), p.admitted.Load(), p.bootstrap.Load()) {
-		if !p.bootstrap.Load() {
+		if !p.bootstrap.Load() && !reported {
 			now := time.Now()
 			if catchUpDeadline.IsZero() {
 				catchUpDeadline = now.Add(window)
 			} else if now.After(catchUpDeadline) {
-				p.finishPostSeedError(ctx, errors.New("source and target did not reach a stable catch-up point within the post-seed window"), p.state.verificationVersion())
-				return
+				reported = true
+				if err := p.postSeedWaiting(window); err != nil {
+					p.fail(err)
+					return
+				}
 			}
 		}
 		select {
@@ -581,6 +589,23 @@ func (p *Pipeline) postSeedVerify(ctx context.Context) {
 	}
 	p.verifying.Store(false)
 	p.log.Info("post-seed verification finished", "verification", result.Status, "tables", result.Tables)
+}
+
+// postSeedWaiting records that post-seed verification has not started yet
+// because the target has not caught up, and keeps it pending.
+func (p *Pipeline) postSeedWaiting(window time.Duration) error {
+	reason := fmt.Sprintf("waiting for the target to catch up with the source before verifying (longer than the %s post-seed window)", window)
+	result := &admin.VerificationEvidence{
+		Status: "incomplete", Method: "sample-and-changed-keys", CheckedAt: time.Now().UTC(), Reason: reason,
+	}
+	for _, table := range p.verificationScope() {
+		result.Tables = append(result.Tables, table.evidence)
+	}
+	if _, err := p.state.recordVerification(result, p.verificationFingerprint(), true, p.state.verificationVersion()); err != nil {
+		return err
+	}
+	p.log.Warn("post-seed verification waits for catch-up", "window", window.String())
+	return nil
 }
 
 func (p *Pipeline) finishPostSeedError(ctx context.Context, err error, version uint64) {

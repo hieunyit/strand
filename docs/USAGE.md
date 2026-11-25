@@ -41,8 +41,8 @@ Phiên bản có test tự động: MySQL 8.4, PostgreSQL 16, 17 và 18. Source 
 | Tự tạo schema đích (`create_schema: auto`, `schema init`) | Có | Có (theo typemap) | Có |
 | Seed từ backup | xtrabackup, clone, mydumper, mysqldump | — | pgBackRest, WAL-G, `strand export` |
 | `--start-at` | GTID set | — (dùng vị trí GTID của source) | LSN `X/Y` |
-| `verify --mode sample` | Có | Không | Không |
-| `verify --mode delta` / verify tự động sau seed | Có | Không (chỉ cảnh báo, xem 10.3) | Không (chỉ cảnh báo) |
+| `verify --mode sample` | Có | Có (PK một cột số nguyên) | Có (PK một cột số nguyên) |
+| `verify --mode delta` / verify tự động sau seed | Có | Có | Có |
 | `verify --mode full` | Có | Có | Có |
 | `verify --repair fix` | Có | Không (khác engine) | Có, trừ PK tổng quát |
 | `checkpoint rewind` | Có | Không | Không |
@@ -504,7 +504,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `verify.delta` | `off` | `on`: verify các khóa CDC vừa chạm (MySQL→MySQL) |
 | `tables.keyless` | tắt | `full_row`: cho bảng không có khóa chạy keyless, chỉ khi dữ liệu đầu từ seed/`--start-at` (mục 5.1.3) |
 | `tables.keyless_allow_float` | `false` | Cho phép cột FLOAT/DOUBLE trong bảng keyless |
-| `verify.post_seed_window` | `30m` | Cửa sổ verify sau seed / `--start-at` (MySQL→MySQL) |
+| `verify.post_seed_window` | `30m` | Cửa sổ verify sau seed / `--start-at`: sau khi đích bắt kịp, verify mẫu ~1% rồi verify mọi khóa CDC chạm trong cửa sổ này. Bắt kịp lâu hơn cửa sổ thì bằng chứng verify báo `incomplete` (đang chờ bắt kịp) nhưng vẫn chờ tiếp, và vẫn verify cả sau restart |
 | `observability.metrics` | tắt | Địa chỉ HTTP cho `/metrics` và `/healthz`, ví dụ `":9464"` |
 | `observability.admin_socket` | tắt | Unix socket cho `top`, `pause`, `resume`, `throttle`, `snapshot add`, `checkpoint`, `verify --mode delta`. Lệnh client mặc định dùng `/run/strand/default.sock` |
 | `observability.log.level` / `format` | `info` / `json` | `debug` \| `info` \| `warn` \| `error`; `json` \| `text` |
@@ -1292,8 +1292,8 @@ strand verify -c billing.yaml --mode full --table public.orders
 ### 10.3 Giới hạn đã biết
 
 - **Lag:** hàng đợi nội bộ còn việc thì lag = now − thời điểm commit ở source của Txn mới nhất. Hàng đợi rỗng nhưng đầu source đang đi trước vị trí reader đã đọc (`pause`, reader bị chặn bởi backpressure/governor/breaker, mạng treo) thì lag vẫn > 0: monitor thăm dò đầu source mỗi giây (MySQL: `gtid_executed` hoặc vị trí binlog; PG: walsender của slot so với head WAL), dùng cùng mốc thời gian nên đó là **cận dưới** (Txn chưa đọc chắc chắn mới hơn mốc). Thăm dò lỗi hoặc không xác định được thì lùi về cách tính cũ (0 khi hàng đợi rỗng). Source PG: walsender có thể đã gửi hết vào bộ đệm TCP trong khi reader đang pause, nên pause ngắn với tải rất nhẹ có thể chưa hiện lag. Governor bỏ qua lag trong lúc operator `pause` (lag tăng vì ta dừng đọc, không phải quá tải).
-- **Verify sau seed ngoài MySQL→MySQL:** chỉ ghi cảnh báo rồi bỏ qua, pipeline vẫn báo `synced` dù chưa verify (handoff dòng 52). Hãy tự chạy `verify --mode full`.
-- **`validate` không kiểm PG source** (dòng 33) và không kiểm quyền.
+- **Verify sau seed với bảng keyless** chỉ so số hàng và checksum. Source thay đổi liên tục trong lúc so thì bằng chứng báo `incomplete`: chạy `verify --mode full` lúc source ít ghi.
+- **`validate` không kiểm PG source** (dòng 33) và chỉ kiểm vài quyền phụ (mục 4.3).
 - **`target.batch.max_wait`** làm khóa nóng chậm lại ở `strict` (dòng 26); `relaxed` gom chuỗi Txn phụ thuộc vào cùng batch.
 - **PG identity `ALWAYS`:** PK bị `UPDATE … SET id = DEFAULT` kèm cột TOAST không đổi làm writer lỗi 428C9 (dòng 27, hiếm).
 - **Source PG:** governor `onoff`/`grace-v2` dùng tín hiệu PG (replica lag của standby đang replay, WAL slot); thiếu quyền thì lùi về `static`.
