@@ -134,6 +134,7 @@ type pipePage struct {
 func TestPipelinePagesRoleMatrix(t *testing.T) {
 	st := store.NewMem()
 	e := dbEnv(t, st, nil, func(o *Options) { o.ConnChecker = &fakeChecker{result: conncheck.Result{OK: true}} })
+	e.ordersMySQLTarget()
 	e.sampleNow()
 	admin, acsrf := e.loginOK()
 	e.hold(true)

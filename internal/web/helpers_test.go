@@ -383,6 +383,18 @@ func (e *testEnv) auditLines() []map[string]any {
 
 // writePipelineFile ghi file cấu hình/.env của pipeline rồi lưu vào DB (như thao tác "Adopt disk version"):
 // DB là nguồn sự thật, sửa file trên đĩa mà không đưa vào DB thì lần vật chất hóa sau đặt nó sang bên.
+// ordersMySQLTarget switches pipeline orders (MySQL -> PostgreSQL) to a MySQL target:
+// the Objects and Repair tabs exist only for MySQL -> MySQL.
+func (e *testEnv) ordersMySQLTarget() {
+	e.t.Helper()
+	p := e.srv.reg.Get("orders")
+	raw, err := os.ReadFile(p.ConfigPath)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.writePipelineFile("orders", p.ConfigPath, strings.Replace(string(raw), "kind: postgres", "kind: mysql", 1), 0o640)
+}
+
 func (e *testEnv) writePipelineFile(name, path, data string, perm os.FileMode) {
 	e.t.Helper()
 	if err := os.WriteFile(path, []byte(data), perm); err != nil {

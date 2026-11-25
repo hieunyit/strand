@@ -344,6 +344,7 @@ func TestSamplerSmoothedRowsPerSecond(t *testing.T) {
 
 func TestPagesAndStreamNeverCallTheAdminSocket(t *testing.T) {
 	e, cp := countedEnv(t)
+	e.ordersMySQLTarget()
 	c, _ := e.loginOK()
 	paths := []string{"/", "/pipelines", "/pipelines/orders", "/pipelines/orders/tables", "/pipelines/orders/checkpoint",
 		"/pipelines/orders/errors", "/pipelines/orders/config", "/pipelines/orders/logs", "/pipelines/orders/jobs",

@@ -155,7 +155,7 @@
       </div>
       <div class="form-actions"><button class="btn danger" type="submit">Rewind...</button></div>
     </form></section>
-  {{else if .CanAdmin}}<p class="muted small">Rewind is available for running MySQL to MySQL pipelines only.</p>{{end}}
+  {{else if and .CanAdmin (ne .View.SourceKind "mongodb")}}<p class="muted small">Rewind is available for running MySQL to MySQL pipelines only.</p>{{end}}
 {{end}}
 
 {{if eq .Tab "errors"}}
@@ -290,76 +290,45 @@
   </section>{{end}}
 {{end}}
 
-{{if eq .Tab "jobs"}}
+{{if eq .Tab "jobs"}}{{$mongo := eq .View.SourceKind "mongodb"}}
   {{if .CanOperate}}<section class="card"><div class="cardhead"><h2>Verify</h2></div>
     {{if .Ctl.JobActive}}<p class="warnbox">A job is running ({{.Ctl.JobActive.Kind}}); one job at a time per pipeline. <a href="/jobs/{{.Ctl.JobActive.ID}}">Open it</a>.</p>{{end}}
+    {{if $mongo}}
+    <p class="card-desc">Runs <code>strand verify</code> as a child process, report only (no repair): per collection, document counts and a hash over every document (full) or a comparison of a random sample of documents by <code>_id</code> (sample). Output streams live on the job page.</p>
+    {{else}}
     <p class="card-desc">Runs <code>strand verify</code> as a child process, report only (no repair). Rate: fraction of rows for sample (0 to 1], chunks per second for full. Output streams live on the job page.</p>
+    {{end}}
     <form class="act" data-action="verify" data-pipeline="{{.View.Name}}">
       <div class="field-grid cols-3">
         <label class="field">
           <span class="field-label">Mode</span>
-          <select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select>
+          {{if $mongo}}<select name="mode"><option value="full">full (every document)</option><option value="sample">sample (random documents)</option></select>
+          {{else}}<select name="mode"><option value="sample">sample (needs a table)</option><option value="full">full (one table, or all)</option><option value="delta">delta (keys touched by CDC; pipeline running)</option></select>{{end}}
         </label>
         <label class="field">
-          <span class="field-label">Table (schema.table)</span>
-          <input type="text" name="table" list="verify-tables" class="mono" placeholder="schema.table" autocomplete="off">
+          {{if $mongo}}<span class="field-label">Collection (database.collection)</span>
+          <input type="text" name="table" list="verify-tables" class="mono" placeholder="empty = every collection" autocomplete="off">
+          {{else}}<span class="field-label">Table (schema.table)</span>
+          <input type="text" name="table" list="verify-tables" class="mono" placeholder="schema.table" autocomplete="off">{{end}}
         </label>
         <label class="field">
-          <span class="field-label">Rate (sample fraction or chunks/s)</span>
-          <input type="text" name="rate" class="mono" placeholder="default">
+          {{if $mongo}}<span class="field-label">Sample size (documents per collection)</span>
+          <input type="text" name="rate" class="mono" inputmode="numeric" placeholder="default: 1000">
+          {{else}}<span class="field-label">Rate (sample fraction or chunks/s)</span>
+          <input type="text" name="rate" class="mono" placeholder="default">{{end}}
         </label>
       </div>
       <datalist id="verify-tables"{{if and .Ctl.Running (not .SrcLoaded)}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{range .Src.Tables}}<option value="{{.Table}}">{{end}}</datalist>
-      <label class="check"><input type="checkbox" name="resume" value="true"><span>Resume an interrupted full run</span></label>
+      {{if not $mongo}}<label class="check"><input type="checkbox" name="resume" value="true"><span>Resume an interrupted full run</span></label>{{end}}
       <div class="form-actions"><button class="btn primary" type="submit">Start verify</button></div>
     </form>
   </section>{{end}}
-  {{if .CanAdmin}}<section class="card"><div class="cardhead"><h2>Plan &amp; schema</h2></div>
-    <form class="act" data-action="schema-diff" data-pipeline="{{.View.Name}}">
-      <p class="card-desc">Schema evolution: changes the pipeline paused on (schema.additive: pause, destructive changes) wait here for approval. Each button runs the matching <code>strand</code> command as a job; output streams on the job page.</p>
-      <div class="btngroup">
-        <button class="btn" type="submit" data-do="plan" data-action="plan">Plan (what will be copied)</button>
-        <button class="btn" type="submit" data-do="schema-init-dry" data-action="schema-init-dry">Preview DDL for missing target tables</button>
-        <button class="btn primary" type="submit" data-do="schema-diff" data-action="schema-diff">Show pending schema changes</button>
-        <label class="check"><input type="checkbox" name="all" value="true"><span>include applied</span></label>
-      </div>
-    </form>
-    <form class="act mt20" data-action="schema-approve-dry" data-pipeline="{{.View.Name}}">
-      <fieldset class="form-section subtle">
-        <legend class="form-section-title">Approve a schema change</legend>
-        <div class="field-grid cols-3">
-          <div class="field">
-            <label class="field-label" for="schema-change-id-jobs">Change id <span class="req" aria-hidden="true">*</span></label>
-            <input type="text" id="schema-change-id-jobs" name="id" class="mono" inputmode="numeric" pattern="[0-9]+" required placeholder="id from the list">
-            <small class="field-hint">ID of the proposed schema change to inspect or approve.</small>
-          </div>
-        </div>
-      <div class="form-actions flat start">
-        <button class="btn" type="submit" data-do="schema-approve-dry" data-action="schema-approve-dry">Preview DDL</button>
-        <button class="btn danger" type="submit" data-do="schema-approve" data-action="schema-approve" data-confirm="Apply the proposed DDL of this schema change on the target? The pipeline continues once the change is applied." data-retype="{{.View.Name}}">Approve &amp; apply</button>
-      </div>
-      </fieldset>
+  {{if .CanAdmin}}<section class="card"><div class="cardhead"><h2>Plan</h2></div>
+    <form class="act" data-action="plan" data-pipeline="{{.View.Name}}">
+      <p class="card-desc">Runs <code>strand plan</code>: what the initial copy will read and how long it should take.{{if not $mongo}} Schema changes and database objects have their own tabs.{{end}}</p>
+      <div class="btngroup"><button class="btn" type="submit" data-do="plan" data-action="plan">Plan (what will be copied)</button></div>
     </form>
   </section>{{end}}
-  {{if and .CanAdmin (eq .View.SourceKind "mysql")}}
-  <section class="card"><div class="cardhead"><h2>Database objects</h2></div>
-    <form class="act" data-action="objects-list" data-pipeline="{{.View.Name}}">
-      <p class="card-desc">Views, routines, triggers, events, users and grants of the selected schemas (<code>strand objects</code>). Apply runs on the MySQL target in phases: <em>pre</em> before cut-over (views, routines, events disabled), <em>users</em>, <em>post</em> at cut-over (triggers, enable events).</p>
-      {{if eq .View.TargetKind "mysql"}}
-      <div class="field-grid cols-3">
-        <label class="field">
-          <span class="field-label">Phase</span>
-          <select name="phase"><option value="pre">pre</option><option value="users">users</option><option value="post">post</option></select>
-        </label>
-      </div>
-      {{end}}
-      <div class="form-actions start">
-        <button class="btn" type="submit" data-do="objects-list" data-action="objects-list">List objects</button>
-        {{if eq .View.TargetKind "mysql"}}<button class="btn danger" type="submit" data-do="objects-apply" data-action="objects-apply" data-confirm="Apply this phase of database objects on the target?" data-retype="{{.View.Name}}">Apply phase</button>{{end}}
-      </div>
-    </form>
-  </section>
-  {{end}}
   <section class="card"><div class="cardhead"><h2>Job history</h2></div>{{template "jobs-table" (jobsCtx .Jobs false $.CanOperate)}}</section>
 {{end}}
 

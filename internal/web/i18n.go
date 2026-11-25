@@ -142,14 +142,16 @@ var messagesEn = map[string]string{
 	"pipelines.subtitle": "Active change data capture pipelines, streaming status and latency",
 
 	// Pipeline tab help
-	"pipeline.tabs_help":           "Guide to pipeline operations",
-	"pipeline.tab_help.checkpoint": "See the source log position saved for CDC to resume from. Administrators can rewind a running MySQL-to-MySQL pipeline to replay changes.",
-	"pipeline.tab_help.jobs":       "Run Verify to compare source and target data without repairing it. See live output and past jobs.",
-	"pipeline.tab_help.schema":     "Preview table definitions and review pending schema changes. An administrator can approve them for the target.",
-	"pipeline.tab_help.objects":    "List MySQL views, routines, triggers, scheduled events, users and grants. Administrators can apply them in phases to a MySQL target.",
-	"pipeline.tab_help.repair":     "Fix data differences in a MySQL-to-MySQL pipeline. The wizard guides an administrator through stopping CDC, repairing the target and restarting.",
-	"pipeline.tab_help.promote":    "Switch application writes to the target. Use the dry run to check readiness. Emergency failover can lose changes the target has yet to apply.",
-	"pipeline.tab_help.seed":       "Initialize the target from a backup or a remote clone, then start CDC from that position. Applying a seed replaces target data.",
+	"pipeline.tabs_help":                 "Guide to pipeline operations",
+	"pipeline.tab_help.checkpoint":       "See the source log position saved for CDC to resume from. Administrators can rewind a running MySQL-to-MySQL pipeline to replay changes.",
+	"pipeline.tab_help.jobs":             "Run Verify to compare source and target data without repairing it. See live output and past jobs.",
+	"pipeline.tab_help.checkpoint_mongo": "See the change stream resume token saved for CDC to resume from, per database.",
+	"pipeline.tab_help.jobs_mongo":       "Run Verify to compare source and target collections (counts, hashes, documents by _id) without repairing them. See live output and past jobs.",
+	"pipeline.tab_help.schema":           "Preview table definitions and review pending schema changes. An administrator can approve them for the target.",
+	"pipeline.tab_help.objects":          "List MySQL views, routines, triggers, scheduled events, users and grants. Administrators can apply them in phases to a MySQL target.",
+	"pipeline.tab_help.repair":           "Fix data differences in a MySQL-to-MySQL pipeline. The wizard guides an administrator through stopping CDC, repairing the target and restarting.",
+	"pipeline.tab_help.promote":          "Switch application writes to the target. Use the dry run to check readiness. Emergency failover can lose changes the target has yet to apply.",
+	"pipeline.tab_help.seed":             "Initialize the target from a backup or a remote clone, then start CDC from that position. Applying a seed replaces target data.",
 
 	// Backups overview page
 	"backups.title":    "Backups",
@@ -335,14 +337,16 @@ var messagesVi = map[string]string{
 	"pipelines.subtitle": "Danh sách pipeline đồng bộ dữ liệu, trạng thái truyền tải và độ trễ",
 
 	// Pipeline tab help
-	"pipeline.tabs_help":           "Hướng dẫn các tab vận hành pipeline",
-	"pipeline.tab_help.checkpoint": "Xem vị trí log nguồn đã lưu, nơi CDC sẽ đọc tiếp. Quản trị viên có thể lùi checkpoint của pipeline MySQL → MySQL đang chạy để phát lại thay đổi.",
-	"pipeline.tab_help.jobs":       "Chạy Verify để đối chiếu dữ liệu nguồn và đích mà không sửa dữ liệu. Xem kết quả trực tiếp và lịch sử các job.",
-	"pipeline.tab_help.schema":     "Xem trước cấu trúc bảng và duyệt thay đổi schema đang chờ. Quản trị viên có thể phê duyệt để áp dụng lên đích.",
-	"pipeline.tab_help.objects":    "Liệt kê view, routine, trigger, sự kiện định kỳ, tài khoản và quyền của MySQL. Quản trị viên có thể áp dụng theo từng giai đoạn lên đích MySQL.",
-	"pipeline.tab_help.repair":     "Sửa dữ liệu lệch trong pipeline MySQL → MySQL. Trình hướng dẫn giúp quản trị viên dừng CDC, sửa dữ liệu ở đích rồi chạy lại.",
-	"pipeline.tab_help.promote":    "Chuyển ứng dụng sang ghi vào đích. Chạy thử để kiểm tra điều kiện. Failover khẩn cấp có thể mất các thay đổi đích chưa áp dụng.",
-	"pipeline.tab_help.seed":       "Khởi tạo dữ liệu đích từ bản sao lưu hoặc bản clone qua mạng, rồi chạy CDC từ vị trí tương ứng. Áp dụng seed sẽ thay thế dữ liệu ở đích.",
+	"pipeline.tabs_help":                 "Hướng dẫn các tab vận hành pipeline",
+	"pipeline.tab_help.checkpoint":       "Xem vị trí log nguồn đã lưu, nơi CDC sẽ đọc tiếp. Quản trị viên có thể lùi checkpoint của pipeline MySQL → MySQL đang chạy để phát lại thay đổi.",
+	"pipeline.tab_help.jobs":             "Chạy Verify để đối chiếu dữ liệu nguồn và đích mà không sửa dữ liệu. Xem kết quả trực tiếp và lịch sử các job.",
+	"pipeline.tab_help.checkpoint_mongo": "Xem resume token của change stream đã lưu (theo từng database), nơi CDC sẽ đọc tiếp.",
+	"pipeline.tab_help.jobs_mongo":       "Chạy Verify để đối chiếu collection nguồn và đích (số document, hash, từng document theo _id) mà không sửa dữ liệu. Xem kết quả trực tiếp và lịch sử các job.",
+	"pipeline.tab_help.schema":           "Xem trước cấu trúc bảng và duyệt thay đổi schema đang chờ. Quản trị viên có thể phê duyệt để áp dụng lên đích.",
+	"pipeline.tab_help.objects":          "Liệt kê view, routine, trigger, sự kiện định kỳ, tài khoản và quyền của MySQL. Quản trị viên có thể áp dụng theo từng giai đoạn lên đích MySQL.",
+	"pipeline.tab_help.repair":           "Sửa dữ liệu lệch trong pipeline MySQL → MySQL. Trình hướng dẫn giúp quản trị viên dừng CDC, sửa dữ liệu ở đích rồi chạy lại.",
+	"pipeline.tab_help.promote":          "Chuyển ứng dụng sang ghi vào đích. Chạy thử để kiểm tra điều kiện. Failover khẩn cấp có thể mất các thay đổi đích chưa áp dụng.",
+	"pipeline.tab_help.seed":             "Khởi tạo dữ liệu đích từ bản sao lưu hoặc bản clone qua mạng, rồi chạy CDC từ vị trí tương ứng. Áp dụng seed sẽ thay thế dữ liệu ở đích.",
 
 	// Backups overview page
 	"backups.title":    "Sao lưu",

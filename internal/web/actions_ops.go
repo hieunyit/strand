@@ -324,6 +324,52 @@ func srvSnapshotAdd(ctx context.Context, srv *Server, req ActionRequest) (Action
 	return ActionResult{Message: "snapshot started for " + strings.Join(done, ", "), Data: map[string]any{"started": done}}, nil
 }
 
+// mongoCollRE is "database.collection" of a MongoDB pipeline (collection names may
+// contain dots).
+var mongoCollRE = regexp.MustCompile(`^[^\s./\\"$]{1,63}\.[^\s$\x00]{1,200}$`)
+
+// srvVerifyMongo starts `strand verify` for a MongoDB pipeline: full or sample, over
+// every collection or one "database.collection"; rate is the sample size per collection.
+func srvVerifyMongo(ctx context.Context, srv *Server, req ActionRequest, argv []string) (ActionResult, error) {
+	p := req.Pipeline
+	mode := req.Args["mode"]
+	if mode != "sample" && mode != "full" {
+		return ActionResult{}, BadRequest("mode must be full or sample for a MongoDB pipeline")
+	}
+	if t := strings.TrimSpace(req.Args["table"]); t != "" {
+		if !mongoCollRE.MatchString(t) {
+			return ActionResult{}, BadRequest("invalid collection %q: expected database.collection", t)
+		}
+		argv = append(argv, "--table="+t)
+	}
+	if r := strings.TrimSpace(req.Args["rate"]); r != "" {
+		n, err := strconv.Atoi(r)
+		if mode != "sample" || err != nil || n < 1 || n > 1000000 {
+			return ActionResult{}, BadRequest("sample size applies to sample verify and must be an integer between 1 and 1000000")
+		}
+		argv = append(argv, "--rate="+r)
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Args["resume"])) {
+	case "", "false", "0", "no":
+	default:
+		return ActionResult{}, BadRequest("resume does not apply to MongoDB pipelines")
+	}
+	srv.materialize(p.Name)
+	env, err := p.Env()
+	if err != nil {
+		return ActionResult{}, &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
+	}
+	id, err := srv.jobs.Start(ctx, JobSpec{Pipeline: p.Name, Kind: "verify", Args: argv, Env: env})
+	if err != nil {
+		var run *ErrJobRunning
+		if errors.As(err, &run) {
+			return ActionResult{}, Conflict("%v", err)
+		}
+		return ActionResult{}, &ActionError{Status: 502, Msg: err.Error()}
+	}
+	return ActionResult{Message: "verify " + mode + " job started", JobID: id}, nil
+}
+
 func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
 	p := req.Pipeline
 	if srv.jobs == nil {
@@ -331,6 +377,9 @@ func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResul
 	}
 	mode := req.Args["mode"]
 	argv := []string{"verify", "-c", p.ConfigPath, "--mode", mode}
+	if p.Cfg != nil && p.Cfg.IsMongoDB() {
+		return srvVerifyMongo(ctx, srv, req, argv)
+	}
 	switch mode {
 	case "sample", "full", "delta":
 	default:

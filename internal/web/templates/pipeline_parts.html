@@ -114,7 +114,7 @@
   {{range .Tabs}}
     {{if eq .Key "checkpoint" "jobs" "schema" "objects" "repair" "promote" "seed"}}
     <dt><a href="{{.Href}}">{{.Label}}</a></dt>
-    <dd>{{t (printf "pipeline.tab_help.%s" .Key)}}</dd>
+    <dd>{{t .Help}}</dd>
     {{end}}
   {{end}}
   </dl>

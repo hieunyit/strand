@@ -57,11 +57,15 @@ func TestCLIJobsOnTheWeb(t *testing.T) {
 	if code, _ := e.act(c, csrf, "orders", ActObjectsApply, map[string]string{"phase": "pre", "confirm_name": "orders"}); code != 400 {
 		t.Errorf("objects-apply on a postgres target: %d", code)
 	}
-	// The Jobs tab offers the buttons.
+	// The Jobs tab offers Plan; schema changes have their own tab (not repeated in Jobs).
 	_, page := e.do(c, "GET", "/pipelines/orders/jobs", "", nil)
-	for _, want := range []string{`data-do="schema-diff"`, `data-do="schema-approve"`, `data-do="plan"`, `data-do="objects-list"`} {
+	if !strings.Contains(page, `data-do="plan"`) || strings.Contains(page, `data-do="schema-approve"`) || strings.Contains(page, `data-do="objects-list"`) {
+		t.Errorf("jobs tab: want Plan only, without the schema and objects forms of their tabs")
+	}
+	_, page = e.do(c, "GET", "/pipelines/orders/schema", "", nil)
+	for _, want := range []string{`data-do="schema-diff"`, `data-do="schema-approve"`, `data-do="plan"`} {
 		if !strings.Contains(page, want) {
-			t.Errorf("jobs tab lacks %s", want)
+			t.Errorf("schema tab lacks %s", want)
 		}
 	}
 }

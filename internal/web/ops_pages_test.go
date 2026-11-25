@@ -36,6 +36,7 @@ func TestNoInlineStyles(t *testing.T) {
 
 func TestPageTitlesPerTab(t *testing.T) {
 	e := newEnv(t, nil)
+	e.ordersMySQLTarget()
 	e.sampleNow()
 	c := e.client()
 	e.login(c, testPassword)

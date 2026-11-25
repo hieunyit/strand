@@ -22,6 +22,7 @@ import (
 // to the shared skeleton (breadcrumb, pagehead, content cards, no inline styles) and tabs markup where relevant.
 func TestStandardPageSkeletonAndNoInlineStyles(t *testing.T) {
 	e := newEnv(t, nil)
+	e.ordersMySQLTarget()
 	e.sampleNow()
 	c, _ := e.loginOK()
 

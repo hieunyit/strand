@@ -665,6 +665,7 @@ func auditHas(lines []map[string]any, result string) bool {
 func TestWizardPagesRenderInEveryStep(t *testing.T) {
 	e := opsEnv(t, false, nil)
 	wizFake(t, e)
+	e.ordersMySQLTarget()
 	e.sampleNow()
 	c, csrf := e.loginOK()
 	get := func(path string) string {

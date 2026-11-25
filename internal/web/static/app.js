@@ -451,6 +451,13 @@
   // ---- toast and confirmation dialog (no inline script: everything is wired here) ----
   var toastEl = document.getElementById('toast');
   var toastTimer = null;
+  // A notice left by the previous page (e.g. "pipeline created") before it navigated here.
+  function showFlash() {
+    var raw = null;
+    try { raw = sessionStorage.getItem('strand-flash'); sessionStorage.removeItem('strand-flash'); } catch (e) { return; }
+    if (!raw) { return; }
+    try { var f = JSON.parse(raw); if (f && f.msg) { toast(String(f.msg), !!f.ok); } } catch (e) { /* ignore */ }
+  }
   // Success toasts hide after 4 s; an error stays until it is dismissed (button, click or Esc).
   function toast(msg, ok) {
     if (!toastEl) { return; }
@@ -467,6 +474,7 @@
     if (ok) { toastTimer = setTimeout(function () { toastEl.hidden = true; }, 4000); }
   }
 
+  showFlash();
   if (toastEl) { toastEl.addEventListener('click', function () { if (toastEl.classList.contains('ok')) { toastEl.hidden = true; } }); }
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape' && toastEl && !toastEl.hidden && !document.querySelector('dialog[open]')) { toastEl.hidden = true; }
@@ -1080,8 +1088,13 @@
               html += '</div>';
               resBody.innerHTML = html;
               newPipeForm.dispatchEvent(new CustomEvent('pipeline-created'));
-              if (res.j.ok) { toast('Pipeline created successfully!', true); }
-              else { toast('Pipeline created but validation FAILED: fix it before Start', false); }
+              if (res.j.ok) {
+                // Open the new pipeline; its page shows the notice and the Start button.
+                try { sessionStorage.setItem('strand-flash', JSON.stringify({msg: 'Pipeline ' + res.j.pipeline + ' created: validate passed. Start it when ready.', ok: true})); } catch (e) { /* private mode */ }
+                window.location.assign('/pipelines/' + encodeURIComponent(res.j.pipeline));
+                return;
+              }
+              toast('Pipeline created but validation FAILED: fix it before Start', false);
             } else {
               var errHtml = '<p class="err">Error: ' + escHtml(res.j.error || 'Failed to create pipeline') + '</p>';
               if (res.status === 409) {

@@ -929,7 +929,62 @@ func tabIcon(key string) string {
 	return "pipelines"
 }
 
-type tabLink struct{ Key, Label, Href string }
+type tabLink struct{ Key, Label, Href, Help string }
+
+// pipelineTabs lists the tabs that apply to a pipeline's source and target: a MongoDB
+// pipeline has no schema evolution, database objects, repair, promote or seed; database
+// objects exist for MySQL → MySQL only, and the repair wizard (offline verify --repair
+// fix) needs the same engine on both sides. A pipeline whose kinds are unknown (config
+// error) shows every tab, so the operator can still reach each page.
+func pipelineTabs(v PipelineView, base string) []tabLink {
+	src, dst := strings.ToLower(v.SourceKind), strings.ToLower(v.TargetKind)
+	mongo := isMongo(src) || isMongo(dst)
+	known := src != "" && dst != ""
+	var tabs []tabLink
+	for _, t := range [][2]string{
+		{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"},
+		{"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"},
+		{"schema", "Schema"}, {"objects", "Objects"},
+		{"repair", "Repair"}, {"promote", "Promote"}, {"seed", "Seed"},
+	} {
+		if known {
+			switch t[0] {
+			case "schema", "promote", "seed":
+				if mongo {
+					continue
+				}
+			case "objects":
+				if src != "mysql" || dst != "mysql" {
+					continue
+				}
+			case "repair":
+				if mongo || src != dst {
+					continue
+				}
+			}
+		}
+		href := base
+		if t[0] != "graph" {
+			href += "/" + t[0]
+		}
+		help := "pipeline.tab_help." + t[0]
+		if mongo && (t[0] == "checkpoint" || t[0] == "jobs") {
+			help += "_mongo"
+		}
+		tabs = append(tabs, tabLink{Key: t[0], Label: t[1], Href: href, Help: help})
+	}
+	return tabs
+}
+
+// hasTab: key is one of tabs.
+func hasTab(tabs []tabLink, key string) bool {
+	for _, t := range tabs {
+		if t.Key == key {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Session, tab string) {
 	p := s.reg.Get(r.PathValue("name"))
@@ -944,17 +999,11 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	b := detailBody{Tab: tab, View: s.view(p), Revision: configRevision(p)}
 	b.CanOperate, b.CanAdmin = RoleAllows(sess.Role, PermOperator), RoleAllows(sess.Role, PermAdmin)
 	b.Ctl = s.controls(p, b.View)
-	for _, t := range [][2]string{
-		{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"},
-		{"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"},
-		{"schema", "Schema"}, {"objects", "Objects"},
-		{"repair", "Repair"}, {"promote", "Promote"}, {"seed", "Seed"},
-	} {
-		href := base
-		if t[0] != "graph" {
-			href += "/" + t[0]
-		}
-		b.Tabs = append(b.Tabs, tabLink{Key: t[0], Label: t[1], Href: href})
+	b.Tabs = pipelineTabs(b.View, base)
+	if !hasTab(b.Tabs, tab) {
+		// A tab of another pipeline kind (old bookmark, typed URL): show the pipeline.
+		http.Redirect(w, r, base, http.StatusSeeOther)
+		return
 	}
 	// Mọi số liệu đọc từ bộ nhớ của sampler: render trang không bao giờ gọi admin socket.
 	ctx := r.Context()

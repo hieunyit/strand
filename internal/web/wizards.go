@@ -945,17 +945,10 @@ func (s *Server) pageWizard(w http.ResponseWriter, r *http.Request, sess *Sessio
 	base := "/pipelines/" + p.Name
 	pg := wizardPage{wizardView: v, Revision: configRevision(p)}
 	pg.CanOperate, pg.CanAdmin = RoleAllows(sess.Role, PermOperator), RoleAllows(sess.Role, PermAdmin)
-	for _, t := range [][2]string{
-		{"graph", "Graph"}, {"tables", "Tables"}, {"checkpoint", "Checkpoint"},
-		{"errors", "Errors"}, {"config", "Config"}, {"logs", "Logs"}, {"jobs", "Jobs"},
-		{"schema", "Schema"}, {"objects", "Objects"},
-		{"repair", "Repair"}, {"promote", "Promote"}, {"seed", "Seed"},
-	} {
-		href := base
-		if t[0] != "graph" {
-			href += "/" + t[0]
-		}
-		pg.Tabs = append(pg.Tabs, tabLink{Key: t[0], Label: t[1], Href: href})
+	pg.Tabs = pipelineTabs(v.View, base)
+	if !hasTab(pg.Tabs, kind) {
+		http.Redirect(w, r, base, http.StatusSeeOther)
+		return
 	}
 	refresh := 5
 	if v.Job != nil && v.Job.Running {

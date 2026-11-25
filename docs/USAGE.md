@@ -1328,6 +1328,8 @@ Chi tiết nằm trong `questions/DECISIONS-2026-11-02.md` và `docs/HANDOFF-COD
 
 Web UI (PostgreSQL bắt buộc) làm được: tạo pipeline cho mọi cặp được hỗ trợ (MySQL/MariaDB/PostgreSQL → MySQL/PostgreSQL, MongoDB → MongoDB) kèm tuning; sửa cấu hình, `.env`, tuning; tải về/tải lên YAML; start/stop/restart/enable/disable, pause/resume, throttle, `snapshot add`, checkpoint show/rewind; `verify`; wizard Repair và Promote; `plan`; duyệt thay đổi schema (`schema diff`/`approve`, xem trước DDL); `schema init --dry-run`; database objects (`objects list`/`apply`); backup (catalog, job); trang MCP; Settings; audit.
 
+Trang pipeline chỉ hiện các tab dùng được cho cặp nguồn → đích của nó: pipeline MongoDB có Graph, Tables, Checkpoint, Errors, Config, Logs, Jobs (Verify theo `database.collection`, chế độ full/sample); Objects và Repair chỉ có ở MySQL → MySQL (Repair cần cùng engine hai phía); Schema, Promote, Seed ở mọi pipeline SQL. Mở URL của tab không áp dụng sẽ quay về trang pipeline. Tab Jobs chỉ còn Verify, Plan và lịch sử job (schema và database objects nằm ở tab riêng). Tạo pipeline thành công (validate đạt) thì console tự mở trang pipeline vừa tạo; validate lỗi thì ở lại trang tạo và hiện lỗi.
+
 Cố ý để lại CLI (lý do):
 
 - `seed plan/apply`: điều phối restore bản backup vật lý lên máy target (cần quyền và đường dẫn trên máy DB, thao tác phá hủy dữ liệu đích); không an toàn để bấm từ web.
