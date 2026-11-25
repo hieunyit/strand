@@ -41,6 +41,10 @@ type BackupProStore interface {
 	ClaimBackupJobVerify(ctx context.Context, id string, now time.Time, every time.Duration) (bool, error)
 	// ClaimBackupJobPrune claims a retention run when the previous one is older than every.
 	ClaimBackupJobPrune(ctx context.Context, id string, now time.Time, every time.Duration) (bool, error)
+
+	// PinBackups and ReleaseBackupPins implement backup.Pinner: restore pins that retention respects.
+	PinBackups(ctx context.Context, holder string, ids []string, ttl time.Duration) error
+	ReleaseBackupPins(ctx context.Context, holder string) error
 }
 
 const backupProCols = `, job_id, repository, method, kind, parent_id, copy_of, format, compression, key_id,
@@ -165,11 +169,36 @@ func (p *PG) UpdateBackupMeta(ctx context.Context, id string, m backup.Meta) (ba
 }
 
 func (p *PG) ClaimBackupDeletion(ctx context.Context, id string, at time.Time) (backup.Record, bool, error) {
-	// The Object Lock check uses the database clock, not the caller's: a writer host whose clock runs ahead
-	// must not claim a backup that is still locked.
-	_, err := p.db.ExecContext(ctx, `UPDATE backups SET status='deleting'
-		WHERE id=$1 AND status='complete' AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= now())`, id)
+	// The row lock orders the claim with PinBackups (which takes FOR SHARE): either the pin commits first
+	// and the pin check below sees it, or the claim commits first and the pin sees status 'deleting'.
+	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
+		return backup.Record{}, false, p.wrap(err)
+	}
+	defer tx.Rollback()
+	var status string
+	switch err := tx.QueryRowContext(ctx, `SELECT status FROM backups WHERE id=$1 FOR UPDATE`, id).Scan(&status); {
+	case errors.Is(err, sql.ErrNoRows):
+		return backup.Record{}, false, nil
+	case err != nil:
+		return backup.Record{}, false, p.wrap(err)
+	}
+	if status == string(backup.StatusComplete) {
+		var pinned bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM backup_pins WHERE backup_id=$1 AND expires_at > now())`, id).Scan(&pinned); err != nil {
+			return backup.Record{}, false, p.wrap(err)
+		}
+		if pinned {
+			return backup.Record{}, false, fmt.Errorf("%w: %s", backup.ErrPinned, id)
+		}
+		// The Object Lock check uses the database clock, not the caller's: a writer host whose clock runs
+		// ahead must not claim a backup that is still locked.
+		if _, err := tx.ExecContext(ctx, `UPDATE backups SET status='deleting'
+			WHERE id=$1 AND status='complete' AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= now())`, id); err != nil {
+			return backup.Record{}, false, p.wrap(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
 	cur, ok, err := p.GetBackup(ctx, id)
@@ -188,7 +217,8 @@ func (p *PG) ClaimBackupDeletion(ctx context.Context, id string, at time.Time) (
 // ExpireBackup stamps expired_at with at, but checks the Object Lock against the database clock.
 func (p *PG) ExpireBackup(ctx context.Context, id string, at time.Time) (backup.Record, bool, error) {
 	res, err := p.db.ExecContext(ctx, `UPDATE backups SET status='expired', expired_at=$2
-		WHERE id=$1 AND status IN ('complete', 'deleting') AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= now())`, id, at)
+		WHERE id=$1 AND status IN ('complete', 'deleting') AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= now())
+		AND NOT (status='complete' AND EXISTS (SELECT 1 FROM backup_pins WHERE backup_id=$1 AND expires_at > now()))`, id, at)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
@@ -207,11 +237,73 @@ func (p *PG) ExpireBackup(ctx context.Context, id string, at time.Time) (backup.
 		return backup.Record{}, false, backup.ErrTransition
 	case cur.LegalHold:
 		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
+	case cur.Status == backup.StatusComplete && p.pinned(ctx, id):
+		return backup.Record{}, false, fmt.Errorf("%w: %s", backup.ErrPinned, id)
 	case cur.RetainUntil != nil:
 		// Still locked by the database clock (the statement compares retain_until with now()).
 		return backup.Record{}, false, fmt.Errorf("%w: backup is object-locked until %s", backup.ErrInvalid, cur.RetainUntil.UTC().Format(time.RFC3339))
 	}
 	return backup.Record{}, false, backup.ErrTransition
+}
+
+func (p *PG) pinned(ctx context.Context, id string) bool {
+	var pinned bool
+	_ = p.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM backup_pins WHERE backup_id=$1 AND expires_at > now())`, id).Scan(&pinned)
+	return pinned
+}
+
+// PinBackups pins complete backups for holder until ttl from now by the database clock (see backup.Pinner).
+// FOR SHARE on the backup rows orders the pin with ClaimBackupDeletion (FOR UPDATE).
+func (p *PG) PinBackups(ctx context.Context, holder string, ids []string, ttl time.Duration) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return p.wrap(err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id, status FROM backups WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+	if err != nil {
+		return p.wrap(err)
+	}
+	status := map[string]string{}
+	for rows.Next() {
+		var id, st string
+		if err := rows.Scan(&id, &st); err != nil {
+			rows.Close()
+			return p.wrap(err)
+		}
+		status[id] = st
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return p.wrap(err)
+	}
+	for _, id := range ids {
+		if err := pinnableErr(id, status[id]); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO backup_pins (backup_id, holder, expires_at)
+		SELECT id, $2, now() + make_interval(secs => $3) FROM unnest($1::text[]) AS id
+		ON CONFLICT (backup_id, holder) DO UPDATE SET expires_at = EXCLUDED.expires_at`, ids, holder, ttl.Seconds()); err != nil {
+		return p.wrap(err)
+	}
+	return p.wrap(tx.Commit())
+}
+
+// ReleaseBackupPins drops the pins of holder (and pins that lapsed a day ago).
+func (p *PG) ReleaseBackupPins(ctx context.Context, holder string) error {
+	_, err := p.db.ExecContext(ctx, `DELETE FROM backup_pins WHERE holder=$1 OR expires_at < now() - interval '1 day'`, holder)
+	return p.wrap(err)
+}
+
+func pinnableErr(id, status string) error {
+	switch status {
+	case string(backup.StatusComplete):
+		return nil
+	case "":
+		return fmt.Errorf("%w: restore point %s not found", backup.ErrInvalid, id)
+	}
+	return fmt.Errorf("%w: restore point %s is %s and cannot be read", backup.ErrInvalid, id, status)
 }
 
 func (p *PG) SetBackupLegalHold(ctx context.Context, id string, hold bool) (backup.Record, bool, error) {

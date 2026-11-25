@@ -17,6 +17,7 @@ type memBackupPro struct {
 	missed   map[string]time.Time
 	verified map[string]time.Time
 	pruned   map[string]time.Time
+	pins     map[string]map[string]time.Time // backup id -> holder -> expiry
 }
 
 func (p *memBackupPro) init() {
@@ -86,6 +87,9 @@ func (m *Mem) ClaimBackupDeletion(_ context.Context, id string, at time.Time) (b
 	if r.Status == backup.StatusDeleting {
 		return cloneBackup(r), true, nil
 	}
+	if r.Status == backup.StatusComplete && m.pinnedLocked(id) {
+		return backup.Record{}, false, fmt.Errorf("%w: %s", backup.ErrPinned, id)
+	}
 	// Like the PG store, the Object Lock is checked against the store's clock, not the caller's.
 	if r.Status != backup.StatusComplete || r.LegalHold || (r.RetainUntil != nil && r.RetainUntil.After(time.Now())) {
 		return cloneBackup(r), false, fmt.Errorf("%w: backup is not eligible for deletion (status, legal hold or retention lock)", backup.ErrInvalid)
@@ -111,6 +115,8 @@ func (m *Mem) ExpireBackup(_ context.Context, id string, at time.Time) (backup.R
 		return backup.Record{}, false, backup.ErrTransition
 	case r.LegalHold:
 		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
+	case r.Status == backup.StatusComplete && m.pinnedLocked(id):
+		return backup.Record{}, false, fmt.Errorf("%w: %s", backup.ErrPinned, id)
 	case r.RetainUntil != nil && r.RetainUntil.After(time.Now()):
 		return backup.Record{}, false, fmt.Errorf("%w: backup is object-locked until %s", backup.ErrInvalid, r.RetainUntil.UTC().Format(time.RFC3339))
 	}
@@ -119,6 +125,54 @@ func (m *Mem) ExpireBackup(_ context.Context, id string, at time.Time) (backup.R
 	r.ExpiredAt = &t
 	m.backups[id] = cloneBackup(r)
 	return cloneBackup(r), true, nil
+}
+
+// pinnedLocked reports a live pin on id (m.mu held).
+func (m *Mem) pinnedLocked(id string) bool {
+	now := time.Now()
+	for _, until := range m.pro.pins[id] {
+		if until.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Mem) PinBackups(_ context.Context, holder string, ids []string, ttl time.Duration) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	for _, id := range ids {
+		if err := pinnableErr(id, string(m.backups[id].Status)); err != nil {
+			return err
+		}
+	}
+	if m.pro.pins == nil {
+		m.pro.pins = map[string]map[string]time.Time{}
+	}
+	until := time.Now().Add(ttl)
+	for _, id := range ids {
+		if m.pro.pins[id] == nil {
+			m.pro.pins[id] = map[string]time.Time{}
+		}
+		m.pro.pins[id][holder] = until
+	}
+	return nil
+}
+
+func (m *Mem) ReleaseBackupPins(_ context.Context, holder string) error {
+	if err := m.enter(); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	for id, hs := range m.pro.pins {
+		delete(hs, holder)
+		if len(hs) == 0 {
+			delete(m.pro.pins, id)
+		}
+	}
+	return nil
 }
 
 func (m *Mem) SetBackupLegalHold(_ context.Context, id string, hold bool) (backup.Record, bool, error) {
@@ -155,6 +209,7 @@ func (m *Mem) DeleteBackup(_ context.Context, id string, now time.Time) (backup.
 		return backup.Record{}, false, err
 	}
 	delete(m.backups, id)
+	delete(m.pro.pins, id)
 	kept := m.pro.checks[:0]
 	for _, c := range m.pro.checks {
 		if c.BackupID != id {
