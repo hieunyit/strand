@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -115,14 +116,11 @@ func validateMongoDB(cfg *Config) error {
 	if !IsMongoKind(cfg.Source.Kind) || !IsMongoKind(cfg.Target.Kind) {
 		return bad(fmt.Sprintf("MongoDB replicates only to MongoDB: source.kind %q and target.kind %q must both be mongodb", cfg.Source.Kind, cfg.Target.Kind))
 	}
-	if strings.TrimSpace(cfg.Source.Database) == "" {
-		return bad("source.database is required for kind mongodb")
-	}
-	if cfg.Target.Database == "" {
-		cfg.Target.Database = cfg.Source.Database
-	}
 	if len(cfg.Tables.Include) == 0 {
 		return bad(`tables.include is required for kind mongodb ("database.collection" globs, e.g. "app.*")`)
+	}
+	if err := validateMongoDatabases(cfg); err != nil {
+		return bad(err.Error())
 	}
 	switch {
 	case len(cfg.Tables.Rename) > 0:
@@ -181,5 +179,141 @@ func (c *Config) MongoDBIgnoredKeys() []string {
 	add(c.Governor.Algorithm != "" || c.Governor.MetricsSource != nil, "governor")
 	add(c.Verify.Delta != "" || c.Verify.Full.Cron != "", "verify (use strand verify -c)")
 	add(c.Source.ReadFrom != "", "source.read_from (use readPreference in the URI)")
+	return out
+}
+
+// MongoDatabase is one source database of a MongoDB pipeline and the target database
+// it is copied to.
+type MongoDatabase struct {
+	Source string
+	Target string
+}
+
+// MongoDatabases lists the databases of a validated MongoDB pipeline in configuration
+// order: source.database (one) or source.databases (several).
+func (c *Config) MongoDatabases() []MongoDatabase {
+	if len(c.Source.Databases) == 0 {
+		return []MongoDatabase{{Source: c.Source.Database, Target: c.Target.Database}}
+	}
+	out := make([]MongoDatabase, 0, len(c.Source.Databases))
+	for _, db := range c.Source.Databases {
+		target := db
+		if t := c.Target.Databases[db]; t != "" {
+			target = t
+		}
+		out = append(out, MongoDatabase{Source: db, Target: target})
+	}
+	return out
+}
+
+// mongoDatabaseNameOK: a database name MongoDB accepts and Strand may replicate.
+func mongoDatabaseNameOK(name string) error {
+	switch {
+	case name == "" || strings.TrimSpace(name) != name:
+		return fmt.Errorf("database name %q is empty or has surrounding spaces", name)
+	case strings.ContainsAny(name, "/\\. \"$\x00"):
+		return fmt.Errorf("database name %q contains a character MongoDB does not allow", name)
+	case len(name) > 63:
+		return fmt.Errorf("database name %q is longer than 63 bytes", name)
+	case name == "admin" || name == "local" || name == "config":
+		return fmt.Errorf("system database %q cannot be replicated", name)
+	case name == "_strand_cdc":
+		return fmt.Errorf("database %q is reserved for Strand checkpoints", name)
+	}
+	return nil
+}
+
+// validateMongoDatabases checks source.database / source.databases, the target
+// database names and that every include/exclude pattern selects a listed database.
+func validateMongoDatabases(cfg *Config) error {
+	src, tgt := &cfg.Source, &cfg.Target
+	if len(src.Databases) == 0 {
+		if strings.TrimSpace(src.Database) == "" {
+			return fmt.Errorf("source.database (one database) or source.databases (several) is required for kind mongodb")
+		}
+		if len(tgt.Databases) > 0 {
+			return fmt.Errorf("target.databases maps the entries of source.databases; with source.database use target.database")
+		}
+		if tgt.Database == "" {
+			tgt.Database = src.Database
+		}
+	} else {
+		if src.Database != "" {
+			return fmt.Errorf("set either source.database or source.databases, not both")
+		}
+		if tgt.Database != "" {
+			return fmt.Errorf("target.database is for a single source.database; with source.databases map names in target.databases (source: target)")
+		}
+	}
+	dbs := cfg.MongoDatabases()
+	sources, targets := map[string]bool{}, map[string]string{}
+	for _, d := range dbs {
+		if err := mongoDatabaseNameOK(d.Source); err != nil {
+			return fmt.Errorf("source database: %w", err)
+		}
+		if err := mongoDatabaseNameOK(d.Target); err != nil {
+			return fmt.Errorf("target database: %w", err)
+		}
+		if sources[d.Source] {
+			return fmt.Errorf("source.databases lists %q twice", d.Source)
+		}
+		sources[d.Source] = true
+		if other, ok := targets[d.Target]; ok {
+			return fmt.Errorf("source databases %q and %q would both be copied to target database %q", other, d.Source, d.Target)
+		}
+		targets[d.Target] = d.Source
+	}
+	for from := range tgt.Databases {
+		if !sources[from] {
+			return fmt.Errorf("target.databases maps %q, which is not in source.databases", from)
+		}
+	}
+	if len(dbs) > 1 {
+		for _, d := range dbs {
+			if d.Target != d.Source && sources[d.Target] {
+				return fmt.Errorf("target database %q of source database %q is itself a source database of this pipeline", d.Target, d.Source)
+			}
+		}
+	}
+	covered := map[string]bool{}
+	for _, list := range []struct {
+		key      string
+		patterns []string
+	}{{"tables.include", cfg.Tables.Include}, {"tables.exclude", cfg.Tables.Exclude}} {
+		for _, p := range list.patterns {
+			dbPattern, coll, ok := strings.Cut(p, ".")
+			if !ok || dbPattern == "" || coll == "" {
+				return fmt.Errorf("%s pattern %q must be database.collection (for example %s.orders or %s.*)", list.key, p, dbs[0].Source, dbs[0].Source)
+			}
+			if _, err := path.Match(p, "x.y"); err != nil {
+				return fmt.Errorf("%s pattern %q is not a valid glob: %v", list.key, p, err)
+			}
+			hit := false
+			for _, d := range dbs {
+				if ok, _ := path.Match(dbPattern, d.Source); ok {
+					hit = true
+					if list.key == "tables.include" {
+						covered[d.Source] = true
+					}
+				}
+			}
+			if !hit {
+				return fmt.Errorf("%s pattern %q selects none of the pipeline's source databases (%s)", list.key, p, strings.Join(mongoSourceNames(dbs), ", "))
+			}
+		}
+	}
+	for _, d := range dbs {
+		if !covered[d.Source] {
+			return fmt.Errorf("no tables.include pattern selects source database %q (add %q)", d.Source, d.Source+".*")
+		}
+	}
+	return nil
+}
+
+func mongoSourceNames(dbs []MongoDatabase) []string {
+	out := make([]string, len(dbs))
+	for i, d := range dbs {
+		out[i] = d.Source
+	}
 	return out
 }

@@ -349,6 +349,29 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 }
 
+// showCopiedCollections lists the selected collections as copied after a restart past
+// the initial snapshot, so admin `tables` (strand top, Web) shows them instead of
+// nothing. It only feeds the observer: errors are logged and ignored.
+func (r *runner) showCopiedCollections(ctx context.Context) {
+	infos, err := listSelectedCollections(ctx, r.source, r.cfg)
+	if err != nil {
+		r.cfg.Logger.Debug("MongoDB: cannot list collections for tables", "error", err)
+		return
+	}
+	progress, err := r.loadProgress(ctx, progressSnapshot)
+	if err != nil {
+		r.cfg.Logger.Debug("MongoDB: cannot read snapshot progress for tables", "error", err)
+	}
+	for _, in := range infos {
+		var copied int64
+		if p := progress[in.Name]; p != nil {
+			copied = p.Copied
+		}
+		est, _ := r.source.Collection(in.Name).EstimatedDocumentCount(ctx)
+		r.obs.setCollection(in.Name, CollDone, progressSnapshot, copied, max(est, copied))
+	}
+}
+
 // targetDBOptions: target reads use readConcern local on the primary. This process is
 // the only writer and every write it made was acknowledged w:majority (durable across
 // failover), so local reads see exactly the committed state. A majority read is NOT
@@ -469,6 +492,8 @@ func (r *runner) run(ctx context.Context, operationTime bson.Timestamp) error {
 			return fmt.Errorf("save MongoDB snapshot checkpoint: %w", err)
 		}
 		cfg.Logger.Info("MongoDB initial snapshot complete", "pipeline", cfg.Pipeline)
+	} else {
+		r.showCopiedCollections(ctx)
 	}
 	if r.state.ConsistentAt.T == 0 {
 		// Checkpoint of the first experimental version: treat everything up to now as

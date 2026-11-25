@@ -75,6 +75,18 @@ func TestNewPipelineMongoDBKind(t *testing.T) {
 	if row, _, _ := e.srv.db.st.GetPipeline(t.Context(), "mongo1"); !strings.Contains(row.ConfigYAML, "stream_batch: 3000") || !strings.Contains(row.ConfigYAML, "lease_ttl: 90s") {
 		t.Fatalf("tuning not stored in the database:\n%s", row.ConfigYAML)
 	}
+	// Collections in parallel (bootstrap.logical.max_parallel) is a setting of MongoDB pipelines too.
+	if !strings.Contains(body, `"max_parallel"`) {
+		t.Fatalf("mongo tuning view lacks max_parallel: %s", body)
+	}
+	if resp, body := e.do(c, "POST", "/api/v1/pipelines/mongo1/tuning", `{"max_parallel": 6}`, hdr); resp.StatusCode != 200 {
+		t.Fatalf("mongo max_parallel save: %d %s", resp.StatusCode, body)
+	}
+	if row, _, _ := e.srv.db.st.GetPipeline(t.Context(), "mongo1"); !strings.Contains(row.ConfigYAML, "max_parallel: 6") {
+		t.Fatalf("max_parallel not stored:\n%s", row.ConfigYAML)
+	} else if cfg, err := config.LoadYAMLStrictWithEnv([]byte(row.ConfigYAML), env); err != nil || cfg.Bootstrap.Logical.MaxParallel != 6 {
+		t.Fatalf("stored config: %v %+v", err, cfg.Bootstrap.Logical)
+	}
 	if resp, body := e.do(c, "POST", "/api/v1/pipelines/mongo1/tuning", `{"iops_soft": 300}`, hdr); resp.StatusCode != 400 || !strings.Contains(body, "pipeline kind") {
 		t.Fatalf("SQL key on a mongo pipeline: %d %s", resp.StatusCode, body)
 	}

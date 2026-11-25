@@ -48,6 +48,8 @@ type SourceConfig struct {
 	Password    string `yaml:"password,omitempty" json:"password,omitempty"`
 	PasswordEnv string `yaml:"password_env,omitempty" json:"password_env,omitempty"`
 	Database    string `yaml:"database,omitempty" json:"database,omitempty"`
+	// Databases (chỉ kind mongodb): nhiều database nguồn trong một pipeline, thay cho database.
+	Databases []string `yaml:"databases,omitempty" json:"databases,omitempty"`
 
 	ReadFrom string `yaml:"read_from" json:"read_from"` // primary | replica | standby (PG16+, chưa triển khai)
 
@@ -76,15 +78,18 @@ type TargetConfig struct {
 	URIEnv string `yaml:"uri_env,omitempty" json:"uri_env,omitempty"`
 	// Kết nối dạng tách trường (thay cho dsn): host, port (mặc định 3306), user, password hoặc
 	// password_env (tên biến môi trường chứa mật khẩu), database. dsn còn nhận dạng URL mysql://.
-	Host        string      `yaml:"host,omitempty" json:"host,omitempty"`
-	Port        int         `yaml:"port,omitempty" json:"port,omitempty"`
-	User        string      `yaml:"user,omitempty" json:"user,omitempty"`
-	Password    string      `yaml:"password,omitempty" json:"password,omitempty"`
-	PasswordEnv string      `yaml:"password_env,omitempty" json:"password_env,omitempty"`
-	Database    string      `yaml:"database,omitempty" json:"database,omitempty"`
-	WriteMode   string      `yaml:"write_mode" json:"write_mode"`     // upsert | insert
-	CommitOrder string      `yaml:"commit_order" json:"commit_order"` // strict | relaxed
-	Batch       BatchConfig `yaml:"batch" json:"batch"`
+	Host        string `yaml:"host,omitempty" json:"host,omitempty"`
+	Port        int    `yaml:"port,omitempty" json:"port,omitempty"`
+	User        string `yaml:"user,omitempty" json:"user,omitempty"`
+	Password    string `yaml:"password,omitempty" json:"password,omitempty"`
+	PasswordEnv string `yaml:"password_env,omitempty" json:"password_env,omitempty"`
+	Database    string `yaml:"database,omitempty" json:"database,omitempty"`
+	// Databases (chỉ kind mongodb, cùng source.databases): database đích theo từng database nguồn
+	// (nguồn -> đích); database không có trong map giữ nguyên tên.
+	Databases   map[string]string `yaml:"databases,omitempty" json:"databases,omitempty"`
+	WriteMode   string            `yaml:"write_mode" json:"write_mode"`     // upsert | insert
+	CommitOrder string            `yaml:"commit_order" json:"commit_order"` // strict | relaxed
+	Batch       BatchConfig       `yaml:"batch" json:"batch"`
 }
 
 type BatchConfig struct {
@@ -395,6 +400,8 @@ func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 		if err := validateMongoDB(&cfg); err != nil {
 			return nil, err
 		}
+	} else if len(cfg.Source.Databases) > 0 || len(cfg.Target.Databases) > 0 {
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax, "source.databases / target.databases are only used by MongoDB pipelines; select MySQL or PostgreSQL tables with tables.include", nil)
 	}
 
 	switch strings.ToLower(strings.TrimSpace(cfg.Tables.Keyless)) {

@@ -1,7 +1,7 @@
 # MongoDB → MongoDB CDC: production guide
 
-Strand replicates selected collections of one MongoDB database into a database of
-another MongoDB deployment: an initial snapshot, then the source change stream, applied
+Strand replicates selected collections of one or several MongoDB databases into
+databases of another MongoDB deployment: an initial snapshot, then the source change stream, applied
 continuously with the checkpoint committed atomically with the data. It is a normal
 Strand pipeline: `strand sync -c <config>` (also `--background`, `stop`, `status`,
 `validate`, `plan`, `top`, `pause`, `resume`, `checkpoint show`, `verify`,
@@ -22,9 +22,13 @@ Strand pipeline: `strand sync -c <config>` (also `--background`, `stop`, `status
 From the Web console (**Pipelines → New pipeline**, source and target "MongoDB 4.4 – 8.0"), each side
 is entered as host(s), port, user, password, replica set name (optional), authentication database
 (default `admin`) and TLS. Several replica set members go in the host field as `host:port` separated
-by commas. The source database has no default: type it or press **List source databases** (it
-connects with the entered credentials and lists the user databases). An empty target database means
-the same name as the source. The console builds the connection URI (user and password escaped) and
+by commas. The source databases have no default: type one or several separated by commas, or press
+**List source databases** (it connects with the entered credentials and lists the user databases)
+and click the ones to copy. **Collections in parallel** (MongoDB tuning, prefilled with 4) is
+`bootstrap.logical.max_parallel`: how many collections the initial snapshot copies at the same
+time, like "Tables in parallel" of MySQL pipelines; it can be changed later on the Tuning card. With one database, an empty target database means the same name as the
+source; several databases keep their names on the target (write `target.databases` in the YAML to
+rename them). The console builds the connection URI (user and password escaped) and
 stores it only in the pipeline's encrypted `.env` as `SRC_URI` / `DST_URI`; the YAML below is what it
 generates.
 
@@ -62,6 +66,46 @@ observability:
 resources:
   spool: { path: /var/lib/strand/orders-replica }   # log/pid of --background
 ```
+
+### Several databases in one pipeline
+
+```yaml
+source:
+  kind: mongodb
+  uri: "${SRC_URI}"
+  databases: [app, billing]       # instead of database:
+target:
+  kind: mongodb
+  uri: "${DST_URI}"
+  databases: { billing: billing_replica }   # optional; unlisted databases keep their name
+tables:
+  include: ["app.*", "billing.invoices"]    # every database needs at least one pattern
+  exclude: ["*.tmp_*"]
+```
+
+- Each database has its own snapshot, change stream, checkpoint and lease on its
+  target database, all in one process: one pipeline to start, stop, watch and verify.
+  `strand top`, the Web UI and `verify` name collections `database.collection`;
+  `snapshot add`, `verify --table` and `mongodb repair` need that form.
+- `bootstrap.logical.max_parallel` is the total: it is shared between the databases
+  (at least one worker each).
+- The pipeline stops as a whole. When one database stops with an error (lost oplog
+  history, unsupported event, lease lost), the others stop at a committed checkpoint
+  and the error names the database. Transient errors are retried per database.
+- **A source transaction that writes to several databases is applied per database**:
+  each part is atomic on its target database, but another reader of the target can
+  see one part before the other (separate pipelines behave the same). Check that the
+  application tolerates this before reading the target.
+- Two source databases cannot share a target database, and a target database cannot
+  be another source database of the same pipeline.
+- Checkpoints: the database of a pipeline that had one database keeps the checkpoint
+  under the pipeline name, so adding databases to it later does not copy it again;
+  the new databases get the checkpoint `<pipeline>/<database>` and are copied. Removing
+  a database leaves its checkpoint and target data in place; adding it back resumes
+  only if its oplog history is still available.
+- Each database opens its own connections to the source and the target (one change
+  stream each); grant the source and target privileges below on every database.
+- Metrics carry `pipeline="<pipeline>/<database>"` for a pipeline with several databases.
 
 `bootstrap.logical.chunk_rows` and `target.batch.max_rows` are accepted as fallbacks for
 `snapshot_batch` / `stream_batch`. Keys of SQL pipelines that have no meaning here
@@ -247,6 +291,10 @@ db.getSiblingDB("admin").createRole({ role: "strandTarget", roles: [], privilege
       "createCollection", "listCollections", "createIndex"] } ] })
 ```
 
+With several databases (`source.databases`), repeat the `app` privilege for every
+source database and the `app_replica` privilege for every target database. The
+`_strand_cdc` and `local` privileges are needed once.
+
 ## Monitoring
 
 Admin socket (`strand top`, Web UI): state (`bootstrapping`, `synced`, `paused`,
@@ -304,8 +352,9 @@ Suggested alerts:
 - **Exit 4 "lease held"** after a crash on another host: wait `lease_ttl` (systemd
   restarts it). **"lease lost"**: another instance took over — make sure only one
   instance of the pipeline runs.
-- **Changing the include/exclude filter or the databases** requires a new pipeline
-  name (the checkpoint is bound to them).
+- **Changing the include/exclude filter of a database, or its target database**
+  requires a new pipeline name (the checkpoint is bound to them). Adding a database to
+  `source.databases` does not: only the new database is copied.
 - **Cut-over**: stop writes on the source, wait for `strand top` lag 0 /
   `strand verify --mode full` OK, `strand stop`, switch the application.
 
@@ -316,6 +365,7 @@ MongoDB 4.4, 5.0, 6.0, 7.0 and 8.0 (source and target of the same version):
 
 | Test | What it proves |
 |---|---|
+| `SeveralDatabases` | a one-database pipeline gets a second database (renamed on the target) without copying the first again; concurrent writes to both; `top`/`tables`/`verify`/`verify --repair fix` with `database.collection` names |
 | `FirstClassPipeline` | `strand validate/plan/sync --background/status/stop/verify/verify --repair fix`, admin socket (top, status, tables, events, checkpoint, source_tables, pause/resume), `/metrics` |
 | `SnapshotUnderConcurrentLoad` | snapshot handoff under insert/update/replace/delete load, byte-identical result |
 | `Kill9SnapshotAndStream` | `kill -9` of strand at random points of snapshot and streaming (8 per round), no loss/duplicates |
@@ -354,8 +404,9 @@ the target; the parallel snapshot scales ~3x with 4 workers.
 ## Limitations
 
 - Sharded clusters are refused (replica sets only).
-- One source database into one target database per pipeline; no transforms, no
-  collection renaming, no filtering of documents.
+- Databases map one to one (source database → target database); no transforms, no
+  collection renaming, no filtering of documents. A transaction across several
+  databases is applied per database (see "Several databases in one pipeline").
 - A single collection is copied by one worker (no range splitting).
 - Views, time-series collections and (with `indexes: replicate`) client-side field
   level encryption options are not replicated.

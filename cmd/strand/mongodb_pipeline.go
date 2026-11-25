@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +24,8 @@ import (
 // mongoConfig maps the normal pipeline configuration to a MongoDB replication:
 //
 //	source/target.uri | dsn | uri_env MongoDB URIs (user + password | password_env optional)
-//	source.database / target.database
+//	source.database / target.database one database
+//	source.databases / target.databases several databases (one change stream each)
 //	tables.include / exclude         "db.collection" globs
 //	bootstrap.logical.max_parallel   collections copied concurrently
 //	mongodb.snapshot_batch           documents per snapshot batch (or bootstrap.logical.chunk_rows)
@@ -74,19 +76,59 @@ func mongoConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger) (
 	return mc, closeTunnels
 }
 
+// mongoDatabaseConfigs is mongoConfig split per database (mongocdc.DatabaseConfigs).
+// The error is set when the checkpoint keys could not be read from the target; the
+// configs are still usable for checks that report the connection failure themselves.
+func mongoDatabaseConfigs(ctx context.Context, cfg *config.Config, logger *slog.Logger) ([]mongocdc.Config, func(), error) {
+	mc, closeTunnels := mongoConfig(ctx, cfg, logger)
+	var dbs []mongocdc.Database
+	for _, d := range cfg.MongoDatabases() {
+		dbs = append(dbs, mongocdc.Database{Source: d.Source, Target: d.Target})
+	}
+	cfgs, err := mongocdc.DatabaseConfigs(ctx, mc, dbs)
+	if cfgs == nil {
+		closeTunnels()
+		return nil, func() {}, err
+	}
+	return cfgs, closeTunnels, err
+}
+
+// mongoDatabaseLabel names the databases of a pipeline in messages: "app -> app_copy".
+func mongoDatabaseLabel(cfg *config.Config) string {
+	var parts []string
+	for _, d := range cfg.MongoDatabases() {
+		if d.Source == d.Target {
+			parts = append(parts, d.Source)
+		} else {
+			parts = append(parts, d.Source+" -> "+d.Target)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
 // runMongoSync runs a MongoDB pipeline with the same admin socket and /metrics as SQL
 // pipelines.
 func runMongoSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, events *admin.EventRing) error {
 	for _, k := range cfg.MongoDBIgnoredKeys() {
 		logger.Warn("configuration key has no effect on a MongoDB pipeline", "key", k)
 	}
-	mc, closeTunnels := mongoConfig(ctx, cfg, logger)
+	cfgs, closeTunnels, err := mongoDatabaseConfigs(ctx, cfg, logger)
 	defer closeTunnels()
-	obs := mongocdc.NewObserver(cfg.Name)
-	mc.Observer = obs
+	if err != nil {
+		return err
+	}
 	m := metrics.NewMetrics(prometheus.NewRegistry())
 	health := metrics.NewHealthChecker(2 * time.Minute)
-	exporter := mongocdc.NewMetricsExporter(obs, m, health)
+	var exporters []*mongocdc.MetricsExporter
+	var parts []mongocdc.AdminPart
+	for i := range cfgs {
+		obs := mongocdc.NewObserver(cfgs[i].Pipeline)
+		cfgs[i].Observer = obs
+		exporters = append(exporters, mongocdc.NewMetricsExporter(obs, m, health))
+		mc := cfgs[i]
+		parts = append(parts, mongocdc.AdminPart{SourceDB: mc.SourceDB, Obs: obs,
+			ListSource: func(ctx context.Context) ([]string, error) { return mongocdc.ListCollections(ctx, mc) }})
+	}
 	if addr := cfg.Observability.Metrics; addr != "" {
 		ms := metrics.NewServer(addr, m, health, logger)
 		if err := ms.Start(); err != nil {
@@ -95,9 +137,8 @@ func runMongoSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, 
 		defer ms.Close()
 	}
 	if sock := cfg.Observability.AdminSocket; sock != "" {
-		h := &mongocdc.AdminHandler{Obs: obs, EventRing: events, SourceKind: "mongodb", TargetKind: "mongodb", SourceDB: cfg.Source.Database,
-			Workers:    max(1, cfg.Bootstrap.Logical.MaxParallel),
-			ListSource: func(ctx context.Context) ([]string, error) { return mongocdc.ListCollections(ctx, mc) }}
+		h := &mongocdc.AdminHandler{Parts: parts, Pipeline: cfg.Name, EventRing: events, SourceKind: "mongodb", TargetKind: "mongodb",
+			Workers: max(1, cfg.Bootstrap.Logical.MaxParallel)}
 		as := admin.NewServer(sock, h, logger)
 		if err := as.Start(); err != nil {
 			return fmt.Errorf("start admin socket: %w", err)
@@ -106,9 +147,16 @@ func runMongoSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, 
 	}
 	expCtx, stopExp := context.WithCancel(ctx)
 	defer stopExp()
-	go exporter.Run(expCtx, time.Second)
-	err := mongocdc.Run(ctx, mc)
-	exporter.Export()
+	for _, e := range exporters {
+		go e.Run(expCtx, time.Second)
+	}
+	if len(cfgs) > 1 {
+		logger.Info("MongoDB pipeline replicates several databases, one change stream each", "pipeline", cfg.Name, "databases", mongoDatabaseLabel(cfg))
+	}
+	err = mongocdc.RunAll(ctx, cfgs)
+	for _, e := range exporters {
+		e.Export()
+	}
 	switch {
 	case err == nil, errors.Is(err, context.Canceled) && ctx.Err() != nil:
 		logger.Info("MongoDB pipeline stopped", "pipeline", cfg.Name)
@@ -126,14 +174,14 @@ func mongoValidate(ctx context.Context, out io.Writer, cfg *config.Config, planO
 	for _, k := range cfg.MongoDBIgnoredKeys() {
 		fmt.Fprintf(out, "warning: %s has no effect on a MongoDB pipeline\n", k)
 	}
-	mc, closeTunnels := mongoConfig(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfgs, closeTunnels, _ := mongoDatabaseConfigs(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer closeTunnels()
-	checks, plan, err := mongocdc.Preflight(ctx, mc)
+	checks, plan, err := mongoPreflight(ctx, cfgs)
 	if err != nil {
 		return err
 	}
 	if planOnly {
-		fmt.Fprintf(out, "MongoDB snapshot plan for %s (%s -> %s):\n", cfg.Name, cfg.Source.Database, cfg.Target.Database)
+		fmt.Fprintf(out, "MongoDB snapshot plan for %s (%s):\n", cfg.Name, mongoDatabaseLabel(cfg))
 		for _, c := range plan.Collections {
 			fmt.Fprintf(out, "  %-40s %12d docs %10d MiB\n", c.Name, c.Documents, c.Bytes>>20)
 		}
@@ -163,6 +211,50 @@ func mongoValidate(ctx context.Context, out io.Writer, cfg *config.Config, planO
 	return nil
 }
 
+// mongoPreflight runs the preflight of every database. With several databases the
+// checks that differ per database name it ("app: ..."), identical ones (topology,
+// update mode) are shown once, collection names are "database.collection", and the
+// estimated copy is the longest one (the databases are copied at the same time).
+func mongoPreflight(ctx context.Context, cfgs []mongocdc.Config) ([]mongocdc.Check, mongocdc.Plan, error) {
+	if len(cfgs) == 1 {
+		return mongocdc.Preflight(ctx, cfgs[0])
+	}
+	var all []mongocdc.Check
+	var plan mongocdc.Plan
+	seen := map[mongocdc.Check]bool{}
+	for _, c := range cfgs {
+		checks, p, err := mongocdc.Preflight(ctx, c)
+		if err != nil {
+			return nil, plan, fmt.Errorf("database %s: %w", c.SourceDB, err)
+		}
+		for _, ch := range checks {
+			if seen[ch] {
+				continue
+			}
+			seen[ch] = true
+			switch ch.Name {
+			case "source topology", "target topology", "source connection", "target connection", "update mode":
+			default:
+				ch.Detail = c.SourceDB + ": " + ch.Detail
+			}
+			all = append(all, ch)
+		}
+		for _, pc := range p.Collections {
+			pc.Name = c.SourceDB + "." + pc.Name
+			plan.Collections = append(plan.Collections, pc)
+		}
+		plan.Documents += p.Documents
+		plan.Bytes += p.Bytes
+		plan.EstimatedCopy = max(plan.EstimatedCopy, p.EstimatedCopy)
+		if p.OplogWindow > 0 && (plan.OplogWindow <= 0 || p.OplogWindow < plan.OplogWindow) {
+			plan.OplogWindow = p.OplogWindow
+		}
+		plan.CheckpointFound = plan.CheckpointFound || p.CheckpointFound
+	}
+	sort.SliceStable(plan.Collections, func(i, j int) bool { return plan.Collections[i].Documents > plan.Collections[j].Documents })
+	return all, plan, nil
+}
+
 func fmtWindow(d time.Duration) string {
 	if d <= 0 {
 		return "unknown"
@@ -175,42 +267,69 @@ func fmtWindow(d time.Duration) string {
 // sample; differences are re-read to absorb lag. --repair fix re-copies each differing
 // collection through the running pipeline (admin socket).
 func mongoVerify(ctx context.Context, out io.Writer, cfg *config.Config, table, mode, repair string, sample int) error {
-	opts := mongocdc.VerifyOptions{}
-	if table != "" {
-		coll := table
-		if db, c, ok := strings.Cut(table, "."); ok && db == cfg.Source.Database {
-			coll = c
-		}
-		opts.Collections = []string{coll}
-	}
 	switch mode {
-	case "sample":
-		opts.Sample = sample
-	case "full":
+	case "sample", "full":
 	default:
 		return exitcode.New("invalid_mode", exitcode.InvalidSyntax, "--mode must be sample|full for MongoDB pipelines", nil)
 	}
-	mc, closeTunnels := mongoConfig(ctx, cfg, slog.Default())
+	cfgs, closeTunnels, err := mongoDatabaseConfigs(ctx, cfg, slog.Default())
 	defer closeTunnels()
-	reports, err := mongocdc.Verify(ctx, mc, opts)
 	if err != nil {
 		return err
 	}
+	if table != "" {
+		db, coll, ok := strings.Cut(table, ".")
+		var pick []mongocdc.Config
+		for _, c := range cfgs {
+			if ok && c.SourceDB == db {
+				pick = []mongocdc.Config{c}
+				break
+			}
+		}
+		switch {
+		case pick == nil && len(cfgs) == 1:
+			pick, coll = cfgs, table
+			if ok && db == cfgs[0].SourceDB {
+				coll = table[len(db)+1:]
+			}
+		case pick == nil && ok:
+			return exitcode.New("invalid_table", exitcode.InvalidSyntax, fmt.Sprintf("--table %s: database %q is not part of this pipeline (%s)", table, db, mongoDatabaseLabel(cfg)), nil)
+		case pick == nil:
+			return exitcode.New("invalid_table", exitcode.InvalidSyntax, fmt.Sprintf("--table %s: name it database.collection, this pipeline replicates several databases (%s)", table, mongoDatabaseLabel(cfg)), nil)
+		}
+		cfgs, table = pick, coll
+	}
 	var bad []string
-	for _, r := range reports {
-		status := "OK"
-		if !r.OK() {
-			status = "MISMATCH"
-			bad = append(bad, r.Collection)
+	for _, mc := range cfgs {
+		opts := mongocdc.VerifyOptions{}
+		if table != "" {
+			opts.Collections = []string{table}
 		}
-		fmt.Fprintf(out, "%-8s %s.%s: source %d, target %d, compared %d, missing %d, extra %d, different %d",
-			status, cfg.Source.Database, r.Collection, r.SourceCount, r.TargetCount, r.Compared, r.Missing, r.Extra, r.Different)
-		if r.SourceHash != "" {
-			fmt.Fprintf(out, ", sha256 %s/%s", r.SourceHash[:12], r.TargetHash[:12])
+		if mode == "sample" {
+			opts.Sample = sample
 		}
-		fmt.Fprintln(out)
-		if len(r.DifferingIDs) > 0 {
-			fmt.Fprintf(out, "         _id: %s\n", strings.Join(r.DifferingIDs, ", "))
+		reports, err := mongocdc.Verify(ctx, mc, opts)
+		if err != nil {
+			if len(cfgs) > 1 {
+				return fmt.Errorf("verify database %s: %w", mc.SourceDB, err)
+			}
+			return err
+		}
+		for _, r := range reports {
+			status := "OK"
+			if !r.OK() {
+				status = "MISMATCH"
+				bad = append(bad, mc.SourceDB+"."+r.Collection)
+			}
+			fmt.Fprintf(out, "%-8s %s.%s: source %d, target %d, compared %d, missing %d, extra %d, different %d",
+				status, mc.SourceDB, r.Collection, r.SourceCount, r.TargetCount, r.Compared, r.Missing, r.Extra, r.Different)
+			if r.SourceHash != "" {
+				fmt.Fprintf(out, ", sha256 %s/%s", r.SourceHash[:12], r.TargetHash[:12])
+			}
+			fmt.Fprintln(out)
+			if len(r.DifferingIDs) > 0 {
+				fmt.Fprintf(out, "         _id: %s\n", strings.Join(r.DifferingIDs, ", "))
+			}
 		}
 	}
 	if len(bad) == 0 {
@@ -219,10 +338,10 @@ func mongoVerify(ctx context.Context, out io.Writer, cfg *config.Config, table, 
 	if repair == "fix" {
 		cli := admin.NewClient(getAdminSocketPath())
 		for _, c := range bad {
-			if err := cli.SnapshotAdd(ctx, cfg.Source.Database+"."+c); err != nil {
+			if err := cli.SnapshotAdd(ctx, c); err != nil {
 				return fmt.Errorf("request re-copy of %s: %w", c, err)
 			}
-			fmt.Fprintf(out, "re-copy of %s.%s started in the running pipeline\n", cfg.Source.Database, c)
+			fmt.Fprintf(out, "re-copy of %s started in the running pipeline\n", c)
 		}
 		return nil
 	}

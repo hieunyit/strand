@@ -45,7 +45,12 @@ type tuningDef struct {
 	Max     int
 	// Mongo: khóa của pipeline kind mongodb (mục mongodb:); khóa khác chỉ dành cho pipeline SQL.
 	Mongo bool
+	// Both: khóa dùng cho cả pipeline SQL và MongoDB (bỏ qua Mongo).
+	Both bool
 }
+
+// forKind: khóa có trên Tuning card của loại pipeline này.
+func (d tuningDef) forKind(mongo bool) bool { return d.Both || d.Mongo == mongo }
 
 var tuningDefs = []tuningDef{
 	{Key: "iops_soft", Path: []string{"resources", "source", "iops", "soft"}, Kind: kInt, Min: 1, Max: 10000000, Default: "600",
@@ -57,9 +62,9 @@ var tuningDefs = []tuningDef{
 	{Key: "chunk_rows", Path: []string{"bootstrap", "logical", "chunk_rows"}, Kind: kChunk, Min: 1, Max: 10000000, Default: "auto (5000)",
 		Label: "Chunk rows",
 		Help:  "Rows per snapshot chunk: a number, or auto. Smaller chunks mean shorter locks and less load per read."},
-	{Key: "max_parallel", Path: []string{"bootstrap", "logical", "max_parallel"}, Kind: kInt, Min: 1, Max: 32, Default: "1",
+	{Key: "max_parallel", Path: []string{"bootstrap", "logical", "max_parallel"}, Kind: kInt, Min: 1, Max: 32, Default: "1", Both: true,
 		Label: "Tables in parallel",
-		Help:  "How many tables the snapshot copies at the same time (1-32). The source read limit is shared by all of them; memory and target connections grow with this number. Ignored for PostgreSQL sources. Takes effect after a restart."},
+		Help:  "How many tables (MongoDB: collections, shared by all databases of the pipeline) the snapshot copies at the same time (1-32). The source read limit is shared by all of them; memory and target connections grow with this number. Ignored for PostgreSQL sources. Takes effect after a restart."},
 	{Key: "windows", Path: []string{"bootstrap", "logical", "windows"}, Kind: kWindows, Default: "any time",
 		Label: "Snapshot windows",
 		Help:  "Hours when the snapshot may run, local time of the process, comma-separated, for example 22:00-06:00 (may cross midnight). Empty = any time."},
@@ -388,7 +393,7 @@ func (s *Server) tuningView(p *Pipeline) TuningView {
 	}
 	mongo := mongoConfig(root)
 	for _, d := range tuningDefs {
-		if d.Mongo != mongo {
+		if !d.forKind(mongo) {
 			continue // khóa của loại pipeline khác
 		}
 		f := TuningField{Key: d.Key, Label: d.Label, Help: d.Help, Default: d.Default,
@@ -470,7 +475,7 @@ func applyTuning(orig []byte, req map[string]any) ([]byte, []string, error) {
 	}
 	mongo := mongoConfig(root)
 	for k := range vals {
-		if d := tuningDefByKey(k); d != nil && d.Mongo != mongo {
+		if d := tuningDefByKey(k); d != nil && !d.forKind(mongo) {
 			errs[k] = "not a setting of this pipeline kind"
 		}
 	}

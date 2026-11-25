@@ -16,7 +16,13 @@ import (
 // AdminHandler serves the SQL pipelines' admin socket protocol (top, status, tables,
 // events, checkpoint, pause/resume, snapshot add = collection re-copy) for a MongoDB
 // pipeline, so `strand top/pause/resume/checkpoint` and the Web UI work unchanged.
+// A pipeline with several databases has one part per database; the handler reports
+// them as one pipeline with "database.collection" table names.
 type AdminHandler struct {
+	// Parts: one per source database. When empty, Obs/SourceDB/ListSource are the
+	// only part.
+	Parts      []AdminPart
+	Pipeline   string // reported pipeline ID (default: the observer's)
 	Obs        *Observer
 	EventRing  *admin.EventRing
 	SourceKind string
@@ -24,6 +30,127 @@ type AdminHandler struct {
 	SourceDB   string
 	Workers    int
 	ListSource func(ctx context.Context) ([]string, error) // optional
+}
+
+// AdminPart is the observer of one database of a pipeline.
+type AdminPart struct {
+	SourceDB   string
+	Obs        *Observer
+	ListSource func(ctx context.Context) ([]string, error) // collections of SourceDB (optional)
+}
+
+func (h *AdminHandler) parts() []AdminPart {
+	if len(h.Parts) > 0 {
+		return h.Parts
+	}
+	return []AdminPart{{SourceDB: h.SourceDB, Obs: h.Obs, ListSource: h.ListSource}}
+}
+
+// snapshot merges the parts' state: collection names are qualified with their
+// database, counters and rates add up, lag is the largest, and the phase is the
+// least advanced one (a failure or retry anywhere shows for the whole pipeline).
+func (h *AdminHandler) snapshot() Snapshot {
+	parts := h.parts()
+	var m Snapshot
+	var phases []Phase
+	var positions, failures, retryErrs []string
+	for i, p := range parts {
+		s := p.Obs.Snapshot()
+		if i == 0 {
+			m = Snapshot{Pipeline: s.Pipeline, Started: s.Started, EventsByOp: map[string]int64{}, OplogWindow: s.OplogWindow}
+		}
+		phases = append(phases, s.Phase)
+		prefix := func(v string) string {
+			if len(parts) == 1 {
+				return v
+			}
+			return p.SourceDB + ": " + v
+		}
+		if s.Failed != "" {
+			failures = append(failures, prefix(s.Failed))
+		}
+		if s.LastRetryError != "" {
+			retryErrs = append(retryErrs, prefix(s.LastRetryError))
+		}
+		if s.Position != "" {
+			positions = append(positions, prefix(s.Position))
+		}
+		if s.Started.Before(m.Started) {
+			m.Started = s.Started
+		}
+		m.Paused = m.Paused || s.Paused
+		m.SnapshotPaused = m.SnapshotPaused || s.SnapshotPaused
+		m.LagSeconds = max(m.LagSeconds, s.LagSeconds)
+		m.CaughtUp = i == 0 && s.CaughtUp || i > 0 && m.CaughtUp && s.CaughtUp
+		if s.LastEventTime.After(m.LastEventTime) {
+			m.LastEventTime = s.LastEventTime
+		}
+		m.Events += s.Events
+		m.DocWrites += s.DocWrites
+		m.Txns += s.Txns
+		m.SnapshotDocs += s.SnapshotDocs
+		m.Lookups += s.Lookups
+		m.Retries += s.Retries
+		m.Fenced += s.Fenced
+		m.EventRate += s.EventRate
+		m.DocRate += s.DocRate
+		m.SnapshotRate += s.SnapshotRate
+		if s.OplogWindow > 0 && (m.OplogWindow <= 0 || s.OplogWindow < m.OplogWindow) {
+			m.OplogWindow = s.OplogWindow
+		}
+		for op, n := range s.EventsByOp {
+			m.EventsByOp[op] += n
+		}
+		for _, c := range s.Collections {
+			c.Name = p.SourceDB + "." + c.Name
+			m.Collections = append(m.Collections, c)
+		}
+	}
+	if h.Pipeline != "" {
+		m.Pipeline = h.Pipeline
+	}
+	m.Phase = mergePhases(phases)
+	m.Failed = strings.Join(failures, "; ")
+	m.LastRetryError = strings.Join(retryErrs, "; ")
+	m.Position = strings.Join(positions, "; ")
+	return m
+}
+
+// mergePhases is the phase shown for several databases: the first of retrying,
+// starting, snapshot/repair, stopped (any database stopped means the pipeline is
+// stopping) found, else streaming.
+func mergePhases(phases []Phase) Phase {
+	for _, want := range []Phase{PhaseRetrying, PhaseStarting, PhaseSnapshot, PhaseRepair, PhaseStopped} {
+		for _, p := range phases {
+			if p == want {
+				return p
+			}
+		}
+	}
+	if len(phases) == 0 {
+		return PhaseStarting
+	}
+	return phases[0]
+}
+
+// part finds the part of "db.collection" (or of a bare collection name when the
+// pipeline has one database).
+func (h *AdminHandler) part(table string) (AdminPart, string, error) {
+	parts := h.parts()
+	if db, c, ok := strings.Cut(table, "."); ok {
+		for _, p := range parts {
+			if p.SourceDB == db {
+				return p, c, nil
+			}
+		}
+		if len(parts) > 1 {
+			return AdminPart{}, "", fmt.Errorf("database %q is not part of this pipeline", db)
+		}
+	}
+	if len(parts) > 1 {
+		return AdminPart{}, "", fmt.Errorf("name the collection as database.collection: this pipeline replicates %d databases", len(parts))
+	}
+	return parts[0], table, nil
 }
 
 var (
@@ -73,7 +200,7 @@ func (s Snapshot) snapshotTotals() (done, total, copied, estimate int64, running
 
 // Top implements admin `top`.
 func (h *AdminHandler) Top(context.Context) (*admin.TopInfo, error) {
-	s := h.Obs.Snapshot()
+	s := h.snapshot()
 	info := &admin.TopInfo{PipelineID: s.Pipeline, State: s.State(), LagSeconds: s.LagSeconds, Throughput: s.EventRate, Zone: "green"}
 	if s.OplogWindow > 0 && s.LagSeconds > s.OplogWindow.Seconds()/2 {
 		info.Zone = "bootstrap_retention_risk"
@@ -97,20 +224,26 @@ func (h *AdminHandler) Top(context.Context) (*admin.TopInfo, error) {
 
 // Pause implements admin `pause`: stop applying after the current batch.
 func (h *AdminHandler) Pause(context.Context) (*admin.PauseResult, error) {
-	h.Obs.Pause(false)
+	for _, p := range h.parts() {
+		p.Obs.Pause(false)
+	}
 	return &admin.PauseResult{State: "paused", Paused: true}, nil
 }
 
 // PauseSnapshot implements admin `pause_snapshot`: stop copying collections only.
 func (h *AdminHandler) PauseSnapshot(context.Context) (*admin.PauseResult, error) {
-	h.Obs.Pause(true)
-	return &admin.PauseResult{State: h.Obs.Snapshot().State(), Paused: true}, nil
+	for _, p := range h.parts() {
+		p.Obs.Pause(true)
+	}
+	return &admin.PauseResult{State: h.snapshot().State(), Paused: true}, nil
 }
 
 // Resume implements admin `resume`.
 func (h *AdminHandler) Resume(_ context.Context, snapshotOnly bool) (*admin.ResumeResult, error) {
-	h.Obs.Resume(snapshotOnly)
-	return &admin.ResumeResult{State: h.Obs.Snapshot().State(), SnapshotOnly: snapshotOnly, Resumed: true}, nil
+	for _, p := range h.parts() {
+		p.Obs.Resume(snapshotOnly)
+	}
+	return &admin.ResumeResult{State: h.snapshot().State(), SnapshotOnly: snapshotOnly, Resumed: true}, nil
 }
 
 // ThrottleSet is not supported: MongoDB pipelines have no IOPS governor.
@@ -120,12 +253,20 @@ func (h *AdminHandler) ThrottleSet(context.Context, admin.Request) (*admin.Throt
 
 // CheckpointShow implements admin `checkpoint_show`: the committed resume token.
 func (h *AdminHandler) CheckpointShow(context.Context) (*admin.CheckpointResult, error) {
-	s := h.Obs.Snapshot()
-	applied := s.Position
-	if !s.LastEventTime.IsZero() {
-		applied = fmt.Sprintf("resume_token=%s cluster_time=%s", s.Position, s.LastEventTime.UTC().Format(time.RFC3339))
+	parts := h.parts()
+	var applied []string
+	for _, p := range parts {
+		s := p.Obs.Snapshot()
+		a := s.Position
+		if !s.LastEventTime.IsZero() {
+			a = fmt.Sprintf("resume_token=%s cluster_time=%s", s.Position, s.LastEventTime.UTC().Format(time.RFC3339))
+		}
+		if len(parts) > 1 {
+			a = p.SourceDB + ": " + a
+		}
+		applied = append(applied, a)
 	}
-	return &admin.CheckpointResult{PipelineID: s.Pipeline, Applied: applied, UpdatedAt: time.Now().UTC()}, nil
+	return &admin.CheckpointResult{PipelineID: h.snapshot().Pipeline, Applied: strings.Join(applied, "; "), UpdatedAt: time.Now().UTC()}, nil
 }
 
 // CheckpointRewind is refused: a MongoDB checkpoint is a change-stream resume token.
@@ -135,16 +276,16 @@ func (h *AdminHandler) CheckpointRewind(context.Context, string) (*admin.Checkpo
 
 // SnapshotAdd re-copies one collection ("db.collection" or "collection").
 func (h *AdminHandler) SnapshotAdd(ctx context.Context, table string) error {
-	coll := table
-	if db, c, ok := strings.Cut(table, "."); ok && db == h.SourceDB {
-		coll = c
+	p, coll, err := h.part(table)
+	if err != nil {
+		return err
 	}
-	return h.Obs.RequestRecopy(ctx, coll)
+	return p.Obs.RequestRecopy(ctx, coll)
 }
 
 // Status implements admin `status`.
 func (h *AdminHandler) Status(context.Context) (*admin.StatusInfo, error) {
-	s := h.Obs.Snapshot()
+	s := h.snapshot()
 	return &admin.StatusInfo{
 		PipelineID: s.Pipeline, State: s.State(), StartedAt: s.Started, UptimeSeconds: time.Since(s.Started).Seconds(),
 		StartPosition: s.Position, SourceKind: h.SourceKind, TargetKind: h.TargetKind, CommitOrder: "source-transaction",
@@ -155,10 +296,10 @@ func (h *AdminHandler) Status(context.Context) (*admin.StatusInfo, error) {
 
 // Tables implements admin `tables`: per-collection copy progress.
 func (h *AdminHandler) Tables(context.Context) ([]admin.TableInfo, error) {
-	s := h.Obs.Snapshot()
+	s := h.snapshot()
 	out := make([]admin.TableInfo, 0, len(s.Collections))
 	for _, c := range s.Collections {
-		ti := admin.TableInfo{Table: h.SourceDB + "." + c.Name, State: c.State, RowsEstimate: c.Estimate, RowsCopied: c.Copied,
+		ti := admin.TableInfo{Table: c.Name, State: c.State, RowsEstimate: c.Estimate, RowsCopied: c.Copied,
 			PK: []string{"_id"}, Key: "_id", GenericPK: true}
 		switch {
 		case c.State == CollDone:
@@ -181,20 +322,23 @@ func (h *AdminHandler) Events(context.Context) ([]admin.EventRecord, error) {
 
 // SourceTables lists the source collections ("db.collection").
 func (h *AdminHandler) SourceTables(ctx context.Context) ([]admin.SourceTable, error) {
-	if h.ListSource == nil {
-		return nil, errors.New("source_tables is not available")
-	}
-	names, err := h.ListSource(ctx)
-	if err != nil {
-		return nil, err
-	}
 	in := map[string]bool{}
-	for _, c := range h.Obs.Snapshot().Collections {
+	for _, c := range h.snapshot().Collections {
 		in[c.Name] = true
 	}
-	out := make([]admin.SourceTable, 0, len(names))
-	for _, n := range names {
-		out = append(out, admin.SourceTable{Table: h.SourceDB + "." + n, InPipeline: in[n]})
+	var out []admin.SourceTable
+	for _, p := range h.parts() {
+		if p.ListSource == nil {
+			return nil, errors.New("source_tables is not available")
+		}
+		names, err := p.ListSource(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range names {
+			t := p.SourceDB + "." + n
+			out = append(out, admin.SourceTable{Table: t, InPipeline: in[t]})
+		}
 	}
 	return out, nil
 }

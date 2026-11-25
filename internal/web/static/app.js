@@ -836,8 +836,9 @@
       if (!out) return;
       var inc = val('include'), exc = val('exclude'), what;
       if (src === 'mongodb') {
-        what = (inc || ((val('source_database') || '?') + '.* (every collection)')) + (exc ? '  except ' + exc : '') +
-          '  ->  MongoDB database ' + (val('target_mongo_database') || val('source_database') || '?');
+        var mdbs = val('source_database').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+        what = (inc || ((mdbs.length ? mdbs.map(function (d) { return d + '.*'; }).join(', ') : '?.*') + ' (every collection)')) + (exc ? '  except ' + exc : '') +
+          (mdbs.length > 1 ? '  ->  MongoDB databases of the same names' : '  ->  MongoDB database ' + (val('target_mongo_database') || mdbs[0] || '?'));
         out.textContent = what;
         return;
       }
@@ -883,7 +884,7 @@
       if (src === 'mongodb') ns = 'db';
       form.querySelectorAll('.np-ns').forEach(function (e) { e.textContent = ns; });
       var exInc = document.getElementById('np-include-ex'), exExc = document.getElementById('np-exclude-ex');
-      var pre = src === 'postgres' ? (val('schema') || 'public') : (src === 'mongodb' ? (val('source_database') || 'db') : ((val('database').split(',')[0] || 'shop').trim().replace('*', 'shop')));
+      var pre = src === 'postgres' ? (val('schema') || 'public') : (src === 'mongodb' ? ((val('source_database').split(',')[0] || '').trim() || 'db') : ((val('database').split(',')[0] || 'shop').trim().replace('*', 'shop')));
       if (exInc) exInc.textContent = pre + '.orders, ' + pre + '.customers';
       if (exExc) exExc.textContent = pre + '.log_*, ' + pre + '.tmp_*';
       preview();
@@ -948,7 +949,7 @@
         .catch(function (err) { if (status) status.textContent = ' ' + err.message; })
         .finally(function () { listDBButton.disabled = false; });
     });
-    // "List source databases" for PostgreSQL and MongoDB: pick one database (the MySQL list above picks several).
+    // "List source databases" for PostgreSQL (pick one) and MongoDB (data-list-multi: pick several, like the MySQL list above).
     Array.prototype.forEach.call(newPipeForm.querySelectorAll('[data-list-databases]'), function (btn) {
       btn.addEventListener('click', function () {
         var id = btn.getAttribute('data-list-databases'), eng = btn.getAttribute('data-list-engine');
@@ -975,11 +976,22 @@
             box.textContent = '';
             var dbs = data.databases || [];
             if (!dbs.length) { box.hidden = true; if (status) status.textContent = 'No user databases found on the source.'; return; }
+            var multi = btn.getAttribute('data-list-multi') === 'true';
+            var chosen = function () { return field.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean); };
             dbs.forEach(function (name) {
               var b = document.createElement('button');
-              b.type = 'button'; b.className = 'chip' + (field.value.trim() === name ? ' active' : ''); b.textContent = name;
-              b.setAttribute('aria-pressed', field.value.trim() === name ? 'true' : 'false');
+              var on0 = multi ? chosen().indexOf(name) >= 0 : field.value.trim() === name;
+              b.type = 'button'; b.className = 'chip' + (on0 ? ' active' : ''); b.textContent = name;
+              b.setAttribute('aria-pressed', on0 ? 'true' : 'false');
               b.addEventListener('click', function () {
+                if (multi) {
+                  var cur = chosen(), at = cur.indexOf(name);
+                  if (at >= 0) { cur.splice(at, 1); } else { cur.push(name); }
+                  field.value = cur.join(', '); field.dispatchEvent(new Event('input', {bubbles: true}));
+                  var on = cur.indexOf(name) >= 0; b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+                  if (status) status.textContent = cur.length ? 'Selected ' + cur.join(', ') + '.' : 'Choose at least one database.';
+                  return;
+                }
                 field.value = name; field.dispatchEvent(new Event('input', {bubbles: true}));
                 Array.prototype.forEach.call(box.querySelectorAll('.chip'), function (c) {
                   var on = c === b; c.classList.toggle('active', on); c.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -989,7 +1001,7 @@
               box.appendChild(b);
             });
             box.hidden = false;
-            if (status) status.textContent = dbs.length + ' database(s) on the source: pick one.';
+            if (status) status.textContent = dbs.length + ' database(s) on the source: ' + (multi ? 'pick one or more.' : 'pick one.');
           })
           .catch(function (err) { if (status) status.textContent = err.message; })
           .finally(function () { btn.disabled = false; });

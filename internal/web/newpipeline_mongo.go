@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,7 +14,8 @@ import (
 
 // Pipeline kind MongoDB -> MongoDB (form tạo pipeline). Khóa cấu hình: source/target.kind mongodb, uri (bí
 // mật, "${SRC_URI}"/"${DST_URI}" từ .env mã hóa), database; tables.include/exclude dạng "db.collection";
-// mục mongodb: snapshot_batch, stream_batch, lease_ttl, overwrite_target (internal/config.MongoDBConfig).
+// mục mongodb: snapshot_batch, stream_batch, lease_ttl, overwrite_target (internal/config.MongoDBConfig);
+// bootstrap.logical.max_parallel: số collection snapshot cùng lúc.
 
 const (
 	mongoSrcURIEnv = "SRC_URI"
@@ -122,7 +124,18 @@ func buildMongoURI(side string, e mongoEndpoint) (string, error) {
 	return u.String(), nil
 }
 
-// mongoTargetDB is the target database: the source database's name when left empty.
+// mongoSourceDBs is the source database list of the form ("app" or "app, billing").
+func mongoSourceDBs(opts NewPipelineOpts) []string {
+	var out []string
+	for _, db := range strings.Split(opts.MongoSourceDB, ",") {
+		if db = strings.TrimSpace(db); db != "" {
+			out = append(out, db)
+		}
+	}
+	return out
+}
+
+// mongoTargetDB is the target database of a single source database: the source database's name when left empty.
 func mongoTargetDB(opts NewPipelineOpts) string {
 	if v := strings.TrimSpace(opts.MongoTargetDB); v != "" {
 		return v
@@ -140,14 +153,28 @@ func checkMongoOpts(opts NewPipelineOpts) error {
 			return err
 		}
 	}
-	if strings.TrimSpace(opts.MongoSourceDB) == "" {
-		return fmt.Errorf("source_database: required: the database to copy (List databases shows the ones on the source)")
+	dbs := mongoSourceDBs(opts)
+	if len(dbs) == 0 {
+		return fmt.Errorf("source_database: required: the database(s) to copy (List databases shows the ones on the source)")
 	}
-	for field, v := range map[string]string{"source_database": opts.MongoSourceDB, "target_mongo_database": mongoTargetDB(opts)} {
-		v = strings.TrimSpace(v)
+	seen := map[string]bool{}
+	for _, v := range dbs {
 		if strings.ContainsAny(v, "/\\. \"$\x00") {
-			return fmt.Errorf("%s %q is not a valid MongoDB database name", field, v)
+			return fmt.Errorf("source_database %q is not a valid MongoDB database name", v)
 		}
+		if seen[v] {
+			return fmt.Errorf("source_database: %q is listed twice", v)
+		}
+		seen[v] = true
+	}
+	if len(dbs) > 1 && strings.TrimSpace(opts.MongoTargetDB) != "" {
+		return fmt.Errorf("target_mongo_database: leave it empty when copying several databases (each keeps its name on the target)")
+	}
+	if v := mongoTargetDB(opts); len(dbs) == 1 && strings.ContainsAny(v, "/\\. \"$\x00") {
+		return fmt.Errorf("target_mongo_database %q is not a valid MongoDB database name", v)
+	}
+	if opts.MaxParallel < 0 || opts.MaxParallel > config.MaxSnapshotParallel {
+		return fmt.Errorf("max_parallel: %d is not an integer between 1 and %d", opts.MaxParallel, config.MaxSnapshotParallel)
 	}
 	for field, n := range map[string]int{"snapshot_batch": opts.MongoSnapshotBatch, "stream_batch": opts.MongoStreamBatch} {
 		if n < 0 || n > 100000 {
@@ -162,7 +189,21 @@ func checkMongoOpts(opts NewPipelineOpts) error {
 	}
 	for _, p := range append(append([]string{}, opts.Includes...), opts.Excludes...) {
 		if !strings.Contains(p, ".") {
-			return fmt.Errorf("include/exclude pattern %q: use database.collection (for example %s.orders or %s.*)", p, opts.MongoSourceDB, opts.MongoSourceDB)
+			return fmt.Errorf("include/exclude pattern %q: use database.collection (for example %s.orders or %s.*)", p, dbs[0], dbs[0])
+		}
+	}
+	if len(opts.Includes) > 0 {
+		for _, db := range dbs {
+			covered := false
+			for _, p := range opts.Includes {
+				dbPattern, _, _ := strings.Cut(p, ".")
+				if ok, _ := path.Match(dbPattern, db); ok {
+					covered = true
+				}
+			}
+			if !covered {
+				return fmt.Errorf("include: no pattern selects database %q (add %s.* or remove it from the source databases)", db, db)
+			}
 		}
 	}
 	return nil
@@ -177,13 +218,27 @@ func buildMongoPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Strand pipeline %s: MongoDB -> MongoDB (created by strand web)\n", opts.Name)
 	fmt.Fprintf(&b, "version: 1\nname: %s\n", q(opts.Name))
-	fmt.Fprintf(&b, "source:\n  kind: mongodb\n  uri: \"${%s}\"\n  database: %s\n", mongoSrcURIEnv, q(strings.TrimSpace(opts.MongoSourceDB)))
+	dbs := mongoSourceDBs(opts)
+	fmt.Fprintf(&b, "source:\n  kind: mongodb\n  uri: \"${%s}\"\n", mongoSrcURIEnv)
+	if len(dbs) == 1 {
+		fmt.Fprintf(&b, "  database: %s\n", q(dbs[0]))
+	} else {
+		b.WriteString("  databases:\n")
+		for _, db := range dbs {
+			fmt.Fprintf(&b, "    - %s\n", q(db))
+		}
+	}
 	writeMongoTunnel(&b, opts.SourceSSHTunnel)
-	fmt.Fprintf(&b, "target:\n  kind: mongodb\n  uri: \"${%s}\"\n  database: %s\n", mongoDstURIEnv, q(mongoTargetDB(opts)))
+	fmt.Fprintf(&b, "target:\n  kind: mongodb\n  uri: \"${%s}\"\n", mongoDstURIEnv)
+	if len(dbs) == 1 {
+		fmt.Fprintf(&b, "  database: %s\n", q(mongoTargetDB(opts)))
+	}
 	writeMongoTunnel(&b, opts.TargetSSHTunnel)
 	inc := opts.Includes
 	if len(inc) == 0 {
-		inc = []string{strings.TrimSpace(opts.MongoSourceDB) + ".*"}
+		for _, db := range dbs {
+			inc = append(inc, db+".*")
+		}
 	}
 	b.WriteString("tables:\n  include:\n")
 	for _, p := range inc {
@@ -194,6 +249,9 @@ func buildMongoPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (
 		for _, p := range opts.Excludes {
 			fmt.Fprintf(&b, "    - %s\n", q(p))
 		}
+	}
+	if opts.MaxParallel > 0 {
+		fmt.Fprintf(&b, "bootstrap:\n  logical:\n    max_parallel: %d\n", opts.MaxParallel)
 	}
 	var m []string
 	if opts.MongoSnapshotBatch > 0 {
