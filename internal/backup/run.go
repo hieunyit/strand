@@ -100,16 +100,22 @@ func NormalizeErrorCode(err error) string {
 		return ""
 	}
 	msg := strings.ToLower(err.Error())
+	diskFull := strings.Contains(msg, "no space left on device") || strings.Contains(msg, "disk full") || strings.Contains(msg, "disk_full")
+	var repoErr *RepositoryError
 	switch {
 	case strings.Contains(msg, "cancel") || errors.Is(err, context.Canceled):
 		return ErrCodeCancelled
 	case strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timeout") || errors.Is(err, context.DeadlineExceeded):
 		return ErrCodeTimeout
+	case errors.As(err, &repoErr) && !diskFull:
+		// The object store refused or failed the upload (its 403 "Access Denied" is not a database
+		// credential problem).
+		return ErrCodeRepoUnreachable
 	case strings.Contains(msg, "access denied") || strings.Contains(msg, "authentication failed") || strings.Contains(msg, "password") || strings.Contains(msg, "bad auth") || strings.Contains(msg, "credentials"):
 		return ErrCodeAuthFailed
 	case strings.Contains(msg, "permission") || strings.Contains(msg, "privilege") || strings.Contains(msg, "super") || strings.Contains(msg, "denied"):
 		return ErrCodePermission
-	case strings.Contains(msg, "no space left on device") || strings.Contains(msg, "disk full") || strings.Contains(msg, "disk_full"):
+	case diskFull:
 		return ErrCodeDiskFull
 	case strings.Contains(msg, "repository") || strings.Contains(msg, "bucket") || strings.Contains(msg, "s3") || strings.Contains(msg, "nosuchbucket") || strings.Contains(msg, "repo_unreachable"):
 		return ErrCodeRepoUnreachable
