@@ -23,7 +23,7 @@ import (
 	"strand/internal/web/store"
 )
 
-// SSHTunnelConfig describes a bastion for a single SQL endpoint.
+// SSHTunnelConfig describes a bastion for a database endpoint.
 type SSHTunnelConfig struct {
 	Profile      string `yaml:"profile,omitempty" json:"profile,omitempty"`
 	Host         string `yaml:"host,omitempty" json:"host"`
@@ -37,9 +37,9 @@ func (c *SSHTunnelConfig) Validate(kind string) error {
 		return nil
 	}
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "mysql", "mariadb", "postgres", "postgresql", "pg":
+	case "mysql", "mariadb", "postgres", "postgresql", "pg", "mongodb":
 	default:
-		return errors.New("SSH tunneling is only supported for MySQL, MariaDB and PostgreSQL endpoints")
+		return errors.New("SSH tunneling is only supported for MySQL, MariaDB, PostgreSQL and MongoDB endpoints")
 	}
 	if c.Profile != "" {
 		if !sshprofile.ValidID(c.Profile) || c.Host != "" || c.User != "" || c.Port != 0 || c.IdentityFile != "" {
@@ -65,36 +65,40 @@ func (c *SSHTunnelConfig) Validate(kind string) error {
 // Open forwards one database address. The bastion's trusted keys and the
 // identity allowlist are configured by the account running Strand.
 func (c *SSHTunnelConfig) Open(ctx context.Context, kind, remote string) (*tunnel.Forward, error) {
+	settings, err := c.TunnelConfig(ctx, kind)
+	if err != nil {
+		return nil, err
+	}
+	return OpenSSHTunnelConfig(ctx, settings, remote)
+}
+
+// TunnelConfig resolves credentials for the configured bastion.
+func (c *SSHTunnelConfig) TunnelConfig(ctx context.Context, kind string) (tunnel.Config, error) {
 	if c == nil {
-		return nil, errors.New("SSH tunnel configuration is required")
+		return tunnel.Config{}, errors.New("SSH tunnel configuration is required")
 	}
 	if err := c.Validate(kind); err != nil {
-		return nil, err
+		return tunnel.Config{}, err
 	}
 	if c.Profile != "" {
 		p, err := sshprofile.Load(ctx, os.Getenv("STRAND_WEB_DATABASE_DSN"), c.Profile)
 		if err != nil {
-			return nil, err
+			return tunnel.Config{}, err
 		}
 		var box *store.Box
 		if len(p.SealedKey) > 0 || len(p.SealedPassword) > 0 {
 			box, err = store.NewBox(os.Getenv("STRAND_WEB_SECRET_KEY"))
 			if err != nil {
-				return nil, err
+				return tunnel.Config{}, err
 			}
 		}
-		settings, err := p.TunnelConfig(box)
-		if err != nil {
-			return nil, err
-		}
-		return OpenSSHTunnelConfig(ctx, settings, remote)
+		return p.TunnelConfig(box)
 	}
 	port := c.Port
 	if port == 0 {
 		port = 22
 	}
-	return OpenSSHTunnelConfig(ctx, tunnel.Config{SSHAddress: net.JoinHostPort(c.Host, strconv.Itoa(port)),
-		SSHUser: c.User, IdentityFile: c.IdentityFile}, remote)
+	return tunnel.Config{SSHAddress: net.JoinHostPort(c.Host, strconv.Itoa(port)), SSHUser: c.User, IdentityFile: c.IdentityFile}, nil
 }
 
 // OpenSSHTunnelConfig uses the trust and identity policy of the Strand service.

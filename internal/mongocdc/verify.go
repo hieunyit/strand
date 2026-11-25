@@ -53,12 +53,12 @@ func Verify(ctx context.Context, cfg Config, opts VerifyOptions) (_ []Collection
 	if opts.MaxReported <= 0 {
 		opts.MaxReported = 10
 	}
-	src, err := connect(ctx, cfg.SourceURI, nil)
+	src, err := connect(ctx, cfg.SourceURI, cfg.SourceDialer, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect MongoDB source: %w", err)
 	}
 	defer disconnect(src)
-	dst, err := connect(ctx, cfg.TargetURI, nil)
+	dst, err := connect(ctx, cfg.TargetURI, cfg.TargetDialer, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect MongoDB target: %w", err)
 	}
@@ -288,7 +288,7 @@ func fetchRaw(ctx context.Context, c *mongo.Collection, ids diffSet) (map[string
 // ListCollections returns the selected source collections (for admin source_tables).
 func ListCollections(ctx context.Context, cfg Config) (_ []string, err error) {
 	defer func() { err = redactError(err, cfg.SourceURI) }()
-	c, err := connect(ctx, cfg.SourceURI, nil)
+	c, err := connect(ctx, cfg.SourceURI, cfg.SourceDialer, nil)
 	if err != nil {
 		return nil, err
 	}

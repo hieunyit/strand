@@ -17,6 +17,7 @@ import (
 	"strand/internal/exitcode"
 	"strand/internal/metrics"
 	"strand/internal/mongocdc"
+	"strand/internal/tunnel"
 )
 
 // mongoConfig maps the normal pipeline configuration to a MongoDB replication:
@@ -29,7 +30,7 @@ import (
 //	mongodb.stream_batch             change events per apply transaction (or target.batch.max_rows)
 //	checkpoint.flush_every           idle checkpoint interval
 //	mongodb.*                        overwrite_target, updates, indexes, lease_ttl
-func mongoConfig(cfg *config.Config, logger *slog.Logger) mongocdc.Config {
+func mongoConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger) (mongocdc.Config, func()) {
 	mc := mongocdc.Config{
 		Pipeline: cfg.Name, SourceURI: cfg.Source.DSN, TargetURI: cfg.Target.DSN,
 		SourceDB: cfg.Source.Database, TargetDB: cfg.Target.Database,
@@ -59,7 +60,18 @@ func mongoConfig(cfg *config.Config, logger *slog.Logger) mongocdc.Config {
 	if d, err := time.ParseDuration(cfg.MongoDB.LeaseTTL); err == nil {
 		mc.LeaseDuration = d
 	}
-	return mc
+	lifetime, closeTunnels := context.WithCancel(context.WithoutCancel(ctx))
+	if ssh := cfg.Source.SSHTunnel; ssh != nil {
+		mc.SourceDialer = tunnel.NewDialer(lifetime, func(ctx context.Context) (tunnel.Config, error) {
+			return ssh.TunnelConfig(ctx, config.KindMongoDB)
+		})
+	}
+	if ssh := cfg.Target.SSHTunnel; ssh != nil {
+		mc.TargetDialer = tunnel.NewDialer(lifetime, func(ctx context.Context) (tunnel.Config, error) {
+			return ssh.TunnelConfig(ctx, config.KindMongoDB)
+		})
+	}
+	return mc, closeTunnels
 }
 
 // runMongoSync runs a MongoDB pipeline with the same admin socket and /metrics as SQL
@@ -68,7 +80,8 @@ func runMongoSync(ctx context.Context, cfg *config.Config, logger *slog.Logger, 
 	for _, k := range cfg.MongoDBIgnoredKeys() {
 		logger.Warn("configuration key has no effect on a MongoDB pipeline", "key", k)
 	}
-	mc := mongoConfig(cfg, logger)
+	mc, closeTunnels := mongoConfig(ctx, cfg, logger)
+	defer closeTunnels()
 	obs := mongocdc.NewObserver(cfg.Name)
 	mc.Observer = obs
 	m := metrics.NewMetrics(prometheus.NewRegistry())
@@ -113,7 +126,9 @@ func mongoValidate(ctx context.Context, out io.Writer, cfg *config.Config, planO
 	for _, k := range cfg.MongoDBIgnoredKeys() {
 		fmt.Fprintf(out, "warning: %s has no effect on a MongoDB pipeline\n", k)
 	}
-	checks, plan, err := mongocdc.Preflight(ctx, mongoConfig(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	mc, closeTunnels := mongoConfig(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer closeTunnels()
+	checks, plan, err := mongocdc.Preflight(ctx, mc)
 	if err != nil {
 		return err
 	}
@@ -175,7 +190,9 @@ func mongoVerify(ctx context.Context, out io.Writer, cfg *config.Config, table, 
 	default:
 		return exitcode.New("invalid_mode", exitcode.InvalidSyntax, "--mode must be sample|full for MongoDB pipelines", nil)
 	}
-	reports, err := mongocdc.Verify(ctx, mongoConfig(cfg, slog.Default()), opts)
+	mc, closeTunnels := mongoConfig(ctx, cfg, slog.Default())
+	defer closeTunnels()
+	reports, err := mongocdc.Verify(ctx, mc, opts)
 	if err != nil {
 		return err
 	}

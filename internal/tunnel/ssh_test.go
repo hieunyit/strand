@@ -164,6 +164,54 @@ func TestPinnedHostKeyRejectsDifferentServerEvenWithTrustedFile(t *testing.T) {
 	}
 }
 
+func TestSSHDialerReconnectsAndSupportsDeadlines(t *testing.T) {
+	srv := startSSHServer(t, false)
+	key, err := ProbeHostKey(t.Context(), srv.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer := NewDialer(t.Context(), func(context.Context) (Config, error) {
+		identity, err := os.ReadFile(srv.identity)
+		return Config{SSHAddress: srv.addr, SSHUser: "strand", HostKey: key, PrivateKey: identity}, err
+	})
+	defer dialer.Close()
+	addr := echoServer(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+	defer cancel()
+	checkEcho := func(conn net.Conn) {
+		t.Helper()
+		defer conn.Close()
+		if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 5)
+		if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "hello" {
+			t.Fatalf("read SSH echo: %q, %v", buf, err)
+		}
+	}
+	first, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkEcho(first)
+	srv.disconnect()
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			checkEcho(conn)
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("SSH session did not reconnect: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func mustParseHostKey(t *testing.T, encoded string) ssh.PublicKey {
 	t.Helper()
 	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(encoded))

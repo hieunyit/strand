@@ -9,6 +9,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // Check is one preflight result.
@@ -61,8 +62,11 @@ func Preflight(ctx context.Context, cfg Config) (checks []Check, plan Plan, err 
 	}
 	clients := map[string]*mongo.Client{}
 	hellos := map[string]helloReply{}
-	for _, side := range []struct{ role, uri string }{{"source", cfg.SourceURI}, {"target", cfg.TargetURI}} {
-		c, err := connect(ctx, side.uri, nil)
+	for _, side := range []struct {
+		role, uri string
+		dialer    options.ContextDialer
+	}{{"source", cfg.SourceURI, cfg.SourceDialer}, {"target", cfg.TargetURI, cfg.TargetDialer}} {
+		c, err := connect(ctx, side.uri, side.dialer, nil)
 		if err != nil {
 			add(side.role+" connection", CheckFail, "%v", err)
 			continue

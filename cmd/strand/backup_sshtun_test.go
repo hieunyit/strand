@@ -237,6 +237,20 @@ func TestManagedBackupUsesSavedSSHProfile(t *testing.T) {
 	if localHost != "127.0.0.1" || localPort == 0 {
 		t.Fatalf("invalid forwarded address %s:%d", localHost, localPort)
 	}
+	connection.ID, connection.Name, connection.User, connection.SecretMode = "conn-scratch", "scratch", "backup", backup.SecretEnv
+	if _, err := st.CreateBackupConnection(ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	job := backup.Job{JobOptions: backup.JobOptions{Method: backup.MethodMySQLDump}}
+	job.ScratchConnectionID, job.TestRestore = connection.ID, true
+	closeScratch, err := openScratchTunnel(ctx, st, &job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeScratch()
+	if job.Scratch.Host != "127.0.0.1" || job.Scratch.Port == 0 || job.Scratch.TLSServerName != connection.Host {
+		t.Fatal("scratch target did not use the saved tunnel")
+	}
 }
 
 func TestRestore_TunneledFlagParsing(t *testing.T) {

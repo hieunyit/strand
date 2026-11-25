@@ -41,14 +41,14 @@ func newValidateCmd() *cobra.Command {
 				return err
 			}
 
+			if cfg.IsMongoDB() {
+				return mongoValidate(cmd.Context(), os.Stdout, cfg, false, false)
+			}
 			closeTunnels, err := config.OpenSSHTunnels(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
 			defer closeTunnels()
-			if cfg.IsMongoDB() {
-				return mongoValidate(cmd.Context(), os.Stdout, cfg, false, false)
-			}
 			// Key đã nhận nhưng chưa triển khai: luôn cảnh báo, không bỏ qua im lặng.
 			for _, k := range cfg.UnimplementedKeys() {
 				fmt.Fprintf(os.Stderr, "warning: %s\n", config.UnimplementedWarning(k))

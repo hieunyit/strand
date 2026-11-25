@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
 	"strand/internal/backup"
 )
 
@@ -20,7 +22,8 @@ type Target struct {
 	URI           string // mongodb:// URI with credentials (overrides host/port/user/password)
 	TLSMode       string
 	CACertPEM     string
-	TLSServerName string // when connected via tunnel, the original host for TLS hostname verification
+	TLSServerName string                // when connected via tunnel, the original host for TLS hostname verification
+	MongoDialer   options.ContextDialer // optional route for MongoDB connections
 }
 
 // Check is one step of the test.

@@ -178,7 +178,9 @@ func buildMongoPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (
 	fmt.Fprintf(&b, "# Strand pipeline %s: MongoDB -> MongoDB (created by strand web)\n", opts.Name)
 	fmt.Fprintf(&b, "version: 1\nname: %s\n", q(opts.Name))
 	fmt.Fprintf(&b, "source:\n  kind: mongodb\n  uri: \"${%s}\"\n  database: %s\n", mongoSrcURIEnv, q(strings.TrimSpace(opts.MongoSourceDB)))
+	writeMongoTunnel(&b, opts.SourceSSHTunnel)
 	fmt.Fprintf(&b, "target:\n  kind: mongodb\n  uri: \"${%s}\"\n  database: %s\n", mongoDstURIEnv, q(mongoTargetDB(opts)))
+	writeMongoTunnel(&b, opts.TargetSSHTunnel)
 	inc := opts.Includes
 	if len(inc) == 0 {
 		inc = []string{strings.TrimSpace(opts.MongoSourceDB) + ".*"}
@@ -219,4 +221,22 @@ func buildMongoPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (
 		fmt.Fprintf(&b, "  log: { level: info, format: %s }\n", q(opts.LogFormat))
 	}
 	return b.String(), nil
+}
+
+func writeMongoTunnel(b *strings.Builder, ssh *config.SSHTunnelConfig) {
+	if ssh == nil {
+		return
+	}
+	b.WriteString("  ssh_tunnel:\n")
+	if ssh.Profile != "" {
+		fmt.Fprintf(b, "    profile: %s\n", yamlQuote(ssh.Profile))
+		return
+	}
+	fmt.Fprintf(b, "    host: %s\n    user: %s\n", yamlQuote(ssh.Host), yamlQuote(ssh.User))
+	if ssh.Port != 0 {
+		fmt.Fprintf(b, "    port: %d\n", ssh.Port)
+	}
+	if ssh.IdentityFile != "" {
+		fmt.Fprintf(b, "    identity_file: %s\n", yamlQuote(ssh.IdentityFile))
+	}
 }

@@ -1334,9 +1334,9 @@ Cố ý để lại CLI (lý do):
 - `archive binlog`: tiến trình lưu trữ chạy liên tục, độc lập với pipeline (thường là một unit systemd riêng trên replica), không có trạng thái để web quan sát.
 - `spool-inspect`, `top`, `export`, `config schema`, `mongodb sync` (bí danh của `strand sync -c` cho pipeline MongoDB; dạng cờ cũ vẫn nhận), `mongodb repair`, `web db migrate|export|audit-archive` (công cụ quản trị chạy ngoài web: chuyển bản cài cũ, sao lưu/quay về).
 
-### SSH tunnel cho pipeline SQL
+### SSH tunnel cho pipeline SQL và MongoDB
 
-Trong form tạo pipeline, có thể bật SSH tunnel riêng cho source hoặc target. Giữ địa chỉ database trong phần kết nối DB như bastion nhìn thấy. Chọn tunnel đã lưu ở **Tools → SSH Tunnels**. `strand` mở cổng loopback tạm trong tiến trình chạy pipeline, rồi đóng cổng khi tiến trình kết thúc.
+Trong form tạo pipeline, có thể bật SSH tunnel riêng cho source hoặc target. Giữ địa chỉ database trong phần kết nối DB như bastion nhìn thấy. Chọn tunnel đã lưu ở **Tools → SSH Tunnels**. Pipeline SQL mở cổng loopback tạm. Pipeline MongoDB chuyển kết nối của driver qua SSH, giữ nguyên URI và tên máy chủ để xác minh TLS.
 
 Ví dụ YAML cho nguồn MySQL:
 
@@ -1355,7 +1355,7 @@ source:
 
 `target.ssh_tunnel` dùng cùng cấu trúc. Đặt khóa riêng trên máy hoặc container chạy Strand và đặt `STRAND_WEB_SSH_KEY_DIR` thành thư mục chứa các khóa được phép sử dụng. Nếu bỏ `identity_file`, tiến trình cần truy cập được SSH agent qua `SSH_AUTH_SOCK`. Cấu hình SSH khai báo trực tiếp và các profile cũ chưa ghim host key dùng file tin cậy của dịch vụ. Đặt `STRAND_WEB_SSH_KNOWN_HOSTS` thành đường dẫn file nếu dịch vụ dùng file riêng, hoặc dùng `~/.ssh/known_hosts` của tài khoản chạy Strand. Tunnel vẫn xác minh host key. Cấu hình TLS đến database tiếp tục dùng tên máy chủ database trong DSN.
 
-SSH tunnel tích hợp hỗ trợ các đầu kết nối MySQL, MariaDB và PostgreSQL. MongoDB replica set cần đường mạng truy cập được những địa chỉ member mà cluster công bố.
+Với MongoDB CDC, các địa chỉ member mà replica set công bố phải truy cập được từ bastion. URI `mongodb+srv://` vẫn cần truy vấn DNS SRV từ tiến trình Strand. Backup và restore MongoDB chạy bằng công cụ native sử dụng một endpoint host/port khi đi qua SSH và vẫn áp dụng giới hạn TLS của công cụ đó.
 
 ## Pipeline MongoDB → MongoDB
 

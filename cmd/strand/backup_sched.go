@@ -119,6 +119,40 @@ func resolveScratchConnection(ctx context.Context, st store.Store, j backup.Job)
 	return backup.ApplyScratchConnection(j, c)
 }
 
+func openScratchTunnel(ctx context.Context, st store.Store, job *backup.Job) (func(), error) {
+	if job.ScratchConnectionID == "" || !job.TestRestore {
+		return func() {}, nil
+	}
+	conn, ok, err := st.GetBackupConnection(ctx, job.ScratchConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("read scratch connection: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("scratch connection %q no longer exists", job.ScratchConnectionID)
+	}
+	*job, err = backup.ApplyScratchConnection(*job, conn)
+	if err != nil {
+		return nil, err
+	}
+	if conn.SSHTunnel == nil {
+		return func() {}, nil
+	}
+	// TestRestore cleans up its scratch database even when the job context is canceled.
+	lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopStartup := context.AfterFunc(ctx, cancel)
+	host, port, closeTunnel, err := openManagedBackupTunnel(lifetime, st, conn)
+	stopStartup()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("open scratch SSH tunnel: %w", err)
+	}
+	job.Scratch.TLSServerName, job.Scratch.Host, job.Scratch.Port = conn.Host, host, port
+	return func() {
+		closeTunnel()
+		cancel()
+	}, nil
+}
+
 // nextAfterRun computes the due time that follows a run (or a missed run) for schedule kinds other than
 // interval; interval jobs keep the store's every_seconds bookkeeping. ok=false: leave next_run_at alone.
 func nextAfterRun(j backup.Job, now time.Time) (time.Time, bool) {

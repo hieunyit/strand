@@ -217,9 +217,6 @@ func ApplyScratchConnection(j Job, c Connection) (Job, error) {
 	if e := j.Engine(); e != c.CatalogEngine() {
 		return j, fmt.Errorf("%w: the scratch server of a %s job must be a %s connection, %q is %s", ErrInvalid, j.Method, e, c.Name, c.Engine)
 	}
-	if c.SSHTunnel != nil {
-		return j, fmt.Errorf("%w: the scratch connection %q uses an SSH tunnel; test restores need a direct connection", ErrInvalid, c.Name)
-	}
 	if c.Host == "" {
 		return j, fmt.Errorf("%w: the scratch connection %q has no host", ErrInvalid, c.Name)
 	}

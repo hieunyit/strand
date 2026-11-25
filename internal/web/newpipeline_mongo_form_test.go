@@ -173,6 +173,35 @@ func TestMongoConnTestAndDatabaseListFromFields(t *testing.T) {
 	}
 }
 
+func TestMongoPipelineSSHTunnelConfiguration(t *testing.T) {
+	opts := NewPipelineOpts{Name: "mongo-ssh", From: "mongodb", To: "mongodb", MongoSourceDB: "app",
+		SourceHost: "mongo-a.internal,mongo-b.internal", TargetHost: "mongo-c.internal",
+		SourceSSHTunnel: &config.SSHTunnelConfig{Profile: "source-bastion"},
+		TargetSSHTunnel: &config.SSHTunnelConfig{Profile: "target-bastion"}}
+	yaml, err := buildNewPipelineYAML(opts, t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadYAMLStrictWithEnv([]byte(yaml), map[string]string{mongoSrcURIEnv: "mongodb://mongo-a.internal,mongo-b.internal", mongoDstURIEnv: "mongodb://mongo-c.internal"})
+	if err != nil || cfg.Source.SSHTunnel == nil || cfg.Target.SSHTunnel == nil ||
+		cfg.Source.SSHTunnel.Profile != "source-bastion" || cfg.Target.SSHTunnel.Profile != "target-bastion" {
+		t.Fatalf("MongoDB SSH settings did not round trip: %v", err)
+	}
+	e := newCPEnv(t)
+	c, csrf := e.loginOK()
+	headers := map[string]string{csrfHeader: csrf, "Content-Type": "application/json"}
+	for path, prefix := range map[string]string{
+		"/api/v1/pipeline-connections/test": `"role":"source","engine":"mongodb",`,
+		"/api/v1/source/databases":          `"from":"mongodb",`,
+	} {
+		resp, _ := e.do(c, "POST", path, `{`+prefix+`"host":"mongo-a.internal,mongo-b.internal","ssh_tunnel":{"profile":"source-bastion"},"tls":true}`, headers)
+		got := e.fake.last()
+		if resp.StatusCode != http.StatusOK || got.MongoDialer == nil || !strings.Contains(got.URI, "mongo-a.internal:27017,mongo-b.internal:27017") || !strings.Contains(got.URI, "tls=true") {
+			t.Fatalf("%s did not pass URI and tunnel to the MongoDB driver: %d", path, resp.StatusCode)
+		}
+	}
+}
+
 // The form: correct MongoDB versions, host/port/user/password fields instead of a URI, no "app" default.
 func TestNewPipelineFormMongoFields(t *testing.T) {
 	e, c, _ := npEnv(t)

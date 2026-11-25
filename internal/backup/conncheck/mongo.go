@@ -60,6 +60,9 @@ func checkMongo(ctx context.Context, t Target, res *Result) {
 		return
 	}
 	opts := options.Client().ApplyURI(uri).SetServerSelectionTimeout(8 * time.Second).SetConnectTimeout(8 * time.Second)
+	if t.MongoDialer != nil {
+		opts.SetDialer(t.MongoDialer)
+	}
 	if cfg != nil {
 		opts.SetTLSConfig(cfg)
 	}

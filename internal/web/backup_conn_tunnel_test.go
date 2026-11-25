@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
 	"strand/internal/backup"
+	"strand/internal/sshprofile"
 	"strand/internal/tunnel/tunneltest"
 )
 
@@ -335,5 +337,32 @@ func TestRestore_ChildGetsTunnelParamsNoSecretInArgv(t *testing.T) {
 	// Verify no secrets appear in argv
 	if strings.Contains(args, "super-secret-target-password") {
 		t.Errorf("argv leaks secret password: %s", args)
+	}
+}
+
+func TestRestore_UsesSavedTunnelProfile(t *testing.T) {
+	e := newCPEnv(t)
+	a := e.admin()
+	profile := sshprofile.Profile{ID: "shared-restore", Host: "bastion.example.com", User: "sshuser", Port: 22}
+	if err := sshprofile.Save(t.Context(), e.st, []sshprofile.Profile{profile}); err != nil {
+		t.Fatal(err)
+	}
+	id := connID(t, a.must("POST", "/api/v1/backup-connections", map[string]any{
+		"name": "shared-mysql", "engine": "mysql", "host": "db.internal", "user": "restoreuser",
+		"secret_mode": "stored", "ssh_tunnel": map[string]any{"profile": profile.ID},
+	}, http.StatusCreated))
+	recordedAt := time.Now().UTC()
+	seedRichBackup(t, e.st, "bkp-profile", "mysql-prod", "mysql", "mysqldump", backup.KindFull, recordedAt,
+		backup.Position{GTIDSet: "u:1-100"}, false, nil, "", &recordedAt, nil, "", nil)
+	a.must("POST", "/api/v1/backup-restores", map[string]any{
+		"backup_id": "bkp-profile", "connection_id": id, "target_database": "restored_db", "confirm": "restored_db",
+	}, http.StatusAccepted)
+	specs := e.rec.take()
+	if len(specs) != 1 {
+		t.Fatalf("expected one restore job, got %d", len(specs))
+	}
+	args := strings.Join(specs[0].Args, " ")
+	if !strings.Contains(args, "--tunnel-profile shared-restore") || strings.Contains(args, "--tunnel-ssh") || strings.Contains(args, "bastion.example.com") {
+		t.Fatalf("restore did not use only the saved profile reference: %s", args)
 	}
 }

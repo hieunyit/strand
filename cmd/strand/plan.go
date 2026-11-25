@@ -35,6 +35,9 @@ func newPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if cfg.IsMongoDB() {
+				return mongoValidate(cmd.Context(), cmd.OutOrStdout(), cfg, true, force)
+			}
 			// Planning reads only the source.
 			cfg.Target.SSHTunnel = nil
 			closeTunnels, err := config.OpenSSHTunnels(cmd.Context(), cfg)
@@ -42,9 +45,6 @@ func newPlanCmd() *cobra.Command {
 				return err
 			}
 			defer closeTunnels()
-			if cfg.IsMongoDB() {
-				return mongoValidate(cmd.Context(), cmd.OutOrStdout(), cfg, true, force)
-			}
 			if engineOf(cfg.Source.Kind) == model.EnginePG {
 				return planPGSnapshot(cmd.Context(), cmd.OutOrStdout(), cfg)
 			}

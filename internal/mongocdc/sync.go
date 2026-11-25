@@ -87,13 +87,15 @@ var ErrLeaseLost = errors.New("mongodb cdc: lease lost to another process")
 
 // Config defines one MongoDB-to-MongoDB replication. Credentials in URIs are never logged.
 type Config struct {
-	Pipeline  string
-	SourceURI string
-	TargetURI string
-	SourceDB  string
-	TargetDB  string
-	Include   []string // database.collection glob patterns
-	Exclude   []string
+	Pipeline     string
+	SourceURI    string
+	TargetURI    string
+	SourceDialer options.ContextDialer
+	TargetDialer options.ContextDialer
+	SourceDB     string
+	TargetDB     string
+	Include      []string // database.collection glob patterns
+	Exclude      []string
 	// OverwriteTarget allows snapshot bootstrap to drop and recreate matching target collections.
 	// It is intentionally opt-in because bootstrap can destroy existing data.
 	OverwriteTarget bool
@@ -232,12 +234,12 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		return err
 	}
 	obs.setPhase(PhaseStarting)
-	source, err := connect(ctx, cfg.SourceURI, nil)
+	source, err := connect(ctx, cfg.SourceURI, cfg.SourceDialer, nil)
 	if err != nil {
 		return fmt.Errorf("connect MongoDB source: %w", err)
 	}
 	defer disconnect(source)
-	target, err := connect(ctx, cfg.TargetURI, durableTargetWriteConcern())
+	target, err := connect(ctx, cfg.TargetURI, cfg.TargetDialer, durableTargetWriteConcern())
 	if err != nil {
 		return fmt.Errorf("connect MongoDB target: %w", err)
 	}
@@ -609,8 +611,11 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
-func connect(ctx context.Context, uri string, wc *writeconcern.WriteConcern) (*mongo.Client, error) {
+func connect(ctx context.Context, uri string, dialer options.ContextDialer, wc *writeconcern.WriteConcern) (*mongo.Client, error) {
 	clientOptions := options.Client().ApplyURI(uri).SetRetryWrites(true).SetRetryReads(true)
+	if dialer != nil {
+		clientOptions.SetDialer(dialer)
+	}
 	if wc != nil {
 		clientOptions.SetWriteConcern(wc)
 	}

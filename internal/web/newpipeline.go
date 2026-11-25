@@ -1189,13 +1189,15 @@ func (s *Server) apiSourceDatabases(w http.ResponseWriter, r *http.Request, sess
 			writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing database discovery")
 			return
 		}
-		host, port, closeTunnel, err := s.openPipelineProbe(r.Context(), req.From, req.Host, req.Port, req.SSHTunnel)
-		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
-			return
+		if req.From != config.KindMongoDB {
+			host, port, closeTunnel, err := s.openPipelineProbe(r.Context(), req.From, req.Host, req.Port, req.SSHTunnel)
+			if err != nil {
+				writeErr(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			defer closeTunnel()
+			req.Host, req.Port = host, port
 		}
-		defer closeTunnel()
-		req.Host, req.Port = host, port
 	}
 
 	switch req.From {
@@ -1260,6 +1262,11 @@ func (s *Server) sourceDatabasesByCheck(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		t.URI = uri
+		if req.SSHTunnel != nil {
+			dialer := s.mongoPipelineDialer(r.Context(), req.SSHTunnel)
+			defer dialer.Close()
+			t.MongoDialer = dialer
+		}
 	} else if t.Host == "" || t.User == "" || req.Port < 1 || req.Port > 65535 {
 		writeErr(w, http.StatusBadRequest, "source host, user, and valid port are required")
 		return

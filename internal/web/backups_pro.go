@@ -564,7 +564,9 @@ func (s *Server) apiBackupRestore(w http.ResponseWriter, r *http.Request, _ *Ses
 			writeErr(w, http.StatusBadRequest, "ssh_tunnel cannot be used with a connection URI; use host/port/user")
 			return
 		}
-		if conn.SSHTunnel != nil {
+		if conn.SSHTunnel != nil && conn.SSHTunnel.Profile != "" {
+			tunnelArgs = append(tunnelArgs, "--tunnel-profile", conn.SSHTunnel.Profile)
+		} else if conn.SSHTunnel != nil {
 			sshAddr := conn.SSHTunnel.Host
 			if conn.SSHTunnel.Port > 0 {
 				sshAddr = net.JoinHostPort(conn.SSHTunnel.Host, strconv.Itoa(conn.SSHTunnel.Port))

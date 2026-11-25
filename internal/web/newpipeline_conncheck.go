@@ -106,20 +106,33 @@ func (s *Server) apiPipelineConnTest(w http.ResponseWriter, r *http.Request, ses
 		writeErr(w, http.StatusInternalServerError, "audit log unavailable; refusing the connection test")
 		return
 	}
+	target := conncheck.Target{Engine: req.Engine, Host: req.Host, Port: req.Port, User: req.User, Password: req.Password, URI: strings.TrimSpace(req.URI)}
 	if req.SSHTunnel != nil {
-		host, port, closeTunnel, err := s.openPipelineProbe(r.Context(), req.Engine, req.Host, req.Port, req.SSHTunnel)
-		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
-			return
+		if req.Engine == backup.ConnMongoDB {
+			dialer := s.mongoPipelineDialer(r.Context(), req.SSHTunnel)
+			defer dialer.Close()
+			target.MongoDialer = dialer
+		} else {
+			host, port, closeTunnel, err := s.openPipelineProbe(r.Context(), req.Engine, req.Host, req.Port, req.SSHTunnel)
+			if err != nil {
+				writeErr(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			defer closeTunnel()
+			target.TLSServerName, target.Host, target.Port = target.Host, host, port
 		}
-		defer closeTunnel()
-		req.Host, req.Port = host, port
 	}
-
-	res := s.connChecker().Check(r.Context(), conncheck.Target{
-		Engine: req.Engine, Host: req.Host, Port: req.Port, User: req.User, Password: req.Password, URI: strings.TrimSpace(req.URI),
-	})
+	res := s.connChecker().Check(r.Context(), target)
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) mongoPipelineDialer(ctx context.Context, ssh *config.SSHTunnelConfig) *tunnel.Dialer {
+	return tunnel.NewDialer(ctx, func(ctx context.Context) (tunnel.Config, error) {
+		if ssh.Profile != "" {
+			return s.savedTunnel(ctx, ssh.Profile)
+		}
+		return ssh.TunnelConfig(ctx, config.KindMongoDB)
+	})
 }
 
 func (s *Server) openPipelineProbe(ctx context.Context, engine, host string, port int, ssh *config.SSHTunnelConfig) (string, int, func(), error) {

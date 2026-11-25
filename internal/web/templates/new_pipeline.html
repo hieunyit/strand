@@ -97,7 +97,7 @@
         <small class="field-hint">Usually <code>public</code>. All tables in it are copied unless you narrow it in step 3.</small>
       </label>
     </div>
-    <div data-when="src:mysql,mariadb,postgres">{{template "pipeline-ssh-fields" (pipelineSSHFields "source" .Body.SSHProfiles)}}</div>
+    {{template "pipeline-ssh-fields" (pipelineSSHFields "source" .Body.SSHProfiles)}}
     <div class="conn-test">
       <button type="button" class="btn" id="np-test-source" data-test="source">Test source connection</button>
       <div class="conn-result" id="np-test-source-result" aria-live="polite"></div>
@@ -173,7 +173,7 @@
         <small class="field-hint">Small database where Strand keeps its checkpoint (<code>_strand_*</code> tables), not your data. Create it once on the target: <code>CREATE DATABASE strand;</code></small>
       </label>
     </div>
-    <div data-when="dst:mysql,postgres">{{template "pipeline-ssh-fields" (pipelineSSHFields "target" .Body.SSHProfiles)}}</div>
+    {{template "pipeline-ssh-fields" (pipelineSSHFields "target" .Body.SSHProfiles)}}
     <div class="conn-test">
       <button type="button" class="btn" id="np-test-target" data-test="target">Test target connection</button>
       <div class="conn-result" id="np-test-target-result" aria-live="polite"></div>
