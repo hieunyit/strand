@@ -22,11 +22,12 @@ type versionedS3 struct {
 	mu      sync.Mutex
 	n       int
 	locks   map[string]string // key -> lock mode of the last PUT
+	bodies  map[string][]byte // key -> body of the last PUT
 	deletes []string          // "key?versionId=..." of each DELETE
 }
 
 func (s *versionedS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	_, _ = io.Copy(io.Discard, r.Body)
+	body, _ := io.ReadAll(r.Body)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, key, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
@@ -37,6 +38,9 @@ func (s *versionedS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut:
 		s.n++
 		s.locks[key] = r.Header.Get("X-Amz-Object-Lock-Mode")
+		if s.bodies != nil {
+			s.bodies[key] = body
+		}
 		w.Header().Set("ETag", `"e"`)
 		w.Header().Set("X-Amz-Version-Id", "v"+string(rune('0'+s.n)))
 	case r.Method == http.MethodDelete:

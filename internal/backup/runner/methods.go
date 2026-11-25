@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +71,9 @@ type Invocation struct {
 	// Files are written (0600) to a private temp dir before the run; "{dir}" in Args/Env is replaced
 	// with that directory.
 	Files map[string]string
+	// HideEnv names inherited variables to remove besides Strand's own: the (legacy, freely named)
+	// variables holding connection secrets. The tool gets its secret only through Env/Files.
+	HideEnv []string
 }
 
 // password returns the secret named by conn.PasswordEnv.
@@ -426,20 +430,34 @@ func secretsOf(inv Invocation) []string {
 	return out
 }
 
-// baseEnv is the environment of native tools: Strand's own secrets are removed.
-func baseEnv() []string {
+// baseEnv is the environment of native tools. Every STRAND_* variable is removed: they carry Strand's own
+// secrets (repository and encryption keys, the Web secret, notification passwords) and the connection
+// secrets of the source, scratch and restore target (STRAND_BACKUP_CONN_PASSWORD/URI,
+// STRAND_BACKUP_SCRATCH_PASSWORD, STRAND_RESTORE_TARGET_PASSWORD/URI, ...), which a tool must not inherit:
+// each tool gets only its own secret, explicitly (Invocation.Env/Files). hide adds further names (legacy
+// password_env/uri_env variables).
+func baseEnv(hide ...string) []string {
 	out := []string{}
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(name, "STRAND_WEB_") || strings.HasPrefix(name, "STRAND_BACKUP_S3_") || strings.HasPrefix(name, "STRAND_BACKUP_REPO_") ||
-			strings.HasPrefix(name, "STRAND_BACKUP_ENCRYPTION") || strings.HasPrefix(name, "STRAND_SECRET") ||
-			strings.HasPrefix(name, "STRAND_BACKUP_NOTIFY") || name == "AWS_SECRET_ACCESS_KEY" || name == "AWS_SESSION_TOKEN" ||
-			name == "MYSQL_PWD" || name == "PGPASSWORD" {
+		if strings.HasPrefix(name, "STRAND_") || name == "AWS_SECRET_ACCESS_KEY" || name == "AWS_SESSION_TOKEN" ||
+			name == "MYSQL_PWD" || name == "PGPASSWORD" || slices.Contains(hide, name) {
 			continue
 		}
 		out = append(out, kv)
 	}
 	return append(out, "TZ=UTC")
+}
+
+// connSecretEnv lists the variables named by the connections of job that hold secrets.
+func connSecretEnv(job backup.Job) []string {
+	var out []string
+	for _, n := range []string{job.Conn.PasswordEnv, job.Conn.URIEnv, job.Scratch.PasswordEnv, job.Scratch.URIEnv} {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Start launches inv. The caller reads Stdout to EOF; the final Read reports a non-zero exit instead of
@@ -465,7 +483,7 @@ func Start(ctx context.Context, getenv Getenv, inv Invocation, stdin io.Reader, 
 		args[i] = sub(a)
 	}
 	cmd := exec.Command(path, args...)
-	cmd.Env = baseEnv()
+	cmd.Env = baseEnv(inv.HideEnv...)
 	for _, e := range inv.Env {
 		cmd.Env = append(cmd.Env, sub(e))
 	}

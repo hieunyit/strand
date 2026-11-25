@@ -370,6 +370,7 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 			return meta, PayloadResult{}, err
 		}
 	}
+	inv.HideEnv = connSecretEnv(job)
 	proc, err := Start(ctx, e.Getenv, inv, nil, e.Log)
 	if err != nil {
 		return meta, PayloadResult{}, err
@@ -548,7 +549,9 @@ func (e *Env) queryBackupObjects(ctx context.Context, job backup.Job, mongoURI s
 func (e *Env) streamMydumper(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions,
 	stored func(PayloadResult) error) (backup.Meta, PayloadResult, error) {
 	var meta backup.Meta
-	proc, err := Start(ctx, e.Getenv, MydumperInvocation(e.Getenv, job.Conn), nil, e.Log)
+	inv := MydumperInvocation(e.Getenv, job.Conn)
+	inv.HideEnv = connSecretEnv(job)
+	proc, err := Start(ctx, e.Getenv, inv, nil, e.Log)
 	if err != nil {
 		return meta, PayloadResult{}, err
 	}
