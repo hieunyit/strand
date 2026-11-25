@@ -285,13 +285,15 @@ trang đầy). Xem `docs/CENTRAL-BACKUPS.md`.
 - `GET /api/v1/backup-jobs`: Liệt kê các job sao lưu đã cấu hình.
 - `POST /api/v1/backup-jobs`: Tạo job mới (`admin`). Kiểm tra chặt chẽ điều kiện PITR (`log_archive`).
 - `GET /api/v1/backup-jobs/{id}`: Chi tiết cấu hình của job.
-- `PUT /api/v1/backup-jobs/{id}`: Cập nhật cấu hình job (`admin`).
+- `PUT /api/v1/backup-jobs/{id}`: Cập nhật cấu hình job (`admin`). Lần chạy kế tiếp (`next_run_at`) giữ nguyên nếu lịch không đổi (đổi tên, retention... không kích hoạt hay lùi backup). Lịch đổi thì tính theo lịch mới: job `interval` tính từ lần chạy trước (đã quá hạn thì chạy ngay), các loại lịch khác tính từ bây giờ. Bật lại job tắt thì như job mới. Lượt đang chạy của chính job đó vẫn bị hủy để áp cấu hình mới, nhưng lịch không bị lùi.
 - `DELETE /api/v1/backup-jobs/{id}`: Xóa job (`admin`).
 - `POST /api/v1/backup-jobs/{id}/run`: Chạy job ngay lập tức (`operator` / `admin`).
 - `POST /api/v1/backup-jobs/{id}/pause`: Tạm dừng lịch chạy của job (`operator` / `admin`).
 - `POST /api/v1/backup-jobs/{id}/resume`: Kích hoạt lại lịch chạy của job (`operator` / `admin`).
 - `GET /api/v1/backup-jobs/{id}/runs?cursor=&limit=`: Lịch sử các lần chạy phân trang bằng cursor. Trả về mảng các `Run` kèm `remediation_hint` cho các mã lỗi chuẩn hóa (`auth_failed`, `network`, `permission`, `disk_full`, `repo_unreachable`, `tool_missing`, `tool_failed`, `timeout`, `cancelled`).
 - `POST /api/v1/backup-runs/{id}/cancel`: Hủy một lượt chạy đang diễn ra (`operator` / `admin`). Chỉ cho phép hủy các tiến trình thuộc sở hữu của instance web hiện tại.
+
+Lịch chạy bám đúng lịch đã đặt: khi một lượt bắt đầu, kết thúc hay được khôi phục sau crash, lần kế tiếp là lần kế tiếp **của lịch** (job hằng ngày 02:00 vẫn chạy 02:00, không trôi theo giờ kết thúc). Lượt bị hủy giữ nguyên thời điểm kế tiếp đã có. Lượt lỗi còn lượt retry thì retry sau backoff, nhưng không muộn hơn lần chạy thường kế tiếp. Lượt còn ghi `running` mà không còn tiến trình nào giữ khóa thực thi của job (instance chết, kể cả khi job đã bị tắt) được tự đánh dấu bị gián đoạn khi Web khởi động/takeover và trong vòng bảo trì định kỳ.
 
 ### Backup connections, policies, schedules (`/backups`; xem `docs/CENTRAL-BACKUPS.md`)
 
@@ -303,7 +305,7 @@ kèm các trường đổi (secret không bao giờ xuất hiện: chỉ `"passw
 | `GET /api/v1/backup-connections` → `{"connections": [...]}` | Có `password_set`, `uri_set`; **không bao giờ** trả secret. |
 | `POST /api/v1/backup-connections` → 201 `{"connection"}` | Body: `name, engine (mysql\|mariadb\|postgres\|mongodb), host, port, user, secret_mode (env\|stored), password_env, uri_env, tls_mode, ca_cert_pem, ssh_tunnel{host,port,user,identity_ref,known_hosts_ref}, labels`; chỉ khi `secret_mode=stored`: `password`, `uri` (ghi-một-chiều, mã hóa bằng `STRAND_WEB_SECRET_KEY`, AAD = id). 400 nếu gửi `password` với `env`; 409 trùng tên/id. | `secret_mode` defaults to `stored`; creating (or switching to) `env` is refused (400): legacy env connections keep working and convert when a password is saved.
 | `GET /api/v1/backup-connections/{id}` → `{"connection", "used_by": [jobId]}` | |
-| `PUT /api/v1/backup-connections/{id}` → `{"connection", "affected_jobs", "refreshed_jobs", "refresh_failed"}` | Thiếu `password`/`uri` = giữ nguyên secret đã lưu. Cập nhật lại các job dùng nó và khởi động lại scheduler của chúng; 409 nếu đổi engine không còn khớp một job. |
+| `PUT /api/v1/backup-connections/{id}` → `{"connection", "affected_jobs", "refreshed_jobs", "refresh_failed"}` | Thiếu `password`/`uri` = giữ nguyên secret đã lưu. Cập nhật lại các job dùng nó; 409 nếu đổi engine không còn khớp một job. Lượt backup đang chạy **không** bị hủy: nó chạy xong với cấu hình cũ, cấu hình mới áp dụng từ lượt sau (scheduler tự khởi động lại sau lượt đó). Lịch kế tiếp của job giữ nguyên. |
 | `DELETE /api/v1/backup-connections/{id}` → 204 | **409** `{"error", "jobs": [id...]}` khi còn job dùng. |
 | `POST /api/v1/backup-connections/test` (operator) | Body như tạo (chưa lưu); thêm `id` của connection đang sửa để dùng lại secret đã lưu. |
 | `POST /api/v1/backup-connections/{id}/test` (operator) | Kiểm tra bản đã lưu, ghi `last_test_at/status/detail`. |
@@ -315,7 +317,7 @@ pitr_allowed, pitr_reason, pitr_methods`. `pitr_*` tính bằng đúng luật `V
 | Route | Ghi chú |
 | --- | --- |
 | `GET /api/v1/backup-policies` → `{"policies": [... "job_count"], "overridable_fields": [...]}` | Gold/Silver/Bronze được tạo một lần khi khởi động đầu tiên (sửa/xóa được, không tự tạo lại). |
-| `POST /api/v1/backup-policies`, `GET/PUT/DELETE /api/v1/backup-policies/{id}` | Body: `name, description, schedule, window_minutes, jitter_seconds, retention, log_archive, log_flush_seconds, rpo_minutes, rto_minutes, repository, replicate_to, compress, compress_level, encrypt, verify_every_seconds, verify_sample_percent, test_restore, retry_max, retry_backoff_seconds`. `PUT` → `{"policy", "affects_jobs": N, "affected_jobs", "refreshed_jobs", "refresh_failed"}`. `DELETE` **409** `{"jobs": [...]}` khi còn job dùng. |
+| `POST /api/v1/backup-policies`, `GET/PUT/DELETE /api/v1/backup-policies/{id}` | Body: `name, description, schedule, window_minutes, jitter_seconds, retention, log_archive, log_flush_seconds, rpo_minutes, rto_minutes, repository, replicate_to, compress, compress_level, encrypt, verify_every_seconds, verify_sample_percent, test_restore, retry_max, retry_backoff_seconds`. `PUT` → `{"policy", "affects_jobs": N, "affected_jobs", "refreshed_jobs", "refresh_failed"}`; như connection, lượt đang chạy không bị hủy và lịch kế tiếp chỉ đổi khi chính lịch của policy đổi. `DELETE` **409** `{"jobs": [...]}` khi còn job dùng. |
 | `POST /api/v1/backup-policies/{id}/preview` (dry run) | Body = policy đề xuất → `{"affects_jobs": N, "jobs": [{job, name, changes[], warnings[]}], "changes", "next_runs"}`; không ghi gì. |
 | `POST /api/v1/backup-schedules/preview` | Body: schedule `{kind, at, days, cron, timezone, every_seconds}` (+ `count` 1..20, mặc định 5; `after` RFC3339) → `{"timezone", "human", "runs": [{"utc", "local"}]}`. |
 | `POST /api/v1/backup-jobs/{id}/convert-connection` (admin) | Chuyển `conn` inline của job built-in thành connection chế độ `env` (dùng lại connection trùng host/port/user/biến) và gắn `connection_id` vào job. Body tùy chọn `{"name"}`. → `{"job_id", "connection", "reused"}`; 409 nếu job đã có connection; 400 với job `custom`. Ghi audit `backup_job.convert_connection`; không đọc/trả secret. |
@@ -349,14 +351,14 @@ phản hồi chỉ có `access_key_set`, `secret_key_set`, `secret_set`; không 
 | `POST /api/v1/backup-repositories` → 200 `{"repository"}` | Body: `name, kind, secret_mode, env_prefix` (env) hoặc `endpoint, region, allow_insecure_local, access_key, secret_key` (stored), `bucket, prefix, lock_mode, lock_days, retention`. 400: `kind` khác `s3`, `env_prefix` ngoài `STRAND_BACKUP_S3_`/`STRAND_BACKUP_REPO_<NAME>_`, gửi khóa với `env`, thiếu khóa với `stored`; 409 trùng tên. | `secret_mode` defaults to `stored` and needs `endpoint`, `access_key`, `secret_key`; `env` is accepted only for an existing legacy env repository (400 otherwise).
 | `POST /api/v1/backup-repositories/test` → 200 checklist (admin) | Same body as POST (plus `id` when editing: blank keys use the stored ones). Runs list/put/get/delete/Object Lock on the unsaved settings; nothing is stored. |
 | `GET /api/v1/backup-repositories/{id}` | `{"repository", "usage_by_source": [{source, count, bytes, copies}], "used_by": {"jobs", "policies"}}`. |
-| `PUT /api/v1/backup-repositories/{id}` | Thiếu `access_key`/`secret_key` = giữ khóa đã lưu. Đổi khóa/endpoint/bucket khởi động lại scheduler của job đang bật dùng nó (`restarted_jobs`). |
+| `PUT /api/v1/backup-repositories/{id}` | Thiếu `access_key`/`secret_key` = giữ khóa đã lưu. Đổi khóa/endpoint/bucket khởi động lại scheduler của job đang bật dùng nó (`restarted_jobs`): lượt đang chạy của các job đó bị hủy, lịch kế tiếp giữ nguyên. |
 | `DELETE /api/v1/backup-repositories/{id}` → 204 | **409** khi repo còn backup chưa hết hạn (`repository still holds N backups`) hoặc còn job/policy dùng (`{"jobs","policies"}`). |
 | `POST /api/v1/backup-repositories/{id}/test` (**operator**) | 200 kể cả khi hỏng: `{"ok","status","steps":[{name: list\|put\|get\|delete\|object_lock, status ok\|failed\|skipped, detail, latency_ms}],"object_lock_enabled","immutable_configured","latency_ms","at"}`. Repo `lock_mode` mà bucket không có Object Lock → bước `object_lock` failed. |
 | `GET/POST /api/v1/backup-notify-channels`, `GET/PUT/DELETE .../{id}` (GET: admin) | Kênh `kind`: `webhook\|slack\|teams\|email`. Body: `name, kind, enabled`, `url` (webhook/slack/teams), hoặc `smtp_addr, from, to[], user, password` (email). Danh sách luôn có kênh chỉ-đọc `id: "env"` ("From environment": `STRAND_BACKUP_NOTIFY_*`, `destinations`, `events`); sửa/xóa nó → 409. Thiếu `url`/`password` khi PUT = giữ nguyên. |
 | `POST /api/v1/backup-notify-channels/{id}/test` (admin) | "Gửi thử" (kể cả `env`): `{"ok","status","detail","at"}`, ghi `last_test_*` của kênh. |
 | `GET/POST /api/v1/backup-notify-rules`, `PUT /{id}` `{"enabled"}`, `DELETE /{id}` | Luật `{event, scope_kind: all\|policy\|job, scope_id, channel_id, enabled}`. Sự kiện: `failure, missed, verify_failed, success, rpo_breach, repo_unreachable`. 400 khi kênh/policy/job không tồn tại hoặc kênh là `env`; 409 trùng. Xóa kênh xóa luôn luật của nó. |
 | `GET /api/v1/backup-keys` (admin) | `{"configured","error","active_key_id","keys":[{id, fingerprint, active, backups, bytes, sample_backup_ids}],"warnings":[{key_id, backups, sample_backup_ids, message}],"unencrypted":{backups, bytes},"notice"}`. Không bao giờ có giá trị khóa. |
-| `GET /api/v1/backup-rpo` | `{"sources":[{source, job_id, pitr, basis: log\|backup\|none, last_restore_point, current_rpo_seconds (-1: chưa có điểm), rpo_target_minutes, rto_minutes, breach}]}`. |
+| `GET /api/v1/backup-rpo` | `{"sources":[{source, job_id, pitr, basis: log\|backup\|none, last_restore_point, current_rpo_seconds (-1: chưa có điểm), rpo_target_minutes, rto_minutes, breach}]}`. Với job PITR, log (binlog/WAL/oplog) chỉ được tính tới cuối **chuỗi log liền mạch nối với một base backup complete** cùng nguồn; đoạn log sau chỗ đứt, hoặc log khi chưa có base backup nào, không được tính (không khôi phục được) và RPO quay về backup mới nhất hoặc `none`. |
 | `GET /api/v1/backup-reports/compliance?from=&to=` | `from`/`to`: RFC 3339 hoặc `YYYY-MM-DD`; mặc định 30 ngày đến hiện tại, tối đa 366 ngày. `{"sources","sources_breaching_rpo","success_rate_7d_pct","success_rate_30d_pct","last_test_restore_at","rows":[...]}`; mỗi dòng có số run/thành công/thất bại trong khoảng, tỉ lệ 7/30 ngày (tính đến `to`), RPO hiện tại và lần test-restore gần nhất. |
 | `GET /api/v1/backup-reports/compliance.csv?from=&to=` | CSV tải về (`Content-Disposition: attachment`), UTF-8 có BOM, CRLF; ô văn bản bắt đầu bằng `=`, `+`, `-`, `@` (hoặc tab/CR) được thêm `'` phía trước. Ghi audit `backup.report_export`. |
 | `GET /api/v1/backup-activity?cursor=&limit=&action=&user=&from=&to=` (admin) | Audit lọc theo tiền tố `backup` (mọi action `backup.*`, `backup_job.*`, `backup_connection.*`, `backup_policy.*`, `backup_repository.*`, `backup_notify_*`, `backup_run.*`), mới nhất trước. `limit` 1..200 (mặc định 50); `action` phải bắt đầu bằng `backup`. → `{"activity":[{id,time,user,ip,action,target,result,detail}],"next_cursor"}`; cursor = `id` của dòng cuối; trang cuối `""`. `detail.changes` = `{field: {from, to}}` (secret chỉ là `set\|cleared\|changed`). |
@@ -380,6 +382,89 @@ công cụ không được khởi động và không retry (log lỗi `scheduled
 trước khi ghi run hay bản ghi catalog.
 Mọi thao tác ghi của backup (job, policy, connection, repository, kênh, luật, run, hủy, restore, legal hold, prune, verify, copy) ghi audit **trước** khi
 thực hiện (từ chối nếu audit lỗi), kèm người dùng và các trường đã đổi.
+
+### Retention, ghim khi đang đọc và các điều kiện an toàn của restore
+
+Phần này mô tả hành vi của retention (prune), verify, restore và test restore. Không đổi route hay định dạng phản hồi.
+
+**Retention (prune)**
+
+- Retention lập kế hoạch **riêng theo dòng (lineage)**: bản gốc so với bản gốc; bản sao (`replicate_to`, có `copy_of`) so với các bản
+  sao trong cùng repository/bucket đích. Bản sao mới tạo không còn chiếm chỗ `keep_*` của bản gốc và làm bản gốc bị xóa.
+- Điểm khôi phục có lần kiểm tra gần nhất **thất bại** (`check_status = failed`) không bao giờ chiếm chỗ `keep_last`,
+  `hourly/daily/...`, `within`, và không được tính là "full mới nhất luôn giữ". Nó chỉ được giữ khi còn mới hơn điểm tốt cũ nhất
+  đang giữ, rồi hết hạn. Nếu một dòng không có điểm tốt nào thì các điểm lỗi được xét như điểm thường (không xóa sạch).
+- **Ghim (pin)**: restore, test restore và verify ghim các bản ghi đang đọc (base, chuỗi incremental và đoạn log) vào bảng
+  `backup_pins` (migration `024_backup_pins.sql`). Prune, kể cả chạy ở tiến trình hoặc instance khác, bỏ qua bản ghi đang ghim
+  (`skipped` trong kết quả prune, không ghi audit `backup.expire`) và thử lại ở lần sau. Ghim tự gia hạn mỗi 2,5 phút và hết hạn
+  sau 10 phút theo **đồng hồ của database** nếu tiến trình đọc chết, nên không chặn retention mãi. Restore bắt đầu sau khi
+  retention đã nhận xóa một bản ghi sẽ bị từ chối ("restore point is no longer available").
+- Kiểm tra Object Lock (`retain_until`) khi xóa/hết hạn dùng đồng hồ của database, không dùng đồng hồ máy Web.
+
+**Ghi backup**
+
+- Upload lớn bị object store từ chối (403, `AccessDenied`, bucket sai...) báo đúng lỗi của S3 và có mã `repo_unreachable`, không
+  còn chỉ là lỗi đọc pipe.
+- `VersionID` và Object Lock của payload được ghi vào catalog ngay sau khi upload xong. Bản ghi chuyển `failed` vì một bước sau
+  upload vẫn giữ chúng: xóa bị từ chối khi lock còn hiệu lực, sau đó xóa đúng phiên bản (không chỉ thêm delete marker).
+  Bản ghi `failed` cũ (trước bản sửa này) không có `VersionID` thì không được bổ sung.
+- Hoàn tất backup lỗi thì manifest "complete" đã ghi lên repository bị xóa; nếu Object Lock không cho xóa thì một manifest
+  `failed` được ghi đè lên, nên re-index repository không tin nhầm bản ghi lỗi.
+- Công cụ native (mysqldump, pg_dump, mongodump, mysql, pg_restore...) chạy với môi trường đã bỏ mọi biến `STRAND_*` (khóa
+  repository, khóa mã hóa, mật khẩu/URI của nguồn, scratch và đích) và biến `password_env`/`uri_env` của connection cũ. Mỗi
+  công cụ chỉ nhận secret của nó qua `MYSQL_PWD`/`PGPASSWORD` hoặc file tùy chọn tạm.
+- Log/lỗi từ stderr của công cụ chỉ che giá trị thật sự bí mật (mật khẩu, token, mật khẩu trong URI), kể cả khi bị cắt ngang giữa
+  hai lần ghi; giá trị thường như `PGSSLMODE` hay đường dẫn không còn bị che nhầm (trước đây có thể làm mất LSN của
+  `pg_basebackup`).
+- Email `verify_failed` có tiêu đề một dòng (lỗi nhiều dòng chỉ nằm trong thân thư).
+
+**Verify**
+
+- Verify theo mẫu (`verify_sample_percent`) luôn đọc **toàn bộ** base backup mới nhất, phần còn lại mới lấy mẫu.
+
+**Restore MySQL/MariaDB**
+
+- Toàn bộ restore được ghi vào binlog của server đích (Strand bỏ `SET SQL_LOG_BIN=0` trong dump), nên replica của server đích
+  nhận đủ dữ liệu (dữ liệu nạp nhận GTID mới trên server đích). User restore không còn cần `SYSTEM_VARIABLES_ADMIN` để đặt
+  `SQL_LOG_BIN`.
+- Restore một phần (`tables`) khớp theo `db.table`: bảng cùng tên ở database khác không bị lấy nhầm.
+- **PITR** (phát lại binlog):
+  - Thời điểm đích phải là **giây chẵn**. `mysqlbinlog` chỉ dừng theo giây, nên thời điểm có phần lẻ giây bị từ chối, kèm gợi ý
+    hai giây chẵn liền kề.
+  - Trước khi tạo database đích, Strand quét binlog; trong lúc phát lại, chỉ câu lệnh đã kiểm mới đi qua. Câu lệnh bị **từ chối**
+    (restore dừng, báo vị trí binlog):
+    - ghi rõ tên database nguồn hoặc database khác (`UPDATE shop.orders ...`, `ALTER TABLE other.t ...`): phát lại sẽ ghi vào chính
+      database đó trên server đích. Hướng xử lý: restore sang server khác với cùng tên database;
+    - `CREATE/ALTER/DROP DATABASE` trên database nguồn;
+    - thay đổi database nguồn khi database mặc định của phiên là database khác (`--database` của `mysqlbinlog` sẽ bỏ qua, restore
+      lệch âm thầm);
+    - thay đổi được quét thấy nhưng không được phát lại.
+  - Với các trường hợp trên: chọn thời điểm trước câu lệnh đó, restore không có thời điểm đích, hoặc phát lại binlog thủ công.
+  - Kiểm tra có thể từ chối thừa: ví dụ alias bảng trùng tên một database (`UPDATE t AS shop SET shop.col = 1`). Khi đó
+    dùng cách restore sang server khác.
+- Restore lỗi thì database **do chính lần restore đó tạo** được xóa; database đã có từ trước không bị đụng tới.
+
+**Restore PostgreSQL**
+
+- PITR chỉ hỗ trợ PostgreSQL **12 trở lên**; base backup của PG 11 trở xuống có thời điểm đích bị từ chối (restore base không có
+  thời điểm đích rồi tự cấu hình `recovery.conf`).
+- PostgreSQL 12 kết thúc recovery và promote **không báo lỗi** khi WAL hết trước thời điểm đích. Strand đọc WAL đã stage và từ
+  chối nếu WAL chưa tới thời điểm đó. Muốn khôi phục tới thời điểm gần nhất trên PG 12, cần có thêm một giao dịch sau thời điểm
+  đó đã được lưu WAL.
+- Database tạm của restore lỗi/test restore được xóa cả trên PG 12 trở xuống (không có `DROP DATABASE ... WITH (FORCE)`): Strand
+  chặn kết nối mới rồi kết thúc các phiên còn lại trên database đó. User cần quyền `pg_terminate_backend` với các phiên đó (chủ
+  database hoặc thành viên `pg_signal_backend`).
+
+**Restore MongoDB**
+
+- Restore lỗi hoặc bị hủy thì dữ liệu dở được xóa: database đích (đã kiểm là chưa có trước restore), hoặc với restore toàn
+  deployment, mọi database không phải hệ thống chưa có trong deployment rỗng ban đầu. Dọn lỗi thì được báo trong lỗi trả về. User admin đã tạo trong lần restore toàn
+  deployment lỗi không bị xóa.
+
+**Test restore**
+
+- Database tạm có tên `strand_verify_<unix>_<12 ký tự hex ngẫu nhiên>`. Chỉ database do chính lượt đó tạo mới bị xóa; hai lượt
+  chạy song song (hoặc database trùng tên có sẵn) không xóa của nhau.
 
 ### Điểm khôi phục theo trạng thái: 409 và `DELETE /api/v1/backups/{id}`
 

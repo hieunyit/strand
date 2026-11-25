@@ -111,6 +111,12 @@ sudo systemctl restart strand-web
 
 Bảng tương thích server và giới hạn đã biết (server MySQL 8.0 cần `mysqldump-8.0`; server PostgreSQL <= 16 cần `pg_dump-16` và `pg_restore-16` khi client mặc định là 17+): docs/CENTRAL-BACKUPS.md mục "Native tools". Image container (mục 10.7) có sẵn tất cả.
 
+Lưu ý khi restore (chi tiết: docs/WEB-API.md mục "Retention, ghim khi đang đọc và các điều kiện an toàn của restore"):
+
+- MySQL/MariaDB: restore ghi toàn bộ vào binlog của server đích, user restore không cần `SYSTEM_VARIABLES_ADMIN`. PITR chỉ nhận thời điểm giây chẵn và dừng nếu binlog có câu lệnh ghi ra ngoài database đích.
+- PostgreSQL: PITR cần server 12 trở lên. Trên PG 12 trở xuống, để dọn database tạm, user cần quyền kết thúc phiên trên database đó (chủ database hoặc `pg_signal_backend`).
+- Bản nâng cấp này thêm migration `024_backup_pins.sql` (bảng `backup_pins`). Web tự áp dụng lúc khởi động.
+
 ### 2b. Cài tay (binary hoặc build từ source)
 
 ```bash
