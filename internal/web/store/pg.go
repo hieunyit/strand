@@ -103,14 +103,26 @@ func lockKey(name string) int64 {
 
 // withAdvisoryLock holds pg_advisory_lock(key) on a dedicated connection while fn runs.
 func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx context.Context) error) error {
+	_, err := advisoryLocked(ctx, db, name, false, fn)
+	return err
+}
+
+// advisoryLocked is withAdvisoryLock; with try it does not wait (pg_try_advisory_lock) and reports false,
+// without running fn, when another session holds the lock.
+func advisoryLocked(ctx context.Context, db *sql.DB, name string, try bool, fn func(ctx context.Context) error) (bool, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 	k := lockKey(name)
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, k); err != nil {
-		return err
+	if try {
+		var got bool
+		if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, k).Scan(&got); err != nil || !got {
+			return false, err
+		}
+	} else if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, k); err != nil {
+		return false, err
 	}
 	defer func() {
 		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -135,10 +147,10 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 	for {
 		select {
 		case err := <-done:
-			return err
+			return true, err
 		case <-ctx.Done():
 			cancel()
-			return <-done
+			return true, <-done
 		case <-ticker.C:
 			pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 			err := conn.PingContext(pingCtx)
@@ -146,7 +158,7 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 			if err != nil {
 				cancel()
 				callbackErr := <-done
-				return errors.Join(fmt.Errorf("advisory lock connection lost: %w", err), callbackErr)
+				return true, errors.Join(fmt.Errorf("advisory lock connection lost: %w", err), callbackErr)
 			}
 		}
 	}
@@ -154,6 +166,11 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 
 func (p *PG) Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error {
 	return p.wrap(withAdvisoryLock(ctx, p.db, key, fn))
+}
+
+func (p *PG) TryLocked(ctx context.Context, key string, fn func(ctx context.Context) error) (bool, error) {
+	got, err := advisoryLocked(ctx, p.db, key, true, fn)
+	return got, p.wrap(err)
 }
 
 func (p *PG) Admin(ctx context.Context) (Admin, bool, error) {
@@ -879,47 +896,111 @@ func (p *PG) SetBackupJobNextRun(ctx context.Context, id string, expectedUpdated
 	return n > 0, p.wrap(err)
 }
 
+// BeginBackupJobRun, FinishBackupJobRun and RecoverBackupJobRun compute next_run_at in Go (backup.Job
+// NextRunAfter / NextRunAfterFinish) from the locked row, so cron/daily/weekly/monthly jobs keep their
+// schedule: SQL only knows every_seconds. The database clock stamps the run, as before.
+
 func (p *PG) BeginBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (time.Time, bool, error) {
-	var startedAt time.Time
-	err := p.db.QueryRowContext(ctx, `UPDATE backup_jobs SET run_started_at=clock_timestamp(), run_finished_at=NULL,
-		last_run_status='running',
-		next_run_at=CASE WHEN enabled THEN clock_timestamp() + make_interval(secs => every_seconds) ELSE next_run_at END
-		WHERE id=$1 AND updated_at=$2 RETURNING run_started_at`, id, expectedUpdatedAt).Scan(&startedAt)
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return time.Time{}, false, p.wrap(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	j, err := scanBackupJob(tx.QueryRowContext(ctx, `UPDATE backup_jobs SET run_started_at=clock_timestamp(),
+		run_finished_at=NULL, last_run_status='running'
+		WHERE id=$1 AND updated_at=$2 RETURNING `+backupJobCols, id, expectedUpdatedAt))
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}
-	return startedAt, err == nil, p.wrap(err)
+	if err != nil {
+		return time.Time{}, false, p.wrap(err)
+	}
+	startedAt := *j.RunStartedAt
+	if j.Enabled {
+		if _, err := tx.ExecContext(ctx, `UPDATE backup_jobs SET next_run_at=$2 WHERE id=$1`, id, j.NextRunAfter(startedAt)); err != nil {
+			return time.Time{}, false, p.wrap(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return time.Time{}, false, p.wrap(err)
+	}
+	return startedAt, true, nil
+}
+
+// lockRunningBackupJob locks the row of a job whose run is still marked running (cond adds the caller's
+// conditions on $1 = id, $2) and reads the database clock.
+func lockRunningBackupJob(ctx context.Context, tx *sql.Tx, cond string, id string, arg any) (backup.Job, time.Time, error) {
+	j, err := scanBackupJob(tx.QueryRowContext(ctx, `SELECT `+backupJobCols+` FROM backup_jobs WHERE id=$1 AND `+cond+`
+		AND run_started_at IS NOT NULL AND run_finished_at IS NULL AND last_run_status='running' FOR UPDATE`, id, arg))
+	if err != nil {
+		return j, time.Time{}, err
+	}
+	var now time.Time
+	err = tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now)
+	return j, now, err
 }
 
 func (p *PG) FinishBackupJobRun(ctx context.Context, id string, startedAt time.Time, status backup.RunStatus) (bool, error) {
 	if status != backup.RunStatusSucceeded && status != backup.RunStatusFailed && status != backup.RunStatusCancelled {
 		return false, fmt.Errorf("%w: invalid backup job run status", backup.ErrInvalid)
 	}
-	// Retry policy: a failed run is retried after retry_backoff_seconds × 2^(failures so far), capped by the
-	// interval, until retry_max consecutive failures; then the regular interval applies again.
-	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET run_finished_at=clock_timestamp(), last_run_status=$3,
-		consecutive_failures=CASE WHEN $3='failed' THEN consecutive_failures+1 WHEN $3='succeeded' THEN 0 ELSE consecutive_failures END,
-		next_run_at=CASE WHEN NOT enabled THEN NULL
-			WHEN $3='failed' AND consecutive_failures < retry_max THEN clock_timestamp() + LEAST(make_interval(secs => every_seconds),
-				make_interval(secs => retry_backoff_seconds * power(2, consecutive_failures)))
-			ELSE clock_timestamp() + make_interval(secs => every_seconds) END
-		WHERE id=$1 AND run_started_at=$2 AND run_finished_at IS NULL AND last_run_status='running'`, id, startedAt, status)
+	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, p.wrap(err)
 	}
-	n, err := res.RowsAffected()
-	return n > 0, p.wrap(err)
+	defer func() { _ = tx.Rollback() }()
+	j, finished, err := lockRunningBackupJob(ctx, tx, "run_started_at=$2", id, startedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	// Retry policy: see backup.Job.NextRunAfterFinish.
+	next := j.NextRunAfterFinish(status, finished)
+	failures := j.ConsecutiveFailures
+	switch status {
+	case backup.RunStatusFailed:
+		failures++
+	case backup.RunStatusSucceeded:
+		failures = 0
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE backup_jobs SET run_finished_at=$2, last_run_status=$3,
+		consecutive_failures=$4, next_run_at=$5 WHERE id=$1`, id, finished, status, failures, next); err != nil {
+		return false, p.wrap(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, p.wrap(err)
+	}
+	return true, nil
 }
 
 func (p *PG) RecoverBackupJobRun(ctx context.Context, id string, expectedUpdatedAt time.Time) (bool, error) {
-	res, err := p.db.ExecContext(ctx, `UPDATE backup_jobs SET run_finished_at=clock_timestamp(), last_run_status='interrupted',
-		next_run_at=CASE WHEN enabled THEN clock_timestamp() + make_interval(secs => every_seconds) ELSE NULL END
-		WHERE id=$1 AND updated_at=$2 AND run_started_at IS NOT NULL AND run_finished_at IS NULL AND last_run_status='running'`, id, expectedUpdatedAt)
+	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, p.wrap(err)
 	}
-	n, err := res.RowsAffected()
-	return n > 0, p.wrap(err)
+	defer func() { _ = tx.Rollback() }()
+	j, now, err := lockRunningBackupJob(ctx, tx, "updated_at=$2", id, expectedUpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, p.wrap(err)
+	}
+	var next *time.Time
+	if j.Enabled {
+		n := j.NextRunAfter(now)
+		next = &n
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE backup_jobs SET run_finished_at=$2, last_run_status='interrupted',
+		next_run_at=$3 WHERE id=$1`, id, now, next); err != nil {
+		return false, p.wrap(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, p.wrap(err)
+	}
+	return true, nil
 }
 
 func (p *PG) DeleteBackupJob(ctx context.Context, id string) (bool, error) {

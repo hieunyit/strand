@@ -248,9 +248,8 @@ func TestWizardPayloadWarningsAndMissed(t *testing.T) {
 	}
 	// A missed run shows as a warning-toned badge and filters.
 	j, _, _ := e.st.GetBackupJob(context.Background(), jid)
-	j.LastRunStatus = backup.RunStatusMissed
-	if _, err := e.st.UpdateBackupJob(context.Background(), j); err != nil {
-		t.Fatal(err)
+	if ok, err := e.st.RecordBackupJobMissed(context.Background(), jid, j.UpdatedAt, e.clock.Now().Add(24*time.Hour)); err != nil || !ok {
+		t.Fatalf("record missed: %v %v", ok, err)
 	}
 	if b := a.must("GET", "/backups/jobs?status=missed", nil, 200); !strings.Contains(b, "gold-two-dbs") || !strings.Contains(b, `st-missed`) {
 		t.Errorf("missed filter/badge missing")

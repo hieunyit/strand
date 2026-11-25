@@ -163,11 +163,8 @@ func nextAfterRun(j backup.Job, now time.Time) (time.Time, bool) {
 	if j.LastRunStatus == backup.RunStatusFailed && j.ConsecutiveFailures <= j.RetryMax && j.ConsecutiveFailures > 0 && j.RetryMax > 0 {
 		return time.Time{}, false
 	}
-	n, err := j.Schedule.Next(now, now)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return n, true
+	// The same computation as the store's Begin/Finish/Recover, so all of them agree on the due time.
+	return j.NextRunAfter(now), true
 }
 
 // advanceSchedule moves next_run_at of a cron/daily/weekly/monthly job to its following due time.

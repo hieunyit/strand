@@ -852,6 +852,7 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	s.recoverStaleBackupRuns(ctx, jobs)
 	now := s.now().UTC()
 	notifyOn := s.notifyConfigured(ctx)
 	for _, j := range jobs {
@@ -951,6 +952,23 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 					go s.notifyBackupEvent(ev, policyID)
 				}
 			}
+		}
+	}
+}
+
+// recoverStaleBackupRuns marks interrupted the runs recorded as running whose process is gone (no holder of
+// the job's execution lock on any instance), for every job: the scheduler of an enabled job does this
+// itself, but nothing else would for a job disabled after a crash, which then stayed "running" forever and
+// blocked deleting its abandoned restore points.
+func (s *Server) recoverStaleBackupRuns(ctx context.Context, jobs []backup.Job) {
+	for _, j := range jobs {
+		if j.LastRunStatus != backup.RunStatusRunning {
+			continue
+		}
+		if ok, err := store.RecoverStaleBackupJobRun(ctx, s.db.st, j.ID); err != nil {
+			s.log.Warn("recover interrupted backup run", "job", j.ID, "error", err)
+		} else if ok {
+			s.log.Info("backup run had no live process: marked interrupted", "job", j.ID)
 		}
 	}
 }

@@ -436,6 +436,8 @@ func Run(t *testing.T, mk func(t *testing.T) store.Store) {
 	t.Run("backup_connections", func(t *testing.T) { runBackupConnections(t, mk(t)) })
 	t.Run("backup_policies", func(t *testing.T) { runBackupPolicies(t, mk(t)) })
 	t.Run("backup_job_schedule", func(t *testing.T) { runBackupJobSchedule(t, mk(t)) })
+	t.Run("backup_job_run_schedule", func(t *testing.T) { runBackupJobRunSchedule(t, mk(t)) })
+	t.Run("backup_stale_run_recovery", func(t *testing.T) { runBackupStaleRunRecovery(t, mk(t)) })
 	t.Run("backup_slots", func(t *testing.T) { runBackupSlots(t, mk(t)) })
 	t.Run("backup_retry", func(t *testing.T) { runBackupRetry(t, mk(t)) })
 	t.Run("backup_runs", func(t *testing.T) { runBackupRuns(t, mk(t)) })
