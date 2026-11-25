@@ -20,14 +20,14 @@ import (
 
 // versionedS3 is a tiny versioned, Object-Lock-aware bucket: every PUT creates version v<n>.
 type versionedS3 struct {
-	mu      sync.Mutex
-	n       int
-	locks   map[string]string // key -> lock mode of the last PUT
-	bodies  map[string][]byte // key -> body of the last PUT
-	sums    map[string]string // key -> SHA-256 metadata of the last PUT
+	mu     sync.Mutex
+	n      int
+	locks  map[string]string // key -> lock mode of the last PUT
+	bodies map[string][]byte // key -> body of the last PUT
+	sums   map[string]string // key -> SHA-256 metadata of the last PUT
 	// deleteStatus, when set, is the answer to DELETE (e.g. 403 for a version under Object Lock).
 	deleteStatus int
-	deletes []string          // "key?versionId=..." of each DELETE
+	deletes      []string // "key?versionId=..." of each DELETE
 }
 
 func (s *versionedS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
