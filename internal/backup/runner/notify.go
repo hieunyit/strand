@@ -11,6 +11,7 @@ import (
 	"net/smtp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Notification environment. Destinations are secrets (webhook URLs, SMTP password) and are therefore
@@ -109,11 +110,27 @@ func (n *Notifier) Send(ctx context.Context, ev Event) error {
 			"title": "Strand backup", "text": text})
 	}
 	if addr := n.Getenv(EnvNotifySMTPAddr); addr != "" {
-		if err := n.mail(addr, ev, text); err != nil {
+		if err := n.mail(addr, ev, mailSubject(ev)); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// mailSubject is a single header-safe line: the first line of the message (verify_failed messages carry a
+// multi-line stderr tail), control characters removed, length-capped. The full message goes in the body.
+func mailSubject(ev Event) string {
+	first, _, _ := strings.Cut(strings.TrimSpace(ev.Message), "\n")
+	first = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, first)
+	if r := []rune(first); len(r) > 160 {
+		first = string(r[:160]) + "…"
+	}
+	return fmt.Sprintf("[strand backup] %s: %s", strings.ToUpper(ev.Kind), strings.TrimSpace(first))
 }
 
 func (n *Notifier) mail(addr string, ev Event, subject string) error {

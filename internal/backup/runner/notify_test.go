@@ -103,3 +103,38 @@ func TestNotifierTeamsForceAndDefaultEvents(t *testing.T) {
 		t.Fatalf("teams body = %v", bodies)
 	}
 }
+
+// verify_failed messages carry a multi-line stderr tail: the email is still sent, with the first line
+// (control characters removed) as its subject and the full message in the body.
+func TestNotifierMailSubjectIsOneLine(t *testing.T) {
+	var mail []byte
+	env := map[string]string{EnvNotifySMTPAddr: "127.0.0.1:2525", EnvNotifySMTPFrom: "strand@example.com", EnvNotifySMTPTo: "ops@example.com"}
+	n := &Notifier{Getenv: func(k string) string { return env[k] }, SendMail: func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+		mail = msg
+		return nil
+	}}
+	ev := Event{Kind: "verify_failed", Source: "pg-prod", At: time.Now(),
+		Message: "test restore of bkp-1 failed:\x1b[31m pg_restore failed\r\npg_restore: error: could not execute query\nBcc: evil@example.com\n" + strings.Repeat("x", 500)}
+	if err := n.Send(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	head, body, ok := strings.Cut(string(mail), "\r\n\r\n")
+	if !ok {
+		t.Fatalf("mail %q", mail)
+	}
+	var subject string
+	for _, h := range strings.Split(head, "\r\n") {
+		if strings.HasPrefix(h, "Bcc:") {
+			t.Fatalf("header injected: %q", head)
+		}
+		if s, ok := strings.CutPrefix(h, "Subject: "); ok {
+			subject = s
+		}
+	}
+	if subject != "[strand backup] VERIFY_FAILED: test restore of bkp-1 failed:[31m pg_restore failed" {
+		t.Fatalf("subject = %q", subject)
+	}
+	if !strings.Contains(body, "could not execute query") || !strings.Contains(body, strings.Repeat("x", 500)) {
+		t.Fatalf("body lacks the full message: %q", body)
+	}
+}
