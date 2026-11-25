@@ -206,7 +206,7 @@ func (r *runner) snapshot(ctx context.Context) error {
 type collCopy struct {
 	info     collectionInfo
 	estimate int64
-	parts    int // planned ranges; prepareCopy may lower it (fewer distinct _id bounds)
+	parts    int  // planned ranges; prepareCopy may lower it (fewer distinct _id bounds)
 	resplit  bool // parent is an unfinished one-range copy: split what is after its LastID
 	once     sync.Once
 	err      error
