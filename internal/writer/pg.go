@@ -1009,25 +1009,47 @@ func (a *pgApplier) partialUpdateRow(row *model.RowChange, pkCols []string) erro
 		}
 		addSet(c.Name, c.Value)
 	}
-	oldCond := keyCond(row.OldKey)
-	newCond := keyCond(row.Key)
-	q := fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s AND NOT EXISTS (SELECT 1 FROM %s WHERE %s AND %s)",
-		tbl, strings.Join(sets, ", "), model.PGRelationRows(tbl, ""), oldCond, tbl, model.PGRelationRows(tbl, ""), newCond)
+	// The new key can compare equal to the old key under PostgreSQL's equality
+	// rules (for example citext 'alice' -> 'ALICE'). Only a physically different
+	// row at the new key may block the UPDATE, and once the UPDATE moved the row
+	// the old key must not be deleted: it can match the moved row.
+	keyCondAs := func(alias string, key []model.Value) string {
+		conds := make([]string, len(pkCols))
+		for i, c := range pkCols {
+			args = append(args, key[i])
+			conds[i] = fmt.Sprintf("%s.%s = $%d", alias, quotePG(c), len(args))
+		}
+		return strings.Join(conds, " AND ")
+	}
+	oldCond := keyCondAs("old_row", row.OldKey)
+	newCond := keyCondAs("new_row", row.Key)
+	q := fmt.Sprintf("UPDATE %s AS old_row SET %s WHERE %s AND %s AND NOT EXISTS (SELECT 1 FROM %s AS new_row WHERE %s AND %s AND (new_row.tableoid, new_row.ctid) <> (old_row.tableoid, old_row.ctid))",
+		tbl, strings.Join(sets, ", "), model.PGRelationRows(tbl, "old_row."), oldCond, tbl, model.PGRelationRows(tbl, "new_row."), newCond)
 	tag, err := a.tx.Exec(a.ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("partial pk-change update on %s: %w", row.Table, err)
 	}
-	if tag.RowsAffected() == 0 {
-		// Hoặc PK mới đã có ở target (giữ nguyên, chỉ xóa PK cũ), hoặc thiếu row PK cũ để dựng row mới.
-		args = args[:0]
-		var one int
-		err := a.tx.QueryRow(a.ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE %s AND %s", tbl, model.PGRelationRows(tbl, ""), keyCond(row.Key)), args...).Scan(&one)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return newToastRowMissing(row.Table, row.OldKey)
-		}
-		if err != nil {
-			return fmt.Errorf("partial pk-change update on %s: %w", row.Table, err)
-		}
+	if tag.RowsAffected() != 0 {
+		return nil
+	}
+	// Either the new key is already on the target (keep it and remove the old
+	// key), or the old row needed to rebuild the new one is missing. A row at
+	// the new key that also matches the old key is the old row itself: the
+	// UPDATE was suppressed (a trigger or policy) and deleting would lose it.
+	args = args[:0]
+	newCond = keyCondAs("new_row", row.Key)
+	oldOnNew := keyCondAs("new_row", row.OldKey)
+	var newExists, distinct bool
+	err = a.tx.QueryRow(a.ctx, fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %[1]s AS new_row WHERE %[2]s AND %[3]s), EXISTS (SELECT 1 FROM %[1]s AS new_row WHERE %[2]s AND %[3]s AND NOT (%[4]s))",
+		tbl, model.PGRelationRows(tbl, "new_row."), newCond, oldOnNew), args...).Scan(&newExists, &distinct)
+	if err != nil {
+		return fmt.Errorf("partial pk-change update on %s: %w", row.Table, err)
+	}
+	if !newExists {
+		return newToastRowMissing(row.Table, row.OldKey)
+	}
+	if !distinct {
+		return fmt.Errorf("partial pk-change update on %s: UPDATE left the old row and no distinct row exists at the new key", row.Table)
 	}
 	return execDelete(a.ctx, a.tx, row.Table, pkCols, [][]model.Value{row.OldKey})
 }

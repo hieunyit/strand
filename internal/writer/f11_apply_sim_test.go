@@ -144,7 +144,22 @@ func (tx *fTx) upsert(tab string, rows []fRow, update bool) error {
 	return tx.checkUnique(tab)
 }
 
+// f11PlainKeyMove maps the aliased key-move statements (UPDATE t AS old_row ...
+// NOT EXISTS (... AS new_row ... ctid ...)) onto the plain form the fake
+// models. Integer keys never compare equal unless identical, so the
+// physical-row guard adds nothing here.
+var f11PlainKeyMoveProbe = regexp.MustCompile(`^SELECT EXISTS \(SELECT 1 FROM (\S+) AS new_row WHERE .*\), EXISTS \(`)
+
+func f11PlainKeyMove(q string) string {
+	q = strings.ReplaceAll(q, " AND (new_row.tableoid, new_row.ctid) <> (old_row.tableoid, old_row.ctid)", "")
+	for _, alias := range []string{" AS old_row", " AS new_row", "old_row.", "new_row."} {
+		q = strings.ReplaceAll(q, alias, "")
+	}
+	return q
+}
+
 func (tx *fTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	sql = f11PlainKeyMove(sql)
 	tx.db.stmts++
 	if strings.HasPrefix(sql, "UPDATE _strand_worker_delta SET applied = $1") {
 		tx.delta = args[0].(string) // row delta của worker (ApplyBatch qua SetTxBeginner)
@@ -233,6 +248,12 @@ func (r fRowRes) Scan(dest ...any) error {
 }
 
 func (tx *fTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	// partialUpdate after a skipped key move: is there a row at the new key ($1),
+	// and one that is not the old key ($2)?
+	if m := f11PlainKeyMoveProbe.FindStringSubmatch(sql); m != nil {
+		_, exists := tx.tabs[m[1]][toI64(args[0])]
+		return fRowRes{vals: []any{exists, exists && toI64(args[0]) != toI64(args[1])}}
+	}
 	if strings.HasPrefix(sql, "SELECT EXISTS") {
 		return fRowRes{vals: []any{tx.db.ordered[args[0].(string)]}}
 	}

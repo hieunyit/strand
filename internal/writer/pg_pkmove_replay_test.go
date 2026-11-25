@@ -107,3 +107,24 @@ func TestPGReferencedCaseInsensitiveKeyUpdate(t *testing.T) {
 		t.Fatalf("parents=%d children=%d key=%q err=%v; expected both retained with updated parent key", parents, children, key, err)
 	}
 }
+
+// A key change that keeps a TOAST value goes through the partial-update path.
+// Under citext the new key equals the old one, so the row must be updated in
+// place; deleting the old key would delete the moved row.
+func TestPGCaseInsensitivePartialKeyUpdate(t *testing.T) {
+	e := newPGEnv(t, "casefold-partial")
+	pgExec(t, e.db, "CREATE EXTENSION IF NOT EXISTS citext")
+	tbl := pgTable(t, e.db, "casefold_toast", "id citext PRIMARY KEY, n int, doc text")
+	pgExec(t, e.db, "INSERT INTO public.casefold_toast VALUES ('alice', 1, repeat('x', 10000))")
+	w := e.writer(t, map[model.TableID][]string{tbl: {"id"}})
+	move := model.RowChange{Table: tbl, Op: model.OpUpdate, OldKey: []model.Value{"alice"}, Key: []model.Value{"ALICE"},
+		Cols: []model.ColValue{cv("id", "ALICE"), cv("n", int64(2)), unchanged("doc")}}
+	if err := w.ApplyBatch(context.Background(), []*model.Txn{{Rows: []model.RowChange{move}}}, e.delta("casefold")); err != nil {
+		t.Fatal(err)
+	}
+	var rows, n, docLen int
+	var key string
+	if err := e.db.QueryRow("SELECT count(*), COALESCE(max(id::text), ''), COALESCE(max(n), 0), COALESCE(max(length(doc)), 0) FROM public.casefold_toast").Scan(&rows, &key, &n, &docLen); err != nil || rows != 1 || key != "ALICE" || n != 2 || docLen != 10000 {
+		t.Fatalf("rows=%d key=%q n=%d doc=%d err=%v; want the row kept with the new key and its TOAST value", rows, key, n, docLen, err)
+	}
+}

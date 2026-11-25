@@ -1014,7 +1014,7 @@ func (p *Pipeline) clearPartialAutoSeed(ctx context.Context) error {
 	}
 	if len(outside) > 0 {
 		sort.Strings(outside)
-		return autoSeedRejected(fmt.Sprintf("interrupted auto-seed has target tables outside the current replication scope: %s; restore the previous table selection and mappings before retrying", strings.Join(outside, ", ")))
+		return autoSeedRejected(fmt.Sprintf("interrupted auto-seed has target tables outside the current replication scope: %s (excluded, mapped to another name, or dropped at the source); Strand does not empty a table it no longer replicates. Restore the previous table selection and mappings to finish that copy, or abandon it: empty the target tables it copied and drop the checkpoint database, so the next Start begins over", strings.Join(outside, ", ")))
 	}
 	conn, err := p.dst.Conn(ctx)
 	if err != nil {
