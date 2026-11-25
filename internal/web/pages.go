@@ -862,6 +862,7 @@ type detailBody struct {
 	Tabs                                []tabLink
 	Status                              StatusView
 	SourceLabel, TargetLabel, FlowPhase string
+	MongoFlow                           []flowDiagnostic // MongoDB: copy workers and change stream under Replication
 	Diagnostics                         []flowDiagnostic
 	Charts                              []chartCard
 	HasHistory                          bool // chế độ DB: lịch sử số liệu quá 1 giờ (6 h, 24 h, 7 d) trong DB
@@ -1021,6 +1022,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		e := engines(b.View.Pair)
 		b.SourceLabel, b.TargetLabel = e[0].Label, e[1].Label
 		b.FlowPhase = replicationPhase(b.View)
+		b.MongoFlow = mongoFlow(b.View, b.Status.Status)
 		b.Diagnostics = flowDiagnostics(b.Metrics)
 		b.HasHistory = true
 		b.Charts = s.charts(p.Name, isMongo(b.View.SourceKind))
@@ -1340,6 +1342,35 @@ func replicationPhase(v PipelineView) string {
 		return "Failed"
 	default:
 		return "Runtime data unavailable"
+	}
+}
+
+// mongoFlow describes the two MongoDB stages inside Replication: the initial copy
+// (workers over collections and _id ranges) and the change stream. Empty for SQL pipelines.
+func mongoFlow(v PipelineView, st *admin.StatusInfo) []flowDiagnostic {
+	if !isMongo(v.SourceKind) {
+		return nil
+	}
+	workers := "-"
+	if st != nil && st.Workers > 0 {
+		workers = strconv.Itoa(st.Workers)
+	}
+	copyText, stream := "-", "-"
+	if v.Top != nil {
+		switch {
+		case v.Top.TablesTotal > 0 && v.Top.TablesDone < v.Top.TablesTotal:
+			copyText = FormatValue(v.Rates.SnapRows) + " docs/s · " + strconv.FormatInt(int64(v.Top.TablesDone), 10) +
+				" / " + strconv.FormatInt(int64(v.Top.TablesTotal), 10) + " collections"
+		case v.Top.TablesTotal > 0:
+			copyText = "copy done · " + strconv.FormatInt(int64(v.Top.TablesTotal), 10) + " collections"
+		default:
+			copyText = "no copy running"
+		}
+		stream = FormatValue(v.Rates.Rows) + " docs/s · lag " + fmtLag(v.Top.LagSeconds)
+	}
+	return []flowDiagnostic{
+		{Label: "Copy ×" + workers, Bind: "flow_copy", Value: copyText},
+		{Label: "Change stream", Bind: "flow_stream", Value: stream},
 	}
 }
 

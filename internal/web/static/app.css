@@ -1118,6 +1118,8 @@ dialog.qsearch::backdrop { background: rgba(11, 18, 32, .45); }
   overflow-wrap: anywhere;
 }
 .flow-stages li { position: relative; }
+.flow-stages .flow-sub { display: block; font-size: var(--fs-sm); color: var(--muted); }
+.flow-stages .flow-sub b { color: var(--ink); font-weight: 600; }
 .flow-stages li:not(:last-child)::after {
   content: "→";
   color: var(--muted);

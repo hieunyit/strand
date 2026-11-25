@@ -360,10 +360,10 @@ func TestCreateErrorsNameTheField(t *testing.T) {
 		`invalid pipeline name "a b" (allowed: letters)`:                           "name",
 		`pipeline "x" already exists in registry (check 'Overwrite' to update it)`: "name",
 		"iops_soft: 5 is not an integer between 1 and 10000000":                    "iops_soft",
-		"windows: bad window":                                                              "windows",
-		`target_database "a-b" is not a plain database name`:                               "target_database",
+		"windows: bad window":                                "windows",
+		`target_database "a-b" is not a plain database name`: "target_database",
 		"PostgreSQL can only be copied to PostgreSQL (postgres -> mysql is not supported)": "to",
-		"something unrelated":                                                              "",
+		"something unrelated": "",
 	} {
 		if got := createErrField(msg); got != want {
 			t.Errorf("createErrField(%q) = %q, want %q", msg, got, want)

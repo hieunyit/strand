@@ -246,7 +246,11 @@ func (s *Server) fullDelta(p *Pipeline, r *LiveRecord, sn *Snap, all bool) {
 	for k, v := range r.F {
 		f[k] = v
 	}
-	f["flow_phase"] = replicationPhase(s.view(p))
+	view := s.view(p)
+	f["flow_phase"] = replicationPhase(view)
+	for _, d := range mongoFlow(view, sn.Status) {
+		f[d.Bind] = d.Value
+	}
 	for _, d := range flowDiagnostics(sn.Metrics) {
 		f[d.Bind] = d.Value
 	}

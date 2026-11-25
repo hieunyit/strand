@@ -24,7 +24,7 @@
     <div class="cardhead"><h2>Data path</h2><span class="badge {{stateClass .View.State}}" data-bind-badge="state">{{.View.State}}</span></div>
     <ol class="flow-stages" aria-label="Replication flow">
       <li><b>Source</b><span>{{.SourceLabel}}{{with .View.SourceHost}} <code>{{.}}</code>{{end}}</span></li>
-      <li><b>Replication</b><span data-bind="flow_phase">{{.FlowPhase}}</span></li>
+      <li><b>Replication</b><span data-bind="flow_phase">{{.FlowPhase}}</span>{{range .MongoFlow}}<span class="flow-sub"><b>{{.Label}}</b> <span data-bind="{{.Bind}}">{{.Value}}</span></span>{{end}}</li>
       <li><b>Target</b><span>{{.TargetLabel}}{{with .View.TargetHost}} <code>{{.}}</code>{{end}}</span></li>
     </ol>
     <nav class="flow-links" aria-label="Replication details">
