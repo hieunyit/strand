@@ -386,6 +386,41 @@ func (j Job) RetryDelay(attempt int) time.Duration {
 	return d
 }
 
+// NextRunAfter is the job's next regular due time after at: at + every_seconds for interval jobs, the
+// schedule's first occurrence strictly after at for cron/daily/weekly/monthly jobs. A schedule that cannot
+// be evaluated falls back to every_seconds, so a stored job always gets a due time.
+func (j Job) NextRunAfter(at time.Time) time.Time {
+	if s := j.EffectiveSchedule(); s.Kind != ScheduleInterval {
+		if n, err := s.Next(at, at); err == nil {
+			return n
+		}
+	}
+	return at.Add(time.Duration(j.EverySeconds) * time.Second).UTC()
+}
+
+// NextRunAfterFinish is next_run_at once a run of j (its state before the run is recorded: NextRunAt as
+// set by Begin or by an edit made during the run, ConsecutiveFailures before this run) finishes at
+// finished with status. Disabled jobs have none. A cancelled run keeps the due time it already has: the
+// schedule (or the edit that cancelled it) set it, and finishing must not push it a further interval
+// away. A failed run with retries left is retried after its back-off, but never later than the next
+// regular run.
+func (j Job) NextRunAfterFinish(status RunStatus, finished time.Time) *time.Time {
+	if !j.Enabled {
+		return nil
+	}
+	if status == RunStatusCancelled && j.NextRunAt != nil {
+		t := *j.NextRunAt
+		return &t
+	}
+	next := j.NextRunAfter(finished)
+	if status == RunStatusFailed {
+		if d := j.RetryDelay(j.ConsecutiveFailures + 1); d > 0 && finished.Add(d).Before(next) {
+			next = finished.Add(d).UTC()
+		}
+	}
+	return &next
+}
+
 // ValidatePITR checks that continuous log archiving (log_archive) is possible for the job's method. It is
 // separate from ValidateJob so that jobs stored before these rules existed can still be read, listed,
 // stopped and run as plain base backups; only saving and starting the log archiver enforce it.

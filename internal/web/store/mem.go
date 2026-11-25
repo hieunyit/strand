@@ -766,8 +766,11 @@ func (m *Mem) UpdateBackupJob(_ context.Context, j backup.Job) (bool, error) {
 			return false, backup.ErrConflict
 		}
 	}
-	j.UpdatedAt = nextBackupJobRevision(m.backupJobs[j.ID].UpdatedAt)
+	prev := m.backupJobs[j.ID]
+	j.UpdatedAt = nextBackupJobRevision(prev.UpdatedAt)
 	j.ConsecutiveFailures = 0
+	// As in PG, an edit does not touch the run state (only Begin/Finish/Recover/RecordMissed do).
+	j.RunStartedAt, j.RunFinishedAt, j.LastRunStatus = prev.RunStartedAt, prev.RunFinishedAt, prev.LastRunStatus
 	m.backupJobs[j.ID] = cloneBackupJob(j)
 	return true, nil
 }
@@ -825,7 +828,7 @@ func (m *Mem) BeginBackupJobRun(_ context.Context, id string, expectedUpdatedAt 
 	j.RunFinishedAt = nil
 	j.LastRunStatus = backup.RunStatusRunning
 	if j.Enabled {
-		next := startedAt.Add(time.Duration(j.EverySeconds) * time.Second)
+		next := j.NextRunAfter(startedAt)
 		j.NextRunAt = &next
 	}
 	m.backupJobs[id] = cloneBackupJob(j)
@@ -847,23 +850,12 @@ func (m *Mem) FinishBackupJobRun(_ context.Context, id string, startedAt time.Ti
 	finished := nextBackupJobRevision(*j.RunStartedAt)
 	j.RunFinishedAt = &finished
 	j.LastRunStatus = status
-	failuresBefore := j.ConsecutiveFailures
+	j.NextRunAt = j.NextRunAfterFinish(status, finished)
 	switch status {
 	case backup.RunStatusFailed:
 		j.ConsecutiveFailures++
 	case backup.RunStatusSucceeded:
 		j.ConsecutiveFailures = 0
-	}
-	if j.Enabled {
-		next := finished.Add(time.Duration(j.EverySeconds) * time.Second)
-		if status == backup.RunStatusFailed {
-			if d := j.RetryDelay(failuresBefore + 1); d > 0 {
-				next = finished.Add(d)
-			}
-		}
-		j.NextRunAt = &next
-	} else {
-		j.NextRunAt = nil
 	}
 	m.backupJobs[id] = cloneBackupJob(j)
 	return true, nil
@@ -882,7 +874,7 @@ func (m *Mem) RecoverBackupJobRun(_ context.Context, id string, expectedUpdatedA
 	j.RunFinishedAt = &finished
 	j.LastRunStatus = backup.RunStatusInterrupted
 	if j.Enabled {
-		next := finished.Add(time.Duration(j.EverySeconds) * time.Second)
+		next := j.NextRunAfter(finished)
 		j.NextRunAt = &next
 	} else {
 		j.NextRunAt = nil
