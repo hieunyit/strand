@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
+	"strand/internal/config"
 	"strand/internal/sshprofile"
 )
 
@@ -198,7 +199,7 @@ func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 	e := newCPEnv(t)
 	c, csrf := e.loginOK()
 	addr, identity, hosts := webTestSSHServer(t, t.TempDir())
-	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", hosts)
+	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", filepath.Join(t.TempDir(), "missing"))
 	key, err := os.ReadFile(identity)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +217,40 @@ func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 	params := url.Values{"intent": {"save-profile"}, "profile_id": {"shared-bastion"}, "profile_host": {net.JoinHostPort(host, port)},
 		"profile_user": {"strand"}, "profile_private_key": {string(key)}, "csrf": {csrf}}
 	formHeaders := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	expectedHosts, err := os.ReadFile(hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, expectedKey, _, _, err := ssh.ParseKnownHosts(expectedHosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := ssh.FingerprintSHA256(expectedKey)
+	params.Set("probe_host_key", "1")
+	params.Del("profile_private_key")
 	resp, body := e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, fingerprint) || !strings.Contains(body, `name="profile_confirm_host_key"`) {
+		t.Fatalf("show fingerprint before authenticating: %d", resp.StatusCode)
+	}
+	if _, found, err := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey); err != nil || found {
+		t.Fatal("probing must not save trust")
+	}
+	params.Del("probe_host_key")
+	params.Set("profile_private_key", string(key))
+	params.Set("profile_host_address", addr)
+	params.Set("profile_fingerprint", fingerprint)
+	resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "confirm the SSH host fingerprint") {
+		t.Fatalf("save without confirmation: %d", resp.StatusCode)
+	}
+	params.Set("profile_confirm_host_key", "1")
+	params.Set("profile_fingerprint", "SHA256:stale-fingerprint")
+	resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "the SSH host key changed") {
+		t.Fatalf("save with stale fingerprint: %d", resp.StatusCode)
+	}
+	params.Set("profile_fingerprint", fingerprint)
+	resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
 	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/tunnels?saved=1" {
 		t.Fatalf("save profile: status=%d body=%s", resp.StatusCode, body)
 	}
@@ -234,12 +268,24 @@ func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 			t.Fatalf("profile controls not rendered safely in %s: %d", page, resp.StatusCode)
 		}
 	}
+	settings, err := e.srv.savedTunnel(context.Background(), "shared-bastion")
+	if err != nil || settings.HostKey == nil || ssh.FingerprintSHA256(settings.HostKey) != fingerprint {
+		t.Fatalf("profile did not retain verified host key: %v", err)
+	}
+	forward, err := config.OpenSSHTunnelConfig(context.Background(), settings, webTestEchoServer(t))
+	if err != nil {
+		t.Fatalf("pipeline tunnel without a trust file: %v", err)
+	}
+	_ = forward.Close()
+	for _, field := range []string{"profile_host_address", "profile_fingerprint", "profile_confirm_host_key"} {
+		params.Del(field)
+	}
 	params.Set("profile_edit", "1")
 	params.Del("profile_private_key")
 	params.Set("profile_host", host)
 	params.Set("profile_port", "1")
 	resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
-	if resp.StatusCode != 400 || !strings.Contains(body, "SSH connection check failed") || !strings.Contains(body, `value="shared-bastion"`) {
+	if resp.StatusCode != 400 || !strings.Contains(body, "SSH address changed") || !strings.Contains(body, `value="shared-bastion"`) {
 		t.Fatalf("invalid edit: %d %s", resp.StatusCode, body)
 	}
 	if after, _, _ := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey); after != raw {

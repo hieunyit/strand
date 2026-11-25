@@ -1,12 +1,6 @@
 {{define "content"}}
 {{if .Body.Message}}<div class="alert alert-success" role="status">{{.Body.Message}}</div>{{end}}
 {{if .Body.Error}}<div class="alert alert-error" role="alert">{{.Body.Error}}</div>{{end}}
-<nav class="settings-nav" aria-label="Web settings">
-  <a href="/settings"{{if eq .Body.Section "general"}} aria-current="page"{{end}}>General</a>
-  <a href="/settings?section=security"{{if eq .Body.Section "security"}} aria-current="page"{{end}}>Security</a>
-  <a href="/settings?section=audit"{{if eq .Body.Section "audit"}} aria-current="page"{{end}}>Audit</a>
-  <a href="/settings?section=about"{{if eq .Body.Section "about"}} aria-current="page"{{end}}>Runtime</a>
-</nav>
 {{if eq .Body.Section "about"}}
 <section class="card" id="sec-about">
   <div class="cardhead"><h2>Runtime</h2></div>

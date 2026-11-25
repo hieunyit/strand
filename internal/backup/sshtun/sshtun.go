@@ -61,15 +61,10 @@ func OpenForStoredConnection(ctx context.Context, c backup.Connection, metadata 
 			return "", 0, nil, err
 		}
 		defer clear(cfg.PrivateKey)
-		cfg.HostKeysFile, err = tunnel.ConfiguredKnownHosts()
-		if err != nil {
-			return "", 0, nil, err
-		}
-	}
-	if strings.TrimSpace(cfg.HostKeysFile) == "" {
+	} else if strings.TrimSpace(cfg.HostKeysFile) == "" {
 		return "", 0, nil, errors.New("ssh_tunnel needs known_hosts_ref")
 	}
-	if err := ValidateSecurity(cfg.IdentityFile, cfg.HostKeysFile); err != nil {
+	if err := cfg.PrepareServiceTrust(); err != nil {
 		return "", 0, nil, err
 	}
 	remotePort := c.Port

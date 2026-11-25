@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"strand/internal/tunnel"
 	"strand/internal/web/store"
 )
@@ -28,6 +30,7 @@ type Profile struct {
 	User         string `json:"user"`
 	IdentityFile string `json:"identity_file,omitempty"`
 	SealedKey    []byte `json:"sealed_key,omitempty"`
+	HostKey      []byte `json:"host_key,omitempty"`
 }
 
 func (p Profile) Address() string { return net.JoinHostPort(p.Host, strconv.Itoa(p.Port)) }
@@ -114,9 +117,17 @@ func Load(ctx context.Context, dsn, id string) (Profile, error) {
 }
 
 func (p Profile) TunnelConfig(box *store.Box) (tunnel.Config, error) {
+	var hostKey ssh.PublicKey
+	if len(p.HostKey) > 0 {
+		var err error
+		hostKey, err = ssh.ParsePublicKey(p.HostKey)
+		if err != nil {
+			return tunnel.Config{}, errors.New("stored SSH host key is invalid")
+		}
+	}
 	key, err := p.OpenKey(box)
 	if err != nil {
 		return tunnel.Config{}, err
 	}
-	return tunnel.Config{SSHAddress: p.Address(), SSHUser: p.User, IdentityFile: p.IdentityFile, PrivateKey: key}, nil
+	return tunnel.Config{SSHAddress: p.Address(), SSHUser: p.User, IdentityFile: p.IdentityFile, PrivateKey: key, HostKey: hostKey}, nil
 }

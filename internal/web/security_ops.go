@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"strand/internal/admin"
 	"strand/internal/spool"
 	"strand/internal/tunnel"
@@ -26,7 +28,7 @@ func readJSON(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-func validateTunnelParams(sshAddr, remoteAddr, listenAddr, identityFile, knownHosts string) error {
+func validateTunnelParams(sshAddr, remoteAddr, listenAddr string) error {
 	if strings.TrimSpace(sshAddr) == "" {
 		return errors.New("ssh: bastion host:port is required")
 	}
@@ -68,9 +70,6 @@ func validateTunnelParams(sshAddr, remoteAddr, listenAddr, identityFile, knownHo
 		return errors.New("listen: local listen address must be on loopback (127.0.0.1)")
 	}
 
-	if err := tunnel.ValidateSecurity(identityFile, knownHosts); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -276,33 +275,29 @@ func (s *Server) validateArchiveDir(dir string) (string, error) {
 // ---- Tunnel HTTP Handlers ----
 
 func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user, remote, listen, identity, knownHosts string, profile string) (tunnelItem, error) {
-	var privateKey []byte
+	cfg := tunnel.Config{SSHAddress: sshAddr, SSHUser: user, IdentityFile: identity, HostKeysFile: knownHosts}
 	if profile != "" {
-		saved, err := s.savedTunnel(ctx, profile)
+		var err error
+		cfg, err = s.savedTunnel(ctx, profile)
 		if err != nil {
 			return tunnelItem{}, err
 		}
-		sshAddr, user, identity, knownHosts = saved.SSHAddress, saved.SSHUser, saved.IdentityFile, ""
-		privateKey = saved.PrivateKey
-		defer clear(privateKey)
+		defer clear(cfg.PrivateKey)
 	}
-	if strings.TrimSpace(user) == "" {
+	if strings.TrimSpace(cfg.SSHUser) == "" {
 		return tunnelItem{}, errors.New("ssh user is required")
 	}
 	if strings.TrimSpace(listen) == "" {
 		listen = "127.0.0.1:0"
 	}
-	useServerTrust := strings.TrimSpace(knownHosts) == ""
-	if useServerTrust {
-		var err error
-		knownHosts, err = tunnel.ConfiguredKnownHosts()
-		if err != nil {
-			return tunnelItem{}, fmt.Errorf("find server SSH host keys: %w", err)
-		}
+	cfg.Remote, cfg.LocalAddress = remote, listen
+	sshAddr, user = cfg.SSHAddress, cfg.SSHUser
+	if err := validateTunnelParams(sshAddr, remote, listen); err != nil {
+		return tunnelItem{}, err
 	}
-	if err := validateTunnelParams(sshAddr, remote, listen, identity, knownHosts); err != nil {
-		if useServerTrust && strings.HasPrefix(err.Error(), "known_hosts:") {
-			return tunnelItem{}, fmt.Errorf("configure the Web server's SSH trust file with STRAND_WEB_SSH_KNOWN_HOSTS or ~/.ssh/known_hosts: %w", err)
+	if err := cfg.PrepareServiceTrust(); err != nil {
+		if knownHosts == "" && strings.HasPrefix(err.Error(), "known_hosts:") {
+			return tunnelItem{}, fmt.Errorf("configure the server's SSH trust file or confirm the fingerprint in SSH Tunnels: %w", err)
 		}
 		return tunnelItem{}, err
 	}
@@ -315,7 +310,7 @@ func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user
 		cancel()
 		return tunnelItem{}, err
 	}
-	fwd, err := tunnel.Start(ctx, tunnel.Config{SSHAddress: sshAddr, SSHUser: user, Remote: remote, LocalAddress: listen, IdentityFile: identity, HostKeysFile: knownHosts, PrivateKey: privateKey})
+	fwd, err := tunnel.Start(ctx, cfg)
 	if err != nil {
 		cancel()
 		_ = s.auditSensitive(r, "tunnel.start", map[string]any{"ssh": sshAddr, "remote": remote, "error": err.Error()}, "error")
@@ -425,15 +420,27 @@ func (s *Server) pageTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Se
 		s.renderError(w, r, sess, http.StatusBadRequest, "invalid SSH tunnel form")
 		return
 	}
-	if r.FormValue("intent") == "save-profile" {
-		form := sshProfileFormFromRequest(r)
-		if err := s.saveSSHProfile(r, form); err != nil {
+	if r.PostForm.Get("intent") == "save-profile" {
+		view := tunnelView{Profiles: s.sshProfileViews(r.Context()), Form: sshProfileFormFromRequest(r)}
+		show := r.PostForm.Get("probe_host_key") == "1"
+		var hostKey ssh.PublicKey
+		var err error
+		if show || r.PostForm.Get("profile_fingerprint") != "" || r.PostForm.Get("profile_confirm_host_key") != "" {
+			view.HostPreview, hostKey, err = sshProfileHostPreview(r, view.Form, show)
+		}
+		if err == nil && !show {
+			err = s.saveSSHProfile(r, view.Form, hostKey)
+			if err == nil {
+				http.Redirect(w, r, "/tunnels?saved=1", http.StatusSeeOther)
+				return
+			}
+		}
+		if err != nil {
+			view.Error = err.Error()
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			s.renderTunnel(w, sess, tunnelView{Profiles: s.sshProfileViews(r.Context()), Form: form, Error: err.Error()})
-			return
 		}
-		http.Redirect(w, r, "/tunnels?saved=1", http.StatusSeeOther)
+		s.renderTunnel(w, sess, view)
 		return
 	}
 	ssh := r.FormValue("ssh")

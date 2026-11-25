@@ -14,6 +14,19 @@
         <label class="field">SSH host<input name="profile_host" required value="{{.Body.Form.Host}}" placeholder="bastion.example.com"></label>
         <label class="field">SSH port<input name="profile_port" type="number" min="1" max="65535" value="{{.Body.Form.Port}}" placeholder="22"></label>
       </div>
+      <div class="form-actions">
+        <button type="submit" class="btn" name="probe_host_key" value="1">Show fingerprint</button>
+      </div>
+      {{with .Body.HostPreview}}
+      <div class="alert alert-info" role="group" aria-label="SSH host fingerprint">
+        <p><strong>{{.Address}}</strong> · {{.KeyType}}<br><code>{{.Fingerprint}}</code></p>
+        <input type="hidden" name="profile_host_address" value="{{.Address}}">
+        <input type="hidden" name="profile_fingerprint" value="{{.Fingerprint}}">
+        <label class="check"><input type="checkbox" name="profile_confirm_host_key" value="1"><span>I verified this fingerprint with a trusted source.</span></label>
+      </div>
+      {{else}}
+      <p class="field-hint">For a new SSH server, show its fingerprint before entering your private key.</p>
+      {{end}}
       <label class="field">SSH private key
         <textarea name="profile_private_key" class="mono" rows="4" maxlength="49152" spellcheck="false" autocomplete="off"></textarea>
         <small class="field-hint">{{if .Body.Form.Edit}}Leave blank to keep the current credentials.{{else}}Paste a key to store it encrypted, or leave blank to use the server's SSH agent.{{end}}</small>

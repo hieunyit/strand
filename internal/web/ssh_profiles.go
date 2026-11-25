@@ -98,7 +98,38 @@ func (f sshProfileForm) profile() (sshprofile.Profile, error) {
 	return p, (&config.SSHTunnelConfig{Host: p.Host, Port: p.Port, User: p.User}).Validate("mysql")
 }
 
-func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm) error {
+type sshHostPreview struct {
+	Address, Fingerprint, KeyType string
+}
+
+func sshProfileHostPreview(r *http.Request, form sshProfileForm, show bool) (*sshHostPreview, ssh.PublicKey, error) {
+	p, err := form.profile()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !show && r.PostForm.Get("profile_host_address") != p.Address() {
+		return nil, nil, errors.New("SSH address changed. Show its fingerprint again")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	key, err := tunnel.ProbeHostKey(ctx, p.Address())
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not read the SSH host key for %s: %w", p.Address(), err)
+	}
+	preview := &sshHostPreview{Address: p.Address(), Fingerprint: ssh.FingerprintSHA256(key), KeyType: key.Type()}
+	if show {
+		return preview, nil, nil
+	}
+	if r.PostForm.Get("profile_fingerprint") != preview.Fingerprint {
+		return preview, nil, errors.New("the SSH host key changed. Verify the new fingerprint before confirming")
+	}
+	if r.PostForm.Get("profile_confirm_host_key") != "1" {
+		return preview, nil, errors.New("confirm the SSH host fingerprint before saving")
+	}
+	return preview, key, nil
+}
+
+func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ssh.PublicKey) error {
 	p, err := form.profile()
 	if err != nil {
 		return err
@@ -123,6 +154,14 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm) error {
 		previous = profiles[index]
 		p.IdentityFile, p.SealedKey = previous.IdentityFile, previous.SealedKey
 		action = "tunnel.profile.update"
+		if p.Address() == previous.Address() {
+			p.HostKey = previous.HostKey
+		} else if len(previous.HostKey) != 0 && hostKey == nil {
+			return errors.New("SSH address changed. Show and confirm the new fingerprint before saving")
+		}
+	}
+	if hostKey != nil {
+		p.HostKey = hostKey.Marshal()
 	}
 	key, err := profilePrivateKey(r.PostForm.Get("profile_private_key"), r.PostForm.Get("profile_key_passphrase"))
 	if err != nil {
@@ -157,6 +196,9 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm) error {
 			profiles = append(profiles, p)
 		}
 		detail := map[string]any{"profile": p.ID, "host": p.Host, "user": p.User, "stored_key": len(p.SealedKey) > 0}
+		if hostKey != nil {
+			detail["host_key_fingerprint"] = ssh.FingerprintSHA256(hostKey)
+		}
 		if err := s.auditSensitive(r, action, detail, "started"); err != nil {
 			return err
 		}
@@ -225,13 +267,9 @@ func (s *Server) checkSSHProfile(ctx context.Context, p sshprofile.Profile) erro
 		return err
 	}
 	defer clear(cfg.PrivateKey)
-	cfg.HostKeysFile, err = tunnel.ConfiguredKnownHosts()
-	if err != nil {
-		return fmt.Errorf("SSH trust is unavailable. Check the server's trusted host keys: %w", err)
-	}
-	if err := tunnel.ValidateSecurity(cfg.IdentityFile, cfg.HostKeysFile); err != nil {
-		if strings.HasPrefix(err.Error(), "known_hosts:") {
-			return fmt.Errorf("configure the server's trusted SSH host keys with STRAND_WEB_SSH_KNOWN_HOSTS: %w", err)
+	if err := cfg.PrepareServiceTrust(); err != nil {
+		if cfg.HostKey == nil && !strings.HasPrefix(err.Error(), "identity_file:") {
+			return fmt.Errorf("use Show fingerprint to verify this SSH server on the Web: %w", err)
 		}
 		return fmt.Errorf("SSH key configuration is invalid on the server: %w", err)
 	}

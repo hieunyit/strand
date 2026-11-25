@@ -19,13 +19,13 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// Config describes an SSH local forward. HostKeysFile is required; this package
-// never accepts unknown or changed host keys automatically.
+// Config describes an SSH local forward. Supply a pinned HostKey or a trusted HostKeysFile.
 type Config struct {
 	SSHAddress   string // host:port; port defaults to 22
 	SSHUser      string
 	IdentityFile string
 	PrivateKey   []byte // in-memory SSH identity, mutually exclusive with IdentityFile
+	HostKey      ssh.PublicKey
 	HostKeysFile string
 	LocalAddress string // host:port; bind to loopback by default
 	Remote       string // host:port as resolved from the SSH server
@@ -51,9 +51,6 @@ func Start(ctx context.Context, cfg Config) (*Forward, error) {
 	}
 	if strings.TrimSpace(cfg.SSHAddress) == "" || strings.TrimSpace(cfg.SSHUser) == "" || strings.TrimSpace(cfg.Remote) == "" {
 		return nil, errors.New("tunnel: SSH address, SSH user, and remote address are required")
-	}
-	if cfg.HostKeysFile == "" {
-		return nil, errors.New("tunnel: known_hosts file is required")
 	}
 	if cfg.LocalAddress == "" {
 		cfg.LocalAddress = "127.0.0.1:0"
@@ -104,34 +101,62 @@ func Check(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+// ProbeHostKey reads the server key and aborts before exchanging credentials.
+func ProbeHostKey(ctx context.Context, address string) (ssh.PublicKey, error) {
+	var offered ssh.PublicKey
+	cfg := &ssh.ClientConfig{User: "strand-host-key-check", HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		offered = key
+		return errors.New("SSH host key probe stops before authentication")
+	}}
+	client, err := handshake(ctx, address, 0, cfg)
+	if client != nil {
+		_ = client.Close()
+	}
+	if offered != nil {
+		return offered, nil
+	}
+	return nil, err
+}
+
 func connect(ctx context.Context, cfg Config) (*ssh.Client, error) {
-	if ctx == nil {
-		return nil, errors.New("tunnel: context is required")
+	if strings.TrimSpace(cfg.SSHUser) == "" {
+		return nil, errors.New("tunnel: SSH user is required")
 	}
-	if strings.TrimSpace(cfg.SSHAddress) == "" || strings.TrimSpace(cfg.SSHUser) == "" || cfg.HostKeysFile == "" {
-		return nil, errors.New("tunnel: SSH address, SSH user, and known_hosts file are required")
-	}
-	sshAddr, err := normalizeSSHAddress(cfg.SSHAddress)
-	if err != nil {
-		return nil, err
-	}
-	hostKeys, err := knownhosts.New(cfg.HostKeysFile)
-	if err != nil {
-		return nil, fmt.Errorf("tunnel: load known_hosts: %w", err)
+	var hostKeys ssh.HostKeyCallback
+	if cfg.HostKey != nil {
+		hostKeys = ssh.FixedHostKey(cfg.HostKey)
+	} else {
+		if cfg.HostKeysFile == "" {
+			return nil, errors.New("tunnel: trusted host key or known_hosts file is required")
+		}
+		var err error
+		hostKeys, err = knownhosts.New(cfg.HostKeysFile)
+		if err != nil {
+			return nil, fmt.Errorf("tunnel: load known_hosts: %w", err)
+		}
 	}
 	auth, cleanup, err := authMethods(cfg.IdentityFile, cfg.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
-	if cfg.HandshakeTimeout <= 0 {
-		cfg.HandshakeTimeout = 15 * time.Second
-	}
-	clientCfg := &ssh.ClientConfig{
+	return handshake(ctx, cfg.SSHAddress, cfg.HandshakeTimeout, &ssh.ClientConfig{
 		User: cfg.SSHUser, Auth: auth, HostKeyCallback: hostKeys,
-		Timeout: cfg.HandshakeTimeout,
+	})
+}
+
+func handshake(ctx context.Context, address string, timeout time.Duration, clientCfg *ssh.ClientConfig) (*ssh.Client, error) {
+	if ctx == nil {
+		return nil, errors.New("tunnel: context is required")
 	}
-	dialer := &net.Dialer{Timeout: cfg.HandshakeTimeout, KeepAlive: 30 * time.Second}
+	sshAddr, err := normalizeSSHAddress(address)
+	if err != nil {
+		return nil, err
+	}
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", sshAddr)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: connect to SSH server: %w", err)
@@ -139,7 +164,7 @@ func connect(ctx context.Context, cfg Config) (*ssh.Client, error) {
 	// ClientConfig.Timeout only applies to ssh.Dial; with NewClientConn a server that accepts TCP but never
 	// speaks SSH would block forever (and with it the backup job's execution lock). Bound the handshake by
 	// a deadline and by ctx.
-	_ = conn.SetDeadline(time.Now().Add(cfg.HandshakeTimeout))
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 	stopWatch := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	cc, chans, reqs, err := ssh.NewClientConn(conn, sshAddr, clientCfg)
 	stopWatch()
@@ -355,6 +380,25 @@ func ValidateSecurity(identityFile, knownHosts string) error {
 		return fmt.Errorf("known_hosts: cannot load trusted host keys: %w", err)
 	}
 
+	return validateIdentityFile(identityFile)
+}
+
+// PrepareServiceTrust resolves the configured trust file for profiles without a pinned host key.
+func (cfg *Config) PrepareServiceTrust() error {
+	if cfg.HostKey != nil {
+		return validateIdentityFile(cfg.IdentityFile)
+	}
+	if cfg.HostKeysFile == "" {
+		file, err := ConfiguredKnownHosts()
+		if err != nil {
+			return err
+		}
+		cfg.HostKeysFile = file
+	}
+	return ValidateSecurity(cfg.IdentityFile, cfg.HostKeysFile)
+}
+
+func validateIdentityFile(identityFile string) error {
 	if strings.TrimSpace(identityFile) != "" {
 		keyDir := os.Getenv("STRAND_WEB_SSH_KEY_DIR")
 		if keyDir == "" {

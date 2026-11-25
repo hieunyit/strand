@@ -419,6 +419,7 @@ pre.box { margin: 0; padding: var(--sp-3) var(--sp-4); background: var(--surface
 /* ---------- tabs ---------- */
 .tabs { display: flex; gap: var(--sp-1); border-bottom: 1px solid var(--line); margin: 0 0 var(--sp-4); overflow-x: auto; scrollbar-width: thin; }
 .page-content > .tabs { margin: 0; }
+.sectiontabs[data-section="system-settings"] { flex-wrap: wrap; overflow: visible; }
 .tabs a, .tabs .tab { display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 var(--sp-3); color: var(--ink-2); border: 0; background: none; font: inherit; font-size: var(--fs-sm); font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; text-decoration: none; }
 .tabs a .ic, .tabs .tab .ic { color: var(--muted); width: 15px; height: 15px; }
 .tabs a:hover, .tabs .tab:hover { text-decoration: none; color: var(--ink); }
@@ -1049,10 +1050,6 @@ fieldset.wiz-step[hidden] { display: none; }
 @media (max-width: 960px) { .detail-layout, .wiz-layout { grid-template-columns: minmax(0, 1fr); } .wiz-summary { position: static; } }
 
 /* Settings */
-.settings-nav { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-4); }
-.settings-nav a { padding: 8px 12px; border-radius: var(--r-sm); color: var(--ink-2); }
-.settings-nav a:hover, .settings-nav a[aria-current="page"] { background: var(--surface-2); color: var(--ink); text-decoration: none; }
-.settings-nav a[aria-current="page"] { font-weight: 600; }
 
 /* Quick search (Ctrl+K) */
 .qsearch-btn kbd { margin-left: 6px; }

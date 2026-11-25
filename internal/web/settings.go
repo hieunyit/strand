@@ -469,12 +469,14 @@ func (s *Server) setSetting(ctx context.Context, key string, val string) error {
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Session) {
 	b := settingsBody{Section: r.URL.Query().Get("section")}
+	active := "settings"
 	switch b.Section {
 	case "security":
-		b.SectionLabel = "Security"
+		b.SectionLabel, active = "Security", "settings-security"
 	case "audit":
-		b.SectionLabel = "Audit"
+		b.SectionLabel, active = "Audit", "settings-audit"
 	case "about":
+		active = "settings-runtime"
 		b.Bootstrap = s.bootstrapSettings()
 	default:
 		b.Section, b.SectionLabel = "general", "General"
@@ -531,7 +533,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Sess
 		}
 		b.Items = sectionItems()
 	}
-	s.render(w, "settings", sess, pageData{Title: "Settings", Active: "settings", Body: b})
+	s.render(w, "settings", sess, pageData{Title: "Settings", Active: active, Body: b})
 }
 
 // bootstrapSettings: các giá trị chỉ đọc (web.yaml/env), hiện để tham khảo.

@@ -105,9 +105,9 @@
       </div>
       {{if .Actions}}<div class="pagehead-actions" role="toolbar" aria-label="Page actions">{{.Actions}}</div>{{end}}
     </header>
-    {{if .SectionTabs}}<nav class="tabs sectiontabs" aria-label="{{t "nav.section_pages"}}">{{range .SectionTabs}}<a class="tab{{if .Active}} active{{end}}" href="{{.URL}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{t .Label}}</span></a>{{end}}</nav>{{end}}
+    {{if .SectionTabs}}<nav class="tabs sectiontabs" data-section="{{.Section}}" aria-label="{{t "nav.section_pages"}}">{{range .SectionTabs}}<a class="tab{{if .Active}} active{{end}}" href="{{.URL}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{t .Label}}</span></a>{{end}}</nav>{{end}}
     {{if .SummaryStrip}}<section class="summary-strip" aria-label="Status summary">{{.SummaryStrip}}</section>{{end}}
-    <p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>
+    {{if ne .Section "system-settings"}}<p class="asof" id="asof">{{if .Live}}<span class="asof-live">Live</span> &middot; sampled every {{.Interval}} s in the background &middot; page rendered <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{else}}Data as of <time datetime="{{.AsOf.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .AsOf}}</time>{{if .Refresh}} &middot; refreshes every {{.Refresh}} s{{else}} &middot; auto-refresh off for this page (reload to update){{end}}{{end}}</p>{{end}}
     <div class="page-content">
       {{template "content" .}}
     </div>

@@ -150,6 +150,20 @@ func TestRejectsChangedHostKeyAtSameAddress(t *testing.T) {
 	}
 }
 
+func TestPinnedHostKeyRejectsDifferentServerEvenWithTrustedFile(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	srv := startSSHServer(t, false)
+	other := startSSHServer(t, false)
+	key, err := ProbeHostKey(context.Background(), other.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{SSHAddress: srv.addr, SSHUser: "u", IdentityFile: srv.identity, HostKey: key, HostKeysFile: srv.knownHost}
+	if err := Check(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "host key mismatch") {
+		t.Fatalf("expected mismatched pin to fail even with a matching known_hosts file: %v", err)
+	}
+}
+
 func mustParseHostKey(t *testing.T, encoded string) ssh.PublicKey {
 	t.Helper()
 	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(encoded))

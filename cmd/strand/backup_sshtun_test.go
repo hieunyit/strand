@@ -14,6 +14,7 @@ import (
 	"strand/internal/backup"
 	"strand/internal/backup/sshtun"
 	"strand/internal/sshprofile"
+	"strand/internal/tunnel"
 	"strand/internal/tunnel/tunneltest"
 	"strand/internal/web/store"
 )
@@ -203,7 +204,7 @@ func TestManagedBackupUsesSavedSSHProfile(t *testing.T) {
 	srv := tunneltest.StartSSHServer(t, false)
 	const secret = "backup-tunnel-test-key"
 	t.Setenv("STRAND_WEB_SECRET_KEY", secret)
-	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", srv.KnownHostsFile())
+	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", filepath.Join(t.TempDir(), "missing"))
 	box, err := store.NewBox(secret)
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +215,11 @@ func TestManagedBackupUsesSavedSSHProfile(t *testing.T) {
 	}
 	host, portText, _ := net.SplitHostPort(srv.Addr())
 	port, _ := strconv.Atoi(portText)
-	profile := sshprofile.Profile{ID: "shared-ops", Host: host, Port: port, User: "ops"}
+	hostKey, err := tunnel.ProbeHostKey(ctx, srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := sshprofile.Profile{ID: "shared-ops", Host: host, Port: port, User: "ops", HostKey: hostKey.Marshal()}
 	profile.SealedKey, err = profile.SealKey(box, key)
 	if err != nil {
 		t.Fatal(err)

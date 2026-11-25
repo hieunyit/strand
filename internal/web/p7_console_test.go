@@ -58,7 +58,7 @@ func TestSidebarGroupsAndRoleLinks(t *testing.T) {
 		"/archive":             {`href="/tunnels"`, `href="/tools/spool-inspect"`},
 		"/backups/connections": {`href="/backups/repositories"`, `href="/backups/policies"`, `href="/backups/keys"`, `href="/backups/notifications"`, `href="/backups/tools"`},
 		"/backups/reports":     {`href="/backups/activity"`},
-		"/settings":            {`href="/settings/db"`, `href="/mcp"`, `href="/help/schema"`},
+		"/settings":            {`href="/settings?section=security"`, `href="/settings?section=audit"`, `href="/settings?section=about"`, `href="/settings/db"`, `href="/mcp"`, `href="/help/schema"`},
 	} {
 		code, body := e.admin().do("GET", path, nil)
 		if code != 200 {
@@ -126,8 +126,15 @@ func TestEnvironmentChipAndSectionedSettings(t *testing.T) {
 	}
 	for _, section := range []string{"general", "security", "audit", "about"} {
 		resp, page := e.do(c, "GET", "/settings?section="+section, "", nil)
-		if resp.StatusCode != 200 || !strings.Contains(page, `id="sec-`+section+`"`) || !strings.Contains(page, `class="settings-nav"`) {
+		if resp.StatusCode != 200 || !strings.Contains(page, `id="sec-`+section+`"`) || strings.Count(page, `class="tabs sectiontabs"`) != 1 || strings.Contains(page, `class="settings-nav"`) {
 			t.Errorf("settings section %s did not render with its navigation: %d", section, resp.StatusCode)
+		}
+		active := "/settings?section=" + section
+		if section == "general" {
+			active = "/settings"
+		}
+		if !strings.Contains(page, `href="`+active+`" aria-current="page"`) {
+			t.Errorf("settings section %s did not mark its link as active", section)
 		}
 		for _, other := range []string{"general", "security", "audit", "about"} {
 			if other != section && strings.Contains(page, `id="sec-`+other+`"`) {

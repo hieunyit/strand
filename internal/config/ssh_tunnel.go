@@ -99,15 +99,11 @@ func (c *SSHTunnelConfig) Open(ctx context.Context, kind, remote string) (*tunne
 
 // OpenSSHTunnelConfig uses the trust and identity policy of the Strand service.
 func OpenSSHTunnelConfig(ctx context.Context, settings tunnel.Config, remote string) (*tunnel.Forward, error) {
-	keys, err := tunnel.ConfiguredKnownHosts()
-	if err != nil {
-		return nil, err
-	}
-	if err := tunnel.ValidateSecurity(settings.IdentityFile, keys); err != nil {
-		return nil, err
-	}
-	settings.HostKeysFile, settings.Remote = keys, remote
 	defer clear(settings.PrivateKey)
+	if err := settings.PrepareServiceTrust(); err != nil {
+		return nil, err
+	}
+	settings.Remote = remote
 	return tunnel.Start(ctx, settings)
 }
 

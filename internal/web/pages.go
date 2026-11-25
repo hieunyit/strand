@@ -535,7 +535,10 @@ var sections = map[string][]sectionPage{
 		{"backups-activity", "nav.activity", "/backups/activity", "logs", true},
 	},
 	"system-settings": {
-		{"settings", "nav.settings", "/settings", "config", true},
+		{"settings", "nav.settings_general", "/settings", "config", true},
+		{"settings-security", "nav.settings_security", "/settings?section=security", "flag", true},
+		{"settings-audit", "nav.settings_audit", "/settings?section=audit", "logs", true},
+		{"settings-runtime", "nav.settings_runtime", "/settings?section=about", "server", true},
 		{"db-admin", "nav.metadata_database", "/settings/db", "db", true},
 		{"mcp", "nav.mcp", "/mcp", "bolt", false},
 		{"schema-help", "nav.config_reference", "/help/schema", "table", false},
@@ -1043,11 +1046,12 @@ type activeTunnel struct {
 }
 
 type tunnelView struct {
-	Profiles []sshProfileView
-	Tunnels  []tunnelItem
-	Form     sshProfileForm
-	Error    string
-	Saved    bool
+	Profiles    []sshProfileView
+	Tunnels     []tunnelItem
+	Form        sshProfileForm
+	Error       string
+	Saved       bool
+	HostPreview *sshHostPreview
 }
 
 type dbMigrateReport struct {
