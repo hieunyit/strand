@@ -159,7 +159,7 @@
 {{end}}
 
 {{if eq .Tab "errors"}}
-  {{if .Errors.LiveErr}}<section class="card"><div class="cardhead"><h2>Recent log entries</h2><a href="/pipelines/{{.View.Name}}/logs">View logs</a></div>{{template "events" .Errors.FromLog}}</section>{{end}}
+  {{if .Errors.LiveErr}}<section class="card"><div class="cardhead"><h2>Recent log entries</h2><a href="/pipelines/{{.View.Name}}/logs">View logs</a></div>{{template "error-log-tail" .Errors}}</section>{{end}}
   <section class="card"><div class="cardhead"><h2>Recent warnings and errors <span class="muted small">running process, last 200, newest last; new ones appear live</span></h2></div>
     {{if .Errors.LiveErr}}{{template "error-state" (errState "Live events are not available" .Errors.LiveErr)}}{{end}}
     <div class="tablewrap tall" id="live-events-wrap"><table class="data-table grid"><caption class="sr-only">Recent warnings and errors of the running process</caption><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody id="live-events">
@@ -167,7 +167,7 @@
     {{end}}<tr class="empty-row"{{if or .Errors.Live .Errors.LiveErr}} hidden{{end}}><td colspan="3"><div class="empty-state">{{icon "check"}}<b>No warnings or errors</b><span>The running process has logged nothing at warning level or above.</span></div></td></tr>
     </tbody></table></div>
   </section>
-  {{if not .Errors.LiveErr}}<section class="card"><div class="cardhead"><h2>From the log tail</h2></div>{{template "events" .Errors.FromLog}}</section>{{end}}
+  {{if not .Errors.LiveErr}}<section class="card"><div class="cardhead"><h2>From the log tail</h2></div>{{template "error-log-tail" .Errors}}</section>{{end}}
 {{end}}
 
 {{if eq .Tab "config"}}
@@ -407,6 +407,15 @@
 </div>
 {{template "pipeline-props" .}}
 </div>
+{{end}}
+{{end}}
+
+{{define "error-log-tail"}}
+{{if .LogErr}}
+  {{template "error-state" (errState "Log tail is not available" .LogErr)}}
+{{else}}
+  {{if not .LogReadAt.IsZero}}<p class="card-desc">Log read at <time datetime="{{.LogReadAt.Format "2006-01-02T15:04:05Z07:00"}}">{{clock .LogReadAt}}</time></p>{{end}}
+  {{template "events" .FromLog}}
 {{end}}
 {{end}}
 
