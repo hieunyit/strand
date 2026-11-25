@@ -187,7 +187,18 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	started := e.now()
-	meta, res, err := e.stream(runCtx, job, repo, key, enc)
+	// Record the stored object version and its Object Lock retention as soon as the upload succeeds: a
+	// later step can still fail the run, and a failed record without them would let DeleteRecord pass
+	// the lock check and delete only the current version (leaving the locked version behind, billed).
+	stored := func(res PayloadResult) error {
+		var m backup.Meta
+		applyPayloadMeta(&m, res, enc)
+		if _, _, err := e.Catalog.UpdateMeta(ctx, id, rec.Engine, m); err != nil {
+			return fmt.Errorf("record uploaded payload version: %w", err)
+		}
+		return nil
+	}
+	meta, res, err := e.stream(runCtx, job, repo, key, enc, stored)
 	if err != nil {
 		return fail(err)
 	}
@@ -209,21 +220,27 @@ func (e *Env) RunJob(ctx context.Context, job backup.Job) (rec backup.Record, er
 		meta.Details["database_scope"] = "all"
 	}
 	meta.Details["duration_ms"] = fmt.Sprint(e.now().Sub(started).Milliseconds())
-	meta.Format, meta.PlainBytes, meta.PlainSHA256, meta.VersionID = res.Format, res.Plain.PlainBytes, res.Plain.PlainSHA256, res.Object.VersionID
-	if enc.Compress {
-		meta.Compression = backup.CompressionZstd
-	}
-	if enc.Key != nil {
-		meta.KeyID = enc.Key.ID
-	}
-	if res.Lock.LockMode != "" {
-		t := res.Lock.RetainUntil
-		meta.LockMode, meta.RetainUntil = res.Lock.LockMode, &t
-	}
+	applyPayloadMeta(&meta, res, enc)
 	if rec, _, err = e.Catalog.UpdateMeta(ctx, id, rec.Engine, meta); err != nil {
 		return fail(fmt.Errorf("record backup metadata: %w", err))
 	}
 	return e.finalize(ctx, repo, rec, res.Object.Size, res.Object.SHA256, job.Retention.LockDays, fail)
+}
+
+// applyPayloadMeta copies what the upload of a payload determined (format, plaintext digest, object
+// version and Object Lock retention) into m.
+func applyPayloadMeta(m *backup.Meta, res PayloadResult, enc backup.EncodeOptions) {
+	m.Format, m.PlainBytes, m.PlainSHA256, m.VersionID = res.Format, res.Plain.PlainBytes, res.Plain.PlainSHA256, res.Object.VersionID
+	if enc.Compress {
+		m.Compression = backup.CompressionZstd
+	}
+	if enc.Key != nil {
+		m.KeyID = enc.Key.ID
+	}
+	if res.Lock.LockMode != "" {
+		t := res.Lock.RetainUntil
+		m.LockMode, m.RetainUntil = res.Lock.LockMode, &t
+	}
 }
 
 // finalize verifies the stored payload, writes the manifest sidecar and completes the record.
@@ -285,7 +302,9 @@ func (e *Env) finalize(ctx context.Context, repo *Repository, rec backup.Record,
 }
 
 // stream runs the method's tool and stores its output.
-func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions) (backup.Meta, PayloadResult, error) {
+// stored is called once the payload is uploaded, before any later step that can fail.
+func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions,
+	stored func(PayloadResult) error) (backup.Meta, PayloadResult, error) {
 	var meta backup.Meta
 	var inv Invocation
 	var err error
@@ -321,7 +340,7 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 		if job.Conn.TLSMode != "" {
 			return meta, PayloadResult{}, errors.New("mydumper cannot enforce the saved TLS policy")
 		}
-		return e.streamMydumper(ctx, job, repo, key, enc)
+		return e.streamMydumper(ctx, job, repo, key, enc, stored)
 	default:
 		return meta, PayloadResult{}, fmt.Errorf("unsupported method %q", job.Method)
 	}
@@ -385,6 +404,9 @@ func (e *Env) stream(ctx context.Context, job backup.Job, repo *Repository, key 
 	}
 
 	if err != nil {
+		return meta, res, err
+	}
+	if err := stored(res); err != nil {
 		return meta, res, err
 	}
 	if err := proc.Wait(); err != nil {
@@ -523,7 +545,8 @@ func (e *Env) queryBackupObjects(ctx context.Context, job backup.Job, mongoURI s
 	return nil
 }
 
-func (e *Env) streamMydumper(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions) (backup.Meta, PayloadResult, error) {
+func (e *Env) streamMydumper(ctx context.Context, job backup.Job, repo *Repository, key string, enc backup.EncodeOptions,
+	stored func(PayloadResult) error) (backup.Meta, PayloadResult, error) {
 	var meta backup.Meta
 	proc, err := Start(ctx, e.Getenv, MydumperInvocation(e.Getenv, job.Conn), nil, e.Log)
 	if err != nil {
@@ -543,5 +566,8 @@ func (e *Env) streamMydumper(ctx context.Context, job backup.Job, repo *Reposito
 	}
 	defer tarStream.Close()
 	res, err := repo.StorePayload(ctx, key, tarStream, enc, job.Retention.LockDays, job.BandwidthKBps)
+	if err == nil {
+		err = stored(res)
+	}
 	return meta, res, err
 }
