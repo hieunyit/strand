@@ -77,7 +77,7 @@ func (c *SSHTunnelConfig) Open(ctx context.Context, kind, remote string) (*tunne
 			return nil, err
 		}
 		var box *store.Box
-		if len(p.SealedKey) > 0 {
+		if len(p.SealedKey) > 0 || len(p.SealedPassword) > 0 {
 			box, err = store.NewBox(os.Getenv("STRAND_WEB_SECRET_KEY"))
 			if err != nil {
 				return nil, err
@@ -99,7 +99,7 @@ func (c *SSHTunnelConfig) Open(ctx context.Context, kind, remote string) (*tunne
 
 // OpenSSHTunnelConfig uses the trust and identity policy of the Strand service.
 func OpenSSHTunnelConfig(ctx context.Context, settings tunnel.Config, remote string) (*tunnel.Forward, error) {
-	defer clear(settings.PrivateKey)
+	defer settings.ClearCredentials()
 	if err := settings.PrepareServiceTrust(); err != nil {
 		return nil, err
 	}

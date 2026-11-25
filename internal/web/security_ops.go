@@ -282,7 +282,7 @@ func (s *Server) startTunnel(ctx context.Context, r *http.Request, sshAddr, user
 		if err != nil {
 			return tunnelItem{}, err
 		}
-		defer clear(cfg.PrivateKey)
+		defer cfg.ClearCredentials()
 	}
 	if strings.TrimSpace(cfg.SSHUser) == "" {
 		return tunnelItem{}, errors.New("ssh user is required")

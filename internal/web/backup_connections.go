@@ -271,7 +271,7 @@ func (s *Server) apiConnSave(update bool) authedHandler {
 				writeErr(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			clear(saved.PrivateKey)
+			saved.ClearCredentials()
 		} else if c.SSHTunnel != nil {
 			if strings.TrimSpace(c.SSHTunnel.KnownHostsRef) == "" {
 				writeErr(w, http.StatusBadRequest, "ssh_tunnel needs known_hosts_ref")

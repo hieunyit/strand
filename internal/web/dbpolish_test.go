@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"strand/internal/sshprofile"
 	"strand/internal/web/store"
 )
 
@@ -193,9 +194,19 @@ func TestSecretKeyMismatchAndRotation(t *testing.T) {
 	if code, _, _, out := createNP(t, e, c, csrf, newOpts("kp", "SrcSecretPw", "DstSecretPw")); code != 200 {
 		t.Fatalf("create: %d %s", code, out)
 	}
+	const sshPassword = "fixture-password-for-rotation"
+	profile := sshprofile.Profile{ID: "bastion", User: "ops", Host: "bastion.example", Port: 22}
+	var err error
+	profile.SealedPassword, err = profile.SealPassword(e.srv.db.box, []byte(sshPassword))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sshprofile.Save(t.Context(), st, []sshprofile.Profile{profile}); err != nil {
+		t.Fatal(err)
+	}
 	cfg := *e.srv.cfg
 	const newKey = "fedcba9876543210fedcba9876543210"
-	_, err := New(Options{Config: &cfg, Version: "test", Commander: e.cmd, Store: st, SecretKey: newKey})
+	_, err = New(Options{Config: &cfg, Version: "test", Commander: e.cmd, Store: st, SecretKey: newKey})
 	if err == nil || !strings.Contains(err.Error(), EnvSecretKeyPrevious) {
 		t.Fatalf("start with a different key: err = %v, want a clear mismatch error", err)
 	}
@@ -206,6 +217,15 @@ func TestSecretKeyMismatchAndRotation(t *testing.T) {
 	nb, _ := store.NewBox(newKey)
 	if pt, err := nb.Open(row.EnvEnc, "kp"); err != nil || !strings.Contains(string(pt), "SrcSecretPw") {
 		t.Fatalf(".env not re-encrypted with the new key: %v", err)
+	}
+	profiles, err := sshprofile.List(t.Context(), st)
+	if err != nil || len(profiles) != 1 {
+		t.Fatalf("read rotated SSH profile: %v", err)
+	}
+	settings, err := profiles[0].TunnelConfig(nb)
+	defer settings.ClearCredentials()
+	if err != nil || string(settings.Password) != sshPassword {
+		t.Fatalf("SSH password did not survive key rotation: %v", err)
 	}
 	// After rotation the new key alone starts; the old one is now rejected.
 	if _, err := New(Options{Config: &cfg, Version: "test", Commander: e.cmd, Store: st, SecretKey: newKey}); err != nil {

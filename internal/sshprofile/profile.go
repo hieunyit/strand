@@ -24,13 +24,14 @@ var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
 func ValidID(id string) bool { return idPattern.MatchString(id) }
 
 type Profile struct {
-	ID           string `json:"id"`
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	User         string `json:"user"`
-	IdentityFile string `json:"identity_file,omitempty"`
-	SealedKey    []byte `json:"sealed_key,omitempty"`
-	HostKey      []byte `json:"host_key,omitempty"`
+	ID             string `json:"id"`
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	User           string `json:"user"`
+	IdentityFile   string `json:"identity_file,omitempty"`
+	SealedKey      []byte `json:"sealed_key,omitempty"`
+	SealedPassword []byte `json:"sealed_password,omitempty"`
+	HostKey        []byte `json:"host_key,omitempty"`
 }
 
 func (p Profile) Address() string { return net.JoinHostPort(p.Host, strconv.Itoa(p.Port)) }
@@ -39,7 +40,7 @@ func (p Profile) SealKey(box *store.Box, key []byte) ([]byte, error) {
 	if box == nil {
 		return nil, errors.New("STRAND_WEB_SECRET_KEY is required for stored SSH keys")
 	}
-	return box.Seal(key, "ssh-tunnel-profile:"+p.ID)
+	return box.Seal(key, p.KeyAAD())
 }
 
 func (p Profile) OpenKey(box *store.Box) ([]byte, error) {
@@ -49,7 +50,18 @@ func (p Profile) OpenKey(box *store.Box) ([]byte, error) {
 	if box == nil {
 		return nil, errors.New("STRAND_WEB_SECRET_KEY is required for stored SSH keys")
 	}
-	return box.Open(p.SealedKey, "ssh-tunnel-profile:"+p.ID)
+	return box.Open(p.SealedKey, p.KeyAAD())
+}
+
+func (p Profile) KeyAAD() string { return "ssh-tunnel-profile:" + p.ID }
+
+func (p Profile) PasswordAAD() string { return "ssh-tunnel-password:" + p.ID }
+
+func (p Profile) SealPassword(box *store.Box, password []byte) ([]byte, error) {
+	if box == nil {
+		return nil, errors.New("STRAND_WEB_SECRET_KEY is required for stored SSH passwords")
+	}
+	return box.Seal(password, p.PasswordAAD())
 }
 
 type Metadata interface {
@@ -125,9 +137,25 @@ func (p Profile) TunnelConfig(box *store.Box) (tunnel.Config, error) {
 			return tunnel.Config{}, errors.New("stored SSH host key is invalid")
 		}
 	}
+	cfg := tunnel.Config{SSHAddress: p.Address(), SSHUser: p.User, IdentityFile: p.IdentityFile, HostKey: hostKey}
+	if len(p.SealedPassword) != 0 {
+		if len(p.SealedKey) != 0 || p.IdentityFile != "" {
+			return tunnel.Config{}, errors.New("stored SSH profile has conflicting authentication methods")
+		}
+		if box == nil {
+			return tunnel.Config{}, errors.New("STRAND_WEB_SECRET_KEY is required for stored SSH passwords")
+		}
+		password, err := box.Open(p.SealedPassword, p.PasswordAAD())
+		if err != nil {
+			return tunnel.Config{}, errors.New("could not decrypt stored SSH password")
+		}
+		cfg.Password = password
+		return cfg, nil
+	}
 	key, err := p.OpenKey(box)
 	if err != nil {
 		return tunnel.Config{}, err
 	}
-	return tunnel.Config{SSHAddress: p.Address(), SSHUser: p.User, IdentityFile: p.IdentityFile, PrivateKey: key, HostKey: hostKey}, nil
+	cfg.PrivateKey = key
+	return cfg, nil
 }

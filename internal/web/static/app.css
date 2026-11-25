@@ -514,6 +514,7 @@ form[aria-busy="true"] { opacity: .7; pointer-events: none; }
 .form-stack { display: flex; flex-direction: column; gap: var(--sp-4); }
 .form-stack > * { margin: 0; }
 
+.ssh-auth-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
 fieldset.form-section { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; margin: 0 0 var(--sp-4); padding: var(--sp-5); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
 .form-stack > fieldset.form-section { margin: 0; }
 fieldset.form-section.subtle { background: var(--surface-2); }

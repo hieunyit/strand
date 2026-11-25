@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -23,6 +25,7 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/sshprofile"
+	"strand/internal/tunnel"
 )
 
 func TestWebTunnelOpensAndStopsVerifiedLoopbackForward(t *testing.T) {
@@ -86,6 +89,11 @@ func TestWebTunnelOpensAndStopsVerifiedLoopbackForward(t *testing.T) {
 
 func webTestSSHServer(t *testing.T, dir string) (addr, identity, hosts string) {
 	t.Helper()
+	return webTestSSHServerWithPassword(t, dir, "")
+}
+
+func webTestSSHServerWithPassword(t *testing.T, dir, password string) (addr, identity, hosts string) {
+	t.Helper()
 	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +124,14 @@ func webTestSSHServer(t *testing.T, dir string) (addr, identity, hosts string) {
 		}
 		return nil, io.EOF
 	}}
+	if password != "" {
+		cfg.PasswordCallback = func(_ ssh.ConnMetadata, entered []byte) (*ssh.Permissions, error) {
+			if string(entered) != password {
+				return nil, errors.New("invalid password")
+			}
+			return nil, nil
+		}
+	}
 	cfg.AddHostKey(hostSigner)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -229,7 +245,7 @@ func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 	params.Set("probe_host_key", "1")
 	params.Del("profile_private_key")
 	resp, body := e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, fingerprint) || !strings.Contains(body, `name="profile_confirm_host_key"`) {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(html.UnescapeString(body), fingerprint) || !strings.Contains(body, `name="profile_confirm_host_key"`) {
 		t.Fatalf("show fingerprint before authenticating: %d", resp.StatusCode)
 	}
 	if _, found, err := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey); err != nil || found {
@@ -387,5 +403,90 @@ func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 	out := make([]byte, 2)
 	if _, err := io.ReadFull(conn, out); err != nil || string(out) != "ok" {
 		t.Fatalf("forwarded response %q: %v", out, err)
+	}
+}
+
+func TestSSHPasswordProfileVerifiesAndReusesEncryptedCredentials(t *testing.T) {
+	const password = " fixture-SSH-password "
+	const rejected = "bad-password-fixture"
+	t.Setenv("SSH_AUTH_SOCK", filepath.Join(t.TempDir(), "missing-agent"))
+	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", filepath.Join(t.TempDir(), "missing"))
+	e := newCPEnv(t)
+	c, csrf := e.loginOK()
+	addr, identity, _ := webTestSSHServerWithPassword(t, t.TempDir(), password)
+	key, err := tunnel.ProbeHostKey(t.Context(), addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := url.Values{
+		"csrf": {csrf}, "intent": {"save-profile"}, "profile_id": {"password-bastion"}, "profile_user": {"strand"},
+		"profile_host": {addr}, "profile_auth_mode": {"password"}, "profile_host_address": {addr},
+		"profile_fingerprint": {ssh.FingerprintSHA256(key)}, "profile_confirm_host_key": {"1"},
+	}
+	submit := func() (*http.Response, string) {
+		return e.do(c, "POST", "/tunnels", params.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	}
+	params.Set("profile_password", rejected)
+	resp, body := submit()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "SSH connection check failed") || strings.Contains(body, rejected) {
+		t.Fatalf("incorrect SSH password result: %d", resp.StatusCode)
+	}
+	params.Set("profile_password", password)
+	params.Set("profile_key_passphrase", "must-not-use-this")
+	resp, _ = submit()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("password did not reject a key passphrase: %d", resp.StatusCode)
+	}
+	if _, found, err := e.srv.db.st.MetaGet(t.Context(), sshprofile.MetaKey); err != nil || found {
+		t.Fatal("failed submissions must not save a profile")
+	}
+	params.Del("profile_key_passphrase")
+	resp, _ = submit()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("save SSH password: %d", resp.StatusCode)
+	}
+	raw, _, err := e.srv.db.st.MetaGet(t.Context(), sshprofile.MetaKey)
+	if err != nil || strings.Contains(raw, password) || strings.Contains(raw, base64.StdEncoding.EncodeToString([]byte(password))) ||
+		!strings.Contains(raw, "sealed_password") || strings.Contains(raw, "sealed_key") {
+		t.Fatalf("password metadata was not stored solely as ciphertext: %v", err)
+	}
+	resp, body = e.do(c, "GET", "/tunnels?edit=password-bastion", "", nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `value="password" selected`) || strings.Contains(body, password) {
+		t.Fatalf("edit did not safely select password authentication: %d", resp.StatusCode)
+	}
+	params.Set("profile_edit", "1")
+	for _, field := range []string{"profile_password", "profile_host_address", "profile_fingerprint", "profile_confirm_host_key"} {
+		params.Del(field)
+	}
+	resp, _ = submit()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("edit without changing the password: %d", resp.StatusCode)
+	}
+	forward, err := e.srv.savedTunnel(t.Context(), "password-bastion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := config.OpenSSHTunnelConfig(t.Context(), forward, webTestEchoServer(t))
+	if err != nil {
+		t.Fatalf("open a pipeline tunnel using the saved password: %v", err)
+	}
+	_ = listener.Close()
+	apiHeaders := map[string]string{csrfHeader: csrf, "Content-Type": "application/json"}
+	resp, body = e.do(c, "POST", "/api/v1/backup-connections/test",
+		`{"engine":"mysql","host":"db.internal","user":"backup","ssh_tunnel":{"profile":"password-bastion"}}`, apiHeaders)
+	var preview struct{ OK bool }
+	if err := json.Unmarshal([]byte(body), &preview); err != nil || resp.StatusCode != http.StatusOK || !preview.OK || e.fake.last().Host != "127.0.0.1" {
+		t.Fatalf("backup connection did not use the saved SSH password: %d %v", resp.StatusCode, err)
+	}
+	privateKey, err := os.ReadFile(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params.Set("profile_auth_mode", "key")
+	params.Set("profile_private_key", string(privateKey))
+	resp, _ = submit()
+	raw, _, err = e.srv.db.st.MetaGet(t.Context(), sshprofile.MetaKey)
+	if resp.StatusCode != http.StatusSeeOther || err != nil || strings.Contains(raw, "sealed_password") || !strings.Contains(raw, "sealed_key") {
+		t.Fatalf("switch authentication: status=%d, read metadata: %v", resp.StatusCode, err)
 	}
 }

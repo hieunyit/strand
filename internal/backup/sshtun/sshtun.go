@@ -60,7 +60,7 @@ func OpenForStoredConnection(ctx context.Context, c backup.Connection, metadata 
 		if err != nil {
 			return "", 0, nil, err
 		}
-		defer clear(cfg.PrivateKey)
+		defer cfg.ClearCredentials()
 	} else if strings.TrimSpace(cfg.HostKeysFile) == "" {
 		return "", 0, nil, errors.New("ssh_tunnel needs known_hosts_ref")
 	}

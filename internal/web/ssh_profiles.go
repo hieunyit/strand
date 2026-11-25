@@ -21,8 +21,8 @@ import (
 )
 
 type sshProfileView struct {
-	ID, Host, User, Address string
-	Port                    int
+	ID, Host, User, Address, AuthMode string
+	Port                              int
 }
 
 type pipelineSSHFieldsView struct {
@@ -41,7 +41,11 @@ func (s *Server) sshProfileViews(ctx context.Context) []sshProfileView {
 	}
 	views := make([]sshProfileView, 0, len(profiles))
 	for _, p := range profiles {
-		views = append(views, sshProfileView{ID: p.ID, Host: p.Host, Port: p.Port, User: p.User, Address: p.Address()})
+		mode := "key"
+		if len(p.SealedPassword) != 0 {
+			mode = "password"
+		}
+		views = append(views, sshProfileView{ID: p.ID, Host: p.Host, Port: p.Port, User: p.User, Address: p.Address(), AuthMode: mode})
 	}
 	return views
 }
@@ -62,15 +66,15 @@ func (s *Server) savedTunnel(ctx context.Context, id string) (tunnel.Config, err
 }
 
 type sshProfileForm struct {
-	ID, Host, Port, User string
-	Edit                 bool
+	ID, Host, Port, User, AuthMode string
+	Edit                           bool
 }
 
 func sshProfileFormFromRequest(r *http.Request) sshProfileForm {
 	return sshProfileForm{
 		ID: strings.TrimSpace(r.PostForm.Get("profile_id")), Host: strings.TrimSpace(r.PostForm.Get("profile_host")),
 		Port: strings.TrimSpace(r.PostForm.Get("profile_port")), User: strings.TrimSpace(r.PostForm.Get("profile_user")),
-		Edit: r.PostForm.Get("profile_edit") == "1",
+		Edit: r.PostForm.Get("profile_edit") == "1", AuthMode: r.PostForm.Get("profile_auth_mode"),
 	}
 }
 
@@ -152,7 +156,6 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ss
 	action := "tunnel.profile.create"
 	if form.Edit {
 		previous = profiles[index]
-		p.IdentityFile, p.SealedKey = previous.IdentityFile, previous.SealedKey
 		action = "tunnel.profile.update"
 		if p.Address() == previous.Address() {
 			p.HostKey = previous.HostKey
@@ -163,17 +166,8 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ss
 	if hostKey != nil {
 		p.HostKey = hostKey.Marshal()
 	}
-	key, err := profilePrivateKey(r.PostForm.Get("profile_private_key"), r.PostForm.Get("profile_key_passphrase"))
-	if err != nil {
+	if err := s.setSSHProfileCredentials(r, form.AuthMode, &p, previous); err != nil {
 		return err
-	}
-	if len(key) != 0 {
-		defer clear(key)
-		p.SealedKey, err = p.SealKey(s.db.box, key)
-		if err != nil {
-			return err
-		}
-		p.IdentityFile = ""
 	}
 	if err := s.checkSSHProfile(r.Context(), p); err != nil {
 		return err
@@ -195,7 +189,7 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ss
 			}
 			profiles = append(profiles, p)
 		}
-		detail := map[string]any{"profile": p.ID, "host": p.Host, "user": p.User, "stored_key": len(p.SealedKey) > 0}
+		detail := map[string]any{"profile": p.ID, "host": p.Host, "user": p.User, "stored_key": len(p.SealedKey) > 0, "stored_password": len(p.SealedPassword) > 0}
 		if hostKey != nil {
 			detail["host_key_fingerprint"] = ssh.FingerprintSHA256(hostKey)
 		}
@@ -211,6 +205,56 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ss
 		}
 		return nil
 	})
+}
+
+func (s *Server) setSSHProfileCredentials(r *http.Request, mode string, p *sshprofile.Profile, previous sshprofile.Profile) error {
+	keyText := r.PostForm.Get("profile_private_key")
+	passphrase := r.PostForm.Get("profile_key_passphrase")
+	passwordText := r.PostForm.Get("profile_password")
+	if mode == "" {
+		mode = "key"
+		if len(previous.SealedPassword) > 0 {
+			mode = "password"
+		}
+	}
+	switch mode {
+	case "password":
+		if strings.TrimSpace(keyText) != "" || passphrase != "" {
+			return errors.New("use only the SSH password with password authentication")
+		}
+		if passwordText == "" {
+			if len(previous.SealedPassword) > 0 && previous.Address() == p.Address() && previous.User == p.User && slices.Equal(previous.HostKey, p.HostKey) {
+				p.SealedPassword = previous.SealedPassword
+				return nil
+			}
+			return errors.New("enter the SSH password for this server and user")
+		}
+		if len(passwordText) > 4<<10 || strings.ContainsRune(passwordText, 0) {
+			return errors.New("SSH password is too long or contains a NUL byte")
+		}
+		password := []byte(passwordText)
+		defer clear(password)
+		var err error
+		p.SealedPassword, err = p.SealPassword(s.db.box, password)
+		return err
+	case "key":
+		if passwordText != "" {
+			return errors.New("use only the SSH private key and its optional passphrase with key authentication")
+		}
+		key, err := profilePrivateKey(keyText, passphrase)
+		if err != nil {
+			return err
+		}
+		if len(key) == 0 {
+			p.IdentityFile, p.SealedKey = previous.IdentityFile, previous.SealedKey
+			return nil
+		}
+		defer clear(key)
+		p.SealedKey, err = p.SealKey(s.db.box, key)
+		return err
+	default:
+		return errors.New("choose password or private key for SSH authentication")
+	}
 }
 
 // profilePrivateKey unlocks the submitted key for sealing with the Web secret key.
@@ -266,7 +310,7 @@ func (s *Server) checkSSHProfile(ctx context.Context, p sshprofile.Profile) erro
 	if err != nil {
 		return err
 	}
-	defer clear(cfg.PrivateKey)
+	defer cfg.ClearCredentials()
 	if err := cfg.PrepareServiceTrust(); err != nil {
 		if cfg.HostKey == nil && !strings.HasPrefix(err.Error(), "identity_file:") {
 			return fmt.Errorf("use Show fingerprint to verify this SSH server on the Web: %w", err)

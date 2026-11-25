@@ -163,7 +163,8 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 			old = b
 		}
 		opens := func(b *store.Box, sealed []byte, aad string) bool {
-			_, err := b.Open(sealed, aad)
+			plain, err := b.Open(sealed, aad)
+			clear(plain)
 			return err == nil
 		}
 		v, have, err := m.st.MetaGet(ctx, keyCheckMetaKey)
@@ -290,22 +291,17 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 				return err
 			}
 			profilesChanged := false
-			for i, profile := range profiles {
-				if len(profile.SealedKey) == 0 {
-					continue
-				}
-				if _, err := profile.OpenKey(m.box); err == nil {
-					continue
-				}
-				key, err := profile.OpenKey(old)
+			for i := range profiles {
+				profile := &profiles[i]
+				keyChanged, err := rotate(&profile.SealedKey, profile.KeyAAD())
 				if err != nil {
-					return fmt.Errorf("SSH tunnel profile %s: cannot decrypt the stored key with either secret key", profile.ID)
+					return fmt.Errorf("SSH tunnel profile %s private key: %w", profile.ID, err)
 				}
-				profiles[i].SealedKey, err = profile.SealKey(m.box, key)
+				passwordChanged, err := rotate(&profile.SealedPassword, profile.PasswordAAD())
 				if err != nil {
-					return err
+					return fmt.Errorf("SSH tunnel profile %s password: %w", profile.ID, err)
 				}
-				profilesChanged = true
+				profilesChanged = profilesChanged || keyChanged || passwordChanged
 			}
 			if profilesChanged {
 				if err := sshprofile.Save(ctx, m.st, profiles); err != nil {

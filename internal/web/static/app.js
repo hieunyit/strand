@@ -16,6 +16,14 @@
   var busy = false;
   var onSwap = []; // called after a structural refresh replaced #content (the live module re-attaches)
 
+  document.addEventListener('change', function (ev) {
+    var field = ev.target;
+    if (field.name !== 'profile_auth_mode' || !field.form || !field.form.hasAttribute('data-ssh-auth-form')) { return; }
+    field.form.querySelectorAll('[data-ssh-mode]').forEach(function (group) {
+      group.hidden = group.disabled = group.getAttribute('data-ssh-mode') !== field.value;
+    });
+  });
+
   // Same-origin fetch that always carries the session cookie and the CSRF header (for POST).
   function api(method, url, body) {
     var opts = { method: method, credentials: 'same-origin', headers: { 'X-CSRF-Token': csrf } };

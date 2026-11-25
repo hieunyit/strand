@@ -25,6 +25,7 @@ type Config struct {
 	SSHUser      string
 	IdentityFile string
 	PrivateKey   []byte // in-memory SSH identity, mutually exclusive with IdentityFile
+	Password     []byte // SSH password authentication, mutually exclusive with keys
 	HostKey      ssh.PublicKey
 	HostKeysFile string
 	LocalAddress string // host:port; bind to loopback by default
@@ -34,6 +35,12 @@ type Config struct {
 	// KeepAlive is the interval of SSH keepalive requests (default 30s); the forward is closed when the
 	// server stops answering, so a backup client fails instead of hanging on a dead bastion.
 	KeepAlive time.Duration
+}
+
+// ClearCredentials wipes the in-memory credentials loaded for a tunnel.
+func (cfg Config) ClearCredentials() {
+	clear(cfg.PrivateKey)
+	clear(cfg.Password)
 }
 
 // Forward owns one SSH session and a local TCP listener until Close or ctx end.
@@ -135,7 +142,7 @@ func connect(ctx context.Context, cfg Config) (*ssh.Client, error) {
 			return nil, fmt.Errorf("tunnel: load known_hosts: %w", err)
 		}
 	}
-	auth, cleanup, err := authMethods(cfg.IdentityFile, cfg.PrivateKey)
+	auth, cleanup, err := authMethods(cfg.IdentityFile, cfg.PrivateKey, cfg.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -224,13 +231,19 @@ func validateLocalAddress(address string) error {
 	return nil
 }
 
-func authMethods(identityFile string, privateKey []byte) ([]ssh.AuthMethod, func(), error) {
+func authMethods(identityFile string, privateKey, password []byte) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
 	var closers []io.Closer
 	cleanup := func() {
 		for _, c := range closers {
 			_ = c.Close()
 		}
+	}
+	if len(password) > 0 {
+		if identityFile != "" || len(privateKey) > 0 {
+			return nil, cleanup, errors.New("tunnel: choose SSH password or private key authentication")
+		}
+		return []ssh.AuthMethod{ssh.PasswordCallback(func() (string, error) { return string(password), nil })}, cleanup, nil
 	}
 	if len(privateKey) > 0 {
 		if identityFile != "" {

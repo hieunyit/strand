@@ -1165,7 +1165,7 @@ func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Sessio
 	if id := r.URL.Query().Get("edit"); id != "" {
 		for _, p := range view.Profiles {
 			if p.ID == id {
-				view.Form = sshProfileForm{ID: p.ID, Host: p.Host, User: p.User, Port: strconv.Itoa(p.Port), Edit: true}
+				view.Form = sshProfileForm{ID: p.ID, Host: p.Host, User: p.User, Port: strconv.Itoa(p.Port), AuthMode: p.AuthMode, Edit: true}
 				break
 			}
 		}
