@@ -165,8 +165,10 @@ func (p *PG) UpdateBackupMeta(ctx context.Context, id string, m backup.Meta) (ba
 }
 
 func (p *PG) ClaimBackupDeletion(ctx context.Context, id string, at time.Time) (backup.Record, bool, error) {
+	// The Object Lock check uses the database clock, not the caller's: a writer host whose clock runs ahead
+	// must not claim a backup that is still locked.
 	_, err := p.db.ExecContext(ctx, `UPDATE backups SET status='deleting'
-		WHERE id=$1 AND status='complete' AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= $2)`, id, at)
+		WHERE id=$1 AND status='complete' AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= now())`, id)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
@@ -183,9 +185,10 @@ func (p *PG) ClaimBackupDeletion(ctx context.Context, id string, at time.Time) (
 	return cur, false, fmt.Errorf("%w: backup is not eligible for deletion (status, legal hold or retention lock)", backup.ErrInvalid)
 }
 
+// ExpireBackup stamps expired_at with at, but checks the Object Lock against the database clock.
 func (p *PG) ExpireBackup(ctx context.Context, id string, at time.Time) (backup.Record, bool, error) {
 	res, err := p.db.ExecContext(ctx, `UPDATE backups SET status='expired', expired_at=$2
-		WHERE id=$1 AND status IN ('complete', 'deleting') AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= $2)`, id, at)
+		WHERE id=$1 AND status IN ('complete', 'deleting') AND NOT legal_hold AND (retain_until IS NULL OR retain_until <= now())`, id, at)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
@@ -200,9 +203,12 @@ func (p *PG) ExpireBackup(ctx context.Context, id string, at time.Time) (backup.
 	switch {
 	case cur.Status == backup.StatusExpired:
 		return cur, false, nil
+	case cur.Status != backup.StatusComplete && cur.Status != backup.StatusDeleting:
+		return backup.Record{}, false, backup.ErrTransition
 	case cur.LegalHold:
 		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
-	case cur.RetainUntil != nil && cur.RetainUntil.After(at):
+	case cur.RetainUntil != nil:
+		// Still locked by the database clock (the statement compares retain_until with now()).
 		return backup.Record{}, false, fmt.Errorf("%w: backup is object-locked until %s", backup.ErrInvalid, cur.RetainUntil.UTC().Format(time.RFC3339))
 	}
 	return backup.Record{}, false, backup.ErrTransition
@@ -234,7 +240,7 @@ func (p *PG) DeleteBackup(ctx context.Context, id string, now time.Time) (backup
 	}
 	// The same guards in the statement: a concurrent finalize, hold or lock wins (checks cascade).
 	res, err := p.db.ExecContext(ctx, `DELETE FROM backups WHERE id=$1 AND status NOT IN ('complete', 'deleting') AND NOT legal_hold
-		AND (retain_until IS NULL OR retain_until <= $2)`, id, now)
+		AND (retain_until IS NULL OR retain_until <= now())`, id)
 	if err != nil {
 		return backup.Record{}, false, p.wrap(err)
 	}
@@ -245,6 +251,10 @@ func (p *PG) DeleteBackup(ctx context.Context, id string, now time.Time) (backup
 		}
 		if err := backup.DeletableErr(again, now); err != nil {
 			return backup.Record{}, false, err
+		}
+		if again.RetainUntil != nil && again.Status != backup.StatusComplete && again.Status != backup.StatusDeleting && !again.LegalHold {
+			// Locked by the database clock (the statement compares retain_until with now()).
+			return backup.Record{}, false, fmt.Errorf("%w: restore point %s is object-locked until %s", backup.ErrInvalid, id, again.RetainUntil.UTC().Format(time.RFC3339))
 		}
 		return backup.Record{}, false, fmt.Errorf("%w: restore point %s changed while it was being deleted", backup.ErrConflict, id)
 	}

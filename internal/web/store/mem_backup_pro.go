@@ -86,7 +86,8 @@ func (m *Mem) ClaimBackupDeletion(_ context.Context, id string, at time.Time) (b
 	if r.Status == backup.StatusDeleting {
 		return cloneBackup(r), true, nil
 	}
-	if r.Status != backup.StatusComplete || r.LegalHold || (r.RetainUntil != nil && r.RetainUntil.After(at)) {
+	// Like the PG store, the Object Lock is checked against the store's clock, not the caller's.
+	if r.Status != backup.StatusComplete || r.LegalHold || (r.RetainUntil != nil && r.RetainUntil.After(time.Now())) {
 		return cloneBackup(r), false, fmt.Errorf("%w: backup is not eligible for deletion (status, legal hold or retention lock)", backup.ErrInvalid)
 	}
 	r.Status = backup.StatusDeleting
@@ -110,7 +111,7 @@ func (m *Mem) ExpireBackup(_ context.Context, id string, at time.Time) (backup.R
 		return backup.Record{}, false, backup.ErrTransition
 	case r.LegalHold:
 		return backup.Record{}, false, fmt.Errorf("%w: legal-hold backup cannot be expired", backup.ErrInvalid)
-	case r.RetainUntil != nil && r.RetainUntil.After(at):
+	case r.RetainUntil != nil && r.RetainUntil.After(time.Now()):
 		return backup.Record{}, false, fmt.Errorf("%w: backup is object-locked until %s", backup.ErrInvalid, r.RetainUntil.UTC().Format(time.RFC3339))
 	}
 	r.Status = backup.StatusExpired
@@ -148,6 +149,9 @@ func (m *Mem) DeleteBackup(_ context.Context, id string, now time.Time) (backup.
 		return backup.Record{}, false, nil
 	}
 	if err := backup.DeletableErr(r, now); err != nil {
+		return backup.Record{}, false, err
+	}
+	if err := backup.DeletableErr(r, time.Now()); err != nil { // the store's clock decides the Object Lock
 		return backup.Record{}, false, err
 	}
 	delete(m.backups, id)
