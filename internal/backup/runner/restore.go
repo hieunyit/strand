@@ -661,6 +661,19 @@ func untar(r io.Reader, dir string) error {
 	}
 }
 
+// dataDirMajor reads the major version of an extracted PostgreSQL data directory (PG_VERSION).
+func dataDirMajor(dir string) (int, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "PG_VERSION"))
+	if err != nil {
+		return 0, fmt.Errorf("base backup has no readable PG_VERSION: %w", err)
+	}
+	major := pgMajor(strings.TrimSpace(string(b)))
+	if major == 0 {
+		return 0, fmt.Errorf("base backup has an invalid PG_VERSION %q", strings.TrimSpace(string(b)))
+	}
+	return major, nil
+}
+
 func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
 	base := plan.Base()
 	if t.Dir == "" || !filepath.IsAbs(t.Dir) {
@@ -712,12 +725,40 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 		e.logf("restore: base backup extracted to %s (consistent at its end LSN %s); start PostgreSQL on it", t.Dir, base.EndPosition.LSN)
 		return nil
 	}
+	// recovery.signal and recovery settings in postgresql.auto.conf exist from PostgreSQL 12; older servers
+	// would ignore them (and need recovery.conf).
+	major, err := dataDirMajor(stage)
+	if err != nil {
+		return err
+	}
+	if major < 12 {
+		return fmt.Errorf("point-in-time recovery of PostgreSQL %d is not supported (Strand configures recovery for "+
+			"PostgreSQL 12 and newer); restore the base backup without a target time and configure recovery.conf manually", major)
+	}
 	walDir := filepath.Join(stage, "strand_wal")
 	if err := os.MkdirAll(walDir, 0o700); err != nil {
 		return err
 	}
-	if _, err := e.stageLogs(ctx, plan.Logs, walDir, func(l backup.Record) string { return l.Details["segment"] }); err != nil {
+	segments, err := e.stageLogs(ctx, plan.Logs, walDir, func(l backup.Record) string { return l.Details["segment"] })
+	if err != nil {
 		return err
+	}
+	if major == 12 && plan.Target != nil {
+		// PostgreSQL 12 promotes without an error when recovery runs out of WAL before the target.
+		from, err := ParseLSN(base.EndPosition.LSN)
+		if err != nil {
+			return fmt.Errorf("base backup %s has no valid end LSN: %w", base.ID, err)
+		}
+		res, err := walReachesTarget(segments, from, *plan.Target)
+		if err != nil {
+			return fmt.Errorf("read staged WAL: %w", err)
+		}
+		if !res.Reached {
+			return fmt.Errorf("the archived WAL does not reach the target time %s (%s): PostgreSQL 12 would end recovery "+
+				"early and promote without an error, so the restore was stopped; choose an earlier target or wait until "+
+				"WAL with a later transaction is archived", plan.Target.UTC().Format(time.RFC3339Nano), res)
+		}
+		e.logf("restore: staged WAL reaches the target (%s)", res)
 	}
 	f, err := os.OpenFile(filepath.Join(stage, "postgresql.auto.conf"), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
