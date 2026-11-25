@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -78,11 +79,15 @@ var (
 	myTriggerOnTableRE = regexp.MustCompile(`(?i)\bTRIGGER\s+[` + "`" + `"'']?([^` + "`" + `"' \t\r\n]+)[` + "`" + `"'']?\s+.*?\bON\s+[` + "`" + `"'']?([^` + "`" + `"' \t\r\n]+)`)
 )
 
+var myCurrentDatabaseRE = regexp.MustCompile("^-- Current Database: `((?:[^`]|``)*)`")
+
 type mysqlPartialFilter struct {
 	r              *bufio.Reader
 	out            bytes.Buffer
-	selected       map[string]bool
-	seenTables     map[string]bool
+	selected       map[string]bool // "db.table" (qualified) or "table" (any database)
+	seenTables     map[string]bool // "db.table" of every table and view in the dump
+	seenIn         map[string]map[string]bool
+	currentDB      string
 	inDropSec      bool
 	inTriggerBlock bool
 	trigBuf        bytes.Buffer
@@ -91,8 +96,15 @@ type mysqlPartialFilter struct {
 }
 
 // NewMySQLPartialFilter filters a mysqldump stream to only include the DDL/DML and triggers
-// of the selected tables, preserving header SET statements and footer.
+// of the selected tables, preserving header SET statements and footer. An object is "table" or
+// "database.table"; a bare name must not be ambiguous in a multi-database dump.
 func NewMySQLPartialFilter(r io.Reader, objects []string) *mysqlPartialFilter {
+	return NewMySQLPartialFilterIn(r, "", objects)
+}
+
+// NewMySQLPartialFilterIn is NewMySQLPartialFilter for a dump whose tables belong to database db until a
+// "-- Current Database" header says otherwise (a single-database mysqldump has no such header).
+func NewMySQLPartialFilterIn(r io.Reader, db string, objects []string) *mysqlPartialFilter {
 	sel := make(map[string]bool, len(objects))
 	for _, o := range objects {
 		o = strings.TrimSpace(o)
@@ -104,6 +116,8 @@ func NewMySQLPartialFilter(r io.Reader, objects []string) *mysqlPartialFilter {
 		r:          bufio.NewReaderSize(r, 1<<20),
 		selected:   sel,
 		seenTables: make(map[string]bool),
+		seenIn:     make(map[string]map[string]bool),
+		currentDB:  db,
 	}
 }
 
@@ -114,16 +128,45 @@ func (f *mysqlPartialFilter) Err() error {
 	return f.err
 }
 
+// see records a table or view of the current database and reports whether it is selected.
+func (f *mysqlPartialFilter) see(tbl string) bool {
+	f.seenTables[f.currentDB+"."+tbl] = true
+	if f.seenIn[tbl] == nil {
+		f.seenIn[tbl] = map[string]bool{}
+	}
+	f.seenIn[tbl][f.currentDB] = true
+	return f.isSelected(tbl)
+}
+
+func (f *mysqlPartialFilter) isSelected(tbl string) bool {
+	return f.selected[tbl] || (f.currentDB != "" && f.selected[f.currentDB+"."+tbl])
+}
+
 func (f *mysqlPartialFilter) checkMissing() error {
 	if f.eofChecked {
 		return f.err
 	}
 	f.eofChecked = true
-	if len(f.selected) > 0 {
-		for t := range f.selected {
-			if !f.seenTables[t] {
-				return fmt.Errorf("table %q not found in backup", t)
+	var names []string
+	for t := range f.selected {
+		names = append(names, t)
+	}
+	sort.Strings(names)
+	for _, t := range names {
+		if f.seenTables[t] {
+			continue
+		}
+		dbs := f.seenIn[t]
+		if len(dbs) == 0 {
+			return fmt.Errorf("table %q not found in backup", t)
+		}
+		if len(dbs) > 1 {
+			var in []string
+			for db := range dbs {
+				in = append(in, db)
 			}
+			sort.Strings(in)
+			return fmt.Errorf("table %q exists in several databases of the backup (%s); select it as database.table", t, strings.Join(in, ", "))
 		}
 	}
 	return nil
@@ -147,29 +190,27 @@ func (f *mysqlPartialFilter) Read(p []byte) (int, error) {
 			// Section start detection
 			if m := myTableStructureRE.FindStringSubmatch(trimmed); len(m) > 1 {
 				f.flushTrigger()
-				tbl := m[1]
-				f.seenTables[tbl] = true
-				f.inDropSec = !f.selected[tbl]
+				f.inDropSec = !f.see(m[1])
 				if !f.inDropSec {
 					f.out.Write(line)
 				}
 			} else if m := myTableDataRE.FindStringSubmatch(trimmed); len(m) > 1 {
 				f.flushTrigger()
-				tbl := m[1]
-				f.inDropSec = !f.selected[tbl]
+				f.inDropSec = !f.isSelected(m[1])
 				if !f.inDropSec {
 					f.out.Write(line)
 				}
 			} else if m := myViewStructureRE.FindStringSubmatch(trimmed); len(m) > 1 {
 				f.flushTrigger()
-				view := m[1]
-				f.seenTables[view] = true
-				f.inDropSec = !f.selected[view]
+				f.inDropSec = !f.see(m[1])
 				if !f.inDropSec {
 					f.out.Write(line)
 				}
 			} else if strings.HasPrefix(trimmed, "-- ") && mySectionHeaderRE.MatchString(trimmed) {
 				f.flushTrigger()
+				if m := myCurrentDatabaseRE.FindStringSubmatch(trimmed); len(m) > 1 {
+					f.currentDB = strings.ReplaceAll(m[1], "``", "`")
+				}
 				f.inDropSec = false
 				f.out.Write(line)
 			} else if !f.inDropSec {
@@ -215,8 +256,7 @@ func (f *mysqlPartialFilter) flushTrigger() {
 
 	m := myTriggerOnTableRE.FindStringSubmatch(bufStr)
 	if len(m) > 2 {
-		tbl := m[2]
-		if f.selected[tbl] {
+		if f.isSelected(m[2]) {
 			f.out.WriteString(bufStr)
 		}
 	} else {

@@ -207,7 +207,8 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 			knownMap[strings.TrimSpace(k)] = true
 		}
 		for _, obj := range t.Objects {
-			if !knownMap[strings.TrimSpace(obj)] {
+			name := strings.TrimPrefix(strings.TrimSpace(obj), dbs[0]+".")
+			if !knownMap[name] {
 				return fmt.Errorf("table %q not found in backup", obj)
 			}
 		}
@@ -264,7 +265,7 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	var stream io.Reader
 	var partialFilter *mysqlPartialFilter
 	if len(t.Objects) > 0 {
-		partialFilter = NewMySQLPartialFilter(body, t.Objects)
+		partialFilter = NewMySQLPartialFilterIn(body, src, t.Objects)
 		stream = NewGTIDPurgedFilter(partialFilter)
 	} else {
 		stream = NewGTIDPurgedFilter(body)
