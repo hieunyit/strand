@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strand/internal/sshprofile"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +20,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"strand/internal/sshprofile"
 )
 
 func TestWebTunnelOpensAndStopsVerifiedLoopbackForward(t *testing.T) {
@@ -248,6 +249,40 @@ func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 	resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("edit profile while keeping stored key: %d %s", resp.StatusCode, body)
+	}
+	privateKey, err := ssh.ParseRawPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const passphrase = " encrypted fixture with spaces "
+	encrypted, err := ssh.MarshalPrivateKeyWithPassphrase(privateKey, "", []byte(passphrase))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params.Set("profile_private_key", string(pem.EncodeToMemory(encrypted)))
+	for _, failure := range []struct{ passphrase, message string }{
+		{"", "enter the passphrase"},
+		{"incorrect passphrase fixture", "could not unlock the SSH private key"},
+	} {
+		params.Set("profile_key_passphrase", failure.passphrase)
+		resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, failure.message) ||
+			strings.Contains(body, "BEGIN OPENSSH PRIVATE KEY") ||
+			(failure.passphrase != "" && strings.Contains(body, failure.passphrase)) {
+			t.Fatalf("encrypted key failure did not render safely: %d", resp.StatusCode)
+		}
+		if after, _, _ := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey); after != raw {
+			t.Fatal("an unsuccessful unlock changed the stored profile")
+		}
+	}
+	params.Set("profile_key_passphrase", passphrase)
+	resp, _ = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("save a protected SSH private key: %d", resp.StatusCode)
+	}
+	after, _, err := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey)
+	if err != nil || after == raw || strings.Contains(after, passphrase) || !strings.Contains(after, "sealed_key") {
+		t.Fatal("expected a new sealed key without the original passphrase")
 	}
 	// Connections consume the same saved key. The preview of an edited
 	// connection also reuses its stored database password when left blank.

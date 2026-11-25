@@ -1336,7 +1336,7 @@ Cố ý để lại CLI (lý do):
 
 ### SSH tunnel cho pipeline SQL
 
-Trong form tạo pipeline, có thể bật SSH tunnel riêng cho source hoặc target. Giữ địa chỉ database trong phần kết nối DB như bastion nhìn thấy. Nhập host, cổng và tài khoản SSH trong phần tunnel. `strand` mở cổng loopback tạm trong tiến trình chạy pipeline, rồi đóng cổng khi tiến trình kết thúc.
+Trong form tạo pipeline, có thể bật SSH tunnel riêng cho source hoặc target. Giữ địa chỉ database trong phần kết nối DB như bastion nhìn thấy. Chọn tunnel đã lưu ở **Tools → SSH Tunnels**. `strand` mở cổng loopback tạm trong tiến trình chạy pipeline, rồi đóng cổng khi tiến trình kết thúc.
 
 Ví dụ YAML cho nguồn MySQL:
 
@@ -1351,7 +1351,7 @@ source:
     identity_file: /etc/strand/keys/bastion
 ```
 
-Để dùng chung cấu hình, lưu một profile ở **Tools → SSH Tunnels**, rồi chọn cùng tên ở Source và Target hoặc khai báo `ssh_tunnel: {profile: production-bastion}`. Chọn cùng profile trong **Connections** để dùng cho các job backup. Khi lưu profile, Web kiểm tra đăng nhập SSH trước. Địa chỉ DB được kiểm tra khi cấu hình kết nối. Profile chứa thông tin bastion và cách xác thực. Địa chỉ DB vẫn cấu hình riêng cho từng kết nối. Private key dán vào form được mã hóa trong PostgreSQL metadata bằng `STRAND_WEB_SECRET_KEY`; YAML chỉ chứa tên profile. Dùng HTTPS khi gửi private key lên Web. Tiến trình `strand` chạy trực tiếp hoặc qua systemd cần có `STRAND_WEB_DATABASE_DSN` và `STRAND_WEB_SECRET_KEY` để dùng profile có khóa lưu trong DB.
+Để dùng chung cấu hình, lưu một profile ở **Tools → SSH Tunnels**, rồi chọn cùng tên ở Source và Target hoặc khai báo `ssh_tunnel: {profile: production-bastion}`. Chọn cùng profile trong **Connections** để dùng cho các job backup. Khi lưu profile, Web kiểm tra đăng nhập SSH trước. Địa chỉ DB được kiểm tra khi cấu hình kết nối. Profile chứa thông tin bastion và cách xác thực. Địa chỉ DB vẫn cấu hình riêng cho từng kết nối. Nếu private key có passphrase, nhập passphrase khi lưu. Web dùng passphrase để mở khóa, sau đó mã hóa private key bằng `STRAND_WEB_SECRET_KEY` trong PostgreSQL metadata. Passphrase chỉ dùng trong lần lưu. YAML chỉ chứa tên profile. Dùng HTTPS khi gửi private key lên Web. Tiến trình `strand` chạy trực tiếp hoặc qua systemd cần có `STRAND_WEB_DATABASE_DSN` và `STRAND_WEB_SECRET_KEY` để dùng profile có khóa lưu trong DB.
 
 `target.ssh_tunnel` dùng cùng cấu trúc. Đặt khóa riêng trên máy hoặc container chạy Strand và đặt `STRAND_WEB_SSH_KEY_DIR` thành thư mục chứa các khóa được phép sử dụng. Nếu bỏ `identity_file`, tiến trình cần truy cập được SSH agent qua `SSH_AUTH_SOCK`. Khóa máy chủ SSH phải có trong file tin cậy của dịch vụ. Đặt `STRAND_WEB_SSH_KNOWN_HOSTS` thành đường dẫn file nếu dịch vụ dùng file riêng, hoặc dùng `~/.ssh/known_hosts` của tài khoản chạy Strand. Tunnel vẫn xác minh host key. Cấu hình TLS đến database tiếp tục dùng tên máy chủ database trong DSN.
 

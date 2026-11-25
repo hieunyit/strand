@@ -18,6 +18,10 @@
         <textarea name="profile_private_key" class="mono" rows="4" maxlength="49152" spellcheck="false" autocomplete="off"></textarea>
         <small class="field-hint">{{if .Body.Form.Edit}}Leave blank to keep the current credentials.{{else}}Paste a key to store it encrypted, or leave blank to use the server's SSH agent.{{end}}</small>
       </label>
+      <label class="field">Private key passphrase
+        <input type="password" name="profile_key_passphrase" maxlength="4096" autocomplete="new-password">
+        <small class="field-hint">Enter this only for a passphrase-protected private key. Strand uses it to unlock the key before encrypting it for storage.</small>
+      </label>
       <div class="form-actions">
         {{if .Body.Form.Edit}}<a class="btn" href="/tunnels">Cancel</a>{{end}}
         <button type="submit" class="btn primary">Check and save</button>

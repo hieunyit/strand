@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -123,15 +124,12 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm) error {
 		p.IdentityFile, p.SealedKey = previous.IdentityFile, previous.SealedKey
 		action = "tunnel.profile.update"
 	}
-	if raw := strings.TrimSpace(r.PostForm.Get("profile_private_key")); raw != "" {
-		if len(raw) > 48<<10 {
-			return errors.New("SSH private key exceeds 48 KiB")
-		}
-		key := []byte(raw + "\n")
+	key, err := profilePrivateKey(r.PostForm.Get("profile_private_key"), r.PostForm.Get("profile_key_passphrase"))
+	if err != nil {
+		return err
+	}
+	if len(key) != 0 {
 		defer clear(key)
-		if _, err := ssh.ParsePrivateKey(key); err != nil {
-			return errors.New("invalid or passphrase-protected SSH private key. Use an SSH agent for passphrase-protected keys")
-		}
 		p.SealedKey, err = p.SealKey(s.db.box, key)
 		if err != nil {
 			return err
@@ -171,6 +169,54 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm) error {
 		}
 		return nil
 	})
+}
+
+// profilePrivateKey unlocks the submitted key for sealing with the Web secret key.
+// The original passphrase is only used during this request.
+func profilePrivateKey(raw, passphrase string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		if passphrase != "" {
+			return nil, errors.New("paste the SSH private key that uses this passphrase")
+		}
+		return nil, nil
+	}
+	if len(raw) > 48<<10 {
+		return nil, errors.New("SSH private key exceeds 48 KiB")
+	}
+	if len(passphrase) > 4<<10 {
+		return nil, errors.New("SSH key passphrase exceeds 4 KiB")
+	}
+	key := []byte(raw + "\n")
+	if _, err := ssh.ParsePrivateKey(key); err == nil {
+		if passphrase != "" {
+			clear(key)
+			return nil, errors.New("leave the passphrase blank for an unencrypted SSH private key")
+		}
+		return key, nil
+	} else {
+		var protected *ssh.PassphraseMissingError
+		if !errors.As(err, &protected) {
+			clear(key)
+			return nil, errors.New("invalid or unsupported SSH private key format")
+		}
+	}
+	defer clear(key)
+	if passphrase == "" {
+		return nil, errors.New("enter the passphrase for this SSH private key")
+	}
+	password := []byte(passphrase)
+	defer clear(password)
+	privateKey, err := ssh.ParseRawPrivateKeyWithPassphrase(key, password)
+	if err != nil {
+		return nil, errors.New("could not unlock the SSH private key. Check the passphrase and key format")
+	}
+	block, err := ssh.MarshalPrivateKey(privateKey, "")
+	if err != nil {
+		return nil, errors.New("could not encode the unlocked SSH private key")
+	}
+	defer clear(block.Bytes)
+	return pem.EncodeToMemory(block), nil
 }
 
 func (s *Server) checkSSHProfile(ctx context.Context, p sshprofile.Profile) error {
