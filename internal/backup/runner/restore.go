@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
 
@@ -746,6 +747,31 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 	return nil
 }
 
+// dropMongoRestored drops the databases a failed MongoDB restore created (see restoreMongo).
+func dropMongoRestored(ctx context.Context, client *mongo.Client, t RestoreTarget, existing map[string]bool) error {
+	var drop []string
+	if t.Deployment {
+		names, err := client.ListDatabaseNames(ctx, bson.D{}, options.ListDatabases().SetAuthorizedDatabases(false))
+		if err != nil {
+			return fmt.Errorf("cleanup failed: cannot list the target deployment to drop the partially restored databases: %w", err)
+		}
+		for _, name := range names {
+			if !existing[name] && name != "admin" && name != "config" && name != "local" {
+				drop = append(drop, name)
+			}
+		}
+	} else if !existing[t.Database] {
+		drop = []string{t.Database}
+	}
+	var errs []error
+	for _, name := range drop {
+		if err := client.Database(name).Drop(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup failed: database %q created by this restore is left on the target: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // MongoRestoreDestination returns the endpoint and namespace to confirm,
 // without URI credentials or connection options.
 func MongoRestoreDestination(uri, database string) (string, error) {
@@ -761,7 +787,7 @@ func MongoRestoreDestination(uri, database string) (string, error) {
 	return parsed.Scheme + "://" + strings.Join(parsed.RawHosts, ",") + "/" + database, nil
 }
 
-func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
+func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarget) (err error) {
 	base := plan.Base()
 	pitr := len(plan.Logs) > 0 || plan.Target != nil
 	if pitr && (!t.Deployment || plan.Target == nil || !pitrBase(base)) {
@@ -871,6 +897,23 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 			return err
 		}
 	}
+	// From here on mongorestore may write. On failure or cancellation drop what this restore created:
+	// the target database, or every database of the (verified empty) target deployment except the
+	// system ones, like the MySQL and PostgreSQL restores do.
+	existing := map[string]bool{}
+	for _, name := range databaseNames {
+		existing[name] = true
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		if cerr := dropMongoRestored(cctx, client, t, existing); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}()
 	body, err := e.openRecord(ctx, base)
 	if err != nil {
 		return err
