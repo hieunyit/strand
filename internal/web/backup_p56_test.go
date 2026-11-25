@@ -582,7 +582,8 @@ func seedLogSegment(t *testing.T, st store.Store, id, source, job string, end ti
 	}
 	_, _, _ = cat.UpdateStatus(ctx, id, backup.StatusUploading, nil)
 	start := end.Add(-time.Minute)
-	if _, _, err := cat.UpdateMeta(ctx, id, "postgres", backup.Meta{Position: backup.Position{LSN: "0/3000000"}, EndPosition: backup.Position{LSN: "0/4000000"}, StartTime: &start, EndTime: &end}); err != nil {
+	if _, _, err := cat.UpdateMeta(ctx, id, "postgres", backup.Meta{Position: backup.Position{LSN: "0/3000000"}, EndPosition: backup.Position{LSN: "0/4000000"}, StartTime: &start, EndTime: &end,
+		Details: map[string]string{"source_identity": "pg-sysid-1", "timeline": "1"}}); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _ = cat.UpdateStatus(ctx, id, backup.StatusVerifying, nil)
@@ -602,12 +603,92 @@ func seedPITRBackup(t *testing.T, st store.Store, id, source, job string, at tim
 	}
 	_, _, _ = cat.UpdateStatus(ctx, id, backup.StatusUploading, nil)
 	start := at
-	if _, _, err := cat.UpdateMeta(ctx, id, "postgres", backup.Meta{Position: backup.Position{LSN: "0/3000028"}, EndPosition: backup.Position{LSN: "0/3000100"}, StartTime: &start}); err != nil {
+	if _, _, err := cat.UpdateMeta(ctx, id, "postgres", backup.Meta{Position: backup.Position{LSN: "0/3000028"}, EndPosition: backup.Position{LSN: "0/3000100"}, StartTime: &start,
+		Details: map[string]string{"source_identity": "pg-sysid-1", "timeline": "1"}}); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _ = cat.UpdateStatus(ctx, id, backup.StatusVerifying, nil)
 	if _, _, err := cat.Finalize(ctx, id, backup.StatusVerifying, 500, strings.Repeat("e", 64), r.ManifestURI, at.Add(time.Minute)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// seedWALSegment seeds a complete WAL segment [from, to) of the fixture's lineage ending at end.
+func seedWALSegment(t *testing.T, st store.Store, id, source, job, from, to string, end time.Time) {
+	t.Helper()
+	cat, _ := backup.NewCatalog(st)
+	ctx := context.Background()
+	r := backup.Record{ID: id, Source: source, Engine: "postgres", Tool: "strand", Bucket: "central-backups", ObjectKey: "pg/wal/" + id,
+		ManifestURI: "s3://central-backups/pg/wal/" + id, Status: backup.StatusQueued, CreatedAt: end, JobID: job, Method: backup.MethodWAL, Kind: backup.KindLog}
+	if _, _, err := cat.Create(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = cat.UpdateStatus(ctx, id, backup.StatusUploading, nil)
+	start := end.Add(-time.Minute)
+	if _, _, err := cat.UpdateMeta(ctx, id, "postgres", backup.Meta{Position: backup.Position{LSN: from}, EndPosition: backup.Position{LSN: to}, StartTime: &start, EndTime: &end,
+		Details: map[string]string{"source_identity": "pg-sysid-1", "timeline": "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = cat.UpdateStatus(ctx, id, backup.StatusVerifying, nil)
+	if _, _, err := cat.Finalize(ctx, id, backup.StatusVerifying, 10, strings.Repeat("d", 64), r.ManifestURI, end); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// RPO credits archived logs only when they extend a continuous window from a base backup: a fresh WAL
+// segment after a gap, or WAL without any base backup, must not make the source look healthy.
+func TestRPOCreditsOnlyContinuousLogWindow(t *testing.T) {
+	e := newP56Env(t, nil)
+	ctx := context.Background()
+	now := e.srv.now().UTC()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, j := range []backup.Job{
+		{ID: "bjob-gap", Name: "gap", EverySeconds: 86400, Bucket: "central-backups", Enabled: true,
+			JobOptions: backup.JobOptions{Method: backup.MethodPGBaseBackup, Source: "pg-gap", PolicyID: "policy-gold", LogArchive: true,
+				Conn: backup.ConnSpec{Host: "db", User: "u", PasswordEnv: "PGPW"}}},
+		{ID: "bjob-nobase", Name: "nobase", EverySeconds: 86400, Bucket: "central-backups", Enabled: true,
+			JobOptions: backup.JobOptions{Method: backup.MethodPGBaseBackup, Source: "pg-nobase", PolicyID: "policy-gold", LogArchive: true,
+				Conn: backup.ConnSpec{Host: "db", User: "u", PasswordEnv: "PGPW"}}},
+	} {
+		must(e.st.CreateBackupJob(ctx, j))
+	}
+	// pg-gap: base 3 h ago, WAL covering it, then a missing segment, then a fresh segment 1 min ago.
+	seedPITRBackup(t, e.st, "bk-gap-base", "pg-gap", "bjob-gap", now.Add(-3*time.Hour))
+	seedWALSegment(t, e.st, "bk-gap-wal-1", "pg-gap", "bjob-gap", "0/3000000", "0/4000000", now.Add(-170*time.Minute))
+	seedWALSegment(t, e.st, "bk-gap-wal-3", "pg-gap", "bjob-gap", "0/5000000", "0/6000000", now.Add(-time.Minute))
+	// pg-nobase: only WAL, 1 min old.
+	seedWALSegment(t, e.st, "bk-nobase-wal", "pg-nobase", "bjob-nobase", "0/3000000", "0/4000000", now.Add(-time.Minute))
+	a := e.admin()
+	var resp struct {
+		Sources []backup.RPOStatus `json:"sources"`
+	}
+	read := func() map[string]backup.RPOStatus {
+		out := a.must("GET", "/api/v1/backup-rpo", nil, 200)
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]backup.RPOStatus{}
+		for _, x := range resp.Sources {
+			m[x.Source] = x
+		}
+		return m
+	}
+	got := read()
+	if g := got["pg-gap"]; g.Basis != backup.RPOBasisLog || g.CurrentSecs != 170*60 || !g.Breach {
+		t.Fatalf("source with a WAL gap = %+v (want the end of the continuous window, 170 min, in breach)", g)
+	}
+	if g := got["pg-nobase"]; g.Basis != backup.RPOBasisNone || g.CurrentSecs != -1 || !g.Breach {
+		t.Fatalf("source with WAL but no base backup = %+v (want no restore point and a breach)", g)
+	}
+	// The missing segment arrives: the window is continuous up to the newest segment.
+	seedWALSegment(t, e.st, "bk-gap-wal-2", "pg-gap", "bjob-gap", "0/4000000", "0/5000000", now.Add(-100*time.Minute))
+	if g := read()["pg-gap"]; g.Basis != backup.RPOBasisLog || g.CurrentSecs != 60 || g.Breach {
+		t.Fatalf("source after the gap is filled = %+v", g)
 	}
 }
 

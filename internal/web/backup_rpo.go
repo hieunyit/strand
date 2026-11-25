@@ -15,8 +15,9 @@ import (
 	"strand/internal/web/store"
 )
 
-// RPO / SLA and compliance. current_rpo = now - latest restore point of a source: the last archived log
-// segment when the job archives logs (PITR), otherwise the newest complete backup (backup.ComputeRPO). The
+// RPO / SLA and compliance. current_rpo = now - latest restore point of a source: the end of the continuous
+// log window from a base backup when the job archives logs (PITR, runner.PITREnd), otherwise the newest
+// complete backup (backup.ComputeRPO). The
 // target is the policy's rpo_minutes. A source over its target raises an rpo_breach notification once per
 // episode (re-sent every rpoRenotify while it lasts), is exported as strand_backup_rpo_seconds{source} and is
 // listed in the compliance report.
@@ -85,7 +86,14 @@ func (s *Server) rpoStatuses(ctx context.Context) ([]backup.RPOStatus, map[strin
 				}
 				in.LastBackup = &t
 			}
-			in.LastLogEnd = sm.LogEnd
+			// Logs earn RPO credit only up to the end of a continuous window from a base backup; the newest
+			// segment alone (after a gap, or with no base at all) restores nothing.
+			if in.PITR && sm.LogEnd != nil && sm.LastSuccess != nil && s.backups != nil {
+				if rs, err := s.backups.ListAll(ctx, backup.Filter{Source: source, Status: backup.StatusComplete}, 0); err == nil {
+					in.LastLogEnd = runner.PITREnd(rs)
+				}
+			}
+			in.LogsWithoutBase = sm.LogEnd != nil && sm.LastSuccess == nil
 		}
 		out = append(out, backup.ComputeRPO(now, in))
 	}
