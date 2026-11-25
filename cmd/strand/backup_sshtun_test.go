@@ -13,6 +13,7 @@ import (
 
 	"strand/internal/backup"
 	"strand/internal/backup/sshtun"
+	"strand/internal/sshprofile"
 	"strand/internal/tunnel/tunneltest"
 	"strand/internal/web/store"
 )
@@ -194,6 +195,42 @@ func TestJobRun_TunneledConnection(t *testing.T) {
 	_, err = net.DialTimeout("tcp", target, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected tunnel listener to be closed after run finished")
+	}
+}
+
+func TestManagedBackupUsesSavedSSHProfile(t *testing.T) {
+	ctx := context.Background()
+	srv := tunneltest.StartSSHServer(t, false)
+	const secret = "backup-tunnel-test-key"
+	t.Setenv("STRAND_WEB_SECRET_KEY", secret)
+	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", srv.KnownHostsFile())
+	box, err := store.NewBox(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := os.ReadFile(srv.IdentityFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portText)
+	profile := sshprofile.Profile{ID: "shared-ops", Host: host, Port: port, User: "ops"}
+	profile.SealedKey, err = profile.SealKey(box, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMem()
+	if err := sshprofile.Save(ctx, st, []sshprofile.Profile{profile}); err != nil {
+		t.Fatal(err)
+	}
+	connection := backup.Connection{Engine: backup.ConnMySQL, Host: "mysql.internal", SSHTunnel: &backup.SSHTunnel{Profile: profile.ID}}
+	localHost, localPort, closeTunnel, err := openManagedBackupTunnel(ctx, st, connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTunnel()
+	if localHost != "127.0.0.1" || localPort == 0 {
+		t.Fatalf("invalid forwarded address %s:%d", localHost, localPort)
 	}
 }
 

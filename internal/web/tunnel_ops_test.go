@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -193,7 +194,7 @@ func webTestEchoServer(t *testing.T) string {
 
 func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
-	e := opsEnv(t, false, nil)
+	e := newCPEnv(t)
 	c, csrf := e.loginOK()
 	addr, identity, hosts := webTestSSHServer(t, t.TempDir())
 	t.Setenv("STRAND_WEB_SSH_KNOWN_HOSTS", hosts)
@@ -211,23 +212,78 @@ func TestSharedSSHProfileStoresOnlyCiphertextAndOpensTunnel(t *testing.T) {
 			t.Fatalf("GET %s returned %d", page, resp.StatusCode)
 		}
 	}
-	params := url.Values{"intent": {"save-profile"}, "profile_id": {"shared-bastion"}, "profile_host": {host}, "profile_port": {port},
+	params := url.Values{"intent": {"save-profile"}, "profile_id": {"shared-bastion"}, "profile_host": {net.JoinHostPort(host, port)},
 		"profile_user": {"strand"}, "profile_private_key": {string(key)}, "csrf": {csrf}}
-	resp, body := e.do(c, "POST", "/tunnels", params.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", csrfHeader: csrf})
-	if resp.StatusCode != 200 && resp.StatusCode != 303 {
+	formHeaders := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	resp, body := e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/tunnels?saved=1" {
 		t.Fatalf("save profile: status=%d body=%s", resp.StatusCode, body)
+	}
+	if _, body := e.do(c, "GET", resp.Header.Get("Location"), "", nil); !strings.Contains(body, "SSH tunnel saved.") {
+		t.Fatal("missing tunnel save confirmation")
 	}
 	raw, found, err := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey)
 	if err != nil || !found || strings.Contains(raw, "PRIVATE KEY") || strings.Contains(raw, base64.StdEncoding.EncodeToString(key)) || !strings.Contains(raw, "sealed_key") {
 		t.Fatalf("profile metadata is not sealed: found=%v err=%v", found, err)
 	}
-	for _, page := range []string{"/tunnels", "/pipelines/new"} {
+	for page, marker := range map[string]string{"/tunnels": `/tunnels?edit=shared-bastion`, "/pipelines/new": `value="shared-bastion"`, "/backups/connections": `value="shared-bastion"`} {
 		resp, body := e.do(c, "GET", page, "", nil)
-		if resp.StatusCode != 200 || !strings.Contains(body, `value="shared-bastion"`) || strings.Contains(body, "BEGIN OPENSSH PRIVATE KEY") {
-			t.Fatalf("profile picker not rendered safely in %s: %d", page, resp.StatusCode)
+		if resp.StatusCode != 200 || !strings.Contains(body, marker) || strings.Contains(body, "BEGIN OPENSSH PRIVATE KEY") ||
+			strings.Contains(body, "Open a verified SSH tunnel") || strings.Contains(body, "Identity file") || strings.Contains(body, "Manual bastion") {
+			t.Fatalf("profile controls not rendered safely in %s: %d", page, resp.StatusCode)
 		}
 	}
-	payload, _ := json.Marshal(map[string]string{"profile": "shared-bastion", "remote": webTestEchoServer(t)})
+	params.Set("profile_edit", "1")
+	params.Del("profile_private_key")
+	params.Set("profile_host", host)
+	params.Set("profile_port", "1")
+	resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+	if resp.StatusCode != 400 || !strings.Contains(body, "SSH connection check failed") || !strings.Contains(body, `value="shared-bastion"`) {
+		t.Fatalf("invalid edit: %d %s", resp.StatusCode, body)
+	}
+	if after, _, _ := e.srv.db.st.MetaGet(context.Background(), sshprofile.MetaKey); after != raw {
+		t.Fatal("failed connection check changed the stored profile")
+	}
+	params.Set("profile_port", port)
+	resp, body = e.do(c, "POST", "/tunnels", params.Encode(), formHeaders)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("edit profile while keeping stored key: %d %s", resp.StatusCode, body)
+	}
+	// Connections consume the same saved key. The preview of an edited
+	// connection also reuses its stored database password when left blank.
+	connection := map[string]any{"name": "shared-sql", "engine": "mysql", "host": "db.internal", "user": "db-user",
+		"password": "db-credential-fixture", "ssh_tunnel": map[string]string{"profile": "shared-bastion"}}
+	payload, _ := json.Marshal(connection)
+	apiHeaders := map[string]string{csrfHeader: csrf, "Content-Type": "application/json"}
+	resp, body = e.do(c, "POST", "/api/v1/backup-connections", string(payload), apiHeaders)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("save connection with SSH tunnel: %d %s", resp.StatusCode, body)
+	}
+	var saved struct{ Connection struct{ ID string } }
+	if err := json.Unmarshal([]byte(body), &saved); err != nil || saved.Connection.ID == "" {
+		t.Fatalf("missing saved connection ID: %v", err)
+	}
+	connection["id"] = saved.Connection.ID
+	connection["reuse_password"] = true
+	delete(connection, "password")
+	payload, _ = json.Marshal(connection)
+	resp, body = e.do(c, "POST", "/api/v1/backup-connections/test", string(payload), apiHeaders)
+	var preview struct{ OK bool }
+	if err := json.Unmarshal([]byte(body), &preview); err != nil || resp.StatusCode != http.StatusOK || !preview.OK {
+		t.Fatalf("test connection with stored SSH and database keys: %d %v %s", resp.StatusCode, err, body)
+	}
+	if got := e.fake.last(); got.Host != "127.0.0.1" || got.TLSServerName != "db.internal" || got.Password != "db-credential-fixture" {
+		t.Fatal("test did not use the saved tunnel or existing password")
+	}
+
+	connection["host"] = "another-db.internal"
+	payload, _ = json.Marshal(connection)
+	resp, body = e.do(c, "POST", "/api/v1/backup-connections/test", string(payload), apiHeaders)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "re-enter the database password") {
+		t.Fatalf("preview reused the password for a different database endpoint: %d %s", resp.StatusCode, body)
+	}
+
+	payload, _ = json.Marshal(map[string]string{"profile": "shared-bastion", "remote": webTestEchoServer(t)})
 	resp, body = e.do(c, "POST", "/api/v1/tunnels", string(payload), map[string]string{csrfHeader: csrf, "Content-Type": "application/json"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("open stored-key tunnel: %d %s", resp.StatusCode, body)

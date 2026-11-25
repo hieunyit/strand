@@ -11,7 +11,9 @@ import (
 	"strings"
 
 	"strand/internal/backup"
+	"strand/internal/sshprofile"
 	"strand/internal/tunnel"
+	"strand/internal/web/store"
 )
 
 // ValidateSecurity validates known_hosts and identity_ref against Strand's SSH security policy.
@@ -24,6 +26,11 @@ func ValidateSecurity(identityFile, knownHosts string) error {
 // Otherwise, it starts an in-process local port forward to c.Host:c.Port (defaulting port if 0)
 // and returns 127.0.0.1, the forwarded local port, a close function, and nil error.
 func OpenForConnection(ctx context.Context, c backup.Connection) (addrHost string, addrPort int, closeFn func(), err error) {
+	return OpenForStoredConnection(ctx, c, nil, nil)
+}
+
+// OpenForStoredConnection also resolves a shared tunnel profile from metadata.
+func OpenForStoredConnection(ctx context.Context, c backup.Connection, metadata sshprofile.Metadata, box *store.Box) (string, int, func(), error) {
 	if c.SSHTunnel == nil {
 		return c.Host, c.Port, func() {}, nil
 	}
@@ -31,13 +38,40 @@ func OpenForConnection(ctx context.Context, c backup.Connection) (addrHost strin
 		return "", 0, nil, errors.New("ssh_tunnel cannot be used with a connection URI; use host/port/user")
 	}
 	tun := c.SSHTunnel
-	if strings.TrimSpace(tun.KnownHostsRef) == "" {
+	sshPort := tun.Port
+	if sshPort <= 0 {
+		sshPort = 22
+	}
+	cfg := tunnel.Config{SSHAddress: net.JoinHostPort(tun.Host, strconv.Itoa(sshPort)),
+		SSHUser: tun.User, IdentityFile: tun.IdentityRef, HostKeysFile: tun.KnownHostsRef}
+	if tun.Profile != "" {
+		if metadata == nil {
+			return "", 0, nil, errors.New("SSH tunnel profile needs the metadata database")
+		}
+		profiles, err := sshprofile.List(ctx, metadata)
+		if err != nil {
+			return "", 0, nil, errors.New("could not read saved SSH tunnels")
+		}
+		profile, err := sshprofile.Find(profiles, tun.Profile)
+		if err != nil {
+			return "", 0, nil, err
+		}
+		cfg, err = profile.TunnelConfig(box)
+		if err != nil {
+			return "", 0, nil, err
+		}
+		defer clear(cfg.PrivateKey)
+		cfg.HostKeysFile, err = tunnel.ConfiguredKnownHosts()
+		if err != nil {
+			return "", 0, nil, err
+		}
+	}
+	if strings.TrimSpace(cfg.HostKeysFile) == "" {
 		return "", 0, nil, errors.New("ssh_tunnel needs known_hosts_ref")
 	}
-	if err := ValidateSecurity(tun.IdentityRef, tun.KnownHostsRef); err != nil {
+	if err := ValidateSecurity(cfg.IdentityFile, cfg.HostKeysFile); err != nil {
 		return "", 0, nil, err
 	}
-
 	remotePort := c.Port
 	if remotePort == 0 {
 		remotePort = backup.DefaultPort(c.CatalogEngine())
@@ -45,22 +79,7 @@ func OpenForConnection(ctx context.Context, c backup.Connection) (addrHost strin
 	if remotePort == 0 {
 		return "", 0, nil, errors.New("ssh_tunnel: remote port is required")
 	}
-	remoteAddr := net.JoinHostPort(c.Host, strconv.Itoa(remotePort))
-
-	sshPort := tun.Port
-	if sshPort <= 0 {
-		sshPort = 22
-	}
-	sshAddr := net.JoinHostPort(tun.Host, strconv.Itoa(sshPort))
-
-	cfg := tunnel.Config{
-		SSHAddress:   sshAddr,
-		SSHUser:      tun.User,
-		IdentityFile: tun.IdentityRef,
-		HostKeysFile: tun.KnownHostsRef,
-		Remote:       remoteAddr,
-		LocalAddress: "127.0.0.1:0",
-	}
+	cfg.Remote = net.JoinHostPort(c.Host, strconv.Itoa(remotePort))
 
 	f, err := tunnel.Start(ctx, cfg)
 	if err != nil {
@@ -75,14 +94,14 @@ func OpenForConnection(ctx context.Context, c backup.Connection) (addrHost strin
 	}
 	port, _ := strconv.Atoi(portStr)
 
-	slog.Info("ssh tunnel opened", "bastion", tun.Host, "bastion_port", sshPort, "remote_host", c.Host, "remote_port", remotePort, "local_addr", localAddr)
+	slog.Info("ssh tunnel opened", "bastion", cfg.SSHAddress, "remote_host", c.Host, "remote_port", remotePort, "local_addr", localAddr)
 
 	closed := false
 	closeFunc := func() {
 		if !closed {
 			closed = true
 			_ = f.Close()
-			slog.Info("ssh tunnel closed", "bastion", tun.Host, "remote_host", c.Host, "local_addr", localAddr)
+			slog.Info("ssh tunnel closed", "bastion", cfg.SSHAddress, "remote_host", c.Host, "local_addr", localAddr)
 		}
 	}
 

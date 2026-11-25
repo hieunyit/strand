@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -16,9 +20,8 @@ import (
 )
 
 type sshProfileView struct {
-	ID, Host, User string
-	Port           int
-	HasStoredKey   bool
+	ID, Host, User, Address string
+	Port                    int
 }
 
 type pipelineSSHFieldsView struct {
@@ -37,7 +40,7 @@ func (s *Server) sshProfileViews(ctx context.Context) []sshProfileView {
 	}
 	views := make([]sshProfileView, 0, len(profiles))
 	for _, p := range profiles {
-		views = append(views, sshProfileView{ID: p.ID, Host: p.Host, Port: p.Port, User: p.User, HasStoredKey: len(p.SealedKey) > 0})
+		views = append(views, sshProfileView{ID: p.ID, Host: p.Host, Port: p.Port, User: p.User, Address: p.Address()})
 	}
 	return views
 }
@@ -57,73 +60,139 @@ func (s *Server) savedTunnel(ctx context.Context, id string) (tunnel.Config, err
 	return p.TunnelConfig(s.db.box)
 }
 
-func (s *Server) saveSSHProfile(r *http.Request) error {
-	if s.db == nil {
-		return errors.New("SSH tunnel profiles require the metadata database")
+type sshProfileForm struct {
+	ID, Host, Port, User string
+	Edit                 bool
+}
+
+func sshProfileFormFromRequest(r *http.Request) sshProfileForm {
+	return sshProfileForm{
+		ID: strings.TrimSpace(r.PostForm.Get("profile_id")), Host: strings.TrimSpace(r.PostForm.Get("profile_host")),
+		Port: strings.TrimSpace(r.PostForm.Get("profile_port")), User: strings.TrimSpace(r.PostForm.Get("profile_user")),
+		Edit: r.PostForm.Get("profile_edit") == "1",
 	}
-	port := 22
-	if raw := strings.TrimSpace(r.FormValue("profile_port")); raw != "" {
-		var err error
-		port, err = strconv.Atoi(raw)
-		if err != nil || port < 1 || port > 65535 {
-			return errors.New("SSH port must be between 1 and 65535")
-		}
-	}
-	p := sshprofile.Profile{ID: strings.TrimSpace(r.FormValue("profile_id")), Host: strings.TrimSpace(r.FormValue("profile_host")),
-		User: strings.TrimSpace(r.FormValue("profile_user")), Port: port, IdentityFile: strings.TrimSpace(r.FormValue("profile_identity_file"))}
+}
+
+func (f sshProfileForm) profile() (sshprofile.Profile, error) {
+	p := sshprofile.Profile{ID: f.ID, Host: f.Host, User: f.User, Port: 22}
 	if !sshprofile.ValidID(p.ID) {
-		return errors.New("profile name must begin with an alphanumeric character and use at most 63 letters, digits, dots, underscores or hyphens")
+		return p, errors.New("tunnel name must begin with a letter or digit and use at most 63 letters, digits, dots, underscores or hyphens")
 	}
-	c := config.SSHTunnelConfig{Host: p.Host, Port: p.Port, User: p.User, IdentityFile: p.IdentityFile}
-	if err := c.Validate("mysql"); err != nil {
+	port := f.Port
+	if host, embeddedPort, err := net.SplitHostPort(f.Host); err == nil {
+		if port != "" && port != embeddedPort {
+			return p, errors.New("SSH host and port fields specify different ports")
+		}
+		p.Host, port = host, embeddedPort
+	} else if strings.HasPrefix(f.Host, "[") && strings.HasSuffix(f.Host, "]") {
+		p.Host = f.Host[1 : len(f.Host)-1]
+	}
+	if port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return p, errors.New("SSH port must be between 1 and 65535")
+		}
+		p.Port = n
+	}
+	return p, (&config.SSHTunnelConfig{Host: p.Host, Port: p.Port, User: p.User}).Validate("mysql")
+}
+
+func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm) error {
+	p, err := form.profile()
+	if err != nil {
 		return err
 	}
-	if p.IdentityFile != "" {
-		knownHosts, err := tunnel.ConfiguredKnownHosts()
-		if err != nil {
-			return err
-		}
-		if err := tunnel.ValidateSecurity(p.IdentityFile, knownHosts); err != nil {
-			return err
-		}
+	profiles, err := sshprofile.List(r.Context(), s.db.st)
+	if err != nil {
+		return errors.New("could not read SSH tunnels from the metadata database")
 	}
-	if raw := strings.TrimSpace(r.FormValue("profile_private_key")); raw != "" {
-		if len(raw) > 48<<10 || p.IdentityFile != "" {
-			return errors.New("choose a private key or an identity file; private key limit is 48 KiB")
+	index := slices.IndexFunc(profiles, func(v sshprofile.Profile) bool { return v.ID == p.ID })
+	if form.Edit != (index >= 0) {
+		if form.Edit {
+			return errors.New("SSH tunnel no longer exists")
+		}
+		return fmt.Errorf("SSH tunnel %q already exists. Choose Edit in the saved tunnels list", p.ID)
+	}
+	if index < 0 && len(profiles) >= 128 {
+		return errors.New("SSH tunnel limit reached")
+	}
+	var previous sshprofile.Profile
+	action := "tunnel.profile.create"
+	if form.Edit {
+		previous = profiles[index]
+		p.IdentityFile, p.SealedKey = previous.IdentityFile, previous.SealedKey
+		action = "tunnel.profile.update"
+	}
+	if raw := strings.TrimSpace(r.PostForm.Get("profile_private_key")); raw != "" {
+		if len(raw) > 48<<10 {
+			return errors.New("SSH private key exceeds 48 KiB")
 		}
 		key := []byte(raw + "\n")
 		defer clear(key)
 		if _, err := ssh.ParsePrivateKey(key); err != nil {
-			return errors.New("invalid or passphrase-protected SSH private key; use an SSH agent for passphrase-protected keys")
+			return errors.New("invalid or passphrase-protected SSH private key. Use an SSH agent for passphrase-protected keys")
 		}
-		var err error
 		p.SealedKey, err = p.SealKey(s.db.box, key)
 		if err != nil {
-			return errors.New("could not encrypt the SSH private key")
+			return err
 		}
+		p.IdentityFile = ""
+	}
+	if err := s.checkSSHProfile(r.Context(), p); err != nil {
+		return err
 	}
 	return s.db.st.Locked(r.Context(), sshprofile.MetaKey, func(ctx context.Context) error {
 		profiles, err := sshprofile.List(ctx, s.db.st)
 		if err != nil {
-			return errors.New("could not read SSH tunnel profiles")
+			return errors.New("could not read SSH tunnels from the metadata database")
 		}
-		if _, err := sshprofile.Find(profiles, p.ID); err == nil {
-			return fmt.Errorf("SSH tunnel profile %q already exists; choose a new name", p.ID)
-		}
-		if len(profiles) >= 128 {
-			return errors.New("SSH tunnel profile limit reached")
+		index := slices.IndexFunc(profiles, func(v sshprofile.Profile) bool { return v.ID == p.ID })
+		if form.Edit {
+			if index < 0 || !reflect.DeepEqual(previous, profiles[index]) {
+				return errors.New("SSH tunnel changed while it was being checked. Reload it and try again")
+			}
+			profiles[index] = p
+		} else {
+			if index >= 0 || len(profiles) >= 128 {
+				return errors.New("SSH tunnel name or limit changed while it was being checked")
+			}
+			profiles = append(profiles, p)
 		}
 		detail := map[string]any{"profile": p.ID, "host": p.Host, "user": p.User, "stored_key": len(p.SealedKey) > 0}
-		if err := s.auditSensitive(r, "tunnel.profile.create", detail, "started"); err != nil {
+		if err := s.auditSensitive(r, action, detail, "started"); err != nil {
 			return err
 		}
-		if err := sshprofile.Save(ctx, s.db.st, append(profiles, p)); err != nil {
-			_ = s.auditSensitive(r, "tunnel.profile.create", detail, "error")
-			return errors.New("could not save SSH tunnel profile")
+		if err := sshprofile.Save(ctx, s.db.st, profiles); err != nil {
+			_ = s.auditSensitive(r, action, detail, "error")
+			return errors.New("could not save SSH tunnel in the metadata database")
 		}
-		if err := s.auditSensitive(r, "tunnel.profile.create", detail, "ok"); err != nil {
-			s.log.Warn("could not record SSH tunnel profile creation outcome", "profile", p.ID)
+		if err := s.auditSensitive(r, action, detail, "ok"); err != nil {
+			s.log.Warn("could not record SSH tunnel save outcome", "profile", p.ID)
 		}
 		return nil
 	})
+}
+
+func (s *Server) checkSSHProfile(ctx context.Context, p sshprofile.Profile) error {
+	cfg, err := p.TunnelConfig(s.db.box)
+	if err != nil {
+		return err
+	}
+	defer clear(cfg.PrivateKey)
+	cfg.HostKeysFile, err = tunnel.ConfiguredKnownHosts()
+	if err != nil {
+		return fmt.Errorf("SSH trust is unavailable. Check the server's trusted host keys: %w", err)
+	}
+	if err := tunnel.ValidateSecurity(cfg.IdentityFile, cfg.HostKeysFile); err != nil {
+		if strings.HasPrefix(err.Error(), "known_hosts:") {
+			return fmt.Errorf("configure the server's trusted SSH host keys with STRAND_WEB_SSH_KNOWN_HOSTS: %w", err)
+		}
+		return fmt.Errorf("SSH key configuration is invalid on the server: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if err := tunnel.Check(ctx, cfg); err != nil {
+		return fmt.Errorf("SSH connection check failed for %s: %w", p.Address(), err)
+	}
+	return nil
 }

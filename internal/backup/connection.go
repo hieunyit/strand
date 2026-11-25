@@ -47,6 +47,7 @@ func (e *InUseError) Is(t error) bool { return t == ErrInUse }
 // SSHTunnel describes an SSH bastion for a connection. IdentityRef and KnownHostsRef are absolute paths on
 // the Strand host (no key material is stored).
 type SSHTunnel struct {
+	Profile       string `json:"profile,omitempty"`
 	Host          string `json:"host"`
 	Port          int    `json:"port,omitempty"`
 	User          string `json:"user"`
@@ -156,6 +157,12 @@ func (c Connection) Validate() error {
 		}
 	}
 	if t := c.SSHTunnel; t != nil {
+		if t.Profile != "" {
+			if !safeText(t.Profile, 63) || t.Host != "" || t.User != "" || t.Port != 0 || t.IdentityRef != "" || t.KnownHostsRef != "" {
+				return bad("ssh_tunnel profile cannot be combined with inline tunnel settings")
+			}
+			return nil
+		}
 		if !hostRE.MatchString(t.Host) || strings.HasPrefix(t.Host, "-") || !userNameRE.MatchString(t.User) || t.Port < 0 || t.Port > 65535 {
 			return bad("ssh_tunnel needs a valid host, user and port")
 		}

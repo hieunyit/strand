@@ -54,8 +54,8 @@
     return true;
   }
   var ERR_FIELDS = [
-    [/known_hosts/i, 'ssh_known_hosts_ref'], [/identity_file|identity_ref/i, 'ssh_identity_ref'],
-    [/ssh_tunnel|ssh/i, 'ssh_host'], [/ca_cert/i, 'ca_cert_pem'], [/tls/i, 'tls_mode'], [/password|secret/i, 'password'],
+    [/ssh_tunnel|SSH tunnel/i, 'ssh_profile'],
+    [/ca_cert/i, 'ca_cert_pem'], [/tls/i, 'tls_mode'], [/password|secret/i, 'password'],
     [/uri/i, 'uri'], [/port/i, 'port'], [/host/i, 'host'], [/engine/i, 'engine'], [/name/i, 'name']
   ];
   // Maps an API error message onto a field of the form when it names one; returns the field or ''.
@@ -302,11 +302,14 @@
     var pw = e.namedItem('password'), uri = e.namedItem('uri');
     if (pw && !pw.disabled && pw.value !== '') { body.password = pw.value; }
     if (uri && !uri.disabled && engine === 'mongodb' && uri.value !== '') { body.uri = uri.value; }
-    if (g('ssh_host')) {
-      body.ssh_tunnel = { host: g('ssh_host'), port: Number(g('ssh_port')) || 0, user: g('ssh_user'), identity_ref: g('ssh_identity_ref'), known_hosts_ref: g('ssh_known_hosts_ref') };
-    }
+    var profile = g('ssh_profile');
+    if (profile === '__legacy__') { body.keep_ssh_tunnel = true; }
+    else if (profile) { body.ssh_tunnel = { profile: profile }; }
     var id = f.getAttribute('data-conn-id');
-    if (forTest && id) { body.id = id; }
+    if (forTest && id) {
+      body.id = id;
+      if (body.ssh_tunnel && !body.password) { body.reuse_password = true; }
+    }
     return body;
   }
   function validateConn(f) {
@@ -315,10 +318,6 @@
     var hasURI = b.engine === 'mongodb' && (b.uri || f.getAttribute('data-conn-id'));
     if (!b.host && !hasURI) { errs.host = 'Host is required.'; }
     if (b.port && (b.port < 1 || b.port > 65535)) { errs.port = 'Port must be between 1 and 65535.'; }
-    if (b.ssh_tunnel && b.ssh_tunnel.host) {
-      if (!b.ssh_tunnel.user) { errs.ssh_user = 'SSH user is required.'; }
-      if (!b.ssh_tunnel.known_hosts_ref) { errs.ssh_known_hosts_ref = 'known_hosts file is required.'; }
-    }
     return errs;
   }
   function applyErrs(f, errs) {
@@ -356,8 +355,16 @@
       if (applyErrs(f, errs)) { return; }
       var id = f.getAttribute('data-conn-id'), btn = $('#conn-save-btn', f);
       busy(btn, true); alertEl.hidden = true;
-      api(id ? 'PUT' : 'POST', '/api/v1/backup-connections' + (id ? '/' + encodeURIComponent(id) : ''), connBody(f, false))
-        .then(function (r) { return readJSON(r, 'Could not save the connection'); })
+      var body = connBody(f, false);
+      var checked = body.ssh_tunnel ? api('POST', '/api/v1/backup-connections/test', connBody(f, true))
+        .then(function (r) { return readJSON(r, 'Connection check failed'); })
+        .then(function (res) {
+          renderTest(result, res);
+          if (!res.ok) { throw new Error(res.error || 'Connection check failed'); }
+        }) : Promise.resolve();
+      checked.then(function () {
+        return api(id ? 'PUT' : 'POST', '/api/v1/backup-connections' + (id ? '/' + encodeURIComponent(id) : ''), body);
+      }).then(function (r) { return readJSON(r, 'Could not save the connection'); })
         .then(function (res) {
           f.removeAttribute('data-dirty');
           if (f.hasAttribute('data-wizard')) {

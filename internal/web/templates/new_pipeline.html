@@ -380,34 +380,12 @@
 {{end}}
 
 {{define "pipeline-ssh-fields"}}
-<details class="advanced">
-  <summary>SSH tunnel <span class="opt">optional</span></summary>
-  <p class="field-hint">Enter the database host above as seen from the SSH bastion. Strand verifies the bastion with its server-managed host keys.</p>
-  <label class="field">
-    <span class="field-label">Saved SSH tunnel</span>
-    <select name="{{.Side}}_ssh_profile">
-      <option value="">None or manual bastion below</option>
-      {{range .Profiles}}<option value="{{.ID}}">{{.ID}} · {{.User}}@{{.Host}}:{{.Port}}</option>{{end}}
-    </select>
-    <small class="field-hint">A saved tunnel takes precedence over manual fields. <a href="/tunnels">Manage saved tunnels</a>.</small>
-  </label>
-  <div class="field-grid cols-4">
-    <label class="field">
-      <span class="field-label">SSH bastion host</span>
-      <input type="text" name="{{.Side}}_ssh_host" class="mono" placeholder="bastion.example.com" autocomplete="off">
-    </label>
-    <label class="field">
-      <span class="field-label">SSH port</span>
-      <input type="number" name="{{.Side}}_ssh_port" class="mono" min="1" max="65535" placeholder="22">
-    </label>
-    <label class="field">
-      <span class="field-label">SSH user</span>
-      <input type="text" name="{{.Side}}_ssh_user" class="mono" placeholder="strand" autocomplete="off">
-    </label>
-    <label class="field">
-      <span class="field-label">Identity file on the server</span>
-      <input type="text" name="{{.Side}}_ssh_identity_file" class="mono" placeholder="Use SSH agent if empty" autocomplete="off">
-    </label>
-  </div>
-</details>
+<label class="field">
+  <span class="field-label">SSH tunnel <span class="opt">optional</span></span>
+  <select name="{{.Side}}_ssh_profile">
+    <option value="">No tunnel</option>
+    {{range .Profiles}}<option value="{{.ID}}">{{.ID}} · {{.User}}@{{.Address}}</option>{{end}}
+  </select>
+  <small class="field-hint">Use the database address as seen from the SSH server. <a href="/tunnels">Manage SSH tunnels</a></small>
+</label>
 {{end}}

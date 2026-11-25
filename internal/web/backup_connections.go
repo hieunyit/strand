@@ -35,21 +35,23 @@ func (s *Server) backupConnectionRoutes(mux *http.ServeMux) {
 
 // connRequest is the write body. Password and URI are write-only: nil keeps the stored value on update.
 type connRequest struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Engine      string            `json:"engine"`
-	Host        string            `json:"host"`
-	Port        int               `json:"port"`
-	User        string            `json:"user"`
-	SecretMode  string            `json:"secret_mode"`
-	PasswordEnv string            `json:"password_env"`
-	URIEnv      string            `json:"uri_env"`
-	Password    *string           `json:"password"`
-	URI         *string           `json:"uri"`
-	TLSMode     string            `json:"tls_mode"`
-	CACertPEM   string            `json:"ca_cert_pem"`
-	SSHTunnel   *backup.SSHTunnel `json:"ssh_tunnel"`
-	Labels      map[string]string `json:"labels"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Engine        string            `json:"engine"`
+	Host          string            `json:"host"`
+	Port          int               `json:"port"`
+	User          string            `json:"user"`
+	SecretMode    string            `json:"secret_mode"`
+	PasswordEnv   string            `json:"password_env"`
+	URIEnv        string            `json:"uri_env"`
+	Password      *string           `json:"password"`
+	URI           *string           `json:"uri"`
+	TLSMode       string            `json:"tls_mode"`
+	CACertPEM     string            `json:"ca_cert_pem"`
+	SSHTunnel     *backup.SSHTunnel `json:"ssh_tunnel"`
+	KeepSSHTunnel bool              `json:"keep_ssh_tunnel,omitempty"`
+	ReusePassword bool              `json:"reuse_password,omitempty"`
+	Labels        map[string]string `json:"labels"`
 }
 
 func randomConnID() (string, error) {
@@ -68,6 +70,12 @@ func (s *Server) connFromRequest(req connRequest, cur *backup.Connection) (backu
 		CACertPEM: req.CACertPEM, SSHTunnel: req.SSHTunnel, Labels: req.Labels}
 	if cur != nil {
 		c.ID = cur.ID
+	}
+	if req.KeepSSHTunnel {
+		if cur == nil || cur.SSHTunnel == nil || req.SSHTunnel != nil {
+			return c, errors.New("there is no existing SSH tunnel to keep")
+		}
+		c.SSHTunnel = cur.SSHTunnel
 	}
 	if c.SecretMode == "" && (req.PasswordEnv != "" || req.URIEnv != "") && (cur == nil || cur.SecretMode != backup.SecretEnv) {
 		c.SecretMode = backup.SecretEnv // refused just below with the explanation
@@ -257,7 +265,14 @@ func (s *Server) apiConnSave(update bool) authedHandler {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if c.SSHTunnel != nil {
+		if c.SSHTunnel != nil && c.SSHTunnel.Profile != "" {
+			saved, err := s.savedTunnel(r.Context(), c.SSHTunnel.Profile)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			clear(saved.PrivateKey)
+		} else if c.SSHTunnel != nil {
 			if strings.TrimSpace(c.SSHTunnel.KnownHostsRef) == "" {
 				writeErr(w, http.StatusBadRequest, "ssh_tunnel needs known_hosts_ref")
 				return
@@ -402,8 +417,7 @@ func (s *Server) connChecker() conncheck.Checker {
 	return conncheck.Live{}
 }
 
-// apiConnTest uses saved credentials only with the saved connection definition.
-// An unsaved probe uses credentials supplied in the request alone.
+// apiConnTest allows a form preview to reuse a password only for the saved tunnel and database endpoint.
 func (s *Server) apiConnTest(saved bool) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, sess *Session) {
 		if !s.needDB(w) {
@@ -432,8 +446,24 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 			if !decodeStrict(w, r, &req) {
 				return
 			}
+			var existing *backup.Connection
 			if req.ID == "" {
 				req.ID = "conn-unsaved"
+			}
+			if req.KeepSSHTunnel || req.ReusePassword {
+				cur, found, err := s.db.st.GetBackupConnection(r.Context(), req.ID)
+				if err != nil {
+					writeErr(w, http.StatusServiceUnavailable, "could not read backup connection")
+					return
+				}
+				if !found {
+					writeErr(w, http.StatusNotFound, "backup connection not found")
+					return
+				}
+				existing = &cur
+			}
+			if req.KeepSSHTunnel && existing != nil && existing.SSHTunnel != nil && req.SSHTunnel == nil {
+				req.SSHTunnel, req.KeepSSHTunnel = existing.SSHTunnel, false
 			}
 			built, err := s.connFromRequest(req, nil)
 			if err != nil {
@@ -448,7 +478,28 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 				return
 			}
 			c = built
-			if req.Password != nil {
+			if req.ReusePassword && req.Password == nil && existing != nil && len(existing.PasswordSealed) > 0 {
+				storedPort, proposedPort := existing.Port, req.Port
+				if storedPort == 0 {
+					storedPort = backup.DefaultPort(existing.Engine)
+				}
+				if proposedPort == 0 {
+					proposedPort = backup.DefaultPort(req.Engine)
+				}
+				if req.SSHTunnel == nil || !reflect.DeepEqual(existing.SSHTunnel, req.SSHTunnel) ||
+					existing.Engine != req.Engine || existing.Host != req.Host || storedPort != proposedPort ||
+					existing.User != req.User || existing.TLSMode != req.TLSMode || existing.CACertPEM != req.CACertPEM {
+					writeErr(w, http.StatusBadRequest, "re-enter the database password to test the changed connection settings")
+					return
+				}
+				plain, err := s.db.box.Open(existing.PasswordSealed, existing.ID)
+				if err != nil {
+					writeErr(w, http.StatusConflict, "the stored password cannot be decrypted (wrong STRAND_WEB_SECRET_KEY?)")
+					return
+				}
+				password = string(plain)
+				clear(plain)
+			} else if req.Password != nil {
 				password = *req.Password
 			}
 			if req.URI != nil {
@@ -487,7 +538,7 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 				writeJSON(w, http.StatusOK, res)
 				return
 			}
-			addrHost, addrPort, closeTunnel, err := sshtun.OpenForConnection(r.Context(), c)
+			addrHost, addrPort, closeTunnel, err := sshtun.OpenForStoredConnection(r.Context(), c, s.db.st, s.db.box)
 			if err != nil {
 				res := conncheck.Result{
 					OK:                false,
@@ -522,7 +573,7 @@ func (s *Server) apiConnTest(saved bool) authedHandler {
 			})
 			res.RestoreEndpoint = restoreEndpoint
 			res.Checks = append([]conncheck.Check{
-				{Name: "ssh_tunnel", Status: "ok", Detail: "connected via " + c.SSHTunnel.Host},
+				{Name: "ssh_tunnel", Status: "ok", Detail: "SSH tunnel connected"},
 			}, res.Checks...)
 			if saved {
 				status, detail := "ok", "connected"

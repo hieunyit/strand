@@ -424,11 +424,14 @@ func (s *Server) pageTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Se
 		return
 	}
 	if r.FormValue("intent") == "save-profile" {
-		if err := s.saveSSHProfile(r); err != nil {
-			s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
+		form := sshProfileFormFromRequest(r)
+		if err := s.saveSSHProfile(r, form); err != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			s.renderTunnel(w, sess, tunnelView{Profiles: s.sshProfileViews(r.Context()), Form: form, Error: err.Error()})
 			return
 		}
-		http.Redirect(w, r, "/tunnels", http.StatusSeeOther)
+		http.Redirect(w, r, "/tunnels?saved=1", http.StatusSeeOther)
 		return
 	}
 	ssh := r.FormValue("ssh")

@@ -64,6 +64,53 @@ func Start(ctx context.Context, cfg Config) (*Forward, error) {
 	if err := validateTCPAddress(cfg.Remote); err != nil {
 		return nil, fmt.Errorf("tunnel: invalid remote address: %w", err)
 	}
+	client, err := connect(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.KeepAlive <= 0 {
+		cfg.KeepAlive = 30 * time.Second
+	}
+	listener, err := net.Listen("tcp", cfg.LocalAddress)
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("tunnel: listen on local address: %w", err)
+	}
+	if tcp, ok := listener.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+		_ = listener.Close()
+		_ = client.Close()
+		return nil, errors.New("tunnel: resolved local listener is not loopback")
+	}
+	f := &Forward{listener: listener, client: client, closed: make(chan struct{})}
+	go f.accept(ctx, cfg.Remote)
+	go f.keepAlive(cfg.KeepAlive)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+		case <-f.closed:
+		}
+	}()
+	return f, nil
+}
+
+// Check verifies the bastion's host key and SSH authentication without opening a forward.
+func Check(ctx context.Context, cfg Config) error {
+	client, err := connect(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	_ = client.Close()
+	return nil
+}
+
+func connect(ctx context.Context, cfg Config) (*ssh.Client, error) {
+	if ctx == nil {
+		return nil, errors.New("tunnel: context is required")
+	}
+	if strings.TrimSpace(cfg.SSHAddress) == "" || strings.TrimSpace(cfg.SSHUser) == "" || cfg.HostKeysFile == "" {
+		return nil, errors.New("tunnel: SSH address, SSH user, and known_hosts file are required")
+	}
 	sshAddr, err := normalizeSSHAddress(cfg.SSHAddress)
 	if err != nil {
 		return nil, err
@@ -79,9 +126,6 @@ func Start(ctx context.Context, cfg Config) (*Forward, error) {
 	defer cleanup()
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = 15 * time.Second
-	}
-	if cfg.KeepAlive <= 0 {
-		cfg.KeepAlive = 30 * time.Second
 	}
 	clientCfg := &ssh.ClientConfig{
 		User: cfg.SSHUser, Auth: auth, HostKeyCallback: hostKeys,
@@ -107,28 +151,7 @@ func Start(ctx context.Context, cfg Config) (*Forward, error) {
 		return nil, fmt.Errorf("tunnel: SSH authentication or host-key verification failed: %w", err)
 	}
 	_ = conn.SetDeadline(time.Time{})
-	client := ssh.NewClient(cc, chans, reqs)
-	listener, err := net.Listen("tcp", cfg.LocalAddress)
-	if err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("tunnel: listen on local address: %w", err)
-	}
-	if tcp, ok := listener.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
-		_ = listener.Close()
-		_ = client.Close()
-		return nil, errors.New("tunnel: resolved local listener is not loopback")
-	}
-	f := &Forward{listener: listener, client: client, closed: make(chan struct{})}
-	go f.accept(ctx, cfg.Remote)
-	go f.keepAlive(cfg.KeepAlive)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = f.Close()
-		case <-f.closed:
-		}
-	}()
-	return f, nil
+	return ssh.NewClient(cc, chans, reqs), nil
 }
 
 func normalizeSSHAddress(address string) (string, error) {

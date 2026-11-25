@@ -1,9 +1,4 @@
 {{define "content"}}
-<nav class="tabs" role="tablist" aria-label="Settings sections">
-  <a href="/settings" class="tab" role="tab" aria-selected="false">{{icon "config"}}<span>General Settings</span></a>
-  <a href="/settings/db" class="tab active" role="tab" aria-selected="true" aria-current="page">{{icon "db"}}<span>Database Admin</span></a>
-</nav>
-
 <section class="card">
   <div class="cardhead"><h2>PostgreSQL Metadata Store Migration (strand web db migrate)</h2></div>
   <p class="card-desc">Import legacy file-mode state from the configured web.yaml into this PostgreSQL metadata store, then verify it. This requires a legacy config file; it does not migrate database tables.</p>

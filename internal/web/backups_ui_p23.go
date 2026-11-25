@@ -103,6 +103,7 @@ func connStatusClass(c backup.Connection) string {
 }
 
 type connDrawer struct {
+	Profiles      []sshProfileView
 	StoredAllowed bool
 	Conn          *backup.Connection
 	Wizard        bool
@@ -146,7 +147,7 @@ func (s *Server) pageBackupConnections(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	cs, err := s.db.st.ListBackupConnections(r.Context())
-	body := backupConnectionsBody{backupRoles: rolesOf(sess), Drawer: connDrawer{StoredAllowed: s.storedAllowed()}}
+	body := backupConnectionsBody{backupRoles: rolesOf(sess), Drawer: connDrawer{Profiles: s.sshProfileViews(r.Context()), StoredAllowed: s.storedAllowed()}}
 	if err != nil {
 		body.Unavail = "Could not read the backup connections."
 	}
@@ -207,7 +208,7 @@ func (s *Server) pageBackupConnectionDetail(w http.ResponseWriter, r *http.Reque
 	}
 	body := backupConnectionDetailBody{backupRoles: rolesOf(sess), Tab: tab, Used: used,
 		Conn:   connRow{Connection: c, Jobs: len(used), StatusClass: connStatusClass(c)},
-		Drawer: connDrawer{StoredAllowed: s.storedAllowed(), Conn: &c}}
+		Drawer: connDrawer{Profiles: s.sshProfileViews(r.Context()), StoredAllowed: s.storedAllowed(), Conn: &c}}
 	s.render(w, "backups_connection_detail", sess, pageData{Title: c.Name, Active: "backups-connections", Body: body,
 		Subtitle:    strings.ToUpper(c.Engine) + " source " + c.Host,
 		Breadcrumbs: []BreadcrumbItem{{Label: "Home", URL: "/"}, {Label: "Backups", URL: "/backups"}, {Label: "Connections", URL: "/backups/connections"}, {Label: c.Name}}})
@@ -419,7 +420,7 @@ func (s *Server) pageBackupJobWizard(edit bool) authedHandler {
 		d.Tools, d.MethodTools, d.TestRestoreTools = wizardTools(r)
 		d.ToolHint = runner.ToolHint
 		raw, _ := json.Marshal(d)
-		body := backupJobWizardBody{backupRoles: rolesOf(sess), Edit: edit, Data: string(raw), Drawer: connDrawer{StoredAllowed: s.storedAllowed(), Wizard: true}}
+		body := backupJobWizardBody{backupRoles: rolesOf(sess), Edit: edit, Data: string(raw), Drawer: connDrawer{Profiles: s.sshProfileViews(r.Context()), StoredAllowed: s.storedAllowed(), Wizard: true}}
 		if job != nil {
 			body.JobID = job.ID
 		}

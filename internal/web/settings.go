@@ -327,10 +327,12 @@ type SettingView struct {
 }
 
 type settingsBody struct {
-	Items    []SettingView
-	Message  string
-	Error    string
-	Bootstap []SettingView
+	Items        []SettingView
+	Message      string
+	Error        string
+	Bootstrap    []SettingView
+	Section      string
+	SectionLabel string
 }
 
 func (s *Server) settingsView() []SettingView {
@@ -466,12 +468,36 @@ func (s *Server) setSetting(ctx context.Context, key string, val string) error {
 // ---- HTTP ----
 
 func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Session) {
-	b := settingsBody{Items: s.settingsView(), Bootstap: s.bootstrapSettings()}
+	b := settingsBody{Section: r.URL.Query().Get("section")}
+	switch b.Section {
+	case "security":
+		b.SectionLabel = "Security"
+	case "audit":
+		b.SectionLabel = "Audit"
+	case "about":
+		b.Bootstrap = s.bootstrapSettings()
+	default:
+		b.Section, b.SectionLabel = "general", "General"
+	}
+	sectionItems := func() []SettingView {
+		var items []SettingView
+		for _, it := range s.settingsView() {
+			if it.Section == b.Section {
+				items = append(items, it)
+			}
+		}
+		return items
+	}
+	b.Items = sectionItems()
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		_ = r.ParseForm()
 		changes := map[string]any{}
-		for _, it := range b.Items {
+		items := b.Items
+		if r.URL.Query().Get("section") == "" {
+			items = s.settingsView() // Forms rendered before section URLs were introduced.
+		}
+		for _, it := range items {
 			if !it.Editable {
 				continue
 			}
@@ -503,7 +529,7 @@ func (s *Server) pageSettings(w http.ResponseWriter, r *http.Request, sess *Sess
 		} else {
 			b.Message = "Saved: " + strings.Join(changed, ", ") + "."
 		}
-		b.Items = s.settingsView()
+		b.Items = sectionItems()
 	}
 	s.render(w, "settings", sess, pageData{Title: "Settings", Active: "settings", Body: b})
 }

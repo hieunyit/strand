@@ -57,6 +57,17 @@ func printJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+func openManagedBackupTunnel(ctx context.Context, st store.Store, c backup.Connection) (string, int, func(), error) {
+	if c.SSHTunnel == nil || c.SSHTunnel.Profile == "" {
+		return sshtun.OpenForConnection(ctx, c)
+	}
+	box, err := store.NewBox(os.Getenv("STRAND_WEB_SECRET_KEY"))
+	if err != nil {
+		return "", 0, nil, err
+	}
+	return sshtun.OpenForStoredConnection(ctx, c, st, box)
+}
+
 // runManagedBuiltinJob runs one built-in-method backup for a managed job (tracked run, execution lock),
 // then applies retention and replication.
 func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Store, job backup.Job, scheduled bool) error {
@@ -88,7 +99,7 @@ func runManagedBuiltinJob(ctx context.Context, cmd *cobra.Command, st store.Stor
 					return err
 				}
 				if ok && c.SSHTunnel != nil {
-					addrHost, addrPort, closeTunnel, err := sshtun.OpenForConnection(runCtx, c)
+					addrHost, addrPort, closeTunnel, err := openManagedBackupTunnel(runCtx, st, c)
 					if err != nil {
 						return fmt.Errorf("open ssh tunnel: %w", err)
 					}
@@ -649,7 +660,7 @@ func newBackupLogArchiveCmd() *cobra.Command {
 						return err
 					}
 					if ok && c.SSHTunnel != nil {
-						addrHost, addrPort, closeTunnel, err := sshtun.OpenForConnection(actx, c)
+						addrHost, addrPort, closeTunnel, err := openManagedBackupTunnel(actx, st, c)
 						if err != nil {
 							return fmt.Errorf("open ssh tunnel: %w", err)
 						}

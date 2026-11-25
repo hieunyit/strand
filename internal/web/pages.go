@@ -1046,6 +1046,9 @@ type activeTunnel struct {
 type tunnelView struct {
 	Profiles []sshProfileView
 	Tunnels  []tunnelItem
+	Form     sshProfileForm
+	Error    string
+	Saved    bool
 }
 
 type dbMigrateReport struct {
@@ -1164,6 +1167,22 @@ func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Sessi
 }
 
 func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Session) {
+	view := tunnelView{Profiles: s.sshProfileViews(r.Context()), Saved: r.URL.Query().Get("saved") == "1"}
+	if id := r.URL.Query().Get("edit"); id != "" {
+		for _, p := range view.Profiles {
+			if p.ID == id {
+				view.Form = sshProfileForm{ID: p.ID, Host: p.Host, User: p.User, Port: strconv.Itoa(p.Port), Edit: true}
+				break
+			}
+		}
+		if !view.Form.Edit {
+			view.Error = "SSH tunnel was not found"
+		}
+	}
+	s.renderTunnel(w, sess, view)
+}
+
+func (s *Server) renderTunnel(w http.ResponseWriter, sess *Session, view tunnelView) {
 	s.tunnelMu.Lock()
 	list := make([]tunnelItem, 0, len(s.tunnels))
 	for _, t := range s.tunnels {
@@ -1177,11 +1196,12 @@ func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Sessio
 		}
 	}
 	s.tunnelMu.Unlock()
+	view.Tunnels = list
 
 	s.render(w, "tunnel", sess, pageData{
 		Title:  "SSH Tunnels",
 		Active: "tunnels",
-		Body:   &tunnelView{Tunnels: list, Profiles: s.sshProfileViews(r.Context())},
+		Body:   &view,
 	})
 }
 

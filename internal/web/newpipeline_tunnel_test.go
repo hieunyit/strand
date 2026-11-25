@@ -12,8 +12,9 @@ func TestNewPipelineSSHTunnelConfig(t *testing.T) {
 	e := newEnv(t, nil)
 	client, _ := e.loginOK()
 	resp, body := e.do(client, "GET", "/pipelines/new", "", nil)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `name="source_ssh_host"`) || !strings.Contains(body, `name="target_ssh_host"`) {
-		t.Fatalf("SSH fields missing from new pipeline page (status %d)", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `name="source_ssh_profile"`) || !strings.Contains(body, `name="target_ssh_profile"`) ||
+		strings.Contains(body, `name="source_ssh_host"`) || strings.Contains(body, `name="target_ssh_host"`) {
+		t.Fatalf("unexpected SSH profile controls on new pipeline page (status %d)", resp.StatusCode)
 	}
 	opts := NewPipelineOpts{
 		Name: "tunneled", From: "mysql", To: "postgres", Database: "app",

@@ -1,75 +1,51 @@
 {{define "content"}}
+{{if .Body.Saved}}<div class="alert alert-success" role="status">SSH tunnel saved.</div>{{end}}
+{{if .Body.Error}}<div class="alert alert-error" role="alert">{{.Body.Error}}</div>{{end}}
 <section class="card mb">
-  <div class="cardhead"><h2>Saved SSH tunnels</h2></div>
+  <div class="cardhead"><h2>{{if .Body.Form.Edit}}Edit SSH tunnel{{else}}Add SSH tunnel{{end}}</h2></div>
   <div class="pad">
-    <p class="small muted">Save a bastion once to use it here or in a pipeline. The destination database is chosen when you use it.</p>
     <form method="post" action="/tunnels" class="form-stack" autocomplete="off">
       <input type="hidden" name="csrf" value="{{$.CSRF}}">
       <input type="hidden" name="intent" value="save-profile">
+      {{if .Body.Form.Edit}}<input type="hidden" name="profile_edit" value="1">{{end}}
       <div class="field-grid">
-        <label class="field">Profile name<input name="profile_id" required maxlength="63" placeholder="production-bastion"></label>
-        <label class="field">SSH host<input name="profile_host" required placeholder="bastion.example.com"></label>
-        <label class="field">SSH port<input name="profile_port" type="number" min="1" max="65535" value="22"></label>
-        <label class="field">SSH user<input name="profile_user" required placeholder="strand"></label>
-        <label class="field">Identity file on the server<input name="profile_identity_file"></label>
-        <label class="field">Or paste SSH private key<textarea name="profile_private_key" class="mono" rows="4" maxlength="49152" spellcheck="false" autocomplete="off"></textarea>
-          <small class="field-hint">The key is encrypted in the metadata database. Leave both identity fields blank to use the SSH agent.</small>
-        </label>
+        <label class="field">Name<input name="profile_id" required maxlength="63" value="{{.Body.Form.ID}}" placeholder="production-bastion"{{if .Body.Form.Edit}} readonly{{end}}></label>
+        <label class="field">SSH user<input name="profile_user" required value="{{.Body.Form.User}}" placeholder="strand"></label>
+        <label class="field">SSH host<input name="profile_host" required value="{{.Body.Form.Host}}" placeholder="bastion.example.com"></label>
+        <label class="field">SSH port<input name="profile_port" type="number" min="1" max="65535" value="{{.Body.Form.Port}}" placeholder="22"></label>
       </div>
-      <button type="submit" class="btn">Save SSH tunnel</button>
+      <label class="field">SSH private key
+        <textarea name="profile_private_key" class="mono" rows="4" maxlength="49152" spellcheck="false" autocomplete="off"></textarea>
+        <small class="field-hint">{{if .Body.Form.Edit}}Leave blank to keep the current credentials.{{else}}Paste a key to store it encrypted, or leave blank to use the server's SSH agent.{{end}}</small>
+      </label>
+      <div class="form-actions">
+        {{if .Body.Form.Edit}}<a class="btn" href="/tunnels">Cancel</a>{{end}}
+        <button type="submit" class="btn primary">Check and save</button>
+      </div>
     </form>
   </div>
 </section>
-<form class="act form-stack" data-action="tunnel-open" method="post" action="/tunnels">
-  <input type="hidden" name="csrf" value="{{$.CSRF}}">
-  <fieldset class="form-section">
-    <legend class="form-section-title">Open a verified SSH tunnel</legend>
-    <p class="form-section-desc">Create loopback-only verified SSH local port forwards to reach private database endpoints through bastions.</p>
-    <label class="field">Saved SSH tunnel
-      <select name="profile">
-        <option value="">Manual bastion below</option>
-        {{range .Body.Profiles}}<option value="{{.ID}}">{{.ID}} · {{.User}}@{{.Host}}:{{.Port}}{{if .HasStoredKey}} · stored key{{end}}</option>{{end}}
-      </select>
-    </label>
-    <div class="field-grid">
-      <div class="field">
-        <label class="field-label" for="tun-ssh">SSH Bastion Host:Port <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="tun-ssh" name="ssh" class="mono" placeholder="bastion.internal:22">
-      </div>
-      <div class="field">
-        <label class="field-label" for="tun-user">SSH Username <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="tun-user" name="user" placeholder="ops">
-      </div>
-      <div class="field">
-        <label class="field-label" for="tun-remote">Remote Target Host:Port <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="tun-remote" name="remote" class="mono" placeholder="db-master.internal:3306" required>
-      </div>
-      <div class="field">
-        <label class="field-label" for="tun-listen">Local Listen Address</label>
-        <input type="text" id="tun-listen" name="listen" class="mono" value="127.0.0.1:0" placeholder="127.0.0.1:0">
-        <small class="field-hint">Port 0 selects an ephemeral free local port</small>
-      </div>
-    </div>
-  </fieldset>
-  <fieldset class="form-section">
-    <legend class="form-section-title">SSH identity</legend>
-    <div class="field-grid cols-1">
-      <div class="field">
-        <label class="field-label" for="tun-identity">SSH private key <span class="opt">optional</span></label>
-        <input type="text" id="tun-identity" name="identity_file" class="mono" placeholder="/etc/strand/ssh/keys/bastion_ed25519">
-        <small class="field-hint">Must be a regular file with restrictive permissions inside STRAND_WEB_SSH_KEY_DIR; otherwise SSH_AUTH_SOCK is used.</small>
-      </div>
-    </div>
-    <div class="form-actions flat">
-      <span class="form-status">The server verifies the bastion's SSH host key. The tunnel listens on loopback only.</span>
-      <button class="btn primary" type="submit" data-action="tunnel-open">Open Tunnel</button>
-    </div>
-  </fieldset>
-</form>
-
+<section class="card mb">
+  <div class="cardhead"><h2>Saved SSH tunnels</h2></div>
+  {{if .Body.Profiles}}
+  <p class="card-desc">Select a saved tunnel when configuring a database connection or pipeline.</p>
+  <div class="tablewrap">
+    <table class="data-table grid">
+      <thead><tr><th scope="col">Name</th><th scope="col">SSH host</th><th scope="col">SSH user</th><th scope="col" class="r">Action</th></tr></thead>
+      <tbody>
+        {{range .Body.Profiles}}
+        <tr><td>{{.ID}}</td><td class="mono">{{.Address}}</td><td>{{.User}}</td><td class="r"><a class="btn sm" href="/tunnels?edit={{.ID}}">Edit</a></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-state"><b>No saved SSH tunnels</b><span>Add a tunnel to use it in database connections and pipelines.</span></div>
+  {{end}}
+</section>
+{{if .Body.Tunnels}}
 <section class="card">
   <div class="cardhead"><h2>Active Tunnels{{if .Body.Tunnels}} <span class="muted small">{{len .Body.Tunnels}}</span>{{end}}</h2></div>
-  {{if .Body.Tunnels}}
   <div class="tablewrap">
     <table class="data-table grid">
       <thead><tr><th scope="col">Local Listen</th><th scope="col">Remote</th><th scope="col">SSH Bastion</th><th scope="col">User</th><th scope="col">Status</th><th scope="col" class="r">Action</th></tr></thead>
@@ -93,8 +69,6 @@
       </tbody>
     </table>
   </div>
-  {{else}}
-  <div class="empty-state">{{icon "server"}}<b>No active tunnels</b><span>Open one above; it appears here while it is running.</span></div>
-  {{end}}
 </section>
+{{end}}
 {{end}}

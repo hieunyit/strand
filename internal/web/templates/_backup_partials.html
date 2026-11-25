@@ -56,16 +56,15 @@
             </select><span class="field-error" hidden></span></label>
           <label class="field span-all"><span class="field-label">CA certificate (PEM) <span class="opt">optional</span></span>
             <textarea name="ca_cert_pem" rows="3" spellcheck="false">{{if .Conn}}{{.Conn.CACertPEM}}{{end}}</textarea><span class="field-error" hidden></span></label>
-          <label class="field"><span class="field-label">SSH host <span class="opt">optional</span></span>
-            <input type="text" name="ssh_host" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.Host}}{{end}}{{end}}"><span class="field-error" hidden></span></label>
-          <label class="field"><span class="field-label">SSH port <span class="opt">optional</span></span>
-            <input type="number" name="ssh_port" min="1" max="65535" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{if .Conn.SSHTunnel.Port}}{{.Conn.SSHTunnel.Port}}{{end}}{{end}}{{end}}" placeholder="22"><span class="field-error" hidden></span></label>
-          <label class="field"><span class="field-label">SSH user <span class="opt">optional</span></span>
-            <input type="text" name="ssh_user" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.User}}{{end}}{{end}}"><span class="field-error" hidden></span></label>
-          <label class="field"><span class="field-label">Identity file <span class="opt">optional</span></span>
-            <input type="text" name="ssh_identity_ref" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.IdentityRef}}{{end}}{{end}}" placeholder="/etc/strand/ssh/id_ed25519"><span class="field-error" hidden></span></label>
-          <label class="field span-all"><span class="field-label">known_hosts file <span class="opt">optional</span></span>
-            <input type="text" name="ssh_known_hosts_ref" value="{{if .Conn}}{{if .Conn.SSHTunnel}}{{.Conn.SSHTunnel.KnownHostsRef}}{{end}}{{end}}"><span class="field-error" hidden></span></label>
+          <label class="field span-all"><span class="field-label">SSH tunnel <span class="opt">optional</span></span>
+            {{$profile := ""}}{{if and .Conn .Conn.SSHTunnel}}{{$profile = .Conn.SSHTunnel.Profile}}{{end}}
+            <select name="ssh_profile">
+              <option value="">No tunnel</option>
+              {{if and .Conn .Conn.SSHTunnel (not $profile)}}<option value="__legacy__" selected>Keep existing tunnel</option>{{end}}
+              {{range .Profiles}}<option value="{{.ID}}"{{if eq .ID $profile}} selected{{end}}>{{.ID}} · {{.User}}@{{.Address}}</option>{{end}}
+            </select>
+            <span class="field-hint"><a href="/tunnels">Manage SSH tunnels</a></span><span class="field-error" hidden></span>
+          </label>
         </div>
       </details>
       <section class="test-result" id="conn-test-result" aria-live="polite" hidden></section>

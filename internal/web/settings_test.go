@@ -105,7 +105,7 @@ func TestSettingsDatabaseMode(t *testing.T) {
 		t.Fatalf("editing an env-set key: %d, want 409", resp.StatusCode)
 	}
 	// HTML page: form posts with CSRF, shows sources.
-	resp, page := e3.do(c3, "GET", "/settings", "", nil)
+	resp, page := e3.do(c3, "GET", "/settings?section=security", "", nil)
 	if resp.StatusCode != 200 || !strings.Contains(page, "STRAND_WEB_SECURE_COOKIES") || !strings.Contains(page, `name="csrf"`) {
 		t.Fatalf("settings page: %d", resp.StatusCode)
 	}

@@ -124,10 +124,15 @@ func TestEnvironmentChipAndSectionedSettings(t *testing.T) {
 	if resp, _ := e.do(c, "POST", "/api/v1/settings", `{"environment_name": "prod\u0007"}`, h); resp.StatusCode != 400 {
 		t.Fatalf("control character accepted: %d", resp.StatusCode)
 	}
-	_, page := e.do(c, "GET", "/settings", "", nil)
-	for _, id := range []string{`id="sec-general"`, `id="sec-security"`, `id="sec-audit"`, `id="sec-about"`, `class="settings-nav"`} {
-		if !strings.Contains(page, id) {
-			t.Errorf("settings page lacks %s", id)
+	for _, section := range []string{"general", "security", "audit", "about"} {
+		resp, page := e.do(c, "GET", "/settings?section="+section, "", nil)
+		if resp.StatusCode != 200 || !strings.Contains(page, `id="sec-`+section+`"`) || !strings.Contains(page, `class="settings-nav"`) {
+			t.Errorf("settings section %s did not render with its navigation: %d", section, resp.StatusCode)
+		}
+		for _, other := range []string{"general", "security", "audit", "about"} {
+			if other != section && strings.Contains(page, `id="sec-`+other+`"`) {
+				t.Errorf("settings section %s also rendered %s", section, other)
+			}
 		}
 	}
 	form := "csrf=" + csrf + "&environment_name=production&environment_tone=danger&scan=&config_dir=&sample_interval_sec=5&shutdown_stop_pipelines=false"
