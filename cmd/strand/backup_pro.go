@@ -566,6 +566,13 @@ Passwords come from the environment variable named by --target-password-env.`,
 					return backupUsageErr("partial restore is not available for " + baseMethod + " backups")
 				}
 			}
+			// Pin the base and the log segments so a prune (the web server's hourly retention runs in
+			// another process) cannot delete them while they are being restored.
+			release, err := env.PinPlan(ctx, plan)
+			if err != nil {
+				return backupRejected(fmt.Errorf("restore point is no longer available: %w", err))
+			}
+			defer release()
 			return env.Restore(ctx, plan, runner.RestoreTarget{
 				Conn:       target,
 				Database:   targetDB,
@@ -716,6 +723,12 @@ func newBackupVerifyCmd() *cobra.Command {
 				if err := backup.RequireComplete(rec, "verified"); err != nil {
 					return backupRejected(err)
 				}
+				// Pin it so a prune (possibly in another process) does not delete it mid-read.
+				release, err := env.PinRecords(ctx, []string{rec.ID})
+				if err != nil {
+					return backupRejected(err)
+				}
+				defer release()
 				verr := env.VerifyBackup(ctx, rec, !head)
 				if err := env.Audit(ctx, "backup.verify", map[bool]string{true: "ok", false: "error"}[verr == nil], map[string]any{"backup_id": id}); err != nil {
 					return errors.Join(verr, err)
@@ -733,6 +746,12 @@ func newBackupVerifyCmd() *cobra.Command {
 			if sample == 0 {
 				sample = job.VerifySamplePercent
 			}
+			// Verification and the test restore read the job's backups: pin them against retention.
+			release, err := env.PinJob(ctx, job.ID)
+			if err != nil {
+				return err
+			}
+			defer release()
 			rep, err := env.VerifyJob(ctx, job, runner.VerifyOptions{SamplePercent: sample})
 			if err != nil {
 				return err

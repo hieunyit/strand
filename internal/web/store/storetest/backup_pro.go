@@ -89,13 +89,31 @@ func runBackupPro(t *testing.T, s store.Store) {
 	if _, _, err := cat.Expire(ctx, wal.ID, base.Add(24*time.Hour)); err == nil || !strings.Contains(err.Error(), "object-locked") {
 		t.Fatalf("expire locked: %v", err)
 	}
-	if _, ok, err := cat.Expire(ctx, wal.ID, lock.Add(time.Second)); err != nil || !ok {
+	// The lock is checked against the store's clock: a caller whose clock runs past retain_until cannot
+	// claim or expire a backup that is still locked.
+	if _, _, err := cat.Expire(ctx, wal.ID, lock.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "object-locked") {
+		t.Fatalf("expire with a caller clock past the lock: %v", err)
+	}
+	if _, ok, err := cat.ClaimDeletion(ctx, wal.ID, lock.Add(time.Second)); err == nil || ok {
+		t.Fatalf("claim with a caller clock past the lock: %v %v", ok, err)
+	}
+	if r, _, _ := cat.Get(ctx, wal.ID); r.Status != backup.StatusComplete {
+		t.Fatalf("locked wal = %+v", r)
+	}
+	// A lock that has passed by the store's clock does not block, whatever the caller's clock says.
+	past := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	wal2 := completeBackup(t, s, backup.Record{ID: "b-wal-2", Source: "pg-prod", Engine: "postgres", Tool: "strand",
+		Bucket: "central-backups", ObjectKey: "pg/wal/000000010000000000000004", Status: backup.StatusQueued, CreatedAt: base.Add(90 * time.Second),
+		JobID: "bjob-pg", Method: backup.MethodWAL, Kind: backup.KindLog},
+		backup.Meta{Position: backup.Position{LSN: "0/4000000"}, EndPosition: backup.Position{LSN: "0/5000000"}, StartTime: &start, EndTime: &end,
+			LockMode: "COMPLIANCE", RetainUntil: &past, VersionID: "v-2"})
+	if _, ok, err := cat.Expire(ctx, wal2.ID, past.Add(-time.Hour)); err != nil || !ok {
 		t.Fatalf("expire after lock: %v %v", ok, err)
 	}
-	if r, _, _ := cat.Get(ctx, wal.ID); r.Status != backup.StatusExpired || r.ExpiredAt == nil {
+	if r, _, _ := cat.Get(ctx, wal2.ID); r.Status != backup.StatusExpired || r.ExpiredAt == nil {
 		t.Fatalf("expired = %+v", r)
 	}
-	if _, ok, err := cat.Expire(ctx, wal.ID, lock.Add(time.Hour)); err != nil || ok {
+	if _, ok, err := cat.Expire(ctx, wal2.ID, time.Now()); err != nil || ok {
 		t.Fatalf("second expire must be idempotent no-op: %v %v", ok, err)
 	}
 	if _, ok, err := cat.SetLegalHold(ctx, full.ID, true); err != nil || !ok {
@@ -104,7 +122,7 @@ func runBackupPro(t *testing.T, s store.Store) {
 	if _, _, err := cat.Expire(ctx, full.ID, time.Now()); err == nil {
 		t.Fatal("legal hold must block expiry")
 	}
-	if _, _, err := cat.SetLegalHold(ctx, wal.ID, true); err == nil {
+	if _, _, err := cat.SetLegalHold(ctx, wal2.ID, true); err == nil {
 		t.Fatal("hold on expired backup accepted")
 	}
 	if _, _, err := cat.ClaimDeletion(ctx, full.ID, time.Now()); err == nil {

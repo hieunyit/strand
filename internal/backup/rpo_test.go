@@ -25,6 +25,9 @@ func TestComputeRPO(t *testing.T) {
 		{"exactly at the target is not a breach", RPOInput{Source: "s", LastBackup: tp(now.Add(-5 * time.Minute)), TargetMinutes: 5}, 300, RPOBasisBackup, false},
 		{"no target never breaches", RPOInput{Source: "s", LastBackup: tp(now.Add(-100 * time.Hour))}, 100 * 3600, RPOBasisBackup, false},
 		{"no restore point: no RPO, no breach", RPOInput{Source: "s", PITR: true, TargetMinutes: 5}, -1, RPOBasisNone, false},
+		{"PITR logs without a base backup restore nothing", RPOInput{Source: "s", PITR: true, LastLogEnd: tp(now.Add(-time.Minute)), LogsWithoutBase: true, TargetMinutes: 5}, -1, RPOBasisNone, true},
+		{"logs are never credited without a base backup", RPOInput{Source: "s", PITR: true, LastLogEnd: tp(now.Add(-time.Minute)), TargetMinutes: 5}, -1, RPOBasisNone, false},
+		{"logs without a base backup and no target: no RPO", RPOInput{Source: "s", PITR: true, LogsWithoutBase: true}, -1, RPOBasisNone, false},
 		{"a point in the future clamps to zero", RPOInput{Source: "s", LastBackup: tp(now.Add(time.Minute)), TargetMinutes: 5}, 0, RPOBasisBackup, false},
 	}
 	for _, c := range cases {

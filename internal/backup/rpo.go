@@ -25,9 +25,14 @@ type RPOInput struct {
 	TargetMinutes int
 	RTOMinutes    int
 	// LastBackup is the point of the newest complete backup (its consistent point: start time, else
-	// creation time); LastLogEnd the end of the newest archived log segment.
+	// creation time). LastLogEnd is the end of the continuous point-in-time recovery window: the newest
+	// archived log segment that an unbroken run of segments connects to a complete standalone base backup
+	// (runner.PITREnd), not merely the newest segment. It is credited only together with LastBackup.
 	LastBackup *time.Time
 	LastLogEnd *time.Time
+	// LogsWithoutBase: the source archives log segments but has no complete base backup, so nothing is
+	// restorable. Such a source has no RPO and breaches any target instead of looking healthy.
+	LogsWithoutBase bool
 }
 
 // RPOStatus is the computed state of a source.
@@ -46,10 +51,12 @@ type RPOStatus struct {
 	Breach        bool       `json:"breach"`
 }
 
-// ComputeRPO = now - latest restore point: the last log segment for a PITR source, else the last backup. A
-// PITR source whose log archive has not produced a segment yet falls back to its last backup. A source
-// without any restore point has no RPO (CurrentSecs -1) and is not flagged: a new job would otherwise
-// alarm before its first run.
+// ComputeRPO = now - latest restore point: the end of the continuous log window for a PITR source, else the
+// last backup. A PITR source whose log archive has no continuous window from a base backup (no segment
+// yet, or a gap) falls back to its last backup; log segments without any base backup earn no credit. A
+// source without any restore point has no RPO (CurrentSecs -1) and is not flagged, since a new job would
+// otherwise alarm before its first run, unless it already archives logs (LogsWithoutBase): then it is
+// over any target, because nothing it has archived can be restored.
 func ComputeRPO(now time.Time, in RPOInput) RPOStatus {
 	st := RPOStatus{Source: in.Source, JobID: in.JobID, JobName: in.JobName, Engine: in.Engine, PolicyID: in.PolicyID, PITR: in.PITR,
 		Basis: RPOBasisNone, CurrentSecs: -1, TargetMinutes: in.TargetMinutes, RTOMinutes: in.RTOMinutes}
@@ -57,10 +64,11 @@ func ComputeRPO(now time.Time, in RPOInput) RPOStatus {
 	if point != nil {
 		st.Basis = RPOBasisBackup
 	}
-	if in.PITR && in.LastLogEnd != nil && (point == nil || in.LastLogEnd.After(*point)) {
+	if in.PITR && point != nil && in.LastLogEnd != nil && in.LastLogEnd.After(*point) {
 		point, st.Basis = in.LastLogEnd, RPOBasisLog
 	}
 	if point == nil {
+		st.Breach = in.LogsWithoutBase && in.TargetMinutes > 0
 		return st
 	}
 	p := *point

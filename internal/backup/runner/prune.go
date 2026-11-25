@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -14,7 +15,10 @@ type PruneResult struct {
 	DryRun    bool              `json:"dry_run"`
 	Decisions []backup.Decision `json:"decisions"`
 	Expired   []string          `json:"expired"`
-	Errors    []string          `json:"errors,omitempty"`
+	// Skipped: expired by the policy but pinned by a restore, test restore or verification in progress;
+	// the next run retries them.
+	Skipped []string `json:"skipped,omitempty"`
+	Errors  []string `json:"errors,omitempty"`
 }
 
 // PruneJob applies the job's retention policy to every backup of the job (including its log segments).
@@ -86,6 +90,10 @@ func (e *Env) prune(ctx context.Context, group string, rs []backup.Record, p bac
 			continue
 		}
 		if err := e.expire(ctx, byID[d.ID], strings.Join(d.Reasons, "; ")); err != nil {
+			if errors.Is(err, backup.ErrPinned) {
+				res.Skipped = append(res.Skipped, d.ID)
+				continue
+			}
 			res.Errors = append(res.Errors, d.ID+": "+err.Error())
 			continue
 		}
@@ -98,6 +106,9 @@ func (e *Env) prune(ctx context.Context, group string, rs []backup.Record, p bac
 // the claim if deletion or expiration was interrupted.
 func (e *Env) expire(ctx context.Context, r backup.Record, reason string) (err error) {
 	defer func() {
+		if errors.Is(err, backup.ErrPinned) {
+			return // in use by a restore: not an expiry attempt worth auditing; retried next run
+		}
 		err = e.audit(context.WithoutCancel(ctx), "backup.expire", err, map[string]any{"backup_id": r.ID, "source": r.Source,
 			"object": "s3://" + r.Bucket + "/" + r.ObjectKey, "reason": reason})
 	}()

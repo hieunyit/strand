@@ -373,6 +373,7 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 		if window.Continuous {
 			rpoInput.PITR, rpoInput.LastLogEnd = true, window.End
 		}
+		rpoInput.LogsWithoutBase = latest == nil && len(logs) > 0
 	}
 
 	allAudit, _ := s.db.st.ListAudit(r.Context(), 100)

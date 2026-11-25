@@ -80,7 +80,20 @@ func runBackupDelete(t *testing.T, s store.Store) {
 	if _, _, err := cat.Delete(ctx, "d-locked", now); err == nil || !strings.Contains(err.Error(), "object-locked") {
 		t.Fatalf("delete locked = %v", err)
 	}
-	if _, ok, err := cat.Delete(ctx, "d-locked", until.Add(time.Second)); err != nil || !ok {
+	// The store's clock decides: a caller whose clock runs past retain_until is still refused.
+	if _, ok, err := cat.Delete(ctx, "d-locked", until.Add(time.Second)); err == nil || ok || !strings.Contains(err.Error(), "object-locked") {
+		t.Fatalf("delete with a caller clock past the lock = %v %v", ok, err)
+	}
+	mk("d-unlocked")
+	if _, _, err := cat.UpdateStatus(ctx, "d-unlocked", backup.StatusUploading, nil); err != nil {
+		t.Fatal(err)
+	}
+	passed := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	if _, _, err := cat.UpdateMeta(ctx, "d-unlocked", "postgres", backup.Meta{LockMode: "GOVERNANCE", RetainUntil: &passed}); err != nil {
+		t.Fatal(err)
+	}
+	fail("d-unlocked")
+	if _, ok, err := cat.Delete(ctx, "d-unlocked", time.Now()); err != nil || !ok {
 		t.Fatalf("delete after lock = %v %v", ok, err)
 	}
 
