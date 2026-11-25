@@ -1095,6 +1095,7 @@ type activeTunnel struct {
 }
 
 type tunnelView struct {
+	ShowForm    bool
 	Profiles    []sshProfileView
 	Tunnels     []tunnelItem
 	Form        sshProfileForm
@@ -1210,10 +1211,11 @@ func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Sessi
 }
 
 func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Session) {
-	view := tunnelView{Profiles: s.sshProfileViews(r.Context()), Saved: r.URL.Query().Get("saved") == "1"}
+	view := tunnelView{Profiles: s.sshProfileViews(r.Context()), Saved: r.URL.Query().Get("saved") == "1", ShowForm: r.URL.Query().Get("new") == "1"}
 	if id := r.URL.Query().Get("edit"); id != "" {
 		for _, p := range view.Profiles {
 			if p.ID == id {
+				view.ShowForm = true
 				view.Form = sshProfileForm{ID: p.ID, Host: p.Host, User: p.User, Port: strconv.Itoa(p.Port), AuthMode: p.AuthMode, Edit: true}
 				break
 			}

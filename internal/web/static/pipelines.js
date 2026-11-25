@@ -27,6 +27,28 @@
     var labels = ['Source', 'Target', 'Tables & options', 'Review'];
     var cur = 1, last = steps.length, errSeq = 0;
 
+    var checks = {source: {state: 'Not tested', revision: 0}, target: {state: 'Not tested', revision: 0}};
+    function setCheck(side, state) {
+      checks[side].state = state;
+      var label = $('np-' + side + '-check-state');
+      if (label) { label.textContent = state; }
+      render();
+    }
+    function invalidateChecks(ev) {
+      var name = ev.target.name || '';
+      var match = /^(source|target)_(host|port|user|password|auth_db|replica_set|tls|ssh_.*)$/.exec(name);
+      var sides = name === 'from' ? ['source', 'target'] : (name === 'to' ? ['target'] : (match ? [match[1]] : []));
+      sides.forEach(function (side) {
+        var check = checks[side];
+        if (check.state === 'Not tested' || check.state === 'Retest required') { return; }
+        check.revision++;
+        $('np-test-' + side + '-result').textContent = '';
+        setCheck(side, 'Retest required');
+      });
+    }
+    form.addEventListener('input', invalidateChecks);
+    form.addEventListener('change', invalidateChecks);
+
     function field(name) { return form.querySelector('[name="' + name + '"]:not([disabled])'); }
     function val(name) { var e = field(name); return e ? e.value.trim() : ''; }
 
@@ -142,8 +164,9 @@
       var h = val(prefix + '_host'), p = val(prefix + '_port'), u = val(prefix + '_user');
       var s = (h || '?') + (p ? ':' + p : '') + (u ? ' as ' + u : '');
       if (withDb) { s += ' / ' + (withDb); }
-      var bastion = val(prefix + '_ssh_host');
-      if (bastion) { s += ' via SSH ' + bastion + ':' + (val(prefix + '_ssh_port') || '22'); }
+      var profile = val(prefix + '_ssh_profile'), bastion = val(prefix + '_ssh_host');
+      if (profile) { s += ' via SSH ' + profile; }
+      else if (bastion) { s += ' via SSH ' + bastion + ':' + (val(prefix + '_ssh_port') || '22'); }
       return s;
     }
     function summaryRows() {
@@ -163,6 +186,7 @@
         rows.push(['Target', ENGINES[dst] + ', ' + addr('target', dst === 'postgres' ? val('target_pg_database') : '')]);
         rows.push(['Target password', val('target_password') ? 'set (hidden)' : 'none']);
       }
+      rows.push(['Source connection', checks.source.state], ['Target connection', checks.target.state]);
       if (val('start_at')) { rows.push(['CDC start position', val('start_at') + ' (from restored copy)']); }
       var pv = $('np-preview');
       rows.push(['Copy', pv ? pv.textContent : '']);
@@ -176,7 +200,7 @@
     }
     function render() {
       var rows = summaryRows();
-      var map = { Name: 'sum-name', Source: 'sum-source', Target: 'sum-target', Copy: 'sum-copy', Options: 'sum-options' };
+      var map = { Name: 'sum-name', Source: 'sum-source', Target: 'sum-target', Copy: 'sum-copy', Options: 'sum-options', 'Source connection': 'sum-source-check', 'Target connection': 'sum-target-check' };
       rows.forEach(function (r) {
         var d = map[r[0]] && $(map[r[0]]);
         if (!d) { return; }
@@ -219,6 +243,8 @@
         body.auth_db = val(pre + '_auth_db'); body.replica_set = val(pre + '_replica_set');
         body.tls = !!(field(pre + '_tls') && field(pre + '_tls').checked);
       }
+      var revision = ++checks[role].revision;
+      setCheck(role, 'Testing…');
       out.textContent = '';
       var sk = make('div', 'skeleton-rows'); sk.appendChild(make('div', 'skeleton')); sk.appendChild(make('div', 'skeleton'));
       sk.setAttribute('aria-label', 'Testing connection'); out.appendChild(sk);
@@ -226,8 +252,16 @@
       var spin = make('span', 'spinner'); spin.setAttribute('aria-hidden', 'true'); btn.insertBefore(spin, btn.firstChild);
       window.strandApi('POST', '/api/v1/pipeline-connections/test', body)
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }, function () { return { ok: false, status: r.status, j: {} }; }); })
-        .then(function (res) { showResult(out, res); })
-        .catch(function (e) { showResult(out, { ok: false, status: 0, j: { error: String(e) } }); })
+        .then(function (res) {
+          if (revision !== checks[role].revision) { return; }
+          setCheck(role, res.ok && res.j.ok ? 'Connected' : 'Test failed');
+          showResult(out, res);
+        })
+        .catch(function (e) {
+          if (revision !== checks[role].revision) { return; }
+          setCheck(role, 'Test failed');
+          showResult(out, { ok: false, status: 0, j: { error: String(e) } });
+        })
         .then(function () { btn.disabled = false; btn.classList.remove('is-busy'); if (spin.parentNode) { spin.remove(); } });
     }
     function tone(status) { return status === 'ok' ? 'st-success' : (status === 'warn' ? 'st-warning' : 'st-danger'); }

@@ -101,7 +101,8 @@
     {{template "pipeline-ssh-fields" (pipelineSSHFields "source" .Body.SSHProfiles)}}
     <div class="conn-test">
       <button type="button" class="btn" id="np-test-source" data-test="source">Test source connection</button>
-      <div class="conn-result" id="np-test-source-result" aria-live="polite"></div>
+      <span id="np-source-check-state" class="muted small" role="status">Not tested</span>
+      <div class="conn-result" id="np-test-source-result"></div>
     </div>
   </fieldset>
   </div>
@@ -178,7 +179,8 @@
     {{template "pipeline-ssh-fields" (pipelineSSHFields "target" .Body.SSHProfiles)}}
     <div class="conn-test">
       <button type="button" class="btn" id="np-test-target" data-test="target">Test target connection</button>
-      <div class="conn-result" id="np-test-target-result" aria-live="polite"></div>
+      <span id="np-target-check-state" class="muted small" role="status">Not tested</span>
+      <div class="conn-result" id="np-test-target-result"></div>
     </div>
   </fieldset>
   </div>
@@ -377,7 +379,9 @@
   <dl class="props" id="np-summary">
     <dt>Name</dt><dd id="sum-name" class="is-empty">not set</dd>
     <dt>Source</dt><dd id="sum-source" class="is-empty">not set</dd>
+    <dt>Source connection</dt><dd id="sum-source-check">Not tested</dd>
     <dt>Target</dt><dd id="sum-target" class="is-empty">not set</dd>
+    <dt>Target connection</dt><dd id="sum-target-check">Not tested</dd>
     <dt>Copy</dt><dd id="sum-copy" class="is-empty">not set</dd>
     <dt>Options</dt><dd id="sum-options">defaults</dd>
   </dl>

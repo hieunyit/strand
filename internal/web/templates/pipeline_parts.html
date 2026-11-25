@@ -107,16 +107,19 @@
 {{end}}
 
 {{define "pipeline-tabs"}}
-<nav class="tabs" role="tablist" aria-label="Pipeline sections">{{$act := .Active}}{{range .Tabs}}<a href="{{.Href}}" class="tab{{if eq $act .Key}} active{{end}}" role="tab" aria-selected="{{if eq $act .Key}}true{{else}}false{{end}}"{{if eq $act .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{.Label}}</span></a>{{end}}</nav>
-<details class="advanced" id="pipeline-tab-help">
+{{$act := .Active}}
+<nav class="tabs" aria-label="Pipeline sections">
+  {{range .Tabs}}{{if eq .Key "graph" "tables" "errors" "logs" "config"}}
+  <a href="{{.Href}}" class="tab{{if eq $act .Key}} active{{end}}"{{if eq $act .Key}} aria-current="page"{{end}}>{{icon (tabIcon .Key)}}<span>{{if eq .Key "graph"}}{{t "nav.overview"}}{{else}}{{.Label}}{{end}}</span></a>
+  {{end}}{{end}}
+</nav>
+<details class="advanced" id="pipeline-tab-help"{{if not (eq $act "graph" "tables" "errors" "logs" "config")}} open{{end}}>
   <summary>{{t "pipeline.tabs_help"}}</summary>
   <dl class="dl">
-  {{range .Tabs}}
-    {{if eq .Key "checkpoint" "jobs" "schema" "objects" "repair" "promote" "seed"}}
-    <dt><a href="{{.Href}}">{{.Label}}</a></dt>
+  {{range .Tabs}}{{if not (eq .Key "graph" "tables" "errors" "logs" "config")}}
+    <dt><a href="{{.Href}}"{{if eq $act .Key}} aria-current="page"{{end}}>{{.Label}}</a></dt>
     <dd>{{t .Help}}</dd>
-    {{end}}
-  {{end}}
+  {{end}}{{end}}
   </dl>
 </details>
 {{end}}
@@ -124,8 +127,8 @@
 {{define "pipeline-props"}}
 {{$eng := engines .View.Pair}}
 <aside class="detail-side" aria-label="Pipeline properties">
-<section class="card">
-  <div class="cardhead"><h2>Properties</h2></div>
+<details class="card pipeline-properties" id="pipeline-properties" data-responsive-properties open>
+  <summary>Properties</summary>
   <dl class="props">
     <dt>Kind</dt><dd>{{if .View.SourceKind}}{{.View.SourceKind}} &rarr; {{.View.TargetKind}}{{else}}-{{end}}</dd>
     <dt>Source</dt><dd>{{(index $eng 0).Label}}</dd>
@@ -138,7 +141,7 @@
     <dt>Config file</dt><dd class="mono small wrap">{{if .View.ConfigPath}}{{.View.ConfigPath}}{{else}}-{{end}}</dd>
     <dt>Last exit</dt><dd>{{if .View.LastExit}}<span title="{{.View.LastExit.Meaning}}">code {{.View.LastExit.Code}}</span>{{else}}-{{end}}</dd>
   </dl>
-</section>
+</details>
 </aside>
 {{end}}
 
@@ -151,7 +154,19 @@
     {{template "stale-tag" .View}}
     <span class="muted small meta">managed by {{.View.Mode}}{{if .View.Runtime.PID}}, pid {{.View.Runtime.PID}}{{end}} &middot; sampled <b class="c-time" data-bind="sampled">{{clock .View.SampledAt}}</b></span>
   </div>
-  {{$why := stateReason .View}}<p class="reason-line {{stateClass $.View.State}}" data-bind-show="reason"{{if not $why}} hidden{{end}}><b>Why:</b> <span class="wrap" data-bind="reason">{{$why}}</span></p>
+  {{$why := stateReason .View}}
+  <section class="pipeline-incident reason-line {{stateClass .View.State}}" data-bind-show="reason"{{if not $why}} hidden{{end}} aria-label="Pipeline status details">
+    <p><strong>Reason:</strong> <span class="wrap" data-bind="reason">{{$why}}</span></p>
+    {{if .View.LastExit}}<p><strong>What to do:</strong> {{.View.LastExit.Action}}</p>
+    <details><summary>Last exit code {{.View.LastExit.Code}}</summary>
+      <p>{{.View.LastExit.Meaning}}</p>
+      <p>{{if .View.LastExit.AutoRestart}}systemd restarts the pipeline for this exit code.{{else}}This exit code needs an operator.{{end}}</p>
+    </details>{{else if eq .View.State "unreachable"}}<p>Check the last log entries and the pipeline’s admin socket.</p>{{end}}
+    <div class="incident-links">
+      {{if .View.ConfigErr}}<a href="/pipelines/{{.View.Name}}/config">Open configuration</a>{{end}}
+      <a href="/pipelines/{{.View.Name}}/logs">View logs</a>
+    </div>
+  </section>
   <p data-bind-show="cdc_state"{{if not .View.Top}} hidden{{else}}{{if not .View.Top.CDCState}} hidden{{end}}{{end}}>CDC: <span data-bind="cdc_state">{{with .View.Top}}{{.CDCState}}{{end}}</span></p>
   {{with .View.Top}}{{with .Verification}}
   <details class="mb" data-verification-status="{{.Status}}" data-verification-at="{{.CheckedAt.Format "2006-01-02T15:04:05.999999999Z07:00"}}">
@@ -163,31 +178,32 @@
   </details>
   {{end}}{{end}}
   {{if .View.Top}}{{if .View.Top.BreakerOpen}}<div class="alert alert-error mb" role="alert" data-bind-show="breaker"><strong>Circuit Breaker Open:</strong> <span data-bind="breaker_reason">{{.View.Top.BreakerReason}}</span></div>{{end}}{{end}}
-  <div class="kpis" aria-label="Live metrics">
+  {{if and .View.Top (ne .View.State "failed")}}<div class="kpis" aria-label="Live metrics">
     <div class="kpi"><div class="kpi-label">Lag</div><div class="kpi-value c-num {{lagClass .View}}" data-bind="lag" data-bind-lag>{{if .View.Top}}{{lag .View.Top.LagSeconds}}{{else}}-{{end}}</div><div class="kpi-sub">source to target</div></div>
     <div class="kpi"><div class="kpi-label" title="Rows applied per second, averaged over the last 30 s">Rows/s <span class="m-hint">30 s avg</span></div><div class="kpi-value c-num" data-bind="rows">{{if .View.Top}}{{num .View.Rates.Rows}}{{else}}-{{end}}</div><div class="kpi-sub"><span class="c-num" data-bind="txn">{{if .View.Top}}{{num .View.Rates.Txn}}{{else}}-{{end}}</span> txn/s &middot; zone <span data-bind="zone">{{if .View.Top}}{{if .View.Top.Zone}}{{.View.Top.Zone}}{{else}}-{{end}}{{else}}-{{end}}</span></div></div>
     {{with tablesOf .View}}<div class="kpi"><div class="kpi-label">Snapshot</div><div class="kpi-value c-num" data-bind="tables">{{if gt .Total 0}}{{.Done}} / {{.Total}}{{else}}-{{end}}</div><div data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span data-bind-bar="tables_pct">{{bar .Pct}}</span></div><div class="kpi-sub" data-bind-hide="tables"{{if gt .Total 0}} hidden{{end}}>no snapshot running</div><div class="kpi-sub" data-bind-show="tables"{{if not (gt .Total 0)}} hidden{{end}}><span class="c-num" data-bind="snap_rows">{{num $.View.Rates.SnapRows}}</span> rows/s{{if $.View.Top}}{{if gt $.View.Top.Progress 0.0}} &middot; <span data-bind="progress">{{pct $.View.Top.Progress}}</span>{{end}}{{if gt $.View.Top.ETASeconds 0.0}} &middot; ETA <span data-bind="eta">{{secs $.View.Top.ETASeconds}}</span>{{end}}{{end}}</div></div>{{end}}
     <div class="kpi"><div class="kpi-label">Uptime</div><div class="kpi-value c-num" data-bind="uptime">{{if .Head.HasInfo}}{{secs .Head.Uptime}}{{else}}-{{end}}</div>{{if .View.Runtime.Since}}<div class="kpi-sub">since {{.View.Runtime.Since}}</div>{{end}}</div>
     <div class="kpi"><div class="kpi-label">Last checkpoint</div><div class="kpi-value c-num" data-bind="ckpt">{{if not .Head.CkptAt.IsZero}}{{rel .Head.CkptAt}}{{else}}-{{end}}</div><div class="kpi-sub" data-bind="ckpt_ts">{{if not .Head.CkptAt.IsZero}}{{ts .Head.CkptAt}}{{end}}</div></div>
   </div>
+  {{end}}
   {{if or .CanOperate .Ctl.JobActive}}<div class="actions" role="group" aria-label="Pipeline actions">
-    {{if .CanOperate}}<span class="grp">
-    <form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}><button class="btn primary" type="submit"{{if or .Ctl.Running (not .Ctl.CfgOK)}} disabled{{end}}{{if .Ctl.Running}} title="Already running"{{else if not .Ctl.CfgOK}} title="Config error: fix the configuration first"{{end}}>{{icon "play"}}Start</button></form>
-    <form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"{{if not .Ctl.Paused}} title="Not paused"{{end}}><button class="btn" type="submit"{{if not .Ctl.Paused}} disabled title="Not paused"{{end}}>Resume</button></form>
-    </span>
-    <span class="grp">
-    <form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}><button class="btn" type="submit"{{if or .Ctl.Paused (not .Ctl.Reachable)}} disabled{{end}}{{if .Ctl.Paused}} title="Already paused"{{else if not .Ctl.Reachable}} title="Pause needs a running pipeline that answers on its admin socket"{{end}}>{{icon "pause"}}Pause</button></form>
-    <form class="act inline" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}}? It is stopped (checkpoint written) and started again."{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>Restart</button></form>
-    {{if .Ctl.Systemd}}<form class="act inline" data-action="enable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Enable at boot</button></form>
-    <form class="act inline" data-action="disable" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">Disable at boot</button></form>{{end}}
-    </span>
-    <span class="grp">
-    <form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? It flushes in-flight batches and writes its checkpoint first (can take up to 150 s); it resumes from the checkpoint on the next start." data-retype="{{.View.Name}}"{{if not .Ctl.Running}} title="Not running"{{end}}><button class="btn danger" type="submit"{{if not .Ctl.Running}} disabled title="Not running"{{end}}>{{icon "stop"}}Stop</button></form>
-    {{if .CanAdmin}}<form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}"><button class="btn danger" type="submit" title="Permanently delete pipeline {{.View.Name}}">Delete</button></form>{{end}}
-    </span>{{end}}
+    {{if .CanOperate}}
+      {{if and (not .Ctl.Running) .Ctl.CfgOK}}<form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit">{{icon "play"}}Start</button></form>{{end}}
+      {{if .Ctl.Paused}}<form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit">Resume</button></form>
+      {{else if .Ctl.Reachable}}<form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">{{icon "pause"}}Pause</button></form>{{end}}
+      {{if .Ctl.Running}}
+        <form class="act inline" data-action="stop" data-pipeline="{{.View.Name}}" data-confirm="Stop pipeline {{.View.Name}}? Strand saves the checkpoint before stopping. The next start resumes from it." data-confirm-title="Stop pipeline" data-confirm-label="Stop pipeline" data-retype="{{.View.Name}}"><button class="btn" type="submit">{{icon "stop"}}Stop</button></form>
+      {{end}}
+      {{if or .Ctl.Running .Ctl.Systemd}}
+        <details class="rowmenu inline"><summary class="btn">More actions</summary><div class="menu">
+          {{if .Ctl.Running}}<form class="act" data-action="restart" data-pipeline="{{.View.Name}}" data-confirm="Restart pipeline {{.View.Name}} after writing a checkpoint?" data-confirm-title="Restart pipeline" data-confirm-label="Restart pipeline"><button class="menuitem" type="submit">Restart</button></form>{{end}}
+          {{if .Ctl.Systemd}}<form class="act" data-action="enable" data-pipeline="{{.View.Name}}"><button class="menuitem" type="submit">Enable at boot</button></form>
+          <form class="act" data-action="disable" data-pipeline="{{.View.Name}}"><button class="menuitem" type="submit">Disable at boot</button></form>{{end}}
+        </div></details>
+      {{end}}
+    {{end}}
     {{if .Ctl.JobActive}}<a class="btn" href="/jobs/{{.Ctl.JobActive.ID}}">Job running: {{.Ctl.JobActive.Kind}}</a>{{end}}
   </div>{{end}}
-  {{if .View.ConfigErr}}<div class="alert alert-error mt10" role="alert">Config error: {{.View.ConfigErr}}</div>{{end}}
-  {{if and .View.LastExit (not .View.Runtime.Running)}}<div class="alert alert-warn mt10" role="alert">Last exit code <b>{{.View.LastExit.Code}}</b>: {{.View.LastExit.Meaning}}. {{.View.LastExit.Action}}{{if .View.Runtime.LastError}}<br>Reason: <code class="wrap">{{.View.Runtime.LastError}}</code>{{end}}</div>{{end}}
+  {{if and .View.ConfigErr (not $why)}}<div class="alert alert-error" role="alert">Config error: {{.View.ConfigErr}} <a href="/pipelines/{{.View.Name}}/config">Open configuration</a></div>{{end}}
 </section>
 {{end}}

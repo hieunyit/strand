@@ -1075,3 +1075,36 @@ dialog.qsearch::backdrop { background: rgba(11, 18, 32, .45); }
 .st-uploading, .st-verifying { --b-fg: var(--info); --b-bg: var(--info-soft); --b-line: var(--info-line); --b-dot: var(--info-solid); }
 .timeline-dot-failed { fill: var(--surface); stroke: var(--bad-solid); stroke-width: 1.5; cursor: pointer; }
 .timeline-dot-pending { fill: var(--surface); stroke: var(--info-solid); stroke-width: 1.5; cursor: pointer; }
+
+/* Pipeline and mobile navigation */
+.mobile-nav-toggle { margin-inline-start: auto; }
+.nav .mobile-nav-toggle { background: var(--nav); color: var(--nav-ink); border-color: var(--tt-nav-border); min-height: 36px; }
+.main, .page-content, [data-pipeline-detail], .pipeline-logs { min-width: 0; }
+[data-pipeline-detail] .tabs { flex-wrap: wrap; overflow: visible; }
+[data-pipeline-detail] .tabs .tab { min-height: 36px; }
+#pipeline-tab-help [aria-current="page"] { font-weight: 700; }
+.pipeline-incident p { margin: 0 0 var(--sp-2); overflow-wrap: anywhere; }
+.incident-links { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-2); }
+.pipeline-properties summary, .pipeline-yaml summary { font-weight: 600; cursor: pointer; }
+.pipeline-properties[open] summary, .pipeline-yaml[open] summary { margin-bottom: var(--sp-3); }
+.pipeline-yaml .mono { overflow-wrap: anywhere; }
+.snap-figs { grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); }
+.snap-fig { min-width: 0; }
+.snap-fig .f-value { overflow-wrap: anywhere; }
+.snap-fig .f-value small { display: block; line-height: 1.4; }
+.pipeline-logs .log { width: 100%; max-width: 100%; overflow: auto; }
+.pipeline-logs .log.wrapcode { overflow-wrap: anywhere; white-space: pre-wrap; }
+.pipeline-logs .cardhead h2, .pipeline-logs .logbar > * { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 1200px) { [data-pipeline-detail] { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 720px) {
+  .topright, .topleft { min-width: 0; }
+  .topbrand { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+@media (max-width: 560px) {
+  header.top .topleft { display: none; }
+  .topright { width: 100%; justify-content: flex-end; gap: var(--sp-1); }
+  .topright .qsearch-btn { margin-inline-end: auto; }
+  .topright .livepill { min-width: 0; }
+  .topright .user-label { max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}

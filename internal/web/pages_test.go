@@ -224,7 +224,7 @@ func TestStoppedPipelineSystemdShowsExitCode(t *testing.T) {
 		t.Fatalf("state %s, want failed", st)
 	}
 	_, body := e.do(c, "GET", "/pipelines/dead/errors", "", nil)
-	for _, want := range []string{"Exit code 5", "log_gap", "systemd", "needs an operator", "pipeline is not running"} {
+	for _, want := range []string{"Last exit code 5", "log_gap", "systemd", "needs an operator", "pipeline is not running"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("errors page lacks %q:\n%s", want, body)
 		}

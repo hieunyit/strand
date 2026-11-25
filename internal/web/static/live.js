@@ -317,7 +317,7 @@
     });
     var rows = body.querySelectorAll('tr[data-ev]');
     for (var i = 0; i < rows.length - 200; i++) { body.removeChild(rows[i]); }
-    if (empty) { empty.hidden = body.querySelectorAll('tr[data-ev]').length > 0; }
+    if (empty) { empty.hidden = rows.length > 0; }
     if (wrap && atEnd) { wrap.scrollTop = wrap.scrollHeight; }
   }
 
@@ -613,9 +613,19 @@
   // ---------- transport: SSE, falling back to polling ----------
   function handle(type, data) {
     var now = Date.now();
-    lastEvent = now;
     var j;
     try { j = JSON.parse(data); } catch (e) { return; }
+    lastEvent = now;
+    if (type === 'snapshot' || type === 'sample' || type === 'overview') {
+      var updated = document.getElementById('last-live-update');
+      var timestamp = window.strandLocalISO(now);
+      if (updated && timestamp) {
+        var time = updated.querySelector('time');
+        setText(time, timestamp.slice(11, 19) + ' UTC+7');
+        time.dateTime = new Date(now).toISOString();
+        updated.hidden = false;
+      }
+    }
     if (type === 'snapshot') {
       if (j.overview) { applyOverview(j.overview); }
       (j.pipelines || []).forEach(function (r) { applyRecord(r, now); });

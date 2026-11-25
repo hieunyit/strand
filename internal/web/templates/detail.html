@@ -15,7 +15,7 @@
     <form class="act inline" data-action="conflict-dismiss" data-pipeline="{{$.Body.View.Name}}"><input type="hidden" name="path" value="{{.Path}}"><button class="btn" type="submit">Keep database version</button></form>
   </div>{{end}}
 </div>{{end}}
-<div class="detail-layout">
+<div class="detail-layout" data-pipeline-detail>
 <div class="detail-main">
 {{template "pipeline-tabs" (tabsCtx .Tabs .Tab)}}
 
@@ -159,75 +159,21 @@
 {{end}}
 
 {{if eq .Tab "errors"}}
-  {{if .Errors.LastExit}}<section class="card"><div class="cardhead"><h2>Last exit</h2></div>
-    <p><b>Exit code {{.Errors.LastExit.Code}}</b> ({{.Errors.ExitFrom}}){{if .Errors.ErrorCode}}, error <code>{{.Errors.ErrorCode}}</code>{{end}}</p>
-    <p>{{.Errors.LastExit.Meaning}}</p><p><b>What to do:</b> {{.Errors.LastExit.Action}}</p>
-    <p class="muted small">{{if .Errors.LastExit.AutoRestart}}systemd restarts this exit code automatically.{{else}}This exit code needs an operator: it is not restarted automatically.{{end}}</p>
-  </section>{{end}}
+  {{if .Errors.LiveErr}}<section class="card"><div class="cardhead"><h2>Recent log entries</h2><a href="/pipelines/{{.View.Name}}/logs">View logs</a></div>{{template "events" .Errors.FromLog}}</section>{{end}}
   <section class="card"><div class="cardhead"><h2>Recent warnings and errors <span class="muted small">running process, last 200, newest last; new ones appear live</span></h2></div>
     {{if .Errors.LiveErr}}{{template "error-state" (errState "Live events are not available" .Errors.LiveErr)}}{{end}}
     <div class="tablewrap tall" id="live-events-wrap"><table class="data-table grid"><caption class="sr-only">Recent warnings and errors of the running process</caption><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody id="live-events">
     {{range .Errors.Live}}<tr data-ev="{{.Time}}|{{.Level}}|{{.Message}}"><td class="small nowrap">{{logTS .Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>
-    {{end}}<tr class="empty-row"{{if .Errors.Live}} hidden{{end}}><td colspan="3"><div class="empty-state">{{icon "check"}}<b>No warnings or errors</b><span>The running process has logged nothing at warning level or above.</span></div></td></tr>
+    {{end}}<tr class="empty-row"{{if or .Errors.Live .Errors.LiveErr}} hidden{{end}}><td colspan="3"><div class="empty-state">{{icon "check"}}<b>No warnings or errors</b><span>The running process has logged nothing at warning level or above.</span></div></td></tr>
     </tbody></table></div>
   </section>
-  <section class="card"><div class="cardhead"><h2>From the log tail</h2></div>{{template "events" .Errors.FromLog}}</section>
+  {{if not .Errors.LiveErr}}<section class="card"><div class="cardhead"><h2>From the log tail</h2></div>{{template "events" .Errors.FromLog}}</section>{{end}}
 {{end}}
 
 {{if eq .Tab "config"}}
-  <section class="card"><div class="cardhead"><h2>Configuration</h2>
-    <div class="btngroup">
-      <a class="btn ghost" href="/pipelines/{{.View.Name}}/config.yaml" download="{{.View.Name}}.yaml">Download YAML</a>
-      {{if .CanAdmin}}<button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>{{end}}
-    </div></div>
-    <p class="muted small mono">{{.Config.Path}}</p>
-    {{if .Config.Error}}{{template "error-state" (errState "Configuration could not be read" .Config.Error)}}{{end}}
-    {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
-
-    {{if .AddedTablesError}}
-    <p class="muted small">The tables added during sync could not be read from local pipeline state.</p>
-    {{else if .AddedTables}}
-    <h3>Tables added during sync</h3>
-    <p class="muted small">Strand remembers these tables across restarts. They supplement the YAML table list. The exclude rules still apply.</p>
-    <ul class="mono">{{range .AddedTables}}<li>{{.}}</li>{{end}}</ul>
-    {{end}}
-
-    <div id="cfg-view-mode">
-      {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code wrapcode">{{.Config.YAML}}</pre>{{end}}
-    </div>
-
-    {{if .CanAdmin}}<div id="cfg-edit-mode" hidden>
-      <form id="cfg-edit-form" data-pipeline="{{.View.Name}}">
-        <p class="muted small">Edit YAML configuration below. Saving validates syntax via <code>strand validate</code>, shows diff, keeps a timestamped backup, and writes atomically.</p>
-        <textarea name="yaml" id="cfg-yaml-textarea" class="code cfg-textarea" rows="22" aria-label="Pipeline configuration YAML" spellcheck="false">{{.Config.YAML}}</textarea>
-        <div class="field-grid mt14">
-          <div class="field">
-            <label class="field-label" for="cfg-upload">Upload YAML <span class="opt">optional</span></label>
-            <input type="file" id="cfg-upload" accept=".yaml,.yml,text/yaml,text/plain">
-            <small class="field-hint">Upload replaces the text above (nothing is saved until you press Save). A file downloaded here keeps secrets as <code>********</code>; they are restored from the stored copy on save.</small>
-          </div>
-          <div class="check-list">
-            <label class="check"><input type="checkbox" name="restart" id="cfg-restart-check" value="true"><span>Restart pipeline after saving</span></label>
-            <label class="check"><input type="checkbox" name="force" id="cfg-force-check" value="true"><span>Save anyway<small class="field-hint">Force save if validation has warnings.</small></span></label>
-          </div>
-        </div>
-        <div class="form-actions">
-          <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
-          <button class="btn" type="button" id="cfg-btn-diff">Validate &amp; Preview Diff</button>
-          <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
-        </div>
-      </form>
-      <div id="cfg-diff-box" class="mt14" hidden>
-        <h3>Validation &amp; Diff</h3>
-        <div id="cfg-val-status" class="mb8"></div>
-        <pre class="code wrapcode" id="cfg-diff-output" aria-label="Diff"></pre>
-      </div>
-    </div>{{end}}
-  </section>
-
   {{if .CanAdmin}}<section class="card" id="tuning-card"><div class="cardhead"><h2>Tuning: snapshot speed &amp; safety</h2></div>
     {{if .Tuning.Error}}{{template "error-state" (errState "Tuning values are not available" .Tuning.Error)}}{{else}}
-    <p class="card-desc">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Graph tab)</a>; it is not saved to the file.</p>
+    <p class="card-desc">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Overview)</a>; it is not saved to the file.</p>
     <form id="tuning-form" class="tuning" data-pipeline="{{.View.Name}}">
       <div class="field-grid cols-3">
         {{range .Tuning.Fields}}
@@ -280,10 +226,64 @@
     </form>
   </section>
 
+  {{end}}
+  <details class="card pipeline-yaml" id="pipeline-yaml"{{if .Config.Error}} open{{end}}>
+    <summary>YAML configuration</summary>
+    <div class="cardhead"><h2>Configuration file</h2>
+    <div class="btngroup">
+      <a class="btn ghost" href="/pipelines/{{.View.Name}}/config.yaml" download="{{.View.Name}}.yaml">Download YAML</a>
+      {{if .CanAdmin}}<button class="btn" id="cfg-btn-toggle" type="button">Edit configuration</button>{{end}}
+    </div></div>
+    <p class="muted small mono">{{.Config.Path}}</p>
+    {{if .Config.Error}}{{template "error-state" (errState "Configuration could not be read" .Config.Error)}}{{end}}
+    {{if .Config.Unimplemented}}<div class="warnbox"><b>Keys accepted but without effect in this version:</b><ul>{{range .Config.Unimplemented}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
+
+    {{if .AddedTablesError}}
+    <p class="muted small">The tables added during sync could not be read from local pipeline state.</p>
+    {{else if .AddedTables}}
+    <h3>Tables added during sync</h3>
+    <p class="muted small">Strand remembers these tables across restarts. They supplement the YAML table list. The exclude rules still apply.</p>
+    <ul class="mono">{{range .AddedTables}}<li>{{.}}</li>{{end}}</ul>
+    {{end}}
+
+    <div id="cfg-view-mode">
+      {{if .Config.YAML}}<p class="muted small">Secrets are masked. Values that come from environment variables (${VAR}) are shown as written, not expanded.</p><pre class="code wrapcode">{{.Config.YAML}}</pre>{{end}}
+    </div>
+
+    {{if .CanAdmin}}<div id="cfg-edit-mode" hidden>
+      <form id="cfg-edit-form" data-pipeline="{{.View.Name}}">
+        <p class="muted small">Edit YAML configuration below. Saving validates syntax via <code>strand validate</code>, shows diff, keeps a timestamped backup, and writes atomically.</p>
+        <textarea name="yaml" id="cfg-yaml-textarea" class="code cfg-textarea" rows="22" aria-label="Pipeline configuration YAML" spellcheck="false">{{.Config.YAML}}</textarea>
+        <div class="field-grid mt14">
+          <div class="field">
+            <label class="field-label" for="cfg-upload">Upload YAML <span class="opt">optional</span></label>
+            <input type="file" id="cfg-upload" accept=".yaml,.yml,text/yaml,text/plain">
+            <small class="field-hint">Upload replaces the text above (nothing is saved until you press Save). A file downloaded here keeps secrets as <code>********</code>; they are restored from the stored copy on save.</small>
+          </div>
+          <div class="check-list">
+            <label class="check"><input type="checkbox" name="restart" id="cfg-restart-check" value="true"><span>Restart pipeline after saving</span></label>
+            <label class="check"><input type="checkbox" name="force" id="cfg-force-check" value="true"><span>Save anyway<small class="field-hint">Force save if validation has warnings.</small></span></label>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn" type="button" id="cfg-btn-cancel">Cancel edit</button>
+          <button class="btn" type="button" id="cfg-btn-diff">Validate &amp; Preview Diff</button>
+          <button class="btn primary" type="button" id="cfg-btn-save">Save changes</button>
+        </div>
+      </form>
+      <div id="cfg-diff-box" class="mt14" hidden>
+        <h3>Validation &amp; Diff</h3>
+        <div id="cfg-val-status" class="mb8"></div>
+        <pre class="code wrapcode" id="cfg-diff-output" aria-label="Diff"></pre>
+      </div>
+    </div>{{end}}
+  </details>
+
+  {{if .CanAdmin}}
   <section class="card danger-card"><div class="cardhead"><h2>Danger zone</h2></div>
     <div class="danger-row">
       <p class="muted small">Permanently delete this pipeline, stopping it if running and removing its configuration. This action cannot be undone.</p>
-      <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Are you sure you want to permanently delete pipeline '{{.View.Name}}'?" data-retype="{{.View.Name}}">
+      <form class="act inline" data-action="delete" data-pipeline="{{.View.Name}}" data-confirm="Permanently delete pipeline {{.View.Name}} and its configuration?" data-confirm-title="Delete pipeline" data-confirm-label="Delete pipeline" data-confirm-danger="true" data-retype="{{.View.Name}}">
         <button class="btn danger" type="submit">Delete pipeline {{.View.Name}}</button>
       </form>
     </div>
@@ -390,11 +390,13 @@
 {{end}}
 
 {{if eq .Tab "logs"}}
-  <section class="card"><div class="cardhead"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2></div>
+  <section class="card pipeline-logs"><div class="cardhead"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2></div>
     <div class="toolbar logbar">
       <label class="switch"><input type="checkbox" id="log-follow"{{if .Follow}} checked{{end}}> Follow live tail</label>
       <span class="muted small" id="log-status" aria-live="polite">{{if .Follow}}Following{{else}}Not following: new lines are not added (reload for the latest){{end}}</span>
       <button type="button" class="btn ghost" id="log-jump" hidden>Jump to latest</button>
+      <label class="switch"><input type="checkbox" id="log-wrap" name="log_wrap" checked> Wrap lines</label>
+      <button type="button" class="btn ghost" data-copy-from="logtail">Copy log</button>
       <a class="small push" href="?lines=1000{{if .Follow}}&amp;follow=1{{end}}">Show 1000 lines</a>
     </div>
     {{if .Logs.Error}}<div id="log-error">{{template "error-state" (errState "Log is not available" .Logs.Error)}}</div>{{end}}

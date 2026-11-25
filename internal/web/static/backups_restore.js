@@ -19,6 +19,7 @@
 
   var curStep = 1;
   var testOK = false;
+  var testRevision = 0;
   var existingDBs = [];
   var lastTestError = '';
 
@@ -82,7 +83,7 @@
   var stepperLis = document.querySelectorAll('#restore-stepper li[data-step-li]');
   var stepPanels = document.querySelectorAll('#restore-form .wiz-step[data-step]');
 
-  function updateStepper(step) {
+  function updateStepper(step, moveFocus) {
     if (step === 4) {
       document.getElementById('restore-confirm-back').setAttribute('data-prev-step', curStep === 3 ? '3' : '2');
     }
@@ -112,6 +113,24 @@
       populateSummary();
       updateConfirm();
     }
+    if (moveFocus) {
+      var heading = form.querySelector('.wiz-step[data-step="' + step + '"] legend');
+      if (heading) { heading.tabIndex = -1; heading.focus(); }
+    }
+  }
+
+  function focusValidationError() {
+    var panel = form.querySelector('.wiz-step[data-step="' + curStep + '"]');
+    if (!panel) { return; }
+    var error = Array.prototype.find.call(panel.querySelectorAll('.field-error:not([hidden]), [role="alert"]:not([hidden])'), function (item) {
+      return !item.closest('[hidden]');
+    });
+    if (!error) { return; }
+    var group = error.closest('details');
+    if (group) { group.open = true; }
+    error.tabIndex = -1;
+    error.focus({preventScroll: true});
+    error.scrollIntoView({block: 'center'});
   }
 
   // Radio switching for restore_from
@@ -144,11 +163,17 @@
   function syncConnection() {
     restoreEndpoint = "";
     testOK = false;
+    testRevision++;
+    lastTestError = '';
+    var testButton = document.getElementById('restore-test-btn');
+    if (testButton) { testButton.disabled = false; }
+    var testError = document.getElementById('err-test-connection');
+    if (testError) { testError.hidden = true; }
     existingDBs = [];
     var testResult = document.getElementById('restore-test-result');
     if (testResult) { testResult.hidden = true; testResult.textContent = ''; }
     var status = document.getElementById('restore-test-status');
-    if (status) { status.textContent = ''; }
+    if (status) { status.textContent = form.elements.connection_id.value ? 'Connection not tested' : ''; }
 
     // If backup tool was pg_basebackup, enforce restore_into = dir
     var chosenTool = getChosenTool();
@@ -630,7 +655,12 @@
         return;
       }
 
-      if (status) { status.textContent = 'Testing connection...'; }
+      var revision = ++testRevision;
+      testOK = false;
+      lastTestError = '';
+      testBtn.disabled = true;
+      if (testResult) { testResult.hidden = true; }
+      if (status) { status.textContent = 'Testing connection…'; }
 
       var p = window.strandApi('POST', '/api/v1/backup-connections/' + encodeURIComponent(connSel) + '/test');
 
@@ -639,6 +669,7 @@
           return { ok: res.ok, status: res.status, data: data };
         });
       }).then(function (result) {
+        if (revision !== testRevision) { return; }
         if (!result.ok || !result.data || result.data.ok !== true) {
           testOK = false;
           existingDBs = [];
@@ -676,11 +707,14 @@
             (existingDBs.length > 0 ? existingDBs.join(', ') : 'none') + '.';
         }
       }).catch(function (err) {
+        if (revision !== testRevision) { return; }
         testOK = false;
         existingDBs = [];
         if (status) { status.textContent = ''; }
         if (errTest) { errTest.textContent = err.message; errTest.hidden = false; }
         if (testResult) { testResult.hidden = true; testResult.textContent = ''; }
+      }).finally(function () {
+        if (revision === testRevision) { testBtn.disabled = false; }
       });
     });
   }
@@ -786,17 +820,17 @@
     var nextBtn = ev.target.closest('[data-next-step]');
     if (nextBtn) {
       var nextS = parseInt(nextBtn.getAttribute('data-next-step'), 10);
-      if (curStep === 1 && !validateStep1()) { return; }
-      if (curStep === 2 && !validateStep2()) { return; }
-      if (nextS === 4 && !validateStep3()) { updateStepper(3); return; }
-      updateStepper(nextS);
+      if (curStep === 1 && !validateStep1()) { focusValidationError(); return; }
+      if (curStep === 2 && !validateStep2()) { focusValidationError(); return; }
+      if (nextS === 4 && !validateStep3()) { updateStepper(3); focusValidationError(); return; }
+      updateStepper(nextS, true);
       return;
     }
 
     var prevBtn = ev.target.closest('[data-prev-step]');
     if (prevBtn) {
       var prevS = parseInt(prevBtn.getAttribute('data-prev-step'), 10);
-      updateStepper(prevS);
+      updateStepper(prevS, true);
       return;
     }
 
@@ -804,11 +838,11 @@
     if (gotoBtn) {
       var targetS = parseInt(gotoBtn.getAttribute('data-goto'), 10);
       if (targetS > curStep) {
-        if (curStep <= 1 && targetS > 1 && !validateStep1()) { return; }
-        if (curStep <= 2 && targetS > 2 && !validateStep2()) { return; }
-        if (curStep <= 3 && targetS > 3 && !validateStep3()) { return; }
+        if (curStep <= 1 && targetS > 1 && !validateStep1()) { focusValidationError(); return; }
+        if (curStep <= 2 && targetS > 2 && !validateStep2()) { focusValidationError(); return; }
+        if (curStep <= 3 && targetS > 3 && !validateStep3()) { focusValidationError(); return; }
       }
-      updateStepper(targetS);
+      updateStepper(targetS, true);
       return;
     }
   });

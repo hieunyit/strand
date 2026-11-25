@@ -1,7 +1,8 @@
 {{define "content"}}
 {{if .Body.Saved}}<div class="alert alert-success" role="status">SSH tunnel saved.</div>{{end}}
 {{if .Body.Error}}<div class="alert alert-error" role="alert">{{.Body.Error}}</div>{{end}}
-<section class="card mb">
+{{if .Body.ShowForm}}
+<section class="card mb ssh-tunnel-form">
   <div class="cardhead"><h2>{{if .Body.Form.Edit}}Edit SSH tunnel{{else}}Add SSH tunnel{{end}}</h2></div>
   <div class="pad">
     <form method="post" action="/tunnels" class="form-stack" autocomplete="off" data-ssh-auth-form>
@@ -14,19 +15,22 @@
         <label class="field">SSH host<input name="profile_host" required value="{{.Body.Form.Host}}" placeholder="bastion.example.com"></label>
         <label class="field">SSH port<input name="profile_port" type="number" min="1" max="65535" value="{{.Body.Form.Port}}" placeholder="22"></label>
       </div>
+      {{if not .Body.HostPreview}}
+      <p class="field-hint">Show the server fingerprint and compare it with a trusted copy before entering credentials.</p>
       <div class="form-actions">
-        <button type="submit" class="btn" name="probe_host_key" value="1">Show fingerprint</button>
+        {{if not .Body.Form.Edit}}<a class="btn" href="/tunnels">Cancel</a>{{end}}
+        <button type="submit" class="btn {{if not .Body.Form.Edit}}primary{{end}}" name="probe_host_key" value="1">Show fingerprint</button>
       </div>
+      {{end}}
       {{with .Body.HostPreview}}
       <div class="alert alert-info" role="group" aria-label="SSH host fingerprint">
         <p><strong>{{.Address}}</strong> · {{.KeyType}}<br><code>{{.Fingerprint}}</code></p>
         <input type="hidden" name="profile_host_address" value="{{.Address}}">
         <input type="hidden" name="profile_fingerprint" value="{{.Fingerprint}}">
-        <label class="check"><input type="checkbox" name="profile_confirm_host_key" value="1"><span>I verified this fingerprint with a trusted source.</span></label>
+        <label class="check"><input type="checkbox" name="profile_confirm_host_key" value="1" required><span>I verified this fingerprint with a trusted source.</span></label>
       </div>
-      {{else}}
-      <p class="field-hint">For a new SSH server, show its fingerprint before entering credentials.</p>
       {{end}}
+      {{if or .Body.Form.Edit .Body.HostPreview}}
       <label class="field">SSH authentication
         <select name="profile_auth_mode">
           <option value="key"{{if ne .Body.Form.AuthMode "password"}} selected{{end}}>Private key</option>
@@ -50,14 +54,17 @@
         </label>
       </fieldset>
       <div class="form-actions">
-        {{if .Body.Form.Edit}}<a class="btn" href="/tunnels">Cancel</a>{{end}}
+        {{if .Body.HostPreview}}<button type="submit" class="btn" name="probe_host_key" value="1" formnovalidate>Refresh fingerprint</button>{{end}}
+        <a class="btn" href="/tunnels">Cancel</a>
         <button type="submit" class="btn primary">Check and save</button>
       </div>
+      {{end}}
     </form>
   </div>
 </section>
+{{else}}
 <section class="card mb">
-  <div class="cardhead"><h2>Saved SSH tunnels</h2></div>
+  <div class="cardhead"><h2>Saved SSH tunnels</h2><a class="btn primary" href="/tunnels?new=1">Add tunnel</a></div>
   {{if .Body.Profiles}}
   <p class="card-desc">Select a saved tunnel when configuring a database connection or pipeline.</p>
   <div class="tablewrap">
@@ -74,6 +81,7 @@
   <div class="empty-state"><b>No saved SSH tunnels</b><span>Add a tunnel to use it in database connections and pipelines.</span></div>
   {{end}}
 </section>
+{{end}}
 {{if .Body.Tunnels}}
 <section class="card">
   <div class="cardhead"><h2>Active Tunnels{{if .Body.Tunnels}} <span class="muted small">{{len .Body.Tunnels}}</span>{{end}}</h2></div>

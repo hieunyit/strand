@@ -421,7 +421,7 @@ func (s *Server) pageTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Se
 		return
 	}
 	if r.PostForm.Get("intent") == "save-profile" {
-		view := tunnelView{Profiles: s.sshProfileViews(r.Context()), Form: sshProfileFormFromRequest(r)}
+		view := tunnelView{ShowForm: true, Profiles: s.sshProfileViews(r.Context()), Form: sshProfileFormFromRequest(r)}
 		show := r.PostForm.Get("probe_host_key") == "1"
 		var hostKey ssh.PublicKey
 		var err error

@@ -211,10 +211,10 @@ func TestPipelinePagesRoleMatrix(t *testing.T) {
 			t.Errorf("no page showed %s to admin", m)
 		}
 	}
-	// Operators may start and stop but not delete.
+	// Running pipeline controls are scoped to the current state and the operator role.
 	_, ob := e.do(oper, "GET", "/pipelines/orders", "", nil)
-	if !strings.Contains(ob, `data-action="start"`) || strings.Contains(ob, `data-action="delete"`) {
-		t.Error("operator detail page: want start, no delete")
+	if !strings.Contains(ob, `data-action="stop"`) || strings.Contains(ob, `data-action="delete"`) || strings.Contains(ob, `data-action="start"`) {
+		t.Error("running operator detail page: want Stop and only applicable controls")
 	}
 	e.hold(false)
 }

@@ -9,13 +9,14 @@ import (
 )
 
 func tabLinks(body string) []string {
+	navigation := between(body, `aria-label="Pipeline sections">`, `</nav>`) + between(body, `id="pipeline-tab-help"`, `</details>`)
 	var out []string
 	for _, k := range []string{"graph", "tables", "checkpoint", "errors", "config", "logs", "jobs", "schema", "objects", "repair", "promote", "seed"} {
-		href := `href="/pipelines/orders/` + k + `" class="tab`
+		href := `href="/pipelines/orders/` + k + `"`
 		if k == "graph" {
-			href = `href="/pipelines/orders" class="tab`
+			href = `href="/pipelines/orders"`
 		}
-		if strings.Contains(body, href) {
+		if strings.Contains(navigation, href) {
 			out = append(out, k)
 		}
 	}
