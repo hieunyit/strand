@@ -93,6 +93,24 @@ func TestPhysicalParsers(t *testing.T) {
 	}
 }
 
+// The dump load must be binlogged like the CREATE DATABASE and the binlog replay of the same restore,
+// so mysqldump's SQL_LOG_BIN statements are commented out with GTID_PURGED.
+func TestGTIDPurgedFilterKeepsDumpLoadBinlogged(t *testing.T) {
+	in := "SET @MYSQLDUMP_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;\nSET @@SESSION.SQL_LOG_BIN= 0;\n" +
+		"SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ 'a:1-5';\nINSERT INTO t VALUES (1);\n" +
+		"SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;\n"
+	out := string(StripGTIDPurged([]byte(in)))
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "SET @@SESSION.SQL_LOG_BIN") {
+			t.Fatalf("binary logging still switched by %q:\n%s", line, out)
+		}
+	}
+	if !strings.Contains(out, "-- [strand] SET @@SESSION.SQL_LOG_BIN= 0;") || !strings.HasPrefix(out, "SET @MYSQLDUMP_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;\n") ||
+		!strings.Contains(out, "\nINSERT INTO t VALUES (1);") {
+		t.Fatal(out)
+	}
+}
+
 func TestGTIDPurgedFilter(t *testing.T) {
 	in := "SET @@SESSION.SQL_LOG_BIN= 0;\nSET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ 'a:1-5,\nb:1-3';\nINSERT INTO t VALUES (1);\n"
 	out := string(StripGTIDPurged([]byte(in)))

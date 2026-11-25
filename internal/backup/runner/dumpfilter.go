@@ -14,6 +14,12 @@ import (
 // gtidPurgedFilter comments out the `SET @@GLOBAL.GTID_PURGED=...;` statement of a mysqldump stream so the
 // dump can be loaded into a server that already has GTIDs (a new database next to the source, or any
 // non-empty server). The recorded GTID set stays in the catalog for point-in-time recovery.
+//
+// It also comments out mysqldump's `SET @@SESSION.SQL_LOG_BIN= 0;` and the statement that restores it:
+// a restore creates its database and replays binlogs with binary logging on, so the dump load must be
+// logged too, or replicas of the restore target get the database and the replay but not the data (they
+// break or silently diverge). Setting SQL_LOG_BIN also needs SYSTEM_VARIABLES_ADMIN or
+// SESSION_VARIABLES_ADMIN, which a restore user should not need.
 type gtidPurgedFilter struct {
 	r      *bufio.Reader
 	out    bytes.Buffer
@@ -27,6 +33,16 @@ func NewGTIDPurgedFilter(r io.Reader) io.Reader {
 }
 
 var gtidPurgedPrefix = []byte("SET @@GLOBAL.GTID_PURGED=")
+
+// sqlLogBinPrefix matches `SET @@SESSION.SQL_LOG_BIN= 0;` and `SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;`
+// (reading @@SESSION.SQL_LOG_BIN into @MYSQLDUMP_TEMP_LOG_BIN needs no privilege and is kept).
+var sqlLogBinPrefix = []byte("SET @@SESSION.SQL_LOG_BIN")
+
+func isFilteredDumpSet(trimmed []byte) bool {
+	return bytes.HasPrefix(trimmed, gtidPurgedPrefix) ||
+		(len(trimmed) > len(sqlLogBinPrefix) && bytes.EqualFold(trimmed[:len(sqlLogBinPrefix)], sqlLogBinPrefix) &&
+			(trimmed[len(sqlLogBinPrefix)] == '=' || trimmed[len(sqlLogBinPrefix)] == ' '))
+}
 
 func (f *gtidPurgedFilter) Read(p []byte) (int, error) {
 	for f.out.Len() == 0 && f.err == nil {
@@ -45,7 +61,7 @@ func (f *gtidPurgedFilter) Read(p []byte) (int, error) {
 				if bytes.Contains(line, []byte(";")) {
 					f.inStmt = false
 				}
-			case bytes.HasPrefix(trimmed, gtidPurgedPrefix):
+			case isFilteredDumpSet(trimmed):
 				f.out.WriteString("-- [strand] ")
 				f.out.Write(line)
 				f.inStmt = !bytes.Contains(line, []byte(";"))
