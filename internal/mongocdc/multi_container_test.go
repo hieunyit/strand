@@ -2,6 +2,7 @@ package mongocdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -175,5 +176,38 @@ func TestContainer_SeveralDatabases(t *testing.T) {
 	}
 	if out, err = f.run("stop"); err != nil {
 		t.Fatalf("stop: %v\n%s", err, out)
+	}
+}
+
+// The copy workers of a pipeline with several databases are one pool: a database
+// with one small collection does not keep half of them, so the large collection of
+// the other database is split between all of them.
+func TestContainer_SeveralDatabasesShareWorkers(t *testing.T) {
+	p := newPair(t)
+	seedDocs(t, p.srcC.Database("wa"), "big", 6000, 21, intID)
+	seedDocs(t, p.srcC.Database("wb"), "tiny", 20, 22, intID)
+	base := p.cfg(t, "pool", "")
+	base.SourceDB, base.TargetDB = "", ""
+	base.Include = []string{"wa.*", "wb.*"}
+	base.SnapshotBatch = 100
+	base.SnapshotParallel = 4
+	base.SplitMinDocs = 100
+	cfgs, err := DatabaseConfigs(context.Background(), base, []Database{{"wa", "wa"}, {"wb", "wb"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunAll(ctx, cfgs) }()
+	p.waitSame(t, "wa", "wa", time.Minute)
+	p.waitSame(t, "wb", "wb", time.Minute)
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	parent, ranges := rangeProgress(t, p, "pool/wa", "big")
+	// 4 ranges per worker of the whole pipeline (16), not of a share of it (2 x 4).
+	if parent.Parts != 16 || len(ranges) != 16 || !parent.Done || parent.Copied != 6000 {
+		t.Fatalf("wa.big: parts=%d ranges=%d done=%v copied=%d, want 16 ranges (all workers of the pipeline)", parent.Parts, len(ranges), parent.Done, parent.Copied)
 	}
 }

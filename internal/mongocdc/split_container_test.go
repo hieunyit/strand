@@ -62,7 +62,9 @@ func TestContainer_SplitCollectionCopy(t *testing.T) {
 	t.Logf("%d concurrent ops, %d interruptions inside the split copy", ops, interrupted)
 
 	parent, ranges := rangeProgress(t, p, "split", "big")
-	if parent.Parts != 4 || len(ranges) != 4 || !parent.Done {
+	// ~8000 documents (the load deletes some), 1000 per range at least, 4 workers x 4:
+	// more ranges than workers.
+	if parent.Parts <= 4 || len(ranges) != parent.Parts || !parent.Done {
 		t.Fatalf("split: parent %+v, %d ranges", parent, len(ranges))
 	}
 	var sum int64
@@ -106,7 +108,65 @@ func TestContainer_SplitCollectionExactCount(t *testing.T) {
 	for _, rp := range ranges {
 		sum += rp.Copied
 	}
-	if parent.Parts != 3 || len(ranges) != 3 || sum != 9000 || parent.Copied != 9000 {
-		t.Fatalf("parts=%d ranges=%d sum=%d parent=%d, want 3 ranges adding up to exactly 9000", parent.Parts, len(ranges), sum, parent.Copied)
+	if parent.Parts != 9 || len(ranges) != 9 || sum != 9000 || parent.Copied != 9000 {
+		t.Fatalf("parts=%d ranges=%d sum=%d parent=%d, want 9 ranges adding up to exactly 9000", parent.Parts, len(ranges), sum, parent.Copied)
+	}
+}
+
+// A copy by one worker that was interrupted is split between the workers when it is
+// resumed with several (a pipeline started with max_parallel 1, or by a version
+// without split copies): the first range carries on from the last copied _id with
+// the count so far, and the ranges add up to exactly the source documents.
+func TestContainer_SplitResumedOneRangeCopy(t *testing.T) {
+	p := newPair(t)
+	db := "resplit"
+	seedDocs(t, p.srcC.Database(db), "m", 20000, 8, mixedID)
+	cfg := p.cfg(t, "resplit", db)
+	cfg.SnapshotBatch = 50
+	cfg.SnapshotParallel = 1
+	cfg.SplitMinDocs = 1000
+
+	ctx := context.Background()
+	progress := p.dstC.Database(stateDatabase).Collection(progressCollection)
+	r := start(cfg)
+	deadline := time.Now().Add(time.Minute)
+	for {
+		var pr collProgress
+		_ = progress.FindOne(ctx, bson.D{{Key: "_id", Value: progressID{Pipeline: "resplit", Collection: "m"}}}).Decode(&pr)
+		if pr.Copied >= 2000 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the one-worker copy did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	r.cancel()
+	if err := <-r.done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	before, ranges := rangeProgress(t, p, "resplit", "m")
+	if before.Done || before.Parts > 1 || len(ranges) != 0 || before.Copied == 0 {
+		t.Fatalf("want an unfinished one-range copy, got %+v and %d ranges", before, len(ranges))
+	}
+
+	cfg.SnapshotParallel = 4
+	r = start(cfg)
+	p.waitIdentical(t, db, time.Minute, r)
+	r.stop(t)
+	parent, ranges := rangeProgress(t, p, "resplit", "m")
+	var sum int64
+	for _, rp := range ranges {
+		if !rp.Done {
+			t.Fatalf("range %d not done", rp.ID.Part)
+		}
+		sum += rp.Copied
+	}
+	if parent.Parts < 2 || len(ranges) != parent.Parts || sum != 20000 || parent.Copied != 20000 || !parent.Done {
+		t.Fatalf("resumed copy: parts=%d ranges=%d sum=%d parent=%d done=%v (copied %d before the restart), want it split with ranges adding up to 20000",
+			parent.Parts, len(ranges), sum, parent.Copied, parent.Done, before.Copied)
+	}
+	if ranges[0].Copied <= before.Copied {
+		t.Fatalf("the first range must carry the %d documents copied before the restart: %d", before.Copied, ranges[0].Copied)
 	}
 }

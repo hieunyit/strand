@@ -24,9 +24,10 @@ const checkpointSeparator = "/"
 
 // DatabaseConfigs returns one Config per database of a pipeline. A pipeline with
 // several databases runs one change stream, snapshot and checkpoint per database
-// (RunAll): each gets the include/exclude patterns that select its database and a
-// share of SnapshotParallel, so the source sees about the same number of copy
-// workers as with one database.
+// (RunAll): each gets the include/exclude patterns that select its database. The
+// copy workers (SnapshotParallel) form one pool shared by the databases: at most
+// SnapshotParallel collections or ranges are copied at a time over all databases,
+// and a database that has nothing left to copy leaves its workers to the others.
 //
 // Checkpoint keys: a pipeline with one database uses the pipeline name, as it always
 // has. With several, a database uses "<pipeline>/<database>", except the database
@@ -43,6 +44,10 @@ func DatabaseConfigs(ctx context.Context, base Config, dbs []Database) ([]Config
 	name := base.Pipeline
 	out := make([]Config, len(dbs))
 	parallel := max(base.SnapshotParallel, 1)
+	var pool chan struct{}
+	if len(dbs) > 1 {
+		pool = make(chan struct{}, parallel)
+	}
 	for i, d := range dbs {
 		c := base
 		c.SourceDB, c.TargetDB = d.Source, d.Target
@@ -50,11 +55,8 @@ func DatabaseConfigs(ctx context.Context, base Config, dbs []Database) ([]Config
 			c.Observer = nil
 			c.Include = patternsFor(base.Include, d.Source)
 			c.Exclude = patternsFor(base.Exclude, d.Source)
-			share := parallel / len(dbs)
-			if i < parallel%len(dbs) {
-				share++
-			}
-			c.SnapshotParallel = max(1, share)
+			c.SnapshotParallel = parallel
+			c.copyPool = pool
 			c.Pipeline = name + checkpointSeparator + d.Source
 		}
 		out[i] = c

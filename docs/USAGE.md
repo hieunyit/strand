@@ -1339,6 +1339,7 @@ Web UI (PostgreSQL bắt buộc) làm được: tạo pipeline cho mọi cặp �
 | Promote, Seed | có | có | có | không |
 
 - Mở URL của tab không áp dụng (bookmark cũ, gõ tay) sẽ quay về trang pipeline. Mục "Guide to pipeline operations" chỉ liệt kê các tab đang hiện; với MongoDB, tab Checkpoint là resume token của change stream theo từng database.
+- Tab **Graph** của pipeline MongoDB vẽ Source → Copy ×N (worker snapshot, docs/s, số collection đã xong) → Change stream → Target, kèm biểu đồ lag và throughput; không có Assembler/Scheduler/governor, thẻ Throttle và biểu đồ holes/spool (không áp dụng cho MongoDB; giới hạn tốc độ copy bằng `max_parallel`).
 - Tab **Jobs** chỉ gồm **Verify**, **Plan** và lịch sử job; duyệt thay đổi schema nằm ở tab **Schema**, database objects ở tab **Objects** (không lặp lại ở Jobs). Verify của pipeline MongoDB: xem đoạn "Job verify".
 - Tạo pipeline thành công (validate đạt) thì console tự mở trang pipeline vừa tạo; validate lỗi thì ở lại trang tạo và hiện lỗi.
 
@@ -1407,7 +1408,7 @@ Cách chạy và điều cần biết:
 
 ### Copy song song nhiều collection
 
-`bootstrap.logical.max_parallel` (1–32, mặc định 1) là **tổng số worker** của snapshot ban đầu, giống "Tables in parallel" của pipeline MySQL. Pipeline nhiều database chia số worker này cho các database (mỗi database ít nhất một).
+`bootstrap.logical.max_parallel` (1–32, mặc định 1) là **tổng số worker** của snapshot ban đầu, giống "Tables in parallel" của pipeline MySQL. Pipeline nhiều database dùng **chung một nhóm worker** cho mọi database: tổng số collection/khoảng đang copy cùng lúc không vượt `max_parallel`, và database nào copy xong thì worker của nó chuyển sang database còn lại (không còn cảnh chọn 4 luồng nhưng chỉ chạy 2 vì database kia đã xong). Collection lớn vẫn được chia theo đủ `max_parallel` worker dù pipeline có nhiều database.
 
 - Trên Web, pipeline mới: mục **MongoDB tuning** → **Collections in parallel** (điền sẵn 4).
 - Pipeline đang có: tab **Config** → thẻ **Tuning** → **Tables in parallel**, lưu rồi restart. Collection đã copy xong không bị copy lại; giá trị mới áp dụng cho phần còn lại.
@@ -1417,13 +1418,14 @@ Collection lớn được bắt đầu trước. Mỗi worker là một luồng 
 
 ### Chia collection lớn cho nhiều worker
 
-Collection có từ **2 × `mongodb.split_min_docs`** document trở lên (mặc định 100 000, tức từ 200 000 document) được chia thành tối đa `max_parallel` khoảng `_id`, mỗi khoảng do một worker copy. Nhờ vậy một collection rất lớn không còn giới hạn thời gian của cả snapshot.
+Collection có từ **2 × `mongodb.split_min_docs`** document trở lên (mặc định 100 000, tức từ 200 000 document) được chia thành tối đa **4 × `max_parallel`** khoảng `_id` (mỗi khoảng ít nhất `split_min_docs` document), mỗi khoảng do một worker copy. Số khoảng nhiều hơn số worker là cố ý: ranh giới lấy từ `$sample` của MongoDB vốn lấy mẫu lệch nên các khoảng to nhỏ không đều; worker nào xong sớm thì nhận khoảng tiếp theo thay vì ngồi chờ, nên đến cuối không còn cảnh một worker chạy một mình. Nhờ vậy một collection rất lớn không còn giới hạn thời gian của cả snapshot.
 
 - Điểm chia lấy từ một mẫu ngẫu nhiên `_id` (`$sample`, đã sắp theo `_id`), nên các khoảng có số document gần bằng nhau. Mỗi khoảng đọc bằng biên của index `_id`, nên đúng với `_id` thuộc mọi kiểu BSON (số, chuỗi, ObjectId, Decimal128, document, binary…).
 - Mỗi khoảng có checkpoint riêng (`_strand_cdc.mongo_sync_progress`, `kind: snapshot_part`). Sau crash hay restart, từng khoảng copy tiếp từ `_id` cuối đã ghi: không copy trùng, không sót. Khoảng xong cuối cùng đánh dấu cả collection đã copy.
 - Tab Tables và `strand top` vẫn hiện **một dòng mỗi collection**, tiến độ gộp từ các khoảng; log có `MongoDB collection split between workers` (số khoảng) và `MongoDB collection range copied` (từng khoảng).
 - Chỉnh ngưỡng: thẻ **Tuning** → **Split large collections (documents per range)**, hoặc YAML `mongodb: { split_min_docs: 50000 }`. Nhỏ hơn thì collection nhỏ hơn cũng được chia; `-1` = không bao giờ chia. `max_parallel` = 1 thì không chia.
-- Quyết định chia được đưa ra **khi collection bắt đầu copy**. Collection đang copy dở giữ cách copy cũ (một worker, hoặc các khoảng đã chia) qua các lần restart; đổi ngưỡng chỉ có tác dụng với collection chưa bắt đầu.
+- Quyết định chia được đưa ra **khi collection bắt đầu copy**; collection đã chia giữ nguyên các khoảng qua các lần restart.
+- Collection đang copy dở bằng **một worker** (pipeline chạy với `max_parallel: 1`, hoặc bắt đầu từ bản strand chưa có tính năng chia) sẽ được **chia phần còn lại** khi khởi động lại: khoảng đầu chạy tiếp từ `_id` cuối đã copy (giữ nguyên số đã copy), phần sau được chia cho các worker khác. Muốn tăng tốc một pipeline đang copy chậm: tăng `max_parallel` rồi Restart, không cần copy lại từ đầu.
 - Không chia: copy lại một collection (`snapshot add`, `verify --repair fix`) và collection có collation mặc định khác mặc định của MongoDB (thứ tự `_id` khi đó theo collation).
 - `strand plan` tính thời gian ước lượng theo số khoảng của collection lớn nhất.
 

@@ -14,7 +14,7 @@ import (
 	"strand/internal/admin"
 )
 
-// Several databases: each gets its patterns, a share of the copy workers and its own
+// Several databases: each gets its patterns, the shared pool of copy workers and its own
 // checkpoint key; one database keeps the pipeline name as its key.
 func TestDatabaseConfigsSplit(t *testing.T) {
 	base := Config{Pipeline: "p", Include: []string{"app.*", "billing.invoices", "*.shared"}, Exclude: []string{"app.tmp", "*.old"}, SnapshotParallel: 5}
@@ -35,8 +35,10 @@ func TestDatabaseConfigsSplit(t *testing.T) {
 	if !reflect.DeepEqual(a.Exclude, []string{"app.tmp", "*.old"}) || !reflect.DeepEqual(b.Exclude, []string{"*.old"}) {
 		t.Fatalf("exclude: %v %v", a.Exclude, b.Exclude)
 	}
-	if a.SnapshotParallel+b.SnapshotParallel != 5 || a.SnapshotParallel != 3 {
-		t.Fatalf("parallel %d + %d", a.SnapshotParallel, b.SnapshotParallel)
+	// One pool of 5 workers for both databases (not 3 + 2: a database that is done
+	// copying leaves its workers to the other).
+	if a.SnapshotParallel != 5 || b.SnapshotParallel != 5 || a.copyPool == nil || a.copyPool != b.copyPool || cap(a.copyPool) != 5 {
+		t.Fatalf("parallel %d, %d; shared pool %v (cap %d)", a.SnapshotParallel, b.SnapshotParallel, a.copyPool != nil && a.copyPool == b.copyPool, cap(a.copyPool))
 	}
 	for _, c := range cfgs {
 		if err := validateConfig(Config{Pipeline: c.Pipeline, SourceURI: "x", TargetURI: "y", SourceDB: c.SourceDB, TargetDB: c.TargetDB, Include: c.Include, Exclude: c.Exclude}); err != nil {
@@ -158,5 +160,26 @@ func TestAdminHandlerSeveralDatabases(t *testing.T) {
 	one := &AdminHandler{Obs: a, SourceDB: "app"}
 	if tables, _ := one.Tables(ctx); len(tables) != 1 || tables[0].Table != "app.users" {
 		t.Fatalf("one database tables %+v", tables)
+	}
+}
+
+// The ETA of a collection resumed after a restart counts only the documents copied
+// since: 9,000,000 of 10,000,000 copied before, 1,000 in the last 10 s (100/s) leaves
+// about 10,000 s, not the ~110 s that the whole count over 10 s would give.
+func TestTablesETAAfterRestart(t *testing.T) {
+	o := NewObserver("p")
+	o.setCollection("big", CollPending, progressSnapshot, 9_000_000, 10_000_000)
+	o.setCollectionState("big", CollRunning)
+	o.copied("big", 1000)
+	o.mu.Lock()
+	o.colls["big"].Started = time.Now().Add(-10 * time.Second)
+	o.mu.Unlock()
+	h := &AdminHandler{Pipeline: "p", Parts: []AdminPart{{Obs: o}}}
+	tables, err := h.Tables(context.Background())
+	if err != nil || len(tables) != 1 {
+		t.Fatalf("tables %v %+v", err, tables)
+	}
+	if eta := tables[0].ETASeconds; eta < 9000 || eta > 11000 {
+		t.Fatalf("ETA %.0f s, want about 9990 s", eta)
 	}
 }

@@ -17,7 +17,8 @@ func TestSplitParts(t *testing.T) {
 		{1, 100000, 10_000_000, nil, 1},      // one worker
 		{8, 100000, 150_000, nil, 1},         // below 2 x split_min_docs
 		{8, 100000, 200_000, nil, 2},         // two ranges of 100k
-		{8, 100000, 10_000_000, nil, 8},      // one range per worker
+		{8, 100000, 10_000_000, nil, 32},     // 4 ranges per worker
+		{8, 100000, 1_500_000, nil, 15},      // ranges of at least split_min_docs
 		{8, -1, 10_000_000, nil, 1},          // never split
 		{8, 100000, 10_000_000, collated, 1}, // collation orders _id differently
 	} {

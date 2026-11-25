@@ -52,6 +52,11 @@ func TestPipelineTabsFollowThePipelineKind(t *testing.T) {
 	if got := strings.Join(tabLinks(body), ","); got != "graph,tables,checkpoint,errors,config,logs,jobs,schema,objects,repair,promote,seed" {
 		t.Errorf("mysql -> mysql tabs: %s", got)
 	}
+	for _, want := range []string{"Assembler", "Scheduler", "Holes and writeset", `data-chart="spool"`, "<dt>Governor</dt>", `id="throttle"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("SQL graph tab lacks %q", want)
+		}
+	}
 
 	p := e.srv.reg.Get("orders")
 	mongo := fmt.Sprintf(`version: 1
@@ -77,6 +82,18 @@ observability: { admin_socket: %s }
 	}
 	if !strings.Contains(body, "change stream resume token") {
 		t.Errorf("operations guide lacks the MongoDB checkpoint help")
+	}
+	// Graph tab: the MongoDB data path (copy workers, change stream) without the SQL
+	// stages, governor, throttle (refused by MongoDB pipelines) and holes/spool charts.
+	for _, gone := range []string{"Assembler", "Scheduler", "Holes and writeset", `data-chart="spool"`, "<dt>Governor</dt>", `id="throttle"`} {
+		if strings.Contains(body, gone) {
+			t.Errorf("MongoDB graph tab shows %q", gone)
+		}
+	}
+	for _, want := range []string{"Change stream", "Copy x", `data-chart="rate"`, `data-chart="lag"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("MongoDB graph tab lacks %q", want)
+		}
 	}
 	for _, path := range []string{"/pipelines/orders/schema", "/pipelines/orders/objects", "/pipelines/orders/promote", "/pipelines/orders/seed", "/pipelines/orders/repair"} {
 		resp, _ := e.do(nc, "GET", path, "", nil)

@@ -19,7 +19,7 @@
 <div class="detail-main">
 {{template "pipeline-tabs" (tabsCtx .Tabs .Tab)}}
 
-{{if eq .Tab "graph"}}
+{{if eq .Tab "graph"}}{{$mongo := eq .View.SourceKind "mongodb"}}
   <section class="card"><div class="cardhead"><h2>Data path</h2></div><div class="graphwrap">{{.Graph}}</div>
   {{if .Status.Error}}<p class="muted">{{.Status.Error}}</p>{{end}}</section>
   {{with .Status.Status}}
@@ -29,11 +29,11 @@
       <dt>Uptime</dt><dd><span class="c-num" data-bind="uptime">{{secs .UptimeSeconds}}</span> (since {{ts .StartedAt}})</dd>
       <dt>Start position</dt><dd class="mono">{{if .StartPosition}}{{.StartPosition}}{{else}}-{{end}}{{if .StartAt}} (--start-at {{.StartAt}}){{end}}</dd>
       <dt>Commit order</dt><dd>{{.CommitOrder}}, {{.Workers}} writer(s)</dd>
-      <dt>Governor</dt><dd data-bind="governor">{{governor .Governor}}</dd>
+      {{if not $mongo}}<dt>Governor</dt><dd data-bind="governor">{{governor .Governor}}</dd>{{end}}
       <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
     </dl>
   </section>{{end}}
-  {{if and .CanOperate .Ctl.Reachable}}<section class="card" id="throttle"><div class="cardhead"><h2>Throttle</h2></div>
+  {{if and .CanOperate .Ctl.Reachable (not $mongo)}}<section class="card" id="throttle"><div class="cardhead"><h2>Throttle</h2></div>
     <p class="card-desc hint">Changes the soft limit of the running process only (the hard limit changes with the config and a restart). The value is not saved to the config file; to make it permanent set the read limit in the <a href="/pipelines/{{.View.Name}}/config#tuning-card">Tuning card (Config tab)</a>.</p>
     <form class="act" data-action="throttle" data-pipeline="{{.View.Name}}">
       <div class="field-grid cols-3">
@@ -125,7 +125,7 @@
   {{if and .CanOperate .Ctl.Running}}<section class="card">
     <div class="cardhead"><h2>Add tables</h2></div>
     {{if .Src.Error}}{{template "error-state" (errState "Source tables are not available" .Src.Error)}}{{else}}
-    <p class="card-desc">Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.</p>
+    <p class="card-desc">{{if eq .View.SourceKind "mongodb"}}Collections already in the pipeline are not listed. A collection added here is copied, then followed by the change stream.{{else}}Tables already in the pipeline are not listed. A table needs a primary key; the pipeline refuses anything else.{{end}}</p>
     <form class="act" data-action="snapshot-add" data-pipeline="{{.View.Name}}" data-confirm="Snapshot the selected tables now? Each one is added to the running pipeline and copied from the source.">
       <div class="picklist" id="src-picklist"{{if not .SrcLoaded}} data-src-tables="/api/v1/pipelines/{{.View.Name}}/source-tables"{{end}}>{{if .SrcLoaded}}{{range .Src.Tables}}{{if not .InPipeline}}<label class="pick"><input type="checkbox" name="tables" value="{{.Table}}" aria-label="{{.Table}}"> <span class="mono">{{.Table}}</span></label>{{end}}{{else}}<span class="muted">No source tables.</span>{{end}}{{else}}<button type="button" class="btn" data-load-src>List source tables</button> <span class="muted small">Asks the running pipeline for the tables of the source database (a query on the source).</span>{{end}}</div>
       <div class="form-actions"><button class="btn primary" type="submit">Snapshot selected tables</button></div>

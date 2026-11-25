@@ -29,13 +29,18 @@ and click the ones to copy. **Collections in parallel** (MongoDB tuning, prefill
 time, like "Tables in parallel" of MySQL pipelines; it can be changed later on the Tuning card.
 
 **Large collections are split between workers.** A collection with at least twice
-`mongodb.split_min_docs` documents (default 100 000) is cut into up to `max_parallel`
-ranges of `_id` (from a random `$sample` of `_id`s, sorted), each copied by its own worker
+`mongodb.split_min_docs` documents (default 100 000) is cut into up to 4 × `max_parallel`
+ranges of `_id` (from a random `$sample` of `_id`s, sorted; more ranges than workers so
+that a worker done early takes the next range: `$sample` is biased and ranges differ in
+size), each copied by one worker
 and checkpointed on its own: after a crash every range resumes from its last copied
 `_id`, so nothing is copied twice or skipped. Ranges use the `_id` index bounds, so
 `_id`s of every BSON type are covered. Collections with a non-simple default collation
 are copied by one worker. The split is decided when the copy of a collection starts;
-a copy in progress keeps its ranges (or its single worker) across restarts. A re-copy
+a split copy keeps its ranges across restarts. A copy by one worker that was interrupted
+(for example started with `max_parallel: 1`, or by a version without split copies) is
+split when it resumes: the first range continues from the last copied `_id`, the rest
+of the collection is cut into ranges for the other workers. A re-copy
 (`snapshot add`, `verify --repair fix`) uses one worker. With one database, an empty target database means the same name as the
 source; several databases keep their names on the target (write `target.databases` in the YAML to
 rename them). The console builds the connection URI (user and password escaped) and
@@ -98,8 +103,11 @@ tables:
   target database, all in one process: one pipeline to start, stop, watch and verify.
   `strand top`, the Web UI and `verify` name collections `database.collection`;
   `snapshot add`, `verify --table` and `mongodb repair` need that form.
-- `bootstrap.logical.max_parallel` is the total: it is shared between the databases
-  (at least one worker each).
+- `bootstrap.logical.max_parallel` is the total for the pipeline: the workers are one
+  pool shared by the databases. At most that many collections or ranges are copied at
+  a time over all databases, and when one database has nothing left to copy its
+  workers go to the others (a large collection is split into `max_parallel` ranges
+  even when the pipeline has several databases).
 - The pipeline stops as a whole. When one database stops with an error (lost oplog
   history, unsupported event, lease lost), the others stop at a committed checkpoint
   and the error names the database. Transient errors are retried per database.

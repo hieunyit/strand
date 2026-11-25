@@ -687,10 +687,13 @@ form.inline { display: inline; margin: 0; }
 .snap-top .cardhead { margin: 0; }
 .snap-top h2 { margin: 0; }
 .snap-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--sp-3); }
-.snap-fig { border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--sp-3) var(--sp-4); }
+.snap-fig { border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--sp-3) var(--sp-4); min-width: 0; }
 .snap-fig .f-label { font-size: var(--fs-xs); color: var(--ink-2); font-weight: 500; }
 .snap-fig .f-value { font-size: var(--fs-lg); line-height: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .snap-fig .f-value small { font-size: var(--fs-sm); color: var(--muted); font-weight: 400; }
+/* Counts of tens of millions do not fit beside their total: the total goes on its own line. */
+.snap-fig .f-value { overflow-wrap: anywhere; }
+#snap-rows small { display: block; line-height: 20px; }
 .snap > p { margin: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; font: inherit; font-size: var(--fs-sm); padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r-pill); background: var(--surface); color: var(--ink); cursor: pointer; }

@@ -75,6 +75,10 @@ type CollectionProgress struct {
 	Estimate int64
 	Started  time.Time
 	Finished time.Time
+	// StartCopied is Copied when the collection started running in this process: the
+	// copy rate (ETA) counts only what this process copied, not what was copied before
+	// a restart.
+	StartCopied int64
 }
 
 type repairRequest struct {
@@ -128,7 +132,7 @@ func (o *Observer) setCollection(name, state, kind string, copied, estimate int6
 		o.colls[name] = c
 	}
 	if state == CollRunning && c.State != CollRunning {
-		c.Started = time.Now()
+		c.Started, c.StartCopied = time.Now(), copied
 	}
 	if state == CollDone && c.State != CollDone {
 		c.Finished = time.Now()
@@ -149,7 +153,7 @@ func (o *Observer) setCollectionState(name, state string) {
 		return
 	}
 	if state == CollRunning {
-		c.Started = time.Now()
+		c.Started, c.StartCopied = time.Now(), c.Copied
 	}
 	c.State = state
 }

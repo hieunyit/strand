@@ -125,6 +125,11 @@ func (r *runner) snapshot(ctx context.Context) error {
 			c.parts = p.Parts // a split copy resumes with its ranges
 		case p == nil:
 			c.parts = r.splitParts(in, est)
+		default:
+			// A copy by one worker that was interrupted (or started by a version
+			// without split copies): what is left is split between the workers.
+			c.parts = r.splitParts(in, est-p.Copied)
+			c.resplit = c.parts > 1
 		}
 		colls = append(colls, c)
 	}
@@ -155,6 +160,16 @@ func (r *runner) snapshot(ctx context.Context) error {
 		case slot = <-slots:
 		case <-workCtx.Done():
 		}
+		if workCtx.Err() == nil && cfg.copyPool != nil {
+			// A pipeline with several databases: the workers are shared with them.
+			select {
+			case cfg.copyPool <- struct{}{}:
+				if workCtx.Err() != nil {
+					<-cfg.copyPool
+				}
+			case <-workCtx.Done():
+			}
+		}
 		if workCtx.Err() != nil {
 			break
 		}
@@ -162,6 +177,9 @@ func (r *runner) snapshot(ctx context.Context) error {
 		go func(j job, slot int) {
 			defer wg.Done()
 			defer func() { slots <- slot }()
+			if cfg.copyPool != nil {
+				defer func() { <-cfg.copyPool }()
+			}
 			c := j.c
 			c.once.Do(func() { c.err = r.prepareCopy(workCtx, slot, c) })
 			if c.err != nil {
@@ -189,6 +207,7 @@ type collCopy struct {
 	info     collectionInfo
 	estimate int64
 	parts    int // planned ranges; prepareCopy may lower it (fewer distinct _id bounds)
+	resplit  bool // parent is an unfinished one-range copy: split what is after its LastID
 	once     sync.Once
 	err      error
 	parent   *collProgress   // the collection's progress document
@@ -198,9 +217,16 @@ type collCopy struct {
 	start    time.Time
 }
 
-// splitParts is the number of ranges a new copy of a collection is split into: one
-// per worker, each of at least SplitMinDocs documents. A collection with a non-simple
-// default collation is not split (its _id order follows the collation).
+// rangesPerWorker: a split collection gets several ranges per worker. The bounds come
+// from $sample, whose random cursor is biased (measured on 12M documents: quartiles
+// 15% off, the same with 400 or 10,000 samples), so ranges differ in size; with more
+// ranges than workers a worker that finishes early takes the next range instead of
+// idling while the largest range is copied alone.
+const rangesPerWorker = 4
+
+// splitParts is the number of ranges a new copy of a collection is split into: up to
+// rangesPerWorker per worker, each of at least SplitMinDocs documents. A collection
+// with a non-simple default collation is not split (its _id order follows the collation).
 func (r *runner) splitParts(info collectionInfo, estimate int64) int {
 	if r.cfg.SnapshotParallel <= 1 || r.cfg.SplitMinDocs <= 0 || estimate < 2*int64(r.cfg.SplitMinDocs) {
 		return 1
@@ -208,13 +234,16 @@ func (r *runner) splitParts(info collectionInfo, estimate int64) int {
 	if _, err := info.Options.LookupErr("collation"); err == nil {
 		return 1
 	}
-	return int(min(int64(r.cfg.SnapshotParallel), estimate/int64(r.cfg.SplitMinDocs)))
+	return int(min(int64(r.cfg.SnapshotParallel*rangesPerWorker), estimate/int64(r.cfg.SplitMinDocs)))
 }
 
 // prepareCopy creates the target collection and the progress records of a new copy,
 // or loads the ranges of a split copy that is resumed.
 func (r *runner) prepareCopy(ctx context.Context, slot int, c *collCopy) error {
 	c.start = time.Now()
+	if c.resplit {
+		return r.splitRemainder(ctx, slot, c)
+	}
 	if c.parent != nil {
 		if c.parts <= 1 {
 			return nil
@@ -224,7 +253,7 @@ func (r *runner) prepareCopy(ctx context.Context, slot int, c *collCopy) error {
 	var bounds []bson.RawValue
 	if c.parts > 1 {
 		var err error
-		if bounds, err = r.sampleBounds(ctx, c.info.Name, c.parts); err != nil {
+		if bounds, err = r.sampleBounds(ctx, c.info.Name, c.parts, bson.RawValue{}); err != nil {
 			r.cfg.Logger.Warn("MongoDB: cannot sample _id bounds; the collection is copied by one worker", "collection", r.cfg.SourceDB+"."+c.info.Name, "error", err)
 			bounds = nil
 		}
@@ -311,15 +340,77 @@ func (r *runner) loadRanges(ctx context.Context, c *collCopy) error {
 	return nil
 }
 
-// sampleBounds picks up to parts-1 _id values that split the collection into ranges
-// of about the same number of documents, from a random sample sorted in _id order.
-func (r *runner) sampleBounds(ctx context.Context, name string, parts int) ([]bson.RawValue, error) {
-	size := min(parts*100, 10000)
-	cur, err := r.source.Collection(name).Aggregate(ctx, mongo.Pipeline{
+// splitRemainder splits the rest of an unfinished one-range copy (the _ids after its
+// LastID) into ranges. The first range continues from LastID and carries the documents
+// already copied, so the ranges still add up to the collection's count.
+func (r *runner) splitRemainder(ctx context.Context, slot int, c *collCopy) error {
+	parent := c.parent
+	bounds, err := r.sampleBounds(ctx, c.info.Name, c.parts, parent.LastID)
+	if err != nil {
+		r.cfg.Logger.Warn("MongoDB: cannot sample _id bounds; the copy continues with one worker", "collection", r.cfg.SourceDB+"."+c.info.Name, "error", err)
+		bounds = nil
+	}
+	if len(bounds) == 0 {
+		c.parts = 1
+		return nil
+	}
+	c.parts = len(bounds) + 1
+	ranges := make([]*collProgress, c.parts)
+	for i := range ranges {
+		rp := &collProgress{ID: progressID{Pipeline: r.cfg.Pipeline, Collection: c.info.Name, Part: i + 1}, Kind: progressPart}
+		if i == 0 {
+			rp.LastID, rp.Copied = parent.LastID, parent.Copied
+		} else {
+			rp.Lo = bounds[i-1]
+		}
+		if i < len(bounds) {
+			rp.Hi = bounds[i]
+		}
+		ranges[i] = rp
+	}
+	err = r.lease.txn(ctx, slot, func(tx context.Context) error {
+		if _, err := r.progress.DeleteMany(tx, bson.D{{Key: "_id.p", Value: r.cfg.Pipeline}, {Key: "_id.c", Value: c.info.Name}, {Key: "kind", Value: progressPart}}); err != nil {
+			return err
+		}
+		if _, err := r.progress.UpdateOne(tx, bson.D{{Key: "_id", Value: parent.ID}}, bson.D{{Key: "$set", Value: bson.D{{Key: "parts", Value: c.parts}}}}); err != nil {
+			return err
+		}
+		docs := make([]any, len(ranges))
+		for i, rp := range ranges {
+			docs[i] = rp
+		}
+		_, err := r.progress.InsertMany(tx, docs)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	parent.Parts = c.parts
+	c.ranges, c.left = ranges, len(ranges)
+	r.cfg.Logger.Info("MongoDB collection copy resumed split between workers", "pipeline", r.cfg.Pipeline, "collection", r.cfg.SourceDB+"."+c.info.Name,
+		"ranges", c.parts, "copied", parent.Copied, "estimate", c.estimate)
+	return nil
+}
+
+// sampleBounds picks up to parts-1 _id values that split the collection (or, with
+// after set, the _ids after it) into ranges of about the same number of documents,
+// from a random sample sorted in _id order. The sample is taken first ($sample on
+// the whole collection uses a random cursor and is fast) and then cut to the _ids
+// after `after` ($gt brackets by type: the bounds then have after's type, every
+// _id of another type stays in the last range).
+func (r *runner) sampleBounds(ctx context.Context, name string, parts int, after bson.RawValue) ([]bson.RawValue, error) {
+	// $sample on a random cursor costs about one read per sampled document; the sample
+	// size limits the random error, not the cursor's bias (see rangesPerWorker).
+	size := min(max(parts*200, 2000), 10000)
+	pipeline := mongo.Pipeline{
 		{{Key: "$sample", Value: bson.D{{Key: "size", Value: size}}}},
 		{{Key: "$project", Value: bson.D{{Key: "_id", Value: 1}}}},
-		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
-	})
+	}
+	if !after.IsZero() {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "_id", Value: bson.D{{Key: "$gt", Value: after}}}}}})
+	}
+	pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}})
+	cur, err := r.source.Collection(name).Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, err
 	}

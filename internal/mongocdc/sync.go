@@ -126,6 +126,11 @@ type Config struct {
 	RetryBackoffMax     time.Duration // cap of the backoff between automatic restarts
 	// Observer receives progress for the admin socket and metrics (optional).
 	Observer *Observer
+
+	// copyPool, when set, bounds the copy workers of all databases of a pipeline
+	// together (DatabaseConfigs): a database whose copy is done hands its workers to
+	// the others instead of leaving them idle.
+	copyPool chan struct{}
 }
 
 func (c *Config) setDefaults() {

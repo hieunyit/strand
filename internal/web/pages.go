@@ -1017,7 +1017,7 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 		}
 		b.Graph = PipelineGraph(s.graphNodes(b.View, b.Status.Status, b.Metrics))
 		b.HasHistory = true
-		b.Charts = s.charts(p.Name)
+		b.Charts = s.charts(p.Name, isMongo(b.View.SourceKind))
 	case "tables":
 		b.Tables = s.tablesPageView(p, r)
 		b.TablesBase = base + "/tables"
@@ -1274,7 +1274,8 @@ type chartCard struct {
 	HTML template.HTML
 }
 
-func (s *Server) charts(name string) []chartCard {
+// A MongoDB pipeline has no holes, writeset or spool: only lag and throughput.
+func (s *Server) charts(name string, mongo bool) []chartCard {
 	smp := s.samp.Series(name)
 	pick := func(f func(Sample) float64) []Point {
 		pts := make([]Point, len(smp))
@@ -1284,7 +1285,7 @@ func (s *Server) charts(name string) []chartCard {
 		return pts
 	}
 	// Keys and series must match CHARTS in app.js (the live redraw).
-	return []chartCard{
+	cards := []chartCard{
 		{"lag", LineChart("Replication lag", "seconds", []ChartSeries{{Name: "lag", Class: "s1", Points: pick(func(x Sample) float64 { return x.Lag })}}, 560, 190)},
 		{"rate", LineChart("Throughput", "rows/s", []ChartSeries{
 			{Name: "applied, 30 s avg", Class: "s1", Points: pick(func(x Sample) float64 { return x.Rows })},
@@ -1296,6 +1297,10 @@ func (s *Server) charts(name string) []chartCard {
 		}, 560, 190)},
 		{"spool", LineChart("Spool", "bytes", []ChartSeries{{Name: "spool bytes", Class: "s4", Points: pick(func(x Sample) float64 { return x.SpoolBytes })}}, 560, 190)},
 	}
+	if mongo {
+		cards = cards[:2]
+	}
+	return cards
 }
 
 func mval(m map[string]float64, k string) string {
@@ -1333,6 +1338,26 @@ func (s *Server) graphNodes(v PipelineView, st *admin.StatusInfo, m map[string]f
 			zone = st.Governor.Algorithm
 		}
 		txns, rows = FormatValue(float64(st.AppliedTxns)), FormatValue(float64(st.AppliedRows))
+	}
+	if isMongo(v.SourceKind) {
+		// MongoDB: the initial copy (workers over collections and _id ranges) and the
+		// change stream write to the target; there is no assembler, scheduler or governor.
+		snap := "-"
+		if v.Top != nil {
+			snap = FormatValue(v.Rates.SnapRows) + " docs/s"
+		}
+		tables := "copy done"
+		if v.Top == nil {
+			tables = "-"
+		} else if v.Top.TablesTotal > 0 {
+			tables = strconv.FormatInt(int64(v.Top.TablesDone), 10) + " / " + strconv.FormatInt(int64(v.Top.TablesTotal), 10) + " collections"
+		}
+		return []GraphNode{
+			{Title: "Source", Class: cls, Lines: []string{srcKind, "lag " + lag, "state " + v.State}, Binds: []string{"", "g_lag", "g_state"}},
+			{Title: "Copy x" + workers, Class: cls, Lines: []string{snap, tables}, Binds: []string{"g_snap", "g_tables"}},
+			{Title: "Change stream", Class: cls, Lines: []string{rate, "order " + order}, Binds: []string{"g_rate", ""}},
+			{Title: "Target", Class: cls, Lines: []string{dstKind, "txns " + txns, "docs " + rows}, Binds: []string{"", "g_txns", "g_rows"}},
+		}
 	}
 	return []GraphNode{
 		{Title: "Source", Class: cls, Lines: []string{srcKind, "lag " + lag, "state " + v.State}, Binds: []string{"", "g_lag", "g_state"}},

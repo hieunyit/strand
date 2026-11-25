@@ -306,8 +306,8 @@ func (h *AdminHandler) Tables(context.Context) ([]admin.TableInfo, error) {
 			ti.ProgressPct = 100
 		case c.Estimate > 0:
 			ti.ProgressPct = min(99.9, 100*float64(c.Copied)/float64(c.Estimate))
-			if el := time.Since(c.Started).Seconds(); c.State == CollRunning && c.Copied > 0 && el > 0 && c.Estimate > c.Copied {
-				ti.ETASeconds = float64(c.Estimate-c.Copied) / (float64(c.Copied) / el)
+			if el, n := time.Since(c.Started).Seconds(), c.Copied-c.StartCopied; c.State == CollRunning && n > 0 && el > 0 && c.Estimate > c.Copied {
+				ti.ETASeconds = float64(c.Estimate-c.Copied) / (float64(n) / el)
 			}
 		}
 		out = append(out, ti)
