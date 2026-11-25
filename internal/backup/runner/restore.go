@@ -73,6 +73,9 @@ func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (e
 		return errors.New("incremental restore requires `strand backup fetch` and the native restore tool")
 	}
 	if base.Method == backup.MethodMySQLDump && plan.Target != nil {
+		if err := checkMySQLTargetTime(*plan.Target); err != nil {
+			return err
+		}
 		if err := checkMySQLPITRBaseTime(base, *plan.Target); err != nil {
 			return err
 		}
