@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 var (
@@ -530,6 +531,70 @@ func (s *PebbleSpool) ImportTrustedRoots(trustedRoots []string, opts ...Inventor
 	return s.ImportInventory(report, opts...)
 }
 
+// ScanPipelineInventoryOffline inspects runtime spill files and any seeded Pebble prefetch spool.
+// Older layouts can have a Pebble index alongside the runtime spill directory.
+func ScanPipelineInventoryOffline(dir string) (*InventoryReport, error) {
+	report := &InventoryReport{}
+	for _, dbDir := range []string{dir, filepath.Join(dir, "prefetch")} {
+		spill := filepath.Join(dbDir, "spill")
+		if dbDir != dir {
+			if exists, err := inventoryDirectory(dbDir); err != nil {
+				return nil, err
+			} else if !exists {
+				continue
+			}
+		}
+		if exists, err := inventoryDirectory(spill); err != nil {
+			return nil, err
+		} else if !exists {
+			continue
+		}
+		db, err := pebble.Peek(dbDir, vfs.Default)
+		if err != nil {
+			return nil, fmt.Errorf("inspect spool index %s: %w", dbDir, err)
+		}
+		var part *InventoryReport
+		if db.Exists {
+			part, err = ScanInventoryOffline(dbDir, []string{spill})
+		} else {
+			part, err = scanRoots([]string{spill}, nil, defaultInventoryOptions(), func(string) (bool, int64, int) {
+				return false, 0, 0
+			})
+		}
+		if err != nil {
+			return nil, err
+		}
+		report.TrustedRoots = append(report.TrustedRoots, part.TrustedRoots...)
+		report.Entries = append(report.Entries, part.Entries...)
+		report.DiscoveredFiles += part.DiscoveredFiles
+		report.DiscoveredBytes += part.DiscoveredBytes
+		report.NewFiles += part.NewFiles
+		report.NewBytes += part.NewBytes
+		report.ExistingFiles += part.ExistingFiles
+		report.ExistingBytes += part.ExistingBytes
+		report.Warnings = append(report.Warnings, part.Warnings...)
+		report.Errors = append(report.Errors, part.Errors...)
+	}
+	return report, nil
+}
+
+func inventoryDirectory(dir string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%w: spool directory %s must not be a symlink", ErrSymlinkEscape, dir)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%w: %s is not a directory", ErrInvalidTrustedRoot, dir)
+	}
+	return true, nil
+}
+
 // ScanInventoryOffline mở database Pebble ở chế độ read-only và thực hiện quét kiểm tra inventory offline.
 func ScanInventoryOffline(spoolDir string, trustedRoots []string, opts ...InventoryOption) (*InventoryReport, error) {
 	cfg := defaultInventoryOptions()
@@ -542,7 +607,7 @@ func ScanInventoryOffline(spoolDir string, trustedRoots []string, opts ...Invent
 		return nil, err
 	}
 
-	db, err := pebble.Open(spoolDir, &pebble.Options{ReadOnly: true})
+	db, err := pebble.Open(spoolDir, &pebble.Options{ReadOnly: true, ErrorIfNotExists: true})
 	if err != nil {
 		return nil, fmt.Errorf("open spool db offline (read-only): %w", err)
 	}

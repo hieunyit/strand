@@ -503,6 +503,85 @@ func TestSpoolInspectScansConfiguredPipelineOffline(t *testing.T) {
 	}
 }
 
+func TestSpoolInspectFormWithRuntimeAndPrefetch(t *testing.T) {
+	e := opsEnv(t, false, nil)
+	c, csrf := e.loginOK()
+	form := url.Values{"csrf": {csrf}, "pipeline": {"orders"}}
+	headers := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	submit := func() (*http.Response, string) {
+		return e.do(c, "POST", "/tools/spool-inspect", form.Encode(), headers)
+	}
+	resp, body := submit()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "stop the pipeline before offline spool inspection") ||
+		!strings.Contains(body, `value="orders" selected`) {
+		t.Fatalf("running pipeline form response: %d", resp.StatusCode)
+	}
+	if err := os.Remove(e.sock); err != nil {
+		t.Fatal(err)
+	}
+	dir := e.srv.reg.Get("orders").Cfg.Resources.Spool.Path
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	resp, body = submit()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "No spool directory found") {
+		t.Fatalf("pipeline without a spool directory: %d", resp.StatusCode)
+	}
+
+	runtimeSpill := filepath.Join(dir, "spill")
+	if err := os.MkdirAll(runtimeSpill, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeSpill, "runtime.spill"), []byte("runtime payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resp, body = submit()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "15 bytes") {
+		t.Fatalf("runtime spill without a Pebble index: %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "LOCK")); !os.IsNotExist(err) {
+		t.Fatalf("the scan should not create a Pebble lock in the runtime directory: %v", err)
+	}
+
+	prefetchDir := filepath.Join(dir, "prefetch")
+	prefetchSpill := filepath.Join(prefetchDir, "spill")
+	if err := os.MkdirAll(prefetchSpill, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(prefetchSpill, "prefetch.spill"), []byte("seed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	index, err := spool.New(prefetchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, importErr := index.ImportTrustedRoots([]string{prefetchSpill})
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if importErr != nil {
+		t.Fatal(importErr)
+	}
+	resp, body = e.do(c, "POST", "/api/v1/tools/spool-inspect", `{"pipeline":"orders"}`, map[string]string{
+		csrfHeader: csrf, "Content-Type": "application/json",
+	})
+	var result struct{ Report spool.InventoryReport }
+	if err := json.Unmarshal([]byte(body), &result); err != nil || resp.StatusCode != http.StatusOK ||
+		result.Report.DiscoveredFiles != 2 || result.Report.DiscoveredBytes != 19 || result.Report.ExistingFiles != 1 || result.Report.NewFiles != 1 {
+		t.Fatalf("combined inventory: status=%d decode=%v report=%+v", resp.StatusCode, err, result.Report)
+	}
+	if err := os.Rename(runtimeSpill, filepath.Join(dir, "old-spill")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), runtimeSpill); err != nil {
+		t.Fatal(err)
+	}
+	resp, body = submit()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "must not be a symlink") {
+		t.Fatalf("symlinked spill directory: %d", resp.StatusCode)
+	}
+}
+
 func TestDBAdminExportsFromOpenMetadataStore(t *testing.T) {
 	e := opsEnv(t, false, nil)
 	e.sampleNow()

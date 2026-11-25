@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"strand/internal/admin"
 	"strand/internal/spool"
 	"strand/internal/tunnel"
 )
@@ -129,22 +130,6 @@ func withinCanonicalRoot(path, root string) (string, error) {
 	return probeReal, nil
 }
 
-func (s *Server) validateSpoolDir(dir string) error {
-	if strings.TrimSpace(dir) == "" {
-		return errors.New("spool_dir: directory is required")
-	}
-	clean := filepath.Clean(dir)
-	if s != nil && s.reg != nil {
-		for _, p := range s.reg.List() {
-			sp, err := s.spoolPath(p)
-			if err == nil && clean == sp {
-				return nil
-			}
-		}
-	}
-	return errors.New("spool_dir: path must exactly match a configured pipeline spool directory")
-}
-
 func (s *Server) spoolPipelineNames() []string {
 	if s == nil || s.reg == nil {
 		return nil
@@ -152,7 +137,7 @@ func (s *Server) spoolPipelineNames() []string {
 	ps := s.reg.List()
 	out := make([]string, 0, len(ps))
 	for _, p := range ps {
-		if p != nil {
+		if p != nil && p.Cfg != nil {
 			out = append(out, p.Name)
 		}
 	}
@@ -196,18 +181,35 @@ func (s *Server) scanPipelineSpool(ctx context.Context, pipeline string) (*spool
 	if p == nil {
 		return nil, "", errors.New("unknown pipeline")
 	}
-	if s.isRunning(p) {
+	if p.Cfg == nil {
+		return nil, "", errors.New("fix the pipeline configuration before inspecting its spool")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, adminTimeout)
+	defer cancel()
+	runtime := s.reg.Runtime(probeCtx, p)
+	if runtime.Running {
 		return nil, "", errors.New("stop the pipeline before offline spool inspection")
+	}
+	if runtime.Error != "" {
+		return nil, "", fmt.Errorf("could not verify that the pipeline is stopped: %s", runtime.Error)
+	}
+	if err := s.withAdmin(probeCtx, p, func(ctx context.Context, c *admin.Client) error {
+		_, err := c.Top(ctx)
+		return err
+	}); err == nil {
+		return nil, "", errors.New("stop the pipeline before offline spool inspection")
+	}
+	if err := probeCtx.Err(); err != nil {
+		return nil, "", fmt.Errorf("could not verify that the pipeline is stopped: %w", err)
 	}
 	dir, err := s.spoolPath(p)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &spool.InventoryReport{Warnings: []string{"No spool directory found. The pipeline may not have created it yet. If it has already run, check the configured path and volume mount."}}, "", nil
+		}
 		return nil, "", err
 	}
-	spill := filepath.Join(dir, "spill")
-	if _, err := os.Stat(spill); err != nil {
-		return nil, dir, fmt.Errorf("spool spill directory unavailable: %w", err)
-	}
-	report, err := spool.ScanInventoryOffline(dir, []string{spill})
+	report, err := spool.ScanPipelineInventoryOffline(dir)
 	return report, dir, err
 }
 
@@ -469,15 +471,14 @@ func (s *Server) apiSpoolInspect(w http.ResponseWriter, r *http.Request, sess *S
 	var req struct {
 		Pipeline string `json:"pipeline"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !decodeStrict(w, r, &req) {
 		return
 	}
 	if err := s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": req.Pipeline}, "started"); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	rep, dir, err := s.scanPipelineSpool(r.Context(), req.Pipeline)
+	rep, _, err := s.scanPipelineSpool(r.Context(), req.Pipeline)
 	if err != nil {
 		_ = s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": req.Pipeline, "error": err.Error()}, "error")
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -487,7 +488,6 @@ func (s *Server) apiSpoolInspect(w http.ResponseWriter, r *http.Request, sess *S
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = dir
 	writeJSON(w, http.StatusOK, map[string]any{"report": rep})
 }
 

@@ -1,9 +1,10 @@
 {{define "content"}}
-<form class="act" data-action="spool-inspect" method="post" action="/tools/spool-inspect">
+{{if .Body.Error}}<div class="alert alert-error" role="alert">{{.Body.Error}}</div>{{end}}
+<form method="post" action="/tools/spool-inspect">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <fieldset class="form-section">
     <legend class="form-section-title">Scan Spool Inventory (Read-Only)</legend>
-    <p class="form-section-desc">Read-only inspection of a stopped pipeline's Pebble spool. The scanner uses only that pipeline's configured spill directory and checks sidecar references and symlink escapes.</p>
+    <p class="form-section-desc">Lists local spill files for a stopped pipeline and checks them against the prefetch index when available.</p>
     <div class="field-grid">
       <div class="field">
         <label class="field-label" for="spool-pipeline">Pipeline <span class="req" aria-hidden="true">*</span></label>
@@ -15,7 +16,7 @@
       </div>
     </div>
     <div class="form-actions flat">
-      <button class="btn primary" type="submit" data-action="spool-inspect">Scan Inventory</button>
+      <button class="btn primary" type="submit">Scan Inventory</button>
     </div>
   </fieldset>
 </form>
@@ -23,10 +24,10 @@
 <section class="card">
   <div class="cardhead"><h2>Scan Results</h2>{{if .Body.Report}}{{if .Body.Report.Errors}}<span class="badge st-failed">{{len .Body.Report.Errors}} errors</span>{{else if .Body.Report.Warnings}}<span class="badge st-warn">{{len .Body.Report.Warnings}} warnings</span>{{else}}<span class="badge st-synced">clean</span>{{end}}{{end}}</div>
   {{if .Body.Report}}
-  <p class="muted small mono">{{.Body.SpoolDir}}</p>
+  {{if .Body.SpoolDir}}<p class="muted small mono">{{.Body.SpoolDir}}</p>{{end}}
   <div class="statgrid">
     <div class="metric"><div class="m-label">Discovered Files</div><div class="m-value c-num">{{.Body.Report.DiscoveredFiles}}</div><div class="m-sub">{{.Body.Report.DiscoveredBytes}} bytes</div></div>
-    <div class="metric"><div class="m-label">New Sidecars</div><div class="m-value c-num">{{.Body.Report.NewFiles}}</div><div class="m-sub">{{.Body.Report.NewBytes}} bytes</div></div>
+    <div class="metric"><div class="m-label">Unindexed Files</div><div class="m-value c-num">{{.Body.Report.NewFiles}}</div><div class="m-sub">{{.Body.Report.NewBytes}} bytes</div></div>
     <div class="metric"><div class="m-label">Already Indexed</div><div class="m-value c-num">{{.Body.Report.ExistingFiles}}</div><div class="m-sub">{{.Body.Report.ExistingBytes}} bytes</div></div>
   </div>
   {{if .Body.Report.Warnings}}

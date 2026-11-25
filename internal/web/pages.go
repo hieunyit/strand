@@ -651,7 +651,7 @@ func defaultSubtitle(page string) string {
 	case "schema":
 		return "Configuration schema reference and YAML validation specification"
 	case "spool_inspect":
-		return "Read-only sidecar inspection of on-disk Pebble spool buffers"
+		return "Read-only inspection of local spill files and prefetch buffers"
 	case "archive":
 		return "Binlog archiver status, continuous log preservation, and contents"
 	case "tunnel":
@@ -1002,13 +1002,12 @@ func (s *Server) pageDetail(w http.ResponseWriter, r *http.Request, sess *Sessio
 	s.render(w, "detail", sess, pageData{Title: p.Name, DocTitle: p.Name + " \u00b7 " + tabLabels[tab], Subtitle: detailSubtitle(b.View), Active: p.Name, Live: live, LiveLogs: liveLogs, Body: b})
 }
 
-type spoolInspectReport = spool.InventoryReport
-
 type spoolInspectView struct {
 	Pipelines []string
 	Pipeline  string
 	SpoolDir  string
-	Report    *spoolInspectReport
+	Report    *spool.InventoryReport
+	Error     string
 }
 
 type archiveFileItem struct {
@@ -1083,39 +1082,30 @@ func (s *Server) pageSchemaHelp(w http.ResponseWriter, r *http.Request, sess *Se
 }
 
 func (s *Server) pageSpoolInspect(w http.ResponseWriter, r *http.Request, sess *Session) {
-	_ = r.ParseForm()
-	pipeline := r.FormValue("pipeline")
-	var rep *spoolInspectReport
-	spoolDir := ""
-
+	view := spoolInspectView{Pipelines: s.spoolPipelineNames(), Pipeline: r.FormValue("pipeline")}
 	if r.Method == http.MethodPost {
-		if err := s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": pipeline}, "started"); err != nil {
+		detail := map[string]any{"pipeline": view.Pipeline}
+		if err := s.auditSensitive(r, "spool.inspect", detail, "started"); err != nil {
 			s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
 			return
 		}
-		var err error
-		rep, spoolDir, err = s.scanPipelineSpool(r.Context(), pipeline)
+		report, dir, err := s.scanPipelineSpool(r.Context(), view.Pipeline)
 		if err != nil {
-			_ = s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": pipeline, "error": err.Error()}, "error")
-			s.renderError(w, r, sess, http.StatusBadRequest, err.Error())
-			return
-		}
-		if err := s.auditSensitive(r, "spool.inspect", map[string]any{"pipeline": pipeline, "discovered_files": rep.DiscoveredFiles, "new_files": rep.NewFiles}, "ok"); err != nil {
-			s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
-			return
+			detail["error"] = err.Error()
+			_ = s.auditSensitive(r, "spool.inspect", detail, "error")
+			view.Error = err.Error()
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+		} else {
+			detail["discovered_files"], detail["new_files"] = report.DiscoveredFiles, report.NewFiles
+			if err := s.auditSensitive(r, "spool.inspect", detail, "ok"); err != nil {
+				s.renderError(w, r, sess, http.StatusInternalServerError, err.Error())
+				return
+			}
+			view.Report, view.SpoolDir = report, dir
 		}
 	}
-
-	s.render(w, "spool_inspect", sess, pageData{
-		Title:  "Spool Inspect",
-		Active: "spool",
-		Body: &spoolInspectView{
-			Pipelines: s.spoolPipelineNames(),
-			Pipeline:  pipeline,
-			SpoolDir:  spoolDir,
-			Report:    rep,
-		},
-	})
+	s.render(w, "spool_inspect", sess, pageData{Title: "Spool Inspect", Active: "spool", Body: &view})
 }
 
 func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Session) {
