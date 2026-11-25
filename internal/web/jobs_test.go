@@ -33,14 +33,15 @@ func TestBackupProcessJobLinks(t *testing.T) {
 	e.srv.SetJobRunner(runner)
 	a := e.admin()
 	const runs = "/backups/jobs/bjob-shop?tab=runs"
-	for path, want := range map[string]string{"/jobs": runs, "/jobs/" + runID: runs, "/jobs/" + restoreID: "/backups"} {
+	const historyLink = runs + "&amp;process=" + runID
+	for path, want := range map[string]string{"/jobs": historyLink, "/jobs/" + runID: historyLink, "/jobs/" + restoreID: "/backups"} {
 		body := a.must("GET", path, nil, 200)
 		if !strings.Contains(body, `href="`+want+`"`) || strings.Contains(body, `href="/pipelines/run-bjob-shop`) ||
 			strings.Contains(body, `href="/pipelines/backup-restore-r-1`) || strings.Contains(body, `data-action="job-cancel"`) {
 			t.Errorf("%s did not show a valid backup link and actions", path)
 		}
 	}
-	a.must("GET", runs, nil, 200)
+	a.must("GET", runs+"&process="+runID, nil, 200)
 }
 
 func (e *testEnv) job(c interface{}, id string) JobStatus {

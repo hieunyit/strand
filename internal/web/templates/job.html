@@ -4,6 +4,7 @@
   <div class="headrow">
     <span class="badge big {{jobClass .Job}}">{{jobState .Job}}</span>
     <span class="pair"><b>{{.Job.Kind}}</b></span>
+    <span class="muted small">{{ts .Job.Started}} · {{jobDur .Job}}</span>
     {{if .Origin.Href}}<a class="mono" href="{{.Origin.Href}}">{{.Origin.Label}}</a>{{else}}<span class="mono">{{.Origin.Label}}</span>{{end}}
     {{if .Origin.Pipeline}}<span class="muted small">(<a href="{{.Origin.Href}}/jobs">all pipeline jobs</a>)</span>{{end}}
   </div>
@@ -26,7 +27,9 @@
     <h2>Output</h2>
     {{if .Job.Running}}<span class="livepill" data-conn="connected"><span class="livedot"></span>Streaming</span>{{end}}
   </div>
-  <pre class="code log wrapcode" id="joboutput" tabindex="0" aria-label="Job output" data-job="{{.Job.ID}}" data-offset="{{.Chunk.Offset}}" data-running="{{.Job.Running}}">{{.Chunk.Data}}</pre>
+  {{template "log-filters" "job"}}
+  <div class="toolbar logbar"><button type="button" class="btn small ghost" data-copy-from="joboutput">Copy output</button></div>
+  <pre class="code log wrapcode" data-raw-log id="joboutput" tabindex="0" aria-label="Job output" data-job="{{.Job.ID}}" data-offset="{{.Chunk.Offset}}" data-running="{{.Job.Running}}">{{.Chunk.Data}}</pre>
 </section>
 </div>
 <aside class="detail-side" aria-label="Job properties">
@@ -40,8 +43,9 @@
     <dt>Duration</dt><dd class="c-num">{{jobDur .Job}}</dd>
     <dt>Exit code</dt><dd><b id="job-exit">{{if .Job.ExitCode}}{{ptrInt .Job.ExitCode}}{{else}}-{{end}}</b></dd>
     {{if .Job.PID}}<dt>PID</dt><dd class="mono">{{.Job.PID}}</dd>{{end}}
-    <dt>Command</dt><dd class="mono small wrap">strand {{join .Job.Args " "}}</dd>
+    <dt>Job ID</dt><dd class="mono small wrap">{{.Job.ID}}</dd>
   </dl>
+<details class="advanced"><summary>Command</summary><p class="mono small wrap">strand {{join .Job.Args " "}}</p></details>
 </section>
 </aside>
 </div>

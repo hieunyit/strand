@@ -66,9 +66,11 @@ type BackupRun = backup.Run
 
 // BackupRunFilter filters runs for listing.
 type BackupRunFilter struct {
-	JobID string
-	Limit int
-	After *backup.Cursor
+	Status    string
+	ProcessID string
+	JobID     string
+	Limit     int
+	After     *backup.Cursor
 }
 
 // UserToken is a scoped API bearer token belonging to a user.
@@ -85,6 +87,7 @@ type UserToken struct {
 
 // Pipeline is a registry row of a pipeline created from the web.
 type Pipeline struct {
+	Tags        string
 	Name        string
 	ConfigPath  string
 	EnvPath     string
@@ -219,6 +222,7 @@ type Store interface {
 	// (never config_yaml), and reports whether the row exists.
 	UpdatePipelineEnv(ctx context.Context, name, envPath string, envEnc []byte) (bool, error)
 	// SetPipelineConflicts replaces the conflicts JSON of a row.
+	SetPipelineTags(ctx context.Context, name, tags string) (bool, error)
 	SetPipelineConflicts(ctx context.Context, name, conflicts string) error
 	// DeletePipeline removes the registry row and its desired state (files are left alone).
 	DeletePipeline(ctx context.Context, name string) error

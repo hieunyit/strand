@@ -20,14 +20,29 @@
 {{template "pipeline-tabs" (tabsCtx .Tabs .Tab)}}
 
 {{if eq .Tab "graph"}}
-  <section class="card"><div class="cardhead"><h2>Data path</h2></div><div class="graphwrap">{{.Graph}}</div>
-  {{if .Status.Error}}<p class="muted">{{.Status.Error}}</p>{{end}}</section>
+  <section class="card replication-flow">
+    <div class="cardhead"><h2>Data path</h2><span class="badge {{stateClass .View.State}}" data-bind-badge="state">{{.View.State}}</span></div>
+    <ol class="flow-stages" aria-label="Replication flow">
+      <li><b>Source</b><span>{{.SourceLabel}}{{with .View.SourceHost}} <code>{{.}}</code>{{end}}</span></li>
+      <li><b>Replication</b><span data-bind="flow_phase">{{.FlowPhase}}</span></li>
+      <li><b>Target</b><span>{{.TargetLabel}}{{with .View.TargetHost}} <code>{{.}}</code>{{end}}</span></li>
+    </ol>
+    <nav class="flow-links" aria-label="Replication details">
+      <a href="/pipelines/{{.View.Name}}/tables">{{if eq .View.SourceKind "mongodb"}}Collections{{else}}Tables{{end}}</a>
+      <a href="/pipelines/{{.View.Name}}/checkpoint">Checkpoint</a>
+      <a href="/pipelines/{{.View.Name}}/logs">Logs</a>
+    </nav>
+    {{if .Status.Error}}<p class="muted wrap">{{.Status.Error}}</p>{{end}}
+    {{if .Diagnostics}}<details class="advanced"><summary>Diagnostics</summary>
+      <dl class="dl">{{range .Diagnostics}}<dt>{{.Label}}</dt><dd class="wrap" data-bind="{{.Bind}}">{{.Value}}</dd>{{end}}</dl>
+    </details>{{end}}
+  </section>
   {{with .Status.Status}}
   <section class="card"><div class="cardhead"><h2>Run</h2></div>
     <dl class="dl">
       <dt>Epoch</dt><dd>{{.Epoch}}</dd>
       <dt>Uptime</dt><dd><span class="c-num" data-bind="uptime">{{secs .UptimeSeconds}}</span> (since {{ts .StartedAt}})</dd>
-      <dt>Start position</dt><dd class="mono">{{if .StartPosition}}{{.StartPosition}}{{else}}-{{end}}{{if .StartAt}} (--start-at {{.StartAt}}){{end}}</dd>
+      <dt>Start position</dt><dd>{{if .StartPosition}}<code class="wrap position-value" id="run-start-position">{{.StartPosition}}</code> <button type="button" class="btn small ghost" data-copy-from="run-start-position">Copy position</button>{{else}}<span class="muted">Unavailable</span>{{end}}{{if .StartAt}}<div class="muted wrap">Configured start: <code>{{.StartAt}}</code></div>{{end}}</dd>
       <dt>Commit order</dt><dd>{{.CommitOrder}}, {{.Workers}} writer(s)</dd>
       <dt>Governor</dt><dd data-bind="governor">{{governor .Governor}}</dd>
       <dt>Paused</dt><dd>{{if .Paused}}yes{{else}}no{{end}}{{if .SnapshotPaused}}, snapshot paused{{end}}</dd>
@@ -171,6 +186,14 @@
 {{end}}
 
 {{if eq .Tab "config"}}
+  <section class="card"><div class="cardhead"><h2>Pipeline tags</h2></div>
+    {{if .CanAdmin}}<form method="post" action="/pipelines/{{.View.Name}}/tags">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <label class="field"><span class="field-label">Tags</span><input name="tags" value="{{join .View.Tags ", "}}" maxlength="512" aria-describedby="pipeline-tag-help"></label>
+      <p class="muted small" id="pipeline-tag-help">Separate tags with commas. Use letters, numbers, hyphens or underscores.</p>
+      <button type="submit" class="btn">Save tags</button>
+    </form>{{else}}<p>{{if .View.Tags}}{{join .View.Tags ", "}}{{else}}No tags{{end}}</p>{{end}}
+  </section>
   {{if .CanAdmin}}<section class="card" id="tuning-card"><div class="cardhead"><h2>Tuning: snapshot speed &amp; safety</h2></div>
     {{if .Tuning.Error}}{{template "error-state" (errState "Tuning values are not available" .Tuning.Error)}}{{else}}
     <p class="card-desc">Current values from the config file. Leave a field empty to remove the key (Strand then uses the default shown). Saving validates the config, shows a diff, keeps a backup and keeps your comments and other keys. Changes apply after a restart. For an <b>immediate</b> change of the read rate use <a href="/pipelines/{{.View.Name}}#throttle">Throttle (Overview)</a>; it is not saved to the file.</p>
@@ -200,7 +223,7 @@
   </section>
 
   <section class="card"><div class="cardhead"><h2>{{if .Env.Database}}Pipeline credentials{{else}}Credentials &amp; Environment (.env){{end}}</h2></div>
-    <p class="muted small mono">{{.Env.Path}}</p>
+    <p class="muted small mono wrap">{{.Env.Path}}</p>
     {{if .Env.Error}}{{template "error-state" (errState "Pipeline credentials could not be read" .Env.Error)}}{{end}}
     <p class="card-desc">{{if .Env.Database}}Credentials are encrypted in the metadata database. Enter a new value to replace a saved credential.{{else}}Passwords are write-only (displayed as <code>********</code>) and stored with file permissions 0600.{{end}}</p>
     <form id="env-edit-form" data-pipeline="{{.View.Name}}">
@@ -392,6 +415,7 @@
 {{if eq .Tab "logs"}}
   <section class="card pipeline-logs"><div class="cardhead"><h2>Logs <span class="muted small">{{.Logs.Source}}</span></h2></div>
     <div class="toolbar logbar">
+      {{template "log-filters" "pipeline"}}
       <label class="switch"><input type="checkbox" id="log-follow"{{if .Follow}} checked{{end}}> Follow live tail</label>
       <span class="muted small" id="log-status" aria-live="polite">{{if .Follow}}Following{{else}}Not following: new lines are not added (reload for the latest){{end}}</span>
       <button type="button" class="btn ghost" id="log-jump" hidden>Jump to latest</button>
@@ -400,7 +424,7 @@
       <a class="small push" href="?lines=1000{{if .Follow}}&amp;follow=1{{end}}">Show 1000 lines</a>
     </div>
     {{if .Logs.Error}}<div id="log-error">{{template "error-state" (errState "Log is not available" .Logs.Error)}}</div>{{end}}
-    <pre class="code log wrapcode" id="logtail" tabindex="0" aria-label="Log tail">{{range .Logs.Lines}}{{.}}
+    <pre class="code log wrapcode" data-raw-log id="logtail" tabindex="0" aria-label="Log tail">{{range .Logs.Lines}}{{.}}
 {{else}}(no log lines){{end}}</pre>
   </section>
 {{end}}

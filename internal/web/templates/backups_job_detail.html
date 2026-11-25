@@ -4,9 +4,9 @@
     <div>
       <h2>{{.Body.Job.Job.Name}}</h2>
       <div class="sub muted">
-        <span>Engine: <b>{{.Body.Job.Job.Engine}} ({{.Body.Job.Job.Method}})</b></span> &middot;
+        <span>Method <b>{{.Body.Job.Job.Engine}} ({{.Body.Job.Job.Method}})</b></span> &middot;
         <span>Source: <b>{{if .Body.Job.Job.Source}}{{.Body.Job.Job.Source}}{{else}}{{.Body.Job.Job.ID}}{{end}}</b> &rarr; <b>{{if .Body.Job.Job.Bucket}}{{.Body.Job.Job.Bucket}}{{else}}default{{end}}</b></span> &middot;
-        <span>Status: <b class="badge st-{{if .Body.Job.Job.Enabled}}running{{else}}paused{{end}}">{{if .Body.Job.Job.Enabled}}enabled{{else}}paused{{end}}</b></span>
+        <span>Schedule <b class="badge st-{{if .Body.Job.Job.Enabled}}running{{else}}paused{{end}}">{{if .Body.Job.Job.Enabled}}enabled{{else}}paused{{end}}</b></span>
       </div>
     </div>
     {{if .Body.CanWrite}}
@@ -25,6 +25,12 @@
     </div>
     {{end}}
   </div>
+<dl class="job-summary">
+  <div><dt>Last run</dt><dd>{{if .Body.Job.Job.LastRunStatus}}{{.Body.Job.Job.LastRunStatus}}{{else}}No runs yet{{end}}</dd></div>
+  <div><dt>Last successful run</dt><dd>{{if .Body.LastSuccess}}{{ts (deref2 .Body.LastSuccess)}}{{else}}Unavailable{{end}}</dd></div>
+  <div><dt>Next scheduled run</dt><dd>{{if not .Body.Job.Job.Enabled}}Paused{{else if .Body.Job.Job.NextRunAt}}{{ts .Body.Job.Job.NextRunAt}}{{else}}Pending{{end}}</dd></div>
+  <div><dt>Latest restore point</dt><dd>{{if .Body.LatestBackup}}<a href="/backups/catalog/{{.Body.LatestBackup.ID}}">{{ts (consistentBackupTime .Body.LatestBackup)}}</a>{{else}}No complete backup{{end}}</dd></div>
+</dl>
 </section>
 
 {{range .Body.Job.Warnings}}<div class="alert alert-warn" role="status"><b>Warning.</b> {{.}}</div>{{end}}
@@ -49,6 +55,7 @@
         <tr><th>Schedule</th><td>{{.Body.Job.ScheduleText}}{{if .Body.Job.Job.WindowMinutes}} <span class="muted small">(start window {{.Body.Job.Job.WindowMinutes}} min)</span>{{end}}</td></tr>
         <tr><th>Policy</th><td>{{if .Body.Job.Job.PolicyID}}<a href="/backups/policies/{{.Body.Job.Job.PolicyID}}">{{if .Body.Job.PolicyName}}{{.Body.Job.PolicyName}}{{else}}{{.Body.Job.Job.PolicyID}}{{end}}</a>{{if .Body.Job.Job.Overrides}} <span class="badge override small">overrides: {{join .Body.Job.Job.Overrides ", "}}</span>{{end}}{{else}}<span class="muted">none (own settings)</span>{{end}}</td></tr>
         <tr><th>Connection</th><td>{{if .Body.Job.Job.ConnectionID}}<a href="/backups/connections/{{.Body.Job.Job.ConnectionID}}">{{.Body.Job.ConnectionName}}</a>{{else if .Body.Job.Legacy}}<span class="muted">inline ({{.Body.Job.Job.Conn.Host}})</span>{{else}}<span class="muted">-</span>{{end}}</td></tr>
+        <tr><th>Databases</th><td class="wrap">{{if .Body.Job.Job.Conn.Databases}}{{join .Body.Job.Job.Conn.Databases ", "}}{{else}}Determined by the selected backup method{{end}}</td></tr>
         <tr><th>Next run</th><td>{{if .Body.Job.Job.NextRunAt}}{{ts .Body.Job.Job.NextRunAt}}{{else}}-{{end}}</td></tr>
         <tr><th>Retention</th><td>{{if .Body.Job.Job.Retention.Enabled}}Keep daily: {{.Body.Job.Job.Retention.KeepDaily}}, weekly: {{.Body.Job.Job.Retention.KeepWeekly}}{{else}}Default policy{{end}}</td></tr>
         <tr><th>Compression</th><td>{{if .Body.Job.Job.Compress}}Enabled (sbk1){{else}}Raw / off{{end}}</td></tr>
@@ -59,8 +66,10 @@
 
   <section class="card" id="job-rpo-card">
     <div class="cardhead"><h3>RPO Status</h3></div>
-    <p class="muted">Recovery Point Objective tracking is monitored against the job's schedule interval.</p>
-    <div class="alert alert-info"><b>Note:</b> Dedicated RPO SLA breach tracking will be enabled in Phase P6.</div>
+    {{with .Body.RPO}}<dl class="dl"><dt>Latest recovery time</dt><dd>{{if .LastPoint}}{{ts (deref2 .LastPoint)}}{{else}}Unavailable{{end}}</dd>
+    <dt>Target</dt><dd>{{if .TargetMinutes}}{{.TargetMinutes}} min{{else}}No policy target{{end}}</dd>
+    <dt>Age</dt><dd>{{if ge .CurrentSecs 0}}{{seconds .CurrentSecs}}{{else}}Unavailable{{end}}{{if .Breach}} <span class="badge st-failed">Above target</span>{{end}}</dd></dl>{{end}}
+    <a href="/backups/reports">Open recovery report</a>
   </section>
 </div>
 
@@ -74,6 +83,7 @@
 
 {{if eq .Body.ActiveTab "runs"}}
 <section class="card" id="job-runs-list">
+  {{if .Body.RunProcess}}<p>Runs for process <code>{{.Body.RunProcess}}</code> · <a href="?tab=runs">Show all runs</a></p>{{end}}
   <div class="cardhead"><h3>Execution runs</h3></div>
   <div class="tablewrap"><table class="data-table" id="runs-table">
     <caption>Execution history for this backup job</caption>
@@ -87,13 +97,13 @@
         <th class="r">Bytes written</th>
         <th>Backup ID</th>
         <th>Error / Remediation</th>
-        {{if .Body.CanWrite}}<th class="r">Actions</th>{{end}}
+        <th class="r">Actions</th>
       </tr>
     </thead>
     <tbody>
       {{range .Body.Runs}}
-      <tr data-run-id="{{.ID}}">
-        <td><span class="badge small">{{.Trigger}}</span></td>
+      <tr data-run-id="{{.ID}}" id="run-{{.ID}}">
+        <td><span class="badge small">{{.Trigger}}</span>{{if gt .Attempt 0}}<div class="muted small">Attempt {{.Attempt}}</div>{{end}}</td>
         <td class="nowrap">{{ts .StartedAt}}</td>
         <td class="nowrap">{{fmtDuration .Duration}}</td>
         <td><span class="badge small st-{{.Status}}">{{.Status}}</span></td>
@@ -108,23 +118,22 @@
           <span class="muted">-</span>
           {{end}}
         </td>
-        {{if $.Body.CanWrite}}
         <td class="r nowrap">
-          {{if eq .Status "running"}}
+          {{if .LogURL}}<a class="btn small ghost" href="{{.LogURL}}">Process log</a>{{else}}<span class="muted small">Log unavailable</span>{{end}}
+          {{if and $.Body.CanWrite (eq .Status "running")}}
           <button type="button" class="btn small danger" data-run-action="cancel" data-id="{{.ID}}">Cancel</button>
           {{end}}
         </td>
-        {{end}}
       </tr>
       {{else}}
-      <tr><td colspan="{{if .Body.CanWrite}}9{{else}}8{{end}}" class="empty">No execution runs recorded yet.</td></tr>
+      <tr><td colspan="9" class="empty">No execution runs recorded yet.</td></tr>
       {{end}}
     </tbody>
   </table></div>
   {{if or .Body.RunsCursor .Body.RunsPaged}}
   <nav class="pad" aria-label="Backup runs pages">
-    {{if .Body.RunsPaged}}<a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs" class="btn small ghost">Newest runs</a>{{end}}
-    {{if .Body.RunsCursor}}<a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs&cursor={{.Body.RunsCursor}}" rel="next" class="btn small ghost">Older runs</a>{{end}}
+    {{if .Body.RunsPaged}}<a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs{{if .Body.RunProcess}}&amp;process={{.Body.RunProcess}}{{end}}" class="btn small ghost">Newest runs</a>{{end}}
+    {{if .Body.RunsCursor}}<a href="/backups/jobs/{{.Body.Job.Job.ID}}?tab=runs&cursor={{.Body.RunsCursor}}{{if .Body.RunProcess}}&amp;process={{.Body.RunProcess}}{{end}}" rel="next" class="btn small ghost">Older runs</a>{{end}}
   </nav>
   {{end}}
 </section>

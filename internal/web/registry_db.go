@@ -109,6 +109,7 @@ func (r *Registry) refreshDB(ctx context.Context) {
 
 	add := func(row store.Pipeline, p *Pipeline) {
 		p.Conflicts = parseConflicts(row.Conflicts)
+		p.Tags = row.Tags
 		if row.HasConfig {
 			p.dbYAML = []byte(row.ConfigYAML) // bản DB là nguồn sự thật, không phụ thuộc file vật chất hóa
 			if row.EnvPath == "" && len(row.EnvEnc) != 0 && p.EnvFile == "" && p.Mode() == ModeBackground {

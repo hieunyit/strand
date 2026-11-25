@@ -96,7 +96,8 @@ func (m *Mem) ListBackupRuns(_ context.Context, f BackupRunFilter) ([]backup.Run
 	}
 	var all []backup.Run
 	for _, r := range m.backupRuns {
-		if f.JobID != "" && r.JobID != f.JobID {
+		if (f.JobID != "" && r.JobID != f.JobID) || (f.Status != "" && r.Status != f.Status) ||
+			(f.ProcessID != "" && r.ProcessID != f.ProcessID) {
 			continue
 		}
 		all = append(all, r)

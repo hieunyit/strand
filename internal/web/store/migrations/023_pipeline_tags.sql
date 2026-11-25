@@ -1,0 +1,1 @@
+ALTER TABLE pipelines ADD COLUMN tags text NOT NULL DEFAULT '';

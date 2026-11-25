@@ -62,6 +62,7 @@ const (
 
 // Pipeline là một pipeline đã đăng ký.
 type Pipeline struct {
+	Tags        string
 	Name        string
 	ConfigPath  string
 	EnvFile     string

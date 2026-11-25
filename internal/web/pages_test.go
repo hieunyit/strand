@@ -126,7 +126,7 @@ func TestPagesRenderLiveData(t *testing.T) {
 		}
 	}
 	g := get("/pipelines/orders")
-	for _, want := range []string{"Source", "Assembler", "Scheduler", "Writer x8", "Target", "grace-v2", "uuid-1234:1-50", "<polyline", "Lag"} {
+	for _, want := range []string{"Source", "Replication", "Applying changes", "Target", "Copy position", "grace-v2", "uuid-1234:1-50", "<polyline", "Lag"} {
 		if !strings.Contains(g, want) {
 			t.Errorf("graph tab lacks %q", want)
 		}

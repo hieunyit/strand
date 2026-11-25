@@ -70,11 +70,11 @@ func TestPagesShowLastUpdatedAndState(t *testing.T) {
 	e.sampleNow()
 	c := e.client()
 	e.login(c, testPassword)
-	// Live pages (numbers arrive over SSE) say how often the sampler polls; static pages keep "Data as of".
-	for path, refresh := range map[string]string{"/": "sampled every 5 s in the background", "/pipelines/orders": "sampled every 5 s in the background",
-		"/pipelines/orders/config": "sampled every 5 s in the background", "/jobs": "refreshes every 5 s"} {
+	// Live pages distinguish render time from incoming telemetry. Static pages keep "Data as of".
+	for path, refresh := range map[string]string{"/": "Last update", "/pipelines/orders": "Last update",
+		"/pipelines/orders/config": "Last update", "/jobs": "refreshes every 5 s"} {
 		_, body := e.do(c, "GET", path, "", nil)
-		if !regexp.MustCompile(`(Data as of|page rendered) <time datetime="[^"]+">\d\d:\d\d:\d\d [^<]+</time>`).MatchString(body) || !strings.Contains(body, refresh) {
+		if !regexp.MustCompile(`(Data as of|Page rendered|page rendered) <time datetime="[^"]+">\d\d:\d\d:\d\d [^<]+</time>`).MatchString(body) || !strings.Contains(body, refresh) {
 			t.Errorf("%s: no last-updated marker (%q)", path, refresh)
 		}
 	}
@@ -84,9 +84,9 @@ func TestPagesShowLastUpdatedAndState(t *testing.T) {
 			t.Errorf("detail lacks %q", want)
 		}
 	}
-	// Pause makes no sense while paused and Resume only while paused: both stay visible, one disabled with a reason.
-	if !strings.Contains(body, `title="Not paused"`) {
-		t.Error("Resume should be disabled with a tooltip when not paused")
+	// Running pipelines show the action that applies to their current state.
+	if !strings.Contains(body, `data-action="pause"`) || strings.Contains(body, `data-action="resume"`) {
+		t.Error("synced pipeline should offer Pause and hide Resume")
 	}
 }
 

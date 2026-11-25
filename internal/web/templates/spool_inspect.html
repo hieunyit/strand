@@ -5,6 +5,7 @@
   <fieldset class="form-section">
     <legend class="form-section-title">Scan Spool Inventory (Read-Only)</legend>
     <p class="form-section-desc">Lists local spill files for a stopped pipeline and checks them against the prefetch index when available.</p>
+    {{if not .Body.Pipelines}}<p class="muted">No stopped pipeline is available to scan. <a href="/pipelines">View pipelines</a>.</p>{{end}}
     <div class="field-grid">
       <div class="field">
         <label class="field-label" for="spool-pipeline">Pipeline <span class="req" aria-hidden="true">*</span></label>
@@ -16,7 +17,7 @@
       </div>
     </div>
     <div class="form-actions flat">
-      <button class="btn primary" type="submit">Scan Inventory</button>
+      <button class="btn primary" type="submit"{{if not .Body.Pipelines}} disabled{{end}}>Scan Inventory</button>
     </div>
   </fieldset>
 </form>

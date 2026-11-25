@@ -39,6 +39,9 @@ func (s *Server) withAdminTimeout(ctx context.Context, p *Pipeline, timeout time
 
 // PipelineView là tóm tắt một pipeline cho danh sách và đầu trang chi tiết.
 type PipelineView struct {
+	Tags       []string       `json:"tags,omitempty"`
+	SourceHost string         `json:"-"`
+	TargetHost string         `json:"-"`
 	Name       string         `json:"name"`
 	Pair       string         `json:"pair"`
 	SourceKind string         `json:"source_kind,omitempty"`
@@ -70,8 +73,10 @@ type PipelineView struct {
 
 func (s *Server) view(p *Pipeline) PipelineView {
 	v := PipelineView{Name: p.Name, Pair: p.Pair(), Mode: p.Mode(), Origin: p.Origin, ConfigPath: p.ConfigPath, ConfigErr: p.CfgErr, State: StateUnknown,
-		Missing: p.Missing, Conflicts: p.Conflicts}
+		Missing: p.Missing, Conflicts: p.Conflicts, Tags: strings.Fields(p.Tags)}
 	if p.Cfg != nil {
+		v.SourceHost = pipelineDisplayHost(p.Cfg.Source.Host, p.Cfg.Source.DSN)
+		v.TargetHost = pipelineDisplayHost(p.Cfg.Target.Host, p.Cfg.Target.DSN)
 		v.SourceKind, v.TargetKind = strings.ToLower(p.Cfg.Source.Kind), strings.ToLower(p.Cfg.Target.Kind)
 	}
 	if sn := s.samp.Latest(p.Name); sn != nil {
@@ -84,24 +89,6 @@ func (s *Server) view(p *Pipeline) PipelineView {
 	}
 	v.StoppedOutside = !v.Runtime.Running && s.stoppedOutside(p)
 	return v
-}
-
-// Nav là một mục ở thanh trái.
-type NavItem struct {
-	Name  string
-	State string
-}
-
-func (s *Server) navItems() []NavItem {
-	var out []NavItem
-	for _, p := range s.reg.List() {
-		st := StateUnknown
-		if sn := s.samp.Latest(p.Name); sn != nil {
-			st = sn.State
-		}
-		out = append(out, NavItem{Name: p.Name, State: st})
-	}
-	return out
 }
 
 // StatusView: kết quả `status` của admin socket, hoặc lý do không có.
