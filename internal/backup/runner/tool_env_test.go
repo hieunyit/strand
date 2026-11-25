@@ -42,12 +42,14 @@ func TestNativeToolInheritsNoConnectionSecrets(t *testing.T) {
 	job := backup.Job{ID: "bjob-env", Name: "env", Bucket: "bkt", JobOptions: backup.JobOptions{Method: backup.MethodMySQLDump, Source: "src",
 		Conn: backup.ConnSpec{Host: "127.0.0.1", Port: 1, User: "root", PasswordEnv: "LEGACY_SOURCE_PW"}}}
 	_, _ = e.RunJob(context.Background(), job)
-	if len(s3.bodies) != 1 {
-		t.Fatalf("uploaded objects = %d, want the tool output", len(s3.bodies))
-	}
 	var out string
-	for _, b := range s3.bodies {
-		out = string(b)
+	for k, b := range s3.bodies {
+		if strings.HasSuffix(k, "/dump.sql") {
+			out = string(b)
+		}
+	}
+	if out == "" {
+		t.Fatal("the tool output was not uploaded")
 	}
 	if !strings.Contains(out, "MYSQL_PWD="+secrets["LEGACY_SOURCE_PW"]) {
 		t.Fatal("the tool did not get its own password through MYSQL_PWD")

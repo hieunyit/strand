@@ -283,6 +283,14 @@ func (e *Env) finalize(ctx context.Context, repo *Repository, rec backup.Record,
 	if err != nil {
 		return fail(fmt.Errorf("upload manifest sidecar: %w", err))
 	}
+	// The sidecar says complete before the catalog does (Finalize needs the manifest URI). If a later
+	// step fails, do not leave a "complete" manifest next to a failed record: a repository re-indexed
+	// from its manifests would resurrect the failed backup.
+	failRecord := fail
+	fail = func(cause error) (backup.Record, error) {
+		e.withdrawManifest(ctx, repo, manifestKey, minfo.VersionID, manifest, lockDays)
+		return failRecord(cause)
+	}
 	if minfo.VersionID != "" {
 		m := backup.MetaOf(rec)
 		if m.Details == nil {
@@ -299,6 +307,25 @@ func (e *Env) finalize(ctx context.Context, repo *Repository, rec backup.Record,
 	}
 	e.logf("backup %s complete: %d bytes stored (%d plaintext)", rec.ID, size, rec.PlainBytes)
 	return out, nil
+}
+
+// withdrawManifest removes (best effort) a manifest sidecar written as complete for a record that is
+// failing. When the version cannot be deleted (Object Lock), it is superseded by a manifest marked failed.
+func (e *Env) withdrawManifest(ctx context.Context, repo *Repository, key, versionID string, manifest backup.Record, lockDays int) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	delErr := repo.Delete(ctx, key, versionID)
+	if delErr == nil {
+		e.logf("backup %s failed: removed its manifest sidecar %s", manifest.ID, repo.URI(key))
+		return
+	}
+	manifest.Status = backup.StatusFailed
+	if _, err := repo.PutJSON(ctx, key, manifest, lockDays); err != nil {
+		e.logf("warning: backup %s failed but its manifest sidecar %s still says complete: delete: %v; mark failed: %v",
+			manifest.ID, repo.URI(key), delErr, err)
+		return
+	}
+	e.logf("backup %s failed: marked its manifest sidecar %s failed (delete: %v)", manifest.ID, repo.URI(key), delErr)
 }
 
 // stream runs the method's tool and stores its output.

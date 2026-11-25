@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,9 @@ type versionedS3 struct {
 	n       int
 	locks   map[string]string // key -> lock mode of the last PUT
 	bodies  map[string][]byte // key -> body of the last PUT
+	sums    map[string]string // key -> SHA-256 metadata of the last PUT
+	// deleteStatus, when set, is the answer to DELETE (e.g. 403 for a version under Object Lock).
+	deleteStatus int
 	deletes []string          // "key?versionId=..." of each DELETE
 }
 
@@ -41,11 +45,22 @@ func (s *versionedS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.bodies != nil {
 			s.bodies[key] = body
 		}
+		if s.sums != nil {
+			s.sums[key] = r.Header.Get("X-Amz-Meta-Strand-Sha256")
+		}
 		w.Header().Set("ETag", `"e"`)
 		w.Header().Set("X-Amz-Version-Id", "v"+string(rune('0'+s.n)))
 	case r.Method == http.MethodDelete:
 		s.deletes = append(s.deletes, key+"?versionId="+q.Get("versionId"))
+		if s.deleteStatus != 0 {
+			w.WriteHeader(s.deleteStatus)
+			_, _ = io.WriteString(w, "<Error><Code>AccessDenied</Code><Message>object is WORM protected</Message></Error>")
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodHead && s.bodies != nil && s.bodies[key] != nil:
+		w.Header().Set("Content-Length", strconv.Itoa(len(s.bodies[key])))
+		w.Header().Set("X-Amz-Meta-Strand-Sha256", s.sums[key])
 	default:
 		w.WriteHeader(http.StatusNotImplemented)
 	}
