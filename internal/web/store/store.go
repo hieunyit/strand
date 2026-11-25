@@ -292,6 +292,8 @@ type Store interface {
 
 	// Locked runs fn while holding an exclusive, cross-instance lock (advisory lock) named by key.
 	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error
+	// TryLocked is Locked without waiting: when another holder has the lock it returns false and does not run fn.
+	TryLocked(ctx context.Context, key string, fn func(ctx context.Context) error) (bool, error)
 }
 
 var (

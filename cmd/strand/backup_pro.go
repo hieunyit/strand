@@ -362,6 +362,11 @@ backup process is gone (the Web checks that before it passes the flag); it is ma
 					return backupRejected(fmt.Errorf("restore point %s is %s: it is still in progress (pass --abandoned only when its backup process is gone)", id, rec.Status))
 				}
 				if rec.JobID != "" {
+					// A run still marked running whose process is gone (nobody holds the job's execution lock)
+					// is recovered first; a live run keeps the refusal.
+					if _, err := store.RecoverStaleBackupJobRun(ctx, st, rec.JobID); err != nil {
+						return fmt.Errorf("check the run of job %s: %w", rec.JobID, err)
+					}
 					if j, ok, err := st.GetBackupJob(ctx, rec.JobID); err == nil && ok && j.LastRunStatus == backup.RunStatusRunning {
 						return backupRejected(fmt.Errorf("restore point %s is %s and job %s is running: wait for the run to finish", id, rec.Status, rec.JobID))
 					}

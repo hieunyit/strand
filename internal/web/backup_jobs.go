@@ -157,6 +157,7 @@ func (s *Server) resumeBackupJobs(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.recoverStaleBackupRuns(ctx, jobs)
 	for _, j := range jobs {
 		if j.Enabled {
 			baseJob := j

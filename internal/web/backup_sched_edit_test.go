@@ -106,3 +106,50 @@ func TestJobEditKeepsDueTimeUnlessScheduleChanges(t *testing.T) {
 		t.Fatalf("new daily schedule: next %v, want %s", got.NextRunAt, want)
 	}
 }
+
+// The maintenance loop of the active instance recovers a run left "running" by a dead process even when
+// the job is disabled (its scheduler, which would recover it, is not running), but never a live run.
+func TestMaintenanceRecoversStaleRunOfDisabledJob(t *testing.T) {
+	e := newCPEnv(t)
+	ctx := context.Background()
+	mk := func(id string) {
+		j := backup.Job{ID: id, Name: id, EverySeconds: 3600, Enabled: true, Bucket: "central-backups", JobOptions: backup.JobOptions{
+			Method: backup.MethodMySQLDump, Source: "s-" + id, Conn: backup.ConnSpec{Host: "h", Databases: []string{"app"}}}}
+		if err := e.st.CreateBackupJob(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+		cur, _, _ := e.st.GetBackupJob(ctx, id)
+		if _, ok, _ := e.st.BeginBackupJobRun(ctx, id, cur.UpdatedAt); !ok {
+			t.Fatal("begin")
+		}
+		cur, _, _ = e.st.GetBackupJob(ctx, id)
+		cur.Enabled, cur.NextRunAt = false, nil
+		if ok, _ := e.st.UpdateBackupJob(ctx, cur); !ok {
+			t.Fatal("disable")
+		}
+	}
+	mk("bjob-dead")
+	mk("bjob-live")
+	held, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = e.st.Locked(ctx, "backup-job-execution:bjob-live", func(context.Context) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held // bjob-live: its backup process holds the job's execution lock
+	e.srv.backupMaintenanceTick(ctx)
+	close(release)
+	<-done
+
+	dead, _, _ := e.st.GetBackupJob(ctx, "bjob-dead")
+	if dead.LastRunStatus != backup.RunStatusInterrupted || dead.RunFinishedAt == nil || dead.NextRunAt != nil {
+		t.Fatalf("stale run of a disabled job not recovered: %+v", dead)
+	}
+	live, _, _ := e.st.GetBackupJob(ctx, "bjob-live")
+	if live.LastRunStatus != backup.RunStatusRunning {
+		t.Fatalf("live run marked %s", live.LastRunStatus)
+	}
+}

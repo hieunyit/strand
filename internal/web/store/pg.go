@@ -103,14 +103,26 @@ func lockKey(name string) int64 {
 
 // withAdvisoryLock holds pg_advisory_lock(key) on a dedicated connection while fn runs.
 func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx context.Context) error) error {
+	_, err := advisoryLocked(ctx, db, name, false, fn)
+	return err
+}
+
+// advisoryLocked is withAdvisoryLock; with try it does not wait (pg_try_advisory_lock) and reports false,
+// without running fn, when another session holds the lock.
+func advisoryLocked(ctx context.Context, db *sql.DB, name string, try bool, fn func(ctx context.Context) error) (bool, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 	k := lockKey(name)
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, k); err != nil {
-		return err
+	if try {
+		var got bool
+		if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, k).Scan(&got); err != nil || !got {
+			return false, err
+		}
+	} else if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, k); err != nil {
+		return false, err
 	}
 	defer func() {
 		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -135,10 +147,10 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 	for {
 		select {
 		case err := <-done:
-			return err
+			return true, err
 		case <-ctx.Done():
 			cancel()
-			return <-done
+			return true, <-done
 		case <-ticker.C:
 			pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 			err := conn.PingContext(pingCtx)
@@ -146,7 +158,7 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 			if err != nil {
 				cancel()
 				callbackErr := <-done
-				return errors.Join(fmt.Errorf("advisory lock connection lost: %w", err), callbackErr)
+				return true, errors.Join(fmt.Errorf("advisory lock connection lost: %w", err), callbackErr)
 			}
 		}
 	}
@@ -154,6 +166,11 @@ func withAdvisoryLock(ctx context.Context, db *sql.DB, name string, fn func(ctx 
 
 func (p *PG) Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error {
 	return p.wrap(withAdvisoryLock(ctx, p.db, key, fn))
+}
+
+func (p *PG) TryLocked(ctx context.Context, key string, fn func(ctx context.Context) error) (bool, error) {
+	got, err := advisoryLocked(ctx, p.db, key, true, fn)
+	return got, p.wrap(err)
 }
 
 func (p *PG) Admin(ctx context.Context) (Admin, bool, error) {

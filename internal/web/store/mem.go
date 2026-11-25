@@ -921,6 +921,21 @@ func (m *Mem) Locked(ctx context.Context, key string, fn func(ctx context.Contex
 	return fn(ctx)
 }
 
+func (m *Mem) TryLocked(ctx context.Context, key string, fn func(ctx context.Context) error) (bool, error) {
+	m.mu.Lock()
+	l := m.locks[key]
+	if l == nil {
+		l = &sync.Mutex{}
+		m.locks[key] = l
+	}
+	m.mu.Unlock()
+	if !l.TryLock() {
+		return false, nil
+	}
+	defer l.Unlock()
+	return true, fn(ctx)
+}
+
 // nextAuditID: bigserial of audit_log (never reused, also after an archive removed rows). Caller holds m.mu.
 func (m *Mem) nextAuditID() int64 {
 	m.auditSeq++

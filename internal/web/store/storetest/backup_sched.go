@@ -112,3 +112,62 @@ func runBackupJobRunSchedule(t *testing.T, s store.Store) {
 		t.Fatalf("disabled job got a due time: %v", ic.NextRunAt)
 	}
 }
+
+// runBackupStaleRunRecovery: a run left "running" by a dead process is recovered for a disabled job too,
+// but never while a live process holds the job's execution lock.
+func runBackupStaleRunRecovery(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	j := cfgJob("bjob-stale", "stale")
+	j.EverySeconds = 3600
+	must(t, s.CreateBackupJob(ctx, j))
+	cur, _, _ := s.GetBackupJob(ctx, j.ID)
+	if _, ok, _ := s.BeginBackupJobRun(ctx, j.ID, cur.UpdatedAt); !ok {
+		t.Fatal("begin")
+	}
+	cur, _, _ = s.GetBackupJob(ctx, j.ID)
+	cur.Enabled, cur.NextRunAt = false, nil
+	if ok, _ := s.UpdateBackupJob(ctx, cur); !ok {
+		t.Fatal("disable")
+	}
+
+	held, release := make(chan struct{}), make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- s.Locked(ctx, store.BackupJobExecutionLock(j.ID), func(context.Context) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	if got, err := s.TryLocked(ctx, store.BackupJobExecutionLock(j.ID), func(context.Context) error {
+		t.Error("TryLocked ran fn while the lock was held")
+		return nil
+	}); err != nil || got {
+		t.Fatalf("TryLocked on a held lock = %v %v", got, err)
+	}
+	if ok, err := store.RecoverStaleBackupJobRun(ctx, s, j.ID); err != nil || ok {
+		t.Fatalf("recovered a run whose process holds the lock: %v %v", ok, err)
+	}
+	if live, _, _ := s.GetBackupJob(ctx, j.ID); live.LastRunStatus != backup.RunStatusRunning {
+		t.Fatalf("live run changed: %+v", live)
+	}
+	close(release)
+	if err := <-lockDone; err != nil {
+		t.Fatal(err)
+	}
+
+	if ok, err := store.RecoverStaleBackupJobRun(ctx, s, j.ID); err != nil || !ok {
+		t.Fatalf("recover stale run of a disabled job: %v %v", ok, err)
+	}
+	got, _, _ := s.GetBackupJob(ctx, j.ID)
+	if got.LastRunStatus != backup.RunStatusInterrupted || got.RunFinishedAt == nil || got.NextRunAt != nil {
+		t.Fatalf("recovered = %+v", got)
+	}
+	if ok, err := store.RecoverStaleBackupJobRun(ctx, s, j.ID); err != nil || ok {
+		t.Fatalf("second recovery = %v %v", ok, err)
+	}
+	if ran, err := s.TryLocked(ctx, store.BackupJobExecutionLock(j.ID), func(context.Context) error { return nil }); err != nil || !ran {
+		t.Fatalf("TryLocked on a free lock = %v %v", ran, err)
+	}
+}
