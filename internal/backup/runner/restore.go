@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -248,6 +250,49 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 	if exists != 0 {
 		return fmt.Errorf("target database %s already exists; restores never overwrite", t.Database)
 	}
+	// Point-in-time recovery: stage the binlogs and prove the replay stays inside the target database
+	// before anything is created (see binlogGuard).
+	var binlogFiles, binlogNames, binlogArgs []string
+	var prescan *binlogGuard
+	var forbidden map[string]bool
+	if len(plan.Logs) > 0 {
+		dir, err := e.tmpDir()
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		binlogFiles, err = e.stageLogs(ctx, plan.Logs, dir, func(l backup.Record) string { return l.Details["seq"] + "-" + l.Details["server_file"] })
+		if err != nil {
+			return err
+		}
+		for _, l := range plan.Logs {
+			binlogNames = append(binlogNames, l.Details["server_file"])
+		}
+		targetDBs, err := mysqlDatabaseNames(ctx, db)
+		if err != nil {
+			return fmt.Errorf("list the databases of the restore target: %w", err)
+		}
+		forbidden = binlogForbiddenDatabases(src, t.Database, targetDBs)
+		// Transactions already in the dump are excluded by GTID; GTIDs are stripped so the replay is not
+		// skipped on a server that executed them (e.g. a new database next to the source).
+		binlogArgs = []string{"--exclude-gtids=" + base.Position.GTIDSet, "--skip-gtids"}
+		if plan.Target != nil {
+			binlogArgs = append(binlogArgs, "--stop-datetime="+plan.Target.UTC().Format("2006-01-02 15:04:05"))
+		}
+		scan, err := Start(ctx, e.Getenv, Invocation{Tool: "mysqlbinlog", Args: append(slices.Clone(binlogArgs), binlogFiles...)}, nil, e.Log)
+		if err != nil {
+			return err
+		}
+		prescan = newBinlogGuard(scan, src, t.Database, forbidden, binlogNames, false)
+		_, err = io.Copy(io.Discard, prescan)
+		scan.Close()
+		if prescan.Err() != nil {
+			return prescan.Err()
+		}
+		if err != nil {
+			return fmt.Errorf("read binlogs: %w", err)
+		}
+	}
 	if _, err := db.ExecContext(ctx, "CREATE DATABASE `"+strings.ReplaceAll(t.Database, "`", "``")+"`"); err != nil {
 		return err
 	}
@@ -290,37 +335,48 @@ func (e *Env) restoreMySQL(ctx context.Context, plan RestorePlan, t RestoreTarge
 		e.logf("restore: dump of %s loaded into %s", src, t.Database)
 		return nil
 	}
-	dir, err := e.tmpDir()
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	files, err := e.stageLogs(ctx, plan.Logs, dir, func(l backup.Record) string { return l.Details["seq"] + "-" + l.Details["server_file"] })
-	if err != nil {
-		return err
-	}
-	// Transactions already in the dump are excluded by GTID; GTIDs are stripped so the replay is not
-	// skipped on a server that executed them (e.g. a new database next to the source).
-	args := []string{"--exclude-gtids=" + base.Position.GTIDSet, "--skip-gtids", "--database=" + t.Database,
-		"--rewrite-db=" + src + "->" + t.Database}
-	if plan.Target != nil {
-		args = append(args, "--stop-datetime="+plan.Target.UTC().Format("2006-01-02 15:04:05"))
-	}
-	args = append(args, files...)
+	args := append(slices.Clone(binlogArgs), "--database="+t.Database, "--rewrite-db="+src+"->"+t.Database)
+	args = append(args, binlogFiles...)
 	binlog, err := Start(ctx, e.Getenv, Invocation{Tool: "mysqlbinlog", Args: args}, nil, e.Log)
 	if err != nil {
 		return err
 	}
 	defer binlog.Close()
-	if err := e.runTool(ctx, client, binlog); err != nil {
+	guard := newBinlogGuard(binlog, src, t.Database, forbidden, binlogNames, true)
+	err = e.runTool(ctx, client, guard)
+	if guard.Err() != nil {
+		return guard.Err()
+	}
+	if err != nil {
 		return fmt.Errorf("replay binlogs: %w", err)
 	}
 	if err := binlog.Wait(); err != nil {
 		return err
 	}
+	if missed := prescan.unreplayed(guard); len(missed) > 0 {
+		return fmt.Errorf("binlog statements that change %s were not replayed (at %s); the restore would silently diverge "+
+			"from the source. Restore without a target time, or replay the binlogs manually", quoteMy(src), strings.Join(missed, ", "))
+	}
 	createdDB = false
 	e.logf("restore: %s restored into %s up to %v", src, t.Database, plan.Target)
 	return nil
+}
+
+func mysqlDatabaseNames(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 func mysqlClient(getenv Getenv, t RestoreTarget) Invocation {
