@@ -322,8 +322,8 @@ Mở URL, đăng nhập bằng mật khẩu admin. Phiên hết hạn sau 30 ph�
 
 1. Kiểm tên (`[A-Za-z0-9][A-Za-z0-9_.-]{0,62}`, không trùng) và cổng `/metrics` (tự chọn cổng trống đầu tiên từ `127.0.0.1:9464`; cổng bạn đặt mà trùng pipeline khác bị từ chối 409).
 2. Ghi `<config_dir>/<name>.yaml` (0640) và `<config_dir>/<name>.env` (0600, chứa mật khẩu; YAML chỉ tham chiếu `password_env`). Spool ở `<state_dir>/pipelines/<name>/spool`. File đã tồn tại thì từ chối.
-3. Chạy `strand validate` và `strand plan`, hiện kết quả. Validate lỗi thì pipeline vẫn được tạo (để sửa ở tab Config) nhưng kết quả là `ok: false` và không có nút Start.
-4. Nút **Start** khởi động ở chế độ nền (`strand sync --background`). Muốn chạy bằng systemd: chép file về `/etc/strand/<name>.{yaml,env}` (`.env` web ghi đã ở dạng `KEY=VALUE` mà systemd `EnvironmentFile` đọc được; mật khẩu có ký tự đặc biệt được đặt trong nháy kép), sửa `resources.spool.path`/`observability.admin_socket` về `/var/lib/strand/<name>` và `/run/strand/<name>/admin.sock`, rồi `systemctl enable --now strand@<name>`. Mật khẩu chứa ký tự xuống dòng bị từ chối (400).
+3. Chạy `strand validate` và `strand plan`. Validate đạt thì trình duyệt **tự chuyển sang trang pipeline vừa tạo**. Validate lỗi thì pipeline vẫn được tạo (để sửa ở tab Config) nhưng kết quả là `ok: false`: trình duyệt ở lại trang tạo, hiện output validate/plan và nút **Fix in Config tab**, không có nút Start.
+4. Nút **Start** ở đầu trang pipeline khởi động ở chế độ nền (`strand sync --background`). Muốn chạy bằng systemd: chép file về `/etc/strand/<name>.{yaml,env}` (`.env` web ghi đã ở dạng `KEY=VALUE` mà systemd `EnvironmentFile` đọc được; mật khẩu có ký tự đặc biệt được đặt trong nháy kép), sửa `resources.spool.path`/`observability.admin_socket` về `/var/lib/strand/<name>` và `/run/strand/<name>/admin.sock`, rồi `systemctl enable --now strand@<name>`. Mật khẩu chứa ký tự xuống dòng bị từ chối (400).
 
 Form chỉ hiện ô hợp với cặp engine đã chọn (PG chỉ sang PG, MariaDB chỉ sang MySQL; cổng tự đổi 3306/5432) và có dòng **Will copy** xem trước phạm vi:
 
@@ -351,7 +351,9 @@ Thẻ **Tuning** (tab Config) cho chỉnh các khóa tốc độ/an toàn snapsh
 | Pause snapshot, Resume (snapshot only), Snapshot add | tab Tables | Snapshot add: chọn bảng từ source (bảng cần PK) |
 | Throttle (soft IOPS) | tab Graph | Chỉ tiến trình đang chạy, đổi ngay, không ghi vào file cấu hình. Muốn lưu lâu dài: thẻ Tuning ở tab Config (6.3) |
 | Checkpoint Rewind | tab Checkpoint | Chỉ MySQL → MySQL, đang chạy; gõ lại tên pipeline |
-| Verify sample/full/delta | tab Jobs | Tiến trình con `strand verify ... --repair report`; mỗi pipeline tối đa **một** job (409 nếu bấm thêm); output trực tiếp ở `/jobs/<id>`, có Cancel |
+| Verify sample/full/delta | tab Jobs | Tiến trình con `strand verify ... --repair report`; mỗi pipeline tối đa **một** job (409 nếu bấm thêm); output trực tiếp ở `/jobs/<id>`, có Cancel. Pipeline MongoDB: chỉ full/sample, ô `database.collection` (trống = mọi collection) và số document mẫu |
+
+Trang pipeline chỉ hiện tab dùng được cho cặp nguồn → đích: pipeline MongoDB chỉ có Graph, Tables, Checkpoint, Errors, Config, Logs, Jobs; **Objects** chỉ có ở MySQL → MySQL; **Repair** cần nguồn và đích cùng engine; Schema, Promote, Seed có ở mọi pipeline SQL (bảng đầy đủ: [USAGE.md](USAGE.md), "Tab theo loại pipeline"). Tab Jobs gồm Verify, Plan và lịch sử job.
 
 Wizard **Repair** (bốn bước: chờ lag gần 0, Stop, Run repair, Start) và **Promote** (Check state, Promote, quyết định nếu exit 10, chuyển ứng dụng) chỉ gọi CLI `verify --repair fix` và `promote`; trạng thái lưu ở `<state_dir>/wizards/` nên đóng trình duyệt hay restart web vẫn tiếp tục đúng bước. DSN target/fence của Promote nhập mỗi lần, không lưu, không vào audit. Đọc [USAGE.md](USAGE.md) 7.10 và 7.15 trước khi dùng trên production.
 
