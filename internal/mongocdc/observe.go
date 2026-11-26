@@ -41,10 +41,11 @@ type Observer struct {
 	phase         Phase
 	failed        string
 	colls         map[string]*CollectionProgress
-	lastEventTime time.Time // source cluster time of the last applied event
-	lastApplied   time.Time // wall clock of the last applied batch
-	caughtUp      bool      // the last getMore returned nothing and nothing is pending
-	position      string    // checkpoint (resume token) description
+	activity      map[string]*CollectionActivity // change events applied per collection (this process)
+	lastEventTime time.Time                      // source cluster time of the last applied event
+	lastApplied   time.Time                      // wall clock of the last applied batch
+	caughtUp      bool                           // the last getMore returned nothing and nothing is pending
+	position      string                         // checkpoint (resume token) description
 	consistentAt  time.Time
 	events        int64
 	eventsByOp    map[string]int64
@@ -79,6 +80,17 @@ type CollectionProgress struct {
 	// copy rate (ETA) counts only what this process copied, not what was copied before
 	// a restart.
 	StartCopied int64
+	// Activity: change-stream events applied to the collection by this process.
+	Activity CollectionActivity
+}
+
+// CollectionActivity counts the change events applied to one collection: inserts, updates (with
+// replaces) and deletes, when the last batch carrying one committed on the target, and the source
+// cluster time of that batch.
+type CollectionActivity struct {
+	Inserts, Updates, Deletes int64
+	LastChange                time.Time
+	LastSource                time.Time
 }
 
 type repairRequest struct {
@@ -194,6 +206,36 @@ func (o *Observer) applied(events int, byOp map[string]int, writes int, lookups 
 	o.mu.Unlock()
 }
 
+// collApplied records the per-collection change events of a committed batch.
+func (o *Observer) collApplied(ops map[string]*collOpCount, last bson.Timestamp) {
+	if len(ops) == 0 {
+		return
+	}
+	now := time.Now()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.activity == nil {
+		o.activity = make(map[string]*CollectionActivity)
+	}
+	for coll, c := range ops {
+		if c.inserts+c.updates+c.deletes == 0 {
+			continue
+		}
+		a := o.activity[coll]
+		if a == nil {
+			a = &CollectionActivity{}
+			o.activity[coll] = a
+		}
+		a.Inserts += c.inserts
+		a.Updates += c.updates
+		a.Deletes += c.deletes
+		a.LastChange = now
+		if last.T != 0 {
+			a.LastSource = time.Unix(int64(last.T), 0)
+		}
+	}
+}
+
 func (o *Observer) setCaughtUp(v bool) {
 	o.mu.Lock()
 	o.caughtUp = v
@@ -258,7 +300,11 @@ func (o *Observer) Snapshot() Snapshot {
 		s.EventsByOp[k] = v
 	}
 	for _, c := range o.colls {
-		s.Collections = append(s.Collections, *c)
+		cp := *c
+		if a := o.activity[c.Name]; a != nil {
+			cp.Activity = *a
+		}
+		s.Collections = append(s.Collections, cp)
 	}
 	sort.Slice(s.Collections, func(i, j int) bool { return s.Collections[i].Name < s.Collections[j].Name })
 	switch {

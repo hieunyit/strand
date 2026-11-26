@@ -287,7 +287,26 @@
   applyList();
 
   // ---- Tables tab: status chips, search and sort; survive the periodic refresh (the state lives here, not in the DOM) ----
-  var tblState = { f: 'all', q: '', sort: 'ord' };
+  var tblState = { f: 'all', q: '', sort: 'ord', since: '', rows: '' };
+  var SINCE = { '5m': 300, '15m': 900, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 };
+  // tblSince: the "Last sync" filter of one row (data-last: Unix ms of the last CDC change, -1 none).
+  function tblSince(r, now) {
+    var f = tblState.since;
+    if (!f) { return true; }
+    var last = parseFloat(r.getAttribute('data-last'));
+    if (isNaN(last)) { last = -1; }
+    if (f === 'none') { return last < 0; }
+    if (f === 'idle24h') { return last < 0 || now - last > 86400000; }
+    return last >= 0 && SINCE[f] !== undefined && now - last <= SINCE[f] * 1000;
+  }
+  // tblRows: the "Rows" filter ("min-max", either side optional) on data-rows.
+  function tblRows(r) {
+    var f = tblState.rows;
+    if (!f) { return true; }
+    var parts = f.split('-'), n = parseFloat(r.getAttribute('data-rows')) || 0;
+    var lo = parts[0] === '' ? 0 : parseFloat(parts[0]), hi = parts[1] === '' || parts[1] === undefined ? Infinity : parseFloat(parts[1]);
+    return n >= lo && n <= hi;
+  }
   function applyTables() {
     var table = document.getElementById('tables-table');
     if (!table) { return; }
@@ -296,9 +315,12 @@
     var body = table.tBodies[0];
     var rows = Array.prototype.slice.call(body.querySelectorAll('tr[data-table]'));
     var qEl = document.getElementById('tb-filter'), sEl = document.getElementById('tb-sort');
+    var siEl = document.getElementById('tb-since'), rEl = document.getElementById('tb-rows');
     if (qEl && qEl.value !== tblState.q) { qEl.value = tblState.q; }
     if (sEl && sEl.value !== tblState.sort) { sEl.value = tblState.sort; }
-    var key = tblState.sort, desc = key === 'pct' || key === 'rows';
+    if (siEl && siEl.value !== tblState.since) { siEl.value = tblState.since; }
+    if (rEl && rEl.value !== tblState.rows) { rEl.value = tblState.rows; }
+    var key = tblState.sort, desc = key === 'pct' || key === 'rows' || key === 'last' || key === 'changes';
     rows.sort(function (a, b) {
       var x, y;
       if (key === 'name') { return a.getAttribute('data-table').localeCompare(b.getAttribute('data-table')); }
@@ -309,17 +331,17 @@
     });
     var anchor = body.querySelector('tr.nomatch');
     rows.forEach(function (r) { body.insertBefore(r, anchor); });
-    var q = tblState.q.trim().toLowerCase(), shown = 0;
+    var q = tblState.q.trim().toLowerCase(), shown = 0, now = Date.now() + (window.strandSkew || 0);
     rows.forEach(function (r) {
       var ok = (tblState.f === 'all' || r.getAttribute('data-state') === tblState.f) &&
-        (!q || r.getAttribute('data-table').toLowerCase().indexOf(q) >= 0);
+        (!q || r.getAttribute('data-table').toLowerCase().indexOf(q) >= 0) && tblSince(r, now) && tblRows(r);
       r.hidden = !ok;
       if (ok) { shown++; }
     });
     var nm = body.querySelector('tr.nomatch');
     if (nm) { nm.hidden = !(rows.length > 0 && shown === 0); }
     var cnt = document.getElementById('tb-count');
-    if (cnt) { cnt.textContent = (tblState.f !== 'all' || q) ? shown + ' of ' + rows.length + ' shown' : rows.length + ' tables'; }
+    if (cnt) { cnt.textContent = (tblState.f !== 'all' || q || tblState.since || tblState.rows) ? shown + ' of ' + rows.length + ' shown' : rows.length + ' tables'; }
     Array.prototype.forEach.call(document.querySelectorAll('[data-tfilter]'), function (c) {
       c.setAttribute('aria-pressed', c.getAttribute('data-tfilter') === tblState.f ? 'true' : 'false');
     });
@@ -333,7 +355,7 @@
       tblState.f = (tblState.f === f && f !== 'all') ? 'all' : f; // a second click on the active chip clears it
       applyTables();
     } else if (t.closest('#tb-clear')) {
-      tblState.f = 'all'; tblState.q = ''; applyTables();
+      tblState.f = 'all'; tblState.q = ''; tblState.since = ''; tblState.rows = ''; applyTables();
     }
   });
   document.addEventListener('input', function (ev) {
@@ -341,7 +363,9 @@
   });
   document.addEventListener('change', function (ev) {
     if (ev.target && ev.target.id === 'tb-sort') { tblState.sort = ev.target.value; applyTables(); }
-    if (ev.target && ev.target.id === 'tb-psort' && ev.target.form) { ev.target.form.submit(); }
+    if (ev.target && ev.target.id === 'tb-since') { tblState.since = ev.target.value; applyTables(); }
+    if (ev.target && ev.target.id === 'tb-rows') { tblState.rows = ev.target.value; applyTables(); }
+    if (ev.target && (ev.target.id === 'tb-psort' || ev.target.id === 'tb-psince' || ev.target.id === 'tb-prows') && ev.target.form) { ev.target.form.submit(); }
   });
   applyTables();
 

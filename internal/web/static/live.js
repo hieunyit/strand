@@ -205,10 +205,12 @@
       tr.setAttribute('data-rows', String(r.rows_estimate));
       tr.setAttribute('data-eta', r.eta_s > 0 ? r.eta_s.toFixed(0) : '-1');
       tr.classList.toggle('is-running', r.state === 'running');
+      setActivity(tr, r);
       Array.prototype.forEach.call(tr.querySelectorAll('[data-tb]'), function (el) {
         var k = el.getAttribute('data-tb');
         if (k === 'state') { swapClass(el, 'st-tbl-', 'st-tbl-' + r.state); setText(el, r.state); }
         else if (k === 'bar') { setBar(el, r.pct); }
+        else if (k === 'last') { setLastCell(el, r); }
         else if (r.f[k] !== undefined) { setText(el, r.f[k]); }
       });
     });
@@ -227,15 +229,59 @@
       if (tr) {
         if (tr.getAttribute('data-state') !== r.state) { restate = true; }
         tr.setAttribute('data-pct', r.pct.toFixed(2));
+        setActivity(tr, r);
         Array.prototype.forEach.call(tr.querySelectorAll('[data-tb]'), function (el) {
           var k = el.getAttribute('data-tb');
-          if (k === 'bar') { setBar(el, r.pct); } else if (k !== 'state' && r.f[k] !== undefined) { setText(el, r.f[k]); }
+          if (k === 'bar') { setBar(el, r.pct); } else if (k === 'last') { setLastCell(el, r); }
+          else if (k !== 'state' && r.f[k] !== undefined) { setText(el, r.f[k]); }
         });
       }
       runlistPut(r);
     });
     if (changed || restate) { structural(); }
   }
+  // CDC activity of a table row: data-last / data-changes (filters and sorts), the Changes tooltip.
+  function setActivity(tr, r) {
+    if (r.last_ms === undefined) { return; }
+    tr.setAttribute('data-last', String(r.last_ms));
+    tr.setAttribute('data-changes', String(r.changes || 0));
+    var chg = tr.querySelector('[data-tb="chg"]');
+    if (chg && r.f.chg_title) { chg.title = r.f.chg_title; }
+  }
+  // Last sync cell: a <time data-ago> the relative-time ticker keeps current, or "-" without a change.
+  function setLastCell(el, r) {
+    if (r.last_ms === undefined) { return; }
+    var t = el.querySelector('time');
+    if (r.last_ms < 0) {
+      if (t || !el.textContent) { el.textContent = ''; var m = document.createElement('span'); m.className = 'muted'; m.textContent = '-'; el.appendChild(m); }
+      if (el.firstChild && r.f.last_title) { el.firstChild.title = r.f.last_title; }
+      return;
+    }
+    if (!t) { el.textContent = ''; t = document.createElement('time'); el.appendChild(t); }
+    if (t.getAttribute('data-ago') !== String(r.last_ms)) {
+      t.setAttribute('data-ago', String(r.last_ms));
+      t.dateTime = new Date(r.last_ms).toISOString();
+    }
+    if (r.f.last_title) { t.title = r.f.last_title; }
+    setText(t, relAgo(r.last_ms));
+  }
+  // relAgo: like the server's fmtRel ("12 s ago", "5 min ago", "3 h ago", "2 d ago"), on the server clock.
+  function relAgo(ms) {
+    var d = (Date.now() + (window.strandSkew || 0) - ms) / 1000;
+    if (d < 0) { return 'just now'; }
+    if (d < 60) { return Math.floor(d) + ' s ago'; }
+    if (d < 3600) { return Math.floor(d / 60) + ' min ago'; }
+    if (d < 48 * 3600) { return Math.floor(d / 3600) + ' h ago'; }
+    return Math.floor(d / 86400) + ' d ago';
+  }
+  window.strandRelAgo = relAgo;
+  setInterval(function () {
+    if (document.hidden) { return; }
+    Array.prototype.forEach.call(document.querySelectorAll('time[data-ago]'), function (t) {
+      var ms = parseFloat(t.getAttribute('data-ago'));
+      if (!isNaN(ms)) { setText(t, relAgo(ms)); }
+    });
+  }, 5000);
   function runlistPut(r) {
     var list = document.getElementById('runlist');
     if (!list) { return; }
@@ -629,6 +675,7 @@
       }
     }
     if (type === 'snapshot') {
+      if (j.server_time) { var st = Date.parse(j.server_time); if (!isNaN(st)) { window.strandSkew = st - now; } }
       if (j.overview) { applyOverview(j.overview); }
       (j.pipelines || []).forEach(function (r) { applyRecord(r, now); });
     } else if (type === 'sample') { applyRecord(j, now); }

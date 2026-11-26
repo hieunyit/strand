@@ -137,7 +137,19 @@ type TableInfo struct {
 	PK           []string       `json:"pk,omitempty"`
 	Key          string         `json:"key,omitempty"` // khóa hàng: "PRIMARY (id)", "UNIQUE uk (a)" hoặc "full row (keyless)"
 	GenericPK    bool           `json:"generic_pk"`    // PK không phải một cột số nguyên (khóa tổng quát)
+
+	// CDC activity of the running pipeline process (since it started; a snapshot copy is not counted):
+	// row changes applied to the target by operation, when the last one was committed on the target, and
+	// the source commit time of that change (MongoDB: of the batch that carried it).
+	Inserts      int64      `json:"inserts,omitempty"`
+	Updates      int64      `json:"updates,omitempty"`
+	Deletes      int64      `json:"deletes,omitempty"`
+	LastChangeAt *time.Time `json:"last_change_at,omitempty"`
+	LastSourceAt *time.Time `json:"last_source_at,omitempty"`
 }
+
+// Changes is the number of CDC row changes applied (inserts + updates + deletes).
+func (t TableInfo) Changes() int64 { return t.Inserts + t.Updates + t.Deletes }
 
 // VerificationEvidence records the scope of a historical post-seed check.
 type VerificationEvidence struct {

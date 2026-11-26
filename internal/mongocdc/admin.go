@@ -300,7 +300,16 @@ func (h *AdminHandler) Tables(context.Context) ([]admin.TableInfo, error) {
 	out := make([]admin.TableInfo, 0, len(s.Collections))
 	for _, c := range s.Collections {
 		ti := admin.TableInfo{Table: c.Name, State: c.State, RowsEstimate: c.Estimate, RowsCopied: c.Copied,
-			PK: []string{"_id"}, Key: "_id", GenericPK: true}
+			PK: []string{"_id"}, Key: "_id", GenericPK: true,
+			Inserts: c.Activity.Inserts, Updates: c.Activity.Updates, Deletes: c.Activity.Deletes}
+		if t := c.Activity.LastChange; !t.IsZero() {
+			t = t.UTC()
+			ti.LastChangeAt = &t
+		}
+		if t := c.Activity.LastSource; !t.IsZero() {
+			t = t.UTC()
+			ti.LastSourceAt = &t
+		}
 		switch {
 		case c.State == CollDone:
 			ti.ProgressPct = 100

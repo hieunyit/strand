@@ -152,6 +152,15 @@ type TablesView struct {
 	Last        int               `json:"last,omitempty"`
 	RunningRows []admin.TableInfo `json:"-"` // "Copying now" (page only), at most runningListMax
 	RunningMore int               `json:"-"`
+	// CDC activity (from the per-table counters of the pipeline process): tables with a change applied in
+	// the last 5 minutes / hour, tables with any change recorded, and the newest change of all.
+	Active5m   int        `json:"active_5m"`
+	Active1h   int        `json:"active_1h"`
+	WithChange int        `json:"with_change"`
+	LastChange *time.Time `json:"last_change_at,omitempty"`
+	Changes    int64      `json:"changes"`
+	// At is the sample time the list was read at (the reference of the Since filter and of the counts above).
+	At time.Time `json:"sampled_at"`
 }
 
 // tableRank orders the groups: running (0), pending (1), done (2).
@@ -213,6 +222,7 @@ type tablesCache struct {
 
 func buildTablesView(sn *Snap) TablesView {
 	var v TablesView
+	v.At = sn.At
 	v.Tables = append([]admin.TableInfo{}, sn.Tables...) // finish sắp xếp tại chỗ: không đụng Snap dùng chung
 	v.finish()
 	return v
@@ -240,6 +250,21 @@ func (v *TablesView) finish() {
 		}
 		v.RowsCopied += tblCopied(t)
 		v.RowsEstimate += tblEst(t)
+		v.Changes += t.Changes()
+		if l := t.LastChangeAt; l != nil {
+			v.WithChange++
+			if v.LastChange == nil || l.After(*v.LastChange) {
+				v.LastChange = l
+			}
+			if !v.At.IsZero() {
+				if age := v.At.Sub(*l); age <= 5*time.Minute {
+					v.Active5m++
+				}
+				if age := v.At.Sub(*l); age <= time.Hour {
+					v.Active1h++
+				}
+			}
+		}
 	}
 	v.Total = len(v.Tables)
 	if v.Total > 0 {

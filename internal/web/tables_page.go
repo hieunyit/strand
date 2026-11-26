@@ -1,11 +1,13 @@
 package web
 
 import (
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"strand/internal/admin"
 )
@@ -23,14 +25,69 @@ const (
 	runningListMax  = 50
 )
 
-// TableQuery is the server-side view of the Tables list (query parameters tq, tstate, tsort, tpage on the page;
-// q, state, sort, page, per_page on the API).
+// TableQuery is the server-side view of the Tables list (query parameters tq, tstate, tsince, trows, tsort, tpage
+// on the page; q, state, since, rows, sort, page, per_page on the API).
 type TableQuery struct {
-	Q       string `json:"q,omitempty"`
-	State   string `json:"state,omitempty"` // all | running | pending | done
-	Sort    string `json:"sort,omitempty"`  // ord | name | pct | rows | eta
+	Q     string `json:"q,omitempty"`
+	State string `json:"state,omitempty"` // all | running | pending | done
+	// Since filters by the last CDC change: a window (5m, 15m, 1h, 6h, 24h, 7d: changed within it), "idle24h"
+	// (no change in the last 24 hours, or none recorded) or "none" (no change recorded). Empty: no filter.
+	Since string `json:"since,omitempty"`
+	// Rows filters by the row count (estimate) as "min-max", either side optional ("1000000-", "-9999", "0-0").
+	Rows    string `json:"rows,omitempty"`
+	Sort    string `json:"sort,omitempty"` // ord | name | pct | rows | eta | last | changes
 	Page    int    `json:"page"`
 	PerPage int    `json:"per_page"`
+}
+
+// sinceWindows are the "changed within" choices of the Since filter.
+var sinceWindows = map[string]time.Duration{"5m": 5 * time.Minute, "15m": 15 * time.Minute, "1h": time.Hour,
+	"6h": 6 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour}
+
+// parseRowsRange parses "min-max" (either side may be empty). ok=false: no filter.
+func parseRowsRange(s string) (lo, hi int64, ok bool) {
+	a, b, found := strings.Cut(strings.ReplaceAll(strings.TrimSpace(s), ",", ""), "-")
+	if !found {
+		return 0, 0, false
+	}
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	lo, hi = 0, math.MaxInt64
+	if a != "" {
+		n, err := strconv.ParseInt(a, 10, 64)
+		if err != nil || n < 0 {
+			return 0, 0, false
+		}
+		lo = n
+	}
+	if b != "" {
+		n, err := strconv.ParseInt(b, 10, 64)
+		if err != nil || n < 0 {
+			return 0, 0, false
+		}
+		hi = n
+	}
+	if a == "" && b == "" || lo > hi {
+		return 0, 0, false
+	}
+	return lo, hi, true
+}
+
+// matchSince reports whether a table passes the Since filter at now.
+func matchSince(t *admin.TableInfo, since string, now time.Time) bool {
+	last := t.LastChangeAt
+	switch since {
+	case "":
+		return true
+	case "none":
+		return last == nil
+	case "idle24h":
+		return last == nil || now.Sub(*last) > 24*time.Hour
+	}
+	w, ok := sinceWindows[since]
+	if !ok {
+		return true
+	}
+	return last != nil && now.Sub(*last) <= w
 }
 
 func normTableQuery(q TableQuery) TableQuery {
@@ -41,9 +98,20 @@ func normTableQuery(q TableQuery) TableQuery {
 		q.State = "all"
 	}
 	switch q.Sort {
-	case "name", "pct", "rows", "eta":
+	case "name", "pct", "rows", "eta", "last", "changes":
 	default:
 		q.Sort = "ord"
+	}
+	if _, ok := sinceWindows[q.Since]; !ok && q.Since != "none" && q.Since != "idle24h" {
+		q.Since = ""
+	}
+	if lo, hi, ok := parseRowsRange(q.Rows); ok {
+		q.Rows = strconv.FormatInt(lo, 10) + "-"
+		if hi != math.MaxInt64 {
+			q.Rows += strconv.FormatInt(hi, 10)
+		}
+	} else {
+		q.Rows = ""
 	}
 	if q.PerPage <= 0 {
 		q.PerPage = tablesPageSize
@@ -59,7 +127,8 @@ func normTableQuery(q TableQuery) TableQuery {
 
 func tableQueryFrom(v url.Values, prefix string) TableQuery {
 	atoi := func(s string) int { n, _ := strconv.Atoi(s); return n }
-	return normTableQuery(TableQuery{Q: v.Get(prefix + "q"), State: v.Get(prefix + "state"), Sort: v.Get(prefix + "sort"),
+	return normTableQuery(TableQuery{Q: v.Get(prefix + "q"), State: v.Get(prefix + "state"), Since: v.Get(prefix + "since"),
+		Rows: v.Get(prefix + "rows"), Sort: v.Get(prefix + "sort"),
 		Page: atoi(v.Get(prefix + "page")), PerPage: atoi(v.Get(prefix + "per_page"))})
 }
 
@@ -69,10 +138,17 @@ func (v *TablesView) applyPage(q TableQuery) {
 	q = normTableQuery(q)
 	v.Paged, v.Query = true, &q
 	needle := strings.ToLower(q.Q)
+	now := v.At
+	if now.IsZero() {
+		now = time.Now()
+	}
+	minRows, maxRows, rowsOn := parseRowsRange(q.Rows)
 	match := v.Tables[:0:0]
-	for _, t := range v.Tables {
-		if (q.State == "all" || tblState(t) == q.State) && (needle == "" || strings.Contains(strings.ToLower(t.Table), needle)) {
-			match = append(match, t)
+	for i := range v.Tables {
+		t := &v.Tables[i]
+		if (q.State == "all" || tblState(*t) == q.State) && (needle == "" || strings.Contains(strings.ToLower(t.Table), needle)) &&
+			matchSince(t, q.Since, now) && (!rowsOn || tblEst(*t) >= minRows && tblEst(*t) <= maxRows) {
+			match = append(match, *t)
 		}
 	}
 	ord := make(map[string]int, len(match))
@@ -103,6 +179,15 @@ func (v *TablesView) applyPage(q TableQuery) {
 			}
 			return 1e18
 		})
+	case "last": // most recently changed first; never changed last
+		by(func(t *admin.TableInfo) float64 {
+			if t.LastChangeAt != nil {
+				return -float64(t.LastChangeAt.UnixNano())
+			}
+			return math.MaxFloat64
+		})
+	case "changes":
+		by(func(t *admin.TableInfo) float64 { return -float64(t.Changes()) })
 	}
 	v.Matching = len(match)
 	v.Pages = (v.Matching + q.PerPage - 1) / q.PerPage
@@ -154,7 +239,8 @@ func (s *Server) tablesPageView(p *Pipeline, r *http.Request) TablesView {
 	v := tablesFromSnap(s.samp.Latest(p.Name))
 	v.runningOf(v.Tables)
 	qv := r.URL.Query()
-	if v.Total > tablesInlineMax || qv.Get("tq") != "" || qv.Get("tstate") != "" || qv.Get("tsort") != "" || qv.Get("tpage") != "" {
+	if v.Total > tablesInlineMax || qv.Get("tq") != "" || qv.Get("tstate") != "" || qv.Get("tsince") != "" || qv.Get("trows") != "" ||
+		qv.Get("tsort") != "" || qv.Get("tpage") != "" {
 		v.applyPage(tableQueryFrom(qv, "t"))
 	}
 	return v
@@ -165,7 +251,7 @@ func (s *Server) tablesPageView(p *Pipeline, r *http.Request) TablesView {
 func (s *Server) tablesAPIView(p *Pipeline, r *http.Request) TablesView {
 	v := tablesFromSnap(s.samp.Latest(p.Name))
 	qv := r.URL.Query()
-	for _, k := range []string{"q", "state", "sort", "page", "per_page"} {
+	for _, k := range []string{"q", "state", "since", "rows", "sort", "page", "per_page"} {
 		if qv.Has(k) {
 			v.applyPage(tableQueryFrom(qv, ""))
 			break
@@ -183,6 +269,12 @@ func tablesHref(base string, q *TableQuery, key, val string) string {
 		}
 		if q.State != "all" {
 			v.Set("tstate", q.State)
+		}
+		if q.Since != "" {
+			v.Set("tsince", q.Since)
+		}
+		if q.Rows != "" {
+			v.Set("trows", q.Rows)
 		}
 		if q.Sort != "ord" {
 			v.Set("tsort", q.Sort)

@@ -138,10 +138,14 @@ type Pipeline struct {
 	seenCond *sync.Cond
 	seen     checkpoint.AppliedSet // applied0 ∪ mọi Txn router đã xử lý (chỉ source MySQL)
 
-	admitted     atomic.Uint64 // seq lớn nhất đã Admit
-	routed       atomic.Uint64 // số Txn route xong (Admit hoặc bỏ vì đã apply); xem drainPrefetch (review R03)
-	appliedTxns  atomic.Int64
-	appliedRows  atomic.Int64
+	admitted    atomic.Uint64 // seq lớn nhất đã Admit
+	routed      atomic.Uint64 // số Txn route xong (Admit hoặc bỏ vì đã apply); xem drainPrefetch (review R03)
+	appliedTxns atomic.Int64
+	appliedRows atomic.Int64
+	// activity: CDC changes applied per source table (counts and last change), for the Tables view.
+	activity tableActivity
+	// rowCounts: source row estimates of every pipeline table, refreshed in the background (Tables view).
+	rowCounts    rowCountCache
 	lastSourceTS atomic.Int64 // SourceTS của Txn mới nhất đã commit ở target
 	lastRoutedTS atomic.Int64
 	// srcAhead: lần thăm dò đầu source gần nhất (monitor, ≤ 1 lần/giây) thấy source có thay đổi mà reader
@@ -1603,6 +1607,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 				}
 			}
 			c.Cols = dropTargetGenerated(c.Cols, meta.TargetGenerated)
+			op := c.Op
 			c.Table = p.filter.Target(c.Table)
 			for i := range c.ForeignKeys {
 				c.ForeignKeys[i].ParentTable = p.filter.Target(c.ForeignKeys[i].ParentTable)
@@ -1610,6 +1615,7 @@ func (p *Pipeline) route(ctx context.Context, t *model.Txn) error {
 			if err := emit(c); err != nil {
 				return err
 			}
+			out.TableOps.Add(rc.Table, op)
 		}
 		return nil
 	}
@@ -2121,6 +2127,7 @@ func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, 
 			p.lastSourceTS.Store(t.SourceTS)
 		}
 	}
+	p.activity.record(batch, time.Now())
 	p.appliedTxns.Add(int64(len(batch)))
 	p.appliedRows.Add(rows)
 	p.metrics.ApplyTxnTotal.WithLabelValues(p.id).Add(float64(len(batch)))

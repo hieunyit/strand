@@ -443,6 +443,9 @@ func (s *Sampler) sampleOne(ctx context.Context, p *Pipeline, force bool) {
 		snap.StatusErr, snap.TablesErr, snap.CheckpointErr, snap.EventsErr = prev.StatusErr, prev.TablesErr, prev.CheckpointErr, prev.EventsErr
 	}
 
+	if !snap.Stale && prev != nil {
+		carryLastChange(snap.Tables, prev.Tables)
+	}
 	shown := ""
 	if prev != nil && !force {
 		shown = prev.State
@@ -643,4 +646,27 @@ func (s *Sampler) BuildOverview() Overview {
 		ov.RowsPerSec += snap.Rates.Rows
 	}
 	return ov
+}
+
+// carryLastChange keeps the last CDC change time of a table across a restart of its pipeline process (whose
+// counters start empty): a table without a recorded change in cur keeps the one of prev. The counts are not
+// carried (they are "since the pipeline started"). Changes before a restart of the Web itself are not known.
+func carryLastChange(cur, prev []admin.TableInfo) {
+	if len(cur) == 0 || len(prev) == 0 {
+		return
+	}
+	old := make(map[string]*admin.TableInfo, len(prev))
+	for i := range prev {
+		if prev[i].LastChangeAt != nil {
+			old[prev[i].Table] = &prev[i]
+		}
+	}
+	if len(old) == 0 {
+		return
+	}
+	for i := range cur {
+		if p := old[cur[i].Table]; p != nil && cur[i].LastChangeAt == nil {
+			cur[i].LastChangeAt, cur[i].LastSourceAt = p.LastChangeAt, p.LastSourceAt
+		}
+	}
 }

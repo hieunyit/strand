@@ -200,6 +200,71 @@ type Txn struct {
 	// XID: xid top-level của Txn ở source PG (từ BEGIN của pgoutput; 0 = không có / MySQL). Snapshot
 	// logic từ source PG dùng nó để biết Txn có visible với snapshot đọc chunk hay không (02 §5).
 	XID uint64 `json:"xid,omitempty"`
+
+	// TableOps: the rows of this Txn that reach the target, per SOURCE table and operation, counted by the
+	// router (Rows of a routed Txn carry target names). Only in RAM: the Tables view reports per-table
+	// change counts and the time of the last applied change from it once the Txn commits.
+	TableOps TableOps `json:"-"`
+}
+
+// TableOpCount counts the row changes of one table by operation.
+type TableOpCount struct {
+	Table                     TableID
+	Inserts, Updates, Deletes int64
+}
+
+// TableOps is a small per-table counter: a Txn usually touches a few tables, so a slice (with the last table
+// checked first, as rows of one table tend to come together) beats a map; an index map is built only once a
+// Txn touches many tables.
+type TableOps struct {
+	Counts []TableOpCount
+	index  map[TableID]int
+	last   int
+}
+
+// Add counts one row change of op on table.
+func (o *TableOps) Add(table TableID, op Op) {
+	i := o.find(table)
+	if i < 0 {
+		o.Counts = append(o.Counts, TableOpCount{Table: table})
+		i = len(o.Counts) - 1
+		if o.index != nil {
+			o.index[table] = i
+		} else if len(o.Counts) > 8 {
+			o.index = make(map[TableID]int, 16)
+			for j, c := range o.Counts {
+				o.index[c.Table] = j
+			}
+		}
+	}
+	o.last = i
+	c := &o.Counts[i]
+	switch op {
+	case OpInsert:
+		c.Inserts++
+	case OpUpdate:
+		c.Updates++
+	case OpDelete:
+		c.Deletes++
+	}
+}
+
+func (o *TableOps) find(table TableID) int {
+	if o.last < len(o.Counts) && o.Counts[o.last].Table == table {
+		return o.last
+	}
+	if o.index != nil {
+		if i, ok := o.index[table]; ok {
+			return i
+		}
+		return -1
+	}
+	for i := range o.Counts {
+		if o.Counts[i].Table == table {
+			return i
+		}
+	}
+	return -1
 }
 
 // IsSpilled kiểm tra transaction có bị tràn xuống đĩa không.

@@ -1186,3 +1186,10 @@ dialog.qsearch::backdrop { background: rgba(11, 18, 32, .45); }
 }
 #env-edit-form { max-width: 100%; min-width: 0; }
 #env-edit-form .env-wrap { max-width: min(100%, 760px); }
+
+/* Tables tab: keep table names readable (break at the schema dot, not every letter) next to the
+   Last sync / Changes columns; the progress bar shrinks first. */
+#tables-table td.tname { min-width: 16ch; max-width: 32ch; overflow-wrap: break-word; word-break: normal; }
+#tables-table .pcell { min-width: 110px; }
+#tables-table .pcell .pbar { width: 64px; }
+#tables-activity { max-width: none; }

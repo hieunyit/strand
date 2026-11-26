@@ -93,6 +93,11 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 	if len(runs) > 1 {
 		rate /= float64(len(runs))
 	}
+	ids := make([]model.TableID, len(metas))
+	for i, m := range metas {
+		ids[i] = m.ID
+	}
+	rowCounts := p.tableRowCounts(ids)
 	out := make([]admin.TableInfo, 0, len(metas))
 	for _, m := range metas {
 		name := m.ID.String()
@@ -121,9 +126,12 @@ func (h *adminHandler) Tables(ctx context.Context) ([]admin.TableInfo, error) {
 			if ti.State == "running" && r > 0 && ti.RowsEstimate > ti.RowsCopied {
 				ti.ETASeconds = float64(ti.RowsEstimate-ti.RowsCopied) / r
 			}
+		} else if n, ok := rowCounts[m.ID]; ok {
+			ti.RowsEstimate = n // statistics of the source: the size of a copied table, refreshed every few minutes
 		}
 		out = append(out, ti)
 	}
+	p.activity.fill(out, ids)
 	return out, nil
 }
 

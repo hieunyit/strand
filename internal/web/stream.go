@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"math"
 	"net/http"
 	"sort"
@@ -30,17 +31,25 @@ type LiveTables struct {
 	RowsEst    int64   `json:"rows_estimate"`
 	RowsPct    float64 `json:"rows_pct"`
 	ETA        float64 `json:"eta_s,omitempty"`
+	// CDC activity: tables changed in the last 5 min / hour, CDC row changes applied, newest change (-1: none).
+	Active5m int   `json:"active_5m"`
+	Active1h int   `json:"active_1h"`
+	Changes  int64 `json:"changes"`
+	LastMs   int64 `json:"last_ms"`
 }
 
 // LiveTableRow là một bảng (chỉ gửi khi đổi, trừ snapshot đầy đủ).
 type LiveTableRow struct {
-	Table  string            `json:"table"`
-	State  string            `json:"state"`
-	Pct    float64           `json:"pct"`
-	Copied int64             `json:"rows_copied"`
-	Est    int64             `json:"rows_estimate"`
-	ETA    float64           `json:"eta_s,omitempty"`
-	F      map[string]string `json:"f"`
+	Table  string  `json:"table"`
+	State  string  `json:"state"`
+	Pct    float64 `json:"pct"`
+	Copied int64   `json:"rows_copied"`
+	Est    int64   `json:"rows_estimate"`
+	ETA    float64 `json:"eta_s,omitempty"`
+	// LastMs: last CDC change in Unix milliseconds (-1: none recorded); Changes: CDC row changes applied.
+	LastMs  int64             `json:"last_ms"`
+	Changes int64             `json:"changes"`
+	F       map[string]string `json:"f"`
 }
 
 // LiveRecord là bản ghi gọn của một pipeline sau mỗi lần lấy mẫu.
@@ -115,23 +124,97 @@ func tableSig(t admin.TableInfo) string {
 	return fmt.Sprintf("%s|%d|%d|%.1f|%.0f", t.State, tblCopied(t), tblEst(t), t.ProgressPct, t.ETASeconds)
 }
 
+// tableActSig is the CDC-activity part of a row: changes there never force a re-render of a paged list.
+func tableActSig(t admin.TableInfo) string {
+	return fmt.Sprintf("|%d|%d", t.Changes(), tblLastMs(t))
+}
+
 func eventKey(e LogEvent) string { return e.Time + "|" + e.Level + "|" + e.Message }
 
-func liveTableRow(t admin.TableInfo) LiveTableRow {
+func liveTableRow(t admin.TableInfo, now time.Time) LiveTableRow {
 	return LiveTableRow{Table: t.Table, State: t.State, Pct: t.ProgressPct, Copied: tblCopied(t), Est: tblEst(t), ETA: t.ETASeconds,
-		F: map[string]string{"pct": fmt.Sprintf("%.1f%%", t.ProgressPct), "rows": tblRowsText(t), "eta": tblETAText(t)}}
+		LastMs: tblLastMs(t), Changes: t.Changes(),
+		F: map[string]string{"pct": fmt.Sprintf("%.1f%%", t.ProgressPct), "rows": tblRowsText(t), "eta": tblETAText(t),
+			"last": tblLastText(t, now), "last_title": tblLastTitle(t), "chg": tblChangesText(t), "chg_title": tblChangesTitle(t)}}
 }
 
 // tblRowsText: "250,000 / 1,000,000" khi đang chép; bảng xong: số đã chép (và ước lượng nếu có).
 func tblRowsText(t admin.TableInfo) string {
 	if t.State == "done" {
-		s := fmtInt(tblCopied(t))
-		if t.RowsEstimate > 0 {
+		if t.RowsCopied == 0 {
+			// SQL pipelines do not keep the copied count of a finished table: show the source statistics.
+			if t.RowsEstimate > 0 {
+				return "~" + fmtInt(t.RowsEstimate)
+			}
+			return "0"
+		}
+		s := fmtInt(t.RowsCopied)
+		if t.RowsEstimate > 0 && t.RowsEstimate != t.RowsCopied {
 			s += " (~" + fmtInt(t.RowsEstimate) + ")"
 		}
 		return s
 	}
 	return fmtInt(t.RowsCopied) + " / " + fmtInt(t.RowsEstimate)
+}
+
+// tblLastMs: the last CDC change of a table in Unix milliseconds, -1 when none is recorded (data-last).
+func tblLastMs(t admin.TableInfo) int64 {
+	if t.LastChangeAt == nil {
+		return -1
+	}
+	return t.LastChangeAt.UnixMilli()
+}
+
+// tblLastText: "12 s ago" relative to now (the sample time), "-" without a recorded change.
+func tblLastText(t admin.TableInfo, now time.Time) string {
+	if t.LastChangeAt == nil {
+		return "-"
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if now.Before(*t.LastChangeAt) {
+		now = *t.LastChangeAt
+	}
+	return fmtRel(*t.LastChangeAt, now)
+}
+
+// tblLastTitle explains the Last sync cell: when the change was applied, its source commit time and the delay.
+func tblLastTitle(t admin.TableInfo) string {
+	if t.LastChangeAt == nil {
+		return "No change applied to this table since the pipeline started"
+	}
+	s := "Last change applied to the target at " + formatWebTime(*t.LastChangeAt, "2006-01-02 15:04:05 MST")
+	if t.LastSourceAt != nil {
+		s += "; committed on the source at " + formatWebTime(*t.LastSourceAt, "2006-01-02 15:04:05 MST")
+		if d := t.LastChangeAt.Sub(*t.LastSourceAt).Seconds(); d >= 1 {
+			s += " (" + fmtSecs(d) + " later on the target)"
+		}
+	}
+	return s
+}
+
+// tblLastHTML renders the Last sync cell; the browser keeps the relative text current from data-ago.
+func tblLastHTML(t admin.TableInfo, now time.Time) template.HTML {
+	if t.LastChangeAt == nil {
+		return template.HTML(`<span class="muted" title="` + template.HTMLEscapeString(tblLastTitle(t)) + `">-</span>`)
+	}
+	return template.HTML(`<time data-ago="` + strconv.FormatInt(tblLastMs(t), 10) + `" datetime="` +
+		t.LastChangeAt.UTC().Format(time.RFC3339) + `" title="` + template.HTMLEscapeString(tblLastTitle(t)) + `">` +
+		template.HTMLEscapeString(tblLastText(t, now)) + `</time>`)
+}
+
+// tblChangesText: CDC row changes applied since the pipeline started ("-" when none).
+func tblChangesText(t admin.TableInfo) string {
+	if t.Changes() == 0 {
+		return "-"
+	}
+	return fmtInt(t.Changes())
+}
+
+func tblChangesTitle(t admin.TableInfo) string {
+	return fmtInt(t.Inserts) + " inserts, " + fmtInt(t.Updates) + " updates, " + fmtInt(t.Deletes) +
+		" deletes applied by CDC since the pipeline started"
 }
 
 func tblETAText(t admin.TableInfo) string {
@@ -144,7 +227,11 @@ func tblETAText(t admin.TableInfo) string {
 func liveTablesOf(tv TablesView, top *admin.TopInfo) *LiveTables {
 	if tv.Total > 0 {
 		lt := &LiveTables{Done: tv.Done, Running: tv.Running, Pending: tv.Pending, Total: tv.Total, Pct: tv.TablesPct,
-			RowsCopied: tv.RowsCopied, RowsEst: tv.RowsEstimate, RowsPct: tv.RowsPct}
+			RowsCopied: tv.RowsCopied, RowsEst: tv.RowsEstimate, RowsPct: tv.RowsPct,
+			Active5m: tv.Active5m, Active1h: tv.Active1h, Changes: tv.Changes, LastMs: -1}
+		if tv.LastChange != nil {
+			lt.LastMs = tv.LastChange.UnixMilli()
+		}
 		if top != nil {
 			lt.ETA = top.ETASeconds
 		}
@@ -220,6 +307,13 @@ func liveFormat(v PipelineView, r LiveRecord, h HeadInfo, now time.Time) map[str
 		f["tables_total"] = strconv.Itoa(t.Total)
 		f["tables_running"] = strconv.Itoa(t.Running)
 		f["tables_pending"] = strconv.Itoa(t.Pending)
+		f["tables_active5m"] = strconv.Itoa(t.Active5m)
+		f["tables_active1h"] = strconv.Itoa(t.Active1h)
+		f["tables_changes"] = fmtInt(t.Changes)
+		f["tables_last"] = "-"
+		if t.LastMs >= 0 {
+			f["tables_last"] = fmtRel(time.UnixMilli(t.LastMs), now)
+		}
 	}
 	if h.HasInfo {
 		f["uptime"] = fmtSecs(h.Uptime)
@@ -280,13 +374,13 @@ func (s *Server) fullDelta(p *Pipeline, r *LiveRecord, sn *Snap, all bool) {
 			// Nhiều bảng: chỉ các bảng đang chép (trang đang xem lấy phần còn lại từ HTML/API phân trang).
 			for _, t := range tv.Tables {
 				if t.State == "running" && len(r.TableRows) < tablesInlineMax {
-					r.TableRows = append(r.TableRows, liveTableRow(t))
+					r.TableRows = append(r.TableRows, liveTableRow(t, sn.At))
 				}
 			}
 		} else {
 			r.TablesFull = true
 			for _, t := range tv.Tables {
-				r.TableRows = append(r.TableRows, liveTableRow(t))
+				r.TableRows = append(r.TableRows, liveTableRow(t, sn.At))
 			}
 		}
 		r.EventsNew = ev
@@ -297,15 +391,31 @@ func (s *Server) fullDelta(p *Pipeline, r *LiveRecord, sn *Snap, all bool) {
 	if sn.Tables != nil {
 		prev := s.delta.tables[r.Name]
 		cur := make(map[string]string, len(tv.Tables))
+		// actRows: rows whose only change is CDC activity (counts, last change). A paged list updates them in
+		// place and never re-renders for them; past tablesInlineMax the most recently changed are sent.
+		var actRows []admin.TableInfo
 		for _, t := range tv.Tables {
-			sig := tableSig(t)
+			snapSig := tableSig(t)
+			sig := snapSig + tableActSig(t)
 			cur[t.Table] = sig
-			if prev == nil || prev[t.Table] != sig {
-				r.TableRows = append(r.TableRows, liveTableRow(t))
+			old, seen := prev[t.Table]
+			switch {
+			case prev == nil || !seen || !strings.HasPrefix(old, snapSig+"|"):
+				r.TableRows = append(r.TableRows, liveTableRow(t, sn.At))
+			case old != sig:
+				actRows = append(actRows, t)
 			}
 		}
+		if big && len(actRows) > tablesInlineMax {
+			sort.Slice(actRows, func(i, j int) bool { return tblLastMs(actRows[i]) > tblLastMs(actRows[j]) })
+			actRows = actRows[:tablesInlineMax]
+		}
+		snapChanged := len(r.TableRows)
+		for _, t := range actRows {
+			r.TableRows = append(r.TableRows, liveTableRow(t, sn.At))
+		}
 		switch {
-		case big && prev != nil && (len(prev) != len(cur) || len(r.TableRows) > tablesInlineMax):
+		case big && prev != nil && (len(prev) != len(cur) || snapChanged > tablesInlineMax):
 			// Nhiều bảng: không bao giờ gửi cả danh sách; client dựng lại trang đang xem.
 			r.TableRows, r.TablesChanged = nil, true
 		case big && prev == nil:
@@ -321,7 +431,7 @@ func (s *Server) fullDelta(p *Pipeline, r *LiveRecord, sn *Snap, all bool) {
 			// Danh sách bảng đổi (bảng mới, bảng bị bỏ): gửi toàn bộ để client dựng lại.
 			r.TableRows, r.TablesFull = nil, true
 			for _, t := range tv.Tables {
-				r.TableRows = append(r.TableRows, liveTableRow(t))
+				r.TableRows = append(r.TableRows, liveTableRow(t, sn.At))
 			}
 		}
 		s.delta.tables[r.Name] = cur

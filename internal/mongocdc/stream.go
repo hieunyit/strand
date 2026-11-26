@@ -180,10 +180,33 @@ type batch struct {
 	txnEvents int
 	txnBytes  int
 	last      bson.Timestamp
+	// collOps: change events per collection (inserts, updates incl. replaces, deletes) for the
+	// Tables view; counted as events, before same-document events collapse.
+	collOps map[string]*collOpCount
 }
 
 func newBatch() *batch {
-	return &batch{ops: make(map[string]*docOp), slow: make(map[string]bool), byOp: make(map[string]int)}
+	return &batch{ops: make(map[string]*docOp), slow: make(map[string]bool), byOp: make(map[string]int),
+		collOps: make(map[string]*collOpCount)}
+}
+
+// collOpCount counts the change events of one collection in a batch.
+type collOpCount struct{ inserts, updates, deletes int64 }
+
+func (b *batch) countColl(coll, op string) {
+	c := b.collOps[coll]
+	if c == nil {
+		c = &collOpCount{}
+		b.collOps[coll] = c
+	}
+	switch op {
+	case "insert":
+		c.inserts++
+	case "update", "replace":
+		c.updates++
+	case "delete":
+		c.deletes++
+	}
 }
 
 // idKey returns a key equal for _ids the unique _id index treats as equal. Numbers of
@@ -413,6 +436,7 @@ func (r *runner) stream(ctx context.Context) (err error) {
 			}
 		}
 		r.obs.applied(b.events, b.byOp, len(b.ops), lookups, b.last, tokenString(r.state.ResumeToken))
+		r.obs.collApplied(b.collOps, b.last)
 		persistedToken = append(bson.Raw(nil), r.state.ResumeToken...)
 		lastCheckpoint = time.Now()
 		b = newBatch()
@@ -665,6 +689,7 @@ func (r *runner) addEvent(b *batch, event *streamEvent) (bool, error) {
 		return false, nil
 	}
 	b.byOp[event.OperationType]++
+	b.countColl(event.NS.Coll, event.OperationType)
 	switch event.OperationType {
 	case "insert", "replace", "update":
 		id, err := event.DocumentKey.LookupErr("_id")

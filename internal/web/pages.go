@@ -61,6 +61,10 @@ func templateFuncsForLang(lang string) template.FuncMap {
 		"governor":             fmtGovernor,
 		"tblRows":              tblRowsText,
 		"tblETA":               tblETAText,
+		"tblLast":              tblLastHTML,
+		"tblLastMs":            tblLastMs,
+		"tblChanges":           tblChangesText,
+		"tblChangesTitle":      tblChangesTitle,
 		"num":                  fmtNum,
 		"int64":                func(v int64) string { return fmtInt(v) },
 		"clock": func(t time.Time) string {
