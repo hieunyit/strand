@@ -177,6 +177,12 @@ Ghi cấu hình ra file tạm cùng thư mục, chạy `strand validate -c <tmp>
 Trả về **200**:
 `{"valid": true|false, "exit_code": 0, "output": "...", "diff": "--- ...\n+++ ..."}`.
 
+### `POST /api/v1/pipelines/{name}/doctor`
+
+Chỉ admin. Không có body. Chạy `strand doctor -c <cfg> --json` với cấu hình và môi trường (`.env`) của pipeline: preflight chỉ đọc, liệt kê mọi vấn đề cùng lúc (USAGE.md mục 7.1a). Dừng sau 50 giây.
+Trả về **200**: `{"pipeline", "ok", "summary": {"errors", "warnings", "info"}, "findings": [{"severity": "error|warning|info", "code", "object", "message", "fix"}], "exit_code", "duration_ms", "timed_out"}`. `ok=false` khi có ít nhất một vấn đề mức `error` (`exit_code` 3). Hết giờ: `timed_out=true` và một vấn đề `doctor_timeout`. Mật khẩu trong `object`/`message`/`fix` bị che.
+**404** pipeline không tồn tại; **502** khi doctor không in ra báo cáo đọc được (output đã che mật khẩu nằm trong `error`). Audit: `pipeline.doctor` (số lỗi, cảnh báo).
+
 ### `POST /api/v1/pipelines/{name}/config`
 
 Body JSON: `{"yaml": "...", "restart": true|false}`.

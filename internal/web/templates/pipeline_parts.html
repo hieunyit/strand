@@ -189,6 +189,7 @@
   {{if or .CanOperate .Ctl.JobActive}}<div class="actions" role="group" aria-label="Pipeline actions">
     {{if .CanOperate}}
       {{if and (not .Ctl.Running) .Ctl.CfgOK}}<form class="act inline" data-action="start" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit">{{icon "play"}}Start</button></form>{{end}}
+      {{if and .CanAdmin (not .Ctl.Running)}}<a class="btn" href="/pipelines/{{.View.Name}}/jobs?doctor=1#doctor" title="Read-only preflight: every problem that would block or slow sync, with fixes">Doctor</a>{{end}}
       {{if .Ctl.Paused}}<form class="act inline" data-action="resume" data-pipeline="{{.View.Name}}"><button class="btn primary" type="submit">Resume</button></form>
       {{else if .Ctl.Reachable}}<form class="act inline" data-action="pause" data-pipeline="{{.View.Name}}"><button class="btn" type="submit">{{icon "pause"}}Pause</button></form>{{end}}
       {{if .Ctl.Running}}

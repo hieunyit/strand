@@ -168,15 +168,16 @@ observability: { admin_socket: %s }
 	}
 }
 
-// After a successful create the console opens the new pipeline (and shows the notice
-// there) instead of staying on the New pipeline page.
+// After a successful create the console opens the new pipeline on its Jobs tab, where strand doctor runs
+// once (and shows the notice there), instead of staying on the New pipeline page; a failed validate runs
+// doctor in place.
 func TestCreatePipelineOpensThePipeline(t *testing.T) {
 	js, err := os.ReadFile("static/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(js)
-	for _, want := range []string{"window.location.assign('/pipelines/' + encodeURIComponent(res.j.pipeline))", "sessionStorage.setItem('strand-flash'", "showFlash();"} {
+	for _, want := range []string{"window.location.assign('/pipelines/' + encodeURIComponent(res.j.pipeline) + '/jobs?doctor=1#doctor')", "runDoctor(res.j.pipeline)", "sessionStorage.setItem('strand-flash'", "showFlash();"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("app.js lacks %q", want)
 		}

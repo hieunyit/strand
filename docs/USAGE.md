@@ -730,6 +730,8 @@ Result: FAILED, 4 blocking problem(s)
 
 Không kiểm (giới hạn hiện tại): ETA snapshot so với thời gian giữ binlog (dùng `strand plan`), quyền target PostgreSQL, FK MySQL→PG, trigger trên bảng đích của auto-seed, PK có snapshot logic được không.
 
+Trên Web (vai trò admin): nút **Doctor** ở đầu trang pipeline (khi pipeline đang dừng) và thẻ **Preflight (doctor)** ở tab Jobs chạy `strand doctor --json` với cấu hình và `.env` của pipeline, rồi hiện bảng vấn đề (mức độ, thông điệp, mã, đối tượng, cách sửa). Wizard tạo pipeline tự chạy doctor: validate qua thì mở tab Jobs và chạy doctor ngay; validate lỗi thì hiện toàn bộ vấn đề ngay dưới kết quả validate. Doctor trên Web dừng sau 50 giây (nguồn hoặc đích không trả lời) và báo `doctor_timeout`. API: `POST /api/v1/pipelines/{name}/doctor` (WEB-API.md).
+
 ### 7.2 `plan`
 
 `strand plan -c p.yaml [--force]` in từng bảng: số row ước lượng, dung lượng, chế độ và ETA theo `resources.source.iops.soft`. Nó từ chối chế độ A khi ETA vượt 50% thời gian giữ binlog. `--force` chấp nhận rủi ro; nếu không, dùng chế độ B.

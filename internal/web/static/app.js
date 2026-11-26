@@ -1219,6 +1219,10 @@
               html += '<span class="badge ' + (planGenerated ? 'st-info' : 'st-failed') + '">Plan: ' + (planGenerated ? 'Generated' : 'FAIL') + '</span></p>';
               html += '<h4>Validate Output</h4><pre class="code">' + escHtml(res.j.validate ? res.j.validate.output : '') + '</pre>';
               html += '<h4>Plan Output</h4><pre class="code">' + escHtml(res.j.plan ? res.j.plan.output : '') + '</pre>';
+              if (!res.j.ok) {
+                // validate stops at the first problem; doctor lists all of them, each with a fix.
+                html += '<h4>Every problem (strand doctor)</h4><div data-doctor-result="' + escHtml(res.j.pipeline) + '" aria-live="polite"></div>';
+              }
               html += '<div class="mt14">';
               if (res.j.ok) {
                 html += '<form class="act inline" data-action="start" data-pipeline="' + escHtml(res.j.pipeline) + '">';
@@ -1228,10 +1232,13 @@
               html += '</div>';
               resBody.innerHTML = html;
               newPipeForm.dispatchEvent(new CustomEvent('pipeline-created'));
+              if (!res.j.ok) { runDoctor(res.j.pipeline); }
               if (res.j.ok) {
                 // Open the new pipeline; its page shows the notice and the Start button.
-                try { sessionStorage.setItem('strand-flash', JSON.stringify({msg: 'Pipeline ' + res.j.pipeline + ' created: validate passed. Start it when ready.', ok: true})); } catch (e) { /* private mode */ }
-                window.location.assign('/pipelines/' + encodeURIComponent(res.j.pipeline));
+                // It opens on the Jobs tab, where strand doctor runs once (?doctor=1): validate passing does not
+                // mean sync start-up will (binlog/WAL settings, row keys, foreign keys, non-empty target tables).
+                try { sessionStorage.setItem('strand-flash', JSON.stringify({msg: 'Pipeline ' + res.j.pipeline + ' created: validate passed. strand doctor is checking it now; start it when no blocking problem is left.', ok: true})); } catch (e) { /* private mode */ }
+                window.location.assign('/pipelines/' + encodeURIComponent(res.j.pipeline) + '/jobs?doctor=1#doctor');
                 return;
               }
               toast('Pipeline created but validation FAILED: fix it before Start', false);
@@ -1294,6 +1301,69 @@
     if (ev.target.id === 'log-wrap') { updateLogWrap(); }
   });
   onSwap.push(updateLogWrap);
+
+  // ---- Doctor (preflight): POST /api/v1/pipelines/{name}/doctor runs `strand doctor --json` and lists every
+  // problem. The result lives here (not in the DOM) so the periodic refresh, which replaces #content, does
+  // not wipe it: every [data-doctor-result="<pipeline>"] is re-rendered after a swap. ----
+  var doctorRuns = {};
+  function doctorHTML(st) {
+    if (st.running) { return '<p class="muted">Running strand doctor&hellip; (up to a minute)</p>'; }
+    if (st.err) { return '<p class="err">Doctor could not run: ' + escHtml(st.err) + '</p>'; }
+    var r = st.res || {}, sum = r.summary || {}, list = r.findings || [];
+    var html = '<p class="doctor-summary">';
+    html += r.ok ? '<span class="badge ok">No blocking problems</span> ' : '<span class="badge bad">' + (sum.errors || 0) + ' blocking problem(s)</span> ';
+    if (sum.warnings) { html += '<span class="badge warn">' + sum.warnings + ' warning(s)</span> '; }
+    if (sum.info) { html += '<span class="badge info">' + sum.info + ' note(s)</span> '; }
+    html += '<span class="muted">' + (r.duration_ms != null ? (r.duration_ms / 1000).toFixed(1) + ' s' : '') + (st.at ? ', ' + escHtml(st.at) : '') + '</span></p>';
+    if (r.timed_out) { html += '<p class="warnbox">Doctor stopped before finishing: the source or target did not answer in time.</p>'; }
+    if (!list.length) { return html + '<p class="muted">No problems found. Sync preflight should pass.</p>'; }
+    html += '<div class="tablewrap"><table class="data-table grid doctor-findings"><caption class="sr-only">Problems found by strand doctor</caption>';
+    html += '<thead><tr><th scope="col">Severity</th><th scope="col">Problem</th><th scope="col">Object</th><th scope="col">How to fix</th></tr></thead><tbody>';
+    list.forEach(function (f) {
+      var cls = f.severity === 'error' ? 'bad' : (f.severity === 'warning' ? 'warn' : 'info');
+      html += '<tr data-severity="' + escHtml(f.severity) + '"><td><span class="badge ' + cls + '">' + escHtml(f.severity) + '</span></td>';
+      html += '<td class="wrap">' + escHtml(f.message) + '<div class="muted"><code>' + escHtml(f.code) + '</code></div></td>';
+      html += '<td class="wrap">' + (f.object ? '<code>' + escHtml(f.object) + '</code>' : '') + '</td>';
+      html += '<td class="wrap">' + (f.fix ? '<code class="wrap">' + escHtml(f.fix) + '</code>' : '<span class="muted">-</span>') + '</td></tr>';
+    });
+    return html + '</tbody></table></div>';
+  }
+  function renderDoctor() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-doctor-result]'), function (el) {
+      var st = doctorRuns[el.getAttribute('data-doctor-result')];
+      if (st) { el.innerHTML = doctorHTML(st); }
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-doctor-run]'), function (b) {
+      var st = doctorRuns[b.getAttribute('data-doctor-run')];
+      b.disabled = !!(st && st.running);
+    });
+  }
+  function runDoctor(name) {
+    if (!name || (doctorRuns[name] && doctorRuns[name].running)) { return; }
+    doctorRuns[name] = { running: true };
+    renderDoctor();
+    api('POST', '/api/v1/pipelines/' + encodeURIComponent(name) + '/doctor')
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }, function () { return { ok: false, status: r.status, j: {} }; }); })
+      .then(function (res) {
+        doctorRuns[name] = res.ok ? { res: res.j, at: new Date().toLocaleTimeString() } : { err: (res.j && res.j.error) || ('HTTP ' + res.status) };
+      })
+      .catch(function (err) { doctorRuns[name] = { err: String(err) }; })
+      .then(renderDoctor);
+  }
+  document.addEventListener('click', function (ev) {
+    var b = ev.target && ev.target.closest && ev.target.closest('[data-doctor-run]');
+    if (b) { ev.preventDefault(); runDoctor(b.getAttribute('data-doctor-run')); }
+  });
+  onSwap.push(renderDoctor);
+  // /pipelines/<name>/jobs?doctor=1 (the Doctor button of the pipeline head, the New pipeline wizard): run once.
+  (function () {
+    if (!/[?&]doctor=1(&|$)/.test(location.search)) { return; }
+    var el = document.querySelector('[data-doctor-result]');
+    if (!el) { return; }
+    try { history.replaceState(null, '', location.pathname + location.search.replace(/([?&])doctor=1(&|$)/, function (m, a, b) { return b ? a : ''; }) + location.hash); } catch (e) { /* ignore */ }
+    runDoctor(el.getAttribute('data-doctor-result'));
+    if (el.scrollIntoView) { el.closest('section') ? el.closest('section').scrollIntoView() : el.scrollIntoView(); }
+  })();
 
   // Unsaved changes: leaving a page with a dirty form[data-guard] asks first. The periodic refresh never
   // replaces such a form (editing() above).

@@ -356,7 +356,11 @@
       <div class="form-actions"><button class="btn primary" type="submit">Start verify</button></div>
     </form>
   </section>{{end}}
-  {{if .CanAdmin}}<section class="card"><div class="cardhead"><h2>Plan</h2></div>
+  {{if .CanAdmin}}<section class="card" id="doctor"><div class="cardhead"><h2>Preflight (doctor)</h2><button class="btn" type="button" data-doctor-run="{{.View.Name}}">Run doctor</button></div>
+    <p class="card-desc">Runs <code>strand doctor</code>: every check of validate and of sync start-up ({{if $mongo}}oplog window, source and target collections, target checkpoint, update mode{{else}}binlog or WAL settings, privileges, row keys, foreign keys, Group Replication, non-empty target tables{{end}}...) without stopping at the first problem, each with a fix. Read-only: no DDL, no writes, no locks. Takes up to a minute.</p>
+    <div data-doctor-result="{{.View.Name}}" aria-live="polite"></div>
+  </section>
+  <section class="card"><div class="cardhead"><h2>Plan</h2></div>
     <form class="act" data-action="plan" data-pipeline="{{.View.Name}}">
       <p class="card-desc">Runs <code>strand plan</code>: what the initial copy will read and how long it should take.{{if not $mongo}} Schema changes and database objects have their own tabs.{{end}}</p>
       <div class="btngroup"><button class="btn" type="submit" data-do="plan" data-action="plan">Plan (what will be copied)</button></div>

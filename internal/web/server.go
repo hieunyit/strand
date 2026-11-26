@@ -519,6 +519,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/pipelines/{name}", s.auth(true, s.apiPipeline))
 	mux.Handle("DELETE /api/v1/pipelines/{name}", s.auth(true, s.apiPipelineDelete))
 	mux.Handle("POST /api/v1/pipelines/{name}/config/validate", s.auth(true, s.apiConfigValidate))
+	mux.Handle("POST /api/v1/pipelines/{name}/doctor", s.auth(true, s.apiDoctor))
 	mux.Handle("POST /api/v1/pipelines/{name}/config", s.auth(true, s.apiConfigSave))
 	mux.Handle("GET /api/v1/pipelines/{name}/tuning", s.auth(true, s.apiTuningGet))
 	mux.Handle("POST /api/v1/pipelines/{name}/tuning", s.auth(true, s.apiTuningSave))
