@@ -898,8 +898,12 @@ func (s *MySQLSnapshotter) SnapshotAddKeys(
 					plan.MinPK, plan.MaxPK, plan.NextPK = bounds.MinPK, bounds.MaxPK, bounds.MinPK
 				}
 			}
-			if bs, ok := s.Chunks.(interface{ BoundSnapshot() *PGSnapshot }); ok {
-				boundSnap = bs.BoundSnapshot() // Txn visible với snapshot này mà chưa qua router: xem TableRanges.BoundSnap
+			if bs, ok := s.Chunks.(interface {
+				BoundSnapshotOf(model.TableID) *PGSnapshot
+			}); ok {
+				// The snapshot of THIS table's bounds read (other tables register concurrently). Txn visible
+				// to it that the router has not routed yet: see TableRanges.BoundSnap.
+				boundSnap = bs.BoundSnapshotOf(table)
 				plan.BoundSnapshot = boundSnap
 			}
 			// Snapshot mới của bảng bắt đầu từ target rỗng: row cũ còn sót (lần chạy trước,

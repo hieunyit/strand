@@ -77,9 +77,12 @@ type PGChunkSource struct {
 
 	mu     sync.Mutex
 	gateOK bool
-	// boundSnap: snapshot của lần đọc biên gần nhất (BoundSnapshot).
-	boundSnap *PGSnapshot
-	types     map[model.TableID]map[string]uint32
+	// boundSnaps: per table, the snapshot of its latest bounds read (BoundSnapshotOf). Per table because
+	// registrations of several tables can run CONCURRENTLY inside one barrier group (a `snapshot add`
+	// while the bootstrap registers a table; parallel snapshot, today MySQL only): with a single "latest"
+	// value table A could take the snapshot of table B's bounds read.
+	boundSnaps map[model.TableID]*PGSnapshot
+	types      map[model.TableID]map[string]uint32
 }
 
 var _ ChunkSource = (*PGChunkSource)(nil)
@@ -178,7 +181,7 @@ func (c *PGChunkSource) Bounds(ctx context.Context, table model.TableID, pkCol s
 	if err := c.DB.QueryRowContext(ctx, q).Scan(&minV, &maxV, &snapTxt, &boundsLSN); err != nil {
 		return nil, fmt.Errorf("failed to query table bounds: %w", err)
 	}
-	if err := c.setBoundSnap(snapTxt, boundsLSN); err != nil {
+	if err := c.setBoundSnap(table, snapTxt, boundsLSN); err != nil {
 		return nil, err
 	}
 	var b TableBounds
@@ -444,8 +447,8 @@ func (c *PGChunkSource) keyCols(codec *PKCodec) string {
 	return strings.Join(cols, ", ")
 }
 
-// setBoundSnap lưu snapshot của lần đọc biên gần nhất (đăng ký bảng chạy tuần tự trong barrier).
-func (c *PGChunkSource) setBoundSnap(txt, lsn string) error {
+// setBoundSnap records the snapshot of the bounds read of table.
+func (c *PGChunkSource) setBoundSnap(table model.TableID, txt, lsn string) error {
 	snap, err := ParsePGSnapshot(txt)
 	if err != nil {
 		return err
@@ -455,17 +458,20 @@ func (c *PGChunkSource) setBoundSnap(txt, lsn string) error {
 		return err
 	}
 	c.mu.Lock()
-	c.boundSnap = snap
+	if c.boundSnaps == nil {
+		c.boundSnaps = map[model.TableID]*PGSnapshot{}
+	}
+	c.boundSnaps[table] = snap
 	c.mu.Unlock()
 	return nil
 }
 
-// BoundSnapshot: snapshot mà lần Bounds/KeyBounds gần nhất nhìn thấy. Ngoài [min, max] đó bảng KHÔNG có
-// row nào tại snapshot này (xem TableRanges.BoundSnap).
-func (c *PGChunkSource) BoundSnapshot() *PGSnapshot {
+// BoundSnapshotOf: the snapshot the latest Bounds/KeyBounds of table saw. Outside that [min, max] the table
+// has NO row at this snapshot (see TableRanges.BoundSnap). nil: no bounds read of the table yet.
+func (c *PGChunkSource) BoundSnapshotOf(table model.TableID) *PGSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.boundSnap
+	return c.boundSnaps[table]
 }
 
 // KeyBounds: khóa nhỏ nhất / lớn nhất (ORDER BY cột của bảng, LIMIT 1). Hai truy vấn chạy trong MỘT
@@ -485,7 +491,7 @@ func (c *PGChunkSource) KeyBounds(ctx context.Context, table model.TableID, code
 	if err = tx.QueryRowContext(ctx, "SELECT pg_current_snapshot()::text, pg_current_wal_insert_lsn()::text").Scan(&snapTxt, &boundsLSN); err != nil {
 		return
 	}
-	if err = c.setBoundSnap(snapTxt, boundsLSN); err != nil {
+	if err = c.setBoundSnap(table, snapTxt, boundsLSN); err != nil {
 		return
 	}
 	q := PGKeySQL{Table: table, Codec: codec, Alias: "t"}

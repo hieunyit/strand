@@ -42,7 +42,7 @@ func TestPGSnapshotCompletionWaitsWithBoundsGuard(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				inBarrier := false
 				bound := &PGSnapshot{Xmin: 100, Xmax: 100, BoundsLSN: 0x100}
-				source := &completionSource{PGChunkSource: &PGChunkSource{boundSnap: bound}, barrier: &inBarrier}
+				source := &completionSource{PGChunkSource: &PGChunkSource{boundSnaps: map[model.TableID]*PGSnapshot{table: bound}}, barrier: &inBarrier}
 				s := NewMySQLSnapshotter(DefaultChunkOptions())
 				s.Chunks = source
 				s.ClearTarget = func(context.Context, model.TableID) error { return nil }
@@ -96,7 +96,7 @@ func TestPGSnapshotCompletionFailureKeepsGuard(t *testing.T) {
 		t.Run(map[bool]string{false: "rendezvous", true: "marker"}[markerFails], func(t *testing.T) {
 			table := model.TableID{Schema: "app", Table: "empty"}
 			blocked := false
-			source := &completionSource{PGChunkSource: &PGChunkSource{boundSnap: &PGSnapshot{Xmin: 100, Xmax: 100, BoundsLSN: 0x100}}, barrier: &blocked}
+			source := &completionSource{PGChunkSource: &PGChunkSource{boundSnaps: map[model.TableID]*PGSnapshot{table: {Xmin: 100, Xmax: 100, BoundsLSN: 0x100}}}, barrier: &blocked}
 			want := context.Canceled
 			if markerFails {
 				source.markerErr = want

@@ -403,12 +403,24 @@ func TestP2_E2E_PGLogicalSnapshotSyncRepRace(t *testing.T) {
 		Include:     []string{"app.*"}, Dir: testDir(t), Bootstrap: "logical", SourceIOPS: 20000}
 	vs := startPGVerSampler(dst, "app.items", "app.events", "app.accounts")
 	p := startStrand(t, cfg.write(t))
+	// The load runs in a window (default 60 s, the whole snapshot of the small tables and most of items),
+	// as in TestP2_E2E_PGLogicalSnapshotToastPKMove: open-ended load from 12 clients outruns the single
+	// strict apply worker on a busy host, the lag only grows and the test measured the machine (380 MB of
+	// WAL behind after the load stopped), not the watermark race it is about.
+	var loadOnce sync.Once
+	stopLoad := func() {
+		loadOnce.Do(func() {
+			stop.Store(true)
+			wg.Wait()
+			wl.Stop()
+		})
+	}
+	loadTimer := time.AfterFunc(time.Duration(envInt("STRAND_E2E_PG_SYNCREP_LOAD_SECONDS", 60))*time.Second, stopLoad)
+	defer loadTimer.Stop()
 	waitSynced(t, &cfg, p, 10*time.Minute)
 	time.Sleep(3 * time.Second)
 
-	stop.Store(true)
-	wg.Wait()
-	wl.Stop()
+	stopLoad()
 	t.Logf("workload (synchronous standby pg_receivewal): %d ops, %d client-side errors, %d two-phase txns, %d PK moves",
 		wl.ops.Load(), wl.errs.Load(), wl.prepared.Load(), moves.Load())
 	waitPGCaughtUp(t, src, dst, &cfg, p, 5*time.Minute)

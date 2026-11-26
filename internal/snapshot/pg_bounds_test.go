@@ -82,7 +82,7 @@ func TestPGBoundsSingleConnection(t *testing.T) {
 	if err != nil || !ok || lo.V[0] != int64(2) || hi.V[0] != int64(100) {
 		t.Fatalf("key bounds: %v %v %v %v", lo, hi, ok, err)
 	}
-	if s := source.BoundSnapshot(); s == nil || !s.Visible(50) || s.Visible(150) || s.BoundsLSN != 0x100 {
+	if s := source.BoundSnapshotOf(table); s == nil || !s.Visible(50) || s.Visible(150) || s.BoundsLSN != 0x100 {
 		t.Fatalf("snapshot: %+v", s)
 	}
 	b, err := source.Bounds(ctx, table, "id")
@@ -120,7 +120,7 @@ func TestPGBoundSnapshotPlanRegistrationResume(t *testing.T) {
 		}
 		if resume {
 			// A newer source marker must not replace the persisted original marker.
-			source.boundSnap = &PGSnapshot{Xmin: 200, Xmax: 200}
+			source.boundSnaps[table] = &PGSnapshot{Xmin: 200, Xmax: 200}
 		}
 		err := s.SnapshotAdd(context.Background(), nil, nil, table, "id", []string{"id"}, func(context.Context, checkpoint.AppliedSet) error { return nil })
 		if !errors.Is(err, stopped) {
