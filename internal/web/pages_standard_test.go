@@ -49,6 +49,7 @@ func TestStandardPageSkeletonAndNoInlineStyles(t *testing.T) {
 		{"/tunnels", false, false},
 		{"/pipelines/orders", true, false},
 		{"/pipelines/orders/tables", true, true},
+		{"/pipelines/orders/tables/app.users", false, false},
 		{"/pipelines/orders/checkpoint", true, false},
 		{"/pipelines/orders/errors", true, true},
 		{"/pipelines/orders/config", true, true},

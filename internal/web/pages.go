@@ -34,6 +34,7 @@ var pageNames = []string{
 	"backups_catalog", "backups_catalog_detail", "backups_restore", "wizard", "new_pipeline", "settings",
 	"mcp", "schema", "spool_inspect", "archive", "tunnel", "db_admin", "error", "users", "account",
 	"backups_repositories", "backups_repository_detail", "backups_notifications", "backups_keys", "backups_activity", "backups_reports",
+	"table_detail",
 }
 
 func templateFuncs() template.FuncMap {
@@ -116,6 +117,9 @@ func templateFuncsForLang(lang string) template.FuncMap {
 		"tablesAriaSort":            tablesAriaSort,
 		"sortDir":                   sortDefaultDir,
 		"tblChangesDetail":          tblChangesDetail,
+		"tableHref":                 tableHref,
+		"tablesCSVHref":             tablesCSVHref,
+		"quietRule":                 func() string { return quietRuleText },
 		"add":                       func(a, b int) int { return a + b },
 		"rel":                       func(t time.Time) string { return fmtRel(t, time.Now()) },
 		"join":                      strings.Join,

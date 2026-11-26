@@ -245,6 +245,18 @@
     if (r.last_ms === undefined) { return; }
     tr.setAttribute('data-last', String(r.last_ms));
     tr.setAttribute('data-changes', String(r.changes || 0));
+    // Quiet badge (server's quiet-table rule): rendered only for quiet rows, added/removed here.
+    if (r.quiet) { tr.setAttribute('data-quiet', '1'); } else { tr.removeAttribute('data-quiet'); }
+    var qb = tr.querySelector('[data-tb="quiet"]'), lc = tr.querySelector('[data-tb="last"]');
+    if (r.quiet && !qb && lc) {
+      qb = document.createElement('span'); qb.className = 'badge st-warn small quiet-badge'; qb.setAttribute('data-tb', 'quiet');
+      qb.title = 'Unusually idle (see quiet in the summary above)'; qb.textContent = 'quiet';
+      lc.parentNode.appendChild(document.createTextNode(' ')); lc.parentNode.appendChild(qb);
+    } else if (!r.quiet && qb) {
+      var sp = qb.previousSibling;
+      if (sp && sp.nodeType === 3 && !sp.nodeValue.trim()) { sp.parentNode.removeChild(sp); }
+      qb.parentNode.removeChild(qb);
+    }
     var chg = tr.querySelector('[data-tb="chg"]');
     if (chg && r.f.chg_title) { (chg.closest('td') || chg).title = r.f.chg_title; }
   }

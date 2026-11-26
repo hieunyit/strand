@@ -36,6 +36,7 @@ type LiveTables struct {
 	Active1h int   `json:"active_1h"`
 	Changes  int64 `json:"changes"`
 	LastMs   int64 `json:"last_ms"`
+	Quiet    int   `json:"quiet"` // tables flagged by the quiet-table rule
 }
 
 // LiveTableRow là một bảng (chỉ gửi khi đổi, trừ snapshot đầy đủ).
@@ -49,6 +50,7 @@ type LiveTableRow struct {
 	// LastMs: last CDC change in Unix milliseconds (-1: none recorded); Changes: CDC row changes applied.
 	LastMs  int64             `json:"last_ms"`
 	Changes int64             `json:"changes"`
+	Quiet   bool              `json:"quiet,omitempty"` // quiet-table rule (table_history.go)
 	F       map[string]string `json:"f"`
 }
 
@@ -126,14 +128,14 @@ func tableSig(t admin.TableInfo) string {
 
 // tableActSig is the CDC-activity part of a row: changes there never force a re-render of a paged list.
 func tableActSig(t admin.TableInfo) string {
-	return fmt.Sprintf("|%d|%d", t.Changes(), tblLastMs(t))
+	return fmt.Sprintf("|%d|%d|%t", t.Changes(), tblLastMs(t), t.Quiet)
 }
 
 func eventKey(e LogEvent) string { return e.Time + "|" + e.Level + "|" + e.Message }
 
 func liveTableRow(t admin.TableInfo, now time.Time) LiveTableRow {
 	return LiveTableRow{Table: t.Table, State: t.State, Pct: t.ProgressPct, Copied: tblCopied(t), Est: tblEst(t), ETA: t.ETASeconds,
-		LastMs: tblLastMs(t), Changes: t.Changes(),
+		LastMs: tblLastMs(t), Changes: t.Changes(), Quiet: t.Quiet,
 		F: map[string]string{"pct": fmt.Sprintf("%.1f%%", t.ProgressPct), "rows": tblRowsText(t), "eta": tblETAText(t),
 			"last": tblLastText(t, now), "last_title": tblLastTitle(t), "chg": tblChangesText(t), "chgd": tblChangesDetail(t),
 			"chg_title": tblChangesTitle(t)}}
@@ -261,7 +263,7 @@ func liveTablesOf(tv TablesView, top *admin.TopInfo) *LiveTables {
 	if tv.Total > 0 {
 		lt := &LiveTables{Done: tv.Done, Running: tv.Running, Pending: tv.Pending, Total: tv.Total, Pct: tv.TablesPct,
 			RowsCopied: tv.RowsCopied, RowsEst: tv.RowsEstimate, RowsPct: tv.RowsPct,
-			Active5m: tv.Active5m, Active1h: tv.Active1h, Changes: tv.Changes, LastMs: -1}
+			Active5m: tv.Active5m, Active1h: tv.Active1h, Changes: tv.Changes, LastMs: -1, Quiet: tv.Quiet}
 		if tv.LastChange != nil {
 			lt.LastMs = tv.LastChange.UnixMilli()
 		}
@@ -343,6 +345,7 @@ func liveFormat(v PipelineView, r LiveRecord, h HeadInfo, now time.Time) map[str
 		f["tables_active5m"] = strconv.Itoa(t.Active5m)
 		f["tables_active1h"] = strconv.Itoa(t.Active1h)
 		f["tables_changes"] = fmtInt(t.Changes)
+		f["tables_quiet"] = strconv.Itoa(t.Quiet)
 		f["tables_last"] = "-"
 		if t.LastMs >= 0 {
 			f["tables_last"] = fmtRel(time.UnixMilli(t.LastMs), now)

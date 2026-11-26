@@ -120,6 +120,9 @@ type Snap struct {
 	Rates    Rates  `json:"rates"`
 	LagLevel string `json:"lag_level"` // "", warn, bad (có trễ pha)
 
+	// quiet: tables flagged by the quiet-table rule at this sample (table_history.go); read only.
+	quiet map[string]bool
+
 	// tables: TablesView đã sắp xếp của mẫu này, tính một lần (trang, API, luồng sống đọc chung; chỉ đọc).
 	tables *tablesCache
 }
@@ -204,7 +207,8 @@ type Sampler struct {
 	rings  map[string]*Ring[Sample]
 	latest map[string]*Snap
 	poll   map[string]*pollState
-	names  string // danh sách pipeline của vòng trước (phát hiện thay đổi cấu trúc)
+	hist   map[string]*pipeHist // per-table CDC history (table_history.go)
+	names  string               // danh sách pipeline của vòng trước (phát hiện thay đổi cấu trúc)
 
 	// Dial mở client admin socket; thay được trong test.
 	Dial func(socket string) AdminPoller
@@ -248,7 +252,7 @@ func NewSampler(reg *Registry, interval time.Duration) *Sampler {
 		reg: reg, interval: interval, timeout: to,
 		client: &http.Client{Timeout: to},
 		sem:    make(chan struct{}, MaxConcurrentPolls),
-		rings:  map[string]*Ring[Sample]{}, latest: map[string]*Snap{}, poll: map[string]*pollState{},
+		rings:  map[string]*Ring[Sample]{}, latest: map[string]*Snap{}, poll: map[string]*pollState{}, hist: map[string]*pipeHist{},
 		Dial: func(socket string) AdminPoller { return admin.NewClient(socket) },
 		Now:  time.Now,
 	}
@@ -328,6 +332,11 @@ func (s *Sampler) round(ctx context.Context, wait bool) {
 	for n := range s.latest {
 		if !keep[n] {
 			delete(s.latest, n)
+		}
+	}
+	for n := range s.hist {
+		if !keep[n] {
+			delete(s.hist, n)
 		}
 	}
 	for n, ps := range s.poll {
@@ -445,6 +454,12 @@ func (s *Sampler) sampleOne(ctx context.Context, p *Pipeline, force bool) {
 
 	if !snap.Stale && prev != nil {
 		carryLastChange(snap.Tables, prev.Tables)
+	}
+	switch {
+	case snap.Stale && prev != nil:
+		snap.quiet = prev.quiet // same tables as the last good sample
+	case snap.Tables != nil:
+		snap.quiet = s.tableHist(p.Name, true).update(snap.Tables, now)
 	}
 	shown := ""
 	if prev != nil && !force {

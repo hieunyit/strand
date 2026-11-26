@@ -504,6 +504,9 @@ func (s *Server) routes() http.Handler {
 		}))
 	}
 
+	mux.Handle("GET /pipelines/{name}/tables/{table}", s.auth(false, s.pageTableDetail))
+	mux.Handle("GET /pipelines/{name}/tables.csv", s.auth(false, s.pageTablesCSV))
+
 	// REST API.
 	mux.Handle("GET /api/v1/session", s.auth(true, s.apiSession))
 	mux.Handle("GET /api/v1/overview", s.auth(true, s.apiOverview))
@@ -528,6 +531,7 @@ func (s *Server) routes() http.Handler {
 		}))
 	}
 	mux.Handle("GET /api/v1/pipelines/{name}/source-tables", s.auth(true, s.apiSourceTables))
+	mux.Handle("GET /api/v1/pipelines/{name}/tables/{table}", s.auth(true, s.apiTableDetail))
 	mux.Handle("GET /api/v1/pipelines/{name}/config/download", s.auth(true, s.apiConfigDownload))
 	mux.Handle("GET /pipelines/{name}/config.yaml", s.auth(false, s.apiConfigDownload))
 	mux.Handle("GET /mcp", s.auth(false, s.pageMCP))

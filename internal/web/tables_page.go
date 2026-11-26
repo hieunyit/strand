@@ -31,7 +31,8 @@ type TableQuery struct {
 	Q     string `json:"q,omitempty"`
 	State string `json:"state,omitempty"` // all | running | pending | done
 	// Since filters by the last CDC change: a window (5m, 15m, 1h, 6h, 24h, 7d: changed within it), "idle24h"
-	// (no change in the last 24 hours, or none recorded) or "none" (no change recorded). Empty: no filter.
+	// (no change in the last 24 hours, or none recorded), "none" (no change recorded) or "quiet" (flagged by the
+	// quiet-table rule: used to change regularly, no change for unusually long; table_history.go). Empty: no filter.
 	Since string `json:"since,omitempty"`
 	// Rows filters by the row count (estimate) as "min-max", either side optional ("1000000-", "-9999", "0-0").
 	Rows string `json:"rows,omitempty"`
@@ -94,6 +95,8 @@ func matchSince(t *admin.TableInfo, since string, now time.Time) bool {
 		return last == nil
 	case "idle24h":
 		return last == nil || now.Sub(*last) > 24*time.Hour
+	case "quiet":
+		return t.Quiet
 	}
 	w, ok := sinceWindows[since]
 	if !ok {
@@ -117,7 +120,7 @@ func normTableQuery(q TableQuery) TableQuery {
 	if q.Dir != "asc" && q.Dir != "desc" {
 		q.Dir = sortDefaultDir(q.Sort)
 	}
-	if _, ok := sinceWindows[q.Since]; !ok && q.Since != "none" && q.Since != "idle24h" {
+	if _, ok := sinceWindows[q.Since]; !ok && q.Since != "none" && q.Since != "idle24h" && q.Since != "quiet" {
 		q.Since = ""
 	}
 	if lo, hi, ok := parseRowsRange(q.Rows); ok {
@@ -147,11 +150,9 @@ func tableQueryFrom(v url.Values, prefix string) TableQuery {
 		Page: atoi(v.Get(prefix + "page")), PerPage: atoi(v.Get(prefix + "per_page"))})
 }
 
-// applyPage keeps the tables of the requested page (v.Tables must be finish()ed: status order). Counters and
-// aggregates stay those of the whole list.
-func (v *TablesView) applyPage(q TableQuery) {
-	q = normTableQuery(q)
-	v.Paged, v.Query = true, &q
+// matching returns every table that passes the search and the filters of q, in the order of q (a new slice;
+// v.Tables is not modified). v.Tables must be finish()ed (status order, the tie-breaker of every sort).
+func (v *TablesView) matching(q TableQuery) []admin.TableInfo {
 	needle := strings.ToLower(q.Q)
 	now := v.At
 	if now.IsZero() {
@@ -209,6 +210,15 @@ func (v *TablesView) applyPage(q TableQuery) {
 	case "changes":
 		by(func(t *admin.TableInfo) (float64, bool) { return float64(t.Changes()), true })
 	}
+	return match
+}
+
+// applyPage keeps the tables of the requested page (v.Tables must be finish()ed: status order). Counters and
+// aggregates stay those of the whole list.
+func (v *TablesView) applyPage(q TableQuery) {
+	q = normTableQuery(q)
+	v.Paged, v.Query = true, &q
+	match := v.matching(q)
 	v.Matching = len(match)
 	v.Pages = (v.Matching + q.PerPage - 1) / q.PerPage
 	if v.Pages == 0 {

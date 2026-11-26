@@ -299,6 +299,7 @@
     if (isNaN(last)) { last = -1; }
     if (f === 'none') { return last < 0; }
     if (f === 'idle24h') { return last < 0 || now - last > 86400000; }
+    if (f === 'quiet') { return r.getAttribute('data-quiet') === '1'; } // the server's quiet-table rule
     return last >= 0 && SINCE[f] !== undefined && now - last <= SINCE[f] * 1000;
   }
   // tblRows: the "Rows" filter ("min-max", either side optional) on data-rows.
@@ -351,11 +352,23 @@
     });
     var nm = body.querySelector('tr.nomatch');
     if (nm) { nm.hidden = !(rows.length > 0 && shown === 0); }
+    tblCSVHref();
     var cnt = document.getElementById('tb-count');
     if (cnt) { cnt.textContent = (tblState.f !== 'all' || q || tblState.since || tblState.rows) ? shown + ' of ' + rows.length + ' shown' : rows.length + ' tables'; }
     Array.prototype.forEach.call(document.querySelectorAll('[data-tfilter]'), function (c) {
       c.setAttribute('aria-pressed', c.getAttribute('data-tfilter') === tblState.f ? 'true' : 'false');
     });
+  }
+  // tblCSVHref: the "Export CSV" link of the inline list carries the filters and the sort shown in the browser
+  // (same parameters as the paged list: tq, tstate, tsince, trows, tsort, tdir).
+  function tblCSVHref() {
+    var a = document.getElementById('tb-csv'), base = a && a.getAttribute('data-csv-base');
+    if (!base) { return; }
+    var p = [], add = function (k, v) { if (v) { p.push(k + '=' + encodeURIComponent(v)); } };
+    add('tq', tblState.q.trim()); add('tstate', tblState.f === 'all' ? '' : tblState.f); add('tsince', tblState.since); add('trows', tblState.rows);
+    add('tsort', tblState.sort === 'ord' ? '' : tblState.sort);
+    if (tblState.dir !== tblDefaultDir(tblState.sort)) { add('tdir', tblState.dir > 0 ? 'asc' : 'desc'); }
+    a.setAttribute('href', base + (p.length ? '?' + p.join('&') : ''));
   }
   document.addEventListener('click', function (ev) {
     var t = ev.target && ev.target.closest ? ev.target : null;

@@ -1,0 +1,61 @@
+{{define "content"}}
+{{with .Body}}{{$t := .Table}}
+<p class="tbl-back"><a href="{{.TablesHref}}">{{icon "table"}}All {{if .Mongo}}collections{{else}}tables{{end}} of {{.Pipeline}}</a></p>
+{{if .Error}}<section class="card"><div class="cardhead"><h2>Table</h2></div>{{template "error-state" (errState "Table status is not available" .Error)}}</section>{{else}}
+<section class="card" id="table-summary" aria-label="Table status">
+  <div class="cardhead"><h2 class="mono wrap">{{$t.Table}}</h2>
+    <span class="tbl-badges"><span class="badge st-tbl-{{$t.State}}" id="tbl-state">{{$t.State}}</span>{{if $t.Quiet}} <span class="badge st-warn quiet-badge" id="tbl-quiet" title="{{quietRule}}">quiet</span>{{end}}{{if .Stale}} <span class="badge st-stale" title="The last sample failed; the numbers are from the last good one">stale</span>{{end}}</span></div>
+  <div class="snap-figs">
+    <div class="snap-fig"><div class="f-label">Initial copy</div><div class="f-value c-num">{{pct $t.ProgressPct}} <small>{{if eq $t.State "done"}}done{{else if eq $t.State "running"}}copying{{else}}waiting{{end}}</small></div><div class="bars">{{bar $t.ProgressPct}}</div></div>
+    <div class="snap-fig"><div class="f-label">Rows copied / estimate</div><div class="f-value c-num" title="Estimates come from the source statistics">{{tblRows $t}}</div></div>
+    <div class="snap-fig"><div class="f-label">ETA</div><div class="f-value c-num">{{tblETA $t}}</div></div>
+    <div class="snap-fig"><div class="f-label">Last sync</div><div class="f-value">{{tblLast $t .SampledAt}}</div></div>
+    <div class="snap-fig"><div class="f-label">Changes since the pipeline started</div><div class="f-value c-num" title="{{tblChangesTitle $t}}">{{tblChanges $t}}{{with tblChangesDetail $t}} <small>{{.}}</small>{{end}}</div></div>
+  </div>
+  <dl class="dl tbl-dl">
+    <dt>Row key</dt><dd>{{$k := .Key}}<span class="keytag {{$k.Kind}}" title="{{$k.Title}}">{{$k.Label}}</span>{{if $k.Detail}} <span class="small mono muted">{{$k.Detail}}</span>{{end}}{{if $t.Key}} <span class="small muted">({{$t.Key}})</span>{{end}}<div class="small muted">{{$k.Title}}</div></dd>
+    <dt>Copy ranges</dt><dd>{{if $t.Ranges}}{{ranges $t.Ranges}}{{else}}<span class="muted">none (only a table being copied has ranges)</span>{{end}}</dd>
+    <dt>Sampled</dt><dd>{{if .SampledAt.IsZero}}-{{else}}{{ts .SampledAt}}{{end}} <span class="small muted">(the page refreshes every few seconds)</span></dd>
+  </dl>
+</section>
+<section class="card" id="table-activity" aria-label="CDC activity">
+  <div class="cardhead"><h2>CDC activity</h2></div>
+  <p class="card-desc">Row changes the pipeline applied to this table by change data capture since the pipeline process started (the initial copy is not counted). The counts restart with the pipeline; the last sync time is kept while the Web runs.</p>
+  <dl class="dl">
+    <dt>Last change applied</dt><dd>{{if $t.LastChangeAt}}{{ts (derefTime $t.LastChangeAt)}} <span class="muted">({{tblLast $t .SampledAt}})</span>{{else}}<span class="muted">No change applied since the pipeline started</span>{{end}}</dd>
+    <dt>Committed on the source</dt><dd>{{if $t.LastSourceAt}}{{ts (derefTime $t.LastSourceAt)}}{{else}}<span class="muted">-</span>{{end}}</dd>
+    <dt>Sync delay</dt><dd>{{if .ApplyDelayS}}<span class="c-num">{{lag (deref .ApplyDelayS)}}</span> <span class="small muted">from the source commit to the target commit of the last change</span>{{else}}<span class="muted">-</span>{{end}}</dd>
+    <dt>Inserts</dt><dd class="c-num">{{int64 $t.Inserts}}</dd>
+    <dt>Updates</dt><dd class="c-num">{{int64 $t.Updates}}</dd>
+    <dt>Deletes</dt><dd class="c-num">{{int64 $t.Deletes}}</dd>
+    <dt>Total</dt><dd class="c-num">{{int64 .Changes}} <span class="small muted">({{int64 .HistoryChanges}} in the chart below)</span></dd>
+    <dt>Quiet check</dt><dd>{{with .Quiet}}{{if .Quiet}}<span class="badge st-warn quiet-badge">quiet</span> No change for {{secs .IdleS}}; this table usually changes every {{secs .UsualGapS}} and counts as quiet after {{secs .QuietAfterS}}.{{else if .Regular}}Changes regularly (in {{.ActiveWindows}} of 12 ten-minute windows, usually every {{secs .UsualGapS}}); it would count as quiet after {{secs .QuietAfterS}} without a change.{{else}}<span class="muted">Not enough regular activity seen to judge ({{.ActiveWindows}} of 12 ten-minute windows with a change, {{.Gaps}} gaps measured).</span>{{end}}<div class="small muted">{{.Rule}}</div>{{end}}</dd>
+  </dl>
+</section>
+<section class="charts" id="table-charts" aria-label="Table history">
+  <section class="card" data-chart="table-changes">{{.ChangesChart}}<p class="small muted">Per minute, for up to the last hour since the Web started watching the pipeline.</p></section>
+  <section class="card" data-chart="table-delay">{{.DelayChart}}<p class="small muted">Largest delay between the source commit and the target commit of the changes seen in each minute.</p></section>
+</section>
+<section class="card" id="table-events"><div class="cardhead"><h2>Recent events about this table</h2></div>
+  {{if .Events}}<div class="tablewrap"><table class="data-table grid"><caption class="sr-only">Newest warnings and errors that mention this table</caption><thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead><tbody>
+    {{range .Events}}<tr><td class="small nowrap">{{logTS .Time}}</td><td><span class="badge lv-{{lower .Level}}">{{.Level}}</span></td><td class="wrap msg">{{.Message}}</td></tr>{{end}}
+  </tbody></table></div>
+  {{else}}<p class="muted">No recent warning or error of the pipeline mentions this table. <a href="/pipelines/{{.Pipeline}}/errors">All errors</a></p>{{end}}
+</section>
+{{if .CanVerify}}<section class="card" id="table-verify"><div class="cardhead"><h2>Verify this {{if .Mongo}}collection{{else}}table{{end}}</h2></div>
+  {{if .JobActive}}<p class="warnbox">A job is running ({{.JobActive.Kind}}); one job at a time per pipeline. <a href="/jobs/{{.JobActive.ID}}">Open it</a>.</p>{{end}}
+  <p class="card-desc">Runs <code>strand verify</code> for this {{if .Mongo}}collection{{else}}table{{end}} only, report only (no repair). Output streams live on the job page.</p>
+  <form class="act" data-action="verify" data-pipeline="{{.Pipeline}}" data-confirm="Start a verify job for {{$t.Table}}? It reads the {{if .Mongo}}collection{{else}}table{{end}} on the source and the target.">
+    <input type="hidden" name="table" value="{{$t.Table}}">
+    <div class="field-grid cols-3">
+      <label class="field"><span class="field-label">Mode</span>
+        {{if .Mongo}}<select name="mode"><option value="sample">sample (random documents)</option><option value="full">full (every document)</option></select>
+        {{else}}<select name="mode"><option value="sample">sample (random rows)</option><option value="full">full (every row)</option></select>{{end}}
+      </label>
+    </div>
+    <div class="form-actions"><button class="btn primary" type="submit">Verify this {{if .Mongo}}collection{{else}}table{{end}}</button></div>
+  </form>
+</section>{{else if .VerifyNote}}<p class="muted small">Verify: {{.VerifyNote}}</p>{{end}}
+{{end}}
+{{end}}
+{{end}}

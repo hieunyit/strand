@@ -146,6 +146,10 @@ type TableInfo struct {
 	Deletes      int64      `json:"deletes,omitempty"`
 	LastChangeAt *time.Time `json:"last_change_at,omitempty"`
 	LastSourceAt *time.Time `json:"last_source_at,omitempty"`
+
+	// Quiet is set by the Web console (never by the pipeline): the table used to change regularly and has had
+	// no change for unusually long (internal/web/table_history.go).
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // Changes is the number of CDC row changes applied (inserts + updates + deletes).

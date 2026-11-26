@@ -159,6 +159,9 @@ type TablesView struct {
 	WithChange int        `json:"with_change"`
 	LastChange *time.Time `json:"last_change_at,omitempty"`
 	Changes    int64      `json:"changes"`
+	// Quiet: tables flagged by the quiet-table rule (they used to change regularly and have had no change for
+	// unusually long; table_history.go).
+	Quiet int `json:"quiet"`
 	// At is the sample time the list was read at (the reference of the Since filter and of the counts above).
 	At time.Time `json:"sampled_at"`
 }
@@ -224,6 +227,9 @@ func buildTablesView(sn *Snap) TablesView {
 	var v TablesView
 	v.At = sn.At
 	v.Tables = append([]admin.TableInfo{}, sn.Tables...) // finish sắp xếp tại chỗ: không đụng Snap dùng chung
+	for i := range v.Tables {
+		v.Tables[i].Quiet = sn.quiet[v.Tables[i].Table]
+	}
 	v.finish()
 	return v
 }
@@ -251,6 +257,9 @@ func (v *TablesView) finish() {
 		v.RowsCopied += tblCopied(t)
 		v.RowsEstimate += tblEst(t)
 		v.Changes += t.Changes()
+		if t.Quiet {
+			v.Quiet++
+		}
 		if l := t.LastChangeAt; l != nil {
 			v.WithChange++
 			if v.LastChange == nil || l.After(*v.LastChange) {
