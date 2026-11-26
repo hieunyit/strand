@@ -66,7 +66,7 @@ func (s *Server) auditBackupOp(w http.ResponseWriter, r *http.Request, action st
 
 // startBackupOpEnv starts `strand backup <args>` as a job process with extra environment variables (active instance only).
 func (s *Server) startBackupOpEnv(kind, pipeline string, extraEnv []string, args ...string) (string, error) {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return "", errors.New("job runner unavailable")
 	}
 	if !s.isActive() {
@@ -79,7 +79,7 @@ func (s *Server) startBackupOpEnv(kind, pipeline string, extraEnv []string, args
 	full = append(append(full, "backup"), args...)
 	env := append(s.backupOpEnv(args), s.repoSecretEnv()...)
 	env = append(env, extraEnv...)
-	return s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full, Env: env})
+	return s.jobRunner().Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: full, Env: env})
 }
 
 // startBackupOp starts `strand backup <args>` as a job process (active instance only).
@@ -856,13 +856,13 @@ func (s *Server) backupMaintenanceTick(ctx context.Context) {
 	now := s.now().UTC()
 	notifyOn := s.notifyConfigured(ctx)
 	for _, j := range jobs {
-		if j.Enabled && j.LogArchive && !j.IsCustom() && s.jobs != nil {
+		if j.Enabled && j.LogArchive && !j.IsCustom() && s.jobRunner() != nil {
 			if err := backup.ValidatePITR(j); err != nil {
 				s.log.Warn("skip log archiving: job validation failed", "job", j.ID, "reason", err)
 				continue
 			}
 			running := false
-			for _, p := range s.jobs.List("backup-logs-" + j.ID) {
+			for _, p := range s.jobRunner().List("backup-logs-" + j.ID) {
 				if p.Kind == "backup-logs" && p.Running {
 					running = true
 				}

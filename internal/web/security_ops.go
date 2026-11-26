@@ -598,7 +598,7 @@ func (s *Server) archivePipelineNames() []string {
 }
 
 func (s *Server) activeArchiveJob() *JobStatus {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return nil
 	}
 	s.archiverMu.Lock()
@@ -608,10 +608,10 @@ func (s *Server) activeArchiveJob() *JobStatus {
 }
 
 func (s *Server) latestArchiveJob() *JobStatus {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return nil
 	}
-	jobs := s.jobs.List("")
+	jobs := s.jobRunner().List("")
 	var latest *JobStatus
 	for i := range jobs {
 		j := &jobs[i]
@@ -623,15 +623,15 @@ func (s *Server) latestArchiveJob() *JobStatus {
 }
 
 func (s *Server) archiveJobByID(id string) *JobStatus {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return nil
 	}
 	if id != "" {
-		if j, ok := s.jobs.Get(id); ok && j.Kind == "archive" && j.Running {
+		if j, ok := s.jobRunner().Get(id); ok && j.Kind == "archive" && j.Running {
 			return &j
 		}
 	}
-	for _, j := range s.jobs.List("") {
+	for _, j := range s.jobRunner().List("") {
 		if j.Kind == "archive" && j.Running {
 			return &j
 		}
@@ -649,7 +649,7 @@ func (s *Server) archiveOutputDir(j *JobStatus) string {
 }
 
 func (s *Server) startArchive(r *http.Request, pipeline, dir string) (JobStatus, error) {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return JobStatus{}, errors.New("job runner unavailable")
 	}
 	p := s.reg.Get(pipeline)
@@ -668,7 +668,7 @@ func (s *Server) startArchive(r *http.Request, pipeline, dir string) (JobStatus,
 	if current := s.archiveJobByID(s.archiverJobID); current != nil {
 		return JobStatus{}, fmt.Errorf("archive job %s is already running for pipeline %s", current.ID, current.Pipeline)
 	}
-	for _, current := range s.jobs.List("") {
+	for _, current := range s.jobRunner().List("") {
 		if current.Kind == "archive" && current.Running {
 			return JobStatus{}, fmt.Errorf("archive job %s is already running for pipeline %s", current.ID, current.Pipeline)
 		}
@@ -683,22 +683,22 @@ func (s *Server) startArchive(r *http.Request, pipeline, dir string) (JobStatus,
 		return JobStatus{}, fmt.Errorf("pipeline env: %w", err)
 	}
 	args := []string{"archive", "binlog", "--config", p.ConfigPath, "--to", cleanDir}
-	id, err := s.jobs.Start(r.Context(), JobSpec{Pipeline: p.Name, Kind: "archive", Args: args, Env: env})
+	id, err := s.jobRunner().Start(r.Context(), JobSpec{Pipeline: p.Name, Kind: "archive", Args: args, Env: env})
 	if err != nil {
 		_ = s.auditSensitive(r, "archive.start", map[string]any{"pipeline": pipeline, "error": err.Error()}, "error")
 		return JobStatus{}, err
 	}
 	s.archiverRunning, s.archiverDir, s.archiverJobID = true, cleanDir, id
 	if err := s.auditSensitive(r, "archive.start", map[string]any{"pipeline": pipeline, "dir": cleanDir, "job_id": id}, "ok"); err != nil {
-		_ = s.jobs.Cancel(id)
+		_ = s.jobRunner().Cancel(id)
 		return JobStatus{}, err
 	}
-	j, _ := s.jobs.Get(id)
+	j, _ := s.jobRunner().Get(id)
 	return j, nil
 }
 
 func (s *Server) stopArchive(r *http.Request, id string) error {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return errors.New("job runner unavailable")
 	}
 	if id == "" {
@@ -709,7 +709,7 @@ func (s *Server) stopArchive(r *http.Request, id string) error {
 	if id == "" {
 		return os.ErrNotExist
 	}
-	j, ok := s.jobs.Get(id)
+	j, ok := s.jobRunner().Get(id)
 	if !ok || j.Kind != "archive" {
 		return os.ErrNotExist
 	}
@@ -717,7 +717,7 @@ func (s *Server) stopArchive(r *http.Request, id string) error {
 		return err
 	}
 	if j.Running {
-		if err := s.jobs.Cancel(id); err != nil {
+		if err := s.jobRunner().Cancel(id); err != nil {
 			_ = s.auditSensitive(r, "archive.stop", map[string]any{"job_id": id, "error": err.Error()}, "error")
 			return err
 		}

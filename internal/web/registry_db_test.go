@@ -50,7 +50,7 @@ func TestDeclaredPipelineRegisteredInDatabase(t *testing.T) {
 	}
 	// Adopt: validated, then stored in the DB and on disk; conflict cleared.
 	waitFor(t, "verify job done", func() bool {
-		for _, j := range e.srv.jobs.List("orders") {
+		for _, j := range e.srv.jobRunner().List("orders") {
 			if j.Running {
 				return false
 			}

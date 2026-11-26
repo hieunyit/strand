@@ -57,20 +57,22 @@ type Server struct {
 	limiter           *LoginLimiter
 	audit             *AuditLog
 	actions           *ActionRegistry
-	jobs              JobRunner // FileJobRunner (M3); test có thể thay bằng SetJobRunner
-	log               *slog.Logger
-	now               func() time.Time
-	tls               bool
-	live              liveSettings // cài đặt hiệu lực (trang Settings)
-	version           string
-	db                *metaDB      // kho metadata PostgreSQL (Mem trong test); luôn khác nil
-	stops             *stopTracker // dừng do web thực hiện (phân biệt với dừng ngoài web)
-	lease             *leaseMgr    // chế độ DB: lease instance active (lease.go)
-	desired           desiredCache
-	backups           *backup.Catalog
-	checker           conncheck.Checker                                                          // connection tests (nil: live)
-	notifyHTTP        *http.Client                                                               // notification deliveries (nil: default client)
-	notifyMail        func(addr string, a smtp.Auth, from string, to []string, msg []byte) error // nil: smtp.SendMail
+	// jobsBox holds the JobRunner (FileJobRunner, M3). Atomic: tests swap it with SetJobRunner while
+	// background goroutines (backup schedule reconcile after a job ends) read it; read it with jobRunner().
+	jobsBox    atomic.Pointer[jobRunnerBox]
+	log        *slog.Logger
+	now        func() time.Time
+	tls        bool
+	live       liveSettings // cài đặt hiệu lực (trang Settings)
+	version    string
+	db         *metaDB      // kho metadata PostgreSQL (Mem trong test); luôn khác nil
+	stops      *stopTracker // dừng do web thực hiện (phân biệt với dừng ngoài web)
+	lease      *leaseMgr    // chế độ DB: lease instance active (lease.go)
+	desired    desiredCache
+	backups    *backup.Catalog
+	checker    conncheck.Checker                                                          // connection tests (nil: live)
+	notifyHTTP *http.Client                                                               // notification deliveries (nil: default client)
+	notifyMail func(addr string, a smtp.Auth, from string, to []string, msg []byte) error // nil: smtp.SendMail
 
 	pages     map[string]*template.Template
 	pagesLang map[string]map[string]*template.Template
@@ -233,7 +235,7 @@ func New(o Options) (*Server, error) {
 		return nil, err
 	}
 	jr.OnEnd = s.auditJobEnd
-	s.jobs = jr
+	s.SetJobRunner(jr)
 	if err := s.resumeBackupJobs(context.Background()); err != nil {
 		s.log.Error("resume scheduled backup jobs", "error", err)
 	}
@@ -304,7 +306,18 @@ func (s *Server) Audit() *AuditLog { return s.audit }
 func (s *Server) Actions() *ActionRegistry { return s.actions }
 
 // SetJobRunner gắn bộ chạy tiến trình con (M3).
-func (s *Server) SetJobRunner(j JobRunner) { s.jobs = j }
+func (s *Server) SetJobRunner(j JobRunner) { s.jobsBox.Store(&jobRunnerBox{r: j}) }
+
+// jobRunnerBox wraps the JobRunner interface for atomic.Pointer.
+type jobRunnerBox struct{ r JobRunner }
+
+// jobRunner returns the current JobRunner (nil when none is set).
+func (s *Server) jobRunner() JobRunner {
+	if b := s.jobsBox.Load(); b != nil {
+		return b.r
+	}
+	return nil
+}
 
 // ListenAndServe chạy sampler và HTTP(S) server cho tới khi ctx hủy.
 func (s *Server) ListenAndServe(ctx context.Context) error {

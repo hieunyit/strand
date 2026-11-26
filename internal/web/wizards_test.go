@@ -60,7 +60,7 @@ func (e *testEnv) lastJobDone(kind string) JobStatus {
 		if err != nil || st == nil || st.JobID == "" {
 			return false
 		}
-		got, ok := e.srv.jobs.Get(st.JobID)
+		got, ok := e.srv.jobRunner().Get(st.JobID)
 		if !ok || got.Running {
 			return false
 		}

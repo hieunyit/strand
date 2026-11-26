@@ -20,7 +20,7 @@ func TestCLIJobsOnTheWeb(t *testing.T) {
 		code, body := e.act(c, csrf, "orders", action, args)
 		if code == 200 {
 			id, _ := body["job_id"].(string)
-			waitFor(t, action+" job", func() bool { j, ok := e.srv.jobs.Get(id); return ok && !j.Running })
+			waitFor(t, action+" job", func() bool { j, ok := e.srv.jobRunner().Get(id); return ok && !j.Running })
 		}
 		return code, body
 	}

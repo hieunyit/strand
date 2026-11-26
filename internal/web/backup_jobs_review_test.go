@@ -141,7 +141,8 @@ func TestReconcileKeepsRetryingThroughOutage(t *testing.T) {
 	fs := &flakyJobStore{Store: mem}
 	fs.failures.Store(20) // far more than the previous 6-attempt budget
 	runner := &startRecorder{backupStopTestRunner: backupStopTestRunner{jobs: map[string]JobStatus{}}}
-	s := &Server{cfg: &Config{}, db: &metaDB{st: fs}, jobs: runner, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s := &Server{cfg: &Config{}, db: &metaDB{st: fs}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s.SetJobRunner(runner)
 	done := make(chan struct{})
 	go func() { s.reconcileBackupSchedule(backupJobPipeline("bjob-1")); close(done) }()
 	select {

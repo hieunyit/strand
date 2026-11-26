@@ -86,10 +86,10 @@ func (s *Server) invalidateSourceTables(name string) {
 }
 
 func (s *Server) listJobs(pipeline string) []JobStatus {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return []JobStatus{}
 	}
-	out := s.jobs.List(pipeline)
+	out := s.jobRunner().List(pipeline)
 	if out == nil {
 		out = []JobStatus{}
 	}
@@ -119,11 +119,11 @@ func (s *Server) apiJobs(w http.ResponseWriter, r *http.Request, _ *Session) {
 
 func (s *Server) lookupJob(w http.ResponseWriter, r *http.Request) (JobStatus, bool) {
 	id := r.PathValue("id")
-	if s.jobs == nil || !JobIDRE.MatchString(id) {
+	if s.jobRunner() == nil || !JobIDRE.MatchString(id) {
 		writeErr(w, http.StatusNotFound, "unknown job")
 		return JobStatus{}, false
 	}
-	j, ok := s.jobs.Get(id)
+	j, ok := s.jobRunner().Get(id)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown job")
 	}
@@ -143,7 +143,7 @@ func (s *Server) apiJobOutput(w http.ResponseWriter, r *http.Request, _ *Session
 		return
 	}
 	off, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
-	out, _ := s.jobs.Output(j.ID, off)
+	out, _ := s.jobRunner().Output(j.ID, off)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -437,17 +437,17 @@ type jobBody struct {
 
 func (s *Server) pageJob(w http.ResponseWriter, r *http.Request, sess *Session) {
 	id := r.PathValue("id")
-	if s.jobs == nil || !JobIDRE.MatchString(id) {
+	if s.jobRunner() == nil || !JobIDRE.MatchString(id) {
 		http.NotFound(w, r)
 		return
 	}
-	j, ok := s.jobs.Get(id)
+	j, ok := s.jobRunner().Get(id)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 	// Output ban đầu nạp sẵn (HTML), phần sau lấy bằng polling ?offset= từ app.js.
-	out, _ := s.jobs.Output(id, 0)
+	out, _ := s.jobRunner().Output(id, 0)
 	origin := s.jobOrigins(r.Context(), []JobStatus{j})[j.ID]
 	active := "jobs"
 	if origin.Pipeline {

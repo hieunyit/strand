@@ -24,12 +24,12 @@ func TestJobOutputStoredInDatabase(t *testing.T) {
 		t.Fatalf("verify: %d %v", code, body)
 	}
 	var id string
-	for _, j := range e.srv.jobs.List("orders") {
+	for _, j := range e.srv.jobRunner().List("orders") {
 		id = j.ID
 	}
 	spool := filepath.Join(state(e), "jobs", id+".log")
 	waitFor(t, "job done and spool shipped", func() bool {
-		j, _ := e.srv.jobs.Get(id)
+		j, _ := e.srv.jobRunner().Get(id)
 		return !j.Running && !fileExists(spool)
 	})
 	b, _ := st.ReadJobOutput(context.Background(), id, 0, 1<<20)
@@ -43,7 +43,7 @@ func TestJobOutputStoredInDatabase(t *testing.T) {
 		t.Fatalf("output API after restart: %d %s", resp.StatusCode, body)
 	}
 	// Offset past the end: clamped, empty.
-	if o, _ := e2.srv.jobs.Output(id, 1<<30); o.Data != "" || o.Offset != int64(len(b)) {
+	if o, _ := e2.srv.jobRunner().Output(id, 1<<30); o.Data != "" || o.Offset != int64(len(b)) {
 		t.Fatalf("offset past end: %+v", o)
 	}
 }

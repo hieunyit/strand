@@ -189,8 +189,8 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 		ProcessID string `json:"process_id"`
 	}
 	_ = json.Unmarshal([]byte(body), &pid)
-	waitFor(t, "restore process recorded", func() bool { _, ok := e.srv.jobs.Get(pid.ProcessID); return ok })
-	js, _ := e.srv.jobs.Get(pid.ProcessID)
+	waitFor(t, "restore process recorded", func() bool { _, ok := e.srv.jobRunner().Get(pid.ProcessID); return ok })
+	js, _ := e.srv.jobRunner().Get(pid.ProcessID)
 	waitIdle(t, e, js.Pipeline)
 	// A second restore runs concurrently (own pipeline), e.g. MySQL and PostgreSQL at the same time.
 	second := `{"source":"mysql-prod","target_time":"2026-11-20T10:00:00Z","connection_id":"` + tc.Connection.ID + `","target_database":"shop_pitr2","confirm":"shop_pitr2"}`
@@ -202,7 +202,7 @@ func TestManagedBackupWebAPIs(t *testing.T) {
 		ProcessID string `json:"process_id"`
 	}
 	_ = json.Unmarshal([]byte(body2), &pid2)
-	if js2, ok := e.srv.jobs.Get(pid2.ProcessID); ok {
+	if js2, ok := e.srv.jobRunner().Get(pid2.ProcessID); ok {
 		waitIdle(t, e, js2.Pipeline)
 	}
 	args := strings.Join(js.Args, " ")
@@ -251,7 +251,7 @@ func TestBackupMaintenanceTick(t *testing.T) {
 	e.srv.backupMaintenanceTick(context.Background())
 	e.srv.backupMaintenanceTick(context.Background())
 	prunes := 0
-	for _, p := range e.srv.jobs.List("backup-prune-" + job.ID) {
+	for _, p := range e.srv.jobRunner().List("backup-prune-" + job.ID) {
 		if p.Kind == "backup-prune" {
 			prunes++
 		}
@@ -301,7 +301,7 @@ func waitIdle(t *testing.T, e *testEnv, pipelines ...string) {
 		for time.Now().Before(deadline) {
 			busy := false
 			for _, p := range pipelines {
-				for _, j := range e.srv.jobs.List(p) {
+				for _, j := range e.srv.jobRunner().List(p) {
 					busy = busy || j.Running
 				}
 			}

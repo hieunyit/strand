@@ -912,8 +912,8 @@ func (s *Server) controls(p *Pipeline, v PipelineView) Controls {
 	c := Controls{Running: v.Runtime.Running || v.Reachable, Systemd: p.Mode() == ModeSystemd, Reachable: v.Reachable,
 		Paused: v.State == StatePaused, CfgOK: p.CfgErr == ""}
 	c.CanRewind = v.Reachable && p.Cfg != nil && p.Cfg.Source.Kind == "mysql" && p.Cfg.Target.Kind == "mysql"
-	if s.jobs != nil {
-		for _, j := range s.jobs.List(p.Name) {
+	if s.jobRunner() != nil {
+		for _, j := range s.jobRunner().List(p.Name) {
 			if j.Running {
 				jj := j
 				c.JobActive = &jj

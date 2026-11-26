@@ -13,7 +13,7 @@ import (
 
 func runningSchedulers(e *testEnv, jobID string) []JobStatus {
 	var out []JobStatus
-	for _, j := range e.srv.jobs.List(backupJobPipeline(jobID)) {
+	for _, j := range e.srv.jobRunner().List(backupJobPipeline(jobID)) {
 		if j.Running && j.Kind == "backup-schedule" {
 			out = append(out, j)
 		}

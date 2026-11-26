@@ -158,7 +158,7 @@ observability: { admin_socket: %s }
 			t.Errorf("%v: argv %q lacks %q", tc.args, args, tc.want)
 		}
 		waitFor(t, "verify job end", func() bool {
-			for _, j := range e.srv.jobs.List("orders") {
+			for _, j := range e.srv.jobRunner().List("orders") {
 				if j.Running {
 					return false
 				}

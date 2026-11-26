@@ -85,7 +85,7 @@ func TestDBMigrateVerifyAndExport(t *testing.T) {
 	if srv.reg.Get("filepipe") == nil || srv.reg.Get("orders") == nil {
 		t.Fatal("pipelines missing in DB mode")
 	}
-	jobs := srv.jobs.List("orders")
+	jobs := srv.jobRunner().List("orders")
 	if len(jobs) != 1 {
 		t.Fatalf("jobs in DB mode: %d", len(jobs))
 	}

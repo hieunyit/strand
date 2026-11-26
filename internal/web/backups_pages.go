@@ -287,8 +287,8 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	jobView := backupJobView{Job: job}
-	if s.jobs != nil {
-		if st, ok := s.jobs.Get(job.ID); ok {
+	if s.jobRunner() != nil {
+		if st, ok := s.jobRunner().Get(job.ID); ok {
 			jobView.Process = &st
 		}
 	}
@@ -328,8 +328,8 @@ func (s *Server) pageBackupsJobDetail(w http.ResponseWriter, r *http.Request, se
 	var runViews []backupRunView
 	for _, run := range runs {
 		view := backupRunView{Run: run, RemediationHint: run.Remediation()}
-		if s.jobs != nil && JobIDRE.MatchString(run.ProcessID) {
-			if process, ok := s.jobs.Get(run.ProcessID); ok &&
+		if s.jobRunner() != nil && JobIDRE.MatchString(run.ProcessID) {
+			if process, ok := s.jobRunner().Get(run.ProcessID); ok &&
 				(process.Pipeline == backupJobPipeline(id) || process.Pipeline == backupJobRunPipeline(id)) {
 				view.LogURL = "/jobs/" + run.ProcessID
 			}
@@ -773,17 +773,17 @@ func (s *Server) apiBackupRunCancel(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 	pid, owned := s.ownedBackupProcs.Load(run.ProcessID)
-	if !owned || s.jobs == nil || !JobIDRE.MatchString(run.ProcessID) {
+	if !owned || s.jobRunner() == nil || !JobIDRE.MatchString(run.ProcessID) {
 		writeErr(w, http.StatusConflict, "backup run is owned by another instance or not running on this host")
 		return
 	}
-	process, ok := s.jobs.Get(run.ProcessID)
+	process, ok := s.jobRunner().Get(run.ProcessID)
 	if !ok || !process.Running || process.PID != pid.(int) ||
 		(process.Pipeline != backupJobPipeline(run.JobID) && process.Pipeline != backupJobRunPipeline(run.JobID)) {
 		writeErr(w, http.StatusConflict, "backup run process is no longer active for this job")
 		return
 	}
-	if runner, ok := s.jobs.(*FileJobRunner); ok && !jobProcessMatches(process.PID, process.ID, runner.bin, runner.logPath(process.ID)) {
+	if runner, ok := s.jobRunner().(*FileJobRunner); ok && !jobProcessMatches(process.PID, process.ID, runner.bin, runner.logPath(process.ID)) {
 		writeErr(w, http.StatusConflict, "backup run process identity could not be verified")
 		return
 	}
@@ -803,7 +803,7 @@ func (s *Server) apiBackupRunCancel(w http.ResponseWriter, r *http.Request, sess
 			return
 		}
 	}
-	if err := s.jobs.Cancel(run.ProcessID); err != nil {
+	if err := s.jobRunner().Cancel(run.ProcessID); err != nil {
 		writeErr(w, http.StatusConflict, "backup run could not be cancelled: "+err.Error())
 		return
 	}

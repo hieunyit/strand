@@ -198,7 +198,8 @@ func TestStopBackupJobStopsSchedulerAndRunNow(t *testing.T) {
 		"schedule": {ID: "schedule", Pipeline: backupJobPipeline("bjob-1"), Kind: "backup-schedule", Running: true},
 		"manual":   {ID: "manual", Pipeline: backupJobRunPipeline("bjob-1"), Kind: "backup-run", Running: true},
 	}}
-	s := &Server{jobs: runner}
+	s := &Server{}
+	s.SetJobRunner(runner)
 	if err := s.stopBackupJob("bjob-1"); err != nil {
 		t.Fatal(err)
 	}

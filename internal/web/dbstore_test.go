@@ -341,7 +341,7 @@ func TestImportFilesIntoDatabaseOnce(t *testing.T) {
 		if jobs, _ := st.ListJobs(ctx); len(jobs) != 1 || jobs[0].ID != jid {
 			t.Fatalf("jobs = %+v", jobs)
 		}
-		if j, ok := srv.jobs.Get(jid); !ok || j.Pipeline != "legacy" {
+		if j, ok := srv.jobRunner().Get(jid); !ok || j.Pipeline != "legacy" {
 			t.Fatalf("imported job not served by the runner: %v", j)
 		}
 		if _, ok, _ := st.GetWizard(ctx, "repair", "legacy"); !ok {
@@ -498,7 +498,7 @@ func TestWizardAndJobsInDatabase(t *testing.T) {
 		t.Fatalf("verify: %d %v", code, body)
 	}
 	id, _ := (func() (string, bool) {
-		for _, j := range e.srv.jobs.List("orders") {
+		for _, j := range e.srv.jobRunner().List("orders") {
 			return j.ID, true
 		}
 		return "", false
@@ -517,7 +517,7 @@ func TestWizardAndJobsInDatabase(t *testing.T) {
 	}
 	// Web khởi động lại: lịch sử job đọc từ DB.
 	e2 := e.restart()
-	if j, ok := e2.srv.jobs.Get(id); !ok || j.Kind != "verify" {
+	if j, ok := e2.srv.jobRunner().Get(id); !ok || j.Kind != "verify" {
 		t.Fatalf("job history lost across restart: %+v %v", j, ok)
 	}
 }

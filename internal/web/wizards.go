@@ -131,7 +131,7 @@ func jobSucceeded(j JobStatus) bool {
 
 // syncWizard đồng bộ trạng thái wizard với kết quả job (job chạy độc lập với web). Gọi khi đã giữ khóa.
 func (s *Server) syncWizard(st *wizardState) {
-	if st == nil || st.JobDone || st.JobID == "" || s.jobs == nil {
+	if st == nil || st.JobDone || st.JobID == "" || s.jobRunner() == nil {
 		return
 	}
 	switch st.Step {
@@ -139,7 +139,7 @@ func (s *Server) syncWizard(st *wizardState) {
 	default:
 		return
 	}
-	j, ok := s.jobs.Get(st.JobID)
+	j, ok := s.jobRunner().Get(st.JobID)
 	if ok && j.Running {
 		return
 	}
@@ -187,7 +187,7 @@ func (s *Server) startWizardJob(ctx context.Context, p *Pipeline, kind string, a
 		return "", &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
 	}
 	env = append(env, extraEnv...)
-	id, err := s.jobs.Start(ctx, JobSpec{Pipeline: p.Name, Kind: kind, Args: args, DisplayArgs: display, Env: env})
+	id, err := s.jobRunner().Start(ctx, JobSpec{Pipeline: p.Name, Kind: kind, Args: args, DisplayArgs: display, Env: env})
 	if err != nil {
 		var run *ErrJobRunning
 		if errors.As(err, &run) {
@@ -340,8 +340,8 @@ func (s *Server) wizAbort(req ActionRequest, kind string) (ActionResult, error) 
 	if !st.active() {
 		return ActionResult{}, Conflict("no %s wizard in progress", kind)
 	}
-	if st.JobID != "" && s.jobs != nil {
-		if j, ok := s.jobs.Get(st.JobID); ok && j.Running {
+	if st.JobID != "" && s.jobRunner() != nil {
+		if j, ok := s.jobRunner().Get(st.JobID); ok && j.Running {
 			return ActionResult{}, Conflict("a %s job is still running (%s); cancel it from the job page first", j.Kind, j.ID)
 		}
 	}
@@ -716,7 +716,7 @@ func (s *Server) jobText(id string) string {
 	var sb strings.Builder
 	var off int64
 	for i := 0; i < 16; i++ {
-		o, ok := s.jobs.Output(id, off)
+		o, ok := s.jobRunner().Output(id, off)
 		if !ok {
 			break
 		}
@@ -781,8 +781,8 @@ func (s *Server) wizardView(ctx context.Context, p *Pipeline, kind string) (wiza
 	if p.Cfg != nil {
 		v.Engine = p.Cfg.Source.Kind + " to " + p.Cfg.Target.Kind
 	}
-	if st != nil && st.JobID != "" && s.jobs != nil {
-		if j, ok := s.jobs.Get(st.JobID); ok {
+	if st != nil && st.JobID != "" && s.jobRunner() != nil {
+		if j, ok := s.jobRunner().Get(st.JobID); ok {
 			v.Job = &j
 			text := s.jobText(j.ID)
 			v.Output = tail(text, 6000)

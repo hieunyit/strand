@@ -53,10 +53,10 @@ func (s *Server) requireCompleteRecord(w http.ResponseWriter, r *http.Request, i
 // process on this instance. A record with no owner to check is presumed alive for abandonedAfter.
 func (s *Server) backupWriterRunning(ctx context.Context, rec backup.Record) (bool, string) {
 	running := func(pipeline string) bool {
-		if s.jobs == nil {
+		if s.jobRunner() == nil {
 			return false
 		}
-		for _, p := range s.jobs.List(pipeline) {
+		for _, p := range s.jobRunner().List(pipeline) {
 			if p.Running {
 				return true
 			}

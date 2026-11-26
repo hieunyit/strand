@@ -43,7 +43,7 @@ func TestTwoInstancesOneActiveStandbyTakesOver(t *testing.T) {
 			t.Fatalf("second instance role = %q, want standby", e2.srv.role())
 		}
 		// Standby did not touch the active instance's job, registry row or pipelines.
-		for _, j := range e2.srv.jobs.List("orders") {
+		for _, j := range e2.srv.jobRunner().List("orders") {
 			if !j.Running || j.Interrupted {
 				t.Fatalf("standby marked the active instance's job: %+v", j)
 			}

@@ -253,7 +253,7 @@ func TestOpsInputValidationNeverReachesBackends(t *testing.T) {
 			t.Errorf("rewind to %q: %d, want 400", to, code)
 		}
 	}
-	if len(e.mock.Calls()) != 0 || len(e.fakeCalls()) != 0 || len(e.srv.jobs.List("")) != 0 {
+	if len(e.mock.Calls()) != 0 || len(e.fakeCalls()) != 0 || len(e.srv.jobRunner().List("")) != 0 {
 		t.Errorf("a rejected request reached a backend: socket %v exec %v", e.mock.Calls(), e.fakeCalls())
 	}
 }

@@ -196,7 +196,7 @@ func (s *Server) leaseStep(ctx context.Context, wasActive bool) bool {
 	if gained {
 		s.takeover(ctx)
 	} else if !nowActive {
-		if jr, ok := s.jobs.(*FileJobRunner); ok {
+		if jr, ok := s.jobRunner().(*FileJobRunner); ok {
 			_ = jr.Reload() // job history written by the active instance
 		}
 	}
@@ -205,7 +205,7 @@ func (s *Server) leaseStep(ctx context.Context, wasActive bool) bool {
 
 // takeover: this standby just became active. Run what the previous holder no longer does.
 func (s *Server) takeover(ctx context.Context) {
-	if jr, ok := s.jobs.(*FileJobRunner); ok {
+	if jr, ok := s.jobRunner().(*FileJobRunner); ok {
 		if err := jr.Recover(); err != nil {
 			s.log.Warn("takeover: recover jobs failed", "err", err)
 		}

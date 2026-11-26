@@ -256,7 +256,7 @@ func newEnvWith(t *testing.T, mutate func(e *testEnv, c *Config), opt func(o *Op
 	t.Cleanup(func() {
 		_ = e.srv.Close()
 		e.hold(false)
-		if jr, ok := e.srv.jobs.(*FileJobRunner); ok {
+		if jr, ok := e.srv.jobRunner().(*FileJobRunner); ok {
 			for _, j := range jr.List("") {
 				if j.Running {
 					_ = jr.Cancel(j.ID)

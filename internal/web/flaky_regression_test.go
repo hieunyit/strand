@@ -97,7 +97,7 @@ func TestReconcileStopsOnClose(t *testing.T) {
 	st := store.NewMem()
 	e := dbEnv(t, st, nil, nil)
 
-	runner := &failStartRunner{JobRunner: e.srv.jobs}
+	runner := &failStartRunner{JobRunner: e.srv.jobRunner()}
 	e.srv.SetJobRunner(runner)
 
 	j := backup.Job{
@@ -272,7 +272,7 @@ func TestDuplicateReconcileOnlyRunsOneLoop(t *testing.T) {
 	st := store.NewMem()
 	e := dbEnv(t, st, nil, nil)
 	runner := &blockingStartRunner{
-		JobRunner: e.srv.jobs,
+		JobRunner: e.srv.jobRunner(),
 		block:     make(chan struct{}),
 	}
 	e.srv.SetJobRunner(runner)
@@ -426,7 +426,7 @@ func TestReconcileLostWakeup(t *testing.T) {
 	e := dbEnv(t, st, nil, nil)
 	defer e.srv.Close()
 
-	runner := &triggerReconcileRunner{JobRunner: e.srv.jobs}
+	runner := &triggerReconcileRunner{JobRunner: e.srv.jobRunner()}
 	e.srv.SetJobRunner(runner)
 
 	j := backup.Job{
@@ -532,7 +532,7 @@ func TestReconcileEarlyExitHonorsAgain(t *testing.T) {
 	e = dbEnv(t, ist, nil, nil)
 	defer e.srv.Close()
 
-	runner := &triggerReconcileRunner{JobRunner: e.srv.jobs}
+	runner := &triggerReconcileRunner{JobRunner: e.srv.jobRunner()}
 	e.srv.SetJobRunner(runner)
 
 	// Launch loop 1:
@@ -594,7 +594,7 @@ func TestReconcileAgainDoesNotRestartOnClosedServer(t *testing.T) {
 	e = dbEnv(t, ist, nil, nil)
 	defer e.srv.Close()
 
-	runner := &triggerReconcileRunner{JobRunner: e.srv.jobs}
+	runner := &triggerReconcileRunner{JobRunner: e.srv.jobRunner()}
 	e.srv.SetJobRunner(runner)
 
 	done := make(chan struct{})

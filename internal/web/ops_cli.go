@@ -111,7 +111,7 @@ func truthyArg(v string) bool {
 // startCLIJob chạy `strand <argv>` thành job của pipeline (một job mỗi pipeline), sau khi dựng lại file
 // cấu hình/.env từ DB (tiến trình strand chỉ đọc file).
 func (s *Server) startCLIJob(ctx context.Context, p *Pipeline, kind string, argv []string) (ActionResult, error) {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return ActionResult{}, &ActionError{Status: 500, Msg: "job runner not configured"}
 	}
 	s.materialize(p.Name)
@@ -119,7 +119,7 @@ func (s *Server) startCLIJob(ctx context.Context, p *Pipeline, kind string, argv
 	if err != nil {
 		return ActionResult{}, &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
 	}
-	id, err := s.jobs.Start(ctx, JobSpec{Pipeline: p.Name, Kind: kind, Args: argv, Env: env})
+	id, err := s.jobRunner().Start(ctx, JobSpec{Pipeline: p.Name, Kind: kind, Args: argv, Env: env})
 	if err != nil {
 		var run *ErrJobRunning
 		if errors.As(err, &run) {

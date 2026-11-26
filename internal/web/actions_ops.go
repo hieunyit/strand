@@ -186,11 +186,11 @@ func (s *Server) registerOps() {
 		if !JobIDRE.MatchString(id) {
 			return ActionResult{}, BadRequest("invalid job_id")
 		}
-		j, ok := srv.jobs.Get(id)
+		j, ok := srv.jobRunner().Get(id)
 		if !ok || j.Pipeline != req.Pipeline.Name {
 			return ActionResult{}, &ActionError{Status: 404, Msg: "unknown job for this pipeline"}
 		}
-		if err := srv.jobs.Cancel(id); err != nil {
+		if err := srv.jobRunner().Cancel(id); err != nil {
 			return ActionResult{}, Conflict("%v", err)
 		}
 		return ActionResult{Message: "cancel requested", JobID: id}, nil
@@ -359,7 +359,7 @@ func srvVerifyMongo(ctx context.Context, srv *Server, req ActionRequest, argv []
 	if err != nil {
 		return ActionResult{}, &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
 	}
-	id, err := srv.jobs.Start(ctx, JobSpec{Pipeline: p.Name, Kind: "verify", Args: argv, Env: env})
+	id, err := srv.jobRunner().Start(ctx, JobSpec{Pipeline: p.Name, Kind: "verify", Args: argv, Env: env})
 	if err != nil {
 		var run *ErrJobRunning
 		if errors.As(err, &run) {
@@ -372,7 +372,7 @@ func srvVerifyMongo(ctx context.Context, srv *Server, req ActionRequest, argv []
 
 func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResult, error) {
 	p := req.Pipeline
-	if srv.jobs == nil {
+	if srv.jobRunner() == nil {
 		return ActionResult{}, &ActionError{Status: 500, Msg: "job runner not configured"}
 	}
 	mode := req.Args["mode"]
@@ -430,7 +430,7 @@ func srvVerify(ctx context.Context, srv *Server, req ActionRequest) (ActionResul
 	if err != nil {
 		return ActionResult{}, &ActionError{Status: 500, Msg: "env_file: " + err.Error()}
 	}
-	id, err := srv.jobs.Start(ctx, JobSpec{Pipeline: p.Name, Kind: "verify", Args: argv, Env: env})
+	id, err := srv.jobRunner().Start(ctx, JobSpec{Pipeline: p.Name, Kind: "verify", Args: argv, Env: env})
 	if err != nil {
 		var run *ErrJobRunning
 		if errors.As(err, &run) {

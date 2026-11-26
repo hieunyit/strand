@@ -149,7 +149,8 @@ func TestSchedulerSkipsJobWithoutNativeTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := &startRecorder{backupStopTestRunner: backupStopTestRunner{jobs: map[string]JobStatus{}}}
-	s := &Server{cfg: &Config{}, db: &metaDB{st: mem}, jobs: rec, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s := &Server{cfg: &Config{}, db: &metaDB{st: mem}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s.SetJobRunner(rec)
 	done := make(chan struct{})
 	go func() { s.reconcileBackupSchedule(backupJobPipeline(j.ID)); close(done) }()
 	select {

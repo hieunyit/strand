@@ -276,7 +276,7 @@ func TestJobDownloadEndpointSecurity(t *testing.T) {
 
 	// Cancel verify job so orders pipeline can run export
 	_, _ = e.act(c, csrf, "orders", ActJobCancel, map[string]string{"job_id": verifyJobID})
-	waitFor(t, "verify job cancellation", func() bool { j, ok := e.srv.jobs.Get(verifyJobID); return ok && !j.Running })
+	waitFor(t, "verify job cancellation", func() bool { j, ok := e.srv.jobRunner().Get(verifyJobID); return ok && !j.Running })
 
 	// 2. Export job download succeeds and is audited
 	e.hold(true)
@@ -295,8 +295,8 @@ func TestJobDownloadEndpointSecurity(t *testing.T) {
 		t.Fatalf("unfinished export must not be downloadable, got HTTP %d", resp.StatusCode)
 	}
 	e.hold(false)
-	waitFor(t, "export job completion", func() bool { j, ok := e.srv.jobs.Get(exportJobID); return ok && !j.Running })
-	j, ok := e.srv.jobs.Get(exportJobID)
+	waitFor(t, "export job completion", func() bool { j, ok := e.srv.jobRunner().Get(exportJobID); return ok && !j.Running })
+	j, ok := e.srv.jobRunner().Get(exportJobID)
 	if !ok || j.ExitCode == nil || *j.ExitCode != 0 {
 		t.Fatalf("export job did not succeed: %+v", j)
 	}
@@ -632,8 +632,8 @@ func TestArchiveStartsAndStopsRealJobWithoutCredentialInArgs(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("stop archive: status=%d body=%s", resp.StatusCode, body)
 	}
-	waitFor(t, "archive job stop", func() bool { j, ok := e.srv.jobs.Get(started.JobID); return ok && !j.Running })
-	finished, _ := e.srv.jobs.Get(started.JobID)
+	waitFor(t, "archive job stop", func() bool { j, ok := e.srv.jobRunner().Get(started.JobID); return ok && !j.Running })
+	finished, _ := e.srv.jobRunner().Get(started.JobID)
 	archiveDir := e.srv.archiveOutputDir(&finished)
 	if err := os.WriteFile(filepath.Join(archiveDir, "mysql-bin.000001"), []byte("binlog"), 0600); err != nil {
 		t.Fatal(err)

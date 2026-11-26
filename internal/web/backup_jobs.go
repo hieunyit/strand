@@ -183,10 +183,10 @@ func (s *Server) resumeBackupJobs(ctx context.Context) error {
 }
 
 func (s *Server) backupJobProcess(j backup.Job) *JobStatus {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return nil
 	}
-	processes := append(s.jobs.List(backupJobPipeline(j.ID)), s.jobs.List(backupJobRunPipeline(j.ID))...)
+	processes := append(s.jobRunner().List(backupJobPipeline(j.ID)), s.jobRunner().List(backupJobRunPipeline(j.ID))...)
 	sort.Slice(processes, func(i, k int) bool {
 		if processes[i].Running != processes[k].Running {
 			return processes[i].Running
@@ -287,7 +287,7 @@ func (s *Server) startBackupProcess(j backup.Job, once bool) (string, error) {
 }
 
 func (s *Server) startBackupProcessWithTrigger(j backup.Job, once bool, trigger string) (string, error) {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return "", errors.New("job runner unavailable")
 	}
 	if !s.isActive() {
@@ -302,7 +302,7 @@ func (s *Server) startBackupProcessWithTrigger(j backup.Job, once bool, trigger 
 		return "", err
 	}
 	if !once {
-		for _, current := range s.jobs.List(backupJobPipeline(j.ID)) {
+		for _, current := range s.jobRunner().List(backupJobPipeline(j.ID)) {
 			if current.Kind == "backup-schedule" && current.Running {
 				return current.ID, nil
 			}
@@ -373,7 +373,7 @@ func (s *Server) startBackupJobProcess(j backup.Job, once bool, args []string) (
 		// Stored repository credentials travel in the child's environment only (never argv).
 		env = append(env, s.repoSecretEnv()...)
 	}
-	id, err := s.jobs.Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: args, Env: env})
+	id, err := s.jobRunner().Start(context.Background(), JobSpec{Pipeline: pipeline, Kind: kind, Args: args, Env: env})
 	if err != nil {
 		return "", err
 	}
@@ -382,10 +382,10 @@ func (s *Server) startBackupJobProcess(j backup.Job, once bool, args []string) (
 }
 
 func (s *Server) trackBackupProcess(id string) {
-	if st, ok := s.jobs.Get(id); ok && st.Running && st.PID > 0 {
+	if st, ok := s.jobRunner().Get(id); ok && st.Running && st.PID > 0 {
 		s.ownedBackupProcs.Store(id, st.PID)
 		// The exit callback can run before registration.
-		if current, ok := s.jobs.Get(id); !ok || !current.Running {
+		if current, ok := s.jobRunner().Get(id); !ok || !current.Running {
 			s.ownedBackupProcs.Delete(id)
 		}
 	}
@@ -406,10 +406,10 @@ func (s *Server) stopBackupSchedulers() {
 		}
 		pid := value.(int)
 		var err error
-		if runner, ok := s.jobs.(*FileJobRunner); ok {
+		if runner, ok := s.jobRunner().(*FileJobRunner); ok {
 			err = runner.terminate(pid, id)
-		} else if s.jobs != nil {
-			err = s.jobs.Cancel(id)
+		} else if s.jobRunner() != nil {
+			err = s.jobRunner().Cancel(id)
 		}
 		if err != nil && !errors.Is(err, errJobNotRunning) && !errors.Is(err, syscall.ESRCH) {
 			s.log.Warn("step-down: could not stop backup process", "job", id, "error", err)
@@ -419,19 +419,19 @@ func (s *Server) stopBackupSchedulers() {
 }
 
 func (s *Server) stopBackupJob(id string) error {
-	if s.jobs == nil {
+	if s.jobRunner() == nil {
 		return nil
 	}
 	// Run now is launched on its own pipeline so the UI can show it separately
 	// from the scheduler. Stop, update, and delete must drain both processes;
 	// otherwise a one-off invocation could keep writing with stale settings after
 	// the job was changed or removed.
-	processes := append(s.jobs.List(backupJobPipeline(id)), s.jobs.List(backupJobRunPipeline(id))...)
+	processes := append(s.jobRunner().List(backupJobPipeline(id)), s.jobRunner().List(backupJobRunPipeline(id))...)
 	for _, j := range processes {
 		if !j.Running {
 			continue
 		}
-		if err := s.jobs.Cancel(j.ID); err != nil {
+		if err := s.jobRunner().Cancel(j.ID); err != nil {
 			if errors.Is(err, errJobNotRunning) || errors.Is(err, errUnknownJob) {
 				continue
 			}
@@ -440,7 +440,7 @@ func (s *Server) stopBackupJob(id string) error {
 		deadline := time.NewTimer(15 * time.Second)
 		tick := time.NewTicker(100 * time.Millisecond)
 		for {
-			current, ok := s.jobs.Get(j.ID)
+			current, ok := s.jobRunner().Get(j.ID)
 			if !ok || !current.Running {
 				tick.Stop()
 				deadline.Stop()

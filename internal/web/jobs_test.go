@@ -45,7 +45,7 @@ func TestBackupProcessJobLinks(t *testing.T) {
 }
 
 func (e *testEnv) job(c interface{}, id string) JobStatus {
-	j, ok := e.srv.jobs.Get(id)
+	j, ok := e.srv.jobRunner().Get(id)
 	if !ok {
 		e.t.Fatalf("job %s unknown", id)
 	}
@@ -129,7 +129,7 @@ func TestVerifyJobStreamingHistoryAndAudit(t *testing.T) {
 			t.Errorf("second job: %d %v, want 409 naming %s", code, resp, id)
 		}
 	}
-	if n := len(e.srv.jobs.List("orders")); n != 1 {
+	if n := len(e.srv.jobRunner().List("orders")); n != 1 {
 		t.Errorf("%d jobs listed, want 1", n)
 	}
 	// Release: the rest streams, the exit code is captured.
@@ -217,7 +217,7 @@ func TestJobCancelAction(t *testing.T) {
 	e.hold(true)
 	_, body := e.act(c, csrf, "orders", ActVerify, map[string]string{"mode": "full"})
 	id := body["job_id"].(string)
-	waitFor(t, "output", func() bool { o, _ := e.srv.jobs.Output(id, 0); return strings.Contains(o.Data, "line one") })
+	waitFor(t, "output", func() bool { o, _ := e.srv.jobRunner().Output(id, 0); return strings.Contains(o.Data, "line one") })
 	// A job id of another pipeline is not cancellable through this pipeline.
 	if code, _ := e.act(c, csrf, "orders", ActJobCancel, map[string]string{"job_id": "20261115T100000Z-deadbeef"}); code != 404 {
 		t.Errorf("cancel unknown: %d", code)
