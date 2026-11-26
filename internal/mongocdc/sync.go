@@ -60,12 +60,16 @@ const (
 	defaultMaxAwait            = 500 * time.Millisecond
 	defaultRetryBackoffMax     = 30 * time.Second
 	defaultIndexReconcile      = time.Minute
-	progressLogInterval        = 10 * time.Second
-	minWireVersion44           = 9  // MongoDB 4.4: implicit collection creation inside transactions.
-	wireVersion50              = 13 // MongoDB 5.0: $v:2 update diffs, $setField.
-	wireVersion60              = 17 // MongoDB 6.0: showExpandedEvents.
-	wireVersion61              = 18 // MongoDB 6.1: disambiguatedPaths in update descriptions.
-	maxSnapshotParallel        = 32
+	progressLogInterval        = 10 * time.Second // snapshot copy progress
+	// streamProgressInterval: change stream progress lines; with no new event since the last line the
+	// next one waits for streamIdleLogInterval (a heartbeat that the stream is alive).
+	streamProgressInterval = time.Minute
+	streamIdleLogInterval  = 10 * time.Minute
+	minWireVersion44       = 9  // MongoDB 4.4: implicit collection creation inside transactions.
+	wireVersion50          = 13 // MongoDB 5.0: $v:2 update diffs, $setField.
+	wireVersion60          = 17 // MongoDB 6.0: showExpandedEvents.
+	wireVersion61          = 18 // MongoDB 6.1: disambiguatedPaths in update descriptions.
+	maxSnapshotParallel    = 32
 	// defaultSplitMinDocs: a collection is split into ranges copied by several workers
 	// when it has at least twice this many documents.
 	defaultSplitMinDocs = 100000

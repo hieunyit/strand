@@ -320,6 +320,12 @@ Admin socket (`strand top`, Web UI): state (`bootstrapping`, `synced`, `paused`,
 `retrying`, `failed`), lag, events/s, per-collection snapshot progress (`tables`),
 recent warnings (`events`), checkpoint.
 
+Log line `MongoDB change stream progress`: once a minute while events arrive, every 10 minutes
+when the stream is idle (heartbeat). `events`, `document_writes`, `lookups`, `batches`,
+`apply_seconds` are totals since the stream opened; `events_since_last` and `events_per_sec` cover
+the time since the previous line; `lag_seconds` as in `strand_lag_seconds`. Snapshot copies log
+`MongoDB snapshot progress` every 10 s.
+
 Prometheus (`observability.metrics`):
 
 | Metric | Meaning |

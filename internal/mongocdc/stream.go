@@ -353,6 +353,28 @@ type streamStats struct {
 	applyTime                        time.Duration
 	start, lastLog                   time.Time
 	lastClusterTime                  bson.Timestamp
+	loggedEvents                     int64 // events at the last progress line
+}
+
+// progressDue: a progress line is due streamProgressInterval after the last one when events arrived
+// since, otherwise only after streamIdleLogInterval (idle heartbeat).
+func (s *streamStats) progressDue(now time.Time) bool {
+	since := now.Sub(s.lastLog)
+	if s.events != s.loggedEvents {
+		return since >= streamProgressInterval
+	}
+	return since >= streamIdleLogInterval
+}
+
+// progressAttrs: the fields of a progress line at now. Counters are totals since the stream started;
+// events_per_sec is the rate since the previous line (one decimal), not the average since the start.
+func (s *streamStats) progressAttrs(now time.Time) []any {
+	rate := 0.0
+	if d := now.Sub(s.lastLog).Seconds(); d > 0 {
+		rate = math.Round(float64(s.events-s.loggedEvents)/d*10) / 10
+	}
+	return []any{"events", s.events, "events_since_last", s.events - s.loggedEvents, "document_writes", s.writes,
+		"lookups", s.lookups, "batches", s.batches, "events_per_sec", rate, "apply_seconds", s.applyTime.Seconds()}
 }
 
 func tokenString(token bson.Raw) string {
@@ -659,12 +681,12 @@ func startReader(parent context.Context, cs *mongo.ChangeStream) (<-chan streamI
 }
 
 func (r *runner) logStreamProgress(stats *streamStats, force bool) {
-	if !force && time.Since(stats.lastLog) < progressLogInterval {
+	now := time.Now()
+	if !force && !stats.progressDue(now) {
 		return
 	}
-	elapsed := time.Since(stats.start).Seconds()
-	stats.lastLog = time.Now()
-	attrs := []any{"pipeline", r.cfg.Pipeline, "events", stats.events, "document_writes", stats.writes, "lookups", stats.lookups, "batches", stats.batches, "events_per_sec", int64(float64(stats.events) / elapsed), "apply_seconds", stats.applyTime.Seconds()}
+	attrs := append([]any{"pipeline", r.cfg.Pipeline}, stats.progressAttrs(now)...)
+	stats.lastLog, stats.loggedEvents = now, stats.events
 	if stats.lastClusterTime.T != 0 {
 		attrs = append(attrs, "lag_seconds", r.obs.Snapshot().LagSeconds)
 	}
