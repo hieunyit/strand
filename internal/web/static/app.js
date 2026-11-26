@@ -16,6 +16,26 @@
   var busy = false;
   var onSwap = []; // called after a structural refresh replaced #content (the live module re-attaches)
 
+  // SSH host form: the account select shows the "new account" fields (or the host's own credentials) only
+  // when chosen; hidden groups are disabled so their fields are not submitted.
+  document.addEventListener('change', function (ev) {
+    var field = ev.target;
+    if (field.hasAttribute && field.hasAttribute('data-ssh-account-select') && field.form) {
+      field.form.querySelectorAll('[data-ssh-account]').forEach(function (group) {
+        group.hidden = group.disabled = group.getAttribute('data-ssh-account') !== field.value;
+      });
+      return;
+    }
+    if (field.name === 'account_auth_mode' && field.form) {
+      field.form.querySelectorAll('[data-account-mode]').forEach(function (group) {
+        var on = group.getAttribute('data-account-mode') === field.value;
+        group.hidden = !on;
+        // A group inside a hidden "new account" block stays disabled.
+        var outer = group.parentElement && group.parentElement.closest('[data-ssh-account]');
+        group.disabled = !on || !!(outer && outer.disabled);
+      });
+    }
+  });
   document.addEventListener('change', function (ev) {
     var field = ev.target;
     if (field.name !== 'profile_auth_mode' || !field.form || !field.form.hasAttribute('data-ssh-auth-form')) { return; }
@@ -676,6 +696,16 @@
       confirmDialog('Delete user ' + confirmUser + '? This action cannot be undone.', confirmUser, { title: 'Delete user', ok: 'Delete user', danger: true }).then(function (res) {
         if (!res) { return; }
         form.removeAttribute('data-confirm-user');
+        form.submit();
+      });
+      return;
+    }
+    var plain = form.getAttribute && form.getAttribute('data-confirm-plain');
+    if (plain) {
+      ev.preventDefault();
+      confirmDialog(plain, null, { title: form.getAttribute('data-confirm-title') || 'Confirm', ok: form.getAttribute('data-confirm-label') || 'OK', danger: true }).then(function (res) {
+        if (!res) { return; }
+        form.removeAttribute('data-confirm-plain');
         form.submit();
       });
       return;

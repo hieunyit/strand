@@ -6,6 +6,7 @@
 <title>{{t "login.title"}} - Strand</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/theme.js"></script>
+<script src="/static/login.js" defer></script>
 </head>
 <body class="loginpage">
 <main>
@@ -13,50 +14,82 @@
   <aside class="login-brand" aria-label="About Strand">
     <div class="logobig"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand</span></div>
     <div class="login-pitch">
+      <p class="login-eyebrow">{{t "login.eyebrow"}}</p>
       <h2>{{t "login.pitch_title"}}</h2>
       <p>{{t "login.pitch_sub"}}</p>
-      <ul>
-        <li>{{t "login.bullet1"}}</li>
-        <li>{{t "login.bullet2"}}</li>
-        <li>{{t "login.bullet3"}}</li>
+      <div class="login-flow" aria-hidden="true">
+        <div class="lf-node"><svg class="ic"><use href="/static/icons.svg#i-db"/></svg><span><b>{{t "login.flow_source"}}</b><small>MySQL · MariaDB · PostgreSQL · MongoDB</small></span></div>
+        <div class="lf-link"><i></i><i></i><i></i></div>
+        <div class="lf-node lf-core"><svg class="ic"><use href="/static/icons.svg#i-logo"/></svg><span><b>Strand</b><small>{{t "login.flow_core"}}</small></span></div>
+        <div class="lf-link"><i></i><i></i><i></i></div>
+        <div class="lf-node"><svg class="ic"><use href="/static/icons.svg#i-server"/></svg><span><b>{{t "login.flow_target"}}</b><small>{{t "login.flow_target_sub"}}</small></span></div>
+        <div class="lf-stats">
+          <span><small>{{t "login.flow_lag"}}</small><b>0.4 s</b></span>
+          <span><small>{{t "login.flow_rows"}}</small><b>12,480</b></span>
+          <span><small>{{t "login.flow_ckpt"}}</small><b>2 s</b></span>
+        </div>
+      </div>
+      <ul class="login-points">
+        <li><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-bolt"/></svg>{{t "login.bullet1"}}</li>
+        <li><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-check"/></svg>{{t "login.bullet2"}}</li>
+        <li><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-shield"/></svg>{{t "login.bullet3"}}</li>
       </ul>
     </div>
-    <div class="login-foot">strand {{.Version}}</div>
+    <div class="login-foot"><span>{{t "login.self_hosted"}}</span><span>strand {{.Version}}</span></div>
   </aside>
   <div class="login-panel">
-    <form class="login card" method="post" action="/login">
+    <form class="login" method="post" action="/login?lang={{.Lang}}" data-login-form novalidate>
       <div class="logobig compact"><svg class="ic logo" aria-hidden="true" focusable="false"><use href="/static/icons.svg#i-logo"/></svg><span>Strand</span></div>
-      <h1>{{t "login.title"}}</h1>
-      <p class="tag">{{t "login.tagline"}}</p>
-      {{if .Error}}<p class="warnbox err" role="alert">{{t .Error}}</p>{{end}}
+      <div class="login-head">
+        <h1>{{if .MustChange}}{{t "login.set_password_title"}}{{else}}{{t "login.title"}}{{end}}</h1>
+        <p class="tag">{{if .MustChange}}{{t "login.first_login_prompt"}}{{else}}{{t "login.tagline"}}{{end}}</p>
+      </div>
+      {{if .Error}}<div class="login-alert" role="alert"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-alert"/></svg><span>{{t .Error}}</span></div>{{end}}
       <input type="hidden" name="csrf" value="{{.CSRF}}">
       <input type="hidden" name="next" value="{{.Next}}">
       {{if .MustChange}}
         <input type="hidden" name="must_change" value="1">
         <input type="hidden" name="username" value="{{.Username}}">
         <input type="hidden" name="current_password" value="{{.CurrentPassword}}">
-        <p class="warnbox" role="status">{{t "login.first_login_prompt"}}</p>
         <div class="field">
           <label class="field-label" for="login-new-password">{{t "login.new_password"}}</label>
-          <input id="login-new-password" type="password" name="new_password" autocomplete="new-password" minlength="12" autofocus required>
+          <div class="login-input"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-lock"/></svg>
+            <input id="login-new-password" type="password" name="new_password" autocomplete="new-password" minlength="12" autofocus required data-caps>
+            <button type="button" class="login-reveal" data-reveal="login-new-password" aria-label="{{t "login.show_password"}}" data-label-show="{{t "login.show_password"}}" data-label-hide="{{t "login.hide_password"}}"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-eye"/></svg></button>
+          </div>
+          <small class="field-hint">{{t "login.password_rule"}}</small>
         </div>
         <div class="field">
           <label class="field-label" for="login-confirm-password">{{t "login.confirm_new_password"}}</label>
-          <input id="login-confirm-password" type="password" name="confirm_password" autocomplete="new-password" minlength="12" required>
+          <div class="login-input"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-lock"/></svg>
+            <input id="login-confirm-password" type="password" name="confirm_password" autocomplete="new-password" minlength="12" required data-caps data-match="login-new-password" data-mismatch="{{t "login.password_mismatch"}}">
+          </div>
         </div>
-        <button class="btn primary" type="submit">{{t "login.set_password_button"}}</button>
+        <p class="login-caps" hidden role="status"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-alert"/></svg>{{t "login.caps_lock"}}</p>
+        <button class="btn primary login-submit" type="submit" data-busy-label="{{t "login.signing_in"}}"><span>{{t "login.set_password_button"}}</span></button>
       {{else}}
         <div class="field">
           <label class="field-label" for="login-username">{{t "login.username"}}</label>
-          <input id="login-username" type="text" name="username" value="{{if .Username}}{{.Username}}{{else}}admin{{end}}" autocomplete="username" autofocus required>
+          <div class="login-input"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-user"/></svg>
+            <input id="login-username" type="text" name="username" value="{{if .Username}}{{.Username}}{{else}}admin{{end}}" autocomplete="username" autocapitalize="none" spellcheck="false" required{{if not .Username}} autofocus{{end}}>
+          </div>
         </div>
         <div class="field">
           <label class="field-label" for="login-password">{{t "login.password"}}</label>
-          <input id="login-password" type="password" name="password" autocomplete="current-password" required>
+          <div class="login-input"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-lock"/></svg>
+            <input id="login-password" type="password" name="password" autocomplete="current-password" required data-caps{{if .Username}} autofocus{{end}}>
+            <button type="button" class="login-reveal" data-reveal="login-password" aria-label="{{t "login.show_password"}}" data-label-show="{{t "login.show_password"}}" data-label-hide="{{t "login.hide_password"}}"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-eye"/></svg></button>
+          </div>
         </div>
-        <button class="btn primary" type="submit">{{t "login.sign_in"}}</button>
+        <p class="login-caps" hidden role="status"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-alert"/></svg>{{t "login.caps_lock"}}</p>
+        <button class="btn primary login-submit" type="submit" data-busy-label="{{t "login.signing_in"}}"><span>{{t "login.sign_in"}}</span></button>
       {{end}}
-      <p class="login-version">{{t "login.forgot_hint"}} &middot; strand {{.Version}}</p>
+      <p class="login-help">{{t "login.forgot_hint"}}</p>
+      {{if not .Secure}}<p class="login-insecure"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-alert"/></svg><span>{{t "login.plain_http"}}</span></p>{{end}}
+      <div class="login-meta">
+        <nav class="login-lang" aria-label="Language"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-globe"/></svg><a href="/login?lang=en{{if .Next}}&amp;next={{.Next}}{{end}}"{{if eq .Lang "en"}} aria-current="true"{{end}} hreflang="en">English</a><a href="/login?lang=vi{{if .Next}}&amp;next={{.Next}}{{end}}"{{if eq .Lang "vi"}} aria-current="true"{{end}} hreflang="vi">Tiếng Việt</a></nav>
+        <span class="login-version">strand {{.Version}}</span>
+      </div>
     </form>
   </div>
 </div>

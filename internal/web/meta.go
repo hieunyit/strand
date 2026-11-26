@@ -308,6 +308,28 @@ func (m *metaDB) checkSecretKey(ctx context.Context, previous string) error {
 					return err
 				}
 			}
+			accounts, err := sshprofile.ListAccounts(ctx, m.st)
+			if err != nil {
+				return err
+			}
+			accountsChanged := false
+			for i := range accounts {
+				account := &accounts[i]
+				keyChanged, err := rotate(&account.SealedKey, account.KeyAAD())
+				if err != nil {
+					return fmt.Errorf("SSH account %s private key: %w", account.ID, err)
+				}
+				passwordChanged, err := rotate(&account.SealedPassword, account.PasswordAAD())
+				if err != nil {
+					return fmt.Errorf("SSH account %s password: %w", account.ID, err)
+				}
+				accountsChanged = accountsChanged || keyChanged || passwordChanged
+			}
+			if accountsChanged {
+				if err := sshprofile.SaveAccounts(ctx, m.st, accounts); err != nil {
+					return err
+				}
+			}
 			if n > 0 {
 				m.log.Info("re-encrypted pipeline .env copies with the new secret key; remove "+EnvSecretKeyPrevious+" now", "pipelines", n)
 			}

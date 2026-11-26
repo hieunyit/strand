@@ -1122,6 +1122,14 @@ type tunnelView struct {
 	Error       string
 	Saved       bool
 	HostPreview *sshHostPreview
+	// Tab: "hosts" (saved SSH hosts and active tunnels) or "accounts" (saved SSH accounts).
+	Tab      string
+	Accounts []sshAccountView
+	// ShowAccountForm / AccountForm: the add or edit form of an SSH account.
+	ShowAccountForm bool
+	AccountForm     sshAccountForm
+	// Notice: a success message (saved account, deleted account).
+	Notice string
 }
 
 type dbMigrateReport struct {
@@ -1231,17 +1239,54 @@ func (s *Server) pageArchive(w http.ResponseWriter, r *http.Request, sess *Sessi
 }
 
 func (s *Server) pageTunnel(w http.ResponseWriter, r *http.Request, sess *Session) {
-	view := tunnelView{Profiles: s.sshProfileViews(r.Context()), Saved: r.URL.Query().Get("saved") == "1", ShowForm: r.URL.Query().Get("new") == "1"}
-	if id := r.URL.Query().Get("edit"); id != "" {
+	q := r.URL.Query()
+	view := tunnelView{Profiles: s.sshProfileViews(r.Context()), Accounts: s.sshAccountViews(r.Context()),
+		Saved: q.Get("saved") == "1", ShowForm: q.Get("new") == "1", Tab: "hosts"}
+	if q.Get("tab") == "accounts" {
+		view.Tab = "accounts"
+	}
+	switch q.Get("notice") {
+	case "account-saved":
+		view.Notice = "SSH account saved."
+		if n, _ := strconv.Atoi(q.Get("checked")); n > 0 {
+			view.Notice = fmt.Sprintf("SSH account saved. Sign-in checked on %d host(s) that use it.", n)
+		}
+	case "account-deleted":
+		view.Notice = "SSH account deleted."
+	}
+	if id := q.Get("edit"); id != "" {
 		for _, p := range view.Profiles {
 			if p.ID == id {
 				view.ShowForm = true
-				view.Form = sshProfileForm{ID: p.ID, Host: p.Host, User: p.User, Port: strconv.Itoa(p.Port), AuthMode: p.AuthMode, Edit: true}
+				view.Form = sshProfileForm{ID: p.ID, Host: p.Host, User: p.User, Port: strconv.Itoa(p.Port), AuthMode: p.AuthMode, Edit: true, Account: p.Account}
+				if p.Account == "" {
+					view.Form.Account = accountInline
+				}
 				break
 			}
 		}
 		if !view.Form.Edit {
 			view.Error = "SSH tunnel was not found"
+		}
+	}
+	if q.Get("account") == "new" {
+		view.Tab, view.ShowAccountForm = "accounts", true
+		view.AccountForm = sshAccountForm{AuthMode: "key"}
+	}
+	if id := q.Get("account_edit"); id != "" {
+		view.Tab = "accounts"
+		for _, a := range view.Accounts {
+			if a.ID == id {
+				mode := a.AuthMode
+				if mode == "agent" {
+					mode = "key"
+				}
+				view.ShowAccountForm, view.AccountForm = true, sshAccountForm{ID: a.ID, User: a.User, AuthMode: mode, Edit: true}
+				break
+			}
+		}
+		if !view.ShowAccountForm {
+			view.Error = "SSH account was not found"
 		}
 	}
 	s.renderTunnel(w, sess, view)

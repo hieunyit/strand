@@ -81,18 +81,9 @@ func (c *SSHTunnelConfig) TunnelConfig(ctx context.Context, kind string) (tunnel
 		return tunnel.Config{}, err
 	}
 	if c.Profile != "" {
-		p, err := sshprofile.Load(ctx, os.Getenv("STRAND_WEB_DATABASE_DSN"), c.Profile)
-		if err != nil {
-			return tunnel.Config{}, err
-		}
-		var box *store.Box
-		if len(p.SealedKey) > 0 || len(p.SealedPassword) > 0 {
-			box, err = store.NewBox(os.Getenv("STRAND_WEB_SECRET_KEY"))
-			if err != nil {
-				return tunnel.Config{}, err
-			}
-		}
-		return p.TunnelConfig(box)
+		return sshprofile.LoadConfig(ctx, os.Getenv("STRAND_WEB_DATABASE_DSN"), c.Profile, func() (*store.Box, error) {
+			return store.NewBox(os.Getenv("STRAND_WEB_SECRET_KEY"))
+		})
 	}
 	port := c.Port
 	if port == 0 {

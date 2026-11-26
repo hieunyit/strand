@@ -814,6 +814,9 @@ func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int,
 		"Username":        username,
 		"MustChange":      mustChange,
 		"CurrentPassword": currentPassword,
+		// Secure: the browser reached Strand over TLS (directly, or through a TLS proxy the admin declared with
+		// secure_cookies). Otherwise the page warns that the password travels unencrypted.
+		"Secure": r.TLS != nil || s.secureCookies(),
 	})
 }
 

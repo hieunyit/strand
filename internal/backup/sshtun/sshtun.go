@@ -48,15 +48,8 @@ func OpenForStoredConnection(ctx context.Context, c backup.Connection, metadata 
 		if metadata == nil {
 			return "", 0, nil, errors.New("SSH tunnel profile needs the metadata database")
 		}
-		profiles, err := sshprofile.List(ctx, metadata)
-		if err != nil {
-			return "", 0, nil, errors.New("could not read saved SSH tunnels")
-		}
-		profile, err := sshprofile.Find(profiles, tun.Profile)
-		if err != nil {
-			return "", 0, nil, err
-		}
-		cfg, err = profile.TunnelConfig(box)
+		var err error
+		cfg, err = sshprofile.Config(ctx, metadata, tun.Profile, box)
 		if err != nil {
 			return "", 0, nil, err
 		}

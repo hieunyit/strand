@@ -420,9 +420,47 @@ func (s *Server) pageTunnelOpen(w http.ResponseWriter, r *http.Request, sess *Se
 		s.renderError(w, r, sess, http.StatusBadRequest, "invalid SSH tunnel form")
 		return
 	}
+	switch r.PostForm.Get("intent") {
+	case "save-account":
+		view := tunnelView{Tab: "accounts", ShowAccountForm: true, Profiles: s.sshProfileViews(r.Context()),
+			Accounts: s.sshAccountViews(r.Context()), AccountForm: sshAccountFormFromRequest(r)}
+		checked, err := s.saveSSHAccountFromPage(r, view.AccountForm)
+		if err == nil {
+			http.Redirect(w, r, "/tunnels?tab=accounts&notice=account-saved&checked="+strconv.Itoa(len(checked)), http.StatusSeeOther)
+			return
+		}
+		view.Error = err.Error()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		s.renderTunnel(w, sess, view)
+		return
+	case "delete-account":
+		if err := s.deleteSSHAccount(r, strings.TrimSpace(r.PostForm.Get("account_id"))); err != nil {
+			view := tunnelView{Tab: "accounts", Profiles: s.sshProfileViews(r.Context()), Accounts: s.sshAccountViews(r.Context()), Error: err.Error()}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			s.renderTunnel(w, sess, view)
+			return
+		}
+		http.Redirect(w, r, "/tunnels?tab=accounts&notice=account-deleted", http.StatusSeeOther)
+		return
+	}
 	if r.PostForm.Get("intent") == "save-profile" {
-		view := tunnelView{ShowForm: true, Profiles: s.sshProfileViews(r.Context()), Form: sshProfileFormFromRequest(r)}
+		view := tunnelView{ShowForm: true, Tab: "hosts", Profiles: s.sshProfileViews(r.Context()), Accounts: s.sshAccountViews(r.Context()), Form: sshProfileFormFromRequest(r)}
 		show := r.PostForm.Get("probe_host_key") == "1"
+		if !r.PostForm.Has("profile_account") && !view.Form.Edit {
+			// First step of the form (or a client that predates accounts): offer the first saved account, or a new one.
+			view.Form.Account = accountNew
+			if len(view.Accounts) > 0 {
+				view.Form.Account = view.Accounts[0].ID
+			}
+			if !show && view.Form.User != "" {
+				view.Form.Account = "" // pre-account client posting its own user and credentials
+			}
+		}
+		if view.Form.Account == accountNew && view.Form.NewAccount.AuthMode == "" {
+			view.Form.NewAccount.AuthMode = "key"
+		}
 		var hostKey ssh.PublicKey
 		var err error
 		if show || r.PostForm.Get("profile_fingerprint") != "" || r.PostForm.Get("profile_confirm_host_key") != "" {

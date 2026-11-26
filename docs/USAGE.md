@@ -1432,6 +1432,13 @@ Cố ý để lại CLI (lý do):
 
 Trong form tạo pipeline, có thể bật SSH tunnel riêng cho source hoặc target. Giữ địa chỉ database trong phần kết nối DB như bastion nhìn thấy. Chọn tunnel đã lưu ở **Tools → SSH Tunnels**. Pipeline SQL mở cổng loopback tạm. Pipeline MongoDB chuyển kết nối của driver qua SSH, giữ nguyên URI và tên máy chủ để xác minh TLS.
 
+**Tools → SSH Tunnels** có hai tab:
+
+- **Accounts**: tài khoản SSH dùng lại được: tên, SSH user và một cách đăng nhập (private key hoặc mật khẩu, lưu mã hóa bằng `STRAND_WEB_SECRET_KEY`; để trống key thì dùng SSH agent của máy chạy Strand). Passphrase của key chỉ dùng một lần để mở khóa, không lưu. Sửa key/mật khẩu của tài khoản: Strand thử đăng nhập lên **mọi host đang dùng nó** trước khi lưu; một host từ chối thì không lưu gì. Không xóa được tài khoản khi còn host dùng (danh sách nêu tên các host đó).
+- **Hosts**: bastion đã lưu (tên, host, port, host key đã xác minh). Thêm host qua hai bước: (1) nhập host/port, **Show fingerprint**, so với bản tin cậy; (2) chọn tài khoản có sẵn hoặc **+ New account...** (tạo tài khoản ngay trong form), đánh dấu đã xác minh fingerprint, **Check and save** (Strand đăng nhập thử rồi mới lưu). Nhiều host dùng chung một tài khoản không lưu lại user/key lần nữa.
+
+Host lưu trước khi có tài khoản vẫn chạy như cũ (cột Account ghi "On this host": user và key/mật khẩu nằm trên host). Mở **Edit** và chọn một tài khoản để chuyển sang dùng chung. Audit: `tunnel.account.create|update|delete` (không ghi bí mật).
+
 Ví dụ YAML cho nguồn MySQL:
 
 ```yaml

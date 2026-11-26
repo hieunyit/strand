@@ -23,6 +23,9 @@ import (
 type sshProfileView struct {
 	ID, Host, User, Address, AuthMode string
 	Port                              int
+	// Account: the saved SSH account this host signs in with; empty for a host that stores its own
+	// credentials (saved before accounts existed).
+	Account string
 }
 
 type pipelineSSHFieldsView struct {
@@ -39,13 +42,23 @@ func (s *Server) sshProfileViews(ctx context.Context) []sshProfileView {
 		s.log.Warn("cannot list SSH tunnel profiles", "error", err)
 		return nil
 	}
+	accounts, err := sshprofile.ListAccounts(ctx, s.db.st)
+	if err != nil {
+		s.log.Warn("cannot list SSH accounts", "error", err)
+	}
 	views := make([]sshProfileView, 0, len(profiles))
 	for _, p := range profiles {
 		mode := "key"
 		if len(p.SealedPassword) != 0 {
 			mode = "password"
 		}
-		views = append(views, sshProfileView{ID: p.ID, Host: p.Host, Port: p.Port, User: p.User, Address: p.Address(), AuthMode: mode})
+		v := sshProfileView{ID: p.ID, Host: p.Host, Port: p.Port, User: p.User, Address: p.Address(), AuthMode: mode, Account: p.Account}
+		if p.Account != "" {
+			if a, err := sshprofile.FindAccount(accounts, p.Account); err == nil {
+				v.User, v.AuthMode = a.User, a.AuthMode()
+			}
+		}
+		views = append(views, v)
 	}
 	return views
 }
@@ -54,29 +67,39 @@ func (s *Server) savedTunnel(ctx context.Context, id string) (tunnel.Config, err
 	if s.db == nil || !sshprofile.ValidID(id) {
 		return tunnel.Config{}, errors.New("invalid or unavailable SSH tunnel profile")
 	}
-	profiles, err := sshprofile.List(ctx, s.db.st)
-	if err != nil {
-		return tunnel.Config{}, errors.New("could not read SSH tunnel profiles")
-	}
-	p, err := sshprofile.Find(profiles, id)
-	if err != nil {
-		return tunnel.Config{}, err
-	}
-	return p.TunnelConfig(s.db.box)
+	return sshprofile.Config(ctx, s.db.st, id, s.db.box)
 }
 
 type sshProfileForm struct {
 	ID, Host, Port, User, AuthMode string
 	Edit                           bool
+	// Account: profile_account. A saved account's name, accountNew (create one from the account_* fields)
+	// or accountInline / "" (the host keeps its own user and credentials, as before accounts existed).
+	Account string
+	// NewAccount: the account_* fields of a new account (no secrets).
+	NewAccount sshAccountForm
 }
 
+const (
+	accountNew    = "__new__"
+	accountInline = "__inline__"
+)
+
 func sshProfileFormFromRequest(r *http.Request) sshProfileForm {
-	return sshProfileForm{
+	f := sshProfileForm{
 		ID: strings.TrimSpace(r.PostForm.Get("profile_id")), Host: strings.TrimSpace(r.PostForm.Get("profile_host")),
 		Port: strings.TrimSpace(r.PostForm.Get("profile_port")), User: strings.TrimSpace(r.PostForm.Get("profile_user")),
 		Edit: r.PostForm.Get("profile_edit") == "1", AuthMode: r.PostForm.Get("profile_auth_mode"),
+		Account: strings.TrimSpace(r.PostForm.Get("profile_account")),
 	}
+	if f.Account == accountNew {
+		f.NewAccount = sshAccountFormFromRequest(r)
+	}
+	return f
 }
+
+// inline: the host stores its own user and credentials.
+func (f sshProfileForm) inline() bool { return f.Account == "" || f.Account == accountInline }
 
 func (f sshProfileForm) profile() (sshprofile.Profile, error) {
 	p := sshprofile.Profile{ID: f.ID, Host: f.Host, User: f.User, Port: 22}
@@ -99,7 +122,11 @@ func (f sshProfileForm) profile() (sshprofile.Profile, error) {
 		}
 		p.Port = n
 	}
-	return p, (&config.SSHTunnelConfig{Host: p.Host, Port: p.Port, User: p.User}).Validate("mysql")
+	user := p.User
+	if user == "" {
+		user = "-" // the user is checked where it is required: inline credentials or the account
+	}
+	return p, (&config.SSHTunnelConfig{Host: p.Host, Port: p.Port, User: user}).Validate("mysql")
 }
 
 type sshHostPreview struct {
@@ -166,16 +193,61 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ss
 	if hostKey != nil {
 		p.HostKey = hostKey.Marshal()
 	}
-	if err := s.setSSHProfileCredentials(r, form.AuthMode, &p, previous); err != nil {
+	accounts, err := sshprofile.ListAccounts(r.Context(), s.db.st)
+	if err != nil {
+		return errors.New("could not read SSH accounts from the metadata database")
+	}
+	var created *sshprofile.Account
+	switch {
+	case form.inline():
+		if p.User == "" {
+			return errors.New("enter the SSH user, or choose an SSH account")
+		}
+		if err := s.setSSHProfileCredentials(r, form.AuthMode, &p, previous); err != nil {
+			return err
+		}
+	default:
+		if inlineCredentialsPosted(r) {
+			return errors.New("the host signs in with an SSH account: enter credentials in the account, not on the host")
+		}
+		p.User = ""
+		if form.Account == accountNew {
+			a, err := s.sshAccountFromForm(r, form.NewAccount, nil, accounts)
+			if err != nil {
+				return err
+			}
+			accounts = append(accounts, a)
+			created = &a
+			p.Account = a.ID
+		} else {
+			if _, err := sshprofile.FindAccount(accounts, form.Account); err != nil {
+				return errors.New("the chosen SSH account no longer exists. Reload the page")
+			}
+			p.Account = form.Account
+		}
+	}
+	if err := s.checkSSHProfile(r.Context(), p, accounts); err != nil {
 		return err
 	}
-	if err := s.checkSSHProfile(r.Context(), p); err != nil {
-		return err
+	if created != nil {
+		if err := s.storeSSHAccount(r, *created, nil); err != nil {
+			return err
+		}
 	}
 	return s.db.st.Locked(r.Context(), sshprofile.MetaKey, func(ctx context.Context) error {
 		profiles, err := sshprofile.List(ctx, s.db.st)
 		if err != nil {
 			return errors.New("could not read SSH tunnels from the metadata database")
+		}
+		if p.Account != "" {
+			// deleteSSHAccount removes an account under this lock only when no host uses it: re-check here.
+			current, err := sshprofile.ListAccounts(ctx, s.db.st)
+			if err != nil {
+				return errors.New("could not read SSH accounts from the metadata database")
+			}
+			if _, err := sshprofile.FindAccount(current, p.Account); err != nil {
+				return errors.New("the chosen SSH account was deleted meanwhile. Reload the page")
+			}
 		}
 		index := slices.IndexFunc(profiles, func(v sshprofile.Profile) bool { return v.ID == p.ID })
 		if form.Edit {
@@ -190,6 +262,9 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ss
 			profiles = append(profiles, p)
 		}
 		detail := map[string]any{"profile": p.ID, "host": p.Host, "user": p.User, "stored_key": len(p.SealedKey) > 0, "stored_password": len(p.SealedPassword) > 0}
+		if p.Account != "" {
+			detail["account"] = p.Account
+		}
 		if hostKey != nil {
 			detail["host_key_fingerprint"] = ssh.FingerprintSHA256(hostKey)
 		}
@@ -208,53 +283,79 @@ func (s *Server) saveSSHProfile(r *http.Request, form sshProfileForm, hostKey ss
 }
 
 func (s *Server) setSSHProfileCredentials(r *http.Request, mode string, p *sshprofile.Profile, previous sshprofile.Profile) error {
-	keyText := r.PostForm.Get("profile_private_key")
-	passphrase := r.PostForm.Get("profile_key_passphrase")
-	passwordText := r.PostForm.Get("profile_password")
+	keep := len(previous.SealedPassword) > 0 && previous.Address() == p.Address() && previous.User == p.User && slices.Equal(previous.HostKey, p.HostKey)
+	prev := sealedCreds{Key: previous.SealedKey, Password: previous.SealedPassword, IdentityFile: previous.IdentityFile}
+	got, err := sealSSHCredentials(r, "profile_", mode, prev, keep,
+		func(b []byte) ([]byte, error) { return p.SealKey(s.db.box, b) },
+		func(b []byte) ([]byte, error) { return p.SealPassword(s.db.box, b) })
+	if err != nil {
+		return err
+	}
+	p.SealedKey, p.SealedPassword, p.IdentityFile = got.Key, got.Password, got.IdentityFile
+	return nil
+}
+
+// sealedCreds: one stored SSH credential (sealed key or sealed password) or neither (identity file or the
+// service's SSH agent).
+type sealedCreds struct {
+	Key, Password []byte
+	IdentityFile  string
+}
+
+// sealSSHCredentials reads <prefix>private_key, <prefix>key_passphrase and <prefix>password for mode
+// ("key" or "password"; "" = the mode of prev) and seals the new secret. A blank field keeps prev: the key
+// always, the password only when keepPassword (same server and user).
+func sealSSHCredentials(r *http.Request, prefix, mode string, prev sealedCreds, keepPassword bool, sealKey, sealPassword func([]byte) ([]byte, error)) (sealedCreds, error) {
+	keyText := r.PostForm.Get(prefix + "private_key")
+	passphrase := r.PostForm.Get(prefix + "key_passphrase")
+	passwordText := r.PostForm.Get(prefix + "password")
 	if mode == "" {
 		mode = "key"
-		if len(previous.SealedPassword) > 0 {
+		if len(prev.Password) > 0 {
 			mode = "password"
 		}
 	}
 	switch mode {
 	case "password":
 		if strings.TrimSpace(keyText) != "" || passphrase != "" {
-			return errors.New("use only the SSH password with password authentication")
+			return sealedCreds{}, errors.New("use only the SSH password with password authentication")
 		}
 		if passwordText == "" {
-			if len(previous.SealedPassword) > 0 && previous.Address() == p.Address() && previous.User == p.User && slices.Equal(previous.HostKey, p.HostKey) {
-				p.SealedPassword = previous.SealedPassword
-				return nil
+			if keepPassword && len(prev.Password) > 0 {
+				return sealedCreds{Password: prev.Password}, nil
 			}
-			return errors.New("enter the SSH password for this server and user")
+			return sealedCreds{}, errors.New("enter the SSH password for this server and user")
 		}
 		if len(passwordText) > 4<<10 || strings.ContainsRune(passwordText, 0) {
-			return errors.New("SSH password is too long or contains a NUL byte")
+			return sealedCreds{}, errors.New("SSH password is too long or contains a NUL byte")
 		}
 		password := []byte(passwordText)
 		defer clear(password)
-		var err error
-		p.SealedPassword, err = p.SealPassword(s.db.box, password)
-		return err
+		sealed, err := sealPassword(password)
+		return sealedCreds{Password: sealed}, err
 	case "key":
 		if passwordText != "" {
-			return errors.New("use only the SSH private key and its optional passphrase with key authentication")
+			return sealedCreds{}, errors.New("use only the SSH private key and its optional passphrase with key authentication")
 		}
 		key, err := profilePrivateKey(keyText, passphrase)
 		if err != nil {
-			return err
+			return sealedCreds{}, err
 		}
 		if len(key) == 0 {
-			p.IdentityFile, p.SealedKey = previous.IdentityFile, previous.SealedKey
-			return nil
+			return sealedCreds{Key: prev.Key, IdentityFile: prev.IdentityFile}, nil
 		}
 		defer clear(key)
-		p.SealedKey, err = p.SealKey(s.db.box, key)
-		return err
+		sealed, err := sealKey(key)
+		return sealedCreds{Key: sealed}, err
 	default:
-		return errors.New("choose password or private key for SSH authentication")
+		return sealedCreds{}, errors.New("choose password or private key for SSH authentication")
 	}
+}
+
+// inlineCredentialsPosted: the request carries host-level credentials (profile_* fields).
+func inlineCredentialsPosted(r *http.Request) bool {
+	return strings.TrimSpace(r.PostForm.Get("profile_private_key")) != "" || r.PostForm.Get("profile_key_passphrase") != "" ||
+		r.PostForm.Get("profile_password") != ""
 }
 
 // profilePrivateKey unlocks the submitted key for sealing with the Web secret key.
@@ -305,8 +406,8 @@ func profilePrivateKey(raw, passphrase string) ([]byte, error) {
 	return pem.EncodeToMemory(block), nil
 }
 
-func (s *Server) checkSSHProfile(ctx context.Context, p sshprofile.Profile) error {
-	cfg, err := p.TunnelConfig(s.db.box)
+func (s *Server) checkSSHProfile(ctx context.Context, p sshprofile.Profile, accounts []sshprofile.Account) error {
+	cfg, err := p.Resolve(accounts, s.db.box)
 	if err != nil {
 		return err
 	}
