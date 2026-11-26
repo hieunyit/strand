@@ -28,6 +28,7 @@ func init() {
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newSchemaCmd())
 	rootCmd.AddCommand(newValidateCmd())
+	rootCmd.AddCommand(newDoctorCmd())
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newStopCmd())

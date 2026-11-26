@@ -105,7 +105,7 @@ Chỉ bảng thường (MySQL `BASE TABLE`; PG bảng thường và bảng parti
 3. Kiểm từng bảng có PK snapshot logic được (mục 5.2). Bảng không hỗ trợ: seed từ backup hoặc đổi kiểu PK.
 4. User, quyền, view, routine, trigger và event **không** được sao chép. Tạo tay ở target. Seed bằng XtraBackup/CLONE thì backup mang theo chúng.
 5. PG source: publication phải chứa mọi bảng (`FOR ALL TABLES` hoặc liệt kê), phát INSERT/UPDATE/DELETE và không lọc dòng hay bỏ cột dữ liệu. Bảng partitioned cần `publish_via_partition_root = true`. Dừng pipeline trước khi đổi publication. PostgreSQL không gửi các thay đổi đã bị lọc, nên reader không thể phát hiện chúng từ stream.
-6. Chạy `strand validate`, rồi `strand plan` (ETA, chọn A hay B), rồi `strand sync`.
+6. Chạy `strand doctor` (liệt kê mọi vấn đề cùng lúc, kèm cách sửa; mục 7.1a) hoặc `strand validate`, rồi `strand plan` (ETA, chọn A hay B), rồi `strand sync`.
 
 ---
 
@@ -279,7 +279,7 @@ Source có GTID thì định vị bằng GTID. Source không GTID thì định v
 | Decode trên standby | PG 16+ và `hot_standby_feedback=on` (reader kiểm). `read_from: standby` chưa triển khai; snapshot logic trên standby bị từ chối |
 | Quyền | `LOGIN REPLICATION`, `SELECT` trên bảng, `SELECT` trên sequence (đồng bộ `last_value` cho promote), dòng `replication` trong `pg_hba.conf` |
 
-`strand validate` **chưa** kiểm các điều kiện PG ở trên. Lỗi chỉ hiện khi `sync` khởi động (handoff dòng 33).
+`strand validate` **chưa** kiểm các điều kiện PG ở trên. Lỗi chỉ hiện khi `sync` khởi động (handoff dòng 33). `strand doctor` (mục 7.1a) kiểm `wal_level`, quyền `REPLICATION`, publication (có đủ bảng, INSERT/UPDATE/DELETE, không lọc) và slot khai báo trong `source.slot`, và báo mọi điều kiện thiếu cùng lúc.
 
 Kết nối PG chỉ khai báo được bằng `dsn` (`postgres://user:pass@host:5432/db?sslmode=require`). Các trường `host`/`user`/`password_env` chỉ dành cho `kind: mysql`.
 
@@ -655,6 +655,80 @@ Nó kiểm:
 - **Schema đích:** số bảng sẽ được tạo. Với `create_schema: off`, bảng thiếu thì exit 3.
 
 Không kiểm: điều kiện PG source (mục 4.2), quyền, PK có snapshot logic được không (lỗi này chỉ hiện ở `sync`).
+
+`validate` dừng ở lỗi đầu tiên. Muốn thấy mọi vấn đề trong một lần chạy, kèm câu SQL hoặc thay đổi cấu hình để sửa, dùng `strand doctor` (mục 7.1a).
+
+### 7.1a `doctor`
+
+`strand doctor -c p.yaml [--json]`. Preflight đầy đủ: chạy mọi kiểm tra của `validate` và của bước khởi động `sync`, **không dừng ở lỗi đầu tiên**, rồi in danh sách vấn đề. Exit 0 khi không có vấn đề mức `error`, exit 3 khi có ít nhất một (cấu hình không đọc được: exit 2 như `validate`).
+
+Chỉ đọc: không DDL, không ghi, không `LOCK TABLES` / `FLUSH TABLES`, không tạo slot hay publication. Mật khẩu trong DSN bị che (`xxxxx`) trong mọi thông điệp. Truy vấn catalog dùng chung với `validate`/`sync` (theo lô với `information_schema` khi code sẵn có làm vậy); doctor đọc `Innodb_buffer_pool_wait_free` hai lần cách nhau 2 giây nên chạy ít nhất 2 giây.
+
+Mỗi vấn đề có:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `severity` | `error`: `sync` sẽ từ chối (hoặc chắc chắn hỏng). `warning`: chạy được nhưng có rủi ro. `info`: thông tin |
+| `code` | Mã snake_case ổn định, dùng để lọc/tự động hóa (bảng dưới) |
+| `object` | Đối tượng: `source`, `target`, `source:<schema>`, `schema.table`, `schema.table.constraint` hoặc khóa cấu hình |
+| `message` | Một dòng mô tả (cùng nội dung lỗi `validate`/`sync` in) |
+| `fix` | Câu SQL hoặc thay đổi cấu hình cụ thể, ví dụ `GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO 'strand'@'%';`, `ALTER TABLE ... ADD CONSTRAINT ...`, `set bootstrap.create_schema: auto` |
+
+Đầu ra thường gom theo mức độ (`ERRORS`, `WARNINGS`, `INFO`), mỗi vấn đề một dòng `[code] object: message` và dòng `fix:` thụt lề. `--json` in một object:
+
+```json
+{
+  "pipeline": "seabank",
+  "ok": false,
+  "summary": { "errors": 2, "warnings": 1, "info": 3 },
+  "findings": [
+    { "severity": "error", "code": "source_privilege_missing", "object": "source",
+      "message": "the source user 'strand'@'%' lacks REPLICATION SLAVE (read the binlog)",
+      "fix": "GRANT REPLICATION SLAVE ON *.* TO 'strand'@'%';" }
+  ]
+}
+```
+
+`findings` xếp theo mức độ (error, warning, info), trong cùng mức theo thứ tự phát hiện; `object` và `fix` vắng khi rỗng; `ok` là `summary.errors == 0`.
+
+Các nhóm kiểm và mã chính:
+
+| Nhóm | Mã |
+| --- | --- |
+| Cấu hình, kết nối | `config_invalid`, `config_key_unimplemented`, `config_max_parallel_ignored`, `source_dsn_invalid`, `target_dsn_invalid`, `source_unreachable`, `target_unreachable`, `ssh_tunnel_failed`, `tables_include_no_match`, `tables_include_invalid` |
+| Phiên bản | `source_version` (info), `source_version_unsupported`, `source_target_pair_unsupported`, `target_version_unsupported` (warning: MariaDB chỉ sang MySQL 8.x) |
+| Binlog source MySQL/MariaDB | `source_binlog_format`, `source_binlog_row_image`, `source_binlog_disabled`, `source_gtid_mode`, `source_gtid_auto_seed`, `source_binlog_row_value_options`, `source_binlog_compressed`, `source_binlog_session_stale`, `source_session_binlog_unverified`, `source_binlog_row_metadata`, `source_binlog_retention` / `source_binlog_retention_short` (dưới 24 giờ) |
+| Quyền | `source_privilege_missing`, `target_privilege_missing`, `source_replica_status_unreadable` (xem dưới) |
+| Bảng trong phạm vi | `source_table_missing`, `source_table_no_key` (kèm `ALTER TABLE` gợi ý), `source_table_keyless` (warning), `source_table_pk_prefix`, `source_table_unsupported` (kiểu/tính năng MariaDB), `source_type_unmappable` (MySQL→PG), `schema_create_unsupported`, `schema_warning`, `target_table_missing` (`create_schema: off`), `target_tables_to_create` (info) |
+| Khóa và collation ở target | `target_key_missing`, `target_unique_incompatible`, `target_key_collation_looser`, `target_collation_unmapped` (MariaDB→MySQL) |
+| Foreign key (MySQL→MySQL) | `source_fk_cascade_overlap` (info), `fk_parent_out_of_scope`, `fk_set_default_unsupported`, `fk_cascade_keyless_parent`, `fk_order_sensitive_rename`, `target_fk_missing`, `target_fk_unexpected`, `target_fk_mismatch`, `target_fk_name_clash`, `target_fk_collation_mismatch`, `target_fk_will_be_added` (info) |
+| Auto-seed | `autoseed_fk_out_of_scope`, `autoseed_target_fk_external`, `target_not_empty` (bảng đích trong nhóm FK của auto-seed đã có dữ liệu), `target_dsn_no_database` |
+| Target MySQL | `target_is_source`, `target_read_only`, `target_engine_not_innodb`, `target_group_replication` (info), `target_gr_keyless` (bảng keyless trên Group Replication), `source_innodb_wait_free` / `target_innodb_wait_free` (warning: `Innodb_buffer_pool_wait_free` đang tăng, breaker sẽ mở) |
+| Source PostgreSQL | `source_pg_wal_level`, `source_pg_standby`, `source_pg_publication`, `source_pg_slot`, `source_pg_slot_unset` (info) |
+| Khác | `source_objects_not_migrated` (info: view/trigger/routine/event không được chép), `check_failed` (warning: một kiểm tra không chạy xong, thường do thiếu quyền đọc catalog) |
+| MongoDB | `mongo_<tên kiểm tra>` từ preflight MongoDB (mục MongoDB) |
+
+Quyền được kiểm theo đúng câu lệnh code dùng (bảng 4.3): source MySQL/MariaDB cần `REPLICATION SLAVE` và `REPLICATION CLIENT` (MariaDB 10.5.2+ in là `BINLOG MONITOR`), `SELECT` trên schema trong phạm vi, `LOCK TABLES` khi snapshot logic ở chế độ vị trí binlog (MariaDB, MySQL `gtid_mode=OFF`), `RELOAD` khi `bootstrap.auto_seed` với source MySQL (`FLUSH TABLES WITH READ LOCK`; source MariaDB đọc `Binlog_snapshot_file` nên **không** cần `RELOAD`); `PROCESS` chỉ là warning. Target MySQL cần `SELECT, INSERT, UPDATE, DELETE` trên schema đích, thêm `CREATE, ALTER, INDEX, REFERENCES` khi `create_schema: auto`, `SELECT, INSERT, UPDATE, DELETE, CREATE` trên database checkpoint; thiếu `DROP` (auto-seed làm lại lần nạp dở) và `CONNECTION_ADMIN` chỉ là warning. Doctor đọc `SHOW GRANTS` của chính user; khi user được cấp role (quyền của role không hiện trong `SHOW GRANTS`), thiếu quyền chỉ là warning. PostgreSQL: kiểm `REPLICATION` của role nguồn; quyền target PG chưa kiểm.
+
+Ví dụ (MariaDB 10.6 → MySQL 8.4 Group Replication, auto-seed):
+
+```text
+strand doctor: pipeline seabank: 4 error(s), 1 warning(s), 2 info
+
+ERRORS (sync refuses to start until these are fixed)
+  [source_privilege_missing] source: the source user 'strand'@'%' lacks REPLICATION SLAVE (read the binlog)
+      fix: GRANT REPLICATION SLAVE ON *.* TO 'strand'@'%';
+  [target_fk_name_clash] app.c.fk_c_b: missing matching target cascading foreign key on app.c referencing app.b ...
+      fix: rename the constraint on the target (ALTER TABLE `app`.`other` DROP FOREIGN KEY `fk_c_b`, then add it back under another name) or rename it on the source
+  [target_not_empty] app.parent: auto-seed: target app.parent already contains data; automatic foreign-key changes require empty tables
+      fix: ...
+  [target_gr_keyless] app.kl: the target uses Group Replication, which rejects rows of tables without a primary key (error 3098) ...
+      fix: SET PERSIST sql_generate_invisible_primary_key=ON; on every group member (MySQL 8.0.30+) ...
+...
+Result: FAILED, 4 blocking problem(s)
+```
+
+Không kiểm (giới hạn hiện tại): ETA snapshot so với thời gian giữ binlog (dùng `strand plan`), quyền target PostgreSQL, FK MySQL→PG, trigger trên bảng đích của auto-seed, PK có snapshot logic được không.
 
 ### 7.2 `plan`
 
@@ -1179,6 +1253,7 @@ Exit 1 là lỗi tạm, nên tự restart. Exit 2–5 và 10 cần người xem.
 | 3 | `collation_looser` | Collation khóa ở target lỏng hơn source | Dùng collation chặt hơn (PG: `"C"`) |
 | 3 | `seed_invariant_failed`, `prerelease_tool` | `seed plan`/`apply` từ chối | Sửa đúng điều kiện SD nêu ra |
 | 3 | `schema_change_pending` | `validate` với `create_schema: off` mà thiếu bảng | `schema init` |
+| 3 | `doctor_failed` | `strand doctor` tìm thấy ít nhất một vấn đề mức `error` | Sửa theo dòng `fix:` của từng vấn đề (mục 7.1a) |
 | 4 | `pipeline_locked`, `fenced` | Instance khác cùng `name` đang chạy hoặc đã thay thế; `repair fix` khi `sync` đang chạy | Bảo đảm chỉ một instance |
 | 5 | `log_gap` | Source đã xóa log chưa apply; slot PG không tồn tại | Cấp lại từ archive (`--archive`), hoặc seed lại |
 | 5 | `prefetch_exhausted` | Spool prefetch đầy | Tăng spool, thêm tầng bucket |

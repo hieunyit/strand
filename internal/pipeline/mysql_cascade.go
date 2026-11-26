@@ -16,6 +16,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"strand/internal/exitcode"
+	"strand/internal/findings"
 	"strand/internal/model"
 )
 
@@ -287,6 +288,8 @@ type mysqlCascadePlan struct {
 	children      map[model.TableID]bool
 	checkedTables map[model.TableID]bool
 	missing       []cascadeFK
+	// sourceFKs/targetFKs: mọi FK đã đọc (doctor dùng lại để tìm trùng tên constraint, không đọc catalog lần nữa).
+	sourceFKs, targetFKs []cascadeFK
 }
 
 func (p *Pipeline) planMySQLCascade(ctx context.Context, additional ...model.TableID) (mysqlCascadePlan, error) {
@@ -300,11 +303,24 @@ func (p *Pipeline) compareMySQLForeignKeys(ctx context.Context, allowMissing boo
 	return compareMySQLForeignKeys(ctx, p.src, p.dst, p.cascadeSourceScope(additional...), p.filter.Target, func(id model.TableID) bool {
 		meta := p.table(id)
 		return meta != nil && meta.Keyless
-	}, allowMissing)
+	}, allowMissing, nil)
 }
 
-func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope map[model.TableID]bool, mapTarget func(model.TableID) model.TableID, isKeyless func(model.TableID) bool, allowMissing bool) (mysqlCascadePlan, error) {
+// compareMySQLForeignKeys so FK nguồn (trong phạm vi) với FK target. c == nil: dừng ở vấn đề đầu tiên (Start,
+// validate). c != nil (strand doctor): mỗi vấn đề thành một Finding trong c và so tiếp; lỗi trả về chỉ còn là
+// lỗi không đọc được catalog.
+func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope map[model.TableID]bool, mapTarget func(model.TableID) model.TableID, isKeyless func(model.TableID) bool, allowMissing bool, c *findings.Collector) (mysqlCascadePlan, error) {
 	var plan mysqlCascadePlan
+	var stop error
+	// fail: c == nil giữ lỗi để trả ngay (true); c != nil ghi Finding và so tiếp (false).
+	fail := func(code, object, fix string, e error) bool {
+		if c == nil {
+			stop = e
+			return true
+		}
+		c.Err(findings.Error, code, object, e, fix)
+		return false
+	}
 	plan.parents, plan.children = map[model.TableID]bool{}, map[model.TableID]bool{}
 	plan.checkedTables = map[model.TableID]bool{}
 	source, err := readSourceForeignKeys(ctx, src, sourceScope, true)
@@ -315,11 +331,17 @@ func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope 
 	if err != nil {
 		return plan, fmt.Errorf("inspect target foreign keys: %w", err)
 	}
+	plan.sourceFKs, plan.targetFKs = source, target
 	targetScope := make(map[model.TableID]bool, len(sourceScope))
 	for id := range sourceScope {
 		targetScope[mapTarget(id)] = true
 	}
 	sourceGroup, sourcePinned, overlap := cascadeGroups(source)
+	if overlap && c != nil {
+		c.Info("source_fk_cascade_overlap", "source",
+			"overlapping cascading foreign keys on the source: Strand applies them natively on the target, so the target must keep the same table and constraint names as the source",
+			"do not rename these tables (tables.rename) and keep the source constraint names on the target")
+	}
 	// Native cascade turns FOREIGN_KEY_CHECKS on for the entire writer. An
 	// unrelated restrictive FK can therefore affect CDC even outside a
 	// cascade-connected component.
@@ -336,21 +358,34 @@ func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope 
 			continue
 		}
 		if !sourceScope[fk.Parent] {
-			return plan, cascadeConfigError(fmt.Sprintf("foreign key %s on %s requires its parent %s in the replication scope", fk.constraint, fk.Child, fk.Parent))
+			if fail("fk_parent_out_of_scope", fkObject(fk.Child, fk.constraint), fmt.Sprintf("add %s to tables.include (or drop the foreign key on the source)", fk.Parent),
+				cascadeConfigError(fmt.Sprintf("foreign key %s on %s requires its parent %s in the replication scope", fk.constraint, fk.Child, fk.Parent))) {
+				return plan, stop
+			}
+			continue
 		}
 		plan.checkedTables[fk.Parent], plan.checkedTables[fk.Child] = true, true
 		if fk.OnDelete == "SET DEFAULT" || fk.OnUpdate == "SET DEFAULT" {
-			return plan, cascadeConfigError(fmt.Sprintf("SET DEFAULT foreign-key actions on %s are unsupported by the MySQL InnoDB target", fk.Child))
+			if fail("fk_set_default_unsupported", fkObject(fk.Child, fk.constraint), "change the foreign key action on the source to RESTRICT, CASCADE or SET NULL, or exclude the table",
+				cascadeConfigError(fmt.Sprintf("SET DEFAULT foreign-key actions on %s are unsupported by the MySQL InnoDB target", fk.Child))) {
+				return plan, stop
+			}
 		}
 		if native {
 			if isKeyless(fk.Parent) {
-				return plan, cascadeConfigError(fmt.Sprintf("cascading foreign key on %s requires a primary or unique key on parent %s", fk.Child, fk.Parent))
+				if fail("fk_cascade_keyless_parent", fkObject(fk.Child, fk.constraint), fmt.Sprintf("add a primary key (or unique NOT NULL key) to %s on the source", fk.Parent),
+					cascadeConfigError(fmt.Sprintf("cascading foreign key on %s requires a primary or unique key on parent %s", fk.Child, fk.Parent))) {
+					return plan, stop
+				}
 			}
 			plan.parents[fk.Parent], plan.children[fk.Child] = true, true
 		}
 		if sourcePinned[fk.Child] {
 			if fk.constraint == "" || mapTarget(fk.Child) != fk.Child {
-				return plan, cascadeConfigError(fmt.Sprintf("order-sensitive foreign keys: %s must keep its schema, table and constraint names on the target", fk.Child))
+				if fail("fk_order_sensitive_rename", fk.Child.String(), fmt.Sprintf("remove %s from tables.rename and give its foreign keys explicit names on the source", fk.Child),
+					cascadeConfigError(fmt.Sprintf("order-sensitive foreign keys: %s must keep its schema, table and constraint names on the target", fk.Child))) {
+					return plan, stop
+				}
 			}
 			fk.Name = fk.constraint
 		}
@@ -395,8 +430,13 @@ func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope 
 			if fk.cascades() {
 				kind = "cascading foreign key"
 			}
-			return plan, cascadeConfigError(fmt.Sprintf("unexpected %s %s on target %s referencing %s (%s); target rules, columns and key collations must match the source%s",
-				kind, fk.constraint, fk.Child, fk.Parent, describeCascadeFK(fk), hint))
+			if fail("target_fk_unexpected", fkObject(fk.Child, fk.constraint),
+				fmt.Sprintf("make it match the source foreign key, or drop it on the target: ALTER TABLE %s DROP FOREIGN KEY %s;", autoSeedTableSQL(fk.Child), mysqlFKQuote(fk.constraint)),
+				cascadeConfigError(fmt.Sprintf("unexpected %s %s on target %s referencing %s (%s); target rules, columns and key collations must match the source%s",
+					kind, fk.constraint, fk.Child, fk.Parent, describeCascadeFK(fk), hint))) {
+				return plan, stop
+			}
+			continue
 		}
 		expected[key]--
 	}
@@ -406,8 +446,17 @@ func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope 
 			continue
 		}
 		if !allowMissing {
-			return plan, cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target) + hint)
+			code := "target_fk_missing"
+			if _, clash := cascadeNameClash(fk, target); clash {
+				code = "target_fk_name_clash"
+			}
+			if fail(code, fkObject(fk.Child, fk.constraint), missingCascadeFix(ctx, dst, fk, target),
+				cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target)+hint)) {
+				return plan, stop
+			}
+			continue
 		}
+		conflicted := false
 		for _, existing := range target {
 			sameLink := existing.Child == fk.Child && existing.Parent == fk.Parent && slices.Equal(existing.Columns, fk.Columns)
 			sameName := existing.Child.Schema == fk.Child.Schema && strings.EqualFold(existing.constraint, fk.constraint)
@@ -418,13 +467,36 @@ func compareMySQLForeignKeys(ctx context.Context, src, dst *sql.DB, sourceScope 
 				if existing.Child == fk.Child {
 					conflict = fmt.Sprintf("; the target already has %s on %s %s", existing.constraint, existing.Child, describeCascadeFK(existing))
 				}
-				return plan, cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target) + conflict + hint)
+				code := "target_fk_mismatch"
+				fix := fmt.Sprintf("make %s on the target match the source (%s), e.g. ALTER TABLE %s DROP FOREIGN KEY %s; then %s",
+					existing.constraint, describeCascadeFK(fk), autoSeedTableSQL(existing.Child), mysqlFKQuote(existing.constraint), cascadeAddSQL(fk, missingCascadeName(fk))+";")
+				if !sameLink {
+					code = "target_fk_name_clash"
+					fix = fmt.Sprintf("rename the constraint on the target (ALTER TABLE %s DROP FOREIGN KEY %s, then add it back under another name) or rename it on the source",
+						autoSeedTableSQL(existing.Child), mysqlFKQuote(existing.constraint))
+				}
+				if fail(code, fkObject(fk.Child, fk.constraint), fix, cascadeConfigError(missingCascadeMessage(ctx, dst, fk, target)+conflict+hint)) {
+					return plan, stop
+				}
+				conflicted = true
+				break
 			}
+		}
+		if conflicted {
+			continue
 		}
 		plan.missing = append(plan.missing, fk)
 		expected[key]--
 	}
 	return plan, nil
+}
+
+// fkObject: "schema.table.constraint" (đối tượng của Finding về một FK).
+func fkObject(table model.TableID, constraint string) string {
+	if constraint == "" {
+		return table.String()
+	}
+	return table.String() + "." + constraint
 }
 
 // cascadeGroups finds the FK components in which native cascade is in use.
@@ -522,11 +594,8 @@ func missingCascadeMessage(ctx context.Context, db *sql.DB, fk cascadeFK, target
 	// MySQL keeps foreign-key names unique per schema (case-insensitively), so a
 	// constraint of another table can block creating this one under its name.
 	clash := ""
-	for _, t := range target {
-		if fk.constraint != "" && t.Child.Schema == fk.Child.Schema && t.Child != fk.Child && strings.EqualFold(t.constraint, fk.constraint) {
-			clash = fmt.Sprintf("; the constraint name %s is already used on the target by %s (MySQL foreign-key names are unique per schema, ignoring case): rename one of them", t.constraint, t.Child)
-			break
-		}
+	if t, ok := cascadeNameClash(fk, target); ok {
+		clash = fmt.Sprintf("; the constraint name %s is already used on the target by %s (MySQL foreign-key names are unique per schema, ignoring case): rename one of them", t.constraint, t.Child)
 	}
 	var exists int
 	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", fk.Child.Schema, fk.Child.Table).Scan(&exists)
@@ -543,6 +612,21 @@ func missingCascadeMessage(ctx context.Context, db *sql.DB, fk cascadeFK, target
 		return msg + fmt.Sprintf(": the target has %s, but the source needs %s %s; make the target rules, columns and key collations match the source",
 			strings.Join(similar, "; "), fk.constraint, describeCascadeFK(fk)) + clash
 	}
+	return msg + fmt.Sprintf(": target table %s exists without it (created before Strand, or by a tool that drops foreign keys); add it on the target with: %s", fk.Child, cascadeAddSQL(fk, missingCascadeName(fk))) + clash
+}
+
+// cascadeNameClash: FK của bảng KHÁC cùng schema trên target đã dùng tên constraint của fk.
+func cascadeNameClash(fk cascadeFK, target []cascadeFK) (cascadeFK, bool) {
+	for _, t := range target {
+		if fk.constraint != "" && t.Child.Schema == fk.Child.Schema && t.Child != fk.Child && strings.EqualFold(t.constraint, fk.constraint) {
+			return t, true
+		}
+	}
+	return cascadeFK{}, false
+}
+
+// missingCascadeName: tên dùng khi thêm fk còn thiếu trên target.
+func missingCascadeName(fk cascadeFK) string {
 	name := fk.Name
 	if name == "" {
 		name = fk.constraint
@@ -550,7 +634,21 @@ func missingCascadeMessage(ctx context.Context, db *sql.DB, fk cascadeFK, target
 	if name == "" {
 		name = fk.Child.Table + "_" + fk.Parent.Table + "_fk"
 	}
-	return msg + fmt.Sprintf(": target table %s exists without it (created before Strand, or by a tool that drops foreign keys); add it on the target with: %s", fk.Child, cascadeAddSQL(fk, name)) + clash
+	return name
+}
+
+// missingCascadeFix: cách sửa cụ thể cho fk thiếu trên target (cùng logic với missingCascadeMessage).
+func missingCascadeFix(ctx context.Context, db *sql.DB, fk cascadeFK, target []cascadeFK) string {
+	if t, ok := cascadeNameClash(fk, target); ok {
+		return fmt.Sprintf("constraint names are unique per schema: rename %s on %s on the target (drop it and add it back under another name), then %s;",
+			t.constraint, t.Child, cascadeAddSQL(fk, missingCascadeName(fk)))
+	}
+	var exists int
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", fk.Child.Schema, fk.Child.Table).Scan(&exists)
+	if err == nil && exists == 0 {
+		return fmt.Sprintf("create %s on the target with its foreign keys: keep bootstrap.create_schema: auto and enable bootstrap.auto_seed, or run strand schema init before sync", fk.Child)
+	}
+	return cascadeAddSQL(fk, missingCascadeName(fk)) + ";"
 }
 
 func (p *Pipeline) initMySQLCascade(ctx context.Context) error {

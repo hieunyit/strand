@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"strand/internal/exitcode"
+	"strand/internal/findings"
 	"strand/internal/schemagen"
 )
 
@@ -15,6 +17,12 @@ import (
 //   - ánh xạ gần đúng: chỉ cho cột không thuộc PRIMARY KEY/UNIQUE index, trả về cảnh báo nêu cột và ánh xạ;
 //   - cột khóa chỉ có ánh xạ gần đúng, hoặc collation không có ánh xạ: từ chối (exit 3).
 func CheckSourceCollationsOnTarget(ctx context.Context, src, dst *sql.DB, tables []string) ([]string, error) {
+	return CheckSourceCollationsOnTargetReport(ctx, src, dst, tables, nil)
+}
+
+// CheckSourceCollationsOnTargetReport là CheckSourceCollationsOnTarget với bộ gom c: c != nil thì mỗi bảng bị
+// từ chối thành một vấn đề target_collation_unmapped trong c và các bảng sau vẫn được kiểm.
+func CheckSourceCollationsOnTargetReport(ctx context.Context, src, dst *sql.DB, tables []string, c *findings.Collector) ([]string, error) {
 	has, err := schemagen.TargetCollations(ctx, dst)
 	if err != nil {
 		return nil, err
@@ -24,7 +32,12 @@ func CheckSourceCollationsOnTarget(ctx context.Context, src, dst *sql.DB, tables
 		schema, table, _ := strings.Cut(t, ".")
 		p, err := schemagen.PlanMariaDBCollations(ctx, src, has, schema, table)
 		if err != nil {
-			return warnings, err
+			if c == nil || exitcode.GetExitCode(err) != exitcode.Rejected {
+				return warnings, err
+			}
+			c.Err(findings.Error, "target_collation_unmapped", t, err,
+				"change the key column on the source to a collation MySQL 8 has (e.g. utf8mb4_bin or utf8mb4_unicode_ci), or exclude the table")
+			continue
 		}
 		warnings = append(warnings, p.Warnings...)
 	}

@@ -10,6 +10,7 @@ import (
 
 	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/findings"
 	"strand/internal/model"
 	"strand/internal/mysqlver"
 	"strand/internal/rowkey"
@@ -123,13 +124,32 @@ func CheckMySQLSource(ctx context.Context, db *sql.DB, tables []string) error {
 // CheckMySQLSourceOpts như CheckMySQLSource, kèm chế độ keyless (tables.keyless=full_row): bảng không khóa vẫn
 // qua khi dữ liệu đến từ seed và kiểu cột so bằng được; warnings liệt kê các bảng chạy keyless.
 func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko KeylessOpts) (warnings []string, err error) {
+	return CheckMySQLSourceReport(ctx, db, tables, ko, nil)
+}
+
+// CheckMySQLSourceReport là CheckMySQLSourceOpts với bộ gom c. c == nil: dừng ở lỗi đầu tiên (hành vi của
+// validate). c != nil (strand doctor): mỗi điều kiện bị từ chối thành một vấn đề trong c và kiểm tiếp; lỗi trả về
+// chỉ còn là lỗi không đọc được source; bảng keyless thành một cảnh báo trong c thay vì warnings.
+func CheckMySQLSourceReport(ctx context.Context, db *sql.DB, tables []string, ko KeylessOpts, c *findings.Collector) (warnings []string, err error) {
 	// Phiên bản server quyết định câu SQL: 5.7 không có binlog_row_value_options (8.0.3+) nên coi là rỗng.
 	ver, err := mysqlver.Cached(ctx, db)
 	if err != nil {
 		return warnings, err
 	}
+	var stop error
+	// fail: c == nil thì giữ lỗi để trả ngay (true); c != nil thì ghi vấn đề và kiểm tiếp (false).
+	fail := func(code, object, fix string, e error) bool {
+		if c == nil {
+			stop = e
+			return true
+		}
+		c.Err(findings.Error, code, object, e, fix)
+		return false
+	}
 	if err := mysqlver.CheckSupported(ver); err != nil {
-		return warnings, err
+		if fail("source_version_unsupported", "source", "upgrade the source to MariaDB 10.3+ or MySQL 5.5+", err) {
+			return warnings, stop
+		}
 	}
 	// Đọc từng biến, biến vắng (5.5/5.6/5.7) lấy mặc định của phiên bản đó (legacy_vars.go).
 	format, image, gtidMode, valueOpts, err := sourceBinlogVars(ctx, db)
@@ -140,20 +160,30 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 		return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, msg, nil)
 	}
 	if !strings.EqualFold(format, "ROW") {
-		return warnings, reject(fmt.Sprintf("binlog_format must be ROW, got %q", format))
+		if fail("source_binlog_format", "source", ver.PersistAdvice("binlog_format", "ROW")+"; then reconnect clients that write", reject(fmt.Sprintf("binlog_format must be ROW, got %q", format))) {
+			return warnings, stop
+		}
 	}
 	if !strings.EqualFold(image, "FULL") {
-		return warnings, reject(fmt.Sprintf("binlog_row_image must be FULL, got %q", image))
+		if fail("source_binlog_row_image", "source", ver.PersistAdvice("binlog_row_image", "FULL")+"; then reconnect clients that write", reject(fmt.Sprintf("binlog_row_image must be FULL, got %q", image))) {
+			return warnings, stop
+		}
 	}
 	// gtid_mode ON: chế độ GTID. OFF hoặc không có biến (5.5): chế độ vị trí binlog (file:pos, bắt đầu bằng
 	// --start-at <file>:<pos>). *_PERMISSIVE trộn Txn có/không GTID trong cùng binlog: không chế độ nào đúng.
 	if ko.RequireBinlogPosition && strings.EqualFold(gtidMode, "ON") {
-		return warnings, reject("bootstrap.auto_seed currently requires binlog file position mode")
+		if fail("source_gtid_auto_seed", "source", "set bootstrap.auto_seed: false (use bootstrap.default: logical or a seed), or run the source with gtid_mode=OFF",
+			reject("bootstrap.auto_seed currently requires binlog file position mode")) {
+			return warnings, stop
+		}
 	}
 	switch strings.ToUpper(gtidMode) {
 	case "ON", "OFF", "":
 	default:
-		return warnings, reject(fmt.Sprintf("gtid_mode must be ON (GTID mode) or OFF (binlog position mode), got %q", gtidMode))
+		if fail("source_gtid_mode", "source", "finish the GTID transition: SET GLOBAL gtid_mode step by step to ON (or back to OFF)",
+			reject(fmt.Sprintf("gtid_mode must be ON (GTID mode) or OFF (binlog position mode), got %q", gtidMode))) {
+			return warnings, stop
+		}
 	}
 	// Không còn bắt buộc GTID nên phải kiểm binlog bật riêng (trước đây gtid_mode=ON ngầm đòi log-bin).
 	var logBin string
@@ -161,10 +191,15 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 		return warnings, fmt.Errorf("read source log_bin: %w", err)
 	}
 	if logBin != "1" && !strings.EqualFold(logBin, "ON") {
-		return warnings, reject("binary logging is disabled on the source (log_bin=OFF): start mysqld with --log-bin and --server-id")
+		if fail("source_binlog_disabled", "source", "add log-bin=mysql-bin and server-id=<unique id> to the [mysqld] section of my.cnf and restart the source",
+			reject("binary logging is disabled on the source (log_bin=OFF): start mysqld with --log-bin and --server-id")) {
+			return warnings, stop
+		}
 	}
 	if err := CheckMySQLBinlogRowValueOptions(valueOpts); err != nil {
-		return warnings, err
+		if fail("source_binlog_row_value_options", "source", ver.PersistAdvice("binlog_row_value_options", "''"), err) {
+			return warnings, stop
+		}
 	}
 	if ver.IsMariaDB() {
 		// log_bin_compress=ON ghi ROWS/QUERY dạng nén: reader chưa hỗ trợ (dừng khi gặp), báo sớm ở đây.
@@ -173,7 +208,10 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 			return warnings, fmt.Errorf("read source log_bin_compress: %w", err)
 		}
 		if compress == "1" || strings.EqualFold(compress, "ON") {
-			return warnings, reject("log_bin_compress is ON on the MariaDB source: compressed binlog events are not supported; SET GLOBAL log_bin_compress=OFF (and in my.cnf)")
+			if fail("source_binlog_compressed", "source", "SET GLOBAL log_bin_compress=OFF; and set log_bin_compress=OFF in my.cnf",
+				reject("log_bin_compress is ON on the MariaDB source: compressed binlog events are not supported; SET GLOBAL log_bin_compress=OFF (and in my.cnf)")) {
+				return warnings, stop
+			}
 		}
 	}
 
@@ -182,8 +220,12 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 	for _, t := range tables {
 		schema, table, ok := strings.Cut(t, ".")
 		if !ok || strings.ContainsAny(t, "*?") {
-			return warnings, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-				fmt.Sprintf("table %q: expected schema.table (wildcards are not supported by validate yet)", t), nil)
+			if fail("tables_include_invalid", t, "list tables as schema.table in tables.include",
+				exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+					fmt.Sprintf("table %q: expected schema.table (wildcards are not supported by validate yet)", t), nil)) {
+				return warnings, stop
+			}
+			continue
 		}
 		var exists int
 		var estRows int64
@@ -198,8 +240,12 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 			return warnings, fmt.Errorf("inspect table %s: %w", t, err)
 		}
 		if exists == 0 {
-			return warnings, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-				fmt.Sprintf("table %s does not exist on source", t), nil)
+			if fail("source_table_missing", t, "remove it from tables.include, or grant the strand user SELECT on it",
+				exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+					fmt.Sprintf("table %s does not exist on source", t), nil)) {
+				return warnings, stop
+			}
+			continue
 		}
 		// Khóa hàng: PRIMARY KEY, hoặc unique index NOT NULL (STATISTICS thay TABLE_CONSTRAINTS: MariaDB 10.6 ẩn
 		// TABLE_CONSTRAINTS với user chỉ có SELECT, LOCK TABLES nên bảng có PK bị báo missing_pk).
@@ -216,7 +262,12 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 				if ko.FoundKeyless != nil {
 					ko.FoundKeyless(model.TableID{Schema: schema, Table: table})
 				}
-				warnings = append(warnings, KeylessWarnings(t)...)
+				if c != nil {
+					c.Warn("source_table_keyless", t, "table has no primary or unique NOT NULL key: it runs in keyless mode (rows matched on all columns, changes applied serially, verify is count+checksum only)",
+						"add a key on the source if you can; otherwise add a non-unique index on selective columns on the target")
+				} else {
+					warnings = append(warnings, KeylessWarnings(t)...)
+				}
 				continue
 			}
 			keylessWhy[t] = why
@@ -226,20 +277,35 @@ func CheckMySQLSourceOpts(ctx context.Context, db *sql.DB, tables []string, ko K
 			if ver.IsMariaDB() {
 				flavor = "mariadb"
 			}
-			missing = append(missing, rowkey.Suggest(rowkey.SuggestInput{
+			suggestion := rowkey.Suggest(rowkey.SuggestInput{
 				Flavor: flavor, Major: ver.Major, Minor: ver.Minor, Patch: ver.Patch,
 				Table: model.TableID{Schema: schema, Table: table}, EstRows: estRows, Notes: rowkey.Explain(res.Rejected), KeylessWhy: keylessWhy[t],
-			}))
+			})
+			if c != nil {
+				msg := "table has no usable row key (no primary key, no unique key on NOT NULL columns)"
+				if why := keylessWhy[t]; why != "" {
+					msg += "; keyless mode is not possible: " + why
+				}
+				c.Errorf("source_table_no_key", t, msg, suggestion)
+			} else {
+				missing = append(missing, suggestion)
+			}
 			continue
 		}
 		// review G1: PRIMARY KEY có cột prefix (SUB_PART) — pipeline từ chối khi nạp schema, validate báo sớm.
 		if res.Info.PKPrefix {
-			return warnings, exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
-				fmt.Sprintf("table %s: primary key with prefix part is not supported; use a full-column primary key", t), nil)
+			if fail("source_table_pk_prefix", t, "replace the prefix primary key with a full-column primary key on the source",
+				exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected,
+					fmt.Sprintf("table %s: primary key with prefix part is not supported; use a full-column primary key", t), nil)) {
+				return warnings, stop
+			}
+			continue
 		}
 		if ver.IsMariaDB() {
 			if err := schemagen.CheckMariaDBTable(ctx, db, schema, table); err != nil {
-				return warnings, err
+				if fail("source_table_unsupported", t, "change the column on the source as the message says, or add the table to tables.exclude", err) {
+					return warnings, stop
+				}
 			}
 		}
 	}
@@ -338,34 +404,54 @@ func CheckMySQLSessionBinlog(ctx context.Context, db *sql.DB) (warnings []string
 // như pipeline) thành danh sách bảng thật trên source. Mẫu include không khớp bảng nào bị từ chối,
 // để lỗi gõ tên không âm thầm thành "không đồng bộ gì".
 func ExpandTables(ctx context.Context, db *sql.DB, include, exclude []string) ([]string, error) {
+	out, unmatched, err := ExpandTablesReport(ctx, db, include, exclude)
+	if err != nil {
+		return nil, err
+	}
+	if len(unmatched) > 0 {
+		return nil, unmatchedPatternError(unmatched[0])
+	}
+	return out, nil
+}
+
+func unmatchedPatternError(p string) error {
+	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
+		fmt.Sprintf("tables.include pattern %q matches no table on source", p), nil)
+}
+
+// UnmatchedPatternMessage là thông điệp validate in khi mẫu include p không khớp bảng nào.
+func UnmatchedPatternMessage(p string) string { return findings.Message(unmatchedPatternError(p)) }
+
+// ExpandTablesReport như ExpandTables nhưng không từ chối mẫu include không khớp: trả chúng trong unmatched
+// (theo thứ tự trong include) cùng các bảng của những mẫu còn lại.
+func ExpandTablesReport(ctx context.Context, db *sql.DB, include, exclude []string) (out, unmatched []string, err error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) FROM information_schema.TABLES
 		 WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') -- MariaDB system-versioned: chỉ chép hàng hiện hành
 		   AND TABLE_SCHEMA NOT IN ('mysql','sys','information_schema','performance_schema')
 		 ORDER BY 1`)
 	if err != nil {
-		return nil, fmt.Errorf("list source tables: %w", err)
+		return nil, nil, fmt.Errorf("list source tables: %w", err)
 	}
 	defer rows.Close()
 	var all []string
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		all = append(all, n)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var out []string
 	matched := make([]bool, len(include))
 	for _, n := range all {
 		in := false
 		for i, p := range include {
 			ok, err := path.Match(p, n)
 			if err != nil {
-				return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid table pattern %q: %v", p, err), err)
+				return nil, nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.InvalidSyntax, fmt.Sprintf("invalid table pattern %q: %v", p, err), err)
 			}
 			if ok {
 				in, matched[i] = true, true
@@ -387,9 +473,18 @@ func ExpandTables(ctx context.Context, db *sql.DB, include, exclude []string) ([
 	}
 	for i, p := range include {
 		if !matched[i] {
-			return nil, exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected,
-				fmt.Sprintf("tables.include pattern %q matches no table on source", p), nil)
+			unmatched = append(unmatched, p)
 		}
 	}
-	return out, nil
+	return out, unmatched, nil
+}
+
+// MaxParallelWarning: bootstrap.logical.max_parallel > 1 với source PostgreSQL không có tác dụng (snapshot
+// logic của source PG luôn tuần tự từng bảng).
+func MaxParallelWarning(cfg *config.Config) string {
+	if cfg.Bootstrap.Logical.MaxParallel > 1 && !strings.EqualFold(cfg.Source.Kind, "mysql") {
+		return fmt.Sprintf("bootstrap.logical.max_parallel = %d is ignored for PostgreSQL sources: tables are snapshotted one at a time",
+			cfg.Bootstrap.Logical.MaxParallel)
+	}
+	return ""
 }

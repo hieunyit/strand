@@ -15,6 +15,7 @@ import (
 
 	"strand/internal/checkpoint"
 	"strand/internal/exitcode"
+	"strand/internal/findings"
 	"strand/internal/model"
 	"strand/internal/mysqlver"
 	mysqlreader "strand/internal/reader/mysql"
@@ -33,6 +34,17 @@ type seedDependency struct {
 // that existing destination tables in the first-copy group are empty. Unrelated
 // tables may already contain data. target maps source IDs through table renames.
 func ValidateAutoSeedPreflight(ctx context.Context, src, dst *sql.DB, allowMissingFK bool, tables, seedTables []model.TableID, target func(model.TableID) model.TableID) error {
+	return autoSeedPreflight(ctx, src, dst, allowMissingFK, tables, seedTables, target, nil)
+}
+
+// AutoSeedPreflightReport là ValidateAutoSeedPreflight cho strand doctor: mọi vấn đề (FK không khớp, nhóm FK ra
+// ngoài phạm vi, bảng đích đã có dữ liệu, FK sẽ được thêm) được ghi vào c thay vì dừng ở vấn đề đầu tiên.
+// Chỉ đọc: không tạo bảng hay FK. Lỗi trả về chỉ còn là lỗi không đọc được catalog.
+func AutoSeedPreflightReport(ctx context.Context, src, dst *sql.DB, allowMissingFK bool, tables, seedTables []model.TableID, target func(model.TableID) model.TableID, c *findings.Collector) error {
+	return autoSeedPreflight(ctx, src, dst, allowMissingFK, tables, seedTables, target, c)
+}
+
+func autoSeedPreflight(ctx context.Context, src, dst *sql.DB, allowMissingFK bool, tables, seedTables []model.TableID, target func(model.TableID) model.TableID, c *findings.Collector) error {
 	if target == nil {
 		target = func(id model.TableID) model.TableID { return id }
 	}
@@ -44,9 +56,14 @@ func ValidateAutoSeedPreflight(ctx context.Context, src, dst *sql.DB, allowMissi
 	for _, id := range seedTables {
 		keyless[id] = true
 	}
-	plan, err := compareMySQLForeignKeys(ctx, src, dst, scope, target, func(id model.TableID) bool { return keyless[id] }, allowMissingFK)
+	plan, err := compareMySQLForeignKeys(ctx, src, dst, scope, target, func(id model.TableID) bool { return keyless[id] }, allowMissingFK, c)
 	if err != nil {
 		return err
+	}
+	if c != nil {
+		if err := reportCreateNameClashes(ctx, dst, plan, target, c); err != nil {
+			return err
+		}
 	}
 	if len(plan.checkedTables) == 0 && len(seedTables) == 0 {
 		return nil
@@ -67,21 +84,31 @@ func ValidateAutoSeedPreflight(ctx context.Context, src, dst *sql.DB, allowMissi
 	for _, id := range tables {
 		byTarget[target(id)] = id
 	}
-	group, err := closeAutoSeedGroup(scope, sourceDeps, targetDeps, byTarget, roots, target)
+	group, err := closeAutoSeedGroup(scope, sourceDeps, targetDeps, byTarget, roots, target, c)
 	if err != nil {
 		return err
 	}
+	existing := map[model.TableID]bool{}
 	for _, id := range group {
 		dstID := target(id)
 		present, err := schemagen.Exists(ctx, dst, "mysql", dstID)
 		if err != nil {
 			return err
 		}
+		existing[dstID] = present
 		if present {
 			if err := requireEmptyForeignKeyTarget(ctx, dst, dstID); err != nil {
-				return err
+				if c == nil || exitcode.GetExitCode(err) != exitcode.Rejected {
+					return err
+				}
+				c.Err(findings.Error, "target_not_empty", dstID.String(), err, fmt.Sprintf(
+					"auto-seed copies this foreign-key group into empty target tables: empty %s on the target only if its rows are disposable (TRUNCATE TABLE %s;), or seed the group another way and set bootstrap.auto_seed: false",
+					dstID, autoSeedTableSQL(dstID)))
 			}
 		}
+	}
+	if c != nil && allowMissingFK {
+		reportAutoSeedRepairs(ctx, dst, plan, existing, c)
 	}
 	return nil
 }
@@ -156,7 +183,7 @@ func readSeedDependencies(ctx context.Context, db *sql.DB) ([]seedDependency, er
 // Edges are undirected because a child and its parent must be in the same
 // consistent initial copy. Source edges use source IDs; target edges use the
 // renamed target IDs.
-func closeAutoSeedGroup(scope map[model.TableID]bool, source, target []seedDependency, targets map[model.TableID]model.TableID, roots []model.TableID, mapTarget func(model.TableID) model.TableID) ([]model.TableID, error) {
+func closeAutoSeedGroup(scope map[model.TableID]bool, source, target []seedDependency, targets map[model.TableID]model.TableID, roots []model.TableID, mapTarget func(model.TableID) model.TableID, c *findings.Collector) ([]model.TableID, error) {
 	neighbors := map[model.TableID][]model.TableID{}
 	add := func(a, b model.TableID) {
 		neighbors[a] = append(neighbors[a], b)
@@ -187,14 +214,24 @@ func closeAutoSeedGroup(scope map[model.TableID]bool, source, target []seedDepen
 			continue
 		}
 		if !scope[id] {
-			return nil, autoSeedRejected(fmt.Sprintf("foreign-key group requires source table %s in the replication scope", id))
+			e := autoSeedRejected(fmt.Sprintf("foreign-key group requires source table %s in the replication scope", id))
+			if c == nil {
+				return nil, e
+			}
+			c.Err(findings.Error, "autoseed_fk_out_of_scope", id.String(), e, fmt.Sprintf("add %s to tables.include: tables linked by foreign keys are copied together", id))
+			seen[id] = true
+			continue
 		}
 		if outside, ok := externalTarget[id]; ok {
 			mapped := id
 			if mapTarget != nil {
 				mapped = mapTarget(id)
 			}
-			return nil, autoSeedRejected(fmt.Sprintf("target %s has a foreign-key dependency on %s outside the replication scope", mapped, outside))
+			e := autoSeedRejected(fmt.Sprintf("target %s has a foreign-key dependency on %s outside the replication scope", mapped, outside))
+			if c == nil {
+				return nil, e
+			}
+			c.Err(findings.Error, "autoseed_target_fk_external", mapped.String(), e, fmt.Sprintf("add the source table of %s to tables.include, or drop that foreign key on the target", outside))
 		}
 		seen[id] = true
 		result = append(result, id)
@@ -227,7 +264,7 @@ func (p *Pipeline) autoSeedTables(ctx context.Context, cascade mysqlCascadePlan)
 	for id := range p.tables {
 		scope[id] = true
 	}
-	return closeAutoSeedGroup(scope, source, target, targets, roots, p.filter.Target)
+	return closeAutoSeedGroup(scope, source, target, targets, roots, p.filter.Target, nil)
 }
 
 // autoSeed runs before CDC and only with an empty checkpoint. Rows and the new
@@ -882,54 +919,65 @@ func (p *Pipeline) checkGroupReplicationKeyless(ctx context.Context) error {
 			keyless = append(keyless, id)
 		}
 	}
-	if len(keyless) == 0 {
-		return nil
-	}
-	active, err := targetGroupReplicationActive(ctx, p.dst)
-	if err != nil || !active {
+	blocked, err := groupReplicationKeylessBlocked(ctx, p.dst, p.cfg.Target.Kind, keyless, p.filter.Target, p.cfg.Bootstrap.CreateSchemaAuto())
+	if err != nil || len(blocked) == 0 {
 		return err
 	}
+	names := make([]string, len(blocked))
+	for i, id := range blocked {
+		names[i] = id.String()
+	}
+	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
+		"the target uses Group Replication, which rejects rows of tables without a primary key (error 3098), and these source tables have no key: %s. "+
+			"Before Strand creates their target tables, set sql_generate_invisible_primary_key=ON on every group member (MySQL 8.0.30+, SET PERSIST) "+
+			"so they get an invisible primary key; or add a key on the source, add one to an existing target table, or exclude the tables",
+		strings.Join(names, ", ")), nil)
+}
+
+// groupReplicationKeylessBlocked trả các bảng nguồn keyless (đã sắp xếp) mà bảng target sẽ không có khóa trong khi
+// target đang chạy Group Replication.
+func groupReplicationKeylessBlocked(ctx context.Context, dst *sql.DB, targetKind string, keyless []model.TableID, mapTarget func(model.TableID) model.TableID, createSchemaAuto bool) ([]model.TableID, error) {
+	if len(keyless) == 0 {
+		return nil, nil
+	}
+	active, err := targetGroupReplicationActive(ctx, dst)
+	if err != nil || !active {
+		return nil, err
+	}
 	var gipk sql.NullInt64
-	if err := p.dst.QueryRowContext(ctx, "SELECT @@SESSION.sql_generate_invisible_primary_key").Scan(&gipk); err != nil {
+	if err := dst.QueryRowContext(ctx, "SELECT @@SESSION.sql_generate_invisible_primary_key").Scan(&gipk); err != nil {
 		var me *drivermysql.MySQLError
 		if !errors.As(err, &me) || me.Number != 1193 { // before MySQL 8.0.30 the variable does not exist
-			return fmt.Errorf("read target sql_generate_invisible_primary_key: %w", err)
+			return nil, fmt.Errorf("read target sql_generate_invisible_primary_key: %w", err)
 		}
 	}
-	var blocked []string
+	var blocked []model.TableID
 	for _, id := range keyless {
-		dst := p.filter.Target(id)
-		present, err := schemagen.Exists(ctx, p.dst, p.cfg.Target.Kind, dst)
+		to := mapTarget(id)
+		present, err := schemagen.Exists(ctx, dst, targetKind, to)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !present {
-			if gipk.Int64 == 0 || !p.cfg.Bootstrap.CreateSchemaAuto() {
-				blocked = append(blocked, id.String())
+			if gipk.Int64 == 0 || !createSchemaAuto {
+				blocked = append(blocked, id)
 			}
 			continue
 		}
 		// Group Replication accepts a primary key or a unique key on NOT NULL columns.
 		var one int
-		err = p.dst.QueryRowContext(ctx, "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING SUM(NULLABLE='YES')=0 LIMIT 1",
-			dst.Schema, dst.Table).Scan(&one)
+		err = dst.QueryRowContext(ctx, "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING SUM(NULLABLE='YES')=0 LIMIT 1",
+			to.Schema, to.Table).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
-			blocked = append(blocked, id.String())
+			blocked = append(blocked, id)
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("inspect keys of target %s: %w", dst, err)
+			return nil, fmt.Errorf("inspect keys of target %s: %w", to, err)
 		}
 	}
-	if len(blocked) == 0 {
-		return nil
-	}
-	sort.Strings(blocked)
-	return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, fmt.Sprintf(
-		"the target uses Group Replication, which rejects rows of tables without a primary key (error 3098), and these source tables have no key: %s. "+
-			"Before Strand creates their target tables, set sql_generate_invisible_primary_key=ON on every group member (MySQL 8.0.30+, SET PERSIST) "+
-			"so they get an invisible primary key; or add a key on the source, add one to an existing target table, or exclude the tables",
-		strings.Join(blocked, ", ")), nil)
+	sort.Slice(blocked, func(i, j int) bool { return blocked[i].String() < blocked[j].String() })
+	return blocked, nil
 }
 
 // autoSeedTarget is the target side of an auto-seed copy. Without a budget it

@@ -3,11 +3,14 @@ package validate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"strand/internal/config"
 	"strand/internal/exitcode"
+	"strand/internal/findings"
 	"strand/internal/model"
 	"strand/internal/rowkey"
 )
@@ -103,6 +106,15 @@ func uniqueIndexCovers(idx map[string][]string, key []string, exactSet bool) (st
 
 // TargetKeyError là lỗi (exit 3) khi bảng target đã có nhưng thiếu unique index khớp khóa hàng của nguồn.
 func TargetKeyError(src, dst model.TableID, key rowkey.Key, engine model.Engine) error {
+	fix := TargetKeyFix(dst, key, engine)
+	return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf(
+		"source table %s has no primary key and uses %s as its row key, but target table %s has no matching unique index/constraint: "+
+			"upserts would insert duplicate rows instead of updating. Create it on the target (or drop the target table and run `strand schema init`): %s",
+		src, key.Label(), dst, fix), nil)
+}
+
+// TargetKeyFix là câu tạo unique index khớp khóa hàng key trên bảng target dst.
+func TargetKeyFix(dst model.TableID, key rowkey.Key, engine model.Engine) string {
 	cols := make([]string, len(key.Columns))
 	for i, c := range key.Columns {
 		if engine == model.EnginePG {
@@ -115,10 +127,7 @@ func TargetKeyError(src, dst model.TableID, key rowkey.Key, engine model.Engine)
 	if engine == model.EnginePG {
 		fix = fmt.Sprintf(`CREATE UNIQUE INDEX ON "%s"."%s" (%s);`, dst.Schema, dst.Table, strings.Join(cols, ", "))
 	}
-	return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf(
-		"source table %s has no primary key and uses %s as its row key, but target table %s has no matching unique index/constraint: "+
-			"upserts would insert duplicate rows instead of updating. Create it on the target (or drop the target table and run `strand schema init`): %s",
-		src, key.Label(), dst, fix), nil)
+	return fix
 }
 
 // CheckTargetKey: bảng target dst (nếu đã tồn tại) phải có unique index khớp khóa key của nguồn. Chỉ áp dụng khi
@@ -208,13 +217,23 @@ func CheckTargetKey(ctx context.Context, dstDB *sql.DB, engine model.Engine, src
 // CheckKeys giải khóa hàng của từng bảng nguồn (MySQL/MariaDB/PostgreSQL), kiểm bảng target đã tồn tại có unique
 // index khớp khi khóa không phải PRIMARY KEY, và trả các dòng "table: key ..." để in cho người vận hành.
 func CheckKeys(ctx context.Context, src *sql.DB, srcKind string, dst *sql.DB, dstKind string, tables []model.TableID, rename map[string]string, ko KeylessOpts) ([]string, error) {
+	return CheckKeysReport(ctx, src, srcKind, dst, dstKind, tables, rename, ko, nil)
+}
+
+// CheckKeysReport là CheckKeys với bộ gom c: c == nil dừng ở lỗi đầu tiên; c != nil ghi từng bảng có vấn đề
+// (khóa target thiếu, unique constraint không tương thích, collation khóa lỏng hơn) vào c và kiểm tiếp.
+// Với c != nil, bảng nguồn thiếu khóa không được báo lại ở đây (CheckMySQLSourceReport đã báo).
+func CheckKeysReport(ctx context.Context, src *sql.DB, srcKind string, dst *sql.DB, dstKind string, tables []model.TableID, rename map[string]string, ko KeylessOpts, c *findings.Collector) ([]string, error) {
 	var lines []string
 	keys := map[model.TableID]*rowkey.Key{}
 	if strings.EqualFold(srcKind, "postgres") {
 		_, kw, err := CheckPGRowKeyOpts(ctx, src, tables, ko)
 		lines = append(lines, prefixWarn(kw)...)
 		if err != nil {
-			return lines, err
+			if c == nil || exitcode.GetExitCode(err) != exitcode.Rejected {
+				return lines, err
+			}
+			c.Err(findings.Error, "source_table_no_key", "source", err, "add a primary key, or REPLICA IDENTITY USING INDEX, as shown for each table")
 		}
 		for _, t := range tables {
 			var oid int64
@@ -258,13 +277,42 @@ func CheckKeys(ctx context.Context, src *sql.DB, srcKind string, dst *sql.DB, ds
 			}
 		}
 		if err := CheckTargetKey(ctx, dst, engine, t, dstID, *k); err != nil {
-			return lines, err
+			if c == nil || exitcode.GetExitCode(err) != exitcode.Rejected {
+				return lines, err
+			}
+			code, fix := "target_key_missing", TargetKeyFix(dstID, *k, engine)
+			if !strings.Contains(err.Error(), "no matching unique index") {
+				code, fix = "target_unique_incompatible", "align the target unique indexes with the full source row key (drop the conflicting one)"
+			}
+			c.Err(findings.Error, code, dstID.String(), err, fix)
 		}
 	}
 	if dst != nil && src != nil {
 		opts := ConstraintCheckOptions{TableRename: rename}
-		if err := CheckConstraintCompatibility(ctx, src, srcEngine, dst, engine, tables, opts); err != nil {
-			return lines, err
+		if c == nil {
+			if err := CheckConstraintCompatibility(ctx, src, srcEngine, dst, engine, tables, opts); err != nil {
+				return lines, err
+			}
+			return lines, nil
+		}
+		for _, t := range tables {
+			dstID := opts.MapTable(t)
+			err := CheckTableConstraintCompatibility(ctx, src, srcEngine, dst, engine, t, dstID, opts)
+			if err == nil {
+				continue
+			}
+			var e *exitcode.Error
+			if !errors.As(err, &e) {
+				return lines, err
+			}
+			if strings.Contains(e.Message, "does not exist") {
+				continue // bảng nguồn không còn: CheckMySQLSourceReport đã báo
+			}
+			code := "target_unique_incompatible"
+			if e.Code == exitcode.ErrCollationLooser {
+				code = "target_key_collation_looser"
+			}
+			c.Err(findings.Error, code, dstID.String(), err, "make the target unique constraint match the source (same columns and collation), or drop it on the target")
 		}
 	}
 	return lines, nil
@@ -392,4 +440,27 @@ func indexContainsIdentity(cols, key []string) bool {
 }
 func incompatibleTargetIndex(src, dst model.TableID, name string) error {
 	return exitcode.New(exitcode.ErrMissingPK, exitcode.Rejected, fmt.Sprintf("target table %s: unique index %q can conflict between distinct rows from source %s; align target unique constraints with the complete source row identity", dst, name, src), nil)
+}
+
+// KeylessOptsFromConfig: cấu hình keyless cho validate/doctor; một bảng "có seed" khi per_table[bảng].mode = seed,
+// hoặc (không có cấu hình riêng) bootstrap.default là seed/start_at, hoặc bootstrap.auto_seed bật.
+func KeylessOptsFromConfig(cfg *config.Config) KeylessOpts {
+	return KeylessOpts{
+		On:                    cfg.Tables.KeylessOn(),
+		AllowFloat:            cfg.Tables.KeylessAllowFloat,
+		RequireBinlogPosition: cfg.Bootstrap.AutoSeed,
+		Seeded: func(table string) bool {
+			if cfg.Bootstrap.AutoSeed {
+				return true
+			}
+			if pt, ok := cfg.Bootstrap.PerTable[table]; ok && pt.Mode != "" {
+				return strings.EqualFold(pt.Mode, "seed")
+			}
+			switch strings.ToLower(strings.TrimSpace(cfg.Bootstrap.Default)) {
+			case "seed", "start_at":
+				return true
+			}
+			return false
+		},
+	}
 }

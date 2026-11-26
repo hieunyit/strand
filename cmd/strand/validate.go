@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -181,27 +180,9 @@ func newValidateCmd() *cobra.Command {
 				return err
 			}
 			if cfg.Bootstrap.AutoSeed && strings.EqualFold(cfg.Source.Kind, "mysql") && strings.EqualFold(cfg.Target.Kind, "mysql") {
-				resumed := false
-				var targetSchema sql.NullString
-				if err := r.Target.QueryRowContext(cmd.Context(), "SELECT DATABASE()").Scan(&targetSchema); err != nil {
-					return err
-				}
-				if !targetSchema.Valid || targetSchema.String == "" {
-					return exitcode.New(exitcode.ErrBinlogConfigInvalid, exitcode.Rejected, "target DSN must select the MySQL checkpoint database for auto-seed", nil)
-				}
-				hasCheckpointTable, err := schemagen.Exists(cmd.Context(), r.Target, "mysql", model.TableID{Schema: targetSchema.String, Table: "_strand_checkpoint"})
+				resumed, err := pipeline.AutoSeedResumed(cmd.Context(), r.Target, cfg.Name)
 				if err != nil {
 					return err
-				}
-				if hasCheckpointTable {
-					var applied string
-					err := r.Target.QueryRowContext(cmd.Context(), "SELECT applied FROM _strand_checkpoint WHERE pipeline_id=?", cfg.Name).Scan(&applied)
-					// Start creates an empty checkpoint row before attempting the copy;
-					// only a published applied position means this is a real resume.
-					resumed = err == nil && applied != ""
-					if err != nil && !errors.Is(err, sql.ErrNoRows) {
-						return err
-					}
 				}
 				if !resumed {
 					if err := pipeline.ValidateAutoSeedPreflight(cmd.Context(), r.Source, r.Target, cfg.Bootstrap.CreateSchemaAuto(), tables, autoSeedKeylessTables, func(id model.TableID) model.TableID {
@@ -266,55 +247,11 @@ func renamedTarget(rename map[string]string, id model.TableID) model.TableID {
 
 // objectsSummaryWarning: "N views, M triggers... are not migrated automatically"; rỗng nếu không có gì.
 func objectsSummaryWarning(c map[objects.Kind]int, toMySQL bool) string {
-	var parts []string
-	for _, k := range []objects.Kind{objects.KindView, objects.KindProcedure, objects.KindFunction, objects.KindTrigger, objects.KindEvent} {
-		if n := c[k]; n > 0 {
-			name := string(k)
-			if n != 1 {
-				name += "s"
-			}
-			parts = append(parts, fmt.Sprintf("%d %s", n, name))
-		}
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	msg := strings.Join(parts, ", ") + " are not migrated automatically (nor are users and grants; counts cover only what the source account can see)"
-	if toMySQL {
-		return msg + "; use `strand objects list|export|apply`"
-	}
-	return msg + ": recreate them on the target by hand"
+	return objects.SummaryWarning(c, toMySQL)
 }
 
-// keylessOpts: cấu hình keyless cho validate; một bảng "có seed" khi per_table[bảng].mode = seed, hoặc (không có
-// cấu hình riêng) bootstrap.default là seed/start_at.
-func keylessOpts(cfg *config.Config) validate.KeylessOpts {
-	return validate.KeylessOpts{
-		On:                    cfg.Tables.KeylessOn(),
-		AllowFloat:            cfg.Tables.KeylessAllowFloat,
-		RequireBinlogPosition: cfg.Bootstrap.AutoSeed,
-		Seeded: func(table string) bool {
-			if cfg.Bootstrap.AutoSeed {
-				return true
-			}
-			if pt, ok := cfg.Bootstrap.PerTable[table]; ok && pt.Mode != "" {
-				return strings.EqualFold(pt.Mode, "seed")
-			}
-			switch strings.ToLower(strings.TrimSpace(cfg.Bootstrap.Default)) {
-			case "seed", "start_at":
-				return true
-			}
-			return false
-		},
-	}
-}
+// keylessOpts: cấu hình keyless cho validate (validate.KeylessOptsFromConfig).
+func keylessOpts(cfg *config.Config) validate.KeylessOpts { return validate.KeylessOptsFromConfig(cfg) }
 
-// maxParallelWarning: bootstrap.logical.max_parallel > 1 với source PostgreSQL không có tác dụng (snapshot
-// logic của source PG luôn tuần tự từng bảng).
-func maxParallelWarning(cfg *config.Config) string {
-	if cfg.Bootstrap.Logical.MaxParallel > 1 && !strings.EqualFold(cfg.Source.Kind, "mysql") {
-		return fmt.Sprintf("bootstrap.logical.max_parallel = %d is ignored for PostgreSQL sources: tables are snapshotted one at a time",
-			cfg.Bootstrap.Logical.MaxParallel)
-	}
-	return ""
-}
+// maxParallelWarning: xem validate.MaxParallelWarning.
+func maxParallelWarning(cfg *config.Config) string { return validate.MaxParallelWarning(cfg) }
