@@ -246,7 +246,7 @@
     tr.setAttribute('data-last', String(r.last_ms));
     tr.setAttribute('data-changes', String(r.changes || 0));
     var chg = tr.querySelector('[data-tb="chg"]');
-    if (chg && r.f.chg_title) { chg.title = r.f.chg_title; }
+    if (chg && r.f.chg_title) { (chg.closest('td') || chg).title = r.f.chg_title; }
   }
   // Last sync cell: a <time data-ago> the relative-time ticker keeps current, or "-" without a change.
   function setLastCell(el, r) {

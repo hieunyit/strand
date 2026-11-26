@@ -287,7 +287,9 @@
   applyList();
 
   // ---- Tables tab: status chips, search and sort; survive the periodic refresh (the state lives here, not in the DOM) ----
-  var tblState = { f: 'all', q: '', sort: 'ord', since: '', rows: '' };
+  var tblState = { f: 'all', q: '', sort: 'ord', dir: 1, since: '', rows: '' };
+  // tblDefaultDir: the direction a sort starts with (largest/newest first for the measures), as on the server.
+  function tblDefaultDir(k) { return (k === 'pct' || k === 'rows' || k === 'last' || k === 'changes') ? -1 : 1; }
   var SINCE = { '5m': 300, '15m': 900, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 };
   // tblSince: the "Last sync" filter of one row (data-last: Unix ms of the last CDC change, -1 none).
   function tblSince(r, now) {
@@ -320,14 +322,23 @@
     if (sEl && sEl.value !== tblState.sort) { sEl.value = tblState.sort; }
     if (siEl && siEl.value !== tblState.since) { siEl.value = tblState.since; }
     if (rEl && rEl.value !== tblState.rows) { rEl.value = tblState.rows; }
-    var key = tblState.sort, desc = key === 'pct' || key === 'rows' || key === 'last' || key === 'changes';
+    // Tables without a value (no ETA, no change recorded: -1) stay at the end in both directions.
+    var key = tblState.sort, dir = tblState.dir;
     rows.sort(function (a, b) {
-      var x, y;
-      if (key === 'name') { return a.getAttribute('data-table').localeCompare(b.getAttribute('data-table')); }
+      var x, y, oa = parseFloat(a.getAttribute('data-ord')), ob = parseFloat(b.getAttribute('data-ord'));
+      if (key === 'name') { return dir * a.getAttribute('data-table').localeCompare(b.getAttribute('data-table')); }
+      if (key === 'ord') { return dir * (oa - ob); }
       x = parseFloat(a.getAttribute('data-' + key)); y = parseFloat(b.getAttribute('data-' + key));
-      if (key === 'eta') { x = x < 0 ? Infinity : x; y = y < 0 ? Infinity : y; }
-      if (x !== y) { return desc ? y - x : (x < y ? -1 : 1); }
-      return parseFloat(a.getAttribute('data-ord')) - parseFloat(b.getAttribute('data-ord'));
+      if (key === 'eta' || key === 'last') {
+        var xn = !(x >= 0) || (key === 'eta' && x === 0), yn = !(y >= 0) || (key === 'eta' && y === 0);
+        if (xn !== yn) { return xn ? 1 : -1; }
+      }
+      if (x !== y) { return dir * (x < y ? -1 : 1); }
+      return oa - ob;
+    });
+    Array.prototype.forEach.call(table.querySelectorAll('th[aria-sort]'), function (th) {
+      var b = th.querySelector('[data-tsort]');
+      th.setAttribute('aria-sort', b && b.getAttribute('data-tsort') === key ? (dir > 0 ? 'ascending' : 'descending') : 'none');
     });
     var anchor = body.querySelector('tr.nomatch');
     rows.forEach(function (r) { body.insertBefore(r, anchor); });
@@ -354,6 +365,10 @@
       var f = chip.getAttribute('data-tfilter');
       tblState.f = (tblState.f === f && f !== 'all') ? 'all' : f; // a second click on the active chip clears it
       applyTables();
+    } else if (t.closest('button[data-tsort]')) { // inline list: a header click sorts, a second click reverses
+      var k = t.closest('button[data-tsort]').getAttribute('data-tsort');
+      if (tblState.sort === k) { tblState.dir = -tblState.dir; } else { tblState.sort = k; tblState.dir = tblDefaultDir(k); }
+      applyTables();
     } else if (t.closest('#tb-clear')) {
       tblState.f = 'all'; tblState.q = ''; tblState.since = ''; tblState.rows = ''; applyTables();
     }
@@ -362,7 +377,8 @@
     if (ev.target && ev.target.id === 'tb-filter') { tblState.q = ev.target.value; applyTables(); }
   });
   document.addEventListener('change', function (ev) {
-    if (ev.target && ev.target.id === 'tb-sort') { tblState.sort = ev.target.value; applyTables(); }
+    if (ev.target && ev.target.id === 'tb-sort') { tblState.sort = ev.target.value; tblState.dir = tblDefaultDir(ev.target.value); applyTables(); }
+    if (ev.target && ev.target.id === 'tb-psort') { var pd = document.getElementById('tb-pdir'); if (pd) { pd.remove(); } }
     if (ev.target && ev.target.id === 'tb-since') { tblState.since = ev.target.value; applyTables(); }
     if (ev.target && ev.target.id === 'tb-rows') { tblState.rows = ev.target.value; applyTables(); }
     if (ev.target && (ev.target.id === 'tb-psort' || ev.target.id === 'tb-psince' || ev.target.id === 'tb-prows') && ev.target.form) { ev.target.form.submit(); }

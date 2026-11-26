@@ -462,6 +462,10 @@ td.actions-cell, td.r.nowrap:last-child { white-space: nowrap; }
 th[aria-sort="ascending"] .sortbtn, th[aria-sort="descending"] .sortbtn { color: var(--ink); }
 th[aria-sort="ascending"] .sortbtn::after { content: "\25B2"; opacity: 1; font-size: 9px; }
 th[aria-sort="descending"] .sortbtn::after { content: "\25BC"; opacity: 1; font-size: 9px; }
+a.sortbtn { text-decoration: none; }
+th.r .sortbtn { justify-content: flex-end; }
+td.chgcell .chgd { display: block; font-size: var(--fs-xs); line-height: 1.2; }
+td.chgcell .chgd:empty { display: none; }
 tr.empty td, tr.nomatch td, tr.empty-row td { padding: var(--sp-5) var(--sp-4); text-align: center; height: auto; }
 .reason { max-width: 42ch; overflow-wrap: anywhere; margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 tr.is-running td { background: var(--accent-soft); }

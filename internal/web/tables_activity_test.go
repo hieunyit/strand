@@ -81,7 +81,7 @@ func TestTablesTabActivityColumnsAndFilters(t *testing.T) {
 	e.login(c, testPassword)
 	_, body := e.do(c, "GET", "/pipelines/orders/tables", "", nil)
 	for _, want := range []string{
-		`<th scope="col" class="nowrap">Last sync</th>`, `<th scope="col" class="r">Changes</th>`, `id="tb-since"`, `id="tb-rows"`,
+		`data-tsort="last"`, `data-tsort="changes"`, `id="tb-since"`, `id="tb-rows"`,
 		`<option value="last">Last sync (newest)</option>`, `data-last="` + fmt.Sprint(now.Add(-90*time.Second).UnixMilli()) + `"`, `data-changes="8"`,
 		`data-ago="` + fmt.Sprint(now.Add(-90*time.Second).UnixMilli()) + `"`, `>1 min ago</time>`, `title="3 inserts, 4 updates, 1 deletes`,
 		`data-last="-1"`, `id="tables-activity"`, `data-bind="tables_active5m">1</b>`, `~2,000,000`,

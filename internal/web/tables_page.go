@@ -25,8 +25,8 @@ const (
 	runningListMax  = 50
 )
 
-// TableQuery is the server-side view of the Tables list (query parameters tq, tstate, tsince, trows, tsort, tpage
-// on the page; q, state, since, rows, sort, page, per_page on the API).
+// TableQuery is the server-side view of the Tables list (query parameters tq, tstate, tsince, trows, tsort, tdir,
+// tpage on the page; q, state, since, rows, sort, dir, page, per_page on the API).
 type TableQuery struct {
 	Q     string `json:"q,omitempty"`
 	State string `json:"state,omitempty"` // all | running | pending | done
@@ -34,10 +34,22 @@ type TableQuery struct {
 	// (no change in the last 24 hours, or none recorded) or "none" (no change recorded). Empty: no filter.
 	Since string `json:"since,omitempty"`
 	// Rows filters by the row count (estimate) as "min-max", either side optional ("1000000-", "-9999", "0-0").
-	Rows    string `json:"rows,omitempty"`
-	Sort    string `json:"sort,omitempty"` // ord | name | pct | rows | eta | last | changes
+	Rows string `json:"rows,omitempty"`
+	Sort string `json:"sort,omitempty"` // ord | name | pct | rows | eta | last | changes
+	// Dir is the sort direction, asc | desc. Empty or invalid: the natural direction of the sort (sortDefaultDir).
+	// Tables without a value (no ETA, no change recorded) stay at the end in both directions.
+	Dir     string `json:"dir,omitempty"`
 	Page    int    `json:"page"`
 	PerPage int    `json:"per_page"`
+}
+
+// sortDefaultDir: the direction a sort starts with (largest/newest first for the measures, A-Z otherwise).
+func sortDefaultDir(sort string) string {
+	switch sort {
+	case "pct", "rows", "last", "changes":
+		return "desc"
+	}
+	return "asc"
 }
 
 // sinceWindows are the "changed within" choices of the Since filter.
@@ -102,6 +114,9 @@ func normTableQuery(q TableQuery) TableQuery {
 	default:
 		q.Sort = "ord"
 	}
+	if q.Dir != "asc" && q.Dir != "desc" {
+		q.Dir = sortDefaultDir(q.Sort)
+	}
 	if _, ok := sinceWindows[q.Since]; !ok && q.Since != "none" && q.Since != "idle24h" {
 		q.Since = ""
 	}
@@ -128,7 +143,7 @@ func normTableQuery(q TableQuery) TableQuery {
 func tableQueryFrom(v url.Values, prefix string) TableQuery {
 	atoi := func(s string) int { n, _ := strconv.Atoi(s); return n }
 	return normTableQuery(TableQuery{Q: v.Get(prefix + "q"), State: v.Get(prefix + "state"), Since: v.Get(prefix + "since"),
-		Rows: v.Get(prefix + "rows"), Sort: v.Get(prefix + "sort"),
+		Rows: v.Get(prefix + "rows"), Sort: v.Get(prefix + "sort"), Dir: v.Get(prefix + "dir"),
 		Page: atoi(v.Get(prefix + "page")), PerPage: atoi(v.Get(prefix + "per_page"))})
 }
 
@@ -156,38 +171,43 @@ func (v *TablesView) applyPage(q TableQuery) {
 		ord[t.Table] = i
 	}
 	// sort.Slice with the status order (ord) as tie-breaker: a total order, so no (slow) stable sort is needed.
-	by := func(key func(t *admin.TableInfo) float64) {
+	// key returns the ascending value and ok=false for "no value", which sorts last in both directions.
+	desc := q.Dir == "desc"
+	by := func(key func(t *admin.TableInfo) (float64, bool)) {
 		sort.Slice(match, func(i, j int) bool {
-			x, y := key(&match[i]), key(&match[j])
+			x, xok := key(&match[i])
+			y, yok := key(&match[j])
+			if xok != yok {
+				return xok
+			}
 			if x != y {
-				return x < y
+				return (x < y) != desc
 			}
 			return ord[match[i].Table] < ord[match[j].Table]
 		})
 	}
 	switch q.Sort {
+	case "ord":
+		if desc {
+			by(func(t *admin.TableInfo) (float64, bool) { return float64(ord[t.Table]), true })
+		}
 	case "name":
-		sort.Slice(match, func(i, j int) bool { return match[i].Table < match[j].Table })
+		sort.Slice(match, func(i, j int) bool { return (match[i].Table < match[j].Table) != desc })
 	case "pct":
-		by(func(t *admin.TableInfo) float64 { return -t.ProgressPct })
+		by(func(t *admin.TableInfo) (float64, bool) { return t.ProgressPct, true })
 	case "rows":
-		by(func(t *admin.TableInfo) float64 { return -float64(tblEst(*t)) })
+		by(func(t *admin.TableInfo) (float64, bool) { return float64(tblEst(*t)), true })
 	case "eta":
-		by(func(t *admin.TableInfo) float64 {
-			if t.ETASeconds > 0 {
-				return t.ETASeconds
+		by(func(t *admin.TableInfo) (float64, bool) { return t.ETASeconds, t.ETASeconds > 0 })
+	case "last":
+		by(func(t *admin.TableInfo) (float64, bool) {
+			if t.LastChangeAt == nil {
+				return 0, false
 			}
-			return 1e18
-		})
-	case "last": // most recently changed first; never changed last
-		by(func(t *admin.TableInfo) float64 {
-			if t.LastChangeAt != nil {
-				return -float64(t.LastChangeAt.UnixNano())
-			}
-			return math.MaxFloat64
+			return float64(t.LastChangeAt.UnixNano()), true
 		})
 	case "changes":
-		by(func(t *admin.TableInfo) float64 { return -float64(t.Changes()) })
+		by(func(t *admin.TableInfo) (float64, bool) { return float64(t.Changes()), true })
 	}
 	v.Matching = len(match)
 	v.Pages = (v.Matching + q.PerPage - 1) / q.PerPage
@@ -240,18 +260,18 @@ func (s *Server) tablesPageView(p *Pipeline, r *http.Request) TablesView {
 	v.runningOf(v.Tables)
 	qv := r.URL.Query()
 	if v.Total > tablesInlineMax || qv.Get("tq") != "" || qv.Get("tstate") != "" || qv.Get("tsince") != "" || qv.Get("trows") != "" ||
-		qv.Get("tsort") != "" || qv.Get("tpage") != "" {
+		qv.Get("tsort") != "" || qv.Get("tdir") != "" || qv.Get("tpage") != "" {
 		v.applyPage(tableQueryFrom(qv, "t"))
 	}
 	return v
 }
 
 // tablesAPIView: GET /api/v1/pipelines/{name}/tables. Without query parameters the whole list (as before);
-// with any of q, state, sort, page, per_page one page.
+// with any of q, state, since, rows, sort, dir, page, per_page one page.
 func (s *Server) tablesAPIView(p *Pipeline, r *http.Request) TablesView {
 	v := tablesFromSnap(s.samp.Latest(p.Name))
 	qv := r.URL.Query()
-	for _, k := range []string{"q", "state", "since", "rows", "sort", "page", "per_page"} {
+	for _, k := range []string{"q", "state", "since", "rows", "sort", "dir", "page", "per_page"} {
 		if qv.Has(k) {
 			v.applyPage(tableQueryFrom(qv, ""))
 			break
@@ -279,11 +299,18 @@ func tablesHref(base string, q *TableQuery, key, val string) string {
 		if q.Sort != "ord" {
 			v.Set("tsort", q.Sort)
 		}
+		if q.Dir != "" && q.Dir != sortDefaultDir(q.Sort) {
+			v.Set("tdir", q.Dir)
+		}
 		if q.Page > 1 {
 			v.Set("tpage", strconv.Itoa(q.Page))
 		}
 	}
-	if val == "" || (key == "tstate" && val == "all") || (key == "tsort" && val == "ord") || (key == "tpage" && val == "1") {
+	if key == "tsort" { // a new sort starts in its natural direction
+		v.Del("tdir")
+	}
+	if val == "" || (key == "tstate" && val == "all") || (key == "tsort" && val == "ord") || (key == "tpage" && val == "1") ||
+		(key == "tdir" && q != nil && val == sortDefaultDir(q.Sort)) {
 		v.Del(key)
 	} else {
 		v.Set(key, val)
@@ -295,4 +322,35 @@ func tablesHref(base string, q *TableQuery, key, val string) string {
 		return base
 	}
 	return base + "?" + v.Encode()
+}
+
+// tablesSortHref: the link of a sortable column header of the paged list. The active column flips its direction;
+// another column starts in its natural direction.
+func tablesSortHref(base string, q *TableQuery, sort string) string {
+	if q == nil || q.Sort != sort {
+		return tablesHref(base, q, "tsort", sort)
+	}
+	c := *q
+	c.Page = 1
+	c.Dir = "asc"
+	if q.Dir == "asc" {
+		c.Dir = "desc"
+	}
+	return tablesHref(base, &c, "tdir", c.Dir)
+}
+
+// tablesAriaSort: aria-sort of a column header ("ascending", "descending" or "none"). Without a query (inline
+// list) the page starts sorted by status; the browser keeps it current afterwards.
+func tablesAriaSort(q *TableQuery, sort string) string {
+	cur, dir := "ord", "asc"
+	if q != nil {
+		cur, dir = q.Sort, q.Dir
+	}
+	if cur != sort {
+		return "none"
+	}
+	if dir == "desc" {
+		return "descending"
+	}
+	return "ascending"
 }

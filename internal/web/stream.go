@@ -135,7 +135,8 @@ func liveTableRow(t admin.TableInfo, now time.Time) LiveTableRow {
 	return LiveTableRow{Table: t.Table, State: t.State, Pct: t.ProgressPct, Copied: tblCopied(t), Est: tblEst(t), ETA: t.ETASeconds,
 		LastMs: tblLastMs(t), Changes: t.Changes(),
 		F: map[string]string{"pct": fmt.Sprintf("%.1f%%", t.ProgressPct), "rows": tblRowsText(t), "eta": tblETAText(t),
-			"last": tblLastText(t, now), "last_title": tblLastTitle(t), "chg": tblChangesText(t), "chg_title": tblChangesTitle(t)}}
+			"last": tblLastText(t, now), "last_title": tblLastTitle(t), "chg": tblChangesText(t), "chgd": tblChangesDetail(t),
+			"chg_title": tblChangesTitle(t)}}
 }
 
 // tblRowsText: "250,000 / 1,000,000" khi đang chép; bảng xong: số đã chép (và ước lượng nếu có).
@@ -210,6 +211,38 @@ func tblChangesText(t admin.TableInfo) string {
 		return "-"
 	}
 	return fmtInt(t.Changes())
+}
+
+// tblChangesDetail: the split of Changes under the total, e.g. "12 ins · 1.2K upd · 3 del" (zero kinds left out).
+func tblChangesDetail(t admin.TableInfo) string {
+	var parts []string
+	for _, p := range []struct {
+		n     int64
+		label string
+	}{{t.Inserts, "ins"}, {t.Updates, "upd"}, {t.Deletes, "del"}} {
+		if p.n > 0 {
+			parts = append(parts, fmtCompact(p.n)+" "+p.label)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// fmtCompact: 999, 1.2K, 34K, 5.6M, 7.8B (one decimal below 10 of the unit).
+func fmtCompact(n int64) string {
+	units := []struct {
+		v int64
+		s string
+	}{{1_000_000_000, "B"}, {1_000_000, "M"}, {1_000, "K"}}
+	for _, u := range units {
+		if n >= u.v {
+			x := float64(n) / float64(u.v)
+			if x < 10 {
+				return strconv.FormatFloat(math.Floor(x*10)/10, 'f', -1, 64) + u.s
+			}
+			return strconv.FormatInt(n/u.v, 10) + u.s
+		}
+	}
+	return strconv.FormatInt(n, 10)
 }
 
 func tblChangesTitle(t admin.TableInfo) string {
