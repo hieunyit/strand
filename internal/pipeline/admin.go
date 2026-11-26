@@ -80,7 +80,7 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 		info.Verification = p.currentVerification()
 	}
 	// The breaker is built after the admin socket opens; ready() orders the read.
-	if h.ready() == nil && p.breaker != nil && p.breaker.IsOpen() {
+	if h.ready() == nil && p.breakerShown() {
 		info.BreakerOpen, info.BreakerReason = true, p.breaker.Reason()
 	}
 	if p.autoSeeding.Load() {

@@ -533,7 +533,7 @@ Loại bảng ra bằng `tables.exclude: ["app.bang_x"]` trong file cấu hình.
 
 - Log có dòng `snapshot made no progress` (mỗi 2 phút khi snapshot không ghi thêm row nào): nêu bảng, breaker và lý do, tốc độ governor, giao dịch mở lâu nhất trên nguồn (`oldest_source_txns`, cần quyền `PROCESS`) và phiên đang chờ khóa. Giao dịch ứng dụng mở hàng giờ chặn `LOCK TABLES … READ` của snapshot: commit/kill nó thì snapshot chạy tiếp.
 
-- `strand top -c ...`: dòng `Breaker: MỞ ...` nêu lý do. Breaker bảo vệ nguồn: khi mở, snapshot tạm dừng; đóng lại sau 60 giây liên tục dưới ngưỡng. Nếu nguồn không thật sự quá tải, nới `governor.breaker.strand_query_p99.max_ratio` (mặc định 3, so với độ trễ đo lúc khởi động) hoặc `replica_lag.max`.
+- `strand top -c ...`: dòng `Breaker: MỞ ...` nêu lý do. Breaker bảo vệ nguồn: khi mở, snapshot tạm dừng; đóng lại sau 60 giây liên tục dưới ngưỡng. Nếu nguồn không thật sự quá tải, nới `governor.breaker.strand_query_p99.max_ratio` (mặc định 3, so với độ trễ đo lúc khởi động), `strand_query_p99.min_latency` (mặc định 20ms: tỉ lệ chỉ tính khi p99 đạt mức này) hoặc `replica_lag.max`. Breaker chỉ dừng việc đọc nền (snapshot, auto-seed, verify sau seed); khi không có việc đó nó không được báo và không ghi log.
 - Tăng tốc khi nguồn còn dư tải: `resources.source.iops` (mặc định 600 IOPS ≈ 9 MiB/s), `resources.workers.max`, `bootstrap.logical.chunk_rows` (chunk lớn hơn = ít lần `LOCK TABLES` hơn). Phía đích trong lúc chép: `innodb_flush_log_at_trx_commit=2`, `sync_binlog=0` (đặt lại `1` trước `promote`).
 - Đổi cấu hình: `strand stop` / Ctrl-C rồi chạy lại `sync`, snapshot đọc tiếp từ chỗ dở.
 

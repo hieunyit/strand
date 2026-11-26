@@ -108,7 +108,7 @@ func TestTuningGetCurrentAndDefaults(t *testing.T) {
 			t.Errorf("%s: got %+v, want value %q set", key, got[key], want)
 		}
 	}
-	for key, def := range map[string]string{"iops_soft": "600", "lag_slo": "5s", "breaker_max_ratio": "off", "workers": "8"} {
+	for key, def := range map[string]string{"iops_soft": "600", "lag_slo": "5s", "breaker_max_ratio": "3", "workers": "8"} {
 		if got[key].Set || got[key].Value != "" || got[key].Default != def {
 			t.Errorf("%s: got %+v, want unset with default %q", key, got[key], def)
 		}

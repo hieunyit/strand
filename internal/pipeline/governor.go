@@ -101,6 +101,7 @@ func (p *Pipeline) setupGovernor(ctx context.Context) error {
 	hard := float64(p.cfg.Resources.Source.IOPS.Hard)
 	bcfg := governor.BreakerConfig{
 		MaxRatio:      p.cfg.Governor.Breaker.StrandQueryP99.MaxRatio,
+		MinP99:        breakerMinP99(p.cfg.Governor.Breaker.StrandQueryP99.MinLatency),
 		MaxReplicaLag: durationOr(p.cfg.Governor.Breaker.ReplicaLag.Max, 0),
 		// Mở lại sau 60 giây liên tục dưới ngưỡng (02 §7).
 		CooldownTicks: int((60 * time.Second) / p.govTick),
@@ -186,6 +187,10 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 		if isGrace {
 			// GRACE tự xuất metric §11 (zone, pressure theo signal, rate, breaker, sensitivity_unknown).
 			p.graceAlerts(gg, &alerts)
+			// GRACE exports the raw breaker state; alerts follow what the breaker actually holds back.
+			if gg.BreakerOpen() && !p.backgroundWork() {
+				p.metrics.BreakerOpen.WithLabelValues(p.id).Set(0)
+			}
 			continue
 		}
 		_, bg := p.gov.CurrentRate()
@@ -193,7 +198,7 @@ func (p *Pipeline) governorLoop(ctx context.Context) {
 		p.metrics.GovernorPressure.WithLabelValues(p.id, "replica_lag").Set(p.gov.Pressure())
 		p.metrics.GovernorRateTokens.WithLabelValues(p.id, "source_iops").Set(bg)
 		open := 0.0
-		if p.gov.BreakerOpen() {
+		if p.gov.BreakerOpen() && p.backgroundWork() {
 			open = 1
 		}
 		p.metrics.BreakerOpen.WithLabelValues(p.id).Set(open)
@@ -297,13 +302,42 @@ func inWindows(windows []string, now time.Time) bool {
 	return false
 }
 
+// breakerMinP99: governor.breaker.strand_query_p99.min_latency. Empty or invalid = the default floor;
+// an explicit zero turns the floor off (negative for governor.BreakerConfig).
+func breakerMinP99(s string) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0
+	}
+	if d == 0 {
+		return -1
+	}
+	return d
+}
+
+// backgroundWork: the pipeline is reading the source in the background (logical snapshot, snapshot add,
+// auto-seed copy, post-seed verify): the only work the breaker pauses. Without it the breaker protects
+// nothing; it is still evaluated (it is ready when work starts) but neither logged nor reported.
+func (p *Pipeline) backgroundWork() bool {
+	return p.bgWork.Load() > 0 || p.autoSeeding.Load() || p.verifying.Load()
+}
+
+// breakerShown: the breaker is open and there is background work it holds back.
+func (p *Pipeline) breakerShown() bool {
+	return p.breaker != nil && p.breaker.IsOpen() && p.backgroundWork()
+}
+
 // logBreaker ghi log khi breaker mở/đóng hoặc đổi lý do (trước đây lý do bị bỏ: người vận hành chỉ thấy
 // snapshot đứng mà không biết vì sao).
 func (p *Pipeline) logBreaker(was bool, reasonWas string) (bool, string) {
 	if p.breaker == nil {
 		return was, reasonWas
 	}
-	open, reason := p.breaker.IsOpen(), p.breaker.Reason()
+	open, reason := p.breakerShown(), p.breaker.Reason()
 	switch {
 	case open && !was:
 		p.breakerLogged = time.Now()

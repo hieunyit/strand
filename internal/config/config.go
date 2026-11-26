@@ -267,6 +267,9 @@ type GovernorConfig struct {
 type BreakerConfig struct {
 	StrandQueryP99 struct {
 		MaxRatio float64 `yaml:"max_ratio" json:"max_ratio"`
+		// MinLatency: the ratio only counts when the p99 itself reaches this (duration, default 20ms;
+		// "0s" = no floor).
+		MinLatency string `yaml:"min_latency,omitempty" json:"min_latency,omitempty"`
 	} `yaml:"strand_query_p99" json:"strand_query_p99"`
 	ReplicaLag struct {
 		Max string `yaml:"max" json:"max"`

@@ -203,7 +203,9 @@ type Pipeline struct {
 	snapBucket tokenBucket
 	// snapReaders / snapGated: số reader snapshot đang chạy / đang bị giữ ở cổng của pace (cửa sổ L).
 	snapReaders atomic.Int32
-	snapGated   atomic.Int32
+	// bgWork counts running snapshot work (bootstrap pool, snapshot add): see backgroundWork.
+	bgWork    atomic.Int32
+	snapGated atomic.Int32
 	// snapPacing: số reader đang ở trong pace (giãn nhịp / cổng) — không sắp tới barrier (xem barrierGroup).
 	snapPacing atomic.Int32
 	// snapRuns: bảng đang snapshot (bootstrap song song và snapshot add) với trạng thái riêng từng bảng.
@@ -1188,7 +1190,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if len(pending) > 0 {
 		p.bootstrap.Store(true)
 		bgWG.Add(1)
-		go func() { defer bgWG.Done(); p.runSnapshots(ctx, pending) }()
+		p.bgWork.Add(1)
+		go func() { defer bgWG.Done(); defer p.bgWork.Add(-1); p.runSnapshots(ctx, pending) }()
 	}
 	// Sau bootstrap.Store: postSeedVerify chờ snapshot logic xong (seed PG một phần) trước khi verify.
 	if postSeedPending {
@@ -2582,7 +2585,9 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 	p.log.Info("snapshot add requested", "table", id.String(), "new_table", added)
 	p.bootstrap.Store(true)
 	started = true
+	p.bgWork.Add(1)
 	go func() {
+		defer p.bgWork.Add(-1)
 		err := p.snapshotTable(ctx, id)
 		p.releaseSnapshotAdd(id)
 		if err != nil {

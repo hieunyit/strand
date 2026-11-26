@@ -49,11 +49,11 @@ func (h *adminHandler) Status(ctx context.Context) (*admin.StatusInfo, error) {
 			gi.ForegroundRate, gi.BackgroundRate = p.gov.CurrentRate()
 			gi.Zone = p.gov.Zone().String()
 			gi.Pressure = p.gov.Pressure()
-			gi.BreakerOpen = p.gov.BreakerOpen()
+			gi.BreakerOpen = p.gov.BreakerOpen() && p.backgroundWork()
 		} else {
 			gi.BackgroundRate = math.Float64frombits(p.softRateBits.Load())
 		}
-		if p.breaker != nil && p.breaker.IsOpen() {
+		if p.breakerShown() {
 			gi.BreakerOpen, gi.BreakerReason = true, p.breaker.Reason()
 		}
 	}

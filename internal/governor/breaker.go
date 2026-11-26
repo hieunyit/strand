@@ -8,10 +8,17 @@ import (
 
 // BreakerConfig cấu hình circuit breaker theo spec/02 §7, §10.
 type BreakerConfig struct {
-	MaxRatio      float64       // Tỉ lệ p99 query latency so với baseline (mặc định 3.0)
+	MaxRatio float64 // Tỉ lệ p99 query latency so với baseline (mặc định 3.0)
+	// MinP99: the ratio trigger only counts when the p99 itself is at least this (default
+	// DefaultBreakerMinP99; negative = no floor). With a baseline of ~1 ms a jump to 3 ms is network or
+	// scheduling noise, not an overloaded source, yet it is a ratio of 3.
+	MinP99        time.Duration
 	MaxReplicaLag time.Duration // Độ trễ replica tối đa cho phép trước khi ngắt (ví dụ 10s)
 	CooldownTicks int           // Số tick liên tục dưới ngưỡng để đóng lại breaker (mặc định 60s)
 }
+
+// DefaultBreakerMinP99: the default absolute floor of the latency trigger (BreakerConfig.MinP99).
+const DefaultBreakerMinP99 = 20 * time.Millisecond
 
 // Breaker cài đặt cơ chế Circuit Breaker bảo vệ cơ sở dữ liệu.
 // spec: 02 §7:
@@ -33,6 +40,9 @@ func NewBreaker(cfg BreakerConfig) *Breaker {
 	if cfg.CooldownTicks <= 0 {
 		cfg.CooldownTicks = 60
 	}
+	if cfg.MinP99 == 0 {
+		cfg.MinP99 = DefaultBreakerMinP99
+	}
 	return &Breaker{
 		cfg: cfg,
 	}
@@ -47,7 +57,7 @@ func (b *Breaker) Evaluate(sig DBSignals) (isOpen bool, reason string) {
 	var triggerReason string
 
 	// 1. Kiểm tra p99 latency query của Strand so với baseline
-	if sig.QueryBaseline > 0 && sig.QueryP99 > 0 {
+	if sig.QueryBaseline > 0 && sig.QueryP99 > 0 && sig.QueryP99 >= b.cfg.MinP99 {
 		ratio := float64(sig.QueryP99) / float64(sig.QueryBaseline)
 		if ratio > b.cfg.MaxRatio {
 			triggered = true
