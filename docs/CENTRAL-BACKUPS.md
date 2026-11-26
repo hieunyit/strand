@@ -448,7 +448,8 @@ service opens them only to put them in the **environment** of the
 `strand backup ...` processes it starts (schedulers, log archivers, verify, prune,
 copy, restore), under a prefix derived from the repository id; they never appear in
 argv. Editing a repository's credentials restarts the schedulers of the enabled jobs
-that use it (their environment is fixed when they start).
+that use it (their environment is fixed when they start): a run in progress of
+those jobs is cancelled, and their next due time is kept.
 
 Repositories read from environment variables of the Web service
 (`STRAND_BACKUP_REPO_<NAME>_ENDPOINT`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`) are a
@@ -478,7 +479,19 @@ reported on the `delete` step.
 With `lock_mode` GOVERNANCE or COMPLIANCE and `lock_days`, every object is
 written with S3 Object Lock retention (the bucket must be created with Object
 Lock; Strand sends Content-MD5 as required) and the catalog records the version
-id and retain-until date. `replicate_to` copies each new backup to a second
+id and retain-until date as soon as the payload upload succeeds. A record that
+fails after that point (a later step of the run) keeps them, so a delete is
+refused while the lock holds and afterwards removes that exact version, not just
+a delete marker. Failed records written by older versions have no version id and
+are not repaired. Lock checks compare `retain_until` with the database clock, not
+the clock of the Web host.
+
+When a large upload fails, the object store's own error (for example 403
+`AccessDenied`, a missing bucket) is reported and classified `repo_unreachable`,
+not hidden behind a pipe error. When finalizing a backup fails after its
+`manifest.json` was uploaded as complete, that manifest version is deleted; if
+Object Lock refuses the delete, a manifest marked `failed` is written over it, so
+a repository re-index never trusts it. `replicate_to` copies each new backup to a second
 repository (`strand backup copy --id ... --to-repository ...`): bytes are copied
 unchanged (still encrypted), verified on download and after upload, and
 cataloged as a new record with `copy_of`.
@@ -490,7 +503,29 @@ GFS policy per job (and a default per repository for backups without a job):
 `keep_yearly`, `keep_within_days`, `max_age_days`, plus `lock_days`. A backup is
 kept when any rule selects it; `max_age_days` is a hard cap. Guarantees: the
 newest full backup is never expired; a kept incremental keeps its whole chain;
-log segments are kept from the oldest kept base onward. Retention claims each
+log segments are kept from the oldest kept base onward.
+
+Retention is planned **per lineage**: originals among originals, and copies made
+by `replicate_to` (records with `copy_of`) among the copies in the same target
+repository and bucket. A copy is cataloged after its original, so planning them
+together would let a fresh copy take a keep slot and expire the original it was
+made from. Every guarantee above holds per lineage.
+
+A restore point whose last check failed (`check_status = failed`) never fills a
+keep slot (`keep_last`, hourly/daily/..., `keep_within_days`) and is not the
+"newest full" the safety net protects. It is kept only while it is newer than the
+oldest kept good restore point, then expires. When a lineage has no good restore
+point at all, failed-check ones are planned as ordinary restore points rather
+than all deleted.
+
+**Pins.** A restore, a test restore and a verification pin the records they read
+(base, incremental chain and log segments) in `backup_pins` (migration 024). A
+prune, in any process or instance, skips a pinned record (`skipped` in the prune
+result, no `backup.expire` audit) and retries it on the next run. A pin is renewed
+every 2.5 minutes and lapses 10 minutes after its holder stops renewing it
+(database clock), so a crashed restore cannot block retention for long. A restore
+that starts after retention claimed one of its records is refused ("restore point
+is no longer available"). Retention claims each
 object in the catalog before touching storage. A legal hold or an unexpired
 Object Lock blocks the claim. A record in `deleting` can no longer be restored
 or put on hold, and a later prune retries interrupted storage deletion.
@@ -501,7 +536,8 @@ strand backup prune --job-id bjob-...             # delete objects (versions), t
 ```
 
 The Web previews a policy (also an unsaved one) and the active instance applies
-each job's policy hourly. Objects are deleted before the record is marked
+each job's policy hourly. Object Lock retention is checked against the database
+clock. Objects are deleted before the record is marked
 `expired`, every expiry is audited (`backup.expire`), and a failed deletion is
 retried on the next run.
 
@@ -540,14 +576,40 @@ Strand chooses the newest base backup consistent before the target and the
 contiguous logs up to it. The target is always new — the database must not
 exist, the directory must be empty — and the source is never written:
 
-- MySQL: the dump is loaded into the new database (its `GTID_PURGED` statement
-  is commented out), then `mysqlbinlog --exclude-gtids=<dump GTIDs>
+- MySQL: the dump is loaded into the new database (its `GTID_PURGED` and
+  `SQL_LOG_BIN` statements are commented out, so the whole restore is written to
+  the target's binary log and replicas of the target stay in step; the loaded
+  data gets new GTIDs there, and the restore user needs no
+  `SYSTEM_VARIABLES_ADMIN`), then `mysqlbinlog --exclude-gtids=<dump GTIDs>
   --skip-gtids --rewrite-db=<src>-><new> --stop-datetime=<target>` is replayed
-  into it. Requires a single-database dump.
+  into it. Requires a single-database dump and a **whole-second** target time:
+  `--stop-datetime` has one-second resolution, so a fractional target is refused
+  with the two whole seconds around it suggested.
+
+  Before it creates the target database Strand scans the binlogs, and during the
+  replay a filter between `mysqlbinlog` and `mysql` passes only statements it has
+  checked. The restore stops, naming the binlog position, when a statement:
+  - names the source database or another database explicitly
+    (`UPDATE shop.orders ...`): replayed into the new database it would change
+    that database itself. Restore to a separate server under the same database
+    name instead;
+  - is `CREATE`/`ALTER`/`DROP DATABASE` on the source database;
+  - changes the source database while the session's default database was another
+    one (`--database` would skip it and the restore would silently diverge);
+  - was seen by the scan but not replayed.
+
+  Pick a target before that statement, restore without a target time, or replay
+  the binlogs by hand. The check can refuse more than needed, for example when a
+  table alias equals a database name (`UPDATE t AS shop SET shop.col = 1`).
 - PostgreSQL: the base backup is extracted, the needed WAL is staged in
   `strand_wal/`, and `restore_command`, `recovery_target_time` and
   `recovery_target_action=promote` are set with `recovery.signal`; start
-  PostgreSQL on the directory to recover and promote.
+  PostgreSQL on the directory to recover and promote. Needs PostgreSQL 12 or
+  newer: a base backup of 11 or older with a target time is refused (restore it
+  without one and write `recovery.conf` by hand). PostgreSQL 12 ends recovery and
+  promotes without an error when WAL runs out before the target, so Strand reads
+  the staged WAL and refuses a target it does not reach; recovering to the newest
+  point on 12 needs a later transaction already archived.
 - MongoDB: restore into a new deployment with one `mongorestore --oplogReplay`.
   Strand appends verified archive entries strictly after the embedded base
   timestamp and before the chosen UTC second. Single-database dumps restore under a
@@ -555,6 +617,17 @@ exist, the directory must be empty — and the source is never written:
 
 `--id <backup>` restores one backup as is. The Web restore wizard (Backups page)
 requires typing the target name to confirm and opens the job log.
+
+A failed or cancelled restore removes what it wrote: MySQL and PostgreSQL drop
+the database the restore created; MongoDB drops the target database (verified
+absent before the restore) or, for a whole-deployment restore, every non-system
+database that was not in the verified-empty deployment (admin users it created
+are not removed). A cleanup failure is part of the returned error. On PostgreSQL
+12 and older, which lack `DROP DATABASE ... WITH (FORCE)`, Strand refuses new
+connections to the database and terminates its other sessions first; the user
+needs the right to terminate them (database owner or `pg_signal_backend`). A
+partial MySQL restore (`tables`) matches `db.table`, so a table of the same name
+in another database is not picked up.
 
 ### Verification and test restores
 
@@ -567,7 +640,11 @@ strand backup verify --job-id bjob-... --test-restore
 
 `--test-restore` (job option `test_restore` + a `scratch` connection) restores
 the newest mysqldump/pg_dump backup into a scratch database
-`strand_verify_<time>`, records per-table row counts, and drops it. Results are
+`strand_verify_<unix time>_<12 random hex>`, records per-table row counts, and
+drops it. Only a database this run created is dropped: two runs at once, or an
+existing database of the same name, are never touched. Sampled verification
+always fully re-reads the newest **base** backup (not the newest log segment), and
+the records a verification or test restore reads are pinned against retention. Results are
 stored per backup (`/api/v1/backups/{id}/checks`), shown on the dashboard and
 counted in metrics. `verify_every_seconds` schedules it on the active instance.
 
@@ -589,7 +666,18 @@ process, passing it in that process's **environment** (`STRAND_BACKUP_CONN_PASSW
 log archiver of a job on a stored connection are started this way, so a job on a
 stored connection must be run from the Web console (a bare CLI run fails with a
 clear message). A connection cannot be deleted while jobs use it (409 with the
-job list); editing one re-materializes its jobs and restarts their schedulers.
+job list); editing one re-materializes its jobs. A run in progress is not
+cancelled: it finishes with the settings it started with, and the scheduler
+restarts with the new ones after it (at once when idle).
+
+The native tools (mysqldump, pg_dump, mongodump, mysql, pg_restore, ...) run with
+every `STRAND_*` variable removed from their environment (repository and
+encryption keys, the source, scratch and restore-target secrets) and without the
+variables a legacy connection names in `password_env`/`uri_env`; each tool gets
+its own secret only, through `MYSQL_PWD`/`PGPASSWORD` or a temporary option file.
+Logged tool output masks the real secrets (passwords, tokens, the password of a
+credentialed URI), also when one is split across two writes, and no longer masks
+ordinary values such as `PGSSLMODE` or paths.
 
 **Test connection** (`POST /api/v1/backup-connections/test` for an unsaved body,
 `/{id}/test` for a saved one; role operator) connects and reports the server
@@ -618,7 +706,8 @@ policy. A policy a job's method cannot honour is applied as far as possible and
 reported in `warnings` (PITR on `mariadb-dump`, `pg_dump` or a multi-database
 `mysqldump` is switched off; test-restore needs a scratch connection), so a policy
 edit never makes a stored job unrunnable. Editing a policy re-materializes every
-job that follows it and restarts its scheduler; `PUT` returns `affects_jobs` and
+job that follows it; like a connection edit, a run in progress finishes with its
+old settings and the scheduler picks up the new ones after it; `PUT` returns `affects_jobs` and
 `POST /api/v1/backup-policies/{id}/preview` is the dry run (affected jobs and what
 changes for each, nothing written). A policy cannot be deleted while jobs use it.
 
@@ -630,7 +719,20 @@ changes for each, nothing written). A policy cannot be deleted while jobs use it
 day-of-month and day-of-week combine with OR like Vixie cron; no `@macros`).
 `timezone` is an IANA name (UTC when empty; zone data is embedded). For
 non-interval kinds `every_seconds` is kept as the typical gap between runs, for the
-retry back-off cap. `POST /api/v1/backup-schedules/preview` returns the next runs
+retry back-off cap.
+
+The next due time always follows the schedule: when a run starts, finishes or is
+recovered after a crash, the next run is the schedule's next occurrence (a daily
+02:00 job runs at 02:00, not drifting with the finish time). A cancelled run keeps
+the due time it already had. A failed run with retries left is retried after its
+back-off, but never later than the next regular run. Editing a job keeps its due
+time unless the schedule itself changed; then the new schedule decides, counted
+from the last run for interval jobs (due at once when that is already past) and
+from now for the other kinds. Enabling a disabled job starts it like a new one.
+Editing the job itself still cancels its run in progress. A run recorded as
+`running` whose process is gone (no holder of the job's execution lock on any
+instance) is marked interrupted when the Web starts or takes over and on every
+maintenance tick, also for a job disabled after the crash. `POST /api/v1/backup-schedules/preview` returns the next runs
 (default 5, up to 20) in UTC and in the zone.
 
 `window_minutes`: a run not started within this many minutes of its due time
@@ -692,7 +794,8 @@ Events: run `failure`/`success`, `missed` schedule (due more than max(5 min,
 `verify_failed`, `rpo_breach` (see below) and `repo_unreachable` (a run that failed
 with the normalized error code `repo_unreachable`; it replaces `failure` for that
 run). Each event is sent once across instances and every delivery is audited
-(`backup.notify`, channel id, no destination).
+(`backup.notify`, channel id, no destination). Email subjects are one line: a
+multi-line error (for example of `verify_failed`) goes to the body only.
 
 ### Metrics and alerts
 
@@ -734,11 +837,13 @@ notice says new backups cannot be encrypted.
 ### RPO/SLA and compliance
 
 Each policy has `rpo_minutes` (the target) and `rto_minutes` (informational). For
-every source the **current RPO** is `now - latest restore point`: the end of the
-last archived log segment when the job archives logs (PITR; a newer base backup
-wins), otherwise the point of the last complete backup (its consistent point, i.e.
-`start_time`, else creation time). A PITR source that has no segment yet falls back
-to its last backup; a source with no restore point has no RPO (`-1`) and is never
+every source the **current RPO** is `now - latest restore point`: when the job
+archives logs (PITR), the end of the newest unbroken run of log segments that
+reaches back over a complete base backup of the same lineage (a newer base backup
+wins); otherwise the point of the last complete backup (its consistent point, i.e.
+`start_time`, else creation time). Segments after a gap, or segments without any
+base backup, restore nothing and earn no RPO credit. A PITR source with no such
+run falls back to its last backup; a source with no restore point has no RPO (`-1`) and is never
 flagged, so a new job does not alarm before its first run. A source over its target
 is a **breach**:
 
@@ -797,7 +902,9 @@ Migration 019 adds the stored-credential columns of `backup_repositories`
 (`kind`, `secret_mode`, `endpoint`, `region`, `allow_insecure_local`, sealed
 `access_key_sealed`/`secret_key_sealed`, last test and its checklist) and the tables
 `backup_notify_channels` and `backup_notify_rules`; migration 020 adds
-`backup_rpo_breaches`.
+`backup_rpo_breaches`. Migration 024 adds `backup_pins` (`backup_id`, `holder`,
+`expires_at` on the database clock; deleted with the backup): the restore pins of
+the Retention section.
 Log segments are self-describing (their catalog row is the manifest); base
 backups get a `manifest.json` sidecar containing the catalog record so a
 repository can be re-indexed without the database.
@@ -912,3 +1019,11 @@ Validation rules enforced by `backup.ValidateJob` and UI:
   restores are not automated.
 - Job output files are capped at 32 MiB each; output after the cap is discarded
   and a truncation marker is written.
+- MySQL PITR replays only whole seconds and stops at binlog statements that would
+  write outside the new database (see Point-in-time recovery); there is no opt-in
+  to replay them anyway.
+- PostgreSQL PITR needs PostgreSQL 12 or newer.
+- `strand backup fetch` and `copy` do not pin the records they read; only
+  restore, test restore and verification do.
+- The RPO shown on a job page is computed from its 50 newest records; the RPO API,
+  metrics and report use the whole catalog.
