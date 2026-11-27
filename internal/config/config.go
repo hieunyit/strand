@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 	"strand/internal/exitcode"
@@ -65,6 +66,16 @@ type SourceConfig struct {
 	CreateSlot           bool   `yaml:"create_slot,omitempty" json:"create_slot,omitempty"`
 	FailoverSlot         bool   `yaml:"failover_slot,omitempty" json:"failover_slot,omitempty"`
 	SequenceSyncInterval string `yaml:"sequence_sync_interval,omitempty" json:"sequence_sync_interval,omitempty"`
+	// HeartbeatInterval (chỉ source PG): chu kỳ ghi một logical message vào WAL của database nguồn để slot
+	// tiến cả khi các bảng của pipeline không có ghi mà cluster vẫn sinh WAL (database khác, bảng ngoài
+	// publication). Mặc định 10s; "off" tắt.
+	HeartbeatInterval string `yaml:"heartbeat_interval,omitempty" json:"heartbeat_interval,omitempty"`
+}
+
+// HeartbeatOff: source.heartbeat_interval = off (hoặc 0).
+func (s SourceConfig) HeartbeatOff() bool {
+	v := strings.ToLower(strings.TrimSpace(s.HeartbeatInterval))
+	return v == "off" || v == "0" || v == "0s"
 }
 
 type TargetConfig struct {
@@ -492,6 +503,17 @@ func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 	}
 	if err := validateZeroDate(&cfg); err != nil {
 		return nil, err
+	}
+	if v := strings.TrimSpace(cfg.Source.HeartbeatInterval); v != "" && !cfg.Source.HeartbeatOff() {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Second {
+			return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+				fmt.Sprintf("invalid source.heartbeat_interval %q (want a duration of at least 1s, or off)", v), nil)
+		}
+		if !strings.EqualFold(cfg.Source.Kind, "postgres") {
+			return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+				"source.heartbeat_interval only applies to a PostgreSQL source", nil)
+		}
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Bootstrap.CreateSchema)) {
 	case "":

@@ -317,6 +317,12 @@ SELECT pg_reload_conf();
 
 Khi slot vượt giới hạn, PostgreSQL vô hiệu hóa slot (`wal_status = lost`) thay vì làm đầy đĩa. Pipeline dừng (exit 5 `log_gap`) và phải chép lại dữ liệu, nhưng source vẫn sống. Chọn giới hạn đủ lớn để chịu được thời gian dừng dài nhất bạn chấp nhận.
 
+**Heartbeat.** Slot chỉ tiến khi Strand xác nhận một vị trí mới. Ghi ở database khác cùng cluster không bao giờ tới walsender của slot. Ghi ở bảng ngoài publication chỉ tới dưới dạng Txn rỗng. Nếu bảng của pipeline không có ghi, slot đứng yên và WAL bị giữ tăng theo mọi ghi khác của cluster (cùng vấn đề mà AWS DMS và Debezium xử lý bằng heartbeat). Mỗi `source.heartbeat_interval` (mặc định 10s), Strand ghi `pg_logical_emit_message(false, 'strand_heartbeat', '')` vào database nguồn. Reader coi message đó là một Txn rỗng, apply nó, và slot tiến tới đó. Đo trên PG 18: 64 MB ghi ở database khác, không heartbeat thì slot đứng yên và giữ 75 MB; có heartbeat thì WAL giữ về 0 MB sau vài chu kỳ.
+
+- Mỗi heartbeat là một bản ghi WAL nhỏ ở source và một commit rỗng ở target.
+- Source là standby thì không ghi được WAL: heartbeat tự tắt (log một lần). Lỗi heartbeat (mất kết nối, source bị fence chỉ đọc) chỉ ghi log, không dừng pipeline.
+- Đếm trong `strand_heartbeat_total`.
+
 Strand giám sát ở ba chỗ:
 
 - `doctor` và `validate`: warning `source_pg_wal_keep_unlimited` khi giới hạn là `-1`. Với slot khai báo trong `source.slot`, warning `source_pg_slot_wal` khi slot giữ từ 50% giới hạn, đã vượt giới hạn (`wal_status = unreserved`), hoặc không có ai dùng mà giữ từ 1 GB khi không giới hạn.
@@ -514,6 +520,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `source.publication` | `strand_<name>` | PG: publication |
 | `source.create_slot` | `false` | PG: tạo slot khi chưa có |
 | `source.failover_slot` | `false` | PG17+: tạo slot `FAILOVER` |
+| `source.heartbeat_interval` | `10s` | PG: chu kỳ ghi heartbeat vào WAL để slot tiến khi bảng của pipeline không có ghi (mục 4.2). `off` để tắt |
 | `source.sequence_sync_interval` | `5s` | PG: chu kỳ ghi `last_value` sequence độc lập vào `_strand_promote` (dùng khi promote không đọc được source). Đặt cùng giá trị cho `promote --sync-interval` |
 | `schema.additive` | `auto` | `auto`: tự áp thay đổi schema cộng thêm lên target (mục 3.4); `pause`: dừng chờ `schema approve` |
 | `schema.destructive` | `pause` | `pause` \| `approve`: thay đổi phá hủy luôn dừng exit 10 và chờ `strand schema approve <id>` |
@@ -793,6 +800,23 @@ strand sync -c p.yaml --start-at 0/16B3748                                      
 - Chạy foreground. `SIGTERM`/`Ctrl-C` dừng đọc, chờ writer, ghi checkpoint rồi thoát 0.
 - Hai instance cùng `name`: instance mới giữ khóa, tăng epoch và ngắt instance cũ. Instance cũ dừng với exit 4 `fenced`.
 - Triển khai thường trực: systemd `strand@<name>.service` hoặc StatefulSet (`deploy/`), với `RestartPreventExitStatus=2 3 4 5 10`.
+
+**Dừng tại một điểm (`--stop-at`, `--stop-at-time`).** Strand apply mọi thay đổi của source tới điểm đó, không apply thay đổi nào sau đó, ghi checkpoint rồi thoát 0 (log `stop position reached`). Chạy lại `sync` không kèm điểm dừng thì tiếp tục đúng từ đó.
+
+```bash
+strand sync -c p.yaml --stop-at 0/3A1B2C40                                  # PG: LSN (SELECT pg_current_wal_insert_lsn())
+strand sync -c p.yaml --stop-at '3E11FA47-71CA-11E1-9E33-C80AA9429562:1-9000'  # MySQL: GTID set (SELECT @@gtid_executed)
+strand sync -c p.yaml --stop-at mysql-bin.000123:4567                        # MySQL không GTID: file:vị trí
+strand sync -c p.yaml --stop-at-time 2026-11-28T08:00:00+07:00               # theo thời điểm commit ở source
+```
+
+- Dùng để diễn tập cutover, tạo bản sao tại một thời điểm, hoặc chạy migration theo đợt.
+- PG: dừng trước Txn đầu tiên có commit LSN lớn hơn điểm dừng. MySQL GTID: dừng khi mọi GTID của tập đã được nhận, trước Txn kế tiếp. File:vị trí: dừng trước Txn kết thúc sau vị trí đó.
+- `--stop-at-time` so theo thời điểm commit ở source, độ phân giải giây: Txn commit trong cùng giây với mốc được tính là trước mốc. Source đứng yên thì Strand dừng khi đồng hồ đã qua mốc và reader đã đọc tới đầu log.
+- PG: heartbeat (mục 4.2) bảo đảm có Txn sau điểm dừng để chạm tới, nên Strand dừng cả khi bảng của pipeline không có ghi. Tắt heartbeat thì Strand chờ tới Txn kế tiếp của các bảng đó.
+- Checkpoint đã ở sau điểm dừng: Strand thoát 0 ngay, không apply gì.
+- Cần snapshot ban đầu đã xong. Bảng còn chờ snapshot thì bị từ chối (exit 3): chặn stream giữa chừng sẽ làm snapshot đứng.
+- Không dùng cho pipeline MongoDB.
 
 ### 7.4 `schema init`
 
@@ -1292,6 +1316,11 @@ Bộ nhớ: không có trần RSS (`resources.memory` chưa thi hành). Các ph�
 | `strand_retention_headroom_seconds` | pipeline | Source MySQL, chỉ trong bootstrap: thời gian còn lại trước khi binlog cần đọc bị xóa |
 | `strand_verify_mismatch_total`, `strand_verify_unverifiable_hot_total` | pipeline, table | Row lệch / row quá nóng khi verify |
 | `strand_fenced_total` | pipeline | Số lần bị instance khác thay thế |
+| `strand_heartbeat_total` | pipeline | Heartbeat WAL đã ghi ở source PG (mục 4.2) |
+| `strand_table_rows_applied_total` | pipeline, table, op | Row CDC đã apply theo bảng nguồn và thao tác (`insert`, `update`, `delete`); không gồm snapshot |
+| `strand_table_last_change_timestamp_seconds` | pipeline, table | Thời điểm thay đổi CDC gần nhất của bảng được commit ở target |
+| `strand_table_apply_delay_seconds` | pipeline, table | Thay đổi gần nhất của bảng: commit ở target trừ commit ở source |
+| `strand_table_schema_changes_total` | pipeline, table | Thay đổi schema cộng thêm Strand đã áp lên bảng ở target |
 | `strand_zero_date_replaced_total` | pipeline, table, column, policy | Zero date MySQL đã ghi thành `NULL`/`1970-01-01` (`tables.zero_date`, mục 3.2) |
 
 Cảnh báo nên đặt:
@@ -1301,6 +1330,7 @@ Cảnh báo nên đặt:
 - Spool trên 80% trần.
 - `verify_mismatch_total` tăng.
 - `zero_date_replaced_total` tăng ở bảng không mong có zero date.
+- `strand_table_last_change_timestamp_seconds` của một bảng vốn bận đứng yên lâu (Web đánh dấu bảng đó là `quiet`).
 - Source PG: WAL slot giữ gần `max_slot_wal_keep_size` (cảnh báo **Source WAL** trên Web, mục 4.2).
 - Process thoát với exit 2–5 hoặc 10.
 

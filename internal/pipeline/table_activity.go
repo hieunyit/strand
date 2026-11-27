@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"strand/internal/admin"
+	"strand/internal/metrics"
 	"strand/internal/model"
 )
 
@@ -23,16 +24,40 @@ type tableAct struct {
 	inserts, updates, deletes int64
 	last                      time.Time // committed on the target
 	lastSource                int64     // source commit time of the last change (Unix seconds; 0 unknown)
+	ddls                      int64     // additive schema changes applied to the target table
+	lastDDL                   time.Time
 }
 
-// record adds the changes of a committed batch (one lock per batch).
-func (a *tableActivity) record(batch []*model.Txn, now time.Time) {
+// recordDDL counts an additive schema change applied to the target for each table.
+func (a *tableActivity) recordDDL(ids []model.TableID, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.m == nil {
+		a.m = make(map[model.TableID]*tableAct)
+	}
+	for _, id := range ids {
+		x := a.m[id]
+		if x == nil {
+			x = &tableAct{}
+			a.m[id] = x
+		}
+		x.ddls++
+		x.lastDDL = now
+	}
+}
+
+// record adds the changes of a committed batch (one lock per batch) and, when m is set, the per-table
+// Prometheus series (rows by operation, last change time, apply delay of the newest change).
+func (a *tableActivity) record(batch []*model.Txn, now time.Time, m *metrics.Metrics, pipeline string) {
 	n := 0
 	for _, t := range batch {
 		n += len(t.TableOps.Counts)
 	}
 	if n == 0 {
 		return
+	}
+	if m != nil {
+		a.export(batch, now, m, pipeline)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -57,6 +82,45 @@ func (a *tableActivity) record(batch []*model.Txn, now time.Time) {
 	}
 }
 
+// export updates the per-table metrics of a committed batch.
+func (a *tableActivity) export(batch []*model.Txn, now time.Time, m *metrics.Metrics, pipeline string) {
+	type agg struct {
+		ins, upd, del int64
+		src           int64
+	}
+	per := map[model.TableID]*agg{}
+	for _, t := range batch {
+		for _, c := range t.TableOps.Counts {
+			x := per[c.Table]
+			if x == nil {
+				x = &agg{}
+				per[c.Table] = x
+			}
+			x.ins += c.Inserts
+			x.upd += c.Updates
+			x.del += c.Deletes
+			if t.SourceTS > x.src {
+				x.src = t.SourceTS
+			}
+		}
+	}
+	for id, x := range per {
+		name := id.String()
+		for _, op := range []struct {
+			name string
+			n    int64
+		}{{"insert", x.ins}, {"update", x.upd}, {"delete", x.del}} {
+			if op.n > 0 {
+				m.TableRowsAppliedTotal.WithLabelValues(pipeline, name, op.name).Add(float64(op.n))
+			}
+		}
+		m.TableLastChange.WithLabelValues(pipeline, name).Set(float64(now.UnixMilli()) / 1000)
+		if x.src > 0 {
+			m.TableApplyDelay.WithLabelValues(pipeline, name).Set(max(0, now.Sub(time.Unix(x.src, 0)).Seconds()))
+		}
+	}
+}
+
 // fill sets the activity fields of the tables in out (keyed by source table name).
 func (a *tableActivity) fill(out []admin.TableInfo, ids []model.TableID) {
 	a.mu.Lock()
@@ -67,6 +131,14 @@ func (a *tableActivity) fill(out []admin.TableInfo, ids []model.TableID) {
 			continue
 		}
 		ti := &out[i]
+		ti.SchemaChanges = x.ddls
+		if !x.lastDDL.IsZero() {
+			d := x.lastDDL.UTC()
+			ti.LastSchemaChangeAt = &d
+		}
+		if x.last.IsZero() {
+			continue
+		}
 		ti.Inserts, ti.Updates, ti.Deletes = x.inserts, x.updates, x.deletes
 		last := x.last.UTC()
 		ti.LastChangeAt = &last

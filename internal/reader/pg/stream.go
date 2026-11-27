@@ -108,6 +108,11 @@ type streamState struct {
 // transactional) mà snapshot logic ghi sau khi đọc một chunk; reader phát nó thành một Txn rỗng.
 const WatermarkPrefix = "strand_watermark"
 
+// HeartbeatPrefix là prefix của message không transactional mà pipeline ghi định kỳ (source.heartbeat_interval).
+// Reader xử lý nó như watermark: một Txn rỗng ở vị trí message, nên lwd và slot tiến cả khi các bảng của
+// pipeline không có ghi nhưng WAL vẫn đi (database khác cùng cluster, bảng ngoài publication).
+const HeartbeatPrefix = "strand_heartbeat"
+
 // errStop báo readLoop dừng (ctx hủy khi đang gửi Event).
 var errStop = fmt.Errorf("dừng")
 
@@ -337,7 +342,7 @@ func (st *streamState) handle(data []byte) error {
 		return nil
 
 	case *pglogrepl.LogicalDecodingMessageV2:
-		if m.Transactional || m.Prefix != WatermarkPrefix || st.cur != nil || st.prep != nil || st.inStream {
+		if m.Transactional || (m.Prefix != WatermarkPrefix && m.Prefix != HeartbeatPrefix) || st.cur != nil || st.prep != nil || st.inStream {
 			return nil // message của ứng dụng khác: không ảnh hưởng dữ liệu
 		}
 		// PG logicalmsg_decode truyền EndRecPtr (exclusive) cho message, còn commit thật dùng

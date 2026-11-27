@@ -110,6 +110,8 @@ func (c *SyncCoordinator) gracefulStop() error {
 }
 
 var (
+	syncStopAt           string
+	syncStopAtTime       string
 	syncSeedManifest     string
 	syncCPUProfile       string
 	syncBlockProfile     string
@@ -134,6 +136,16 @@ func newSyncCmd() *cobra.Command {
 			cfg, err := config.LoadFile(cfgPath)
 			if err != nil {
 				return err
+			}
+			var stopAtTime time.Time
+			if s := strings.TrimSpace(syncStopAtTime); s != "" {
+				if stopAtTime, err = time.Parse(time.RFC3339, s); err != nil {
+					return exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+						fmt.Sprintf("invalid --stop-at-time %q (want RFC 3339, for example 2026-11-28T08:00:00+07:00): %v", s, err), err)
+				}
+			}
+			if (syncStopAt != "" || !stopAtTime.IsZero()) && cfg.IsMongoDB() {
+				return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, "--stop-at / --stop-at-time are not supported for MongoDB pipelines", nil)
 			}
 			if syncBackground && os.Getenv(bgChildEnv) == "" {
 				return startBackground(cmd, cfg)
@@ -182,6 +194,9 @@ func newSyncCmd() *cobra.Command {
 			// SIGTERM/SIGINT: ngừng đọc, chờ writer xong, ghi checkpoint rồi thoát (01 §3).
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
 			defer stop()
+			// --stop-at: pipeline hủy ctx này khi đã apply tới điểm dừng — dừng êm như SIGTERM.
+			ctx, requestStop := context.WithCancel(ctx)
+			defer requestStop()
 			if cfg.IsMongoDB() {
 				if syncStartAt != "" {
 					return exitcode.New("invalid_syntax", exitcode.InvalidSyntax, "--start-at is not supported for MongoDB pipelines", nil)
@@ -194,10 +209,15 @@ func newSyncCmd() *cobra.Command {
 				SeedManifest: syncSeedManifest,
 				Logger:       logger,
 				Events:       events,
+				StopAt:       syncStopAt,
+				StopAtTime:   stopAtTime,
+				RequestStop:  requestStop,
 			})
 		},
 	}
 	cmd.Flags().StringVar(&syncStartAt, "start-at", "", "Vị trí bắt đầu: seed | <gtid> (source MySQL) | <file binlog>:<vị trí> (source MySQL không GTID, ví dụ mysql-bin.000123:4567) | <LSN X/Y> (source PostgreSQL)")
+	cmd.Flags().StringVar(&syncStopAt, "stop-at", "", "Dừng CDC tại một vị trí của source rồi thoát (exit 0): <GTID set> | <file binlog>:<vị trí> | <LSN X/Y>. Giao dịch sau vị trí đó chưa được apply; lần chạy sau tiếp từ đó")
+	cmd.Flags().StringVar(&syncStopAtTime, "stop-at-time", "", "Dừng CDC sau giao dịch cuối cùng commit ở source trước hoặc đúng thời điểm này (RFC 3339, độ phân giải giây) rồi thoát (exit 0)")
 	cmd.Flags().StringVar(&syncSeedManifest, "seed-manifest", "seed.json", "Đường dẫn seed.json khi --start-at seed")
 	cmd.Flags().BoolVarP(&syncBackground, "background", "d", false, "Chạy nền: tách khỏi terminal, log ra --log-file, PID ra --pid-file; dừng bằng strand stop -c ...")
 	cmd.Flags().StringVar(&syncLogFile, "log-file", "", "Với --background: file log (mặc định <resources.spool.path>/strand.log)")

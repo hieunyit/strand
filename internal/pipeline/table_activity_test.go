@@ -5,7 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"strand/internal/admin"
+	"strand/internal/metrics"
 	"strand/internal/model"
 )
 
@@ -47,7 +51,7 @@ func TestRouteCountsChangesPerSourceTable(t *testing.T) {
 	}
 
 	at := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
-	p.activity.record([]*model.Txn{got, got}, at)
+	p.activity.record([]*model.Txn{got, got}, at, nil, "")
 	out := []admin.TableInfo{{Table: cItems.String()}, {Table: cAccounts.String()}}
 	p.activity.fill(out, []model.TableID{cItems, cAccounts})
 	it := out[0]
@@ -143,4 +147,59 @@ func TestQueryRowCountsDB(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Per-table Prometheus series (như table statistics của AWS DMS) và số thay đổi schema theo bảng.
+func TestTableActivityMetricsAndSchemaChanges(t *testing.T) {
+	m := metrics.NewMetrics(prometheus.NewRegistry())
+	var a tableActivity
+	items, acc := model.TableID{Schema: "app", Table: "items"}, model.TableID{Schema: "app", Table: "accounts"}
+	tx := &model.Txn{SourceTS: 1_700_000_000}
+	tx.TableOps.Add(items, model.OpInsert)
+	tx.TableOps.Add(items, model.OpUpdate)
+	tx.TableOps.Add(items, model.OpUpdate)
+	tx.TableOps.Add(acc, model.OpDelete)
+	at := time.Unix(1_700_000_003, 0)
+	a.record([]*model.Txn{tx, tx}, at, m, "p")
+
+	for _, c := range []struct {
+		table, op string
+		want      float64
+	}{{"app.items", "insert", 2}, {"app.items", "update", 4}, {"app.accounts", "delete", 2}} {
+		if got := metricValue(t, m.TableRowsAppliedTotal.WithLabelValues("p", c.table, c.op)); got != c.want {
+			t.Errorf("%s %s = %v, want %v", c.table, c.op, got, c.want)
+		}
+	}
+	if got := metricValue(t, m.TableApplyDelay.WithLabelValues("p", "app.items")); got != 3 {
+		t.Errorf("apply delay = %v, want 3", got)
+	}
+	if got := metricValue(t, m.TableLastChange.WithLabelValues("p", "app.accounts")); got != float64(at.Unix()) {
+		t.Errorf("last change = %v", got)
+	}
+
+	ddlAt := at.Add(time.Minute)
+	a.recordDDL([]model.TableID{items}, ddlAt)
+	a.recordDDL([]model.TableID{items, {Schema: "app", Table: "quiet"}}, ddlAt)
+	out := []admin.TableInfo{{Table: "app.items"}, {Table: "app.quiet"}}
+	a.fill(out, []model.TableID{items, {Schema: "app", Table: "quiet"}})
+	if out[0].SchemaChanges != 2 || out[0].LastSchemaChangeAt == nil || !out[0].LastSchemaChangeAt.Equal(ddlAt) || out[0].Changes() != 6 {
+		t.Fatalf("items: %+v", out[0])
+	}
+	// Bảng chỉ có DDL, chưa có thay đổi row: không báo thời điểm thay đổi row.
+	if out[1].SchemaChanges != 1 || out[1].LastChangeAt != nil || out[1].Changes() != 0 {
+		t.Fatalf("quiet: %+v", out[1])
+	}
+}
+
+// metricValue reads a counter or gauge value.
+func metricValue(t *testing.T, c prometheus.Metric) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Counter != nil {
+		return m.Counter.GetValue()
+	}
+	return m.Gauge.GetValue()
 }

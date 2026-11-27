@@ -81,6 +81,14 @@ type Metrics struct {
 	VerifyIncompleteTotal *prometheus.CounterVec
 	// ZeroDateReplacedTotal: số zero date MySQL được ghi thành NULL/1970-01-01 theo tables.zero_date.
 	ZeroDateReplacedTotal *prometheus.CounterVec
+	// HeartbeatTotal: số heartbeat WAL đã ghi ở source PG (source.heartbeat_interval).
+	HeartbeatTotal *prometheus.CounterVec
+	// Theo bảng nguồn (như table statistics của AWS DMS). Số series = số bảng × 3 (+2): với hàng nghìn
+	// bảng, lọc ở phía Prometheus nếu cần.
+	TableRowsAppliedTotal   *prometheus.CounterVec
+	TableLastChange         *prometheus.GaugeVec
+	TableApplyDelay         *prometheus.GaugeVec
+	TableSchemaChangesTotal *prometheus.CounterVec
 }
 
 // NewMetrics khởi tạo và đăng ký đầy đủ 20 metric theo spec/02 §11.
@@ -208,6 +216,26 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "strand_zero_date_replaced_total",
 			Help: "Số giá trị zero date của MySQL được ghi thành giá trị thay thế (tables.zero_date: set_null | epoch).",
 		}, []string{"pipeline", "table", "column", "policy"}),
+		TableRowsAppliedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "strand_table_rows_applied_total",
+			Help: "Số row CDC đã apply ở target theo bảng nguồn và thao tác (insert | update | delete); không gồm snapshot.",
+		}, []string{"pipeline", "table", "op"}),
+		TableLastChange: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "strand_table_last_change_timestamp_seconds",
+			Help: "Thời điểm (Unix) thay đổi CDC gần nhất của bảng được commit ở target.",
+		}, []string{"pipeline", "table"}),
+		TableApplyDelay: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "strand_table_apply_delay_seconds",
+			Help: "Với thay đổi CDC gần nhất của bảng: thời điểm commit ở target trừ thời điểm commit ở source (giây).",
+		}, []string{"pipeline", "table"}),
+		TableSchemaChangesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "strand_table_schema_changes_total",
+			Help: "Số thay đổi schema cộng thêm (DDL) Strand đã áp lên bảng ở target.",
+		}, []string{"pipeline", "table"}),
+		HeartbeatTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "strand_heartbeat_total",
+			Help: "Số heartbeat WAL đã ghi ở source PostgreSQL để slot tiến khi các bảng của pipeline không có ghi.",
+		}, []string{"pipeline"}),
 		SpoolCapacityBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "strand_spool_capacity_bytes",
 			Help: "Dung lượng tối đa (hard limit) của spool theo tầng.",
@@ -240,6 +268,11 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.RowsNotWrittenTotal,
 		m.VerifyIncompleteTotal,
 		m.ZeroDateReplacedTotal,
+		m.HeartbeatTotal,
+		m.TableRowsAppliedTotal,
+		m.TableLastChange,
+		m.TableApplyDelay,
+		m.TableSchemaChangesTotal,
 	)
 
 	return m

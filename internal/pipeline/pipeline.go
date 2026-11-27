@@ -62,6 +62,11 @@ type Options struct {
 	// Events: ring buffer WARN/ERROR cho lệnh admin `events` (nil = lệnh trả danh sách rỗng).
 	// Chỉ quan sát: Logger đã được bọc bởi ring.Wrap ở nơi tạo Options.
 	Events *admin.EventRing
+	// StopAt / StopAtTime: điểm dừng CDC (`sync --stop-at` / `--stop-at-time`, xem stop_at.go).
+	// RequestStop được gọi khi đã apply tới điểm dừng; nó phải hủy ctx của Run (dừng êm như SIGTERM).
+	StopAt      string
+	StopAtTime  time.Time
+	RequestStop func()
 }
 
 // Pipeline là một lần chạy `strand sync`.
@@ -152,11 +157,14 @@ type Pipeline struct {
 	// chưa đọc tới. Lỗi/không biết → false (lagSeconds lùi về cách tính theo hàng đợi nội bộ).
 	srcAhead   atomic.Bool
 	sourceHead atomic.Uint32
-	paused     atomic.Bool
-	pauseMu    sync.Mutex
-	pauseCond  *sync.Cond
-	snapPaused atomic.Bool // tạm dừng riêng phần snapshot logic (strand pause --snapshot)
-	bootstrap  atomic.Bool
+	// stopGate: điểm dừng CDC (nil = không có); stopTripped: đã gặp điểm dừng, router ngừng nhận Txn.
+	stopGate    *stopGate
+	stopTripped atomic.Bool
+	paused      atomic.Bool
+	pauseMu     sync.Mutex
+	pauseCond   *sync.Cond
+	snapPaused  atomic.Bool // tạm dừng riêng phần snapshot logic (strand pause --snapshot)
+	bootstrap   atomic.Bool
 	// running: khởi động xong (đã quyết định snapshot/verify sau seed). Trước đó admin báo "starting",
 	// không bao giờ "synced" — admin socket mở sớm hơn lúc biết có bootstrap hay không.
 	running       atomic.Bool
@@ -838,6 +846,26 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			return err
 		}
 	}
+	gate, atStop, err := p.newStopGate(applied)
+	if err != nil {
+		return err
+	}
+	if gate != nil {
+		if len(pending) > 0 {
+			names := make([]string, 0, len(pending))
+			for _, id := range pending {
+				names = append(names, id.String())
+			}
+			return exitcode.New("invalid_syntax", exitcode.Rejected,
+				fmt.Sprintf("--stop-at needs the initial copy to be finished; tables still to copy: %s. Run sync without a stop position until the copy is done", strings.Join(names, ", ")), nil)
+		}
+		if atStop {
+			p.log.Info("the checkpoint already covers the stop position: nothing to apply", "stop_at", gate.desc)
+			return nil
+		}
+		p.stopGate = gate
+		p.log.Info("CDC will stop at a position", "stop_at", gate.desc)
+	}
 
 	mysqlWriterDB := p.dst
 	if len(p.cascade.signatures) > 0 {
@@ -1193,10 +1221,18 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	go func() { defer bgWG.Done(); p.progressLoop(ctx) }()
 	go func() { defer bgWG.Done(); p.monitor(ctx) }()
 	go func() { defer bgWG.Done(); p.watchCompactor(ctx) }()
+	if p.stopGate != nil {
+		bgWG.Add(1)
+		go func() { defer bgWG.Done(); p.watchStopIdle(ctx) }()
+	}
 	if p.pgReader != nil {
 		bgWG.Add(2)
 		go func() { defer bgWG.Done(); p.pgConfirmLoop(ctx) }()
 		go func() { defer bgWG.Done(); p.pgPruneXIDs(ctx) }()
+		if !p.cfg.Source.HeartbeatOff() {
+			bgWG.Add(1)
+			go func() { defer bgWG.Done(); p.pgHeartbeatLoop(ctx) }()
+		}
 		if p.dstEngine == model.EnginePG {
 			stopSeq := p.startSequenceSync(ctx)
 			defer stopSeq()
@@ -1446,7 +1482,16 @@ func (p *Pipeline) router(ctx context.Context, txns <-chan *model.Txn, asmErr <-
 				return
 			}
 			p.routeMu.Lock()
+			if g := p.stopGate; g != nil && (p.stopTripped.Load() || g.beyond(t)) {
+				dropUnrouted(t)
+				p.finishAtStop(ctx, "the next source transaction is after the stop position")
+				p.routeMu.Unlock()
+				return
+			}
 			err := p.route(ctx, t)
+			if err == nil && p.stopGate != nil && p.stopGate.reachedAfter(t) {
+				p.finishAtStop(ctx, "the stop position was applied")
+			}
 			p.routeMu.Unlock()
 			if err != nil {
 				if ctx.Err() == nil {
@@ -2145,7 +2190,7 @@ func (p *Pipeline) finishBatch(ctx context.Context, id int, batch []*model.Txn, 
 			p.lastSourceTS.Store(t.SourceTS)
 		}
 	}
-	p.activity.record(batch, time.Now())
+	p.activity.record(batch, time.Now(), p.metrics, p.id)
 	p.appliedTxns.Add(int64(len(batch)))
 	p.appliedRows.Add(rows)
 	p.metrics.ApplyTxnTotal.WithLabelValues(p.id).Add(float64(len(batch)))

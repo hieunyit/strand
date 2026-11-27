@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -26,6 +27,7 @@ func (p *Pipeline) evolveSchema(ctx context.Context, t *model.Txn, ids []model.T
 	}
 	req := schemagen.Request{Source: p.src, Target: p.dst, SourceKind: p.cfg.Source.Kind, TargetKind: p.cfg.Target.Kind, Rename: p.cfg.Tables.Rename}
 	var all schemagen.Evolution
+	var changedTables []model.TableID
 	for _, id := range ids {
 		msg, both, err := p.schemaDiffInfo(ctx, id)
 		if err != nil {
@@ -45,6 +47,9 @@ func (p *Pipeline) evolveSchema(ctx context.Context, t *model.Txn, ids []model.T
 			return false, nil
 		}
 		all.Changes = append(all.Changes, ev.Changes...)
+		if len(ev.Changes) > 0 {
+			changedTables = append(changedTables, id)
+		}
 	}
 	if all.Empty() {
 		return false, nil
@@ -59,6 +64,12 @@ func (p *Pipeline) evolveSchema(ctx context.Context, t *model.Txn, ids []model.T
 			return false, err
 		}
 		p.log.Info("additive schema change applied to target", "position", t.SourcePos.Label(), "changes", all.Describe(), "ddl", all.Statements())
+		p.activity.recordDDL(changedTables, time.Now())
+		if p.metrics != nil {
+			for _, id := range changedTables {
+				p.metrics.TableSchemaChangesTotal.WithLabelValues(p.id, id.String()).Inc()
+			}
+		}
 		return true, nil
 	}
 	store := schemachange.NewStore(p.dst, p.dstEngine == model.EnginePG)

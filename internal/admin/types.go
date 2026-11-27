@@ -147,6 +147,10 @@ type TableInfo struct {
 	Deletes      int64      `json:"deletes,omitempty"`
 	LastChangeAt *time.Time `json:"last_change_at,omitempty"`
 	LastSourceAt *time.Time `json:"last_source_at,omitempty"`
+	// SchemaChanges: additive schema changes (DDL) Strand applied to the target table since the process
+	// started; LastSchemaChangeAt: when the last one was applied.
+	SchemaChanges      int64      `json:"schema_changes,omitempty"`
+	LastSchemaChangeAt *time.Time `json:"last_schema_change_at,omitempty"`
 
 	// Quiet is set by the Web console (never by the pipeline): the table used to change regularly and has had
 	// no change for unusually long (internal/web/table_history.go).

@@ -681,6 +681,54 @@ func (p *Pipeline) pgConfirmLoop(ctx context.Context) {
 	}
 }
 
+// pgHeartbeatSQL ghi một logical message không transactional vào WAL của database nguồn. Reader biến nó
+// thành một Txn rỗng (pg.HeartbeatPrefix): lwd và confirmed_flush_lsn của slot tiến tới đó dù các bảng
+// của pipeline không có ghi. Không có heartbeat, ghi ở database khác cùng cluster không bao giờ tới
+// walsender của slot, slot đứng yên và WAL bị giữ tăng mãi tới đầy đĩa source.
+const pgHeartbeatSQL = `SELECT pg_logical_emit_message(false, '` + pgreader.HeartbeatPrefix + `', '')`
+
+// pgHeartbeatLoop ghi heartbeat mỗi source.heartbeat_interval (mặc định 10s). Lỗi (source là standby, source
+// đã bị fence chỉ đọc, mất kết nối) chỉ ghi log một lần cho tới khi heartbeat lại thành công: heartbeat
+// không bao giờ làm dừng pipeline.
+func (p *Pipeline) pgHeartbeatLoop(ctx context.Context) {
+	interval := durationOr(p.cfg.Source.HeartbeatInterval, pgDefaultHeartbeat)
+	var standby bool
+	if err := p.src.QueryRowContext(ctx, "SELECT pg_is_in_recovery()").Scan(&standby); err == nil && standby {
+		p.log.Info("source is a standby: WAL heartbeat disabled (a standby cannot write WAL); the slot advances only with changes to the pipeline tables")
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	failing := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if p.paused.Load() {
+			continue
+		}
+		hctx, cancel := context.WithTimeout(ctx, interval)
+		_, err := p.src.ExecContext(hctx, pgHeartbeatSQL)
+		cancel()
+		switch {
+		case err != nil && ctx.Err() == nil && !failing:
+			failing = true
+			p.log.Warn("WAL heartbeat failed; the replication slot may keep WAL while the pipeline tables are idle", "error", err)
+		case err == nil && failing:
+			failing = false
+			p.log.Info("WAL heartbeat works again")
+		}
+		if err == nil && p.metrics != nil {
+			p.metrics.HeartbeatTotal.WithLabelValues(p.id).Inc()
+		}
+	}
+}
+
+// pgDefaultHeartbeat: chu kỳ heartbeat mặc định của source PG.
+const pgDefaultHeartbeat = 10 * time.Second
+
 // startSequenceSync chạy đồng bộ định kỳ last_value của sequence độc lập ở source PG vào
 // _strand_promote trên target (02 §8, Δt_sync). Trả hàm dừng (chờ goroutine thoát).
 // Source MySQL không có sequence nên không có gì để đồng bộ: sequence độc lập ở target PG được promote

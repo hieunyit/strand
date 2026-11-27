@@ -29,6 +29,7 @@
     <dt>Updates</dt><dd class="c-num">{{int64 $t.Updates}}</dd>
     <dt>Deletes</dt><dd class="c-num">{{int64 $t.Deletes}}</dd>
     <dt>Total</dt><dd class="c-num">{{int64 .Changes}} <span class="small muted">({{int64 .HistoryChanges}} in the chart below)</span></dd>
+    <dt>Schema changes</dt><dd data-schema-changes>{{if $t.SchemaChanges}}<span class="c-num">{{int64 $t.SchemaChanges}}</span> applied to the target{{if $t.LastSchemaChangeAt}}, last {{ts (derefTime $t.LastSchemaChangeAt)}}{{end}}{{else}}<span class="muted">None applied since the pipeline started</span>{{end}}</dd>
     <dt>Quiet check</dt><dd>{{with .Quiet}}{{if .Quiet}}<span class="badge st-warn quiet-badge">quiet</span> No change for {{secs .IdleS}}; this table usually changes every {{secs .UsualGapS}} and counts as quiet after {{secs .QuietAfterS}}.{{else if .Regular}}Changes regularly (in {{.ActiveWindows}} of 12 ten-minute windows, usually every {{secs .UsualGapS}}); it would count as quiet after {{secs .QuietAfterS}} without a change.{{else}}<span class="muted">Not enough regular activity seen to judge ({{.ActiveWindows}} of 12 ten-minute windows with a change, {{.Gaps}} gaps measured).</span>{{end}}<div class="small muted">{{.Rule}}</div>{{end}}</dd>
   </dl>
 </section>
