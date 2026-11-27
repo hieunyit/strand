@@ -79,6 +79,8 @@ type Metrics struct {
 	RowsNotWrittenTotal *prometheus.CounterVec
 	// VerifyIncompleteTotal: verify sau seed không đủ bằng chứng (tràn giới hạn theo dõi khóa đổi).
 	VerifyIncompleteTotal *prometheus.CounterVec
+	// ZeroDateReplacedTotal: số zero date MySQL được ghi thành NULL/1970-01-01 theo tables.zero_date.
+	ZeroDateReplacedTotal *prometheus.CounterVec
 }
 
 // NewMetrics khởi tạo và đăng ký đầy đủ 20 metric theo spec/02 §11.
@@ -202,6 +204,10 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "strand_verify_incomplete_total",
 			Help: "Post-seed verify runs that could not cover every changed key (tracking limit or key encoding failure)",
 		}, []string{"pipeline"}),
+		ZeroDateReplacedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "strand_zero_date_replaced_total",
+			Help: "Số giá trị zero date của MySQL được ghi thành giá trị thay thế (tables.zero_date: set_null | epoch).",
+		}, []string{"pipeline", "table", "column", "policy"}),
 		SpoolCapacityBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "strand_spool_capacity_bytes",
 			Help: "Dung lượng tối đa (hard limit) của spool theo tầng.",
@@ -233,6 +239,7 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.SpoolCapacityBytes,
 		m.RowsNotWrittenTotal,
 		m.VerifyIncompleteTotal,
+		m.ZeroDateReplacedTotal,
 	)
 
 	return m

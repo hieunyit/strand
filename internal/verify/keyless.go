@@ -75,6 +75,7 @@ func (mv *MerkleVerifier) VerifyTableKeyless(ctx context.Context, t model.TableI
 	if err != nil {
 		return nil, err
 	}
+	srcCols = mv.withZeroDate(t, srcCols)
 	allDst, err := allColumns(ctx, mv.cfg.Target, mv.cfg.TargetEngine, dstTable)
 	if err != nil {
 		return nil, err

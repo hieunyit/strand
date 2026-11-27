@@ -193,6 +193,8 @@
       var opts = [];
       OPTION_FIELDS.forEach(function (o) { var v = val(o[0]); if (v && v !== o[1]) { opts.push(o[0] + ' ' + v); } });
       if (val('keyless') === 'full_row') { opts.push('full-row matching for tables without a key'); }
+      if (val('zero_date') === 'set_null') { opts.push('MySQL zero dates written as NULL'); }
+      if (val('zero_date') === 'epoch') { opts.push('MySQL zero dates written as 1970-01-01'); }
       var autoSeed = field('auto_seed');
       if (autoSeed && autoSeed.checked) { opts.push('automatically copy tables without a usable key and their foreign-key groups'); }
       rows.push(['Options', opts.length ? opts.join(', ') : 'defaults']);

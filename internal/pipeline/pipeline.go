@@ -281,6 +281,21 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if srcEngine == model.EngineMySQL && dstEngine == model.EnginePG {
 		p.conv = newValueConverter()
+		p.conv.zeroDate = func(id model.TableID) string { return p.cfg.Tables.ZeroDateFor(id.Schema, id.Table) }
+		var zeroSeen sync.Map
+		p.conv.onZeroDate = func(id model.TableID, column, policy string) {
+			if p.metrics != nil {
+				p.metrics.ZeroDateReplacedTotal.WithLabelValues(p.id, id.String(), column, policy).Inc()
+			}
+			if _, dup := zeroSeen.LoadOrStore(id.String()+"\x00"+column, true); !dup {
+				repl := "NULL"
+				if policy == "epoch" {
+					repl = "1970-01-01 00:00:00"
+				}
+				p.log.Warn("zero date written as a replacement value (tables.zero_date); later ones in this column are only counted in strand_zero_date_replaced_total",
+					"table", id.String(), "column", column, "written_as", repl)
+			}
+		}
 	}
 	p.seenCond = sync.NewCond(&p.seenMu)
 	p.pauseCond = sync.NewCond(&p.pauseMu)

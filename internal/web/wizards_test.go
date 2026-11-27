@@ -28,7 +28,7 @@ func setTestLag(v float64) { testLagMu.Lock(); testLag = v; testLagMu.Unlock() }
 func (m *recPipeline) Top(ctx context.Context) (*admin.TopInfo, error) {
 	testLagMu.Lock()
 	defer testLagMu.Unlock()
-	return &admin.TopInfo{PipelineID: "orders", State: "synced", LagSeconds: testLag, Throughput: 1234, Zone: "green"}, nil
+	return &admin.TopInfo{PipelineID: "orders", State: "synced", LagSeconds: testLag, Throughput: 1234, Zone: "green", SlotWAL: m.slotWAL}, nil
 }
 
 // wizFake thay script strand giả bằng bản in nội dung file `out.txt` (nếu có), ghi calls.log như newFakeStrand.

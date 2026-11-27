@@ -477,6 +477,67 @@ func TestAC3_ZeroDate_ValidationReject(t *testing.T) {
 	}
 }
 
+// Zero date theo bảng (tables.zero_date / zero_date_tables): epoch/set_null chỉ cảnh báo số row sẽ bị thay;
+// set_null trên cột NOT NULL, reject, và zero date trong cột khóa vẫn là lỗi exit 3.
+func TestZeroDatePolicy_ValidationPerTable(t *testing.T) {
+	ctx := context.Background()
+	mDB := getMySQL(t)
+	pDB := getPostgres(t)
+	for _, q := range []string{
+		`DROP TABLE IF EXISTS strand.test_zd_policy, strand.test_zd_key`,
+		`CREATE TABLE strand.test_zd_policy (id INT PRIMARY KEY, d_null DATE NULL, d_nn DATETIME NOT NULL)`,
+		`CREATE TABLE strand.test_zd_key (d DATE NOT NULL PRIMARY KEY, v INT)`,
+		`SET SESSION sql_mode = '';
+		 INSERT INTO strand.test_zd_policy VALUES (1, '0000-00-00', '0000-00-00 00:00:00'), (2, '2024-01-01', '2024-01-01 00:00:00');
+		 INSERT INTO strand.test_zd_key VALUES ('0000-00-00', 1)`,
+	} {
+		if _, err := mDB.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	check := func(table string, policy map[string]string) ([]string, error) {
+		opts := typemap.DefaultOptions()
+		opts.ZeroDateFor = func(schema, tbl string) string { return policy[schema+"."+tbl] }
+		return typemap.CheckMySQLToPGTables(ctx, mDB, pDB, []string{table}, opts)
+	}
+	hasAll := func(ws []string, parts ...string) bool {
+		for _, w := range ws {
+			ok := true
+			for _, p := range parts {
+				ok = ok && strings.Contains(w, p)
+			}
+			if ok {
+				return true
+			}
+		}
+		return false
+	}
+
+	ws, err := check("strand.test_zd_policy", map[string]string{"strand.test_zd_policy": "epoch"})
+	if err != nil {
+		t.Fatalf("epoch: %v", err)
+	}
+	if !hasAll(ws, "d_null", "1970-01-01") || !hasAll(ws, "d_nn", "1970-01-01") {
+		t.Fatalf("epoch: want a replacement warning for d_null and d_nn, got %v", ws)
+	}
+
+	_, err = check("strand.test_zd_policy", map[string]string{"strand.test_zd_policy": "set_null"})
+	if exitcode.GetExitCode(err) != exitcode.Rejected || !strings.Contains(err.Error(), "d_nn") || !strings.Contains(err.Error(), "NOT NULL") {
+		t.Fatalf("set_null with a zero date in a NOT NULL column: want exit 3 naming d_nn, got %v", err)
+	}
+
+	// Chính sách của bảng khác không áp cho bảng này: mặc định reject.
+	_, err = check("strand.test_zd_policy", map[string]string{"strand.other": "epoch"})
+	if exitcode.GetExitCode(err) != exitcode.Rejected || !strings.Contains(err.Error(), "policy=reject") {
+		t.Fatalf("default policy: want exit 3 policy=reject, got %v", err)
+	}
+
+	_, err = check("strand.test_zd_key", map[string]string{"strand.test_zd_key": "epoch"})
+	if exitcode.GetExitCode(err) != exitcode.Rejected || !strings.Contains(err.Error(), "row key") {
+		t.Fatalf("zero date in a key column: want exit 3 mentioning the row key, got %v", err)
+	}
+}
+
 func TestValidation_PracticalScan_Int8OverflowAndEnum(t *testing.T) {
 	ctx := context.Background()
 	mDB := getMySQL(t)

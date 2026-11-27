@@ -124,6 +124,7 @@ func newValidateCmd() *cobra.Command {
 					}
 					tmOpts := typemap.DefaultOptions()
 					tmOpts.AllowKeyless = cfg.Tables.KeylessOn()
+					tmOpts.ZeroDateFor = cfg.Tables.ZeroDateFor
 					mpWarns, mpErr := typemap.CheckMySQLToPGTablesMapped(cmd.Context(), db, dstDB, tables, tmOpts, cfg.Tables.Rename)
 					for _, w := range mpWarns {
 						fmt.Fprintln(os.Stderr, "warning: "+w)

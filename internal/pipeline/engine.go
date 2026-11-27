@@ -718,23 +718,52 @@ type convFunc func(model.Value) (model.Value, error)
 // valueConverter giữ hàm chuyển giá trị theo cột của từng bảng nguồn MySQL (02 §8).
 type valueConverter struct {
 	mu     sync.RWMutex
-	tables map[model.TableID]map[string]convFunc
+	tables map[model.TableID]tableConv
+	// zeroDate trả chính sách zero date của bảng nguồn (tables.zero_date); nil = reject.
+	zeroDate func(model.TableID) string
+	// onZeroDate được gọi mỗi lần một zero date được thay (metric, log).
+	onZeroDate func(t model.TableID, column, policy string)
+}
+
+// tableConv: hàm chuyển theo cột. key: hàm cho cột thuộc khóa hàng — luôn từ chối zero date (thay khóa
+// bằng NULL/1970-01-01 sẽ gộp các row khác nhau hoặc làm mất khóa).
+type tableConv struct {
+	cols map[string]convFunc
+	key  map[string]convFunc
 }
 
 func newValueConverter() *valueConverter {
-	return &valueConverter{tables: map[model.TableID]map[string]convFunc{}}
+	return &valueConverter{tables: map[model.TableID]tableConv{}}
 }
 
-// load đọc cột của bảng ở source MySQL và dựng hàm chuyển theo typemap (policy mặc định).
-// Kiểu không map được → type_unmappable (exit 3).
+// load đọc cột của bảng ở source MySQL và dựng hàm chuyển theo typemap (chính sách zero date của bảng,
+// các chính sách khác mặc định). Kiểu không map được → type_unmappable (exit 3).
 func (c *valueConverter) load(ctx context.Context, db *sql.DB, id model.TableID) error {
 	cols, err := typemap.InspectMySQLColumns(ctx, db, id.Schema, id.Table)
 	if err != nil {
 		return err
 	}
-	m := make(map[string]convFunc, len(cols))
+	opts := typemap.DefaultOptions()
+	if c.zeroDate != nil {
+		opts.ZeroDatePolicy = typemap.ZeroDateKind(c.zeroDate(id))
+	}
+	if c.onZeroDate != nil {
+		on := c.onZeroDate
+		opts.OnZeroDate = func(column, policy string) { on(id, column, policy) }
+	}
+	keyOpts := typemap.DefaultOptions()
+	tc := tableConv{cols: make(map[string]convFunc, len(cols)), key: make(map[string]convFunc, len(cols))}
 	for _, col := range cols {
-		cm, err := typemap.MapMySQLColumn(col, typemap.DefaultOptions())
+		cm, err := typemap.MapMySQLColumn(col, opts)
+		if err == nil && opts.ZeroDatePolicy != keyOpts.ZeroDatePolicy {
+			var km typemap.ColumnMapping
+			km, err = typemap.MapMySQLColumn(col, keyOpts)
+			if km.Convert != nil {
+				tc.key[col.Name] = km.Convert
+			}
+		} else if cm.Convert != nil {
+			tc.key[col.Name] = cm.Convert
+		}
 		if err != nil {
 			var ee *exitcode.Error
 			if errors.As(err, &ee) {
@@ -743,11 +772,11 @@ func (c *valueConverter) load(ctx context.Context, db *sql.DB, id model.TableID)
 			return exitcode.New(exitcode.ErrTypeUnmappable, exitcode.Rejected, fmt.Sprintf("table %s column %s: %v", id, col.Name, err), err)
 		}
 		if cm.Convert != nil {
-			m[col.Name] = cm.Convert
+			tc.cols[col.Name] = cm.Convert
 		}
 	}
 	c.mu.Lock()
-	c.tables[id] = m
+	c.tables[id] = tc
 	c.mu.Unlock()
 	return nil
 }
@@ -762,18 +791,32 @@ func (c *valueConverter) forget(id model.TableID) {
 // không đụng tới slice của bản gốc. pk là tên cột PK theo thứ tự của Key.
 func (c *valueConverter) row(src model.TableID, rc *model.RowChange, pk []string) error {
 	c.mu.RLock()
-	m := c.tables[src]
+	tc, ok := c.tables[src]
 	c.mu.RUnlock()
-	if m == nil {
+	if !ok {
 		return fmt.Errorf("no type mapping loaded for table %s", src)
 	}
+	isKey := func(col string) bool {
+		for _, k := range pk {
+			if k == col {
+				return true
+			}
+		}
+		return false
+	}
 	conv := func(col string, v model.Value) (model.Value, error) {
-		f := m[col]
+		f := tc.cols[col]
+		if isKey(col) {
+			f = tc.key[col]
+		}
 		if f == nil || v == nil {
 			return v, nil
 		}
 		out, err := f(v)
 		if err != nil {
+			if isKey(col) {
+				return nil, fmt.Errorf("table %s row key column %s (zero dates in key columns are always rejected): %w", src, col, err)
+			}
 			return nil, fmt.Errorf("table %s column %s: %w", src, col, err)
 		}
 		return out, nil

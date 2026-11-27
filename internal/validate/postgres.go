@@ -60,6 +60,27 @@ func CheckPGSourceReport(ctx context.Context, db *sql.DB, cfg *config.Config, ta
 			return nil, stop
 		}
 	}
+	var warnings []string
+	warn := func(code, object, msg, fix string) {
+		if c != nil {
+			c.Warn(code, object, msg, fix)
+			return
+		}
+		warnings = append(warnings, msg)
+	}
+	// max_slot_wal_keep_size: -1 (mặc định) nghĩa là slot giữ WAL không giới hạn. Pipeline dừng lâu (crash,
+	// target chậm, quên xóa pipeline) thì WAL dồn tới khi đĩa của source đầy và source ngừng ghi. Có
+	// giới hạn thì PG vô hiệu hóa slot (wal_status=lost) thay vì đầy đĩa: Strand dừng với log gap và
+	// phải chép lại, nhưng source vẫn sống.
+	keepMB, err := pgWalKeepMB(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if keepMB < 0 {
+		warn("source_pg_wal_keep_unlimited", "source",
+			"max_slot_wal_keep_size = -1: a stopped or slow pipeline makes its replication slot keep WAL without limit until the source disk is full",
+			"ALTER SYSTEM SET max_slot_wal_keep_size = '<size that fits the WAL disk, e.g. 50GB>'; SELECT pg_reload_conf(); -- if the slot passes the limit PostgreSQL invalidates it (the pipeline stops and the data must be copied again) instead of filling the disk")
+	}
 	norm := func(name string) string {
 		var b strings.Builder
 		for _, r := range strings.ToLower(name) {
@@ -84,7 +105,6 @@ func CheckPGSourceReport(ctx context.Context, db *sql.DB, cfg *config.Config, ta
 			return nil, err
 		}
 	}
-	var warnings []string
 	slot := cfg.Source.Slot
 	if slot == "" {
 		return append(warnings, "slot not explicitly configured: seed state may choose the slot; validate did not inspect it"), nil
@@ -124,7 +144,53 @@ func CheckPGSourceReport(ctx context.Context, db *sql.DB, cfg *config.Config, ta
 	if active {
 		warnings = append(warnings, fmt.Sprintf("replication slot %q is active; validate cannot determine its owner", slot))
 	}
+	if retained, ok, err := pgSlotRetainedMB(ctx, db, slot); err != nil {
+		return nil, err
+	} else if ok {
+		switch {
+		case status == "unreserved":
+			warn("source_pg_slot_wal", slot,
+				fmt.Sprintf("replication slot %q keeps %d MB of WAL and is past max_slot_wal_keep_size (wal_status=unreserved): PostgreSQL will invalidate it at the next checkpoint unless the pipeline catches up", slot, retained),
+				"start or speed up the pipeline now; if it cannot catch up, plan a new copy")
+		case keepMB > 0 && retained*2 >= keepMB:
+			warn("source_pg_slot_wal", slot,
+				fmt.Sprintf("replication slot %q keeps %d MB of WAL, %d%% of max_slot_wal_keep_size (%d MB)", slot, retained, retained*100/keepMB, keepMB),
+				"check that the pipeline is running and keeping up (strand status), or raise max_slot_wal_keep_size if the WAL disk has room")
+		case keepMB < 0 && !active && retained >= pgSlotIdleWarnMB:
+			warn("source_pg_slot_wal", slot,
+				fmt.Sprintf("replication slot %q is not in use and keeps %d MB of WAL with no limit (max_slot_wal_keep_size = -1)", slot, retained),
+				"start the pipeline, or drop the slot if the pipeline is gone: SELECT pg_drop_replication_slot('"+strings.ReplaceAll(slot, "'", "''")+"');")
+		}
+	}
 	return warnings, nil
+}
+
+// pgSlotIdleWarnMB: slot không dùng mà giữ từ chừng này WAL trở lên (không giới hạn) thì cảnh báo.
+const pgSlotIdleWarnMB = 1024
+
+// pgWalKeepMB đọc max_slot_wal_keep_size theo MB (-1 = không giới hạn).
+func pgWalKeepMB(ctx context.Context, db *sql.DB) (int64, error) {
+	var keep int64
+	if err := db.QueryRowContext(ctx, `SELECT (setting::bigint * CASE unit WHEN 'kB' THEN 1.0/1024 WHEN 'MB' THEN 1 WHEN 'GB' THEN 1024 ELSE 1 END)::bigint
+		FROM pg_settings WHERE name = 'max_slot_wal_keep_size'`).Scan(&keep); err != nil {
+		return 0, fmt.Errorf("read max_slot_wal_keep_size: %w", err)
+	}
+	return keep, nil
+}
+
+// pgSlotRetainedMB: lượng WAL (MB) slot đang giữ — từ restart_lsn tới đầu WAL hiện tại (standby: vị trí
+// đã replay). ok=false khi slot chưa có restart_lsn.
+func pgSlotRetainedMB(ctx context.Context, db *sql.DB, slot string) (int64, bool, error) {
+	var mb sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT (pg_wal_lsn_diff(CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END, restart_lsn) / 1048576)::bigint
+		FROM pg_replication_slots WHERE slot_name = $1`, slot).Scan(&mb)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read WAL kept by replication slot %q: %w", slot, err)
+	}
+	return mb.Int64, mb.Valid, nil
 }
 
 // CheckPGPublication checks that pgoutput will publish all row changes in the snapshot scope.

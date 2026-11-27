@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -197,6 +198,36 @@ type TopInfo struct {
 	SnapshotRate      float64  `json:"snapshot_rate,omitempty"`       // row/giây (~60 s gần nhất)
 	BreakerOpen       bool     `json:"breaker_open,omitempty"`
 	BreakerReason     string   `json:"breaker_reason,omitempty"`
+	// SlotWAL: WAL mà replication slot của pipeline (source PG) đang giữ, từ mẫu governor gần nhất.
+	SlotWAL *SlotWAL `json:"slot_wal,omitempty"`
+}
+
+// SlotWAL là WAL mà replication slot của source PostgreSQL đang giữ.
+type SlotWAL struct {
+	RetainedBytes int64  `json:"retained_bytes"`
+	KeepBytes     int64  `json:"keep_bytes"` // max_slot_wal_keep_size; -1 = không giới hạn
+	Status        string `json:"wal_status,omitempty"`
+}
+
+// SlotWALIdleWarnBytes: không có giới hạn mà slot giữ từ chừng này WAL trở lên thì cảnh báo.
+const SlotWALIdleWarnBytes = 1 << 30
+
+// Warning trả câu cảnh báo khi WAL slot giữ đáng lo (rỗng = ổn): vượt giới hạn (unreserved/lost), từ
+// 50% max_slot_wal_keep_size, hoặc ≥ 1 GiB khi không giới hạn (đĩa source có thể đầy).
+func (s *SlotWAL) Warning() string {
+	if s == nil || s.RetainedBytes < 0 {
+		return ""
+	}
+	mb := func(b int64) string { return fmt.Sprintf("%d MB", b>>20) }
+	switch {
+	case s.Status == "unreserved" || s.Status == "lost":
+		return fmt.Sprintf("the replication slot keeps %s of WAL and is past max_slot_wal_keep_size (wal_status=%s): PostgreSQL invalidates it unless the pipeline catches up, and then the data must be copied again", mb(s.RetainedBytes), s.Status)
+	case s.KeepBytes > 0 && s.RetainedBytes*2 >= s.KeepBytes:
+		return fmt.Sprintf("the replication slot keeps %s of WAL, %d%% of max_slot_wal_keep_size (%s)", mb(s.RetainedBytes), s.RetainedBytes*100/s.KeepBytes, mb(s.KeepBytes))
+	case s.KeepBytes < 0 && s.RetainedBytes >= SlotWALIdleWarnBytes:
+		return fmt.Sprintf("the replication slot keeps %s of WAL and max_slot_wal_keep_size = -1 (no limit): if the pipeline stays behind, the source disk fills up", mb(s.RetainedBytes))
+	}
+	return ""
 }
 
 // PauseResult chứa kết quả của lệnh `strand pause`.

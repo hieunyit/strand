@@ -111,6 +111,83 @@ type TablesConfig struct {
 	Keyless string `yaml:"keyless,omitempty" json:"keyless,omitempty"`
 	// KeylessAllowFloat: cho phép bảng keyless có cột FLOAT/DOUBLE (so bằng có thể không khớp); mặc định từ chối.
 	KeylessAllowFloat bool `yaml:"keyless_allow_float,omitempty" json:"keyless_allow_float,omitempty"`
+	// ZeroDate (chỉ MySQL → PostgreSQL): cách xử lý ngày zero của MySQL ('0000-00-00', tháng/ngày = 00) mà
+	// PostgreSQL không biểu diễn được. reject (mặc định): dừng pipeline, exit 3. set_null: ghi NULL (chỉ
+	// cột nullable; cột NOT NULL vẫn bị từ chối). epoch: ghi 1970-01-01 00:00:00. Cột thuộc khóa hàng
+	// luôn từ chối. Không dùng chữ "null" để YAML không đọc nhầm thành giá trị rỗng.
+	ZeroDate string `yaml:"zero_date,omitempty" json:"zero_date,omitempty"`
+	// ZeroDateTables: chính sách riêng cho từng bảng nguồn "schema.table", ghi đè ZeroDate.
+	ZeroDateTables map[string]string `yaml:"zero_date_tables,omitempty" json:"zero_date_tables,omitempty"`
+}
+
+// Giá trị của tables.zero_date.
+const (
+	ZeroDateReject  = "reject"
+	ZeroDateSetNull = "set_null"
+	ZeroDateEpoch   = "epoch"
+)
+
+// ZeroDateFor trả chính sách zero date của bảng nguồn schema.table (đã chuẩn hóa; mặc định reject).
+func (t TablesConfig) ZeroDateFor(schema, table string) string {
+	key := schema + "." + table
+	for k, v := range t.ZeroDateTables {
+		if strings.EqualFold(strings.TrimSpace(k), key) {
+			return normalizeZeroDate(v)
+		}
+	}
+	return normalizeZeroDate(t.ZeroDate)
+}
+
+// ZeroDateUsed: có bảng nào không dùng reject.
+func (t TablesConfig) ZeroDateUsed() bool {
+	if normalizeZeroDate(t.ZeroDate) != ZeroDateReject {
+		return true
+	}
+	for _, v := range t.ZeroDateTables {
+		if normalizeZeroDate(v) != ZeroDateReject {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeZeroDate(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return ZeroDateReject
+	}
+	return v
+}
+
+func validateZeroDate(cfg *Config) error {
+	bad := func(field, v string) error {
+		return exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("invalid %s %q (want reject | set_null | epoch)", field, v), nil)
+	}
+	check := func(field, v string) error {
+		switch normalizeZeroDate(v) {
+		case ZeroDateReject, ZeroDateSetNull, ZeroDateEpoch:
+			return nil
+		}
+		return bad(field, v)
+	}
+	if err := check("tables.zero_date", cfg.Tables.ZeroDate); err != nil {
+		return err
+	}
+	for k, v := range cfg.Tables.ZeroDateTables {
+		if parts := strings.Split(strings.TrimSpace(k), "."); len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+				fmt.Sprintf("tables.zero_date_tables key %q must be schema.table", k), nil)
+		}
+		if err := check("tables.zero_date_tables["+k+"]", v); err != nil {
+			return err
+		}
+	}
+	if cfg.Tables.ZeroDateUsed() && !(strings.EqualFold(cfg.Source.Kind, "mysql") && strings.EqualFold(cfg.Target.Kind, "postgres")) {
+		return exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			"tables.zero_date / zero_date_tables only apply to MySQL → PostgreSQL pipelines (MySQL → MySQL keeps zero dates as they are)", nil)
+	}
+	return nil
 }
 
 // KeylessOn: tables.keyless = full_row.
@@ -412,6 +489,9 @@ func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 	default:
 		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
 			fmt.Sprintf("invalid tables.keyless %q (want off | full_row)", cfg.Tables.Keyless), nil)
+	}
+	if err := validateZeroDate(&cfg); err != nil {
+		return nil, err
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Bootstrap.CreateSchema)) {
 	case "":

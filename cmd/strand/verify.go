@@ -25,6 +25,7 @@ import (
 	"strand/internal/pipeline"
 	"strand/internal/schemagen"
 	"strand/internal/snapshot"
+	"strand/internal/typemap"
 	"strand/internal/verify"
 )
 
@@ -170,6 +171,7 @@ func newVerifyCmd() *cobra.Command {
 				defer primary.Close()
 			}
 			waiter := applyWaiter(running, src, primary, dst, srcEngine, dstEngine, cfg.Name)
+			zeroDate := zeroDatePolicy(cfg)
 
 			target := func(x model.TableID) model.TableID {
 				if r, ok := cfg.Tables.Rename[x.String()]; ok {
@@ -223,6 +225,7 @@ func newVerifyCmd() *cobra.Command {
 						mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{
 							Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
 							SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target, ApplyWaiter: waiter,
+							ZeroDate: zeroDate,
 						})
 						krep, kerr := mv.VerifyTableKeyless(cmd.Context(), id)
 						if kerr != nil {
@@ -257,7 +260,7 @@ func newVerifyCmd() *cobra.Command {
 					}
 					if !intPK {
 						// Việc C: PK nhiều cột / không phải số nguyên — full verify theo tuple.
-						rep, err := verifyFullKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, fullRate, cfg.Name, waiter)
+						rep, err := verifyFullKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, fullRate, cfg.Name, waiter, zeroDate)
 						if err != nil {
 							return err
 						}
@@ -297,7 +300,7 @@ func newVerifyCmd() *cobra.Command {
 					mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{
 						Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name,
 						SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target,
-						ChunkRows: verify.DefaultChunkRows, Rate: fullRate, Resume: resume, LiveVerifier: lv,
+						ChunkRows: verify.DefaultChunkRows, Rate: fullRate, Resume: resume, LiveVerifier: lv, ZeroDate: zeroDate,
 						ApplyWaiter: waiter,
 					})
 					rep, err := mv.VerifyTableFull(cmd.Context(), id, pk)
@@ -361,9 +364,9 @@ func newVerifyCmd() *cobra.Command {
 				// PG→PG, MySQL→PG: so chuỗi chính tắc (verify.MerkleVerifier) — PK một cột số nguyên theo range
 				// số, PK tổng quát theo range tuple PK.
 				if !intPK {
-					return verifySampleKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, cfg.Name, waiter, rate, repair == "fix" && !dryRun)
+					return verifySampleKeys(cmd, src, dst, srcEngine, dstEngine, id, target(id), pkCols, cfg.Name, waiter, zeroDate, rate, repair == "fix" && !dryRun)
 				}
-				return verifySampleCanonical(cmd, src, dst, srcEngine, dstEngine, id, pk, target, cfg.Name, waiter, rate, repair == "fix" && !dryRun)
+				return verifySampleCanonical(cmd, src, dst, srcEngine, dstEngine, id, pk, target, cfg.Name, waiter, zeroDate, rate, repair == "fix" && !dryRun)
 			}
 			// Chỉ chờ target apply khi pipeline đang chạy (xem running; đang giữ khóa để sửa thì không chạy).
 			lv := verify.NewLiveVerifier(verify.LiveConfig{Source: src, Target: dst, Meta: dst, PipelineID: cfg.Name, TargetName: target, SkipApplyWait: !running})
@@ -572,14 +575,14 @@ func applyWaiter(running bool, src, primary, dst *sql.DB, srcEngine, dstEngine m
 
 // verifySampleCanonical: verify --mode sample cho cặp engine khác MySQL→MySQL (PK một cột số nguyên).
 func verifySampleCanonical(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id model.TableID, pk string,
-	target func(model.TableID) model.TableID, pipelineID string, waiter verify.ApplyWaiter, rate float64, fix bool) error {
+	target func(model.TableID) model.TableID, pipelineID string, waiter verify.ApplyWaiter, zeroDate func(model.TableID) string, rate float64, fix bool) error {
 	ctx := cmd.Context()
 	ranges, err := verify.SampleRangesEngine(ctx, src, srcEngine, id, pk, rate, 1000, rand.New(rand.NewSource(time.Now().UnixNano())))
 	if err != nil {
 		return err
 	}
 	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
-		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target, ApplyWaiter: waiter})
+		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: target, ApplyWaiter: waiter, ZeroDate: zeroDate})
 	rep, err := mv.VerifyRanges(ctx, id, pk, ranges)
 	if err != nil {
 		return err
@@ -642,7 +645,7 @@ func verifyKeyCodecs(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine
 
 // verifyFullKeys: full verify theo tuple PK (việc C) sau khi kiểm hai phía cùng thứ tự khóa.
 func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
-	pkCols []string, rate float64, pipelineID string, waiter verify.ApplyWaiter) (*verify.FullVerifyReport, error) {
+	pkCols []string, rate float64, pipelineID string, waiter verify.ApplyWaiter, zeroDate func(model.TableID) string) (*verify.FullVerifyReport, error) {
 	ctx := cmd.Context()
 	sc, dc, exact, err := verifyKeyCodecs(ctx, src, dst, srcEngine, dstEngine, id, dstID, pkCols, "full verify")
 	if err != nil {
@@ -650,7 +653,7 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 	}
 	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
 		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
-		ChunkRows: verify.DefaultChunkRows, Rate: rate, ApplyWaiter: waiter})
+		ChunkRows: verify.DefaultChunkRows, Rate: rate, ApplyWaiter: waiter, ZeroDate: zeroDate})
 	if exact {
 		return mv.VerifyTableFullKeysExact(ctx, id, sc, dc)
 	}
@@ -662,7 +665,7 @@ func verifyFullKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine m
 // kiểm lại row lệch (MerkleVerifier.VerifyKeyRanges). Bảng sắp khóa khác thứ tự hai phía (khóa chính
 // xác) không so theo range được: từ chối, chỉ --mode full.
 func verifySampleKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine model.Engine, id, dstID model.TableID,
-	pkCols []string, pipelineID string, waiter verify.ApplyWaiter, rate float64, fix bool) error {
+	pkCols []string, pipelineID string, waiter verify.ApplyWaiter, zeroDate func(model.TableID) string, rate float64, fix bool) error {
 	ctx := cmd.Context()
 	sc, dc, exact, err := verifyKeyCodecs(ctx, src, dst, srcEngine, dstEngine, id, dstID, pkCols, "sample verify")
 	if err != nil {
@@ -679,7 +682,7 @@ func verifySampleKeys(cmd *cobra.Command, src, dst *sql.DB, srcEngine, dstEngine
 	}
 	mv := verify.NewMerkleVerifier(verify.FullVerifyConfig{Source: src, Target: dst, Meta: dst, PipelineID: pipelineID,
 		SourceEngine: srcEngine, TargetEngine: dstEngine, TargetName: func(model.TableID) model.TableID { return dstID },
-		ApplyWaiter: waiter})
+		ApplyWaiter: waiter, ZeroDate: zeroDate})
 	rep, err := mv.VerifyKeyRanges(ctx, id, sc, dc, ranges)
 	if err != nil {
 		return err
@@ -1116,4 +1119,12 @@ func targetWriteExclusions(ctx context.Context, dst *sql.DB, engine model.Engine
 		identity = identity || ident
 	}
 	return skip, identity, rows.Err()
+}
+
+// zeroDatePolicy: chính sách zero date đã áp cho từng bảng nguồn (tables.zero_date), để verify so đúng
+// giá trị writer đã ghi thay zero date.
+func zeroDatePolicy(cfg *config.Config) func(model.TableID) string {
+	return func(id model.TableID) string {
+		return typemap.ZeroDateKind(cfg.Tables.ZeroDateFor(id.Schema, id.Table))
+	}
 }

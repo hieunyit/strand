@@ -405,3 +405,47 @@ func TestPace_CreditsElapsedSinceReadStart(t *testing.T) {
 		t.Fatalf("pace waited %v; 90ms of the 100ms cost had already elapsed since the chunk read started", el)
 	}
 }
+
+// top.slot_wal: WAL mà slot source PG giữ, từ mẫu governor gần nhất (Web dựa vào đây để cảnh báo).
+func TestAdminTopReportsSlotWAL(t *testing.T) {
+	p := wiringPipeline(model.EnginePG, "onoff")
+	p.src = fakePGSource(nil, "1024", float64(700<<20), 0)
+	if err := p.setupGovernor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h := &adminHandler{p: p}
+	p.sched = sched.NewScheduler(sched.DefaultConfig())
+	p.running.Store(true)
+	if _, err := p.pgSignals.Sample(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	top, err := h.Top(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := top.SlotWAL
+	if w == nil || w.RetainedBytes != 700<<20 || w.KeepBytes != 1024<<20 || w.Status != "reserved" {
+		t.Fatalf("top.slot_wal = %+v, want 700 MB of 1024 MB, reserved", w)
+	}
+	if msg := w.Warning(); !strings.Contains(msg, "68% of max_slot_wal_keep_size") {
+		t.Fatalf("warning = %q", msg)
+	}
+	// Slot không tồn tại (chưa tạo): không báo slot_wal.
+	q := wiringPipeline(model.EnginePG, "onoff")
+	q.src = fakePGSource(nil, "-1", -1, 0)
+	if err := q.setupGovernor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	q.sched = sched.NewScheduler(sched.DefaultConfig())
+	q.running.Store(true)
+	if _, err := q.pgSignals.Sample(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	top, err = (&adminHandler{p: q}).Top(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if top.SlotWAL != nil {
+		t.Fatalf("unknown retained WAL: slot_wal = %+v, want none", top.SlotWAL)
+	}
+}

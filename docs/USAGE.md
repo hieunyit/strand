@@ -152,7 +152,7 @@ Về giao dịch và các trường hợp đặc biệt:
 
 ### 3.2 Ánh xạ kiểu MySQL → PostgreSQL
 
-Mặc định cố định, chưa có khóa cấu hình để đổi chính sách (`internal/typemap`):
+Mặc định cố định (`internal/typemap`). Khóa cấu hình duy nhất đổi được là cách xử lý zero date (dưới bảng):
 
 | MySQL | PostgreSQL | Ghi chú |
 | --- | --- | --- |
@@ -167,9 +167,9 @@ Mặc định cố định, chưa có khóa cấu hình để đổi chính sác
 | `CHAR(n)` / `VARCHAR(n)` | `char(n)` / `varchar(n)` | Cột khóa: `COLLATE "C"` |
 | `TEXT` (mọi cỡ) | `text` | |
 | `BINARY`, `VARBINARY`, `BLOB` (mọi cỡ) | `bytea` | |
-| `DATE` | `date` | Zero date bị từ chối |
-| `DATETIME(n)` | `timestamp(n)` | Giữ nguyên giờ đồng hồ |
-| `TIMESTAMP(n)` | `timestamptz(n)` | Đọc theo UTC |
+| `DATE` | `date` | Zero date: theo `tables.zero_date` (mặc định từ chối) |
+| `DATETIME(n)` | `timestamp(n)` | Giữ nguyên giờ đồng hồ. Zero date như `DATE` |
+| `TIMESTAMP(n)` | `timestamptz(n)` | Đọc theo UTC. Zero date như `DATE` |
 | `TIME(n)` | `time(n)` | |
 | `YEAR` | `smallint` | |
 | `JSON` | `jsonb` | |
@@ -182,6 +182,32 @@ Mặc định cố định, chưa có khóa cấu hình để đổi chính sác
 1. Kiểu nào không ánh xạ được (`type_unmappable`).
 2. Collation cột khóa ở target không được lỏng hơn source, và không được dùng `citext` (`collation_looser`).
 3. Có giá trị thực tế gây lỗi không: zero date, giá trị ENUM ngoài danh sách. Kiểm bằng truy vấn có LIMIT.
+
+**Zero date (`0000-00-00`, hoặc tháng/ngày `00`).** PostgreSQL không có giá trị tương đương. `tables.zero_date` chọn cách xử lý cho cả pipeline, `tables.zero_date_tables` ghi đè theo bảng nguồn:
+
+```yaml
+tables:
+  include: ["legacy.*"]
+  zero_date: epoch              # reject (mặc định) | set_null | epoch
+  zero_date_tables:
+    legacy.audit_log: set_null  # bảng này ghi NULL
+    legacy.invoices: reject     # bảng này vẫn dừng
+```
+
+| Giá trị | Kết quả khi gặp zero date |
+| --- | --- |
+| `reject` (mặc định) | Dừng pipeline, exit 3 `type_unmappable`, kèm bảng và cột |
+| `set_null` | Ghi `NULL`. Chỉ cho cột nullable: cột `NOT NULL` vẫn dừng như `reject` và gợi ý dùng `epoch` |
+| `epoch` | Ghi `1970-01-01` (`DATE`) hoặc `1970-01-01 00:00:00` (`DATETIME`, `TIMESTAMP` theo UTC) |
+
+- Viết `set_null`, không viết `null`: YAML đọc `null` không nháy thành giá trị rỗng, tức `reject`.
+- Cột thuộc khóa hàng (PK hoặc unique key dùng làm khóa) luôn từ chối zero date, bất kể chính sách. Thay khóa bằng cùng một giá trị sẽ gộp các row khác nhau.
+- Áp cho snapshot logic và CDC. `verify` so với đúng giá trị đã thay, nên row đã thay không bị báo lệch.
+- Mỗi lần thay tăng `strand_zero_date_replaced_total{table,column,policy}`. Lần đầu ở mỗi cột ghi một dòng log `zero date written as a replacement value`.
+- `validate` và `doctor` quét giá trị thực tế (có LIMIT). Với `set_null`/`epoch`, chúng báo số row sẽ bị thay (warning). Chúng báo lỗi nếu zero date nằm ở cột khóa, hoặc ở cột `NOT NULL` khi dùng `set_null`.
+- Chỉ có tác dụng với MySQL → PostgreSQL. MySQL → MySQL giữ nguyên zero date. Đặt khác `reject` cho cặp khác thì cấu hình bị từ chối.
+- Wizard **New pipeline** trên Web (MySQL → PostgreSQL) có ô **MySQL zero dates**.
+- Giá trị thay là dữ liệu khác nguồn: ứng dụng đọc target phải hiểu `NULL` hoặc `1970-01-01` nghĩa là "không có ngày". Nếu cần giữ đúng nguyên trạng, sửa dữ liệu ở nguồn rồi để mặc định `reject`.
 
 ### 3.3 Tạo schema bằng tay (khi `create_schema: off` hoặc bị từ chối)
 
@@ -270,7 +296,8 @@ Source có GTID thì định vị bằng GTID. Source không GTID thì định v
 | Yêu cầu | Chi tiết |
 | --- | --- |
 | `wal_level` | `logical`. Thiếu thì exit 3 |
-| `max_replication_slots`, `max_wal_senders` | Mỗi pipeline 1 slot và 1 walsender. Nên đặt `max_slot_wal_keep_size` |
+| `max_replication_slots`, `max_wal_senders` | Mỗi pipeline 1 slot và 1 walsender |
+| `max_slot_wal_keep_size` | **Nên đặt** (mặc định `-1` là không giới hạn). Xem dưới bảng |
 | Slot | Mặc định tên `strand_<name>`. `source.create_slot: true` để Strand tạo; mặc định `false`, slot thiếu thì exit 5 `log_gap`. PG17+: `failover_slot: true` tạo slot `FAILOVER` |
 | Publication | **DBA tạo trước**. Mặc định tên `strand_<name>`: `CREATE PUBLICATION strand_x FOR TABLE app.a, app.b WITH (publish = 'insert, update, delete');` hoặc `FOR ALL TABLES`. TRUNCATE chưa hỗ trợ: nếu publication phát TRUNCATE thì Strand dừng |
 | Bảng partitioned | `ALTER PUBLICATION … SET (publish_via_partition_root = true)`. Thiếu thì Strand từ chối chạy và in đúng lệnh cần chạy |
@@ -279,7 +306,22 @@ Source có GTID thì định vị bằng GTID. Source không GTID thì định v
 | Decode trên standby | PG 16+ và `hot_standby_feedback=on` (reader kiểm). `read_from: standby` chưa triển khai; snapshot logic trên standby bị từ chối |
 | Quyền | `LOGIN REPLICATION`, `SELECT` trên bảng, `SELECT` trên sequence (đồng bộ `last_value` cho promote), dòng `replication` trong `pg_hba.conf` |
 
-`strand validate` **chưa** kiểm các điều kiện PG ở trên. Lỗi chỉ hiện khi `sync` khởi động (handoff dòng 33). `strand doctor` (mục 7.1a) kiểm `wal_level`, quyền `REPLICATION`, publication (có đủ bảng, INSERT/UPDATE/DELETE, không lọc) và slot khai báo trong `source.slot`, và báo mọi điều kiện thiếu cùng lúc.
+`strand validate` kiểm `wal_level`, quyền, publication, slot và `max_slot_wal_keep_size`, nhưng dừng ở lỗi đầu tiên. `strand doctor` (mục 7.1a) kiểm `wal_level`, quyền `REPLICATION`, publication (có đủ bảng, INSERT/UPDATE/DELETE, không lọc) slot khai báo trong `source.slot` và WAL mà slot giữ, và báo mọi điều kiện thiếu cùng lúc.
+
+**WAL do slot giữ.** Slot giữ mọi WAL từ vị trí pipeline đã xác nhận trở đi. Pipeline dừng lâu (crash, target chậm, quên xóa pipeline cũ) thì WAL dồn lại. Với `max_slot_wal_keep_size = -1`, WAL dồn tới khi đĩa source đầy và source ngừng ghi. Strand không tự xóa slot, vì xóa slot là mất vị trí CDC. Không ai sửa được trường hợp này từ phía Strand khi chính Strand đã chết. Lớp bảo vệ đúng là giới hạn của PostgreSQL:
+
+```sql
+ALTER SYSTEM SET max_slot_wal_keep_size = '50GB';  -- nhỏ hơn chỗ trống của đĩa WAL
+SELECT pg_reload_conf();
+```
+
+Khi slot vượt giới hạn, PostgreSQL vô hiệu hóa slot (`wal_status = lost`) thay vì làm đầy đĩa. Pipeline dừng (exit 5 `log_gap`) và phải chép lại dữ liệu, nhưng source vẫn sống. Chọn giới hạn đủ lớn để chịu được thời gian dừng dài nhất bạn chấp nhận.
+
+Strand giám sát ở ba chỗ:
+
+- `doctor` và `validate`: warning `source_pg_wal_keep_unlimited` khi giới hạn là `-1`. Với slot khai báo trong `source.slot`, warning `source_pg_slot_wal` khi slot giữ từ 50% giới hạn, đã vượt giới hạn (`wal_status = unreserved`), hoặc không có ai dùng mà giữ từ 1 GB khi không giới hạn.
+- Khi chạy: governor đọc `wal_status` và lượng WAL slot giữ mỗi tick. `unreserved`/`lost` là tín hiệu cứng (breaker mở). Tỉ lệ WAL giữ / giới hạn là một số hạng của áp suất lag.
+- Web, trang pipeline: cảnh báo **Source WAL** theo cùng ngưỡng như `doctor`, từ mẫu governor gần nhất. API: `pipeline.top.slot_wal` (`retained_bytes`, `keep_bytes`, `wal_status`).
 
 Kết nối PG chỉ khai báo được bằng `dsn` (`postgres://user:pass@host:5432/db?sslmode=require`). Các trường `host`/`user`/`password_env` chỉ dành cho `kind: mysql`.
 
@@ -505,6 +547,8 @@ Mỗi phía chọn **một** trong ba cách:
 | `verify.delta` | `off` | `on`: verify các khóa CDC vừa chạm (MySQL→MySQL) |
 | `tables.keyless` | tắt | `full_row`: cho bảng không có khóa chạy keyless, chỉ khi dữ liệu đầu từ seed/`--start-at` (mục 5.1.3) |
 | `tables.keyless_allow_float` | `false` | Cho phép cột FLOAT/DOUBLE trong bảng keyless |
+| `tables.zero_date` | `reject` | MySQL → PG: zero date của MySQL thành `reject` (dừng, exit 3) \| `set_null` \| `epoch` (mục 3.2) |
+| `tables.zero_date_tables` | rỗng | Ghi đè `zero_date` theo bảng nguồn: `{"app.t": "epoch"}` |
 | `verify.post_seed_window` | `30m` | Cửa sổ verify sau seed / `--start-at`: sau khi đích bắt kịp, verify mẫu ~1% rồi verify mọi khóa CDC chạm trong cửa sổ này. Bắt kịp lâu hơn cửa sổ thì bằng chứng verify báo `incomplete` (đang chờ bắt kịp) nhưng vẫn chờ tiếp, và vẫn verify cả sau restart |
 | `observability.metrics` | tắt | Địa chỉ HTTP cho `/metrics` và `/healthz`, ví dụ `":9464"` |
 | `observability.admin_socket` | tắt | Unix socket cho `top`, `pause`, `resume`, `throttle`, `snapshot add`, `checkpoint`, `verify --mode delta`. Lệnh client mặc định dùng `/run/strand/default.sock` |
@@ -704,7 +748,7 @@ Các nhóm kiểm và mã chính:
 | Foreign key (MySQL→MySQL) | `source_fk_cascade_overlap` (info), `fk_parent_out_of_scope`, `fk_set_default_unsupported`, `fk_cascade_keyless_parent`, `fk_order_sensitive_rename`, `target_fk_missing`, `target_fk_unexpected`, `target_fk_mismatch`, `target_fk_name_clash`, `target_fk_collation_mismatch`, `target_fk_will_be_added` (info) |
 | Auto-seed | `autoseed_fk_out_of_scope`, `autoseed_target_fk_external`, `target_not_empty` (bảng đích trong nhóm FK của auto-seed đã có dữ liệu), `target_dsn_no_database` |
 | Target MySQL | `target_is_source`, `target_read_only`, `target_engine_not_innodb`, `target_group_replication` (info), `target_gr_keyless` (bảng keyless trên Group Replication), `source_innodb_wait_free` / `target_innodb_wait_free` (warning: `Innodb_buffer_pool_wait_free` đang tăng, breaker sẽ mở) |
-| Source PostgreSQL | `source_pg_wal_level`, `source_pg_standby`, `source_pg_publication`, `source_pg_slot`, `source_pg_slot_unset` (info) |
+| Source PostgreSQL | `source_pg_wal_level`, `source_pg_standby`, `source_pg_publication`, `source_pg_slot`, `source_pg_slot_unset` (info), `source_pg_wal_keep_unlimited` (warning: `max_slot_wal_keep_size = -1`), `source_pg_slot_wal` (warning: slot giữ nhiều WAL) |
 | Khác | `source_objects_not_migrated` (info: view/trigger/routine/event không được chép), `check_failed` (warning: một kiểm tra không chạy xong, thường do thiếu quyền đọc catalog) |
 | MongoDB | `mongo_<tên kiểm tra>` từ preflight MongoDB (mục MongoDB) |
 
@@ -898,6 +942,21 @@ strand promote --pipeline billing --engine pg \
 - `--pipeline` phải trùng `name` (mặc định `default`).
 - `--engine auto` nhận diện engine từ DSN.
 - Không có `--source-app-roles` thì fence PG chỉ mang tính hợp tác: role ứng dụng có thể tự đặt lại `default_transaction_read_only`.
+
+**Promote không phải HA.** Đọc trước khi dùng promote cho chuyển đổi thật:
+
+- **Strand chặn ghi ở mức database, không ở mức mạng hay máy chủ.** Không có STONITH: Strand không tắt máy, không cắt mạng, không đổi VIP/DNS/proxy. Chuyển ứng dụng sang target (bước 5 của mục 9e) là việc của người vận hành hoặc hệ thống điều phối của bạn.
+- **Fence MySQL** (`super_read_only = ON`) chặn cả user có `SUPER`. Nhưng bất kỳ ai có quyền `SUPER` hoặc `SYSTEM_VARIABLES_ADMIN` đều có thể tắt nó và ghi tiếp.
+- **Fence PostgreSQL** gồm: `default_transaction_read_only` cho toàn server, ngắt session đang mở, `NOLOGIN` cho role trong `--source-app-roles`. Superuser luôn ghi được. Role ứng dụng **không** khai báo trong `--source-app-roles` có thể tự `SET default_transaction_read_only = off`. Vì vậy luôn khai báo mọi role ứng dụng ghi vào source.
+- **Strand chứng minh không còn commit nào sau fence** bằng marker trong log (PG: `pg_logical_emit_message`; MySQL: `gtid_executed`). Nếu không fence được, hoặc mất kết nối source sau khi fence, Strand dừng exit 10 và chờ người vận hành quyết định, không tự promote. Web có màn hình riêng cho quyết định này.
+- **Split-brain vẫn có thể xảy ra ngoài tầm Strand:** khi ứng dụng còn ghi vào source cũ bằng quyền cao hơn fence, hoặc khi bạn xác nhận `--source-fenced-externally` mà source thật ra vẫn nhận ghi. Ghi vào source cũ sau thời điểm đó không được chép sang target.
+- **Không có đồng bộ ngược.** Sau promote, source cũ không nhận thay đổi từ target. Muốn quay lại thì cần một pipeline mới theo chiều ngược.
+
+Trước khi promote:
+
+1. Cô lập ghi ở tầng ứng dụng hoặc proxy trước (chế độ bảo trì, ngắt pool). Fence của Strand là lớp thứ hai.
+2. Liệt kê mọi role/user ghi vào source. PG: đưa hết vào `--source-app-roles`. MySQL: không cấp `SUPER`/`SYSTEM_VARIABLES_ADMIN` cho tài khoản ứng dụng.
+3. Chỉ dùng `--source-fenced-externally` khi đã thật sự tắt máy hoặc chặn mạng source.
 
 **Failover khi source đã chết:**
 
@@ -1233,6 +1292,7 @@ Bộ nhớ: không có trần RSS (`resources.memory` chưa thi hành). Các ph�
 | `strand_retention_headroom_seconds` | pipeline | Source MySQL, chỉ trong bootstrap: thời gian còn lại trước khi binlog cần đọc bị xóa |
 | `strand_verify_mismatch_total`, `strand_verify_unverifiable_hot_total` | pipeline, table | Row lệch / row quá nóng khi verify |
 | `strand_fenced_total` | pipeline | Số lần bị instance khác thay thế |
+| `strand_zero_date_replaced_total` | pipeline, table, column, policy | Zero date MySQL đã ghi thành `NULL`/`1970-01-01` (`tables.zero_date`, mục 3.2) |
 
 Cảnh báo nên đặt:
 
@@ -1240,6 +1300,8 @@ Cảnh báo nên đặt:
 - `retention_headroom` sắp về 0.
 - Spool trên 80% trần.
 - `verify_mismatch_total` tăng.
+- `zero_date_replaced_total` tăng ở bảng không mong có zero date.
+- Source PG: WAL slot giữ gần `max_slot_wal_keep_size` (cảnh báo **Source WAL** trên Web, mục 4.2).
 - Process thoát với exit 2–5 hoặc 10.
 
 ### 8.3 Exit code
@@ -1375,11 +1437,11 @@ strand verify -c billing.yaml --mode full --table public.orders
 
 - **Lag:** hàng đợi nội bộ còn việc thì lag = now − thời điểm commit ở source của Txn mới nhất. Hàng đợi rỗng nhưng đầu source đang đi trước vị trí reader đã đọc (`pause`, reader bị chặn bởi backpressure/governor/breaker, mạng treo) thì lag vẫn > 0: monitor thăm dò đầu source mỗi giây (MySQL: `gtid_executed` hoặc vị trí binlog; PG: walsender của slot so với head WAL), dùng cùng mốc thời gian nên đó là **cận dưới** (Txn chưa đọc chắc chắn mới hơn mốc). Thăm dò lỗi hoặc không xác định được thì lùi về cách tính cũ (0 khi hàng đợi rỗng). Source PG: walsender có thể đã gửi hết vào bộ đệm TCP trong khi reader đang pause, nên pause ngắn với tải rất nhẹ có thể chưa hiện lag. Governor bỏ qua lag trong lúc operator `pause` (lag tăng vì ta dừng đọc, không phải quá tải).
 - **Verify sau seed với bảng keyless** chỉ so số hàng và checksum. Source thay đổi liên tục trong lúc so thì bằng chứng báo `incomplete`: chạy `verify --mode full` lúc source ít ghi.
-- **`validate` không kiểm PG source** (dòng 33) và chỉ kiểm vài quyền phụ (mục 4.3).
+- **`validate` dừng ở lỗi đầu tiên** và chỉ kiểm vài quyền phụ (mục 4.3). Dùng `doctor` để thấy mọi vấn đề cùng lúc.
 - **`target.batch.max_wait`** làm khóa nóng chậm lại ở `strict` (dòng 26); `relaxed` gom chuỗi Txn phụ thuộc vào cùng batch.
 - **PG identity `ALWAYS`:** PK bị `UPDATE … SET id = DEFAULT` kèm cột TOAST không đổi làm writer lỗi 428C9 (dòng 27, hiếm).
 - **Source PG:** governor `onoff`/`grace-v2` dùng tín hiệu PG (replica lag của standby đang replay, WAL slot); thiếu quyền thì lùi về `static`.
-- **Không có:** đồng bộ hai chiều, DDL tự động từ source PG, verify full theo lịch, HA tự failover của chính Strand, tự co giãn worker, mask cột, đọc từ PG standby.
+- **Không có:** đồng bộ hai chiều, DDL tự động từ source PG, verify full theo lịch, HA tự failover của chính Strand, fence mức mạng/máy chủ khi promote (mục 7.10), tự co giãn worker, mask cột, đọc từ PG standby.
 - **Hiệu năng:** đo trên máy test container, khoảng 2.100 txn/s relaxed và 1.600 txn/s strict (MySQL→MySQL). Chưa có benchmark Gate 2.
 
 ### 10.4 Quyết định đã chốt trong code, chờ cập nhật spec

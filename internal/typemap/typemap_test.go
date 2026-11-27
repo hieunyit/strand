@@ -384,16 +384,41 @@ func TestMapMySQLColumn_Date_ZeroDatePolicies(t *testing.T) {
 		}
 	}
 
-	// 2. Policy "null"
-	optsNull := typemap.DefaultOptions()
-	optsNull.ZeroDatePolicy = "null"
-	mNull, err := typemap.MapMySQLColumn(col, optsNull)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	vNull, err := mNull.Convert("0000-00-00")
-	if err != nil || vNull != nil {
-		t.Errorf("expected nil for zero date with policy null, got v=%v, err=%v", vNull, err)
+	// 2. Policy "null" (và tên trong config "set_null"): chỉ cột nullable nhận NULL; cột NOT NULL vẫn từ
+	// chối (ghi NULL sẽ vỡ ràng buộc NOT NULL ở target).
+	for _, name := range []string{"null", "set_null"} {
+		optsNull := typemap.DefaultOptions()
+		optsNull.ZeroDatePolicy = name
+		var hooked []string
+		optsNull.OnZeroDate = func(column, policy string) { hooked = append(hooked, column+":"+policy) }
+		nullable := col
+		nullable.Nullable = true
+		mNull, err := typemap.MapMySQLColumn(nullable, optsNull)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		vNull, err := mNull.Convert("0000-00-00")
+		if err != nil || vNull != nil {
+			t.Errorf("policy %s: expected nil for zero date in a nullable column, got v=%v, err=%v", name, vNull, err)
+		}
+		if len(hooked) != 1 || hooked[0] != "d:null" {
+			t.Errorf("policy %s: OnZeroDate calls = %v, want [d:null]", name, hooked)
+		}
+		if _, err := mNull.Convert("2024-01-02"); err != nil || len(hooked) != 1 {
+			t.Errorf("policy %s: normal date: err=%v hooks=%v", name, err, hooked)
+		}
+
+		mNotNull, err := typemap.MapMySQLColumn(col, optsNull)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		_, err = mNotNull.Convert("0000-00-00")
+		if exitcode.GetExitCode(err) != exitcode.Rejected || err == nil || !strings.Contains(err.Error(), "NOT NULL") {
+			t.Errorf("policy %s on a NOT NULL column: want exit 3 mentioning NOT NULL, got %v", name, err)
+		}
+		if len(hooked) != 1 {
+			t.Errorf("policy %s: rejected zero date must not call OnZeroDate (%v)", name, hooked)
+		}
 	}
 
 	// 3. Policy "epoch"

@@ -18,6 +18,7 @@ import (
 	"strand/internal/model"
 	pgreader "strand/internal/reader/pg"
 	"strand/internal/snapshot"
+	"strand/internal/typemap"
 	"strand/internal/verify"
 )
 
@@ -284,6 +285,9 @@ func (p *Pipeline) canonicalVerifier() *verify.MerkleVerifier {
 	return verify.NewMerkleVerifier(verify.FullVerifyConfig{
 		Source: p.src, Target: p.dst, Meta: p.dst, PipelineID: p.id,
 		SourceEngine: p.srcEngine, TargetEngine: p.dstEngine, TargetName: p.filter.Target,
+		ZeroDate: func(id model.TableID) string {
+			return typemap.ZeroDateKind(p.cfg.Tables.ZeroDateFor(id.Schema, id.Table))
+		},
 		ApplyWaiter: &verify.LogApplyWaiter{Source: p.src, Meta: p.dst, PipelineID: p.id,
 			SourceEngine: p.srcEngine, TargetEngine: p.dstEngine},
 	})

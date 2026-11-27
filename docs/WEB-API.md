@@ -132,6 +132,8 @@ Lỗi: **400** tên sai whitelist hoặc tham số sai, **409** tên pipeline ho
  "config_error": "", "sampled_at": "2026-11-15T10:00:00Z"}
 ```
 
+`top.slot_wal` (chỉ source PostgreSQL, khi governor đã có mẫu): `{"retained_bytes": 5368709120, "keep_bytes": -1, "wal_status": "extended"}`, tức WAL mà replication slot đang giữ và `max_slot_wal_keep_size` (`-1` = không giới hạn). Trang pipeline hiện cảnh báo **Source WAL** khi slot đã vượt giới hạn (`unreserved`/`lost`), giữ từ 50% giới hạn, hoặc giữ từ 1 GiB khi không giới hạn (docs/USAGE.md mục 4.2).
+
 `runtime.exit_code` và `last_exit` chỉ có khi pipeline đang dừng và biết exit code: từ systemd, hoặc (chế độ nền) suy ra từ đuôi log. Chế độ nền: lần chạy cuối kết thúc bằng lỗi (dòng `Error...:` của CLI hoặc ERROR `pipeline failed` sau mốc khởi động gần nhất) thì `state = "failed"`, `runtime.last_error` là lý do (đã che bí mật), `last_exit.code` theo mã `[code]` hoặc 1 nếu lỗi không gắn mã; dừng êm vẫn là `stopped`.
 
 ### `GET /api/v1/pipelines/{name}` → `{"pipeline": PipelineView, "status": StatusView}`

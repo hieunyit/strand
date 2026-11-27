@@ -503,6 +503,7 @@ func (mv *MerkleVerifier) intColumns(ctx context.Context, t model.TableID, pkCol
 	if err != nil {
 		return nil, nil, err
 	}
+	srcCols = mv.withZeroDate(t, srcCols)
 	if !isIntegerType(mv.cfg.SourceEngine, srcCols[0].DataType) {
 		return nil, nil, fmt.Errorf("table %s: verify needs an integer primary key, %s is %s", t, pkCol, srcCols[0].DataType)
 	}

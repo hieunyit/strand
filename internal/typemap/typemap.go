@@ -43,8 +43,16 @@ type Options struct {
 	// AllowKeyless: bảng không có khóa hàng được chấp nhận (tables.keyless=full_row); bỏ kiểm collation khóa cho bảng đó.
 	AllowKeyless bool
 
-	// ZeroDatePolicy: "reject" (mặc định, trả lỗi exit 3), "null" (gán NULL), "epoch" (1970-01-01)
+	// ZeroDatePolicy: "reject" (mặc định, trả lỗi exit 3), "null"/"set_null" (gán NULL, chỉ cột
+	// nullable), "epoch" (1970-01-01). Áp cho một bảng; ZeroDateFor (nếu có) quyết định theo bảng.
 	ZeroDatePolicy string
+
+	// ZeroDateFor, nếu có, trả chính sách zero date của bảng nguồn schema.table (ghi đè ZeroDatePolicy
+	// trong CheckMySQLToPGTables).
+	ZeroDateFor func(schema, table string) string
+
+	// OnZeroDate, nếu có, được gọi mỗi lần một zero date được thay theo chính sách (không gọi khi từ chối).
+	OnZeroDate func(column, policy string)
 
 	// BigIntUnsignedPolicy: "numeric" (mặc định -> numeric(20,0)), "int8-checked" (từ chối giá trị > 2^63-1)
 	BigIntUnsignedPolicy string
@@ -256,21 +264,49 @@ func isZeroDate(v model.Value) (bool, string) {
 	return false, ""
 }
 
-// handleZeroDate áp dụng chính sách zero date theo Options (reject | null | epoch).
-func handleZeroDate(dateStr string, policy string) (model.Value, error) {
+// ZeroDateKind chuẩn hóa chính sách zero date: "null" và "set_null" (tên trong config) là một;
+// rỗng hoặc giá trị lạ là "reject".
+func ZeroDateKind(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "null", "set_null":
+		return "null"
+	case "epoch":
+		return "epoch"
+	}
+	return "reject"
+}
+
+// handleZeroDate áp dụng chính sách zero date theo Options (reject | null | epoch) cho cột col.
+// Cột NOT NULL không nhận NULL: chính sách null vẫn từ chối, kèm gợi ý dùng epoch. Thay thế thành
+// công được báo qua opts.OnZeroDate (đếm metric, ghi log).
+func handleZeroDate(dateStr string, opts Options, col MySQLColumn) (model.Value, error) {
+	policy := ZeroDateKind(opts.ZeroDatePolicy)
+	var out model.Value
 	switch policy {
 	case "null":
-		return nil, nil
+		if !col.Nullable {
+			return nil, exitcode.New(
+				exitcode.ErrTypeUnmappable,
+				exitcode.Rejected,
+				fmt.Sprintf("zero date %q in NOT NULL column %s cannot be written as NULL (tables.zero_date: set_null); use epoch for this table, or make the column nullable", dateStr, col.Name),
+				nil,
+			)
+		}
+		out = nil
 	case "epoch":
-		return time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), nil
+		out = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 	default: // "reject"
 		return nil, exitcode.New(
 			exitcode.ErrTypeUnmappable,
 			exitcode.Rejected,
-			fmt.Sprintf("zero date %q rejected by policy (spec: 02 §8)", dateStr),
+			fmt.Sprintf("zero date %q in column %s rejected by policy (tables.zero_date: reject; set_null or epoch write a replacement instead, spec: 02 §8)", dateStr, col.Name),
 			nil,
 		)
 	}
+	if opts.OnZeroDate != nil {
+		opts.OnZeroDate(col.Name, policy)
+	}
+	return out, nil
 }
 
 // MapMySQLColumn tạo ánh xạ cột từ MySQL sang PostgreSQL theo đặc tả spec/02 §8.
@@ -731,7 +767,7 @@ func MapMySQLColumn(col MySQLColumn, opts Options) (ColumnMapping, error) {
 				return nil, nil
 			}
 			if isZero, s := isZeroDate(v); isZero {
-				return handleZeroDate(s, opts.ZeroDatePolicy)
+				return handleZeroDate(s, opts, col)
 			}
 			switch x := v.(type) {
 			case time.Time:
@@ -775,7 +811,7 @@ func MapMySQLColumn(col MySQLColumn, opts Options) (ColumnMapping, error) {
 				return nil, nil
 			}
 			if isZero, s := isZeroDate(v); isZero {
-				return handleZeroDate(s, opts.ZeroDatePolicy)
+				return handleZeroDate(s, opts, col)
 			}
 			switch x := v.(type) {
 			case time.Time:
@@ -804,7 +840,7 @@ func MapMySQLColumn(col MySQLColumn, opts Options) (ColumnMapping, error) {
 				return nil, nil
 			}
 			if isZero, s := isZeroDate(v); isZero {
-				return handleZeroDate(s, opts.ZeroDatePolicy)
+				return handleZeroDate(s, opts, col)
 			}
 			switch x := v.(type) {
 			case time.Time:

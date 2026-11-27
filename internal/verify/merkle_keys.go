@@ -161,6 +161,7 @@ func (mv *MerkleVerifier) keySides(ctx context.Context, t model.TableID, srcCode
 	if err != nil {
 		return nil, err
 	}
+	srcCols = mv.withZeroDate(t, srcCols)
 	allDst, err := GetTableColumns(ctx, dst.db, dst.engine, dst.table, pkNames[0])
 	if err != nil {
 		return nil, err

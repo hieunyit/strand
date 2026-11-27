@@ -61,6 +61,10 @@ var ErrVerifyInterrupted = errors.New("verify interrupted")
 type ColumnInfo struct {
 	Name     string
 	DataType string
+	// ZeroDate (chỉ cột ngày giờ của source MySQL): chính sách tables.zero_date đã áp khi ghi
+	// ("null" | "epoch"); rỗng hoặc "reject" = so nguyên văn. Chuỗi chính tắc của zero date được
+	// thay bằng đúng giá trị writer đã ghi, để row đã thay không bị báo lệch.
+	ZeroDate string
 }
 
 // ChunkRange là dải PK [Start, End] của một chunk.
@@ -105,6 +109,9 @@ type FullVerifyConfig struct {
 	RecheckRetries int
 	ApplyWaiter    ApplyWaiter
 	Metrics        *metrics.Metrics
+	// ZeroDate, nếu có, trả chính sách zero date đã áp cho bảng nguồn (typemap.ZeroDateKind của
+	// tables.zero_date: "reject" | "null" | "epoch"). Chỉ dùng khi source là MySQL.
+	ZeroDate func(model.TableID) string
 }
 
 // FullVerifyReport là kết quả full verify một bảng.
@@ -551,7 +558,49 @@ func canonicalValueExpr(engine model.Engine, col ColumnInfo) string {
 	default:
 		e = fmt.Sprintf("CAST(%s AS CHAR CHARACTER SET utf8mb4)", i)
 	}
+	if repl, ok := zeroDateCanonical(col); ok {
+		// Cùng điều kiện với typemap.isZeroDate / validate (so trên chuỗi: literal '0000-00-00' lỗi
+		// dưới NO_ZERO_DATE).
+		c := fmt.Sprintf("CAST(%s AS CHAR)", i)
+		e = fmt.Sprintf("(CASE WHEN %s LIKE '0000-00-00%%' OR %s LIKE '%%-00-%%' OR %s LIKE '%%-00' OR %s LIKE '%%-00 %%' THEN %s ELSE %s END)",
+			c, c, c, c, repl, e)
+	}
 	return fmt.Sprintf("CONVERT(%s USING utf8mb4)", e)
+}
+
+// zeroDateCanonical: chuỗi chính tắc (SQL) của giá trị writer ghi thay zero date của cột col theo
+// col.ZeroDate; ok=false khi cột không phải ngày giờ hoặc chính sách là reject.
+func zeroDateCanonical(col ColumnInfo) (string, bool) {
+	if col.DataType != "date" && col.DataType != "datetime" && col.DataType != "timestamp" {
+		return "", false
+	}
+	switch col.ZeroDate {
+	case "null", "set_null":
+		return "NULL", true
+	case "epoch":
+		if col.DataType == "date" {
+			return "'1970-01-01'", true
+		}
+		return "'1970-01-01 00:00:00.000000'", true
+	}
+	return "", false
+}
+
+// withZeroDate gắn chính sách zero date của bảng nguồn t vào các cột source MySQL (FullVerifyConfig.ZeroDate).
+func (mv *MerkleVerifier) withZeroDate(t model.TableID, cols []ColumnInfo) []ColumnInfo {
+	if mv.cfg.ZeroDate == nil || mv.cfg.SourceEngine != model.EngineMySQL {
+		return cols
+	}
+	p := mv.cfg.ZeroDate(t)
+	if p == "" || p == "reject" {
+		return cols
+	}
+	out := make([]ColumnInfo, len(cols))
+	for k, c := range cols {
+		c.ZeroDate = p
+		out[k] = c
+	}
+	return out
 }
 
 // doubleExpr ép cột float/double sang DOUBLE bằng phép cộng `+ 0e0` thay cho CAST(x AS DOUBLE): cú pháp
@@ -684,6 +733,7 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 	if err != nil {
 		return nil, err
 	}
+	srcCols = mv.withZeroDate(t, srcCols)
 	if !isIntegerType(mv.cfg.SourceEngine, srcCols[0].DataType) {
 		return nil, fmt.Errorf("table %s: full verify needs an integer primary key, %s is %s", t, pkCol, srcCols[0].DataType)
 	}

@@ -70,6 +70,15 @@ func checkMySQLToPGTables(ctx context.Context, src, dst *sql.DB, tables []string
 			schema = "strand"
 		}
 
+		// Chính sách zero date của bảng này (tables.zero_date / zero_date_tables).
+		zp := opts.ZeroDatePolicy
+		if opts.ZeroDateFor != nil {
+			zp = opts.ZeroDateFor(schema, table)
+		}
+		zp = ZeroDateKind(zp)
+		tblOpts := opts
+		tblOpts.ZeroDatePolicy = zp
+
 		// 1. Kiểm tra tồn tại bảng nguồn
 		var exists int
 		err := src.QueryRowContext(ctx,
@@ -128,7 +137,7 @@ func checkMySQLToPGTables(ctx context.Context, src, dst *sql.DB, tables []string
 			colMap[col.Name] = col
 
 			// 4. Kiểm tra kiểu không map được (type_unmappable)
-			mapping, mapErr := MapMySQLColumn(col, opts)
+			mapping, mapErr := MapMySQLColumn(col, tblOpts)
 			if mapErr != nil {
 				return warnings, mapErr
 			}
@@ -242,8 +251,9 @@ func checkMySQLToPGTables(ctx context.Context, src, dst *sql.DB, tables []string
 
 		// 6. Quét giá trị thực tế gây lỗi trên source MySQL (LIMIT)
 		for _, col := range cols {
-			// 6.1. Zero Date: khi policy là reject (mặc định)
-			if (col.DataType == "date" || col.DataType == "datetime" || col.DataType == "timestamp") && opts.ZeroDatePolicy == "reject" {
+			// 6.1. Zero Date: quét mọi cột ngày giờ. reject (mặc định), cột khóa hàng và cột NOT NULL với
+			// set_null là lỗi; set_null/epoch trên cột còn lại chỉ cảnh báo giá trị sẽ bị thay.
+			if col.DataType == "date" || col.DataType == "datetime" || col.DataType == "timestamp" {
 				// Chỉ so sánh trên chuỗi CAST(col AS CHAR): KHÔNG dùng literal '0000-00-00' vì dưới sql_mode
 				// mặc định (strict + NO_ZERO_DATE) MySQL trả ERROR 1525 "Incorrect DATE/TIMESTAMP value" cho
 				// `col = '0000-00-00'`. Đọc giá trị zero rồi đổi sang chuỗi không phụ thuộc sql_mode.
@@ -263,12 +273,31 @@ func checkMySQLToPGTables(ctx context.Context, src, dst *sql.DB, tables []string
 					return warnings, fmt.Errorf("validate %s.%s column %s: zero-date scan failed (cannot conclude table is safe): %w", schema, table, col.Name, err)
 				}
 				if zeroCount > 0 {
-					return warnings, exitcode.New(
-						exitcode.ErrTypeUnmappable,
-						exitcode.Rejected,
-						fmt.Sprintf("table %s.%s column %s: found %d row(s) with zero date ('0000-00-00') (policy=reject, spec: 02 §8)", schema, table, col.Name, zeroCount),
-						nil,
-					)
+					reject := func(why string) error {
+						return exitcode.New(
+							exitcode.ErrTypeUnmappable,
+							exitcode.Rejected,
+							fmt.Sprintf("table %s.%s column %s: found %d row(s) with zero date ('0000-00-00'): %s (spec: 02 §8)", schema, table, col.Name, zeroCount, why),
+							nil,
+						)
+					}
+					switch {
+					case pkMap[col.Name]:
+						return warnings, reject("the column is part of the row key, so a zero date cannot be replaced; fix the rows on the source")
+					case zp == "reject":
+						return warnings, reject("policy=reject; set tables.zero_date (or zero_date_tables) to set_null or epoch to write a replacement")
+					case zp == "null" && !col.Nullable:
+						return warnings, reject("policy=set_null but the column is NOT NULL; use epoch for this table")
+					}
+					repl := "NULL"
+					if zp == "epoch" {
+						repl = "1970-01-01 00:00:00"
+					}
+					more := ""
+					if zeroCount >= opts.ScanLimit {
+						more = " or more"
+					}
+					warnings = append(warnings, fmt.Sprintf("table %s.%s column %s: %d%s row(s) with zero date will be written as %s on the target (tables.zero_date)", schema, table, col.Name, zeroCount, more, repl))
 				}
 			}
 

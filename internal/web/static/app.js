@@ -1007,9 +1007,12 @@
     var from = document.getElementById('np-from'), to = document.getElementById('np-to');
     if (!from || !to) return;
     function engineOf(v) { return v === 'postgres' ? 'postgres' : (v === 'mongodb' ? 'mongodb' : 'mysql'); }
+    // cond: "src:a,b" hoặc "dst:x", nhiều điều kiện nối bằng ";" phải cùng đúng ("src:mysql;dst:postgres").
     function matches(cond, src, dst) {
-      var kv = cond.split(':'), vals = kv[1].split(',');
-      return vals.indexOf(kv[0] === 'src' ? src : dst) >= 0;
+      return cond.split(';').every(function (c) {
+        var kv = c.split(':'), vals = kv[1].split(',');
+        return vals.indexOf(kv[0] === 'src' ? src : dst) >= 0;
+      });
     }
     function setPort(el, eng) {
       if (el && !el.dataset.touched && el.dataset[eng]) el.value = el.dataset[eng];

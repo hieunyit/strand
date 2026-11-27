@@ -178,6 +178,7 @@
   </details>
   {{end}}{{end}}
   {{if .View.Top}}{{if .View.Top.BreakerOpen}}<div class="alert alert-error mb" role="alert" data-bind-show="breaker"><strong>Circuit Breaker Open:</strong> <span data-bind="breaker_reason">{{.View.Top.BreakerReason}}</span></div>{{end}}{{end}}
+  {{with .View.Top}}{{with .SlotWAL}}{{with .Warning}}<div class="alert alert-warn mb" role="alert" data-slot-wal><strong>Source WAL:</strong> {{.}}.</div>{{end}}{{end}}{{end}}
   {{if and .View.Top (ne .View.State "failed")}}<div class="kpis" aria-label="Live metrics">
     <div class="kpi"><div class="kpi-label">Lag</div><div class="kpi-value c-num {{lagClass .View}}" data-bind="lag" data-bind-lag>{{if .View.Top}}{{lag .View.Top.LagSeconds}}{{else}}-{{end}}</div><div class="kpi-sub">source to target</div></div>
     <div class="kpi"><div class="kpi-label" title="Rows applied per second, averaged over the last 30 s">Rows/s <span class="m-hint">30 s avg</span></div><div class="kpi-value c-num" data-bind="rows">{{if .View.Top}}{{num .View.Rates.Rows}}{{else}}-{{end}}</div><div class="kpi-sub"><span class="c-num" data-bind="txn">{{if .View.Top}}{{num .View.Rates.Txn}}{{else}}-{{end}}</span> txn/s &middot; zone <span data-bind="zone">{{if .View.Top}}{{if .View.Top.Zone}}{{.View.Top.Zone}}{{else}}-{{end}}{{else}}-{{end}}</span></div></div>

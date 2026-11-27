@@ -238,6 +238,17 @@
         <small class="field-hint" id="np-start-at-help">Restore all included tables on the target and enter the position recorded in that backup. Strand starts CDC there and skips the initial snapshot. Leave this blank when all included tables have a usable key and you want Strand to take the initial snapshot.</small>
       </label>
     </div>
+    <div data-when="src:mysql,mariadb;dst:postgres">
+      <label class="field">
+        <span class="field-label">MySQL zero dates (0000-00-00)</span>
+        <select name="zero_date" aria-describedby="np-zero-date-help">
+          <option value="">Stop the pipeline (default)</option>
+          <option value="set_null">Write NULL (nullable columns only)</option>
+          <option value="epoch">Write 1970-01-01 00:00:00</option>
+        </select>
+      </label>
+      <small class="field-hint" id="np-zero-date-help">PostgreSQL has no zero date. By default a zero date stops the pipeline with exit 3. A replacement keeps the pipeline running: NOT NULL columns still stop with NULL, and key columns always stop. Verify compares against the replacement. Each replacement is counted in <code>strand_zero_date_replaced_total</code>.</small>
+    </div>
   </fieldset>
 
   <details class="advanced" data-when="src:mongodb">

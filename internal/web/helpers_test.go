@@ -100,10 +100,12 @@ func (f *fakeCmd) Run(ctx context.Context, name string, args ...string) ([]byte,
 type mockPipeline struct {
 	events []admin.EventRecord
 	tables []admin.TableInfo // nil: the three default tables
+	// slotWAL: top.slot_wal (source PG); nil = không có.
+	slotWAL *admin.SlotWAL
 }
 
 func (m *mockPipeline) Top(ctx context.Context) (*admin.TopInfo, error) {
-	return &admin.TopInfo{PipelineID: "orders", State: "synced", LagSeconds: 0.25, Throughput: 1234, Zone: "green"}, nil
+	return &admin.TopInfo{PipelineID: "orders", State: "synced", LagSeconds: 0.25, Throughput: 1234, Zone: "green", SlotWAL: m.slotWAL}, nil
 }
 func (m *mockPipeline) Pause(ctx context.Context) (*admin.PauseResult, error) { return nil, nil }
 func (m *mockPipeline) Resume(ctx context.Context, so bool) (*admin.ResumeResult, error) {

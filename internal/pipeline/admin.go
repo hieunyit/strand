@@ -83,6 +83,12 @@ func (h *adminHandler) Top(ctx context.Context) (*admin.TopInfo, error) {
 	if h.ready() == nil && p.breakerShown() {
 		info.BreakerOpen, info.BreakerReason = true, p.breaker.Reason()
 	}
+	// pgSignals cũng được dựng sau khi admin socket mở (setupGovernor); ready() sắp thứ tự lần đọc.
+	if h.ready() == nil && p.pgSignals != nil {
+		if s, ok := p.pgSignals.Last(); ok && s.SlotFound && s.SlotRetainedBytes >= 0 {
+			info.SlotWAL = &admin.SlotWAL{RetainedBytes: s.SlotRetainedBytes, KeepBytes: s.MaxSlotWALKeepBytes, Status: s.SlotWALStatus}
+		}
+	}
 	if p.autoSeeding.Load() {
 		info.TablesTotal, info.TablesDone = p.autoSeedTotal.Load(), p.autoSeedDone.Load()
 		if table := p.autoSeedTable.Load(); table != nil {

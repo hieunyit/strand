@@ -73,6 +73,8 @@ type NewPipelineOpts struct {
 	Includes []string `json:"include,omitempty"`
 	Excludes []string `json:"exclude,omitempty"`
 	Keyless  string   `json:"keyless,omitempty"`
+	// ZeroDate: tables.zero_date (chỉ MySQL → PostgreSQL): reject | set_null | epoch.
+	ZeroDate string `json:"zero_date,omitempty"`
 
 	ServerID    int    `json:"server_id,omitempty"`
 	CommitOrder string `json:"commit_order,omitempty"`
@@ -232,6 +234,9 @@ tables:
 {{- if .FullRowKeyless}}
   keyless: full_row
 {{- end}}
+{{- if .ZeroDate}}
+  zero_date: {{.ZeroDate}}
+{{- end}}
 
 bootstrap:
 {{- if .StartAt}}
@@ -292,6 +297,7 @@ type tmplData struct {
 	Includes          []string
 	Excludes          []string
 	FullRowKeyless    bool
+	ZeroDate          string
 	ServerID          int
 	CommitOrder       string
 	SpoolDir          string
@@ -366,6 +372,7 @@ func buildNewPipelineYAML(opts NewPipelineOpts, spoolDir, socketPath string) (st
 		Includes:          opts.Includes,
 		Excludes:          opts.Excludes,
 		FullRowKeyless:    strings.EqualFold(strings.TrimSpace(opts.Keyless), "full_row"),
+		ZeroDate:          zeroDateOpt(opts.ZeroDate),
 		ServerID:          opts.ServerID,
 		CommitOrder:       opts.CommitOrder,
 		SpoolDir:          spoolDir,
@@ -541,6 +548,15 @@ func checkOpts(opts NewPipelineOpts) error {
 		}
 	default:
 		return errors.New("keyless: choose off or full_row")
+	}
+	switch zeroDateOpt(opts.ZeroDate) {
+	case "":
+	case "set_null", "epoch":
+		if (opts.From != "mysql" && opts.From != "mariadb") || opts.To != "postgres" {
+			return errors.New("zero_date: replacing zero dates only applies to MySQL or MariaDB to PostgreSQL")
+		}
+	default:
+		return errors.New("zero_date: choose reject, set_null or epoch")
 	}
 	if opts.AutoSeed && ((opts.From != "mysql" && opts.From != "mariadb") || opts.To != "mysql" ||
 		!strings.EqualFold(strings.TrimSpace(opts.Keyless), "full_row") || strings.TrimSpace(opts.StartAt) != "") {
@@ -1055,6 +1071,7 @@ func parseFormOpts(r *http.Request) (NewPipelineOpts, error) {
 	opts.Includes = splitList(f.Get("include"))
 	opts.Excludes = splitList(f.Get("exclude"))
 	opts.Keyless = f.Get("keyless")
+	opts.ZeroDate = f.Get("zero_date")
 	opts.Windows = splitList(f.Get("windows"))
 	for field, dst := range map[string]*int{
 		"source_port": &opts.SourcePort, "target_port": &opts.TargetPort, "workers": &opts.Workers,
@@ -1290,4 +1307,13 @@ func (s *Server) sourceDatabasesByCheck(w http.ResponseWriter, r *http.Request, 
 		dbs = append(dbs, d)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"databases": dbs})
+}
+
+// zeroDateOpt chuẩn hóa lựa chọn zero date của form; "reject" (mặc định) không cần ghi vào YAML.
+func zeroDateOpt(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "reject" {
+		return ""
+	}
+	return v
 }

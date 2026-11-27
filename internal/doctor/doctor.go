@@ -246,6 +246,7 @@ func (d *run) mysqlSource(ctx context.Context) {
 	if d.dstKind == "postgres" && d.dst != nil {
 		opts := typemap.DefaultOptions()
 		opts.AllowKeyless = cfg.Tables.KeylessOn()
+		opts.ZeroDateFor = cfg.Tables.ZeroDateFor
 		ws, err := typemap.CheckMySQLToPGTablesMapped(ctx, src, d.dst, tables, opts, cfg.Tables.Rename)
 		for _, w := range ws {
 			d.c.Warn("schema_type_mapping", "", w, "")
