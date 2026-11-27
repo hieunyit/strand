@@ -209,16 +209,39 @@ func (w *PGWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta Del
 	w.mu.Unlock()
 
 	strict := orderer != nil && orderer.Mode() == "strict" && len(batch) > 0
+	parallel := strict && orderer.Parallel()
 	if strict {
 		if err := validateStrictBatch(batch); err != nil {
 			return err
 		}
-		// Chờ đến lượt TRƯỚC khi mở transaction (CP-5), giống MySQLWriter: nếu ghi trước rồi mới
-		// chờ, batch seq lớn giữ row lock mà batch seq nhỏ cần, hai bên chờ nhau.
-		if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
-			return err
+		if !parallel {
+			// Chờ đến lượt TRƯỚC khi mở transaction (CP-5), giống MySQLWriter: nếu ghi trước rồi mới
+			// chờ, batch seq lớn giữ row lock mà batch seq nhỏ cần, hai bên chờ nhau. Strict song song
+			// ghi trước rồi chờ lượt, xử lý vòng chờ đó bằng nhường lượt (CommitOrderer.WaitTurnOrYield).
+			if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
+				return err
+			}
 		}
 	}
+	if parallel {
+		d := delta
+		d.turn = orderer
+		for {
+			err := w.applyBatchOnce(ctx, batch, d, orderer, strict)
+			if !errors.Is(err, errYieldTurn) {
+				return err
+			}
+			if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
+				return err
+			}
+			d.turn = nil // đã có lượt
+		}
+	}
+	return w.applyBatchOnce(ctx, batch, delta, orderer, strict)
+}
+
+// applyBatchOnce: một lần ghi batch trong một transaction (xem ApplyBatch).
+func (w *PGWriter) applyBatchOnce(ctx context.Context, batch []*model.Txn, delta DeltaRow, orderer *CommitOrderer, strict bool) (err error) {
 
 	committing := false
 	if strict {
@@ -296,6 +319,10 @@ func (w *PGWriter) applyOnConn(ctx context.Context, pc *pgx.Conn, batch []*model
 
 // applyTx: dữ liệu của batch + row delta (hoặc row toàn cục) + commit trên transaction tx đã mở.
 func (w *PGWriter) applyTx(ctx context.Context, tx pgx.Tx, batch []*model.Txn, delta DeltaRow, committing *bool) error {
+	if o := delta.turn; o != nil {
+		o.BeginApply(batch[0].Seq())
+		defer o.EndApply(batch[0].Seq())
+	}
 	defer func() {
 		// Rollback bằng context không bị hủy để transaction không treo trên kết nối khi ctx đã hủy.
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -327,6 +354,20 @@ func (w *PGWriter) applyTx(ctx context.Context, tx pgx.Tx, batch []*model.Txn, d
 		delta.Stats.Rows = a.written
 	}
 
+	if o := delta.turn; o != nil {
+		// Strict song song: dữ liệu đã ghi, giờ mới chờ lượt (row toàn cục và commit theo seq).
+		o.EndApply(batch[0].Seq())
+		if delta.OnApplied != nil {
+			delta.OnApplied()
+		}
+		y, err := o.WaitTurnOrYield(ctx, batch[0].Seq())
+		if err != nil {
+			return err
+		}
+		if y {
+			return errYieldTurn // defer của applyTx rollback: nhả lock cho batch đến lượt
+		}
+	}
 	pid, wid, ep := resolveDelta(delta, w.pipelineID, w.workerID, w.epoch)
 	if delta.Global == nil {
 		// 2. Row delta có điều kiện epoch trong CÙNG transaction (CP-1, SG-1).

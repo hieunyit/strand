@@ -114,7 +114,9 @@ type Pipeline struct {
 	writers []batchWriter
 	// laneOn: writer cuối của writers chạy làn tuần tự (laneWorker, model.Txn.Lane).
 	laneOn bool
-	snap   *snapshot.MySQLSnapshotter
+	// strictPar: strict song song (strict_parallel.go).
+	strictPar bool
+	snap      *snapshot.MySQLSnapshotter
 
 	// Source PG: reader (để báo lwd bền vững), bộ theo dõi LSN cho Vouch, lwd bền vững ở strict.
 	pgReader *pgreader.Reader
@@ -909,10 +911,16 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	}
 	if p.strict {
 		p.orderer = writer.NewCommitOrderer("strict", 1)
-		// strict apply tuần tự (chờ lượt trước khi mở transaction), nên nhiều worker không thêm
-		// song song mà chỉ chia nhỏ batch (mỗi worker một seq → một commit mỗi Txn). Một worker
-		// gom tối đa các Txn liên tiếp vào một commit (group commit).
-		nWorkers = 1
+		if p.strictParallelOn() && nWorkers > 1 {
+			// Strict song song (strict_parallel.go): batch không chung khóa ghi trên nhiều writer, commit
+			// theo seq.
+			p.orderer.SetParallel(0)
+			p.strictPar = true
+		} else {
+			// strict apply tuần tự (chờ lượt trước khi mở transaction), nên nhiều worker không thêm
+			// song song mà chỉ chia nhỏ batch. Một worker gom tối đa các Txn liên tiếp vào một commit.
+			nWorkers = 1
+		}
 	}
 	// Làn tuần tự (relaxed, source PG): thêm một writer riêng ở cuối p.writers (laneWorker).
 	p.laneOn = p.srcEngine == model.EnginePG && !p.strict
@@ -1191,12 +1199,25 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 		go p.strictDispatcher(wctx, p.sched.Ready(), ordered)
 		p.readyCh = ordered
 	}
+	var strictBatches chan strictBatch
+	var inflight *inflightSet
+	if p.strictPar {
+		strictBatches = make(chan strictBatch)
+		inflight = newInflightSet()
+		go p.strictBatcher(wctx, p.readyCh, strictBatches, inflight, p.batchLimits())
+		p.log.Info("strict commit order with parallel writers: batches without shared keys are written concurrently and committed in source order",
+			"writers", len(p.writers))
+	}
 	for i, w := range p.writers {
 		workersWG.Add(1)
 		go func(i int, w batchWriter) {
 			defer workersWG.Done()
 			if p.laneOn && i == len(p.writers)-1 {
 				p.laneWorker(wctx, i+1, w)
+				return
+			}
+			if p.strictPar {
+				p.strictParallelWorker(wctx, i+1, w, strictBatches, inflight)
 				return
 			}
 			p.worker(wctx, i+1, w)
@@ -1287,7 +1308,8 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	if err := p.comp.Compact(fctx); err != nil {
 		return fmt.Errorf("final checkpoint flush: %w", err)
 	}
-	p.log.Info("pipeline stopped cleanly", "applied_txns", p.appliedTxns.Load(), "reapplied_in_seq_order", p.reorderRetry.Load())
+	p.log.Info("pipeline stopped cleanly", "applied_txns", p.appliedTxns.Load(), "reapplied_in_seq_order", p.reorderRetry.Load(),
+		"strict_parallel", p.strictPar, "strict_yields", p.orderer.Yields())
 	return nil
 }
 
@@ -1920,7 +1942,8 @@ func (p *Pipeline) drain(timeout time.Duration) bool {
 // Worker
 // ---------------------------------------------------------------------------
 
-func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
+// batchLimits: giới hạn gom batch của writer (target.batch).
+func (p *Pipeline) batchLimits() batchLimits {
 	lim := batchLimits{maxRows: int64(p.cfg.Target.Batch.MaxRows), strict: p.strict,
 		maxBytes: int64(parseBytes(p.cfg.Target.Batch.MaxBytes)), maxWait: durationOr(p.cfg.Target.Batch.MaxWait, 0)}
 	if lim.maxRows <= 0 {
@@ -1929,6 +1952,11 @@ func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 	if lim.maxBytes <= 0 {
 		lim.maxBytes = 4 << 20 // 4 MiB (02 §10)
 	}
+	return lim
+}
+
+func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
+	lim := p.batchLimits()
 	if !p.strict {
 		// Relaxed: batch kéo theo chuỗi Txn phụ thuộc vào nó (row nóng, G2-11) — xem TakeChained.
 		lim.chain = p.sched.TakeChained
@@ -1964,24 +1992,7 @@ func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 		}
 		stash = next
 		if p.strict {
-			b := batch
-			err := w.ApplyBatch(ctx, b, writer.DeltaRow{Global: func() (string, error) {
-				// Gọi sau khi đến lượt commit: mọi batch có seq nhỏ hơn đã commit vào row toàn cục.
-				return p.strictGlobal(b), nil
-			}})
-			for attempt := 1; err != nil && isRetryable(err) && attempt < 20 && ctx.Err() == nil; attempt++ {
-				time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
-				err = w.ApplyBatch(ctx, b, writer.DeltaRow{Global: func() (string, error) {
-					return p.strictGlobal(b), nil
-				}})
-			}
-			if err == nil && p.srcEngine == model.EnginePG {
-				// Row toàn cục vừa commit: lwd của nó là lwd bền vững cho slot.
-				p.strictMu.Lock()
-				p.strictDurable.Store(p.strictApplied.Lwd().LSN)
-				p.strictMu.Unlock()
-			}
-			if !p.finishBatch(ctx, id, batch, rows, err) {
+			if !p.applyStrict(ctx, id, w, batch, rows) {
 				return
 			}
 			continue
@@ -1990,6 +2001,33 @@ func (p *Pipeline) worker(ctx context.Context, id int, w batchWriter) {
 			return
 		}
 	}
+}
+
+// applyStrict ghi một batch strict (row toàn cục trong transaction commit, theo lượt seq) và hoàn tất nó.
+// Trả false nếu worker phải dừng.
+func (p *Pipeline) applyStrict(ctx context.Context, id int, w batchWriter, batch []*model.Txn, rows int64) bool {
+	return p.applyStrictWith(ctx, id, w, batch, rows, nil)
+}
+
+// applyStrictWith như applyStrict; onApplied (strict song song) được gọi khi dữ liệu đã ghi xong, trước
+// khi chờ lượt commit.
+func (p *Pipeline) applyStrictWith(ctx context.Context, id int, w batchWriter, batch []*model.Txn, rows int64, onApplied func()) bool {
+	global := writer.DeltaRow{Global: func() (string, error) {
+		// Gọi sau khi đến lượt commit: mọi batch có seq nhỏ hơn đã commit vào row toàn cục.
+		return p.strictGlobal(batch), nil
+	}, OnApplied: onApplied}
+	err := w.ApplyBatch(ctx, batch, global)
+	for attempt := 1; err != nil && isRetryable(err) && attempt < 20 && ctx.Err() == nil; attempt++ {
+		time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond)
+		err = w.ApplyBatch(ctx, batch, global)
+	}
+	if err == nil && p.srcEngine == model.EnginePG {
+		// Row toàn cục vừa commit: lwd của nó là lwd bền vững cho slot.
+		p.strictMu.Lock()
+		p.strictDurable.Store(p.strictApplied.Lwd().LSN)
+		p.strictMu.Unlock()
+	}
+	return p.finishBatch(ctx, id, batch, rows, err)
 }
 
 // applyRelaxed apply một batch ở relaxed: thêm vào tập đã apply của worker (mine), ghi row delta cùng

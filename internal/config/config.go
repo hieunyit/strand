@@ -101,6 +101,9 @@ type TargetConfig struct {
 	WriteMode   string            `yaml:"write_mode" json:"write_mode"`     // upsert | insert
 	CommitOrder string            `yaml:"commit_order" json:"commit_order"` // strict | relaxed
 	Batch       BatchConfig       `yaml:"batch" json:"batch"`
+	// StrictParallel (commit_order strict): auto (mặc định) — source MySQL ghi các batch không chung khóa
+	// trên nhiều writer (resources.workers.max) và commit đúng thứ tự; off — một writer.
+	StrictParallel string `yaml:"strict_parallel,omitempty" json:"strict_parallel,omitempty"`
 }
 
 type BatchConfig struct {
@@ -503,6 +506,12 @@ func loadYAMLStrict(data []byte, secretEnv map[string]string) (*Config, error) {
 	}
 	if err := validateZeroDate(&cfg); err != nil {
 		return nil, err
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Target.StrictParallel)) {
+	case "", "auto", "off":
+	default:
+		return nil, exitcode.New("invalid_syntax", exitcode.InvalidSyntax,
+			fmt.Sprintf("invalid target.strict_parallel %q (want auto | off)", cfg.Target.StrictParallel), nil)
 	}
 	if v := strings.TrimSpace(cfg.Source.HeartbeatInterval); v != "" && !cfg.Source.HeartbeatOff() {
 		d, err := time.ParseDuration(v)

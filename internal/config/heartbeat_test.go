@@ -35,3 +35,20 @@ func TestHeartbeatIntervalConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestStrictParallelConfig(t *testing.T) {
+	load := func(v string) error {
+		y := "version: 1\nname: sp\nsource: { kind: mysql, dsn: \"root@tcp(127.0.0.1:3306)/app\" }\n" +
+			"target: { kind: mysql, dsn: \"root@tcp(127.0.0.1:3307)/strand\", strict_parallel: " + v + " }\ntables: { include: [\"app.*\"] }\n"
+		_, err := config.LoadYAMLStrict([]byte(y))
+		return err
+	}
+	for _, ok := range []string{"auto", "off", "OFF", "\"\""} {
+		if err := load(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	if err := load("on"); err == nil || exitcode.GetExitCode(err) != exitcode.InvalidSyntax || !strings.Contains(err.Error(), "strict_parallel") {
+		t.Errorf("on: %v", err)
+	}
+}

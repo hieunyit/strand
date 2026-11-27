@@ -57,7 +57,7 @@ Phiên bản có test tự động: MySQL 8.4, PostgreSQL 16, 17 và 18. Source 
 - **Chế độ B (seed):** bạn restore một bản backup vào target. Strand kiểm vị trí P của backup rồi bắt kịp từ P. Không đọc dữ liệu bảng trên source.
 - **`--start-at`:** bạn cam kết target đã khớp source tại một vị trí. Strand chỉ stream từ đó.
 - **`commit_order`:**
-  - `strict` (mặc định): apply đúng thứ tự commit của source, một luồng ghi. Target luôn là một tiền tố của source.
+  - `strict` (mặc định): commit đúng thứ tự commit của source. Target luôn là một tiền tố của source. Source MySQL: các batch không chung khóa được ghi song song trên nhiều writer (`resources.workers.max`) rồi commit theo thứ tự (`target.strict_parallel`, mục 8.1). Source PostgreSQL: một luồng ghi.
   - `relaxed`: các Txn không đụng nhau chạy song song. Nhanh hơn, nhưng target có thể tạm thời có "lỗ".
 - **Trạng thái pipeline** (`strand top`): `starting` → `bootstrapping` → `synced`. Ngoài ra còn `paused` và `failed`.
   - `bootstrapping`: đang snapshot hoặc đang verify sau seed.
@@ -525,6 +525,7 @@ Mỗi phía chọn **một** trong ba cách:
 | `schema.additive` | `auto` | `auto`: tự áp thay đổi schema cộng thêm lên target (mục 3.4); `pause`: dừng chờ `schema approve` |
 | `schema.destructive` | `pause` | `pause` \| `approve`: thay đổi phá hủy luôn dừng exit 10 và chờ `strand schema approve <id>` |
 | `target.commit_order` | **`strict`** | `strict` \| `relaxed` (mục 1.3) |
+| `target.strict_parallel` | `auto` | `strict`, source MySQL: ghi song song các batch không chung khóa, commit theo thứ tự source. `off`: một writer (mục 8.1) |
 | `target.batch.max_rows` | 2000 | Đóng batch khi đủ số row |
 | `target.batch.max_bytes` | `4MiB` | Đóng batch khi đủ dung lượng (ước lượng) |
 | `target.batch.max_wait` | 0 | Chờ tối đa để gom thêm Txn. Relaxed: chuỗi Txn của một khóa nóng được gom cùng batch (không còn giới hạn 1/max_wait Txn/s). Strict: khóa nóng vẫn chỉ đạt khoảng 1/max_wait Txn/s (handoff dòng 26) |
@@ -1265,12 +1266,20 @@ Governor chỉ điều tốc **phần đọc snapshot** trên source. Stream lu�
 - **Tín hiệu cứng** (dừng snapshot ngay trong tick): `Innodb_buffer_pool_wait_free` hoặc `Innodb_log_waits` tăng trên source MySQL, hoặc spool local đạt 95% `spool.hard`.
 - **Trong bootstrap:** lag vượt `lag_slo` thì log `bootstrap_retention_risk` và **ưu tiên** snapshot thay vì dừng, để không tự khóa chết.
 
+**Strict song song (`target.strict_parallel: auto`, source MySQL).** Cách làm giống Parallel Replicat của Oracle GoldenGate và `replica_preserve_commit_order` của MySQL:
+
+- Strand cắt luồng Txn thành các batch liên tiếp. Một batch chỉ được giao cho writer khác khi không chung khóa writeset (PK, unique key cũ và mới, khóa cha qua FK) với batch nào **còn đang ghi**. Batch đã ghi xong chỉ chờ lượt commit nên không chặn.
+- Writer ghi dữ liệu song song, rồi chờ lượt để ghi row checkpoint toàn cục và commit đúng thứ tự batch. Target vẫn luôn là một tiền tố của source (CP-5).
+- Khóa nằm ngoài writeset (gap lock của InnoDB, ràng buộc chỉ có ở target) có thể làm batch đến lượt phải chờ lock của batch đang chờ lượt. DB không thấy vòng chờ này. Strand phát hiện khi batch đến lượt ghi lâu bất thường (từ 50 ms, hoặc gấp 4 lần thời gian ghi trung bình của một batch). Khi đó batch đang chờ rollback, chờ lượt mà không giữ lock, rồi ghi lại. Số lần nhường được ghi ở log dừng (`strict_yields`).
+- Không áp dụng (một writer như trước) với source PostgreSQL, vì walsender là trần. Cũng không áp dụng khi target MySQL có cascade FK, vì cascade chạm row con mà writeset không thấy. Hoặc khi `target.strict_parallel: off`.
+- Số writer là `resources.workers.max` (mặc định 8). Row nóng: các batch chung khóa ghi tuần tự như trước.
+
 | Mục đích | Thao tác | Hiệu lực |
 | --- | --- | --- |
 | Giảm đọc trên source khi snapshot | `throttle set --source-iops N` | Ngay |
 | Nhường source giờ cao điểm | `pause --snapshot` / `resume --snapshot-only`, hoặc `bootstrap.logical.windows` | Ngay / khởi động lại |
 | Governor nhạy hơn | `governor.lag_slo`, `governor.tick` | Khởi động lại |
-| Target bắt kịp nhanh hơn | `commit_order: relaxed`, tăng `workers.max` | Khởi động lại |
+| Target bắt kịp nhanh hơn | `strict` (source MySQL) đã ghi song song theo `workers.max`; `commit_order: relaxed` nhanh hơn nữa | Khởi động lại |
 | Snapshot nhiều bảng nhanh hơn khi **ghi target** (flush) là nút cổ chai | `bootstrap.logical.max_parallel` (vd 4) | Khởi động lại |
 | Ít commit hơn | `target.batch.max_rows` / `max_bytes` | Khởi động lại |
 | Đệm khi target chậm | `spool.hard`, `spool.overflow` | Khởi động lại |
@@ -1472,7 +1481,7 @@ strand verify -c billing.yaml --mode full --table public.orders
 - **PG identity `ALWAYS`:** PK bị `UPDATE … SET id = DEFAULT` kèm cột TOAST không đổi làm writer lỗi 428C9 (dòng 27, hiếm).
 - **Source PG:** governor `onoff`/`grace-v2` dùng tín hiệu PG (replica lag của standby đang replay, WAL slot); thiếu quyền thì lùi về `static`.
 - **Không có:** đồng bộ hai chiều, DDL tự động từ source PG, verify full theo lịch, HA tự failover của chính Strand, fence mức mạng/máy chủ khi promote (mục 7.10), tự co giãn worker, mask cột, đọc từ PG standby.
-- **Hiệu năng:** đo trên máy test container, khoảng 2.100 txn/s relaxed và 1.600 txn/s strict (MySQL→MySQL). Chưa có benchmark Gate 2.
+- **Hiệu năng:** đo trên máy test container (16 nhân, các container dùng chung máy, 2026-11-28), xả một khối tồn đọng 600.000 UPDATE một dòng trên 50.000 dòng: MySQL→MySQL strict một writer khoảng 14.400 txn/s, strict song song khoảng 22.000–24.000 txn/s, relaxed khoảng 27.600–31.600 txn/s. PG→PG strict khoảng 10.250 txn/s, bằng tốc độ walsender tự đọc cùng khối WAL (khoảng 10.200 txn/s): source PG bị chặn bởi việc giải mã WAL một luồng của PostgreSQL, không phải bởi Strand. Chưa có benchmark Gate 2.
 
 ### 10.4 Quyết định đã chốt trong code, chờ cập nhật spec
 

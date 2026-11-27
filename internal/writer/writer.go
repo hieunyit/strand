@@ -3,6 +3,7 @@ package writer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -31,7 +32,17 @@ type DeltaRow struct {
 
 	// Stats (tùy chọn): writer (PG, MySQL) điền số row đã ghi của batch khi ApplyBatch thành công.
 	Stats *ApplyStats
+
+	// OnApplied (strict song song, tùy chọn): gọi khi dữ liệu của batch đã ghi xong, trước khi chờ lượt
+	// commit — từ đó batch không xin thêm lock nào, batch sau chạm cùng row chỉ phải chờ nó commit.
+	OnApplied func()
+
+	// turn (strict song song, đặt bởi writer PG): chờ lượt sau khi ghi dữ liệu, trước row toàn cục.
+	turn *CommitOrderer
 }
+
+// errYieldTurn: batch nhường lượt (strict song song) — transaction đã rollback, ghi lại khi đến lượt.
+var errYieldTurn = errors.New("strict commit order: yield the turn and apply again")
 
 // ApplyStats: số liệu một lần ApplyBatch (F11).
 type ApplyStats struct {
@@ -335,53 +346,78 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 	w.mu.Unlock()
 
 	strict := orderer != nil && orderer.Mode() == "strict" && len(batch) > 0
+	parallel := strict && orderer.Parallel()
 	if strict {
 		if err := validateStrictBatch(batch); err != nil {
 			return err
 		}
-		// Chờ đến lượt TRƯỚC khi mở transaction (CP-5). Nếu thực thi câu lệnh trước rồi mới chờ,
-		// batch đang chờ giữ row/gap lock mà batch seq nhỏ hơn cần: seq nhỏ chờ lock, seq lớn chờ
-		// lượt — InnoDB không thấy vòng chờ này (chỉ hết hạn lock wait rồi lặp lại).
+		if !parallel {
+			// Chờ đến lượt TRƯỚC khi mở transaction (CP-5). Nếu thực thi câu lệnh trước rồi mới chờ,
+			// batch đang chờ giữ row/gap lock mà batch seq nhỏ hơn cần: seq nhỏ chờ lock, seq lớn chờ
+			// lượt — InnoDB không thấy vòng chờ này. Strict song song xử lý vòng chờ đó bằng nhường lượt
+			// (CommitOrderer.WaitTurnOrYield).
+			if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
+				return err
+			}
+		}
+	}
+	// Strict song song: ghi dữ liệu trước, chờ lượt sau. Nhường lượt → rollback, chờ lượt không giữ lock
+	// rồi ghi lại (lần sau đã có lượt nên không chờ nữa).
+	waitTurn := parallel
+	for {
+		yielded, err := w.applyBatchOnce(ctx, batch, delta, orderer, strict, waitTurn)
+		if err != nil || !yielded {
+			return err
+		}
 		if err := orderer.WaitTurn(ctx, batch[0].Seq()); err != nil {
 			return err
 		}
+		waitTurn = false
 	}
+}
 
+// applyBatchOnce: một lần ghi batch trong một transaction. waitTurn (strict song song): chờ lượt sau khi
+// ghi dữ liệu; yielded = true khi phải nhường (transaction đã rollback, không gì được commit).
+func (w *MySQLWriter) applyBatchOnce(ctx context.Context, batch []*model.Txn, delta DeltaRow, orderer *CommitOrderer, strict, waitTurn bool) (yielded bool, err error) {
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return false, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 	committing := false
 
+	if waitTurn {
+		orderer.BeginApply(batch[0].Seq())
+		defer orderer.EndApply(batch[0].Seq())
+	}
 	// 1. Ghi dữ liệu vào các bảng ứng dụng (kể cả Txn đã tràn đĩa). Upsert liên tiếp cùng bảng,
 	// cùng tập cột được gom thành multi-row qua ranh giới các Txn của batch: thứ tự row trong
-	// transaction đích giữ nguyên, nhưng số round-trip giảm (quan trọng ở strict, một worker).
+	// transaction đích giữ nguyên, nhưng số round-trip giảm.
 	var cur *mysqlUpsertBatch
 	budget, maxPacket, err := w.queueLimits(ctx, tx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	q := &stmtQueue{tx: tx, on: w.pipelining, budget: budget, maxPacket: maxPacket}
 	var routed int64
 	for _, txn := range batch {
 		routed += txn.TotalRows()
 		if err := w.applyTxnMySQL(ctx, q, txn, &cur); err != nil {
-			return fmt.Errorf("failed to apply row changes: %w", err)
+			return false, fmt.Errorf("failed to apply row changes: %w", err)
 		}
 	}
 	if cur != nil {
 		if err := cur.flush(ctx, q); err != nil {
-			return fmt.Errorf("failed to apply row changes: %w", err)
+			return false, fmt.Errorf("failed to apply row changes: %w", err)
 		}
 	}
 	if err := q.flush(ctx); err != nil {
-		return fmt.Errorf("failed to apply row changes: %w", err)
+		return false, fmt.Errorf("failed to apply row changes: %w", err)
 	}
 	// F11 (như writer PG): mọi row đã định tuyến phải nằm trong một câu lệnh đã chạy thành công — kiểm
 	// TRƯỚC row delta và commit, để batch thiếu row rollback thay vì được đánh dấu đã apply.
 	if err := checkRowsWritten(batch, routed, q.handed, q.written); err != nil {
-		return err
+		return false, err
 	}
 	if delta.Stats != nil {
 		delta.Stats.Rows = q.written
@@ -393,19 +429,32 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 		query := "UPDATE _strand_worker_delta SET applied = ?, batch_no = batch_no + 1 WHERE pipeline_id = ? AND worker_id = ? AND epoch = ?"
 		res, err := tx.ExecContext(ctx, query, delta.Applied, pid, wid, ep)
 		if err != nil {
-			return fmt.Errorf("failed to update worker delta: %w", err)
+			return false, fmt.Errorf("failed to update worker delta: %w", err)
 		}
 		affected, err := res.RowsAffected()
 		if err != nil {
-			return fmt.Errorf("failed to get rows affected: %w", err)
+			return false, fmt.Errorf("failed to get rows affected: %w", err)
 		}
 		if affected != 1 {
 			// spec: 02 §4 quy tắc 3: số row != 1 -> rollback và dừng với mã fenced
-			return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: expected 1 row affected, got %d", affected), nil)
+			return false, exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: expected 1 row affected, got %d", affected), nil)
 		}
 	}
 
-	// 3. Chờ đến lượt commit ở chế độ strict (CP-5)
+	// 3. Strict song song: dữ liệu đã ghi, giờ mới chờ lượt (row toàn cục và commit theo seq).
+	if waitTurn {
+		orderer.EndApply(batch[0].Seq())
+		if delta.OnApplied != nil {
+			delta.OnApplied()
+		}
+		y, err := orderer.WaitTurnOrYield(ctx, batch[0].Seq())
+		if err != nil {
+			return false, err
+		}
+		if y {
+			return true, nil // defer rollback: nhả lock cho batch đến lượt
+		}
+	}
 	if strict {
 		// Lỗi TRƯỚC commit: batch chưa commit, lượt vẫn thuộc về nó (caller có thể retry cùng seq).
 		// Lỗi KHI commit: kết quả không chắc chắn, dừng orderer để không seq nào commit sau nó.
@@ -420,30 +469,30 @@ func (w *MySQLWriter) ApplyBatch(ctx context.Context, batch []*model.Txn, delta 
 	if delta.Global != nil {
 		applied, gerr := delta.Global()
 		if gerr != nil {
-			return gerr
+			return false, gerr
 		}
 		res, gerr := tx.ExecContext(ctx,
 			"UPDATE _strand_checkpoint SET applied = ?, updated_at = NOW(6) WHERE pipeline_id = ? AND epoch = ?",
 			applied, pid, ep)
 		if gerr != nil {
-			return fmt.Errorf("failed to update global checkpoint: %w", gerr)
+			return false, fmt.Errorf("failed to update global checkpoint: %w", gerr)
 		}
 		if n, _ := res.RowsAffected(); n != 1 {
-			return exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: global checkpoint update affected %d rows", n), nil)
+			return false, exitcode.New(exitcode.ErrFenced, exitcode.Fenced, fmt.Sprintf("writer fenced: global checkpoint update affected %d rows", n), nil)
 		}
 	}
 
 	// 4. Commit cả dữ liệu và delta
 	committing = true
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit batch transaction: %w", err)
+		return false, fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
 
 	// 5. Thông báo commit xong cho orderer (CP-5)
 	if strict {
 		orderer.CommitDone(batch[len(batch)-1].Seq())
 	}
-	return nil
+	return false, nil
 }
 
 // stmtQueue gửi các câu lệnh dữ liệu của một batch theo lô nhiều câu trong một round-trip
