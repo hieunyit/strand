@@ -72,8 +72,11 @@ func (d *fDB) begin() *fTx {
 }
 
 var (
-	reTemp   = regexp.MustCompile(`^CREATE TEMP TABLE "([^"]+)" \(LIKE (\S+) INCLUDING DEFAULTS\) ON COMMIT DROP$`)
-	reMerge  = regexp.MustCompile(`^MERGE INTO (\S+) AS _strand_t USING pg_temp\."([^"]+)" AS _strand_s ON \(.*?\) (WHEN MATCHED THEN (?:DO NOTHING|UPDATE SET .*?)) WHEN NOT MATCHED THEN INSERT \(.*?\) OVERRIDING SYSTEM VALUE VALUES \(.*?\); TRUNCATE pg_temp\."([^"]+)"$`)
+	reTemp = regexp.MustCompile(`^CREATE TEMP TABLE "([^"]+)" \(LIKE (\S+) INCLUDING DEFAULTS\) ON COMMIT DROP$`)
+	// MERGE được bọc bởi SET LOCAL tắt hash/merge join (bảng tạm không có thống kê) rồi trả lại mặc định.
+	reMerge = regexp.MustCompile(`^SET LOCAL enable_hashjoin = off; SET LOCAL enable_mergejoin = off; ` +
+		`MERGE INTO (\S+) AS _strand_t USING pg_temp\."([^"]+)" AS _strand_s ON \(.*?\) (WHEN MATCHED THEN (?:DO NOTHING|UPDATE SET .*?)) WHEN NOT MATCHED THEN INSERT \(.*?\) OVERRIDING SYSTEM VALUE VALUES \(.*?\); ` +
+		`SET LOCAL enable_hashjoin TO DEFAULT; SET LOCAL enable_mergejoin TO DEFAULT; TRUNCATE pg_temp\."([^"]+)"$`)
 	reInsert = regexp.MustCompile(`^INSERT INTO (\S+) \((.*?)\) OVERRIDING SYSTEM VALUE VALUES .* ON CONFLICT \((.*?)\) (DO NOTHING|DO UPDATE SET .*)$`)
 	reDelete = regexp.MustCompile(`^DELETE FROM (\S+) WHERE \((.*?)\) IN \((.*)\)$`)
 	reUpdate = regexp.MustCompile(`^UPDATE (\S+) SET (.*?) WHERE (.*?)(?: AND NOT EXISTS \(SELECT 1 FROM \S+ WHERE (.*)\))?$`)

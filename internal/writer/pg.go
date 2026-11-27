@@ -1156,7 +1156,16 @@ func (b *pgUpsertBlock) flush(a *pgApplier) error {
 	}
 	tmpQ := "pg_temp." + quotePG(tmp)
 	// MERGE và TRUNCATE bảng tạm gửi chung một round-trip (simple protocol, không tham số).
-	q := fmt.Sprintf("MERGE INTO %s AS _strand_t USING %s AS _strand_s ON (%s) %s WHEN NOT MATCHED THEN INSERT (%s) OVERRIDING SYSTEM VALUE VALUES (%s); TRUNCATE %s",
+	//
+	// Bảng tạm vừa COPY không có thống kê, nên planner đoán sai số row nguồn và với bảng đích cỡ vừa
+	// (vài chục nghìn row) chọn hash join + quét toàn bảng đích: 226 row vào bảng 50k row mất ~24 ms,
+	// 20 row ~23 ms (PG 18, 2026-11-27). Khối luôn ≤ pgCopyBlockRows và bảng đích luôn có index
+	// trên khóa (đường này không nhận bảng keyless; ON CONFLICT cũng cần index đó), nên nested loop
+	// dò index không bao giờ tệ: cùng phép đo còn ~7 ms / ~2.4 ms, bảng nhỏ và bảng 2M row không đổi.
+	// SET LOCAL … TO DEFAULT trả lại cấu hình ngay sau MERGE cho phần còn lại của transaction.
+	q := fmt.Sprintf("SET LOCAL enable_hashjoin = off; SET LOCAL enable_mergejoin = off; "+
+		"MERGE INTO %s AS _strand_t USING %s AS _strand_s ON (%s) %s WHEN NOT MATCHED THEN INSERT (%s) OVERRIDING SYSTEM VALUE VALUES (%s); "+
+		"SET LOCAL enable_hashjoin TO DEFAULT; SET LOCAL enable_mergejoin TO DEFAULT; TRUNCATE %s",
 		quotePGTable(b.table), tmpQ, strings.Join(on, " AND "), matched,
 		strings.Join(quoted, ", "), strings.Join(src, ", "), tmpQ)
 	if _, err := a.tx.Exec(a.ctx, q, pgx.QueryExecModeSimpleProtocol); err != nil {
