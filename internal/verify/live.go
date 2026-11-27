@@ -252,7 +252,7 @@ func SampleRanges(ctx context.Context, db *sql.DB, t model.TableID, pk string, r
 // SampleRangesEngine như SampleRanges cho source thuộc engine bất kỳ (PG: ước lượng số row từ
 // pg_class.reltuples).
 func SampleRangesEngine(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID, pk string, rate float64, rows int64, rng *rand.Rand) ([][2]int64, error) {
-	qpk, qtab, ph1 := QuoteIdent(engine, pk), QuoteTable(engine, t), keyPh(engine, 1)
+	qpk, qtab, ph1 := QuoteIdent(engine, pk), FromTable(engine, t), keyPh(engine, 1)
 	if rows <= 0 {
 		rows = 1000
 	}
@@ -294,7 +294,7 @@ func SampleRangesEngine(ctx context.Context, db *sql.DB, engine model.Engine, t 
 		return out, nil
 	}
 	if engine == model.EnginePG {
-		_ = db.QueryRowContext(ctx, "SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = to_regclass($1)", qtab).Scan(&est)
+		_ = db.QueryRowContext(ctx, "SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = to_regclass($1)", QuoteTable(engine, t)).Scan(&est)
 	} else {
 		_ = db.QueryRowContext(ctx, "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 			t.Schema, t.Table).Scan(&est)

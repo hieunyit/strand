@@ -833,7 +833,8 @@ func repairRows(ctx context.Context, src, dst *sql.DB, srcEngine, dstEngine mode
 	}
 	srcQ := fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", srcQT, srcQPK)
 	if srcEngine == model.EnginePG {
-		srcQ = fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", srcQT, srcQPK)
+		// Chỉ row của chính relation (inheritance thường: không lấy row bảng con), như writer.
+		srcQ = fmt.Sprintf("SELECT * FROM %s WHERE %s = $1 AND %s", srcQT, srcQPK, model.PGRelationRows(srcQT, ""))
 	}
 	// 1. Ảnh source của mọi khóa lệch (nil = source không còn row).
 	imgs := make([]repairImage, 0, len(keys))
@@ -972,7 +973,7 @@ func repairBulkPG(ctx context.Context, dst *sql.DB, t model.TableID, pk string, 
 	}
 	qt, qpk := verify.QuoteTable(model.EnginePG, t), verify.QuoteIdent(model.EnginePG, pk)
 	for _, img := range imgs {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", qt, qpk), img.key); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1 AND %s", qt, qpk, model.PGRelationRows(qt, "")), img.key); err != nil {
 			return false, fmt.Errorf("repair %s pk %s: %w", t, img.key, err)
 		}
 	}
@@ -1011,6 +1012,10 @@ func repairOneByOne(ctx context.Context, dst *sql.DB, dstEngine model.Engine, ds
 		k, names, vals := img.key, img.names, img.vals
 		if names == nil {
 			delQ := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", dstQT, dstQPK, ph(1))
+			if dstEngine == model.EnginePG {
+				// DELETE trên bảng cha inheritance thường xóa cả row bảng con trùng khóa.
+				delQ += " AND " + model.PGRelationRows(dstQT, "")
+			}
 			if _, err := dst.ExecContext(ctx, delQ, k); err != nil {
 				return err
 			}

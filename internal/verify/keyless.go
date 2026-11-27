@@ -52,7 +52,7 @@ func hashTableSQL(engine model.Engine, t model.TableID, cols []ColumnInfo) strin
 	row := rowExpression(engine, cols)
 	if engine == model.EnginePG {
 		return fmt.Sprintf("SELECT count(*)::text, COALESCE(sum(('x' || substr(md5(%s), 1, 15))::bit(60)::bigint), 0)::text FROM %s",
-			row, QuoteTable(engine, t))
+			row, FromTable(engine, t))
 	}
 	return fmt.Sprintf("SELECT CAST(COUNT(*) AS CHAR), CAST(COALESCE(SUM(CAST(CONV(SUBSTRING(MD5(%s), 1, 15), 16, 10) AS UNSIGNED)), 0) AS CHAR) FROM %s",
 		row, QuoteTable(engine, t))

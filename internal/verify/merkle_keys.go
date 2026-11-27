@@ -71,7 +71,7 @@ func (s keySide) hash(ctx context.Context, c keyChunk, cols []ColumnInfo) (strin
 	var q string
 	if s.engine == model.EnginePG {
 		q = fmt.Sprintf("SELECT count(*)::text, COALESCE(sum(('x' || substr(md5(%s), 1, 15))::bit(60)::bigint), 0)::text FROM %s WHERE %s",
-			row, QuoteTable(s.engine, s.table), w)
+			row, FromTable(s.engine, s.table), w)
 	} else {
 		q = fmt.Sprintf("SELECT CAST(COUNT(*) AS CHAR), CAST(COALESCE(SUM(CAST(CONV(SUBSTRING(MD5(%s), 1, 15), 16, 10) AS UNSIGNED)), 0) AS CHAR) FROM %s WHERE %s",
 			row, QuoteTable(s.engine, s.table), w)
@@ -105,7 +105,7 @@ func (s keySide) rowsBounds(ctx context.Context, c keyChunk, cols []ColumnInfo, 
 			sel = append(sel, QuoteIdent(s.engine, pc.Name))
 		}
 	}
-	q := fmt.Sprintf("SELECT %s, %s FROM %s WHERE %s", strings.Join(sel, ", "), rowExpression(s.engine, cols), QuoteTable(s.engine, s.table), w)
+	q := fmt.Sprintf("SELECT %s, %s FROM %s WHERE %s", strings.Join(sel, ", "), rowExpression(s.engine, cols), FromTable(s.engine, s.table), w)
 	rs, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read rows of %s: %w", s.table, err)

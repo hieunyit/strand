@@ -372,6 +372,17 @@ func QuoteTable(engine model.Engine, t model.TableID) string {
 	return QuoteIdent(engine, t.Schema) + "." + QuoteIdent(engine, t.Table)
 }
 
+// FromTable là QuoteTable dùng ở mệnh đề FROM khi ĐỌC row: với PostgreSQL chỉ lấy row của chính relation
+// như writer và snapshot (model.PGRelationRows) — bảng cha của inheritance thường không kéo theo row của bảng
+// con; gốc partition khai báo vẫn gồm mọi partition.
+func FromTable(engine model.Engine, t model.TableID) string {
+	q := QuoteTable(engine, t)
+	if engine != model.EnginePG {
+		return q
+	}
+	return "(SELECT * FROM " + q + " WHERE " + model.PGRelationRows(q, "") + ") AS " + QuoteIdent(engine, t.Table)
+}
+
 // GetTableColumns trả các cột của bảng theo thứ tự định nghĩa, cột PK đứng đầu.
 func GetTableColumns(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID, pkCol string) ([]ColumnInfo, error) {
 	schema := schemaOrDefault(ctx, db, engine, t)
@@ -453,7 +464,7 @@ func DivideTableChunks(ctx context.Context, db *sql.DB, engine model.Engine, t m
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkRows
 	}
-	qpk, qt := QuoteIdent(engine, pkCol), QuoteTable(engine, t)
+	qpk, qt := QuoteIdent(engine, pkCol), FromTable(engine, t)
 	var mn, mx sql.NullInt64
 	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s", qpk, qpk, qt)).Scan(&mn, &mx); err != nil {
 		return nil, fmt.Errorf("min/max pk of %s: %w", t, err)
@@ -634,7 +645,7 @@ func HashChunk(ctx context.Context, db *sql.DB, engine model.Engine, t model.Tab
 	var q string
 	if engine == model.EnginePG {
 		q = fmt.Sprintf("SELECT count(*)::text, COALESCE(sum(('x' || substr(md5(%s), 1, 15))::bit(60)::bigint), 0)::text FROM %s WHERE %s BETWEEN $1::bigint AND $2::bigint",
-			row, QuoteTable(engine, t), qpk)
+			row, FromTable(engine, t), qpk)
 	} else {
 		q = fmt.Sprintf("SELECT CAST(COUNT(*) AS CHAR), CAST(COALESCE(SUM(CAST(CONV(SUBSTRING(MD5(%s), 1, 15), 16, 10) AS UNSIGNED)), 0) AS CHAR) FROM %s WHERE %s BETWEEN ? AND ?",
 			row, QuoteTable(engine, t), qpk)
@@ -833,7 +844,7 @@ func (mv *MerkleVerifier) VerifyTableFull(ctx context.Context, t model.TableID, 
 // readCanonicalRows đọc PK -> row chính tắc của range r (cùng biểu thức dùng khi hash).
 func readCanonicalRows(ctx context.Context, db *sql.DB, engine model.Engine, t model.TableID, pkCol string, cols []ColumnInfo, r [2]int64) (map[string]string, error) {
 	q := fmt.Sprintf("SELECT %s, %s FROM %s WHERE %s BETWEEN %s AND %s",
-		canonicalValueExpr(engine, cols[0]), rowExpression(engine, cols), QuoteTable(engine, t),
+		canonicalValueExpr(engine, cols[0]), rowExpression(engine, cols), FromTable(engine, t),
 		QuoteIdent(engine, pkCol), keyPh(engine, 1), keyPh(engine, 2))
 	rows, err := db.QueryContext(ctx, q, r[0], r[1])
 	if err != nil {
