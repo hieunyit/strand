@@ -1268,7 +1268,7 @@ Governor chỉ điều tốc **phần đọc snapshot** trên source. Stream lu�
 
 **Strict song song (`target.strict_parallel: auto`, source MySQL).** Cách làm giống Parallel Replicat của Oracle GoldenGate và `replica_preserve_commit_order` của MySQL:
 
-- Strand cắt luồng Txn thành các batch liên tiếp. Một batch chỉ được giao cho writer khác khi không chung khóa writeset (PK, unique key cũ và mới, khóa cha qua FK) với batch nào **còn đang ghi**. Batch đã ghi xong chỉ chờ lượt commit nên không chặn.
+- Strand cắt luồng Txn thành các batch liên tiếp. Một batch chỉ được giao cho writer khác khi không chung khóa writeset (PK, unique key cũ và mới, khóa cha qua FK) với batch nào **còn đang ghi**. Batch đã ghi xong chỉ chờ lượt commit nên không chặn. Riêng target PostgreSQL: UPDATE/DELETE đọc theo snapshot nên không chờ row mà batch trước mới INSERT nhưng chưa commit. Vì vậy ở đó batch chung khóa phải chờ batch trước commit hẳn.
 - Writer ghi dữ liệu song song, rồi chờ lượt để ghi row checkpoint toàn cục và commit đúng thứ tự batch. Target vẫn luôn là một tiền tố của source (CP-5).
 - Khóa nằm ngoài writeset (gap lock của InnoDB, ràng buộc chỉ có ở target) có thể làm batch đến lượt phải chờ lock của batch đang chờ lượt. DB không thấy vòng chờ này. Strand phát hiện khi batch đến lượt ghi lâu bất thường (từ 50 ms, hoặc gấp 4 lần thời gian ghi trung bình của một batch). Khi đó batch đang chờ rollback, chờ lượt mà không giữ lock, rồi ghi lại. Số lần nhường được ghi ở log dừng (`strict_yields`).
 - Không áp dụng (một writer như trước) với source PostgreSQL, vì walsender là trần. Cũng không áp dụng khi target MySQL có cascade FK, vì cascade chạm row con mà writeset không thấy. Hoặc khi `target.strict_parallel: off`.

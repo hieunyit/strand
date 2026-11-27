@@ -129,15 +129,20 @@ type strictBatch struct {
 // liệu (có thể xin thêm lock); false khi đã ghi xong và chỉ chờ lượt commit (không xin thêm lock nào).
 // Batch mới chỉ phải tránh batch CÒN ĐANG GHI chung khóa: chạm row của batch đã ghi xong thì chỉ chờ lock
 // tới khi batch đó commit (nó đi trước theo seq và không chờ gì từ batch mới), không có vòng chờ.
+//
+// Target PostgreSQL (holdUntilCommit): UPDATE/DELETE đọc theo snapshot nên KHÔNG chờ row mà batch trước
+// mới INSERT chưa commit — chúng bỏ qua row đó (0 row) và mất thay đổi. Ở đó batch chung khóa phải chờ
+// batch trước commit hẳn. InnoDB thì UPDATE/DELETE/INSERT đều là current read có khóa, chờ đúng.
 type inflightSet struct {
-	mu   sync.Mutex
-	cond *sync.Cond
-	set  map[*batchKeys]bool // → applying
-	dead bool
+	mu              sync.Mutex
+	cond            *sync.Cond
+	set             map[*batchKeys]bool // → applying
+	dead            bool
+	holdUntilCommit bool
 }
 
-func newInflightSet() *inflightSet {
-	s := &inflightSet{set: map[*batchKeys]bool{}}
+func newInflightSet(holdUntilCommit bool) *inflightSet {
+	s := &inflightSet{set: map[*batchKeys]bool{}, holdUntilCommit: holdUntilCommit}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -165,6 +170,9 @@ func (s *inflightSet) acquire(k *batchKeys) bool {
 
 // applied: k đã ghi xong dữ liệu, chỉ còn chờ lượt commit.
 func (s *inflightSet) applied(k *batchKeys) {
+	if s.holdUntilCommit {
+		return
+	}
 	s.mu.Lock()
 	if _, ok := s.set[k]; ok {
 		s.set[k] = false

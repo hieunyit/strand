@@ -1203,7 +1203,7 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 	var inflight *inflightSet
 	if p.strictPar {
 		strictBatches = make(chan strictBatch)
-		inflight = newInflightSet()
+		inflight = newInflightSet(p.dstEngine == model.EnginePG)
 		go p.strictBatcher(wctx, p.readyCh, strictBatches, inflight, p.batchLimits())
 		p.log.Info("strict commit order with parallel writers: batches without shared keys are written concurrently and committed in source order",
 			"writers", len(p.writers))

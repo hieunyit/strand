@@ -56,7 +56,7 @@ func TestStrictBatchKeysConflicts(t *testing.T) {
 
 // Batch mới chỉ chờ batch CÒN ĐANG GHI chung khóa; batch đã ghi xong (chỉ chờ lượt commit) không chặn.
 func TestInflightSetWaitsOnlyForApplyingBatches(t *testing.T) {
-	s := newInflightSet()
+	s := newInflightSet(false)
 	a := keysOfBatch([]*model.Txn{spTxn(spRow("t", 1))}, 0)
 	b := keysOfBatch([]*model.Txn{spTxn(spRow("t", 1))}, 0)
 	free := keysOfBatch([]*model.Txn{spTxn(spRow("t", 2))}, 0)
@@ -88,5 +88,33 @@ func TestInflightSetWaitsOnlyForApplyingBatches(t *testing.T) {
 	s.stop()
 	if ok := <-got; ok {
 		t.Fatal("acquire after stop must return false")
+	}
+}
+
+// Target PG: DELETE/UPDATE không chờ row chưa commit của batch trước (đọc theo snapshot, bỏ qua row đó),
+// nên batch chung khóa phải chờ batch trước commit hẳn (release), không chỉ ghi xong (applied).
+func TestInflightSetPGTargetWaitsForCommit(t *testing.T) {
+	s := newInflightSet(true)
+	a := keysOfBatch([]*model.Txn{spTxn(spRow("t", 1))}, 0)
+	b := keysOfBatch([]*model.Txn{spTxn(spRow("t", 1))}, 0)
+	if !s.acquire(a) {
+		t.Fatal("acquire")
+	}
+	got := make(chan bool, 1)
+	go func() { got <- s.acquire(b) }()
+	s.applied(a)
+	select {
+	case <-got:
+		t.Fatal("PG target: b must wait until a commits, not only until a has applied")
+	case <-time.After(100 * time.Millisecond):
+	}
+	s.release(a)
+	select {
+	case ok := <-got:
+		if !ok {
+			t.Fatal("acquire after release returned false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("b must start once a has committed")
 	}
 }
