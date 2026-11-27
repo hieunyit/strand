@@ -64,8 +64,8 @@ func TestPR1_UnfencedSourceNeedsOperatorDecision(t *testing.T) {
 	if !errors.As(err, &ee) || ee.ExitCode != exitcode.NeedsDecision || ee.Code != exitcode.ErrPromoteNeedsDecision {
 		t.Fatalf("expected exit 10 promote_needs_decision, got %v", err)
 	}
-	if progress.State != promote.StateAwaitingOperator {
-		t.Fatalf("state = %s, want awaiting_operator", progress.State)
+	if progress.State != promote.StateAwaitingOperator || progress.DecisionReason != promote.DecisionFenceFailed {
+		t.Fatalf("state = %s reason = %q, want awaiting_operator / %s", progress.State, progress.DecisionReason, promote.DecisionFenceFailed)
 	}
 	if progress.IsStepCompleted(promote.StepFenceSource) {
 		t.Fatalf("fence must not be marked completed when the source was not fenced")

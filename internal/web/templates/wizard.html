@@ -61,9 +61,27 @@
   {{end}}
 {{else if eq .Kind "promote"}}
   {{if .PlanInfo}}<section class="card"><div class="cardhead"><h2>Promote state</h2></div><p>{{.PlanInfo}}</p></section>{{end}}
-  {{if .Decision}}<section class="card danger-card"><div class="cardhead"><h2>The CLI needs a decision (exit 10)</h2></div>
-    <pre class="code wrapcode">{{.Decision}}</pre>
-    <p class="mt10">Options: (a) isolate the old source another way (power it off, block the network), then use <b>Failover</b> below; the data the CLI lists above may be lost. (b) If only sequence values are needed, run Promote again with <code>override_sequences</code> filled in. (c) Close the wizard; the promote progress stays saved and a later run resumes it.</p>
+  {{if .Decision}}<section class="card danger-card" id="promote-decision" data-decision="{{if .Dec}}{{.Dec.Reason}}{{end}}">
+    <div class="cardhead"><h2>{{if .Dec}}{{.Dec.Title}}{{else}}The CLI needs a decision (exit 10){{end}}</h2><span class="badge st-warning">exit 10 · needs decision</span></div>
+    {{with .Dec}}
+    <p>{{.Explain}}</p>
+    <dl class="props mt10">
+      <dt>Old source</dt><dd>{{if .Fenced}}<span class="badge st-synced">fenced (read-only)</span>{{else}}<span class="badge st-failed">not fenced</span>{{end}}</dd>
+      {{if .Summary}}<dt>Applied on the target</dt><dd class="mono small wrap">{{.Summary}}</dd>{{end}}
+    </dl>
+    <h3 class="mt10">What you can do</h3>
+    <ol class="decision-options">{{range .Options}}<li>{{.}}</li>{{end}}</ol>
+    {{if .Sequences}}
+    <h3 class="mt10">Suggested sequence values</h3>
+    <div class="tablewrap"><table class="data-table"><thead><tr><th>Sequence</th><th class="c-num">Suggested next value</th></tr></thead><tbody>
+      {{range .Sequences}}<tr><td class="mono">{{.Name}}</td><td class="c-num mono">{{.Value}}</td></tr>{{end}}
+    </tbody></table></div>
+    <div class="form-actions"><button type="button" class="btn" data-fill-form="promote-form" data-fill-name="override_sequences" data-fill-value="{{.OverrideJSON}}">Use these values in Override sequences</button>
+      <span class="muted small">Fills the field below; nothing runs until you press Promote or Failover.</span></div>
+    {{end}}
+    {{end}}
+    <details class="advanced mt10"{{if not .Dec}} open{{end}}><summary>CLI report</summary><pre class="code wrapcode">{{.Decision}}</pre></details>
+    {{if not .Dec}}<p class="mt10">Options: (a) isolate the old source another way (power it off, block the network), then use <b>Failover</b> below; the data the CLI lists above may be lost. (b) If only sequence values are needed, run Promote again with <code>override_sequences</code> filled in. (c) Close the wizard; the promote progress stays saved and a later run resumes it.</p>{{end}}
   </section>{{end}}
   {{if eq .Step "done"}}<section class="card"><div class="cardhead"><h2>Promoted</h2><span class="badge st-synced">done</span></div><p>The target accepts writes. Switch the application to it, then stop the pipeline (it keeps running otherwise).</p>
     {{if .Ctl.Running}}<div class="form-actions"><form class="act inline" data-action="stop" data-pipeline="{{.Name}}" data-stay data-confirm="Stop pipeline {{.Name}}? Do this only after the application uses the new primary."><button class="btn danger" type="submit">Stop the pipeline</button></form></div>{{end}}

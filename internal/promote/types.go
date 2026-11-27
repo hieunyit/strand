@@ -87,6 +87,7 @@ type Progress struct {
 	Sequences          []SequenceInfo   `json:"sequences"`
 	SuggestedSequences map[string]int64 `json:"suggested_sequences"`
 	FailoverSummary    string           `json:"failover_summary,omitempty"`
+	DecisionReason     string           `json:"decision_reason,omitempty"` // lý do exit 10 gần nhất (Decision*)
 	UpdatedAt          time.Time        `json:"updated_at"`
 }
 

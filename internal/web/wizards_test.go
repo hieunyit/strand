@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strand/internal/promote"
 	"strings"
 	"sync"
 	"testing"
@@ -702,5 +703,58 @@ func TestWizardPagesRenderInEveryStep(t *testing.T) {
 	e.lastJobDone("promote")
 	if p := get("/pipelines/orders/promote"); !strings.Contains(p, "promote-plan") || strings.Contains(p, "Leaky") {
 		t.Errorf("promote page, ready step")
+	}
+}
+
+// Exit 10 vì source mất sau fence: trang hiện lý do, lời khuyên đúng trường hợp và bảng sequence gợi ý,
+// nút điền sẵn override_sequences mang JSON gợi ý (người vận hành vẫn bấm Promote/Failover).
+func TestPromoteWizardStructuredDecision(t *testing.T) {
+	e := opsEnv(t, false, func(c *Config) {})
+	wizFake(t, e)
+	e.sampleNow()
+	c, csrf := e.loginOK()
+	e.act(c, csrf, "orders", ActPromotePlan, promoteBody(nil))
+	e.lastJobDone("promote")
+
+	d := promote.Decision{
+		Reason: promote.DecisionSourceLostAfterFence, Fenced: true, CurrentStep: promote.StepApplyRemaining,
+		CompletedSteps:     []promote.PromoteStep{promote.StepFenceSource, promote.StepHoldReadOnly},
+		FailoverSummary:    "target applied up to uuid:1-42",
+		SuggestedSequences: map[string]int64{"public.z_seq": 900, "public.a_seq": 12345},
+		Message:            "the source became unreachable after it was fenced",
+	}
+	e.setExit(10)
+	e.setOut("=== PROMOTE NEEDS OPERATOR DECISION ===\nTrạng thái pipeline: awaiting_operator\n" + d.Line() + "\nError [promote_needs_decision]: x\n")
+	if code, b := e.act(c, csrf, "orders", ActPromoteRun, promoteBody(map[string]string{"confirm_name": "orders"})); code != 200 {
+		t.Fatalf("promote: %d %v", code, b)
+	}
+	e.lastJobDone("promote")
+	v := e.wizState(c, "promote")
+	dd, _ := v["decision_detail"].(map[string]any)
+	if dd == nil || dd["reason"] != promote.DecisionSourceLostAfterFence || dd["fenced"] != true ||
+		dd["override_json"] != `{"public.a_seq":12345,"public.z_seq":900}` || dd["failover_offered"] != true {
+		t.Fatalf("decision_detail = %v", dd)
+	}
+	seqs, _ := dd["suggested_sequences"].([]any)
+	if len(seqs) != 2 || seqs[0].(map[string]any)["name"] != "public.a_seq" {
+		t.Fatalf("sequences = %v", seqs)
+	}
+	resp, page := e.do(c, "GET", "/pipelines/orders/promote", "", nil)
+	for _, want := range []string{
+		"The source went away after it was fenced", "fenced (read-only)", "target applied up to uuid:1-42",
+		"Wait for the source to come back", `data-fill-name="override_sequences"`,
+		`data-fill-value="{&#34;public.a_seq&#34;:12345,&#34;public.z_seq&#34;:900}"`, ">12345<", "CLI report",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("promote page (%d) misses %q", resp.StatusCode, want)
+		}
+	}
+
+	// Dòng JSON hỏng: trang quay về hiện nguyên văn như trước, không có decision_detail.
+	e.setOut("=== PROMOTE NEEDS OPERATOR DECISION ===\n" + promote.DecisionLinePrefix + "{broken\n")
+	e.act(c, csrf, "orders", ActPromoteRun, promoteBody(map[string]string{"confirm_name": "orders"}))
+	e.lastJobDone("promote")
+	if v := e.wizState(c, "promote"); v["decision_detail"] != nil || !strings.Contains(fmt.Sprint(v["decision"]), "PROMOTE NEEDS OPERATOR DECISION") {
+		t.Errorf("fallback: detail=%v decision=%v", v["decision_detail"], v["decision"])
 	}
 }

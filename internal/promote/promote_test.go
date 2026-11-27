@@ -357,6 +357,9 @@ func TestPM3_UnreachableSource_Exit10PromoteNeedsDecision(t *testing.T) {
 	if progress.State != promote.StateAwaitingOperator {
 		t.Fatalf("trạng thái mong muốn %s, nhận được %s", promote.StateAwaitingOperator, progress.State)
 	}
+	if progress.DecisionReason != promote.DecisionFenceFailed {
+		t.Fatalf("lý do dừng = %q, muốn %s", progress.DecisionReason, promote.DecisionFenceFailed)
+	}
 
 	// Kiểm tra giá trị gợi ý: last_synced + margin
 	expectedMargin := promote.CalculateMargin(cacheSize, incrementBy, peakRate, syncIntervalSec)

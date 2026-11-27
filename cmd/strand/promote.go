@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -308,6 +309,10 @@ func newPromoteCmd() *cobra.Command {
 						fmt.Printf("Không fence được source cũ (không truy cập được hoặc thiếu --fence).\n")
 						fmt.Printf("Cô lập source bằng cách khác rồi chạy lại với --source-fenced-externally.\n")
 					}
+					if progress.DecisionReason == promote.DecisionSourceLostAfterFence {
+						fmt.Printf("Source đã bị fence nhưng mất kết nối trước khi xác nhận target đã apply hết log còn lại.\n")
+						fmt.Printf("Chờ source quay lại rồi chạy lại promote, hoặc xác nhận failover với --source-fenced-externally (có thể thiếu giao dịch chưa apply).\n")
+					}
 					if progress.FailoverSummary != "" {
 						fmt.Printf("Dữ liệu sẽ mất nếu tiếp tục: %s\n", progress.FailoverSummary)
 					}
@@ -318,6 +323,13 @@ func newPromoteCmd() *cobra.Command {
 						}
 						fmt.Printf("Duyệt hoặc chỉ định giá trị qua --override-sequences '<json>' khi chạy lại.\n")
 					}
+					// Dòng máy đọc được cho Web (không chứa DSN/bí mật).
+					msg := err.Error()
+					var xe *exitcode.Error
+					if errors.As(err, &xe) {
+						msg = xe.Message
+					}
+					fmt.Println(promote.DecisionFrom(progress, msg).Line())
 				}
 				return err
 			}

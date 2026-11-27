@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strand/internal/exitcode"
 	"strconv"
 	"strings"
 	"syscall"
@@ -132,7 +133,11 @@ func (s *Server) lookupJob(w http.ResponseWriter, r *http.Request) (JobStatus, b
 
 func (s *Server) apiJob(w http.ResponseWriter, r *http.Request, _ *Session) {
 	if j, ok := s.lookupJob(w, r); ok {
-		writeJSON(w, http.StatusOK, map[string]any{"job": j})
+		body := map[string]any{"job": j}
+		if v := s.jobVerifyOutcome(j); v != nil {
+			body["verify_outcome"] = v
+		}
+		writeJSON(w, http.StatusOK, body)
 	}
 }
 
@@ -433,6 +438,7 @@ type jobBody struct {
 	Job    JobStatus
 	Chunk  JobOutput
 	Origin jobOrigin
+	Verify *verifyOutcome
 }
 
 func (s *Server) pageJob(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -453,5 +459,13 @@ func (s *Server) pageJob(w http.ResponseWriter, r *http.Request, sess *Session) 
 	if origin.Pipeline {
 		active = j.Pipeline
 	}
-	s.render(w, "job", sess, pageData{Title: "Job " + j.Kind + " " + origin.Label, Active: active, Refresh: 0, Body: jobBody{Job: j, Chunk: out, Origin: origin}})
+	s.render(w, "job", sess, pageData{Title: "Job " + j.Kind + " " + origin.Label, Active: active, Refresh: 0, Body: jobBody{Job: j, Chunk: out, Origin: origin, Verify: s.jobVerifyOutcome(j)}})
+}
+
+// jobVerifyOutcome đọc toàn bộ output (job verify đã xong, mã 5) để giải thích kết quả; nil với job khác.
+func (s *Server) jobVerifyOutcome(j JobStatus) *verifyOutcome {
+	if j.Kind != "verify" || j.Running || j.ExitCode == nil || *j.ExitCode != exitcode.DataError {
+		return nil
+	}
+	return parseVerifyOutcome(j, s.jobText(j.ID))
 }

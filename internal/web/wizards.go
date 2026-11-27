@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strand/internal/promote"
 	"strconv"
 	"strings"
 	"sync"
@@ -698,7 +699,8 @@ type wizardView struct {
 	LagOK    bool              `json:"lag_ok"`
 	LagNote  string            `json:"lag_note,omitempty"`
 	Thr      float64           `json:"lag_threshold"`
-	Decision string            `json:"decision,omitempty"` // phần CLI in khi exit 10, nguyên văn
+	Decision string            `json:"decision,omitempty"`        // phần CLI in khi exit 10, nguyên văn
+	Dec      *promoteDecision  `json:"decision_detail,omitempty"` // bản có cấu trúc của exit 10 (dòng STRAND_PROMOTE_DECISION)
 	PlanInfo string            `json:"promote_state,omitempty"`
 	Engine   string            `json:"engine,omitempty"`
 	Opts     map[string]string `json:"opts"`
@@ -789,6 +791,9 @@ func (s *Server) wizardView(ctx context.Context, p *Pipeline, kind string) (wiza
 			if kind == "promote" {
 				if i := strings.LastIndex(text, decisionMarker); i >= 0 && st.Step == stProDecision {
 					v.Decision = tail(strings.TrimSpace(text[i:]), 4000)
+					if d, ok := promote.ParseDecision(text[i:]); ok {
+						v.Dec = newPromoteDecision(d)
+					}
 				}
 				if j.Kind == "promote-plan" {
 					v.PlanInfo = promoteStateFrom(text)

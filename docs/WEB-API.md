@@ -566,7 +566,7 @@ Với chuyển ghi có kế hoạch, dừng ghi ứng dụng và đợi `pipelin
 
 Trạng thái wizard ở `<state_dir>/wizards/<repair|promote>-<pipeline>.json` (0600, ghi nguyên tử, đọc lại từ đĩa mỗi request nên web khởi động lại vẫn tiếp tục). Thứ tự bước được ép ở server: gọi sai bước trả **409** kèm bước hiện tại. Kết quả job (mã thoát) được đồng bộ vào state khi đọc. Mọi bước chạy tiến trình con `strand` (argv mảng, `env_file`), một job mỗi pipeline.
 
-`GET /api/v1/pipelines/{name}/repair` và `.../promote` → `{"kind", "pipeline", "step", "active", "state": {step, job_id, job_done, last_exit, failover, opts, history[]} | null, "steps": [{n, title, status}], "job", "output_tail", "pipeline_running", "lag_seconds", "lag_ok", "lag_threshold", "decision", "promote_state", "can": {action: bool}}`. `step`: repair `wait`→`verify`→`start`→`done` (hoặc `aborted`); promote `plan`→`planning`→`ready`→`running`→`done`, `decision` (exit 10), `failed` (khác 0 và 10), `aborted`. Trang HTML: `/pipelines/{name}/repair` và `/promote`.
+`GET /api/v1/pipelines/{name}/repair` và `.../promote` → `{"kind", "pipeline", "step", "active", "state": {step, job_id, job_done, last_exit, failover, opts, history[]} | null, "steps": [{n, title, status}], "job", "output_tail", "pipeline_running", "lag_seconds", "lag_ok", "lag_threshold", "decision", "decision_detail", "promote_state", "can": {action: bool}}`. `step`: repair `wait`→`verify`→`start`→`done` (hoặc `aborted`); promote `plan`→`planning`→`ready`→`running`→`done`, `decision` (exit 10), `failed` (khác 0 và 10), `aborted`. Trang HTML: `/pipelines/{name}/repair` và `/promote`.
 
 | Action | Yêu cầu | Việc làm |
 | --- | --- | --- |
@@ -580,7 +580,7 @@ Trạng thái wizard ở `<state_dir>/wizards/<repair|promote>-<pipeline>.json` 
 | `promote-failover` | `confirm_name` **và** `confirm_name2` (cùng bằng tên pipeline); chỉ ở bước `decision`; `fence_dsn` tùy chọn | Job `promote-failover`: như `promote-run` thêm `--source-fenced-externally` |
 | `promote-abort` | như `repair-abort` | Đóng wizard (tiến độ promote vẫn nằm trong `_strand_promote`) |
 
-Tùy chọn promote (đều qua whitelist): `catchup_timeout`, `fence_timeout` (`30s`, `5m`, `1h`), `peak_rate`, `sync_interval` (số), `app_role`, `schemas` (chỉ target PG), `source_app_roles`, `objects_post` (`true`, chỉ target MySQL), `override_sequences` (JSON `{"seq": số}`). `--engine` lấy từ `target.kind` của cấu hình, `--pipeline` từ `name` của cấu hình. `target_dsn` và `fence_dsn` không bao giờ được lưu; dòng audit ghi `<hidden>` và `Job.args` ghi `--target=<hidden>`. `decision` là đoạn CLI in sau dòng `=== PROMOTE NEEDS OPERATOR DECISION ===` (nguyên văn, gồm phần dữ liệu sẽ mất).
+Tùy chọn promote (đều qua whitelist): `catchup_timeout`, `fence_timeout` (`30s`, `5m`, `1h`), `peak_rate`, `sync_interval` (số), `app_role`, `schemas` (chỉ target PG), `source_app_roles`, `objects_post` (`true`, chỉ target MySQL), `override_sequences` (JSON `{"seq": số}`). `--engine` lấy từ `target.kind` của cấu hình, `--pipeline` từ `name` của cấu hình. `target_dsn` và `fence_dsn` không bao giờ được lưu; dòng audit ghi `<hidden>` và `Job.args` ghi `--target=<hidden>`. `decision` là đoạn CLI in sau dòng `=== PROMOTE NEEDS OPERATOR DECISION ===` (nguyên văn, gồm phần dữ liệu sẽ mất). `decision_detail` (khi CLI in dòng `STRAND_PROMOTE_DECISION {json}`) là bản có cấu trúc: `{"reason", "title", "explain", "options": [..], "fenced", "failover_summary", "message", "suggested_sequences": [{name, value}], "override_json", "failover_offered", "completed_steps"}`; `reason` là `fence_failed` (không fence được source), `source_lost_after_fence` (source mất sau fence, chưa kiểm được catch-up) hoặc `independent_sequences` (chỉ thiếu giá trị sequence độc lập). `override_json` dùng thẳng cho `override_sequences`. Dòng JSON hỏng hoặc thiếu thì chỉ có `decision`.
 
 ### 4.3 Job
 
@@ -590,7 +590,7 @@ Job lưu ở `<state_dir>/jobs/<id>.json` (trạng thái) và `<id>.log` (stdout
 | --- | --- |
 | `GET /api/v1/jobs?pipeline=` | `{"jobs": [Job]}` mới nhất trước |
 | `GET /api/v1/pipelines/{name}/jobs` | như trên cho một pipeline |
-| `GET /api/v1/jobs/{id}` | `{"job": Job}` |
+| `GET /api/v1/jobs/{id}` | `{"job": Job}`; job `verify` thoát 5 có thêm `verify_outcome`: `{"status": "incomplete"|"mismatch", "title", "explain", "tables": [{name, reason}], "no_mismatch", "scope_changed", "message", "mode"}` (đọc từ dòng `Error [verify_incomplete|verify_mismatch]` của CLI; `no_mismatch` = mọi số `N mismatches` trong output đều 0) |
 | `GET /api/v1/jobs/{id}/output?offset=N` | `{"data", "offset", "running", "exit_code"}`: output từ byte `N`; gọi lại với `offset` trả về cho tới khi `running=false`. Khi còn chạy chỉ trả đến dòng đầy đủ cuối cùng; mật khẩu/DSN bị che; tối đa 256 KiB mỗi lần |
 | `GET /api/v1/pipelines/{name}/source-tables` | `{"tables": [{"table", "in_pipeline"}], "error"}` từ admin socket `source_tables` (chỉ đọc); dùng để chọn bảng cho `snapshot-add`/`verify` |
 

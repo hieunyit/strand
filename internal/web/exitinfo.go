@@ -34,7 +34,7 @@ func ExplainExit(code int) ExitInfo {
 	case exitcode.Fenced:
 		return ExitInfo{code, "pipeline_locked or fenced: another instance with the same name is running or has replaced this one", "Make sure only one instance runs", false}
 	case exitcode.DataError:
-		return ExitInfo{code, "Data or log error: log_gap, prefetch_exhausted or verify_mismatch", "log_gap: restore the log from the archive or re-seed; verify_mismatch: run the repair procedure (USAGE 7.8)", false}
+		return ExitInfo{code, "Data or log error: log_gap, prefetch_exhausted, verify_mismatch or verify_incomplete", "log_gap: restore the log from the archive or re-seed; verify_mismatch: run the repair procedure (USAGE 7.8); verify_incomplete: no difference was found but some tables could not be compared (rows kept changing): verify them again (sample or full)", false}
 	case exitcode.NeedsDecision:
 		return ExitInfo{code, "Stopped for an operator decision: schema_change_pending or promote_needs_decision", "Apply the DDL on the target and start again; or fence the source and re-run promote with --source-fenced-externally", false}
 	case 137:

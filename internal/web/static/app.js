@@ -739,6 +739,19 @@
     });
   });
 
+  // Buttons with data-fill-form/name/value copy a suggested value into a form field (promote decision).
+  document.addEventListener('click', function (ev) {
+    var b = ev.target && ev.target.closest && ev.target.closest('[data-fill-form]');
+    if (!b) { return; }
+    var f = document.getElementById(b.getAttribute('data-fill-form'));
+    var el = f && f.elements[b.getAttribute('data-fill-name')];
+    if (!el) { return; }
+    el.value = b.getAttribute('data-fill-value') || '';
+    f.setAttribute('data-dirty', '1');
+    el.focus();
+    toast('Suggested values copied into ' + b.getAttribute('data-fill-name'), true);
+  });
+
   document.addEventListener('input', function (ev) {
     var form = ev.target && ev.target.form;
     if (form) { form.setAttribute('data-dirty', '1'); }

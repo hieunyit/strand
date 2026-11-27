@@ -20,6 +20,23 @@
     <a class="btn ghost" href="/jobs">All jobs</a>
   </div>
 </section>
+{{with .Verify}}
+<section class="card {{if eq .Status "mismatch"}}danger-card{{end}}" id="verify-outcome" data-verify-status="{{.Status}}" aria-label="Verify result">
+  <div class="cardhead"><h2>{{.Title}}</h2>
+    {{if eq .Status "incomplete"}}<span class="badge st-warning">incomplete{{if .NoMismatch}} · 0 mismatches{{end}}</span>{{else}}<span class="badge st-failed">mismatch</span>{{end}}</div>
+  <p>{{.Explain}}</p>
+  {{if .Tables}}
+  <div class="tablewrap mt10"><table class="data-table"><thead><tr><th>Table</th><th>Why it was not verified</th>{{if and $.CanOperate $.Body.Origin.Pipeline (eq .Status "incomplete")}}<th>Verify again</th>{{end}}</tr></thead><tbody>
+  {{range .Tables}}<tr><td class="mono">{{.Name}}</td><td>{{.Reason}}</td>
+    {{if and $.CanOperate $.Body.Origin.Pipeline (eq $.Body.Verify.Status "incomplete")}}<td><div class="actions">
+      <form class="act inline" data-action="verify" data-pipeline="{{$.Body.Job.Pipeline}}"><input type="hidden" name="mode" value="sample"><input type="hidden" name="table" value="{{.Name}}"><button class="btn small" type="submit">Sample</button></form>
+      <form class="act inline" data-action="verify" data-pipeline="{{$.Body.Job.Pipeline}}" data-confirm="Run a full verify of {{.Name}}? It reads every row of the table on the source and the target."><input type="hidden" name="mode" value="full"><input type="hidden" name="table" value="{{.Name}}"><button class="btn small" type="submit">Full</button></form>
+    </div></td>{{end}}</tr>{{end}}
+  </tbody></table></div>
+  {{end}}
+  <details class="advanced mt10"><summary>CLI message</summary><p class="mono small wrap">{{.Message}}</p></details>
+</section>
+{{end}}
 <div class="detail-layout">
 <div class="detail-main">
 <section class="card">

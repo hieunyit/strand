@@ -309,7 +309,7 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 					}
 					progress.FailoverSummary = summary
 				}
-				progress.State = StateAwaitingOperator
+				progress.State, progress.DecisionReason = StateAwaitingOperator, DecisionFenceFailed
 				_ = p.stateStore.SaveProgress(ctx, progress)
 				msg := "source could not be fenced: isolate the old source by other means (power off, STONITH, block application traffic), then re-run with --source-fenced-externally"
 				if progress.FailoverSummary != "" {
@@ -363,7 +363,7 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 					}
 					progress.FailoverSummary = summary
 				}
-				progress.State = StateAwaitingOperator
+				progress.State, progress.DecisionReason = StateAwaitingOperator, DecisionSourceLostAfterFence
 				_ = p.stateStore.SaveProgress(ctx, progress)
 				msg := "the source became unreachable after it was fenced, so Strand cannot show that the target applied the remaining log. " +
 					"Wait for the source and re-run promote, or confirm the failover with --source-fenced-externally (transactions not yet applied may be missing)"
@@ -515,7 +515,7 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 		}
 
 		if needsDecision {
-			progress.State = StateAwaitingOperator
+			progress.State, progress.DecisionReason = StateAwaitingOperator, DecisionIndependentSequences
 			_ = p.stateStore.SaveProgress(ctx, progress)
 			return progress, exitcode.New(
 				exitcode.ErrPromoteNeedsDecision,

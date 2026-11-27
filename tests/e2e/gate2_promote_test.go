@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strand/internal/promote"
 	"strconv"
 	"strings"
 	"sync"
@@ -783,6 +784,10 @@ func TestG2_E2E_PromoteSourceUnreachableCache1000PG(t *testing.T) {
 	if !ok {
 		t.Fatalf("promote #1 does not name the independent sequence app.ext_seq with a suggested value:\n%s", out)
 	}
+	// Dòng máy đọc được cho Web: cùng lý do và cùng giá trị gợi ý với phần chữ.
+	if dec, ok := promote.ParseDecision(out); !ok || dec.Reason != promote.DecisionFenceFailed || dec.Fenced || dec.SuggestedSequences["app.ext_seq"] != got {
+		t.Fatalf("promote #1 decision line = %+v (ok=%v), want reason %s, not fenced, app.ext_seq=%d\n%s", dec, ok, promote.DecisionFenceFailed, got, out)
+	}
 	if got != synced+margin {
 		t.Fatalf("suggested value for app.ext_seq = %d, want last synced %d + margin %d = %d", got, synced, margin, synced+margin)
 	}
@@ -889,6 +894,9 @@ func TestG2_E2E_PromoteSourceUnreachableCache1000MySQL(t *testing.T) {
 	}
 	requireContains(t, "promote #1", out, "promote_needs_decision", "PROMOTE NEEDS OPERATOR DECISION",
 		"Không fence được source cũ", "--source-fenced-externally", "Dữ liệu sẽ mất nếu tiếp tục", "target applied up to", uuid)
+	if dec, ok := promote.ParseDecision(out); !ok || dec.Reason != promote.DecisionFenceFailed || !strings.Contains(dec.FailoverSummary, uuid) {
+		t.Fatalf("promote #1 decision line = %+v (ok=%v), want reason %s with the applied set\n%s", dec, ok, promote.DecisionFenceFailed, out)
+	}
 	if sug := parseSuggestions(out); len(sug) != 0 {
 		t.Fatalf("promote #1 asks about sequences %v, but the target has only identity columns (max(col) + margin):\n%s", sug, out)
 	}

@@ -706,8 +706,9 @@ func TestPR1_AC3_SourceUnreachableAfterFence_Exit10(t *testing.T) {
 	}
 	// Dừng ở bước 3 (apply nốt log): không chứng minh được target đã apply hết khi source mất sau fence,
 	// nên chưa qua bước đó; người vận hành nhận gợi ý sequence và cách xác nhận failover.
-	if progress.State != promote.StateAwaitingOperator || progress.CurrentStep != promote.StepApplyRemaining || progress.IsStepCompleted(promote.StepApplyRemaining) {
-		t.Fatalf("AC3: state=%s step=%s", progress.State, progress.CurrentStep)
+	if progress.State != promote.StateAwaitingOperator || progress.CurrentStep != promote.StepApplyRemaining || progress.IsStepCompleted(promote.StepApplyRemaining) ||
+		progress.DecisionReason != promote.DecisionSourceLostAfterFence {
+		t.Fatalf("AC3: state=%s step=%s reason=%q", progress.State, progress.CurrentStep, progress.DecisionReason)
 	}
 	if !strings.Contains(err.Error(), "--source-fenced-externally") || !strings.Contains(err.Error(), `"ac3_seq":`) {
 		t.Fatalf("AC3: the decision message must say how to continue and the suggested value: %v", err)

@@ -1271,3 +1271,7 @@ dialog.qsearch::backdrop { background: rgba(11, 18, 32, .45); }
 .segmented .check input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 1px; }
 .ssh-account-new { padding: var(--sp-4); border: 1px dashed var(--line-strong); border-radius: var(--r-md); background: var(--surface-2); }
 .ssh-account-new[hidden] { display: none; }
+
+/* Promote decision (exit 10) */
+.decision-options { margin: 6px 0 0 18px; padding: 0; display: grid; gap: 6px; }
+.decision-options li { line-height: 1.45; }
