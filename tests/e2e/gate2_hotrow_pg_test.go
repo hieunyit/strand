@@ -6,7 +6,8 @@ package e2e
 //   - `verify --mode full` và `--mode sample --rate 1.0`: exit 5 (verify_mismatch), lệch đúng một row
 //     (row cài lệch), row nóng không bao giờ lọt vào danh sách lệch, unverifiable_hot ≤ 1 và = 1 ở ít
 //     nhất một trong 3 lượt (lượt so range có thể đọc trúng lúc target bằng source);
-//   - `--mode delta` (khóa CDC đã chạm = row nóng): exit 0, metric
+//   - `--mode delta` (khóa CDC đã chạm = row nóng): exit 5 verify_incomplete nêu bảng bị bỏ qua, 0
+//     mismatch (fail-closed từ 87f06f7; exit 0 khi lượt đó không chạm row nóng), metric
 //     strand_verify_unverifiable_hot_total của bảng tăng.
 // Cuối: dừng tải, trả row cài lệch về giá trị source, trạng thái cuối giống hệt.
 //
@@ -162,7 +163,8 @@ func pgHotVerifyRuns(t *testing.T, mode string, re *regexp.Regexp, minRows int, 
 	t.Fatalf("%s: hot row %d (%.0f updates/s) was never reported unverifiable_hot in 3 runs", mode, pgHotRowID, hot.rate())
 }
 
-// pgHotDelta: delta (chỉ khóa đã chạm = row nóng) không báo lệch giả, metric unverifiable_hot tăng.
+// pgHotDelta: delta (chỉ khóa đã chạm = row nóng) không báo lệch giả (checkHotDelta), metric
+// unverifiable_hot tăng.
 func pgHotDelta(t *testing.T, cfg *strandCfg, path, table string, p *strandProc) {
 	t.Helper()
 	labels := map[string]string{"pipeline": cfg.Name, "table": table}
@@ -171,9 +173,7 @@ func pgHotDelta(t *testing.T, cfg *strandCfg, path, table string, p *strandProc)
 	for attempt := 1; attempt <= 3 && pgHotMetric(t, cfg.MetricsAddr, metric, labels) <= base; attempt++ {
 		out, code := runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--mode", "delta", "--socket", cfg.Socket)
 		t.Logf("delta attempt %d: exit %d: %s", attempt, code, strings.TrimSpace(out))
-		if code != 0 {
-			t.Fatalf("verify delta on the hot row reported a mismatch or failed: exit %d\n%s\n%s", code, out, p.tail())
-		}
+		checkHotDelta(t, code, out, table, p.tail())
 	}
 	if got := pgHotMetric(t, cfg.MetricsAddr, metric, labels); got <= base {
 		t.Fatalf("%s{table=%s} did not increase over 3 delta runs (%.0f)", metric, table, got)

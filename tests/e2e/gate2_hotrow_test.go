@@ -15,7 +15,8 @@ package e2e
 //     row nóng không bao giờ bị báo lệch, và unverifiable_hot = 1 (row nóng) — tối đa 3 lượt, vì có
 //     thể lượt so range đầu tiên đọc trúng lúc target bằng source.
 //   - delta (khóa CDC đã chạm = row nóng): không báo lệch giả, metric
-//     strand_verify_unverifiable_hot_total{table="app.accounts"} tăng.
+//     strand_verify_unverifiable_hot_total{table="app.accounts"} tăng. Từ 87f06f7 delta fail-closed:
+//     row nóng → exit 5 verify_incomplete, bảng nằm trong danh sách bỏ qua (checkHotDelta).
 //   - Cuối: trả row 777 về đúng giá trị source, trạng thái cuối giống hệt (row nóng không mất bản ghi nào).
 
 import (
@@ -173,9 +174,7 @@ func TestG2_E2E_HotRowUnverifiableAndPlantedMismatch(t *testing.T) {
 	for attempt := 1; attempt <= 3 && unverifiable() <= base; attempt++ {
 		out, code := runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--mode", "delta", "--socket", cfg.Socket)
 		t.Logf("delta attempt %d: exit %d: %s", attempt, code, strings.TrimSpace(out))
-		if code != 0 {
-			t.Fatalf("verify delta on the hot row reported a mismatch or failed: exit %d\n%s\n%s", code, out, p.tail())
-		}
+		checkHotDelta(t, code, out, "app.accounts", p.tail())
 	}
 	if got := unverifiable(); got <= base {
 		t.Fatalf("strand_verify_unverifiable_hot_total{table=app.accounts} did not increase over 3 delta runs (%.0f)", got)
@@ -204,4 +203,26 @@ func TestG2_E2E_HotRowUnverifiableAndPlantedMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	compareFinal(t, src, dst, appTables...)
+}
+
+// hotDeltaZeroMismatch: delta report "... N changed keys in M tables verified, 0 mismatches".
+var hotDeltaZeroMismatch = regexp.MustCompile(`\b0 mismatches\b`)
+
+// checkHotDelta: kết quả một lượt `verify --mode delta` khi bảng có row nóng. Từ 87f06f7 delta
+// fail-closed: bảng có row không kiểm được (S1 ≠ S2) → exit 5 verify_incomplete, bảng được nêu là
+// bỏ qua vì "rows continued changing during verification", và KHÔNG có mismatch nào. Exit 0 vẫn hợp
+// lệ: lượt đó row nóng không nằm trong tập khóa đã chạm. Mọi kết quả khác (mismatch, lỗi khác) là
+// fail. table rỗng: bảng nào bị bỏ qua cũng được (tải ngẫu nhiên).
+func checkHotDelta(t *testing.T, code int, out, table, tail string) {
+	t.Helper()
+	if code == 0 {
+		return
+	}
+	if code == exitcode.DataError && strings.Contains(out, exitcode.ErrVerifyIncomplete) &&
+		strings.Contains(out, table+" (rows continued changing during verification)") &&
+		hotDeltaZeroMismatch.MatchString(out) {
+		return
+	}
+	t.Fatalf("verify delta on a hot row: want exit 0, or exit %d %s skipping %q with 0 mismatches; got exit %d\n%s\n%s",
+		exitcode.DataError, exitcode.ErrVerifyIncomplete, table, code, out, tail)
 }

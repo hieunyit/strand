@@ -308,8 +308,8 @@ func TestAC3_ResumeAfterPartialVerify(t *testing.T) {
 	if err := dst.QueryRow("SELECT COUNT(*) FROM _strand_verify WHERE pipeline_id = 'pipe_ac3' AND table_name = ?", tbl.String()).Scan(&saved); err != nil || saved != 2 {
 		t.Fatalf("saved chunks = %d (%v), want 2", saved, err)
 	}
-	// Đổi một row thuộc chunk đã hash ở lượt 1 (id 5 thuộc chunk [1, 10000]). Lượt resume dùng lại
-	// hash đã lưu nên không thấy thay đổi này — bằng chứng chunk đó không bị hash lại.
+	// Đổi một row thuộc chunk đã hash ở lượt 1 (id 5 thuộc chunk [1, 10000]). Từ 87f06f7 lượt resume đọc
+	// lại MỌI chunk (không dùng hash đã lưu: target có thể đã đổi trong lúc ngắt), nên thấy cả thay đổi này.
 	mustExec(t, dst, "UPDATE verify_dst.ac3_resume SET val = val + 1 WHERE id = 5")
 
 	rep, err := mysqlFull(src, dst, "pipe_ac3", 10000, lv, func(c *verify.FullVerifyConfig) { c.Resume = true }).VerifyTableFull(ctx, tbl, "id")
@@ -319,8 +319,8 @@ func TestAC3_ResumeAfterPartialVerify(t *testing.T) {
 	if rep.TotalChunks != 7 || rep.ResumedChunks != 0 || rep.HashedChunks != 7 {
 		t.Fatalf("run 2: total=%d resumed=%d hashed=%d, want 7/0/7", rep.TotalChunks, rep.ResumedChunks, rep.HashedChunks)
 	}
-	if !reflect.DeepEqual(rep.Mismatches, []string{"45000"}) {
-		t.Fatalf("run 2 mismatches = %v, want [45000]", rep.Mismatches)
+	if !reflect.DeepEqual(sorted(rep.Mismatches), []string{"45000", "5"}) {
+		t.Fatalf("run 2 mismatches = %v, want [45000 5] (resume re-reads the chunk changed after run 1)", rep.Mismatches)
 	}
 	// Lượt mới (không Resume) xóa tiến độ cũ, hash lại hết và thấy cả hai row.
 	rep, err = mysqlFull(src, dst, "pipe_ac3", 10000, lv, nil).VerifyTableFull(ctx, tbl, "id")

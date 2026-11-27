@@ -842,10 +842,11 @@ Bảng thêm bằng lệnh này mà không nằm trong `tables.include` được
 | Chế độ | Lệnh | Cặp | Ghi chú |
 | --- | --- | --- | --- |
 | sample | `verify --mode sample --table app.t [--rate 0.01]` | Mọi cặp (PG→PG, MySQL→PG: chỉ PK một cột số nguyên) | Lấy mẫu `--rate` phần row theo khoảng khóa, so trực tiếp (khác engine: so chuỗi chính tắc như full) |
-| delta | `verify --mode delta` | Mọi cặp | Qua socket: verify các khóa CDC vừa chạm. Lệch thì exit 5 |
+| delta | `verify --mode delta` | Mọi cặp | Qua socket: verify các khóa CDC vừa chạm. Lệch thì exit 5 `verify_mismatch`; có bảng không kiểm trọn được (row nóng, bảng vượt giới hạn) thì exit 5 `verify_incomplete` |
 | full | `verify --mode full [--table app.t] [--rate N]` | Mọi cặp | Cây Merkle theo chunk 10.000 row, rồi so từng row ở chunk lệch. `--rate` ở đây là chunk/giây (không đặt thì 10) |
 
 - Mọi chế độ kiểm lại row lệch: đọc source, chờ target apply tới vị trí log của source lúc đọc (MySQL: `gtid_executed`; PG: WAL insert LSN, kèm một watermark `pg_logical_emit_message` để pipeline dời checkpoint qua đó cả khi source rảnh), đọc target, đọc lại source. Row đổi ở source trong mọi lần thử (mặc định 5) được đếm `unverifiable_hot` (metric `strand_verify_unverifiable_hot_total`), không báo lệch.
+- `--mode delta` fail-closed với row nóng: bảng có row `unverifiable_hot` được nêu là bỏ qua ("rows continued changing during verification") và lệnh trả **exit 5 `verify_incomplete`**, dù `0 mismatches`. Đây không phải lệch dữ liệu; script giám sát dùng exit code nên phân biệt theo mã lỗi (`verify_incomplete` khác `verify_mismatch`). Cách xử lý: chạy lại `verify --mode sample --table <bảng>` hoặc `--mode full --table <bảng>` lúc bảng bớt ghi (row vẫn nóng thì vẫn được đếm `unverifiable_hot`, không báo lệch).
 - Bước chờ apply chỉ chạy khi pipeline đang chạy (khóa pipeline trên target đang bị giữ). Pipeline đã dừng thì không chờ; pipeline đang `pause` thì chờ hết hạn (2 phút) rồi lỗi. Source PG đọc qua `--replica-dsn` (standby) không ghi được watermark: source rảnh thì chờ có thể hết hạn.
 - `--table` của full: không đặt thì kiểm **mọi bảng của pipeline** (theo `tables.include`/`exclude`, kể cả mẫu `app.*`). `--table` chỉ nhận một bảng `schema.table`, không nhận wildcard.
 - `--require-complete`: bắt buộc một lượt full mới trên mọi bảng đã cấu hình, kết quả chưa trọn vẹn thì lệnh thất bại. Dùng trước cutover.
@@ -903,6 +904,8 @@ strand promote --pipeline billing --engine pg \
 1. Không fence được source thì promote dừng exit 10 `promote_needs_decision`. Nó in vị trí đã apply ở target và thời điểm checkpoint cuối, tức phần dữ liệu sẽ mất nếu tiếp tục.
 2. Cô lập source bằng cách khác: tắt máy hoặc chặn mạng.
 3. Chạy lại cùng lệnh, thêm `--source-fenced-externally`.
+
+**Source mất kết nối ngay sau khi Strand fence xong:** Strand không chứng minh được target đã apply hết phần log còn lại, nên promote dừng ở bước 3 với exit 10 `promote_needs_decision`. Thông báo kèm vị trí đã apply ở target và giá trị gợi ý cho sequence độc lập (lần đồng bộ cuối cộng biên, dạng JSON của `--override-sequences`). Hai cách tiếp tục: chờ source quay lại rồi chạy lại cùng lệnh (bước 3 kiểm lại catch-up); hoặc xác nhận failover bằng `--source-fenced-externally` (chấp nhận có thể thiếu giao dịch chưa apply) kèm `--override-sequences` với giá trị bằng hoặc cao hơn gợi ý.
 
 ### 7.10b `objects` (MySQL/MariaDB → MySQL)
 
@@ -1260,8 +1263,9 @@ Exit 1 là lỗi tạm, nên tự restart. Exit 2–5 và 10 cần người xem.
 | 5 | `log_gap` | Source đã xóa log chưa apply; slot PG không tồn tại | Cấp lại từ archive (`--archive`), hoặc seed lại |
 | 5 | `prefetch_exhausted` | Spool prefetch đầy | Tăng spool, thêm tầng bucket |
 | 5 | `verify_mismatch` | Verify thấy lệch; UPDATE TOAST mà row không có ở target | Quy trình repair (7.8), điều tra nguyên nhân |
+| 5 | `verify_incomplete` | Verify không kiểm trọn được (bảng có row nóng `unverifiable_hot`, bảng vượt giới hạn của delta, checksum bảng keyless chưa ổn định); không phải lệch | Chạy lại `verify --mode sample`/`full` trên bảng được nêu lúc bớt ghi (7.8) |
 | 10 | `schema_change_pending` | DDL phá hủy (hoặc `additive: pause`) trên bảng của pipeline; DROP/RENAME bảng; source PG | `strand schema diff`, `strand schema approve <id>`, chạy lại `sync` (mục 3.4) |
-| 10 | `promote_needs_decision` | Promote không fence được source | Cô lập source, chạy lại với `--source-fenced-externally` |
+| 10 | `promote_needs_decision` | Promote không fence được source, hoặc source mất kết nối sau fence (không kiểm được catch-up, không đọc được sequence) | Cô lập source / chờ source quay lại, chạy lại với `--source-fenced-externally` (và `--override-sequences` theo gợi ý) |
 
 ---
 

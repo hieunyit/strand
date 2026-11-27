@@ -704,8 +704,13 @@ func TestPR1_AC3_SourceUnreachableAfterFence_Exit10(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode != exitcode.NeedsDecision || exitErr.Code != exitcode.ErrPromoteNeedsDecision {
 		t.Fatalf("AC3: want exit 10 promote_needs_decision, got %v", err)
 	}
-	if progress.State != promote.StateAwaitingOperator || progress.CurrentStep != promote.StepSetval {
+	// Dừng ở bước 3 (apply nốt log): không chứng minh được target đã apply hết khi source mất sau fence,
+	// nên chưa qua bước đó; người vận hành nhận gợi ý sequence và cách xác nhận failover.
+	if progress.State != promote.StateAwaitingOperator || progress.CurrentStep != promote.StepApplyRemaining || progress.IsStepCompleted(promote.StepApplyRemaining) {
 		t.Fatalf("AC3: state=%s step=%s", progress.State, progress.CurrentStep)
+	}
+	if !strings.Contains(err.Error(), "--source-fenced-externally") || !strings.Contains(err.Error(), `"ac3_seq":`) {
+		t.Fatalf("AC3: the decision message must say how to continue and the suggested value: %v", err)
 	}
 	if got := progress.SuggestedSequences["ac3_seq"]; got != wantSuggested {
 		t.Fatalf("AC3: suggested = %d, want last sync 10000 + margin %d = %d", got, margin, wantSuggested)
@@ -724,9 +729,14 @@ func TestPR1_AC3_SourceUnreachableAfterFence_Exit10(t *testing.T) {
 		t.Fatalf("AC3: sequence changed before a decision: %d", got)
 	}
 
-	// Người vận hành nhập giá trị cao hơn gợi ý rồi chạy lại: tiếp tục từ bước setval.
+	// Chạy lại chỉ với giá trị sequence (chưa xác nhận failover): vẫn dừng ở bước 3.
 	override := wantSuggested + 1000
 	cfg.SequenceOverrides = map[string]int64{"ac3_seq": override}
+	if _, err := promote.NewPromoter(cfg, pgStore, sourceDriver, targetDriver, seqs, nil).Run(ctx); !errors.As(err, &exitErr) || exitErr.ExitCode != exitcode.NeedsDecision {
+		t.Fatalf("AC3: re-run without confirming the failover must still stop: %v", err)
+	}
+	// Người vận hành xác nhận failover (source đã bị cô lập) và nhập giá trị cao hơn gợi ý: tiếp tục.
+	cfg.SourceFencedExternally = true
 	progress, err = promote.NewPromoter(cfg, pgStore, sourceDriver, targetDriver, seqs, nil).Run(ctx)
 	if err != nil || progress.State != promote.StatePromoted {
 		t.Fatalf("AC3: re-run with override: %v (%+v)", err, progress)

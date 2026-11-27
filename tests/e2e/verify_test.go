@@ -29,11 +29,10 @@ func TestP1_E2E_VerifySampleDeltaRepair(t *testing.T) {
 		t.Fatalf("verify under load reported a mismatch (false positive?): exit %d\n%s", code, out)
 	}
 	t.Logf("under load: %s", strings.TrimSpace(out))
+	// Khóa nóng có thể khiến delta bỏ qua bảng (fail-closed từ 87f06f7: exit 5 verify_incomplete, 0 mismatch).
 	out, code = runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--mode", "delta", "--socket", cfg.Socket)
-	if code != 0 {
-		t.Fatalf("verify delta under load: exit %d\n%s", code, out)
-	}
-	t.Logf("delta: %s", strings.TrimSpace(out))
+	checkHotDelta(t, code, out, "", p.tail())
+	t.Logf("delta: exit %d: %s", code, strings.TrimSpace(out))
 
 	// 2. Cài lệch thật vào target (row không ai ghi): phải phát hiện.
 	dst.exec(t, "UPDATE app.accounts SET note = 'CORRUPTED' WHERE id = 9000000001")

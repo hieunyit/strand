@@ -112,8 +112,10 @@ func TestC_E2E_GenericPKSnapshotUnderLoad(t *testing.T) {
 		}
 		t.Logf("%s", strings.TrimSpace(out))
 	}
+	// Under load a hot key can make delta skip a table (exit 5 verify_incomplete, 0 mismatches; see checkHotDelta).
 	out, code := runStrandCLI(t, 10*time.Minute, "verify", "-c", path, "--mode", "delta", "--socket", cfg.Socket)
-	if code != 0 || !strings.Contains(out, "changed keys") {
+	checkHotDelta(t, code, out, "", p.tail())
+	if !strings.Contains(out, "changed keys") {
 		t.Fatalf("verify delta under load: exit %d\n%s", code, out)
 	}
 	t.Logf("%s", strings.TrimSpace(out))

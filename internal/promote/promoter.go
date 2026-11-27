@@ -350,6 +350,31 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 		_ = p.stateStore.SaveProgress(ctx, progress)
 
 		if err := p.targetDriver.ApplyRemaining(ctx); err != nil {
+			if !p.cfg.SourceFencedExternally && errors.Is(err, errCatchUpSourceUnavailable) && ctx.Err() == nil {
+				// spec 02 §8 (dòng 390): source mất sau fence → dừng hỏi người vận hành, kèm gợi ý sequence.
+				// Không coi bước 3 là xong: chưa chứng minh được target đã apply hết log (444821e). Người vận
+				// hành chờ source quay lại rồi chạy lại, hoặc xác nhận failover (--source-fenced-externally,
+				// chấp nhận có thể thiếu giao dịch) kèm --override-sequences.
+				p.suggestIndependentSequences(ctx, progress)
+				if summarizer, ok := p.targetDriver.(FailoverSummarizer); ok {
+					summary, serr := summarizer.FailoverSummary(ctx)
+					if serr != nil {
+						summary = "unknown: " + serr.Error()
+					}
+					progress.FailoverSummary = summary
+				}
+				progress.State = StateAwaitingOperator
+				_ = p.stateStore.SaveProgress(ctx, progress)
+				msg := "the source became unreachable after it was fenced, so Strand cannot show that the target applied the remaining log. " +
+					"Wait for the source and re-run promote, or confirm the failover with --source-fenced-externally (transactions not yet applied may be missing)"
+				if len(progress.SuggestedSequences) > 0 {
+					msg += fmt.Sprintf(" and set independent sequences with --override-sequences (suggested: %s)", formatSuggestions(progress.SuggestedSequences))
+				}
+				if progress.FailoverSummary != "" {
+					msg += "; applied on the target: " + progress.FailoverSummary
+				}
+				return progress, exitcode.New(exitcode.ErrPromoteNeedsDecision, exitcode.NeedsDecision, msg, err)
+			}
 			if !p.cfg.SourceFencedExternally || !errors.Is(err, errCatchUpSourceUnavailable) || ctx.Err() != nil {
 				return progress, fmt.Errorf("apply remaining log failed: %w", err)
 			}
@@ -552,4 +577,18 @@ func (p *Promoter) Run(ctx context.Context) (*Progress, error) {
 	}
 
 	return progress, nil
+}
+
+// formatSuggestions: {"a": 1, "b": 2} → `{"a":1,"b":2}` (sorted, the JSON --override-sequences takes).
+func formatSuggestions(m map[string]int64) string {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		parts = append(parts, fmt.Sprintf("%q:%d", n, m[n]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
