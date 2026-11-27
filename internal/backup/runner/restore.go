@@ -788,23 +788,30 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 	return nil
 }
 
-// dropMongoRestored drops the databases a failed MongoDB restore created (see restoreMongo).
-func dropMongoRestored(ctx context.Context, client *mongo.Client, t RestoreTarget, existing map[string]bool) error {
+// dropMongoRestored drops the databases a failed MongoDB restore created (see restoreMongo). For a deployment
+// target only databases that are new since the preflight AND come from the restored archive (created) are
+// dropped: another client may create a database on the target meanwhile, and that one is left in place.
+func dropMongoRestored(ctx context.Context, client *mongo.Client, t RestoreTarget, existing map[string]bool, created *mongoArchiveDatabases) error {
 	var drop []string
+	var errs []error
 	if t.Deployment {
 		names, err := client.ListDatabaseNames(ctx, bson.D{}, options.ListDatabases().SetAuthorizedDatabases(false))
 		if err != nil {
 			return fmt.Errorf("cleanup failed: cannot list the target deployment to drop the partially restored databases: %w", err)
 		}
 		for _, name := range names {
-			if !existing[name] && name != "admin" && name != "config" && name != "local" {
-				drop = append(drop, name)
+			if existing[name] || name == "admin" || name == "config" || name == "local" {
+				continue
 			}
+			if created == nil || !created.has(name) {
+				errs = append(errs, fmt.Errorf("cleanup: database %q appeared on the target during the restore but is not part of the restored backup; left in place", name))
+				continue
+			}
+			drop = append(drop, name)
 		}
 	} else if !existing[t.Database] {
 		drop = []string{t.Database}
 	}
-	var errs []error
 	for _, name := range drop {
 		if err := client.Database(name).Drop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("cleanup failed: database %q created by this restore is left on the target: %w", name, err))
@@ -938,34 +945,55 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 			return err
 		}
 	}
-	// From here on mongorestore may write. On failure or cancellation drop what this restore created:
-	// the target database, or every database of the (verified empty) target deployment except the
-	// system ones, like the MySQL and PostgreSQL restores do.
-	existing := map[string]bool{}
-	for _, name := range databaseNames {
-		existing[name] = true
-	}
-	defer func() {
-		if err == nil {
-			return
-		}
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-		defer cancel()
-		if cerr := dropMongoRestored(cctx, client, t, existing); cerr != nil {
-			err = errors.Join(err, cerr)
-		}
-	}()
 	body, err := e.openRecord(ctx, base)
 	if err != nil {
 		return err
 	}
 	defer body.Close()
+	// From here on mongorestore may write. On failure or cancellation drop what this restore created, like
+	// the MySQL and PostgreSQL restores do: the target database, or the databases of the (verified empty)
+	// target deployment that are new AND come from the archive mongorestore read (created). The archive is
+	// teed to a parser before mongorestore sees a byte, so created covers everything it could have written.
+	existing := map[string]bool{}
+	for _, name := range databaseNames {
+		existing[name] = true
+	}
+	var created *mongoArchiveDatabases
+	var teeDone chan struct{}
+	var teeW *io.PipeWriter
+	defer func() {
+		if teeW != nil {
+			_ = teeW.Close()
+			<-teeDone
+		}
+		if err == nil {
+			return
+		}
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		if cerr := dropMongoRestored(cctx, client, t, existing, created); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}()
+	tee := func(in io.Reader) io.Reader {
+		if !t.Deployment {
+			return in
+		}
+		created = &mongoArchiveDatabases{}
+		pr, pw := io.Pipe()
+		teeW, teeDone = pw, make(chan struct{})
+		go func() {
+			defer close(teeDone)
+			created.collect(pr)
+		}()
+		return io.TeeReader(in, pw)
+	}
 	var input io.Reader = body
 	var rewriteDone chan error
 	if pitr {
 		r, w := io.Pipe()
 		defer r.Close()
-		input = r
+		input = tee(r)
 		rewriteDone = make(chan error, 1)
 		go func() {
 			_, err := streamMongoArchive(body, w, anchor, func(out io.Writer) error {
@@ -984,7 +1012,7 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 			err = rewriteErr
 		}
 	} else {
-		err = e.runTool(ctx, inv, input)
+		err = e.runTool(ctx, inv, tee(input))
 	}
 	if err != nil {
 		return fmt.Errorf("mongorestore: %w", err)

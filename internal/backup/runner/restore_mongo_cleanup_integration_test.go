@@ -41,7 +41,12 @@ func TestMongoRestoreDropsPartialDataOnFailure(t *testing.T) {
 	vars["DST_MONGO_URI"] = fmt.Sprintf("mongodb://127.0.0.1:%d", dst.Port)
 	wrapper(t, tools, "mongodump", src.Container, "mongodump")
 	// Restores everything, then fails (e.g. a late index build error or a lost connection).
-	failing := fmt.Sprintf("#!/bin/sh\ndocker exec -i %s mongorestore \"$@\" || exit 1\necho \"simulated failure after the load\" >&2\nexit 1\n", src.Container)
+	// With the marker file, another client creates a database on the target while the restore runs
+	// (review DBA): cleanup must not drop it.
+	foreignMarker := filepath.Join(dir, "foreign-db")
+	failing := fmt.Sprintf("#!/bin/sh\ndocker exec -i %[1]s mongorestore \"$@\" || exit 1\n"+
+		"if [ -f %[2]s ]; then docker exec %[1]s mongosh --quiet mongodb://127.0.0.1:%[3]d --eval 'db.getSiblingDB(\"otherapp\").x.insertOne({a: 1})' >/dev/null || exit 3; fi\n"+
+		"echo \"simulated failure after the load\" >&2\nexit 1\n", src.Container, foreignMarker, dst.Port)
 	if err := os.WriteFile(filepath.Join(tools, "mongorestore"), []byte(failing), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -98,18 +103,33 @@ func TestMongoRestoreDropsPartialDataOnFailure(t *testing.T) {
 	// Whole deployment into an empty one (the failing tool runs against the source container's binary,
 	// the target URI points to the second server).
 	all := run("bjob-mongo-all", nil)
+	if err := os.WriteFile(foreignMarker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	err = e.Restore(ctx, RestorePlan{Chain: []backup.Record{all}}, RestoreTarget{Conn: backup.ConnSpec{URIEnv: "DST_MONGO_URI"}, Deployment: true})
 	if err == nil || !strings.Contains(err.Error(), "simulated failure") || strings.Contains(err.Error(), "cleanup failed") {
 		t.Fatalf("failing deployment restore: %v", err)
 	}
+	restoreErr := err
 	names, err := dst.Client.ListDatabaseNames(ctx, bson.D{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	foreign := false
 	for _, n := range names {
-		if n != "admin" && n != "config" && n != "local" {
+		switch n {
+		case "admin", "config", "local":
+		case "otherapp":
+			foreign = true
+		default:
 			t.Fatalf("failed deployment restore left database %q (all: %v)", n, names)
 		}
+	}
+	if !foreign {
+		t.Fatalf("cleanup dropped database otherapp, created on the target by another client during the restore (all: %v)", names)
+	}
+	if !strings.Contains(restoreErr.Error(), `"otherapp"`) {
+		t.Fatalf("cleanup must report the database it left in place: %v", restoreErr)
 	}
 }
 

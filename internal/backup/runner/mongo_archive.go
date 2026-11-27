@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"hash/crc64"
 	"io"
+	"strings"
+	"sync"
 	"time"
 
 	"strand/internal/backup"
@@ -259,6 +261,122 @@ func copyMongoSlice(src io.Reader, dst io.Writer, rec backup.Record, anchor, cut
 		if ts.Compare(anchor) > 0 && ts.Compare(cutoff) < 0 {
 			if _, err := dst.Write(doc); err != nil {
 				return err
+			}
+		}
+	}
+}
+
+// mongoArchiveDatabases: các database mà một archive mongorestore có thể ghi — db của từng khối namespace
+// và của mọi ns trong oplog (kể cả applyOps lồng nhau, renameCollection). Bằng chứng sở hữu khi dọn một
+// restore lỗi: chỉ database nằm trong archive mới có thể do restore này tạo.
+type mongoArchiveDatabases struct {
+	mu         sync.Mutex
+	dbs        map[string]bool
+	incomplete bool // không đọc được hết archive: không chứng minh được gì
+}
+
+func (s *mongoArchiveDatabases) addNS(ns string) {
+	db, _, _ := strings.Cut(ns, ".")
+	if db == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.dbs == nil {
+		s.dbs = map[string]bool{}
+	}
+	s.dbs[db] = true
+	s.mu.Unlock()
+}
+
+// has: archive chắc chắn chứa database name.
+func (s *mongoArchiveDatabases) has(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.incomplete && s.dbs[name]
+}
+
+func (s *mongoArchiveDatabases) oplogEntry(doc bson.Raw) {
+	if ns, ok := doc.Lookup("ns").StringValueOK(); ok {
+		s.addNS(ns)
+	}
+	o, ok := doc.Lookup("o").DocumentOK()
+	if !ok {
+		return
+	}
+	for _, k := range []string{"renameCollection", "to"} {
+		if ns, ok := o.Lookup(k).StringValueOK(); ok {
+			s.addNS(ns)
+		}
+	}
+	if ops, ok := o.Lookup("applyOps").ArrayOK(); ok {
+		vals, _ := ops.Values()
+		for _, v := range vals {
+			if d, ok := v.DocumentOK(); ok {
+				s.oplogEntry(d)
+			}
+		}
+	}
+}
+
+// collect đọc archive từ r tới hết (luôn đọc cạn r để không chặn bên ghi).
+func (s *mongoArchiveDatabases) collect(r io.Reader) {
+	// Archive bị cắt (mongorestore dừng giữa chừng) vẫn là bằng chứng đủ: parser đã thấy mọi byte
+	// mongorestore nhận. Chỉ archive sai định dạng mới làm mất bằng chứng.
+	if err := s.parse(r); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		s.mu.Lock()
+		s.incomplete = true
+		s.mu.Unlock()
+	}
+	_, _ = io.Copy(io.Discard, r)
+}
+
+func (s *mongoArchiveDatabases) parse(r io.Reader) error {
+	var magic [4]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return err
+	}
+	if binary.LittleEndian.Uint32(magic[:]) != mongoArchiveMagic {
+		return errors.New("invalid mongodump archive magic")
+	}
+	reader := mongoBSONReader{r: r}
+	for {
+		_, end, err := reader.next()
+		if err != nil {
+			return err
+		}
+		if end {
+			break
+		}
+	}
+	for {
+		doc, end, err := reader.next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if end {
+			return errors.New("invalid mongodump namespace header")
+		}
+		var header mongoNamespaceHeader
+		if err := bson.Unmarshal(doc, &header); err != nil {
+			return err
+		}
+		isOplog := header.Database == "" && header.Collection == "oplog"
+		if !isOplog {
+			s.addNS(header.Database + ".")
+		}
+		for {
+			doc, end, err := reader.next()
+			if err != nil {
+				return err
+			}
+			if end {
+				break
+			}
+			if isOplog {
+				s.oplogEntry(doc)
 			}
 		}
 	}

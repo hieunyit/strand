@@ -65,3 +65,51 @@ func TestMongoArchiveVerifiesEmbeddedBoundaryAndContinuation(t *testing.T) {
 		})
 	}
 }
+
+// Bằng chứng sở hữu khi dọn restore lỗi: database của khối namespace và của mọi ns trong oplog (applyOps lồng
+// nhau, renameCollection sang database khác). Archive bị cắt giữ những gì đã thấy; sai định dạng thì rỗng.
+func TestMongoArchiveDatabasesCollectsEveryWrittenDatabase(t *testing.T) {
+	marshal := func(v any) []byte {
+		t.Helper()
+		b, err := bson.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	end := binary.LittleEndian.AppendUint32(nil, mongoArchiveEnd)
+	prelude := binary.LittleEndian.AppendUint32(nil, mongoArchiveMagic)
+	prelude = append(prelude, marshal(bson.D{{Key: "version", Value: "0.1"}})...)
+	oplog := [][]byte{
+		marshal(bson.D{{Key: "ts", Value: bson.Timestamp{T: 1}}, {Key: "op", Value: "i"}, {Key: "ns", Value: "late.items"}}),
+		marshal(bson.D{{Key: "ts", Value: bson.Timestamp{T: 2}}, {Key: "op", Value: "c"}, {Key: "ns", Value: "admin.$cmd"},
+			{Key: "o", Value: bson.D{{Key: "applyOps", Value: bson.A{bson.D{{Key: "op", Value: "i"}, {Key: "ns", Value: "txn.orders"}}}}}}}),
+		marshal(bson.D{{Key: "ts", Value: bson.Timestamp{T: 3}}, {Key: "op", Value: "c"}, {Key: "ns", Value: "app.$cmd"},
+			{Key: "o", Value: bson.D{{Key: "renameCollection", Value: "app.a"}, {Key: "to", Value: "moved.a"}}}}),
+	}
+	archive := bytes.Join([][]byte{prelude, end,
+		marshal(mongoNamespaceHeader{Database: "app", Collection: "a"}), marshal(bson.D{{Key: "x", Value: 1}}), end,
+		marshal(mongoNamespaceHeader{Collection: "oplog"}), bytes.Join(oplog, nil), end,
+	}, nil)
+	var got mongoArchiveDatabases
+	got.collect(bytes.NewReader(archive))
+	for _, db := range []string{"app", "late", "txn", "moved", "admin"} {
+		if !got.has(db) {
+			t.Errorf("database %q of the archive not collected", db)
+		}
+	}
+	if got.has("otherapp") {
+		t.Error("collected a database the archive does not contain")
+	}
+	// Bị cắt giữa oplog (mongorestore dừng giữa chừng): những gì đã thấy vẫn là bằng chứng.
+	var cut mongoArchiveDatabases
+	cut.collect(bytes.NewReader(archive[:len(archive)-len(oplog[2])-len(end)-3]))
+	if !cut.has("app") || !cut.has("late") || cut.has("moved") {
+		t.Errorf("truncated archive: app=%v late=%v moved=%v", cut.has("app"), cut.has("late"), cut.has("moved"))
+	}
+	var bad mongoArchiveDatabases
+	bad.collect(bytes.NewReader(append([]byte{1, 2, 3, 4}, archive[4:]...)))
+	if bad.has("app") {
+		t.Error("an archive with an invalid format proves nothing")
+	}
+}

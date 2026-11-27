@@ -553,19 +553,19 @@ Passwords come from the environment variable named by --target-password-env.`,
 			}
 			// Pin the base and the log segments so a prune (the web server's hourly retention runs in
 			// another process) cannot delete them while they are being restored.
-			release, err := env.PinPlan(ctx, plan)
+			pinned, release, err := env.PinPlan(ctx, plan)
 			if err != nil {
 				return backupRejected(fmt.Errorf("restore point is no longer available: %w", err))
 			}
 			defer release()
-			return env.Restore(ctx, plan, runner.RestoreTarget{
+			return pinLapse(pinned, env.Restore(pinned, plan, runner.RestoreTarget{
 				Conn:       target,
 				Database:   targetDB,
 				Deployment: targetDeployment,
 				Dir:        targetDir,
 				Threads:    threads,
 				Objects:    objects,
-			})
+			}))
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "backup to restore")
@@ -709,12 +709,12 @@ func newBackupVerifyCmd() *cobra.Command {
 					return backupRejected(err)
 				}
 				// Pin it so a prune (possibly in another process) does not delete it mid-read.
-				release, err := env.PinRecords(ctx, []string{rec.ID})
+				pinned, release, err := env.PinRecords(ctx, []string{rec.ID})
 				if err != nil {
 					return backupRejected(err)
 				}
 				defer release()
-				verr := env.VerifyBackup(ctx, rec, !head)
+				verr := pinLapse(pinned, env.VerifyBackup(pinned, rec, !head))
 				if err := env.Audit(ctx, "backup.verify", map[bool]string{true: "ok", false: "error"}[verr == nil], map[string]any{"backup_id": id}); err != nil {
 					return errors.Join(verr, err)
 				}
@@ -732,14 +732,14 @@ func newBackupVerifyCmd() *cobra.Command {
 				sample = job.VerifySamplePercent
 			}
 			// Verification and the test restore read the job's backups: pin them against retention.
-			release, err := env.PinJob(ctx, job.ID)
+			pinned, release, err := env.PinJob(ctx, job.ID)
 			if err != nil {
 				return err
 			}
 			defer release()
-			rep, err := env.VerifyJob(ctx, job, runner.VerifyOptions{SamplePercent: sample})
+			rep, err := env.VerifyJob(pinned, job, runner.VerifyOptions{SamplePercent: sample})
 			if err != nil {
-				return err
+				return pinLapse(pinned, err)
 			}
 			if testRestore {
 				closeTunnel, err := openScratchTunnel(ctx, st, &job)
@@ -747,8 +747,8 @@ func newBackupVerifyCmd() *cobra.Command {
 					return err
 				}
 				defer closeTunnel()
-				res, terr := env.TestRestore(ctx, job)
-				if terr != nil {
+				res, terr := env.TestRestore(pinned, job)
+				if terr = pinLapse(pinned, terr); terr != nil {
 					rep.Problems = append(rep.Problems, "test restore: "+terr.Error())
 				} else {
 					fmt.Fprintf(cmd.OutOrStdout(), "test restore: %s\n", res.Detail)
@@ -873,4 +873,16 @@ func newBackupCopyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "backup ID")
 	cmd.Flags().StringVar(&to, "to-repository", "", "destination repository ID")
 	return cmd
+}
+
+// pinLapse: a reader cancelled because its restore pin could not be renewed reports that cause instead of a
+// bare "context canceled".
+func pinLapse(pinned context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if cause := context.Cause(pinned); errors.Is(cause, runner.ErrPinLapsed) && !errors.Is(err, runner.ErrPinLapsed) {
+		return errors.Join(cause, err)
+	}
+	return err
 }

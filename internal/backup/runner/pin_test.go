@@ -2,7 +2,9 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,7 +37,7 @@ func TestPruneSkipsPinnedRestorePoints(t *testing.T) {
 	mk("bkp-old", now.Add(-48*time.Hour))
 	mk("bkp-new", now.Add(-time.Hour))
 	old, _, _ := e.Catalog.Get(ctx, "bkp-old")
-	release, err := e.PinPlan(ctx, RestorePlan{Chain: []backup.Record{old}})
+	_, release, err := e.PinPlan(ctx, RestorePlan{Chain: []backup.Record{old}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +66,67 @@ func TestPruneSkipsPinnedRestorePoints(t *testing.T) {
 		t.Fatalf("released restore point still complete: %+v", res)
 	}
 	// A record retention already claimed cannot be pinned for a restore.
-	if _, err := e.PinRecords(ctx, []string{"bkp-old"}); err == nil {
+	if _, _, err := e.PinRecords(ctx, []string{"bkp-old"}); err == nil {
 		t.Fatal("pinned a restore point that retention is deleting")
+	}
+}
+
+type flakyPins struct {
+	store.Store
+	fail atomic.Bool
+}
+
+func (f *flakyPins) PinBackups(ctx context.Context, holder string, ids []string, ttl time.Duration) error {
+	if f.fail.Load() {
+		return errors.New("catalog unreachable")
+	}
+	return f.Store.PinBackups(ctx, holder, ids, ttl)
+}
+
+// Review DBA: gia hạn pin lỗi kéo dài thì reader phải dừng TRƯỚC khi pin hết hạn — nếu không, retention ở
+// tiến trình khác có thể xóa đúng backup đang được restore.
+func TestPinLapseCancelsTheReaderBeforeThePinExpires(t *testing.T) {
+	old := PinTTL
+	PinTTL = 800 * time.Millisecond
+	t.Cleanup(func() { PinTTL = old })
+	vars := map[string]string{"STRAND_BACKUP_S3_ENDPOINT": "http://127.0.0.1:1", "STRAND_BACKUP_S3_ACCESS_KEY": "k",
+		"STRAND_BACKUP_S3_SECRET_KEY": "s", "STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL": "true"}
+	st := &flakyPins{Store: store.NewMem()}
+	e := testEnv(t, vars, st)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+	r := backup.Record{ID: "bkp-lapse", Source: "pg-prod", Engine: "postgres", Tool: "pg_dump", Bucket: "central-backups",
+		ObjectKey: "prod/bkp-lapse", Status: backup.StatusQueued, CreatedAt: now, Method: backup.MethodPGDump, JobID: "bjob-lapse"}
+	if _, _, err := e.Catalog.Create(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = e.Catalog.UpdateStatus(ctx, r.ID, backup.StatusUploading, nil)
+	_, _, _ = e.Catalog.UpdateStatus(ctx, r.ID, backup.StatusVerifying, nil)
+	if _, _, err := e.Catalog.Finalize(ctx, r.ID, backup.StatusVerifying, 10, strings.Repeat("a", 64), "s3://central-backups/prod/bkp-lapse", now); err != nil {
+		t.Fatal(err)
+	}
+	pinned, release, err := e.PinRecords(ctx, []string{r.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	// Gia hạn được: reader chạy quá TTL mà không bị dừng.
+	time.Sleep(PinTTL * 3 / 2)
+	if pinned.Err() != nil {
+		t.Fatalf("reader cancelled while renewals succeed: %v", context.Cause(pinned))
+	}
+	st.fail.Store(true)
+	start := time.Now()
+	select {
+	case <-pinned.Done():
+	case <-time.After(PinTTL * 3):
+		t.Fatal("renewals keep failing but the reader still runs past the pin's expiry")
+	}
+	if !errors.Is(context.Cause(pinned), ErrPinLapsed) {
+		t.Fatalf("cause = %v, want ErrPinLapsed", context.Cause(pinned))
+	}
+	// Dừng trước khi pin (gia hạn thành công cuối cùng + TTL) có thể hết hạn.
+	if waited := time.Since(start); waited >= PinTTL {
+		t.Fatalf("reader stopped %v after renewals began failing; the pin may already have expired (TTL %v)", waited, PinTTL)
 	}
 }
