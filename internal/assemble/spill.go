@@ -74,11 +74,13 @@ func NewSpillBuffer(maxInMem int, dir string) *SpillBuffer {
 		dir = os.TempDir()
 	}
 
+	// inMem bắt đầu rỗng và lớn dần theo append: mỗi Txn nguồn có một buffer, phần lớn chỉ vài dòng.
+	// Cấp sẵn 1024 RowChange (~172 KB, phải xóa trắng, rồi đi theo Txn qua hàng đợi) khiến memclr + GC
+	// là trần thông lượng của strict ở tải nhiều transaction nhỏ (~5000 Txn/s, 2026-11-27).
 	return &SpillBuffer{
 		maxInMem: maxInMem,
 		dir:      dir,
-		inMem:    make([]model.RowChange, 0, 1024),
-		tableSet: make(map[model.TableID]struct{}),
+		tableSet: make(map[model.TableID]struct{}, 1),
 	}
 }
 
