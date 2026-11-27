@@ -444,11 +444,10 @@ func newVerifyCmd() *cobra.Command {
 // mysqlUTCDSN: DSN MySQL với phiên time_zone='+00:00' và time.Time ở UTC.
 // A successful strict run covers the entire configured and runtime-added scope.
 func strictVerifyTables(ctx context.Context, src *sql.DB, cfg *config.Config) ([]model.TableID, error) {
-	added, err := pipeline.VerificationAddedTables(cfg.Resources.Spool.Path, cfg.Name)
+	include, err := pipeline.EffectiveInclude(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("read table scope: %w", err)
+		return nil, err
 	}
-	include := append(slices.Clone(cfg.Tables.Include), added...)
 	ids, _, err := schemagen.Discover(ctx, src, cfg.Source.Kind, include, cfg.Tables.Exclude)
 	if err != nil {
 		return nil, err

@@ -511,6 +511,15 @@ func (p *Pipeline) run(parent context.Context) (retErr error) {
 			return err
 		}
 	}
+	{
+		tables := make([]model.TableID, 0, len(p.tables))
+		for id := range p.tables {
+			tables = append(tables, id)
+		}
+		if err := p.checkTargetConstraints(ctx, tables); err != nil {
+			return err
+		}
+	}
 	if err := p.store.EnsureTables(ctx); err != nil {
 		return fmt.Errorf("ensure metadata tables: %w", err)
 	}
@@ -2588,6 +2597,9 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		return fmt.Errorf("table must be schema.table")
 	}
 	id := model.TableID{Schema: s, Table: t}
+	if p.filter != nil && p.filter.excluded(id) {
+		return excludedTableError(id)
+	}
 	if p.pgChunks != nil && p.pgChunks.GateErr != nil {
 		return fmt.Errorf("logical snapshot from this PostgreSQL source is not possible: %w", p.pgChunks.GateErr)
 	}
@@ -2634,6 +2646,10 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		if err != nil {
 			return err
 		}
+	}
+	// Cùng kiểm tra như lúc khởi động, trước DDL ở target, state và p.tables.
+	if err := p.checkAdmission(ctx, []model.TableID{id}); err != nil {
+		return err
 	}
 	if plan, err := p.planMySQLCascade(ctx, id); err != nil {
 		return err

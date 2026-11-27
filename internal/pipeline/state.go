@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"strand/internal/admin"
+	"strand/internal/config"
 	"strand/internal/exitcode"
 	"strand/internal/model"
 	mysqlreader "strand/internal/reader/mysql"
@@ -86,6 +87,17 @@ func VerificationAddedTables(dir, pipelineID string) ([]string, error) {
 		return nil, fmt.Errorf("local state is for pipeline %q, expected %q", state.PipelineID, pipelineID)
 	}
 	return state.AddedTables, nil
+}
+
+// EffectiveInclude: tables.include cộng các bảng đã thêm lúc chạy (snapshot add, lưu trong state cục bộ ở
+// resources.spool.path) — phạm vi mà pipeline thực sự chạy (tables.exclude vẫn thắng khi discover). doctor,
+// validate và verify dùng cùng phạm vi này với runtime.
+func EffectiveInclude(cfg *config.Config) ([]string, error) {
+	added, err := VerificationAddedTables(cfg.Resources.Spool.Path, cfg.Name)
+	if err != nil {
+		return cfg.Tables.Include, fmt.Errorf("read tables added during sync: %w", err)
+	}
+	return append(slices.Clone(cfg.Tables.Include), added...), nil
 }
 
 // AddedTables trả các bảng đã thêm qua snapshot add (đã sắp xếp).

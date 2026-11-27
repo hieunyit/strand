@@ -395,6 +395,14 @@ func (p *Pipeline) handleDDL(ctx context.Context, t *model.Txn) error {
 				fmt.Sprintf("DDL at %s left table %s without a usable row key; replication of it cannot continue.\n%s",
 					t.SourcePos.Label(), id, rowkey.Suggest(p.suggestInput(ctx, id, m))), nil)
 		}
+		if m != nil && p.table(id) == nil {
+			// Bảng mới vào pipeline qua DDL: cùng kiểm tra như lúc khởi động và snapshot add.
+			if err := p.checkAdmission(ctx, []model.TableID{id}); err != nil {
+				return exitcode.New(exitcode.ErrSchemaChangePending, exitcode.NeedsDecision,
+					fmt.Sprintf("DDL at %s brings table %s into the pipeline but it cannot be replicated: %s. "+
+						"Fix the target (or add the table to tables.exclude), then resume. DDL: %q", t.SourcePos.Label(), id, err.Error(), t.DDL), err)
+			}
+		}
 		if prev := p.table(id); prev != nil && m != nil && prev.KeyName != "" && (prev.KeyName != m.KeyName || strings.Join(prev.PK, ",") != strings.Join(m.PK, ",")) {
 			p.log.Warn("row key of table changed by DDL", "table", id.String(), "from", keyLabel(prev), "to", keyLabel(m))
 		}

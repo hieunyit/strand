@@ -60,6 +60,14 @@ func newValidateCmd() *cobra.Command {
 			if err := validate.Preflight(cmd.Context(), cfg); err != nil {
 				return err
 			}
+			// Cùng phạm vi với runtime: tables.include cộng bảng đã thêm lúc chạy (snapshot add).
+			if include, err := pipeline.EffectiveInclude(cfg); err != nil {
+				return err
+			} else if len(include) != len(cfg.Tables.Include) {
+				scoped := *cfg
+				scoped.Tables.Include = include
+				cfg = &scoped
+			}
 
 			// Kiểm source thật (spec 02 §8): binlog, partial JSON, PK.
 			if strings.EqualFold(cfg.Source.Kind, "mysql") {

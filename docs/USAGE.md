@@ -900,6 +900,10 @@ Lệnh tạo slot cùng exported snapshot, rồi chạy `pg_dump --snapshot` (`-
 
 `strand snapshot add --table app.t -c p.yaml` thêm bảng vào pipeline đang chạy. Bảng được snapshot logic có điều tốc, không dừng stream. PK theo mục 5.2. PG source: bảng phải có trong publication.
 
+Bảng thêm lúc chạy qua cùng kiểm tra như lúc khởi động, trước khi Strand tạo bảng đích hay ghi gì: bảng nằm trong `tables.exclude` bị từ chối (bỏ khỏi exclude trước), bảng đích không được là một bảng nguồn của pipeline trên cùng database, và với target MySQL, mọi unique của bảng đích có sẵn phải được unique của nguồn bao hàm (một unique chỉ có ở đích sẽ gộp hai dòng nguồn thành một khi upsert). Target PostgreSQL không gộp âm thầm: unique như vậy làm pipeline dừng với lỗi trùng khóa, và `validate`/`doctor` báo trước. Bảng mới vào pipeline qua DDL `CREATE TABLE`/`RENAME` cũng được kiểm như vậy; không qua thì pipeline dừng chờ quyết định. Với target MySQL, `sync` cũng kiểm unique đích của mọi bảng lúc khởi động, như `validate`.
+
+Bảng thêm lúc chạy được lưu trong `pipeline-state.json` ở `resources.spool.path` và giữ qua restart. `doctor`, `validate` và `verify --require-complete` kiểm cả các bảng này cùng `tables.include`. Chuyển pipeline sang máy khác chỉ bằng file YAML sẽ thiếu chúng: thêm chúng vào `tables.include` trước.
+
 Bảng thêm chạy song song với snapshot của bootstrap đang dở (không tính vào `max_parallel`, nhưng cùng chia ngân sách đọc nguồn). Bảng còn trong hàng đợi của bootstrap (chưa tới lượt) bị từ chối với `already being snapshotted`: nó sẽ được snapshot khi tới lượt. Pipeline chỉ báo `synced` khi bootstrap và mọi `snapshot add` đều xong.
 
 Bảng thêm bằng lệnh này mà không nằm trong `tables.include` được ghi vào state cục bộ (`pipeline-state.json` trong `resources.spool.path`, trường `added_tables`) và **vẫn thuộc pipeline sau khi restart**: khởi động hợp chúng vào bộ lọc, nạp metadata/schema như bảng thường và không snapshot lại bảng đã xong. Bảng đã bị xóa ở source thì chỉ log WARN và bỏ qua.
@@ -919,6 +923,7 @@ Bảng thêm bằng lệnh này mà không nằm trong `tables.include` được
 - Bước chờ apply chỉ chạy khi pipeline đang chạy (khóa pipeline trên target đang bị giữ). Pipeline đã dừng thì không chờ; pipeline đang `pause` thì chờ hết hạn (2 phút) rồi lỗi. Source PG đọc qua `--replica-dsn` (standby) không ghi được watermark: source rảnh thì chờ có thể hết hạn.
 - `--table` của full: không đặt thì kiểm **mọi bảng của pipeline** (theo `tables.include`/`exclude`, kể cả mẫu `app.*`). `--table` chỉ nhận một bảng `schema.table`, không nhận wildcard.
 - `--require-complete`: bắt buộc một lượt full mới trên mọi bảng đã cấu hình, kết quả chưa trọn vẹn thì lệnh thất bại. Dùng trước cutover.
+- PostgreSQL: verify và `--repair fix` chỉ đọc và ghi đúng relation như writer. Bảng cha theo inheritance thường không kéo theo dòng của bảng con (sửa một khóa ở bảng cha không xóa dòng bảng con trùng khóa). Gốc bảng phân vùng khai báo vẫn gồm mọi partition.
 - `--resume`: chạy tiếp lượt full bị ngắt. Chỉ dùng lại chunk đã khớp. Lượt chạy hết thì tiến độ bị xóa. Không có cho PK tổng quát.
 - `--replica-dsn`: đọc phía source từ replica.
 - `--repair report|fix`:

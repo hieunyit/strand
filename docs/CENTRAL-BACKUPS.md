@@ -523,7 +523,10 @@ than all deleted.
 prune, in any process or instance, skips a pinned record (`skipped` in the prune
 result, no `backup.expire` audit) and retries it on the next run. A pin is renewed
 every 2.5 minutes and lapses 10 minutes after its holder stops renewing it
-(database clock), so a crashed restore cannot block retention for long. A restore
+(database clock), so a crashed restore cannot block retention for long. When
+renewals keep failing (catalog unreachable) for over half that time, the
+restore, verification or test restore stops with "restore pin could not be
+renewed" before the pin can lapse under it. A restore
 that starts after retention claimed one of its records is refused ("restore point
 is no longer available"). Retention claims each
 object in the catalog before touching storage. A legal hold or an unexpired
@@ -621,8 +624,11 @@ requires typing the target name to confirm and opens the job log.
 A failed or cancelled restore removes what it wrote: MySQL and PostgreSQL drop
 the database the restore created; MongoDB drops the target database (verified
 absent before the restore) or, for a whole-deployment restore, every non-system
-database that was not in the verified-empty deployment (admin users it created
-are not removed). A cleanup failure is part of the returned error. On PostgreSQL
+database that was not in the verified-empty deployment and that the restored
+archive contains (its namespace blocks and every `ns` in its oplog, including
+`applyOps` and `renameCollection`). A database another client created on the
+target during the restore is not in the archive: it is left in place and named
+in the error. Admin users the restore created are not removed. A cleanup failure is part of the returned error. On PostgreSQL
 12 and older, which lack `DROP DATABASE ... WITH (FORCE)`, Strand refuses new
 connections to the database and terminates its other sessions first; the user
 needs the right to terminate them (database owner or `pg_signal_backend`). A

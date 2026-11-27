@@ -415,7 +415,9 @@ Phần này mô tả hành vi của retention (prune), verify, restore và test 
 - **Ghim (pin)**: restore, test restore và verify ghim các bản ghi đang đọc (base, chuỗi incremental và đoạn log) vào bảng
   `backup_pins` (migration `024_backup_pins.sql`). Prune, kể cả chạy ở tiến trình hoặc instance khác, bỏ qua bản ghi đang ghim
   (`skipped` trong kết quả prune, không ghi audit `backup.expire`) và thử lại ở lần sau. Ghim tự gia hạn mỗi 2,5 phút và hết hạn
-  sau 10 phút theo **đồng hồ của database** nếu tiến trình đọc chết, nên không chặn retention mãi. Restore bắt đầu sau khi
+  sau 10 phút theo **đồng hồ của database** nếu tiến trình đọc chết, nên không chặn retention mãi. Nếu gia hạn lỗi liên tục quá
+  nửa thời gian đó (không tới được catalog), restore/verify/test restore tự dừng với lỗi `restore pin could not be renewed` trước khi
+  ghim hết hạn. Restore bắt đầu sau khi
   retention đã nhận xóa một bản ghi sẽ bị từ chối ("restore point is no longer available").
 - Kiểm tra Object Lock (`retain_until`) khi xóa/hết hạn dùng đồng hồ của database, không dùng đồng hồ máy Web.
 

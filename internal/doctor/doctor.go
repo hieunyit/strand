@@ -58,6 +58,14 @@ func Run(ctx context.Context, cfg *config.Config, c *findings.Collector) {
 	if !d.configChecks(ctx) {
 		return
 	}
+	// Cùng phạm vi với runtime: tables.include cộng bảng đã thêm lúc chạy (snapshot add).
+	if include, err := pipeline.EffectiveInclude(cfg); err != nil {
+		c.Warn("table_scope_incomplete", "", err.Error()+"; checking only the tables in the configuration", "")
+	} else if len(include) != len(cfg.Tables.Include) {
+		scoped := *cfg
+		scoped.Tables.Include = include
+		cfg, d.cfg = &scoped, &scoped
+	}
 	d.open(ctx)
 	defer func() {
 		for _, db := range []*sql.DB{d.src, d.dst} {
