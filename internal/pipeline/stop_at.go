@@ -22,8 +22,8 @@ type stopGate struct {
 	beyond func(t *model.Txn) bool
 	// reachedAfter: sau khi route t, mọi Txn tới điểm dừng đã được route (không cần chờ Txn kế tiếp).
 	reachedAfter func(t *model.Txn) bool
-	// reachedIdle (có thể nil): đã tới điểm dừng dù không có Txn mới (source đứng yên).
-	reachedIdle func() bool
+	// timeLimit (chỉ --stop-at-time, giây Unix): watchStopIdle dừng khi source đứng yên sau mốc này.
+	timeLimit int64
 }
 
 // newStopGate dựng điểm dừng từ Options. applied: tập đã apply lúc bắt đầu. Trả (nil, true) nếu không có
@@ -47,11 +47,7 @@ func (p *Pipeline) newStopGate(applied checkpoint.AppliedSet) (g *stopGate, reac
 			// (watermark, heartbeat) không có SourceTS và không bao giờ là "sau mốc".
 			beyond:       func(t *model.Txn) bool { return t.SourceTS > limit },
 			reachedAfter: func(*model.Txn) bool { return false },
-			// Source đứng yên: đã qua mốc theo đồng hồ và reader đã đọc tới đầu log thì mọi Txn còn lại
-			// (nếu có) commit sau mốc.
-			reachedIdle: func() bool {
-				return time.Now().Unix() > limit && p.sourceHead.Load() == sourceHeadCaughtUp
-			},
+			timeLimit:    limit,
 		}, false, nil
 	}
 	switch {
@@ -157,13 +153,92 @@ func (p *Pipeline) finishAtStop(ctx context.Context, why string) {
 	}()
 }
 
+// stopClockMargin: đồng hồ source phải qua mốc thêm chừng này giây trước khi lấy đầu log. Thời điểm commit
+// được lấy ngay trước khi bản ghi commit vào log, nên một Txn commit "đúng mốc" có thể vào log muộn hơn
+// một chút; khoảng đệm bảo đảm nó đã nằm trước đầu log được lấy.
+const stopClockMargin = 1
+
+// stopIdleState: trạng thái của watchStopIdle giữa các lần thăm dò.
+type stopIdleState struct {
+	pgMark uint64 // source PG: đầu WAL lấy khi đồng hồ source đã qua mốc (0 = chưa lấy)
+}
+
+// stopIdleReached: source đứng yên sau mốc thời gian VÀ router đã tự xử lý mọi Txn commit trước mốc.
+// Trước đây dựa vào cờ đuổi kịp của monitor (PG: sent_lsn cách đầu WAL ≤ 16 MiB, mẫu trễ tới 1s, đồng hồ
+// máy Strand): cờ bật khi Txn trước mốc còn ở reader hoặc trong channel, rồi router bỏ chúng khi dừng.
+// Giờ mốc được đo bằng đồng hồ source và đầu log lấy SAU khi đồng hồ đó qua mốc; chỉ dừng khi vị trí
+// router đã xử lý phủ đầu log đó. Mọi Txn tới sau đều commit sau mốc (beyond).
+func (p *Pipeline) stopIdleReached(ctx context.Context, st *stopIdleState) (bool, error) {
+	limit := p.stopGate.timeLimit + stopClockMargin
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	switch {
+	case p.srcEngine == model.EnginePG:
+		if st.pgMark == 0 {
+			var now int64
+			var head string
+			if err := p.src.QueryRowContext(qctx, "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint, pg_current_wal_insert_lsn()::text").Scan(&now, &head); err != nil {
+				return false, err
+			}
+			if now <= limit {
+				return false, nil
+			}
+			mark, err := checkpoint.ParseLSN(head)
+			if err != nil {
+				return false, err
+			}
+			// Message sau đầu WAL: reader phát Txn rỗng ở vị trí > mark nên router thấy mark cả khi các
+			// bảng của pipeline không có ghi.
+			if _, err := p.src.ExecContext(qctx, pgHeartbeatSQL); err != nil {
+				return false, fmt.Errorf("write a WAL message to confirm the source is idle: %w", err)
+			}
+			st.pgMark = mark
+		}
+		return p.lsns != nil && p.lsns.seenLSN() >= st.pgMark, nil
+	case p.srcEngine != model.EngineMySQL:
+		return false, nil
+	case p.posMode:
+		var now int64
+		if err := p.src.QueryRowContext(qctx, "SELECT UNIX_TIMESTAMP()").Scan(&now); err != nil {
+			return false, err
+		}
+		if now <= limit {
+			return false, nil
+		}
+		// Đầu binlog đọc SAU đồng hồ source.
+		caught, known := p.posCaughtUpState(qctx)
+		if !known {
+			return false, fmt.Errorf("cannot read the source binlog head")
+		}
+		return caught, nil
+	default:
+		var executed string
+		var now int64
+		if err := p.src.QueryRowContext(qctx, "SELECT UNIX_TIMESTAMP(), @@GLOBAL.gtid_executed").Scan(&now, &executed); err != nil {
+			return false, err
+		}
+		if now <= limit {
+			return false, nil
+		}
+		set, err := checkpoint.ParseMySQLGTIDSet(executed)
+		if err != nil {
+			return false, err
+		}
+		p.seenMu.Lock()
+		defer p.seenMu.Unlock()
+		return set.IsSubsetOf(p.seen.(*checkpoint.MySQLAppliedSet)), nil
+	}
+}
+
 // watchStopIdle: điểm dừng theo thời gian khi source đứng yên (không có Txn mới để chạm cổng).
 func (p *Pipeline) watchStopIdle(ctx context.Context) {
-	if p.stopGate == nil || p.stopGate.reachedIdle == nil {
+	if p.stopGate == nil || p.stopGate.timeLimit == 0 {
 		return
 	}
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
+	var st stopIdleState
+	var lastErr string
 	for {
 		select {
 		case <-ctx.Done():
@@ -173,7 +248,16 @@ func (p *Pipeline) watchStopIdle(ctx context.Context) {
 		if p.stopTripped.Load() {
 			return
 		}
-		if p.stopGate.reachedIdle() {
+		ok, err := p.stopIdleReached(ctx, &st)
+		if err != nil {
+			if ctx.Err() == nil && err.Error() != lastErr {
+				lastErr = err.Error()
+				p.log.Warn("cannot confirm that the source is idle past the stop time; waiting for the next source transaction after it", "error", err)
+			}
+			continue
+		}
+		lastErr = ""
+		if ok {
 			p.routeMu.Lock()
 			p.finishAtStop(ctx, "the source is idle past the stop time")
 			p.routeMu.Unlock()

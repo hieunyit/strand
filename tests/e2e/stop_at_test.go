@@ -133,3 +133,33 @@ func TestSA_E2E_MySQLStopAtGTID(t *testing.T) {
 		t.Fatalf("strand exit code %d\n%s", code, p.tail())
 	}
 }
+
+// --stop-at-time khi source đứng yên sau mốc nhưng router còn hàng nghìn Txn trước mốc chưa xử lý: trước
+// đây cờ "đuổi kịp" của monitor (PG: sent_lsn cách đầu WAL ≤ 16 MiB) bật ngay, pipeline dừng và router bỏ
+// các Txn trước mốc còn trong hàng đợi — báo "đã apply tới mốc" khi target còn thiếu.
+func TestSA_E2E_PGStopAtTimeWaitsForQueuedTxns(t *testing.T) {
+	slot, pub := "strand_e2e_stopq", "strand_e2e_stopq_pub"
+	src, dst, lsn := setupPGPair(t, slot, pub)
+	cfg := strandCfg{Name: "e2e-pg-stopq", SourceKind: "postgres", TargetKind: "postgres",
+		SourceDSN: src.DSN, TargetDSN: dst.DSN,
+		SourceExtra: fmt.Sprintf(", slot: %s, publication: %s", slot, pub),
+		Include:     []string{"app.*"}, Dir: testDir(t), Bootstrap: "start_at"}
+	cfgPath := cfg.write(t)
+
+	const n = 30000
+	src.exec(t, fmt.Sprintf(`DO $$ BEGIN FOR i IN 1..%d LOOP INSERT INTO app.marker VALUES (100000 + i, 'Q'); COMMIT; END LOOP; END $$`, n))
+	time.Sleep(1100 * time.Millisecond)
+	at := time.Now()
+	time.Sleep(3 * time.Second) // source đứng yên, đồng hồ đã qua mốc
+
+	p := startStrand(t, cfgPath, "--start-at", lsn, "--stop-at-time", at.Format(time.RFC3339))
+	if code := waitExit(t, p, 3*time.Minute); code != 0 {
+		t.Fatalf("stop at time: exit %d\n%s", code, p.tail())
+	}
+	if !strings.Contains(p.output.String(), "stop position reached") {
+		t.Fatalf("missing stop log\n%s", p.tail())
+	}
+	if got := pgCount(t, dst, "SELECT count(*) FROM app.marker WHERE tag = 'Q'"); got != n {
+		t.Fatalf("--stop-at-time %s reported the stop position as applied with %d of the %d transactions committed before it", at.Format(time.RFC3339), got, n)
+	}
+}
