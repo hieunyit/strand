@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -100,6 +101,58 @@ func TestSC_E2E_SnapshotAddRejectsSourceAsTarget(t *testing.T) {
 	waitSynced(t, &cfg, p, 3*time.Minute)
 	if out, code := runStrandCLI(t, time.Minute, "snapshot", "add", "--table", "app.self", "--socket", cfg.Socket); code == 0 || !strings.Contains(out, "same database") {
 		t.Fatalf("snapshot add app.self -> app.self on the same server: exit %d\n%s", code, out)
+	}
+	if code := p.stop(t); code != 0 {
+		t.Fatalf("stop: exit %d\n%s", code, p.tail())
+	}
+}
+
+// Nghiệm thu lại (P1): hai `snapshot add` đồng thời cho hai bảng nguồn cùng ánh xạ tới một bảng đích (app.x
+// rename sang app.y, app.y giữ tên mặc định; cả hai ngoài phạm vi ban đầu). Trước đây mỗi lệnh chỉ giữ bảng
+// nguồn của nó và kiểm trùng trên p.tables chưa có bảng kia: cả hai qua, hai nguồn cùng ghi vào app.y.
+func TestSC_E2E_ConcurrentSnapshotAddsCannotShareATarget(t *testing.T) {
+	src, dst := newPair(t)
+	for _, n := range []*mysqlNode{src, dst} {
+		n.exec(t,
+			"CREATE TABLE app.base (id BIGINT PRIMARY KEY, v INT NOT NULL)",
+			"CREATE TABLE app.x (id BIGINT PRIMARY KEY, v INT NOT NULL)",
+			"CREATE TABLE app.y (id BIGINT PRIMARY KEY, v INT NOT NULL)")
+	}
+	src.exec(t, "INSERT INTO app.base VALUES (1, 1)", "INSERT INTO app.x VALUES (1, 10), (2, 20)", "INSERT INTO app.y VALUES (1, 99)")
+	cfg := strandCfg{Name: "e2e-scope-race", SourceDSN: src.RootDSN, TargetDSN: dst.RootDSN + "strand",
+		Include: []string{"app.base"}, Dir: testDir(t), TablesExtra: "  rename: {app.x: app.y}\n"}
+	p := startStrand(t, cfg.write(t))
+	waitSynced(t, &cfg, p, 3*time.Minute)
+
+	type result struct {
+		out  string
+		code int
+	}
+	start := make(chan struct{})
+	res := make([]result, 2)
+	var wg sync.WaitGroup
+	for i, table := range []string{"app.x", "app.y"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			out, code := runStrandCLI(t, time.Minute, "snapshot", "add", "--table", table, "--socket", cfg.Socket)
+			res[i] = result{out, code}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	ok := 0
+	for _, r := range res {
+		switch {
+		case r.code == 0:
+			ok++
+		case !strings.Contains(r.out, "both map to target table app.y"):
+			t.Fatalf("snapshot add failed for another reason: exit %d\n%s", r.code, r.out)
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("concurrent snapshot adds of app.x (renamed to app.y) and app.y: %d succeeded, want exactly 1\n%s\n---\n%s", ok, res[0].out, res[1].out)
 	}
 	if code := p.stop(t); code != 0 {
 		t.Fatalf("stop: exit %d\n%s", code, p.tail())

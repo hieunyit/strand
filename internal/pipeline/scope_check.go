@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"strand/internal/exitcode"
 	"strand/internal/model"
@@ -64,4 +65,46 @@ func (p *Pipeline) checkTargetConstraints(ctx context.Context, ids []model.Table
 		}
 	}
 	return nil
+}
+
+// reserveTargets giữ tên đích của các bảng ids sắp vào pipeline lúc chạy: lỗi nếu một tên đích trùng với bảng
+// đã thuộc pipeline hoặc với bảng khác đang được giữ (snapshot add / DDL đồng thời). Kiểm và giữ nằm trong
+// cùng một vùng khóa. release (gọi được nhiều lần) bỏ giữ; gọi sau khi bảng đã vào p.tables hoặc khi lỗi.
+func (p *Pipeline) reserveTargets(ids []model.TableID) (release func(), err error) {
+	p.joiningMu.Lock()
+	defer p.joiningMu.Unlock()
+	joining := make(map[model.TableID]*tableMeta, len(ids))
+	for _, id := range ids {
+		joining[id] = nil
+	}
+	p.tablesMu.RLock()
+	existing := make(map[model.TableID]*tableMeta, len(p.tables)+len(p.joining))
+	for id, m := range p.tables {
+		existing[id] = m
+	}
+	p.tablesMu.RUnlock()
+	for id := range p.joining {
+		existing[id] = nil // cùng bảng nguồn với một id trong ids: không phải trùng
+	}
+	if err := checkTargetCollisions(p.filter, joining, existing); err != nil {
+		return nil, err
+	}
+	if p.joining == nil {
+		p.joining = map[model.TableID]int{}
+	}
+	for _, id := range ids {
+		p.joining[id]++
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.joiningMu.Lock()
+			for _, id := range ids {
+				if p.joining[id]--; p.joining[id] <= 0 {
+					delete(p.joining, id)
+				}
+			}
+			p.joiningMu.Unlock()
+		})
+	}, nil
 }

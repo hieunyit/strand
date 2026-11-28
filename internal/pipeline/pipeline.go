@@ -234,6 +234,11 @@ type Pipeline struct {
 	// kết nối song song; IsRegistered chỉ đúng sau khi snapshot đã đăng ký range (review R14).
 	snapAddMu  sync.Mutex
 	snapAdding map[model.TableID]bool
+	// joining: bảng nguồn đang vào pipeline lúc chạy (snapshot add, DDL tạo bảng) đã giữ tên đích nhưng
+	// chưa vào p.tables. Kiểm trùng tên đích tính cả chúng (reserveTargets), nên hai lệnh đồng thời không
+	// cùng qua được với hai bảng nguồn ánh xạ tới một bảng đích.
+	joiningMu sync.Mutex
+	joining   map[model.TableID]int
 	// snapPoolRunning: pool bootstrap (runSnapshots) chưa xong; snapPoolDeferred: pool đã xong nhưng còn
 	// snapshot add chạy — "bootstrap finished" được ghi khi cái cuối cùng xong (maybeFinishBootstrap).
 	snapPoolRunning  bool
@@ -2639,13 +2644,13 @@ func (p *Pipeline) SnapshotAdd(ctx context.Context, table string) error {
 		if m.Keyless {
 			return p.keylessPendingError(ctx, id, m)
 		}
-		// review R10: bảng mới không được trùng tên đích với một bảng đã thuộc pipeline.
-		p.tablesMu.RLock()
-		err = checkTargetCollisions(p.filter, map[model.TableID]*tableMeta{id: m}, p.tables)
-		p.tablesMu.RUnlock()
+		// review R10: bảng mới không được trùng tên đích với một bảng đã thuộc pipeline hoặc đang vào
+		// pipeline. Giữ tên đích tới khi bảng đã vào p.tables (hoặc lệnh lỗi).
+		unreserve, err := p.reserveTargets([]model.TableID{id})
 		if err != nil {
 			return err
 		}
+		defer unreserve()
 	}
 	// Cùng kiểm tra như lúc khởi động, trước DDL ở target, state và p.tables.
 	if err := p.checkAdmission(ctx, []model.TableID{id}); err != nil {
