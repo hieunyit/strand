@@ -520,7 +520,7 @@ docker run --rm -v strand_strand_config:/c -v strand_strand_state:/s -v "$PWD":/
 
 ### 10.5 TLS và cổng
 
-Compose mặc định chỉ publish HTTP trên `127.0.0.1:8080` của host. Để truy cập từ xa, dùng TLS:
+Compose mặc định chỉ publish HTTP trên `127.0.0.1:8080` của host. Đặt `STRAND_WEB_BIND` ra ngoài loopback mà không có TLS thì container từ chối khởi động, trừ khi bạn chủ động đặt `STRAND_WEB_ALLOW_PLAIN_HTTP=true` (HTTP thường: mật khẩu và cookie không mã hóa, chỉ dùng trong mạng tin cậy). Để truy cập từ xa, dùng TLS:
 
 - **Reverse proxy (khuyến nghị)**: đặt `STRAND_WEB_BIND=127.0.0.1`, `STRAND_WEB_SECURE_COOKIES=true`, `STRAND_WEB_TRUST_FORWARDED_FOR=true`, rồi proxy (nginx, Caddy, Traefik) kết thúc TLS và chuyển tới `127.0.0.1:8080` (mục 5.4).
 - **TLS tại web**: mount chứng chỉ (`./certs:/certs:ro` trong `compose.yaml`) và đặt `STRAND_WEB_TLS_CERT=/certs/tls.crt`, `STRAND_WEB_TLS_KEY=/certs/tls.key`, `STRAND_WEB_ALLOW_PLAIN_HTTP=false`. Healthcheck tự chuyển sang HTTPS.

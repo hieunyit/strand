@@ -26,15 +26,20 @@ fi
 
 truthy() { case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
 
-# A public Compose bind can use TLS in Strand or plain HTTP on a trusted
-# network when STRAND_WEB_ALLOW_PLAIN_HTTP is enabled.
-case "${STRAND_WEB_PUBLISH_HOST:-127.0.0.1}" in
-  127.0.0.1|::1|'[::1]') ;;
+# Publish trên loopback (mặc định): HTTP thường được phép, chỉ máy này truy cập được.
+# Publish ra ngoài loopback: cần TLS (STRAND_WEB_TLS_CERT/KEY), hoặc chọn rõ HTTP thường bằng
+# STRAND_WEB_ALLOW_PLAIN_HTTP=true (mạng tin cậy). Chỉ đổi STRAND_WEB_BIND thì không còn tự ra HTTP thường.
+PLAIN_HTTP="${STRAND_WEB_ALLOW_PLAIN_HTTP:-}"
+PUBLISH_HOST="${STRAND_WEB_PUBLISH_HOST:-127.0.0.1}"
+case "$PUBLISH_HOST" in
+  127.0.0.1|::1|'[::1]'|localhost)
+    [ -n "$PLAIN_HTTP" ] || PLAIN_HTTP=true
+    ;;
   *)
     if [ "$GENERATED" = 1 ] \
       && { [ -z "${STRAND_WEB_TLS_CERT:-}" ] || [ -z "${STRAND_WEB_TLS_KEY:-}" ]; } \
-      && ! truthy "${STRAND_WEB_ALLOW_PLAIN_HTTP:-true}"; then
-      echo "A non-loopback STRAND_WEB_BIND requires STRAND_WEB_TLS_CERT and STRAND_WEB_TLS_KEY" >&2
+      && ! truthy "$PLAIN_HTTP"; then
+      echo "STRAND_WEB_BIND=$PUBLISH_HOST publishes the Web UI outside loopback: set STRAND_WEB_TLS_CERT and STRAND_WEB_TLS_KEY, or set STRAND_WEB_ALLOW_PLAIN_HTTP=true to serve plain HTTP (passwords and cookies unencrypted) on a trusted network" >&2
       exit 2
     fi
     ;;
@@ -45,7 +50,7 @@ if [ "$GENERATED" = 1 ]; then
   set -- --config "$STRAND_WEB_CONFIG" --listen "$LISTEN" --state-dir "$STATE_DIR" --scan "$CONFIG_DIR/*.yaml"
   if [ -n "${STRAND_WEB_TLS_CERT:-}" ] || [ -n "${STRAND_WEB_TLS_KEY:-}" ]; then
     set -- "$@" --tls-cert "${STRAND_WEB_TLS_CERT:-}" --tls-key "${STRAND_WEB_TLS_KEY:-}"
-  elif truthy "${STRAND_WEB_ALLOW_PLAIN_HTTP:-true}"; then
+  elif truthy "$PLAIN_HTTP"; then
     set -- "$@" --allow-plain-http
   fi
   truthy "${STRAND_WEB_SECURE_COOKIES:-false}" && set -- "$@" --secure-cookies
