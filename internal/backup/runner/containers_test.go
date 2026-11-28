@@ -234,7 +234,7 @@ func testEnv(t *testing.T, vars map[string]string, st store.Store) *Env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Env{Getenv: get, Catalog: cat, Keys: keys, Log: testWriter{t},
+	return &Env{Getenv: get, Catalog: cat, Keys: keys, Log: testWriter{t}, TryLock: st.TryLocked,
 		Repo: func(ctx context.Context, id string) (backup.Repo, bool, error) { return st.GetBackupRepo(ctx, id) }}
 }
 

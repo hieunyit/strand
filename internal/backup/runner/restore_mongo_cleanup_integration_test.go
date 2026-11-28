@@ -44,9 +44,10 @@ func TestMongoRestoreDropsPartialDataOnFailure(t *testing.T) {
 	// With the marker file, another client creates a database on the target while the restore runs
 	// (review DBA): cleanup must not drop it.
 	foreignMarker := filepath.Join(dir, "foreign-db")
-	failing := fmt.Sprintf("#!/bin/sh\ndocker exec -i %[1]s mongorestore \"$@\" || exit 1\n"+
+	slowMarker := filepath.Join(dir, "slow")
+	failing := fmt.Sprintf("#!/bin/sh\nif [ -f %[4]s ]; then sleep 6; fi\ndocker exec -i %[1]s mongorestore \"$@\" || exit 1\n"+
 		"if [ -f %[2]s ]; then docker exec %[1]s mongosh --quiet mongodb://127.0.0.1:%[3]d --eval 'db.getSiblingDB(\"otherapp\").x.insertOne({a: 1})' >/dev/null || exit 3; fi\n"+
-		"echo \"simulated failure after the load\" >&2\nexit 1\n", src.Container, foreignMarker, dst.Port)
+		"echo \"simulated failure after the load\" >&2\nexit 1\n", src.Container, foreignMarker, dst.Port, slowMarker)
 	if err := os.WriteFile(filepath.Join(tools, "mongorestore"), []byte(failing), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +99,35 @@ func TestMongoRestoreDropsPartialDataOnFailure(t *testing.T) {
 	}
 	if dbs := userDatabases(); len(dbs) != 1 || dbs[0] != "testdb" {
 		t.Fatalf("failed restore left partial data: databases %v", dbs)
+	}
+
+	// Nghiệm thu lại (P1): hai restore chồng nhau vào cùng server. Không có khóa, cả hai qua preflight "đích
+	// chưa tồn tại" rồi bước dọn của lệnh này xóa dữ liệu lệnh kia ghi. Lệnh thứ hai phải bị từ chối ngay.
+	if err := os.WriteFile(slowMarker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- e.Restore(ctx, RestorePlan{Chain: []backup.Record{one}}, RestoreTarget{Conn: backup.ConnSpec{URIEnv: "SRC_MONGO_URI"}, Database: "testdb_r1"})
+	}()
+	time.Sleep(2 * time.Second) // lệnh đầu đã qua preflight, đang chờ trong tool
+	second := e.Restore(ctx, RestorePlan{Chain: []backup.Record{one}}, RestoreTarget{Conn: backup.ConnSpec{URIEnv: "SRC_MONGO_URI"}, Database: "testdb_r1"})
+	select {
+	case err := <-firstDone:
+		t.Fatalf("the first restore finished (%v) before the overlapping one returned (%v)", err, second)
+	default:
+	}
+	if second == nil || !strings.Contains(second.Error(), "another restore into") {
+		t.Fatalf("overlapping restore into the same server: %v", second)
+	}
+	if err := <-firstDone; err == nil || !strings.Contains(err.Error(), "simulated failure") {
+		t.Fatalf("first restore: %v", err)
+	}
+	if err := os.Remove(slowMarker); err != nil {
+		t.Fatal(err)
+	}
+	if dbs := userDatabases(); len(dbs) != 1 || dbs[0] != "testdb" {
+		t.Fatalf("overlapping restores left databases %v", dbs)
 	}
 
 	// Whole deployment into an empty one (the failing tool runs against the source container's binary,

@@ -21,23 +21,27 @@ var ErrPinLapsed = errors.New("restore pin could not be renewed; stopped before 
 // PinRecords pins backups against retention while a restore, test restore or verification reads them
 // (the pins live in the catalog, so a prune in another process respects them). It fails when one of the
 // records is no longer complete, e.g. retention already claimed it. The reader must use the returned
-// context: it is cancelled (cause ErrPinLapsed) when renewals keep failing for 3/4 of PinTTL, before the
+// context: it is cancelled (cause ErrPinLapsed) when no renewal has succeeded for 3/4 of PinTTL, failing or hung, before the
 // pin can expire under it. The returned release drops the pins and must be called when the reader is done;
 // it is safe to call more than once.
 func (e *Env) PinRecords(ctx context.Context, ids []string) (pinned context.Context, release func(), err error) {
 	holder := NewID("pin")
+	ttl := PinTTL
 	firstPin := time.Now()
-	if err := e.Catalog.Pin(ctx, holder, ids, PinTTL); err != nil {
+	if err := e.Catalog.Pin(ctx, holder, ids, ttl); err != nil {
 		return ctx, func() {}, err
 	}
-	ttl := PinTTL
 	pinned, cancel := context.WithCancelCause(ctx)
+	// lastOK: lúc GỬI lần gia hạn thành công gần nhất (hạn mới không sớm hơn lúc đó + ttl).
+	var mu sync.Mutex
+	lastOK, lastErr := firstPin, error(nil)
 	stop, done := make(chan struct{}), make(chan struct{})
+	// Gia hạn: mỗi lần có hạn chót riêng (ttl/4), nên một lệnh catalog treo (chờ row lock, mất mạng) không
+	// chặn các lần sau.
 	go func() {
 		defer close(done)
 		t := time.NewTicker(ttl / 4)
 		defer t.Stop()
-		lastOK := firstPin
 		for {
 			select {
 			case <-stop:
@@ -45,19 +49,49 @@ func (e *Env) PinRecords(ctx context.Context, ids []string) (pinned context.Cont
 			case <-pinned.Done():
 				return
 			case <-t.C:
-				attempt := time.Now()
-				if err := e.Catalog.Pin(pinned, holder, ids, ttl); err != nil {
-					e.logf("renew restore pin: %v", err)
-					// Pin hết hạn khoảng lastOK + ttl. Quá nửa TTL mà chưa gia hạn được thì tick kế tiếp
-					// (sau ttl/4) đã sát hạn: dừng ngay, chậm nhất khoảng 3/4 TTL sau lần gia hạn cuối.
-					if time.Since(lastOK) > ttl/2 {
-						cancel(fmt.Errorf("%w: %v", ErrPinLapsed, err))
-						return
-					}
-					continue
+			}
+			attempt := time.Now()
+			actx, acancel := context.WithTimeout(pinned, ttl/4)
+			err := e.Catalog.Pin(actx, holder, ids, ttl)
+			acancel()
+			mu.Lock()
+			if err != nil {
+				lastErr = err
+			} else if attempt.After(lastOK) {
+				lastOK, lastErr = attempt, nil
+			}
+			mu.Unlock()
+			if err != nil {
+				e.logf("renew restore pin: %v", err)
+			}
+		}
+	}()
+	// Canh hạn độc lập với I/O: quá 3/4 TTL kể từ lần gia hạn thành công cuối mà chưa gia hạn được thì dừng
+	// reader, kể cả khi lệnh gia hạn đang treo không trả về.
+	go func() {
+		limit := ttl * 3 / 4
+		for {
+			mu.Lock()
+			due := lastOK.Add(limit)
+			lerr := lastErr
+			mu.Unlock()
+			wait := time.Until(due)
+			if wait <= 0 {
+				if lerr == nil {
+					lerr = errors.New("renewal did not complete")
 				}
-				// Tính từ lúc gửi yêu cầu: hạn mới không sớm hơn attempt + ttl.
-				lastOK = attempt
+				cancel(fmt.Errorf("%w: %v", ErrPinLapsed, lerr))
+				return
+			}
+			timer := time.NewTimer(wait)
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-pinned.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
 			}
 		}
 	}()
@@ -65,8 +99,13 @@ func (e *Env) PinRecords(ctx context.Context, ids []string) (pinned context.Cont
 	return pinned, func() {
 		once.Do(func() {
 			close(stop)
-			<-done
 			cancel(nil)
+			// Lệnh gia hạn đang treo đã bị hủy qua context; không chờ mãi một catalog không trả lời.
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				e.logf("release restore pin: a renewal is still running")
+			}
 			rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer rcancel()
 			if err := e.Catalog.Unpin(rctx, holder); err != nil {

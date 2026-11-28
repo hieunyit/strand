@@ -130,3 +130,65 @@ func TestPinLapseCancelsTheReaderBeforeThePinExpires(t *testing.T) {
 		t.Fatalf("reader stopped %v after renewals began failing; the pin may already have expired (TTL %v)", waited, PinTTL)
 	}
 }
+
+// hangingPins: sau khi bật hang, PinBackups không trả về (bỏ qua cả context) cho tới khi unblock đóng —
+// catalog ngừng trả lời hoặc chờ row lock.
+type hangingPins struct {
+	store.Store
+	hang    atomic.Bool
+	unblock chan struct{}
+}
+
+func (h *hangingPins) PinBackups(ctx context.Context, holder string, ids []string, ttl time.Duration) error {
+	if h.hang.Load() {
+		<-h.unblock
+		return errors.New("catalog stopped answering")
+	}
+	return h.Store.PinBackups(ctx, holder, ids, ttl)
+}
+
+// Nghiệm thu lại: lệnh gia hạn treo không được giữ reader chạy qua hạn của pin.
+func TestPinLapseCancelsTheReaderWhenARenewalHangs(t *testing.T) {
+	old := PinTTL
+	PinTTL = 800 * time.Millisecond
+	t.Cleanup(func() { PinTTL = old })
+	vars := map[string]string{"STRAND_BACKUP_S3_ENDPOINT": "http://127.0.0.1:1", "STRAND_BACKUP_S3_ACCESS_KEY": "k",
+		"STRAND_BACKUP_S3_SECRET_KEY": "s", "STRAND_BACKUP_S3_ALLOW_INSECURE_LOCAL": "true"}
+	st := &hangingPins{Store: store.NewMem(), unblock: make(chan struct{})}
+	e := testEnv(t, vars, st)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+	r := backup.Record{ID: "bkp-hang", Source: "pg-prod", Engine: "postgres", Tool: "pg_dump", Bucket: "central-backups",
+		ObjectKey: "prod/bkp-hang", Status: backup.StatusQueued, CreatedAt: now, Method: backup.MethodPGDump, JobID: "bjob-hang"}
+	if _, _, err := e.Catalog.Create(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = e.Catalog.UpdateStatus(ctx, r.ID, backup.StatusUploading, nil)
+	_, _, _ = e.Catalog.UpdateStatus(ctx, r.ID, backup.StatusVerifying, nil)
+	if _, _, err := e.Catalog.Finalize(ctx, r.ID, backup.StatusVerifying, 10, strings.Repeat("a", 64), "s3://central-backups/prod/bkp-hang", now); err != nil {
+		t.Fatal(err)
+	}
+	pinned, release, err := e.PinRecords(ctx, []string{r.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	defer close(st.unblock)
+	time.Sleep(PinTTL * 3 / 2)
+	if pinned.Err() != nil {
+		t.Fatalf("reader cancelled while renewals succeed: %v", context.Cause(pinned))
+	}
+	st.hang.Store(true)
+	start := time.Now()
+	select {
+	case <-pinned.Done():
+	case <-time.After(PinTTL * 3):
+		t.Fatal("a renewal hangs but the reader still runs past the pin's expiry")
+	}
+	if !errors.Is(context.Cause(pinned), ErrPinLapsed) {
+		t.Fatalf("cause = %v, want ErrPinLapsed", context.Cause(pinned))
+	}
+	if waited := time.Since(start); waited >= PinTTL {
+		t.Fatalf("reader stopped %v after renewals began hanging; the pin may already have expired (TTL %v)", waited, PinTTL)
+	}
+}

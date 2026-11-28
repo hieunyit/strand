@@ -33,6 +33,9 @@ type Env struct {
 	Now   func() time.Time
 	// ReadBack re-reads and decodes every new payload before completing it (default true).
 	NoReadBack bool
+	// TryLock runs fn under an exclusive lock shared by every Strand process using the same catalog
+	// (store.TryLocked); ran is false when another holder has the key. Restores lock their target server.
+	TryLock func(ctx context.Context, key string, fn func(ctx context.Context) error) (ran bool, err error)
 }
 
 func (e *Env) now() time.Time {

@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -125,6 +127,54 @@ func (e *Env) Restore(ctx context.Context, plan RestorePlan, t RestoreTarget) (e
 		}
 	}
 
+	if t.Dir == "" && e.TryLock != nil {
+		key, label, err := restoreTargetLock(e.Getenv, base, t)
+		if err != nil {
+			return err
+		}
+		var inner error
+		ran, err := e.TryLock(ctx, key, func(ctx context.Context) error {
+			inner = e.restoreInto(ctx, plan, t)
+			return nil
+		})
+		if err != nil {
+			return errors.Join(inner, err)
+		}
+		if !ran {
+			return fmt.Errorf("another restore into %s is running; restores into one server run one at a time (wait for it, or restore into another server)", label)
+		}
+		return inner
+	}
+	return e.restoreInto(ctx, plan, t)
+}
+
+// restoreTargetLock: khóa độc quyền theo server đích (engine + host). Hai restore chồng nhau vào cùng
+// server có thể cùng qua preflight "đích chưa tồn tại / deployment rỗng", rồi bước dọn khi lỗi của lệnh này
+// xóa dữ liệu lệnh kia vừa ghi (review DBA). label không chứa thông tin đăng nhập.
+func restoreTargetLock(getenv Getenv, base backup.Record, t RestoreTarget) (key, label string, err error) {
+	var hosts []string
+	if base.Method == backup.MethodMongodump {
+		uri, err := MongoURI(getenv, t.Conn)
+		if err != nil {
+			return "", "", err
+		}
+		cs, err := connstring.Parse(uri)
+		if err != nil || len(cs.Hosts) == 0 {
+			return "", "", errors.New("invalid MongoDB target connection")
+		}
+		for _, h := range cs.Hosts {
+			hosts = append(hosts, strings.ToLower(h))
+		}
+		sort.Strings(hosts)
+	} else {
+		hosts = []string{strings.ToLower(net.JoinHostPort(t.Conn.Host, strconv.Itoa(t.Conn.Port)))}
+	}
+	label = strings.Join(hosts, ",")
+	return "backup-restore-target:" + base.Engine + ":" + label, label, nil
+}
+
+func (e *Env) restoreInto(ctx context.Context, plan RestorePlan, t RestoreTarget) error {
+	base := plan.Base()
 	e.logf("restore: base %s (%s, %s) + %d log segment(s)", base.ID, base.Method, ConsistentTime(base).Format(time.RFC3339), len(plan.Logs))
 	switch base.Method {
 	case backup.MethodMySQLDump, backup.MethodMariaDBDump:
@@ -788,6 +838,27 @@ func (e *Env) restorePGBase(ctx context.Context, plan RestorePlan, t RestoreTarg
 	return nil
 }
 
+// recheckMongoTarget: đích vẫn như lúc preflight (before) ngay trước khi mongorestore ghi.
+func recheckMongoTarget(ctx context.Context, client *mongo.Client, t RestoreTarget, before []string) error {
+	names, err := client.ListDatabaseNames(ctx, bson.D{}, options.ListDatabases().SetAuthorizedDatabases(false))
+	if err != nil {
+		return errors.New("cannot verify all MongoDB target databases; restore needs listDatabases privileges")
+	}
+	known := map[string]bool{}
+	for _, n := range before {
+		known[n] = true
+	}
+	for _, n := range names {
+		if known[n] {
+			continue
+		}
+		if t.Deployment || n == t.Database {
+			return fmt.Errorf("MongoDB database %q appeared on the target while the restore was being prepared; the target must not be written by other clients during a restore", n)
+		}
+	}
+	return nil
+}
+
 // dropMongoRestored drops the databases a failed MongoDB restore created (see restoreMongo). For a deployment
 // target only databases that are new since the preflight AND come from the restored archive (created) are
 // dropped: another client may create a database on the target meanwhile, and that one is left in place.
@@ -950,6 +1021,11 @@ func (e *Env) restoreMongo(ctx context.Context, plan RestorePlan, t RestoreTarge
 		return err
 	}
 	defer body.Close()
+	// Kiểm lại ngay trước khi ghi: chuẩn bị (tải oplog PITR, mở payload) có thể lâu, và một database mới xuất
+	// hiện trong lúc đó không thuộc restore này. Từ chối thay vì để bước dọn sau lỗi có thể xóa nó.
+	if err := recheckMongoTarget(ctx, client, t, databaseNames); err != nil {
+		return err
+	}
 	// From here on mongorestore may write. On failure or cancellation drop what this restore created, like
 	// the MySQL and PostgreSQL restores do: the target database, or the databases of the (verified empty)
 	// target deployment that are new AND come from the archive mongorestore read (created). The archive is

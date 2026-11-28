@@ -39,7 +39,7 @@ func backupRunnerEnv(st store.Store, out io.Writer) (*runner.Env, error) {
 	}
 	return &runner.Env{
 		Getenv: os.Getenv, Catalog: cat, Keys: keys, Log: out,
-		Repo: st.GetBackupRepo,
+		Repo: st.GetBackupRepo, TryLock: st.TryLocked,
 		Audit: func(ctx context.Context, action, result string, detail map[string]any) error {
 			if e, ok := detail["error"].(string); ok {
 				detail["error"] = store.Redact(e)
